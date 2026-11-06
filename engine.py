@@ -275,6 +275,7 @@ _EMBEDDING_SCHEMA_LOCK = threading.Lock()
 
 _EMBEDDING_RETIRE_TIMEOUT_S = 2.0
 _SESSION_END_BUSY_TIMEOUT_MS = 50
+_SESSION_DIAGNOSTIC_LOG_MAX = 4096
 _SHUTDOWN_COMPACTION_WAIT_MAX_S = 86400.0
 
 
@@ -1004,7 +1005,7 @@ class LCMEngine(
         self._last_stub_first_exit: Optional[dict[str, int]] = None
         self._stub_first_exit_now: Optional[dict[str, int]] = None
         self._diagnostic_engine_token = next(_DIAGNOSTIC_ENGINE_TOKENS)
-        self._session_diagnostic_logs: set[tuple] = set()
+        self._session_diagnostic_logs: dict[tuple, None] = {}
         self._compress_commit_reason, self._compress_commit_publication = "no_proof", "local"
         self._end_attribution = None
         self._compress_calls = 0  # #1116: which compress() a stub-first proof came from
@@ -4739,6 +4740,8 @@ class LCMEngine(
                     old_session_id,
                     session_id,
                 )
+                self._log_session_decision(session_id, "bypass", "stale_auxiliary_compression",
+                                           platform=requested_platform, parent=old_session_id)
                 self._ledger_count("ledger.emission_boundary_unadopted")
                 return
             pre_reset_preserve_ambiguous_no_frame_old_session = bool(
@@ -4843,6 +4846,8 @@ class LCMEngine(
                     old_session_id,
                     session_id,
                 )
+                self._log_session_decision(session_id, "bypass", "stale_auxiliary_compression",
+                                           platform=requested_platform, parent=old_session_id)
                 self._ledger_count("ledger.emission_boundary_unadopted")
                 return
             if (
@@ -4868,7 +4873,8 @@ class LCMEngine(
                     ),
                 )
                 self._handoff_delegate_child_compression(old_session_id, session_id)
-                self._log_auxiliary_session_decision(session_id, platform=requested_platform, parent=old_session_id)
+                self._log_auxiliary_session_decision(session_id, platform=requested_platform, parent=old_session_id,
+                                                     reason="auxiliary_compression")
                 logger.info(
                     "LCM auxiliary session %s compressed to %s — keeping boundary stateless",
                     old_session_id,
@@ -4939,7 +4945,7 @@ class LCMEngine(
             else:
                 self._register_auxiliary_session(session_id)
             self._log_auxiliary_session_decision(
-                session_id, platform=str(kwargs.get("platform") or ""), parent=explicit_parent_id,
+                session_id, platform=str(kwargs.get("platform") or ""), parent=explicit_parent_id, reason="live_aux_lineage",
             )
             logger.info(
                 "LCM session %s is a live child of bound session %s — treating it as auxiliary/stateless",
@@ -5344,6 +5350,8 @@ class LCMEngine(
             or off_current_matches_bypass_prefix
             or ended_lineage_bypasses
         ):
+            if off_current_should_bypass:
+                self._log_session_ingest_outcome(session_id, reason="bypass_lineage_end")
             self._end_host_fallback_compressor_for_session(
                 session_id,
                 messages,
@@ -6148,13 +6156,19 @@ class LCMEngine(
 
     # -- Internal: message ingestion ---------------------------------------
 
+    def _claim_session_diagnostic(self, key):
+        with self._auxiliary_session_lock:
+            if key in self._session_diagnostic_logs:
+                return False
+            self._session_diagnostic_logs[key] = None
+            if len(self._session_diagnostic_logs) > _SESSION_DIAGNOSTIC_LOG_MAX:
+                self._session_diagnostic_logs.pop(next(iter(self._session_diagnostic_logs)))
+            return True
+
     def _log_session_decision(self, session_id, decision, reason, *, platform="", parent=""):
         try:
             key = (self._diagnostic_engine_token, session_id, decision, reason)
-            with self._auxiliary_session_lock:
-                if not session_id or key in self._session_diagnostic_logs:
-                    return
-                self._session_diagnostic_logs.add(key)
+            if session_id and self._claim_session_diagnostic(key):
                 logger.info("LCM session decision: session=%s platform=%s parent=%s decision=%s reason=%s engine=%s",
                             session_id, platform or "-", parent or "-", decision, reason, self._diagnostic_engine_token)
         except Exception:
@@ -6166,10 +6180,7 @@ class LCMEngine(
                 return
             kind = "first store" if rows > 0 else "skipped"
             key = (self._diagnostic_engine_token, session_id, kind)
-            with self._auxiliary_session_lock:
-                if key in self._session_diagnostic_logs:
-                    return
-                self._session_diagnostic_logs.add(key)
+            if self._claim_session_diagnostic(key):
                 if rows > 0:
                     logger.info("LCM session first store: session=%s rows=%d", session_id, rows)
                 else:
@@ -6177,12 +6188,13 @@ class LCMEngine(
         except Exception:
             pass  # Diagnostics cannot turn a durable ingest into failure.
 
-    def _append_off_current_session_end_suffix(self, session_id, suffix, **kwargs):
+    def _append_off_current_session_end_suffix(self, session_id, suffix, *, _log_outcome=True, **kwargs):
         if session_id and suffix and kwargs.get("source") != "subagent":
             self._log_session_decision(session_id, "store", "off_current_s3",
                                        platform=self._lcm_session_last_platform.get(session_id, ""))
         stored = super()._append_off_current_session_end_suffix(session_id, suffix, **kwargs)
-        self._log_session_ingest_outcome(session_id, rows=len(stored))
+        if _log_outcome:
+            self._log_session_ingest_outcome(session_id, rows=len(stored))
         return stored
 
     def _schedule_ingest_cursor_reconciliation(self) -> None:
@@ -11749,16 +11761,24 @@ class LCMEngine(
                 return None
         return len(stored)
 
+    @contextmanager
+    def _cold_tail_diagnostic_commit(self, store, session, ids):
+        with store.ingest_atomic():
+            yield
+        # The transaction committed, including on an early return from the retry.
+        if ids:
+            self._log_session_ingest_outcome(session, rows=len(ids))
+
     def _retry_cold_tail_s3(self, tail, *, stamps=False, hermes_home=None, deadline=None):
         view, session = tail["view"], tail["session_id"]
         ids = []
-        with tail["store"].ingest_atomic():
+        with self._cold_tail_diagnostic_commit(tail["store"], session, ids):
             stored = self._cold_tail_stored(tail, stamps=stamps)
             conflict = self._cold_tail_one_conflict(tail) if stored is None or not stamps else None
             if stored is not None and not stamps and conflict is not None:
                 if stored < len(view):
-                    self._append_off_current_session_end_suffix(session, view[stored:], source=tail["source"],
-                        conversation_id=_normalize_conversation_id_value(tail["conversation_id"]))
+                    ids.extend(self._append_off_current_session_end_suffix(session, view[stored:], source=tail["source"],
+                        conversation_id=_normalize_conversation_id_value(tail["conversation_id"]), _log_outcome=False))
                 if self._cold_tail_conflict_placed(tail, conflict, deadline=deadline):
                     return True
                 stored = None
@@ -11771,10 +11791,10 @@ class LCMEngine(
                     tail["unmatched_warned"] = True
                 return False
             if stored < len(view):
-                ids = self._append_off_current_session_end_suffix(session, view[stored:], source=tail["source"],
-                    conversation_id=_normalize_conversation_id_value(tail["conversation_id"]),
+                ids.extend(self._append_off_current_session_end_suffix(session, view[stored:], source=tail["source"],
+                    conversation_id=_normalize_conversation_id_value(tail["conversation_id"]), _log_outcome=False,
                     **(dict(store=tail["store"], hermes_home=hermes_home,
-                            context_window_tokens=tail.get("context_window_tokens")) if hermes_home is not None else {}))
+                            context_window_tokens=tail.get("context_window_tokens")) if hermes_home is not None else {})))
         if hermes_home is not None and ids:
             self._ledger_count("ledger.tail.cold_detached_stored")
         return True

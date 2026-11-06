@@ -1,7 +1,13 @@
 # ruff: noqa: F811  # Imported pytest fixture is intentionally injected by name.
 """#2042 step 1: engine-direct decision/outcome diagnostics never carry content."""
 
+from contextlib import contextmanager
 import logging
+import re
+from types import SimpleNamespace
+
+from hermes_lcm import aux_session as auxiliary_module
+from hermes_lcm import engine as engine_module
 import sqlite3
 
 import pytest
@@ -20,7 +26,8 @@ HISTORY = [{"role": "user", "content": f"question {SENTINEL}"},
 
 
 @pytest.fixture
-def engines(tmp_path, caplog):
+def engines(tmp_path, caplog, monkeypatch):
+    monkeypatch.setattr(auxiliary_module, "_DELEGATE_AUXILIARY_IDS", set())
     caplog.set_level(logging.INFO, logger="hermes_lcm")
     opened = []
 
@@ -71,10 +78,16 @@ def test_plain_bind_first_store_and_rebind_are_deduplicated(engines, caplog):
 ])
 def test_filtered_bind_and_first_skipped_ingest(engines, caplog, decision, reason, config_key):
     engine = engines(**{config_key: ["filtered", f"unmatched-{PATTERN_SENTINEL}"]},
-                     ignore_message_patterns=[f"unmatched-{PATTERN_SENTINEL}"])
+                     ignore_message_patterns=[PATTERN_SENTINEL])
+    # Exercise the real matching wrapper even on minimal installs without regex.
+    pattern = re.compile(PATTERN_SENTINEL)
+    engine._compiled_ignore_message_patterns = [SimpleNamespace(
+        pattern=PATTERN_SENTINEL, search=lambda text, timeout: pattern.search(text))]
+    matched = {"role": "user", "content": f"{SENTINEL} {PATTERN_SENTINEL}"}
+    assert engine._matches_ignore_message_patterns(matched)
     engine.on_session_start("filtered", platform="desktop")
     for _ in range(2):
-        engine.ingest(HISTORY)
+        engine.ingest([*HISTORY, matched])
     engine.on_session_start("filtered", platform="desktop")
     assert len(lines(caplog)) == 1
     assert f"decision={decision} reason={reason}" in lines(caplog)[0]
@@ -182,10 +195,9 @@ def test_off_current_s3_store_logs_its_session(engines, caplog):
     engine = engines()
     engine.on_session_start("ended", platform="desktop")
     engine.on_session_start("current", platform="desktop")
-    caplog.clear()
     engine.on_session_end("ended", HISTORY)
-    assert len(lines(caplog, session="ended")) == 1
-    assert "decision=store reason=off_current_s3" in lines(caplog, session="ended")[0]
+    assert len(lines(caplog, session="ended")) == 2
+    assert "decision=store reason=off_current_s3" in lines(caplog, session="ended")[-1]
     assert lines(caplog, "LCM session first store:") == ["LCM session first store: session=ended rows=2"]
     assert engine._session_id == "current"
     assert_safe_logs(caplog)
@@ -233,9 +245,247 @@ def test_resident_engine_conflict_skip_deduplicates_by_engine_and_session(host, 
         assert parent._store.get_session_count("unbound") == 0
         assert parent._store.get_session_count("other") == 0
     assert lines(caplog, "LCM session skipped:") == [
-        "LCM session skipped: session=unbound reason=resident_engine_conflict",
-        "LCM session skipped: session=other reason=resident_engine_conflict",
+        "LCM session skipped: session=unbound reason=not_delegate",
+        "LCM session skipped: session=other reason=not_delegate",
     ] * 2
     assert sum("skipped ingest: stable engine use ended with resident_engine_conflict" in record.getMessage()
                for record in caplog.records) == 6
+    assert_safe_logs(caplog)
+
+
+class BadDiagnosticAgent:
+    enabled_toolsets = ["memory", "skills"]
+
+    @property
+    def _parent_session_id(self):
+        raise RuntimeError("diagnostic input failed")
+
+
+def test_auxiliary_logging_input_failure_does_not_break_bind(engines, caplog, monkeypatch):
+    engine = engines()
+    engine.on_session_start("parent", platform="desktop")
+    monkeypatch.setattr(engine, "_delegate_child_agent", lambda sid: BadDiagnosticAgent())
+    child = Child("bad-bind", enabled_toolsets=["memory", "skills"])
+    child.start(engine)
+    child.ingest(engine)
+    assert engine._session_id == "parent"
+    assert engine._thread_context_has_auxiliary_session("bad-bind")
+    assert engine._store.get_session_count("bad-bind") == 0
+    assert_safe_logs(caplog)
+
+
+def test_auxiliary_logging_input_failure_still_restores_foreground(engines, caplog, monkeypatch):
+    engine = engines()
+    foreground = _FakeAgent(engine, "parent")
+    foreground.start_session()
+    foreground.ingest_history_as_foreground(HISTORY)
+    child = _FakeAgent(engine, "late", "parent")
+    child.start_session()
+    monkeypatch.setattr(engine, "_delegate_child_agent", lambda sid: BadDiagnosticAgent())
+    child.ingest_history_after_background_marker(HISTORY)
+    assert engine.current_session_id == "parent"
+    assert engine._store.get_session_count("parent") == 2
+    assert engine._store.get_session_count("late") == 0
+    assert_safe_logs(caplog)
+
+
+def test_bypassed_logging_input_failure_does_not_break_ingest(engines, caplog, monkeypatch):
+    engine = engines(ignore_session_patterns=["ignored"])
+    engine.on_session_start("ignored")
+
+    original = engine._bypass_lcm_session_id
+    calls = 0
+
+    def fail():
+        nonlocal calls
+        calls += 1
+        if calls == 1:  # Only the diagnostic lookup fails; prefix tracking stays real.
+            raise RuntimeError("diagnostic session lookup failed")
+        return original()
+
+    monkeypatch.setattr(engine, "_bypass_lcm_session_id", fail)
+    engine.ingest(HISTORY)
+    assert engine._session_ignored
+    assert engine._store.get_session_count("ignored") == 0
+    assert_safe_logs(caplog)
+
+
+def test_diagnostic_dedupe_is_bounded_and_evicts_oldest(engines, caplog):
+    engine = engines()
+    limit = engine_module._SESSION_DIAGNOSTIC_LOG_MAX
+    for index in range(limit + 1):
+        if index % 2:
+            engine._log_session_ingest_outcome(f"s{index}", rows=1)
+        else:
+            engine._log_session_decision(f"s{index}", "store", "default")
+    assert len(engine._session_diagnostic_logs) == limit
+    assert all(key[1] != "s0" for key in engine._session_diagnostic_logs)
+    assert next(iter(engine._session_diagnostic_logs))[1] == "s1"
+    engine._log_session_ingest_outcome("s1", rows=1)
+    assert len(lines(caplog, "LCM session first store:", "s1")) == 1
+    engine._log_session_decision("s0", "store", "default")
+    assert len(lines(caplog, session="s0")) == 2
+    assert len(engine._session_diagnostic_logs) == limit
+    assert all(key[1] != "s1" for key in engine._session_diagnostic_logs)
+    assert_safe_logs(caplog)
+
+
+@pytest.mark.parametrize("hook", [False, True])
+def test_no_frame_live_auxiliary_bind_names_actual_decision(engines, caplog, hook):
+    engine = engines()
+    engine.on_session_start("parent", platform="desktop")
+    engine._register_auxiliary_session("aux-parent")
+    if hook:
+        record_subagent_start({"child_session_id": "no-frame", "parent_session_id": "aux-parent"})
+    try:
+        engine.on_session_start("no-frame", platform="subagent", parent_session_id="aux-parent")
+        assert f"decision=auxiliary reason={'subagent_start' if hook else 'live_aux_lineage'}" in lines(
+            caplog, session="no-frame")[0]
+        assert engine._session_id == "parent"
+        assert engine._store.get_session_count("no-frame") == 0
+    finally:
+        record_subagent_stop({"child_session_id": "no-frame"})
+    assert_safe_logs(caplog)
+
+
+def test_no_frame_bypassed_ingest_names_inherited_rule(engines, caplog):
+    engine = engines()
+    engine.on_session_start("parent")
+    engine._mark_thread_context_stateless("no-frame")
+    engine.ingest(HISTORY)
+    assert "decision=auxiliary reason=inherited_bypass" in lines(caplog, session="no-frame")[0]
+    assert lines(caplog, "LCM session skipped:") == [
+        "LCM session skipped: session=no-frame reason=inherited_bypass"]
+    assert engine._session_id == "parent"
+    assert engine._store.get_session_count("no-frame") == 0
+    assert_safe_logs(caplog)
+
+
+@pytest.mark.parametrize("late", [False, True])
+def test_stale_auxiliary_compression_logs_new_session(engines, caplog, monkeypatch, late):
+    engine = engines()
+    engine.on_session_start("parent")
+    calls = 0
+
+    def generation(sid):
+        nonlocal calls
+        calls += 1
+        return 7 if sid == "old-aux" and (not late or calls > 2) else 0
+
+    engine._auxiliary_retired_session_generations["old-aux"] = {7}
+    monkeypatch.setattr(engine, "_in_process_auxiliary_caller_generation", generation)
+    engine.on_session_start("new-aux", platform="subagent", boundary_reason="compression", old_session_id="old-aux")
+    assert "parent=old-aux decision=bypass reason=stale_auxiliary_compression" in lines(caplog, session="new-aux")[0]
+    assert engine._session_id == "parent"
+    assert engine._store.get_session_count("new-aux") == 0
+    assert_safe_logs(caplog)
+
+
+@pytest.mark.parametrize("shape,reason", [
+    ("auxiliary", "auxiliary"), ("remembered", "auxiliary_lineage"),
+    ("require_agent", "no_agent"), ("filtered", "bypass_pattern"),
+    ("unproven", "not_delegate"), ("no_parent", "no_parent"),
+    ("self_parent", "no_parent"), ("ignored_parent", "ignored_parent"),
+    ("filtered_parent", "parent_bypass_pattern"),
+])
+def test_each_delegate_link_rejection_logs_skip(engines, caplog, monkeypatch, shape, reason):
+    engine = engines(ignore_session_patterns=["filtered", "blocked-parent"])
+    engine.on_session_start("parent")
+    session = "filtered" if shape == "filtered" else "rejected-child"
+    parent = "blocked-parent" if shape == "filtered_parent" else "" if shape == "no_parent" else (
+        session if shape == "self_parent" else "parent")
+    if shape == "auxiliary":
+        monkeypatch.setattr(engine, "_delegate_child_agent", lambda sid: Child(sid, enabled_toolsets=["memory"]))
+    elif shape == "remembered":
+        key = engine._delegate_child_key(session)
+        monkeypatch.setattr(auxiliary_module, "_DELEGATE_AUXILIARY_IDS", {key})
+    if shape == "ignored_parent":
+        engine._session_ignored = True
+    hook = shape in {"no_parent", "self_parent", "ignored_parent", "filtered_parent"}
+    if hook:
+        record_subagent_start({"child_session_id": session, "parent_session_id": parent})
+    try:
+        for _ in range(2):
+            assert engine._delegate_child_link(session, require_agent=shape == "require_agent") is None
+        assert lines(caplog, "LCM session skipped:", session) == [
+            f"LCM session skipped: session={session} reason={reason}"]
+        assert engine._store.get_session_count(session) == 0
+        assert engine._session_id == "parent"
+    finally:
+        record_subagent_stop({"child_session_id": session})
+    assert_safe_logs(caplog)
+
+
+def test_off_current_bypass_lineage_end_logs_skip(engines, caplog):
+    engine = engines()
+    engine.on_session_start("parent")
+    engine._mark_lcm_bypass_lineage_session("bypassed", platform="subagent")
+    engine.on_session_end("bypassed", HISTORY)
+    assert lines(caplog, "LCM session skipped:", "bypassed") == [
+        "LCM session skipped: session=bypassed reason=bypass_lineage_end"]
+    assert engine._store.get_session_count("bypassed") == 0
+    assert engine._session_id == "parent"
+    assert_safe_logs(caplog)
+
+
+def test_resident_conflict_delegate_store_does_not_log_conflict_skip(host, caplog):
+    caplog.set_level(logging.INFO)
+    load, clone = host
+    ctx, _ = load()
+    parent = clone(ctx)
+    parent.on_session_start("parent")
+    Child("stored-child", **DELEGATE).turn(ctx, HISTORY)
+    assert parent._store.get_session_count("stored-child") == 2
+    assert lines(caplog, "LCM session skipped:", "stored-child") == []
+    assert_safe_logs(caplog)
+
+
+@pytest.mark.parametrize("early,fail_commit", [(False, False), (True, False), (False, True)])
+def test_cold_tail_first_store_is_after_commit(engines, caplog, monkeypatch, early, fail_commit):
+    engine = engines()
+    engine.on_session_start("parent")
+    store = engine._store
+    atomic = store.ingest_atomic
+    committed = False
+
+    @contextmanager
+    def transaction():
+        nonlocal committed
+        with atomic():
+            yield
+            assert lines(caplog, "LCM session first store:", "cold") == []
+            if fail_commit:
+                raise sqlite3.OperationalError("synthetic commit failure")
+        committed = True
+
+    monkeypatch.setattr(store, "ingest_atomic", transaction)
+    monkeypatch.setattr(engine, "_cold_tail_stored", lambda *a, **kw: 0)
+    monkeypatch.setattr(engine, "_cold_tail_one_conflict", lambda *a, **kw: HISTORY[0] if early else None)
+    monkeypatch.setattr(engine, "_cold_tail_conflict_placed", lambda *a, **kw: True)
+    tail = {"view": HISTORY, "session_id": "cold", "store": store, "source": "desktop", "conversation_id": "cold"}
+    if fail_commit:
+        with pytest.raises(sqlite3.OperationalError, match="synthetic commit failure"):
+            engine._retry_cold_tail_s3(tail)
+        assert lines(caplog, "LCM session first store:", "cold") == []
+        assert store.get_session_count("cold") == 0
+    else:
+        assert engine._retry_cold_tail_s3(tail)
+        assert committed
+        assert lines(caplog, "LCM session first store:", "cold") == ["LCM session first store: session=cold rows=2"]
+        assert store.get_session_count("cold") == 2
+    assert_safe_logs(caplog)
+
+
+def test_diagnostics_log_outside_auxiliary_lock(engines, caplog, monkeypatch):
+    engine = engines()
+    original = engine_module.logger.info
+
+    def info(*args, **kwargs):
+        assert not engine._auxiliary_session_lock._is_owned()
+        original(*args, **kwargs)
+
+    monkeypatch.setattr(engine_module.logger, "info", info)
+    engine._log_session_decision("unlocked", "store", "default")
+    engine._log_session_ingest_outcome("unlocked", rows=1)
+    assert len(lines(caplog, session="unlocked")) == len(lines(caplog, "LCM session first store:")) == 1
     assert_safe_logs(caplog)

@@ -863,7 +863,6 @@ def register(ctx):
                             timeout=None,
                         )
                         if result.status is ActiveEngineUseStatus.RESIDENT_ENGINE_CONFLICT:
-                            engine._log_session_ingest_outcome(session_id, reason="resident_engine_conflict")
                             # No engine of the child's own: store its rows without binding one.
                             stored = use_lcm_engine(engine, _store_delegate_child, timeout=None)
                             if stored.used and stored.value:
