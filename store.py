@@ -2111,9 +2111,16 @@ class MessageStore:
                 self._foreground_ingest_owner = True
                 self._ingest_folded_tail_reads = {}
                 try:
+                    # #2345: a foreign COMMIT or ROLLBACK on this shared connection drops this savepoint.
+                    # Python then opens a new transaction implicitly, which in_transaction cannot tell apart.
+                    self._conn.execute("SAVEPOINT lcm_ingest_attempt")
                     yield timing
                     if not self._conn.in_transaction:
                         raise _SqliteSavepointError("Foreground ingest transaction lost before COMMIT")
+                    try:
+                        self._conn.execute("RELEASE lcm_ingest_attempt")
+                    except sqlite3.OperationalError as exc:  # no such savepoint: rows were lost or half-committed
+                        raise _SqliteSavepointError("Foreground ingest transaction lost before COMMIT") from exc
                 finally:
                     self._ingest_folded_tail_reads = None
                     self._foreground_ingest_owner = previous
@@ -2886,9 +2893,11 @@ class MessageStore:
 
         Used by the backup path's cross-connection flush so callers do not reach
         the private connection. Requires a live connection: a closed store
-        raises, matching direct ``_conn.commit()`` use.
+        raises, matching direct ``_conn.commit()`` use. #2345: the write lock
+        keeps it from committing a foreground ingest's batch halfway.
         """
-        self._conn.commit()
+        with self._write_lock:
+            self._conn.commit()
 
     def backup(self, dest: sqlite3.Connection) -> None:
         """Copy the store's database into the already-open ``dest`` connection.
