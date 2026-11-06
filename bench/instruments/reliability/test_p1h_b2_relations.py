@@ -468,3 +468,34 @@ def test_p1h_b2s_proven_pass_with_clean_numbers_still_passes(monkeypatch):
     row = next(r for r in rows if r["cell"] == PERSISTENT)
     row.update(verdict="PASS", numbers={"B2": dict(FULL)})
     assert ci.gate(rows, set()) == []
+
+
+def test_p1h_stripped_tool_result_link_uses_the_stored_rows():
+    # #2335 review: a cursor-0 copy of a tool result linked through the stripped pass. Tool groups carry no row
+    # evidence, so with no user/assistant surplus the scorer must read the stored rows the caller passes.
+    rows = [(1, "S0", "tool", "<think>plan</think>answer", None, "call-1"),
+            (2, "S0", "tool", "answer", None, "call-1")]
+    # The two contents differ, so the copy is its own key: row 1 is expected, row 2 is the only surplus.
+    keys = [(("tool", "digest-of-answer"), 1, [2])]
+    relations = [(2, "possible_replay_of", 1)]
+    split = multiset.split_surplus(keys, relations, {r[0]: (r[1], r[2], r[3]) for r in rows})
+    assert (split["visible_surplus_rows"], split["silent_surplus_rows"]) == (1, 0)
+    # A relation between rows whose stripped content differs explains nothing.
+    other = {1: ("S0", "tool", "<think>plan</think>answer"), 2: ("S0", "tool", "different")}
+    split = multiset.split_surplus(keys, relations, other)
+    assert (split["visible_surplus_rows"], split["silent_surplus_rows"]) == (0, 1)
+
+
+def test_p1h_shared_evidence_map_is_merged_once():
+    # score() attaches one shared stored-row map to every surplus group; it must be read once, not once per group.
+    class CountingMap(dict):
+        reads = 0
+
+        def items(self):
+            CountingMap.reads += 1
+            return super().items()
+
+    shared = CountingMap({1: ("S0", "user", "a"), 2: ("S0", "user", "a")})
+    groups = [(("user", f"k{i}"), 0, [1], [], shared) for i in range(50)]
+    multiset.split_surplus(groups, [])
+    assert CountingMap.reads <= 1

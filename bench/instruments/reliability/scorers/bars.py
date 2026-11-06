@@ -346,7 +346,8 @@ def score(cell: dict, cell_dir: Path, db_dir: Path | None = None) -> dict:
         failed["B2"] = {**numbers["B2"], "missing": [dict(e, session=g) for g, m in bad.items() for e in m["missing"]],
                         "duplicated": [dict(e, session=g) for g, m in bad.items() for e in m["duplicated"]],
                         "extra": [dict(e, session=g) for g, m in bad.items() for e in m["extra"]]}
-    numbers["B2"].update(multiset.split_surplus(surplus_keys, relations))
+    numbers["B2"].update(multiset.split_surplus(surplus_keys, relations,
+                                                {r[0]: (r[1], r[2], r[3]) for r in b2_full}))
     conflicts = counted(cell, phases, "publication_invariant_conflict")
     numbers["B3"] = {"publication_invariant_conflict": conflicts}
     if conflicts:

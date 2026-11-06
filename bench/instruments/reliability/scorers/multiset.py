@@ -462,7 +462,7 @@ def phase_c_score(expected: list[tuple[str, str]], rows: list[tuple]) -> dict:
     return out
 
 
-def split_surplus(groups, relations):
+def split_surplus(groups, relations, rows=None):
     """Maximum matching of relation witnesses to rows, with each key capped at its unlicensed surplus.
 
     Flow: key quota -> unique self/pair witness -> stored row. Witness and row nodes belong to one key, so a row
@@ -492,7 +492,15 @@ def split_surplus(groups, relations):
     pairs = sorted({tuple(sorted((sid, other))) for sid, kind, other in relations
                     if kind == "possible_replay_of" and other is not None and sid != other})
     # Stored text only verifies an existing directed witness; it never creates one.
-    replay_rows = {sid: row for group in groups if len(group) > 4 for sid, row in group[4].items()}
+    # ``rows`` (store_id -> (session, role, content)) covers every stored row, tool results included; without it,
+    # the evidence maps attached to surplus groups are merged once each (score() shares one map across groups).
+    if rows is None:
+        rows, seen = {}, set()
+        for group in groups:
+            if len(group) > 4 and id(group[4]) not in seen:
+                seen.add(id(group[4]))
+                rows.update(group[4])
+    replay_rows = rows
     stripped_pairs = [(other, sid) for sid, kind, other in relations
                       if kind == "possible_replay_of" and other in replay_rows and sid in replay_rows and other < sid
                       and replay_rows[sid][:2] == replay_rows[other][:2]
