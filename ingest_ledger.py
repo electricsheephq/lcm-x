@@ -300,7 +300,7 @@ def plan_rebinds(store, conversation_id, session_id, salt, attempt, mark):
             candidates.add(key)
     if len(candidates) > 4096:
         return dict(pairs=[], skipped=Counter(too_large=1), too_large=True)
-    want = {key: by_key[key] for key in candidates}
+    want = {key: indexes for key, indexes in by_key.items() if key in candidates}  # first-seen order
     rows = store.find_rows_by_observed_at(conversation_id, [session_id], [float(s) for s, _ in want])
     keyed = defaultdict(list)
     for row in rows:
