@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import hashlib
 import json
+import sqlite3
 from types import SimpleNamespace
 
 import pytest
@@ -942,3 +943,27 @@ def test_selective_persistence_rejects_generic_or_ungrounded_state(tmp_path):
         "reason_code": "no_high_value_grounded_state",
     }
     assert count == 0
+
+
+@pytest.mark.parametrize("mode", [None, "proposal", "auto"])
+@pytest.mark.parametrize("error", [sqlite3.OperationalError, ValueError])
+def test_compile_tool_read_failure_contract(tmp_path, monkeypatch, mode, error):
+    from hermes_lcm import evidence_compiler
+
+    engine = _engine(tmp_path)
+    def fail(*args, **kwargs):
+        raise error("injected compile failure")
+    monkeypatch.setattr(evidence_compiler, "compile_evidence", fail)
+    monkeypatch.setattr(evidence_compiler, "compile_preanswer_evidence", fail)
+    args = {"question": "Who owns Atlas?", **({"mode": mode} if mode else {})}
+    try:
+        if error is ValueError:
+            with pytest.raises(ValueError, match="injected compile failure"):
+                lcm_compile_evidence(args, engine=engine)
+        else:
+            assert json.loads(lcm_compile_evidence(args, engine=engine)) == {
+                "status": "fallback", "state": "unknown", "reason": "store_unavailable",
+                "reason_code": "store_unavailable", "next_path": "evidence_only",
+                "context": None, "computation": None, "evidence": []}
+    finally:
+        engine._store.close()

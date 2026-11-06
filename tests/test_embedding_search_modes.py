@@ -13,7 +13,7 @@ import pytest
 
 import hermes_lcm.embedding_provider as embedding_provider
 import hermes_lcm.tools as lcm_tools
-from tests.timing_helpers import deadline_block, returns_while_blocked
+from tests.timing_helpers import deadline_block
 
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.dag import SummaryDAG, SummaryNode
@@ -860,52 +860,33 @@ def test_full_text_setup_expiry_does_not_start_search(semantic_engine, monkeypat
 
 
 def test_result_hydration_is_inside_request_deadline(semantic_engine, monkeypatch):
-    semantic_engine._config.embedding_query_timeout_s = 0.02
+    # #1470: a logical clock, so embedding and k-NN cannot spend the 20 ms budget before hydration on a busy
+    # host; deadline_block still checks the hydration join gets a timeout within the remaining budget.
+    with deadline_block(monkeypatch, "lcm-result-hydration", 0.02, False) as block:
+        semantic_engine._config.embedding_query_timeout_s = 0.02
 
-    class OneResultStore:
-        def __init__(self, *_args, **_kwargs):
-            pass
+        class OneResultStore:
+            def __init__(self, *_args, **_kwargs):
+                pass
 
-        def knn(self, *_args, **_kwargs):
-            return KNNResult([("1", 1.0, "summary")], coverage="full")
+            def knn(self, *_args, **_kwargs):
+                return KNNResult([("1", 1.0, "summary")], coverage="full")
 
-        def close(self):
-            pass
+            def close(self):
+                pass
 
-    release = threading.Event()
+        def blocking_get_node(_node_id):
+            block()
+            return None
 
-    def blocking_get_node(_node_id):
-        release.wait()
-        return None
-
-    monkeypatch.setattr(lcm_tools, "VectorStore", OneResultStore)
-    monkeypatch.setattr(lcm_tools, "resolve_provider", lambda _config: MockProvider())
-    monkeypatch.setattr(semantic_engine._dag, "get_node", blocking_get_node)
-    original_join = threading.Thread.join
-    hydration_timeouts = []
-
-    def bounded_join(thread, timeout=None):
-        if thread.name == "lcm-result-hydration":
-            hydration_timeouts.append(timeout)
-            assert timeout is not None and 0 < timeout <= 0.02, "hydration must join within the request budget"
-        return original_join(thread, timeout=timeout)
-
-    monkeypatch.setattr(threading.Thread, "join", bounded_join)
-    try:
-        payload = returns_while_blocked(
-            lambda: json.loads(lcm_tools.lcm_grep(
-                {"query": "deadline", "mode": "semantic"}, engine=semantic_engine
-            )), release,
-        )
-        assert len(hydration_timeouts) == 1
+        monkeypatch.setattr(lcm_tools, "VectorStore", OneResultStore)
+        monkeypatch.setattr(lcm_tools, "resolve_provider", lambda _config: MockProvider())
+        monkeypatch.setattr(semantic_engine._dag, "get_node", blocking_get_node)
+        payload = json.loads(lcm_tools.lcm_grep(
+            {"query": "deadline", "mode": "semantic"}, engine=semantic_engine
+        ))
         assert payload["timeout"] is True
         assert payload["timeout_stage"] == "result_resolution"
-    finally:
-        monkeypatch.setattr(threading.Thread, "join", original_join)
-        release.set()
-        for thread in threading.enumerate():
-            if thread.name == "lcm-result-hydration":
-                thread.join(timeout=0.2)
 
 
 @pytest.mark.latency

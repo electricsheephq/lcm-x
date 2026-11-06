@@ -412,6 +412,8 @@ hook entry handles:
   real-session proof shows tool results are complete, `/compact` and `/rewind` never
   rewrite the file, and event ids are stable. Without stable ids, uid = session, line index and
   line digest; a rewritten file starts a new generation.
+- While Grok capture is off, the MCP launcher starts no reader under Grok Build (and says why on
+  stderr) unless the Grok store home holds an `lcm.db` or a `reader-override.json`.
 
 ## Runtime and failure modes
 

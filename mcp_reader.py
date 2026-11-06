@@ -66,8 +66,8 @@ READER_TOOLS = {
 READER_NOTE = (
     " Served read-only by lcm-x mcp, which has no active session: lcm_grep defaults to "
     "session_scope='all', a node_id without session_id resolves in the node's own session, "
-    "externalized payloads resolve from any session of this store, and ids may carry a "
-    "'<store_uuid>:' prefix."
+    "externalized payloads resolve from any session of this store when its payload folder is "
+    "inside the profile, and ids may carry a '<store_uuid>:' prefix."
 )
 PROFILE_ENV_EXTRA_KEYS = ("FASTEMBED_CACHE_PATH",)
 TOKENIZER_WAIT_S = 30.0
@@ -158,7 +158,8 @@ def disabled_tool_names(environ: MutableMapping[str, str] | None = None) -> set[
 
 def tool_definitions(disabled: set[str]) -> list[dict[str, Any]]:
     return [{"name": name, "description": schema.get("description", "") + READER_NOTE,
-             "inputSchema": schema.get("parameters") or {"type": "object", "properties": {}}}
+             "inputSchema": schema.get("parameters") or {"type": "object", "properties": {}},
+             "annotations": {"readOnlyHint": True}}  # every reader tool only reads the store
             for name, schema in READER_TOOLS.items() if name not in disabled]
 
 

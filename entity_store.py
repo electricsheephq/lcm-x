@@ -22,11 +22,12 @@ class EntityStoreUnavailableError(RuntimeError):
 
 def normalize_alias(value: str) -> str:
     value = " ".join(unicodedata.normalize("NFKC", value).casefold().split())
-    while value and unicodedata.category(value[0]).startswith("P"):
-        value = value[1:].lstrip()
-    while value and unicodedata.category(value[-1]).startswith("P"):
-        value = value[:-1].rstrip()
-    return value
+    start, end = 0, len(value)
+    while start < end and (value[start].isspace() or unicodedata.category(value[start]).startswith("P")):
+        start += 1
+    while end > start and (value[end - 1].isspace() or unicodedata.category(value[end - 1]).startswith("P")):
+        end -= 1
+    return value[start:end]
 
 
 def normalize_platform_id(platform: str, identifier: str) -> str:
