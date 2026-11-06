@@ -98,6 +98,11 @@ def lcm_query_state(args: Dict[str, Any], **kwargs: Any) -> str:
     if "scope_key" in args:
         scope_key = str(args.get("scope_key") or "").strip()
 
+    for key, value in (("subject_key", subject_key), ("predicate_key", predicate_key),
+                       ("scope_key", scope_key)):
+        if value is not None and len(value) > 1_000:
+            return json.dumps({"error": f"{key} must be at most 1000 characters"})
+
     raw_kinds = args.get("kinds")
     kinds: list[str] | None = None
     if raw_kinds is not None and raw_kinds != []:  # [] means "not provided" (#1194)
