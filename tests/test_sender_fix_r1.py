@@ -363,7 +363,7 @@ def test_w6_scope_xsession_emulated_empty_b(tmp_path, monkeypatch, anchor, path)
     """A stored under a compression ancestor, empty B stored in the current session: W6's
     same-session NOT EXISTS cannot see B, so the UPDATE scope (current + ancestors) reaches A."""
     monkeypatch.setenv("LCM_IDENTITY_ANCHOR", anchor)
-    with engine_context(tmp_path, window=128000, conversation_id="conv") as e:
+    with engine_context(tmp_path, window=128000, conversation_id="conv", embeddings_enabled=False) as e:
         prefix = [message(), dict(role="assistant", content="synthetic reply", timestamp=100.5)]
         a = dict(role="user", content=A_TEXT, timestamp=101.0)
         e.ingest([*prefix, a])
@@ -394,7 +394,8 @@ def test_w6_scope_xsession_emulated_empty_b(tmp_path, monkeypatch, anchor, path)
 def test_w6_scope_xsession_rotation_empty_b(tmp_path, monkeypatch, anchor, path):
     """Real LCM rotation S -> C (compression boundary) between A's store and empty B's store."""
     monkeypatch.setenv("LCM_IDENTITY_ANCHOR", anchor)
-    with engine_context(tmp_path, window=128000, conversation_id="conv", platform="telegram") as e:
+    with engine_context(tmp_path, window=128000, conversation_id="conv", platform="telegram",
+                        embeddings_enabled=False) as e:
         scope_state_db(e, [("S", None, "compression"), ("C", "S", None)])
         prefix = [message(), dict(role="assistant", content="synthetic reply", timestamp=100.5)]
         a = dict(role="user", content=A_TEXT, timestamp=101.0)
@@ -432,7 +433,7 @@ def test_w6_scope_real_rotation_then_empty_b(tmp_path, monkeypatch, anchor, seco
 
     monkeypatch.setenv("LCM_IDENTITY_ANCHOR", anchor)
     monkeypatch.setattr(engine_module, "summarize_with_escalation", _stub_summarizer())
-    e = LCMEngine(config=_config(tmp_path), hermes_home=str(tmp_path / "home"))
+    e = LCMEngine(config=_config(tmp_path, embeddings_enabled=False), hermes_home=str(tmp_path / "home"))
     try:
         e.on_session_start("S", platform="telegram", context_length=200000, conversation_id="conv")
         scope_state_db(e, [("S", None, "compression"), ("C", "S", None)])
@@ -467,7 +468,7 @@ def test_w6_scope_real_rotation_then_empty_b(tmp_path, monkeypatch, anchor, seco
 @pytest.mark.parametrize("earlier_clock", [False, True], ids=["ordinary-clock", "earlier-clock"])
 def test_w6_scope_ancestor_candidate_current_user_veto(tmp_path, earlier_clock):
     """R1/R3: store_id chronology crosses sessions, even when wall clocks disagree."""
-    with engine_context(tmp_path, window=128000, conversation_id="conv") as e:
+    with engine_context(tmp_path, window=128000, conversation_id="conv", embeddings_enabled=False) as e:
         row = message()
         e.ingest([row])
         assert e.drain_rollup_maintenance(timeout=10)
@@ -489,7 +490,7 @@ def test_w6_scope_ancestor_candidate_current_user_veto(tmp_path, earlier_clock):
 
 def test_w6_scope_mirror_current_candidate_older_ancestor_accepts(tmp_path):
     """R3 mirror: a lower-store_id ancestor does not veto the current candidate."""
-    with engine_context(tmp_path, window=128000, conversation_id="conv") as e:
+    with engine_context(tmp_path, window=128000, conversation_id="conv", embeddings_enabled=False) as e:
         older = e._store.append("ancestor", message(-1))
         row = message()
         e.ingest([row])
@@ -510,7 +511,7 @@ def test_w6_scope_mirror_current_candidate_older_ancestor_accepts(tmp_path):
 def test_w6_scope_rotation_no_later_user_records_accept(tmp_path, monkeypatch, anchor, record_property):
     """R2: record capture or permitted NULL after S->C without any later user."""
     monkeypatch.setenv("LCM_IDENTITY_ANCHOR", anchor)
-    with engine_context(tmp_path, window=128000, conversation_id="conv") as e:
+    with engine_context(tmp_path, window=128000, conversation_id="conv", embeddings_enabled=False) as e:
         scope_state_db(e, [("S", None, "compression"), ("C", "S", None)])
         row = message()
         e.ingest([row])
@@ -531,7 +532,7 @@ def test_w6_scope_rotation_no_later_user_records_accept(tmp_path, monkeypatch, a
 
 def test_w6_scope_longest_chain_parameter_bound(tmp_path):
     """R4: 256 ancestors + current need at most 3 + 2*257 = 517 binds (<999)."""
-    with engine_context(tmp_path, window=128000, conversation_id="conv") as e:
+    with engine_context(tmp_path, window=128000, conversation_id="conv", embeddings_enabled=False) as e:
         sessions = [("S", "a0", None)] + [
             (f"a{i}", f"a{i+1}" if i < 256 else None, "compression") for i in range(257)]
         scope_state_db(e, sessions)
