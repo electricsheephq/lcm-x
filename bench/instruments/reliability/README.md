@@ -114,8 +114,9 @@ the host reported `interrupted`. Any other assistant row is surplus.
   worst case, because a silent re-store stored before a related later copy cannot be told apart: its surplus
   fills rows without a self relation first, then the self-related rows that hold the most copies, and each
   self-related row it reaches explains one copy; pairs explain nothing there. A copy that a host merge record
-  consumed as a composite's part is a kept copy of its key and stays in the key's ID list: it counts toward the
-  copies the key keeps, and a `possible_replay_of` pair can link a later copy to it.
+  consumed as a composite's part is a kept copy of its key and stays in the key's ID list. A key with one takes
+  the worst case whatever it keeps: the record's parts are picked among identical copies (around rows reserved for
+  embedded credits), so store order no longer identifies its kept copy.
   Maximum matching assigns distinct witnesses to distinct stored rows within each key, capped by
   that key's unlicensed surplus; a stored row explains at most one copy of each key it holds, so an assistant row
   whose content and tool entries were stored twice explains one copy of each. A row whose `tool_calls` holds the

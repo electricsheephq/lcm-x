@@ -245,9 +245,11 @@ def test_p1h_a_row_that_holds_a_call_twice_explains_one_copy():
 
 @pytest.mark.parametrize("composite,relations,want", [
     # Bot review on #2291: a host merge record consumes rows 1 and 2 as the expected composite's parts, and row 3
-    # re-stores part "alpha" with a pair to row 1. The consumed copy stays in alpha's ID list as its one kept copy,
-    # so the pair explains row 3.
-    ("alpha\n\nbeta", [(3, "possible_replay_of", 1)], (1, 0)),
+    # re-stores part "alpha" with a pair to row 1. The record picked its part among identical copies, so alpha takes
+    # the worst case and the pair explains nothing: B2S fails closed (an accepted tradeoff; no gate cell has host
+    # merge records).
+    ("alpha\n\nbeta", [(3, "possible_replay_of", 1)], (0, 1)),
+    ("alpha\n\nbeta", [(3, "supersedes", None)], (0, 1)),
     # Controls: a pair to the consumed copy of another key (row 2, "beta") explains nothing; so does no relation.
     ("alpha\n\nbeta", [(3, "possible_replay_of", 2)], (0, 1)),
     ("alpha\n\nbeta", [], (0, 1)),
@@ -256,7 +258,8 @@ def test_p1h_a_row_that_holds_a_call_twice_explains_one_copy():
     # nor a self relation on row 3 explains the surplus.
     ("alpha\n\nalpha", [(3, "possible_replay_of", 1)], (0, 1)),
     ("alpha\n\nalpha", [(3, "supersedes", None)], (0, 1)),
-], ids=["pair-to-consumed-part", "pair-to-other-part", "no-relation", "two-consumed-pair", "two-consumed-self"])
+], ids=["pair-to-consumed-part", "self-on-later-copy", "pair-to-other-part", "no-relation", "two-consumed-pair",
+        "two-consumed-self"])
 def test_p1h_merge_consumed_copies_stay_in_the_key(composite, relations, want):
     parts = [("user", multiset.h(p)) for p in composite.split("\n\n")]
     host = {("user", multiset.h(composite)): {"n": 1, "ids": [9], "merges": [{"host_row_id": 9, "parts": parts}]}}
@@ -264,6 +267,21 @@ def test_p1h_merge_consumed_copies_stay_in_the_key(composite, relations, want):
     out, split = _split([("user", composite)], [(1, "user", "alpha"), (2, "user", second), (3, "user", "alpha")],
                         relations, host=host)
     assert (out["deficit_rows"], out["surplus_rows"]) == (0, 1)
+    assert (split["visible_surplus_rows"], split["silent_surplus_rows"]) == want
+
+
+@pytest.mark.parametrize("groups,relations,want", [
+    # Delta review on #2291: an embedded credit reserved row 1, so the merge consumed the later copy (row 3) and row 1
+    # is the key's surplus. A self relation on the consumed row must not explain it, and a key with a consumed copy
+    # takes the worst case whichever row is marked.
+    ([(KEY, 1, [1, 3], [3])], [(3, "supersedes", None)], (0, 1)),
+    ([(KEY, 1, [1, 3], [3])], [(1, "supersedes", None)], (0, 1)),
+    # Control: the same ids with no consumed copy follow store order, so a relation on the later copy explains it.
+    ([(KEY, 1, [1, 3])], [(3, "supersedes", None)], (1, 0)),
+    ([(KEY, 1, [1, 3], [])], [(3, "supersedes", None)], (1, 0)),
+], ids=["consumed-later-copy-marked", "surplus-copy-marked", "no-merge", "empty-merge-list"])
+def test_p1h_a_key_with_a_merge_consumed_copy_takes_the_worst_case(groups, relations, want):
+    split = multiset.split_surplus(groups, relations)
     assert (split["visible_surplus_rows"], split["silent_surplus_rows"]) == want
 
 

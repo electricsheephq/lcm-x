@@ -311,7 +311,8 @@ def score(expected: list[tuple[str, str]], stored_rows: list[tuple], host: dict 
             if have - n > entry.get("licensed", 0):
                 duplicated.append(entry)
                 if surplus_keys is not None:
-                    surplus_keys.append((key, have - n - entry.get("licensed", 0), stored[key] + consumed[key]))
+                    surplus_keys.append((key, have - n - entry.get("licensed", 0), stored[key] + consumed[key],
+                                         list(consumed[key])))
     extra = []
     for k, v in stored.items():
         if k not in want:
@@ -319,7 +320,7 @@ def score(expected: list[tuple[str, str]], stored_rows: list[tuple], host: dict 
             licensed += [lic] if lic else []
             if len(v) > (lic or {}).get("licensed", 0):
                 if surplus_keys is not None:
-                    surplus_keys.append((k, len(v) - (lic or {}).get("licensed", 0), v + consumed[k]))
+                    surplus_keys.append((k, len(v) - (lic or {}).get("licensed", 0), v + consumed[k], list(consumed[k])))
                 extra.append({"role": k[0], "copies": len(v) - (lic or {}).get("licensed", 0), "store_ids": v[:6]})
     # #804: a held user composite whose parts the host durably stored apart is stored here as those parts, each
     # licensed by host parity; the composite key is then not a deficit. Only the occurrences the host did not store
@@ -452,7 +453,9 @@ def split_surplus(groups, relations):
     related later copy cannot be told apart: its surplus fills rows without a self relation first, then the
     self-related rows that hold the most copies, and each self-related row it reaches explains one copy; pairs
     explain nothing there. A copy that a host merge record consumed as a composite's part is a kept copy of its key
-    and stays in the key's ID list: it counts toward the copies the key keeps, and a pair can link a later copy to it.
+    and stays in the key's ID list; a group's optional fourth item lists those copies. A key with one takes the worst
+    case whatever it keeps, because the record's parts are picked among identical copies (around rows reserved for
+    embedded credits), so store order no longer identifies its kept copy.
     """
     graph, source, sink = defaultdict(dict), ("source",), ("sink",)
 
@@ -464,11 +467,11 @@ def split_surplus(groups, relations):
     pairs = sorted({tuple(sorted((sid, other))) for sid, kind, other in relations
                     if kind == "possible_replay_of" and other is not None and sid != other})
     caps = []
-    for index, (_key, surplus, ids) in enumerate(groups):
+    for index, (_key, surplus, ids, *merged) in enumerate(groups):
         quota, held, count = ("key", index), set(ids), Counter(ids)
         copies = sorted(ids)  # one row can hold a key twice (a repeated tool-call entry): count copies, not rows
         kept = len(copies) - surplus  # the key's expected, licensed or loose-allowed copies
-        if kept <= 1:
+        if kept <= 1 and not (merged and merged[0]):
             # Store order identifies the expected copy: only the key's last `surplus` copies can be explained.
             cap, later = surplus, set(copies[max(0, kept):]) if surplus > 0 else set()
             witnesses = [("self", sid) for sid in sorted(later & self_ids)]
@@ -515,7 +518,7 @@ def split_surplus(groups, relations):
             node = previous
         visible += 1
     examples = []
-    for index, (key, surplus, ids) in enumerate(groups):
+    for index, (key, surplus, ids, *_merged) in enumerate(groups):
         silent = surplus - (caps[index] - graph[source][("key", index)])  # surplus minus what the matching explained
         if not silent:
             continue
@@ -526,5 +529,5 @@ def split_surplus(groups, relations):
         unexplained = sorted((sid for sid, n in count.items() if n > 1 - graph[("row", index, sid)].get(sink, 1)),
                              key=lambda sid: (sid not in self_ids, sid))
         examples += [{"store_id": sid, "role": key[0], "sha256": key[1]} for sid in unexplained[-silent:]]
-    return {"visible_surplus_rows": visible, "silent_surplus_rows": sum(n for _k, n, _ids in groups) - visible,
+    return {"visible_surplus_rows": visible, "silent_surplus_rows": sum(g[1] for g in groups) - visible,
             "silent_surplus_examples": sorted(examples, key=lambda e: (e["store_id"], e["role"], e["sha256"]))[:10]}
