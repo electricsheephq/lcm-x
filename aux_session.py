@@ -925,6 +925,9 @@ class DelegateChildMixin:
                 # the next compression or turn retries the store. Other failures compact as before (a store
                 # that keeps failing saves nothing by stalling the child) and stay visible below.
                 self._note_delegate_child_fallback(session_id, "compaction skipped: input not stored")
+                state = self._bypass_compress_state()
+                state["_last_compression_status"] = "noop"
+                state["_last_compression_noop_reason"] = "compaction skipped: input not stored"
                 return messages
             try:
                 if self._delegate_child_link(session_id, platform=_DELEGATE_SOURCE, require_agent=True):

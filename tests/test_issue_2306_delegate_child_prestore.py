@@ -76,6 +76,9 @@ def test_failed_pre_compaction_store_skips_compaction_and_loses_nothing(
     monkeypatch.setattr(engine, "_bypass_compaction_target_tokens", lambda **kwargs: 64)
     aux = module("aux_session")
     fallbacks = aux.delegate_child_store_counts().get("fallbacks", 0)
+    # The skip's no-op status is written to the child's frame-bound state, read here during the call.
+    bypass_state, seen_states = engine._bypass_compress_state, []
+    monkeypatch.setattr(engine, "_bypass_compress_state", lambda: seen_states.append(bypass_state()) or seen_states[-1])
     with caplog.at_level("WARNING"):
         first = child.compress(engine, view)
     assert calls, "the injected failure never ran"
@@ -83,6 +86,9 @@ def test_failed_pre_compaction_store_skips_compaction_and_loses_nothing(
     assert aux.delegate_child_store_counts()["fallbacks"] > fallbacks
     assert any("compaction skipped: input not stored" in record.getMessage() for record in caplog.records)
     assert stored_child_contents(engine) == sent[:5], "the failed pre-store wrote rows after all"
+    assert seen_states and seen_states[-1]["_last_compression_status"] == "noop"
+    assert seen_states[-1]["_last_compression_noop_reason"] == "compaction skipped: input not stored"
+    monkeypatch.setattr(engine, "_bypass_compress_state", bypass_state)
     if locker is not None:
         locker.close()
 
