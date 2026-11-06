@@ -16,12 +16,13 @@ _PATTERNS = tuple(re.compile(pattern, re.I) for pattern in (
     _PREFIX + r"forget\s+(?:that I|that I'm|that I've|that my|what I (?:said|told you|mentioned|shared)|about my|my|I|I'm|I've)\b",
     _PREFIX + r"forget\s+(?:the|this|that)\s+(?:detail|preference|fact|info|information|note)\s+(?:about|that|on|regarding)\b",
     _PREFIX + r"(?:don't|do not|stop|no longer)\s+(?:remember|store|retain|memorize|keep in mind)\w*\s+(?:that I|what I|my|about me|this about me)\b",
-    r"\b(?:erase|delete|remove|wipe|purge|discard)\b[^.!?\n]{0,40}\bfrom (?:your )?memory\b",
+    _PREFIX + r"(?:erase|delete|remove|wipe|purge|discard)\b[^.!?\n]{0,40}\bfrom (?:your )?memory\b",
     _PREFIX + r"(?:disregard|ignore) what I (?:said|told you|mentioned|shared) about\b",
     r"\bI don't want you to (?:remember|store|retain|know) (?:that|this|my|about)\b",
     r"\bI'd rather you (?:not|didn't) (?:remember|store|retain|know) (?:that|this|my|about)\b",
 ))
 _NON_REQUEST_TEXT = re.compile(r'```[\s\S]*?(?:```|\Z)|`[^`\n]*(?:`|$)|^\s*>[^\n]*|"[^"]*(?:"|\Z)|“[^”]*(?:”|\Z)|‘[^’]*(?:’|\Z)', re.M)
+_NEGATION = re.compile(r"\b(?:don't|do\s+not|never|no\s+need\s+to|not|shouldn't)\b", re.I)
 _CONTRACTIONS = frozenset("""
     i'm i've i'd i'll it's let's that's what's who's he's she's there's here's
     where's when's how's don't doesn't didn't can't couldn't won't wouldn't
@@ -41,16 +42,31 @@ _STOPWORDS = frozenset("""
 """.split())
 _KEYWORDS = ('forget', 'remember', 'disregard', 'erase', 'delete', 'remove', 'wipe',
              'scratch', 'discard', 'purge', 'rather you', 'want you to', 'memory', 'memorize', 'retain',
-             'store', 'ignore', 'know')
+             'store', 'ignore', 'know', 'keep in mind')
 # Every detection pattern has at least one of these terms or phrases (the index has no stemming).
-_FTS_QUERY = ('forget OR remember OR remembering OR memory OR memorize OR retain OR disregard '
-              'OR "store my" OR "store that" OR "store this" OR "know my" OR "know that" '
+# ``store`` is common prose, so only its request phrasings are candidates (the
+# 200-row candidate cap must not fill with unrelated "store"/"storage" rows).
+_STORE_PHRASES = " OR ".join(f'"{verb} {obj}"' for verb in ("store", "stores", "storing", "stored")
+                             for obj in ("that", "what", "my", "about", "this"))
+_FTS_QUERY = ('forget* OR remember* OR memor* OR retain* OR disregard '
+              f'OR {_STORE_PHRASES} OR "keep in mind"* OR "know my" OR "know that" '
               'OR "know this" OR "know about" OR "ignore what"')
 
 
+def request_text(text: str) -> str:
+    """Use the same unquoted prose for detection and coverage detail words."""
+    return _NON_REQUEST_TEXT.sub(" ", text).replace("’", "'").replace("‘", "'")
+
+
 def is_forget_request(text: str, role: str = "user") -> bool:
-    text = _NON_REQUEST_TEXT.sub(" ", text).replace("’", "'").replace("‘", "'")
-    return role.lower() == "user" and any(p.search(text) for p in _PATTERNS)
+    if role.lower() != "user":
+        return False
+    text = request_text(text)
+    # A colon may anchor a command inside a negated clause. Include a matched
+    # sentence boundary, but retain the prefix before a colon. Negation within
+    # the explicit non-retention patterns ("don't remember") is intentional.
+    return any(not _NEGATION.search(re.split(r"[.!?;\n]", text[:m.start() + 1])[-1])
+               for p in _PATTERNS for m in p.finditer(text))
 
 
 def forget_content_words(text: str) -> set[str]:
@@ -70,7 +86,7 @@ def covers(row: dict, forget: dict) -> bool:
     earlier = row["store_id"] < forget["store_id"]
     if row.get("observed_at") is not None and forget.get("observed_at") is not None:
         earlier = earlier and row["observed_at"] <= forget["observed_at"]
-    words = forget_content_words(forget.get("content") or "")
+    words = forget_content_words(request_text(forget.get("content") or ""))
     if not earlier or len(words) < 2:
         return False
     shared = len(words & forget_content_words(row.get("content") or ""))
@@ -192,6 +208,7 @@ def filter_session_payload(payload, rows, forgets, current_session, *, seen_refs
                                  forget_event_time=event_time(f)))
     if not receipts:
         return []
+    original_hits = payload["hits"]
     payload.update(hits=hits, total_results=len(hits))
     delivery = payload["provenance"]["delivery"]
     delivery.update(message_count=len(hits), session_count=len({h["session_id"] for h in hits}))
@@ -199,10 +216,52 @@ def filter_session_payload(payload, rows, forgets, current_session, *, seen_refs
         if meta["session_id"] not in affected_sessions:
             continue
         ids = [h["store_id"] for h in hits if h["session_id"] == meta["session_id"]]
+        positions = {h["store_id"]: i for i, h in enumerate(
+            h for h in original_hits if h["session_id"] == meta["session_id"])}
+        ranges = []
+        for ident in ids:
+            previous = ranges[-1][1] if ranges else None
+            # Preserve original source-order runs, including interleaved IDs;
+            # never merge across a withheld row or an existing window gap.
+            if (previous is not None and positions[ident] == positions[previous] + 1
+                    and any(start <= previous <= ident <= end
+                            for start, end in meta.get("returned_id_ranges", []))):
+                ranges[-1][1] = ident
+            else:
+                ranges.append([ident, ident])
         meta.update(complete=False, omission_reason="forget_requested",
-                    returned_id_ranges=[[i, i] for i in ids])
+                    returned_id_ranges=ranges)
+    delivery["truncated"] = bool(delivery.get("stop_reason")) or any(
+        not s["complete"] for s in delivery["sessions"])
     if "delta" in payload:
         refs = [h["exact_ref"] for h in hits if h.get("exact_ref") and h["exact_ref"] not in seen_refs]
         payload["delta"].update(novel_refs=refs, novel_ref_count=len(refs), progress=bool(refs),
                                 termination_reason=None if refs else "no_novel_exact_ref")
     return receipts
+
+
+def encode_payload(payload, *, char_cap=None):
+    """Fit forget receipts only; retain source hits and read-failure provenance."""
+    provenance = payload["provenance"]
+    delivery = provenance.get("delivery")
+    if delivery is not None:
+        from .tokens import count_tokens
+        char_cap = delivery.get("char_budget", char_cap)
+
+    def encode():
+        if delivery is not None:
+            for _ in range(10):
+                raw = json.dumps(payload, ensure_ascii=False)
+                size = (count_tokens(raw), len(raw))
+                if size == (delivery["response_tokens"], delivery["response_chars"]):
+                    return raw
+                delivery["response_tokens"], delivery["response_chars"] = size
+        return json.dumps(payload, ensure_ascii=False)
+
+    raw = encode()
+    receipts = provenance.get("forget_withheld", [])
+    while char_cap is not None and len(raw) > char_cap and receipts:
+        receipts.pop()
+        provenance["forget_withheld_omitted"] = provenance.get("forget_withheld_omitted", 0) + 1
+        raw = encode()
+    return raw

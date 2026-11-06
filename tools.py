@@ -4743,16 +4743,8 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
     if forget_info:
         payload = json.loads(response)
         payload["provenance"].update(forget_info)
-        if session_delivery is not None:
-            from .tokens import count_tokens
-            delivery = payload["provenance"]["delivery"]
-            for _ in range(10):
-                raw = json.dumps(payload, ensure_ascii=False)
-                size = (count_tokens(raw), len(raw))
-                if size == (delivery["response_tokens"], delivery["response_chars"]):
-                    return raw
-                delivery["response_tokens"], delivery["response_chars"] = size
-        return json.dumps(payload, ensure_ascii=False)
+        return forget_requests.encode_payload(
+            payload, char_cap=_LCM_RECALL_RESPONSE_CHAR_CAP if detail == "answer_ready" else None)
     return response
 
 

@@ -1,10 +1,14 @@
-"""Pure policy thresholds and command-form detection."""
+"""Policy thresholds, command-form detection and candidate-path parity."""
+import sqlite3
+import time
+
 import pytest
 
-from hermes_lcm.forget_requests import covers, forget_content_words, is_forget_request
+from hermes_lcm.forget_requests import covers, forget_content_words, is_forget_request, read_forget_rows
+from hermes_lcm.store import MessageStore
 
 
-@pytest.mark.parametrize("text", [
+POSITIVE_EXAMPLES = [
     "Please forget that I prefer green tea.", "Please forget my preference for window seats.",
     "Please forget the detail about my brother's job.", "Forget that I'm vegetarian.",
     "Don't remember that I live in Austin.", "Please delete my address from your memory.",
@@ -18,7 +22,19 @@ from hermes_lcm.forget_requests import covers, forget_content_words, is_forget_r
     "I'd rather you didn't know about my green tea preference.",
     "Kindly forget about my green tea preference.", "FORGET THAT I'VE MOVED TO AUSTIN.",
     "I’d like you to forget that I’m vegetarian.",
-])
+    "Can you erase my phone number from your memory?",
+    "Stop remembering my home address on Oak Street",
+    "Don't store my home address on Oak Street",
+    "I don't want you to know my home address on Oak Street",
+    "Ignore what I said about my home address on Oak Street",
+    "I'd rather you not store my home address on Oak Street",
+    "Stop memorize my green tea preference.",
+    "No longer store about me green tea.",
+    "Stop keep in minding my green tea preference.",
+]
+
+
+@pytest.mark.parametrize("text", POSITIVE_EXAMPLES)
 def test_commands(text):
     assert is_forget_request(text)
     assert not is_forget_request(text, "assistant")
@@ -41,6 +57,15 @@ def test_commands(text):
     "> Please forget that I like green tea.\nordinary text",
     "Erase my green tea preference.", "I'd rather you not remember green tea.",
     "Delete " + "x" * 41 + " from your memory.",
+    "Don't delete my green tea preference from your memory.",
+    "Do not delete my green tea preference from your memory.",
+    "Never erase my address from your memory.",
+    "No need to remove my phone number from memory.",
+    "Please don't forget that I prefer green tea.",
+    "I don't want you to forget my birthday.",
+    "Not: delete my green tea preference from memory.",
+    "You shouldn't: forget my green tea preference.",
+    "She might delete my green tea preference from memory.",
 ])
 def test_non_commands(text):
     assert not is_forget_request(text)
@@ -49,6 +74,44 @@ def test_non_commands(text):
 def test_detail_words():
     assert forget_content_words("Please forget that I shared my preference: green tea!") == {"green", "tea"}
     assert forget_content_words("I'm I've I'd I'll it's let's that's what's don't Jane’s party a x 12") == {"jane", "party"}
+
+
+def test_every_positive_through_fts_and_scan(tmp_path):
+    path = tmp_path / "indexed.db"
+    store = MessageStore(str(path))
+    try:
+        assert store.connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE name='messages_fts'"
+        ).fetchone()
+        ids = [store.append("s", dict(role="user", content=text, timestamp=1)) for text in POSITIVE_EXAMPLES]
+        fs, _, reason = read_forget_rows(path, [], deadline=time.monotonic() + 5)
+        assert reason is None
+        assert {r["store_id"] for r in fs} == set(ids)
+        indexed = {r["content"] for r in fs}
+    finally:
+        store.close()
+    scan_path = tmp_path / "scan.db"
+    with sqlite3.connect(scan_path) as conn:
+        conn.execute("CREATE TABLE messages (store_id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, "
+                     "content TEXT, source TEXT, observed_at REAL, timestamp REAL)")
+        conn.executemany("INSERT INTO messages VALUES (?, 's', 'user', ?, '', NULL, 1)",
+                         enumerate(POSITIVE_EXAMPLES, 1))
+    fs, _, reason = read_forget_rows(scan_path, [], deadline=time.monotonic() + 5)
+    assert reason is None
+    assert {r["content"] for r in fs} == indexed
+
+
+@pytest.mark.parametrize("excluded", [
+    "```\nalpha beta gamma delta epsilon zeta\n```",
+    '"alpha beta gamma delta epsilon zeta"',
+    "> alpha beta gamma delta epsilon zeta",
+    "`alpha beta gamma delta epsilon zeta`",
+])
+def test_coverage_uses_cleaned_request_text(excluded):
+    f = row(10, "Please forget my green tea preference\n" + excluded, previous_ids=[9])
+    assert is_forget_request(f["content"])
+    assert covers(row(9, "I love green tea in the morning"), f)
+    assert not covers(row(1, "alpha beta gamma delta epsilon zeta"), f)
 
 
 @pytest.mark.parametrize("forgotten,other,adjacent", [
@@ -95,3 +158,11 @@ def test_order_scope_and_precision():
 def test_later_restatement_in_old_session_without_observed_at():
     f = row(100, "Forget my green tea", "B", session_order=100)
     assert not covers(row(150, "green tea", "A", session_order=1), f)
+
+
+def test_store_prose_is_not_a_candidate_term():
+    """Only store-request phrasings reach the bounded candidate set, so unrelated
+    store/storage prose cannot crowd real requests out of the 200-row cap."""
+    from hermes_lcm import forget_requests
+    assert "store*" not in forget_requests._FTS_QUERY
+    assert '"store what"' in forget_requests._FTS_QUERY

@@ -10,6 +10,7 @@ from hermes_lcm import forget_requests as forget, tools
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.dag import SummaryDAG, SummaryNode
 from hermes_lcm.store import MessageStore
+from tests.test_forget_requests import POSITIVE_EXAMPLES
 
 
 @pytest.fixture
@@ -156,6 +157,12 @@ def test_session_neighbours_cannot_reintroduce_covered_rows(engine):
     result = recall(engine)
     assert f in {h["store_id"] for h in result["hits"]}
     assert not {old, reply} & {h["store_id"] for h in result["hits"]}
+    delivery = result["provenance"]["delivery"]
+    assert delivery["sessions"][0]["complete"] is False
+    assert delivery["sessions"][0]["omission_reason"] == "forget_requested"
+    assert delivery["truncated"] == (bool(delivery.get("stop_reason")) or any(
+        not s["complete"] for s in delivery["sessions"]))
+    assert delivery["truncated"] is True
 
 
 @pytest.mark.parametrize("detail", ["snippets", "answer_ready"])
@@ -311,7 +318,7 @@ def test_fts_candidate_path_is_used_scoped_and_read_only(engine, monkeypatch):
     assert reason is None and [r["store_id"] for r in fs] == [f]
     query = next(s for s in statements if s.startswith("WITH requests"))
     assert "messages_fts MATCH" in query and "instr(lower" not in query
-    assert "forget OR remember OR remembering OR memory OR memorize OR retain OR disregard" in query
+    assert forget._FTS_QUERY in query
     assert not any(s.startswith(("INSERT", "UPDATE", "DELETE", "CREATE")) for s in statements)
 
 
@@ -325,13 +332,7 @@ def test_scan_fallback_when_fts_is_absent(tmp_path):
     assert reason is None and [r["store_id"] for r in fs] == [1]
 
 
-@pytest.mark.parametrize("text", [
-    "Stop remembering my home address on Oak Street",
-    "Don't store my home address on Oak Street",
-    "I don't want you to know my home address on Oak Street",
-    "Ignore what I said about my home address on Oak Street",
-    "I'd rather you not store my home address on Oak Street",
-])
+@pytest.mark.parametrize("text", POSITIVE_EXAMPLES)
 def test_every_detected_form_is_read_through_the_index(engine, text):
     old = add(engine, "My home address is 12 Oak Street")
     add(engine, "Noted your address", "assistant")
@@ -350,3 +351,68 @@ def test_tool_call_and_result_rows_are_never_covered():
     plain = dict(store_id=8, session_id="s", role="assistant", content="Your home address on Oak Street", observed_at=None)
     assert not forget.covers(call, f) and not forget.covers(result, f)
     assert forget.covers(plain, f)
+
+
+@pytest.mark.parametrize("unit", ["hits", "session"])
+def test_near_cap_forget_receipts_are_trimmed(engine, monkeypatch, unit):
+    ids = {add(engine, f"green tea detail {i}") for i in range(25)}
+    f = add(engine, "Forget my green tea", stamp=1700100000)
+    engine._config.recall_delivery_unit = unit
+    original = tools.recall_delivery.deliver_recall
+    delivered = []
+
+    def near_cap(*a, **kw):
+        payload = json.loads(original(*a, **kw))
+        cap = (payload["provenance"]["delivery"]["char_budget"] if unit == "session"
+               else tools._LCM_RECALL_RESPONSE_CHAR_CAP)
+        payload["provenance"]["padding"] = ""
+        payload["provenance"]["padding"] = "x" * (cap - 150 - len(json.dumps(payload, ensure_ascii=False)))
+        raw = json.dumps(payload, ensure_ascii=False)
+        assert len(raw) == cap - 150
+        delivered.append(payload)
+        return raw
+
+    monkeypatch.setattr(tools.recall_delivery, "deliver_recall", near_cap)
+    raw = tools.lcm_recall({"query": "green tea", "limit": 25, "detail": "answer_ready"}, engine=engine)
+    result = json.loads(raw)
+    provenance = result["provenance"]
+    cap = provenance["delivery"]["char_budget"] if unit == "session" else tools._LCM_RECALL_RESPONSE_CHAR_CAP
+    assert len(raw) <= cap
+    assert provenance["forget_withheld_omitted"] > 0
+    assert result["hits"] == delivered[0]["hits"]
+    assert {h["store_id"] for h in result["hits"]} == {f}
+    assert not ids & {h["store_id"] for h in result["hits"]}
+    if unit == "session":
+        assert provenance["delivery"]["response_chars"] == len(raw)
+
+
+@pytest.mark.parametrize("ids,ranges,expected", [
+    ([1, 2, 3, 4, 5], [[1, 5]], [[1, 2], [4, 5]]),
+    ([1, 2, 3, 4, 5], [[1, 2], [3, 3], [4, 4], [5, 5]], [[1, 2], [4, 4], [5, 5]]),
+    ([1, 2, 3, 5, 7], [[1, 7]], [[1, 2], [5, 7]]),
+])
+def test_session_ranges_preserve_source_runs_after_filtering(ids, ranges, expected):
+    rows = {i: dict(store_id=i, session_id="s", content="green tea" if i == 3 else "unrelated") for i in ids}
+    f = dict(store_id=10, session_id="s", content="Forget my green tea")
+    meta = dict(session_id="s", complete=True, returned_id_ranges=ranges)
+    payload = dict(hits=list(rows.values()), provenance=dict(delivery=dict(sessions=[meta])))
+    forget.filter_session_payload(payload, rows, [f], "s")
+    assert meta["returned_id_ranges"] == expected
+
+
+def test_receipt_budget_preserves_unavailable_and_prefix():
+    receipts = [dict(store_id=i, forget_store_id=99, forget_event_time=None) for i in range(10)]
+    payload = dict(hits=[], provenance=dict(forget_withheld=receipts.copy(), forget_unavailable="deadline"))
+    cap = len(json.dumps(dict(hits=[], provenance=dict(
+        forget_withheld=receipts[:2], forget_unavailable="deadline", forget_withheld_omitted=8)), ensure_ascii=False))
+    raw = forget.encode_payload(payload, char_cap=cap)
+    assert len(raw) <= cap
+    assert payload["provenance"]["forget_withheld"] == receipts[:2]
+    assert payload["provenance"]["forget_withheld_omitted"] == 8
+    assert payload["provenance"]["forget_unavailable"] == "deadline"
+    # A base envelope that cannot fit still returns, without dropping its failure reason.
+    raw = forget.encode_payload(payload, char_cap=1)
+    assert len(raw) > 1
+    assert payload["provenance"]["forget_unavailable"] == "deadline"
+    assert payload["provenance"]["forget_withheld"] == []
+    assert payload["provenance"]["forget_withheld_omitted"] == 10

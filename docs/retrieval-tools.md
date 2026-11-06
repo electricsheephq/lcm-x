@@ -596,15 +596,20 @@ delivery, including proactive recall, the pre-answer baseline and evidence packs
 In hits mode, the forget turn replaces covered hits where possible; uncovered
 pool hits refill remaining slots. Session delivery only removes covered rows;
 it never inserts a forget turn, and only affected sessions receive changed
-completeness/omission/range metadata. Nothing is deleted or rewritten in the
+completeness/omission/range metadata and the overall truncation flag. Returned
+ranges preserve consecutive source-order runs after withholding.
+Nothing is deleted or rewritten in the
 store. Summary hits are never withheld and may still contain the detail.
 
 Detection uses the existing full-text index to select at most the 200 newest
-user rows matching `forget OR remember OR memory OR memorize OR retain OR disregard`
+user rows matching prefix terms `forget*`, `remember*`, `memor*`, `retain*`,
+`store*` or the supported disregard, ignore, know and keep-in-mind forms
 in the searched store/session scope under the request deadline, then applies
 conservative request patterns. If the index is absent, a keyword scan is used.
 Subagent-source rows, fenced/inline code, blockquote lines and double-quoted
-text are excluded from detection. Ordinary file/library instructions and vague
+text are excluded from detection and from the request's coverage detail words.
+Deletion commands must be explicit requests; negated deletion/forgetting commands
+do not qualify. Ordinary file/library instructions and vague
 phrases such as "forget it" do not qualify. Requests need at least two detail
 words, excluding contractions, pronouns, short words and stopwords; possessive
 `'s` is stripped. The two preceding messages in the same session need 30% word
@@ -618,6 +623,9 @@ Self and later turns are never covered, even when event times are missing.
 withholding, not every covered row in the candidate pool. All covered pool rows
 are excluded from refill. In session mode receipts describe removed delivered
 rows. `fts_anchor` provenance describes ranking before withholding.
+If receipts exceed the response character budget, entries are dropped from the
+end and `provenance.forget_withheld_omitted` records their count. Withheld rows
+stay withheld, and `forget_unavailable` is always retained.
 A failed or expired read leaves delivery
 unchanged and sets `provenance.forget_unavailable` to `read_error` or `deadline`.
 This is conservative, bounded delivery suppression, not erasure or a guarantee
