@@ -1,3 +1,5 @@
+import os
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -109,3 +111,34 @@ def test_second_run_is_idempotent(tmp_path):
     assert run(repo).returncode == 0
     assert changelog(repo) == after_first
     assert after_first.count(b"- New: once.") == 1
+
+
+def test_empty_unreleased_followed_by_heading(tmp_path):
+    repo = make_repo(tmp_path, {"1-a.md": "- New: x.\n"}, changelog="# Changelog\n\n## Unreleased\n\n## v1.0.0\n\n- New: old.\n")
+    assert run(repo).returncode == 0
+    assert changelog(repo) == b"# Changelog\n\n## Unreleased\n\n- New: x.\n\n## v1.0.0\n\n- New: old.\n"
+
+
+def test_fragment_without_trailing_newline(tmp_path):
+    repo = make_repo(tmp_path, {"1-a.md": "- New: x.\n  more."})
+    assert run(repo).returncode == 0
+    assert changelog(repo) == CHANGELOG.replace("## Unreleased\n\n", "## Unreleased\n\n- New: x.\n  more.\n").encode()
+
+
+def test_bad_file_name_exits_1_and_changes_nothing(tmp_path):
+    for bad in ("Upper-Case.md", "1-a.markdown", "-lead.md", "under_score.md"):
+        repo = make_repo(tmp_path / bad, {"1-good.md": "- New: fine.\n", bad: "- New: x.\n"})
+        before = changelog(repo)
+        result = run(repo)
+        assert result.returncode == 1
+        assert bad in result.stderr
+        assert changelog(repo) == before
+        assert fragment_names(repo) == sorted(["1-good.md", bad, "README.md"])
+
+
+def test_file_mode_preserved_and_no_temp_file_left(tmp_path):
+    repo = make_repo(tmp_path, {"1-a.md": "- New: x.\n"})
+    os.chmod(repo / "CHANGELOG.md", 0o644)
+    assert run(repo).returncode == 0
+    assert stat.S_IMODE(os.stat(repo / "CHANGELOG.md").st_mode) == 0o644
+    assert sorted(p.name for p in repo.iterdir()) == ["CHANGELOG.md", "changelog.d"]

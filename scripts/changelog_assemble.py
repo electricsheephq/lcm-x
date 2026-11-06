@@ -7,11 +7,14 @@ Nothing is written unless every fragment is valid and the heading exists.
 """
 import argparse
 import os
+import re
+import stat
 import sys
 import tempfile
 from pathlib import Path
 
 HEADING = b"## Unreleased"
+FRAGMENT_NAME = re.compile(r"^[a-z0-9][a-z0-9-]*\.md$")
 
 
 def validate(path):
@@ -49,9 +52,11 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     fragment_dir = args.repo / "changelog.d"
-    fragments = sorted(p for p in fragment_dir.glob("*.md") if p.name != "README.md") if fragment_dir.is_dir() else []
+    entries = sorted(p for p in fragment_dir.iterdir() if p.name != "README.md") if fragment_dir.is_dir() else []
+    errors = [f"{p.name}: file name must match {FRAGMENT_NAME.pattern}" for p in entries if not FRAGMENT_NAME.match(p.name)]
+    fragments = [p for p in entries if FRAGMENT_NAME.match(p.name)]
 
-    added, errors = [], []
+    added = []
     for path in fragments:
         lines, error = validate(path)
         if error:
@@ -86,14 +91,26 @@ def main(argv=None):
     try:
         with os.fdopen(handle, "wb") as out:
             out.write(changelog[:offset] + block + rest)
+        os.chmod(temp, stat.S_IMODE(os.stat(changelog_path).st_mode))
         os.replace(temp, changelog_path)
     except BaseException:
         if os.path.exists(temp):
             os.unlink(temp)
         raise
     if not args.keep:
+        undeleted = []
         for path in fragments:
-            path.unlink()
+            try:
+                path.unlink()
+            except OSError as exc:
+                undeleted.append(f"{path.name} ({exc})")
+        if undeleted:
+            print(
+                "error: CHANGELOG.md is already updated, but these fragments could not be deleted; delete them by hand "
+                "before any rerun or their entries will be added twice: " + ", ".join(undeleted),
+                file=sys.stderr,
+            )
+            return 1
     print(f"added {len(added)} line(s) from {len(fragments)} fragment(s)")
     return 0
 
