@@ -286,9 +286,12 @@ class EngineOracle:
         return (self._identity(row, snapshot),)
 
     def stored_aliases(self, row, snapshot):
-        forms = {self._identity(row, snapshot, stored_row=True, with_host_rewrite=h) for h in (False, True)}
-        raw = self.identity_tuple(row)
+        # Host-rewrite overrides apply only to user rows. The other roles have
+        # the same stored identity with either flag, including tool payloads.
+        rewrites = (False, True) if row.get("role") == "user" else (False,)
+        forms = {self._identity(row, snapshot, stored_row=True, with_host_rewrite=h) for h in rewrites}
         tool = row.get("role") == "tool"
+        raw = self.identity_tuple(row) if tool else None
         # A digest-equal nameless form proves the ledger identity was nameless,
         # including when a stored stub expands to the original payload. Otherwise
         # a lost `name` cannot be reconstructed: use v5.1's witness fallback.
