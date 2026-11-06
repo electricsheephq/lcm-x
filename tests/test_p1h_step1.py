@@ -402,3 +402,22 @@ def test_marker_hint_recomputed_when_row_changes(engines, monkeypatch):
     monkeypatch.setattr(engine._store, "ingest_atomic", atomic)
     engine._ingest_messages([seed, new])
     assert "generated_unproven" in _relation_kinds(engine, content)
+
+
+def test_oversized_payload_is_not_counted_before_begin(engines, monkeypatch):
+    engine = engines()
+    engine._config.large_output_externalization_enabled = True
+    seed = _m("user", "seed", 10.)
+    engine._ingest_messages([seed])
+    big = "x" * (engine._config.large_output_externalization_threshold_chars + 1)
+    unlocked = []
+    real_count = engine_module.count_message_tokens
+
+    def count(row):
+        if not engine._store._conn.in_transaction:
+            unlocked.append(row.get("content") == big)
+        return real_count(row)
+
+    monkeypatch.setattr(engine_module, "count_message_tokens", count)
+    engine._ingest_messages([seed, _m("user", big, 11.)])
+    assert True not in unlocked  # the raw payload is not tokenized before BEGIN

@@ -8639,12 +8639,19 @@ class LCMEngine(
                 hints["names"] = _tool_result_names(inputs)
             except Exception:
                 pass  # Retry at the original call site, with its original error boundary.
+            config = self._config
+            # Externalization replaces an oversized payload with a placeholder,
+            # so its raw estimate could never be reused; leave it to the lock.
+            oversized = (int(getattr(config, "large_output_externalization_threshold_chars", 0) or 0)
+                         if getattr(config, "large_output_externalization_enabled", False) else 0)
             for index in range(min(max(self._ingest_cursor, 0), len(inputs)), len(inputs)):
                 row = inputs[index]
                 try:
                     hints["markers"][index] = self._lcm_generated_marker(row)
                 except Exception:
                     pass
+                if oversized and len(row.get("content") or "") > oversized:
+                    continue
                 if _token_counter._encoder_ready and type(row.get("content")) in (str, type(None)):
                     try:
                         hints["estimates"][index] = count_message_tokens(row)
