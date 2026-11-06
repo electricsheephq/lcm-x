@@ -444,7 +444,9 @@ def split_surplus(groups, relations):
     are its earliest stored copies (as for licences and silent examples), so only its last ``surplus`` rows by
     store id can be explained: a self relation counts only on such a row, and a pair explains only such an
     endpoint. A relation on an expected copy (an edited revision's ``supersedes``, say) never explains a later
-    unmarked copy.
+    unmarked copy. Store order settles this only for a key with at most one expected or licensed copy. With two or
+    more, a silent re-store stored before a related later copy cannot be told apart, so the key counts its worst
+    case: every row without a self relation may be surplus, and pairs explain nothing there.
     """
     graph, source, sink = defaultdict(dict), ("source",), ("sink",)
 
@@ -455,13 +457,23 @@ def split_surplus(groups, relations):
     self_ids = {sid for sid, kind, _other in relations if kind in ("supersedes", "generated_unproven")}
     pairs = sorted({tuple(sorted((sid, other))) for sid, kind, other in relations
                     if kind == "possible_replay_of" and other is not None and sid != other})
+    caps = []
     for index, (_key, surplus, ids) in enumerate(groups):
         quota, held = ("key", index), set(ids)
         order = sorted(held)
-        later = set(order[max(0, len(order) - surplus):]) if surplus > 0 else set()  # copies that can be surplus
-        edge(source, quota, surplus)
-        witnesses = [("self", sid) for sid in sorted(later & self_ids)]
-        witnesses += [("pair", a, b) for a, b in pairs if a in held and b in held and (a in later or b in later)]
+        kept = len(order) - surplus  # the key's expected and licensed copies
+        if kept <= 1:
+            # Store order identifies the expected copy: only the key's last `surplus` rows can be explained.
+            cap, later = surplus, set(order[max(0, kept):]) if surplus > 0 else set()
+            witnesses = [("self", sid) for sid in sorted(later & self_ids)]
+            witnesses += [("pair", a, b) for a, b in pairs if a in held and b in held and (a in later or b in later)]
+        else:
+            # Worst case: every row without a self relation may be a surplus copy, and pairs explain nothing.
+            later = held & self_ids
+            cap = max(0, surplus - len(held - self_ids))
+            witnesses = [("self", sid) for sid in sorted(later)]
+        caps.append(cap)
+        edge(source, quota, cap)
         for witness in witnesses:
             before, after = ("in", index, witness), ("out", index, witness)
             edge(quota, before)
@@ -493,7 +505,7 @@ def split_surplus(groups, relations):
         visible += 1
     examples = []
     for index, (key, surplus, ids) in enumerate(groups):
-        silent = graph[source][("key", index)]
+        silent = surplus - (caps[index] - graph[source][("key", index)])  # surplus minus what the matching explained
         if not silent:
             continue
         # Best-effort representatives: the highest-numbered rows the matching left unexplained, usually the later

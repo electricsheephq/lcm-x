@@ -108,7 +108,10 @@ the host reported `interrupted`. Any other assistant row is surplus.
   explain nothing. A key's expected and licensed copies are its earliest stored copies (by store ID), so only its
   last *surplus* rows can be explained: a self relation counts only on such a row, and a pair explains only such an
   endpoint. A relation on an expected copy (an edited revision's `supersedes`, say) never explains a later copy
-  that carries none, and a pair between two expected copies explains nothing.
+  that carries none, and a pair between two expected copies explains nothing. Store order settles this only for
+  a key with at most one expected or licensed copy: with two or more (genuine repeats, host-licensed copies), a
+  silent re-store stored before a related later copy cannot be told apart, so the key counts its worst case:
+  every row without a self relation may be surplus, and pairs explain nothing there.
   Maximum matching assigns distinct witnesses to distinct stored rows within each key, capped by
   that key's unlicensed surplus; a stored row explains at most one copy of each key it holds, so an assistant row
   whose content and tool entries were stored twice explains one copy of each. A row whose `tool_calls` holds the

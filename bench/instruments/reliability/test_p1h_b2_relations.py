@@ -155,10 +155,20 @@ def test_p1h_silent_examples_prefer_the_later_copy(tmp_path):
     assert [e["store_id"] for e in out["silent_surplus_examples"]] == [2]
 
 
-def _split(expected, rows, relations):
+def _split(expected, rows, relations, host=None):
     keys = []
-    out = multiset.score(expected, [(sid, "S", role, text) for sid, role, text in rows], surplus_keys=keys)
+    out = multiset.score(expected, [(sid, "S", role, text) for sid, role, text in rows], host=host, surplus_keys=keys)
     return out, multiset.split_surplus(keys, relations)
+
+
+def test_p1h_a_host_licensed_copy_makes_the_key_fail_closed():
+    # Delta review on #2291: one expected copy plus one host-licensed copy; the silent re-store (row 2) sits before
+    # the related host-mirrored copy (row 3), so the key's surplus stays silent.
+    host = {("user", multiset.h("B")): {"n": 2, "ids": [101, 102]}}
+    out, split = _split([("user", "B")], [(1, "user", "B"), (2, "user", "B"), (3, "user", "B")],
+                        [(3, "possible_replay_of", 1)], host=host)
+    assert out["surplus_rows"] == 1 and [r["licensed"] for r in out["host_parity_licensed"]] == [1]
+    assert (split["visible_surplus_rows"], split["silent_surplus_rows"]) == (0, 1)
 
 
 @pytest.mark.parametrize("expected,rows,relations,want", [
@@ -173,12 +183,19 @@ def _split(expected, rows, relations):
     # unmarked copy: the pair links two expected copies.
     ([("user", "B")] * 2, [(1, "user", "B"), (2, "user", "B"), (3, "user", "B")],
      [(2, "possible_replay_of", 1)], (1, 0, 1, [3])),
+    # Delta review on #2291: with two expected copies, a silent re-store (row 2) stored before the related genuine
+    # repeat (row 3) cannot be told apart, so the key's surplus stays silent (fail closed).
+    ([("user", "B")] * 2, [(1, "user", "B"), (2, "user", "B"), (3, "user", "B")],
+     [(3, "possible_replay_of", 1)], (1, 0, 1, [3])),
+    ([("user", "B")] * 2, [(1, "user", "B"), (2, "user", "B"), (3, "user", "B")],
+     [(3, "supersedes", None)], (1, 0, 1, [3])),
     # Controls: a relation on the later copy still explains it, by itself or through a pair to the original.
     ([("user", "B")], [(1, "user", "B"), (2, "user", "B")], [(2, "supersedes", None)], (1, 1, 0, [])),
     ([("user", "B")], [(1, "user", "B"), (2, "user", "B")], [(1, "possible_replay_of", 2)], (1, 1, 0, [])),
     ([("user", "B")], [(1, "user", "B"), (2, "user", "B")],
      [(1, "generated_unproven", None), (2, "generated_unproven", None)], (1, 1, 0, [])),
 ], ids=["supersedes-on-original", "unproven-on-original", "self-plus-pair", "pair-between-expected",
+        "two-expected-pair-on-last", "two-expected-self-on-last",
         "later-self", "pair-to-original", "both-unproven"])
 def test_p1h_only_later_copies_can_be_explained(expected, rows, relations, want):
     out, split = _split(expected, rows, relations)
