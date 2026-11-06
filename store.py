@@ -2886,9 +2886,11 @@ class MessageStore:
 
         Used by the backup path's cross-connection flush so callers do not reach
         the private connection. Requires a live connection: a closed store
-        raises, matching direct ``_conn.commit()`` use.
+        raises, matching direct ``_conn.commit()`` use. #2345: the write lock
+        keeps it from committing a foreground ingest's batch halfway.
         """
-        self._conn.commit()
+        with self._write_lock:
+            self._conn.commit()
 
     def backup(self, dest: sqlite3.Connection) -> None:
         """Copy the store's database into the already-open ``dest`` connection.

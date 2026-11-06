@@ -105,7 +105,10 @@ def collect_doctor(engine: Any) -> DoctorFacts:
 
     try:
         store_fts_count = int(store_conn.execute("SELECT COUNT(*) FROM messages_fts").fetchone()[0])
-        store_fts_integrity = command.check_external_content_fts_integrity(store_conn, command.build_message_fts_spec())
+        # #2345: the check's SAVEPOINT/ROLLBACK TO must not interleave with a foreground ingest.
+        with engine._store._write_lock:
+            store_fts_integrity = command.check_external_content_fts_integrity(
+                store_conn, command.build_message_fts_spec())
         store_fts = _fts_text_status(store_fts_integrity)
     except Exception as exc:  # pragma: no cover - defensive
         store_fts_count = f"error: {exc}"
