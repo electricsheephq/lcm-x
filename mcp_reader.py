@@ -66,8 +66,8 @@ READER_TOOLS = {
 READER_NOTE = (
     " Served read-only by lcm-x mcp, which has no active session: lcm_grep defaults to "
     "session_scope='all', a node_id without session_id resolves in the node's own session, "
-    "externalized payloads resolve from any session of this store, and ids may carry a "
-    "'<store_uuid>:' prefix."
+    "externalized payloads resolve from any session of this store when its payload folder is "
+    "inside the profile, and ids may carry a '<store_uuid>:' prefix."
 )
 PROFILE_ENV_EXTRA_KEYS = ("FASTEMBED_CACHE_PATH",)
 TOKENIZER_WAIT_S = 30.0
