@@ -11,6 +11,7 @@ import re
 import sqlite3
 import threading
 import time
+from contextlib import nullcontext
 from types import SimpleNamespace
 from datetime import datetime, timezone
 from functools import partial
@@ -5531,12 +5532,16 @@ def lcm_doctor(args: Dict[str, Any], **kwargs) -> str:
 
     # 1b. FTS5 integrity, separated from generic SQLite integrity so malformed
     # inverted indexes point at the exact table and repair path.
-    for check_name, conn, spec in (
-        ("messages_fts_integrity", engine._store.connection, build_message_fts_spec()),
-        ("nodes_fts_integrity", engine._dag.connection, build_nodes_fts_spec()),
+    # #2345: each check's SAVEPOINT/ROLLBACK TO runs under the lock its connection's
+    # writers take, so it cannot interleave with an ingest or a summary-tree write.
+    for check_name, conn, lock, spec in (
+        ("messages_fts_integrity", engine._store.connection, engine._store._write_lock, build_message_fts_spec()),
+        ("nodes_fts_integrity", engine._dag.connection, getattr(engine._dag, "_db_lock", nullcontext()),
+         build_nodes_fts_spec()),
     ):
         try:
-            fts_integrity = check_external_content_fts_integrity(conn, spec)
+            with lock:
+                fts_integrity = check_external_content_fts_integrity(conn, spec)
             status = fts_integrity["status"]
             checks.append({
                 "check": check_name,

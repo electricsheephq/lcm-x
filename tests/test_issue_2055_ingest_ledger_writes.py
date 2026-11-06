@@ -473,3 +473,36 @@ def test_r2_real_read_only_prematch_error_counts_once(engines, monkeypatch):
     finally:
         locker.rollback()
         locker.close()
+
+
+def test_p1_gate_failed_vector_then_restart(engines, monkeypatch):
+    from tests.p1_gate import expect_from_view, record, store_outcome
+
+    engine = engines()
+    view = [_m("user", "question", 10.), _m("assistant", "answer", 11.)]
+    write = ledger.write_view
+    fired = []
+
+    def fail(*args, **kwargs):
+        result = write(*args, **kwargs)
+        fired.append(True)
+        raise sqlite3.OperationalError("injected vector savepoint failure")
+        return result
+
+    with monkeypatch.context() as patch:
+        patch.setattr(ledger, "write_view", fail)
+        engine.ingest(copy.deepcopy(view))
+    assert fired == [True] and count(engine, "write_failed") == 1
+    assert all(not sql_rows(engine, table) for table in ("ingest_views", "occurrence_bindings", "stamp_observations"))
+    root = Path(engine._hermes_home)
+    engine.shutdown()
+    fresh = _engine(root)
+    view += [_m("user", "next question", 12.), _m("assistant", "next answer", 13.)]
+    try:
+        fresh.ingest(copy.deepcopy(view))
+        assert [r["content"] for r in fresh._store.get_session_messages("S")] == [r["content"] for r in view]
+        outcome = store_outcome(fresh._store._conn, expect_from_view(view, "conv"))
+        record(dict(family="savepoint", boundary="vector_restart"), outcome, fresh)
+        assert outcome["loss"] == outcome["silent"] == 0, outcome
+    finally:
+        fresh.shutdown()

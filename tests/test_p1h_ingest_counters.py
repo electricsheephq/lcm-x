@@ -458,3 +458,73 @@ def test_rows_classified_uses_rewound_prefix(engines, metadata, rewound):
     engine._ingest_messages(copy.deepcopy(retry))
     assert records(engine)[-1]["rows_classified"] == 0
     assert engine._store.get_session_count("S") == len(stored)
+
+
+@pytest.mark.parametrize("rollback", [False, True], ids=["commit", "rollback"])
+def test_hold_includes_transaction_exit(engines, monkeypatch, clock, rollback):
+    engine = engines()
+
+    class ExitDelay:
+        def __init__(self, conn):
+            self.conn, self.exits = conn, []
+
+        def __getattr__(self, name):
+            return getattr(self.conn, name)
+
+        def commit(self):
+            self.exits.append("commit")
+            clock.advance(13)
+            return self.conn.commit()
+
+        def rollback(self):
+            self.exits.append("rollback")
+            clock.advance(17)
+            return self.conn.rollback()
+
+    conn = ExitDelay(engine._store._conn)
+    monkeypatch.setattr(engine._store, "_conn", conn)
+    original = engine._store._append_protected_batch
+
+    def append(*args, **kwargs):
+        clock.advance(7)
+        if rollback:
+            raise ValueError("timed rollback")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(engine._store, "_append_protected_batch", append)
+    if rollback:
+        with pytest.raises(ValueError, match="timed rollback"):
+            engine._ingest_messages([_m("user", "transaction exit", 1.)])
+    else:
+        engine._ingest_messages([_m("user", "transaction exit", 1.)])
+    assert conn.exits == ["rollback" if rollback else "commit"]
+    assert records(engine)[-1]["hold_ms"] == pytest.approx(24 if rollback else 20)
+    assert records(engine)[-1]["outcome"] == ("rollback" if rollback else "commit")
+
+
+def test_emission_hold_times_its_write_only(engines, monkeypatch, clock):
+    engine = engines()
+    original = ingest_ledger.insert_emissions
+    calls = []
+
+    def write(*args, **kwargs):
+        calls.append(1)
+        clock.advance(11)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(ingest_ledger, "insert_emissions", write)
+    prepare = engine._ledger_view_entries
+
+    def entries(*args, **kwargs):
+        clock.advance(19)  # digest preparation is outside the write owner
+        return prepare(*args, **kwargs)
+
+    monkeypatch.setattr(engine, "_ledger_view_entries", entries)
+    clock.advance(101)  # outside the emission owner
+    output = [_m("user", "summary", 1.)]
+    engine._compress_exit_write(output, (output, [dict(kind="summary", output_occurrence=dict(index=0, of=1))], None))
+    clock.advance(103)  # outside the emission owner
+    sample, = records(engine)
+    assert calls == [1]
+    assert (sample["route"], sample["outcome"]) == ("emission", "commit")
+    assert sample["hold_ms"] == pytest.approx(11)

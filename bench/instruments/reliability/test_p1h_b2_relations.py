@@ -507,3 +507,10 @@ def test_p1h_shared_evidence_map_is_merged_once():
     groups = [(("user", f"k{i}"), 0, [1], [], shared) for i in range(50)]
     multiset.split_surplus(groups, [])
     assert CountingMap.reads <= 1
+
+
+def test_silent_example_names_unexplained_surplus_copy():
+    key = ("assistant", "digest")
+    out = multiset.split_surplus([(key, 2, [1, 2, 2])], [(2, "generated_unproven", None)])
+    assert (out["visible_surplus_rows"], out["silent_surplus_rows"]) == (1, 1)
+    assert out["silent_surplus_examples"] == [{"store_id": 2, "role": "assistant", "sha256": "digest"}]

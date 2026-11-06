@@ -11,6 +11,7 @@ import pytest
 from hermes_lcm import command, db_bootstrap as boot, tools
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.dag import SummaryDAG, build_nodes_fts_spec
+from hermes_lcm.sqlite_session import TransactionOwner
 from hermes_lcm.store import MessageStore, build_message_fts_spec
 from hermes_lcm.trajectory_store import CorpusIdentity, TrajectoryStore
 
@@ -240,7 +241,10 @@ def test_round2_no_background_ddl(tmp_path, monkeypatch, scenario):
     if scenario == "doctor":
         # Keep the defect until repair apply; opening a store would already restore it.
         conn = sqlite3.connect(str(db))
-        obj = SimpleNamespace(connection=conn, db_path=db)
+        lock = threading.RLock()  # #2345: repair apply runs under the store write lock and owner
+        owner = TransactionOwner(lock)
+        obj = SimpleNamespace(connection=conn, db_path=db, _write_lock=lock,
+                              atomic=lambda immediate=False: owner.atomic(conn, immediate=immediate))
         dag = SummaryDAG(db)
         monkeypatch.setattr(command, "backup_database", lambda _: {
             "ok": True, "db_path": str(db), "backup_path": "synthetic-backup", "backup_size": 0,
