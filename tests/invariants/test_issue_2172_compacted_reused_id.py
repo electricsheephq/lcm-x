@@ -13,7 +13,7 @@ from tests.test_issue_671_stub_first_exit import tool_pair
 @pytest.mark.parametrize("dangling", [
     pytest.param(False, id="full-pair", marks=pytest.mark.xfail(
         strict=True,
-        reason="#2172 compacted variant: an identical earlier pair compacted out of the host view still proves a replay; planned for v0.30.0",
+        reason="#2172 compacted variant: an identical earlier pair compacted out of the host view still proves a replay; planned for v0.30.x (design r3.8 named loss limit)",
     )),
     pytest.param(True, id="dangling-call"),
 ])

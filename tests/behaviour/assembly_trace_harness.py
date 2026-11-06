@@ -47,6 +47,7 @@ if __name__ == "__main__":
 
 import tests.conftest  # noqa: F401
 from tests.behaviour.frontier_observer import HOLDER_NAME, legacy_frontier_fields, observed_attribute
+from tests.behaviour.trace_config import LCMConfig, trace_config
 from tests.phase0_hygiene import product_env_keys
 from tests.harness import engine_context, pin_char_counter
 
@@ -151,6 +152,8 @@ class Canonical:
             return {'bytes': hashlib.sha256(value).hexdigest()}
         if isinstance(value, re.Pattern):
             return {'pattern': value.pattern}
+        if isinstance(value, LCMConfig):
+            return trace_config(value, self.value)
         if dataclasses.is_dataclass(value) and not isinstance(value, type):
             return {f.name: self.value(getattr(value, f.name), f.name) for f in dataclasses.fields(value)}
         if isinstance(value, dict):

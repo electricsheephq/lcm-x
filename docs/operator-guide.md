@@ -557,6 +557,7 @@ Useful environment variables:
 | `LCM_KNN_PRESCREEN_MULTIPLIER` | `4` | Stage-1 prescreen breadth for two-stage KNN: `M = multiplier × k` lowest-Hamming-distance survivors are exact-rescored |
 | `LCM_RERANK_ENABLED` | `false` | Let `lcm_recall` ask Voyage to rerank its bounded fused candidate window. Failures preserve the incoming RRF order; `lcm_grep` is unaffected |
 | `LCM_RERANK_MODEL` | `rerank-2.5-lite` | Voyage reranker model used by `lcm_recall`; set `rerank-2.5` for the quality-oriented model |
+| `LCM_RECALL_DELIVERY_ORDER` | `score` | Config field `recall_delivery_order`; `time` delivers the same selected hits oldest to newest by host observation time, then untimed hits and summaries in score order. Ties keep score order. Applies only to model-called hits delivery; session delivery and internal recall keep their existing order. Unknown values warn and use `score`. |
 | `LCM_RECALL_FTS_ANCHOR` | `true` | With two or more `lcm_recall` arms, keep the full-text arm's best match in the ranked window when fusion pushed it out (at most one session displaced; the hit keeps its own score). Reported under `provenance.fts_anchor` (`fired`, `position`, `delivered`). Embeddings-off output is unchanged; an `fts` weight of `0` turns it off; `false` restores the previous order. Managed (evaOS fleet) profiles can set it only after a provisioning release adds it to the environment allowlist. See [retrieval tools](retrieval-tools.md#fts-anchor-slot-lcm_recall_fts_anchor) |
 | `LCM_RECALL_HONOUR_FORGET` | `false` | Withhold message rows covered by a user forget request from automatic recall; keep raw storage intact. Explicit grep/expand still return rows with `forget_requested`. Summary hits are unaffected. See [retrieval tools](retrieval-tools.md#honouring-forget-requests) |
 | `LCM_EMBEDDING_BACKFILL_BATCH_SIZE` | `32` | Documents claimed per backfill batch (`/lcm embed backfill` and state/chunk backfill). Non-positive or non-integer values fall back to the default. The effective value also clamps to the provider request-item ceiling — the lower of `LCM_EMBEDDING_MAX_BATCH_ITEMS` (normalized like the provider: non-positive means 1) and 1000 — so the dry-run estimate always matches real request splits |
@@ -1569,11 +1570,14 @@ LCM-X memory while Hermes keeps running. It is a stdio MCP server over ONE store
 and serves five tools with their production schemas and outputs: `lcm_recall`,
 `lcm_grep`, `lcm_expand`, `lcm_load_session` and `lcm_describe`.
 
-Register it with the Hermes venv Python (3.10 or newer; an older interpreter
+The reader needs a source checkout of this repository (`git clone
+https://github.com/electricsheephq/lcm-x`): the Hermes catalog payload does not
+carry `scripts/`, so a catalog install has no `scripts/lcm_x_mcp.py`. Register it
+from the checkout with the Hermes venv Python (3.10 or newer; an older interpreter
 exits with one line saying so):
 
 ```bash
-claude mcp add lcm-x -- <hermes-venv-python> <plugin_dir>/scripts/lcm_x_mcp.py \
+claude mcp add lcm-x -- <hermes-venv-python> <lcm-x-checkout>/scripts/lcm_x_mcp.py \
   --store <path/to/lcm.db> --hermes-home <HERMES_HOME> [--log-dir <dir>]
 ```
 
@@ -1586,9 +1590,10 @@ What it reads:
 - the store, opened `mode=ro` with a new connection for each tool call, so no read
   snapshot outlives a call and Hermes' WAL checkpoints keep progressing;
 - the profile's externalized payload files (read only, never created);
-- `<HERMES_HOME>/.env`, of which it parses only `LCM_*` lines and
-  `FASTEMBED_CACHE_PATH`. Provider API keys and every other line are never read
-  into the server, logged or forwarded. The `LCM_*` settings of the shell that
+- `<HERMES_HOME>/.env`. It reads the whole file but parses and keeps only the
+  `LCM_*` lines and `FASTEMBED_CACHE_PATH`. Provider API keys and every other line
+  are in the server's memory while it parses, and are never kept, logged or
+  forwarded. The `LCM_*` settings of the shell that
   started the server are ignored, including `LCM_HERMES_BASE_DIR`.
   `LCM_DISABLED_TOOLS` from the profile hides those tools.
 
@@ -1605,7 +1610,9 @@ Behaviour without an active session:
 - `lcm_expand`/`lcm_describe` with a `node_id` but no `session_id` resolve the
   node in its own session;
 - externalized payloads (by `externalized_ref`, or attached to a `store_id`
-  expansion) resolve from any session of the store.
+  expansion) resolve from any session of the store when the payload directory is
+  inside the profile. With `LCM_LARGE_OUTPUT_EXTERNALIZATION_PATH` outside it, a
+  lookup without a session filter returns not found.
 
 Result flags. Every result is the production JSON object prefixed with
 `store_uuid` and a `reader` object:
@@ -1636,8 +1643,11 @@ Errors:
   v5, or lacks a required core table. Nothing is opened for write.
 
 Logs go to `lcm-x-mcp-<pid>.log` under `--log-dir` (default `$TMPDIR`): one
-metadata line per call (tool, argument hash, latency, size); the server itself
-never logs argument text or `.env` values. Stdout carries only protocol lines.
+metadata line per call (tool, argument hash, latency, size). The server's own lines
+never carry argument text or `.env` values, but the production tool code it runs
+can log a warning that quotes an argument (an unsupported `lcm_grep`
+`session_scope` value), and that warning goes to the same file. Stdout carries
+only protocol lines.
 
 ## Import and backfill
 

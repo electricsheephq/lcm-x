@@ -265,6 +265,7 @@
       "summary": 0.9
     },
     "recall_delivery_unit": "hits",
+    "recall_delivery_order": "score",
     "recall_fts_anchor": true,
     "recall_honour_forget": false,
     "recall_query_timeout_s": 8.0,

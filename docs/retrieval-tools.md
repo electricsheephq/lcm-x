@@ -53,6 +53,13 @@ tool, even when its flag is enabled. The manifest retains all 16 declarations.
 | `lcm_doctor` | Run database, FTS, lifecycle, config, and context-pressure diagnostics. |
 | `lcm_memory` | Default-off read-only `lookup`/`list` over this profile. Lookup accepts a name and up to 8 aliases; returns mention counts, event/write-labelled first/last times (carried times marked `time_uncertain: carried`) and sessions over all matching rows, plus capped cited snippets and compatible assertion facts. Optional question ranks up to 5 mentions across all entity matches, independently of the card limit. List groups assertion subjects by namespace; without assertions there is no registry until E2. No writes or model calls. |
 
+Set `recall_delivery_order="time"` (or `LCM_RECALL_DELIVERY_ORDER=time`) to deliver
+model-called `lcm_recall` hits oldest to newest by `observed_at`, after score-based
+selection and response caps. Untimed hits and summaries follow timed hits in
+score order; ties keep score order. The default `score` preserves existing output.
+Only time mode adds `provenance.delivery_order: "time"`; session delivery and
+internal recall consumers keep their existing order.
+
 ### Retrieval contract
 
 LCM retrieval tools default to current-session scope. `lcm_grep` accepts

@@ -1290,19 +1290,18 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
     results: list[Dict[str, Any]] = []
     message_search_error: str | None = None
 
-    if (
-        content_scope in {"history", "both"}
-        and search_session_id not in excluded_session_ids
-    ):
+    if content_scope in {"history", "both"}:
         try:
             # #1931: 'current' also covers the current session's delegated subagents (session_lineage).
-            descendant_ids = [
-                child_id for child_id in (
-                    getattr(engine._store, "session_lineage_descendants", lambda _sid: ())(current_session_id)
-                    if session_scope == "current" and has_current_session else ()
-                ) if child_id not in excluded_session_ids
+            descendant_ids = (
+                getattr(engine._store, "session_lineage_descendants", lambda _sid: ())(current_session_id)
+                if session_scope == "current" and has_current_session else ()
+            )
+            scoped_session_ids = [
+                scoped_id for scoped_id in (search_session_id, *descendant_ids)
+                if scoped_id not in excluded_session_ids
             ]
-            for scoped_session_id in (search_session_id, *descendant_ids):
+            for scoped_session_id in scoped_session_ids:
                 msg_hits = engine._store.search(
                     query,
                     session_id=scoped_session_id,
@@ -4739,6 +4738,7 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
         ),
         rerank_enabled=lambda: bool(getattr(engine._config, "rerank_enabled", False)),
         session_delivery=session_delivery,
+        delivery_order=kwargs.get("delivery_order", getattr(engine._config, "recall_delivery_order", "score")),
     )
     if forget_info:
         payload = json.loads(response)

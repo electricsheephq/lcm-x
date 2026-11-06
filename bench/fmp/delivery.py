@@ -191,7 +191,7 @@ def harness_agentic(q, client, reader, server, records):
               "trace": [], "tool_calls": 0, "forced_final": None, "finish_reason": None}
     def retryable(attempt_records):
         return not any(json.loads(line).get("counted") for c in attempt_records if c.get("mcp_log")
-                       for log in [Path(c["mcp_log"])] if log.exists() for line in log.read_text().splitlines())
+                       for log in [Path(c["mcp_log"])] if log.exists() for line in log.read_text().split("\n") if line.strip())
     try:
         message = retry_call(lambda: client.agentic(reader, messages, records, server, readiness_attempts=1),
                              records, result, retryable=retryable)
@@ -201,7 +201,7 @@ def harness_agentic(q, client, reader, server, records):
     finally:
         logs = [Path(c["mcp_log"]) for c in records if c.get("mcp_log")]
         result["trace"] = [{**json.loads(line), **({"attempt": i} if len(logs) > 1 else {})}
-                           for i, log in enumerate(logs, 1) if log.exists() for line in log.read_text().splitlines()]
+                           for i, log in enumerate(logs, 1) if log.exists() for line in log.read_text().split("\n") if line.strip()]
         result["tool_calls"] = sum(bool(t.get("counted")) for t in result["trace"])
         result["forced_final"] = "tool_calls" if any(t.get("counted") is False for t in result["trace"]) else None
     if any(t.get("fatal") == "DeliveryMismatch" for t in result["trace"]):
