@@ -321,7 +321,7 @@ def test_cli_writes_summary_and_fails_closed(evidence):
 def test_workflow_requires_every_report_without_changing_test_selection():
     workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/ci.yml").read_text()
     assert 'tests/ --collect-only -q -m "not latency" --ignore=tests/test_embedding_privacy.py' in workflow
-    assert '-q -m "not latency" -n 4 -o junit_family=xunit1' in workflow
+    assert '-q -m "not latency" -n 4 --dist worksteal -o junit_family=xunit1' in workflow
     assert 'tests/test_embedding_privacy.py -q -m "not latency" -o junit_family=xunit1' in workflow
     assert "needs: [test, test-312, test-313, test-314, bench-test-root]" in workflow
     assert "reports/test-{3.11,3.12,3.13,3.14}/shard-{1,2,3,4}/main.xml" in workflow

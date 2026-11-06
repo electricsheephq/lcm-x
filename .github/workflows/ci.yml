@@ -193,7 +193,7 @@ jobs:
       - name: Run pytest shard under low file descriptor limit
         run: |
           ulimit -n 1024
-          python -m pytest @"$RUNNER_TEMP/pytest-shards/shard-${{ matrix.shard }}.txt" -q -m "not latency" -n 4 -o junit_family=xunit1 --junitxml=reports/test-${{ matrix.python-version }}/shard-${{ matrix.shard }}/main.xml
+          python -m pytest @"$RUNNER_TEMP/pytest-shards/shard-${{ matrix.shard }}.txt" -q -m "not latency" -n 4 --dist worksteal -o junit_family=xunit1 --junitxml=reports/test-${{ matrix.python-version }}/shard-${{ matrix.shard }}/main.xml
 
       - name: Run embedding privacy tests alone
         if: matrix.shard == 1
