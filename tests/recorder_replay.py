@@ -39,7 +39,8 @@ EXCLUDED_TOOL_RETURNS = frozenset({"lcm_expand_query"})
 # compaction.py:1762/:2775/:2946 and engine.py:976 ``duration_ms``; engine.py:1945/:2044 ``last_compaction_duration_ms``.
 # get_status's ``no_progress_hold.until`` is wall clock plus a monotonic remainder (engine.py:2390).
 # Its lifecycle binding and update timestamps also follow the replay clock.
-CLOCK_FIELDS = frozenset({"duration_ms", "last_compaction_duration_ms"})
+# LCMEngine._ingest_lock_status builds get_status's clock-driven ingest_lock summary.
+CLOCK_FIELDS = frozenset({"duration_ms", "last_compaction_duration_ms", "ingest_lock"})
 CLOCK_PATHS = frozenset({("no_progress_hold", "until"), ("lifecycle", "current_bound_at"),
                          ("lifecycle", "updated_at")})
 # SQL defaults and Python wall-clock writes; row identities remain in the comparison.

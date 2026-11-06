@@ -22,7 +22,25 @@ def records(engine):
         return list(engine._ingest_lock_records)
 
 
-def test_busy_attempt_and_commit_are_separate(engines, monkeypatch):
+@pytest.fixture
+def clock(monkeypatch):
+    """Advance perf_counter only at the transaction boundaries each test exercises."""
+    class Clock:
+        milliseconds = 0
+
+        def advance(self, milliseconds):
+            self.milliseconds += milliseconds
+
+        def __call__(self):
+            return self.milliseconds / 1000
+
+    clock = Clock()
+    monkeypatch.setattr(time, "perf_counter", clock)
+    monkeypatch.setattr("hermes_lcm.engine._perf_counter", clock)
+    return clock
+
+
+def test_busy_attempt_and_commit_are_separate(engines, monkeypatch, clock):
     engine = engines()
     original = engine._store._append_protected_batch
     calls = []
@@ -30,8 +48,9 @@ def test_busy_attempt_and_commit_are_separate(engines, monkeypatch):
     def busy(*args, **kwargs):
         calls.append(1)
         if len(calls) == 1:
-            time.sleep(.02)
+            clock.advance(20)
             raise sqlite3.OperationalError("database is locked")
+        clock.advance(5)
         return original(*args, **kwargs)
 
     monkeypatch.setattr(engine._store, "_append_protected_batch", busy)
@@ -40,13 +59,13 @@ def test_busy_attempt_and_commit_are_separate(engines, monkeypatch):
     first, second = records(engine)
     assert [(r["attempt"], r["outcome"]) for r in (first, second)] == [(1, "busy"), (2, "commit")]
     assert first["busy"]["attempt"] and not second["busy"]["attempt"]
-    assert first["hold_ms"] >= 20
-    assert second["hold_ms"] < 20
+    assert first["hold_ms"] == pytest.approx(20)
+    assert second["hold_ms"] == pytest.approx(5)
     assert engine.get_status()["ingest_lock"]["busy_attempts"] == 1
     assert engine._store.get_session_count("S") == 1
 
 
-def test_failed_begin_has_no_hold(engines, monkeypatch):
+def test_failed_begin_has_no_hold(engines, monkeypatch, clock):
     engine = engines()
     original = engine._store.atomic
     calls = []
@@ -64,41 +83,48 @@ def test_failed_begin_has_no_hold(engines, monkeypatch):
     assert engine._ingest_messages(view) == view
     first, second = records(engine)
     assert (first["attempt"], first["outcome"], first["hold_ms"]) == (1, "busy", None)
-    assert second["attempt"] == 2 and second["outcome"] == "commit" and second["hold_ms"] > 0
+    assert second["attempt"] == 2 and second["outcome"] == "commit" and second["hold_ms"] == 0
     status = engine.get_status()["ingest_lock"]
     assert status["samples"] == 1 and status["busy_attempts"] == 1
     assert sum(status["buckets"].values()) == 2
     assert calls == [True, True] and engine._store.get_session_count("S") == 1
 
 
-def test_hold_excludes_post_commit_settlement(engines, monkeypatch):
+def test_hold_excludes_post_commit_settlement(engines, monkeypatch, clock):
     engine = engines()
     original = ingest_ledger.settle_pending_emissions
+    original_append = engine._store._append_protected_batch
+
+    def append(*args, **kwargs):
+        clock.advance(7)
+        return original_append(*args, **kwargs)
+
+    monkeypatch.setattr(engine._store, "_append_protected_batch", append)
 
     def settle(*args, **kwargs):
-        time.sleep(.05)
+        clock.advance(50)
         return original(*args, **kwargs)
 
     monkeypatch.setattr(ingest_ledger, "settle_pending_emissions", settle)
     engine._ingest_messages([_m("user", "settled", 1.)])
     sample = records(engine)[-1]
-    assert sample["hold_ms"] < 50
-    assert engine._last_ingest_attribution["lock_hold_ms"] >= 50
+    assert sample["hold_ms"] == pytest.approx(7)
+    assert engine._last_ingest_attribution["lock_hold_ms"] == pytest.approx(57)
     assert set(engine._last_ingest_attribution) == {
         "lock_hold_ms", "rows_written", "bytes_written", "busy_snapshot_retry", "ledger_digest_ms", "ledger_ms"}
 
 
-def test_hold_includes_insert(engines, monkeypatch):
+def test_hold_includes_insert(engines, monkeypatch, clock):
     engine = engines()
     original = engine._store._append_protected_batch
 
     def append(*args, **kwargs):
-        time.sleep(.05)
+        clock.advance(50)
         return original(*args, **kwargs)
 
     monkeypatch.setattr(engine._store, "_append_protected_batch", append)
     engine._ingest_messages([_m("user", "insert", 1.)])
-    assert records(engine)[-1]["hold_ms"] >= 50
+    assert records(engine)[-1]["hold_ms"] == pytest.approx(50)
 
 
 def test_view_classification_and_respacing_delta(engines, monkeypatch):
@@ -127,13 +153,13 @@ def test_view_classification_and_respacing_delta(engines, monkeypatch):
     assert engine.get_status()["ingest_lock"]["respaced_total"] == 6
 
 
-def test_compress_emission_write_is_recorded(engines):
+def test_compress_emission_write_is_recorded(engines, clock):
     engine = engines()
     output = [_m("user", "summary", 1.)]
     engine._compress_exit_write(output, (output, [dict(kind="summary", output_occurrence=dict(index=0, of=1))], None))
     sample = records(engine)[-1]
     assert (sample["route"], sample["outcome"], sample["view_rows"]) == ("emission", "commit", 1)
-    assert sample["hold_ms"] > 0
+    assert sample["hold_ms"] == 0
     status = engine.get_status()["ingest_lock"]
     assert status["samples"] == 0 and status["emission"]["samples"] == 1
 
@@ -227,14 +253,15 @@ def test_routes(engines, route):
     assert records(engine)[-1]["route"] == route
 
 
-def test_shallow_clone_has_own_ring(engines):
+def test_shallow_copy_shares_telemetry(engines):
     engine = engines()
     engine._ingest_messages([_m("user", "before clone", 1.)])
     clone = copy.copy(engine)
     assert clone._store is engine._store
-    assert not records(clone)
-    assert clone._ingest_lock_guard is not engine._ingest_lock_guard
-    assert len(records(engine)) == 1
+    assert clone._ingest_lock_records is engine._ingest_lock_records
+    assert clone._ingest_lock_guard is engine._ingest_lock_guard
+    assert clone._ingest_lock_totals is engine._ingest_lock_totals
+    assert len(records(clone)) == len(records(engine)) == 1
 
 
 def test_rollback_record_preserves_exception_and_zero_rows(engines, monkeypatch):
@@ -317,7 +344,7 @@ def test_r4_busy_emission_begin_has_no_hold(engines):
         samples=0, p90_ms=None, p99_ms=None, max_ms=None)
 
 
-def test_r4_rekey_inside_ingest_has_no_emission_record(engines, tmp_path, monkeypatch):
+def test_r4_rekey_inside_ingest_has_no_emission_record(engines, tmp_path, monkeypatch, clock):
     from tests.test_issue_1286_cleanup_rewrite_proof import Host, _commit_cleanup, _turns
 
     host = Host(tmp_path / "rekey")
@@ -343,7 +370,7 @@ def test_r4_rekey_inside_ingest_has_no_emission_record(engines, tmp_path, monkey
         sample, = records(engine)[start:]
         assert (sample["route"], sample["outcome"]) == ("foreground", "commit")
         assert sample["rows_written"] == host.stored() - rows > 0
-        assert sample["hold_ms"] > 0
+        assert sample["hold_ms"] == 0
     finally:
         host.close()
 
@@ -381,7 +408,7 @@ def test_r4_late_rollback_reports_no_durable_writes(engines, monkeypatch, busy):
     assert engine._store.get_session_count("S") == 0
 
 
-def test_r4_hold_starts_after_begin_succeeds(engines, monkeypatch):
+def test_r4_hold_starts_after_begin_succeeds(engines, monkeypatch, clock):
     engine = engines()
     class DelayedBegin:
         def __init__(self, conn):
@@ -391,13 +418,43 @@ def test_r4_hold_starts_after_begin_succeeds(engines, monkeypatch):
         def execute(self, sql, *args):
             if sql == "BEGIN IMMEDIATE":
                 self.begins += 1
-                time.sleep(.15)
+                clock.advance(150)
             return self.conn.execute(sql, *args)
     conn = DelayedBegin(engine._store._conn)
     monkeypatch.setattr(engine._store, "_conn", conn)
+    original_append = engine._store._append_protected_batch
+
+    def append(*args, **kwargs):
+        clock.advance(25)
+        return original_append(*args, **kwargs)
+
+    monkeypatch.setattr(engine._store, "_append_protected_batch", append)
     started = time.perf_counter()
     engine._ingest_messages([_m("user", "after admission", 1.)])
     elapsed = (time.perf_counter() - started) * 1000
-    assert conn.begins == 1 and elapsed >= 150
-    assert records(engine)[-1]["hold_ms"] < 100
+    assert conn.begins == 1 and elapsed == pytest.approx(175)
+    assert records(engine)[-1]["hold_ms"] == pytest.approx(25)
     assert engine._store.get_session_count("S") == 1
+
+
+@pytest.mark.parametrize("metadata", ["timestamp", "message_uid"])
+@pytest.mark.parametrize("rewound", [0, 2])
+def test_rows_classified_uses_rewound_prefix(engines, metadata, rewound):
+    """#1179: a changed host occurrence exposes rows before the entry cursor."""
+    engine = engines()
+    view = [_m("user", "alpha", 1., "u1"), _m("assistant", "first", 2., "a1"),
+            _m("user", "same text", 3., "u2"), _m("assistant", "old answer", 4., "a2")]
+    engine._ingest_messages(copy.deepcopy(view))
+    assert engine._ingest_cursor == len(view)
+    retry = copy.deepcopy(view)
+    retry[rewound][metadata] = 50. if metadata == "timestamp" else "retry-occurrence"
+    engine._ingest_messages(retry)
+    sample = records(engine)[-1]
+    assert (sample["view_rows"], sample["rows_classified"]) == (len(retry), len(retry) - rewound)
+    assert sample["outcome"] == "commit" and sample["rows_written"] == 1
+    stored = engine._store.get_session_messages("S")
+    assert len(stored) == len(view) + 1
+    assert stored[-1]["content"] == view[rewound]["content"]
+    engine._ingest_messages(copy.deepcopy(retry))
+    assert records(engine)[-1]["rows_classified"] == 0
+    assert engine._store.get_session_count("S") == len(stored)

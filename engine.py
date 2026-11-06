@@ -1167,9 +1167,6 @@ class LCMEngine(
         """Copy scalar frontier values while retaining the shared proof dicts."""
         clone = type(self).__new__(type(self))
         clone.__dict__.update(self.__dict__)
-        clone._ingest_lock_guard = threading.Lock()
-        clone._ingest_lock_records = deque(maxlen=512)
-        clone._ingest_lock_totals = Counter()
         if hasattr(self, "_frontier"):
             clone._frontier = copy.copy(self._frontier)
         return clone
@@ -7942,7 +7939,7 @@ class LCMEngine(
         reconciled_existing_session = self._ingest_cursor_needs_reconcile
         if telemetry is not None:
             self._ingest_telemetry(telemetry.update, dict(
-                rows_classified=n if reconciled_existing_session else n - entry_cursor))
+                rows_classified=n - scan_start))
         reconcile_messages = replay_messages
         bind_session_counts: list = []
         ledger_run, today = dict(k=0, pairs={}), self._ingest_cursor
