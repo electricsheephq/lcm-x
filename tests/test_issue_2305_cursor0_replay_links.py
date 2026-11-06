@@ -422,3 +422,25 @@ def test_23_many_identical_copies_link_one_to_one_oldest_first(host):
     linked = [target for _, target in pairs if target in originals]
     assert len(linked) >= 20 and linked == originals[:len(linked)]  # oldest targets first, none skipped
     assert len({target for _, target in pairs}) == len(pairs)
+
+
+def test_24_stamped_copies_take_the_oldest_allowed_target(host, monkeypatch):
+    # #2335 review: candidates are indexed by stamp, so vetoed rows are skipped without a rescan. A stamped copy takes
+    # the oldest unused target with the same stamp (or none); a different stamp never links; an unstamped copy takes
+    # the oldest unused target of any stamp.
+    host.turn(reply="ok")
+    first, second = host.stamp(), host.stamp() + 1
+    for stamp in (first, second, first):
+        host.live.append({"role": "assistant", "content": "repeat", "timestamp": stamp})
+    host.engine.ingest(host.live)
+    targets = [r["store_id"] for r in host.engine._store.get_session_messages(SID) if r["content"] == "repeat"]
+    assert len(targets) == 3
+    monkeypatch.setenv("LCM_IDENTITY_ANCHOR", "off")
+    copies = [{"role": "assistant", "content": "repeat", "timestamp": second},
+              {"role": "assistant", "content": "repeat", "timestamp": second + 50},
+              {"role": "assistant", "content": "repeat"},
+              {"role": "assistant", "content": "repeat", "timestamp": first}]
+    sources = _ingest_copies(host, copies)
+    assert len(sources) == 4
+    assert _pairs(host.engine) == [(sources[0], targets[1]), (sources[2], targets[0]), (sources[3], targets[2])]
+    assert _counts(host.engine)["ledger.replay_pairs.cursor0_unlinked"] == 1

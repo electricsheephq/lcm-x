@@ -7657,9 +7657,24 @@ class LCMEngine(
                                 "WHERE kind='possible_replay_of' AND related_store_id<?", (first,))} if conn.execute(
                                     "SELECT 1 FROM sqlite_master WHERE name='message_relations'").fetchone() else set()
                             pairs, linked, candidate_ids, stripped_count = [], set(), set(), 0
-                            # Per-list start: the leading targets already used are skipped once, not per row, so N
-                            # copies of one payload match in linear time under the write lock.
-                            starts = {}
+                            # Each candidate list is split into lanes: all rows, rows without a stamp, and rows per
+                            # stamp. A lane's start skips its used leading targets once, not per row, so N copies of
+                            # one payload match in linear time under the write lock, stamp-vetoed rows included.
+                            lanes, starts = {}, {}
+
+                            def first_unused(candidates, lane_key):
+                                if id(candidates) not in lanes:
+                                    by_stamp = {}
+                                    for position, (_old, old_stamp) in enumerate(candidates):
+                                        by_stamp.setdefault(old_stamp, []).append(position)
+                                    lanes[id(candidates)] = {"all": range(len(candidates)), **{
+                                        ("stamp", key): positions for key, positions in by_stamp.items()}}
+                                lane = lanes[id(candidates)].get(lane_key, ())
+                                at = starts.get((id(candidates), lane_key), 0)
+                                while at < len(lane) and candidates[lane[at]][0] in used:
+                                    at += 1
+                                starts[(id(candidates), lane_key)] = at
+                                return lane[at] if at < len(lane) else None
                             # Complete the exact pass before any stripped copy can spend a target.
                             for strip, index in ((False, earlier), (True, stripped_earlier)):
                                 for sid, role, content, call_id, calls, name, stamp in new_rows:
@@ -7671,12 +7686,12 @@ class LCMEngine(
                                         candidate_ids.add(sid)
                                     if stripped is None and (strip or not call_id and not calls):
                                         continue
-                                    begin = starts.get(id(candidates), 0)
-                                    while begin < len(candidates) and candidates[begin][0] in used:
-                                        begin += 1
-                                    starts[id(candidates)] = begin
-                                    target = next((old for old, old_stamp in map(candidates.__getitem__, range(begin, len(candidates))) if old not in used
-                                                   and (stamp is None or old_stamp is None or stamp == old_stamp)), None)
+                                    # The oldest unused target that the stamp veto allows: any row for an unstamped
+                                    # copy; otherwise an unstamped row or one with the same stamp.
+                                    found = [first_unused(candidates, "all")] if stamp is None else [
+                                        first_unused(candidates, ("stamp", None)), first_unused(candidates, ("stamp", stamp))]
+                                    found = [position for position in found if position is not None]
+                                    target = candidates[min(found)][0] if found else None
                                     if target is not None:
                                         pairs.append([(sid, "possible_replay_of", target, None, None)])
                                         linked.add(sid)
