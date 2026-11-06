@@ -2059,6 +2059,7 @@ class MessageStore:
 
     @contextmanager
     def _ingest_atomic(self, *, admission_retry=False):
+        timing = {"hold_ms": None}
         with self._write_lock:
             if self._transaction_owner.owns(self._conn):
                 raise _SqliteSavepointError("Foreground ingest cannot join an enclosing transaction")
@@ -2073,18 +2074,52 @@ class MessageStore:
                     trace.ingest_admission = True
                 try:
                     with (_temporary_sqlite_busy_timeout([self._conn], 0) if admission_retry else nullcontext()):
+                        start_timer = self._start_lock_timer(timing, owner)
                         owner.enter_context(self.atomic(immediate=True))
+                        start_timer()
                 finally:
                     if trace is not None:
                         trace.ingest_admission = False
                 previous = getattr(self, "_foreground_ingest_owner", False)
                 self._foreground_ingest_owner = True
                 try:
-                    yield
+                    yield timing
                     if not self._conn.in_transaction:
                         raise _SqliteSavepointError("Foreground ingest transaction lost before COMMIT")
                 finally:
                     self._foreground_ingest_owner = previous
+
+    @staticmethod
+    def _start_lock_timer(timing, timer):
+        if timing is None:
+            return lambda: None
+        started = None
+        def start():
+            nonlocal started
+            try:
+                started = time.perf_counter()
+            except Exception as exc:
+                timing["telemetry_error"] = type(exc).__name__
+        try:
+            def finish():
+                if started is None:
+                    return
+                try:
+                    timing["hold_ms"] = (time.perf_counter() - started) * 1000
+                except Exception as exc:
+                    timing["telemetry_error"] = type(exc).__name__
+            timer.callback(finish)
+        except Exception as exc:
+            timing["telemetry_error"] = type(exc).__name__
+        return start
+
+    @contextmanager
+    def _timed_atomic(self, timing):
+        with ExitStack() as timer:
+            start_timer = self._start_lock_timer(timing, timer)
+            timer.enter_context(self.atomic(immediate=True))
+            start_timer()
+            yield
 
     def atomic(self, *, immediate: bool = False) -> AbstractContextManager[None]:
         """Own a transaction under the existing write lock, joining nested entries.
