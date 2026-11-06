@@ -1722,7 +1722,7 @@ class MessageStore:
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_relations'"
             ).fetchone():
                 return set()
-            if not conn.in_transaction:
+            if conn is self._conn and not conn.in_transaction:
                 self._carried_relation_connections.add(conn)
                 getattr(self, "_memory_relation_connections", {}).pop(conn, None)
                 getattr(self, "_memory_relation_generations", {}).pop(conn, None)
