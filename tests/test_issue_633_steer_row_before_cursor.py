@@ -274,8 +274,9 @@ def test_t7_the_insertion_diff_is_bounded_on_a_long_repetitive_list(tmp_path, la
         engine.shutdown()
 
 
-@pytest.mark.xfail(strict=True, reason="#633 out of scope: Hermes <= 0.21.1 appends the steer block in place "
-                                       "to an ingested tool row; the audit skips tool rows")
+@pytest.mark.xfail(strict=True, reason="out of scope (ruled on 2026-09-30 in #633, closed): "
+                                       "Hermes <= 0.21.1 appends the steer block in place to an ingested tool row; "
+                                       "the audit skips tool rows")
 def test_t5_in_place_shape_is_out_of_scope(tmp_path):
     engine = _engine(tmp_path)
     try:
@@ -290,7 +291,8 @@ def test_t5_in_place_shape_is_out_of_scope(tmp_path):
         engine.shutdown()
 
 
-@pytest.mark.xfail(strict=True, reason="#633 out of scope: LCM_IDENTITY_ANCHOR=0 has no prefix audit")
+@pytest.mark.xfail(strict=True, reason="out of scope (ruled on 2026-09-30 in #633, closed): "
+                                       "LCM_IDENTITY_ANCHOR=0 has no prefix audit")
 def test_t5_anchor_off_is_out_of_scope(tmp_path, monkeypatch):
     monkeypatch.setenv("LCM_IDENTITY_ANCHOR", "0")
     engine = _engine(tmp_path)

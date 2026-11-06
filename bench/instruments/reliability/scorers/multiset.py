@@ -527,13 +527,11 @@ def split_surplus(groups, relations):
         # Best-effort representatives: the highest-numbered rows that still hold a copy the matching left unexplained
         # (a row explains at most one copy), usually the later copies rather than the original. Rows without a self
         # relation sort last, so they are taken first: in a worst-case key the likely silent copy is the unmarked one.
-        # #2297: only the ordered branch identifies a kept copy. Preserve the
-        # worst-case branch's existing representative placement.
         copies = sorted(ids)
         kept = len(copies) - surplus
-        if kept <= 1 and not (_merged and _merged[0]):
-            copies = copies[max(0, kept):]
-        count = Counter(copies)
+        # With one kept copy and no reserved merge, store order identifies the surplus.
+        candidates = copies[max(0, kept):] if kept <= 1 and not (_merged and _merged[0]) else copies
+        count = Counter(candidates)
         unexplained = sorted((sid for sid, n in count.items() if n > 1 - graph[("row", index, sid)].get(sink, 1)),
                              key=lambda sid: (sid not in self_ids, sid))
         examples += [{"store_id": sid, "role": key[0], "sha256": key[1]} for sid in unexplained[-silent:]]

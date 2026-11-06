@@ -1213,7 +1213,7 @@ def test_resumed_engine_resend_keeps_the_earlier_cold_occurrence(engines, monkey
 @pytest.mark.parametrize("then", ["same", "older"])
 @pytest.mark.parametrize("shape", ["uidless", "uids", "two_conflicts", "tool_conflict", "same_reply_text",
     "scaffold_row", "store_longer", pytest.param("ignored_row", marks=pytest.mark.xfail(strict=True,
-        reason="known limit: an ignored row plus a stamp conflict takes the cold start (DECISION-1838 known limits)"))])
+        reason="#2247: known limit: an ignored row plus a stamp conflict takes the cold start; planned for v0.30.x (DECISION-1838 known limits)"))])
 def test_noop_ingest_after_a_resumed_resend_keeps_the_earlier_occurrence(engines, monkeypatch, then, shape):
     engine = ignoring(engines()) if shape == "ignored_row" else engines()
     queued, resent = cold_resend_views(shape)

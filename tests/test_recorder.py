@@ -56,7 +56,11 @@ class Lab:
             monkeypatch.delenv(key)
         for key, value in {"LCM_EMBEDDINGS_ENABLED": "false", "LCM_ENABLE_SLASH_COMMAND": "1",
                            "LCM_FRESH_TAIL_COUNT": "2", "LCM_LEAF_CHUNK_TOKENS": "64",
-                           "LCM_TEMPORAL_ROLLUPS_ENABLED": "false"}.items():
+                           "LCM_TEMPORAL_ROLLUPS_ENABLED": "false",
+                           # The startup FTS deep scan runs on a daemon thread behind a 50 ms lock claim, so whether
+                           # it re-stamps fts_integrity_checked_at:* differs between legs under load. It is clock-driven
+                           # and outside any root (declared gaps in docs/recorder.md), so the lab never runs it.
+                           "LCM_FTS_INTEGRITY_CHECK_INTERVAL_HOURS": "-1"}.items():
             monkeypatch.setenv(key, value)
         self.host = HostModules(tmp_path / "home").__enter__()
 

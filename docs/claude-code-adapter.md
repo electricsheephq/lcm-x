@@ -412,6 +412,8 @@ hook entry handles:
   real-session proof shows tool results are complete, `/compact` and `/rewind` never
   rewrite the file, and event ids are stable. Without stable ids, uid = session, line index and
   line digest; a rewritten file starts a new generation.
+- While Grok capture is off, the MCP launcher starts no reader under Grok Build (and says why on
+  stderr) unless the Grok store home holds an `lcm.db` or a `reader-override.json`.
 
 ## Runtime and failure modes
 
@@ -524,6 +526,10 @@ gate's instrument (see "The audit" in the test plan).
 
 ## Release mechanics
 
+The release rules (the gate, no rc tag, the draft release) are in
+`bench/specs/RELEASE-READINESS-V1.md`, "Claude Code unit releases"; the steps are in
+`docs/process/claude-code-unit-release.md`.
+
 LCM-X for Claude Code is its own release unit, versioned by the plugin manifest
 (`adapters/claude-code/.claude-plugin/plugin.json`; `0.1.0` is the preview).
 - A release is an annotated tag `claude-code-v<version>` on a `main` commit. The Hermes release
@@ -536,11 +542,12 @@ LCM-X for Claude Code is its own release unit, versioned by the plugin manifest
   - `bundle.json`: the unit version, the tag, the full core commit and core's own version.
 
   The asset is `lcm-x-claude-code-<version>.tar.gz`, with its `.sha256` beside it. The build
-  refuses a tag that does not name the manifest's version. The release notes repeat the core
-  commit and version.
-- A unit release needs two passes on its candidate:
-  - the unit gate: the audit gate, with its local-GC qualification;
-  - the CLI smoke (`scripts/claude_code_unit_smoke.py`). It needs #1216 on `main`.
+  refuses a tag that does not name the manifest's version. The release body repeats the core
+  commit and version: the tag workflow adds them from `bundle.json`.
+- A unit release passes the four-item gate in `bench/specs/RELEASE-READINESS-V1.md` ("Claude Code
+  unit releases") on its candidate: the audit gate (with its local-GC qualification) on real
+  sessions R1-R10, each with its record; the growth check; and the CLI smoke; with install records
+  beside its receipt. The CLI smoke (`scripts/claude_code_unit_smoke.py`) works as follows.
     - It unpacks the asset with no Hermes, in two runtime modes: a fresh venv of the running
       Python (3.11 or newer), and that Python found on `PATH` and run with `-I -S`.
     - It runs the `SessionStart`, `UserPromptSubmit`, `PostToolBatch` (20 times) and `Stop` hooks
@@ -578,8 +585,8 @@ The adapter writes no #2055 ledger tables. This is how its records adopt them on
 ## Test plan with real Claude Code sessions
 
 Headless `claude -p` sessions with the plugin loaded by `--plugin-dir` and an isolated store home,
-plus one interactive lane as client zero. R0-R10 run before 2026-11-03 on Claude Code backed by an
-Anthropic-compatible GLM endpoint; each run records its backend, and at least one R-test is repeated
+plus one interactive lane as client zero. R0 ran on 2026-11-01; R1-R10 run on each unit release's
+candidate, on Claude Code backed by an Anthropic-compatible GLM endpoint; each run records its backend, and at least one R-test is repeated
 on Anthropic models afterwards. Only synthetic stores and the test lane's own sessions are used.
 
 | Run | What it proves |
@@ -621,7 +628,7 @@ committed row, and store growth (the growth gate above).
 
 **Install records**, one per supported platform (macOS and Linux):
 - **Setup:** only the documented install steps, on a fresh machine. On macOS this may be a clean
-  account environment, named as such in the record.
+  environment (a scratch `HOME` and Claude Code config directory), named as such in the record.
 - **Recorded:** whether capture writes rows or records `runtime_missing`, and how many manual steps
   it took.
 - **Without Claude Code:** the CLI smoke (`scripts/claude_code_unit_smoke.py`) runs the same path

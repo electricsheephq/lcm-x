@@ -512,3 +512,28 @@ def test_profile_scope_falls_back_to_resolved_home(tmp_path, monkeypatch, resolu
         assert engine._entities.scope_key == str(home.resolve())
     finally:
         engine.shutdown()
+
+
+@pytest.mark.parametrize('value', ['', ' . . Alex ! ! ', '“  Alex,  Smith! ”',
+                                  'Ａｌｅｘ', 'Straße', '! ? ...', '_Ａ　Ｂ＿', '🙂Alex🙂'])
+def test_normalize_alias_preserves_legacy_behavior(api, value):
+    import unicodedata
+
+    expected = ' '.join(unicodedata.normalize('NFKC', value).casefold().split())
+    while expected and unicodedata.category(expected[0]).startswith('P'):
+        expected = expected[1:].lstrip()
+    while expected and unicodedata.category(expected[-1]).startswith('P'):
+        expected = expected[:-1].rstrip()
+    assert api.normalize_alias(value) == expected
+
+
+def test_normalize_alias_long_punctuation_is_fast(api):
+    from time import process_time
+
+    value = '“' * 50_000 + ' Alex ' + '”' * 50_000
+    durations = []
+    for _ in range(3):
+        started = process_time()
+        assert api.normalize_alias(value) == 'alex'
+        durations.append(process_time() - started)
+    assert min(durations) < 0.1

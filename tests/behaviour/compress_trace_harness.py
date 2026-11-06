@@ -36,6 +36,7 @@ import pytest
 # Reuse the suite's registration when invoked with python -m outside pytest.
 import tests.conftest  # noqa: F401
 from tests.behaviour.frontier_observer import observed_attribute
+from tests.behaviour.trace_config import LCMConfig, trace_config
 from tests.phase0_hygiene import product_env_keys
 from tests.harness import engine_context, pin_char_counter
 
@@ -581,6 +582,8 @@ class Canonical:
             return {"bytes_sha256": hashlib.sha256(value).hexdigest()}
         if callable(value):
             return {"callable": value.__qualname__}
+        if isinstance(value, LCMConfig):
+            return trace_config(value, lambda v, name: self.value(v, f"{path}.{name}"))
         if dataclasses.is_dataclass(value) and not isinstance(value, type):
             return {f.name: self.value(getattr(value, f.name), f"{path}.{f.name}")
                     for f in dataclasses.fields(value)}

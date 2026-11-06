@@ -275,18 +275,32 @@ def plan_ordinals(existing, placements):
 
 
 def plan_rebinds(store, conversation_id, session_id, salt, attempt, mark):
-    """Plan exact own-session pairs, including bound hits in the uniqueness test."""
-    want, skipped = defaultdict(list), Counter()
+    """Plan exact own-session pairs, including bound hits in the uniqueness test.
+
+    The cap counts candidate keys only (#2254): keys with an entry that this
+    ingest neither stored nor matched to a row that already has a binding. An
+    entry matched to a bound row can never pair, so it is kept only where it
+    shares a key with a candidate, for the uniqueness test.
+    """
+    matched = attempt["matched"]
+    matched_bound = {r[0] for r in store._conn.execute(
+        "SELECT DISTINCT store_id FROM occurrence_bindings WHERE store_id IN (SELECT value FROM json_each(?))",
+        (json.dumps(sorted(set(matched.values()))),))} if matched else set()
+    by_key, candidates, skipped = defaultdict(list), set(), Counter()
     for i, entry in enumerate(attempt["entries"]):
         if i in attempt["stored"]:
             continue
         stamp = attempt["stamps"][i]
         if stamp is None:
             skipped["unstamped"] += 1
-        else:
-            want[stamp, entry.identity_digest].append(i)
-    if len(want) > 4096:
+            continue
+        key = stamp, entry.identity_digest
+        by_key[key].append(i)
+        if matched.get(i) not in matched_bound:
+            candidates.add(key)
+    if len(candidates) > 4096:
         return dict(pairs=[], skipped=Counter(too_large=1), too_large=True)
+    want = {key: indexes for key, indexes in by_key.items() if key in candidates}  # first-seen order
     rows = store.find_rows_by_observed_at(conversation_id, [session_id], [float(s) for s, _ in want])
     keyed = defaultdict(list)
     for row in rows:

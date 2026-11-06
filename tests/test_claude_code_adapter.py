@@ -393,6 +393,17 @@ def test_projection_keeps_the_preview_when_the_saved_output_cannot_be_read(tmp_p
     assert projection.rows[0][1]["content"] == marker and projection.problems == [problem]
 
 
+def test_projection_ignores_a_persisted_output_marker_quoted_mid_text(tmp_path):
+    """REGRESSION (#2187): a tool output that quotes the tag and a real saved-output path in its
+    middle keeps its own text; only a result that starts with the tag is a preview."""
+    folder, path, marker = _saved(tmp_path, "toolu_9.txt", b"another tool's full output\n")
+    text = f"grep found this in a log:\n{marker}\nend of match"
+    entry = _entry("user", [{"type": "tool_result", "tool_use_id": "toolu_1", "content": text}])
+    projection = project_entry(entry, folder=folder)
+    assert projection.rows[0][1]["content"] == text
+    assert projection.files == [] and projection.problems == []
+
+
 def test_content_digest_ignores_only_the_copy_envelope():
     entry = _entry("user", "hello", promptId="p1")
     copy = {**entry, "sessionId": "fork", "promptId": "p2"}
@@ -833,6 +844,21 @@ def start_reader(env, tmp_path, monkeypatch):
         return only
     start.launcher = launcher
     return start
+
+
+def test_grok_build_offers_no_recall_tools_over_a_store_nothing_writes(start_reader, env, monkeypatch, capsys):
+    """REGRESSION (#2267): the hooks capture no Grok Build event, so under Grok Build with no lcm.db
+    and no reader override the launcher starts no reader and says why. A store there still starts one."""
+    grok = Path(env["LCMX_GROK_HOME"])
+    monkeypatch.setenv("GROK_SESSION_ID", "g-1")
+    assert start_reader.launcher.main() == 0  # an exec would raise from the fixture's recorder
+    err = capsys.readouterr().err
+    assert "Grok Build sessions are not captured" in err and str(grok) in err
+    assert not grok.exists()
+    grok.mkdir()
+    (grok / "lcm.db").write_bytes(b"")
+    which, _path, argv, _environment = start_reader()
+    assert which == "plain" and argv[argv.index("--store") + 1] == str(grok / "lcm.db")
 
 
 def _plain_reader(env, tmp_path, runtime=(sys.executable,)):

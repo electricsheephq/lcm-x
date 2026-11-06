@@ -68,7 +68,8 @@ python -m pip install -q PyYAML==6.0.3
 # Assign each script first: under `set -e` a failed command substitution inside an argument
 # would not stop the script, and an empty script would "succeed".
 install="$(step_script .github/workflows/ci.yml 'Install test dependencies')"
-sqlite="$(step_script .github/actions/sqlite-runtime/action.yml 'Build and load SQLite')"
+sqlite_build="$(step_script .github/actions/sqlite-runtime/action.yml 'Build SQLite')"
+sqlite_load="$(step_script .github/actions/sqlite-runtime/action.yml 'Load SQLite')"
 stub="$(step_script .github/workflows/ci.yml 'Stub hermes-agent ABC')"
 rollback="$(step_script .github/workflows/ci.yml 'Fetch the rollback-reader commits')"
 ruamel="$(step_script .github/workflows/ci.yml 'Test the upstream ruamel loader')"
@@ -84,10 +85,11 @@ PY
 
 # GitHub runs a workflow step's script with `bash -e`, and a composite-action step that
 # declares `shell: bash` with `bash -eo pipefail`; each step runs here the same way.
-# 1. CI's test tools. 2. SQLite: CI's build-and-verify step with the action's defaults.
+# 1. CI's test tools. 2. SQLite: the action's build step, then its load-and-verify step, with its defaults.
 bash -e -c "$install"
 : > "$cache/github-env"
-RUNNER_TEMP="$cache" GITHUB_ENV="$cache/github-env" bash -eo pipefail -c "$sqlite"
+RUNNER_TEMP="$cache" GITHUB_ENV="$cache/github-env" bash -eo pipefail -c "$sqlite_build"
+RUNNER_TEMP="$cache" GITHUB_ENV="$cache/github-env" bash -eo pipefail -c "$sqlite_load"
 # 3. The hermes-agent ContextEngine stub (agent/ is gitignored).
 bash -e -c "$stub"
 # 4. The rollback-reader commits. Without them the old-reader tests fail here (#841).
