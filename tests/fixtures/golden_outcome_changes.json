@@ -581,16 +581,16 @@
       "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "reconcile-tool-after-new": {
-      "outcome_sha": "9a29ad8f15c45502fc310a24d6db434912bce0dc3303a238c7ec6e62734e9797",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed; then reconcile-tool-after-new: adds possible_replay_of 7->3 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "543cbb5c52001cc28ae44cb5a539d0bf1a4d16605e510c840af703ad8aa713c2",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed; then reconcile-tool-after-new: adds possible_replay_of 7->3 (#2305 P1h PR5 cursor-0 batch links); review fix: adds possible_replay_of 6->2 for the empty assistant tool-call copy (#2305 PR #2335)"
     },
     "repeated-equal-occurrences": {
       "outcome_sha": "480bf34f73468d8895de439c70c004e9e40216bbce40ebd09e4b9e8ae81a626e",
       "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "repeated-tool-id": {
-      "outcome_sha": "7edca6518d95c455aecfe3bc1d485572292789e70412cc44f2eb78c94a96168e",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed; then repeated-tool-id: adds possible_replay_of 6->3 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "11fa8f61ed9cbc7b0f6afa93a202ce1ba19e17f531add6072a5cd3755e221c8e",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed; then repeated-tool-id: adds possible_replay_of 6->3 (#2305 P1h PR5 cursor-0 batch links); review fix: adds possible_replay_of 5->2 for the empty assistant tool-call copy (#2305 PR #2335)"
     },
     "replay-build-mapped-ignore": {
       "outcome_sha": "4f38d7ab5c79110083ed38450964fa8943e381e2195d740426ddd4145cf83bdc",
@@ -701,16 +701,16 @@
       "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "tools-changed": {
-      "outcome_sha": "4667af35e7380e1ff5b0d15afc4fa49c9e8f532abb0f0f7a12bba949c529389f",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed; then tools-changed: adds possible_replay_of 7->3 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "bdc330c9dbf0fad134979b9c8a2a454c78a88f891d75373188b1a591a860df87",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed; then tools-changed: adds possible_replay_of 7->3 (#2305 P1h PR5 cursor-0 batch links); review fix: adds possible_replay_of 6->2 for the empty assistant tool-call copy (#2305 PR #2335)"
     },
     "tools-delta": {
-      "outcome_sha": "8bfaa29350133ad2316cb0b441b90280e527b36169ce7d21317f67aebdbf548b",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed; then tools-delta: adds possible_replay_of 6->3 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "3e1bc146b1e67c5196abb5c284bf56424ad90f46f1ddeae1ad549b48fca90571",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed; then tools-delta: adds possible_replay_of 6->3 (#2305 P1h PR5 cursor-0 batch links); review fix: adds possible_replay_of 5->2 for the empty assistant tool-call copy (#2305 PR #2335)"
     },
     "tools-full": {
-      "outcome_sha": "d8e14b3eb153454bea05adb0f57a5f17732bc9c1d0197d3bd1a44c26a7d223db",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed; then tools-full: adds possible_replay_of 6->3 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "6b362863f1e3615b74d237a63e0b64989e53ea4ec61ed62cfe85b064853c055f",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed; then tools-full: adds possible_replay_of 6->3 (#2305 P1h PR5 cursor-0 batch links); review fix: adds possible_replay_of 5->2 for the empty assistant tool-call copy (#2305 PR #2335)"
     },
     "tools-new": {
       "outcome_sha": "a3466bb1587c908f0931f33189494c141153913b61d1fd01c86df808c50386ba",
@@ -721,8 +721,8 @@
       "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed"
     },
     "tools-rewrite": {
-      "outcome_sha": "ab4a53539444221eba7cccf784918e00528ec9cc9be81a09d4be71610423b5d4",
-      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed; then tools-rewrite: adds possible_replay_of 6->3 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "432dae8c5b441ccff2f641f32d59deb87c50a8ecd7cc8bc2aff530aff6b00ff2",
+      "reason": "R2 (#2308): the config gains recall_delivery_order (default score), so only the config digest inside the state snapshot changes; no other outcome changed; then tools-rewrite: adds possible_replay_of 6->3 (#2305 P1h PR5 cursor-0 batch links); review fix: adds possible_replay_of 5->2 for the empty assistant tool-call copy (#2305 PR #2335)"
     },
     "tools-suffix": {
       "outcome_sha": "fa50bfdf098b2dc9931ca2f7a4af73a2c4a01dc508220cd9b33524f1c0630403",

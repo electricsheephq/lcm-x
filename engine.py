@@ -7549,45 +7549,63 @@ class LCMEngine(
                 if attempt.get("cursor0_batch") and attempt["stored"]:
                     # #2305: annotate the batch, never consume or change a message.
                     # Compare stored bytes (including tool fields), not the host view's digest.
-                    first = min(attempt["stored"].values())
-                    earlier, stripped_earlier = {}, {}
-                    for sid, role, content, call_id, calls, stamp in conn.execute(
-                        "SELECT store_id,role,content,tool_call_id,tool_calls,observed_at "
-                        "FROM messages WHERE session_id=? AND store_id<? ORDER BY store_id",
-                        (self._session_id, first)):
-                        earlier.setdefault((role, content, call_id, calls), []).append((sid, stamp))
-                        stripped = ingest_ledger.stripped_replay_content(content)
-                        if stripped is not None:
-                            stripped_earlier.setdefault((role, stripped, call_id, calls), []).append((sid, stamp))
-                    used = {row[0] for row in conn.execute(
-                        "SELECT related_store_id FROM message_relations "
-                        "WHERE kind='possible_replay_of' AND related_store_id<?", (first,))} if conn.execute(
-                            "SELECT 1 FROM sqlite_master WHERE name='message_relations'").fetchone() else set()
-                    pairs, linked, candidate_ids, stripped_count = [], set(), set(), 0
-                    new_rows = list(conn.execute(
-                        "SELECT store_id,role,content,tool_call_id,tool_calls,observed_at "
-                        "FROM messages WHERE session_id=? AND store_id IN "
-                        "(SELECT value FROM json_each(?)) ORDER BY store_id",
-                        (self._session_id, json.dumps(sorted(attempt["stored"].values())))))
-                    # Complete the exact pass before any stripped copy can spend a target.
-                    for strip, index in ((False, earlier), (True, stripped_earlier)):
-                        for sid, role, content, call_id, calls, stamp in new_rows:
-                            if sid in linked or ingest_ledger.stripped_replay_content(content) is None:
-                                continue
-                            content = ingest_ledger.stripped_replay_content(content) if strip else content
-                            candidates = index.get((role, content, call_id, calls), ())
-                            if candidates:
-                                candidate_ids.add(sid)
-                            target = next((old for old, old_stamp in candidates if old not in used
-                                           and (stamp is None or old_stamp is None or stamp == old_stamp)), None)
-                            if target is not None:
-                                pairs.append([(sid, "possible_replay_of", target, None, None)])
-                                linked.add(sid)
-                                used.add(target)
-                                stripped_count += int(strip)
-                    delta["ledger.replay_pairs.cursor0"] += store.add_message_relations(pairs)
-                    delta["ledger.replay_pairs.cursor0_unlinked"] += len(candidate_ids - linked)
-                    delta["ledger.replay_pairs.cursor0_stripped"] += stripped_count
+                    flag = getattr(store, "_pending_relation_schema", False)
+                    try:
+                        with _sqlite_savepoint(conn, abort_on_cleanup_failure=True, owner_active=True, foreground_ingest=True):
+                            first = min(attempt["stored"].values())
+                            new_rows = list(conn.execute(
+                                "SELECT store_id,role,content,tool_call_id,tool_calls,tool_name,observed_at "
+                                "FROM messages WHERE session_id=? AND store_id IN "
+                                "(SELECT value FROM json_each(?)) ORDER BY store_id",
+                                (self._session_id, json.dumps(sorted(attempt["stored"].values())))))
+                            keys = {(role, call_id, calls, name) for _, role, _, call_id, calls, name, _ in new_rows}
+                            earlier, stripped_earlier = {}, {}
+                            for sid, role, content, call_id, calls, name, stamp in conn.execute(
+                                "SELECT m.store_id,m.role,m.content,m.tool_call_id,m.tool_calls,m.tool_name,m.observed_at "
+                                "FROM json_each(?) k JOIN messages m ON m.session_id=? "
+                                "AND m.role IS json_extract(k.value,'$[0]') "
+                                "AND m.tool_call_id IS json_extract(k.value,'$[1]') "
+                                "AND m.tool_calls IS json_extract(k.value,'$[2]') "
+                                "AND m.tool_name IS json_extract(k.value,'$[3]') "
+                                "WHERE m.store_id<? ORDER BY m.store_id",
+                                (json.dumps(sorted(keys, key=repr)), self._session_id, first)):
+                                earlier.setdefault((role, content, call_id, calls, name), []).append((sid, stamp))
+                                stripped = ingest_ledger.stripped_replay_content(content)
+                                if stripped is not None:
+                                    stripped_earlier.setdefault((role, stripped, call_id, calls, name), []).append((sid, stamp))
+                            used = {row[0] for row in conn.execute(
+                                "SELECT related_store_id FROM message_relations "
+                                "WHERE kind='possible_replay_of' AND related_store_id<?", (first,))} if conn.execute(
+                                    "SELECT 1 FROM sqlite_master WHERE name='message_relations'").fetchone() else set()
+                            pairs, linked, candidate_ids, stripped_count = [], set(), set(), 0
+                            # Complete the exact pass before any stripped copy can spend a target.
+                            for strip, index in ((False, earlier), (True, stripped_earlier)):
+                                for sid, role, content, call_id, calls, name, stamp in new_rows:
+                                    if sid in linked:
+                                        continue
+                                    stripped = ingest_ledger.stripped_replay_content(content)
+                                    candidates = index.get((role, stripped if strip else content, call_id, calls, name), ())
+                                    if candidates:
+                                        candidate_ids.add(sid)
+                                    if stripped is None and (strip or call_id is None and calls is None):
+                                        continue
+                                    target = next((old for old, old_stamp in candidates if old not in used
+                                                   and (stamp is None or old_stamp is None or stamp == old_stamp)), None)
+                                    if target is not None:
+                                        pairs.append([(sid, "possible_replay_of", target, None, None)])
+                                        linked.add(sid)
+                                        used.add(target)
+                                        stripped_count += int(strip)
+                            written = store.add_message_relations(pairs)
+                        delta["ledger.replay_pairs.cursor0"] += written
+                        delta["ledger.replay_pairs.cursor0_unlinked"] += len(candidate_ids - linked)
+                        delta["ledger.replay_pairs.cursor0_stripped"] += stripped_count
+                    except BaseException as exc:
+                        store._pending_relation_schema = flag
+                        if (not isinstance(exc, Exception) or _is_ingest_busy_error(exc)
+                                or isinstance(exc, _SqliteSavepointError) or not conn.in_transaction):
+                            raise
+                        delta["ledger.write_failed"] += 1
                 key = "session_lineage:" + str(self._session_id)
                 persisted = conn.execute("SELECT value FROM ledger_meta WHERE key=?", (key,)).fetchone()
                 lineage = persisted[0] if persisted else attempt["lineage"]

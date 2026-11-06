@@ -210,6 +210,7 @@ def test_08_ledger_off(host, monkeypatch):
 def test_09_relation_failure_keeps_rows_and_rolls_back_links(host, monkeypatch):
     before, view, added = _insert_case(host)
     store = host.engine._store
+    previous_seq = store._conn.execute("SELECT max(view_seq) FROM ingest_views").fetchone()[0]
     original = store.add_message_relations
     attempted = []
 
@@ -228,6 +229,12 @@ def test_09_relation_failure_keeps_rows_and_rolls_back_links(host, monkeypatch):
     assert _pairs(host.engine) == []
     assert _counts(host.engine)["ledger.write_failed"] == 1
     assert not _counts(host.engine)["ledger.replay_pairs.cursor0"]
+    new_ids = {row["store_id"] for row in store.get_session_messages(SID)[len(before):]}
+    bound_ids = {row[0] for row in store._conn.execute("SELECT store_id FROM occurrence_bindings")}
+    assert new_ids <= bound_ids
+    assert store._conn.execute("SELECT max(view_seq) FROM ingest_views").fetchone()[0] > previous_seq
+    assert _counts(host.engine)["ledger.bindings_written"] >= len(new_ids)
+    assert _counts(host.engine)["ledger.views_written"] > 0
 
 
 def test_10_different_reasoning_is_linked_and_stored(host):
@@ -287,6 +294,7 @@ def test_15_all_reasoning_never_links(host, text):
     host.turn(reply=text)
     _ingest_copies(host, [{"role": "assistant", "content": text}])
     assert _pairs(host.engine) == []
+    assert _counts(host.engine)["ledger.replay_pairs.cursor0_unlinked"] == 1
 
 
 @pytest.mark.parametrize("field,value", [("tool_call_id", "other"), ("tool_calls", [
@@ -322,3 +330,39 @@ def test_17_recorder_cursor0_and_append(host, caplog):
     assert len(records) == 1 and records[0].levelno == logging.DEBUG
     assert "route=foreground" in records[0].getMessage()
     assert "rows=1 replay_pairs=0 stripped=0" in records[0].getMessage()
+
+
+def test_18_cursor0_tool_turn_links_call_and_result(host):
+    host.tool_turn()
+    originals = host.engine._store.get_session_messages(SID)[-3:-1]
+    copies = deepcopy(host.live[-3:-1])
+    assert copies[0]["content"] == "" and copies[0]["tool_calls"]
+    sources = _ingest_copies(host, copies)
+    assert _pairs(host.engine) == list(zip(sources, [row["store_id"] for row in originals]))
+    assert _counts(host.engine)["ledger.replay_pairs.cursor0"] == 2
+    assert _counts(host.engine)["ledger.replay_pairs.cursor0_unlinked"] == 0
+
+
+@pytest.mark.parametrize("content", ["", "same output"])
+def test_19_tool_names_without_call_ids_must_match(host, content):
+    host.live += [{"role": "tool", "tool_name": name, "content": content} for name in ("search", "lookup")]
+    host.engine.ingest(host.live)
+    originals = host.engine._store.get_session_messages(SID)[-2:]
+    assert [row["tool_name"] for row in originals] == ["search", "lookup"]
+    sources = _ingest_copies(host, [{"role": "tool", "tool_name": name, "content": content}
+                                    for name in ("lookup", "different")])
+    # Empty unkeyed content stays unlinked, but a matching-name candidate is counted.
+    assert _pairs(host.engine) == ([(sources[0], originals[1]["store_id"])] if content else [])
+    assert _counts(host.engine)["ledger.replay_pairs.cursor0_unlinked"] == int(not content)
+
+
+@pytest.mark.parametrize("field,value", [("tool_call_id", "call-empty"), ("tool_calls", [
+    {"id": "call-empty", "type": "function", "function": {"name": "search", "arguments": "{}"}}])])
+def test_20_empty_tool_key_is_one_to_one_and_counted(host, field, value):
+    row = {"role": "assistant", "content": "", field: value}
+    host.live.append(deepcopy(row))
+    host.engine.ingest(host.live)
+    target = host.engine._store.get_session_messages(SID)[-1]["store_id"]
+    sources = _ingest_copies(host, [deepcopy(row), deepcopy(row)])
+    assert _pairs(host.engine) == [(sources[0], target)]
+    assert _counts(host.engine)["ledger.replay_pairs.cursor0_unlinked"] == 1
