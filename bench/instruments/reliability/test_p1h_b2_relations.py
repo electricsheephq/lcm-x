@@ -161,6 +161,23 @@ def _split(expected, rows, relations, host=None):
     return out, multiset.split_surplus(keys, relations)
 
 
+@pytest.mark.parametrize("relations,want", [([], 0), ([(2, "possible_replay_of", 1)], 1),
+                                          ([(1, "possible_replay_of", 2)], 0), ([(2, "carried_stamp", 1)], 0)])
+def test_cursor0_stripped_content_requires_product_pair(relations, want):
+    _out, split = _split([("assistant", "<think>old</think>answer")],
+                         [(1, "assistant", "<think>old</think>answer"), (2, "assistant", "answer")], relations)
+    assert split["visible_surplus_rows"] == want
+    assert split["silent_surplus_rows"] == 1 - want
+
+
+@pytest.mark.parametrize("old,new", [("<think>x</think>", " "), ("<think>x</think>answer", " answer"),
+                                    ("<think>x</think>Answer", "answer"), ("<think>x</think>answer", "other")])
+def test_cursor0_stripped_pair_rechecks_content_without_more_normalization(old, new):
+    _out, split = _split([("assistant", old)], [(1, "assistant", old), (2, "assistant", new)],
+                         [(2, "possible_replay_of", 1)])
+    assert split["visible_surplus_rows"] == 0
+
+
 def test_p1h_a_host_licensed_copy_makes_the_key_fail_closed():
     # Delta review on #2291: one expected copy plus one host-licensed copy; the silent re-store (row 2) sits before
     # the related host-mirrored copy (row 3), so the key's surplus stays silent.

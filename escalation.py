@@ -450,6 +450,12 @@ def _strip_reasoning_blocks(text: str) -> str:
     return _THINK_BLOCK_RE.sub("", text)
 
 
+def stripped_replay_content(content):
+    """The replay transform for cursor-0 links (#2305): reasoning blocks removed; empty is never evidence."""
+    stripped = _strip_reasoning_blocks(content)
+    return stripped if stripped and stripped.strip() else None
+
+
 def _sanitize_reasoning_summary(text: str) -> str:
     """Return a summary safe to persist, or ``""`` when the model returned only
     reasoning.

@@ -14,10 +14,32 @@ nothing.
 from __future__ import annotations
 
 import hashlib
+import importlib
+import importlib.util
 import json
 import re
+import sys
 import unicodedata
 from collections import Counter, defaultdict
+from pathlib import Path
+
+
+def stripped_replay_content(content):
+    """The product's replay transform (escalation.stripped_replay_content), loaded on first use.
+
+    Bench-only runs do not register the plugin package, so register it here the way tests/conftest.py does
+    (without executing its plugin entry point); the scorer never re-implements the transform."""
+    module = sys.modules.get("hermes_lcm.escalation")
+    if module is None:
+        if "hermes_lcm" not in sys.modules:
+            root = Path(__file__).resolve().parents[4]
+            spec = importlib.util.spec_from_file_location(
+                "hermes_lcm", root / "__init__.py", submodule_search_locations=[str(root)])
+            package = importlib.util.module_from_spec(spec)
+            package.__path__ = [str(root)]
+            sys.modules["hermes_lcm"] = package
+        module = importlib.import_module("hermes_lcm.escalation")
+    return module.stripped_replay_content(content)
 
 
 def norm(text: str) -> str:
@@ -250,6 +272,7 @@ def score(expected: list[tuple[str, str]], stored_rows: list[tuple], host: dict 
     """``expected``: (role, text) items; ``stored_rows``: (store_id, session_id, role, content); ``host``: the
     lineage's host occurrences (key -> {"n", "ids"}), or None."""
     stored_rows = sorted(stored_rows, key=lambda r: r[0])
+    replay_rows = {sid: (session, role, content) for sid, session, role, content in stored_rows}
     key_of = _key or (lambda role, text: (role, h(text)))
     stored, by_session = defaultdict(list), defaultdict(list)
     for sid, session, role, content in stored_rows:
@@ -312,7 +335,7 @@ def score(expected: list[tuple[str, str]], stored_rows: list[tuple], host: dict 
                 duplicated.append(entry)
                 if surplus_keys is not None:
                     surplus_keys.append((key, have - n - entry.get("licensed", 0), stored[key] + consumed[key],
-                                         consumed[key] + [sid for sid in stored[key] if sid in embedded_ids]))
+                                         consumed[key] + [sid for sid in stored[key] if sid in embedded_ids], replay_rows))
     extra = []
     for k, v in stored.items():
         if k not in want:
@@ -321,7 +344,7 @@ def score(expected: list[tuple[str, str]], stored_rows: list[tuple], host: dict 
             if len(v) > (lic or {}).get("licensed", 0):
                 if surplus_keys is not None:
                     surplus_keys.append((k, len(v) - (lic or {}).get("licensed", 0), v + consumed[k],
-                                         consumed[k] + [sid for sid in v if sid in embedded_ids]))
+                                         consumed[k] + [sid for sid in v if sid in embedded_ids], replay_rows))
                 extra.append({"role": k[0], "copies": len(v) - (lic or {}).get("licensed", 0), "store_ids": v[:6]})
     # #804: a held user composite whose parts the host durably stored apart is stored here as those parts, each
     # licensed by host parity; the composite key is then not a deficit. Only the occurrences the host did not store
@@ -468,6 +491,13 @@ def split_surplus(groups, relations):
     self_ids = {sid for sid, kind, _other in relations if kind in ("supersedes", "generated_unproven")}
     pairs = sorted({tuple(sorted((sid, other))) for sid, kind, other in relations
                     if kind == "possible_replay_of" and other is not None and sid != other})
+    # Stored text only verifies an existing directed witness; it never creates one.
+    replay_rows = {sid: row for group in groups if len(group) > 4 for sid, row in group[4].items()}
+    stripped_pairs = [(other, sid) for sid, kind, other in relations
+                      if kind == "possible_replay_of" and other in replay_rows and sid in replay_rows and other < sid
+                      and replay_rows[sid][:2] == replay_rows[other][:2]
+                      and stripped_replay_content(replay_rows[sid][2]) is not None
+                      and stripped_replay_content(replay_rows[sid][2]) == stripped_replay_content(replay_rows[other][2])]
     caps = []
     for index, (_key, surplus, ids, *merged) in enumerate(groups):
         quota, held, count = ("key", index), set(ids), Counter(ids)
@@ -478,6 +508,7 @@ def split_surplus(groups, relations):
             cap, later = surplus, set(copies[max(0, kept):]) if surplus > 0 else set()
             witnesses = [("self", sid) for sid in sorted(later & self_ids)]
             witnesses += [("pair", a, b) for a, b in pairs if a in held and b in held and (a in later or b in later)]
+            witnesses += [("pair", a, b) for a, b in stripped_pairs if b in later and a not in held]
         else:
             # Worst case: the surplus fills rows without a self relation first, then the self-related rows that hold
             # the most copies; each self-related row it reaches explains one copy, and pairs explain nothing.

@@ -3,11 +3,15 @@
 from collections import Counter, defaultdict
 from copy import deepcopy
 import sqlite3
+import logging
+import re
 
 import pytest
 
 from bench.instruments.reliability.scorers.multiset import split_surplus
 from hermes_lcm.engine import LCMEngine
+from hermes_lcm.escalation import _strip_reasoning_blocks
+from hermes_lcm.ingest_ledger import stripped_replay_content
 from tests.test_issue_1286_cleanup_rewrite_proof import (
     SID, Host, _change, _commit_cleanup, _turns,
     _no_summaries, _pin_lcm_char_counter,  # noqa: F401
@@ -83,13 +87,18 @@ def _assert_whole_store(host, before, view, added, surplus):
     for source, target in pairs:
         assert source in new_ids and target < min(new_ids)
         assert by_id[source]["session_id"] == by_id[target]["session_id"] == SID
-        assert _key(by_id[source]) == _key(by_id[target])
-    groups = [(key, max(0, len(held) - wanted[key]), held) for key, held in ids.items()]
+        left, right = by_id[source], by_id[target]
+        assert (left["role"], left["tool_call_id"], left["tool_calls"]) == (
+            right["role"], right["tool_call_id"], right["tool_calls"])
+        assert stripped_replay_content(left["content"]) == stripped_replay_content(right["content"])
+    evidence = {sid: (row["session_id"], row["role"], row["content"]) for sid, row in by_id.items()}
+    groups = [(key, max(0, len(held) - wanted[key]), held, [], evidence) for key, held in ids.items()]
     split = split_surplus(groups, [(s, "possible_replay_of", t) for s, t in pairs])
     assert split["silent_surplus_rows"] == 0
     assert split["visible_surplus_rows"] == surplus
     assert _counts(host.engine)["ledger.replay_pairs.cursor0"] == surplus
     assert host.engine.get_status()["ingest_ledger"]["ledger.replay_pairs.cursor0"] == surplus
+    assert _counts(host.engine)["ledger.replay_pairs.cursor0_stripped"] == 1
 
 
 def test_01_mid_history_insert(host):
@@ -219,3 +228,97 @@ def test_09_relation_failure_keeps_rows_and_rolls_back_links(host, monkeypatch):
     assert _pairs(host.engine) == []
     assert _counts(host.engine)["ledger.write_failed"] == 1
     assert not _counts(host.engine)["ledger.replay_pairs.cursor0"]
+
+
+def test_10_different_reasoning_is_linked_and_stored(host):
+    host.turn(reply="<think>old reasoning</think>answer")
+    target = host.engine._store.get_session_messages(SID)[-1]["store_id"]
+    sources = _ingest_copies(host, [{"role": "assistant", "content": "<think>new reasoning</think>answer"}])
+    assert _pairs(host.engine) == [(sources[0], target)]
+    assert host.rows()[-1][1] == "<think>new reasoning</think>answer"
+    assert _counts(host.engine)["ledger.replay_pairs.cursor0_stripped"] == 1
+
+
+def test_11_exact_pass_spends_targets_before_stripped_pass(host):
+    for reply in ("<think>oldest</think>ok", "ok", "<think>third</think>ok"):
+        host.turn(reply=reply)
+    targets = [r["store_id"] for r in host.engine._store.get_session_messages(SID) if r["role"] == "assistant"]
+    copies = [{"role": "assistant", "content": text} for text in ("<think>new</think>ok", "ok", "ok")]
+    sources = _ingest_copies(host, copies)
+    assert _pairs(host.engine) == [(sources[0], targets[0]), (sources[1], targets[1]), (sources[2], targets[2])]
+    assert _counts(host.engine)["ledger.replay_pairs.cursor0_stripped"] == 2
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("<think>unclosed answer", "<think>unclosed answer"),
+    ("<think>outer<think>inner</think>rest</think>answer", "rest</think>answer"),
+    ("<think>a</think>x<thinking>b</thinking>y", "xy"),
+    ("<think>a</think> answer ", " answer "),
+])
+def test_12_product_stripping_is_the_only_transform(host, raw, expected):
+    assert _strip_reasoning_blocks(raw) == expected
+    assert stripped_replay_content(raw) == expected
+    host.turn(reply=raw)
+    target = host.engine._store.get_session_messages(SID)[-1]["store_id"]
+    sources = _ingest_copies(host, [{"role": "assistant", "content": expected}])
+    assert _pairs(host.engine) == [(sources[0], target)]
+
+
+def test_13_other_session_is_refused(host):
+    other = host.bind("other-session")
+    other.ingest([{"role": "assistant", "content": "<think>old</think>answer"}])
+    host.turn(reply="unrelated")
+    _ingest_copies(host, [{"role": "assistant", "content": "answer"}])
+    assert _pairs(host.engine) == []
+
+
+def test_14_stripped_stamp_veto(host, monkeypatch):
+    stamp = host.stamp()
+    host.live += [{"role": "assistant", "content": "<think>old</think>answer", "timestamp": stamp}]
+    host.engine.ingest(host.live)
+    monkeypatch.setenv("LCM_IDENTITY_ANCHOR", "off")
+    _ingest_copies(host, [{"role": "assistant", "content": "answer", "timestamp": stamp + 10}])
+    assert _pairs(host.engine) == []
+    assert _counts(host.engine)["ledger.replay_pairs.cursor0_unlinked"] == 1
+
+
+@pytest.mark.parametrize("text", ["<think>old</think>", "<think>old</think> \n"])
+def test_15_all_reasoning_never_links(host, text):
+    host.turn(reply=text)
+    _ingest_copies(host, [{"role": "assistant", "content": text}])
+    assert _pairs(host.engine) == []
+
+
+@pytest.mark.parametrize("field,value", [("tool_call_id", "other"), ("tool_calls", [
+    {"id": "other", "type": "function", "function": {"name": "lookup", "arguments": "{}"}}])])
+def test_16_tool_fields_must_match(host, field, value):
+    host.turn(reply="<think>old</think>answer")
+    _ingest_copies(host, [{"role": "assistant", "content": "answer", field: value}])
+    assert _pairs(host.engine) == []
+
+
+def _route_records(caplog):
+    return [record for record in caplog.records if record.getMessage().startswith("LCM ingest route:")]
+
+
+def test_17_recorder_cursor0_and_append(host, caplog):
+    before, view, _added = _insert_case(host)
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG, logger="hermes_lcm"):
+        host.engine.ingest(view)
+    records = _route_records(caplog)
+    assert len(records) == 1 and records[0].levelno == logging.INFO
+    match = re.fullmatch(r"LCM ingest route: session=(\S+) route=(.*?) cursor=(\d+) reason=(.*?) "
+                         r"stored=(\d+)-(\d+) rows=(\d+) replay_pairs=(\d+) stripped=(\d+)", records[0].getMessage())
+    assert match is not None
+    new = host.engine._store.get_session_messages(SID)[len(before):]
+    assert match.groups() == (SID, "persisted batch", "0", "persisted ambiguous delta", str(new[0]["store_id"]),
+                              str(new[-1]["store_id"]), str(len(new)), "7", "1")
+    assert all(row["content"] not in records[0].getMessage() for row in new)
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG, logger="hermes_lcm"):
+        host.engine.ingest([*view, {"role": "user", "content": "ordinary append", "timestamp": host.stamp()}])
+    records = _route_records(caplog)
+    assert len(records) == 1 and records[0].levelno == logging.DEBUG
+    assert "route=foreground" in records[0].getMessage()
+    assert "rows=1 replay_pairs=0 stripped=0" in records[0].getMessage()
