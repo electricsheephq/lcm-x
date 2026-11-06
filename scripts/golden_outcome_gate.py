@@ -25,12 +25,24 @@ OUTCOME_HEADS = {
     # Assembly: output rows/identity, caller input/identity, persisted payloads and stored rows/DAG.
     "assembly": ("row ", "result aliases ", "input after ", "input aliases after ", "payload ",
                  "after _store ", "after _dag "),
+    # Summary chain: structured events for returned text, propagated failures and final provenance/budget.
+    "summary_chain": ("return", "raise", "state"),
+    # Backfill: persisted tables/cursors at checkpoints and reopen, final state and operator results.
+    "backfill": ("discovery state ", "accepted checkpoint ", "reopened state ", "after ",
+                 "return type ", "report fields ", "rendered ", "runner raises "),
 }
 ALLOWLIST = "tests/fixtures/golden_outcome_changes.json"
 
 
 def outcomes(family, events):
-    return [event for event in events if event.startswith(OUTCOME_HEADS[family])]
+    result = []
+    for event in events:
+        if isinstance(event, str):
+            if event.startswith(OUTCOME_HEADS[family]):
+                result.append(event)
+        elif event[0] in OUTCOME_HEADS[family]:
+            result.append(json.dumps(event, sort_keys=True, separators=(",", ":")))
+    return result
 
 
 def outcome_sha(events):
@@ -40,10 +52,14 @@ def outcome_sha(events):
 def golden(text):
     value = json.loads(text)
     if not isinstance(value, dict) or any(
-        not isinstance(events, list) or any(not isinstance(event, str) for event in events)
+        not isinstance(events, list) or any(
+            not isinstance(event, str) and not (
+                isinstance(event, list) and event and isinstance(event[0], str)
+            ) for event in events
+        )
         for events in value.values()
     ):
-        raise ValueError("golden must map scenario names to lists of event strings")
+        raise ValueError("golden must map scenario names to lists of strings or nonempty lists with string heads")
     return value
 
 

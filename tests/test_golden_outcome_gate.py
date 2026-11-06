@@ -29,9 +29,9 @@ def repo(tmp_path):
     return tmp_path, path
 
 
-def run(repo, *args):
+def run(repo, *args, family="ingest"):
     return subprocess.run(
-        [sys.executable, str(SCRIPT), "--base-ref", "HEAD", "--families", "ingest", *args],
+        [sys.executable, str(SCRIPT), "--base-ref", "HEAD", "--families", family, *args],
         cwd=repo, capture_output=True, text=True,
     )
 
@@ -87,7 +87,11 @@ def test_stale_entry_without_difference_is_advisory(repo):
 @pytest.mark.parametrize("family", OUTCOME_HEADS)
 def test_every_outcome_head_is_gated_and_noise_is_ignored(family):
     for head in OUTCOME_HEADS[family]:
-        assert compare(family, {"case": [head + "old"]}, {"case": [head + "new"]}, {}) == 1
+        before, after = ([head, "old"], [head, "new"]) if family == "summary_chain" else (head + "old", head + "new")
+        assert compare(family, {"case": [before]}, {"case": [after]}, {}) == 1
+    if family in NEW_FAMILY_NOISE:
+        assert outcomes(family, NEW_FAMILY_NOISE[family]) == []
+        return
     assert outcomes(family, ["sql changed", "attr changed", "attrs changed", "log changed",
                              "before changed", "after changed", "helper return changed",
                              "attr _store_complete_cut=changed", "attr _compress_run=changed",
@@ -102,17 +106,82 @@ STORED_STATE_EVENTS = {
     "reconcile": ["attr _store=sha12/len=0/1", "attr _dag=[]", "attr _lifecycle=sha12/len=0/1",
                   "attr _ingest_cursor=0"],
     "assembly": ["after _store sha256=0 chars=1", "after _dag sha256=0 chars=1"],
+    "summary_chain": [["state", {"model": "primary"}, None, True]],
+    "backfill": ["after sha12/len=abc/123", "reopened state sha12/len=abc/123",
+                 "accepted checkpoint sha12/len=abc/123", "discovery state sha12/len=abc/123"],
+}
+
+
+# Independent examples from test_summary_chain_trace.py and backfill_trace_harness.py.
+NEW_FAMILY_NOISE = {
+    "summary_chain": [[head, "changed"] for head in (
+        "accepts", "admit", "allows", "hung_route", "in_config_episode", "log", "note_route",
+        "provenance", "provider", "record_call", "record_config_error", "record_failure",
+        "record_hang", "record_rejection", "record_success", "spend", "stop", "return_helper",
+    )],
+    "backfill": ["sql changed", "log changed", "store enter changed", "store exit changed",
+                 "store raises changed", "connection changed", "provider changed", "files changed",
+                 "discovery checkpoint changed", "before changed", "observer changed", "boundary changed",
+                 "callback changed", "document changed", "reopen changed", "race changed",
+                 "commit raises changed", "teardown raises changed"],
 }
 
 
 @pytest.mark.parametrize("family,event", [(family, event) for family, events in STORED_STATE_EVENTS.items()
                                           for event in events])
 def test_stored_state_changes_fail_unlisted(family, event):
-    assert compare(family, {"case": [event]}, {"case": [event + " changed"]}, {}) == 1
+    changed = [*event, "changed"] if isinstance(event, list) else event + " changed"
+    assert compare(family, {"case": [event]}, {"case": [changed]}, {}) == 1
+
+
+@pytest.mark.parametrize("family,event", [
+    ("summary_chain", ["return", "short"]), ("summary_chain", ["raise", "SweepBudgetExhausted", "budget"]),
+    ("backfill", "return type [\"str\",null]"), ("backfill", "report fields changed"),
+    ("backfill", "rendered changed"), ("backfill", "runner raises changed"),
+    *[(family, event) for family in ("summary_chain", "backfill") for event in STORED_STATE_EVENTS[family]],
+])
+def test_new_family_outcome_requires_printed_digest(repo, family, event):
+    root, old_path = repo
+    path = old_path.with_name(f"{family}_trace.json")
+    before = [*event, "old"] if isinstance(event, list) else event + " old"
+    path.write_text(json.dumps({"case": [before]}))
+    subprocess.run(["git", "add", str(path)], cwd=root, check=True, capture_output=True)
+    subprocess.run(["git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+                    "commit", "-qm", "Add family base"], cwd=root, check=True, capture_output=True)
+    path.write_text(json.dumps({"case": [event]}))
+    result = run(root, family=family)
+    assert result.returncode == 1
+    digest = next(line for line in result.stdout.splitlines() if '"outcome_sha":' in line)
+    entry = json.loads("{" + digest + ', "reason": "Accepted outcome change"}')
+    canonical = json.dumps(event, sort_keys=True, separators=(",", ":")) if isinstance(event, list) else event
+    assert entry["outcome_sha"] == hashlib.sha256(canonical.encode()).hexdigest()
+    path.with_name("golden_outcome_changes.json").write_text(json.dumps({family: {"case": entry}}))
+    assert run(root, family=family).returncode == 0
+    path.write_text(json.dumps({"case": [event, event]}))
+    assert run(root, family=family).returncode == 1
+
+
+@pytest.mark.parametrize("family", ["summary_chain", "backfill"])
+def test_new_family_noise_changes_pass(family):
+    current = golden((ROOT / f"tests/fixtures/{family}_trace.json").read_text(encoding="utf-8"))
+    changed = {name: [*NEW_FAMILY_NOISE[family], *reversed([
+        event for event in events if not outcomes(family, [event])
+    ]), *[event for event in events if outcomes(family, [event])]] for name, events in current.items()}
+    assert compare(family, current, changed, {}) == 0
+
+
+def test_list_events_are_canonical_and_use_exact_head():
+    first = golden('{"case": [["state", {"z": 1, "a": 2}, null, true]]}')
+    second = golden('{"case": [["state", {"a": 2, "z": 1}, null, true]]}')
+    assert compare("summary_chain", first, second, {}) == 0
+    assert outcomes("summary_chain", first["case"]) == ['["state",{"a":2,"z":1},null,true]']
+    assert outcomes("summary_chain", [["state_helper", 1]]) == []
 
 
 @pytest.mark.parametrize("target,text", [("ingest_trace.json", "[]"),
                                        ("ingest_trace.json", '{"case": [42]}'),
+                                       ("ingest_trace.json", '{"case": [[]]}'),
+                                       ("ingest_trace.json", '{"case": [[42]]}'),
                                        ("golden_outcome_changes.json", "{"),
                                        ("golden_outcome_changes.json", '{"ingest": {"case": {}}}')])
 def test_parse_errors_exit_two(repo, target, text):
