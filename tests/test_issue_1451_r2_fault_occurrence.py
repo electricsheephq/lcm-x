@@ -35,7 +35,8 @@ def test_publication_failure_keeps_new_retained_occurrence(tmp_path, monkeypatch
         assert engine._last_compression_status == "compacted"
         assert fired == [True]
         copied = copy.deepcopy(output)
-        retained = next(row for row in reversed(copied) if row["role"] == "user")
+        retained_index = max(i for i, row in enumerate(copied) if row["role"] == "user")
+        retained = copied[retained_index]
         old_uid, old_timestamp = retained["message_uid"], retained["timestamp"]
         retained.update(timestamp=9999.0, message_uid="r2-new-retained-occurrence")
         assert old_uid != retained["message_uid"] and old_timestamp != retained["timestamp"]
@@ -44,8 +45,8 @@ def test_publication_failure_keeps_new_retained_occurrence(tmp_path, monkeypatch
         had_stamps = "output_metadata" in proof
         assert proof.get("durable") is False, "the injected failure must leave the proof non-durable"
         assert had_stamps and len(proof["output_metadata"]) == len(proof["output"])
-        assert proof["output_metadata"][output.index(next(row for row in reversed(output) if row["role"] == "user"))].get(
-            "message_uid") == old_uid, "the per-row stamps survive the failed publication"
+        assert proof["output_metadata"][retained_index].get("message_uid") == old_uid, \
+            "the per-row stamps survive the failed publication"
         cursor = engine._ingest_cursor
         engine.ingest(copied)
         rows = engine._store.get_session_messages("S")
