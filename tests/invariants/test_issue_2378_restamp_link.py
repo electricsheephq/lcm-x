@@ -1,4 +1,4 @@
-"""REPRO (expected RED): a turn that lands while a manual compress is in flight is stored twice, unlinked.
+"""A turn re-stamped while a manual compress is in flight is stored twice and linked.
 
 Host-view sequence (content-free evidence, ACP rotation 185a62de and TUI in-place c85ae0):
 1. the host writes the user row T at the compress request (stamp t_req) and LCM ingests it;
@@ -7,7 +7,7 @@ Host-view sequence (content-free evidence, ACP rotation 185a62de and TUI in-plac
    T again with the commit-time stamp (Hermes' ``_insert_message_rows`` stamps ``now_ts`` when no
    active donor row matches), optionally with the same ``message_uid``;
 4. the next turn is ingested.
-LCM then holds T twice (t_req and t_commit) with no ``possible_replay_of`` link. The control keeps
+LCM holds T twice (t_req and t_commit) with a ``possible_replay_of`` link. The control keeps
 T's stamp and stores T once. No fault is injected.
 """
 
@@ -21,6 +21,8 @@ import pytest
 import hermes_lcm.engine as engine_module
 from tests.harness import make_engine
 from tests.test_compression_boundary import _stub_summarizer
+
+pytestmark = pytest.mark.issue(2378)
 
 T = "please list the three deploy steps again for the staging box"
 REPLY = "steps: build, push, restart"
@@ -87,7 +89,8 @@ def build(tmp_path, monkeypatch):
         engine.shutdown()
 
 
-def run(build, caplog, *, mode: str, uids: bool, restamp: bool) -> tuple[Any, list[Row]]:
+def run(build, caplog, *, mode: str, uids: bool, restamp: bool,
+        prior_copies: int = 1, before_ingest=None) -> tuple[Any, list[Row]]:
     engine = build(rotating=mode == "rotating")
     hist = history(uids)
     engine.ingest(deepcopy(hist))
@@ -96,7 +99,9 @@ def run(build, caplog, *, mode: str, uids: bool, restamp: bool) -> tuple[Any, li
     if uids:
         user_t["message_uid"], reply_t["message_uid"] = "a" * 32, "b" * 32
     # 1. the host writes T at the compress request; LCM ingests it
-    before = hist + [user_t]
+    before = hist + ([{**user_t, "timestamp": T_REQ - 2, "message_uid": "c" * 32},
+                      {"role": "assistant", "content": "earlier steps", "timestamp": T_REQ - 1}]
+                     if prior_copies == 2 else []) + [user_t]
     engine.ingest(deepcopy(before))
     # 2. manual compress over that list; the reply lands while it runs
     output = engine.compress(deepcopy(before), force=True)
@@ -109,14 +114,17 @@ def run(build, caplog, *, mode: str, uids: bool, restamp: bool) -> tuple[Any, li
                             old_session_id=sid, conversation_id=engine._conversation_id, platform="cli")
     view = deepcopy(output)
     carried = [row for row in view if row.get("role") == "user" and row.get("content") == T]
-    assert len(carried) == 1, "compress output must carry the in-flight user row"
+    assert len(carried) == prior_copies, "compress output must carry the in-flight user rows"
     if restamp:
-        carried[0]["timestamp"] = T_COMMIT  # the host re-persists T at commit time
+        for idx, row in enumerate(carried):
+            row["timestamp"] = T_COMMIT + idx  # the host re-persists T at commit time
     view.append(dict(reply_t))
     # 4. the next turn
     view += [{"role": "assistant", "content": "steps again: build, push, restart", "timestamp": 2161.0},
              {"role": "user", "content": "thanks, next question", "timestamp": 2170.0}]
     caplog.clear()
+    if before_ingest is not None:
+        before_ingest(engine, view)
     with caplog.at_level(logging.INFO):
         engine.ingest(deepcopy(view))
     for record in caplog.records:
@@ -133,13 +141,124 @@ def test_inflight_turn_restamped_at_commit_is_not_a_silent_duplicate(build, capl
     engine, rows = run(build, caplog, mode=mode, uids=uids, restamp=True)
     copies = [row for row in rows if row["role"] == "user" and row["content"] == T]
     links = replay_links(engine)
-    unlinked = [row for row in copies[1:] if (row["store_id"], copies[0]["store_id"]) not in links]
-    assert not unlinked, (
-        f"T stored {len(copies)}x with no possible_replay_of link: "
-        f"{[(r['store_id'], r['session_id'], r['observed_at']) for r in copies]}")
+    assert len(copies) == 2
+    assert [row["observed_at"] for row in copies] == [T_REQ, T_COMMIT]
+    assert links == {(copies[1]["store_id"], copies[0]["store_id"])}
 
 
 @pytest.mark.parametrize("mode", ["inplace", "rotating"])
 def test_control_kept_stamp_stores_once(build, caplog, mode):
     _engine, rows = run(build, caplog, mode=mode, uids=False, restamp=False)
     assert sum(row["role"] == "user" and row["content"] == T for row in rows) == 1
+    assert replay_links(_engine) == set()
+
+
+@pytest.mark.parametrize("mode", ["inplace", "rotating"])
+def test_different_user_turn_is_never_linked(build, caplog, mode):
+    different = "please cancel staging and deploy a different service"
+
+    def replace(_engine, view):
+        next(row for row in view if row.get("content") == T)["content"] = different
+
+    engine, rows = run(build, caplog, mode=mode, uids=False, restamp=True, before_ingest=replace)
+    assert sum(row["content"] == T for row in rows) == 1
+    assert sum(row["content"] == different for row in rows) == 1
+    assert replay_links(engine) == set()
+
+
+@pytest.mark.parametrize("mode", ["inplace", "rotating"])
+@pytest.mark.parametrize("prior_copies", [1, 2])
+def test_restamp_links_are_one_to_one(build, caplog, mode, prior_copies):
+    def duplicate(_engine, view):
+        if prior_copies == 1:
+            idx = next(idx for idx, row in enumerate(view) if row.get("content") == T)
+            # Retain the published prefix so its commit proof remains usable.
+            view.append({**view[idx], "timestamp": T_COMMIT + 1})
+
+    engine, rows = run(build, caplog, mode=mode, uids=False, restamp=True,
+                       prior_copies=prior_copies, before_ingest=duplicate)
+    copies = [row for row in rows if row["content"] == T]
+    assert len(copies) == prior_copies + 2
+    links = replay_links(engine)
+    assert links == {(copies[prior_copies + idx]["store_id"], copies[idx]["store_id"])
+                     for idx in range(prior_copies)}
+    assert len({target for _source, target in links}) == len(links)
+
+
+@pytest.mark.parametrize("mode", ["inplace", "rotating"])
+def test_relation_write_failure_still_stores(build, caplog, monkeypatch, mode):
+    attempted = []
+
+    def inject(engine, _view):
+        write = engine._store.add_message_relations
+
+        def fail(groups):
+            result = write(groups)
+            if any(relation[1] == "possible_replay_of" for group in groups for relation in group):
+                assert engine._store._conn.in_transaction
+                assert engine._store._transaction_owner.owns_connection(engine._store._conn)
+                attempted.append(True)
+                raise RuntimeError("injected relation write failure after SQL")
+            return result
+
+        monkeypatch.setattr(engine._store, "add_message_relations", fail)
+
+    engine, rows = run(build, caplog, mode=mode, uids=False, restamp=True, before_ingest=inject)
+    assert attempted == [True]
+    assert engine._ingest_failure_count == 0
+    assert sum(row["content"] == T for row in rows) == 2
+    assert replay_links(engine) == set()
+    assert "re-stamped occurrence link write failed" in caplog.text
+
+
+def test_rotation_without_snapshot_reuses_durable_recovery(build, caplog, monkeypatch):
+    called = []
+
+    def remove_snapshot(engine, _view):
+        key = engine._replay_snapshot_metadata_key("host_occurrence_snapshot", "S")
+        engine._store._conn.execute("DELETE FROM metadata WHERE key=?", (key,))
+        engine._store._conn.commit()
+        link = engine._identity_anchor_link_durable_recovery
+
+        def spy(attempt, lineage):
+            called.append(True)
+            return link(attempt, lineage)
+
+        monkeypatch.setattr(engine, "_identity_anchor_link_durable_recovery", spy)
+
+    engine, rows = run(build, caplog, mode="rotating", uids=False, restamp=True,
+                       before_ingest=remove_snapshot)
+    assert called
+    assert sum(row["content"] == T for row in rows) == 2
+    assert engine._ingest_failure_count == 0
+
+
+def test_cold_inplace_restamp_is_stored_and_linked(build, caplog):
+    def rebind(engine, _view):
+        engine.on_session_start("S", conversation_id=engine._conversation_id, platform="cli")
+
+    engine, rows = run(build, caplog, mode="inplace", uids=False, restamp=True, before_ingest=rebind)
+    copies = [row for row in rows if row["content"] == T]
+    assert len(copies) == 2
+    assert replay_links(engine) == {(copies[1]["store_id"], copies[0]["store_id"])}
+
+
+@pytest.mark.parametrize("mode", ["inplace", "rotating"])
+@pytest.mark.parametrize("target_count", [0, 2])
+def test_missing_or_ambiguous_prior_target_stores_without_link(build, caplog, monkeypatch, mode, target_count):
+    def change_targets(engine, _view):
+        lookup = engine._store.find_rows_by_observed_at
+        if target_count == 2:
+            engine._store.append("S", {"role": "user", "content": T, "timestamp": T_REQ},
+                                 conversation_id=engine._conversation_id)
+
+        def find(conversation, sessions, stamps):
+            rows = lookup(conversation, sessions, stamps)
+            return [row for row in rows if target_count != 0 or row["observed_at"] != T_REQ]
+
+        monkeypatch.setattr(engine._store, "find_rows_by_observed_at", find)
+
+    engine, rows = run(build, caplog, mode=mode, uids=False, restamp=True, before_ingest=change_targets)
+    assert sum(row["content"] == T for row in rows) == (3 if target_count == 2 else 2)
+    assert replay_links(engine) == set()
+    assert engine._ingest_failure_count == 0
