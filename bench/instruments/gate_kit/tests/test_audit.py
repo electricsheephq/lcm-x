@@ -16,6 +16,7 @@ import benchmarking.longmemeval as lme  # noqa: E402
 
 lme._ensure_hermes_lcm_package()
 from hermes_lcm.dag import SummaryDAG, SummaryNode  # noqa: E402
+from hermes_lcm.engine import _PRESERVED_TODO_CONTEXT_PREFIX  # noqa: E402
 from hermes_lcm.store import MessageStore  # noqa: E402
 
 from bench.instruments.gate_kit import audit  # noqa: E402
@@ -1148,7 +1149,7 @@ def test_in_place_chained_compactions_with_inner_carriers(tmp_path, lose):
     assert totals["surplus_rows"] == 0
 
 
-TODO = audit.multiset.todo_header() + f"\n- [ ] {S} step"
+TODO = _PRESERVED_TODO_CONTEXT_PREFIX + f"\n- [ ] {S} step"  # the todo injection header
 LINK = "2026-11-06 10:00:01,000 WARNING [S1] hermes_lcm.engine: LCM tool replay link failed {}\n"
 
 

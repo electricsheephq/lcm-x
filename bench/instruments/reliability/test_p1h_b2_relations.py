@@ -568,9 +568,14 @@ def test_link_pending_credits_a_surplus_copy_and_counts_every_marked_row(relatio
     assert split["link_pending_rows_total"] == 1 + sum(o is None for _s, _k, o in relations)
 
 
-BLOCK = multiset.todo_header() + "\n- [ ] step"
+BLOCK = "<todo block>"  # replaced by the todo injection header plus an item when a test runs
 PARTS = {1: ("S", "user", "prompt one"), 2: ("S", "user", "prompt two"), 4: ("T", "user", "prompt two"),
          5: ("S", "user", BLOCK), 6: ("S", "user", "plain first")}
+
+
+def todo_rows(rows):
+    block = multiset.todo_header() + "\n- [ ] step"
+    return {sid: (session, role, text.replace(BLOCK, block)) for sid, (session, role, text) in rows.items()}
 
 
 @pytest.mark.parametrize("content,segments,want", [
@@ -590,15 +595,15 @@ PARTS = {1: ("S", "user", "prompt one"), 2: ("S", "user", "prompt two"), 4: ("T"
 ], ids=["P1", "P2", "N1-byte", "N2-no-header", "N3-order", "N3-gap", "N4-two-null", "N5-other-session",
         "N6-none", "N7-single-newline", "P3-stored-todo", "N8-non-todo-first", "N9-other-session"])
 def test_composite_of_witness_credits_only_the_exact_shapes(content, segments, want):
-    rows = {**PARTS, 9: ("S", "user", content)}
-    split = multiset.split_surplus([(("user", multiset.h(content)), 1, [9])],
+    rows = todo_rows({**PARTS, 9: ("S", "user", content)})
+    split = multiset.split_surplus([(("user", multiset.h(rows[9][2])), 1, [9])],
                                    [(9, "composite_of", r, o) for o, r in segments], rows)
     assert (split["visible_surplus_rows"], split["silent_surplus_rows"], split["composite_rows"]) == (
         want, 1 - want, want)
 
 
 def test_composite_of_witness_leaves_a_silent_part_silent():
-    rows = {**PARTS, 7: ("S", "user", "prompt one"), 9: ("S", "user", BLOCK + "\n\nprompt one")}
+    rows = todo_rows({**PARTS, 7: ("S", "user", "prompt one"), 9: ("S", "user", BLOCK + "\n\nprompt one")})
     groups = [(("user", multiset.h(rows[9][2])), 1, [9]), (("user", multiset.h("prompt one")), 1, [1, 7])]
     split = multiset.split_surplus(groups, [(9, "composite_of", None, 0), (9, "composite_of", 7, 1)], rows)
     assert (split["visible_surplus_rows"], split["silent_surplus_rows"], split["composite_rows"]) == (1, 1, 1)
