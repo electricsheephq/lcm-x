@@ -7119,14 +7119,14 @@ class LCMEngine(
                         for tier in dict.fromkeys(tiers):
                             matches = matches or same_occurrence(tier, row["timestamp"], identity, sid)
                         if not matches and predecessors is None:
-                            predecessors = [s for s in self._rotation_predecessor_session_ids(
-                                str(self._session_id), max_hops=1) if s not in sessions]
-                            if predecessors:
-                                more = self._store.find_rows_by_observed_at(self._conversation_id, predecessors, stamps)
+                            predecessors = self._rotation_predecessor_session_ids(str(self._session_id), max_hops=1)
+                            unloaded = [s for s in predecessors if s not in sessions]  # rows already fetched stay
+                            if unloaded:
+                                more = self._store.find_rows_by_observed_at(self._conversation_id, unloaded, stamps)
                                 used |= {relation["related_store_id"] for relation in self._store.get_message_relations(
                                     [target["store_id"] for target in more], "possible_replay_of", related=True)}
                                 targets = [*targets, *more]
-                        for tier in predecessors if not matches else ():
+                        for tier in [s for s in predecessors if s not in tiers] if not matches else ():
                             matches = matches or same_occurrence(tier, row["timestamp"], identity, sid)
                         if len(matches) > 1:
                             # The host's volatile scaffolding (todo fold, model-switch note) is the
