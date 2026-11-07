@@ -115,3 +115,38 @@ def test_b9_only_early_unsupported_is_unchanged(tmp_path):
     out = bars.score({"bars": ["B9"], "min_compactions": 2}, tmp_path / "cell")
     assert out == before
     assert out["verdict"] == "UNSUPPORTED" and "diagnostic" not in out["numbers"]
+
+
+@pytest.mark.parametrize("ordered", [True, False], ids=["would-pass", "fails"])
+def test_unreadable_messages_table_with_readable_sessions_is_never_pass(tmp_path, ordered):
+    """#2382: the sessions read succeeds, so lineage sets no error; the messages read fails. Any failed host read
+    must set host_evidence_error: a passing B1 is capped at INCONCLUSIVE, and a failure stays a failure."""
+    rows, events, host = continue_fixture()
+    order = list(range(6)) if ordered else [0, 1, 3, 2, 4, 5]
+    fixture.make(tmp_path, rows=[rows[i] for i in order], events=events, host_occurrences=host,
+                 observed=[float(i + 1) * 10 for i in order], bars=["B1"])
+    with sqlite3.connect(tmp_path / "cell/db/state.db") as con:
+        con.execute("drop table messages")
+    out = bars.score({"bars": ["B1"]}, tmp_path / "cell")
+    assert out["numbers"]["diagnostic"]["host_evidence_error"]
+    assert out["numbers"]["B1"]["continue_fallbacks"] == [{"lineage": "chat", "reason": "state.db unreadable"}]
+    if ordered:
+        assert out["verdict"] == "INCONCLUSIVE" and set(out["inconclusive_bars"]) == {"B1"}
+    else:
+        assert out["verdict"] == "FAIL" and "B1" in out["failed_bars"]
+
+
+@pytest.mark.parametrize("link", ["missing", "S0"], ids=["missing-parent-link", "linked"])
+def test_unreadable_messages_keeps_b10_session_checks(tmp_path, monkeypatch, link):
+    """Review of #2382: readable sessions with a failed messages read (here the host parity read) must keep B10's
+    session-backed failures (a missing parent link stays FAIL); an otherwise-passing B10 is capped at INCONCLUSIVE."""
+    child_fixture.make(tmp_path, link=None if link == "missing" else link)
+    monkeypatch.setattr(bars.host_parity, "load",
+                        lambda *_a, **_k: (None, "host state.db unreadable: OperationalError('no such table')"))
+    out = bars.score({"bars": ["B10"], "delegate_plan": [{"turns": [2]}]}, tmp_path / "cell")
+    assert out["numbers"]["diagnostic"]["host_evidence_error"]
+    if link == "missing":
+        assert out["verdict"] == "FAIL"
+        assert out["failed_bars"]["B10"]["children_without_parent_link"] == ["C1"]
+    else:
+        assert out["verdict"] == "INCONCLUSIVE" and set(out["inconclusive_bars"]) == {"B10"}
