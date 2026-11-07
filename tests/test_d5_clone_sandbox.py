@@ -1,5 +1,6 @@
 """Real sandbox controls; never substitute a mock for the egress proof."""
 
+from pathlib import Path
 import socket
 import subprocess
 import sys
@@ -71,7 +72,8 @@ def test_unavailable_off_macos():
         sandbox.positive_control("http://127.0.0.1:1/")
 
 
-@pytest.mark.parametrize("root", ["/", "/private", "/private/var/run", "/private/tmp/some-gateway", "/var/run"])
+@pytest.mark.parametrize("root", ["/", "/private", "/private/var/run", "/private/tmp/some-gateway", "/var/run",
+                                  "~", "~/.hermes", "~/.hermes/profiles", "/private/var/folders"])
 def test_socket_roots_that_reach_system_sockets_are_refused(root):
     with pytest.raises(ValueError):
-        sandbox.profile([], [root])
+        sandbox.profile([], [Path(root).expanduser()])

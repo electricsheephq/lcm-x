@@ -14,12 +14,31 @@ def _sha(data):
     return hashlib.sha256(data).hexdigest()
 
 
+MANIFEST = "d5-clone-pins.json"
+
+
 def _load_path(directory, name):
-    """A loaded module: a basename, or a package's ``<pkg>/__init__.py``, under the instrument directory."""
+    """A pinned file by its relative POSIX name under the instrument directory (no '..', no absolute names)."""
     parts = Path(name).parts if isinstance(name, str) else ()
-    if parts and len(parts) == 2 and parts[1] == "__init__.py" and parts[0] not in ("..", "."):
-        return Path(directory) / parts[0] / parts[1]
-    return _path(directory, name)
+    if not parts or Path(name).is_absolute() or any(part in ("..", ".") for part in parts):
+        raise ValueError("expected a relative file name")
+    return Path(directory).joinpath(*parts)
+
+
+def directory_files(instrument_dir):
+    """Every file under the instrument directory except the manifest and bytecode caches. The manifest must pin
+    all of them, so a sibling file cannot change unnoticed however it is loaded (import, importlib, runpy)."""
+    root = Path(instrument_dir)
+    found = set()
+    for path in root.rglob("*"):
+        relative = path.relative_to(root)
+        if "__pycache__" in relative.parts or relative.as_posix() == MANIFEST:
+            continue
+        if path.is_symlink():
+            found.add("symlink:" + relative.as_posix())  # Never pinnable: a link can point anywhere.
+        elif path.is_file():
+            found.add(relative.as_posix())
+    return found
 
 
 def _path(directory, name):
@@ -223,7 +242,11 @@ def build(instrument_dir, files, roots_by_file, loads_by_file, interpreter, data
         manifest["extra_hashes"].extend(
             {"file": name, "kind": "assign", "name": a, "sha256": assign_source_sha256(path, a)}
             for a in sorted(assignments))
-    (Path(instrument_dir) / "d5-clone-pins.json").write_text(
+    unpinned = directory_files(instrument_dir) - set(files) - {
+        load for name in files for load in loads_by_file.get(name, [])}
+    if unpinned:
+        raise ValueError("every file under the instrument directory must be pinned")
+    (Path(instrument_dir) / MANIFEST).write_text(
         json.dumps(manifest, sort_keys=True, indent=2) + "\n", encoding="utf-8")
     return manifest
 
@@ -276,7 +299,11 @@ def verify(manifest_path, instrument_dir, python_version=None, interpreter=None)
                     continue
             except (OSError, ValueError, SyntaxError):
                 pass
-            mismatches.append(Path(name).name)
+            safe = isinstance(name, str) and not Path(name).is_absolute() and ".." not in Path(name).parts
+            mismatches.append(name if safe else "manifest")  # Only a relative name under the instrument dir.
+        pinned = {f["name"] for f in manifest["files"]} | {m["name"] for f in manifest["files"] for m in f["loads"]}
+        if directory_files(instrument_dir) - pinned:
+            mismatches.append("unpinned_files")  # A file added beside the instruments, by name only in the count.
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         mismatches.append("manifest")
     return {"verdict": "FAIL" if mismatches else "PASS", "mismatches": sorted(set(mismatches))}

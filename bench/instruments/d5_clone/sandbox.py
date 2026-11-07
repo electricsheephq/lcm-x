@@ -26,9 +26,12 @@ def profile(ports, socket_roots=()):
         resolved = str(Path(root).resolve())
         if '"' in resolved or "\\" in resolved:
             raise ValueError("unsupported socket directory name")
-        inside = (resolved == system or resolved.startswith(system + "/") or system.startswith(resolved.rstrip("/") + "/")
-                  for system in _SYSTEM_SOCKETS)
-        if any(inside):
+        home = str(Path.home().resolve())
+        subtrees = _SYSTEM_SOCKETS + (home + "/.hermes",)  # Never inside these: other services' sockets live there.
+        ancestors = subtrees + (home, "/private/var/folders")  # Never these or above them.
+        inside = any(resolved == d or resolved.startswith(d + "/") for d in subtrees)
+        above = any(resolved == d or d.startswith(resolved.rstrip("/") + "/") for d in ancestors)
+        if inside or above:
             raise ValueError("socket root would re-admit system sockets")
         lines.append(f'(allow network-outbound (remote unix-socket (subpath "{resolved}")))')
     return "\n".join(lines) + "\n"

@@ -141,13 +141,13 @@ def test_bad_manifest_fails_closed(instrument, damage):
         save(path, manifest)
     result = pins.verify(path, directory)
     assert result["verdict"] == "FAIL"
-    assert all("/" not in name for name in result["mismatches"])
+    assert all(".." not in name and not name.startswith("/") for name in result["mismatches"])
 
 
 def test_empty_manifest_fails(instrument):
     directory, _, path, manifest = instrument
     save(path, {**manifest, "files": [], "functions": [], "extra_hashes": []})
-    assert pins.verify(path, directory) == {"verdict": "FAIL", "mismatches": ["empty"]}
+    assert pins.verify(path, directory) == {"verdict": "FAIL", "mismatches": ["empty", "unpinned_files"]}
 
 
 def _pin(tmp_path, source, roots=("rule",), loads=(), files=None):
@@ -256,3 +256,33 @@ def test_data_names_cannot_exempt_code(tmp_path):
     module.write_text("def h():\n    return 1\n\ndef rule():\n    return h()\n", encoding="utf-8")
     with pytest.raises(ValueError, match="plain values"):
         pins.call_closure(module, ["rule"], data=["h"])
+
+
+@pytest.mark.parametrize("loader", [
+    "import sibpkg\n\ndef rule():\n    return sibpkg.h()\n",
+    "import runpy\n\ndef rule():\n    return runpy.run_path('sibpkg/mod.py')\n",
+    "from importlib import import_module as im\nMOD = im('sibpkg.mod')\n\ndef rule():\n    return MOD.h()\n",
+], ids=["package-relative-submodule", "runpy", "aliased-import-module"])
+def test_every_file_under_the_instrument_dir_is_pinned(tmp_path, loader):
+    (tmp_path / "sibpkg").mkdir()
+    (tmp_path / "sibpkg" / "__init__.py").write_text("from .mod import h\n", encoding="utf-8")
+    (tmp_path / "sibpkg" / "mod.py").write_text("def h():\n    return 1\n", encoding="utf-8")
+    (tmp_path / "rules.py").write_text(loader, encoding="utf-8")
+    interpreter = {"path_basename": Path(sys.executable).name, "version": platform.python_version()}
+    with pytest.raises(ValueError, match="every file"):  # sibpkg/mod.py is not listed.
+        pins.build(tmp_path, ["rules.py"], {"rules.py": []}, {"rules.py": ["sibpkg/__init__.py"]}, interpreter)
+    pins.build(tmp_path, ["rules.py"], {"rules.py": []},
+               {"rules.py": ["sibpkg/__init__.py", "sibpkg/mod.py"]}, interpreter)
+    path = tmp_path / "d5-clone-pins.json"
+    assert pins.verify(path, tmp_path)["verdict"] == "PASS"
+    (tmp_path / "sibpkg" / "mod.py").write_text("def h():\n    return 2\n", encoding="utf-8")
+    assert pins.verify(path, tmp_path)["mismatches"] == ["sibpkg/mod.py"]
+
+
+def test_added_file_or_symlink_fails_verify(tmp_path):
+    module, path = _pin(tmp_path, "def rule():\n    return 1\n")
+    (tmp_path / "late.py").write_text("X = 1\n", encoding="utf-8")
+    assert pins.verify(path, tmp_path)["mismatches"] == ["unpinned_files"]
+    (tmp_path / "late.py").unlink()
+    (tmp_path / "link.py").symlink_to(module)
+    assert pins.verify(path, tmp_path)["mismatches"] == ["unpinned_files"]
