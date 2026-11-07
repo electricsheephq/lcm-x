@@ -213,6 +213,7 @@ def test_middle_block_characterization(tmp_path):
         engine.ingest([_u(P1, 500.0), _a("reply", 501.0), _u(P2, 502.0)])
         merged = P2 + "\n\n" + TODO + "\n\nthe next prompt"
         engine.ingest([_u(P1, 500.0), _a("reply", 501.0), _u(merged, 502.0)])
+        # V is stored only in this row, so it must stay (release-manager ruling: not a loss, no writer change).
         assert [(r["store_id"], r["content"]) for r in _rows(engine)] == [
             (1, P1), (2, "reply"), (3, P2), (4, merged)]
         assert _relations(engine) == [(4, "carried_stamp", 3, None)]
