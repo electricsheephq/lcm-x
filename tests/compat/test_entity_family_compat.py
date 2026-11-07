@@ -61,7 +61,7 @@ def family_snapshot(path):
 
 @pytest.mark.parametrize('reader', tuple(ENTITY_READERS))
 def test_entity_forward(reader, tmp_path, old_tree, host_root, monkeypatch):
-    assert PREVIOUS_GA == 'v0.28.1'
+    assert PREVIOUS_GA == 'v0.29.0'
     assert run_old(old_tree(reader), tmp_path, host_root, OLD_WRITE, mode='write')['compressed']
     path = tmp_path / 'lcm.db'
     before = core_snapshot(path)
