@@ -887,3 +887,22 @@ def test_text_presence_only_normalizes_matching_role_text_rows(tmp_path, monkeyp
         assert seen == [("assistant", False)]
     finally:
         engine.shutdown()
+
+
+
+def test_paged_presence_preserves_cleanup_copy_consumption_order(tmp_path, monkeypatch):
+    engine = _engine(tmp_path)
+    try:
+        old = {"role": "assistant", "content": "old reasoning then reply"}
+        reply = {"role": "assistant", "content": "reply"}
+        engine._store.append_batch(SESSION, [old, *[{"role": "user", "content": f"padding {i}"}
+                                                   for i in range(598)], reply])
+
+        def cleanup(identity):
+            return (identity[0], "reply", *identity[2:]) if identity[1] == old["content"] else None
+
+        monkeypatch.setattr(engine, "_active_cleanup_replay_identity", cleanup)
+        # Consume the newest direct copy first, leaving the oldest copy for its original form.
+        assert _presence(engine, [reply, old]) == []
+    finally:
+        engine.shutdown()

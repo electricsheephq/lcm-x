@@ -57,7 +57,7 @@ _INSERT_DIFF_BUDGET = 1_000_000  # #633: old x new rows compared per insertion d
 _CARRIER_LEDGER_CAP = 256  # #1000: carrier emission keys remembered as seen / retired (process-local)
 _PRESENCE_WINDOW_ROWS = 10000  # total stored rows across the presence scope
 _PRESENCE_WINDOW_BYTES = 4_000_000  # stored content and tool-call text across the scope
-_PRESENCE_WINDOW_LOGGED: set[tuple[str, str]] = set()  # (store path, session), once per process
+_PRESENCE_WINDOW_LOGGED: set[tuple[str, int, str]] = set()  # store file and session, once per process
 
 
 def _ws_equivalent(stored, identity) -> bool:
@@ -649,7 +649,7 @@ class IdentityAnchorMixin:
             rows = {int(row["store_id"]): row for group in held.values() for row in group}
             budget, byte_budget = _PRESENCE_WINDOW_ROWS, _PRESENCE_WINDOW_BYTES
             for source in scope:
-                end = None
+                end, pages = None, []
                 while True:
                     limit = min(256, budget + 1)
                     tail = (self._store.get_session_tail(source, limit=limit) if end is None else
@@ -658,16 +658,18 @@ class IdentityAnchorMixin:
                     byte_budget -= sum(len(row.get("content") or "") + len(row.get("tool_calls") or "")
                                        for row in tail)
                     if budget < 0 or byte_budget < 0:
-                        notice = (str(self._db_path), session)
+                        notice = (str(self._db_path), self._db_path.stat().st_ino, session)
                         if notice not in _PRESENCE_WINDOW_LOGGED:
                             logger.info("LCM identity-anchor presence window incomplete: session=%s scope=%d "
                                         "budget=%d bytes=%d", session, len(scope), budget + len(tail), byte_budget)
                             _PRESENCE_WINDOW_LOGGED.add(notice)
                         return []
-                    rows.update((int(row["store_id"]), row) for row in tail)
+                    pages.append(tail)
                     if len(tail) < limit:
                         break
                     end = int(tail[0]["store_id"]) - 1
+                for page in reversed(pages):  # Preserve the previous chronological copy-consumption order.
+                    rows.update((int(row["store_id"]), row) for row in page)
             text_roles = {wanted[0] for wanted in candidates.values() if wanted and wanted[0] not in {"call", "tool"}}
             index: dict = defaultdict(list)
             for row in rows.values():
