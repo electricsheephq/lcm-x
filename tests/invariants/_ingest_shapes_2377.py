@@ -10,6 +10,8 @@ from copy import deepcopy
 from dataclasses import dataclass
 import json
 
+import pytest
+
 from hermes_lcm.ingest_ledger import stripped_replay_content
 from tests.invariants.test_issue_2163_compacted_cursor import _poll
 
@@ -108,9 +110,11 @@ def ingest_shape(build, monkeypatch, source, host, cursor=1, bindings=None,
     if configure:
         configure(engine)
     engine.ingest(deepcopy(source))
-    assert engine._ingest_failure_count == 0, engine._last_ingest_error
+    if engine._ingest_failure_count != 0:
+        pytest.fail(f"ingest failed: {engine._last_ingest_error}")
     before = engine._store.get_session_messages(engine._session_id)
-    assert len(before) == len(source), "initial history must contain every true occurrence"
+    if len(before) != len(source):
+        pytest.fail("initial history must contain every true occurrence")
     if prepare:
         prepare(engine, before)
     engine.shutdown()
@@ -136,16 +140,21 @@ def ingest_shape(build, monkeypatch, source, host, cursor=1, bindings=None,
     monkeypatch.setattr(engine, "_replayed_tool_segment_indexes_after_cursor", tracked)
     monkeypatch.setattr(engine, "_store_ingest_rows", capture)
     engine.ingest(deepcopy(host))
-    assert engine._ingest_failure_count == 0, engine._last_ingest_error
+    if engine._ingest_failure_count != 0:
+        pytest.fail(f"ingest failed: {engine._last_ingest_error}")
     after = engine._store.get_session_messages(engine._session_id)
-    assert len(after) >= len(before), "durable history shrank"
+    if len(after) < len(before):
+        pytest.fail("durable history shrank")
     for old, current in zip(before, after):
         # Existing cold reconciliation may enrich an unknown host stamp. It must
         # preserve all payload/ownership fields and every already known stamp.
         enriched = {"observed_at", "observed_at_source"} if old["observed_at"] is None else set()
-        assert {k: v for k, v in old.items() if k not in enriched} == {
-            k: v for k, v in current.items() if k not in enriched}, "durable prefix changed"
+        if {k: v for k, v in old.items() if k not in enriched} != {
+                k: v for k, v in current.items() if k not in enriched}:
+            pytest.fail("durable prefix changed")
     added = after[len(before):]
-    assert scans, "the cold ingest never ran the tool-segment scan"
-    assert Counter(inserted.values()) == Counter(r["store_id"] for r in added), "capture missed inserted rows"
+    if not scans:
+        pytest.fail("the cold ingest never ran the tool-segment scan")
+    if Counter(inserted.values()) != Counter(r["store_id"] for r in added):
+        pytest.fail("capture missed inserted rows")
     return Run(engine, before, added, inserted, scans[0] if scans else set(), host)
