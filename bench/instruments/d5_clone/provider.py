@@ -34,6 +34,7 @@ def _envelope_nonce(messages):
 
 BYTES_PER_SUMMARY_TOKEN = 160  # A token is at least one UTF-8 byte, so source/summary <= 160 even for the densest text.
 BUDGET = re.compile(r"(?:about |Target ~|Maximum )(\d+) tokens")  # The token budget LCM-X's summary prompts state.
+CLIPPED = "...[truncated]..."  # summary_input_clip.CLIP_MARKER, without its newlines (JSON-escaped in the request).
 HIDDEN = re.compile(r"\[(?:GC'd )?[Ee]xternalized [^\]]*?\bchars=(\d+)")  # The size a tool-output placeholder hides.
 
 
@@ -52,8 +53,9 @@ def _padding(messages):
     budgets = [int(b) for text in system for b in BUDGET.findall(text)]
     hidden = sum(int(n) for text in shown for n in HIDDEN.findall(text))
     transcript = sum(len(text.encode("utf-8")) for text in shown)
-    target = max(-(-(len(_json(messages).encode("utf-8")) + hidden) // BYTES_PER_SUMMARY_TOKEN),
-                 min(min(budgets), transcript // 10) if budgets else 0)
+    clipped = any(CLIPPED in text for text in shown)  # The source was cut to fit, and the marker gives no size:
+    target = max(-(-(len(_json(messages).encode("utf-8")) + hidden) // BYTES_PER_SUMMARY_TOKEN),  # write the most
+                 (3 * min(budgets) if clipped else min(min(budgets), transcript // 10)) if budgets else 0)  # it allows.
     # One token per word under both counters (cl100k encodes " pad" as one token; the estimate counts 4 characters).
     return f"\nd5 pad {_sha(messages)[:8]}" + "".join("\n" + " ".join(["pad"] * 16) for _ in range(-(-target // 16)))
 

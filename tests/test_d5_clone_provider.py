@@ -325,3 +325,19 @@ def test_an_unclipped_small_source_is_never_summarized_longer_than_itself(provid
         messages, nonce = escalation._summary_contract_messages(escalation._build_l1_prompt(source, 2000, 0))
         body, failed, _ = escalation._check_summary_contract(_summary_reply(provider, messages), nonce, 2000)
         assert failed == "" and count_tokens(body) < count_tokens(source)
+
+
+def test_a_clipped_leaf_gets_the_longest_summary_its_prompt_allows(provider):
+    """Default serialization clips a huge source with a marker that gives no size; the reviewer's case is a
+    1,000,005-token leaf. The digest then takes three times the stated budget (the v2 prompt's own maximum)."""
+    import hermes_lcm.escalation as escalation
+    from hermes_lcm.summary_input_clip import CLIP_MARKER
+    from hermes_lcm.tokens import count_tokens
+
+    stored = "word " * 800_000
+    shown = stored[:2_000] + CLIP_MARKER + stored[-800:]
+    for version in (1, 2):
+        messages, nonce = escalation._summary_contract_messages(
+            escalation._build_l1_prompt(shown, 2000, 0, prompt_version=version))
+        body, failed, _ = escalation._check_summary_contract(_summary_reply(provider, messages), nonce, 2000)
+        assert failed == "" and count_tokens(stored) / count_tokens(body) < 400
