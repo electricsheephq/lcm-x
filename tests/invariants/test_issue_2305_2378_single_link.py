@@ -73,3 +73,11 @@ def test_restamp_pairing_and_cursor0_scan_link_a_row_once(build, monkeypatch):
             stripped_replay_content(target_content) == stripped_replay_content(source_content)), (source, target)
     per_source = Counter(source for source, *_ in links)
     assert all(count == 1 for count in per_source.values()), [(s, t) for s, t, *_ in links]
+    # The rotation pairing's link is the one kept: the re-stamped T in the child points at its
+    # predecessor-session original, not at the child's own earlier copy (#2378).
+    restamped = list(engine._store._conn.execute(
+        "SELECT r.store_id, b.session_id, b.observed_at FROM message_relations r "
+        "JOIN messages a ON a.store_id=r.store_id JOIN messages b ON b.store_id=r.related_store_id "
+        "WHERE r.kind='possible_replay_of' AND a.session_id='rotated' AND a.observed_at=?", (T_COMMIT,)))
+    assert len(restamped) == 1, restamped
+    assert restamped[0][1] == "S", restamped

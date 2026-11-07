@@ -965,6 +965,10 @@ If the native compressor is unavailable, LCM falls back to a deterministic
 head/tail trim as a last-resort safety net, still without writing the bypassed
 session to `lcm.db`.
 
+Known limitation (v0.30.0, [#2070](https://github.com/electricsheephq/lcm-x/issues/2070)): a delegated child of
+an ignored or stateless session that rotated by compression is still stored when the child runs on a cloned or
+prototype engine; only the shared engine refuses it. Rows are kept, never lost; the fix is planned for v0.30.x.
+
 Delegated subagents (sessions the host's delegate tool starts) are stored under
 their own session ids, with a link to the parent session in `session_lineage`,
 but LCM does not manage their context: no compaction, summaries or context

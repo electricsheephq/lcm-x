@@ -73,15 +73,16 @@ def build(tmp_path, monkeypatch):
     engines: list[Any] = []
     monkeypatch.setattr(engine_module, "summarize_with_escalation", _stub_summarizer())
 
-    def create(rotating: bool = False) -> Any:
+    def create(rotating: bool = False, session_id: str = "S", **overrides: Any) -> Any:
         if rotating:
             lineage(tmp_path)
-        engine = make_engine(tmp_path, window=200_000, session_id="S", conversation_id="conversation",
-                             fresh_tail_count=6, leaf_chunk_tokens=400,
-                             large_output_externalization_enabled=False,
-                             large_output_active_replay_stubbing_enabled=False,
-                             temporal_rollups_enabled=False, embeddings_enabled=False,
-                             deferred_maintenance_enabled=False)
+        config = dict(fresh_tail_count=6, leaf_chunk_tokens=400,
+                      large_output_externalization_enabled=False,
+                      large_output_active_replay_stubbing_enabled=False,
+                      temporal_rollups_enabled=False, embeddings_enabled=False,
+                      deferred_maintenance_enabled=False)
+        engine = make_engine(tmp_path, window=200_000, session_id=session_id, conversation_id="conversation",
+                             **{**config, **overrides})
         engines.append(engine)
         return engine
 

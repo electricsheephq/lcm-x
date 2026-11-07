@@ -16,6 +16,7 @@ import benchmarking.longmemeval as lme  # noqa: E402
 
 lme._ensure_hermes_lcm_package()
 from hermes_lcm.dag import SummaryDAG, SummaryNode  # noqa: E402
+from hermes_lcm.engine import _PRESERVED_TODO_CONTEXT_PREFIX  # noqa: E402
 from hermes_lcm.store import MessageStore  # noqa: E402
 
 from bench.instruments.gate_kit import audit  # noqa: E402
@@ -76,7 +77,8 @@ class Home:
                                  | ({"timestamp": m["_obs"]} if "_obs" in m else {}))
                     for n, (sid, m) in enumerate(host if stored is None else stored)]
         if relations:
-            store.add_message_relations([[(s, kind, o, None, None)] for s, kind, o in relations])
+            store.add_message_relations([[(r[0], r[1], r[2], r[3] if len(r) > 3 else None, None)]
+                                         for r in relations])  # (store_id, kind, related[, ordinal])
         for child, parent in lineage:
             store.record_session_lineage(child, parent, source="subagent_start")
         store.close()
@@ -1145,3 +1147,150 @@ def test_in_place_chained_compactions_with_inner_carriers(tmp_path, lose):
     assert totals["expected_rows"] == len(genuine)
     assert totals["missing_rows"] == int(lose)
     assert totals["surplus_rows"] == 0
+
+
+TODO = _PRESERVED_TODO_CONTEXT_PREFIX + f"\n- [ ] {S} step"  # the todo injection header
+# Dated after the store's ingested_at (the time the test runs), as a link line follows the row it names.
+LINK = "2099-01-01 10:00:01,000 WARNING [S1] hermes_lcm.engine: LCM tool replay link failed {}\n"
+OK = "source_store_id=3 target_store_id=1 reason=relation_write_failed"
+
+
+def dup_home(tmp_path, **kw):
+    """Turn 1, its prompt stored again as store id 3 (a surplus copy)."""
+    return Home(tmp_path, ONE, turn(1), stored=turn(1) + [turn(1)[0]], **kw)
+
+
+@pytest.mark.parametrize("relations,credited", [([(3, "link_pending", None)], 1), ([], 0),
+                                                ([(1, "link_pending", None)], 0), ([(3, "link_pending", 1)], 0)],
+                         ids=["on-surplus", "none", "on-expected-copy", "related-not-null"])
+def test_a_link_pending_surplus_row_is_a_visible_copy(tmp_path, relations, credited):
+    out = dup_home(tmp_path, relations=relations + [(2, "link_pending", None)]).run()
+    t = out["parity"]["totals"]
+    assert (t["visible_surplus_rows"], t["silent_surplus_rows"], t["link_pending_rows"]) == (credited, 1 - credited,
+                                                                                          credited)
+    assert out["parity"]["link_pending_rows_total"] == 1 + sum(o is None for _s, _k, o in relations)  # row 2 too
+
+
+@pytest.mark.parametrize("copies,want", [([T0], (0, 1)), ([T0, T0], (1, 1)), ([], (0, 0)), ([T0 + 1], (1, 0))],
+                         ids=["one-copy", "second-copy", "no-copy", "other-stamp"])
+def test_a_stored_copy_of_a_displayed_todo_row_is_expected_once(tmp_path, copies, want):
+    todo = {"role": "user", "content": TODO}
+    host = [("S1", dict(todo, _ts=T0))] + [("S1", dict(m, _ts=T0 + 2 + n)) for n, (_s, m) in enumerate(turn(1))]
+    stored = [("S1", stamped(todo, t)) for t in copies] + [("S1", stamped(m, m["_ts"])) for _s, m in host[1:]]
+    out = Home(tmp_path, ONE, host, stored=stored).run()
+    t = out["parity"]["totals"]
+    assert (t["silent_surplus_rows"], t["host_todo_rows_expected"], t["missing_rows"]) == (*want, 0)
+
+
+@pytest.mark.parametrize("rotated", [False, True], ids=["same-session", "compression-child"])
+def test_a_same_stamp_double_display_of_a_todo_expects_one_copy(tmp_path, rotated):
+    """The host stamps each row of a batch 1e-6 s apart, so a todo displayed twice at one stamp, in one session or in
+    a compression child, is one occurrence and a carried copy: it expects one stored copy, matched once."""
+    todo = {"role": "user", "content": TODO}
+    sessions, second = (ROTATED, "P2") if rotated else (ONE, "S1")
+    first = "P" if rotated else "S1"
+    host = [(first, dict(todo, _ts=T0)), (second, dict(todo, _ts=T0))] + [
+        (second, dict(m, _ts=T0 + 2 + n)) for n, (_s, m) in enumerate(turn(1, second))]
+    stored = [(first, stamped(todo, T0)), (second, stamped(todo, T0))] + [
+        (second, stamped(m, m["_ts"])) for _s, m in host[2:]]
+    out = Home(tmp_path, sessions, host, stored=stored).run()
+    t = out["parity"]["totals"]
+    assert (t["silent_surplus_rows"], t["host_todo_rows_expected"], t["missing_rows"]) == (1, 1, 0)
+
+
+@pytest.mark.parametrize("relations,credited", [([(3, "composite_of", None, 0), (3, "composite_of", 1, 1)], 1),
+                                                ([], 0)], ids=["witnessed", "no-witness"])
+def test_a_witnessed_composite_is_a_visible_copy(tmp_path, relations, credited):
+    composite = {"role": "user", "content": TODO + "\n\n" + u("question 1")["content"]}
+    out = Home(tmp_path, ONE, turn(1), stored=turn(1) + [("S1", composite)], relations=relations).run()
+    t = out["parity"]["totals"]
+    assert (t["visible_surplus_rows"], t["silent_surplus_rows"], t["composite_rows"]) == (credited, 1 - credited,
+                                                                                       credited)
+
+
+def test_scaffold_provenance_metadata_never_clears_a_surplus_row(tmp_path):
+    home = dup_home(tmp_path)
+    con = sqlite3.connect(home.lcm)
+    con.execute("insert into metadata (key, value) values (?, ?)",
+                ("real_user_scaffold_store_id:3", json.dumps({"version": 1, "kind": "user-authored-scaffold"})))
+    con.commit()
+    con.execute("pragma wal_checkpoint(truncate)")
+    con.close()
+    out = home.run()
+    assert out["parity"]["totals"]["silent_surplus_rows"] == 1
+    assert out["exempted_surplus"]["store_ids"]["unattributed"] == [3]
+
+
+@pytest.mark.parametrize("line,credited,unparsed", [
+    (LINK.format("source_store_id=3 target_store_id=1 reason=relation_write_failed"), 1, 0),
+    (LINK.format("source_store_id=3 target_store_id=1 reason=pending_write_failed"), 1, 0),
+    (LINK.format("source_store_id=1 target_store_id=3 reason=relation_write_failed"), 0, 0),
+    (LINK.format("source_store_id=3 target_store_id=1 reason=other_failure"), 0, 1),
+    (LINK.format("source_store_id=3x target_store_id=1 reason=relation_write_failed"), 0, 1),
+    (LINK.format("source_store_id=3 target_store_id=None reason=pending_write_failed"), 1, 0),
+    (LINK.format("source_store_id=3 target_store_id=None reason=relation_write_failed"), 0, 1),
+    ("", 0, 0)], ids=["relation", "pending", "target-only", "unknown-reason", "malformed", "pending-null-target",
+                      "relation-null-target", "no-line"])
+def test_a_logged_link_source_is_a_visible_copy(tmp_path, line, credited, unparsed):
+    out = dup_home(tmp_path).run(logs=[line])
+    t = out["parity"]["totals"]
+    assert (t["visible_surplus_rows"], t["logged_link_rows"], out["recorder"]["logged_link_unparsed"]) == (
+        credited, credited, unparsed)
+
+
+def test_link_pending_marks_and_logged_links_hold_the_verdict_for_a_hand_check(tmp_path):
+    for name in ("clean", "marked", "logged"):
+        (tmp_path / name).mkdir()
+    clean = dup_home(tmp_path / "clean").run()
+    assert not [c for c in clean["gate"]["hand_checks"] if c["reason"] in ("link_pending_marked", "logged_link_failed")]
+    marked = dup_home(tmp_path / "marked", relations=[(3, "link_pending", None)]).run()
+    assert {"reason": "link_pending_marked", "store_ids": [3]} in marked["gate"]["hand_checks"]
+    assert marked["gate"]["verdict"] != "GATE PASS"
+    logged = dup_home(tmp_path / "logged").run(logs=[LINK.format(OK)])
+    assert {"reason": "logged_link_failed", "store_ids": [3]} in logged["gate"]["hand_checks"]
+    assert logged["gate"]["verdict"] != "GATE PASS"
+
+
+def test_a_link_computation_failure_line_is_counted_once(tmp_path):
+    line = "2099-01-01 10:00:01,000 WARNING [S1] hermes_lcm.engine: LCM tool replay computation failed reason=KeyError\n"
+    out = dup_home(tmp_path).run(logs=[line, line])  # the same line in two files is one ingest
+    assert out["recorder"]["link_computation_failed"] == 1
+    assert out["recorder"]["logged_link_unparsed"] == 0 and out["parity"]["totals"]["logged_link_rows"] == 0
+
+
+def test_route_link_pending_fields_are_summed(tmp_path):
+    home = dup_home(tmp_path)
+    lines = route("S1", "foreground", 0, 1, 2)[:-1] + " link_pending=2\n" + route("S1", "append", 2, 3, 3)[:-1] + \
+        " link_pending=1\n"
+    assert home.run(logs=[lines])["recorder"]["link_pending_logged"] == 3
+    assert home.run(logs=[route("S1", "foreground", 0, 1, 3)])["recorder"]["link_pending_logged"] is None
+
+
+def test_the_stamp_equal_todo_copy_is_the_kept_one(tmp_path):
+    todo = {"role": "user", "content": TODO}
+    host = [("S1", dict(todo, _ts=T0 + 2))] + [("S1", dict(m, _ts=T0 + 3 + n)) for n, (_s, m) in enumerate(turn(1))]
+    stored = [("S1", stamped(m, m["_ts"])) for _s, m in host[1:]] + [("S1", stamped(todo, T0 - 500)),
+                                                                       ("S1", stamped(todo, T0 + 2))]
+    out = Home(tmp_path, ONE, host, stored=stored, relations=[(4, "link_pending", None)]).run()
+    t = out["parity"]["totals"]
+    assert (t["visible_surplus_rows"], t["silent_surplus_rows"], t["host_todo_rows_expected"]) == (0, 1, 1)
+    assert out["exempted_surplus"]["store_ids"]["unattributed"] == [3]
+
+
+@pytest.mark.parametrize("line", [LINK.replace("[S1]", "[S2]").format(OK), LINK.replace("WARNING", "INFO").format(OK),
+                                  LINK.replace("2099-01-01", "2026-01-01").format(OK),
+                                  LINK.replace(" [S1]", "").format(OK)],
+                         ids=["other-session", "info", "before-stored", "no-session"])
+def test_a_logged_link_out_of_scope_credits_nothing(tmp_path, line):
+    out = dup_home(tmp_path).run(logs=[line])
+    t = out["parity"]["totals"]
+    assert (t["visible_surplus_rows"], t["silent_surplus_rows"], t["logged_link_rows"]) == (0, 1, 0)
+    assert out["recorder"]["logged_link_out_of_scope"] == 1
+
+
+@pytest.mark.parametrize("day,credited", [("2099-06-01", 0), ("2100-06-01", 1)], ids=["before-window", "in-window"])
+def test_a_logged_link_before_the_window_credits_nothing(tmp_path, day, credited):
+    sessions = {"S1": ("cli", None, 4102444900.0, "user_exit", 4102444800.0)}  # started 2100-01-01
+    out = Home(tmp_path, sessions, turn(1), stored=turn(1) + [turn(1)[0]]).run(
+        logs=[LINK.replace("2099-01-01", day).format(OK)], since=4102444800.0)
+    assert out["parity"]["totals"]["visible_surplus_rows"] == credited
