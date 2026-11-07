@@ -13,12 +13,13 @@ P1) provides ``identity(row)``, ``credits`` (the two host-rewrite credits, each 
 """
 
 import argparse
-from datetime import datetime
+from datetime import datetime, timedelta
 import hashlib
 import importlib.util
 import json
 from contextlib import closing
 from pathlib import Path
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -26,14 +27,120 @@ import sys
 import time
 
 from . import bars, capture, gateway, pins, plan as planner, provider as prov, sandbox, snapshot
+from ..release_gauntlet import kit_evidence
 
 SCHEMA = "d5-clone-receipt/1"
 NEED_FREE = 40 * 10**9
 PREFLIGHTS = ("P3", "P4", "P5", "P6", "P7")
+DOCTOR_STATUS = {"pass": "ok", "ok": "ok", "warn": "warn", "fail": "fail"}  # Any other status stays, and fails bar 5.
+# LCM-X's externalized-payload reference (externalize.py _EXTERNALIZED_REF_RE).
+EXTERNALIZED_REF = re.compile(r"\[(?:Externalized|GC'd externalized) (?:tool output|payload):.*?;\s*ref=([^;\]\s]+)\]")
+CRON_MODEL = "d5-cron"
 
 
 def _sha_json(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def _rows(db, sql, args=()):
+    """A read-only query's rows; a store, table or column that is not there reads as no rows."""
+    try:
+        with closing(capture._readonly(db)) as con:
+            return con.execute(sql, args).fetchall()
+    except (OSError, sqlite3.Error, capture.CaptureError):
+        return []
+
+
+def _json(value):
+    """A JSON object, else None."""
+    try:
+        value = json.loads(value)
+    except (TypeError, ValueError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _sha(text):
+    return hashlib.sha256(str(text).encode()).hexdigest()
+
+
+def marks(home):
+    """Where the arm's stores stand before its gateway first starts: what facts() counts from."""
+    lcm, host = Path(home) / "lcm.db", Path(home) / "state.db"
+
+    def top(db, sql):
+        return (_rows(db, sql) or [(0,)])[0][0] or 0
+
+    return {"store_id": top(lcm, "SELECT max(store_id) FROM messages"), "host_id": top(host, "SELECT max(id) FROM messages"),
+            "node_id": top(lcm, "SELECT max(node_id) FROM summary_nodes"),
+            "proofs": {k: _sha(v) for k, v in _rows(lcm, "SELECT key, value FROM metadata WHERE key GLOB 'compaction_commit_proof:*'")},
+            "rewrites": sorted(k for k, in _rows(lcm, "SELECT key FROM metadata WHERE key GLOB 'host_rewrite_identity:*'"))}
+
+
+def workload_facts(home, before, cron_id=None):
+    """Bar 6's host observations, counted from the stopped arm's own files against its marks (counts only)."""
+    lcm, host = Path(home) / "lcm.db", Path(home) / "state.db"
+    store_after, host_after = (before.get("store_id", 0),), (before.get("host_id", 0),)
+    # A published compaction: a session whose LCM-X commit proof row changed and is not native, with a new summary node.
+    nodes = {s for s, in _rows(lcm, "SELECT DISTINCT session_id FROM summary_nodes WHERE node_id > ?", (before.get("node_id", 0),))}
+    published = sum(key.partition(":")[2] in nodes and before.get("proofs", {}).get(key) != _sha(value)
+                    and (_json(value) or {}).get("native") is False
+                    for key, value in _rows(lcm, "SELECT key, value FROM metadata WHERE key GLOB 'compaction_commit_proof:*'"))
+    # A whitespace rewrite: a host_rewrite_identity row for a new user row, recording the edge whitespace stripped.
+    users = {str(i) for i, in _rows(lcm, "SELECT store_id FROM messages WHERE role = 'user' AND store_id > ?", store_after)}
+    rewrites = sum(key not in before.get("rewrites", ()) and key.partition(":")[2] in users
+                   and any((_json(value) or {}).get("stripped") or ())
+                   for key, value in _rows(lcm, "SELECT key, value FROM metadata WHERE key GLOB 'host_rewrite_identity:*'"))
+    # A payload swap: a new tool row LCM-X holds as an externalized reference, which its host row does not hold as is.
+    held = {(s, c): text for s, c, text in _rows(lcm, "SELECT session_id, tool_call_id, content FROM messages WHERE role ="
+                                              " 'tool' AND tool_call_id IS NOT NULL AND store_id > ?", store_after)}
+    swaps = sum((s, c) in held and bool(EXTERNALIZED_REF.search(held[s, c] or "")) and text != held[s, c]
+                for s, c, text in _rows(host, "SELECT session_id, tool_call_id, content FROM messages WHERE role = 'tool'"
+                                              " AND tool_call_id IS NOT NULL AND id > ?", host_after))
+    fired = 0
+    if cron_id:  # A run is the host's cron session for the job (cron/scheduler.py), or its saved output.
+        sessions = len(_rows(host, "SELECT id FROM sessions WHERE id GLOB ?", (f"cron_{cron_id}_*",)))
+        fired = max(sessions, sum(p.is_file() for p in (Path(home) / "cron" / "output" / cron_id).glob("*.md")))
+    return {"cron_fired": fired, "compactions_published": published, "whitespace_rewrites": rewrites,
+            "payload_swaps": swaps}
+
+
+def cron_job(cron, now):
+    """The plan's job as the host's create_job records it (cron/jobs.py). Its id comes from the plan, so both arms
+    create the same job; only the creation and next-run times differ."""
+    match = re.fullmatch(r"every (\d+)m", cron["schedule"])
+    if not match:
+        raise ValueError("only an 'every <n>m' cron schedule is supported")
+    minutes, empty = int(match[1]), dict.fromkeys((
+        "skill", "base_url", "script", "monitor_script", "monitor_url", "monitor_state", "context_from", "paused_at",
+        "paused_reason", "last_run_at", "last_status", "last_error", "last_delivery_error", "last_delivery_unverified",
+        "last_failure", "origin", "enabled_toolsets", "workdir"))
+    schedule = {"kind": "interval", "minutes": minutes, "display": f"every {minutes}m"}
+    return {**empty, "id": _sha(cron["prompt"])[:12], "name": cron["prompt"][:50].strip(), "prompt": cron["prompt"],
+            "skills": [], "model": CRON_MODEL, "provider": "d5", "no_agent": False, "schedule": schedule,
+            "schedule_display": schedule["display"], "repeat": {"times": cron["repeat"], "completed": 0},
+            "enabled": True, "state": "scheduled", "created_at": now.isoformat(),
+            "next_run_at": (now + timedelta(minutes=minutes)).isoformat(), "failure_streak": 0, "deliver": "local"}
+
+
+def probe_checks(out):
+    """Doctor and schema checks from the probe's files in *out*. A kind the probe did not produce is left out, so bar
+    5 reads it as not shown. Doctor rows go through the gauntlet's doctor-match parser."""
+    found = []
+    if out is None:
+        return found
+    try:
+        rows = kit_evidence.doctor_match(out / "doctor.json", out / "doctor.json")["candidate_signatures"]
+        found += [{"kind": "doctor", "check": r["check"], "status": DOCTOR_STATUS.get(r["status"], r["status"])}
+                  for r in rows]
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        pass
+    schema = _json((out / "schema.json").read_text(encoding="utf-8")) if (out / "schema.json").is_file() else None
+    if isinstance(schema, dict) and set(schema) == {"lcm.db", "state.db"}:
+        found += [{"kind": "schema", "check": name, "status": "ok" if isinstance(s, dict) and s.get("error") is False
+                   and s.get("missing_tables") == [] and type(s.get("version")) is int and s["version"] == s.get("expected")
+                   else "fail"} for name, s in sorted(schema.items())]
+    return found
 
 
 class LocalHost:
@@ -130,7 +237,7 @@ class LocalHost:
         env, _ = gateway.build_env(self.c["lcm_env"], home=home, provider_url=server.url, host_bin=tree["host_bin"],
                                    port_file=home.parent / "d5-local.port", lcm_tree=tree["lcm_tree"])
         port = server.server.server_address[1]
-        return {"name": name, "home": home, "provider": server, "port": port, "tree": tree,
+        return {"name": name, "home": home, "provider": server, "port": port, "tree": tree, "marks": marks(home),
                 "gateway": gateway.Gateway(tree["host_bin"], home, env, home.parent, provider_port=port),
                 "payloads": sum(p.is_file() for p in (home / "lcm-large-outputs").rglob("*")),
                 "chats": {c["name"]: c["chat_id"] for c in plan["conversations"]}}
@@ -191,22 +298,55 @@ class LocalHost:
     def roots(self, ctx):
         return [str(ctx["home"] / "plugins" / "hermes-lcm-x"), str(Path(ctx["tree"]["lcm_tree"]).resolve())]
 
+    def schedule(self, ctx, cron):
+        """Add the plan's cron job to the arm home's host job file, as create_job adds one; returns its id's sha256."""
+        path = ctx["home"] / "cron" / "jobs.json"
+        data = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {"jobs": []}
+        data = data if isinstance(data, dict) else {"jobs": data}
+        job = cron_job(cron, datetime.now().astimezone())
+        data.update(jobs=[*data.get("jobs", []), job], updated_at=job["created_at"])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        ctx["cron_id"] = job["id"]
+        return _sha(job["id"])
+
+    def probe(self, ctx):
+        """The doctor and schema probe, by the arm's host interpreter under the sandbox, on a clone of the stopped arm
+        home (the engine may write to the store it opens). Returns the probe's output dir, or None if it failed."""
+        clone, out = ctx["home"].parent / "doctor" / "home", ctx["home"].parent / "doctor" / "out"  # Per arm clone.
+        try:
+            out.mkdir(parents=True)
+            capture.clone_tree(ctx["home"], clone)
+        except (OSError, subprocess.CalledProcessError):
+            return None
+        env = {**ctx["gateway"].env, "HERMES_HOME": str(clone), "HOME": str(clone / "user-home"), "TMPDIR": str(clone / "tmp"),
+               **{k: str(clone / v) for k, v in gateway.FORCED_LCM_PATHS.items()}}
+        tree = ctx["tree"]
+        argv = sandbox.wrap([str(Path(tree["host_bin"]) / "python"), "-P", "-B",  # Never this dir's modules first.
+                             str(Path(__file__).with_name("doctor_probe.py")),
+                             str(Path(tree["lcm_tree"]).resolve()), str(clone), str(out)], ports=[])
+        try:
+            done = subprocess.run(["/usr/bin/nice", "-n", "19", *argv], cwd=clone, env=env, capture_output=True,
+                                  timeout=self.c.get("doctor_timeout", 1800))
+        except subprocess.TimeoutExpired:
+            return None
+        return out if done.returncode == 0 else None
+
     def checks(self, ctx):
-        """quick_check and integrity on both stores. Doctor and schema checks are not collected here yet, so bar 5
-        reads them as not shown (INCONCLUSIVE) until they are."""
+        """quick_check and integrity on both stores, then the doctor's checks and both stores' schema (probe_checks)."""
         out = []
         for name in ("lcm.db", "state.db"):
             with closing(capture._readonly(ctx["home"] / name)) as db:
                 for kind, pragma in (("quick_check", "quick_check"), ("integrity", "integrity_check")):
                     ok = db.execute(f"PRAGMA {pragma}").fetchall() == [("ok",)]
                     out.append({"kind": kind, "check": name, "status": "ok" if ok else "fail"})
-        return out
+        return out + probe_checks(self.probe(ctx))
 
     def facts(self, ctx):
-        """Workload observations this host can count. Cron firing, published compactions and the two host rewrites
-        are not observed here yet, so bar 6 reads them as missing (INCONCLUSIVE) until they are."""
+        """Workload observations counted from the arm's own files after it ends (workload_facts)."""
         now = sum(p.is_file() for p in (ctx["home"] / "lcm-large-outputs").rglob("*"))
-        return {"payload_files_created": now - ctx["payloads"]}
+        return {"payload_files_created": now - ctx["payloads"],
+                **workload_facts(ctx["home"], ctx.get("marks") or {}, ctx.get("cron_id"))}
 
     def stats(self, ctx):
         with ctx["provider"].lock:
@@ -222,11 +362,13 @@ def run_arm(host, name, home, plan, extras):
     ctx = host.arm(name, home, plan)
     sid = {c["name"]: c["session_id"] for c in plan["conversations"]}
     binds, restarts, egress, tool_turns, started = [], [], [], 0, time.monotonic()
-    planned, not_completed = 0, []
+    planned, not_completed, cron_job_sha256 = 0, [], None
     try:
         for epoch in plan["epochs"]:
             if epoch["restart_before"]:
                 host.stop(ctx)
+            if epoch["epoch"] == plan["cron"]["created_before_epoch"]:  # Created while the gateway is stopped.
+                cron_job_sha256 = host.schedule(ctx, plan["cron"])
             host.start(ctx)
             begun, cold = time.monotonic(), []
             for step in epoch["steps"]:
@@ -266,7 +408,7 @@ def run_arm(host, name, home, plan, extras):
                 "large_conversation_rows": max(c["lcm_rows"] for c in plan["conversations"]),
                 "replay_misses": sum(stats.get("replay_misses", {}).values()), "turns_planned": planned,
                 "turns_completed": planned - len(not_completed), "turns_not_completed": not_completed,
-                **host.facts(ctx)}
+                "cron_job_sha256": cron_job_sha256, **host.facts(ctx)}
     return {"binds": binds, "workload": workload, "egress": {"samples": len(egress), "non_local": sum(egress)},
             "provider": stats, "logs": host.logs(ctx), "roots": host.roots(ctx), "checks": host.checks(ctx),
             "rows": host.rows(home), "wall_s": round(time.monotonic() - started, 3)}
