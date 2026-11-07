@@ -283,6 +283,8 @@ def test_replay_runs_the_edition_under_the_sandbox(tmp_path, monkeypatch):
         return type("Done", (), {"returncode": 0})()
 
     monkeypatch.setattr(r.subprocess, "run", fake_run)
+    monkeypatch.setattr(r.sandbox, "profile", lambda ports, socket_roots=(): "".join(  # tmp_path may sit under /tmp.
+        f'(allow network-outbound (remote ip "localhost:{port}"))' for port in ports))
     config = {"interpreter": "python3", "instrument_dir": "kit", "rc": {"lcm_tree": "rc"}, "ga": {"lcm_tree": "ga"},
               "constants_argv": ["{python}", "gen", "{t0}", "{h8}", "{out}"], "replay_argv": ["{python}", "replay"]}
     host = r.LocalHost(config, tmp_path / "run")
@@ -310,3 +312,18 @@ def test_a_ga_rerun_that_completes_no_turn_is_not_clean(setup):
     bar5 = receipt["bars"]["bar5"]
     assert bar5["ga_failed"] == ["schema"] and bar5["ga_rerun_failed"] == [] and bar5["ga_rerun_turns_complete"] is False
     assert bar5["verdict"] == bars.INCONCLUSIVE and receipt["verdict"]["raw"] != bars.PASS
+
+
+def test_a_store_too_damaged_to_check_is_a_failed_check(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    for name in ("lcm.db", "state.db"):
+        with closing(sqlite3.connect(home / name)) as db:
+            db.execute("CREATE TABLE t (x)")
+            db.commit()
+    with open(home / "lcm.db", "r+b") as f:  # A damaged header: SQLite refuses to read the file.
+        f.write(b"not a sqlite database at all")
+    checks = r.LocalHost({}, tmp_path / "run").checks({"home": home})
+    assert {(c["kind"], c["check"]): c["status"] for c in checks} == {
+        ("quick_check", "lcm.db"): "fail", ("integrity", "lcm.db"): "fail",
+        ("quick_check", "state.db"): "ok", ("integrity", "state.db"): "ok"}
