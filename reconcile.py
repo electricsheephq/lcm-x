@@ -3344,7 +3344,7 @@ class ReconcileMixin:
         stored_identity_counts.subtract(prefix_counts)
         # #2377: ownership is one stored occurrence, never an identity-keyed pool.
         bindings = self._tool_segment_bindings(
-            messages, tail_rows, consumed, consumed_pairs, replay_candidates=replay_candidates)
+            messages, tail_rows, consumed, consumed_pairs, replay_candidates=replay_candidates, cursor=cursor)
         replayed: set[int] = set()
         metadata = None  # Loaded once, only when a borrowed pair binds.
         users = None  # Lazily index both views once per replay scan.
@@ -3458,12 +3458,16 @@ class ReconcileMixin:
             index = max(index + 1, probe)
         return replayed
 
-    def _tool_segment_bindings(self, messages, tail_rows, consumed, consumed_pairs, *, replay_candidates=None):
+    def _tool_segment_bindings(self, messages, tail_rows, consumed, consumed_pairs, *, replay_candidates=None,
+                               cursor=0):
         """#2377: bind in host order to one unspent stored occurrence.
 
-        A single occurrence must cover every host result. Among full matches,
-        ledger pairs outrank equal stamps, then unstamped order. Conflicting stamps
-        veto replay, but identity-equal stored rows can still annotate a kept copy.
+        A single occurrence must cover every host result, stamps included: a stamped host result needs a stored
+        result at its stamp or an unstamped one. Among full matches, ledger pairs outrank equal stamps, then
+        unstamped order. Conflicting stamps veto replay, but identity-equal stored rows can still annotate a kept
+        copy. A proven-prefix call (index < ``cursor``) that no occurrence fully covers (the host changed a result
+        after the cursor) still owns one: it reserves the stamp-compatible occurrence covering most of its results,
+        so a later new call never spends it.
         """
         segments, current = [], None
         for row in tail_rows:
@@ -3477,11 +3481,14 @@ class ReconcileMixin:
         # call identity, so binding stays linear in the tail (a review thread measured O(H*S) here).
         by_identity = defaultdict(list)
         for call, results in segments:
+            unspent = [((str(row.get("tool_call_id") or ""), self._message_replay_identity(row, stored_row=True)),
+                        _normalize_observed_at(row.get("observed_at")))
+                       for row in results if row["store_id"] not in consumed
+                       and not self._matches_ignore_message_patterns(row, stored_row=True)]
             by_identity[self._message_replay_identity(call, stored_row=True)].append((
                 call, results, _normalize_observed_at(call.get("observed_at")),
-                Counter((str(row.get("tool_call_id") or ""), self._message_replay_identity(row, stored_row=True))
-                        for row in results if row["store_id"] not in consumed
-                        and not self._matches_ignore_message_patterns(row, stored_row=True))))
+                Counter(key for key, _stamp in unspent),
+                Counter((key, stamp) for key, stamp in unspent if stamp is not None)))
         used, bindings = set(), {}
         for index, host in enumerate(messages):
             if host.get("role") != "assistant" or not host.get("tool_calls"):
@@ -3495,9 +3502,24 @@ class ReconcileMixin:
                     break
                 host_results.append(result)
             candidates, possible = [], []
-            needed = Counter((str(row.get("tool_call_id") or ""), self._message_replay_identity(row))
-                             for row in host_results)
-            for call, results, stored_stamp, available in by_identity.get(identity, ()):
+            host_keys = [((str(row.get("tool_call_id") or ""), self._message_replay_identity(row)),
+                          self._host_occurrence_metadata(row)["timestamp"]) for row in host_results]
+            needed = Counter(key for key, _stamp in host_keys)
+            needed_stamped = Counter((key, stamp) for key, stamp in host_keys if stamp is not None)
+
+            def covers(available, stamped):
+                """Every host result has its own stored result, and each stamped one a stored result at its
+                stamp or an unstamped one (the shared unstamped pool absorbs the stamped shortfall)."""
+                if any(available[key] < count for key, count in needed.items()):
+                    return False
+                shortfall = Counter()
+                for (key, host_stamp), count in needed_stamped.items():
+                    shortfall[key] += max(0, count - stamped[(key, host_stamp)])
+                return all(shortfall[key] <= available[key] - sum(
+                    count for (k, _s), count in stamped.items() if k == key) for key in shortfall)
+
+            compatible = []
+            for call, results, stored_stamp, available, stamped_results in by_identity.get(identity, ()):
                 sid = call["store_id"]
                 if sid in used or (sid in consumed and sid != ledger_id):
                     continue
@@ -3508,11 +3530,16 @@ class ReconcileMixin:
                     if sid == ledger_id:
                         used.add(sid)  # A vetoed ledger occurrence stays reserved.
                     continue
-                if all(available[key] >= count for key, count in needed.items()):
+                compatible.append((call, results, available))
+                if covers(available, stamped_results):
                     candidates.append((call, results))
             stamped = [pair for pair in candidates if stamp is not None
                        and _normalize_observed_at(pair[0].get("observed_at")) == stamp]
             candidates = stamped or candidates
+            if not candidates and index < cursor and compatible:
+                # The prefix owns one of these occurrences even though a later result changed.
+                best = max(compatible, key=lambda entry: sum(min(entry[2][key], count) for key, count in needed.items()))
+                used.add(best[0]["store_id"])
             if not candidates:
                 if replay_candidates is not None and possible:
                     rows = [row for call, results in possible for row in (call, *results)]
@@ -3550,7 +3577,7 @@ class ReconcileMixin:
         if not call_ids or _has_lossy_redacted_identity(call_identity):
             return set()
         if bindings is None:
-            bindings = self._tool_segment_bindings(messages, tail_rows, consumed, consumed_pairs)
+            bindings = self._tool_segment_bindings(messages, tail_rows, consumed, consumed_pairs, cursor=cursor)
         bound = bindings.get(call_index)
         if bound is None:
             # The proven prefix already owns this call. Keep #2163's partial-result
