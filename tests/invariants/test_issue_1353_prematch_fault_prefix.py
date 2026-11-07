@@ -238,18 +238,17 @@ def test_partial_write_retry_is_idempotent(tmp_path, monkeypatch, stage):
         assert fired == [True], "fault must follow the real operation"
         observed_failures = e._ingest_failure_count
         relations_after_fault = _relations(e)
-        if stage == "commit-relation":
-            assert relations_after_fault == []  # R2: discard this writer's partial evidence.
+        # #1815: the fault fires once, on the first attempt; that attempt rolls back (R2: this writer's partial
+        # evidence is discarded) and the same ingest classifies again and succeeds, so no ingest failure is counted.
         e.ingest(deepcopy(host))
         relations_after_retry = _relations(e)
         e.ingest(deepcopy(host))
         _assert_once(e, host)
         assert _relations(e) == relations_after_retry
-        assert observed_failures == failures + 1
+        assert observed_failures == failures
+        assert relations_after_retry == relations_after_fault
         if stage == "commit-relation":
             assert len(relations_after_retry) == 2
             assert {relation[1] for relation in relations_after_retry} == {"composite"}
-        else:
-            assert relations_after_retry == relations_after_fault
     finally:
         e.shutdown()

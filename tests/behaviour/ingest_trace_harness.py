@@ -89,6 +89,7 @@ OBSERVED_ATTRIBUTES = frozenset({
     "_identity_anchor_versions", "_pressure_yield_tail_token_limit", "_survival_projected_fields",
     "_host_uid_lineage_cache", "_engine_uids_pending", "_engine_uids_recorded",
     "_pending_ingest_frontier", "_last_ingest_attribution", "_end_attribution", "_ingest_read_only",
+    "_ingest_attempt_index",
     "_ingest_ledger_attempt", "_ingest_ledger_observations", "_ingest_ledger_counters", "_ingest_ledger_warned",
     "_ingest_lock_guard", "_ingest_lock_records", "_ingest_lock_totals", "_ingest_lock_warned",
     "_ledger_rollback_failures_published", "_ledger_adopted", "_ledger_rebind_too_large", "_frozen_ledger_prepared", "_frozen_tail_reached",
@@ -362,6 +363,7 @@ def snapshot(engine: Any, canonical: IngestCanonical) -> dict[str, Any]:
                                             "_ledger_rollback_failures_published",
                                             "_ledger_adopted",  # Commit-only optimization; observed in the attribute stream.
                                             "_ledger_rebind_too_large",  # In-process cap memo; observed, not a durable outcome.
+                                            "_ingest_attempt_index",  # #1815: this ingest's attempt number; reset every ingest.
                                             "_ingest_ledger_observations", "_ingest_ledger_counters", "_ingest_ledger_warned",
                                             # P1h lock-hold telemetry; no ingest decision reads it.
                                             "_ingest_lock_guard", "_ingest_lock_records", "_ingest_lock_totals", "_ingest_lock_warned"}):

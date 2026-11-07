@@ -215,7 +215,9 @@ def test_faulted_prematch_does_not_rescan_and_retry_recovers(engine, monkeypatch
     with monkeypatch.context() as patch:
         patch.setattr(engine, "_identity_anchor_prematch", fail)
         engine.ingest(host)
-    assert calls == [2]
+    # #1815: a first-attempt pre-match fault rolls back and classifies once more, so a fault that persists costs
+    # exactly one extra scan from the same cursor (never a rescan from 0), then the ordered-prefix path stands.
+    assert calls == [2, 2]
     assert "Revised migration prompt" not in _contents(engine)
     engine.ingest(host)
     assert _contents(engine).count("Revised migration prompt") == 1
