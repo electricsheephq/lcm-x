@@ -7085,7 +7085,8 @@ class LCMEngine(
         prior_targets = {r[2] for r in seeds if r[1] == "possible_replay_of"}
         buckets = {}
         for row in targets:
-            key = ingest_ledger.tool_replay_scorer_key(row, conversation=self._conversation_id)
+            # A stored row's own id, blank included: unknown ownership is never the active conversation.
+            key = ingest_ledger.tool_replay_scorer_key(row)
             buckets.setdefault(key, []).append(row)
         used, linked, plan = set(), set(), []
         source_buckets = {}

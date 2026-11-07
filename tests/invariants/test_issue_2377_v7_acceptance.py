@@ -249,7 +249,8 @@ def test_A16_literal_placeholder_is_new(build, monkeypatch):
 
 def test_A17_scorer_key_rejects_false_targets(build):
     engine = build()
-    targets = [dict(X, store_id=1, content="different"), dict(X, store_id=2, tool_call_id="other")]
+    owned = dict(X, conversation_id=engine._conversation_id)
+    targets = [dict(owned, store_id=1, content="different"), dict(owned, store_id=2, tool_call_id="other")]
     # Proposed pure planner: (batch-position, target-store-id) pairs.
     assert engine._plan_tool_replay_links([X], targets, seeds=[]) == []
 
@@ -441,7 +442,9 @@ def test_A27_borrow_spends_capacity(build, monkeypatch):
 
 def test_A28_prior_ingest_target_is_last_priority(build):
     engine = build()
-    targets = [dict(X, store_id=1, observed_at=30), dict(X, store_id=2, observed_at=10)]
+    # Stored rows carry their owning conversation id.
+    owned = dict(X, conversation_id=engine._conversation_id)
+    targets = [dict(owned, store_id=1, observed_at=30), dict(owned, store_id=2, observed_at=10)]
     copies = [X, dict(X, timestamp=20)]
     assert engine._plan_tool_replay_links(copies, targets, seeds=[(99, "possible_replay_of", 2)]) == [(0, 1), (1, 2)]
 
