@@ -7085,17 +7085,25 @@ class LCMEngine(
         try:
             with self._ingest_evidence():
                 if previous:
-                    sessions = {session for session, _row in previous.values()}
+                    # A child row can sit at a predecessor stamp: look in the current session too.
+                    sessions = {session for session, _row in previous.values()} | {str(self._session_id)}
                     stamps = [row["timestamp"] for _session, row in previous.values()
                               if row.get("timestamp") is not None]
-                    targets = self._store.find_rows_by_observed_at(self._conversation_id, list(sessions), stamps)
+                    targets = self._store.find_rows_by_observed_at(self._conversation_id, sorted(sessions), stamps)
                     current = self._store.get_batch([sid for idx, sid in stored_at.items() if idx in previous and sid])
                     used = {row["related_store_id"] for row in self._store.get_message_relations(
                         [row["store_id"] for row in targets], "possible_replay_of", related=True)}
                     linked = {row["store_id"] for row in self._store.get_message_relations(
                         list(current), "possible_replay_of")}
-                    linked_stamps = set()
-                    for idx, (session, row) in sorted(previous.items()):
+                    linked_stamps, widened = set(), False
+
+                    def same_occurrence(stamp, identity, sid):
+                        return [target for target in targets
+                                if target["observed_at"] == stamp and target["store_id"] < sid
+                                and _proof_user_identity(self._message_replay_identity(
+                                    target, stored_row=True)) == _proof_user_identity(identity)]
+
+                    for idx, (_session, row) in sorted(previous.items()):
                         sid = stored_at.get(idx)
                         if not sid or sid not in current or sid in linked:
                             continue
@@ -7105,11 +7113,19 @@ class LCMEngine(
                         identity = self._message_replay_identity(current[sid], stored_row=True)
                         if _commit_proof_identity_digest(_proof_user_identity(identity)) != row.get("identity_sha256"):
                             continue
-                        matches = [target for target in targets
-                                   if target["session_id"] == session and target["observed_at"] == row["timestamp"]
-                                   and target["store_id"] < sid
-                                   and _proof_user_identity(self._message_replay_identity(
-                                       target, stored_row=True)) == _proof_user_identity(identity)]
+                        matches = same_occurrence(row["timestamp"], identity, sid)
+                        if not matches and not widened:
+                            # A carried row can live in the rotation predecessor while the
+                            # child's own proof records it under the child session.
+                            widened = True
+                            extra = set(self._rotation_predecessor_session_ids(
+                                str(self._session_id), max_hops=1)) - sessions
+                            if extra:
+                                more = self._store.find_rows_by_observed_at(self._conversation_id, sorted(extra), stamps)
+                                used |= {relation["related_store_id"] for relation in self._store.get_message_relations(
+                                    [target["store_id"] for target in more], "possible_replay_of", related=True)}
+                                targets, sessions = [*targets, *more], sessions | extra
+                                matches = same_occurrence(row["timestamp"], identity, sid)
                         if len(matches) > 1:
                             # The host's volatile scaffolding (todo fold, model-switch note) is the
                             # replay itself; exact content only breaks a tie between equal identities.
@@ -7125,12 +7141,12 @@ class LCMEngine(
                         self._store.add_message_relations([[(sid, "possible_replay_of", target, None, None)]])
                         used.add(target)
                         linked.add(sid)
-                        linked_stamps.add((session, row["timestamp"]))
+                        linked_stamps.add(row["timestamp"])
                     # #2378: the NEXT prompt can inherit the carried turn's stamp but
                     # postdate the snapshot. Its later own-stamp copy needs doubt too.
                     transfer_targets = [target for target in targets
                                         if target["role"] == "user" and target["store_id"] not in used
-                                        and (target["session_id"], target["observed_at"]) in linked_stamps]
+                                        and target["observed_at"] in linked_stamps]
                     if transfer_targets:
                         sources = self._store.get_batch([sid for idx, sid in stored_at.items()
                                                          if idx not in previous and sid])
