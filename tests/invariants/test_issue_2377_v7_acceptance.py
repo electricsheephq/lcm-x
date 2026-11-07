@@ -445,6 +445,21 @@ def test_A28_prior_ingest_target_is_last_priority(build):
     assert engine._plan_tool_replay_links(copies, targets, seeds=[(99, "possible_replay_of", 2)]) == [(0, 1), (1, 2)]
 
 
+
+def test_A28b_equal_stamp_replays_beat_prior_targets(build):
+    """Astra F2: prior-used targets must not lose their equal-stamp replays to other copies."""
+    from tests.invariants.test_issue_2377_v7_oracle import _row, _run
+    targets = [_row(1, 2.0), _row(2, 2.0), _row(3), _row(4)]
+    seeds = [(3, "possible_replay_of", 1), (4, "possible_replay_of", 2)]
+    stamps = [None, None, 9.0, 2.0, 2.0]  # host 0-2 are new, host 3-4 replay the @2 originals
+    copies = [dict(_row(None), timestamp=s) for s in stamps]
+    plan = build()._plan_tool_replay_links(copies, targets, seeds=seeds)
+    added = [_row(11 + i, s) for i, s in enumerate(stamps)]
+    links = [(s, t) for s, _k, t in seeds] + [(11 + pos, t) for pos, t in plan]
+    run = _run(targets, added, {i: 11 + i for i in range(5)}, links=links)
+    assert run.violations({0, 1, 2}) == dict(missing=[], silent=[], invalid=[])
+
+
 def test_A29_restamped_rewritten_original(build, monkeypatch):
     run = ingest_shape(build, monkeypatch, [U, call(2), dict(X, timestamp=2)],
                        [U, call(4), dict(X, content="Y", timestamp=4), call(), X, V])

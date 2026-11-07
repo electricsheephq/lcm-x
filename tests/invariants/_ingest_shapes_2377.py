@@ -76,13 +76,15 @@ class Run:
         # Attribution. A replay copy the product CAN tell apart from its key-mates is checked per row:
         # a ledger-bound host occurrence, or a stamped copy that is unique among the added rows of its
         # key AND has an equal-stamp original (the evidence §2.5's first tier uses). It must carry the
-        # link itself, and must link to its own equal-stamp original when exactly one exists. Every
+        # link itself, and must link to its own equal-stamp original when exactly one exists. A stamped
+        # copy that shares its stamp with other added key-mates AND has an equal-stamp original is
+        # counted per (key, stamp) group: its members are interchangeable, but the group as a whole is
+        # distinguishable from rows of other stamps, so another stamp's link never covers it. Every
         # other replay row pools with its scorer KEY, across stamps: a stamp no original carries is no
         # evidence, so WHICH row of the key carries the link is not observable (NOTE §3 I-link) and the
-        # scorer counts per key. A group is never widened across stamps that carry evidence (an
-        # equal-stamp original). Pooling's blind spot, shared with the gate scorer: within one key in
-        # one batch, a dropped new row and an unlinked replay cancel in the count (no text is missing:
-        # the content is identical).
+        # scorer counts per key. Pooling's blind spot, shared with the gate scorer: within one pooled
+        # group in one batch, a dropped new row and an unlinked replay cancel in the count (no text is
+        # missing: the content is identical).
         bound_ids = {self.inserted[i] for i in self.bound if i in self.inserted}
         silent = []
         groups = {}
@@ -100,7 +102,7 @@ class Run:
                 if sid not in genuinely_new_ids and len(own) == 1 and links.get(sid, own) != own:
                     invalid.append((sid, links[sid], "replay not linked to its own equal-stamp original"))
                 continue
-            groups.setdefault(key(r), []).append(sid)
+            groups.setdefault((key(r), stamp) if own else (key(r),), []).append(sid)
         for rows in groups.values():
             replays = sum(sid not in genuinely_new_ids for sid in rows)
             attributed = [sid for sid in rows if sid in links or sid in pending]

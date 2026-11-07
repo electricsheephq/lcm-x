@@ -2,8 +2,9 @@
 
 Per-row checks apply to the rows the product CAN tell apart: a ledger-bound occurrence, or a stamped
 copy unique among the added rows of its key that has an equal-stamp original; such a replay must carry
-its own link, to that original when exactly one exists. Every other replay pools with its scorer key,
-across stamps (release-manager ruling: a group is never widened across stamps that carry evidence).
+its own link, to that original when exactly one exists. Repeated stamped copies with an equal-stamp
+original are counted per (key, stamp) group. Every other replay pools with its scorer key, across
+stamps (release-manager ruling: a group is never widened across stamps that carry evidence).
 These tests run the oracle on synthetic rows, so a later edit cannot silently move either boundary.
 """
 
@@ -72,3 +73,19 @@ def test_restamped_replay_without_an_equal_stamp_original_pools_with_its_key():
     assert _run(before, evident, {6: 8, 3: 11}, links=[(11, 5)]).violations({3})["silent"] == [8]
     assert _run(before, evident, {6: 8, 3: 11}).violations({3})["silent"] == [8]
     assert _run(before, evident, {6: 8, 3: 11}, links=[(8, 5)]).violations({3}) == clean
+
+
+def test_equal_stamp_group_is_not_pooled_with_other_stamps():
+    """Astra F2 in miniature. Originals 1@2, 2@2, 3, 4; host 0-2 are new (two unstamped, one @9), host 3-4
+    replay the @2 originals. Two @2 copies are interchangeable with each other, but not with the
+    unstamped or @9 rows: those rows' links never cover the @2 group."""
+    before = [_row(1, 2.0), _row(2, 2.0), _row(3), _row(4)]
+    added = [_row(11), _row(12), _row(13, 9.0), _row(14, 2.0), _row(15, 2.0)]
+    inserted = dict(enumerate([11, 12, 13, 14, 15]))
+    wrong = _run(before, added, inserted, links=[(11, 3), (12, 4), (13, 1), (14, 2)])
+    assert wrong.violations({0, 1, 2})["silent"] == [15]
+    right = _run(before, added, inserted, links=[(11, 3), (12, 4), (14, 1), (15, 2)])
+    assert right.violations({0, 1, 2}) == dict(missing=[], silent=[], invalid=[])
+    # Within the group, which member carries which link is not observable.
+    swapped = _run(before, added, inserted, links=[(11, 3), (12, 4), (14, 2), (15, 1)])
+    assert swapped.violations({0, 1, 2}) == dict(missing=[], silent=[], invalid=[])
