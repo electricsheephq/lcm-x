@@ -268,10 +268,10 @@ def test_A18_transient_relation_failure_rolls_back(build, monkeypatch):
     with monkeypatch.context() as fault:
         fault.setattr(engine._store, "add_message_relations", busy)
         with pytest.raises(sqlite3.OperationalError, match="locked"):
-            engine._ingest_messages([call(4), dict(X, timestamp=4)])
+            engine._ingest_messages([U, call(), X, call(4), dict(X, timestamp=4)])
     assert engine._store.get_session_messages("S") == before
     assert relations(engine) == before_links
-    engine._ingest_messages([call(4), dict(X, timestamp=4)])
+    engine._ingest_messages([U, call(), X, call(4), dict(X, timestamp=4)])
     assert len(engine._store.get_session_messages("S")) == len(before) + 2
     assert len(relations(engine)) == len(before_links) + 2
 
@@ -285,7 +285,7 @@ def test_A18b_computation_failure_marks_entire_batch(build, monkeypatch):
         assert partial  # A partially computed plan must be discarded on failure.
         raise ValueError("synthetic planner failure after partial computation")
     monkeypatch.setattr(engine, "_plan_tool_replay_links", broken)
-    engine.ingest([call(4), dict(X, timestamp=4), V])
+    engine.ingest([U, call(), X, call(4), dict(X, timestamp=4), V])
     assert engine._ingest_failure_count == 0
     added = engine._store.get_session_messages("S")[len(before):]
     assert len(added) == 3
@@ -304,7 +304,7 @@ def test_A18c_read_only_missing_relations(build, monkeypatch, caplog):
         return sqlite3.SQLITE_DENY if action == sqlite3.SQLITE_CREATE_TABLE and arg1 == "message_relations" else sqlite3.SQLITE_OK
     conn.set_authorizer(deny_schema)
     try:
-        engine.on_session_end("S", [call(4), dict(X, timestamp=4)])
+        engine.on_session_end("S", [U, call(), X, call(4), dict(X, timestamp=4)])
         failures = engine._last_tool_link_failures
         assert len(engine._store.get_session_messages("S")) == 5
         assert len(failures) == 2
@@ -314,6 +314,20 @@ def test_A18c_read_only_missing_relations(build, monkeypatch, caplog):
     finally:
         conn.set_authorizer(None)
 
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError,
+                   reason="#2377 follow-up: a warm tool-first view after [U, A, X] keeps main's positional "
+                          "cursor, so its new rows are never stored (pre-existing on main)")
+def test_warm_tool_first_view_is_stored(build):
+    engine = build()
+    engine.ingest([U, call(), X])
+    before = len(engine._store.get_session_messages("S"))
+    b = call(4, ids=("b",), args='{"b":1}')
+    y = {"role": "tool", "tool_call_id": "b", "content": "Y", "timestamp": 4}
+    engine.ingest([b, y])
+    assert engine._ingest_failure_count == 0
+    assert len(engine._store.get_session_messages("S")) == before + 2
 
 @pytest.mark.parametrize("twin", ["ignored", "borrowed"])
 def test_A19_ignored_borrowed_twins(build, monkeypatch, twin):
