@@ -61,6 +61,7 @@ CONFIG_ROWS = (
     ('rerank_enabled', 'LCM_RERANK_ENABLED', 'bool', False),
     ('recall_reference_strict', 'LCM_RECALL_REFERENCE_STRICT', 'bool', True),
     ('recall_adjacent_reply', 'LCM_RECALL_ADJACENT_REPLY', 'bool', False),
+    ('recall_snippet_window_hits', 'LCM_RECALL_SNIPPET_WINDOW_HITS', 'int', 0),
     ('recall_fts_anchor', 'LCM_RECALL_FTS_ANCHOR', 'bool', True),
     ('recall_summary_event_time', 'LCM_RECALL_SUMMARY_EVENT_TIME', 'bool', False),
     ('proactive_recall_enabled', 'LCM_PROACTIVE_RECALL_ENABLED', 'bool', False),
@@ -177,6 +178,7 @@ EXTRA_CONFIG_ROWS = (
 
 # from_env has validation after the primitive reader for these fields.
 SPECIAL = {
+    "recall_snippet_window_hits": (D, D, D, D, 1, 0, D, D, D, D, D, D, D, D, D, 25),
     "embeddings_enabled": FLAG,  # R3: unset local ON; invalid/blank stays OFF.
     "embedding_provider": (D, D, *VALUES[2:]),  # R4: blank provider follows unset local default.
     "recall_delivery_unit": ("hits",) * 16,

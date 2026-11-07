@@ -66,10 +66,10 @@ class Home:
                             (sid, source, parent, started[0] if started else 1000.0 + i, ended, reason))
             for n, (sid, m) in enumerate(host):
                 con.execute("insert into messages (session_id, role, content, tool_call_id, tool_calls, timestamp,"
-                            " active, compacted) values (?,?,?,?,?,?,?,?)",
+                            " active, compacted, _compressed_summary) values (?,?,?,?,?,?,?,?,?)",
                             (sid, m["role"], m.get("content"), m.get("tool_call_id"),
                              json.dumps(m["tool_calls"]) if m.get("tool_calls") else None, m.get("_ts", 2000.0 + n),
-                             m.get("_active", 1), m.get("_compacted", 0)))
+                             m.get("_active", 1), m.get("_compacted", 0), m.get("_compressed_summary", 0)))
         store = MessageStore(self.lcm)
         self.ids = [store.append(sid, {k: v for k, v in m.items() if not k.startswith("_")}
                                  | ({"timestamp": 1700000000.0 + n} if n in stamps else {})
@@ -210,6 +210,123 @@ def test_in_place_rewound_rows_are_not_expected(tmp_path):
                       ("S1", dict(u("question 3"), _active=0, _compacted=1))]  # archived history: displayed
     out = Home(tmp_path, ONE, host, stored=turn(1) + [("S1", u("question 3"))]).run()
     assert out["parity"]["totals"]["missing_rows"] == 0 and out["parity"]["totals"]["expected_rows"] == 3
+
+
+@pytest.mark.parametrize("lose", [None, "original", "resend"])
+def test_in_place_archived_tail_copies_keep_stamps_and_resend_counts(tmp_path, lose):
+    tail = [u("retained question"), call("carried-call"), result("carried-call"), a("retained answer")]
+    original = turn(0) + [("S1", dict(m, _ts=3000.0 + i)) for i, m in enumerate(tail)]
+    archived = [(s, dict(m, _active=0, _compacted=1)) for s, m in original]
+    carried = [("S1", dict(m, _ts=3000.0 + i)) for i, m in enumerate(tail)]  # copies keep the original's stamp
+    # Tool-calling assistant identity uses call ids even when its rendered content changes.
+    carried[1][1]["content"] = f"{S} carried rendering"
+    resend = [("S1", dict(tail[0], _ts=5000.0)), ("S1", a("new answer"))]
+    stored = original + resend
+    if lose == "resend":
+        stored = original + resend[1:]
+    elif lose == "original":
+        stored = original[:3] + original[4:] + resend  # lose the tool call, not just its copied rendering
+    boundary = [("S1", dict(a("host summary"), _compressed_summary=1, _ts=4000.0))]
+    out = Home(tmp_path, ONE, archived + boundary + carried + resend, stored=stored).run()
+    totals = out["parity"]["totals"]
+    assert totals["expected_rows"] == len(original) + len(resend)
+    assert totals["missing_rows"] == int(lose is not None)
+    assert totals["surplus_rows"] == 0
+    assert S not in json.dumps(out)
+
+
+def test_in_place_unmatched_user_ends_carry_block(tmp_path):
+    archived = [("S1", dict(u("repeat"), _active=0, _compacted=1, _ts=3000.0))]
+    # No carried tail here: a new user turn ends the insertion block. A later repeat is a real occurrence.
+    live = [("S1", u("new turn")), ("S1", dict(u("repeat"), _ts=4000.0))]
+    boundary = [("S1", dict(a("host summary"), _compressed_summary=1))]
+    out = Home(tmp_path, ONE, archived + boundary + live, stored=archived + live[:1]).run()
+    assert out["parity"]["totals"]["expected_rows"] == 3
+    assert out["parity"]["totals"]["missing_rows"] == 1
+
+
+def repeated_in_place():
+    """Two summary boundaries; the first carried block was archived by the second compaction."""
+    original = turn(0) + [("S1", dict(m, _ts=3000.0 + i)) for i, m in enumerate(
+        [u("retained question"), call("carried-call"), result("carried-call"), a("retained answer")])]
+    later = [(s, dict(m, _ts=3500.0 + i)) for i, (s, m) in enumerate(turn(2))]
+    def archive(batch):
+        return [(s, dict(m, _active=0, _compacted=1)) for s, m in batch]
+
+    first = [(s, dict(m)) for s, m in original[2:]]
+    first[1][1]["content"] = f"{S} first carried rendering"
+    second = [(s, dict(m)) for s, m in first + later]  # a chained compaction copies the first block's copies
+    second[1][1]["content"] = f"{S} second carried rendering"
+    first_boundary = [("S1", dict(a("host summary"), _compressed_summary=1, _ts=4000.0))]
+    boundary = [("S1", dict(a("host summary"), _compressed_summary=1, _ts=5000.0))]
+    host = (archive(original) + archive(first_boundary) + archive(first) + archive(later) + boundary + second)
+    return host, original + later
+
+
+@pytest.mark.parametrize("lose", [False, True], ids=["kept", "missing-original"])
+def test_in_place_multiple_compactions_deduplicate_archived_copies(tmp_path, lose):
+    host, original = repeated_in_place()
+    # Dropping a real tool call must remain visible even when both host carry blocks hold it.
+    stored = original[:3] + original[4:] if lose else original
+    out = Home(tmp_path, ONE, host, stored=stored).run()
+    totals = out["parity"]["totals"]
+    assert totals["expected_rows"] == len(original)
+    assert totals["missing_rows"] == int(lose)
+    assert totals["surplus_rows"] == 0
+    assert S not in json.dumps(out)
+
+
+@pytest.mark.parametrize("kind", ["merged", "pure", "prefix", "blank"])
+def test_in_place_carrier_at_block_start_does_not_stop_matching(tmp_path, kind):
+    original = [(s, dict(m, _ts=3000.0 + i)) for i, (s, m) in enumerate(turn(1))]
+    archived = [(s, dict(m, _active=0, _compacted=1)) for s, m in original]
+    text = {"merged": CARRIER + "\n\n" + u("question 1")["content"], "pure": CARRIER,
+            "prefix": audit.plugin_tree.carrier_markers(REPO)[1][0] + S, "blank": "  "}[kind]
+    boundary = [("S1", dict(a("host summary"), _compressed_summary=1))]
+    host = archived + boundary + [("S1", {"role": "user", "content": text})] + original
+    out = Home(tmp_path, ONE, host, stored=original, nodes=NODE).run()
+    totals = out["parity"]["totals"]
+    assert totals["expected_rows"] == 2
+    assert totals["missing_rows"] == totals["surplus_rows"] == 0
+
+
+@pytest.mark.parametrize("stamp", [3000.0, 6000.0], ids=["pool-used-by-its-copy", "new-stamp"])
+def test_in_place_resend_after_second_block_still_counts(tmp_path, stamp):
+    """A resend has a stamp of its own (new-stamp). At the original's exact stamp it still counts only because the
+    block's own copy used that pool row first (see the dropped-copy limit below)."""
+    host, original = repeated_in_place()
+    resend = ("S1", dict(u("retained question"), _ts=stamp))
+    out = Home(tmp_path, ONE, host + [resend], stored=original).run()
+    totals = out["parity"]["totals"]
+    assert totals["expected_rows"] == len(original) + 1
+    assert totals["missing_rows"] == 1
+    assert totals["surplus_rows"] == 0
+
+
+def test_in_place_accepted_limit_a_row_at_an_unused_archived_stamp_is_a_copy(tmp_path):
+    """Accepted limit, pinned: the rule assumes a new row has a stamp of its own. If the host dropped a row's copy and
+    a later row carried that row's exact role, content and stamp, it would be taken for the dropped copy. The host
+    stamps new rows with time.time() (1e-6 apart in a batch), so it does not write such a row."""
+    host, original = repeated_in_place()
+    question = u("retained question")["content"]
+    copies = [i for i, (_s, m) in enumerate(host) if m.get("content") == question and not m.get("_compacted")]
+    assert len(copies) == 1  # the second block's copy of "retained question"
+    host = host[:copies[0]] + host[copies[0] + 1:] + [("S1", dict(u("retained question"), _ts=3000.0))]
+    totals = Home(tmp_path, ONE, host, stored=original).run()["parity"]["totals"]
+    assert totals["expected_rows"] == len(original) and totals["missing_rows"] == 0
+
+
+@pytest.mark.parametrize("signal", ["no-boundary", "no-compacted-column"])
+def test_in_place_requires_boundary_and_compacted_evidence(tmp_path, signal):
+    original = [("S1", dict(u("repeat"), _active=0, _compacted=1))]
+    boundary = [] if signal == "no-boundary" else [("S1", dict(a("host summary"), _compressed_summary=1))]
+    home = Home(tmp_path, ONE, original + boundary + [("S1", u("repeat"))], stored=original)
+    if signal == "no-compacted-column":
+        with sqlite3.connect(home.state) as con:
+            con.execute("alter table messages drop column compacted")
+    totals = home.run()["parity"]["totals"]
+    assert totals["expected_rows"] == 2
+    assert totals["missing_rows"] == 1
 
 
 ROTATED = {"P": ("cli", None, 1000.5, "compression", 100.0), "P2": ("cli", "P", 3000.0, "user_exit", 1001.0)}
@@ -930,3 +1047,101 @@ def test_replay_links_are_checked_against_stored_content():
     resolved = {r[0]: (r[1], r[2], r[3]) for r in rows}
     numbers, _silent = audit.score_lineage("S", [("assistant", "expanded")], {}, rows, relations, resolved)
     assert (numbers["visible_surplus_rows"], numbers["silent_surplus_rows"]) == (0, 1)
+
+
+def carrier_boundary_home(tmp_path, block, *, stored, history=None, summary=False):
+    """This host pin's real in-place shape: no flagged summary row; the inserted block opens with LCM's pure summary
+    carrier (a user row), then the host's copies of the retained tail. ``summary``: a host-flagged summary row instead."""
+    history = history or [("S1", dict(m, _ts=3000.0 + i)) for i, (_s, m) in enumerate(turn(0) + turn(1))]
+    archived = [(s, dict(m, _active=0, _compacted=1)) for s, m in history]
+    opened = [("S1", dict(a("host summary"), _compressed_summary=1, _ts=3500.0) if summary else
+               {"role": "user", "content": CARRIER, "_ts": 3500.0})]
+    return Home(tmp_path, ONE, archived + opened + block, stored=stored, nodes=NODE)
+
+
+@pytest.mark.parametrize("lose", [False, True], ids=["kept", "missing-original"])
+def test_in_place_carrier_boundary_without_summary_row(tmp_path, lose):
+    history = [("S1", dict(m, _ts=3000.0 + i)) for i, (_s, m) in enumerate(turn(0) + turn(1))]
+    stored = history[:1] + history[2:] if lose else history
+    totals = carrier_boundary_home(tmp_path, history[2:], stored=stored).run()["parity"]["totals"]
+    assert totals["expected_rows"] == len(history)
+    assert totals["missing_rows"] == int(lose)
+    assert totals["surplus_rows"] == 0
+
+
+def test_in_place_repeated_turns_keep_a_genuine_repeat(tmp_path):
+    """Review: an unbounded longest-suffix match took a genuine new go/ok pair for copies. Stamps decide."""
+    go = [("S1", dict(u("go"), _ts=3000.0)), ("S1", dict(a("ok"), _ts=3001.0)),
+          ("S1", dict(u("go"), _ts=3002.0)), ("S1", dict(a("ok"), _ts=3003.0))]
+    copies = go[2:]
+    genuine = [("S1", dict(u("go"), _ts=3600.0)), ("S1", dict(a("ok"), _ts=3601.0))]
+    totals = carrier_boundary_home(tmp_path, copies + genuine, stored=go, history=go).run()["parity"]["totals"]
+    assert totals["missing_rows"] == 2
+
+
+@pytest.mark.parametrize("summary", [False, True], ids=["carrier", "summary-row"])
+@pytest.mark.parametrize("shape", ["unanswered-resend", "reused-call-id", "single-ok"])
+def test_in_place_new_rows_with_their_own_stamps_are_never_copies(tmp_path, shape, summary):
+    if shape == "unanswered-resend":
+        history = turn(0) + [("S1", u("x"))]
+        new = [("S1", dict(u("x"), _ts=3500.000001))]  # the resend lands just after the boundary's commit
+    elif shape == "reused-call-id":
+        history = turn(0) + [("S1", call("call_0")), ("S1", result("call_0"))]
+        new = [("S1", dict(call("call_0"), _ts=3600.0)), ("S1", dict(result("call_0"), _ts=3601.0))]
+    else:
+        history = turn(0) + [("S1", a("ok"))]
+        new = [("S1", {"role": "user", "content": CARRIER, "_ts": 3599.0}), ("S1", dict(a("ok"), _ts=3600.0))]
+    history = [(s, dict(m, _ts=3000.0 + i)) for i, (s, m) in enumerate(history)]
+    totals = carrier_boundary_home(tmp_path, new, stored=history, history=history,
+                                   summary=summary).run()["parity"]["totals"]
+    assert totals["missing_rows"] == sum(1 for _s, m in new if m["content"] != CARRIER)
+
+
+@pytest.mark.parametrize("summary", [False, True], ids=["carrier", "summary-row"])
+def test_in_place_restamped_copy_is_a_false_alarm_not_a_hidden_loss(tmp_path, summary):
+    """A copy the host stamps anew is not provably a copy: it stays expected (missing), whatever its distance from
+    the boundary."""
+    history = [("S1", dict(m, _ts=3000.0 + i)) for i, (_s, m) in enumerate(turn(0) + turn(1))]
+    restamped = [(s, dict(m, _ts=3500.000001 + i / 1e6)) for i, (s, m) in enumerate(history[2:])]
+    totals = carrier_boundary_home(tmp_path, restamped, stored=history, history=history,
+                                   summary=summary).run()["parity"]["totals"]
+    assert totals["missing_rows"] == len(restamped)
+
+
+def chained_in_place():
+    """The r2 c85ae0 shape: three in-place compactions with no flagged summary row. The second copies the first
+    block's copies, a prefix carrier and the new turn, with one copy dropped and one row moved; the third opens with a
+    merged carrier and carries an empty carrier inside its block."""
+    def at(batch, t0):
+        return [(s, dict(m, _ts=t0 + i)) for i, (s, m) in enumerate(batch)]
+
+    def archive(batch):
+        return [(s, dict(m, _active=0, _compacted=1)) for s, m in batch]
+
+    prefix = audit.plugin_tree.carrier_markers(REPO)[1][0] + S
+    first_turns = at(turn(0) + turn(1) + [("S1", call("c1")), ("S1", result("c1")), ("S1", a("ok"))], 3000.0)
+    block1 = [(s, dict(m)) for s, m in first_turns[2:]]
+    new1 = at(turn(2) + [("S1", call("c2")), ("S1", result("c2")), ("S1", a("ok"))], 4000.0)
+    pure = [("S1", {"role": "user", "content": CARRIER, "_ts": 3900.0})]
+    pfx = [("S1", {"role": "user", "content": prefix, "_ts": 3900.5})]
+    # Second compaction: drops one copy, moves the last, and carries the prefix carrier between.
+    block2 = [(s, dict(m)) for s, m in block1[1:-1]] + pfx + [(s, dict(m)) for s, m in new1] + [block1[-1]]
+    new2 = at(turn(3), 5000.0)
+    merged = [("S1", {"role": "user", "content": CARRIER + "\n\n" + u("question 9")["content"], "_ts": 5900.0})]
+    empty = [("S1", {"role": "user", "content": "", "_ts": 3900.5})]
+    block3 = [(s, dict(m)) for s, m in new1[:2]] + empty + [(s, dict(m)) for s, m in new1[2:] + new2]
+    host = (archive(first_turns) + archive(pure) + archive(block1) + archive(pfx) + archive(new1) + archive(pure)
+            + archive(block2) + archive(new2) + merged + block3)
+    genuine = first_turns + new1 + new2 + [("S1", dict(u("question 9"), _ts=5900.0))]
+    return host, genuine
+
+
+@pytest.mark.parametrize("lose", [False, True], ids=["kept", "missing-genuine"])
+def test_in_place_chained_compactions_with_inner_carriers(tmp_path, lose):
+    host, genuine = chained_in_place()
+    stored = [r for r in genuine if not (lose and r[1].get("content") == u("question 3")["content"])]
+    out = Home(tmp_path, ONE, host, stored=stored, nodes=NODE).run()
+    totals = out["parity"]["totals"]
+    assert totals["expected_rows"] == len(genuine)
+    assert totals["missing_rows"] == int(lose)
+    assert totals["surplus_rows"] == 0

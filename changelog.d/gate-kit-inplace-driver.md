@@ -1,0 +1,1 @@
+- Fix: Count carried tails once across every in-place compaction in the bench gate-kit audit, skip carriers while matching, preserve genuine resends, label compression results from LCM logs, and retry confirmed no-ops with bounded filler turns; no product change.
