@@ -99,3 +99,35 @@ def test_a_firmlink_spelling_inside_a_refused_subtree_is_refused(inside):
     for root in ("/System/Volumes/Data" + str(Path.home().resolve()) + inside, "/System/Volumes/Data/private/var/run/x"):
         with pytest.raises(ValueError):
             sandbox.profile([], [root])
+
+
+def test_a_denied_path_is_denied_in_every_spelling():
+    text = sandbox.profile([], deny_paths=["/Users/someone/.hermes"])
+    for spelling in ("/Users/someone/.hermes", "/System/Volumes/Data/Users/someone/.hermes"):
+        assert f'(deny file-read* file-write* (subpath "{spelling}"))' in text
+    with pytest.raises(ValueError):
+        sandbox.profile([], deny_paths=['/tmp/a"b'])
+    assert sandbox.hermes_home() == str(Path.home() / ".hermes")
+
+
+@pytest.mark.skipif(not sandbox.available(), reason="macOS sandbox-exec required")
+def test_a_child_cannot_read_a_denied_path_but_may_hash_its_name(tmp_path):
+    """The replay edition only hashes --observed-state-db (a path under the live agent's home); under the deny,
+    opening it fails, so a replay that opened it would error instead of reading it."""
+    denied, allowed = tmp_path / "live", tmp_path / "other"
+    for d in (denied, allowed):
+        d.mkdir()
+        (d / "state.db").write_bytes(b"synthetic")
+    child = ("import hashlib, sys\n"
+             "def go(p):\n"
+             "    try:\n"
+             "        open(p, 'rb').read()\n"
+             "        return 'read'\n"
+             "    except OSError:\n"
+             "        return 'denied'\n"
+             "print(hashlib.sha256(sys.argv[1].encode()).hexdigest()[:8], go(sys.argv[1]), go(sys.argv[2]))\n")
+    result = subprocess.run(sandbox.wrap([sys.executable, "-c", child, str(denied / "state.db"), str(allowed / "state.db")],
+                                         ports=[], deny_paths=[denied]),
+                            capture_output=True, text=True, timeout=20, cwd=allowed)
+    import hashlib
+    assert result.stdout.split() == [hashlib.sha256(str(denied / "state.db").encode()).hexdigest()[:8], "denied", "read"]

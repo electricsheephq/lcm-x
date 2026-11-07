@@ -20,18 +20,27 @@ def _digest(text):
 
 
 def choose_sessions(host_db, lcm_db, covered, *, min_large=1000, min_small=20, n_small=2):
+    """The largest covered open session and the next *n_small* covered ones, by (-lcm_rows, sha256 of the id).
+    covered() is the costly check (one host rebuild each), so sessions are taken in that order and checked only
+    until n_small + 1 are covered: the same choice, and the same refusal, as checking every open session."""
     with closing(_readonly(host_db)) as host, closing(_readonly(lcm_db)) as lcm:
-        candidates = []
+        rows = []
         for (sid,) in host.execute("SELECT id FROM sessions WHERE end_reason IS NULL"):
-            if covered(sid):
-                counts = [db.execute("SELECT count(*) FROM messages WHERE session_id = ?",
-                                     (sid,)).fetchone()[0] for db in (lcm, host)]
-                candidates.append(dict(session_id=sid, lcm_rows=counts[0], host_rows=counts[1]))
-    candidates.sort(key=lambda row: (-row["lcm_rows"], _digest(row["session_id"])))
-    large = sum(row["lcm_rows"] >= min_large for row in candidates)
+            counts = [db.execute("SELECT count(*) FROM messages WHERE session_id = ?",
+                                 (sid,)).fetchone()[0] for db in (lcm, host)]
+            rows.append(dict(session_id=sid, lcm_rows=counts[0], host_rows=counts[1]))
+    rows.sort(key=lambda row: (-row["lcm_rows"], _digest(row["session_id"])))
+    candidates, checked = [], 0
+    for row in rows:
+        if len(candidates) == n_small + 1:
+            break
+        checked += 1
+        if covered(row["session_id"]):
+            candidates.append(row)
+    large = sum(row["lcm_rows"] >= min_large for row in candidates[:1])
     small = sum(row["lcm_rows"] >= min_small for row in candidates[1:])
     if not large or small < n_small:
-        raise PlanError(f"eligible={len(candidates)} large={large} small={small} needed={n_small}")
+        raise PlanError(f"covered={len(candidates)} of checked={checked} large={large} small={small} needed={n_small}")
     return [dict(row, name=name, chat_id=f"d5-{name}") for row, name in
             zip(candidates[:n_small + 1], ["L"] + [f"S{i + 1}" for i in range(n_small)])]
 
