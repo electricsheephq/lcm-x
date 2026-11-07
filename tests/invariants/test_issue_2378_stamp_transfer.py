@@ -82,3 +82,38 @@ def test_625_todo_prompt_composite_with_stamp_transfer_copy_is_replay(build):
     ids = {row["store_id"] for row in before if row["content"] in (todo, P)}
     assert len(relations) == 2
     assert all(a in ids and b in ids for a, _kind, b in relations)
+
+
+@pytest.mark.parametrize("cold", [False, True], ids=["warm", "cold"])
+@pytest.mark.parametrize("host_form", ["trimmed", "raw"])
+def test_retained_prompt_vetoes_a_genuine_repeat(build, cold, host_form):
+    """The host still shows the transferred prompt at its old stamp (trimmed, or byte-equal as the control), and the
+    user then really repeats it at a new stamp: that repeat is a new occurrence, never linked to the old copy."""
+    engine = build()
+    before = history(False) + [{"role": "user", "content": T, "timestamp": T_REQ}]
+    engine.ingest(deepcopy(before))
+    view = engine.compress(deepcopy(before), force=True)
+    assert engine._last_compression_status == "compacted"
+    view += [{"role": "assistant", "content": "compress finished", "timestamp": T_REQ + 1},
+             {"role": "user", "content": P + "\n", "timestamp": T_REQ}]
+    engine.ingest(deepcopy(view))
+    old = [row["store_id"] for row in all_rows(engine) if row["content"].strip() == P]
+    assert len(old) == 1
+    engine.on_session_end("S", deepcopy(view))
+    if cold:
+        engine.shutdown()
+        engine = build()
+    else:
+        engine.on_session_start("S", conversation_id="conversation", platform="cli")
+    if host_form == "trimmed":
+        next(row for row in view if row.get("content") == P + "\n")["content"] = P
+    next(row for row in view if row.get("content") == T)["timestamp"] = T_COMMIT - 1
+    view += [{"role": "user", "content": P, "timestamp": T_COMMIT},
+             {"role": "user", "content": NEW, "timestamp": T_COMMIT + 10}]
+    engine.ingest(deepcopy(view))
+    rows, links = all_rows(engine), replay_links(engine)
+    repeat = [row["store_id"] for row in rows if row["content"] == P and row["observed_at"] == T_COMMIT]
+    evidence = {"old": old, "repeat": repeat, "relations": sorted(links)}
+    assert sum(row["content"] == NEW for row in rows) == 1, evidence
+    assert len(repeat) == 1, evidence
+    assert not any(a == repeat[0] and b == old[0] for a, b in links), evidence
