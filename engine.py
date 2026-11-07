@@ -147,7 +147,7 @@ from .message_patterns import compile_message_patterns, matches_message_pattern
 from .aux_session import AuxiliarySessionMixin, DelegateChildMixin
 from .placeholder_ledger import PlaceholderLedgerMixin
 from .reconcile import _COMPACTION_COMMIT_PROOF_METADATA_PREFIX, ReconcileMixin, _PRESERVED_OBJECTIVE_CONTEXT_PREFIX
-from .reconcile import _HERMES_PRUNED_TOOL_PLACEHOLDER, _emission_identity
+from .reconcile import _HERMES_PRUNED_TOOL_PLACEHOLDER, _emission_identity, _strip_volatile_host_scaffolding
 from .reconcile import _hermes_salvage_protected_positions
 from .reconcile import _commit_proof_identity_digest, _has_lossy_redacted_identity, _merge_append_cut, _proof_user_identity
 from .compaction import CompactionMixin
@@ -7160,7 +7160,7 @@ class LCMEngine(
                             if target["store_id"] not in stored_forms:
                                 content = target["content"]
                                 try:
-                                    stored_forms[target["store_id"]] = {text.strip() for text in (
+                                    stored_forms[target["store_id"]] = {_strip_volatile_host_scaffolding(text).strip() for text in (
                                         content, self._restore_ingest_payload_placeholders_in_content_identity(
                                             content, session_id=target["session_id"]),
                                         *self._stored_row_externalized_text_parts_for_pattern_matching(target))}
@@ -7181,17 +7181,21 @@ class LCMEngine(
                                           and source["content"].strip() == target["content"].strip()]
                             if any(shown_as(target) is None for target in candidates):
                                 continue  # an unreadable candidate fails the whole source closed
-                            candidates = [target for target in candidates
-                                          if not any(message.get("role") == "user"
-                                                      and message.get("content") is not None
-                                                      # stored content is redacted as protect_message_for_ingest does
-                                                      and normalize_content_value(redact_sensitive_value(
-                                                          message["content"], self._config, parse_json_strings=False
-                                                      )).strip() in shown_as(target)
-                                                      and self._host_occurrence_metadata(message)["timestamp"]
-                                                      == target["observed_at"] for message in messages)]
-                            if len(candidates) == 1:
-                                target = int(candidates[0]["store_id"])
+                            # One stored row can be found at several stamps (an alt_stamp): it is one candidate,
+                            # vetoed if the host still shows it at any of them.
+                            vetoed = {int(target["store_id"]) for target in candidates
+                                      if any(message.get("role") == "user" and message.get("content") is not None
+                                             # stored content is redacted as protect_message_for_ingest does, and
+                                             # the host's volatile scaffolding (a model-switch note) is not content
+                                             and _strip_volatile_host_scaffolding(normalize_content_value(
+                                                 redact_sensitive_value(message["content"], self._config,
+                                                                        parse_json_strings=False)) or "").strip()
+                                             in shown_as(target)
+                                             and self._host_occurrence_metadata(message)["timestamp"]
+                                             == target["observed_at"] for message in messages)}
+                            remaining = {int(target["store_id"]) for target in candidates} - vetoed
+                            if len(remaining) == 1:
+                                target = remaining.pop()
                                 self._store.add_message_relations([[(sid, "possible_replay_of", target, None, None)]])
                                 used.add(target)
                 attempt = getattr(self, "_ingest_ledger_attempt", None)
