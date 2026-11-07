@@ -131,6 +131,7 @@ def test_cold_alias_replay(tmp_path, case, record_property, caplog):
                  "bindings_hash": digest([bindings(engine, r["store_id"]) for r in rows(engine)])}
         record_property("byte_identity", json.dumps(proof, sort_keys=True))
         assert digest(next(r for r in rows(engine) if r["store_id"] == sid)) == digest(old)
+        # old_view_absent pins today's behaviour (one copy); the #1519 fix flips it with the strict xfail below.
         assert len(targets(engine)) == 1
         if case == "different_known_key":
             assert any("would reject" in r.message for r in caplog.records)
