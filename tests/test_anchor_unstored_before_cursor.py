@@ -11,6 +11,7 @@ anchor must now be bound, matched to a stored row, or a compaction output; any o
 """
 from __future__ import annotations
 
+import json
 import logging
 from collections import Counter
 
@@ -44,13 +45,14 @@ def _call(call_id, ts) -> dict:
 
 
 def _result(call_id, text, ts) -> dict:
-    return {"role": "tool", "content": text, "tool_call_id": call_id, "name": "read_file", "timestamp": float(ts)}
+    return {"role": "tool", "content": text, "tool_call_id": call_id, "tool_name": "read_file", "timestamp": float(ts)}
 
 
 def _key(row) -> tuple:
-    calls = row.get("tool_calls")
-    call = str(calls) if calls else ""
-    return (row.get("role"), str(row.get("content") or "").strip(), row.get("tool_call_id") or "", "call" if call else "")
+    calls = row.get("tool_calls") or []
+    calls = json.loads(calls) if isinstance(calls, str) else calls
+    ids = ",".join(sorted(str(call.get("id")) for call in calls))
+    return (row.get("role"), str(row.get("content") or "").strip(), row.get("tool_call_id") or "", ids)
 
 
 def _stored(engine) -> list[dict]:
