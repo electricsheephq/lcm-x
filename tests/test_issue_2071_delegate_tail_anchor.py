@@ -121,12 +121,14 @@ def _compact_after_a_failed_pre_store(host, monkeypatch):  # noqa: F811
     return ctx, aux, engine, child, stored, result
 
 
-def test_the_compacted_head_is_not_stored_and_x_is_stored_once(host, monkeypatch):  # noqa: F811
-    """The anchor check consumes the compaction's own output: only X is stored. The copy of the last stored row is the
-    anchor itself: equal identities cannot be told apart, so it reads as that stored row (on main X is lost too)."""
+def test_after_a_failed_pre_store_the_compacted_head_is_stored_once_and_x_once(host, monkeypatch):  # noqa: F811
+    """After a failed pre-store the compaction's outputs are never recorded, even when the input was stored earlier: a
+    copy of the last stored row behind an unstored one would read as covered (#2071). So the head is stored once, a
+    visible surplus and never a loss, and X once. The copy of the last stored row is the anchor itself."""
     ctx, aux, engine, child, stored, result = _compact_after_a_failed_pre_store(host, monkeypatch)
     assert _send_x_then_a_repeat(ctx, engine, child, result) == 1
-    assert [row["content"] for row in child_rows(engine)] == [*(row["content"] for row in stored), X["content"]]
+    assert [row["content"] for row in child_rows(engine)] == [
+        *(row["content"] for row in stored), COMPACTED[0]["content"], X["content"]]
 
 
 def test_the_output_record_follows_a_compression_handoff(host, monkeypatch):  # noqa: F811

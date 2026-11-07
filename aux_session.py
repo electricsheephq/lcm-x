@@ -962,12 +962,13 @@ class DelegateChildMixin:
                     tail = self._store.get_session_tail(session_id, limit=1)
                     view = [msg for msg in messages
                             if isinstance(msg, dict) and not self._matches_ignore_message_patterns(msg)]
-                    # The input is covered when its last row is the stored tail: then its rows were stored before
-                    # this pass, even when this pass's own store failed.
-                    covered = bool(tail and view and self._session_end_prefix_compare_identity(
+                    # The input is covered only when this pass stored it and its last row is the stored tail. After a
+                    # failed store, a matching tail can be a copy of the last stored row behind an unstored one (#2071),
+                    # so the summary is kept: a surplus head, never a lost one.
+                    covered = bool(pre_store is not None and tail and view and self._session_end_prefix_compare_identity(
                         tail[-1], session_id=session_id,
                     ) == self._session_end_prefix_compare_identity(view[-1], session_id=session_id))
-                    if pre_store is not None and covered:
+                    if covered:
                         stored_tail = tail
                     else:
                         self._note_delegate_child_fallback(
