@@ -609,9 +609,56 @@ def test_any_stamp_repeat_is_not_definitive(tmp_path, rows):
     assert result["host_copies_resolved"] is False and result["sessions_not_definitive"] == 1
 
 
-def test_two_sends_with_their_own_stamps_stay_definitive(tmp_path):
+@pytest.mark.parametrize("rows,generation_rows,definitive", [
+    ([("go", 1.0, 1, 0), ("go", 1.000001, 1, 0)], 0, True),     # two sends, all active, none compacted
+    ([("go", 1.0, 0, 0), ("go", 2.0, 1, 0)], 1, False),         # an inactive copy, then a fresh-stamped active one
+    ([("go", 1.0, 1, 1), ("go", 2.0, 1, 0)], 1, False)])        # a compacted row whose identity repeats
+def test_distinct_stamps_stay_definitive_only_without_generation_copies(tmp_path, rows, generation_rows, definitive):
     lcm = _messages(tmp_path / "lcm.db", "store_id", [("s", "user", "go", None, None)])
-    host = _host_generations(tmp_path / "state.db", [("go", 1.0, 1, 0), ("go", 1.000001, 1, 0)])
-    result = kit.reorder(lcm, host)
-    assert (result["host_only"], result["host_stamp_repeat_rows"], result["host_copies_resolved"]) == (1, 0, True)
+    result = kit.reorder(lcm, _host_generations(tmp_path / "state.db", rows))
+    assert (result["host_only"], result["host_stamp_repeat_rows"]) == (1, 0)
+    assert (result["per_session"][0]["counts_definitive"], result["host_copies_resolved"]) == (definitive, definitive)
+    assert result["host_generation_rows"] == result["per_session"][0]["host_generation_rows"] == generation_rows
 
+
+def _rewrites(path, overrides):
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT)")
+        conn.executemany("INSERT INTO metadata VALUES (?, ?)", [
+            (f"host_rewrite_identity:{store_id}", json.dumps({"version": 1, "content": content, "stripped": ["", "\n"],
+                                                              "stored_sha256": hashlib.sha256(stored.encode()).hexdigest()}))
+            for store_id, content, stored in overrides])
+    return path
+
+
+@pytest.mark.parametrize("overrides,credited,lcm_only", [
+    ([(2, "go", "go\n")], 1, 0),            # a valid recorded rewrite: the host form's identity
+    ([], 0, 1),                              # no override: edge whitespace is never stripped
+    ([(2, "go", "other\n")], 0, 1)])        # the recorded hash does not match the stored content
+def test_recorded_host_rewrites_are_credited(tmp_path, overrides, credited, lcm_only):
+    lcm = _messages(tmp_path / "lcm.db", "store_id", [("s", "user", "hi", None, None), ("s", "user", "go\n", None, None),
+                                                      ("s", "assistant", "ok", None, None)])
+    host = _messages(tmp_path / "state.db", "id", [("s", "user", "hi", None, None), ("s", "user", "go", None, None),
+                                                   ("s", "assistant", "ok", None, None)])
+    result = kit.reorder(_rewrites(lcm, overrides), host)
+    row = result["per_session"][0]
+    assert (row["matched"], row["lcm_only"], row["host_only"]) == (3 - lcm_only, lcm_only, lcm_only)
+    assert row["host_rewrites_credited"] == result["host_rewrites_credited"] == credited
+
+
+def test_a_reorder_among_credited_rows_is_counted(tmp_path):
+    lcm = _messages(tmp_path / "lcm.db", "store_id", [("s", "user", "A\n", None, None), ("s", "user", " B", None, None)])
+    host = _messages(tmp_path / "state.db", "id", [("s", "user", "B", None, None), ("s", "user", "A", None, None)])
+    result = kit.reorder(_rewrites(lcm, [(1, "A", "A\n"), (2, "B", " B")]), host)
+    assert (result["matched"], result["lcm_only"], result["host_only"]) == (2, 0, 0)
+    assert (result["reordered_rows"], result["host_rewrites_credited"]) == (1, 2)
+
+
+@pytest.mark.parametrize("root_a,root_b,a,b,verdict", [
+    ("/root-a/", "/root-b/", "/root-a/cache", "/root-b/cache", "PATHS_ONLY"),
+    ("/", "/root-b", "/cache", "/root-b/cache", "PATHS_ONLY"),
+    ("/", "/root-b/", "/cache", "/root-b/other", "OTHER")])
+def test_config_roots_with_trailing_separators(tmp_path, root_a, root_b, a, b, verdict):
+    yaml = pytest.importorskip("yaml")
+    paths = [_write(tmp_path / name, yaml.safe_dump({"model": value})) for name, value in (("a.yaml", a), ("b.yaml", b))]
+    assert kit.config_diff(paths[0], root_a, paths[1], root_b)["verdict"] == verdict
