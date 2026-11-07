@@ -7159,10 +7159,14 @@ class LCMEngine(
                         def shown_as(target):
                             if target["store_id"] not in stored_forms:
                                 content = target["content"]
-                                stored_forms[target["store_id"]] = {text.strip() for text in (
-                                    content, self._restore_ingest_payload_placeholders_in_content_identity(
-                                        content, session_id=target["session_id"]),
-                                    *self._stored_row_externalized_text_parts_for_pattern_matching(target))}
+                                try:
+                                    stored_forms[target["store_id"]] = {text.strip() for text in (
+                                        content, self._restore_ingest_payload_placeholders_in_content_identity(
+                                            content, session_id=target["session_id"]),
+                                        *self._stored_row_externalized_text_parts_for_pattern_matching(target))}
+                                except Exception as exc:
+                                    self._raise_ingest_busy(exc)
+                                    stored_forms[target["store_id"]] = None  # unreadable: treated as retained
                             return stored_forms[target["store_id"]]
 
                         for sid, source in sorted(sources.items()):
@@ -7175,7 +7179,7 @@ class LCMEngine(
                                           and isinstance(source["content"], str)
                                           and isinstance(target["content"], str)
                                           and source["content"].strip() == target["content"].strip()
-                                          and not any(message.get("role") == "user"
+                                          and shown_as(target) is not None and not any(message.get("role") == "user"
                                                       and message.get("content") is not None
                                                       # stored content is redacted as protect_message_for_ingest does
                                                       and normalize_content_value(redact_sensitive_value(
