@@ -1,13 +1,15 @@
 """#7: unstamped replacements before the steady-state cursor (#497/#493), a v0.30.0 named loss limit.
 
 The loss cases are strict xfails until the v0.30.x fix lands (taken from draft PR #742, which also lists the shapes
-a fix must keep). The stamped controls show the same shapes are stored when the host stamps its rows.
+a fix must keep). The stamped controls show the same shapes are stored when the host stamps its rows; the #561
+control shows the retained-row merge persist compacts and loses nothing.
 New host objects exercise the prefix audit, not the R6 same-object rewrite path.
 """
 from __future__ import annotations
 
 import pytest
 
+import hermes_lcm.engine as lcm_engine
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
 
@@ -140,6 +142,59 @@ def test_493_stamped_control_stores_the_replacement_once(tmp_path):
         assert texts.count(prime["content"]) == 1
         assert texts.count(host[2]["content"]) == 1
         assert len(texts) == before + 2
+    finally:
+        engine.shutdown()
+
+
+@pytest.fixture
+def summaries(monkeypatch):
+    captured = []
+
+    def summarize(**kwargs):
+        captured.append(kwargs["text"])
+        return "Earlier turns.\nExpand for details about: turns", 1
+
+    monkeypatch.setattr(lcm_engine, "summarize_with_escalation", summarize)
+    return captured
+
+
+def test_561_dangling_retained_row_merge_persist_is_not_a_loss(tmp_path, summaries, record_property):
+    engine = _engine(tmp_path, fresh_tail_count=2, leaf_chunk_tokens=1)
+    head = []
+    for turn in range(1, 4):
+        head += [_u(f"head U{turn}" + PAD, float(turn * 100)),
+                 _a(f"head A{turn}" + PAD, float(turn * 100 + 1))]
+    retained = _u("retained R" + PAD, 500.0)
+    user = _u("follow-up U" + PAD, 600.0)
+    try:
+        engine.ingest([*head, retained])
+    finally:
+        engine.shutdown()
+    engine = _engine(tmp_path, fresh_tail_count=2, leaf_chunk_tokens=1)
+    try:
+        live = engine.compress([*head, retained, user])
+        assert engine._last_compression_status == "compacted"
+        # R may be glued behind the DAG-verified summary carrier or stand alone.
+        assert [engine._message_replay_identity(row)[1] for row in live[-2:]] == [
+            retained["content"], user["content"]]
+        live = [*live[:-2], _u(user["content"], retained["timestamp"])]
+        engine.ingest(live)  # host persist: U alone under the retained row's stamp
+        statuses = []
+        for turn in range(7, 10):
+            live += [_u(f"later U{turn}" + PAD, float(turn * 100)),
+                     _a(f"later A{turn}" + PAD, float(turn * 100 + 1))]
+            engine.ingest(live)
+            engine.note_turn_complete()  # #935: a hidden-only pass holds later passes until the turn ends
+            live = engine.compress(live)
+            statuses.append(engine._last_compression_status)
+        texts = [row["content"] for row in _stored(engine)]
+        copies = texts.count(user["content"])
+        record_property("u_copies", copies)
+        record_property("compaction_statuses", statuses)
+        assert texts.count(retained["content"]) == 1
+        assert copies >= 1
+        assert "error" not in statuses
+        assert statuses == ["compacted"] * 3
     finally:
         engine.shutdown()
 
