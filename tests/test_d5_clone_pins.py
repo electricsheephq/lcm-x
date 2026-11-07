@@ -441,3 +441,12 @@ def test_a_file_named_frozen_is_in_rule_files(tmp_path):
     with pytest.raises(OSError):
         pins.build(tmp_path, ["rules.py", "script.py"], {"rules.py": ["rule"]}, {"script.py": ["leaf.py"]},
                    interpreter, frozen=["missing.py"])
+
+
+def test_a_cross_file_data_name_must_be_a_literal(tmp_path):
+    (tmp_path / "rules.py").write_text("import helper\n\ndef rule(x):\n    return helper.PRED(x)\n", encoding="utf-8")
+    (tmp_path / "helper.py").write_text("PRED = lambda row: False\n", encoding="utf-8")
+    interpreter = {"path_basename": Path(sys.executable).name, "version": platform.python_version()}
+    with pytest.raises(ValueError, match="plain values"):
+        pins.build(tmp_path, ["rules.py", "helper.py"], {"rules.py": ["rule"]}, {"rules.py": ["helper.py"]}, interpreter,
+                   {"helper.py": ["PRED"]})

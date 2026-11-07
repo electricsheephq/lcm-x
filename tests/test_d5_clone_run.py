@@ -191,20 +191,22 @@ def test_rerun_rules(setup):
     assert r.run(FakeHost(config, run_dir), rc_id="rc-synthetic", prior=same).get("stopped_at") is None
 
 
-def test_the_rule_fingerprint_covers_the_rule_closure(tmp_path, monkeypatch):
-    manifest = {"functions": [{"name": "identity", "sha256": "a" * 64}], "extra_hashes": [{"name": "RX", "sha256": "b" * 64}]}
+def test_the_rule_fingerprint_freezes_every_pinned_file(tmp_path, monkeypatch):
+    manifest = {"files": [{"name": "rules.py", "sha256": "a" * 64, "loads": [{"name": "helper.py", "sha256": "b" * 64}]}],
+                "functions": [{"file": "rules.py", "qualname": "identity", "sha256": "c" * 64}], "extra_hashes": []}
     path = tmp_path / "manifest.json"
     monkeypatch.setattr(r.pins, "require", lambda *a, **k: None)
     monkeypatch.setattr(r.pins, "verify", lambda *a, **k: {"verdict": "PASS", "mismatches": []})
     host = r.LocalHost({"manifest": str(path), "instrument_dir": str(tmp_path)}, tmp_path / "run")
     path.write_text(json.dumps(manifest))
     first = host.pins()["rules_sha256"]
-    path.write_text(json.dumps({**manifest, "extra_hashes": [{"name": "RX", "sha256": "c" * 64}]}))
-    second = host.pins()["rules_sha256"]
-    assert second != first  # A changed constant or regex is a changed rule.
-    path.write_text(json.dumps({**manifest, "extra_hashes": [{"name": "RX", "sha256": "c" * 64}],
-                                "rule_files": [{"name": "helper.py", "sha256": "d" * 64}]}))
-    assert host.pins()["rules_sha256"] != second  # So is a file a rule reads whole.
+    path.write_text(json.dumps({**manifest, "functions": []}))
+    assert host.pins()["rules_sha256"] == first  # The closure layer is for parity; the freeze is the files.
+    changed = {**manifest, "files": [{**manifest["files"][0], "loads": [{"name": "helper.py", "sha256": "d" * 64}]}]}
+    path.write_text(json.dumps(changed))
+    assert host.pins()["rules_sha256"] != first  # Any pinned file, a plumbing load included, is frozen.
+    path.write_text(json.dumps({**manifest, "rule_files": [{"name": "script.py", "sha256": "e" * 64}]}))
+    assert host.pins()["rules_sha256"] != first
 
 
 @pytest.mark.parametrize("result, done", [({"completed": True, "outcome": "success"}, True),

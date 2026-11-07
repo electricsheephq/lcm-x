@@ -59,7 +59,9 @@ class LocalHost:
             return pins.verify(*args, **kwargs)
         manifest = json.loads(Path(self.c["manifest"]).read_text(encoding="utf-8"))
         return {**pins.verify(*args, **kwargs), "manifest_sha256": capture._sha256(self.c["manifest"]),
-                "rules_sha256": _sha_json({k: manifest.get(k, []) for k in ("functions", "extra_hashes", "rule_files")})}
+                "rules_sha256": _sha_json(sorted({(e["name"], e["sha256"]) for f in manifest["files"] for e in (f, *f["loads"])}
+                                                 | {(e["name"], e["sha256"]) for e in manifest.get("rule_files", [])}))}
+        # A total freeze (release manager, 2026-11-07): every pinned file whole, so no same-rc fix touches the kit.
 
     def snapshot(self):
         return snapshot.verify(self.c["snapshot_pin"], self.c["snapshot_dir"], self._dir("scratch"))
