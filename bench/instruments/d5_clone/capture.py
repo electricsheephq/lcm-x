@@ -18,7 +18,11 @@ class CaptureError(ValueError):
 
 
 def _readonly(path):
-    return sqlite3.connect(f"file:{quote(str(Path(path).absolute()))}?mode=ro", uri=True)
+    """A read-only connection that never writes beside the input. With no -wal file there is no pending WAL content,
+    so immutable=1 is exact and keeps SQLite from creating sidecars next to a stopped input."""
+    path = Path(path).absolute()
+    flags = "mode=ro" + ("" if Path(str(path) + "-wal").exists() else "&immutable=1")
+    return sqlite3.connect(f"file:{quote(str(path))}?{flags}", uri=True)
 
 
 def _sha256(path):

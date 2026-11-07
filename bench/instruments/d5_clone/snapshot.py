@@ -46,7 +46,7 @@ def verify(pin_path, snapshot_dir, scratch_dir):
     if pin["schema"] != "d5-clone-snapshot-pin/1":
         raise ValueError("unknown snapshot pin schema")
     categories = ("size_mismatch", "sha_mismatch", "missing", "extra_on_disk", "symlinks", "duplicate_entries")
-    result = dict(verdict="PASS", pin_sha256=_sha256(pin_path), entries=len(pin["files"]), ok=0,
+    result = dict(verdict="PASS", unreadable=False, pin_sha256=_sha256(pin_path), entries=len(pin["files"]), ok=0,
                   **{c: {"names": [], "payload": 0} for c in categories}, quick_check={})
 
     def report(category, name):
@@ -76,8 +76,12 @@ def verify(pin_path, snapshot_dir, scratch_dir):
             report("missing", name)
             continue
         path = root / name
-        size_ok = path.stat().st_size == entry["size"]
-        sha_ok = _sha256(path) == entry["sha256"]
+        try:
+            size_ok = path.stat().st_size == entry["size"]
+            sha_ok = _sha256(path) == entry["sha256"]
+        except OSError:
+            result.update(verdict="FAIL", unreadable=True)  # No message: it could carry a payload path.
+            return result
         if not size_ok:
             report("size_mismatch", name)
         if not sha_ok:
@@ -90,7 +94,7 @@ def verify(pin_path, snapshot_dir, scratch_dir):
             clone = _relative(Path(scratch), name)
             clone.parent.mkdir(parents=True, exist_ok=True)
             try:
-                for suffix in ("", "-wal", "-shm"):
+                for suffix in ("", "-wal", "-shm", "-journal"):  # A hot rollback journal must come along.
                     if name + suffix in disk:
                         target = Path(str(clone) + suffix)
                         if sys.platform == "darwin":  # An APFS clone: no full copy of a multi-GB store.

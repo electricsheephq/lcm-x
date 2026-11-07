@@ -1,7 +1,9 @@
 """Capture the SQLite WAL and files without modifying input bytes."""
 
+from contextlib import closing
 import hashlib
 import json
+from pathlib import Path
 import sqlite3
 from datetime import datetime
 
@@ -155,3 +157,16 @@ def test_inner_symlink_is_refused_on_the_portable_copy_path(inputs, tmp_path, mo
     with pytest.raises(cap.CaptureError):
         cap.capture("T0", tmp_path / "out", store_db=inputs[0], host_db=inputs[1], payload_dir=real)
     assert not (tmp_path / "out" / "lcm-large-outputs" / "inner-link.json").exists()
+
+
+def test_reading_a_stopped_wal_input_writes_no_sidecar(tmp_path):
+    db = tmp_path / "stopped.db"
+    with closing(sqlite3.connect(db)) as conn:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("CREATE TABLE t (x)")
+        conn.execute("INSERT INTO t VALUES (1)")
+        conn.commit()
+    assert not Path(str(db) + "-wal").exists()  # Closed cleanly: checkpointed, no sidecars.
+    with closing(cap._readonly(db)) as conn:
+        assert conn.execute("SELECT count(*) FROM t").fetchone() == (1,)
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["stopped.db"]
