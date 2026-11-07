@@ -8525,21 +8525,19 @@ class LCMEngine(
         if replay_candidates:
             try:
                 with self._ingest_evidence():
-                    conn = self._store._conn
                     sources = [sid for idx, sid in stored_at.items() if idx in replay_candidates]
                     targets = sorted({row["store_id"] for rows in replay_candidates.values() for row in rows})
-                    existing = []
-                    if sources and conn.execute("SELECT 1 FROM sqlite_master WHERE name='message_relations'").fetchone():
-                        # Only the relations of this batch's sources and their candidate targets.
-                        ids = sorted({*sources, *targets})
-                        marks = ",".join("?" * len(ids))
-                        existing = list(conn.execute(
-                            "SELECT store_id,related_store_id FROM message_relations WHERE kind='possible_replay_of'"
-                            f" AND (store_id IN ({marks}) OR related_store_id IN ({marks}))", (*ids, *ids)))
+                    # Only the relations of this batch's sources and their candidate targets,
+                    # read in chunks (the store helper bounds each query's variables).
+                    existing = [(row["store_id"], row["related_store_id"])
+                                for ids, related in ((sources, False), (targets, True))
+                                for row in self._store.get_message_relations(ids, "possible_replay_of", related=related)]
                     linked, used = {row[0] for row in existing}, {row[1] for row in existing}
                     groups, batch_used = [], set()
                     # Compare durable identities after protection; links never authorize skipping.
-                    durable = self._store.get_batch(sources)
+                    durable = {}
+                    for start in range(0, len(sources), 500):  # bounded variables per query
+                        durable.update(self._store.get_batch(sources[start:start + 500]))
                     for idx, sid in stored_at.items():
                         if sid not in durable or sid in linked:
                             continue
