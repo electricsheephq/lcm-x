@@ -8,8 +8,10 @@ opens the pinned snapshot itself, only its clones; P2 hashes its files and check
 
 The rules module (``rules_module`` in the run config, a pinned file in the instrument directory, imported only after
 P1) provides ``identity(row)``, ``credits`` (the two host-rewrite credits, each ``(row, host_row) -> bool``) and
-``covered(session_id)`` for planning. The edition steps are argv templates in the config: ``constants_argv`` writes
-``{out}/constants.json`` (with ``range_new_rows``) and ``replay_argv`` writes ``{out}/receipt.json``.
+``covered(session_id)`` for planning. The edition steps are argv templates in the config (placeholders ``{python}``,
+``{t0}``, ``{h8}``, ``{out}``, ``{instrument_dir}``, ``{rc_tree}``, ``{ga_tree}`` and ``{session_h12}``):
+``constants_argv`` must leave the generator's report, with ``range_new_rows``, at ``{out}/constants.json``, and
+``replay_argv`` writes the edition's receipt, named by ``replay_receipt`` (default ``receipt.json``), in ``{out}``.
 """
 
 import argparse
