@@ -154,7 +154,7 @@ from .compaction import CompactionMixin
 from . import leaf_prep
 from .compaction_request import CompactionRequest
 from .compress_run import CompressRun
-from .identity_anchor import IdentityAnchorMixin, _raw_remainder
+from .identity_anchor import IdentityAnchorMixin, _ROTATION_LINEAGE_UNRECORDED, _raw_remainder
 from .host_uid import HostUidShadowMixin, _valid_uid
 from .host_uid_emit import carry_identity, identity_emit_enabled, record_absorbed_message, sync_cached_host_metadata
 from .store_complete import HiddenBacklog, StoreCompleteMixin
@@ -5662,6 +5662,7 @@ class LCMEngine(
             )
         except Exception as exc:  # lineage is best-effort; rotation still continues
             self._rotation_lineage_unrecorded = getattr(self, "_rotation_lineage_unrecorded", set()) | {session_id}
+            _ROTATION_LINEAGE_UNRECORDED.add((str(self._db_path), str(session_id)))  # survives clones in this process
             logger.warning(
                 "LCM rotation lineage write failed: session=%s predecessor=%s exception=%s",
                 session_id,

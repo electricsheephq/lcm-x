@@ -59,6 +59,7 @@ _PRESENCE_WINDOW_ROWS = 10000  # total stored rows across the presence scope
 _PRESENCE_WINDOW_BYTES = 104_000_000  # characters (code points) of stored content and tool-call text across the scope
 _PRESENCE_TEXT_BYTES = 8_000_000  # characters of stored text the audit normalizes (rows of a candidate's text role)
 _PRESENCE_WINDOW_LOGGED: set[tuple[str, int, str]] = set()  # store file and session, once per process
+_ROTATION_LINEAGE_UNRECORDED: set[tuple[str, str]] = set()  # store file and session whose predecessor write failed, per process
 
 
 def _ws_equivalent(stored, identity) -> bool:
@@ -579,11 +580,15 @@ class IdentityAnchorMixin:
         if missed:
             # Class A (#2071 rule): the cursor resumes only behind rows that are accounted for. A position no longer
             # proves a row stored once the host changed the list, and the audit above never examines tool rows.
+            # A host object this process stored and now sees rewritten in place (R6) is never credited as present nor
+            # made a positional replay here: the version rewind still stores its new version, as on main (#2466 review).
+            rewritten = {idx for idx in self._identity_anchor_rewritten(messages, cursor)
+                         if idx >= plan.get("accepted_prefix", 0) and idx not in plan["replayed"] and idx not in excluded}
             missed = sorted({*missed, *self._identity_anchor_unaccounted(
-                messages, identity_messages, cursor, start, identity_at, held, capped, consumed, plan, matched, excluded,
-                missed)})
+                messages, identity_messages, cursor, start, identity_at, held, capped, consumed, plan, matched,
+                set(excluded) | rewritten, missed)})
             plan["cursor"] = min(missed)
-            plan["positional"] = {idx for idx in range(min(missed), cursor) if idx not in missed}
+            plan["positional"] = {idx for idx in range(min(missed), cursor) if idx not in missed and idx not in rewritten}
             plan["replayed"].update(plan["positional"])
             logger.warning("LCM identity-anchor: host changed its list before the cursor; %d row(s) from %d are neither "
                            "stored nor compaction outputs; storing them: session=%s",
@@ -651,7 +656,8 @@ class IdentityAnchorMixin:
         explained = set(excluded) | set(matched) | set(plan.get("matched", {})) | plan["replayed"] | set(missed)
         try:
             candidates = {idx: key(identity_messages[idx]) for idx in range(start, cursor)
-                          if idx not in explained and not (identity_at(idx) is None and
+                          if idx not in explained and identity_messages[idx].get("role") != "system"
+                          and not (identity_at(idx) is None and
                           self._identity_is_lcm_scaffold(identity_messages[idx]))
                           and not self._matches_ignore_message_patterns(messages[idx])}
             session = str(self._session_id)
@@ -667,7 +673,8 @@ class IdentityAnchorMixin:
                 if next_source != (predecessors[hop] if hop < len(predecessors) else None):
                     raise ValueError("incomplete rotation predecessor scope")
             scope = list(dict.fromkeys([session, *chain, *predecessors]))
-            if set(scope) & getattr(self, "_rotation_lineage_unrecorded", set()):
+            failed = {session_id for path, session_id in _ROTATION_LINEAGE_UNRECORDED if path == str(self._db_path)}
+            if set(scope) & (getattr(self, "_rotation_lineage_unrecorded", set()) | failed):
                 # Any session of the scope whose own predecessor write failed ends the scope early (#2466 review).
                 raise ValueError("unrecorded rotation lineage")
             rows = {int(row["store_id"]): row for group in held.values() for row in group}
