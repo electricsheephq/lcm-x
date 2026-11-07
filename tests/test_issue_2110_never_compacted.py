@@ -79,7 +79,8 @@ def test_a_scaffold_shaped_user_turn_is_stored_in_a_never_compacted_session(tmp_
         reply = {"role": "assistant", "content": "reply to the quoting turn"}
         view = [*host, turn, reply] if place == "after-tail" else [*host[:-1], turn, host[-1], reply]
         additions = [turn, reply]
-        # Before-last: warm reconciliation replays the last row; the cold plain control replays the whole view.
+        # Before-last: main stores host[-1] again (warm) and the whole view again (cold plain control). These rows are
+        # unstamped, and unstamped rewrites cost duplicates, never loss (#2203, docs/exactly-once-ingest.md section 3.5).
         if place == "before-last-row":
             if restart and shape == "plain":
                 additions = view

@@ -117,7 +117,8 @@ def test_a_user_turn_shaped_like_scaffold_is_stored_after_a_legacy_restart(tmp_p
         # Compaction keeps the original raw history; the emitted summary head is not stored.
         prefix = [(row["role"], row["content"]) for row in [*_pre, host[-1]] if row["role"] != "system"]
         _expect_stored_once(_stored(engine), prefix)
-        # Before-last reconciliation replays the last row, except the v4 task-header path, which appends only reply.
+        # Before-last reconciliation stores the last row again, except the v4 task-header path, which appends only
+        # reply: unstamped rewrites cost duplicates, never loss (#2203, docs/exactly-once-ingest.md section 3.5).
         replay_last = place == "before-last-row" and not (shape == "todo-prefix" and version == 4)
         additions = [row for row in view if row is turn or row is reply or (replay_last and row is host[-1])]
         fixed = prefix + [(row["role"], row["content"]) for row in additions]
@@ -150,6 +151,7 @@ def test_a_scaffold_shaped_user_turn_is_stored_past_a_stale_v4_proof(stub_first_
     host.clock += 0.5
     host.live = [*host.live[:-1], {"role": "user", "content": quoted, "timestamp": host.clock}, host.live[-1]]
     # Raw history stays in store order; stale-proof recovery also appends the summary head for these two shapes.
+    # That is main's shape today, pinned so any change shows; it is a surplus row to check against section 5.
     additions = ([host.live[0]] if stale and shape in ("summary-part", "objective-prefix") else []) + [host.live[-2]]
     fixed = prefix + [(row["role"], row["content"]) for row in additions]
     host.cold_rebind()
