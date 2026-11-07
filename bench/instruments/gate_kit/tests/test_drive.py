@@ -300,7 +300,7 @@ def test_compress_request_precedes_triggering_turn(tmp_path, monkeypatch, slot, 
 
     def trigger(s, prompt):
         requests = [e for e in audit.read_events(ev.path) if e["kind"] == "compress_request"] if ev.path.exists() else []
-        assert len(requests) == int(len(sent) == age_turns + 1)
+        assert len(requests) == 1 + int(len(sent) == age_turns + 1)  # phase=paste, then phase=trigger
         sent.append(prompt)
         return send(s, prompt)
 
@@ -310,7 +310,9 @@ def test_compress_request_precedes_triggering_turn(tmp_path, monkeypatch, slot, 
     assert len(attempts) == 1
     assert sent == [ix] + [drive.CATS["plain"][(ix + j) % len(drive.CATS["plain"])] for j in range(age_turns + 1)]
     sequence = [e["kind"] for e in events if e["kind"] != "source2_session"]
-    assert sequence == ["turn"] * (age_turns + 1) + ["compress_request", "turn", "compress_result"]
+    assert sequence == ["compress_request"] + ["turn"] * (age_turns + 1) + ["compress_request", "turn", "compress_result"]
+    assert [e["detail"] for e in events if e["kind"] == "compress_request"] == [f"slot={slot} phase=paste",
+                                                                                f"slot={slot} phase=trigger"]
     assert events[-3]["session"] == d.slots[slot]["session"]
     assert any(e["kind"] == "compress_result" and "manual=compressed" in e["detail"] for e in events)
 
@@ -388,13 +390,49 @@ def test_compress_noop_retries_are_bounded_and_summary_counts_real(tmp_path, mon
     n = min(noops + 1, 3)
     events = [json.loads(x) for x in ev.path.read_text().splitlines()]
     sequence = [e for e in events if e["kind"] in ("compress_request", "turn", "compress_result")]
-    assert [e["kind"] for e in sequence] == (["turn"] * 5 + ["compress_request", "turn", "compress_result"]) * n
-    assert [e["retry"] for e in sequence if e["kind"] == "compress_request"] == list(range(n))
+    assert [e["kind"] for e in sequence] == (
+        ["compress_request"] + ["turn"] * 5 + ["compress_request", "turn", "compress_result"]) * n
+    assert [e["retry"] for e in sequence if e["kind"] == "compress_request"] == [r for r in range(n) for _ in "pt"]
     assert len(attempts) == n and summary["prompts_by_category"] == {"long": n, "plain": n * 5}
     assert summary["executed"] == {"compress": 1}  # retries do not change the seeded plan's op counts
     assert summary["compactions"] == {"planned": 1, "requests": n, "real": int(noops < 3),
                                       "noop": min(noops, 3) if missing == "noop" else 0,
-                                      "log_none": min(noops, 3) if missing == "none" else 0}
+                                      "log_none": min(noops, 3) if missing == "none" else 0, "stop_reasons": {}}
+
+
+@pytest.mark.parametrize("slot", ["A1", "T1"])
+def test_compress_records_lcm_stop_reasons(tmp_path, monkeypatch, slot):
+    d, ev, _log = stub_driver(tmp_path)
+    messages = ["LCM compaction stop: reason=sanitized", "LCM compaction stop: reason=time_budget_exhausted",
+                "LCM compaction #1: published"]
+    compress_stub_log(d, slot, monkeypatch, messages, logger="hermes_lcm.compaction")
+    summary = d.run([{"op": "compress", "slot": slot, "prompt": drive.CATS["long"][0]}], {"delegated_children": 0})
+    results = [json.loads(x) for x in ev.path.read_text().splitlines() if '"compress_result"' in x]
+    assert [e["stop_reasons"] for e in results] == [["sanitized"], ["time_budget_exhausted"], []]
+    assert summary["compactions"]["stop_reasons"] == {"sanitized": 1, "time_budget_exhausted": 1}
+    assert summary["compactions"]["real"] == 1 and summary["compactions"]["log_none"] == 2
+
+
+def test_compaction_during_paste_ageing_counts_for_the_attempt(tmp_path, monkeypatch):
+    d, ev, _log = stub_driver(tmp_path)
+    attempts = compress_stub_log(d, "A1", monkeypatch, ["LCM compression no-op: below leaf chunk threshold"] * 3)
+    send, sent = d.send, []
+
+    def ageing(slot, prompt):
+        sent.append(prompt)
+        if len(sent) == 2:  # the first ageing turn compacts automatically
+            with (d.logs / "acp.stderr").open("a") as fh:
+                fh.write("2026-11-06 10:00:01 INFO hermes_lcm.compaction: LCM compaction #2: published\n")
+        return send(slot, prompt)
+
+    monkeypatch.setattr(d, "send", ageing)
+    summary = d.run([{"op": "compress", "slot": "A1", "prompt": drive.CATS["long"][0]}], {"delegated_children": 0})
+    assert len(attempts) == 1  # the ageing compaction is this attempt's: no retry
+    assert summary["compactions"]["real"] == 1 and summary["compactions"]["requests"] == 1
+    events = [json.loads(x) for x in ev.path.read_text().splitlines()]
+    paste = next(e for e in events if e["kind"] == "compress_request")
+    assert paste["detail"] == "slot=A1 phase=paste"
+    assert paste["t"] <= min(e["t"] for e in events if e["kind"] == "turn")  # its window opens before the paste
 
 
 def test_shared_acp_restart_records_all_bound_sessions(tmp_path):
@@ -613,9 +651,15 @@ def test_failed_compress_request_is_not_attributed(tmp_path, monkeypatch, slot, 
     monkeypatch.setattr(d, "send", fail)
     d.guarded({"op": "compress", "slot": slot, "prompt": drive.CATS["long"][0]})
     events = [json.loads(x) for x in ev.path.read_text().splitlines()]
-    request = next(e for e in events if e["kind"] == "compress_request")
-    assert any(e["kind"] == "compress_request_failed" and e["session"] == request["session"] for e in events)
-    assert audit.attribute_compactions([(None, request["t"])], audit.read_events(ev.path)) == ([(None, request["t"])], 1)
+    kinds = [e["kind"] for e in events if e["kind"].startswith("compress_request")]
+    assert kinds == ["compress_request", "compress_request", "compress_request_failed"]
+    request = [e for e in events if e["kind"] == "compress_request"][-1]
+    assert request["detail"].endswith("phase=trigger")
+    # The failed trigger request is dropped; only the paste-phase window (the paste and ageing turns did run)
+    # remains, so of two lines at the trigger's time exactly one is attributed.
+    lines = [(None, request["t"]), (None, request["t"])]
+    assert audit.attribute_compactions(lines, audit.read_events(ev.path)) == (
+        [(request["session"], request["t"]), (None, request["t"])], 1)
     ev.write("compress_request", request["session"], t=request["t"] + 300)
     assert audit.attribute_compactions([(None, request["t"] + 300)], audit.read_events(ev.path)) == (
         [(request["session"], request["t"] + 300)], 0)
@@ -896,5 +940,6 @@ def test_compress_deadline_after_a_noop_attempt_still_counts_the_op(tmp_path, mo
     monkeypatch.setattr(d.ev, "write", write)
     d.op({"op": "compress", "slot": slot, "prompt": drive.CATS["long"][0]})
     events = [json.loads(x) for x in ev.path.read_text().splitlines()]
-    assert [e["kind"] for e in events if e["kind"].startswith("compress")] == ["compress_request", "compress_result"]
+    assert [e["kind"] for e in events if e["kind"].startswith("compress")] == [
+        "compress_request", "compress_request", "compress_result"]  # phase=paste, phase=trigger, one result
     assert d.done["compress"] == 1
