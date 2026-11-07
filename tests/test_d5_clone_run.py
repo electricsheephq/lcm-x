@@ -416,8 +416,8 @@ def test_a_not_shown_bind_is_inconclusive_never_pass(tmp_path, monkeypatch, rang
 class UnreadableFinal(FakeHost):
     """The arm's store goes bad after its checks: its final rows read raises, and its checks report the failure."""
 
-    def __init__(self, config, run_dir, arm):
-        super().__init__(config, run_dir)
+    def __init__(self, config, run_dir, arm, fail=None):
+        super().__init__(config, run_dir, fail=fail)
         self.bad = arm
 
     def rows(self, path):
@@ -435,13 +435,28 @@ def test_an_unreadable_final_store_keeps_its_failed_checks_and_never_passes(setu
     _, config, run_dir = setup
     host = UnreadableFinal(config, run_dir, arm)
     receipt = r.run(host, rc_id="rc-synthetic")  # A receipt, not a crash.
-    for bar in ("bar1", "bar3"):
-        assert receipt["bars"][bar] == {"verdict": bars.INCONCLUSIVE, "rows_unreadable": [arm]}
     if arm == "rc":
+        for bar in ("bar1", "bar3"):
+            assert receipt["bars"][bar] == {"verdict": bars.INCONCLUSIVE, "rows_unreadable": ["rc"]}
         assert receipt["bars"]["bar5"]["verdict"] == bars.FAIL and receipt["verdict"]["raw"] == bars.FAIL
     else:
+        assert (receipt["bars"]["bar1"]["verdict"], receipt["bars"]["bar1"]["rows_unreadable"]) == (
+            bars.INCONCLUSIVE, ["ga"])
+        assert receipt["bars"]["bar3"]["verdict"] == bars.PASS  # Bar 3 never reads GA's rows.
         assert host.armed == ["rc", "ga", "ga"] and receipt["ga_rerun"] is not None  # The GA failure re-runs it.
         assert receipt["verdict"]["raw"] != bars.PASS
+
+
+class UnreadableGaRowsOnly(UnreadableFinal):
+    def checks(self, ctx):  # GA's checks stay ok: no rerun, and only its rows are missing.
+        return FakeHost.checks(self, ctx)
+
+
+def test_unreadable_ga_rows_never_hide_an_rc_failure(setup):
+    _, config, run_dir = setup
+    receipt = r.run(UnreadableGaRowsOnly(config, run_dir, "ga", fail="lose"), rc_id="rc-synthetic")
+    assert receipt["bars"]["bar1"]["verdict"] == bars.FAIL and receipt["bars"]["bar1"]["lost"] > 0
+    assert receipt["verdict"]["raw"] == bars.FAIL
 
 
 def test_the_rules_module_can_import_its_pinned_siblings(tmp_path):

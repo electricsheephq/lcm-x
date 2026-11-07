@@ -576,7 +576,7 @@ def run(host, *, rc_id, prior=(), instrument_fix=None):
     snap = host.rows(base)
     unreadable = [a for a in arms if arms[a]["rows"] is None]
     for a in unreadable:
-        arms[a]["rows"] = {"store": [], "host": []}  # Placeholders only: bars 1 and 3 are INCONCLUSIVE below.
+        arms[a]["rows"] = {"store": [], "host": []}  # Placeholders only: unreadable rc rows make bars 1 and 3 INCONCLUSIVE below; unreadable GA rows alone keep a bar 1 FAIL.
     tops = {k: max((r[c] for r in snap[k]), default=0) for k, c in (("store", "store_id"), ("host", "id"))}
     new = {a: [r for r in arms[a]["rows"]["store"] if r["store_id"] > tops["store"]] for a in arms}
     binds, hosts = arms["rc"]["binds"], [r for r in arms["rc"]["rows"]["host"] if r["id"] > tops["host"]]
@@ -584,7 +584,10 @@ def run(host, *, rc_id, prior=(), instrument_fix=None):
                         window_start=max((b["t0_at"] for b in binds), default=None),
                         bind_receipts=[b["receipt"] for b in binds if isinstance(b["receipt"], dict)])
     results = {
-        "bar1": bars.bar1(new["rc"], hosts, snap["store"] + snap["host"], new["ga"], binds,
+        # GA rows unreadable: GA's class-3 allowance is unknown, so it is set to the rc's own rows (never exceeded);
+        # a lost or settled unassigned row still fails, and the class-3 judgment is left INCONCLUSIVE below.
+        "bar1": bars.bar1(new["rc"], hosts, snap["store"] + snap["host"],
+                          new["rc"] if "ga" in unreadable else new["ga"], binds,
                           {b["bind"]: b["bar2"]["verdict"] for b in binds}, rules["identity"], rules["credits"],
                           missing_receipts=[b["bind"] for b in binds if not isinstance(b["receipt"], dict)]),
         "bar2": bars.bar2([b["bar2"] for b in binds]),
@@ -593,9 +596,12 @@ def run(host, *, rc_id, prior=(), instrument_fix=None):
         "bar5": bars.bar5(arms["rc"]["checks"], arms["ga"]["checks"], ga_rerun and ga_rerun["checks"],
                           bool(ga_rerun) and bars.workload_items(ga_rerun["workload"])["turns_completed"]),
         "bar6": bars.bar6({a: arms[a]["workload"] for a in arms})}
-    if unreadable:
+    if "rc" in unreadable:  # Bars 1 and 3 judge the rc's rows: without them neither can pass or fail.
         for bar in ("bar1", "bar3"):
             results[bar] = {"verdict": bars.INCONCLUSIVE, "rows_unreadable": unreadable}
+    elif unreadable:  # Only GA's rows: bar 3 never reads them, and an rc failure bar 1 finds without GA stands.
+        verdict = bars.FAIL if results["bar1"]["verdict"] == bars.FAIL else bars.INCONCLUSIVE
+        results["bar1"] = {**results["bar1"], "verdict": verdict, "rows_unreadable": unreadable}
     receipt.update(
         arms={a: {**{k: arms[a][k] for k in ("workload", "egress", "provider", "doctor_not_exercised", "cron_paused")},
                   "checks": bars.check_counts(arms[a]["checks"])} for a in arms},
