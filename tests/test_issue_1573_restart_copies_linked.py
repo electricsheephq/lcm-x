@@ -1,8 +1,8 @@
 """#1573 check (C1): the repeated-restart copies of the issue's count table (V3 with three restarts, V5, V7) are
 linked ``possible_replay_of`` at shipped defaults, so they are visible duplicates, never silent surplus.
 
-The invariant holds with or without the #1573 fix: every stored row beyond the genuine occurrences carries a link to
-an earlier stored row with the same role and content. A fix that stops storing the copies keeps it (no copies, no
+The invariant holds with or without the #1573 fix: every row a restart stored beyond the genuine occurrences carries a
+link to an earlier stored row with the same role and content. A fix that stops storing the copies keeps it (no copies, no
 links); a change that stores a copy without a link fails it.
 """
 import pytest
@@ -48,6 +48,10 @@ def test_every_restart_copy_is_linked_as_a_possible_replay(tmp_path, shape, cls)
     try:
         for labels in before:
             engine.ingest(_view(labels, cls))
+        # Without a stamp, V5's second B0 can first be stored by the restart's ingest, so it may still be missing here.
+        before_ids = {row["store_id"] for row in engine._store.get_session_messages(SESSION)}
+        if len(before_ids) > genuine:
+            pytest.fail("setup: more rows than genuine occurrences were stored before the restarts")
         for _ in range(restarts):
             engine.shutdown()
             engine = _engine(tmp_path)
@@ -63,4 +67,7 @@ def test_every_restart_copy_is_linked_as_a_possible_replay(tmp_path, shape, cls)
     for store_id, target in links:
         assert target < store_id
         assert (rows[target]["role"], rows[target]["content"]) == (rows[store_id]["role"], rows[store_id]["content"])
-    assert len(copies) >= len(rows) - genuine, "a restart copy is stored without a possible_replay_of link"
+    # Rows the restarts added: all but the genuine occurrences still missing before them are copies, and each needs its
+    # own link (a link on a row stored before the restarts cannot stand in for one).
+    unlinked = (set(rows) - before_ids) - copies
+    assert len(unlinked) <= genuine - len(before_ids), "a restart copy is stored without a possible_replay_of link"
