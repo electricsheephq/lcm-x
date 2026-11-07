@@ -44,13 +44,13 @@ To turn capture off for a launch, set `LCMX_CAPTURE=off`, or start Claude Code w
 - **A subagent transcript removed before the worker first reads it** cannot be captured, and the audit cannot see that it existed.
 - **Audit memory.** The audit needs memory roughly in proportion to the largest session in the store: about 1.2 GB for a 625,000-line session. Capture itself stays under about 400 MB.
 - **Hook timing under heavy load.** Hooks usually hand off in milliseconds. Under heavy disk and memory pressure from other work, the hook's write of its small pointer file can stall.
-  - In one full run of the release gate, 8 of 670 hook runs took over 2 s, all of them in that write. The runs with stalls started at 1-minute loads of 20 to 37.
+  - In one full run of the release gate (on an earlier 0.1.0 candidate with the same hook code), 8 of 670 hook runs took over 2 s, all of them in that write. The runs with stalls started at 1-minute loads of 20 to 37.
   - The slowest, 7.6 to 8.3 s, came from the background hook or during the stress tests' scripted hook bursts. In an ordinary session, the slowest blocking hook took 3.8 s.
   - A rerun of the compaction session, with no other job from this gate running, saw the load go from 5 to 88 as other jobs started; the slowest of its 54 hooks took 526 ms.
 
   `PostToolBatch` runs in the background. The other hooks run before Claude Code goes on, with a 5-second limit (15 seconds for `PreCompact`), so a stall there adds to the turn.
 
-  No audit lost anything. A hook cut off at its time limit is designed to be caught up by the next hook, or the next time Claude Code starts. The gate did not exercise that path: no hook was cut off, including the ones that ran past 5 s. Tracked in #2350.
+  No audit lost anything. A hook cut off at its time limit is designed to be caught up by the next hook, or the next time Claude Code starts. No hook was seen killed at its time limit, and the ones that ran past 5 s finished; that catch-up path was not exercised. Tracked in #2350.
 - **Leftover temporary files.** A hook that is killed mid-write can leave an empty `.tmp` file in the store's `spool` folder. It holds nothing and is safe to delete; capture is unaffected.
 
 ## What it bundles
