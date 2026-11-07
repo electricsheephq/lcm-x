@@ -1,0 +1,1 @@
+- Fix: Make possible replay copies of a recovered user turn visible after a restart, while preserving new same-text requests.
