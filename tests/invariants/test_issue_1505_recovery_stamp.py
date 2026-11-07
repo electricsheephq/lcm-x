@@ -424,3 +424,80 @@ def test_recovery_receipt_never_vouches_for_a_later_user_turn(tmp_path: Path, sh
             retry[-1]["message_uid"] = "new-B-occurrence"
         engine.ingest([*retry, message("response to B retry", 51., "assistant")])
         assert len([r for r in users(engine) if r["content"] == later]) >= 2
+
+
+@pytest.mark.parametrize("stop", ["after-compress", "after-stamped-note", "after-restart-stamped-note"])
+def test_durable_recovery_receipt_after_restart(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stop: str) -> None:
+    """I1/I2: a restart before the host rewrite must leave no silent surplus or missing turn."""
+    pin_char_counter(monkeypatch)
+    ScriptedSummarizer("outage").install(monkeypatch)
+    lineage(tmp_path)
+    current = message("[T32] rebuild the index " * 500, 20.)
+    source = [message("[T31] earlier request", 10.), message("earlier reply", 11., "assistant"), current,
+              {"role": "tool", "content": "orphan result", "tool_call_id": "orphan", "timestamp": 21.}]
+    with engine_context(tmp_path, window=128000, session_id="parent", conversation_id="conv") as engine:
+        engine.ingest(source)
+        original = [(r["store_id"], r["content"]) for r in engine._store.get_session_messages("parent")]
+        recovered_id = next(r["store_id"] for r in users(engine) if r["content"] == current["content"])
+        engine._config.fresh_tail_count, engine._config.max_assembly_tokens = 64, 120
+        view = list(engine.compress(source, current_tokens=100, force=True))
+        assert engine._last_compression_status == "overflow_recovery"
+        view[-1]["timestamp"] = 30.
+        if stop == "after-stamped-note":
+            engine.ingest(deepcopy(view))
+    with engine_context(tmp_path, window=128000, session_id="parent", conversation_id="conv") as engine:
+        if stop == "after-restart-stamped-note":
+            engine.ingest(deepcopy(view))
+        view[-1]["content"] = current["content"]
+        view.append(message("reply", 31., "assistant"))
+        engine.ingest(deepcopy(view))
+        rows = engine._store.get_session_messages("parent")
+        assert [(r["store_id"], r["content"]) for r in rows[:len(original)]] == original
+        copies = [r for r in users(engine) if r["content"] == current["content"]]
+        relations = engine._store.get_message_relations([r["store_id"] for r in copies], "possible_replay_of")
+        linked = {r["store_id"] for r in relations if r["related_store_id"] == recovered_id}
+        assert {r["store_id"] for r in copies} - {recovered_id} - linked == set(), "silent recovery surplus"
+        count = len(copies)
+        engine.ingest([*deepcopy(view), message("next request", 40.)])
+        assert len([r for r in users(engine) if r["content"] == current["content"]]) == count
+        fresh = [*deepcopy(view), message(current["content"], 50.)]
+        engine.ingest(fresh)
+        new = next(r for r in users(engine) if r["content"] == current["content"] and r["observed_at"] == 50.)
+        assert engine._store.get_message_relations([new["store_id"]], "possible_replay_of") == []
+    with engine_context(tmp_path, window=128000, session_id="parent", conversation_id="foreign") as engine:
+        foreign = deepcopy(view)
+        engine.ingest(foreign)
+        new = next(r for r in users(engine) if r["content"] == current["content"]
+                   and r["conversation_id"] == "foreign")
+        assert engine._store.get_message_relations([new["store_id"]], "possible_replay_of") == []
+
+
+def test_durable_recovery_receipt_foreign_first(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """I2: a foreign conversation cannot claim the original recovery's first observed stamp."""
+    pin_char_counter(monkeypatch)
+    ScriptedSummarizer("outage").install(monkeypatch)
+    lineage(tmp_path)
+    current = message("[T32] rebuild the index " * 500, 20.)
+    source = [message("[T31] earlier request", 10.), message("earlier reply", 11., "assistant"), current,
+              {"role": "tool", "content": "orphan result", "tool_call_id": "orphan", "timestamp": 21.}]
+    with engine_context(tmp_path, window=128000, session_id="parent", conversation_id="conv") as engine:
+        engine.ingest(source)
+        recovered_id = next(r["store_id"] for r in users(engine) if r["content"] == current["content"])
+        engine._config.fresh_tail_count, engine._config.max_assembly_tokens = 64, 120
+        view = list(engine.compress(source, current_tokens=100, force=True))
+        assert engine._last_compression_status == "overflow_recovery"
+        before = engine._store._conn.execute("SELECT * FROM ledger_emissions ORDER BY emission_id").fetchall()
+    with engine_context(tmp_path, window=128000, session_id="parent", conversation_id="foreign") as engine:
+        foreign = deepcopy(view)
+        foreign[-1]["timestamp"] = 40.
+        engine.ingest(foreign)
+        assert engine._store._conn.execute("SELECT * FROM ledger_emissions ORDER BY emission_id").fetchall() == before
+        foreign_ids = [r["store_id"] for r in users(engine) if r["conversation_id"] == "foreign"]
+        assert engine._store.get_message_relations(foreign_ids, "possible_replay_of") == []
+    with engine_context(tmp_path, window=128000, session_id="parent", conversation_id="conv") as engine:
+        view[-1].update(content=current["content"], timestamp=30.)
+        engine.ingest([*deepcopy(view), message("reply", 31., "assistant")])
+        copies = [r for r in users(engine) if r["content"] == current["content"] and r["conversation_id"] == "conv"]
+        assert {r["store_id"] for r in copies} == {recovered_id} | {
+            rel["store_id"] for rel in engine._store.get_message_relations(
+                [r["store_id"] for r in copies], "possible_replay_of") if rel["related_store_id"] == recovered_id}

@@ -367,9 +367,12 @@ def insert_bindings(conn, lineage, rows):
 def insert_emissions(conn, lineage, view_seq, rows):
     _require_owner(conn)
     return [conn.execute(
-        "INSERT INTO ledger_emissions(lineage,view_seq,output_index,descriptor_digest,kind,source_store_ids,state,next_occ_id) "
-        "VALUES (?,?,?,?,?,?,'proposed',NULL)",
-        (lineage, view_seq, row["output_index"], row["descriptor_digest"], row["kind"], '[]'),
+        "INSERT INTO ledger_emissions(lineage,view_seq,output_index,descriptor_digest,kind,source_store_ids,state,next_occ_id,recovered_store_id) "
+        "VALUES (?,?,?,?,?,?,'proposed',NULL,(SELECT CASE WHEN count(*)=1 THEN min(store_id) END "
+        "FROM messages WHERE role='user' AND session_id=? AND conversation_id IN (?, '') "
+        "AND observed_at=? AND content=?))",
+        (lineage, view_seq, row["output_index"], row["descriptor_digest"], row["kind"], '[]',
+         *(row.get("recovery_source") or (None, None, None, None))),
     ).lastrowid for row in rows]
 
 

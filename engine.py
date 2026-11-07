@@ -7385,7 +7385,11 @@ class LCMEngine(
             lineage = persisted[0] if persisted else ingest_ledger.lineage_key(resolved, sid)
             entries, _stamps = self._ledger_view_entries(salt, returned)
             rows = [dict(output_index=i, descriptor_digest=entries[i].identity_digest,
-                         kind="scaffold" if d["kind"] == "objective" else d["kind"])
+                         kind="scaffold" if d["kind"] == "objective" else d["kind"],
+                         recovery_source=next(((str(sid), (self._conversation_id or "").strip(),
+                                                r.get("source_stamp"), normalize_content_value(r.get("source_content"))) for r in
+                             getattr(self, "_identity_anchor_recoveries", ())
+                             if d["kind"] == "recovery" and r["row"] is returned[i] and not r.get("blocked")), None))
                     for i, d in zip(indices, fresh)]
             conversation_key = self._hold_conversation_key()
             payload = dict(session_id=sid, rows=rows, indices=indices, entries=list(entries),
@@ -7726,6 +7730,12 @@ class LCMEngine(
                 lineage = persisted[0] if persisted else attempt["lineage"]
                 if persisted and attempt["resolved"] is not None and lineage != attempt["resolved"]:
                     delta["ledger.lineage_drift"] += 1
+                if (attempt.get("recovery_probe") or getattr(self, "_identity_anchor_durable_recovery_pending", False)
+                        or "recovery" in attempt.get("stored_markers", {}).values()):
+                    pending = self._identity_anchor_link_durable_recovery(attempt, lineage)
+                    if pending is not None:
+                        after_commit.append(lambda pending=pending: setattr(
+                            self, "_identity_anchor_durable_recovery_pending", pending))
                 markers = {idx: kind for idx, kind in attempt.get("stored_markers", {}).items()
                            if idx in attempt["stored"]}
                 flagged = set(markers)
@@ -8355,6 +8365,8 @@ class LCMEngine(
         if getattr(self, "_ingest_ledger_attempt", None) is not None:
             try:
                 # Freeze this transaction's decision; warm appends can retain an older status.
+                self._ingest_ledger_attempt["recovery_probe"] = (
+                    reconciled_existing_session and bool(bind_session_counts and bind_session_counts[0]))
                 self._ingest_ledger_attempt["cursor0_batch"] = (
                     reconciled_existing_session and cursor == 0
                     and self._last_ingest_reconciliation.get("action") == "persisted batch"
