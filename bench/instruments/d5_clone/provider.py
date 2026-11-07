@@ -21,6 +21,15 @@ def _sha(value):
     return hashlib.sha256(_json(value).encode("utf-8")).hexdigest()
 
 
+
+def _scripted(script, index):
+    """The scripted reply at index, or None (a replay miss) when there is none or it is not a usable reply: a dict
+    with a str "text" or a list of "tool_calls". An empty or null entry is a miss, never a silent fallback."""
+    entry = script[index] if isinstance(script, list) and index < len(script) else None
+    if isinstance(entry, dict) and (isinstance(entry.get("text"), str) or isinstance(entry.get("tool_calls"), list)):
+        return entry
+    return None
+
 class Provider:
     """Agent step indices are zero-based; log hashes cover canonical request/completion JSON."""
 
@@ -135,17 +144,15 @@ class Provider:
                     index = self.stats["calls_per_step"][self.step]
                     self.stats["calls_per_step"][self.step] += 1
                     script = self.plan.get("steps", {}).get(self.step, [])
-                    if index < len(script):
-                        entry = script[index]
-                    else:
+                    entry = _scripted(script, index)
+                    if entry is None:
                         self.stats["replay_misses"][self.step] += 1
             elif model == self.cron:
                 index = self.cron_index
                 self.cron_index += 1
                 script = self.plan.get("cron", [])
-                if index < len(script):
-                    entry = script[index]
-                else:
+                entry = _scripted(script, index)
+                if entry is None:
                     self.stats["replay_misses"]["cron"] += 1
             else:
                 if model not in self.models:
