@@ -11,6 +11,10 @@ import pytest
 from bench.instruments.release_gauntlet import kit_evidence as kit
 
 
+def _h(name):
+    return "h:" + kit._sha(name)[:12]
+
+
 def _write(path, text):
     path.write_text(text, encoding="utf-8")
     return path
@@ -55,7 +59,8 @@ def test_import_events_and_privacy(tmp_path):
     result = kit.trace_events([_write(tmp_path / "host.log", text)])
     assert result["optional_import_traces_total"] == 3
     assert result["by_event"] == [
-        {"logger": "agent.optional", "missing_module": None, "count": 1, "per_event_counts": [1]},
+        {"logger": "agent.optional", "missing_module": "f:" + kit._fingerprint("ImportError: " + marker), "count": 1,
+         "per_event_counts": [1]},
         {"logger": "agent.relay_runtime", "missing_module": "optional.module", "count": 2, "per_event_counts": [2]}]
     assert result["other_tracebacks"] == {"ValueError": 1}
     assert result["unattributed"] == 0
@@ -261,8 +266,8 @@ def test_doctor_signature_causes_hold_no_values(tmp_path):
     assert result["verdict"] == "MATCHED"
     assert result["candidate_signatures"] == [{
         "check": "lifecycle_fragmentation", "status": "warn", "detail_type": "dict",
-        "detail_keys": ["empty_lifecycle_rows", "state_db_error"],
-        "causes": {"empty_lifecycle_rows": True, "state_db_error": "f:" + kit._fingerprint("PRIVATE_STATE")}}]
+        "detail_keys": [_h("empty_lifecycle_rows"), _h("state_db_error")],
+        "causes": {_h("empty_lifecycle_rows"): True, _h("state_db_error"): "f:" + kit._fingerprint("PRIVATE_STATE")}}]
     assert "PRIVATE_STATE" not in json.dumps(result)
 
 
@@ -374,13 +379,13 @@ def test_doctor_detail_keys_from_data_are_hashed(tmp_path):
              for name in ("candidate.json", "previous.json")]
     result = kit.doctor_match(*paths)
     assert result["candidate_signatures"][0]["detail_keys"] == [
-        "h:" + hashlib.sha256(key.encode()).hexdigest()[:12], "rows"]
+        "h:" + hashlib.sha256(key.encode()).hexdigest()[:12], _h("rows")]
     assert "PRIVATE_KEY_NAME" not in json.dumps(result)
 
 
 @pytest.mark.parametrize("final,name", [("Exception: failed", "Exception"), ("SystemExit: 2", "SystemExit"),
                                         ("KeyboardInterrupt", "KeyboardInterrupt"),
-                                        ("pkg.mod.CustomError: x", "pkg.mod.CustomError")])
+                                        ("pkg.mod.CustomError: x", _h("pkg.mod.CustomError"))])
 def test_bare_and_dotted_traceback_terminators_are_counted(tmp_path, final, name):
     result = kit.trace_events([_write(tmp_path / "host.log", _log("agent", "start", "INFO") + _trace(final))])
     assert result["other_tracebacks"] == {name: 1}
@@ -503,8 +508,8 @@ def test_doctor_dict_string_causes(tmp_path, candidate, previous, verdict):
     assert all(word not in encoded for word in ("sessions", "locked", "degraded", "/a/x.db", "48213"))
 
 
-@pytest.mark.parametrize("final,name", [("ProviderCircuitOpen: open", "ProviderCircuitOpen"),
-                                        ("pkg.ProviderRateLimited", "pkg.ProviderRateLimited")])
+@pytest.mark.parametrize("final,name", [("ProviderCircuitOpen: open", _h("ProviderCircuitOpen")),
+                                        ("pkg.ProviderRateLimited", _h("pkg.ProviderRateLimited"))])
 def test_terminators_without_a_conventional_suffix_are_counted(tmp_path, final, name):
     result = kit.trace_events([_write(tmp_path / "host.log", _log("agent", "start", "INFO") + _trace(final))])
     assert result["other_tracebacks"] == {name: 1}
@@ -528,7 +533,7 @@ def test_exception_group_source_line_does_not_end_a_sub_traceback(tmp_path):
              "    | ProviderRateLimited: slow\n"
              "    +------------------------------------\n")
     result = kit.trace_events([_write(tmp_path / "host.log", _log("agent", "start", "INFO") + group)])
-    assert result["other_tracebacks"] == {"ExceptionGroup": 1, "ProviderRateLimited": 1}
+    assert result["other_tracebacks"] == {"ExceptionGroup": 1, _h("ProviderRateLimited"): 1}
 
 
 def _host_generations(path, rows):
@@ -582,9 +587,28 @@ def test_same_generation_repeat_is_a_kept_duplicate(tmp_path):
         2, 1, 1, 0)
 
 
-@pytest.mark.parametrize("word", ["ghp_SECRETTOKEN123", "WARNING", "lowercase_word"])
+@pytest.mark.parametrize("word", ["ghp_SECRETTOKEN123", "WARNING", "lowercase_word", "CustomerSecretToken",
+                                  "sk_live_abc123.ProviderError"])
 def test_a_non_exception_word_after_a_cut_traceback_is_hashed(tmp_path, word):
     cut = 'Traceback (most recent call last):\n  File "synthetic.py", line 1\n'
     result = kit.trace_events([_write(tmp_path / "host.log", _log("agent", "start", "INFO") + cut + word + "\n")])
     assert word not in json.dumps(result)
     assert sum(result["other_tracebacks"].values()) == 1
+
+
+def test_different_import_failures_do_not_share_a_signature(tmp_path):
+    def cell(name, final):
+        return kit.trace_events([_write(tmp_path / name, _log("agent.optional", "warn") + _trace(final))])["by_event"]
+    a = cell("a.log", "ImportError: cannot import name 'optional_helper' from 'optional_pkg'")
+    b = cell("b.log", "ImportError: cannot import name 'ContextEngine' from 'hermes'")
+    assert a[0]["missing_module"] != b[0]["missing_module"]
+    assert "optional_helper" not in json.dumps(a) and "ContextEngine" not in json.dumps(b)
+
+
+def test_data_shaped_lowercase_doctor_keys_are_hashed(tmp_path):
+    paths = [_write(tmp_path / name, json.dumps({"checks": [
+        {"check": "storage", "status": "warn", "detail": {"customer_secret_token": 1}}]}))
+             for name in ("candidate.json", "previous.json")]
+    result = kit.doctor_match(*paths)
+    assert "customer_secret_token" not in json.dumps(result)
+    assert result["verdict"] == "MATCHED"

@@ -1,5 +1,6 @@
 """Public-clean, read-only evidence records for a release-gauntlet cell."""
 import argparse
+import builtins
 from bisect import bisect_left
 from collections import Counter, defaultdict
 from contextlib import contextmanager
@@ -20,7 +21,9 @@ LOG_FORMATS = (re.compile(rf"^{_STAMP} \[{_LEVEL}\] (?P<logger>[\w.]+): "),
 # A traceback's final line: a dotted or bare exception name, then ":" or the end of the line, at the traceback's edge.
 # The name need not end in Error (ProviderCircuitOpen, KeyboardInterrupt).
 FINAL = re.compile(r"^((?:[A-Za-z_]\w*\.)*[A-Za-z_]\w*)(?::|\s*$)")
-EXCEPTION_NAME = re.compile(r"(?:[A-Za-z_]\w*\.)*[A-Z]\w*[a-z]\w*")  # A CamelCase last part, as exception classes are.
+# Only a builtin exception's bare name is emitted as is; any other name (a custom class, a dotted name or a word that
+# merely looks like one after a cut traceback) is emitted as a hash, which still matches across cells.
+BUILTIN_EXCEPTIONS = frozenset(n for n, v in vars(builtins).items() if isinstance(v, type) and issubclass(v, BaseException))
 SUB_EDGE = re.compile(r"[ \t]*\| \S")  # An exception group's final line: one space after "|"; source lines have more.
 MISSING = re.compile(r"No module named '([\w.]+)'")
 REFUSAL = "NotImplementedError: LCM-X cannot detach a context engine"
@@ -29,11 +32,9 @@ SECTIONS = set("model providers custom_providers compression lcm context plugins
                "terminal auxiliary platforms gateway cron memory display agent tools toolsets".split())
 
 
-KEY_NAME = re.compile(r"[a-z][a-z_]{0,63}")  # Fixed doctor key names; digits (ids, hashes) or anything else is hashed.
-
-
 def _key_name(key):
-    return key if KEY_NAME.fullmatch(str(key)) else "h:" + _sha(str(key))[:12]
+    """Every doctor detail key is hashed: a key can be data (a session or table name), and a hash still matches."""
+    return "h:" + _sha(str(key))[:12]
 
 
 def _cause(value):
@@ -120,14 +121,16 @@ def trace_events(log):
                 if final:
                     if stripped.startswith(("ModuleNotFoundError", "ImportError")):
                         missing = MISSING.search(stripped)
-                        imports[(logger, missing[1] if missing else None)] += 1
-                        per_event[(logger, missing[1] if missing else None)][current] += 1
+                        # Any other import failure keeps a masked fingerprint, so two different failures never match.
+                        module = missing[1] if missing else "f:" + _fingerprint(stripped)
+                        imports[(logger, module)] += 1
+                        per_event[(logger, module)][current] += 1
                         if warning is not None and not counted:
                             events[warning] += 1
                             counted = True
                     elif not stripped.startswith(REFUSAL):
                         name = final[1]  # Any other column-0 word is hashed: a cut traceback can precede raw text.
-                        other[name if len(name) <= 128 and EXCEPTION_NAME.fullmatch(name) else "h:" + _sha(name)[:12]] += 1
+                        other[name if name in BUILTIN_EXCEPTIONS else "h:" + _sha(name)[:12]] += 1
                 if final or (line and not line[0].isspace() and line[0] != "|"):
                     if traceback and not final:
                         other["(no final line)"] += 1  # Cut short: counted, never dropped.
