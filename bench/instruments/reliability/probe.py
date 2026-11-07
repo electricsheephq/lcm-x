@@ -623,6 +623,14 @@ def main():
     handler.setFormatter(logging.Formatter("%(levelname)s %(name)s %(message)s"))
     logging.getLogger().addHandler(handler)
     logging.getLogger().setLevel(logging.INFO)
+    # #2330 diagnostics: named loggers at DEBUG (comma-separated); everything else stays at INFO.
+    if debug_loggers := [n.strip() for n in os.environ.get("LCM_RELIABILITY_DEBUG_LOGGERS", "").split(",") if n.strip()]:
+        handler.setLevel(logging.DEBUG)
+        logging.getLogger().setLevel(logging.INFO)
+        for name in debug_loggers:
+            logging.getLogger(name).setLevel(logging.DEBUG)
+        handler.addFilter(lambda record: record.levelno >= logging.INFO
+                          or any(record.name == n or record.name.startswith(n + ".") for n in debug_loggers))
     os.environ.setdefault("OPENROUTER_API_KEY", "test-key")
     from hermes_cli import plugins as P
     P.discover_plugins(force=True)

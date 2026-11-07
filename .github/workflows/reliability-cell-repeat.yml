@@ -1,0 +1,59 @@
+name: reliability cell repeat (#2330 diagnostics)
+# Evidence-only (#2330): repeats the R1 in-process matrix on one host, as the nightly job runs it (all cells, 4 jobs,
+# so the contention matches), with DEBUG ingest logs and the stores of every failing cell kept. Runs only on the PR
+# that adds or edits this file; it is not a required check and the PR is not meant to merge.
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/reliability-cell-repeat.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: reliability-cell-repeat-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  repeat:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        attempt: [1, 2, 3, 4, 5, 6, 7, 8]
+    env:
+      HOST: r34.15-0.21.5
+      OUT: ${{ github.workspace }}/reliability-out
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Set up Python (harness)
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        run: pip install uv==0.11.26
+
+      - name: Prepare the pinned Hermes tree
+        run: python -m bench.instruments.reliability.ci prep --host "$HOST" --root "$RUNNER_TEMP/hosts" --out "$RUNNER_TEMP/hosts.json"
+
+      - name: R1 in-process, all cells (failing cells keep their stores)
+        run: python bench/instruments/reliability/run_matrix.py --hosts-file "$RUNNER_TEMP/hosts.json" --hosts "$HOST" --plugin-ref HEAD --cells all --jobs 4 --out "$OUT/r1" --keep-dbs fail --lcm-env LCM_RELIABILITY_DEBUG_LOGGERS=hermes_plugins.hermes_lcm_x.engine,hermes_plugins.hermes_lcm_x.reconcile
+
+      - name: Rotation cell verdict
+        if: always()
+        run: grep -h '"parallel-tool-group/rotation"' "$OUT/r1/results.jsonl" | python -c "import json,sys; [print(json.loads(l)['verdict'], json.loads(l).get('failed_bars', {}).keys()) for l in sys.stdin]" >> "$GITHUB_STEP_SUMMARY" || true
+
+      - name: Upload
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rotation-cell-attempt-${{ matrix.attempt }}
+          include-hidden-files: true
+          path: ${{ env.OUT }}
+          retention-days: 14
