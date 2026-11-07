@@ -7000,7 +7000,7 @@ class LCMEngine(
 
     def _rotation_restamp_metadata(self, messages):
         """#2378: a predecessor snapshot supplies doubt, never permission to skip."""
-        predecessors = self._rotation_predecessor_session_ids(str(self._session_id))
+        predecessors = self._rotation_predecessor_session_ids(str(self._session_id), max_hops=1)
         if not predecessors:
             return {}, False
         session = predecessors[0]
@@ -7049,6 +7049,20 @@ class LCMEngine(
             # A position holds one stored content, so rows of equal content share their candidates
             # and rows of different content never compete: the exact matching, when it covers every
             # row, pairs each content's rows with its positions in order (identical copies never swap).
+            # The host's own retained message_uid names the occurrence outright: pair it first.
+            by_uid = {}
+            for idx in rows:
+                uid = self._host_occurrence_metadata(messages[idx])["message_uid"]
+                position = next((pos for pos in free if uid and pos not in by_uid.values()
+                                 and target[pos].get("message_uid") == uid), None)
+                if position is not None:
+                    by_uid[idx] = position
+            for idx, pos in by_uid.items():
+                used.add(pos)
+                result[idx] = (session, target[pos])
+            rows = [idx for idx in rows if idx not in by_uid]
+            free = [pos for pos in free if pos not in by_uid.values()]
+            exact = {idx: [pos for pos in exact[idx] if pos in free] for idx in rows}
             pairs, by_content = dict(zip(rows, free)), defaultdict(list)  # default: the ordered first fit
             for idx in rows:
                 content = messages[idx].get("content")
@@ -7092,7 +7106,8 @@ class LCMEngine(
                         matches = [target for target in targets
                                    if target["session_id"] == session and target["observed_at"] == row["timestamp"]
                                    and target["store_id"] < sid
-                                   and self._message_replay_identity(target, stored_row=True) == identity]
+                                   and _proof_user_identity(self._message_replay_identity(
+                                       target, stored_row=True)) == _proof_user_identity(identity)]
                         if len(matches) > 1:
                             # The host's volatile scaffolding (todo fold, model-switch note) is the
                             # replay itself; exact content only breaks a tie between equal identities.
@@ -8158,6 +8173,7 @@ class LCMEngine(
                 restamp_metadata, recovery_fallback = self._rotation_restamp_metadata(messages)
             except Exception:
                 logger.debug("LCM predecessor occurrence metadata load failed", exc_info=True)
+                restamp_metadata, recovery_fallback = {}, True  # degrade to the #1523 durable recovery
         new_prefix_occurrences = set()
         unchanged_prefix_occurrences = set()
         proven_cursor = 0  # Full matched prefix, before new occurrences rewind the cursor.

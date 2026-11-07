@@ -488,3 +488,58 @@ def test_rotation_list_content_row_keeps_its_links(build, caplog, monkeypatch):
     engine, rows = run(build, caplog, mode="rotating", uids=False, restamp=True, before_ingest=reorder)
     assert len(replay_links(engine)) == 2
     assert not [record for record in caplog.records if "TypeError" in record.getMessage()]
+
+
+@pytest.mark.issue(2390)
+def test_rotation_retained_uids_pair_reordered_equal_copies_with_their_own(build, caplog):
+    """#2387 review thread: two equal T copies keep distinct message_uids, are re-stamped and reversed.
+    The host's uid names each occurrence, so each copy links to its own original."""
+    def reverse(_engine, view):
+        carried = [i for i, row in enumerate(view) if row.get("role") == "user" and row.get("content") == T]
+        view[carried[0]], view[carried[1]] = view[carried[1]], view[carried[0]]
+
+    engine, rows = run(build, caplog, mode="rotating", uids=True, restamp=True, prior_copies=2, before_ingest=reverse)
+    links = replay_links(engine)
+    by_stamp = {(row["session_id"], row["observed_at"]): row["store_id"] for row in rows if row["content"] == T}
+    # restamp gives carried copy k the stamp T_COMMIT + k in its original order (k=0: uid c, k=1: uid a)
+    assert (by_stamp[("rotated", T_COMMIT)], by_stamp[("S", T_REQ - 2)]) in links
+    assert (by_stamp[("rotated", T_COMMIT + 1)], by_stamp[("S", T_REQ)]) in links
+
+
+@pytest.mark.issue(2390)
+def test_rotation_acp_trimmed_restamp_is_linked(build, caplog, monkeypatch):
+    """#2387 review thread: ACP persists prompt.strip(); a trimmed re-stamped carried row is still linked."""
+    padded = "  " + T + "  \n"
+    monkeypatch.setattr(__name__ + ".T", padded)
+
+    def trim(_engine, view):
+        next(row for row in view if row.get("role") == "user" and row.get("content") == padded)["content"] = padded.strip()
+
+    engine, rows = run(build, caplog, mode="rotating", uids=True, restamp=True, before_ingest=trim)
+    original = next(row["store_id"] for row in rows if row["session_id"] == "S" and row["content"] == padded)
+    copy = next(row["store_id"] for row in rows if row["session_id"] == "rotated" and row["content"] == padded.strip())
+    assert (copy, original) in replay_links(engine)
+
+
+@pytest.mark.issue(2390)
+def test_rotation_metadata_failure_degrades_to_durable_recovery(build, caplog, monkeypatch):
+    """Grok review thread on #2387: if the re-stamp helper raises, the #1523 durable recovery still runs."""
+    called = []
+
+    def break_helper(engine, _view):
+        def boom(_messages):
+            raise RuntimeError("synthetic snapshot read failure")
+
+        link = engine._identity_anchor_link_durable_recovery
+
+        def spy(attempt, lineage):
+            called.append(True)
+            return link(attempt, lineage)
+
+        monkeypatch.setattr(engine, "_rotation_restamp_metadata", boom)
+        monkeypatch.setattr(engine, "_identity_anchor_link_durable_recovery", spy)
+
+    engine, rows = run(build, caplog, mode="rotating", uids=False, restamp=True, before_ingest=break_helper)
+    assert called
+    assert sum(row["content"] == T for row in rows) == 2
+    assert engine._ingest_failure_count == 0
