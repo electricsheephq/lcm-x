@@ -5,12 +5,14 @@ from copy import deepcopy
 import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import re
 import socket
 import threading
 
 
 MAX_BODY = 64 * 1024 * 1024
 OUTSIDE = "(outside a step)"  # The stats key for agent calls with no active step; never a valid step id.
+NONCE = re.compile(r'<lcm-summary nonce="([0-9a-f]+)">')  # LCM-X's summary integrity envelope opener.
 
 
 def _json(value):
@@ -20,6 +22,14 @@ def _json(value):
 def _sha(value):
     return hashlib.sha256(_json(value).encode("utf-8")).hexdigest()
 
+
+
+def _envelope_nonce(messages):
+    """The output nonce of LCM-X's summary contract, or None. The contract's opener is in the trusted system policy;
+    only system messages are read, because the transcript is untrusted data and may quote an older envelope."""
+    found = {n for m in messages if isinstance(m, dict) and m.get("role") == "system"
+             and isinstance(m.get("content"), str) for n in NONCE.findall(m["content"])}
+    return found.pop() if len(found) == 1 else None
 
 
 def _tool_call(call):
@@ -187,7 +197,11 @@ class Provider:
                     self.stats["unknown_models"][model] += 1
                 text = f"D5 digest v1\nmessages={len(messages)}\n"
                 text += "\n".join(f"{m['role']} {_sha(m.get('content'))[:12]}" for m in messages)
-                entry = {"text": text + f"\nrequest={_sha(messages)}"}
+                text += f"\nrequest={_sha(messages)}"
+                nonce = _envelope_nonce(messages)
+                if nonce:  # The fixed digest inside the envelope LCM-X's summary route requires, with its closing hint.
+                    text = f'<lcm-summary nonce="{nonce}">\n{text}\nExpand for details about: d5 digest\n</lcm-summary>'
+                entry = {"text": text}
             message = _message(entry)
             # Token counts are a fixed estimate (UTF-8 bytes / 4, rounded up), so host pre-checks see realistic sizes.
             prompt, completion = (-(-len(_json(value).encode("utf-8")) // 4) for value in (messages, message))

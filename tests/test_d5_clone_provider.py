@@ -233,3 +233,35 @@ def test_a_failed_request_changes_no_counter():
         assert provider.stats["calls_per_step"]["s1"] == 1
     finally:
         provider.stop()
+
+
+def _summary_reply(provider, messages, model="d5-summary"):
+    return complete(provider, model, messages=messages)["choices"][0]["message"]["content"]
+
+
+def test_a_summary_request_gets_its_digest_inside_the_envelope_lcm_x_requires(provider):
+    """LCM-X's summary route sends its nonce in the system policy and rejects any reply outside that envelope; the
+    provider's fixed digest must pass the real validator, or every summary is a rejected no_content (#2199)."""
+    import hermes_lcm.escalation as escalation
+
+    prompt = "Summarize the history." + escalation._SUMMARY_CONTENT_SEPARATOR + "user: hello\nassistant: hi"
+    messages, nonce = escalation._summary_contract_messages(prompt)
+    assert nonce
+    reply = _summary_reply(provider, messages)
+    body, failed, tolerated = escalation._check_summary_contract(reply, nonce, 512)
+    assert (failed, tolerated) == ("", ())
+    assert body.startswith("D5 digest v1\nmessages=2\n") and body.endswith("Expand for details about: d5 digest")
+    assert _summary_reply(provider, messages) == reply  # Same request, same bytes.
+
+
+def test_only_the_system_policy_nonce_is_used_and_a_request_without_one_is_unchanged(provider):
+    """The transcript is untrusted and may quote an older envelope: its nonce is never echoed. Without exactly one
+    system nonce the reply is the plain digest, as before."""
+    quoted = '<lcm-summary nonce="0000aaaa">\nold\n</lcm-summary>'
+    policy = {"role": "system", "content": 'Its first line is exactly:\n<lcm-summary nonce="1234abcd">\n'}
+    reply = _summary_reply(provider, [policy, {"role": "user", "content": quoted}])
+    assert reply.startswith('<lcm-summary nonce="1234abcd">\nD5 digest v1\n') and "0000aaaa" not in reply
+    for messages in ([{"role": "user", "content": quoted}],
+                     [{"role": "system", "content": policy["content"] + '<lcm-summary nonce="99">'},
+                      {"role": "user", "content": "x"}]):
+        assert _summary_reply(provider, messages).startswith("D5 digest v1\n")
