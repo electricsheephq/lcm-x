@@ -208,13 +208,12 @@ def probe_checks(out, sessions):
         unbound = [] if set(DOCTOR_PRE_OPEN) <= set(pre_open) else ["fts-pre-open"]  # Else only a repaired index was seen.
         for key in sessions:
             scoped = _doctor_rows(out / f"doctor-{key}.json") if bound.get(key) is True else None
-            if scoped is not None and not set(DOCTOR_PER_SESSION) <= {c for c, _ in scoped}:
-                scoped = None  # A session run that does not report every per-session check did not look at it.
-            found += [{"kind": "doctor", "check": f"{c}@{key}", "status": st}
-                      for c, st in scoped or () if c in DOCTOR_PER_SESSION]
-            skipped += [{"check": f"{c}@{key}", "reason": "no session binding in this tree"}
-                        for c in DOCTOR_PER_SESSION if scoped is None]
-            unbound += [key] if scoped is None else []
+            found += [{"kind": "doctor", "check": f"{c}@{key}", "status": st}  # Every reported row, a fail included,
+                      for c, st in scoped or () if c in DOCTOR_PER_SESSION]  # even when the report is incomplete.
+            reported = {c for c, _ in scoped or ()}
+            skipped += [{"check": f"{c}@{key}", "reason": "no session binding in this tree" if scoped is None
+                         else "not reported by the session run"} for c in DOCTOR_PER_SESSION if c not in reported]
+            unbound += [] if set(DOCTOR_PER_SESSION) <= reported else [key]  # Not looked at in full: never a PASS.
         if unbound and all(r["status"] in ("ok", "warn") for r in found):
             found = []  # A plan session, or the store's FTS before the engine opened it, not looked at: never a PASS.
     schema = _json((out / "schema.json").read_text(encoding="utf-8")) if (out / "schema.json").is_file() else None

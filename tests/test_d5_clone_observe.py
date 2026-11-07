@@ -204,7 +204,13 @@ def test_a_bound_session_missing_a_per_session_check_is_not_looked_at(tmp_path):
     (out / "sessions.json").write_text(json.dumps({KEY: True}))
     checks, skipped = r.probe_checks(out, [KEY])
     assert checks == [] and "doctor" in bars.kinds_missing(checks)
-    assert {s["check"] for s in skipped} == {f"{c}@{KEY}" for c in r.DOCTOR_PER_SESSION}
+    assert {s["check"] for s in skipped} == {f"{r.DOCTOR_PER_SESSION[2]}@{KEY}"}
+    (out / f"doctor-{KEY}.json").write_text(json.dumps(doctor("fail", "pass", names=r.DOCTOR_PER_SESSION[:2])))
+    checks, _ = r.probe_checks(out, [KEY])  # An incomplete report that fails a check still fails it.
+    assert bars.failed_checks(checks) == [f"{r.DOCTOR_PER_SESSION[0]}@{KEY}"]
+    sqlite = [{"kind": k, "check": "lcm.db", "status": "ok"} for k in ("quick_check", "integrity", "schema")]
+    ok = [{"kind": "doctor", "check": "database_integrity", "status": "ok"}]
+    assert bars.bar5(sqlite + ok, sqlite + checks)["ga_rerun_needed"] is True  # As the GA arm: it re-runs, never PASS.
 
 
 def test_a_ga_arm_whose_doctor_did_not_run_leaves_bar5_unjudged(tmp_path):
