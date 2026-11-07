@@ -28,7 +28,6 @@ import json
 import logging
 import sqlite3
 from collections import Counter, defaultdict
-from copy import deepcopy
 from difflib import SequenceMatcher
 from typing import Any, Dict, Optional
 
@@ -590,7 +589,6 @@ class IdentityAnchorMixin:
         # Bind the note to the latest input user occurrence, never to a later equal-text row.
         source = next((m for m in reversed(messages) if m.get("role") == "user"), None)
         receipt["source_stamp"] = _normalize_observed_at(source.get("timestamp")) if source is not None else None
-        receipt["source_content"] = deepcopy(source.get("content")) if source is not None else None
         receipts = list(getattr(self, "_identity_anchor_recoveries", ()))
         for previous in receipts:
             if (previous["row"] is row or previous["store"] is self._store

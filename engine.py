@@ -7387,7 +7387,7 @@ class LCMEngine(
             rows = [dict(output_index=i, descriptor_digest=entries[i].identity_digest,
                          kind="scaffold" if d["kind"] == "objective" else d["kind"],
                          recovery_source=next(((str(sid), (self._conversation_id or "").strip(),
-                                                r.get("source_stamp"), normalize_content_value(r.get("source_content"))) for r in
+                                                r.get("source_stamp"), r.get("max_store_id")) for r in
                              getattr(self, "_identity_anchor_recoveries", ())
                              if d["kind"] == "recovery" and r["row"] is returned[i] and not r.get("blocked")), None))
                     for i, d in zip(indices, fresh)]

@@ -370,7 +370,7 @@ def insert_emissions(conn, lineage, view_seq, rows):
         "INSERT INTO ledger_emissions(lineage,view_seq,output_index,descriptor_digest,kind,source_store_ids,state,next_occ_id,recovered_store_id) "
         "VALUES (?,?,?,?,?,?,'proposed',NULL,(SELECT CASE WHEN count(*)=1 THEN min(store_id) END "
         "FROM messages WHERE role='user' AND session_id=? AND (conversation_id IN (?, '') OR conversation_id IS NULL) "
-        "AND observed_at=? AND content=?))",
+        "AND observed_at=? AND store_id<=?))",
         (lineage, view_seq, row["output_index"], row["descriptor_digest"], row["kind"], '[]',
          *(row.get("recovery_source") or (None, None, None, None))),
     ).lastrowid for row in rows]
