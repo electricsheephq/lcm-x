@@ -174,3 +174,28 @@ def test_a_prefix_segment_keeps_its_stored_occurrence_from_a_later_new_call(buil
         build, monkeypatch, [_U, a, X, dangling, other, X], [_U, a, X, new_call, X, _V], cursor=3)
     assert [(r["role"], r.get("tool_call_id"), r["content"]) for r in added] == [
         ("assistant", None, ""), ("tool", "c", "X"), ("user", None, "next")]
+
+
+def test_result_stamps_choose_the_matching_occurrence(build, monkeypatch):
+    """Review thread (P2, two bots): unstamped calls with stamped results. The host's A·X@4 replays the second
+    stored occurrence; the first (X@2) must not be chosen and then vetoed, which stored the replay again unlinked."""
+    a = _poll(["c"], "{}", None)
+    engine, before, added = _ingest_shape(
+        build, monkeypatch, [_U, a, {**X, "timestamp": 2.0}, a, {**X, "timestamp": 4.0}],
+        [_U, a, {**X, "timestamp": 4.0}, _V])
+    assert [(r["role"], r["content"]) for r in added] == [("user", "next")]
+
+
+def test_a_prefix_call_with_a_changed_result_keeps_its_occurrence(build, monkeypatch):
+    """Review thread (P1): the prefix A(c,d) owns the stored unstamped A·X·D even though the host changed D to Y
+    after the cursor. A later new A@1·X·D must not spend that occurrence; B@3's X·D (same ids, other arguments) and
+    the dangling A@2 never stand in for it."""
+    a = _poll(["c", "d"], "{}", None)
+    dangling = _poll(["c", "d"], "{}", 2)
+    other = _poll(["c", "d"], '{"b":1}', 3)
+    new_call = _poll(["c", "d"], "{}", 1)
+    y = {**D, "content": "Y"}
+    engine, before, added = _ingest_shape(
+        build, monkeypatch, [_U, a, X, D, dangling, other, X, D], [_U, a, X, y, new_call, X, D, _V], cursor=3)
+    stored = [(r["role"], r.get("tool_call_id"), r["content"]) for r in added]
+    assert ("assistant", None, "") in stored and stored.count(("tool", "c", "X")) == 1, stored
