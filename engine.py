@@ -8420,15 +8420,6 @@ class LCMEngine(
         # BEFORE filtering and pre-match so every exposed row is handled.
         # Missing metadata on either side retains the legacy positional proof.
         cached_active_replay_messages = getattr(self, "_last_active_replay_messages", ())
-        # A warm tool-only delivery can replace the whole previous view. Its
-        # old positional cursor proves none of this newly exposed segment;
-        # stamped anchor evidence may still recognize actual replays below.
-        shifted_tool_delivery = bool(cursor > 0 and messages[0].get("tool_calls")
-                                     and current_prefix_identities
-                                     and current_prefix_identities[0] != cached_source_identities[0])
-        if shifted_tool_delivery:
-            cursor = self._ingest_cursor = 0
-            current_prefix_identities = []
         if (not self._ingest_cursor_needs_reconcile and current_prefix_identities is not None
                 # After compaction the cursor indexes its output, not this cache
                 # of the last ingested list; the commit proof owns that boundary.
@@ -8496,10 +8487,6 @@ class LCMEngine(
                         if self._host_occurrence_metadata(messages[idx]) == self._host_occurrence_metadata(previous)
                     }
                     cursor = self._ingest_cursor = min(new_prefix_occurrences)
-        if shifted_tool_delivery:
-            # A retry's identity-only suffix reconciliation cannot restore the
-            # stale positional proof either. Anchor stamps still run below.
-            cursor = self._ingest_cursor = 0
         # Remapping can expose rows the ledger proved: they are no longer a
         # consumed prefix, so every residual consumer must be able to match them.
         ledger_run["pairs"] = {idx: row for idx, row in ledger_run["pairs"].items() if idx < cursor}
