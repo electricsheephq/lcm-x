@@ -32,14 +32,15 @@ def _envelope_nonce(messages):
     return found.pop() if len(found) == 1 else None
 
 
-SUMMARY_RATIO = 100  # Source tokens per summary token in the padded digest: far under LCM-X's extreme 400.
+BYTES_PER_SUMMARY_TOKEN = 160  # A token is at least one UTF-8 byte, so source/summary <= 160 even for the densest text.
 
 
 def _padding(messages):
-    """Deterministic filler lines that bring the digest to about 1/SUMMARY_RATIO of the request's estimated tokens
-    (UTF-8 bytes / 4). A fixed 40-token digest of a 20k-token leaf is a 500:1 summary, which LCM-X's summary_quality
-    doctor check reports as degraded, so every large leaf would warn in both arms and hide a real regression."""
-    target = -(-len(_json(messages).encode("utf-8")) // 4) // SUMMARY_RATIO
+    """Deterministic filler lines that give the digest one token per BYTES_PER_SUMMARY_TOKEN request bytes. A fixed
+    40-token digest of a 20k-token leaf is a 500:1 summary, which LCM-X's summary_quality doctor check reports as
+    degraded (>= 400:1, or under 500 tokens for a 100k-token source), so every large leaf would warn in both arms and
+    hide a real regression. Sized from bytes, not a tokens estimate: dense text can be one token per byte."""
+    target = -(-len(_json(messages).encode("utf-8")) // BYTES_PER_SUMMARY_TOKEN)
     seed = _sha(messages)[:8]
     return "".join(f"\nd5 pad {i:05d} {seed}" for i in range(-(-target // 6)))  # Each line is at least 6 tokens.
 

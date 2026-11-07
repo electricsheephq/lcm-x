@@ -267,8 +267,8 @@ def test_only_the_system_policy_nonce_is_used_and_a_request_without_one_is_uncha
         assert _summary_reply(provider, messages).startswith("D5 digest v1\n")
 
 
-@pytest.mark.parametrize("source_tokens", [2_000, 24_000, 120_000])
-def test_a_large_leaf_s_summary_stays_under_lcm_x_s_extreme_ratio(provider, source_tokens):
+@pytest.mark.parametrize("source_tokens,dense", [(2_000, False), (24_000, False), (120_000, False), (100_000, True)])
+def test_a_large_leaf_s_summary_stays_under_lcm_x_s_extreme_ratio(provider, source_tokens, dense):
     """LCM-X's doctor reports a summary as degraded at source/summary >= 400, or a source of 100k tokens or more
     summarized in under 500 (tools._summary_quality_stats). The digest is padded with the request's size, so a large
     leaf is not reported in both arms, which would hide a real regression; the reply is still a fixed function of the
@@ -276,14 +276,23 @@ def test_a_large_leaf_s_summary_stays_under_lcm_x_s_extreme_ratio(provider, sour
     import hermes_lcm.escalation as escalation
     from hermes_lcm.tokens import count_tokens
 
-    source = "\n".join(f"user: synthetic leaf line {i} " + "word " * 12 for i in range(source_tokens // 20))
-    assert source_tokens <= count_tokens(source) < 1.25 * source_tokens
+    # Dense text defeats a bytes/4 estimate: "xQ" * 50000 is 100k cl100k tokens (the reviewer's boundary case).
+    source = "xQ" * source_tokens if dense else "\n".join(
+        f"user: synthetic leaf line {i} " + "word " * 12 for i in range(source_tokens // 20))
+    counters = [count_tokens]
+    try:  # The exact encoder when installed; LCM-X uses it then, and its fallback estimate otherwise.
+        import tiktoken
+        encoding = tiktoken.get_encoding("cl100k_base")
+        counters.append(lambda text: len(encoding.encode(text, disallowed_special=())))
+    except Exception:
+        pass
+    assert dense or count_tokens(source) >= source_tokens  # Dense text is 100k tokens only to the exact encoder.
     messages, nonce = escalation._summary_contract_messages(escalation._build_l1_prompt(source, 2000, 0))
     reply = _summary_reply(provider, messages)
     assert _summary_reply(provider, messages) == reply
     body, failed, _ = escalation._check_summary_contract(reply, nonce, 2000)
     assert failed == "" and body.startswith("D5 digest v1\n")
-    ratio = count_tokens(source) / count_tokens(body)
-    assert ratio < 400 and count_tokens(body) < count_tokens(source)
-    if source_tokens >= 100_000:
-        assert count_tokens(body) >= 500
+    for count in counters:
+        assert count(source) / count(body) < 400 and count(body) < count(source)
+        if count(source) >= 100_000:
+            assert count(body) >= 500
