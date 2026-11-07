@@ -1,0 +1,1 @@
+- Changed: the Claude Code unit 0.1.0 release notes scope the `PreCompact` timing to the drain (up to about 1.1 seconds in the gate runs on earlier candidates), note that the hook's pointer-file write can stall for a few seconds, and point to the result card for this release's own run.
