@@ -626,6 +626,28 @@ class IdentityAnchorMixin:
             identity = self._message_replay_identity(msg, stored_row=stored)
             return None if _lossy(identity) else (identity[0], identity[1].strip())
 
+        def exact_form(msg, loose, stored=False):
+            # The payload-exact form of a call or result, tried before its loose id key, so a reused id matches its
+            # own payload first (#2466 review); a pre-ledger row whose payload differs still matches loosely.
+            if loose is None or loose[0] not in {"call", "tool"}:
+                return loose
+            if loose[0] == "tool":
+                content = msg.get("content")
+                return ("toolx", loose[1], content.strip() if isinstance(content, str) else json.dumps(content, sort_keys=True, default=str))
+            value = msg.get("tool_calls") or ()
+            if isinstance(value, str):
+                try:
+                    value = json.loads(value)
+                except ValueError:
+                    return loose
+            parts = []
+            for c in value if isinstance(value, list) else ():
+                function = (c.get("function") or {}) if isinstance(c, dict) else {}
+                arguments = function.get("arguments") if isinstance(function, dict) else None
+                parts.append((str(c.get("id") or "") if isinstance(c, dict) else "", str(function.get("name") if isinstance(function, dict) else ""),
+                              arguments if isinstance(arguments, str) else json.dumps(arguments, sort_keys=True, default=str)))
+            return ("callx", loose[1], tuple(sorted(parts)))
+
         explained = set(excluded) | set(matched) | set(plan.get("matched", {})) | plan["replayed"] | set(missed)
         try:
             candidates = {idx: key(identity_messages[idx]) for idx in range(start, cursor)
@@ -683,15 +705,25 @@ class IdentityAnchorMixin:
             # exact copy before an alias (#2466 review).
             exact: dict = defaultdict(list)
             alias: dict = defaultdict(list)
+            expanded = _PRESENCE_TEXT_BYTES
             row_forms: dict = defaultdict(list)
             for store_id in sorted(rows):
                 row = rows[store_id]
                 if calls(row, stored=True) or row.get("role") == "tool" and row.get("tool_call_id"):
-                    own, cleaned_form = key(row, stored=True), None
+                    cleaned_form = key(row, stored=True)
+                    own = exact_form(row, cleaned_form, stored=True)
                 elif row.get("role") in text_roles:
                     identity = self._message_replay_identity(row, stored_row=True)
                     if _lossy(identity):
                         continue
+                    expanded -= len(identity[1])  # identity may load an externalized payload (#2466 review)
+                    if expanded < 0:
+                        notice = (str(self._db_path), self._db_path.stat().st_ino, session)
+                        if notice not in _PRESENCE_WINDOW_LOGGED:
+                            logger.info("LCM identity-anchor presence window incomplete: session=%s scope=%d "
+                                        "expanded text over budget", session, len(scope))
+                            _PRESENCE_WINDOW_LOGGED.add(notice)
+                        return []
                     own = (identity[0], identity[1].strip())
                     cleaned = self._active_cleanup_replay_identity(identity)
                     cleaned_form = (cleaned[0], cleaned[1].strip()) if cleaned else None  # proven cleanup form (#1286)
@@ -707,24 +739,30 @@ class IdentityAnchorMixin:
                 # Exact-before-alias allocation is optimal only when a cleanup form is never itself the form of a
                 # row that has an alias (cleanup is idempotent); otherwise keep main's result (#2466 review).
                 raise ValueError("cleanup forms are not idempotent")
-            stored_calls = {ident for form in exact if form and form[0] == "call" for ident in form[1]}
-            reserved = Counter(key(identity_messages[idx]) for idx in range(min(start, len(messages)))
-                               if idx not in excluded and idx not in matched)
+            stored_calls = {ident for form in alias if form and form[0] == "call" for ident in form[1]}
+            wanted_forms = {wanted for wanted in candidates.values() if wanted is not None}
+            demand = []  # (candidate index or None for a prefix copy, exact form, loose form): the prefix first
+            for idx in range(min(start, len(messages))):
+                if idx not in excluded and idx not in matched:
+                    loose = key(identity_messages[idx])
+                    if loose in wanted_forms:
+                        demand.append((None, exact_form(identity_messages[idx], loose), loose))
+            demand += [(idx, exact_form(identity_messages[idx], wanted), wanted)
+                       for idx, wanted in candidates.items() if wanted is not None]
         except Exception as exc:
             logger.warning("LCM identity-anchor presence unavailable (%s); keeping positional replays", type(exc).__name__)
             return []
-        # Allocate stored copies per form: the prefix's reserved copies first, then candidates in view order. Every
-        # form takes its exact copies before any alias, so an alias goes only to demand its own row cannot meet
-        # (an exact form with an alias is never an alias target, checked above): a maximum allocation, linear time
-        # (#2466 review). A candidate left without a copy is unaccounted.
-        used, served = set(consumed), set()
-        queues: dict = {}
-        for idx, wanted in candidates.items():
-            if wanted is not None:
-                if wanted not in queues:  # the reserved phantoms once per form, never per candidate
-                    queues[wanted] = deque([None] * reserved[wanted])
-                queues[wanted].append(idx)
-        for stacks in (exact, alias):
+        # Allocate stored copies: the prefix's reserved copies first, then candidates in view order. Pass 1 serves each
+        # demand from its exact form (text, or a call's or result's payload); pass 2 serves what is left from aliases
+        # (a reasoning-cleanup form, or a call's or result's id). An exact form with an alias is never an alias
+        # target (checked above), so this is a maximum allocation, in linear time (#2466 review). A candidate left
+        # without a copy is unaccounted.
+        used, served, done = set(consumed), set(), set()
+        for stacks, pick in ((exact, 1), (alias, 2)):
+            queues: dict = {}
+            for pos, item in enumerate(demand):
+                if pos not in done:
+                    queues.setdefault(item[pick], deque()).append(pos)
             for form, queue in queues.items():
                 stack = stacks.get(form)
                 while queue and stack:
@@ -732,10 +770,11 @@ class IdentityAnchorMixin:
                     if store_id in used:
                         continue
                     used.add(store_id)
-                    idx = queue.popleft()
-                    if idx is not None:
+                    pos = queue.popleft()
+                    done.add(pos)
+                    if demand[pos][0] is not None:
                         consumed.add(store_id)
-                        served.add(idx)
+                        served.add(demand[pos][0])
 
         def storing(k) -> tuple:
             # Call ids this ingest stores at view index ``k``: none for a row the ignore patterns drop.
