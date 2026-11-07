@@ -170,3 +170,21 @@ def test_summary_coverage_matches_the_recursive_walk(build):
     expected = {row[0] for row in conn.execute(_RECURSIVE_SUMMARY_WALK)}
     assert expected == {*ids[:5], 10**6}
     assert _summary_covered_message_ids(conn) == expected
+
+
+@pytest.mark.parametrize("stored_id,links", [
+    ("' ' || conversation_id || ' '", True),  # a padded id for the same conversation still matches
+    ("NULL", False),  # a legacy row with no conversation is not a wildcard for the active one
+    ("''", False),
+], ids=["padded", "null", "empty"])
+def test_blank_stored_conversation_is_not_the_active_one(build, stored_id, links):
+    engine = build()
+    assert engine._conversation_id
+    engine.ingest([U, call(), X])
+    targets = [r["store_id"] for r in engine._store.get_session_messages("S")[1:]]
+    conn = engine._store._conn
+    conn.execute(f"UPDATE messages SET conversation_id = {stored_id} WHERE session_id = 'S'")
+    conn.commit()
+    engine.ingest([U, call(), X, call(), X])
+    linked = {target for _source, kind, target in relations(engine) if kind == "possible_replay_of"}
+    assert (linked == set(targets)) if links else not (linked & set(targets))
