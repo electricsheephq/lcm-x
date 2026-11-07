@@ -457,15 +457,20 @@ class IdentityAnchorMixin:
         or an unstamped user row the host inserted there (#633: a /steer row), that
         no stored occurrence explains (key, witness, alias, or a stored copy of its content -- up to
         edge whitespace, with the same stamp or a canonical host-uid binding for a NULL stamp --
-        in the tail of this session or a verified ancestor, each copy used once) and no ignore pattern drops was never stored. The cursor moves back
-        to the first such row; every other row of that range stays a replay (today's positional proof)."""
+        in the tail of this session or a verified ancestor, each copy used once) and no ignore pattern drops was never stored. When there
+        is such a row, every other row of the range must be accounted for too (#2071's rule, here for the parent
+        list): ``_identity_anchor_unaccounted`` adds the rows provably never stored, and keeps its unsure cases as
+        replays. The cursor moves back to the first row to store; every other row from there stays a replay."""
         from .reconcile import _proof_user_identity
 
         span = max(64, 2 * (cursor - start))
         held: dict = defaultdict(list)
         chain = self._identity_anchor_chain()
+        capped = False  # a session holds more rows than the audited tail: its older copies are not in ``held``
         for session in [str(self._session_id), *chain]:
-            for row in self._store.get_session_tail(session, limit=span):
+            tail = self._store.get_session_tail(session, limit=span)
+            capped = capped or len(tail) >= span
+            for row in tail:
                 if int(row["store_id"]) not in consumed:
                     held[_proof_user_identity(self._message_replay_identity(row, stored_row=True))].append(row)
         bindings = None
@@ -568,11 +573,81 @@ class IdentityAnchorMixin:
                     continue
                 missed.append(idx)
         if missed:
+            # Class A (#2071 rule): the cursor resumes only behind rows that are accounted for. A position no longer
+            # proves a row stored once the host changed the list, and the audit above never examines tool rows.
+            missed = sorted({*missed, *self._identity_anchor_unaccounted(
+                messages, identity_messages, cursor, start, identity_at, held, capped, consumed, plan, matched, excluded,
+                missed)})
             plan["cursor"] = min(missed)
             plan["positional"] = {idx for idx in range(min(missed), cursor) if idx not in missed}
             plan["replayed"].update(plan["positional"])
-            logger.info("LCM identity-anchor: host changed its list before the cursor; %d unstored rows from %d: session=%s",
-                        len(missed), min(missed), self._session_id)
+            logger.warning("LCM identity-anchor: host changed its list before the cursor; %d row(s) from %d are neither "
+                           "stored nor compaction outputs; storing them: session=%s",
+                           len(missed), min(missed), self._session_id)
+
+    def _identity_anchor_unaccounted(self, messages, identity_messages, cursor, start, identity_at, held, capped,
+                                     consumed, plan, matched, excluded, missed) -> list[int]:
+        """Rows in ``[start, cursor)`` that are neither bound, matched to a stored row, a compaction output (LCM's
+        own scaffold) nor ignored, and that no stored copy in the audited tail accounts for, one copy each. The
+        copies the view's unchanged prefix ``[0, start)`` holds are reserved first. Counting stored copies, not
+        bindings, keeps an upgraded store's pre-ledger rows from being stored again. The count compares a loose
+        key (call ids, a result's call id, else role and stripped text), never fields a pre-ledger row can lack.
+        A stored row's reasoning-cleanup form counts as its copy. Past the audited tail this returns nothing.
+        Unsure is accounted (the positional replay, as before): a row with no comparable key (a lossy identity)
+        and a tool result whose call is neither in the view before it nor stored."""
+        if capped:
+            # Past the audited tail, absence proves nothing: the audit adds nothing beyond its own finds, as on
+            # main. Long-session class A is a named limit (docs/exactly-once-ingest.md §5, #2455).
+            return []
+
+        def calls(msg) -> tuple:
+            value = msg.get("tool_calls") or ()
+            if isinstance(value, str):
+                try:
+                    value = json.loads(value)
+                except ValueError:
+                    return ("?",)  # unreadable: equal to nothing, so never proof of a copy
+            return tuple(sorted(str(c.get("id") or "") for c in value if isinstance(c, dict))) if isinstance(
+                value, list) else ()
+
+        def key(msg, stored=False):
+            if calls(msg):
+                return ("call", calls(msg))
+            if msg.get("role") == "tool" and msg.get("tool_call_id"):
+                return ("tool", str(msg["tool_call_id"]))
+            identity = self._message_replay_identity(msg, stored_row=stored)
+            return None if _lossy(identity) else (identity[0], identity[1].strip())
+
+        index: dict = defaultdict(list)
+        for row in {int(row["store_id"]): row for rows in held.values() for row in rows}.values():
+            forms = {key(row, stored=True)}
+            identity = self._message_replay_identity(row, stored_row=True)
+            cleaned = None if calls(row) or _lossy(identity) else self._active_cleanup_replay_identity(identity)
+            forms |= {(cleaned[0], cleaned[1].strip())} if cleaned else set()  # the proven cleanup form (#1286)
+            for form in forms:
+                index[form].append(row)
+        explained = set(excluded) | set(matched) | set(plan.get("matched", {})) | plan["replayed"] | set(missed)
+        reserved = Counter(key(identity_messages[idx]) for idx in range(min(start, len(messages)))
+                           if idx not in excluded and idx not in matched)
+        unaccounted = []
+        for idx in range(start, cursor):
+            message = identity_messages[idx]
+            if (idx in explained or identity_at(idx) is None and self._identity_is_lcm_scaffold(message)
+                    or self._matches_ignore_message_patterns(messages[idx])):
+                continue
+            wanted = key(message)
+            if wanted is None:
+                continue
+            copies = [row for row in index.get(wanted, ()) if int(row["store_id"]) not in consumed]
+            if len(copies) > reserved[wanted]:
+                consumed.add(int(copies[-1]["store_id"]))
+                continue
+            if wanted[0] == "tool" and not any(  # never store a result without its call
+                    wanted[1] in calls(identity_messages[k]) for k in range(idx)) and not any(
+                    wanted[1] in k[1] for k in index if k and k[0] == "call"):
+                continue
+            unaccounted.append(idx)
+        return unaccounted
 
     def _identity_anchor_record_recovery(self, result, emissions, messages=()) -> None:
         """#1505: keep the actual published recovery object, never a displaced-occurrence mapping."""
