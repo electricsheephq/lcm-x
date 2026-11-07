@@ -374,8 +374,8 @@ one threshold, doctor at close. Minimum 30 turns. Green =
   Missing copies, surplus copies and unexpected stored rows fail. Phase C alone adopts the release
   multiset-v2 split predicate (r2, sha256 8943a6a7…) without its own-turn prompt rule; the store-order
   check below fails the borrowed-turn case that rule guarded. A missing, unique assistant item may match exactly
-  one run of 2–8 consecutive non-empty assistant rows in one session, joined with a space or directly
-  under v2's NFC, CRLF and whitespace-run normalization. Tool rows may intervene; every user row,
+  one run of two or more consecutive non-empty assistant rows in one session, with no user row between its first and last fragment, joined with a space or directly
+  under v2's NFC, CRLF and whitespace-run normalization. Unlike r2, the run has no fragment cap (#2214, from v0.30.0 rc1). Tool rows may intervene; every user row,
   even empty, across any owned session is a turn boundary. No fragment key may be a transcript item; no row may serve two answers;
   extra copies of used fragments fail. Whole-row absence, uniqueness and fragment ownership use
   v2-normalized keys for this split exception only. The transcript must also be a subsequence of
