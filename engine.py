@@ -8209,9 +8209,11 @@ class LCMEngine(
         # helper strip rows out of an unproven batch would partially re-instate
         # the batch-suppression #259 removed. It runs only once reconciliation
         # has already proven a partial replay.
+        replay_candidates = {}
         replayed_tool_segment_indexes = (
             self._replayed_tool_segment_indexes_after_cursor(
-                reconcile_messages, cursor, **({"consumed_pairs": consumed_pairs} if consumed_pairs else {}))
+                reconcile_messages, cursor, replay_candidates=replay_candidates,
+                **({"consumed_pairs": consumed_pairs} if consumed_pairs else {}))
             if reconciled_existing_session and today > 0 and cursor > 0
             else set()
         )
@@ -8520,6 +8522,35 @@ class LCMEngine(
         originals = [messages[idx] for idx, _msg in messages_to_store_with_index]
         after_commit.append(lambda: self._watch_stored_user_rows(zip(originals, protected_messages, store_ids)))
         stored_at = {idx: store_id for (idx, _msg), store_id in zip(messages_to_store_with_index, store_ids)}
+        if replay_candidates:
+            try:
+                with self._ingest_evidence():
+                    conn = self._store._conn
+                    existing = list(conn.execute(
+                        "SELECT store_id,related_store_id FROM message_relations WHERE kind='possible_replay_of'"
+                    )) if conn.execute("SELECT 1 FROM sqlite_master WHERE name='message_relations'").fetchone() else []
+                    linked, used = {row[0] for row in existing}, {row[1] for row in existing}
+                    groups = []
+                    # Compare durable identities after protection; links never authorize skipping.
+                    durable = self._store.get_batch([sid for idx, sid in stored_at.items() if idx in replay_candidates])
+                    for idx, sid in stored_at.items():
+                        if sid not in durable or sid in linked:
+                            continue
+                        identity = self._message_replay_identity(durable[sid], stored_row=True, allow_pruned_tool_alias=False)
+                        for row in replay_candidates.get(idx, ()):
+                            target = row["store_id"]
+                            if (target not in used and target < sid
+                                    and row.get("conversation_id") == durable[sid].get("conversation_id")
+                                    and self._message_replay_identity(row, stored_row=True, allow_pruned_tool_alias=False) == identity):
+                                groups.append([(sid, "possible_replay_of", target, None, None)])
+                                linked.add(sid)
+                                used.add(target)
+                                break
+                    if groups:
+                        self._store.add_message_relations(groups)
+            except Exception as exc:
+                self._raise_ingest_busy(exc)
+                logger.warning("LCM tool-segment replay link write failed (%s)", type(exc).__name__)
         if getattr(self, "_ingest_ledger_attempt", None) is not None:
             self._ingest_ledger_attempt["stored"] = stored_at
             # The remainder too: whole-row externalization replaces a large generated row's marker bytes.

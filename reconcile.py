@@ -3239,7 +3239,7 @@ class ReconcileMixin:
         self,
         messages: List[Dict[str, Any]],
         cursor: int,
-        *, consumed_store_ids=(), consumed_pairs=None,
+        *, consumed_store_ids=(), consumed_pairs=None, replay_candidates=None,
     ) -> set[int]:
         """Find exact durable tool pairs replayed after a preserved new delta.
 
@@ -3334,7 +3334,8 @@ class ReconcileMixin:
         # account for. Over-reserving can keep a duplicate.
         stored_identity_counts.subtract(prefix_counts)
         # #2377: ownership is one stored occurrence, never an identity-keyed pool.
-        bindings = self._tool_segment_bindings(messages, tail_rows, consumed, consumed_pairs)
+        bindings = self._tool_segment_bindings(
+            messages, tail_rows, consumed, consumed_pairs, replay_candidates=replay_candidates)
         replayed: set[int] = set()
         metadata = None  # Loaded once, only when a borrowed pair binds.
         users = None  # Lazily index both views once per replay scan.
@@ -3448,12 +3449,12 @@ class ReconcileMixin:
             index = max(index + 1, probe)
         return replayed
 
-    def _tool_segment_bindings(self, messages, tail_rows, consumed, consumed_pairs):
+    def _tool_segment_bindings(self, messages, tail_rows, consumed, consumed_pairs, *, replay_candidates=None):
         """#2377: bind in host order to one unspent stored occurrence.
 
-        Ledger pairs outrank equal stamps, then unstamped order. Conflicting stamps
-        veto a pair; equally good copies with different results prove nothing.
-        Binding reserves the whole occurrence even when its results do not replay.
+        A single occurrence must cover every host result. Among full matches,
+        ledger pairs outrank equal stamps, then unstamped order. Conflicting stamps
+        veto replay, but identity-equal stored rows can still annotate a kept copy.
         """
         segments, current = [], None
         for row in tail_rows:
@@ -3470,7 +3471,12 @@ class ReconcileMixin:
             identity = self._message_replay_identity(host)
             stamp = self._host_occurrence_metadata(host)["timestamp"]
             ledger_id = consumed_pairs.get(index)
-            candidates = []
+            host_results = []
+            for result in messages[index + 1:]:
+                if result.get("role") != "tool":
+                    break
+                host_results.append(result)
+            candidates, possible = [], []
             for call, results in segments:
                 sid = call["store_id"]
                 if sid in used or (sid in consumed and sid != ledger_id):
@@ -3479,18 +3485,28 @@ class ReconcileMixin:
                     continue
                 if self._message_replay_identity(call, stored_row=True) != identity:
                     continue
+                possible.append((call, results))
                 stored_stamp = _normalize_observed_at(call.get("observed_at"))
                 if stamp is not None and stored_stamp is not None and stamp != stored_stamp:
                     if sid == ledger_id:
                         used.add(sid)  # A vetoed ledger occurrence stays reserved.
                     continue
-                candidates.append((call, results))
+                available = Counter(
+                    (str(row.get("tool_call_id") or ""), self._message_replay_identity(row, stored_row=True))
+                    for row in results if row["store_id"] not in consumed
+                    and not self._matches_ignore_message_patterns(row, stored_row=True))
+                needed = Counter((str(row.get("tool_call_id") or ""), self._message_replay_identity(row))
+                                 for row in host_results)
+                if all(available[key] >= count for key, count in needed.items()):
+                    candidates.append((call, results))
             stamped = [pair for pair in candidates if stamp is not None
                        and _normalize_observed_at(pair[0].get("observed_at")) == stamp]
             candidates = stamped or candidates
-            signatures = {tuple(self._message_replay_identity(row, stored_row=True, allow_pruned_tool_alias=False)
-                                for row in results) for _call, results in candidates}
-            if not candidates or len(signatures) != 1:
+            if not candidates:
+                if replay_candidates is not None and possible:
+                    rows = [row for call, results in possible for row in (call, *results)]
+                    for offset in range(len(host_results) + 1):
+                        replay_candidates[index + offset] = rows
                 continue
             chosen = candidates[0]  # Store order is stable; identical copies spend earliest first.
             used.add(chosen[0]["store_id"])
@@ -3526,9 +3542,14 @@ class ReconcileMixin:
             bindings = self._tool_segment_bindings(messages, tail_rows, consumed, consumed_pairs)
         bound = bindings.get(call_index)
         if bound is None:
-            return set()
+            # The proven prefix already owns this call. Keep #2163's partial-result
+            # replay, with its ledger/unique-copy fence below, even if a new sibling
+            # result means the whole host segment has no full-match candidate.
+            bound = self._tool_segment_bindings(messages[:cursor], tail_rows, consumed, consumed_pairs).get(call_index)
+            if bound is None:
+                return set()
         call, following = bound
-        # Keep the old cursor uniqueness fence: this change may only reduce skipping.
+        # Keep the old cursor uniqueness fence. This helper never skips more than base; an equal-stamp binding elsewhere in the scan may (a correct dedup).
         if call_index not in consumed_pairs:
             copies = sum(self._message_replay_identity(row, stored_row=True) == call_identity for row in tail_rows)
             def carriers(rows):
