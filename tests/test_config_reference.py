@@ -340,3 +340,38 @@ def test_snippet_window_default_and_spec():
     assert config.LCMConfig.from_env().recall_snippet_window_hits == 0
     assert any(s.name == "recall_snippet_window_hits" and s.env_key == "LCM_RECALL_SNIPPET_WINDOW_HITS"
                and s.py_type is int for s in config.ENV_FIELD_SPECS)
+
+
+@pytest.mark.parametrize("raw,expected,warning", [
+    ("5", 5, False), ("0", 0, False), ("-1", 0, True), ("x", 0, True),
+    ("true", 0, True), ("1.5", 0, True), ("99", 25, False),
+])
+def test_extra_entries_env(monkeypatch, raw, expected, warning):
+    monkeypatch.setenv("LCM_RECALL_EXTRA_ENTRIES", raw)
+    cfg = config.LCMConfig.from_env()
+    assert cfg.recall_extra_entries == expected
+    assert bool([w for w in cfg.config_source_warnings if "recall_extra_entries" in w]) == warning
+
+
+@pytest.mark.parametrize("raw,expected,warning", [
+    (5, 5, False), (0, 0, False), (99, 25, False), (-1, 0, True),
+    (True, 0, True), (False, 0, True), (1.5, 0, True), ("5", 0, True), ("x", 0, True),
+])
+def test_extra_entries_yaml(monkeypatch, tmp_path, raw, expected, warning):
+    import json
+
+    (tmp_path / "config.yaml").write_text("lcm:\n  recall_extra_entries: " + json.dumps(raw) + "\n")
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    cfg = config.LCMConfig.from_env()
+    assert cfg.recall_extra_entries == expected
+    assert "recall_extra_entries" not in cfg.ignored_config_yaml_lcm_keys
+    assert bool([w for w in cfg.config_source_warnings if "recall_extra_entries" in w]) == warning
+    monkeypatch.setenv("LCM_RECALL_EXTRA_ENTRIES", "2")
+    assert config.LCMConfig.from_env().recall_extra_entries == 2
+
+
+def test_extra_entries_default_and_spec():
+    assert config.LCMConfig().recall_extra_entries == 0
+    assert config.LCMConfig.from_env().recall_extra_entries == 0
+    assert any(s.name == "recall_extra_entries" and s.env_key == "LCM_RECALL_EXTRA_ENTRIES"
+               and s.py_type is int for s in config.ENV_FIELD_SPECS)
