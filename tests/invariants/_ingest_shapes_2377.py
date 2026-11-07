@@ -72,10 +72,17 @@ class Run:
         invalid += [(s, ts, "multiple links") for s, ts in links.items() if len(ts) > 1]
         originals = {key(r) for r in self.before}
         genuinely_new_ids = {self.inserted[i] for i in new if i in self.inserted}
-        silent = [r["store_id"] for r in self.added
-                  if r["store_id"] not in genuinely_new_ids
-                  and key(r) in originals and r["store_id"] not in links
-                  and r["store_id"] not in pending]
+        # Multiset attribution, the scorer's basis: per scorer key, the stored replay copies must be
+        # matched by as many linked/pending rows of that key. Rows of one key are interchangeable to
+        # the scorer and to the link writer (NOTE §3 I-link), so WHICH row of the key carries the
+        # link is not observable; only an unattributed surplus is a silent copy.
+        silent = []
+        for k in sorted({key(r) for r in self.added if key(r) in originals}, key=repr):
+            rows = [r["store_id"] for r in self.added if key(r) == k]
+            replays = sum(sid not in genuinely_new_ids for sid in rows)
+            attributed = [sid for sid in rows if sid in links or sid in pending]
+            unattributed = [sid for sid in rows if sid not in links and sid not in pending]
+            silent += sorted(unattributed)[:max(0, replays - len(attributed))]
         return dict(missing=missing, silent=silent, invalid=invalid)
 
     def check(self, new):
