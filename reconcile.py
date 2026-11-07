@@ -3306,6 +3306,7 @@ class ReconcileMixin:
         borrowed_ids = {sid for ids in self._tool_borrow_proofs.values() for sid in ids}
         # All summaries, including invisible and condensed roots, own their raw sources.
         covered = _summary_covered_message_ids(self._store._conn)
+        owned = spent | covered | borrowed_ids  # once per scan, never per tail row
         classes, by_identity, row_owner = {}, defaultdict(list), {}
         exact, owner_class = set(), {}
         for number, group in enumerate(occurrences):
@@ -3315,7 +3316,7 @@ class ReconcileMixin:
                 row_owner[tail[i]["store_id"]] = number
             results = [i for i in group[1:] if tail[i]["store_id"] not in spent
                        and not self._matches_ignore_message_patterns(tail[i], stored_row=True)]
-            if any(tail[i]["store_id"] in spent | covered | borrowed_ids for i in group):
+            if any(tail[i]["store_id"] in owned for i in group):
                 exact.add(number)
             if not results:
                 continue
