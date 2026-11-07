@@ -205,6 +205,8 @@ def probe_checks(out, sessions):
         unbound = []
         for key in sessions:
             scoped = _doctor_rows(out / f"doctor-{key}.json") if bound.get(key) is True else None
+            if scoped is not None and not set(DOCTOR_PER_SESSION) <= {c for c, _ in scoped}:
+                scoped = None  # A session run that does not report every per-session check did not look at it.
             found += [{"kind": "doctor", "check": f"{c}@{key}", "status": st}
                       for c, st in scoped or () if c in DOCTOR_PER_SESSION]
             skipped += [{"check": f"{c}@{key}", "reason": "no session binding in this tree"}

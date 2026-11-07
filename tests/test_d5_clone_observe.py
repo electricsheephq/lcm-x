@@ -168,6 +168,23 @@ def test_an_unbound_plan_session_leaves_the_doctor_unshown_but_a_fail_still_fail
     assert bars.failed_checks(r.probe_checks(out, [KEY])[0]) == ["payload_storage"]
 
 
+
+def test_a_bound_session_missing_a_per_session_check_is_not_looked_at(tmp_path):
+    out = probe_out(tmp_path, doctor("pass", "warn"))
+    (out / f"doctor-{KEY}.json").write_text(json.dumps(doctor("pass", "pass", names=r.DOCTOR_PER_SESSION[:2])))
+    (out / "sessions.json").write_text(json.dumps({KEY: True}))
+    checks, skipped = r.probe_checks(out, [KEY])
+    assert checks == [] and "doctor" in bars.kinds_missing(checks)
+    assert {s["check"] for s in skipped} == {f"{c}@{KEY}" for c in r.DOCTOR_PER_SESSION}
+
+
+def test_a_ga_arm_whose_doctor_did_not_run_leaves_bar5_unjudged(tmp_path):
+    rc = r.probe_checks(probe_out(tmp_path / "rc", doctor("pass", "warn"), {"lcm.db": OK_SCHEMA, "state.db": OK_SCHEMA}), [])[0]
+    ga = r.probe_checks(probe_out(tmp_path / "ga", None, {"lcm.db": OK_SCHEMA, "state.db": OK_SCHEMA}), [])[0]
+    sqlite = [{"kind": k, "check": "lcm.db", "status": "ok"} for k in ("quick_check", "integrity")]
+    result = bars.bar5(sqlite + rc, sqlite + ga)  # The GA probe crashed or timed out: no doctor rows in that arm.
+    assert result["verdict"] == bars.INCONCLUSIVE and result["ga_kinds_missing"] == ["doctor"]
+
 @pytest.mark.parametrize("value", [None, {"error": "LCM engine not initialized"}, {"checks": []}, "not json"])
 def test_a_doctor_that_did_not_run_leaves_the_kind_missing(tmp_path, value):
     out = probe_out(tmp_path)
