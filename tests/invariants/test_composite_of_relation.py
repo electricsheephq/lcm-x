@@ -145,7 +145,8 @@ def test_scaffold_never_holds_a_whole_stored_row(tmp_path):
         engine.shutdown()
 
 
-@pytest.mark.parametrize("case", ["cross-session-copy", "overlapping-separator", "header-not-leading"])
+@pytest.mark.parametrize("case", ["cross-session-copy", "overlapping-separator", "header-not-leading",
+                                  "blank-scaffold"])
 def test_writer_finds_every_split(tmp_path, case):
     """Writer-level shapes: a rule (ii) split still counts when a part also has a copy outside C's session; cuts
     at overlapping separators ("\\n\\n\\n") are all tried; text before the header is never a scaffold."""
@@ -163,6 +164,9 @@ def test_writer_finds_every_split(tmp_path, case):
         elif case == "overlapping-separator":  # [TODO, "\nP"] and [TODO + "\n", "P"]: two splits
             put("S", "\nP"), put("S", "P")
             target = put("S", TODO + "\n\n\nP")
+        elif case == "blank-scaffold":  # cut 1 of "\n\n\n" + TODO leaves the scaffold "\n", which is no todo block
+            put("S", TODO)
+            target = put("S", "\n\n\n" + TODO)
         else:
             put("S", P1)
             target = put("S", "intro\n\n" + TODO + "\n\n" + P1)
