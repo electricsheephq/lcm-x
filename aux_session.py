@@ -25,6 +25,9 @@ from pathlib import Path
 from collections import Counter
 from typing import Any, Dict, List, Optional
 
+from .engine_registry import (
+    _ACTIVE_ENGINE_REGISTRY_LOCK, _ACTIVE_ENGINES_BY_CONVERSATION_ID, _ACTIVE_ENGINES_BY_SESSION_ID, _BOUND_ENGINES,
+)
 from .sqlite_util import _is_ingest_busy_error
 
 logger = logging.getLogger(__name__)
@@ -1088,6 +1091,9 @@ class DelegateChildMixin:
                 return None
         else:
             parent_platform = self._lcm_session_last_platform.get(parent, "") or self._host_session_parent(parent)[1]
+            if self._live_parent_binding_excludes(parent):
+                self._log_session_ingest_outcome(session_id, reason="ignored_parent")
+                return None
         if self._session_id_matches_lcm_bypass_filters(parent, platform=parent_platform):
             self._log_session_ingest_outcome(session_id, reason="parent_bypass_pattern")
             return None
@@ -1216,6 +1222,37 @@ class DelegateChildMixin:
             if end is not None:
                 return end
         return None
+
+    def _live_parent_binding_excludes(self, parent: str) -> bool:
+        """#2070: the engine bound to ``parent`` in this process holds it ignored, or stateless and not a delegated
+        child (the shared route's test), and no other live engine holds a normal binding of it. Every doubt answers
+        False, so the caller falls back to the pattern check: a refusal here must never drop a normal parent's rows."""
+        try:
+            with _ACTIVE_ENGINE_REGISTRY_LOCK:
+                owner = _ACTIVE_ENGINES_BY_SESSION_ID.get(parent)  # a direct hit only, never a foreground scan
+            if owner is None or owner is self:
+                return False
+            own_store, store = self.__dict__.get("_store"), owner.__dict__.get("_store")  # never a lazy open
+            if own_store is None or store is None or getattr(store, "_conn", None) is None \
+                    or store.db_path != own_store.db_path:
+                return False
+            excluded = bool(owner.__dict__.get("_session_ignored")) or (
+                bool(owner.__dict__.get("_session_stateless")) and not self._is_known_delegate_child(parent))
+            if not excluded:
+                return False
+            # The flags were read first: the binding must still be the same one, so a rebind mid-read refuses nothing.
+            with _ACTIVE_ENGINE_REGISTRY_LOCK:
+                if _ACTIVE_ENGINES_BY_SESSION_ID.get(parent) is not owner:
+                    return False
+                engines = [*_ACTIVE_ENGINES_BY_SESSION_ID.values(), *_ACTIVE_ENGINES_BY_CONVERSATION_ID.values(),
+                           *_BOUND_ENGINES]
+            if str(owner.__dict__.get("_session_id") or "") != parent:
+                return False
+            return not any(engine is not owner and str(engine.__dict__.get("_session_id") or "") == parent
+                           and not (engine.__dict__.get("_session_ignored") or engine.__dict__.get("_session_stateless"))
+                           for engine in engines)
+        except Exception:
+            return False
 
     def _note_delegate_child_fallback(self, session_id: str, reason: str) -> None:
         _count("fallbacks")

@@ -45,6 +45,7 @@ from .engine_registry import (
     _ACTIVE_ENGINE_REGISTRY_LOCK,
     _ACTIVE_ENGINES_BY_CONVERSATION_ID,
     _ACTIVE_ENGINES_BY_SESSION_ID,
+    _BOUND_ENGINES,
     _remove_registry_entries_for_engine,
     ActiveEngineUseResult,
     ActiveEngineUseStatus,
@@ -3190,6 +3191,7 @@ class LCMEngine(
                     keep_conversation_id=conversation_id,
                 )
                 _ACTIVE_ENGINES_BY_SESSION_ID[session_id] = self
+                _BOUND_ENGINES.add(self)
                 if conversation_id:
                     _ACTIVE_ENGINES_BY_CONVERSATION_ID[conversation_id] = self
 

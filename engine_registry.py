@@ -23,6 +23,9 @@ _ACTIVE_ENGINE_REGISTRY_LOCK = threading.RLock()
 _ACTIVE_ENGINE_COLD_START_LOCK = threading.RLock()
 _ACTIVE_ENGINES_BY_SESSION_ID = weakref.WeakValueDictionary()
 _ACTIVE_ENGINES_BY_CONVERSATION_ID = weakref.WeakValueDictionary()
+# #2070: every engine that registered a binding (weak). Two engines can bind one session id, and the later one replaces
+# the earlier in both maps above; this set still shows the earlier binding to the delegated-child parent check.
+_BOUND_ENGINES = weakref.WeakSet()
 
 
 class ActiveEngineUseStatus(str, Enum):
