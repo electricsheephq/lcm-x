@@ -137,13 +137,35 @@ def test_checks_the_probe_cannot_exercise_are_reported_never_rows(tmp_path):
              *r.DOCTOR_PER_SESSION)
     out = probe_out(tmp_path, doctor(*["pass"] * len(names), names=names))
     per_session(out, KEY, "pass", "warn", "pass")
-    checks, skipped = r.probe_checks(out, [KEY, "000000000000"])  # The second session never bound.
+    checks, skipped = r.probe_checks(out, [KEY])
     assert [c["check"] for c in checks] == ["database_integrity", *(f"{c}@{KEY}" for c in r.DOCTOR_PER_SESSION)]
-    assert checks[2]["status"] == "warn"  # The bound session's own result, not the unbound one's.
+    assert checks[2]["status"] == "warn"  # The bound session's own result.
+    not_exercised = {"context_pressure": "the probe process's own counter",
+                     "identity_migration": "no plugin registration step in the probe",
+                     "ingest_health": "the probe process's own counter", "new_check": "not classified for the probe"}
+    assert {s["check"]: s["reason"] for s in skipped} == not_exercised
+    checks, skipped = r.probe_checks(out, [KEY, "000000000000"])  # The second session never bound.
+    assert checks == [] and "doctor" in bars.kinds_missing(checks)  # A session not looked at is never a PASS.
     assert {s["check"]: s["reason"] for s in skipped} == {
-        "context_pressure": "the probe process's own counter", "identity_migration": "no plugin registration step in the probe",
-        "ingest_health": "the probe process's own counter", "new_check": "not classified for the probe",
-        **{f"{c}@000000000000": "no session binding in this tree" for c in r.DOCTOR_PER_SESSION}}
+        **not_exercised, **{f"{c}@000000000000": "no session binding in this tree" for c in r.DOCTOR_PER_SESSION}}
+
+
+def test_a_failing_unclassified_check_fails_bar5(tmp_path):
+    names = ("database_integrity", "messages_fts_integrity_background_flag", "another_new_check", "identity_migration")
+    out = probe_out(tmp_path, doctor("pass", "fail", "pass", "fail", names=names))
+    checks, skipped = r.probe_checks(out, [])
+    assert bars.failed_checks(checks) == ["messages_fts_integrity_background_flag"]
+    assert {s["check"] for s in skipped} == {"another_new_check", "identity_migration"}  # Ruled not exercised.
+
+
+def test_an_unbound_plan_session_leaves_the_doctor_unshown_but_a_fail_still_fails(tmp_path):
+    out = probe_out(tmp_path, doctor("pass", "warn"), {"lcm.db": OK_SCHEMA, "state.db": OK_SCHEMA})
+    per_session(out, KEY, "pass", "pass", "pass", bound=False)
+    checks, _ = r.probe_checks(out, [KEY])
+    assert [c["kind"] for c in checks] == ["schema", "schema"] and "doctor" in bars.kinds_missing(checks)
+    out = probe_out(tmp_path / "f", doctor("pass", "fail"))
+    per_session(out, KEY, "pass", "pass", "pass", bound=False)
+    assert bars.failed_checks(r.probe_checks(out, [KEY])[0]) == ["payload_storage"]
 
 
 @pytest.mark.parametrize("value", [None, {"error": "LCM engine not initialized"}, {"checks": []}, "not json"])

@@ -196,13 +196,21 @@ def probe_checks(out, sessions):
             if check in DOCTOR_STORE_WIDE:
                 found.append({"kind": "doctor", "check": check, "status": status})
             elif check not in DOCTOR_PER_SESSION:
-                skipped.append({"check": check, "reason": DOCTOR_NOT_EXERCISED.get(check, "not classified for the probe")})
+                if check not in DOCTOR_NOT_EXERCISED and status not in ("ok", "warn"):
+                    found.append({"kind": "doctor", "check": check, "status": status})  # a failing new check counts
+                else:
+                    skipped.append({"check": check,
+                                    "reason": DOCTOR_NOT_EXERCISED.get(check, "not classified for the probe")})
+        unbound = []
         for key in sessions:
             scoped = _doctor_rows(out / f"doctor-{key}.json") if bound.get(key) is True else None
             found += [{"kind": "doctor", "check": f"{c}@{key}", "status": st}
                       for c, st in scoped or () if c in DOCTOR_PER_SESSION]
             skipped += [{"check": f"{c}@{key}", "reason": "no session binding in this tree"}
                         for c in DOCTOR_PER_SESSION if scoped is None]
+            unbound += [key] if scoped is None else []
+        if unbound and all(r["status"] in ("ok", "warn") for r in found):
+            found = []  # A plan session the doctor could not look at: the doctor kind is not shown, never a PASS.
     schema = _json((out / "schema.json").read_text(encoding="utf-8")) if (out / "schema.json").is_file() else None
     if isinstance(schema, dict) and set(schema) == {"lcm.db", "state.db"}:
         found += [{"kind": "schema", "check": name, "status": "ok" if isinstance(s, dict) and s.get("error") is False
