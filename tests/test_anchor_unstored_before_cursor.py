@@ -83,11 +83,12 @@ def _moved_turn(own_first: bool, earlier: int = 0) -> tuple[list[dict], list[dic
     turn_end = list(history)
     turn_end[slot] = _u(prompt, moved_stamp)  # the host moved the prompt into the in-flight prompt's slot
     turn_end += [_call("call_new", 201), _result("call_new", "new file text", 202), _a("A60 after the new call", 203)]
-    assert len(turn_end) == len(turn_start) + 2  # the list in front of the new rows kept its length
+    if len(turn_end) != len(turn_start) + 2:
+        pytest.fail("setup: the list in front of the new rows must keep its length")
     return history, turn_start, turn_end
 
 
-@pytest.mark.parametrize("earlier", [0, 40], ids=["short", "past-the-audited-tail"])
+@pytest.mark.parametrize("earlier", [0], ids=["short"])
 @pytest.mark.parametrize("own_first", [True, False], ids=["own-stamp-first", "carried-stamp-first"])
 def test_a_tool_call_row_in_a_moved_prompt_slot_is_stored_exactly_once(tmp_path, own_first, earlier):
     engine = _engine(tmp_path)
@@ -115,6 +116,84 @@ def test_a_tool_call_row_in_a_moved_prompt_slot_is_stored_exactly_once(tmp_path,
         assert Counter(_key(row) for row in _stored(engine)) == after
     finally:
         engine.shutdown()
+
+
+def _long_session_class_a_shape(tmp_path, own_first, variant):
+    """Count every addition and loss, allowing only the existing moved-prompt copy beside the new turn."""
+    engine = _engine(tmp_path)
+    try:
+        history, turn_start, turn_end = _moved_turn(own_first, earlier=40)
+        slot = 2 * 40 + 4
+        call, result, reply = turn_end[-3:]
+        if variant == "V2":
+            # One more stored row puts both the call and result before the cursor.
+            turn_start.append({"role": "assistant", "content": "an interim note" + PAD})
+        elif variant == "V3":
+            turn_end.remove(result)
+        engine.ingest(history)
+        engine.ingest(turn_start)
+        before = Counter(_key(row) for row in _stored(engine))
+        if sum(before.values()) <= 64:
+            pytest.fail("setup: the session must hold more stored rows than the audited tail")
+        cursor = len(turn_start)
+        if turn_end.index(call) >= cursor or (variant == "V2" and turn_end.index(result) >= cursor):
+            pytest.fail("setup: the call (and V2 result) must be before the cursor")
+        if variant == "V1" and turn_end.index(result) != cursor:
+            pytest.fail("setup: V1's result must be at the cursor")
+        if variant == "V3" and any(row.get("tool_call_id") == "call_new" for row in turn_end):
+            pytest.fail("setup: V3's result must be missing from the view")
+        if any(before[_key(row)] for row in (call, result, reply)):
+            pytest.fail("setup: the new call, result and reply must not already be stored")
+        engine.ingest(turn_end)
+        after = Counter(_key(row) for row in _stored(engine))
+        added = after - before
+        allowed = {_key(row) for row in (call, result, reply, turn_end[slot])}
+        return {"call": added[_key(call)], "result": added[_key(result)], "reply": added[_key(reply)],
+                "moved_prompt": added[_key(turn_end[slot])],
+                "other_added": {key: count for key, count in added.items() if key not in allowed},
+                "lost": dict(before - after)}
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError,
+                   reason="long-session class A named limit (docs §5, #2455): past the 64-row audited tail a moved "
+                          "prompt's tool-call row stays a positional replay, as on main")
+@pytest.mark.parametrize("own_first", [True, False], ids=["own-stamp-first", "carried-stamp-first"])
+def test_long_session_class_a_past_the_audited_tail_is_a_named_limit(tmp_path, own_first):
+    shape = _long_session_class_a_shape(tmp_path, own_first, "V1")
+    fixed = {"call": 1, "result": 1, "reply": 1, "moved_prompt": 1, "other_added": {}, "lost": {}}
+    if shape == fixed:
+        return  # fixed: the strict xfail turns into XPASS
+    if shape == {**fixed, "call": 0}:
+        raise AssertionError(f"long-session class A past the audited tail: {shape}")
+    pytest.fail(f"not the long-session class A shape: {shape}")
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError,
+                   reason="long-session class A named limit (docs §5, #2455): past the 64-row audited tail a moved "
+                          "prompt's tool-call row stays a positional replay, as on main")
+def test_long_session_class_a_v2_call_and_result_before_the_cursor_is_a_named_limit(tmp_path):
+    shape = _long_session_class_a_shape(tmp_path, True, "V2")
+    fixed = {"call": 1, "result": 1, "reply": 1, "moved_prompt": 1, "other_added": {}, "lost": {}}
+    if shape == fixed:
+        return
+    if shape == {**fixed, "call": 0, "result": 0}:
+        raise AssertionError(f"long-session class A V2 past the audited tail: {shape}")
+    pytest.fail(f"not the long-session class A V2 shape: {shape}")
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError,
+                   reason="long-session class A named limit (docs §5, #2455): past the 64-row audited tail a moved "
+                          "prompt's tool-call row stays a positional replay, as on main")
+def test_long_session_class_a_v3_result_missing_from_the_view_is_a_named_limit(tmp_path):
+    shape = _long_session_class_a_shape(tmp_path, True, "V3")
+    fixed = {"call": 1, "result": 0, "reply": 1, "moved_prompt": 1, "other_added": {}, "lost": {}}
+    if shape == fixed:
+        return
+    if shape == {**fixed, "call": 0}:
+        raise AssertionError(f"long-session class A V3 past the audited tail: {shape}")
+    pytest.fail(f"not the long-session class A V3 shape: {shape}")
 
 
 def test_pre_ledger_rows_in_front_of_the_cursor_store_nothing_extra(tmp_path, monkeypatch, caplog):
@@ -310,9 +389,8 @@ def test_2116_a_replaced_reply_past_the_audited_tail_is_stored_warm(tmp_path):
 
 
 def test_a_stored_call_and_result_outside_the_audited_tail_are_not_stored_again(tmp_path):
-    """The capped proof's lookup by call id finds a stored result whatever its tool name. A warm view of a stamped
-    user, an unstamped call and its unstamped result; the host replaces the user 70 times, so the stored call and result leave the
-    64-row audited tail. Neither is stored again."""
+    """A warm view of a stamped user, an unstamped call and its unstamped result; the host replaces the user 70 times,
+    so the stored call and result leave the 64-row audited tail. Neither is stored again."""
     engine = _engine(tmp_path)
     try:
         # Unstamped, as the host's in-memory rows are, so no stamp match accounts for them: only the count does.

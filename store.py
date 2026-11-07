@@ -1298,33 +1298,6 @@ class MessageStore:
         ).fetchall()
         return [self._row_to_dict(row) for row in rows]
 
-    def stored_call_ids(self, session_id: str, call_ids: Collection[str], *, conversation_id: str) -> set[str]:
-        """The ids in ``call_ids`` that this session holds as a tool result's ``tool_call_id`` or in an assistant
-        row's ``tool_calls``, in a conversation ``conversation_id`` owns (as ``find_session_tool_rows``). One scan
-        per 200 ids; SQL narrows call rows by substring and the exact id is confirmed on the parsed calls (an
-        unreadable row counts as holding every id it contains as a substring)."""
-        owned_clause, owned_args = owned_conversation_clause(self._conn, conversation_id)
-        ids, found = sorted({str(i) for i in call_ids if i}), set()
-        for start in range(0, len(ids), 200):
-            chunk = ids[start:start + 200]
-            marks = ",".join("?" * len(chunk))
-            rows = self._conn.execute(
-                f"""SELECT role, tool_call_id, tool_calls FROM messages
-                   WHERE session_id = ? AND {owned_clause} AND ((role = 'tool' AND tool_call_id IN ({marks}))
-                     OR (role = 'assistant' AND ({' OR '.join(['instr(tool_calls, ?) > 0'] * len(chunk))})))""",
-                (session_id, *owned_args, *chunk, *chunk)).fetchall()
-            for role, tool_call_id, tool_calls in rows:
-                if role == "tool":
-                    found.add(str(tool_call_id))
-                    continue
-                try:
-                    calls = json.loads(tool_calls or "[]")
-                    held = {str(c.get("id") or "") for c in calls if isinstance(c, dict)}
-                except (ValueError, TypeError, AttributeError):
-                    held = {i for i in chunk if i in str(tool_calls)}
-                found |= held & set(chunk)
-        return found
-
     def write_generation(self) -> tuple:
         """A token that changes whenever a committed write may have changed rows this connection reads:
         this connection's own writes (``total_changes``) and another connection's commits

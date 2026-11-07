@@ -592,12 +592,14 @@ class IdentityAnchorMixin:
         copies the view's unchanged prefix ``[0, start)`` holds are reserved first. Counting stored copies, not
         bindings, keeps an upgraded store's pre-ledger rows from being stored again. The count compares a loose
         key (call ids, a result's call id, else role and stripped text), never fields a pre-ledger row can lack.
-        A stored row's reasoning-cleanup form counts as its copy. Absence from a ``capped`` tail proves nothing,
-        so there a row is unaccounted only by direct proof: a tool result whose call id no stored result holds, or
-        a call row with a result at or after the cursor whose call ids no stored call row and no stored result hold.
-        Unsure is accounted (the positional replay, as before): a row with no comparable key (a lossy identity),
-        any other row a ``capped`` tail lacks, and a tool result whose call is neither in the view before it nor
-        stored."""
+        A stored row's reasoning-cleanup form counts as its copy. Past the audited tail this returns nothing.
+        Unsure is accounted (the positional replay, as before): a row with no comparable key (a lossy identity)
+        and a tool result whose call is neither in the view before it nor stored."""
+        if capped:
+            # Past the audited tail, absence proves nothing: the audit adds nothing beyond its own finds, as on
+            # main. Long-session class A is a named limit (docs/exactly-once-ingest.md §5, #2455).
+            return []
+
         def calls(msg) -> tuple:
             value = msg.get("tool_calls") or ()
             if isinstance(value, str):
@@ -616,26 +618,6 @@ class IdentityAnchorMixin:
             identity = self._message_replay_identity(msg, stored_row=stored)
             return None if _lossy(identity) else (identity[0], identity[1].strip())
 
-        stored_ids: list = []
-
-        def stored(call_id) -> bool:  # an uncapped lookup by call id (result or call row), this session or an
-            if not stored_ids:  # ancestor: one scan per session for every call id in the audited range
-                wanted = {i for m in identity_messages[start:cursor] for i in (*calls(m), m.get("tool_call_id")) if i}
-                stored_ids.append(set().union(*(self._store.stored_call_ids(
-                    session, wanted, conversation_id=str(self._conversation_id or ""))
-                    for session in [str(self._session_id), *chain])))
-            return call_id in stored_ids[0]
-
-        def proven_new(idx, wanted) -> bool:
-            if not capped:
-                return True  # the tail holds every stored row: absence is proof
-            if wanted[0] == "tool":
-                return not stored(wanted[1])
-            return wanted[0] == "call" and any(  # a result at or after the cursor, and no stored call row or result
-                identity_messages[k].get("tool_call_id") in wanted[1] for k in range(cursor, len(messages))) and not any(
-                map(stored, wanted[1]))
-
-        chain = self._identity_anchor_chain()
         index: dict = defaultdict(list)
         for row in {int(row["store_id"]): row for rows in held.values() for row in rows}.values():
             forms = {key(row, stored=True)}
@@ -654,21 +636,16 @@ class IdentityAnchorMixin:
                     or self._matches_ignore_message_patterns(messages[idx])):
                 continue
             wanted = key(message)
-            if wanted is None or capped and reserved[wanted]:
+            if wanted is None:
                 continue
             copies = [row for row in index.get(wanted, ()) if int(row["store_id"]) not in consumed]
             if len(copies) > reserved[wanted]:
                 consumed.add(int(copies[-1]["store_id"]))
                 continue
-            if not proven_new(idx, wanted):
-                continue
             if wanted[0] == "tool" and not any(  # never store a result without its call
                     wanted[1] in calls(identity_messages[k]) for k in range(idx)) and not any(
                     wanted[1] in k[1] for k in index if k and k[0] == "call"):
                 continue
-            if wanted[0] == "tool" and capped and not any(  # proven new: no stored row holds its call id, so in a
-                    wanted[1] in calls(identity_messages[k]) for k in (*missed, *unaccounted)):  # capped tail a
-                continue  # result is stored only beside a call this ingest stores (#2455 tracks such calls)
             unaccounted.append(idx)
         return unaccounted
 
