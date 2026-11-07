@@ -7178,8 +7178,11 @@ class LCMEngine(
                                           and source["observed_at"] != target["observed_at"]
                                           and isinstance(source["content"], str)
                                           and isinstance(target["content"], str)
-                                          and source["content"].strip() == target["content"].strip()
-                                          and shown_as(target) is not None and not any(message.get("role") == "user"
+                                          and source["content"].strip() == target["content"].strip()]
+                            if any(shown_as(target) is None for target in candidates):
+                                continue  # an unreadable candidate fails the whole source closed
+                            candidates = [target for target in candidates
+                                          if not any(message.get("role") == "user"
                                                       and message.get("content") is not None
                                                       # stored content is redacted as protect_message_for_ingest does
                                                       and normalize_content_value(redact_sensitive_value(
