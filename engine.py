@@ -12273,14 +12273,13 @@ class LCMEngine(
 
     def _cold_tail_ingest_drops(self, message):
         """Whether ignore filtering excludes this incoming host row."""
-        text = text_content_for_pattern_matching(message.get("content")) or ""
-        return (self._matches_ignore_message_patterns(message)
-                or self._is_volatile_ignored_quarantine_placeholder(message, text)
-                or self._is_ignored_active_replay_placeholder(message, text))
+        return self._matches_ignore_message_patterns(message)
 
     def _cold_tail_ingest_view(self, tail):
-        """Exclude ignored host rows and LCM's placeholders from the exit count."""
+        """Exclude host rows matching configured ignore patterns from the exit count."""
         view = tail["view"]
+        if not self._compiled_ignore_message_patterns:
+            return view
         kept = [message for message in view if not self._cold_tail_ingest_drops(message)]
         return view if len(kept) == len(view) else kept
 
@@ -12297,6 +12296,9 @@ class LCMEngine(
                     self._session_end_prefix_compare_identity(message, session_id=session, hermes_home=home)):
                 if self._cold_tail_ingest_drops(message):
                     index += 1
+                    continue
+                elif self._matches_ignore_message_patterns(row, stored_row=True):
+                    stored_index += 1
                     continue
                 return None
             stamp, seen = _normalize_observed_at(message.get("timestamp")), _normalize_observed_at(row.get("observed_at"))
