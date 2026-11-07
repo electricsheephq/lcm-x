@@ -1,0 +1,1 @@
+- Fix: Bind cold tool replays to one carried stored occurrence so parallel calls cannot pool results and hide a new result.
