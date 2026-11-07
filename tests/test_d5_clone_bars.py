@@ -67,6 +67,12 @@ def test_bar1_class3_needs_ga_and_inconclusive_bind():
     leftover = rc_rows()[:4] + [store(12.5, "S", "assistant", "b")] + rc_rows()[4:]  # inside the bind range
     assert bar1(leftover, bind2=b.INCONCLUSIVE)["verdict"] == b.INCONCLUSIVE
     assert bar1(leftover, bind2=b.PASS)["verdict"] == b.FAIL
+    # One class-3 identity both outside the bind and inside an open bind: GA's one occurrence absorbs the settled
+    # row, so only the bind's excess is left, and that is INCONCLUSIVE, never FAIL.
+    split = rc_rows()[:4] + [store(12.5, "S", "assistant", "digest")] + rc_rows()[4:]
+    assert bar1(split, bind2=b.INCONCLUSIVE)["verdict"] == b.INCONCLUSIVE
+    assert bar1(split, bind2=b.PASS)["verdict"] == b.FAIL
+    assert bar1(split, ga=(), bind2=b.INCONCLUSIVE)["verdict"] == b.FAIL  # No allowance: the settled row fails.
 
 
 def test_bar1_reserves_exactly_the_copies_bar2_judged():
