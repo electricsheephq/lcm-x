@@ -124,7 +124,7 @@ def test_config_keys(tmp_path):
     assert config["auxiliary"] == {t: {"provider": "d5", "model": "d5-aux", "base_url": URL} for t in ("vision", "compression")}
     assert config["context"] == {"engine": "lcm-x"}
     assert config["compression"] == settings["compression"]
-    assert config["lcm"] == {**settings["lcm"], "summary_model": "d5-summary"}
+    assert config["lcm"] == settings["lcm"]  # No dead summary_model key: LCM-X takes it from the env.
     assert config["plugins"] == {"enabled": ["hermes-lcm-x", "d5-local"], "disabled": [], "isolation": "in_process"}
     assert config["platforms"] == {"d5-local": {"enabled": True, "extra": {}}}
     assert config["gateway"]["message_timestamps"]["enabled"] is False
@@ -174,8 +174,8 @@ def test_build_env_drops_every_redirecting_lcm_key(tmp_path):
     env, declaration = g.build_env(lcm, home=tmp_path, provider_url=URL, host_bin="/b", port_file=tmp_path / "p", lcm_tree=ROOT)
     assert declaration["dropped_names"] == sorted(set(lcm) - {"LCM_EMBEDDING_PROVIDER", "LCM_FRESH_TAIL_COUNT", *g.FORCED_LCM_PATHS})
     assert {k: v for k, v in env.items() if k.startswith("LCM_") and k not in g.FORCED_LCM_PATHS} == {
-        "LCM_EMBEDDING_PROVIDER": "fastembed", "LCM_FRESH_TAIL_COUNT": "8"}
-    assert declaration["overridden_names"] == sorted(g.FORCED_LCM_PATHS)
+        "LCM_EMBEDDING_PROVIDER": "fastembed", "LCM_FRESH_TAIL_COUNT": "8", "LCM_SUMMARY_MODEL": "d5-summary"}
+    assert declaration["overridden_names"] == sorted([*g.FORCED_LCM_PATHS, "LCM_SUMMARY_MODEL"])
     assert all(Path(env[k]).is_relative_to(tmp_path) for k in g.FORCED_LCM_PATHS)
     # Every write-location key the LCM-X tree reads is forced.
     named = {m for f in ROOT.glob("*.py") for m in re.findall(r"LCM_[A-Z0-9_]*(?:PATH|DIR)\b", f.read_text())}
@@ -418,6 +418,24 @@ def test_build_env_drops_a_remote_recall_provider(tmp_path, value, passed):
                                    host_bin="/b", port_file=tmp_path / "p", lcm_tree=ROOT)
     assert ("LCM_PROACTIVE_RECALL_PROVIDER" in env) is passed
     assert ("LCM_PROACTIVE_RECALL_PROVIDER" in declaration["dropped_names"]) is not passed
+
+
+@pytest.mark.parametrize("lcm", [{}, {"LCM_SUMMARY_MODEL": "another-summary-model"}])
+def test_build_env_pins_the_summary_model(tmp_path, lcm):
+    env, declaration = g.build_env(lcm, home=tmp_path, provider_url=URL, host_bin="/b", port_file=tmp_path / "p",
+                                   lcm_tree=ROOT)
+    assert env["LCM_SUMMARY_MODEL"] == "d5-summary" and "LCM_SUMMARY_MODEL" in declaration["overridden_names"]
+
+
+@pytest.mark.parametrize("provider, flag, expected", [
+    ("voyage", "0", "false"), ("voyage", "1", "false"), ("voyage", None, "false"),
+    ("fastembed", "0", "0")])  # The local row is a guard: a local provider's flag passes through as given.
+def test_build_env_turns_embeddings_off_when_a_remote_provider_is_dropped(tmp_path, provider, flag, expected):
+    lcm = {"LCM_EMBEDDING_PROVIDER": provider, **({"LCM_EMBEDDINGS_ENABLED": flag} if flag is not None else {})}
+    env, declaration = g.build_env(lcm, home=tmp_path, provider_url=URL, host_bin="/b", port_file=tmp_path / "p",
+                                   lcm_tree=ROOT)
+    assert env["LCM_EMBEDDINGS_ENABLED"] == expected
+    assert ("LCM_EMBEDDINGS_ENABLED" in declaration["overridden_names"]) is (provider == "voyage")
 
 
 def test_nonlocal_connections(monkeypatch):
