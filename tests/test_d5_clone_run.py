@@ -451,7 +451,9 @@ def test_an_unreadable_final_store_keeps_its_failed_checks_and_never_passes(setu
     receipt = r.run(host, rc_id="rc-synthetic")  # A receipt, not a crash.
     if arm == "rc":
         for bar in ("bar1", "bar3"):
-            assert receipt["bars"][bar] == {"verdict": bars.INCONCLUSIVE, "rows_unreadable": ["rc"]}
+            assert {k: v for k, v in receipt["bars"][bar].items() if k != "known_risk"} == {
+                "verdict": bars.INCONCLUSIVE, "rows_unreadable": ["rc"]}
+        assert "known_risk" in receipt["bars"]["bar1"]  # Kept in every receipt.
         assert receipt["bars"]["bar5"]["verdict"] == bars.FAIL and receipt["verdict"]["raw"] == bars.FAIL
     else:
         assert (receipt["bars"]["bar1"]["verdict"], receipt["bars"]["bar1"]["rows_unreadable"]) == (

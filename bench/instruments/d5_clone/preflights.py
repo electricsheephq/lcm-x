@@ -149,7 +149,7 @@ def _home_paths(text, home):
     output and names the file that keeps it in full, under the arm's home and with a timestamp, so the same output
     differs between the trees only there."""
     for root in sorted({str(home), str(Path(home).resolve())}, key=len, reverse=True):
-        text = re.sub(re.escape(root) + r"""[^\s"'\])]*""", "<home-path>", text)
+        text = re.sub(re.escape(root) + r"""/[^\s"'\])\\]*""", "<home-path>", text)  # Beneath it; stops at an escape.
     return text
 
 

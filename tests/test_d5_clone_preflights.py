@@ -122,7 +122,7 @@ class FakeHost:
     def facts(self, ctx):
         if self.fault == "late-publish" and "pf-P3" in str(ctx["home"]):  # The compaction lands after the last turn.
             ctx["polls"] = ctx.get("polls", 0) + 1
-            ctx["facts"]["compactions_published"] = int(ctx["polls"] > 7)
+            ctx["facts"]["compactions_published"] = int(ctx["polls"] > 6)  # After the six turns' checks: the first wait.
         return {**ctx["facts"], "payload_files_created": sum(1 for _ in (ctx["home"] / "lcm-large-outputs").iterdir())}
 
     def stats(self, ctx):
@@ -192,3 +192,13 @@ def test_an_exception_s_text_never_enters_a_receipt(tmp_path, monkeypatch):
     assert pf.produce(FakeHost(tmp_path), ["P3"]) == {"P3": "INCONCLUSIVE"}
     text = (tmp_path / "P3.json").read_text()
     assert MARKER not in text and json.loads(text)["reasons"] == ["ValueError"]
+
+
+def test_only_paths_beneath_the_arm_s_home_are_masked(tmp_path):
+    """A sibling such as <home>-backup is outside the home: masking it could hide a real difference between the trees."""
+    home = tmp_path / "pf-P4-rc" / "home"
+    text = f'{{"full_output_path": "{home}/tool_output/a-1.txt", "other": "{home}-backup/lost.txt", "bare": "{home}"}}'
+    masked = pf._home_paths(text, home)
+    assert masked.count("<home-path>") == 1 and f"{home}-backup/lost.txt" in masked and f'"bare": "{home}"' in masked
+    escaped = json.dumps({"output": f"{home}/a.txt\nRC-TEXT more"})  # The JSON escape ends the path, not the text.
+    assert pf._home_paths(escaped, home) == json.dumps({"output": "<home-path>\nRC-TEXT more"})

@@ -794,16 +794,16 @@ def run(host, *, rc_id, prior=(), instrument_fix=None):
                      "start": _keyed({c["session_id"]: c.get("flagged_summary_nodes") for c in plan["conversations"]}),
                      **{a: arms[a]["flagged_summary_nodes"] for a in arms}}},
         "bar6": bars.bar6({a: arms[a]["workload"] for a in arms})}
-    results["bar1"]["known_risk"] = (  # Release manager, 2026-11-07: recorded, not changed (the K6 rule is frozen).
-        "class 3's GA allowance matches rows by content identity across the arms; a tool output that names its arm's"
-        " home path differs between the arms there, so such a leftover can show as over GA (a false FAIL, never a"
-        " false PASS); the fix would be path parity in the runner")
     if "rc" in unreadable:  # Bars 1 and 3 judge the rc's rows: without them neither can pass or fail.
         for bar in ("bar1", "bar3"):
             results[bar] = {"verdict": bars.INCONCLUSIVE, "rows_unreadable": unreadable}
     elif unreadable:  # Only GA's rows: bar 3 never reads them, and an rc failure bar 1 finds without GA stands.
         verdict = bars.FAIL if results["bar1"]["verdict"] == bars.FAIL else bars.INCONCLUSIVE
         results["bar1"] = {**results["bar1"], "verdict": verdict, "rows_unreadable": unreadable}
+    results["bar1"]["known_risk"] = (  # Release manager, 2026-11-07: recorded, not changed (the K6 rule is frozen).
+        "class 3's GA allowance matches rows by content identity across the arms; a tool output that names its arm's"
+        " home path differs between the arms there, so such a leftover can show as over GA (a false FAIL, never a"
+        " false PASS); the fix would be path parity in the runner")
     receipt.update(
         arms={a: {**{k: arms[a][k] for k in ("workload", "egress", "provider", "doctor_not_exercised", "cron_paused", "routing")},
                   "checks": bars.check_counts(arms[a]["checks"])} for a in arms},
