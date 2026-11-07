@@ -215,10 +215,19 @@ def _host_rewrites(conn):
 
 
 def _flag(value, missing):
-    """A 0/1 column read as a bool, whatever its storage class ("0" and "false" are false); NULL gives *missing*."""
+    """A 0/1 column read as a bool, whatever its storage class (0, 0.0, "0", "0.0" and "false" are false); NULL gives
+    *missing*."""
     if value is None:
         return missing
-    return str(value).strip().lower() not in ("0", "false", "")
+    if isinstance(value, (bytes, bytearray)):
+        value = bytes(value).decode("utf-8", "replace")
+    if not isinstance(value, str):
+        return value != 0
+    text = value.strip().lower()
+    try:
+        return float(text) != 0
+    except ValueError:
+        return text not in ("false", "")
 
 
 def _identities(path, order, host=False):
@@ -244,10 +253,13 @@ def _identities(path, order, host=False):
             calls = json.loads(row.get("tool_calls") or "[]") if row["role"] == "assistant" else []
             calls = [(c.get("id"), c.get("function", c).get("name"), c.get("function", c).get("arguments"))
                      for c in calls]
-            content = row.get("content") or ""
-            override = overrides.get(row.get("store_id")) if row["role"] == "user" and isinstance(content, str) else None
+            raw = row.get("content")
+            content = raw or ""
+            # Only stored text with something besides edge whitespace: NULL, a number or a blob is never credited.
+            override = overrides.get(row.get("store_id")) if (
+                row["role"] == "user" and isinstance(raw, str) and raw.strip()) else None
             if (override and override.get("stored_sha256") == hashlib.sha256(content.encode()).hexdigest()
-                    and override["content"].strip() == content.strip()):  # An edge-whitespace rewrite only.
+                    and override["content"] == content.strip()):  # An edge-trim rewrite only, as the host stores it.
                 content = override["content"]  # Never stripped without a valid recorded override.
                 credited[row["session_id"]] += 1
             identity = (row["role"], _sha(content), calls,
@@ -319,7 +331,7 @@ def _flatten(value, prefix=""):
 def _below(value, root):
     """A value's path below its root, or None when it is not under it. Trailing separators on the root are ignored;
     a bare "/" stays the root."""
-    if not isinstance(value, str) or not root:
+    if not isinstance(value, str) or not value or not root:  # An empty value is not a path.
         return None
     base = root.rstrip("/")
     if value == root or value.rstrip("/") == base:

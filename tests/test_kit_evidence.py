@@ -635,7 +635,8 @@ def _rewrites(path, overrides):
     ([(2, "go", "go\n")], 1, 0),            # a valid recorded rewrite: the host form's identity
     ([], 0, 1),                              # no override: edge whitespace is never stripped
     ([(2, "go", "other\n")], 0, 1),         # the recorded hash does not match the stored content
-    ([(2, "stop", "go\n")], 0, 1)])         # a valid hash, but the recorded form is not an edge-whitespace rewrite
+    ([(2, "stop", "go\n")], 0, 1),         # a valid hash, but the recorded form is not an edge-whitespace rewrite
+    ([(2, "go ", "go\n")], 0, 1)])         # a valid hash, but not the edge-trimmed form the host stores
 def test_recorded_host_rewrites_are_credited(tmp_path, overrides, credited, lcm_only):
     lcm = _messages(tmp_path / "lcm.db", "store_id", [("s", "user", "hi", None, None), ("s", "user", "go\n", None, None),
                                                       ("s", "assistant", "ok", None, None)])
@@ -659,7 +660,8 @@ def test_a_reorder_among_credited_rows_is_counted(tmp_path):
     ("/root-a/", "/root-b/", "/root-a/cache", "/root-b/cache", "PATHS_ONLY"),
     ("/", "/root-b", "/cache", "/root-b/cache", "PATHS_ONLY"),
     ("/", "/root-b/", "/cache", "/root-b/other", "OTHER"),
-    ("/a/", "/b", "/a/", "/b/", "PATHS_ONLY")])
+    ("/a/", "/b", "/a/", "/b/", "PATHS_ONLY"),
+    ("/", "/b/", "", "/b/", "OTHER")])          # an empty value is not a path, even under a bare "/" root
 def test_config_roots_with_trailing_separators(tmp_path, root_a, root_b, a, b, verdict):
     yaml = pytest.importorskip("yaml")
     paths = [_write(tmp_path / name, yaml.safe_dump({"model": value})) for name, value in (("a.yaml", a), ("b.yaml", b))]
@@ -679,6 +681,15 @@ def test_only_the_exact_override_key_is_read(tmp_path):
 
 @pytest.mark.parametrize("value,missing,expected", [
     (0, True, False), (1, False, True), ("0", True, False), ("false", True, False), (" 1 ", False, True),
-    (None, True, True), (None, False, False)])
+    (None, True, True), (None, False, False), (0.0, True, False), ("0.0", True, False), (b"0", True, False),
+    (1.0, False, True), (b"1", False, True)])
 def test_generation_flags_read_any_storage_class(value, missing, expected):
     assert kit._flag(value, missing) is expected
+
+
+@pytest.mark.parametrize("stored", [None, "", b"", 0])
+def test_stored_content_without_text_is_never_credited(tmp_path, stored):
+    lcm = _messages(tmp_path / "lcm.db", "store_id", [("s", "user", stored, None, None)])
+    host = _messages(tmp_path / "state.db", "id", [("s", "user", " ", None, None)])
+    result = kit.reorder(_rewrites(lcm, [(1, " ", "")]), host)
+    assert (result["host_rewrites_credited"], result["lcm_only"], result["host_only"]) == (0, 1, 1)
