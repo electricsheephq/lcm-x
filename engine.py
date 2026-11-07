@@ -18,7 +18,7 @@ import threading
 import time
 import uuid
 from bisect import bisect_left, bisect_right
-from collections import Counter, deque
+from collections import Counter, defaultdict, deque
 from contextlib import contextmanager
 from datetime import datetime
 from functools import lru_cache
@@ -7024,12 +7024,32 @@ class LCMEngine(
                 pending.append((idx, digest))
             else:
                 used.add(position)
-        for idx, digest in pending:
-            position = next((pos for pos, row in enumerate(target) if pos not in used
-                             and row["identity_sha256"] == digest), None)
-            if position is not None:
-                used.add(position)
-                result[idx] = (session, target[position])
+        if not pending:
+            return result, False
+        # #2390: identity-equal occurrences can differ in content (a model-switch note, a todo
+        # fold). A re-stamped row first takes an occurrence whose stored row has its exact
+        # content, so reordered rows never cross; only then the first identity-equal one.
+        stamps = [row["timestamp"] for row in target if row.get("timestamp") is not None]
+        stored = defaultdict(list)
+        for row in self._store.find_rows_by_observed_at(self._conversation_id, [session], stamps):
+            if row.get("session_id") == session:
+                stored[row.get("observed_at")].append((row.get("role"), row.get("content")))
+
+        def same_content(idx, row):
+            return (messages[idx].get("role"), messages[idx].get("content")) in stored.get(row.get("timestamp"), ())
+
+        for exact in (True, False):
+            left = []
+            for idx, digest in pending:
+                position = next((pos for pos, row in enumerate(target) if pos not in used
+                                 and row["identity_sha256"] == digest
+                                 and (not exact or same_content(idx, row))), None)
+                if position is None:
+                    left.append((idx, digest))
+                else:
+                    used.add(position)
+                    result[idx] = (session, target[position])
+            pending = left
         return result, False
 
     def _link_restamped_occurrences(self, messages, stored_at, previous, recovery_fallback):

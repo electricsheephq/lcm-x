@@ -354,3 +354,33 @@ def test_rotation_reordered_carried_rows_are_each_linked(build, caplog):
         assert [row["session_id"] for row in copies] == ["S", "rotated"], content[:30]
         assert (copies[1]["store_id"], copies[0]["store_id"]) in links, content[:30]
     assert len(links) == len({target for _source, target in links})
+
+
+@pytest.mark.issue(2390)
+def test_rotation_reordered_identity_equal_rows_with_different_content_link_to_their_own(build, caplog, monkeypatch):
+    """#2390: P (a model-switch note before T's text) and T share one replay identity. Both are carried,
+    re-stamped and reordered; each copy must link to its own original, never crossed."""
+    prefixed = "[Note: model was just switched from X to Y]\n\n" + T
+    plain_history = history
+
+    def history_with_prefixed_turn(uids):
+        rows = plain_history(uids)
+        last_user = max(i for i, row in enumerate(rows) if row["role"] == "user")
+        rows[last_user]["content"] = prefixed
+        return rows
+
+    monkeypatch.setattr(__name__ + ".history", history_with_prefixed_turn)
+
+    def reorder(_engine, view):
+        p_index = next(i for i, row in enumerate(view) if row.get("content") == prefixed)
+        t_index = next(i for i, row in enumerate(view) if row.get("role") == "user" and row.get("content") == T)
+        view[p_index]["timestamp"] += 0.5  # re-stamped too
+        view[p_index], view[t_index] = view[t_index], view[p_index]
+
+    engine, rows = run(build, caplog, mode="rotating", uids=False, restamp=True, before_ingest=reorder)
+    links = replay_links(engine)
+    for content in (prefixed, T):
+        copies = [row for row in rows if row["role"] == "user" and row["content"] == content]
+        assert [row["session_id"] for row in copies] == ["S", "rotated"], content[:30]
+        assert (copies[1]["store_id"], copies[0]["store_id"]) in links, content[:30]
+    assert len(links) == len({target for _source, target in links})
