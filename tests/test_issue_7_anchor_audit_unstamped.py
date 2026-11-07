@@ -48,7 +48,7 @@ def _repair(stamped=False):
     return host, [*host[:3], merged, _u("U6" + PAD, ts(600)), _a("A6" + PAD, ts(601))]
 
 
-@pytest.mark.xfail(strict=True, reason="#7: an unstamped user row the host replaced before the ingest cursor is not audited")
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason="#7: an unstamped user row the host replaced before the ingest cursor is not audited")
 def test_497_repair_merge_before_cursor_unstamped_stores_the_new_user_row_once(tmp_path):
     engine = _engine(tmp_path)
     try:
@@ -65,7 +65,7 @@ def test_497_repair_merge_before_cursor_unstamped_stores_the_new_user_row_once(t
         engine.shutdown()
 
 
-@pytest.mark.xfail(strict=True, reason="#7: an unstamped user row the host replaced before the ingest cursor is not audited")
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason="#7: an unstamped user row the host replaced before the ingest cursor is not audited")
 def test_497_repair_merge_without_appended_reply_stores_the_new_user_row(tmp_path):
     engine = _engine(tmp_path)
     try:
@@ -81,7 +81,7 @@ def test_497_repair_merge_without_appended_reply_stores_the_new_user_row(tmp_pat
         engine.shutdown()
 
 
-@pytest.mark.xfail(strict=True, reason="#7: an unstamped user row the host replaced before the ingest cursor is not audited")
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason="#7: an unstamped user row the host replaced before the ingest cursor is not audited")
 @pytest.mark.parametrize("reply", [False, True])
 @pytest.mark.parametrize("turn_stamps", ["none", "host"])
 def test_493_rollback_and_replace_unstamped_stores_the_replacement_once(tmp_path, reply, turn_stamps):
@@ -101,7 +101,7 @@ def test_493_rollback_and_replace_unstamped_stores_the_replacement_once(tmp_path
         engine.shutdown()
 
 
-@pytest.mark.xfail(strict=True, reason="#7: an unstamped user row the host replaced before the ingest cursor is not audited")
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason="#7: an unstamped user row the host replaced before the ingest cursor is not audited")
 def test_493_merge_onto_the_last_row_as_a_new_object_stores_the_new_text(tmp_path):
     engine = _engine(tmp_path)
     try:
@@ -241,8 +241,8 @@ def test_561_dangling_retained_row_merge_persist_is_not_a_loss(tmp_path, summari
         engine.shutdown()
 
 
-@pytest.mark.xfail(strict=True, reason="#7: LCM_IDENTITY_ANCHOR=0 has no prefix audit")
-def test_anchor_off_is_out_of_scope(tmp_path, monkeypatch):
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason="#7: LCM_IDENTITY_ANCHOR=0 has no prefix audit")
+def test_anchor_off_stores_the_new_user_row_out_of_scope_for_7(tmp_path, monkeypatch):
     monkeypatch.setenv("LCM_IDENTITY_ANCHOR", "0")
     engine = _engine(tmp_path)
     try:
@@ -254,7 +254,21 @@ def test_anchor_off_is_out_of_scope(tmp_path, monkeypatch):
         engine.shutdown()
 
 
-@pytest.mark.xfail(strict=True, reason="#7: a replacement after the host truncated its list is not audited")
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason="#7: LCM_IDENTITY_ANCHOR=0 has no prefix audit, so even a "
+                                                              "stamped replacement before the cursor is not stored")
+def test_anchor_off_stores_a_stamped_new_user_row(tmp_path, monkeypatch):
+    monkeypatch.setenv("LCM_IDENTITY_ANCHOR", "0")
+    engine = _engine(tmp_path)
+    try:
+        host, repaired = _repair(stamped=True)
+        engine.ingest(host)
+        engine.ingest(repaired)
+        assert any(row["content"] == repaired[4]["content"] for row in _stored(engine))
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason="#7: a replacement after the host truncated its list is not audited")
 def test_truncated_then_replaced_row_stores_the_new_row(tmp_path):
     """Review r4 shape 1: the host truncates its list, then puts a new row where an old one was."""
     engine = _engine(tmp_path)
@@ -270,7 +284,7 @@ def test_truncated_then_replaced_row_stores_the_new_row(tmp_path):
         engine.shutdown()
 
 
-@pytest.mark.xfail(strict=True, reason="#7: a short user row equal to an older row's last paragraph is not audited")
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason="#7: a short user row equal to an older row's last paragraph is not audited")
 def test_short_reply_matching_an_earlier_paragraph_is_stored(tmp_path):
     """Review r4 shape 2: a new short user row equals the last paragraph of an older stored row."""
     engine = _engine(tmp_path)
