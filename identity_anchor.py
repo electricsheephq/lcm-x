@@ -679,40 +679,69 @@ class IdentityAnchorMixin:
                     end = int(tail[0]["store_id"]) - 1
                 for page in reversed(pages):  # Preserve the previous chronological copy-consumption order.
                     rows.update((int(row["store_id"]), row) for row in page)
-            index: dict = defaultdict(list)
-            for row in rows.values():
+            # Per form, stored copies in store order: exact forms and cleanup aliases apart, so a replay takes an
+            # exact copy before an alias (#2466 review). ``avail`` counts unconsumed copies of either kind.
+            exact: dict = defaultdict(list)
+            alias: dict = defaultdict(list)
+            row_forms: dict = defaultdict(list)
+            for store_id in sorted(rows):
+                row = rows[store_id]
                 if calls(row, stored=True) or row.get("role") == "tool" and row.get("tool_call_id"):
-                    forms = {key(row, stored=True)}
+                    own, cleaned_form = key(row, stored=True), None
                 elif row.get("role") in text_roles:
                     identity = self._message_replay_identity(row, stored_row=True)
                     if _lossy(identity):
                         continue
-                    forms = {(identity[0], identity[1].strip())}
+                    own = (identity[0], identity[1].strip())
                     cleaned = self._active_cleanup_replay_identity(identity)
-                    if cleaned:
-                        forms.add((cleaned[0], cleaned[1].strip()))  # proven cleanup form (#1286)
+                    cleaned_form = (cleaned[0], cleaned[1].strip()) if cleaned else None  # proven cleanup form (#1286)
                 else:
                     continue
-                for form in forms:
-                    index[form].append(row)
+                exact[own].append(store_id)
+                row_forms[store_id].append(own)
+                if cleaned_form is not None and cleaned_form != own:
+                    alias[cleaned_form].append(store_id)
+                    row_forms[store_id].append(cleaned_form)
+            avail = Counter(form for store_id, forms in row_forms.items() if store_id not in consumed for form in forms)
+            stored_calls = {ident for form in exact if form and form[0] == "call" for ident in form[1]}
             reserved = Counter(key(identity_messages[idx]) for idx in range(min(start, len(messages)))
                                if idx not in excluded and idx not in matched)
         except Exception as exc:
             logger.warning("LCM identity-anchor presence unavailable (%s); keeping positional replays", type(exc).__name__)
             return []
+        def take(wanted) -> None:
+            # Newest unconsumed exact copy first, then the newest alias; amortized O(1) (#2466 review).
+            for stack in (exact.get(wanted), alias.get(wanted)):
+                while stack:
+                    store_id = stack.pop()
+                    if store_id not in consumed:
+                        consumed.add(store_id)
+                        for form in row_forms[store_id]:
+                            avail[form] -= 1
+                        return
+
+        def storing(k) -> tuple:
+            # Call ids this ingest stores at view index ``k``: none for a row the ignore patterns drop.
+            return () if self._matches_ignore_message_patterns(messages[k]) else (calls(identity_messages[k]) or ())
+
         unaccounted = []
+        pending: dict = {}  # call id -> the earliest view index this ingest stores it at
+        for k in sorted(missed):
+            for ident in (storing(k) if 0 <= k < len(messages) else ()):
+                pending.setdefault(ident, k)
         for idx, wanted in candidates.items():
             if wanted is None:
                 continue
-            copies = [row for row in index.get(wanted, ()) if int(row["store_id"]) not in consumed]
-            if len(copies) > reserved[wanted]:
-                consumed.add(int(copies[-1]["store_id"]))
+            if avail[wanted] > reserved[wanted]:
+                take(wanted)
                 continue
-            if wanted[0] == "tool" and not any(  # never store a result without its call
-                    wanted[1] in (calls(identity_messages[k]) or ()) for k in range(idx)) and not any(
-                    wanted[1] in k[1] for k in index if k and k[0] == "call"):
+            # Never store a result without its call: the call is stored, or this ingest stores it (the audit's own
+            # finds or an earlier unaccounted row), and the ignore patterns do not drop it (#2466 review).
+            if wanted[0] == "tool" and wanted[1] not in stored_calls and not pending.get(wanted[1], idx) < idx:
                 continue
             unaccounted.append(idx)
+            for ident in (storing(idx) if wanted[0] == "call" else ()):
+                pending.setdefault(ident, idx)
         return unaccounted
 
     def _identity_anchor_record_recovery(self, result, emissions, messages=()) -> None:
