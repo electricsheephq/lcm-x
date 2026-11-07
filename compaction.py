@@ -1196,7 +1196,7 @@ class CompactionMixin:
             self._compress_commit_proof = proof
             self._prepare_compress_commit_proof(proof, result)
             if any(d.get("kind") == "recovery" for d in getattr(self, "_pending_emission_candidates", ())):
-                self._identity_anchor_record_recovery(result, emissions)
+                self._identity_anchor_record_recovery(result, emissions, messages)
             if proof["published"] or proof["native"] or proof["recovery"] or proof["filtered"]:
                 self._persist_compress_commit_proof(proof)
             elif proof["stub_first"] or proof.get("cleanup_rewrite"):

@@ -359,6 +359,38 @@ def held_after(result, text_tag, reply, notices):
             [m for m in after if m.get("role") == "tool"], tags, own)
 
 
+def is_delegate_child(agent) -> bool:
+    """A delegate_task child (tools/delegate_tool.py ``_build_child_agent``: platform "subagent", depth >= 1)."""
+    try:
+        depth = int(getattr(agent, "_delegate_depth", 0) or 0)
+    except (TypeError, ValueError):
+        depth = 0
+    return depth > 0 or getattr(agent, "platform", None) == "subagent"
+
+
+def child_turn(agent, orig_run, a, k):
+    """#1931: a delegated child's run is its own attempt (``child_*`` events under its session id), never the parent
+    turn's: the parent's turn context, counters and turn_end are left untouched."""
+    user = k.get("user_message", a[0] if a else None)
+    found = re.search(_r1.CHILD_TAG, user if isinstance(user, str) else "")
+    ctag = found.group(1) if found else None
+    event(turn=cur["turn"], event="child_user_sent", tag=ctag, parent_tag=tag(), session_prefix="D",
+          session=agent.session_id, content=user if isinstance(user, str) else None)
+    try:
+        result = orig_run(agent, *a, **k)
+    except BaseException as exc:
+        event(turn=cur["turn"], event="child_turn_end", tag=ctag, session_prefix="D", session=agent.session_id,
+              held=None, failed=True, exception=repr(exc)[:300])
+        raise
+    msgs = result.get("messages") if isinstance(result.get("messages"), list) else []
+    held = next((m["content"] for m in msgs if m.get("role") == "user" and isinstance(m.get("content"), str)
+                 and ctag and f"[{ctag}]" in m["content"]), None)
+    event(turn=cur["turn"], event="child_turn_end", tag=ctag, session_prefix="D", session=agent.session_id,
+          held=held, failed=bool(result.get("failed")) or not result.get("completed", True),
+          interrupted=bool(result.get("interrupted")))
+    return result
+
+
 def patch_run_agent(mod):
     cls = mod.AIAgent
     orig_init, orig_run, orig_cc = cls.__init__, cls.run_conversation, getattr(cls, "_compress_context", None)
@@ -375,6 +407,8 @@ def patch_run_agent(mod):
 
     def run_conversation(self, *a, **k):
         ensure_tap()
+        if is_delegate_child(self):
+            return child_turn(self, orig_run, a, k)
         tc = load_turn()
         cur["session"] = self.session_id
         cur["agent"] = self
@@ -415,6 +449,15 @@ def patch_run_agent(mod):
         snapshot(failed_turn_notices=notices, provenance=_r1.provenance(json.loads((DIR / "cell.json").read_text()), []))
         return result
     cls.run_conversation = run_conversation
+
+    # #1931: the host's delegate_task call site; the sequential executor bypasses the inline table for it. No call id
+    # reaches it, so the scorer binds the dispatch by name and args.
+    orig_delegate = getattr(cls, "_dispatch_delegate_task", None)
+    if orig_delegate is not None:
+        def dispatch_delegate(self, function_args, *a, **k):
+            return dispatched(lambda: orig_delegate(self, function_args, *a, **k), "delegate_task", function_args, None,
+                              "delegate_dispatch")
+        cls._dispatch_delegate_task = dispatch_delegate
 
     if orig_cc is not None:  # hosts whose /compress calls _compress_context(force=True) directly
         def compress_context(self, *a, **k):
@@ -476,17 +519,22 @@ def patch_model_tools(mod):
 
 
 def patch_inline_tools(mod):
-    """#659 P2: ``todo_list`` is an agent-level inline tool (``INLINE_TOOL_EXECUTORS``), dispatched before the registry,
-    so ``handle_function_call`` never sees it. Only that entry is wrapped: no other cell plans an inline tool."""
+    """#659 P2 / #1931: ``todo_list`` and ``delegate_task`` are agent-level inline tools (``INLINE_TOOL_EXECUTORS``),
+    dispatched before the registry, so ``handle_function_call`` never sees them. Only those entries are wrapped: no
+    other cell plans an inline tool."""
     table = getattr(mod, "INLINE_TOOL_EXECUTORS", None)
-    run = table.get("todo_list") if isinstance(table, dict) else None
-    if run is None:
+    if not isinstance(table, dict):
         return
+    for name in ("todo_list", "delegate_task"):
+        if table.get(name) is not None:
+            table[name] = _traced_inline(name, table[name])
 
+
+def _traced_inline(name, run):
     def traced(agent, args, ctx):
-        return dispatched(lambda: run(agent, args, ctx), "todo_list", args, getattr(ctx, "tool_call_id", None),
+        return dispatched(lambda: run(agent, args, ctx), name, args, getattr(ctx, "tool_call_id", None),
                           "inline_tool_dispatch")
-    table["todo_list"] = traced
+    return traced
 
 
 def patch_helpers(mod):

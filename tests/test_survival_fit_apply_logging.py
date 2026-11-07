@@ -94,7 +94,10 @@ def test_apply_logging_measurement_and_cursor_order(
     if counter_failure:
         warning(f"LCM survival-fit counter write failed (projected={path != 'no-shrink'}); "
                 "/lcm doctor under-counts survival fits for this store")
-    assert [(record.name, record.levelno, record.getMessage()) for record in caplog.records] == expected_logs
+    # Only this module's records: a stem-backfill thread left running by an earlier test (engine shutdown does not
+    # join it) can log a db_bootstrap warning inside the capture window, at a time set by scheduling.
+    assert [(record.name, record.levelno, record.getMessage()) for record in caplog.records
+            if record.name == "hermes_lcm.survival_fit"] == expected_logs
     assert measurements == expected_measurements
     assert warning_cursors == ([(len(rows), False)] if path == "emergency-prefix" else [])
     assert (engine._ingest_cursor, engine._ingest_cursor_needs_reconcile) == (
