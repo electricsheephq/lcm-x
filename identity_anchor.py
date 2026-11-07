@@ -588,17 +588,34 @@ class IdentityAnchorMixin:
         """Rows in ``[start, cursor)`` that are neither bound, matched to a stored row, a compaction output (LCM's
         own scaffold) nor ignored, and that no stored copy in the audited tail accounts for, one copy each. The
         copies the view's unchanged prefix ``[0, start)`` holds are reserved first. Counting stored copies, not
-        bindings, keeps an upgraded store's pre-ledger rows from being stored again. Unsure is accounted (the
-        positional replay, as before): a row with no comparable key (a lossy identity), and a reserved key whose
-        older copies a ``capped`` tail does not hold."""
-        from .reconcile import _proof_user_identity
+        bindings, keeps an upgraded store's pre-ledger rows from being stored again. The count compares a loose
+        key (call ids, a result's call id, else role and stripped text), never fields a pre-ledger row can lack.
+        Unsure is accounted (the positional replay, as before): a row with no comparable key (a lossy identity),
+        a reserved key whose older copies a ``capped`` tail does not hold, and a tool result whose call is
+        neither in the view before it nor stored."""
+        def calls(msg) -> tuple:
+            value = msg.get("tool_calls") or ()
+            if isinstance(value, str):
+                try:
+                    value = json.loads(value)
+                except ValueError:
+                    return ("?",)  # unreadable: equal to nothing, so never proof of a copy
+            return tuple(sorted(str(c.get("id") or "") for c in value if isinstance(c, dict))) if isinstance(
+                value, list) else ()
 
-        def key(idx):
-            identity = self._message_replay_identity(identity_messages[idx])
-            return None if _lossy(identity) else _proof_user_identity(identity)
+        def key(msg, stored=False):
+            if calls(msg):
+                return ("call", calls(msg))
+            if msg.get("role") == "tool" and msg.get("tool_call_id"):
+                return ("tool", str(msg["tool_call_id"]))
+            identity = self._message_replay_identity(msg, stored_row=stored)
+            return None if _lossy(identity) else (identity[0], identity[1].strip())
 
+        index: dict = defaultdict(list)
+        for row in {int(row["store_id"]): row for rows in held.values() for row in rows}.values():
+            index[key(row, stored=True)].append(row)
         explained = set(excluded) | set(matched) | set(plan.get("matched", {})) | plan["replayed"] | set(missed)
-        reserved = Counter(key(idx) for idx in range(min(start, len(messages)))
+        reserved = Counter(key(identity_messages[idx]) for idx in range(min(start, len(messages)))
                            if idx not in excluded and idx not in matched)
         unaccounted = []
         for idx in range(start, cursor):
@@ -606,12 +623,16 @@ class IdentityAnchorMixin:
             if (idx in explained or identity_at(idx) is None and self._identity_is_lcm_scaffold(message)
                     or self._matches_ignore_message_patterns(messages[idx])):
                 continue
-            wanted = key(idx)
+            wanted = key(message)
             if wanted is None or capped and reserved[wanted]:
                 continue
-            copies = [row for row in held.get(wanted, ()) if int(row["store_id"]) not in consumed]
+            copies = [row for row in index.get(wanted, ()) if int(row["store_id"]) not in consumed]
             if len(copies) > reserved[wanted]:
                 consumed.add(int(copies[-1]["store_id"]))
+                continue
+            if wanted[0] == "tool" and not any(  # never store a result without its call
+                    wanted[1] in calls(identity_messages[k]) for k in range(idx)) and not any(
+                    wanted[1] in k[1] for k in index if k and k[0] == "call"):
                 continue
             unaccounted.append(idx)
         return unaccounted
