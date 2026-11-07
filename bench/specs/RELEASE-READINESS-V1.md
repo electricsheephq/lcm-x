@@ -507,12 +507,13 @@ fixture requires new comparable measurements; it cannot restamp old results.
 5. Doctor, quick_check, integrity and schema: no failed check. Doctor warnings are matched by check name, and each needs a count no higher than the previous-GA arm's.
 6. Workload: the receipt shows each workload item above in each arm, item by item (for example, each forced restart with the cold bind of each conversation's first turn after it), and counts replay misses per arm. A missing item in either arm, or any replay miss, makes the bar INCONCLUSIVE.
 
-**Rulings on bars 1 and 2.** Each is fixed before any run's data:
+**Rulings on bars 1, 2 and 5.** Each is fixed before any run's data:
 - Bar 1, class 3: only a row whose identity matches no host row and no snapshot row may be assigned to identical rows of the previous-GA arm, and per identity over the whole run the rc stores it no more times than the previous GA does.
 - Bar 1, order (from v0.30.0 rc1): host rows are matched in order within each session, which closes the reorder gap Phase B already treats as a regression; rows of other sessions, such as the scheduled job's, are ordered only within their own session.
 - Bar 2, a zero-copy bind: validity holds iff the rc's replay stores 0 copies, and a replay error is INCONCLUSIVE.
 - The S7 classifier is not run; only the integrity reader's identity function is imported, pinned by sha256.
 - Bar 2's comparison uses raw identity, and a preflight first checks that both trees store the same externalized tool output identically.
+- Bar 5, the arms (2026-11-07): a failed check in the rc arm fails the bar. A failed check in the previous-GA arm is never PASS: that arm is re-run once, and if the re-run fails too, the receipt names the check and the bar stays INCONCLUSIVE until the release manager records a disposition (a known previous-GA defect with its issue, or an environment fault that needs a re-run). Both arms are recorded.
 
 **Verdict.** The run's raw verdict is PASS when every bar holds, and FAIL when any bar fails; a FAIL is never re-run. Otherwise it is INCONCLUSIVE, which is not green, and the clone run may re-run once on the same rc. A second INCONCLUSIVE is an instrument defect: D5 stays INCONCLUSIVE for that rc until a reviewed fix to the instrument lands and the run passes. That fix may change the runner, the captures or the provider, but not the identity, rewrite-credit, validity or comparison code; a change there applies from the next rc.
 

@@ -123,6 +123,17 @@ def test_bar5_checks_and_warnings():
     assert b.bar5(checks()[1:], checks())["verdict"] == b.INCONCLUSIVE
 
 
+def test_bar5_a_failed_ga_check_is_never_pass():
+    ga_fail = checks({"kind": "integrity", "check": "fk", "status": "fail"})
+    first = b.bar5(checks(), ga_fail)
+    assert first["verdict"] == b.INCONCLUSIVE and first["ga_rerun_needed"] and first["ga_failed"] == ["fk"]
+    again = b.bar5(checks(), ga_fail, ga_fail)
+    assert again["verdict"] == b.INCONCLUSIVE and again["ga_disposition_needed"] and again["ga_rerun_failed"] == ["fk"]
+    assert b.bar5(checks(), ga_fail, checks())["verdict"] == b.PASS
+    rc_fail = checks({"kind": "schema", "check": "core", "status": "fail"})
+    assert b.bar5(rc_fail, ga_fail, ga_fail)["verdict"] == b.FAIL  # An rc failure is FAIL whatever the GA arm shows.
+
+
 def workload(**change):
     names = ["L", "S1", "S2"]
     return {"conversation_names": names, "large_conversation_rows": 1000, "cron_fired": 1, "tool_heavy_turns": 2,

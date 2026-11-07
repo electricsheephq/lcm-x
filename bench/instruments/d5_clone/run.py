@@ -283,6 +283,9 @@ def run(host, *, rc_id, prior=(), instrument_fix=None):
     rules, base = host.rules(), host.run_dir / "plan" / "home"
     arms = {name: run_arm(host, name, host.clone(name), plan, rules, {"RC3/store.db": base / "store.db"})
             for name in ("rc", "ga")}
+    ga_rerun = None  # Bar 5: a failed check in the GA arm re-runs that arm once (release manager, 2026-11-07).
+    if bars.failed_checks(arms["ga"]["checks"]):
+        ga_rerun = run_arm(host, "ga", host.clone("ga-rerun"), plan, rules, {"RC3/store.db": base / "store.db"})
     snap = host.rows(base)
     tops = {k: max((r[c] for r in snap[k]), default=0) for k, c in (("store", "store_id"), ("host", "id"))}
     new = {a: [r for r in arms[a]["rows"]["store"] if r["store_id"] > tops["store"]] for a in arms}
@@ -294,10 +297,11 @@ def run(host, *, rc_id, prior=(), instrument_fix=None):
         "bar2": bars.bar2([b["bar2"] for b in binds]),
         "bar3": bars.bar3(snap["store"], arms["rc"]["rows"]["store"], rules["identity"]),
         "bar4": bars.bar4(arms["rc"]["logs"], arms["ga"]["logs"], arms["rc"]["roots"], arms["ga"]["roots"]),
-        "bar5": bars.bar5(arms["rc"]["checks"], arms["ga"]["checks"]),
+        "bar5": bars.bar5(arms["rc"]["checks"], arms["ga"]["checks"], ga_rerun and ga_rerun["checks"]),
         "bar6": bars.bar6({a: arms[a]["workload"] for a in arms})}
     receipt.update(
         arms={a: {k: arms[a][k] for k in ("workload", "egress", "provider")} for a in arms},
+        ga_rerun=ga_rerun and {k: ga_rerun[k] for k in ("workload", "egress", "provider", "wall_s")},
         binds=[{k: v for k, v in b.items() if k != "t0_keys"} for b in binds], bars=results,
         verdict=bars.verdict(results, prior_verdicts),
         wall_s={**{a: arms[a]["wall_s"] for a in arms}, "total": round(time.monotonic() - started, 3)})

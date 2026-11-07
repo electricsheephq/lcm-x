@@ -162,17 +162,27 @@ def bar4(rc_lines, ga_lines, rc_roots, ga_roots):
             "rc_signatures": dict(rc), "ga_signatures": dict(ga), "over_ga": over}
 
 
-def bar5(rc_checks, ga_checks):
+def failed_checks(checks):
+    return sorted({c["check"] for c in checks if c["status"] == "fail"})
+
+
+def bar5(rc_checks, ga_checks, ga_rerun_checks=None):
     """No failed doctor, quick_check, integrity or schema check in the rc arm; doctor warnings by check name, with
-    rc <= GA. Checks are {kind, check, status}; a kind with no check is not shown (INCONCLUSIVE)."""
-    failed = sorted({c["check"] for c in rc_checks if c["status"] == "fail"})
+    rc <= GA. Checks are {kind, check, status}; a kind with no check is not shown (INCONCLUSIVE). A failed check in
+    the previous-GA arm is never PASS (release manager, 2026-11-07): the GA arm is re-run once; if the re-run fails
+    too, the bar stays INCONCLUSIVE until the release manager records a disposition."""
+    failed, ga_failed = failed_checks(rc_checks), failed_checks(ga_checks)
+    rerun_failed = failed_checks(ga_rerun_checks) if ga_rerun_checks is not None else None
+    baseline = ga_rerun_checks if ga_failed and ga_rerun_checks is not None and not rerun_failed else ga_checks
     rc_w, ga_w = (Counter(c["check"] for c in checks if c["kind"] == "doctor" and c["status"] == "warn")
-                  for checks in (rc_checks, ga_checks))
+                  for checks in (rc_checks, baseline))
     over = sorted(name for name, n in rc_w.items() if n > ga_w[name])
     missing = [k for k in CHECK_KINDS if not any(c["kind"] == k for c in rc_checks)]
-    return {"verdict": FAIL if failed or over else INCONCLUSIVE if missing else PASS, "failed": failed,
-            "warnings_over_ga": over, "kinds_missing": missing,
-            "ga_failed": sorted({c["check"] for c in ga_checks if c["status"] == "fail"})}
+    ga_open = bool(ga_failed) and (rerun_failed is None or bool(rerun_failed))
+    verdict = FAIL if failed or over else INCONCLUSIVE if missing or ga_open else PASS
+    return {"verdict": verdict, "failed": failed, "warnings_over_ga": over, "kinds_missing": missing,
+            "ga_failed": ga_failed, "ga_rerun_needed": bool(ga_failed) and rerun_failed is None,
+            "ga_rerun_failed": rerun_failed or [], "ga_disposition_needed": bool(rerun_failed)}
 
 
 def workload_items(w):

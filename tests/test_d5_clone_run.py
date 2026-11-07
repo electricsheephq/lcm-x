@@ -107,7 +107,10 @@ class FakeHost(r.LocalHost):
         return [str(ctx["home"] / "plugins" / "hermes-lcm-x")]
 
     def checks(self, ctx):
-        return [{"kind": k, "check": k, "status": "ok"} for k in bars.CHECK_KINDS]
+        self.ga_checks = getattr(self, "ga_checks", 0) + (ctx["name"] == "ga")
+        broken = ctx["name"] == "ga" and (self.fail == "ga_twice" or (self.fail == "ga_once" and self.ga_checks == 1))
+        return [{"kind": k, "check": k, "status": "fail" if broken and k == "schema" else "ok"}
+                for k in bars.CHECK_KINDS]
 
     def facts(self, ctx):
         return {"cron_fired": 1, "payload_files_created": 1, "compactions_published": 1, "whitespace_rewrites": 1,
@@ -189,3 +192,14 @@ def test_replay_runs_the_edition_under_the_sandbox(tmp_path, monkeypatch):
     assert [argv[:4] for argv in seen] == [["/usr/bin/nice", "-n", "19", "/usr/bin/sandbox-exec"]] * 2
     assert seen[0][-5:] == ["python3", "gen", "T0", "H8", os.fspath(tmp_path / "run" / "rc" / "replays" / "e0-L-0")]
     assert 'localhost:4242' in seen[0][5]
+
+
+@pytest.mark.parametrize("fail, verdict", [("ga_once", bars.PASS), ("ga_twice", bars.INCONCLUSIVE)])
+def test_a_failed_ga_check_reruns_the_ga_arm_once(setup, fail, verdict):
+    _, config, run_dir = setup
+    host = FakeHost(config, run_dir, fail=fail)
+    receipt = r.run(host, rc_id="rc-synthetic")
+    assert host.armed == ["rc", "ga", "ga"] and receipt["ga_rerun"] is not None
+    bar5 = receipt["bars"]["bar5"]
+    assert bar5["verdict"] == verdict and bar5["ga_failed"] == ["schema"]
+    assert bar5["ga_disposition_needed"] is (fail == "ga_twice") and bar5["ga_rerun_needed"] is False
