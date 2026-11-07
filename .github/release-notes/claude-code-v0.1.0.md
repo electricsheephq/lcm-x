@@ -50,7 +50,7 @@ To turn capture off for a launch, set `LCMX_CAPTURE=off`, or start Claude Code w
 
   `PostToolBatch` runs in the background. The other hooks run before Claude Code goes on, with a 5-second limit (15 seconds for `PreCompact`), so a stall there adds to the turn.
 
-  No audit lost anything. A hook cut off at its time limit is designed to be caught up by the next hook, or the next time Claude Code starts. No hook was seen killed at its time limit, and the ones that ran past 5 s finished; that catch-up path was not exercised. Tracked in #2350.
+  No audit lost anything. A hook cut off at its time limit is designed to be caught up by the session's next hook. If an earlier hook had already recorded the session, a later worker run, even one started from another session, also catches it up. If every hook of a new session were cut off before any of them recorded it, that session would not be captured. No hook was seen killed at its time limit, and the ones that ran past 5 s finished; that catch-up path was not exercised. Tracked in #2350.
 - **Leftover temporary files.** A hook that is killed mid-write can leave an empty `.tmp` file in the store's `spool` folder. It holds nothing and is safe to delete; capture is unaffected.
 
 ## What it bundles
