@@ -17,6 +17,12 @@ occurrence.
   link than main mode. Which row of a key carries the link is not observable when no
   equal-stamp evidence exists (the oracle's pooling rule), so this is a count per key.
 LCM_MULTI_PLANS sets the plan count (default 600, split over six chunks for xdist).
+
+Ownership variants (blank-id stores and a second conversation): after an ingest, a plan may
+relabel delivered occurrences to NULL, '', whitespace (legacy blank ids, which the active
+conversation owns, #581) or to another conversation. The relabel is applied by true occurrence
+in both runs. A link into a row of another conversation is a failure of its own.
+LCM_MULTI_VARIANT_PLANS sets that plan count (default 300).
 """
 from copy import deepcopy
 from collections import Counter, defaultdict
@@ -33,13 +39,17 @@ from tests.invariants._ingest_shapes_2377 import U, call, key, relations
 pytestmark = pytest.mark.issue(2377)
 
 PLANS = int(os.environ.get("LCM_MULTI_PLANS", "600"))
+VARIANT_PLANS = int(os.environ.get("LCM_MULTI_VARIANT_PLANS", "300"))
+VARIANT_FIRST_SEED = 63770
+RELABELS = ("NULL", "''", "'  '", "'other'")
 CHUNKS = 6
 FIRST_SEED = 23770
 
 
-def generate(seed):
-    """A plan: the true rows, then 2-4 ingests, each (view, mode, cursor)."""
+def generate(seed, variant=False):
+    """A plan: the true rows, then 2-4 ingests, each (view, mode, cursor[, relabel])."""
     rng = random.Random(seed)
+    relabel_rng = random.Random(seed * 7919 + 1)  # a separate stream: base plans stay unchanged
     alphabet = []
     for identity in range(rng.randint(1, 2)):
         ids = tuple(f"id-{identity}-{i}" for i in range(rng.randint(1, 2)))
@@ -80,6 +90,9 @@ def generate(seed):
         cursor = rng.choice(sorted(set(b for b in boundaries if 1 <= b <= delivered))) if number else 0
         ingests.append(dict(view=view, warm=warm, cursor=cursor))
         delivered = len(true)
+        if variant and relabel_rng.random() < 0.6:
+            chosen = sorted(relabel_rng.sample(range(delivered), relabel_rng.randint(1, delivered)))
+            ingests[-1]["relabel"] = (relabel_rng.choice(RELABELS), chosen)
     return ingests
 
 
@@ -109,6 +122,7 @@ def run_plan(ingests, folder, main_mode):
         return engine
 
     stored = defaultdict(list)  # true occurrence -> store ids, in ingest order
+    foreign, seen = [], set()  # links into another conversation's row, judged when each link is written
     try:
         engine = None
         with pytest.MonkeyPatch.context() as patch:
@@ -131,19 +145,34 @@ def run_plan(ingests, folder, main_mode):
                         patch.setattr(engine, "_ledger_cold_cursor", lambda *a, at=at, **kw: dict(k=at, pairs={}))
                 engine.ingest(deepcopy(step["view"]))
                 assert engine._ingest_failure_count == 0, engine._last_ingest_error
+                owner = dict(engine._store._conn.execute("SELECT store_id, conversation_id FROM messages"))
+                for link in relations(engine):
+                    if link not in seen:
+                        seen.add(link)
+                        if link[1] == "possible_replay_of" and (owner.get(link[2]) or "").strip() not in (
+                                "", "conversation"):
+                            foreign.append(link)
+                if step.get("relabel"):
+                    value, chosen = step["relabel"]
+                    ids = [sid for idx in chosen for sid in stored.get(idx, ())]
+                    conn = engine._store._conn
+                    conn.execute(f"UPDATE messages SET conversation_id = {value} WHERE store_id IN "
+                                 "(SELECT value FROM json_each(?))", (json.dumps(ids),))
+                    conn.commit()
         assert len(engine._store.get_session_messages("S")) == sum(map(len, stored.values())), "capture missed rows"
         sources = {s for s, _kind, _t in relations(engine)}
         unlinked = Counter(key(r) for r in engine._store.get_session_messages("S") if r["store_id"] not in sources)
-        return set(stored), unlinked
+        return set(stored), unlinked, sorted(foreign)
     finally:
         for engine in engines:
             engine.shutdown()
 
 
-def check(seed, root):
-    ingests = generate(seed)
-    return compare(run_plan(ingests, root / f"v7-{seed}", main_mode=False),
-                   run_plan(ingests, root / f"main-{seed}", main_mode=True))
+def check(seed, root, variant=False):
+    ingests = generate(seed, variant)
+    v7 = run_plan(ingests, root / f"v7-{seed}", main_mode=False)
+    loss, silent = compare(v7, run_plan(ingests, root / f"main-{seed}", main_mode=True))
+    return (loss, silent, v7[2]) if variant else (loss, silent)
 
 
 def compare(v7, main):
@@ -187,3 +216,46 @@ def test_multi_ingest_seed_26092_cross_class_copy(tmp_path):
     """A replay copy linked to an original in ANOTHER class (re-delivered unstamped) must not fund a skip:
     the unstamped class held that copy plus two new pairs, and a later new A@16 pair was lost."""
     assert check(26092, tmp_path) == ([], [])
+
+
+@pytest.mark.parametrize("chunk", range(CHUNKS))
+def test_multi_ingest_ownership_variants(tmp_path, chunk, record_property):
+    """Blank-id stores and a second conversation: no loss, no unlinked extra, no foreign link."""
+    seeds = range(VARIANT_FIRST_SEED + chunk, VARIANT_FIRST_SEED + VARIANT_PLANS, CHUNKS)
+    started = time.perf_counter()
+    failures = {"loss": [], "silent": [], "foreign": []}
+    for seed in seeds:
+        for name, found in zip(("loss", "silent", "foreign"), check(seed, tmp_path, variant=True)):
+            if found:
+                failures[name].append(seed)
+    result = dict(chunk=chunk, plans=len(seeds), seconds=round(time.perf_counter() - started, 3),
+                  failed={k: len(v) for k, v in failures.items()}, first_ten={k: v[:10] for k, v in failures.items()})
+    record_property("multi_ingest_variant_result", json.dumps(result, sort_keys=True))
+    print("\nMULTI_INGEST_VARIANT_RESULT " + json.dumps(result, sort_keys=True))
+    assert not any(failures.values()), json.dumps(result, sort_keys=True)
+
+
+@pytest.mark.parametrize("value", ["NULL", "''", "'  '"], ids=["null", "empty", "spaces"])
+def test_multi_ingest_blank_id_copy_is_linked(tmp_path, value):
+    """Astra r5: an unlinked replay copy of a blank-id original funded a later skip, and the new pair
+    was lost. Blank ids belong to the active conversation (#581), so the copy is linked and adds no capacity."""
+    X = {"role": "tool", "tool_call_id": "c", "content": "X"}
+    plan = [dict(view=[U, call(2), dict(X, timestamp=2)], warm=False, cursor=0, relabel=(value, [0, 1, 2])),
+            dict(view=[U, call(4), dict(X, timestamp=4), {"role": "user", "content": "next", "timestamp": 1000.0}],
+                 warm=False, cursor=1),
+            dict(view=[U, call(), X, call(), X, {"role": "user", "content": "next2", "timestamp": 2000.0}],
+                 warm=False, cursor=1)]
+    v7 = run_plan(plan, tmp_path / "v7", main_mode=False)
+    assert compare(v7, run_plan(plan, tmp_path / "main", main_mode=True)) == ([], [])
+    assert v7[2] == []
+
+
+def test_multi_ingest_foreign_original_is_never_a_target(tmp_path):
+    """The same chain with the original in another conversation: no link crosses into it."""
+    X = {"role": "tool", "tool_call_id": "c", "content": "X"}
+    plan = [dict(view=[U, call(2), dict(X, timestamp=2)], warm=False, cursor=0, relabel=("'other'", [1, 2])),
+            dict(view=[U, call(4), dict(X, timestamp=4), {"role": "user", "content": "next", "timestamp": 1000.0}],
+                 warm=False, cursor=1)]
+    v7 = run_plan(plan, tmp_path / "v7", main_mode=False)
+    assert compare(v7, run_plan(plan, tmp_path / "main", main_mode=True)) == ([], [])
+    assert v7[2] == []
