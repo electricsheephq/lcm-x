@@ -27,8 +27,8 @@ def test_cold_compaction_cursor_keeps_changed_result_timestamp(build, monkeypatc
     scans = []
     helper = engine._replayed_tool_segment_indexes_after_cursor
 
-    def observe(messages, cursor):
-        selected = helper(messages, cursor)
+    def observe(messages, cursor, **kwargs):
+        selected = helper(messages, cursor, **kwargs)
         scans.append((cursor, selected))
         return selected
 
@@ -67,8 +67,8 @@ def test_cold_compaction_cursor_keeps_changed_segment_timestamps(build, monkeypa
     scans = []
     helper = engine._replayed_tool_segment_indexes_after_cursor
 
-    def observe(messages, cursor):
-        selected = helper(messages, cursor)
+    def observe(messages, cursor, **kwargs):
+        selected = helper(messages, cursor, **kwargs)
         scans.append((cursor, selected.copy()))
         return selected
 
@@ -76,7 +76,9 @@ def test_cold_compaction_cursor_keeps_changed_segment_timestamps(build, monkeypa
     engine.ingest(deepcopy(host))
     after = stored(engine)
     assert engine._ingest_failure_count == 0, engine._last_ingest_error
-    assert scans == [(call_index, {call_index, call_index + 1})]
+    # #2377: changed stamps veto the stored occurrence before suppression.
+    # Both rows remain eligible here; the final stored pair stays the same.
+    assert scans == [(call_index, set())]
     assert after[:len(before)] == before
     added = after[len(before):]
     assert [(row["role"], row.get("observed_at")) for row in added] == [
