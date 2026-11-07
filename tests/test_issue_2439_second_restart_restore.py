@@ -33,3 +33,19 @@ def test_a_second_restart_with_the_same_rewritten_view_stores_nothing_again(host
     ctx, engine = _restart(load, clone)
     child.turn(ctx, view, engine)
     assert [row["content"] for row in child_rows(engine)] == [*stored, view[0]["content"]]
+
+
+def test_a_second_restart_stores_nothing_again_when_a_new_row_follows_the_kept_rows(host):  # noqa: F811
+    """The control: the same two restarts, with a new row after the kept rows. That row is the stored tail, so the
+    anchor resumes after it and nothing is stored again."""
+    load, clone = host
+    ctx, engine = _restart(load, clone)
+    child = Agent("child", **DELEGATE)
+    child.turn(ctx, child_view(2), engine)
+    stored = [row["content"] for row in child_rows(engine)]
+    view = [{"role": "user", "content": "[CONTEXT COMPACTION] rewritten head"}, *child_view(2)[-2:],
+            {"role": "assistant", "content": "after the rewrite"}]
+    for _ in range(2):
+        ctx, engine = _restart(load, clone)
+        child.turn(ctx, view, engine)
+    assert [row["content"] for row in child_rows(engine)] == [*stored, view[0]["content"], view[-1]["content"]]
