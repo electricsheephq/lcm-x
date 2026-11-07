@@ -5,12 +5,12 @@ LCM-X for Claude Code keeps a lossless, local record of your Claude Code session
 ## What it does
 
 - **Captures every session.** Each message, tool call and tool result of your Claude Code sessions is written to a local LCM-X store, including the large tool outputs Claude Code saves to files, subagent sessions, resumed sessions and forks. Nothing is summarized away or dropped: the store keeps every transcript line it reads, and an audit command checks each captured line against its transcript file (see Known issues for the two cases it cannot see).
-- **Lets the agent recall it.** The plugin adds five read-only tools: `lcm_grep` (exact and full-text search), `lcm_recall`, `lcm_expand` (returns a stored message or tool output in full), `lcm_load_session` and `lcm_describe`. They work across sessions, so the agent can find what an earlier session said or ran.
+- **Lets the agent recall it.** The plugin adds five read-only tools: `lcm_grep` (full-text search, including exact phrases in quotes), `lcm_recall`, `lcm_expand` (returns a stored message or tool output in full, paging through long ones), `lcm_load_session` and `lcm_describe`. They work across sessions, so the agent can find what an earlier session said or ran.
 - **Leaves Claude Code alone.** Claude Code's own compaction is unchanged. The plugin never rewrites the conversation and adds nothing to the context by itself; the agent reads memory only when it calls a tool. The hooks print nothing: most run in a few milliseconds and hand the work to a background worker. Before Claude Code compacts, the `PreCompact` hook drains the session into the store first. That can delay compaction: the drain stops after 10 seconds, and Claude Code stops the hook at its 15-second limit. In our gate runs before release it took up to about 1.1 seconds.
 
 ## How to opt in
 
-You need Claude Code 2.1.139 or later (the release that added the hook `args` this plugin uses; this release was tested on 2.1.319), `python3` 3.9 or later on `PATH` (the macOS system Python is fine), and Python 3.11 or later somewhere on `PATH` for capture and recall (for example from Homebrew or python.org). macOS and Linux are supported.
+You need Claude Code 2.1.139 or later (the release that added the hook `args` this plugin uses; this release was tested on 2.1.319), `python3` 3.9 or later on `PATH` (the macOS system Python is fine), and Python 3.11 or later for capture and recall, on `PATH` or in the venv below (for example from Homebrew or python.org). macOS and Linux are supported.
 
 1. Download `lcm-x-claude-code-0.1.0.tar.gz` and its `.sha256` from this release, then check and unpack it:
    ```bash
@@ -21,8 +21,8 @@ You need Claude Code 2.1.139 or later (the release that added the hook `args` th
    ```bash
    claude --plugin-dir "$PWD/lcm-x-claude-code-0.1.0"
    ```
-   Capture starts with the session. The store lives in `$HOME/.lcm-x/claude-code` (set `LCMX_CC_HOME` to move it), outside the plugin folder, so removing or updating the plugin never removes your memory.
-3. Without a Python 3.11 or later, capture waits and records `runtime_missing`. Nothing is lost while it waits as long as Claude Code keeps its transcripts (its default; see the local transcript GC under Known issues), because they stay the source and capture reads them once a runtime is there. One step fixes it: install Python 3.11 or later, or run `uv venv --python 3.11 $HOME/.lcm-x/claude-code/venv`.
+   Capture starts with the session. The store lives in `$HOME/.lcm-x/claude-code`, outside the plugin folder, so removing or updating the plugin never removes your memory (set `LCMX_CC_HOME` to move it; keep it outside the plugin folder).
+3. Without a Python 3.11 or later, capture waits and records `runtime_missing`. Nothing is lost while it waits as long as Claude Code keeps its transcripts (its default; see the local transcript GC under Known issues), because they stay the source and capture reads them once a runtime is there. One step fixes it: install Python 3.11 or later, or run `uv venv --python 3.11 "${LCMX_CC_HOME:-$HOME/.lcm-x/claude-code}/venv"`.
 
 To check what was captured, run the audit with any Python 3.11 or later (here `python3.12`): `python3.12 lcm-x-claude-code-0.1.0/lcm-x/scripts/lcm_x_capture.py audit --home "${LCMX_CC_HOME:-$HOME/.lcm-x/claude-code}"`. It prints counts and ids only, and says whether every captured line is accounted for (`ok`) and nothing is pending (`verified`).
 
@@ -40,7 +40,7 @@ To turn capture off for a launch, set `LCMX_CAPTURE=off`, or start Claude Code w
 
 ## Known issues
 
-- **Claude Code's local transcript GC.** Lossless capture needs Claude Code's opt-in local transcript GC off (`CLAUDE_CODE_TRANSCRIPT_LOCAL_GC` unset, the default). With it on, capture is best effort and the audit lists those sessions without a lossless claim.
+- **Claude Code's local transcript GC.** Lossless capture needs Claude Code's opt-in local transcript GC off (`CLAUDE_CODE_TRANSCRIPT_LOCAL_GC` unset, the default). With it on, capture is best effort, and the audit lists those sessions under `local_gc`; its `ok` and `verified` cannot cover lines the GC removed before capture.
 - **A subagent transcript removed before the worker first reads it** cannot be captured, and the audit cannot see that it existed.
 - **Audit memory.** The audit needs memory roughly in proportion to the largest session in the store: about 1.3 GB for a 690,000-line session in our gate run. Capture itself peaked at about 0.4 GB in that run.
 - **Hook timing.** Hooks usually hand off in milliseconds, but the hook's write of its small pointer file sometimes stalls for a few seconds, at moderate as well as heavy machine load.
@@ -54,7 +54,7 @@ To turn capture off for a launch, set `LCMX_CAPTURE=off`, or start Claude Code w
   In all three runs no audit lost anything. A hook cut off at its time limit is designed to be caught up by the session's next hook. If an earlier hook had already recorded the session, a later worker run, even one started from another session, also catches it up. If every hook of a new session were cut off before any of them recorded it, that session would not be captured.
 
   The hook log records a hook only when it finishes, so these runs cannot show whether any hook was killed at its time limit. Every hook that ran past 5 s finished, and each one was either the background hook, which does not hold up the turn, or a scripted burst hook, which the test calls directly rather than through Claude Code. That catch-up path was not exercised. Tracked in #2350.
-- **Leftover temporary files.** A hook that is killed mid-write can leave an empty `.tmp` file in the store's `spool` folder. It holds nothing and is safe to delete; capture is unaffected.
+- **Leftover temporary files.** A hook that is killed mid-write can leave a hidden temporary file (`.<id>.<pid>.tmp`, empty or partly written) in the store's `spool` folder. Capture ignores it, and it is safe to delete.
 
 ## What it bundles
 
