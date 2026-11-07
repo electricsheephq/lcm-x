@@ -1003,7 +1003,9 @@ def test_prematch_failure_is_counted_only_after_commit(ingest_case, monkeypatch,
     monkeypatch.setattr(engine._store, "_append_protected_batch", appended)
     monkeypatch.setattr(engine, "_record_ingest_failure", recorded_failure)
     engine._ingest_messages(host)
-    assert len(matches) == len(inserts) == 2
+    # #1815: the first attempt's pre-match fault rolls back and classifies again before any insert, so three
+    # pre-matches run for the two attempts that insert (the second of which is BUSY-aborted).
+    assert (len(matches), len(inserts)) == (3, 2)
     assert recorded == (["identity-anchor pre-match"] if fail_committing_attempt else [])
     assert engine._ingest_failure_count == int(fail_committing_attempt)
 
