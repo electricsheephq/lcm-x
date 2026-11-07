@@ -174,10 +174,26 @@ class Scenario:
         for group in self.cell.get("tool_plan", []):
             turns = ([first] if phase != "A" else []) if group["turns"] == "restart" else group["turns"]
             out += [group["calls"]] if t in turns else []
+        # #1931: one delegate_task step; its child answers from child() while this turn waits for the tool result
+        out += [[{"name": "delegate_task", "args": {"goal": P1.child_goal(t)}}]
+                for group in self.cell.get("delegate_plan", []) if t in group["turns"]]
         return out
+
+    def child(self, messages: list[dict]) -> dict | None:
+        """A request from a delegated child (its last user row is a ``[Dnn]`` goal): the scripted child reply, never a
+        parent step and never ``unexpected``."""
+        last_user = next((m["content"] for m in reversed(messages) if m["role"] == "user"), "")
+        m = re.search(P1.CHILD_TAG, last_user if isinstance(last_user, str) else json.dumps(last_user))
+        if not m or not self.cell.get("delegate_plan"):
+            return None
+        text = P1.child_reply(int(m.group(1)[1:]))
+        self.run.event(turn=self.st["t"], event="child_emit", tag=m.group(1), session_prefix="D", text=text)
+        return {"content": text, "log": {"turn": self.st["t"], "kind": "child", "child": m.group(1)}}
 
     def main(self, messages: list[dict]) -> dict:
         st, run = self.st, self.run
+        if (reply := self.child(messages)) is not None:  # before any parent step or result is recorded
+            return reply
         t, text_tag = st["t"], run.text_tag
         for m in messages:  # record received results even when the scripted reply returns early
             cid = m.get("tool_call_id") if m["role"] == "tool" else None
@@ -349,7 +365,21 @@ class ProcessCell:
                 killer.stop.set()
                 killer.join()
         self.event(turn=t, event="acp_response", tag=f"T{t:02d}", stop_reason=stop, chars=len(answer))
+        self.wait_for_child(t)
         return stop
+
+    def wait_for_child(self, t: int, timeout: float = 60.0) -> None:
+        """#1931: top-level delegations run in the background on current hosts, so the parent turn can end first.
+        Wait (bounded) for the child's end before the next turn or phase exit; a child that never ends is left to
+        the scorer, which reports the scenario UNSUPPORTED."""
+        if not any(t in plan.get("turns", ()) for plan in self.cell.get("delegate_plan", ())):
+            return
+        tag, deadline = f"D{t:02d}", time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if any(e.get("event") == "child_turn_end" and e.get("tag") == tag for e in read_jsonl(self.transcript)):
+                return
+            time.sleep(0.2)
+        self.event(turn=t, event="child_wait_timeout", tag=tag, timeout_s=timeout)
 
     def final_check(self) -> dict:
         """The ACP ``/compress`` command, re-sent once after a cleanup-only ``sanitized`` pass (R1 final_check)."""
@@ -485,6 +515,7 @@ def accounting(d: Path, events: list[dict]) -> dict:
     implied = {"emit": sum(1 for e in events if e["event"] == "emit"),
                "tool_steps": len({(e["phase"], e["id"].rsplit("_", 1)[0]) for e in events if e["event"] == "tool_issue"}),
                "crash_holds": sum(1 for e in events if e.get("fault") == "crash_after_compaction_before_reply"),
+               "child_emit": sum(1 for e in events if e["event"] == "child_emit"),
                "unexpected": len({r["rid"] for r in reqs if r.get("unexpected")})}
     kills = sorted(e["kill_monotonic_ns"] for e in events
                    if e.get("event") == "crash" and e.get("kill_monotonic_ns") is not None)

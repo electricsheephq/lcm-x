@@ -574,7 +574,7 @@ class IdentityAnchorMixin:
             logger.info("LCM identity-anchor: host changed its list before the cursor; %d unstored rows from %d: session=%s",
                         len(missed), min(missed), self._session_id)
 
-    def _identity_anchor_record_recovery(self, result, emissions) -> None:
+    def _identity_anchor_record_recovery(self, result, emissions, messages=()) -> None:
         """#1505: keep the actual published recovery object, never a displaced-occurrence mapping."""
         entries = [d for d in emissions if d.get("kind") == "recovery"]
         if len(entries) != 1:
@@ -586,6 +586,9 @@ class IdentityAnchorMixin:
                    "store": self._store, "home": str(self._hermes_home), "conversation": str(self._conversation_id),
                    "generation": getattr(self, "_identity_anchor_user_generation", 0), "stamp": None, "used": False,
                    "max_store_id": self._store.max_store_id()}  # the recovered turn was stored before its recovery
+        # Bind the note to the latest input user occurrence, never to a later equal-text row.
+        source = next((m for m in reversed(messages) if m.get("role") == "user"), None)
+        receipt["source_stamp"] = _normalize_observed_at(source.get("timestamp")) if source is not None else None
         receipts = list(getattr(self, "_identity_anchor_recoveries", ()))
         for previous in receipts:
             if (previous["row"] is row or previous["store"] is self._store
@@ -593,6 +596,80 @@ class IdentityAnchorMixin:
                 previous["blocked"] = receipt["blocked"] = True
         self._identity_anchor_recoveries = (receipts + [receipt])[-4:]
         self._identity_anchor_recovery = receipt
+
+    def _identity_anchor_link_durable_recovery(self, attempt, lineage) -> bool | None:
+        """#1523: durable doubt is a visible link, never authority to skip a cold user row."""
+        from . import ingest_ledger
+        from .store import _normalize_conversation_id_value
+
+        conn, salt = self._store._conn, attempt["salt"]
+        view, _reason = ingest_ledger.emission_candidate(conn, lineage)
+        if view is None:
+            return
+        emitted = ingest_ledger.decode_entries(view["entries"])
+        entries = attempt["entries"]
+        recoveries = list(conn.execute(
+            "SELECT emission_id,output_index,descriptor_digest,observed_stamp,recovered_store_id "
+            "FROM ledger_emissions WHERE lineage=? AND view_seq=? AND kind='recovery' "
+            "AND recovered_store_id IS NOT NULL AND state IN ('proposed','adopted')",
+            (lineage, view["view_seq"])))
+        if len(recoveries) != 1:
+            return
+        emission, idx, digest, observed, target = recoveries[0]
+        if (idx != len(emitted) - 1 or idx >= len(entries)
+                or any(a.identity_digest != b.identity_digest or a.stamp_digest != b.stamp_digest
+                       or a.uidset_digest != b.uidset_digest for a, b in zip(emitted[:idx], entries[:idx]))
+                or entries[idx].uidset_digest != emitted[idx].uidset_digest):
+            return
+        stamp = attempt["stamps"][idx]
+        generated = entries[idx].identity_digest == digest
+        stored_id = attempt["stored"].get(idx)
+        if stamp is None or observed not in (None, stamp):
+            return
+        if stored_id is None:
+            # The cold cursor can recognize the descriptor without storing the note.
+            # Admit its later warm rewrite to reads only; durable writes still need both rows.
+            return True if generated else None
+        if target >= stored_id:
+            return
+        rows = self._store.get_batch([target, stored_id])
+        prior, current = rows.get(target), rows.get(stored_id)
+        conversation = _normalize_conversation_id_value(self._conversation_id)
+        if (not prior or not current or prior.get("role") != "user" or current.get("role") != "user"
+                or any(r.get("session_id") != self._session_id for r in (prior, current))
+                # A legacy recovered row may carry no conversation id (NULL or blank); the new row never may.
+                or _normalize_conversation_id_value(prior.get("conversation_id")) not in (conversation, "")
+                or _normalize_conversation_id_value(current.get("conversation_id")) != conversation
+                or prior.get("observed_at") is None or prior["observed_at"] == current.get("observed_at")
+                or not generated and self._message_replay_identity(prior, stored_row=True)
+                != self._message_replay_identity(current, stored_row=True)):
+            return
+        # Only assistant/tool followers or the observed generated note may intervene.
+        # Page through every row between them: a long tool run must not hide the link (review: no follower cap).
+        start = target + 1
+        while start < stored_id:
+            followers = self._store.get_range(str(self._session_id), start_id=start, end_id=stored_id - 1,
+                                              limit=256, conversation_id=conversation, include_blank_conversation=True)
+            if any(r.get("role") not in {"assistant", "tool"} and not (
+                    observed is not None and ingest_ledger.stamp_text(r.get("observed_at")) == observed
+                    and ingest_ledger.identity_digest(salt, r) == digest) for r in followers):
+                return
+            if len(followers) < 256:
+                break
+            start = followers[-1]["store_id"] + 1
+        if self._store.get_message_relations([target], "alt_stamp"):
+            return  # the live receipt already consumed this occurrence
+        if conn.execute("SELECT 1 FROM sqlite_master WHERE name='message_relations'").fetchone() and conn.execute(
+                "SELECT 1 FROM message_relations WHERE kind='possible_replay_of' AND related_store_id=?", (target,)).fetchone():
+            return
+        if generated:
+            if observed is None:
+                conn.execute("UPDATE ledger_emissions SET observed_stamp=? WHERE emission_id=? AND observed_stamp IS NULL",
+                             (stamp, emission))
+            return True  # Keep admitting the later warm rewrite; row guards still own every write.
+        else:
+            self._store.add_message_relations([[(stored_id, "possible_replay_of", target, None, None)]])
+            return False
 
     @staticmethod
     def _identity_anchor_occurrence_keys(row) -> dict:
