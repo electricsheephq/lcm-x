@@ -268,7 +268,9 @@ def in_place_carried_ids(rows, strip, prefixes):
                 continue
             block = [r for r in segment[boundary + 1:end] if r[9] and not carrier(r)]
             before_keys, block_keys = [key(r) for r in before], [key(r) for r in block]
-            opened = segment[boundary][7]
+            # The insert-batch stamp counts only at a host-flagged summary row: an LCM carrier can also open a
+            # genuine new turn (#1961's merge), so after a carrier boundary a copy must keep its original's stamp.
+            opened = segment[boundary][7] if segment[boundary][6] else None
             for start in range(len(before)):
                 n = len(before) - start
                 if n <= len(block) and before_keys[start:] == block_keys[:n] and all(
