@@ -7125,7 +7125,8 @@ class LCMEngine(
                             if unloaded:
                                 more = self._store.find_rows_by_observed_at(self._conversation_id, unloaded, stamps)
                                 used |= {relation["related_store_id"] for relation in self._store.get_message_relations(
-                                    [target["store_id"] for target in more], "possible_replay_of", related=True)}
+                                    [target["store_id"] for target in more], "possible_replay_of", related=True)
+                                    if relation["observed_at"] is None}  # a borrowed-stamp link never consumes
                                 targets = [*targets, *more]
                         for tier in [s for s in predecessors if s not in tiers] if not matches else ():
                             matches = matches or same_occurrence(tier, row["timestamp"], identity, sid)
