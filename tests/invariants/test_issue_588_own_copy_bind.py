@@ -64,6 +64,17 @@ def test_fresh_bind_maps_rows_to_their_own_copies(tmp_path, monkeypatch, copies,
     engine.shutdown()
 
 
+# Main's shape: each fresh bind stores the replayed history again (growth, stored contents), and with the ledger on
+# every copy carries a possible_replay_of link (stored row positions: copy -> original).
+_ROWS = [f"row-{i}" for i in range(8)]
+_STORED_588 = [*_ROWS, "row-1", "row-2", *_ROWS, "new-1", *_ROWS, "new-1", "new-2"]
+KNOWN_588 = {
+    "shadow": dict(growth=[9, 10], stored=_STORED_588, links=[
+        *((10 + i, i) for i in range(8)), (19, 10), (20, 8), (21, 9), *((22 + i, 13 + i) for i in range(6))]),
+    "off": dict(growth=[9, 10], stored=_STORED_588, links=[]),
+}
+
+
 @pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
     "#588: with unstamped rows a later copy set defeats the replay match, so every fresh bind stores the replayed "
     "history again (linked possible_replay_of when the ledger is on); the v0.30.0 named limit for unstamped copy "
@@ -94,5 +105,16 @@ def test_unstamped_fresh_bind_over_a_copy_set_stores_only_new_rows(tmp_path, mon
             pytest.fail(f"bind {bind} stored no row")
         growth.append(rows - stored)
         stored = rows
+    rows = engine._store.get_session_messages("S")
+    at = {row["store_id"]: index for index, row in enumerate(rows)}
+    links = [(at.get(source), at.get(target)) for source, target in engine._store._conn.execute(
+        "SELECT store_id, related_store_id FROM message_relations WHERE kind = 'possible_replay_of' "
+        "ORDER BY relation_id")] if engine._store._conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE name = 'message_relations'").fetchone() else []
     engine.shutdown()
-    assert growth == [1, 1], growth
+    if growth == [1, 1]:
+        return  # fixed: the strict marker turns this into a loud XPASS
+    observed = dict(growth=growth, stored=[row["content"] for row in rows], links=links)
+    if observed == KNOWN_588[ledger]:
+        raise AssertionError(f"#588 known shape: {observed}")
+    pytest.fail(f"not the #588 shape: {observed}")

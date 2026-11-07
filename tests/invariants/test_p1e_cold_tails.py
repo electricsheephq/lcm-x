@@ -915,7 +915,8 @@ def test_covered_view_reconciles_the_live_cursor(engines, monkeypatch):
 
 
 @pytest.mark.parametrize("stamped", [True, pytest.param(False, marks=pytest.mark.xfail(
-    strict=True, reason="#2203: an unstamped cold view that a resumed session rewrote is stored again"))])
+    strict=True, raises=AssertionError,
+    reason="#2203: an unstamped cold view that a resumed session rewrote is stored again"))])
 def test_resumed_session_that_rewrote_the_cold_view(engines, monkeypatch, stamped):
     old = engines()
     stamp = (lambda value: value) if stamped else (lambda value: None)
@@ -934,7 +935,13 @@ def test_resumed_session_that_rewrote_the_cold_view(engines, monkeypatch, stampe
         old._retry_pending_session_tails(exiting=True)
     finally:
         resumed.shutdown()
-    assert contents(old) == ["A", "B", "C", "D", "E", "F", "Q"]
+    desired = ["A", "B", "C", "D", "E", "F", "Q"]
+    if stamped or contents(old) == desired:
+        assert contents(old) == desired  # the stamped control; unstamped, a fix shows as a loud XPASS
+        return
+    if contents(old) == ["A", "B", "C", "D", "E", "F", "A", "B", "C", "D", "Q"]:  # A-D again, after E and F
+        raise AssertionError(f"#2203 known shape: the rewritten view was stored again: {contents(old)}")
+    pytest.fail(f"not the #2203 shape (a duplicate, never a loss): {contents(old)}")
 
 
 @pytest.mark.parametrize("frozen", ["read", "recovery"])
@@ -1157,6 +1164,16 @@ def resumed_cold_resend(engine, monkeypatch, queued, resent):
         resumed.shutdown()
 
 
+# #2247, main's shape for both cases: the no-op ingest and the retry store nothing, and the tail is dropped
+# uncounted, so the resent Q@6 stays stored and the earlier Q@5 occurrence is never stored.
+_STORED_2247 = [("user", "A", 1.), ("assistant", "B", 2.), ("user", "C", 3.), ("assistant", "D", 4.), ("user", "Q", 6.)]
+KNOWN_2247 = dict(noop=_STORED_2247, kept=False, unmatched=0, retry=_STORED_2247)
+
+
+def _row(row):
+    return row["role"], row["content"], row["observed_at"]
+
+
 def cold_resend_views(shape="uidless"):
     queued = [*history(), _m("user", "Q", 5.)]
     resent = [*history(), _m("user", "Q", 6.)]
@@ -1216,7 +1233,7 @@ def test_resumed_engine_resend_keeps_the_earlier_cold_occurrence(engines, monkey
 
 @pytest.mark.parametrize("then", ["same", "older"])
 @pytest.mark.parametrize("shape", ["uidless", "uids", "two_conflicts", "tool_conflict", "same_reply_text",
-    "scaffold_row", "store_longer", pytest.param("ignored_row", marks=pytest.mark.xfail(strict=True,
+    "scaffold_row", "store_longer", pytest.param("ignored_row", marks=pytest.mark.xfail(strict=True, raises=AssertionError,
         reason="#2247: known limit: an ignored row plus a stamp conflict takes the cold start; planned for v0.30.x (DECISION-1838 known limits)"))])
 def test_noop_ingest_after_a_resumed_resend_keeps_the_earlier_occurrence(engines, monkeypatch, then, shape):
     engine = ignoring(engines()) if shape == "ignored_row" else engines()
@@ -1224,11 +1241,23 @@ def test_noop_ingest_after_a_resumed_resend_keeps_the_earlier_occurrence(engines
     with resumed_cold_resend(engine, monkeypatch, queued, resent) as (tail, _):
         before = committed_rows(tail["store"].db_path, "S")
         engine.ingest(copy.deepcopy(resent if then == "same" else queued[:4]))
-        assert committed_rows(tail["store"].db_path, "S") == before
+        if shape != "ignored_row":
+            assert committed_rows(tail["store"].db_path, "S") == before
+            engine._retry_pending_session_tails()
+            assert engine._pending_session_tails == [tail]
+            assert count(engine, "tail.cold_unmatched") >= 1
+            assert committed_rows(tail["store"].db_path, "S") == before
+            return
+        noop = committed_rows(tail["store"].db_path, "S")
         engine._retry_pending_session_tails()
-        assert engine._pending_session_tails == [tail]
-        assert count(engine, "tail.cold_unmatched") >= 1
-        assert committed_rows(tail["store"].db_path, "S") == before
+        observed = dict(noop=[_row(r) for r in noop], kept=engine._pending_session_tails == [tail],
+                        unmatched=count(engine, "tail.cold_unmatched"),
+                        retry=[_row(r) for r in committed_rows(tail["store"].db_path, "S")])
+        if noop == before and observed["kept"] and observed["unmatched"] >= 1 and observed["retry"] == observed["noop"]:
+            return  # fixed: the strict marker turns this into a loud XPASS
+        if observed == KNOWN_2247:
+            raise AssertionError(f"#2247 known shape: {observed}")
+        pytest.fail(f"not the #2247 shape: before={[_row(r) for r in before]}; {observed}")
 
 
 def test_store_newer_restamp_stores_missing_rows_and_keeps_the_tail(engines, monkeypatch):
