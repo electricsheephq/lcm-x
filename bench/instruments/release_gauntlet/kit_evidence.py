@@ -20,6 +20,7 @@ LOG_FORMATS = (re.compile(rf"^{_STAMP} \[{_LEVEL}\] (?P<logger>[\w.]+): "),
 # A traceback's final line: a dotted or bare exception name, then ":" or the end of the line, at the traceback's edge.
 # The name need not end in Error (ProviderCircuitOpen, KeyboardInterrupt).
 FINAL = re.compile(r"^((?:[A-Za-z_]\w*\.)*[A-Za-z_]\w*)(?::|\s*$)")
+EXCEPTION_NAME = re.compile(r"(?:[A-Za-z_]\w*\.)*[A-Z]\w*[a-z]\w*")  # A CamelCase last part, as exception classes are.
 SUB_EDGE = re.compile(r"[ \t]*\| \S")  # An exception group's final line: one space after "|"; source lines have more.
 MISSING = re.compile(r"No module named '([\w.]+)'")
 REFUSAL = "NotImplementedError: LCM-X cannot detach a context engine"
@@ -125,7 +126,8 @@ def trace_events(log):
                             events[warning] += 1
                             counted = True
                     elif not stripped.startswith(REFUSAL):
-                        other[final[1]] += 1
+                        name = final[1]  # Any other column-0 word is hashed: a cut traceback can precede raw text.
+                        other[name if len(name) <= 128 and EXCEPTION_NAME.fullmatch(name) else "h:" + _sha(name)[:12]] += 1
                 if final or (line and not line[0].isspace() and line[0] != "|"):
                     if traceback and not final:
                         other["(no final line)"] += 1  # Cut short: counted, never dropped.
@@ -192,17 +194,20 @@ def lifecycle_rows(lcm_db):
 
 def _identities(path, order, host=False):
     """Per session, each row's identity hash in order. On a host with transcript generations (an ``active`` or
-    ``compacted`` column), a row whose identity and ``timestamp`` repeat an earlier row of its session is the same
-    occurrence's physical copy (a copy keeps its original's stamp; two sends get stamps of their own), so it counts
-    once. Without a ``timestamp`` column such copies cannot be told apart: ``resolved`` is False."""
-    sessions, copies = defaultdict(list), Counter()
+    ``compacted`` column), a row whose identity and ``timestamp`` repeat an earlier row of its session in ANOTHER
+    generation (different active/compacted flags) is the same occurrence's physical copy (a copy keeps its original's
+    stamp; two sends get stamps of their own), so it counts once. A repeat within the same generation is a duplicate:
+    it stays a host row and is counted in ``duplicates``. Without a ``timestamp`` column copies cannot be told apart:
+    ``resolved`` is False."""
+    sessions, copies, duplicates = defaultdict(list), Counter(), Counter()
     with _db(path) as conn:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(messages)")}
         fields = [name for name in ("session_id", "role", "content", "tool_calls", "tool_call_id") if name in columns]
         generations = host and bool({"active", "compacted"} & columns)
         stamped = generations and "timestamp" in columns
-        seen = set()
-        select = fields + ["timestamp"] * stamped
+        seen = defaultdict(set)  # slot -> generation flags seen
+        flags = [name for name in ("active", "compacted") if name in columns]
+        select = fields + (["timestamp", *flags] if stamped else [])
         for row in conn.execute(f"SELECT {', '.join(select)} FROM messages ORDER BY {order}"):
             row = dict(row)
             calls = json.loads(row.get("tool_calls") or "[]") if row["role"] == "assistant" else []
@@ -213,16 +218,21 @@ def _identities(path, order, host=False):
             key = _sha(json.dumps(identity, sort_keys=True))
             if stamped and row["timestamp"] is not None:
                 slot = (row["session_id"], key, float(row["timestamp"]))
-                if slot in seen:
+                generation = tuple(row[name] for name in flags)
+                if generation in seen[slot]:
+                    duplicates[row["session_id"]] += 1  # Same generation, same stamp: a doubled row, kept.
+                elif seen[slot]:
+                    seen[slot].add(generation)
                     copies[row["session_id"]] += 1
                     continue
-                seen.add(slot)
+                seen[slot].add(generation)
             sessions[row["session_id"]].append(key)
-    return sessions, fields, copies, stamped or not generations
+    return sessions, fields, copies, duplicates, stamped or not generations
 
 
 def reorder(lcm_db, state_db):
-    (lcm, lc, _, _), (host, hc, copies, resolved) = _identities(lcm_db, "store_id"), _identities(state_db, "id", True)
+    (lcm, lc, *_), (host, hc, copies, doubled, resolved) = (_identities(lcm_db, "store_id"),
+                                                             _identities(state_db, "id", True))
     results = []
     only = {side: sorted(_sha(str(sid))[:12] for sid in keys) for side, keys in (
         ("lcm", lcm.keys() - host.keys()), ("host", host.keys() - lcm.keys()))}
@@ -243,6 +253,7 @@ def reorder(lcm_db, state_db):
         results.append({"session_h12": _sha(str(sid))[:12], "lcm_rows": len(a), "host_rows": len(b),
                         "matched": shared, "lcm_only": len(a) - shared, "host_only": len(b) - shared,
                         "reordered_rows": shared - len(tails), "host_copy_rows": copies[sid],
+                        "host_duplicate_rows": doubled[sid],
                         # Rows sharing an identity are matched by count and order only: a lost occurrence that a
                         # duplicate of another occurrence replaces is not seen. This counts the rows where it could be.
                         "repeated_identity_rows": sum(n for n in Counter(b).values() if n > 1),
@@ -251,7 +262,7 @@ def reorder(lcm_db, state_db):
     return {"sessions": len(results), "per_session": results, "identity_degraded": bool(missing),
             "host_copies_resolved": resolved,
             "missing_columns": missing, **{key: sum(row[key] for row in results) for key in (
-                "lcm_rows", "host_rows", "matched", "lcm_only", "host_only", "reordered_rows", "host_copy_rows",
+                "lcm_rows", "host_rows", "matched", "lcm_only", "host_only", "reordered_rows", "host_copy_rows", "host_duplicate_rows",
                 "repeated_identity_rows")},
             **{side + "_only_sessions": len(ids) for side, ids in only.items()},
             **{side + "_only_sessions_h12": ids for side, ids in only.items()}}

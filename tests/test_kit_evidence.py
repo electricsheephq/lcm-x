@@ -572,3 +572,19 @@ def test_repeated_identities_are_counted(tmp_path):
     result = kit.reorder(*paths)
     assert result["repeated_identity_rows"] == 2
     assert result["per_session"][0]["repeated_identity_rows"] == 2
+
+
+def test_same_generation_repeat_is_a_kept_duplicate(tmp_path):
+    lcm = _messages(tmp_path / "lcm.db", "store_id", [("s", "user", "A", None, None)])
+    host = _host_generations(tmp_path / "state.db", [("A", 100.0, 1, 0), ("A", 100.0, 1, 0)])
+    result = kit.reorder(lcm, host)
+    assert (result["host_rows"], result["host_only"], result["host_duplicate_rows"], result["host_copy_rows"]) == (
+        2, 1, 1, 0)
+
+
+@pytest.mark.parametrize("word", ["ghp_SECRETTOKEN123", "WARNING", "lowercase_word"])
+def test_a_non_exception_word_after_a_cut_traceback_is_hashed(tmp_path, word):
+    cut = 'Traceback (most recent call last):\n  File "synthetic.py", line 1\n'
+    result = kit.trace_events([_write(tmp_path / "host.log", _log("agent", "start", "INFO") + cut + word + "\n")])
+    assert word not in json.dumps(result)
+    assert sum(result["other_tracebacks"].values()) == 1
