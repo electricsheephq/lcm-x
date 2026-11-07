@@ -133,8 +133,8 @@ def test_an_owner_whose_store_was_never_opened_is_not_opened(host, monkeypatch):
 
 
 def test_a_same_id_rebind_to_a_normal_binding_during_the_check_refuses_nothing(host, monkeypatch):  # noqa: F811
-    """The owner's flags are read as excluded, then the owner rebinds the same id normally while the check runs: the
-    second flag read sees the normal binding, so the child is stored."""
+    """The owner rebinds the same id normally while the slow known-child query runs: the flags are read only after
+    that query (the reorder this pins), so they show the normal binding and the child is stored."""
     ctx, _module, clone, owner = _excluded_parent(host, monkeypatch)
     engine = clone(ctx)
     child = Agent("child", **DELEGATE)
