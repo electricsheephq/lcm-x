@@ -289,27 +289,27 @@ def reorder(lcm_db, state_db):
     only = {side: sorted(_sha(str(sid))[:12] for sid in keys) for side, keys in (
         ("lcm", lcm.keys() - host.keys()), ("host", host.keys() - lcm.keys()))}
     for sid in sorted(lcm.keys() | host.keys()):
-        a, b, credited = list(lcm[sid]), host[sid], 0
-        # A recorded rewrite takes the host form only for a stored form left over, and only while the host holds an
-        # unmatched row of that form: either form can match, and a credit never makes an extra match.
-        over, spare = Counter(a) - Counter(b), Counter(b) - Counter(a)
-        for i, alt in sorted(alts.get(sid, {}).items()):
+        a, b, forms = lcm[sid], host[sid], alts.get(sid, {})
+        # A recorded rewrite lets a row match the host form too, but only a stored form left over takes it, and only
+        # while the host holds an unmatched row of that form: a credit never makes an extra match.
+        over, spare, credited = Counter(a) - Counter(b), Counter(b) - Counter(a), 0
+        for i, alt in sorted(forms.items()):
             if over[a[i]] > 0 and spare[alt] > 0:
                 over[a[i]] -= 1
                 spare[alt] -= 1
-                a[i], credited = alt, credited + 1
-        shared = sum((Counter(a) & Counter(b)).values())
+                credited += 1
+        shared = sum((Counter(a) & Counter(b)).values()) + credited
         where = defaultdict(list)
         for j, key in enumerate(b):
             where[key].append(j)
         tails = []  # Hunt-Szymanski: the LCS is the longest increasing run of matched host positions.
-        for key in a:
-            for pos in reversed(where.get(key, ())):
-                i = bisect_left(tails, pos)
-                if i == len(tails):
+        for i, key in enumerate(a):  # A row with a recorded rewrite may sit at a host row of either form.
+            for pos in sorted({pos for k in {key, forms.get(i, key)} for pos in where.get(k, ())}, reverse=True):
+                at = bisect_left(tails, pos)
+                if at == len(tails):
                     tails.append(pos)
                 else:
-                    tails[i] = pos
+                    tails[at] = pos
         results.append({"session_h12": _sha(str(sid))[:12], "lcm_rows": len(a), "host_rows": len(b),
                         "matched": shared, "lcm_only": len(a) - shared, "host_only": len(b) - shared,
                         "reordered_rows": shared - len(tails), "host_stamp_repeat_rows": repeats[sid],

@@ -706,3 +706,24 @@ def test_either_recorded_form_matches_once(tmp_path, host_forms, matched, credit
     result = kit.reorder(_rewrites(lcm, [(1, "go", "go\n")]), host)
     assert (result["matched"], result["lcm_only"], result["host_only"]) == (matched, 1 - matched, len(host_forms) - matched)
     assert result["host_rewrites_credited"] == credited
+
+
+@pytest.mark.parametrize("lcm_rows,host_rows", [
+    (["go\n", "go\n"], ["go\n", "go"]),
+    (["go\n", "a", "go\n"], ["go\n", "a", "go"]),
+    (["go\n", "go\n", "go\n"], ["go\n", "go", "go\n"])])
+def test_credited_rows_in_host_order_are_not_reordered(tmp_path, lcm_rows, host_rows):
+    lcm = _messages(tmp_path / "lcm.db", "store_id", [("s", "user", text, None, None) for text in lcm_rows])
+    host = _messages(tmp_path / "state.db", "id", [("s", "user", text, None, None) for text in host_rows])
+    overrides = [(i, "go", "go\n") for i, text in enumerate(lcm_rows, 1) if text == "go\n"]
+    result = kit.reorder(_rewrites(lcm, overrides), host)
+    assert (result["matched"], result["lcm_only"], result["host_only"], result["reordered_rows"]) == (
+        len(lcm_rows), 0, 0, 0)
+    assert result["host_rewrites_credited"] == 1
+
+
+def test_credited_rows_out_of_host_order_are_reordered(tmp_path):
+    lcm = _messages(tmp_path / "lcm.db", "store_id", [("s", "user", "go\n", None, None), ("s", "user", "a", None, None)])
+    host = _messages(tmp_path / "state.db", "id", [("s", "user", "a", None, None), ("s", "user", "go", None, None)])
+    result = kit.reorder(_rewrites(lcm, [(1, "go", "go\n")]), host)
+    assert (result["matched"], result["reordered_rows"], result["host_rewrites_credited"]) == (2, 1, 1)
