@@ -70,7 +70,7 @@ class Provider:
                     request = json.loads(self.rfile.read(length) or b"{}")
                     if self.path in ("/_d5/step", "/_d5/end"):
                         step = request["step"] if self.path.endswith("step") else None
-                        if step is not None and not isinstance(step, str):
+                        if self.path.endswith("step") and not isinstance(step, str):
                             raise TypeError("step ids are strings")
                         with provider.lock:
                             provider.step = step

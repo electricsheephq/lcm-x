@@ -153,6 +153,9 @@ def test_configured_models_and_string_steps_only():
         with pytest.raises(HTTPError) as refused:
             request(instance, "/_d5/step", {"step": 0})  # 0 and "0" must not alias one step.
         assert refused.value.code == 400
+        with pytest.raises(HTTPError) as refused:
+            request(instance, "/_d5/step", {"step": None})  # Ending a step is /_d5/end, never a null step.
+        assert refused.value.code == 400
         request(instance, "/_d5/step", {"step": "0"})
         assert complete(instance, "agent")["choices"][0]["message"]["content"] == "zero"
         complete(instance, "digest")

@@ -221,3 +221,38 @@ def test_decorator_with_space_after_at_is_in_the_segment(tmp_path):
     function = "@ decorate\ndef f():\n    return 1"
     path.write_text(function + "\n", encoding="utf-8")
     assert pins.function_source_sha256(path, "f") == hashlib.sha256(function.encode()).hexdigest()
+
+
+@pytest.mark.parametrize("importer,extra", [
+    ("from {pkg}.sibling import VALUE\n\ndef rule():\n    return VALUE\n", {}),
+    ("import sibpkg\n\ndef rule():\n    return sibpkg.VALUE\n", {"sibpkg/__init__.py": "VALUE = 1\n"}),
+], ids=["package-path", "sibling-package"])
+def test_absolute_and_package_imports_must_be_listed(tmp_path, importer, extra):
+    directory = tmp_path / "pkgdir"
+    directory.mkdir()
+    (directory / "sibling.py").write_text("VALUE = 1\n", encoding="utf-8")
+    for name, text in extra.items():
+        (directory / name).parent.mkdir(exist_ok=True)
+        (directory / name).write_text(text, encoding="utf-8")
+    with pytest.raises(ValueError, match="loads"):
+        _pin(directory, importer.format(pkg=directory.name))
+
+
+def test_second_level_import_must_be_listed(tmp_path):
+    files = {"sib.py": "from sib2 import X\n", "sib2.py": "X = 1\n"}
+    with pytest.raises(ValueError, match="loads"):
+        _pin(tmp_path, "import sib\n\ndef rule():\n    return sib.X\n", loads=["sib.py"], files=files)
+    _pin(tmp_path, "import sib\n\ndef rule():\n    return sib.X\n", loads=["sib.py", "sib2.py"])
+
+
+@pytest.mark.parametrize("body", ["importlib.import_module('sib').X", "sys.modules['sib'].X"])
+def test_dynamic_module_access_is_refused(tmp_path, body):
+    with pytest.raises(ValueError):
+        _pin(tmp_path, f"import importlib\nimport sys\n\ndef rule():\n    return {body}\n")
+
+
+def test_data_names_cannot_exempt_code(tmp_path):
+    module = tmp_path / "rules.py"
+    module.write_text("def h():\n    return 1\n\ndef rule():\n    return h()\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="plain values"):
+        pins.call_closure(module, ["rule"], data=["h"])

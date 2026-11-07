@@ -14,6 +14,14 @@ def _sha(data):
     return hashlib.sha256(data).hexdigest()
 
 
+def _load_path(directory, name):
+    """A loaded module: a basename, or a package's ``<pkg>/__init__.py``, under the instrument directory."""
+    parts = Path(name).parts if isinstance(name, str) else ()
+    if parts and len(parts) == 2 and parts[1] == "__init__.py" and parts[0] not in ("..", "."):
+        return Path(directory) / parts[0] / parts[1]
+    return _path(directory, name)
+
+
 def _path(directory, name):
     if not isinstance(name, str) or not name or name == ".." or Path(name).name != name:
         raise ValueError("expected a file basename")
@@ -22,7 +30,7 @@ def _path(directory, name):
 
 _PINNABLE = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Assign, ast.AnnAssign, ast.Import,
              ast.ImportFrom)
-_DYNAMIC = {"globals", "vars", "locals", "eval", "exec", "__import__"}
+_DYNAMIC = {"globals", "vars", "locals", "eval", "exec", "__import__", "importlib", "import_module"}
 
 
 def _bindings(body):
@@ -120,7 +128,12 @@ def call_closure(path, roots, data=()):
 
     while pending:
         name = pending.pop()
-        if name in seen or name in data:
+        if name in data:
+            if any(isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Import, ast.ImportFrom))
+                   for n in bindings.get(name, [])):
+                raise ValueError(f"data names must be plain values, not code: {name}")
+            continue
+        if name in seen:
             continue
         nodes = bindings.get(name, [])
         if len(nodes) != 1 or not isinstance(nodes[0], _PINNABLE):
@@ -128,8 +141,9 @@ def call_closure(path, roots, data=()):
         node = nodes[0]
         seen.add(name)
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            if any(isinstance(n, ast.Name) and n.id in _DYNAMIC for n in ast.walk(node)):
-                raise ValueError("closure reads globals dynamically")
+            if any((isinstance(n, ast.Name) and n.id in _DYNAMIC) or (
+                    isinstance(n, ast.Attribute) and n.attr in ("modules", "import_module")) for n in ast.walk(node)):
+                raise ValueError("closure reads globals or modules dynamically")
             # Outside the body (evaluated in module scope): decorators, defaults, annotations, bases.
             outer = [*node.decorator_list, *((node.bases + [k.value for k in node.keywords])
                                              if isinstance(node, ast.ClassDef) else
@@ -144,27 +158,41 @@ def call_closure(path, roots, data=()):
     return functions, seen - functions
 
 
+def _module_file(directory, parts):
+    base = Path(directory).joinpath(*parts) if parts else None
+    for candidate in ((base.with_suffix(".py"), base / "__init__.py") if base else ()):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
 def local_imports(path, instrument_dir):
-    """Basenames of instrument_dir modules that *path* imports (relative, or absolute with a sibling file)."""
+    """Files under instrument_dir that *path* imports: relative imports, and absolute dotted names whose tail
+    (after the instrument directory's own name, or from the start) resolves to a module or package there."""
+    directory = Path(instrument_dir)
     found = set()
     for node in ast.walk(ast.parse(Path(path).read_text(encoding="utf-8"))):
-        if isinstance(node, ast.ImportFrom) and node.level:
-            modules = [node.module] if node.module else [alias.name for alias in node.names]
+        if isinstance(node, ast.Import):
+            dotted = [alias.name.split(".") for alias in node.names]
         elif isinstance(node, ast.ImportFrom):
-            modules = [node.module or ""]
-        elif isinstance(node, ast.Import):
-            modules = [alias.name for alias in node.names]
+            module = (node.module or "").split(".") if node.module else []
+            dotted = [module] + [module + [alias.name] for alias in node.names if alias.name != "*"]
+            if node.level:  # Relative: resolved against the importing file's directory, which is instrument_dir.
+                for parts in dotted:
+                    hit = _module_file(directory, parts)
+                    if hit:
+                        found.add(hit)
+                continue
         else:
             continue
-        for module in modules:
-            candidate = module.split(".")[0] + ".py"
-            if node_is_relative(node) or (Path(instrument_dir) / candidate).is_file():
-                found.add(candidate)
-    return found
-
-
-def node_is_relative(node):
-    return isinstance(node, ast.ImportFrom) and bool(node.level)
+        for parts in dotted:
+            for start in range(len(parts)):
+                if start and parts[start - 1] != directory.name:
+                    continue
+                hit = _module_file(directory, parts[start:])
+                if hit:
+                    found.add(hit)
+    return {f.relative_to(directory).as_posix() for f in found}
 
 
 def build(instrument_dir, files, roots_by_file, loads_by_file, interpreter, data_by_file=None):
@@ -172,11 +200,19 @@ def build(instrument_dir, files, roots_by_file, loads_by_file, interpreter, data
                 "files": [], "functions": [], "extra_hashes": []}
     for name in files:
         path = _path(instrument_dir, name)
-        unlisted = local_imports(path, instrument_dir) - set(loads_by_file.get(name, []))
-        if unlisted:
-            raise ValueError("a local import is not pinned in loads")
+        listed = set(loads_by_file.get(name, []))
+        pending, scanned = [name], set()
+        while pending:  # Imports of the file and, transitively, of every module it loads must all be listed.
+            current = pending.pop()
+            if current in scanned:
+                continue
+            scanned.add(current)
+            imported = local_imports(Path(instrument_dir) / current, instrument_dir) - {current}
+            if imported - listed:
+                raise ValueError("a local import is not pinned in loads")
+            pending.extend(imported)
         manifest["files"].append({"name": name, "sha256": _sha(path.read_bytes()), "loads": [
-            {"name": load, "sha256": _sha(_path(instrument_dir, load).read_bytes())}
+            {"name": load, "sha256": _sha(_load_path(instrument_dir, load).read_bytes())}
             for load in loads_by_file.get(name, [])]})
         data = sorted((data_by_file or {}).get(name, []))
         manifest["files"][-1]["data"] = data
@@ -195,8 +231,11 @@ def build(instrument_dir, files, roots_by_file, loads_by_file, interpreter, data
 def _interpreter_version(interpreter):
     if interpreter is None:
         return platform.python_version()
-    probe = subprocess.run([str(interpreter), "-I", "-c", "import platform; print(platform.python_version())"],
-                           capture_output=True, text=True, timeout=30)
+    try:
+        probe = subprocess.run([str(interpreter), "-I", "-c", "import platform; print(platform.python_version())"],
+                               capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
     return probe.stdout.strip() if probe.returncode == 0 else None
 
 
@@ -229,7 +268,7 @@ def verify(manifest_path, instrument_dir, python_version=None, interpreter=None)
             mismatches.append("extra_hashes")
         for name, expected, member in entries:
             try:
-                path = _path(instrument_dir, name)
+                path = _load_path(instrument_dir, name)
                 actual = (_sha(path.read_bytes()) if member is None else
                           assign_source_sha256(path, member[0]) if isinstance(member, tuple) else
                           function_source_sha256(path, member))

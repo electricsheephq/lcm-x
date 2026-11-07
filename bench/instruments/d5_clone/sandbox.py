@@ -13,6 +13,9 @@ import sys
 from urllib.parse import urlsplit
 
 
+_SYSTEM_SOCKETS = ("/private/var/run", "/private/tmp", "/private/var/tmp", "/var/run", "/tmp")
+
+
 def profile(ports, socket_roots=()):
     lines = ["(version 1)", "(allow default)", "(deny network-outbound)"]
     for port in ports:
@@ -23,6 +26,10 @@ def profile(ports, socket_roots=()):
         resolved = str(Path(root).resolve())
         if '"' in resolved or "\\" in resolved:
             raise ValueError("unsupported socket directory name")
+        inside = (resolved == system or resolved.startswith(system + "/") or system.startswith(resolved.rstrip("/") + "/")
+                  for system in _SYSTEM_SOCKETS)
+        if any(inside):
+            raise ValueError("socket root would re-admit system sockets")
         lines.append(f'(allow network-outbound (remote unix-socket (subpath "{resolved}")))')
     return "\n".join(lines) + "\n"
 
