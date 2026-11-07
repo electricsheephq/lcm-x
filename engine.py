@@ -7659,7 +7659,9 @@ class LCMEngine(
                             for sid, role, content, call_id, calls, name, stamp, conv in conn.execute(
                                 "SELECT store_id,role,content,tool_call_id,tool_calls,tool_name,observed_at,conversation_id "
                                 "FROM messages WHERE session_id IN (SELECT value FROM json_each(?)) AND store_id<? "
-                                "ORDER BY store_id", (json.dumps(attempt.get("replay_sessions") or [self._session_id]), first)):
+                                # #2029: own rows first, so a copy with a target in its own session keeps that target.
+                                "ORDER BY session_id<>?, store_id",
+                                (json.dumps(attempt.get("replay_sessions") or [self._session_id]), first, self._session_id)):
                                 conv = _normalize_conversation_id_value(conv)
                                 if (conv, role, call_id, calls, name) not in keys:
                                     continue
@@ -8372,10 +8374,11 @@ class LCMEngine(
                     and self._last_ingest_reconciliation.get("action") == "persisted batch"
                     and self._last_ingest_reconciliation.get("reason") == "persisted ambiguous delta"
                     and self._last_ingest_reconciliation.get("cursor") == 0)
-                # #2029: a rotation child re-sent from cursor 0 without a commit proof stores its
-                # predecessors' rows again; annotate them against the recorded rotation chain.
+                # #2029: a rotation child re-sent from cursor 0 without a commit proof (no reconciliation ran) stores
+                # its predecessors' rows again; annotate them against the recorded rotation chain.
                 ancestors = self._rotation_predecessor_session_ids(self._session_id) if cursor == 0 else []
-                self._ingest_ledger_attempt["cursor0_batch"] = bool(cursor0_batch or ancestors)
+                self._ingest_ledger_attempt["cursor0_batch"] = bool(
+                    cursor0_batch or ancestors and not reconciled_existing_session)
                 self._ingest_ledger_attempt["replay_sessions"] = [self._session_id, *ancestors]
                 self._ingest_ledger_attempt["matched"] = {
                     idx: int(rows[0]["store_id"]) for idx, rows in (anchor_plan or {}).get("matched", {}).items() if len(rows) == 1}

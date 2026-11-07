@@ -147,3 +147,37 @@ def test_unstamped_new_rows_are_stored_and_link_at_most_once(tmp_path, monkeypat
         assert len(links) == 1 and links[0][1] == "P"  # one ancestor "ok", one link; the second copy stays unlinked
     finally:
         child.shutdown()
+
+
+def test_reconciled_cursor0_route_keeps_own_session_targets_with_a_chain(tmp_path, monkeypatch):
+    """#2305's reconciled cursor-0 route in a session that has a recorded predecessor: the predecessor holds the same
+    unstamped rows at LOWER store ids, yet every copy still links to its own session's earlier row (own rows first).
+    Non-ancestor sessions stay refused on this route by test_issue_2305's test_13."""
+    from tests.test_issue_1286_cleanup_rewrite_proof import SID, Host
+    from tests.test_issue_2305_cursor0_replay_links import _assert_cursor0, _assert_whole_store, _insert_case
+
+    monkeypatch.setenv("LCM_INGEST_LEDGER", "shadow")
+    monkeypatch.setenv("LCM_IDENTITY_ANCHOR", "on")
+    monkeypatch.setenv("LCM_HOST_MESSAGE_UID", "off")
+    for name in ("_schedule_rollup_maintenance", "_schedule_embedding_maintenance"):
+        monkeypatch.setattr(LCMEngine, name, lambda *args: None)
+    (tmp_path / "probe").mkdir()
+    probe = Host(tmp_path / "probe", embeddings_enabled=False)  # the same deterministic turns, to seed the parent
+    try:
+        probe_history, _view, _added = _insert_case(probe)
+    finally:
+        probe.close()
+    host = Host(tmp_path, embeddings_enabled=False)
+    try:
+        parent = host.bind("P")
+        # The parent holds the session's stored history (stored bytes, reasoning kept), at lower store ids.
+        parent.ingest([{"role": role, "content": content} for role, content, call_id, calls in probe_history
+                       if not call_id and not calls])
+        before, view, added = _insert_case(host)
+        _chain(host.engine, SID, "P")
+        assert host.engine._rotation_predecessor_session_ids(SID) == ["P"]
+        host.engine.ingest(view)
+        _assert_cursor0(host.engine)
+        _assert_whole_store(host, before, view, added, 7)  # every target is in SID, none in P
+    finally:
+        host.close()
