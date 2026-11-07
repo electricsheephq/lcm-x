@@ -155,10 +155,14 @@ def p6(host, plan):
     try:
         host.start(ctx)
         before = _tops(ctx)
-        t0_dir, _ = host.capture(ctx, "T0", cold, {"RC3/store.db": host.run_dir / "pf-plan" / "home" / "store.db"})
+        t0_dir, t0 = host.capture(ctx, "T0", cold, {"RC3/store.db": host.run_dir / "pf-plan" / "home" / "store.db"})
         _turn(host, ctx, cold)
-        h8_dir, _ = host.capture(ctx, "H8", cold)
-        receipt, error, range_new = host.replay(ctx, cold, t0_dir, h8_dir)  # As run_arm: right after its H8.
+        durable, waited = host.wait_cold_ingest(ctx, cold, t0)  # As run_arm: H8 only once the cold ingest is durable.
+        if durable:
+            h8_dir, _ = host.capture(ctx, "H8", cold)
+            receipt, error, range_new = host.replay(ctx, cold, t0_dir, h8_dir)  # As run_arm: right after its H8.
+        else:
+            receipt, error, range_new = None, True, None
         bind, cold_anchors, mid = bars.bar2_bind(receipt, range_new_rows=range_new, error=error), anchors(), _tops(ctx)
         # The edition's conversation_id is the T0 host session row's session_key (p_s6r_clone.py:1148).
         keys = {k for k, in run._rows(Path(t0_dir) / "host-0.db", "SELECT session_key FROM sessions WHERE id = ?", (sid,))}
@@ -185,7 +189,8 @@ def p6(host, plan):
     f = {"bind": bind, "cold_anchors": cold_anchors, "warm_anchors": warm_anchors, "ended_sessions": ended,
          "warm_rows": [new("lcm.db", "store_id", mid["store"]), new("state.db", "id", mid["host"])],
          "host_rows": [new("state.db", "id", before["host"], False), new("state.db", "id", before["host"])],
-         "live_conversation_sha256": sorted(map(_sha, live)), "receipt_conversation_sha256": sorted(map(_sha, replayed))}
+         "live_conversation_sha256": sorted(map(_sha, live)), "receipt_conversation_sha256": sorted(map(_sha, replayed)),
+         "cold_ingest_durable": durable, "cold_ingest_wait_s": waited}
     return _failed([
         ("bind validity is not PASS", not error and bind["validity"] != "PASS"),
         ("range_new_rows is not 0", not error and range_new != 0),
@@ -194,7 +199,8 @@ def p6(host, plan):
         ("a chosen session ended", ended), ("d5-local is not enabled", "d5-local" not in (enabled or ())),
         ("new host rows outside L's session", len(set(f["host_rows"])) != 1 or f["host_rows"][0] < 2),
         ("the live and replayed conversation_id differ", replayed and live != replayed)]), \
-        _failed([("the edition replay errored (no receipt to judge)", error),
+        _failed([("the cold turn's ingest was not durable within the wait (no H8, no replay)", not durable),
+                 ("the edition replay errored (no receipt to judge)", durable and error),
                  ("neither the T0 session row nor the edition receipt gives a conversation_id to compare", not replayed)]), f
 
 

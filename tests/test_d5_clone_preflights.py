@@ -80,6 +80,9 @@ class FakeHost:
     def capture(self, ctx, kind, step, extras=None):
         return self.run_dir / kind, {}
 
+    def wait_cold_ingest(self, ctx, step, t0):
+        return self.fault != "not-durable", 0.0
+
     def replay(self, ctx, step, t0, h8):
         if self.fault == "replay-error":
             return None, True, None
@@ -104,7 +107,8 @@ class FakeHost:
     start = stop = close = pause_cron
 
 
-@pytest.mark.parametrize("fault", [None, "P3", "P4", "P6", "P7", "crash", "no-conversation", "replay-error"])
+@pytest.mark.parametrize("fault", [None, "P3", "P4", "P6", "P7", "crash", "no-conversation", "replay-error",
+                                   "not-durable"])
 def test_each_preflight_fails_on_its_own_fault(tmp_path, monkeypatch, fault):
     monkeypatch.setitem(sys.modules, "yaml", types.SimpleNamespace(safe_load=json.loads))  # Not in every test venv.
     if fault == "P3":  # A provider whose second reply differs from the first.
@@ -113,7 +117,7 @@ def test_each_preflight_fails_on_its_own_fault(tmp_path, monkeypatch, fault):
             **complete(self, request), "created": len(self.stats["request_log"])})
     host = FakeHost(tmp_path, fault)
     verdicts = pf.produce(host, list(pf.PREFLIGHTS))
-    assert host.removed == ([] if fault in ("crash", "replay-error") else ["T0", "H8"])
+    assert host.removed == ([] if fault in ("crash", "replay-error", "not-durable") else ["T0", "H8"])
     expected = dict.fromkeys(pf.PREFLIGHTS, "INCONCLUSIVE" if fault == "crash" else "PASS")
     expected.update({fault: "FAIL"} if fault in pf.PREFLIGHTS else {"P6": "INCONCLUSIVE"} if fault else {})
     assert verdicts == expected
