@@ -1,7 +1,6 @@
 """Approved #2377 design v7 §2/§4: I1/I2/I8, expected behavior on main.
 
-Strict xfails are implementation-removal gates, not alternate expectations.
-Skipped contracts name the exact proposed implementation seam they require.
+All acceptance rows exercise the implemented proof and attribution contracts.
 """
 import sqlite3
 
@@ -16,15 +15,6 @@ from tests.test_host_uid_emit_carry import _ContainsPattern
 pytestmark = pytest.mark.issue(2377)
 
 
-def red(why):
-    return pytest.mark.xfail(strict=True, reason=f"#2377 v7: {why}")
-
-
-def hook(name):
-    return pytest.mark.skip(reason=f"#2377 v7: needs implementation hook {name}")
-
-
-@red('main skips new host result 6 and stores one silent replay call')
 def test_A1_vetoed_ownership(build, monkeypatch):
     a = lambda stamp: call(stamp, args='{"a":1}')  # noqa: E731
     b = call(3, args='{"b":1}')
@@ -33,7 +23,6 @@ def test_A1_vetoed_ownership(build, monkeypatch):
     run.check({2, 4, 6, 7})
 
 
-@red('main skips new host result 3 by pooling partial occurrences')
 def test_A2_partial_parallel(build, monkeypatch):
     p, q = call(2, ("c", "d")), call(4, ("c", "d"))
     host = [U, p, X, D, q, X, D, V]
@@ -52,14 +41,12 @@ def summary_claim(engine, rows, *, condensed=False, partial=False):
         assert parent.depth >= 1 and parent.source_ids == [leaf.node_id]
 
 
-@red('main skips both new pair rows despite full summary coverage')
 def test_A3_summary_owns_full_pair(build, monkeypatch):
     host = [U, call(), X, V]  # Old pair absent; this pair is a NEW occurrence.
     run = ingest_shape(build, monkeypatch, host[:-1], host, prepare=summary_claim)
     run.check({1, 2, 3})
 
 
-@red('main skips both new pair rows despite transitive summary coverage')
 def test_A3b_condensed_summary_claim(build, monkeypatch):
     run = ingest_shape(build, monkeypatch, [U, call(), X], [U, call(), X, V],
                        prepare=lambda e, r: summary_claim(e, r, condensed=True))
@@ -100,7 +87,6 @@ def test_A7_claude_floor(build, monkeypatch, record_property):
     run.check({3, 4, 9})
 
 
-@red('main stores the first repeated result without attribution')
 def test_A8_mixed_stamp_matching(build, monkeypatch):
     k = dict(X, content="k")
     run = ingest_shape(build, monkeypatch, [U, call(), k, dict(k, timestamp=2)],
@@ -113,22 +99,22 @@ def test_A8_mixed_stamp_matching(build, monkeypatch):
 
 
 A9_CASES = [
-    pytest.param("three-parallel", marks=red("main loses the first new parallel segment and stores three silent replay rows")),
-    pytest.param("stamp-mismatch", marks=red("main skips all three new rows despite the call-stamp mismatch")),
+    "three-parallel",
+    "stamp-mismatch",
     "unstamped-order", "full-match",
-    pytest.param("ambiguous-shadow", marks=red("main pools two partial occurrences and skips all three rows")),
-    pytest.param("ambiguous-off", marks=red("main pools partial occurrences with the ledger off")),
-    pytest.param("two-ambiguous", marks=red("main pools partial occurrences and skips both combined segments")),
-    pytest.param("earlier-same", marks=red("main skips the ambiguous segment instead of linking to the earlier-ingest target")),
-    pytest.param("earlier-unstamped", marks=red("main skips the ambiguous unstamped segment instead of storing linked copies")),
-    pytest.param("earlier-new", marks=red("main skips the re-stamped ambiguous segment instead of storing linked copies")),
-    pytest.param("stamp-veto", marks=red("main skips the new call/result despite the stamp veto")),
+    "ambiguous-shadow",
+    "ambiguous-off",
+    "two-ambiguous",
+    "earlier-same",
+    "earlier-unstamped",
+    "earlier-new",
+    "stamp-veto",
     "prefix-new", "2163-partial",
-    pytest.param("2163-vetoed", marks=red("main loses new result 6 and stores a silent replay call")),
+    "2163-vetoed",
     "consumed-twin",
-    pytest.param("rule-b", marks=red("main stores two silent replay rows after an out-of-tail binding")),
-    pytest.param("vetoed", marks=red("main loses new result 6 and stores a silent replay call")),
-    pytest.param("partial", marks=red("main loses new result 3 and stores two silent replay calls")),
+    "rule-b",
+    "vetoed",
+    "partial",
 ]
 
 
@@ -231,7 +217,6 @@ def test_A12_shadow_no_double_claim(build, monkeypatch):
     assert {3, 4} <= run.skips
 
 
-@red('main skips new call and both results after a borrowed prefix')
 def test_A13_placeholder_partial_occurrences(build, monkeypatch):
     a = call(None, ("c", "d"))
     long = dict(X, content="long output " * 50)
@@ -241,7 +226,6 @@ def test_A13_placeholder_partial_occurrences(build, monkeypatch):
     run.check({4, 5, 6, 7})
 
 
-@red('main skips the new call and result after a rewritten prefix')
 def test_A14_changed_prefix(build, monkeypatch):
     run = ingest_shape(build, monkeypatch, [U, call(), X, call(2)],
                        [U, call(), dict(X, content="Y"), call(1), X, V], 3)
@@ -262,7 +246,6 @@ def test_A16_literal_placeholder_is_new(build, monkeypatch):
     run.check({3, 4, 5})
 
 
-@hook("engine._plan_tool_replay_links")
 def test_A17_scorer_key_rejects_false_targets(build):
     engine = build()
     targets = [dict(X, store_id=1, content="different"), dict(X, store_id=2, tool_call_id="other")]
@@ -270,7 +253,6 @@ def test_A17_scorer_key_rejects_false_targets(build):
     assert engine._plan_tool_replay_links([X], targets, seeds=[]) == []
 
 
-@hook("engine._plan_tool_replay_links")
 def test_A18_transient_relation_failure_rolls_back(build, monkeypatch):
     engine = build()
     engine.ingest([U, call(), X])
@@ -294,7 +276,6 @@ def test_A18_transient_relation_failure_rolls_back(build, monkeypatch):
     assert len(relations(engine)) == len(before_links) + 2
 
 
-@hook("engine._plan_tool_replay_links")
 def test_A18b_computation_failure_marks_entire_batch(build, monkeypatch):
     engine = build()
     engine.ingest([U, call(), X])
@@ -312,7 +293,6 @@ def test_A18b_computation_failure_marks_entire_batch(build, monkeypatch):
         (r["store_id"], "link_pending", None) for r in added}
 
 
-@hook("engine._last_tool_link_failures")
 def test_A18c_read_only_missing_relations(build, monkeypatch, caplog):
     engine = build()
     engine.ingest([U, call(), X])
@@ -375,7 +355,6 @@ def test_A21_ceiling_exclusions(build, monkeypatch, mode):
 
 @pytest.mark.parametrize("classes,stamped_call", [(64, False), (65, False), (64, True), (65, True)],
                          ids=["64-call-stamps", "65-call-stamps", "64-result-stamps", "65-result-stamps"])
-@red('main skips the stamped suffix call and result at both 64 and 65 classes')
 def test_A22_cap_boundary(build, monkeypatch, classes, stamped_call, record_property):
     source = [U]
     for i in range(classes):
@@ -393,7 +372,6 @@ def test_A22_cap_boundary(build, monkeypatch, classes, stamped_call, record_prop
     assert {1, 2} <= run.inserted.keys()
 
 
-@hook("engine._last_tool_class_cap_count")
 @pytest.mark.parametrize("classes", [64, 65])
 @pytest.mark.parametrize("stamped_call", [False, True])
 def test_A22_cap_counter(build, monkeypatch, classes, stamped_call):
@@ -407,7 +385,6 @@ def test_A22_cap_counter(build, monkeypatch, classes, stamped_call):
     assert run.engine._last_tool_class_cap_count == int(classes > 64)
 
 
-@hook("engine._last_tool_skip_sets")
 def test_A23_frozen_ceiling_subset(build, monkeypatch):
     p, q = call(2, ("c", "d")), call(4, ("c", "d"))
     run = ingest_shape(build, monkeypatch, [U, p, X, q, D], [U, p, X, D, q, X, D, V])
@@ -416,13 +393,11 @@ def test_A23_frozen_ceiling_subset(build, monkeypatch):
     assert set(v7_skips) < set(main_skips)  # Unsafe pooled skips were removed.
 
 
-@red('main skips the new call and result after storing a rewritten original')
 def test_A24_stored_suffix_claim(build, monkeypatch):
     run = ingest_shape(build, monkeypatch, [U, call(), X], [U, call(), dict(X, content="Y"), call(), X, V])
     run.check({3, 4, 5})
 
 
-@red('main skips both re-stamped rows instead of storing linked copies')
 def test_A25_restamped_resume_links(build, monkeypatch):
     run = ingest_shape(build, monkeypatch, [U, call(2), dict(X, timestamp=2)],
                        [U, call(4), dict(X, timestamp=4), V])
@@ -430,7 +405,6 @@ def test_A25_restamped_resume_links(build, monkeypatch):
     run.check({3})
 
 
-@red('main skips a new pair whose original result is summarized')
 def test_A26_partial_summary_claim(build, monkeypatch):
     run = ingest_shape(build, monkeypatch, [U, call(), X], [U, call(), X, V],
                        prepare=lambda e, r: summary_claim(e, r, partial=True))
@@ -450,7 +424,6 @@ def test_A27_borrow_spends_capacity(build, monkeypatch):
     run.check({3, 4, 5, 6, 7, 8, 9})
 
 
-@hook("engine._plan_tool_replay_links")
 def test_A28_prior_ingest_target_is_last_priority(build):
     engine = build()
     targets = [dict(X, store_id=1, observed_at=30), dict(X, store_id=2, observed_at=10)]
@@ -458,7 +431,6 @@ def test_A28_prior_ingest_target_is_last_priority(build):
     assert engine._plan_tool_replay_links(copies, targets, seeds=[(99, "possible_replay_of", 2)]) == [(0, 1), (1, 2)]
 
 
-@red('main skips the new unstamped pair after a re-stamped rewritten original')
 def test_A29_restamped_rewritten_original(build, monkeypatch):
     run = ingest_shape(build, monkeypatch, [U, call(2), dict(X, timestamp=2)],
                        [U, call(4), dict(X, content="Y", timestamp=4), call(), X, V])

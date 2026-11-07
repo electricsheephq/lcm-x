@@ -14,8 +14,7 @@ from tests.test_issue_671_stub_first_exit import tool_pair
 
 
 @pytest.mark.parametrize("dangling", [
-    pytest.param(False, id="full-pair", marks=pytest.mark.xfail(strict=True, reason=(
-        "#2172: a new call and result that repeat a pair compacted out of the view are taken as a replay"))),
+    pytest.param(False, id="full-pair"),
     pytest.param(True, id="dangling-call"),
 ])
 def test_compacted_away_identical_pair_is_not_proof(build, monkeypatch, dangling):
@@ -312,7 +311,6 @@ _U = {"role": "user", "content": "start", "timestamp": 0.5}
 _V = {"role": "user", "content": "next", "timestamp": 10.0}
 
 
-@pytest.mark.xfail(strict=True, reason="#2377: a vetoed occurrence's ownership stays spendable by another occurrence")
 def test_issue_2377_vetoed_ownership_stays_spendable(build, monkeypatch):
     """Store A@2(c)·X, B@3(c)·X, A@4(c) dangling; the host's A@1 is another occurrence. The new X at host index 6 is
     the dangling A@4's result: no single stored occurrence proves it, so it is not a replay."""
@@ -325,7 +323,6 @@ def test_issue_2377_vetoed_ownership_stays_spendable(build, monkeypatch):
     assert 6 not in replayed, replayed
 
 
-@pytest.mark.xfail(strict=True, reason="#2377: partial parallel occurrences pool their pairs into a false replay proof")
 def test_issue_2377_partial_parallel_occurrences_pool(build, monkeypatch):
     """P(c,d)@2·X and P(c,d)@4·D are stored; neither occurrence holds both results. The host's first segment
     P@2·X·D is not proven by one occurrence, so its D (host index 3) is not a replay."""

@@ -95,6 +95,9 @@ OBSERVED_ATTRIBUTES = frozenset({
     "_ingest_lock_guard", "_ingest_lock_records", "_ingest_lock_totals", "_ingest_lock_warned",
     "_ledger_rollback_failures_published", "_ledger_adopted", "_ledger_rebind_too_large", "_frozen_ledger_prepared", "_frozen_tail_reached",
     "_compress_calls", "_emission_handle",
+    "_last_tool_skip_sets", "_last_tool_class_cap_count", "_tool_cursor_spent",
+    "_tool_borrow_proofs",
+    "_last_tool_link_failures", "_last_tool_link_pending_count",
 }) | DIAGNOSTIC_ATTRIBUTES
 Trace = list[str]
 Message = dict[str, Any]

@@ -23,6 +23,18 @@ from .reconcile import ReconcileMixin, _strip_volatile_host_scaffolding
 from .sqlite_session import TransactionOwner
 from .store import ledger_digest
 
+
+def tool_replay_scorer_key(row, *, conversation=None):
+    """I-link's whole-row key, pinned against the independent audit oracle."""
+    calls = row.get("tool_calls") or None
+    if isinstance(calls, str):
+        calls = json.loads(calls)
+    content = normalize_content_value(row.get("content")) or ""
+    stripped = stripped_replay_content(content)
+    return (str(row.get("conversation_id") or conversation or "").strip(), row.get("role"),
+            content if stripped is None else stripped, row.get("tool_call_id") or None,
+            json.dumps(calls, sort_keys=True), row.get("tool_name") or None)
+
 ORDINAL_STEP = 1 << 20
 MIN_GAP = 1 << 10
 STAMP_WRITTEN, STAMP_EXISTS, STAMP_CAPPED = "written", "exists", "capped"

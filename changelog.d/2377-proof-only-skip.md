@@ -1,0 +1,1 @@
+- Fix: Require occurrence proof for cold tool replay skips and record ambiguous replay copies.

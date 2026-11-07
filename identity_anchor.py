@@ -632,6 +632,9 @@ class IdentityAnchorMixin:
             return True if generated else None
         if target >= stored_id:
             return
+        if not generated and (stored_id in attempt.get("link_sources_used", ())
+                              or target in attempt.get("link_targets_used", ())):
+            return
         rows = self._store.get_batch([target, stored_id])
         prior, current = rows.get(target), rows.get(stored_id)
         conversation = _normalize_conversation_id_value(self._conversation_id)
@@ -660,7 +663,9 @@ class IdentityAnchorMixin:
         if self._store.get_message_relations([target], "alt_stamp"):
             return  # the live receipt already consumed this occurrence
         if conn.execute("SELECT 1 FROM sqlite_master WHERE name='message_relations'").fetchone() and conn.execute(
-                "SELECT 1 FROM message_relations WHERE kind='possible_replay_of' AND related_store_id=?", (target,)).fetchone():
+                "SELECT 1 FROM message_relations WHERE (kind='possible_replay_of' AND related_store_id=?) "
+                "OR (? AND store_id=? AND kind IN ('possible_replay_of','link_pending'))",
+                (target, not generated, stored_id)).fetchone():
             return
         if generated:
             if observed is None:
@@ -669,6 +674,8 @@ class IdentityAnchorMixin:
             return True  # Keep admitting the later warm rewrite; row guards still own every write.
         else:
             self._store.add_message_relations([[(stored_id, "possible_replay_of", target, None, None)]])
+            attempt.setdefault("link_sources_used", set()).add(stored_id)
+            attempt.setdefault("link_targets_used", set()).add(target)
             return False
 
     @staticmethod

@@ -21,7 +21,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections import Counter
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional
@@ -3245,10 +3245,231 @@ class ReconcileMixin:
         return self._reconcile_unmatched_store_history(run)
 
     def _replayed_tool_segment_indexes_after_cursor(
+        self, messages, cursor, *, consumed_store_ids=(), consumed_pairs=None,
+    ) -> set[int]:
+        """v7: frozen legacy ceiling, occurrence classes, and ordered ownership claims."""
+        self._last_tool_skip_sets = (set(), set())
+        self._last_tool_class_cap_count = 0
+        self._tool_cursor_spent = set()
+        self._tool_borrow_proofs = {}
+        if not self._session_id or cursor >= len(messages):
+            return set()
+        tail = self._store.get_session_tail(self._session_id, limit=max(len(messages) * 4, 64))
+        ceiling = self._main_tool_segment_skip_ceiling(
+            messages, cursor, consumed_store_ids=consumed_store_ids,
+            consumed_pairs=consumed_pairs, tail_rows=tail)
+        self._tool_borrow_proofs = {pair: ids for pair, ids in self._tool_borrow_proofs.items()
+                                   if set(pair) <= ceiling}
+        result = self._proof_tool_segment_skips(messages, cursor, tail, ceiling,
+                                                consumed_store_ids, consumed_pairs or {})
+        result &= ceiling
+        self._last_tool_skip_sets = (set(ceiling), set(result))
+        return result
+
+    def _proof_tool_segment_skips(self, messages, cursor, tail, ceiling, consumed_ids, pairs):
+        # Literal identities deliberately disable the pruned-result alias.
+        def identity(row, stored=False):
+            return self._message_replay_identity(row, stored_row=stored, allow_pruned_tool_alias=False)
+
+        def stamp(row, stored=False):
+            return _normalize_observed_at(row.get("observed_at" if stored else "timestamp"))
+
+        def conversation(row):
+            return str(row.get("conversation_id") or self._conversation_id or "").strip()
+
+        def segments(rows):
+            groups = []
+            for i, row in enumerate(rows):
+                if row.get("role") == "assistant" and row.get("tool_calls"):
+                    groups.append([i])
+                elif row.get("role") == "tool" and groups and groups[-1][-1] == i - 1:
+                    groups[-1].append(i)
+            return groups
+
+        hosts, occurrences = segments(messages), segments(tail)
+        sensitive = {identity(messages[g[0]]) for g in hosts
+                     if any(stamp(messages[i]) is not None for i in g)}
+        consumed = set(consumed_ids) | set(pairs.values())
+        spent = consumed | self._tool_cursor_spent
+        borrowed_hosts = {i for pair in self._tool_borrow_proofs for i in pair}
+        borrowed_ids = {sid for ids in self._tool_borrow_proofs.values() for sid in ids}
+        # All summaries, including invisible and condensed roots, own their raw sources.
+        covered = {r[0] for r in self._store._conn.execute("""
+            WITH RECURSIVE walk(kind,id) AS (
+                SELECT n.source_type, CAST(j.value AS INTEGER)
+                FROM summary_nodes n, json_each(n.source_ids) j
+                UNION SELECT n.source_type, CAST(j.value AS INTEGER)
+                FROM summary_nodes n JOIN walk w ON w.kind='nodes' AND n.node_id=w.id
+                JOIN json_each(n.source_ids) j
+            ) SELECT DISTINCT id FROM walk WHERE kind='messages'""")}
+        classes, by_identity, row_owner = {}, defaultdict(list), {}
+        exact, owner_class = set(), {}
+        for number, group in enumerate(occurrences):
+            call = tail[group[0]]
+            key = (conversation(call), identity(call, True))
+            for i in group:
+                row_owner[tail[i]["store_id"]] = number
+            results = [i for i in group[1:] if tail[i]["store_id"] not in spent
+                       and not self._matches_ignore_message_patterns(tail[i], stored_row=True)]
+            if any(tail[i]["store_id"] in spent | covered | borrowed_ids for i in group):
+                exact.add(number)
+            if not results:
+                continue
+            blind = key[1] not in sensitive
+            fingerprint = (key, None if blind else stamp(call, True), frozenset(Counter(
+                (str(tail[i].get("tool_call_id") or ""), identity(tail[i], True),
+                 None if blind else stamp(tail[i], True)) for i in results).items()))
+            if fingerprint not in classes:
+                classes[fingerprint] = dict(members=[], claims=0, skips=0, call=call, results=results,
+                                            claim_stamp=None if blind else stamp(call, True))
+                by_identity[key].append(fingerprint)
+            classes[fingerprint]["members"].append(number)
+            owner_class[number] = fingerprint
+        for number in exact:
+            if number in owner_class:
+                classes[owner_class[number]]["claims"] += 1
+        # Conservative claims are lazy counters: an unstamped prefix against
+        # thousands of classes must not walk that population on every segment.
+        all_claims, stamp_claims = Counter(), Counter()
+        populations_by_stamp, result_classes = defaultdict(set), defaultdict(set)
+        population_sets = {}
+        for key, population in by_identity.items():
+            population_sets[key] = set(population)
+            for fingerprint in population:
+                cls = classes[fingerprint]
+                populations_by_stamp[(key, cls["claim_stamp"])].add(fingerprint)
+                for i in cls["results"]:
+                    token = (key, str(tail[i].get("tool_call_id") or ""), identity(tail[i], True))
+                    result_classes[(token, "all")].add(fingerprint)
+                    result_classes[(token, stamp(tail[i], True))].add(fingerprint)
+        match_cache = {}
+        skips = set()
+        # The helper is already the exact, fixed-ceiling proof for cursor-leading results.
+        for i in range(cursor, len(messages)):
+            if messages[i].get("role") != "tool":
+                break
+            if i in ceiling:
+                skips.add(i)
+
+        def compatible(a, b):
+            return a is None or b is None or a == b
+
+        def candidates_for(group, key):
+            # Intersect indexed necessary conditions before doing any matching.
+            # Distinct result stamps must not re-normalize the entire identity
+            # population for each segment, even when only one class can match.
+            at = stamp(messages[group[0]])
+            constraints = [population_sets.get(key, set()) if at is None else (
+                populations_by_stamp.get((key, None), set()) | populations_by_stamp.get((key, at), set()))]
+            for i in group[1:]:
+                row = messages[i]
+                if self._matches_ignore_message_patterns(row):
+                    continue
+                literal = identity(row)
+                if literal != self._message_replay_identity(row):
+                    continue  # The UID-checked borrow stays outside match().
+                token = (key, str(row.get("tool_call_id") or ""), literal)
+                at = stamp(row)
+                constraints.append(result_classes.get((token, "all"), set()) if at is None else (
+                    result_classes.get((token, None), set()) | result_classes.get((token, at), set())))
+            candidates = min(constraints, key=len).copy()
+            for constraint in constraints:
+                candidates.intersection_update(constraint)
+                if not candidates:
+                    break
+            return candidates
+
+        def assignment(group, cls):
+            call = messages[group[0]]
+            if not compatible(stamp(call), stamp(cls["call"], True)):
+                return None
+            wants = []
+            for i in group[1:]:
+                row = messages[i]
+                if self._matches_ignore_message_patterns(row):
+                    continue
+                literal = identity(row)
+                borrowed = literal != self._message_replay_identity(row)
+                if borrowed:
+                    # Only main's UID-checked #1540 proof may skip the borrow.
+                    if i not in ceiling:
+                        return None
+                    continue
+                wants.append(i)
+            edges = {i: [j for j in cls["results"]
+                         if identity(messages[i]) == identity(tail[j], True)
+                         and str(messages[i].get("tool_call_id") or "") == str(tail[j].get("tool_call_id") or "")
+                         and compatible(stamp(messages[i]), stamp(tail[j], True))] for i in wants}
+            matched = {}
+
+            def augment(i, seen):
+                for j in edges[i]:
+                    if j in seen:
+                        continue
+                    seen.add(j)
+                    if j not in matched or augment(matched[j], seen):
+                        matched[j] = i
+                        return True
+                return False
+            return matched if all(augment(i, set()) for i in wants) else None
+
+        for group in hosts:
+            start = group[0]
+            key = (conversation(messages[start]), identity(messages[start]))
+            population = by_identity.get(key, ())
+            # A binding of any row replaces this segment's conservative claim.
+            named = {row_owner[pairs[i]] for i in group if i in pairs and pairs[i] in row_owner}
+            helper = start == cursor - 1 and bool(self._tool_cursor_spent)
+            if start < cursor:
+                if named or helper:
+                    continue
+            else:
+                eligible = {i for i in group if not self._matches_ignore_message_patterns(messages[i])}
+                if eligible <= borrowed_hosts and eligible <= ceiling:
+                    # #1540 binds this very occurrence, rather than claiming a
+                    # free twin. Its exact claim (also if summarized) is counted
+                    # once above; it cannot fund a later identical segment.
+                    skips.update(eligible)
+                    continue
+                matches = []
+                if eligible <= ceiling:
+                    signature = tuple((identity(messages[i]), stamp(messages[i]), i in ceiling,
+                                       self._matches_ignore_message_patterns(messages[i])) for i in group)
+                    cache_key = (key, signature)
+                    if cache_key not in match_cache:
+                        matches = []
+                        for fingerprint in candidates_for(group, key):
+                            if assignment(group, classes[fingerprint]) is not None:
+                                matches.append(fingerprint)
+                                if len(matches) == 65:
+                                    break
+                        match_cache[cache_key] = matches
+                    matches = match_cache[cache_key]
+                if len(matches) == 65:
+                    self._last_tool_class_cap_count += 1
+                if len(matches) == 1:
+                    cls = classes[matches[0]]
+                    claims = cls["claims"] + all_claims[key] + stamp_claims[(key, cls["claim_stamp"])]
+                    if (eligible <= ceiling and len(cls["members"]) > claims + cls["skips"]):
+                        cls["skips"] += 1
+                        skips.update(eligible)
+                        continue
+            # Earlier stores own one member per equal-call-stamp class, or all
+            # classes if no equal stamp exists. Result bytes never narrow this.
+            # An absent stamp is not equal-stamp evidence. In a stamp-blind
+            # identity this still claims all classes; in a mixed view it must
+            # not leave stamped originals free after a rewritten prefix.
+            if stamp(messages[start]) is not None and (key, stamp(messages[start])) in populations_by_stamp:
+                stamp_claims[(key, stamp(messages[start]))] += 1
+            else:
+                all_claims[key] += 1
+        return skips
+
+    def _main_tool_segment_skip_ceiling(
         self,
         messages: List[Dict[str, Any]],
         cursor: int,
-        *, consumed_store_ids=(), consumed_pairs=None,
+        *, consumed_store_ids=(), consumed_pairs=None, tail_rows=None,
     ) -> set[int]:
         """Find exact durable tool pairs replayed after a preserved new delta.
 
@@ -3296,11 +3517,12 @@ class ReconcileMixin:
         """
         if not self._session_id or cursor >= len(messages):
             return set()
-        session_count = self._store.get_session_count(self._session_id)
-        if session_count <= 0:
-            return set()
-        tail_limit = min(max(len(messages) * 4, 64), session_count)
-        tail_rows = self._store.get_session_tail(self._session_id, limit=tail_limit)
+        if tail_rows is None:
+            session_count = self._store.get_session_count(self._session_id)
+            if session_count <= 0:
+                return set()
+            tail_limit = min(max(len(messages) * 4, 64), session_count)
+            tail_rows = self._store.get_session_tail(self._session_id, limit=tail_limit)
         consumed_pairs = consumed_pairs or {}
         consumed = set(consumed_store_ids) | set(consumed_pairs.values())
         stored_rows = [row for row in tail_rows if row["store_id"] not in consumed]
@@ -3547,6 +3769,7 @@ class ReconcileMixin:
                     and counts[identity] > 0):
                 counts[identity] -= 1
                 spent.add(stored["store_id"])
+                self.__dict__.setdefault("_tool_cursor_spent", set()).add(stored["store_id"])
                 replayed.add(index)
             index += 1
         reserve_unspent()
@@ -3594,6 +3817,8 @@ class ReconcileMixin:
                     not protected and str(stored_result.get("role") or "") == "tool"
                     and str(stored_result.get("tool_call_id") or "") == result_id
                     and len(stored_text) > _HERMES_PRUNE_MIN_CHARS and not _is_stored_nonstring_content(stored_text)):
+                self.__dict__.setdefault("_tool_borrow_proofs", {})[(call_index, result_index)] = (
+                    stored_call["store_id"], stored_result["store_id"])
                 return True
         return False
 

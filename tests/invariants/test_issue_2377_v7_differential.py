@@ -2,7 +2,7 @@
 
 LCM_DIFF_CASES defaults to 2,000. Each case uses random.Random(case_seed), so a
 failure's seed alone reconstructs its conversation, projection, cursor and ledger.
-I-c is separately skipped until the frozen main/candidate skip-set hook exists.
+I-c is asserted on every case through the frozen main/candidate skip-set hook.
 """
 from copy import deepcopy
 from dataclasses import dataclass
@@ -112,10 +112,8 @@ def execute(case, root):
             # I-b is about surplus replay rows, whose occurrences are known by construction.
             replay_ids = {run.inserted[i] for i in case.replay if i in run.inserted}
             assert set(errors["silent"]) <= replay_ids
-            ceiling = getattr(run.engine, "_last_tool_skip_sets", None)
-            if ceiling is not None:
-                main_skips, v7_skips = ceiling
-                assert set(v7_skips) <= set(main_skips), (case.seed, "I-c")
+            main_skips, v7_skips = run.engine._last_tool_skip_sets
+            assert set(v7_skips) <= set(main_skips), (case.seed, "I-c")
             return errors
     finally:
         for engine in engines:
@@ -123,7 +121,6 @@ def execute(case, root):
 
 
 @pytest.mark.parametrize("seed", [2377], ids=["seed-2377"])
-@pytest.mark.xfail(strict=True, raises=DifferentialFailure, reason="#2377 v7: main loses new repeated occurrences and stores silent replay copies")
 def test_seeded_differential_all_cases(tmp_path, seed, record_property):
     cases = int(os.environ.get("LCM_DIFF_CASES", "2000"))
     assert cases > 0
@@ -157,7 +154,6 @@ def test_seeded_differential_green_subset(tmp_path, seed):
     assert not any(errors.values()), (seed, errors)
 
 
-@pytest.mark.skip(reason="#2377 v7: needs implementation hook engine._last_tool_skip_sets")
 def test_seeded_differential_ceiling_subset(tmp_path):
     case = generate(2377)
     folder = Path(tmp_path) / "ceiling"
