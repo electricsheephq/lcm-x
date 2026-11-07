@@ -280,3 +280,13 @@ def test_durable_recovery_still_links_to_a_target_of_a_borrowed_link(tmp_path, m
         linked = {r["store_id"] for r in engine._store.get_message_relations(list(copies), "possible_replay_of")
                   if r["related_store_id"] == recovered}
         assert len(copies) == 2 and copies - {recovered} == linked, (sorted(copies), sorted(linked))
+
+
+def test_two_links_into_one_target_both_count_visible():
+    """The kit's split_surplus needs no distinct targets: E kept, N and R both linked to E, both visible."""
+    from bench.instruments.reliability.scorers.multiset import split_surplus
+
+    evidence = {sid: ("S", "user", P) for sid in (1, 2, 3)}
+    split = split_surplus([(("user", P), 2, [1, 2, 3], [], evidence)],
+                          [(2, "possible_replay_of", 1), (3, "possible_replay_of", 1)])
+    assert (split["visible_surplus_rows"], split["silent_surplus_rows"]) == (2, 0), split
