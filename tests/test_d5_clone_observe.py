@@ -12,13 +12,17 @@ import pytest
 from bench.instruments.d5_clone import bars, run as r
 from tests.test_d5_clone_run import FakeHost, setup  # noqa: F401  (setup is the shared fixture)
 
-STUB = "[Externalized tool output: terminal; chars=204800; ref=20261107_120000_s_0123456789ab_1.json]"
+REF = "20261107_120000_s_0123456789ab_1.json"
+STUB = f"[Externalized tool output: terminal; chars=204800; ref={REF}]"
+RAW = "d" * 2048
+GC = STUB.replace("Externalized", "GC'd externalized")  # LCM-X's other reference form, a second row of the same call.
+KEY = r._sha("S")[:12]
 OBSERVATIONS = ("compaction", "whitespace", "swap", "cron")
 OK_SCHEMA = {"version": 5, "expected": 5, "missing_tables": [], "error": False}
 
 
 def stores(home):
-    home.mkdir(parents=True, exist_ok=True)
+    (home / "lcm-large-outputs").mkdir(parents=True, exist_ok=True)
     with closing(sqlite3.connect(home / "lcm.db")) as lcm, closing(sqlite3.connect(home / "state.db")) as host:
         lcm.executescript("CREATE TABLE messages (store_id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, content TEXT,"
                           " tool_call_id TEXT); CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT);"
@@ -28,8 +32,10 @@ def stores(home):
     return home
 
 
-def observe(home, name, sid="S", cron_id=None, *, native=False, stripped="  \r\n", host_text="d" * 64):
-    """Write one observation into a home's stores, as the host and LCM-X would."""
+def observe(home, name, sid="S", cron_id=None, *, native=False, stripped="  \r\n", host_text=STUB, lcm_texts=(RAW,),
+            payload=RAW):
+    """Write one observation into a home's stores, as the host and LCM-X would. A payload swap: the host row holds the
+    externalized stub, the payload file holds the output, and LCM-X stores the output itself."""
     with closing(sqlite3.connect(home / "lcm.db")) as lcm, closing(sqlite3.connect(home / "state.db")) as host, lcm, host:
         if name == "compaction":
             lcm.execute("INSERT INTO summary_nodes (session_id) VALUES (?)", (sid,))
@@ -41,8 +47,9 @@ def observe(home, name, sid="S", cron_id=None, *, native=False, stripped="  \r\n
             lcm.execute("INSERT INTO metadata VALUES (?, ?)", (f"host_rewrite_identity:{store_id}",
                         json.dumps({"version": 1, "content": "hello", "stripped": ["", stripped]})))
         elif name == "swap":
-            lcm.execute("INSERT INTO messages (session_id, role, content, tool_call_id) VALUES (?, 'tool', ?, 'c1')",
-                        (sid, STUB))
+            (home / "lcm-large-outputs" / REF).write_text(json.dumps({"content": payload}))
+            lcm.executemany("INSERT INTO messages (session_id, role, content, tool_call_id) VALUES (?, 'tool', ?, 'c1')",
+                            [(sid, text) for text in lcm_texts])
             host.execute("INSERT INTO messages (session_id, role, content, tool_call_id) VALUES (?, 'tool', ?, 'c1')",
                          (sid, host_text))
         elif name == "cron":
@@ -66,7 +73,6 @@ def test_each_workload_fact_counts_on_a_positive_home_and_is_zero_on_a_negative_
 @pytest.mark.parametrize("name, kwargs, key", [
     ("compaction", {"native": True}, "compactions_published"),  # A native proof is not an LCM-X publication.
     ("whitespace", {"stripped": ""}, "whitespace_rewrites"),  # No edge whitespace recorded.
-    ("swap", {"host_text": STUB}, "payload_swaps"),  # The host row holds the same text: nothing to credit.
     ("cron", {"cron_id": "ffffffffffff"}, "cron_fired"),  # Another job's run.
 ])
 def test_a_near_miss_is_not_counted(tmp_path, name, kwargs, key):
@@ -74,6 +80,20 @@ def test_a_near_miss_is_not_counted(tmp_path, name, kwargs, key):
     before = r.marks(home)
     observe(home, name, **{"cron_id": "0123456789ab", **kwargs})
     assert r.workload_facts(home, before, "0123456789ab")[key] == 0
+
+
+@pytest.mark.parametrize("kwargs", [  # Each holds an LCM-X reference row that the round-0 rule counted.
+    {"host_text": RAW, "lcm_texts": (STUB,)},  # LCM-X externalized it and the host kept the output: no host swap.
+    {"host_text": RAW[:64], "lcm_texts": (STUB,)},  # A host truncation.
+    {"host_text": STUB + " " + STUB, "lcm_texts": (RAW, GC)},  # Two references in one host row.
+    {"payload": RAW[:-1] + "e", "lcm_texts": (RAW, GC)},  # The payload differs from LCM-X's row by one byte.
+    {"host_text": STUB.replace(REF, "sub/" + REF), "lcm_texts": (RAW, GC)},  # A reference the engine cannot open.
+])
+def test_only_the_pinned_credits_payload_swap_shape_counts(tmp_path, kwargs):
+    home = stores(tmp_path / "home")
+    before = r.marks(home)
+    observe(home, "swap", **kwargs)
+    assert r.workload_facts(home, before)["payload_swaps"] == 0
 
 
 def probe_out(path, doctor=None, schema=None):
@@ -85,22 +105,45 @@ def probe_out(path, doctor=None, schema=None):
     return path
 
 
-def doctor(*statuses):
-    return {"overall": "healthy", "checks": [{"check": f"c{i}", "status": s, "detail": "x"} for i, s in enumerate(statuses)]}
+def doctor(*statuses, names=("database_integrity", "payload_storage")):
+    return {"overall": "healthy", "checks": [{"check": n, "status": s, "detail": "x"} for n, s in zip(names, statuses)]}
+
+
+def per_session(out, key=KEY, *statuses, bound=True):
+    """The probe's run bound to one session, and its sessions.json."""
+    (out / f"doctor-{key}.json").write_text(json.dumps(doctor(*statuses, names=r.DOCTOR_PER_SESSION)))
+    (out / "sessions.json").write_text(json.dumps({key: bound}))
 
 
 def test_doctor_checks_map_to_bar5_statuses(tmp_path):
     out = probe_out(tmp_path, doctor("pass", "warn"), {"lcm.db": OK_SCHEMA, "state.db": OK_SCHEMA})
-    checks = r.probe_checks(out)
-    assert [c for c in checks if c["kind"] == "doctor"] == [
-        {"kind": "doctor", "check": "c0", "status": "ok"}, {"kind": "doctor", "check": "c1", "status": "warn"}]
-    assert [c["status"] for c in checks if c["kind"] == "schema"] == ["ok", "ok"]
+    checks, skipped = r.probe_checks(out, [])
+    assert [c for c in checks if c["kind"] == "doctor"] == [{"kind": "doctor", "check": "database_integrity", "status": "ok"},
+                                                            {"kind": "doctor", "check": "payload_storage", "status": "warn"}]
+    assert [c["status"] for c in checks if c["kind"] == "schema"] == ["ok", "ok"] and skipped == []
     assert bars.failed_checks(checks) == [] and not {"doctor", "schema"} & set(bars.kinds_missing(checks))
 
 
 @pytest.mark.parametrize("status", ["fail", "FAIL", "degraded"])
 def test_a_doctor_fail_or_an_unknown_status_is_a_failed_check(tmp_path, status):
-    assert bars.failed_checks(r.probe_checks(probe_out(tmp_path, doctor("pass", status)))) == ["c1"]
+    out = probe_out(tmp_path, doctor("pass", status))
+    assert bars.failed_checks(r.probe_checks(out, [])[0]) == ["payload_storage"]
+    per_session(out, KEY, "pass", status, "pass")
+    assert bars.failed_checks(r.probe_checks(out, [KEY])[0]) == [f"orphaned_dag_nodes@{KEY}", "payload_storage"]
+
+
+def test_checks_the_probe_cannot_exercise_are_reported_never_rows(tmp_path):
+    names = ("database_integrity", "identity_migration", "ingest_health", "context_pressure", "new_check",
+             *r.DOCTOR_PER_SESSION)
+    out = probe_out(tmp_path, doctor(*["pass"] * len(names), names=names))
+    per_session(out, KEY, "pass", "warn", "pass")
+    checks, skipped = r.probe_checks(out, [KEY, "000000000000"])  # The second session never bound.
+    assert [c["check"] for c in checks] == ["database_integrity", *(f"{c}@{KEY}" for c in r.DOCTOR_PER_SESSION)]
+    assert checks[2]["status"] == "warn"  # The bound session's own result, not the unbound one's.
+    assert {s["check"]: s["reason"] for s in skipped} == {
+        "context_pressure": "the probe process's own counter", "identity_migration": "no plugin registration step in the probe",
+        "ingest_health": "the probe process's own counter", "new_check": "not classified for the probe",
+        **{f"{c}@000000000000": "no session binding in this tree" for c in r.DOCTOR_PER_SESSION}}
 
 
 @pytest.mark.parametrize("value", [None, {"error": "LCM engine not initialized"}, {"checks": []}, "not json"])
@@ -108,18 +151,19 @@ def test_a_doctor_that_did_not_run_leaves_the_kind_missing(tmp_path, value):
     out = probe_out(tmp_path)
     if value is not None:
         (out / "doctor.json").write_text(value if isinstance(value, str) else json.dumps(value))
-    assert "doctor" in bars.kinds_missing(r.probe_checks(out)) and "doctor" in bars.kinds_missing(r.probe_checks(None))
+    assert "doctor" in bars.kinds_missing(r.probe_checks(out, [KEY])[0])
+    assert r.probe_checks(None, [KEY]) == ([], [])
 
 
 @pytest.mark.parametrize("bad", [{"version": 4}, {"missing_tables": ["messages"]}, {"error": True}, {"version": None}])
 def test_a_schema_mismatch_fails_that_db(tmp_path, bad):
-    checks = r.probe_checks(probe_out(tmp_path, schema={"lcm.db": {**OK_SCHEMA, **bad}, "state.db": OK_SCHEMA}))
+    checks, _ = r.probe_checks(probe_out(tmp_path, schema={"lcm.db": {**OK_SCHEMA, **bad}, "state.db": OK_SCHEMA}), [])
     assert bars.failed_checks(checks) == ["lcm.db"]
 
 
 @pytest.mark.parametrize("schema", [None, {"lcm.db": OK_SCHEMA}])
 def test_an_unread_schema_leaves_the_kind_missing(tmp_path, schema):
-    assert "schema" in bars.kinds_missing(r.probe_checks(probe_out(tmp_path, schema=schema)))
+    assert "schema" in bars.kinds_missing(r.probe_checks(probe_out(tmp_path, schema=schema), [])[0])
 
 
 def test_the_cron_job_is_created_once_before_epoch_2_identically_in_both_arms(tmp_path):
@@ -135,6 +179,24 @@ def test_the_cron_job_is_created_once_before_epoch_2_identically_in_both_arms(tm
         jobs.append({k: v for k, v in data["jobs"][1].items() if k not in ("created_at", "next_run_at")})
     assert jobs[0] == jobs[1] and jobs[0]["model"] == "d5-cron" and jobs[0]["repeat"] == {"times": 1, "completed": 0}
     assert jobs[0]["schedule"] == {"kind": "interval", "minutes": 2, "display": "every 2m"}
+
+
+@pytest.mark.parametrize("shape", ["dict", "list"])
+def test_existing_jobs_are_paused_and_the_file_keeps_its_shape(tmp_path, shape):
+    cron = {"schedule": "every 2m", "repeat": 1, "created_before_epoch": 2, "prompt": "d5 cron abc"}
+    home = tmp_path / "home"
+    (home / "cron").mkdir(parents=True)
+    jobs = [{"id": "b2", "enabled": True, "state": "scheduled"}, {"id": "a1", "enabled": True}]
+    (home / "cron" / "jobs.json").write_text(json.dumps({"jobs": jobs} if shape == "dict" else jobs))
+    host = r.LocalHost({}, tmp_path)
+    assert host.pause_cron({"home": home}) == {"job_ids": ["a1", "b2"], "count": 2}
+    host.schedule({"home": home}, cron)
+    data = json.loads((home / "cron" / "jobs.json").read_text())
+    assert isinstance(data, dict if shape == "dict" else list)
+    *old, new = data["jobs"] if shape == "dict" else data
+    assert all(j["enabled"] is False and j["state"] == "paused" and j["paused_at"]
+               and j["paused_reason"] == "d5 clone run: paused before the run" for j in old)
+    assert new["enabled"] is True and new["state"] == "scheduled"  # The plan's own job stays enabled.
 
 
 class ObservingHost(FakeHost):
@@ -154,8 +216,10 @@ class ObservingHost(FakeHost):
                 db.execute("ALTER TABLE messages ADD COLUMN tool_call_id TEXT")
             lcm.executescript("CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT);"
                               " CREATE TABLE summary_nodes (node_id INTEGER PRIMARY KEY, session_id TEXT);")
+        (home / "cron").mkdir()
+        (home / "cron" / "jobs.json").write_text(json.dumps({"jobs": [{"id": "snap-job", "enabled": True}]}))
         payloads = sum(p.is_file() for p in (home / "lcm-large-outputs").rglob("*"))
-        return {**ctx, "marks": r.marks(home), "payloads": payloads}
+        return {**ctx, "marks": r.marks(home), "payloads": payloads, "session_ids": list(ctx["sessions"].values())}
 
     def rules(self):  # The swap's two rows are one occurrence, as the pinned payload credit makes them.
         return {**super().rules(), "credits": (lambda row, host: row["role"] == host["role"] == "tool"
@@ -168,16 +232,21 @@ class ObservingHost(FakeHost):
         names = {"e0-S1-1": "whitespace", "e1-L-1": "swap", "e1-L-2": "compaction"}
         if step["id"] in names and names[step["id"]] != self.absent:
             observe(ctx["home"], names[step["id"]], sid)
-        if step["id"] == "e1-L-1":
-            (ctx["home"] / "lcm-large-outputs" / f"{ctx['name']}-payload.json").write_text("{}")
         if step["id"] == "e2-L-0" and self.absent != "cron":
             observe(ctx["home"], "cron", cron_id=ctx["cron_id"])
         return ok
 
     def probe(self, ctx):
         out = ctx["home"].parent / "doctor" / "out"
-        return probe_out(out, None if self.absent == "doctor" else doctor("pass", "warn"),
-                         None if self.absent == "schema" else {"lcm.db": OK_SCHEMA, "state.db": OK_SCHEMA})
+        names = ("database_integrity", "payload_storage", "identity_migration", *r.DOCTOR_PER_SESSION)
+        probe_out(out, None if self.absent == "doctor" else doctor("pass", "warn", "pass", "pass", "pass", "pass",
+                                                                    names=names),
+                  None if self.absent == "schema" else {"lcm.db": OK_SCHEMA, "state.db": OK_SCHEMA})
+        keys = [r._sha(s)[:12] for s in ctx["session_ids"]]
+        for key in keys:
+            per_session(out, key, "pass", "pass", "pass")
+        (out / "sessions.json").write_text(json.dumps(dict.fromkeys(keys, True)))
+        return out
 
 
 def test_a_full_fake_run_with_every_observation_passes_bars_5_and_6(setup):  # noqa: F811
@@ -187,7 +256,12 @@ def test_a_full_fake_run_with_every_observation_passes_bars_5_and_6(setup):  # n
     assert receipt["verdict"]["raw"] == bars.PASS, receipt["bars"]
     work = receipt["arms"]["rc"]["workload"]
     assert work["cron_job_sha256"] == receipt["arms"]["ga"]["workload"]["cron_job_sha256"]
-    assert receipt["arms"]["rc"]["checks"]["by_kind_status"]["doctor:warn"] == 1
+    for arm in ("rc", "ga"):
+        assert receipt["arms"][arm]["checks"]["by_kind_status"] == {
+            "doctor:ok": 10, "doctor:warn": 1, "integrity:ok": 2, "quick_check:ok": 2, "schema:ok": 2}  # 1 + 3 x 3 ok
+        assert receipt["arms"][arm]["doctor_not_exercised"] == [
+            {"check": "identity_migration", "reason": "no plugin registration step in the probe"}]
+        assert receipt["arms"][arm]["cron_paused"] == {"job_ids": ["snap-job"], "count": 1}
 
 
 @pytest.mark.parametrize("absent, bar, item", [
@@ -198,6 +272,7 @@ def test_each_missing_observation_makes_its_bar_inconclusive(setup, absent, bar,
     _, config, run_dir = setup
     receipt = r.run(ObservingHost(config, run_dir, absent=absent), rc_id="rc-synthetic")
     result = receipt["bars"][bar]
+    assert receipt["arms"]["rc"]["cron_paused"]["count"] == 1  # The snapshot's job never fires in any variant.
     assert result["verdict"] == bars.INCONCLUSIVE and receipt["verdict"]["raw"] == bars.INCONCLUSIVE
     assert (result["kinds_missing"] == [item]) if bar == "bar5" else result["items"]["rc"][item] is False
 
@@ -227,6 +302,24 @@ def test_the_cron_job_parses_with_the_pinned_hosts_own_loader(tmp_path):
 
 
 @PINNED
+def test_the_hosts_loader_reads_paused_jobs_as_not_due(tmp_path):
+    home = tmp_path / "home"
+    (home / "cron").mkdir(parents=True)
+    due = {"id": "aaaaaaaaaaaa", "name": "old", "prompt": "old", "schedule": {"kind": "interval", "minutes": 1,
+           "display": "every 1m"}, "repeat": {"times": None, "completed": 0}, "enabled": True, "state": "scheduled",
+           "next_run_at": "2026-01-01T00:00:00+00:00", "deliver": "local"}
+    (home / "cron" / "jobs.json").write_text(json.dumps({"jobs": [due]}))
+    env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path), "HERMES_HOME": str(home), "TMPDIR": str(tmp_path)}
+    code = ("import json; from cron import jobs\nwith jobs.use_cron_store(" + repr(str(home)) + "):\n"
+            "    print(json.dumps([[j['id'] for j in jobs.get_due_jobs()],"
+            " [jobs.is_job_runnable(j) for j in jobs.load_jobs()]]))")
+    assert json.loads(host_python(code, env, tmp_path))[1] == [True]  # The host would run it.
+    (home / "cron" / "jobs.json").write_text(json.dumps({"jobs": [due]}))
+    r.LocalHost({}, tmp_path).pause_cron({"home": home})
+    assert json.loads(host_python(code, env, tmp_path)) == [[], [False]]
+
+
+@PINNED
 def test_the_real_probe_runs_the_doctor_on_a_clone_and_never_writes_the_arm_home(tmp_path):
     """The arm's stores are made by the pinned host and this tree's engine; the probe runs on a clone of them."""
     home, tree = tmp_path / "arm" / "home", Path(r.__file__).resolve().parents[3]
@@ -237,13 +330,19 @@ def test_the_real_probe_runs_the_doctor_on_a_clone_and_never_writes_the_arm_home
             f"db_path=__import__('pathlib').Path({str(home / 'state.db')!r})).close(); t = {str(tree)!r}; s = importlib.util.spec_from_file_location("
             "'hermes_lcm_x', t + '/__init__.py', submodule_search_locations=[t]); sys.modules['hermes_lcm_x'] ="
             " importlib.util.module_from_spec(s); c = importlib.import_module('hermes_lcm_x.config');"
-            " e = importlib.import_module('hermes_lcm_x.engine'); e.LCMEngine(config=c.LCMConfig.from_env(),"
-            f" hermes_home={str(home)!r})._store.connection; sys.stdout.flush(); os._exit(0)")
+            " e = importlib.import_module('hermes_lcm_x.engine'); x = e.LCMEngine(config=c.LCMConfig.from_env(),"
+            f" hermes_home={str(home)!r}); x.on_session_start('S', platform='d5-local'); x._ingest_messages(["
+            "{'role': 'user', 'content': 'hello'}, {'role': 'assistant', 'content': 'hi'}]); sys.stdout.flush(); os._exit(0)")
     host_python(make, env, tmp_path)
     before = {p.relative_to(home): p.stat().st_mtime_ns for p in home.rglob("*") if p.is_file()}
-    ctx = {"home": home, "gateway": type("G", (), {"env": env})(),
+    ctx = {"home": home, "gateway": type("G", (), {"env": env})(), "session_ids": ["S"],
            "tree": {"host_bin": os.environ["D5_HOST_BIN"], "lcm_tree": str(tree)}}
-    checks = r.probe_checks(r.LocalHost({}, tmp_path).probe(ctx))
+    out = r.LocalHost({}, tmp_path).probe(ctx)
+    checks, skipped = r.probe_checks(out, [KEY])
     assert {p.relative_to(home): p.stat().st_mtime_ns for p in home.rglob("*") if p.is_file()} == before
     assert {c["kind"] for c in checks} == {"doctor", "schema"} and bars.failed_checks(checks) == []
-    assert any(c["check"] == "schema_core_tables" and c["status"] == "ok" for c in checks)
+    names = {c["check"] for c in checks}
+    assert "schema_core_tables" in names and {f"{c}@{KEY}" for c in r.DOCTOR_PER_SESSION} <= names
+    assert {s["check"] for s in skipped} == set(r.DOCTOR_NOT_EXERCISED) - {"context_pressure"}  # Not emitted here.
+    scoped = json.loads((out / f"doctor-{KEY}.json").read_text())["checks"]
+    assert next(c for c in scoped if c["check"] == "fts_index_sync")["detail"].startswith("2 session FTS rows")

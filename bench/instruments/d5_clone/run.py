@@ -36,6 +36,22 @@ DOCTOR_STATUS = {"pass": "ok", "ok": "ok", "warn": "warn", "fail": "fail"}  # An
 # LCM-X's externalized-payload reference (externalize.py _EXTERNALIZED_REF_RE).
 EXTERNALIZED_REF = re.compile(r"\[(?:Externalized|GC'd externalized) (?:tool output|payload):.*?;\s*ref=([^;\]\s]+)\]")
 CRON_MODEL = "d5-cron"
+CRON_PAUSE_REASON = "d5 clone run: paused before the run"
+# How the probe can exercise each lcm_doctor check on a stopped arm (both trees' tools.py lcm_doctor). Store-wide
+# checks read the store, the payload files or the arm's config once; per-session checks read the engine's current
+# session, so they run once per plan session, bound by on_session_start. The rest never see the run: they are left
+# out of bar 5 and reported (release manager, 2026-11-07), and so is any check not named here.
+DOCTOR_STORE_WIDE = frozenset((
+    "database_integrity", "schema_core_tables", "messages_fts_integrity", "nodes_fts_integrity", "sqlite_storage",
+    "payload_storage", "source_lineage_hygiene", "lifecycle_fragmentation", "sensitive_pattern_handling",
+    "config_validation", "embedding_provider_health"))
+DOCTOR_PER_SESSION = ("fts_index_sync", "orphaned_dag_nodes", "summary_quality")
+DOCTOR_NOT_EXERCISED = {
+    "identity_migration": "no plugin registration step in the probe",
+    "inactive_process": "reads live processes; the arm's gateway has stopped",
+    "ingest_health": "the probe process's own counter", "ignore_pattern_drops": "the probe process's own counter",
+    "context_pressure": "the probe process's own counter", "compaction_progress": "the probe process's own counter",
+    "token_counter": "the probe process's tokenizer state"}
 
 
 def _sha_json(value):
@@ -91,18 +107,50 @@ def workload_facts(home, before, cron_id=None):
     rewrites = sum(key not in before.get("rewrites", ()) and key.partition(":")[2] in users
                    and any((_json(value) or {}).get("stripped") or ())
                    for key, value in _rows(lcm, "SELECT key, value FROM metadata WHERE key GLOB 'host_rewrite_identity:*'"))
-    # A payload swap: a new tool row LCM-X holds as an externalized reference, which its host row does not hold as is.
-    held = {(s, c): text for s, c, text in _rows(lcm, "SELECT session_id, tool_call_id, content FROM messages WHERE role ="
-                                              " 'tool' AND tool_call_id IS NOT NULL AND store_id > ?", store_after)}
-    swaps = sum((s, c) in held and bool(EXTERNALIZED_REF.search(held[s, c] or "")) and text != held[s, c]
-                for s, c, text in _rows(host, "SELECT session_id, tool_call_id, content FROM messages WHERE role = 'tool'"
-                                              " AND tool_call_id IS NOT NULL AND id > ?", host_after))
+    # A payload swap, in the shape the pinned payload credit rewards: a new host tool row that is one reference to one
+    # payload file, whose content LCM-X stores in a row of the same session, role and tool_call_id.
+    swaps = 0
+    for s, c, text in _rows(host, "SELECT session_id, tool_call_id, content FROM messages WHERE role = 'tool'"
+                                  " AND tool_call_id IS NOT NULL AND id > ?", host_after):
+        payload = _swap_payload(home, text)
+        swaps += payload is not None and bool(_rows(lcm, "SELECT 1 FROM messages WHERE session_id = ? AND role = 'tool'"
+                                                         " AND tool_call_id = ? AND content = ? LIMIT 1", (s, c, payload)))
     fired = 0
     if cron_id:  # A run is the host's cron session for the job (cron/scheduler.py), or its saved output.
         sessions = len(_rows(host, "SELECT id FROM sessions WHERE id GLOB ?", (f"cron_{cron_id}_*",)))
         fired = max(sessions, sum(p.is_file() for p in (Path(home) / "cron" / "output" / cron_id).glob("*.md")))
     return {"cron_fired": fired, "compactions_published": published, "whitespace_rewrites": rewrites,
             "payload_swaps": swaps}
+
+
+def _swap_payload(home, text):
+    """The payload content a host row that is exactly one engine-form reference resolves to, else None (the pinned
+    payload credit: one whole marker, a basename ref, one payload file whose decoded content is a str)."""
+    marker = EXTERNALIZED_REF.fullmatch(text) if isinstance(text, str) else None
+    if marker is None or len(EXTERNALIZED_REF.findall(text)) != 1 or Path(marker[1]).name != marker[1] \
+            or "quarantined_assistant_output" in text:
+        return None
+    path = Path(home) / "lcm-large-outputs" / marker[1]
+    try:
+        payload = json.loads(path.read_bytes().decode("utf-8")) if path.is_file() else None
+    except (OSError, ValueError, UnicodeError):
+        return None
+    return payload["content"] if isinstance(payload, dict) and isinstance(payload.get("content"), str) else None
+
+
+def pause_cron_jobs(home, now):
+    """Pause every job already in the arm's host job file, as the host's pause_job does (cron/jobs.py), keeping the
+    file's shape: a declared copy edit, the same in both arms. Returns the paused job ids (ids, not content)."""
+    path = Path(home) / "cron" / "jobs.json"
+    data = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else []
+    jobs = data if isinstance(data, list) else data.get("jobs", [])
+    jobs = [j for j in (jobs.values() if isinstance(jobs, dict) else jobs) if isinstance(j, dict)]
+    for job in jobs:
+        job.update(enabled=False, state="paused", paused_at=now.isoformat(), paused_reason=CRON_PAUSE_REASON)
+    if jobs:
+        path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    ids = sorted(str(j.get("id")) for j in jobs)
+    return {"job_ids": ids, "count": len(ids)}
 
 
 def cron_job(cron, now):
@@ -123,24 +171,44 @@ def cron_job(cron, now):
             "next_run_at": (now + timedelta(minutes=minutes)).isoformat(), "failure_streak": 0, "deliver": "local"}
 
 
-def probe_checks(out):
-    """Doctor and schema checks from the probe's files in *out*. A kind the probe did not produce is left out, so bar
-    5 reads it as not shown. Doctor rows go through the gauntlet's doctor-match parser."""
-    found = []
-    if out is None:
-        return found
+def _doctor_rows(path):
+    """A doctor result's (check, status) rows through the gauntlet's doctor-match parser, else None."""
     try:
-        rows = kit_evidence.doctor_match(out / "doctor.json", out / "doctor.json")["candidate_signatures"]
-        found += [{"kind": "doctor", "check": r["check"], "status": DOCTOR_STATUS.get(r["status"], r["status"])}
-                  for r in rows]
+        return [(r["check"], DOCTOR_STATUS.get(r["status"], r["status"]))
+                for r in kit_evidence.doctor_match(path, path)["candidate_signatures"]]
     except (OSError, ValueError, TypeError, KeyError, AttributeError):
-        pass
+        return None
+
+
+def probe_checks(out, sessions):
+    """(bar-5 rows, not exercised) from the probe's files in *out*; *sessions* are the plan sessions' sha256 12 keys.
+    A kind the probe did not produce is left out, so bar 5 reads it as not shown. Store-wide doctor checks come from
+    the unbound run, per-session ones from each session's run as ``<check>@<key>``; a check the probe cannot exercise
+    is never a row, only {check, reason}."""
+    found, skipped = [], []
+    if out is None:
+        return found, skipped
+    rows = _doctor_rows(out / "doctor.json")
+    if rows is not None:
+        bound = (_json((out / "sessions.json").read_text(encoding="utf-8")) if (out / "sessions.json").is_file()
+                 else None) or {}
+        for check, status in rows:
+            if check in DOCTOR_STORE_WIDE:
+                found.append({"kind": "doctor", "check": check, "status": status})
+            elif check not in DOCTOR_PER_SESSION:
+                skipped.append({"check": check, "reason": DOCTOR_NOT_EXERCISED.get(check, "not classified for the probe")})
+        for key in sessions:
+            scoped = _doctor_rows(out / f"doctor-{key}.json") if bound.get(key) is True else None
+            found += [{"kind": "doctor", "check": f"{c}@{key}", "status": st}
+                      for c, st in scoped or () if c in DOCTOR_PER_SESSION]
+            skipped += [{"check": f"{c}@{key}", "reason": "no session binding in this tree"}
+                        for c in DOCTOR_PER_SESSION if scoped is None]
     schema = _json((out / "schema.json").read_text(encoding="utf-8")) if (out / "schema.json").is_file() else None
     if isinstance(schema, dict) and set(schema) == {"lcm.db", "state.db"}:
         found += [{"kind": "schema", "check": name, "status": "ok" if isinstance(s, dict) and s.get("error") is False
                    and s.get("missing_tables") == [] and type(s.get("version")) is int and s["version"] == s.get("expected")
                    else "fail"} for name, s in sorted(schema.items())]
-    return found
+    return found, sorted(skipped, key=lambda item: item["check"])
 
 
 class LocalHost:
@@ -238,6 +306,7 @@ class LocalHost:
                                    port_file=home.parent / "d5-local.port", lcm_tree=tree["lcm_tree"])
         port = server.server.server_address[1]
         return {"name": name, "home": home, "provider": server, "port": port, "tree": tree, "marks": marks(home),
+                "session_ids": [c["session_id"] for c in plan["conversations"]],
                 "gateway": gateway.Gateway(tree["host_bin"], home, env, home.parent, provider_port=port),
                 "payloads": sum(p.is_file() for p in (home / "lcm-large-outputs").rglob("*")),
                 "chats": {c["name"]: c["chat_id"] for c in plan["conversations"]}}
@@ -302,13 +371,18 @@ class LocalHost:
         """Add the plan's cron job to the arm home's host job file, as create_job adds one; returns its id's sha256."""
         path = ctx["home"] / "cron" / "jobs.json"
         data = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {"jobs": []}
-        data = data if isinstance(data, dict) else {"jobs": data}
         job = cron_job(cron, datetime.now().astimezone())
-        data.update(jobs=[*data.get("jobs", []), job], updated_at=job["created_at"])
+        if isinstance(data, list):  # The file's own shape is kept.
+            data.append(job)
+        else:
+            data.update(jobs=[*data.get("jobs", []), job], updated_at=job["created_at"])
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
         ctx["cron_id"] = job["id"]
         return _sha(job["id"])
+
+    def pause_cron(self, ctx):
+        return pause_cron_jobs(ctx["home"], datetime.now().astimezone())
 
     def probe(self, ctx):
         """The doctor and schema probe, by the arm's host interpreter under the sandbox, on a clone of the stopped arm
@@ -324,7 +398,8 @@ class LocalHost:
         tree = ctx["tree"]
         argv = sandbox.wrap([str(Path(tree["host_bin"]) / "python"), "-P", "-B",  # Never this dir's modules first.
                              str(Path(__file__).with_name("doctor_probe.py")),
-                             str(Path(tree["lcm_tree"]).resolve()), str(clone), str(out)], ports=[])
+                             str(Path(tree["lcm_tree"]).resolve()), str(clone), str(out),
+                             json.dumps(ctx["session_ids"])], ports=[])
         try:
             done = subprocess.run(["/usr/bin/nice", "-n", "19", *argv], cwd=clone, env=env, capture_output=True,
                                   timeout=self.c.get("doctor_timeout", 1800))
@@ -340,7 +415,8 @@ class LocalHost:
                 for kind, pragma in (("quick_check", "quick_check"), ("integrity", "integrity_check")):
                     ok = db.execute(f"PRAGMA {pragma}").fetchall() == [("ok",)]
                     out.append({"kind": kind, "check": name, "status": "ok" if ok else "fail"})
-        return out + probe_checks(self.probe(ctx))
+        rows, ctx["doctor_not_exercised"] = probe_checks(self.probe(ctx), [_sha(s)[:12] for s in ctx["session_ids"]])
+        return out + rows
 
     def facts(self, ctx):
         """Workload observations counted from the arm's own files after it ends (workload_facts)."""
@@ -360,6 +436,7 @@ class LocalHost:
 
 def run_arm(host, name, home, plan, extras):
     ctx = host.arm(name, home, plan)
+    cron_paused = host.pause_cron(ctx)  # Before the first gateway start: no snapshot job fires in the run.
     sid = {c["name"]: c["session_id"] for c in plan["conversations"]}
     binds, restarts, egress, tool_turns, started = [], [], [], 0, time.monotonic()
     planned, not_completed, cron_job_sha256 = 0, [], None
@@ -409,8 +486,10 @@ def run_arm(host, name, home, plan, extras):
                 "replay_misses": sum(stats.get("replay_misses", {}).values()), "turns_planned": planned,
                 "turns_completed": planned - len(not_completed), "turns_not_completed": not_completed,
                 "cron_job_sha256": cron_job_sha256, **host.facts(ctx)}
+    checks = host.checks(ctx)
     return {"binds": binds, "workload": workload, "egress": {"samples": len(egress), "non_local": sum(egress)},
-            "provider": stats, "logs": host.logs(ctx), "roots": host.roots(ctx), "checks": host.checks(ctx),
+            "provider": stats, "logs": host.logs(ctx), "roots": host.roots(ctx), "checks": checks,
+            "doctor_not_exercised": ctx.get("doctor_not_exercised", []), "cron_paused": cron_paused,
             "rows": host.rows(home), "wall_s": round(time.monotonic() - started, 3)}
 
 
@@ -465,9 +544,10 @@ def run(host, *, rc_id, prior=(), instrument_fix=None):
                           bool(ga_rerun) and bars.workload_items(ga_rerun["workload"])["turns_completed"]),
         "bar6": bars.bar6({a: arms[a]["workload"] for a in arms})}
     receipt.update(
-        arms={a: {**{k: arms[a][k] for k in ("workload", "egress", "provider")},
+        arms={a: {**{k: arms[a][k] for k in ("workload", "egress", "provider", "doctor_not_exercised", "cron_paused")},
                   "checks": bars.check_counts(arms[a]["checks"])} for a in arms},
-        ga_rerun=ga_rerun and {**{k: ga_rerun[k] for k in ("workload", "egress", "provider", "wall_s")},
+        ga_rerun=ga_rerun and {**{k: ga_rerun[k] for k in ("workload", "egress", "provider", "wall_s",
+                                                         "doctor_not_exercised", "cron_paused")},
                                "checks": bars.check_counts(ga_rerun["checks"])},
         binds=[{k: v for k, v in b.items() if k not in ("dup_store_ids", "receipt")} for b in binds], bars=results,
         verdict=bars.verdict(results, prior_verdicts),

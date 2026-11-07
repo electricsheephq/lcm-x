@@ -1,12 +1,14 @@
 """Doctor and schema facts for a clone of one stopped arm home, run by that arm's host interpreter.
 
-argv: <lcm_tree> <home> <out_dir>. It writes ``schema.json`` (both stores' schema version and required tables, read
-before anything opens the store) and then ``doctor.json`` (the ``lcm_doctor`` tool's result, through the engine, as
-the release gauntlet runs it). Opening the engine may write to the store it opens, so the runner points this at a
+argv: <lcm_tree> <home> <out_dir> <session ids, JSON>. It writes ``schema.json`` (both stores' schema version and
+required tables, read before anything opens the store), then ``doctor.json`` (the ``lcm_doctor`` tool's result,
+through the engine, as the release gauntlet runs it), then, per session, ``doctor-<sha256 12>.json`` with the engine
+bound to that session by its public ``on_session_start``, and ``sessions.json`` ({sha256 12: bound}). Opening the engine may write to the store it opens, so the runner points this at a
 clone and never at the arm home.
 """
 
 from contextlib import closing
+import hashlib
 import importlib
 import importlib.util
 import json
@@ -37,7 +39,7 @@ def schema(home, boot, host_sql, host_version):
     return out
 
 
-def main(tree, home, out):
+def main(tree, home, out, sessions="[]"):
     tree, home, out = Path(tree), Path(home), Path(out)
     spec = importlib.util.spec_from_file_location("hermes_lcm_x", tree / "__init__.py",
                                                   submodule_search_locations=[str(tree)])
@@ -51,9 +53,20 @@ def main(tree, home, out):
     config, engine = (importlib.import_module(f"hermes_lcm_x.{name}") for name in ("config", "engine"))
     lcm = engine.LCMEngine(config=config.LCMConfig.from_env(), hermes_home=str(home))
     (out / "doctor.json").write_text(lcm.handle_tool_call("lcm_doctor", {}))
+    bound = {}
+    for session_id in json.loads(sessions):  # The doctor scopes some checks to the engine's current session.
+        key = hashlib.sha256(session_id.encode()).hexdigest()[:12]
+        try:
+            lcm.on_session_start(session_id)
+            bound[key] = lcm.current_session_id == session_id
+        except Exception:
+            bound[key] = False
+        if bound[key]:
+            (out / f"doctor-{key}.json").write_text(lcm.handle_tool_call("lcm_doctor", {}))
+    (out / "sessions.json").write_text(json.dumps(bound))
 
 
 if __name__ == "__main__":
-    main(*sys.argv[1:4])
+    main(*sys.argv[1:5])
     sys.stdout.flush()
     os._exit(0)  # The engine's background threads never hold the run.
