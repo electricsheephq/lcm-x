@@ -170,7 +170,7 @@ def test_config_diff(tmp_path, changed, verdict):
     (["warn"], [], "UNMATCHED", ["shape"], []),
     (["warn", "warn"], ["warn"], "UNMATCHED", ["shape"], []),
     (["fail"], [], "UNMATCHED", [], ["shape"]),
-    ([], ["fail"], "MATCHED", [], ["shape"]),
+    (["pass"], ["fail"], "MATCHED", [], ["shape"]),
 ])
 def test_doctor_match(tmp_path, candidate, previous, verdict, unmatched, failed):
     paths = []
@@ -237,7 +237,6 @@ def test_lifecycle_affected_conversation(tmp_path):
      {"checks": [{"check": "lifecycle_fragmentation", "status": "warn",
                   "detail": {"empty_lifecycle_rows": 0, "state_db_error": True}}]}, "UNMATCHED"),
     ({"checks": [{"check": "shape", "status": "unexpected"}]}, {"checks": []}, "UNMATCHED"),
-    ({"checks": []}, {"checks": [{"check": "shape", "status": "unexpected"}]}, "UNMATCHED"),
     ([{"checks": [{"check": "shape", "status": "FAIL"}]}, {"checks": []}], {"checks": []}, "UNMATCHED"),
     ([{"checks": [{"check": "shape", "status": "warn"}]}] * 2,
      {"checks": [{"check": "shape", "status": "warn"}]}, "UNMATCHED"),
@@ -263,7 +262,7 @@ def test_doctor_signature_conditions_are_booleans(tmp_path):
     assert result["candidate_signatures"] == [{
         "check": "lifecycle_fragmentation", "status": "warn", "detail_type": "dict",
         "detail_keys": ["empty_lifecycle_rows", "state_db_error"],
-        "empty_lifecycle_rows": True, "state_db_error": True}]
+        "causes": {"empty_lifecycle_rows": True, "state_db_error": True}}]
     assert "PRIVATE_STATE" not in json.dumps(result)
 
 
@@ -468,3 +467,20 @@ def test_indented_bare_name_does_not_end_a_traceback(tmp_path):
     result = kit.trace_events([_write(tmp_path / "host.log", _log("agent.optional", "warn") + trace)])
     assert result["optional_import_traces_total"] == 1
     assert result["other_tracebacks"] == {}
+
+
+def test_doctor_dict_detail_new_cause_is_unmatched(tmp_path):
+    def doctor(name, missing):
+        return _write(tmp_path / name, json.dumps({"checks": [{"check": "payload_storage", "status": "warn",
+            "detail": {"suspicious_rows": 3, "externalized_payload_refs_missing": missing, "check": "x"}}]}))
+    assert kit.doctor_match(doctor("c.json", 0), doctor("p.json", 0))["verdict"] == "MATCHED"
+    result = kit.doctor_match(doctor("c1.json", 1), doctor("p1.json", 0))
+    assert result["verdict"] == "UNMATCHED"
+    assert result["candidate_signatures"][0]["check"] == "payload_storage"  # A detail key cannot overwrite it.
+
+
+@pytest.mark.parametrize("candidate", [{"checks": []}, [{"checks": []}, {"checks": []}]])
+def test_empty_candidate_checks_are_refused(tmp_path, candidate):
+    previous = _write(tmp_path / "p.json", json.dumps({"checks": [{"check": "x", "status": "fail"}]}))
+    with pytest.raises(ValueError):
+        kit.doctor_match(_write(tmp_path / "c.json", json.dumps(candidate)), previous)

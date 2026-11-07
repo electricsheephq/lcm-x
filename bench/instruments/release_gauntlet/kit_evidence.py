@@ -30,6 +30,17 @@ SECTIONS = set("model providers custom_providers compression lcm context plugins
 KEY_NAME = re.compile(r"[a-z][a-z0-9_]{0,63}")  # Fixed doctor key names; anything else is hashed.
 
 
+def _key_name(key):
+    return key if KEY_NAME.fullmatch(str(key)) else "h:" + _sha(str(key))[:12]
+
+
+def _cause(value):
+    """A detail value reduced to whether its cause is present: a number above 0, or any other non-empty value."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return bool(value)
+    return value > 0
+
+
 def _fingerprint(entry):
     """A doctor detail entry's hash after absolute paths and long numbers are masked, so one cause hashes alike
     across cells. Short numbers (status codes) and URL hosts stay significant."""
@@ -246,6 +257,8 @@ def doctor_match(candidate, previous):
             raise ValueError("empty doctor input")
         checks.append([{**row, "status": row["status"].lower()} for item in (value if isinstance(value, list) else [value])
                        for row in item["checks"]])
+    if not checks[0]:
+        raise ValueError("empty doctor input")  # No candidate checks is missing evidence, never a match.
 
     def signature(row):
         detail = row.get("detail")
@@ -257,9 +270,8 @@ def doctor_match(candidate, previous):
         else:
             shape = (type(detail).__name__, ())
         conditions = ()
-        if row["check"] == "lifecycle_fragmentation" and isinstance(detail, dict):
-            conditions = tuple((key, detail[key] > 0 if key == "empty_lifecycle_rows" else bool(detail[key]))
-                               for key in ("empty_lifecycle_rows", "state_db_error") if key in detail)
+        if isinstance(detail, dict):  # Every dict value as a cause flag, so a new cause cannot hide in a warning.
+            conditions = tuple(sorted((_key_name(key), _cause(value)) for key, value in detail.items()))
         return row["check"], row["status"], shape, conditions
 
     warnings = [Counter(signature(row) for row in rows if row["status"] == "warn") for rows in checks]
@@ -270,10 +282,9 @@ def doctor_match(candidate, previous):
     statuses = {"pass", "warn", "fail", "ok", "skip"}
     unknown = sorted({row["check"] for rows in checks for row in rows if row["status"] not in statuses})
     signatures = [{"check": sig[0], "status": sig[1] if sig[1] in statuses else "unknown_status",
-                   "detail_keys": [key if KEY_NAME.fullmatch(str(key)) else "h:" + _sha(str(key))[:12]
-                                   for key in sig[2][1]] if sig[2][0] == "dict" else [],
+                   "detail_keys": [_key_name(key) for key in sig[2][1]] if sig[2][0] == "dict" else [],
                    **({"detail_fingerprints": list(sig[2][1])} if sig[2][0] in ("list", "str") else {}),
-                   "detail_type": sig[2][0], **dict(sig[3])}
+                   "detail_type": sig[2][0], "causes": dict(sig[3])}
                   for sig in sorted({signature(row) for row in checks[0]}, key=repr)]
     return {"warnings": results, "unmatched": unmatched, "failed_checks": failed, "unknown_status": unknown,
             "candidate_signatures": signatures,
