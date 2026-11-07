@@ -273,8 +273,15 @@ def test_a_second_rebind_paused_before_its_flags_refuses_nothing(host, monkeypat
         return refresh()
 
     owner.__dict__["_refresh_session_filters"] = refresh_after_pause
-    rebind = threading.Thread(target=owner.on_session_start, args=("parent",),
-                              kwargs={"platform": "telegram", "context_length": 200_000}, name="normal-rebind")
+    errors = []
+
+    def rebind_normally():
+        try:
+            owner.on_session_start("parent", platform="telegram", context_length=200_000)
+        except BaseException as exc:  # surfaced below: a rebind that raises must not pass silently
+            errors.append(exc)
+
+    rebind = threading.Thread(target=rebind_normally, name="normal-rebind")
     try:
         rebind.start()
         if not paused.wait(wait) or owner._session_id != "parent" or not owner._session_ignored:
@@ -284,4 +291,8 @@ def test_a_second_rebind_paused_before_its_flags_refuses_nothing(host, monkeypat
         resume.set()
         rebind.join(wait)
         owner.__dict__.pop("_refresh_session_filters", None)
+    if rebind.is_alive() or errors:
+        pytest.fail(f"setup: the rebind did not finish cleanly: alive={rebind.is_alive()} errors={errors!r}")
+    if owner._session_id != "parent" or owner._session_stateless or owner._session_ignored:
+        pytest.fail("setup: the rebind did not leave a normal binding of the parent")
     assert _stored(engine)
