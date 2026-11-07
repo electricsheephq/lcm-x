@@ -18,6 +18,7 @@ from collections import Counter
 
 import pytest
 
+from hermes_lcm import identity_anchor
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
 
@@ -522,12 +523,12 @@ def test_a_capped_session_reusing_a_stored_call_id_stores_the_new_call_once(tmp_
         engine.shutdown()
 
 
-@pytest.mark.parametrize("failure", ["predecessor", "metadata", "ids", "text"])
+@pytest.mark.parametrize("failure", ["predecessor", "metadata", "tail"])
 def test_a_failed_presence_lookup_keeps_only_the_audits_own_finds(tmp_path, monkeypatch, caplog, failure):
     engine = _engine(tmp_path)
     try:
         history, turn_start, turn_end = _moved_turn(True, earlier=40)
-        # Leave an unstamped text candidate in the audited range to trigger the lazy scan.
+        # Leave an unstamped text candidate in the audited range.
         history[-1].pop("timestamp")
         engine.ingest(history)
         engine.ingest(turn_start)
@@ -546,10 +547,13 @@ def test_a_failed_presence_lookup_keeps_only_the_audits_own_finds(tmp_path, monk
                 return fail() if key.startswith("rotation_predecessor_session:") else read(key, *args, **kwargs)
 
             monkeypatch.setattr(store, "read_metadata_json", fail_predecessor)
-        elif failure == "ids":
-            monkeypatch.setattr(store, "rows_with_call_ids", fail, raising=False)
         else:
-            monkeypatch.setattr(store, "get_session_messages_after", fail)
+            read_tail = store.get_session_tail
+
+            def fail_presence_tail(session, *, limit):
+                return fail() if limit == getattr(identity_anchor, "_PRESENCE_WINDOW_ROWS", 10000) + 1 else read_tail(session, limit=limit)
+
+            monkeypatch.setattr(store, "get_session_tail", fail_presence_tail)
         with caplog.at_level(logging.WARNING):
             engine.ingest(turn_end)
         after = Counter(_key(row) for row in _stored(engine))
@@ -557,30 +561,6 @@ def test_a_failed_presence_lookup_keeps_only_the_audits_own_finds(tmp_path, monk
         assert after - before == Counter(_key(row) for row in (turn_end[84], *turn_end[-2:]))
         assert not before - after
         assert any("presence" in record.message and record.levelno == logging.WARNING for record in caplog.records)
-    finally:
-        engine.shutdown()
-
-
-@pytest.mark.parametrize("call_id", ["call_exact", "call_é新", "quote'\"?);--"])
-def test_call_id_lookup_is_exact_owned_and_untruncated(tmp_path, call_id):
-    engine = _engine(tmp_path)
-    try:
-        store = engine._store
-        pairs = [_call(call_id, 1), _result(call_id, "held result", 2)]
-        store.append_batch(SESSION, pairs, conversation_id="conv")
-        store.append_batch(SESSION, pairs, conversation_id="foreign")
-        store.append_batch("other-session", pairs, conversation_id="conv")
-        store.append_batch(SESSION, [_call(call_id + "_suffix", 3)], conversation_id="conv")
-        store.append_batch(SESSION, [{"role": "assistant", "content": "invalid JSON"}], conversation_id="conv")
-        store._conn.execute("UPDATE messages SET tool_calls = 'not-json' WHERE content = 'invalid JSON'")
-        store.append_batch(SESSION, pairs, conversation_id="")
-        # Matching rows after 10,000 unrelated rows must not be hidden by a fetch limit.
-        store.append_batch(SESSION, [{"role": "assistant", "content": f"filler {i}"} for i in range(10_001)],
-                           conversation_id="conv")
-        store.append_batch(SESSION, pairs, conversation_id="conv")
-        rows = store.rows_with_call_ids(SESSION, [call_id], conversation_id="conv")
-        assert Counter(_key(row) for row in rows) == Counter({_key(row): 3 for row in pairs})
-        assert store.rows_with_call_ids(SESSION, [], conversation_id="conv") == []
     finally:
         engine.shutdown()
 
@@ -596,34 +576,6 @@ def test_non_string_view_call_ids_are_unsure(tmp_path, call_id):
     engine = _engine(tmp_path)
     try:
         assert _presence(engine, [_call(call_id, 1), _result(call_id, "result", 2)]) == []
-    finally:
-        engine.shutdown()
-
-
-def test_text_presence_scan_pages_beyond_ten_thousand_rows(tmp_path, monkeypatch):
-    engine = _engine(tmp_path)
-    try:
-        store = engine._store
-        store.append_batch(SESSION, [{"role": "assistant", "content": f"older reply {i}"} for i in range(10_001)])
-        read, pages = store.get_session_messages_after, []
-
-        def paged(session_id, after_store_id=0, limit=10000):
-            pages.append((after_store_id, limit))
-            return read(session_id, after_store_id, limit)
-
-        monkeypatch.setattr(store, "get_session_messages_after", paged)
-        assert _presence(engine, [{"role": "assistant", "content": "older reply 10000"}]) == []
-        assert len(pages) == 6 and {limit for _, limit in pages} == {2000}
-        assert pages[-1][0] == 10_000
-    finally:
-        engine.shutdown()
-
-
-def test_tool_only_presence_lookup_does_not_scan_text(tmp_path, monkeypatch):
-    engine = _engine(tmp_path)
-    try:
-        monkeypatch.setattr(engine._store, "get_session_messages_after", lambda *a, **k: pytest.fail("text scan"))
-        assert _presence(engine, [_call("call_new", 1), _result("call_new", "new result", 2)]) == [0, 1]
     finally:
         engine.shutdown()
 
@@ -646,5 +598,108 @@ def test_a_transient_predecessor_read_failure_cannot_hide_a_scope_session(tmp_pa
         with caplog.at_level(logging.WARNING):
             assert _presence(engine, [_call("call_new", 3), _result("call_new", "new", 4)]) == []
         assert any("presence" in record.message and record.levelno == logging.WARNING for record in caplog.records)
+    finally:
+        engine.shutdown()
+
+
+_WINDOW_LIMIT = ("#2455/#2116: past the presence window (_PRESENCE_WINDOW_ROWS stored rows across the scope) "
+                 "a moved or replaced row stays a positional replay, as on main")
+
+
+def _window_ingest(tmp_path, monkeypatch, shape, window):
+    """Literal main multisets: preserve every prior row and add only the audit's own finds and fresh tail."""
+    engine = _engine(tmp_path)
+    try:
+        if shape == "V1":
+            history, turn_start, changed = _moved_turn(True)
+            engine.ingest(history)
+            engine.ingest(turn_start)
+            initial = [*history, turn_start[-1]]
+            main_rows = [*initial, changed[4], *changed[-2:]]
+            missing = changed[-3]
+        else:
+            initial = []
+            for index in range(6):
+                initial += [_u(f"T{index} user turn", 1000 + index),
+                            {"role": "assistant", "content": f"reply to T{index}" + PAD}]
+                engine.ingest(initial)
+            new = [_u("the resent user turn", 3000), {"role": "assistant", "content": "a new reply" + PAD},
+                   _u("the next user turn", 3001), {"role": "assistant", "content": "next" + PAD}]
+            changed = [*initial[:-2], *new]
+            main_rows = [*initial, new[0], *new[2:]]
+            missing = new[1]
+        before = Counter(_key(row) for row in _stored(engine))
+        assert before == Counter(_key(row) for row in initial)
+        # raising=False lets the same proof run on the base, which ignores this constant.
+        monkeypatch.setattr(identity_anchor, "_PRESENCE_WINDOW_ROWS", window, raising=False)
+        engine.ingest(changed)
+        after = Counter(_key(row) for row in _stored(engine))
+        assert not before - after
+        return after, Counter(_key(row) for row in main_rows), _key(missing)
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("shape", ["V1", "2116"])
+def test_past_presence_window_stored_multiset_equals_main(tmp_path, monkeypatch, shape):
+    after, main, _missing = _window_ingest(tmp_path, monkeypatch, shape, 8)
+    assert after == main
+
+
+@pytest.mark.xfail(strict=True, reason=_WINDOW_LIMIT)
+def test_2455_past_presence_window_moved_call_is_stored_named_limit(tmp_path, monkeypatch):
+    after, _main, missing = _window_ingest(tmp_path, monkeypatch, "V1", 8)
+    assert after[missing] == 1
+
+
+@pytest.mark.xfail(strict=True, reason=_WINDOW_LIMIT)
+def test_2116_past_presence_window_replaced_reply_is_stored_named_limit(tmp_path, monkeypatch):
+    after, _main, missing = _window_ingest(tmp_path, monkeypatch, "2116", 8)
+    assert after[missing] == 1
+
+
+@pytest.mark.parametrize("window,stored", [(10, 1), (9, 0)], ids=["exactly-N", "N-plus-one"])
+def test_presence_window_ingest_boundary(tmp_path, monkeypatch, window, stored):
+    after, main, missing = _window_ingest(tmp_path, monkeypatch, "V1", window)
+    assert after == main + Counter({missing: stored})
+
+
+@pytest.mark.parametrize("extra", [0, 1], ids=["exactly-N", "N-plus-one"])
+@pytest.mark.parametrize("capped", [False, True])
+def test_presence_window_counts_deduplicated_whole_scope(tmp_path, monkeypatch, caplog, extra, capped):
+    engine = _engine(tmp_path)
+    try:
+        store = engine._store
+        store.append_batch(SESSION, [_a("current", 1)])
+        store.append_batch("A", [_a("ancestor", 2)])
+        store.append_batch("P", [_a(f"predecessor {i}", 3 + i) for i in range(2 + extra)])
+        engine._record_rotation_predecessor(SESSION, "P")
+        monkeypatch.setattr(engine, "_identity_anchor_chain", lambda: ["A", "P"])
+        monkeypatch.setattr(identity_anchor, "_PRESENCE_WINDOW_ROWS", 4, raising=False)
+        read_tail, reads = store.get_session_tail, []
+
+        def tail(source, *, limit):
+            reads.append((source, limit))
+            return read_tail(source, limit=limit)
+
+        monkeypatch.setattr(store, "get_session_tail", tail)
+        with caplog.at_level(logging.DEBUG, logger=identity_anchor.__name__):
+            found = _presence(engine, [_call("new", 10), _result("new", "result", 11)], capped=capped)
+        assert found == ([] if extra else [0, 1])  # over budget: main's positional behavior
+        assert reads == [(SESSION, 5), ("A", 4), ("P", 3)]
+        assert not any(record.levelno >= logging.WARNING for record in caplog.records)
+        if extra:
+            assert any("presence window" in record.message and "scope=3" in record.message
+                       and "budget=2" in record.message and SESSION in record.message for record in caplog.records)
+    finally:
+        engine.shutdown()
+
+
+def test_tool_only_presence_uses_the_same_bounded_tail(tmp_path, monkeypatch):
+    engine = _engine(tmp_path)
+    try:
+        monkeypatch.setattr(identity_anchor, "_PRESENCE_WINDOW_ROWS", 2, raising=False)
+        engine._store.append_batch(SESSION, [_call("kept", 1), _result("kept", "held", 2), _a("third", 3)])
+        assert _presence(engine, [_call("new", 4), _result("new", "new result", 5)]) == []
     finally:
         engine.shutdown()
