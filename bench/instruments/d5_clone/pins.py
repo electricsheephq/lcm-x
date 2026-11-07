@@ -120,7 +120,7 @@ def _stored_names(node):
 def _segment(source, node):
     if getattr(node, "decorator_list", []):
         first = node.decorator_list[0]
-        line = source.splitlines(keepends=True)[first.lineno - 1]
+        line = source.split("\n")[first.lineno - 1]  # ast numbers lines by "\n" only.
         node.lineno, node.col_offset = first.lineno, line.rindex("@", 0, first.col_offset + 1)
     return ast.get_source_segment(source, node)
 
@@ -163,6 +163,8 @@ def call_closure(path, roots, data=()):
     or when a reachable function reads globals dynamically (globals(), vars(), eval, exec, __import__)."""
     source = Path(path).read_text(encoding="utf-8")
     body = ast.parse(source).body
+    if any(isinstance(n, ast.ImportFrom) and any(a.name == "*" for a in n.names) for n in ast.walk(ast.parse(source))):
+        raise ValueError("a star import cannot be pinned: the names it binds are unknown")
     top = symtable.symtable(source, "instrument", "exec")
     tables = {s.get_name(): s for s in top.get_children()}
     bindings = _bindings(body)

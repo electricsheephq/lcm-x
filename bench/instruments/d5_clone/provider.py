@@ -109,7 +109,19 @@ class Provider:
         self.thread = None
 
     def complete(self, request):
+        """One reply. A request that fails part way changes no counter, so it cannot shift the replay's indices."""
         with self.lock:
+            saved = ({k: v.copy() if hasattr(v, "copy") else v for k, v in self.stats.items() if k != "request_log"},
+                     self.cron_index)
+            try:
+                return self._complete(request)
+            except Exception:
+                self.stats.update(saved[0])
+                self.cron_index = saved[1]
+                raise
+
+    def _complete(self, request):
+        if True:
             model, messages = request["model"], request.get("messages", [])
             self.stats["calls_by_model"][model] += 1
             index = self.stats["calls_by_model"][model] - 1

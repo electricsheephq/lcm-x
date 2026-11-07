@@ -6,6 +6,7 @@ system resolver's socket, so a host name lookup cannot leave the machine through
 """
 
 import json
+import os
 from pathlib import Path
 import socket
 import subprocess
@@ -13,7 +14,10 @@ import sys
 from urllib.parse import urlsplit
 
 
-_SYSTEM_SOCKETS = ("/private/var/run", "/private/tmp", "/private/var/tmp", "/var/run", "/tmp")
+# Both spellings and their resolved forms, so the guard holds where /var/run or /tmp is a link (macOS, Linux).
+_SYSTEM_SOCKETS = tuple(dict.fromkeys(d for raw in ("/private/var/run", "/private/tmp", "/private/var/tmp", "/var/run",
+                                                   "/run", "/tmp", "/var/tmp")
+                                      for d in (raw, os.path.realpath(raw))))
 
 
 def profile(ports, socket_roots=()):
@@ -27,7 +31,7 @@ def profile(ports, socket_roots=()):
         if '"' in resolved or "\\" in resolved:
             raise ValueError("unsupported socket directory name")
         home = str(Path.home().resolve())
-        subtrees = _SYSTEM_SOCKETS + (home + "/.hermes",)  # Never inside these: other services' sockets live there.
+        subtrees = _SYSTEM_SOCKETS + (home + "/.hermes", os.path.realpath(home + "/.hermes"))  # Never inside these: other services' sockets live there.
         ancestors = subtrees + (home, "/private/var/folders")  # Never these or above them.
         inside = any(resolved == d or resolved.startswith(d + "/") for d in subtrees)
         above = any(resolved == d or d.startswith(resolved.rstrip("/") + "/") for d in ancestors)

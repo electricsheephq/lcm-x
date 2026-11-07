@@ -334,3 +334,13 @@ def test_an_empty_bytecode_cache_dir_fails_verify(tmp_path):
     module, path = _pin(tmp_path, "def rule():\n    return 1\n")
     (tmp_path / "__pycache__").mkdir()
     assert pins.verify(path, tmp_path)["mismatches"] == ["unpinnable_files"]
+
+
+def test_a_star_import_cannot_be_pinned(tmp_path):
+    with pytest.raises(ValueError, match="star import"):
+        _pin(tmp_path, "from os.path import *\n\ndef rule():\n    return join('a', 'b')\n")
+
+
+def test_decorator_lookup_ignores_non_newline_line_breaks(tmp_path):
+    module, path = _pin(tmp_path, "S = 'a\\x0cb'\n\ndef deco(f):\n    return f\n\n@deco\ndef rule():\n    return S\n")
+    assert pins.verify(path, tmp_path)["verdict"] == "PASS"
