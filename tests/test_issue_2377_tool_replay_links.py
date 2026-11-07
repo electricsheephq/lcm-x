@@ -188,3 +188,21 @@ def test_blank_stored_conversation_is_not_the_active_one(build, stored_id, links
     engine.ingest([U, call(), X, call(), X])
     linked = {target for _source, kind, target in relations(engine) if kind == "possible_replay_of"}
     assert (linked == set(targets)) if links else not (linked & set(targets))
+
+
+def test_summary_coverage_is_combined_once_per_scan(build, monkeypatch):
+    """Codex P2: the ownership union is built once, not copied for every tail tool row."""
+    from hermes_lcm import reconcile
+
+    unions = []
+
+    class Coverage(set):
+        def __ror__(self, other):
+            unions.append(1)
+            return set.__or__(other, self)
+
+    real = reconcile._summary_covered_message_ids
+    monkeypatch.setattr(reconcile, "_summary_covered_message_ids", lambda conn: Coverage(real(conn)))
+    source = [U, call(2), dict(X, timestamp=2), call(3), dict(X, timestamp=3), call(4), dict(X, timestamp=4)]
+    run = ingest_shape(build, monkeypatch, source, [*source, V])
+    assert run.skips and len(unions) == 1
