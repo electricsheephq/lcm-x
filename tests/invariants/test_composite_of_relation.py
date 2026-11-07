@@ -238,6 +238,8 @@ HOLDER_CASES = {
                           TODO + "\n\n" + R + "\n\n" + Q, [None, 0, 1]),
     "assistant-between-parts": ([("user", R), ("assistant", "a"), ("user", Q), ("user", R)],
                                 TODO + "\n\n" + R + "\n\n" + Q, []),
+    # One stored occurrence never stands for two parts: a repeated part needs as many distinct rows.
+    "one-row-two-equal-parts": ([("user", R)], TODO + "\n\n" + R + "\n\n" + R, []),
 }
 
 
@@ -255,5 +257,35 @@ def test_holder_rule_for_identical_texts(tmp_path, case):
         assert [r for r in _relations(engine) if r[1] == "composite_of"] == [
             (target, "composite_of", None if part is None else ids[part], ordinal)
             for ordinal, part in enumerate(expected)]
+    finally:
+        engine.shutdown()
+
+
+def test_holder_search_is_linear_in_session_history(tmp_path, monkeypatch):
+    """NeonDiff: N rows each of R and Q, an assistant row after every R. Resolving TODO + R + Q must not
+    compare every R holder against every Q holder (holder membership is a set lookup)."""
+    import hermes_lcm.identity_anchor as anchor
+    n, calls = 300, {"n": 0}
+    original = anchor._composite_of_holders
+
+    class CountingList(list):
+        def __contains__(self, item):
+            calls["n"] += len(self)  # a linear scan costs one comparison per element
+            return list.__contains__(self, item)
+
+    def counting(choices, order):
+        return original([CountingList(c) for c in choices], order)
+
+    monkeypatch.setattr(anchor, "_composite_of_holders", counting)
+    engine = _engine(tmp_path)
+    try:
+        store, conversation = engine._store, engine._conversation_id
+        for _ in range(n):
+            store.append("S", {"role": "user", "content": R}, conversation_id=conversation)
+            store.append("S", {"role": "assistant", "content": "a"}, conversation_id=conversation)
+            store.append("S", {"role": "user", "content": Q}, conversation_id=conversation)
+        target = store.append("S", _u(TODO + "\n\n" + R + "\n\n" + Q, None), conversation_id=conversation)
+        engine._identity_anchor_record_composite_of([target])
+        assert calls["n"] <= 8 * n, calls["n"]
     finally:
         engine.shutdown()
