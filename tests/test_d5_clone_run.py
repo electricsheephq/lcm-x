@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+import sys
 
 import pytest
 
@@ -227,7 +228,7 @@ def test_replay_paths_are_absolute_whatever_the_cli_was_given(tmp_path, monkeypa
                         "{ga_tree}", "{out}"], "replay_argv": ["true"]}, "run")
     seen = []
     monkeypatch.setattr(r.sandbox, "wrap", lambda argv, **k: seen.append(argv) or ["/usr/bin/false"])
-    host.replay({"name": "rc", "port": 1}, {"id": "e0-L-0"}, "t0", "h8")
+    host.replay({"name": "rc", "port": 1, "sessions": {"L": "s"}}, {"id": "e0-L-0", "conversation": "L"}, "t0", "h8")
     assert seen and all(os.path.isabs(a) for a in seen[0]), seen
 
 
@@ -294,7 +295,8 @@ def test_replay_runs_the_edition_under_the_sandbox(tmp_path, monkeypatch):
     config = {"interpreter": "python3", "instrument_dir": "kit", "rc": {"lcm_tree": "rc"}, "ga": {"lcm_tree": "ga"},
               "constants_argv": ["{python}", "gen", "{t0}", "{h8}", "{out}"], "replay_argv": ["{python}", "replay"]}
     host = r.LocalHost(config, tmp_path / "run")
-    receipt, error, range_new = host.replay({"name": "rc", "port": 4242}, {"id": "e0-L-0"}, "T0", "H8")
+    receipt, error, range_new = host.replay({"name": "rc", "port": 4242, "sessions": {"L": "s"}},
+                                            {"id": "e0-L-0", "conversation": "L"}, "T0", "H8")
     assert (receipt, error, range_new) == ({"checks": {}}, False, 0)
     assert [argv[:4] for argv in seen] == [["/usr/bin/nice", "-n", "19", "/usr/bin/sandbox-exec"]] * 2
     assert seen[0][-5:] == ["python3", "gen", "T0", "H8", os.fspath(tmp_path / "run" / "rc" / "replays" / "e0-L-0")]
@@ -320,7 +322,8 @@ def test_a_ga_rerun_that_completes_no_turn_is_not_clean(setup):
     assert bar5["verdict"] == bars.INCONCLUSIVE and receipt["verdict"]["raw"] != bars.PASS
 
 
-def test_a_store_too_damaged_to_check_is_a_failed_check(tmp_path):
+def test_a_store_too_damaged_to_check_is_a_failed_check(tmp_path, monkeypatch):
+    monkeypatch.setattr(r.LocalHost, "probe", lambda self, ctx: None)  # The doctor probe has its own tests.
     home = tmp_path / "home"
     home.mkdir()
     for name in ("lcm.db", "state.db"):
@@ -329,7 +332,7 @@ def test_a_store_too_damaged_to_check_is_a_failed_check(tmp_path):
             db.commit()
     with open(home / "lcm.db", "r+b") as f:  # A damaged header: SQLite refuses to read the file.
         f.write(b"not a sqlite database at all")
-    checks = r.LocalHost({}, tmp_path / "run").checks({"home": home})
+    checks = r.LocalHost({}, tmp_path / "run").checks({"home": home, "session_ids": []})
     assert {(c["kind"], c["check"]): c["status"] for c in checks} == {
         ("quick_check", "lcm.db"): "fail", ("integrity", "lcm.db"): "fail",
         ("quick_check", "state.db"): "ok", ("integrity", "state.db"): "ok"}
@@ -337,5 +340,138 @@ def test_a_store_too_damaged_to_check_is_a_failed_check(tmp_path):
         db.execute("PRAGMA journal_mode=WAL")
     (home / "state.db-shm").unlink(missing_ok=True)
     (home / "state.db-wal").write_bytes(b"")
-    assert {c["check"] for c in r.LocalHost({}, tmp_path / "run").checks({"home": home}) if c["status"] == "fail"} == {
+    assert {c["check"] for c in r.LocalHost({}, tmp_path / "run").checks({"home": home, "session_ids": []})
+            if c["status"] == "fail"} == {
         "lcm.db", "state.db"}
+
+
+@pytest.mark.parametrize("codes, receipt_written, expected", [
+    ((0, 0), True, ({"checks": {}}, False, 0)),     # the edition's receipt, read by its declared name
+    ((1,), False, (None, True, 3)),                 # constants exit 1: NOT SHOWN, its report's range_new_rows kept
+    ((2,), False, (None, True, None)),              # refused: no constants, no report
+    ((0, 1), False, (None, True, 0)),               # a replay that fails is an error, range_new_rows still kept
+    ((0, 0), False, (None, True, 0))])              # no receipt under the declared name: an error
+def test_replay_feeds_the_edition_and_reads_its_outcome(tmp_path, monkeypatch, codes, receipt_written, expected):
+    seen, results = [], list(codes)
+
+    def fake_run(argv, **kwargs):
+        seen.append(argv)
+        out, code = Path(kwargs["cwd"]), results.pop(0)
+        if len(seen) == 1 and code in (0, 1):
+            (out / "constants.json").write_text(json.dumps({"range_new_rows": 3 if code else 0}))
+        if len(seen) == 2 and receipt_written:
+            (out / "p-s6r-d5.json").write_text(json.dumps({"checks": {}}))
+        return type("Done", (), {"returncode": code})()
+
+    monkeypatch.setattr(r.subprocess, "run", fake_run)
+    monkeypatch.setattr(r.sandbox, "wrap", lambda argv, **k: argv)
+    config = {"interpreter": "python3", "instrument_dir": "kit", "rc": {"lcm_tree": "rc"}, "ga": {"lcm_tree": "ga"},
+              "replay_receipt": "p-s6r-d5.json", "constants_argv": ["gen", "--session-hash", "{session_h12}"],
+              "replay_argv": ["replay"]}
+    ctx = {"name": "rc", "port": 1, "sessions": {"L": "host-session-1"}}
+    assert r.LocalHost(config, tmp_path / "run").replay(ctx, {"id": "e0-L-0", "conversation": "L"}, "T0", "H8") == expected
+    assert seen[0][-1] == hashlib.sha256(b"host-session-1").hexdigest()[:12]
+    assert len(seen) == len(codes)  # NOT SHOWN or refused: the replay never runs.
+
+
+def test_replay_receipt_must_be_a_bare_name(tmp_path):
+    host = r.LocalHost({"interpreter": "python3", "instrument_dir": "kit", "rc": {"lcm_tree": "rc"},
+                        "ga": {"lcm_tree": "ga"}, "replay_receipt": "../receipt.json",
+                        "constants_argv": ["gen"], "replay_argv": ["replay"]}, tmp_path / "run")
+    with pytest.raises(ValueError):
+        host.replay({"name": "rc", "port": 1, "sessions": {"L": "s"}}, {"id": "e0-L-0", "conversation": "L"}, "T0", "H8")
+
+
+def test_an_h8_capture_carries_the_window_host_logs(tmp_path, monkeypatch):
+    home = tmp_path / "arm" / "home"
+    (home / "logs").mkdir(parents=True)
+    (home / "logs" / "agent.log").write_text("synthetic agent line\n")
+    seen = {}
+    monkeypatch.setattr(r.capture, "capture", lambda kind, out, **k: seen.setdefault(kind, k["extras"]) and {})
+    host = r.LocalHost({}, tmp_path / "run")
+    for kind in ("T0", "H8"):
+        host.capture({"name": "rc", "home": home}, kind, {"id": f"e0-L-{kind}"}, {"RC3/store.db": "x"})
+    assert seen["T0"] == {"RC3/store.db": "x"}
+    assert seen["H8"] == {"RC3/store.db": "x", "native-agent.log.log": home / "logs" / "agent.log"}  # gateway.log absent
+
+
+@pytest.mark.parametrize("range_new", [0, 3, None])
+def test_a_not_shown_bind_is_inconclusive_never_pass(tmp_path, monkeypatch, range_new):
+    def fake_run(argv, **kwargs):  # The generator exits 1 (NOT SHOWN) and leaves its report; no replay runs.
+        if range_new is not None:
+            (Path(kwargs["cwd"]) / "constants.json").write_text(json.dumps({"range_new_rows": range_new}))
+        return type("Done", (), {"returncode": 1})()
+
+    monkeypatch.setattr(r.subprocess, "run", fake_run)
+    monkeypatch.setattr(r.sandbox, "wrap", lambda argv, **k: argv)
+    config = {"interpreter": "python3", "instrument_dir": "kit", "rc": {"lcm_tree": "rc"}, "ga": {"lcm_tree": "ga"},
+              "constants_argv": ["gen"], "replay_argv": ["replay"]}
+    ctx = {"name": "rc", "port": 1, "sessions": {"L": "s"}}
+    receipt, error, kept = r.LocalHost(config, tmp_path / "run").replay(ctx, {"id": "e0-L-0", "conversation": "L"},
+                                                                      "T0", "H8")
+    result = bars.bar2_bind(receipt, range_new_rows=kept, error=error)
+    assert (result["verdict"], result["range_new_rows"]) == (bars.INCONCLUSIVE, range_new)
+
+
+class UnreadableFinal(FakeHost):
+    """The arm's store goes bad after its checks: its final rows read raises, and its checks report the failure."""
+
+    def __init__(self, config, run_dir, arm, fail=None):
+        super().__init__(config, run_dir, fail=fail)
+        self.bad = arm
+
+    def rows(self, path):
+        if Path(path).parent.name == self.bad:
+            raise sqlite3.DatabaseError("synthetic: malformed")
+        return super().rows(path)
+
+    def checks(self, ctx):
+        return [{**c, "status": "fail" if ctx["name"] == self.bad and c["kind"] == "integrity" else c["status"]}
+                for c in super().checks(ctx)]
+
+
+@pytest.mark.parametrize("arm", ["rc", "ga"])
+def test_an_unreadable_final_store_keeps_its_failed_checks_and_never_passes(setup, arm):
+    _, config, run_dir = setup
+    host = UnreadableFinal(config, run_dir, arm)
+    receipt = r.run(host, rc_id="rc-synthetic")  # A receipt, not a crash.
+    if arm == "rc":
+        for bar in ("bar1", "bar3"):
+            assert receipt["bars"][bar] == {"verdict": bars.INCONCLUSIVE, "rows_unreadable": ["rc"]}
+        assert receipt["bars"]["bar5"]["verdict"] == bars.FAIL and receipt["verdict"]["raw"] == bars.FAIL
+    else:
+        assert (receipt["bars"]["bar1"]["verdict"], receipt["bars"]["bar1"]["rows_unreadable"]) == (
+            bars.INCONCLUSIVE, ["ga"])
+        assert receipt["bars"]["bar3"]["verdict"] == bars.PASS  # Bar 3 never reads GA's rows.
+        assert host.armed == ["rc", "ga", "ga"] and receipt["ga_rerun"] is not None  # The GA failure re-runs it.
+        assert receipt["verdict"]["raw"] != bars.PASS
+
+
+class UnreadableGaRowsOnly(UnreadableFinal):
+    def checks(self, ctx):  # GA's checks stay ok: no rerun, and only its rows are missing.
+        return FakeHost.checks(self, ctx)
+
+
+def test_unreadable_ga_rows_never_hide_an_rc_failure(setup):
+    _, config, run_dir = setup
+    receipt = r.run(UnreadableGaRowsOnly(config, run_dir, "ga", fail="lose"), rc_id="rc-synthetic")
+    assert receipt["bars"]["bar1"]["verdict"] == bars.FAIL and receipt["bars"]["bar1"]["lost"] > 0
+    assert receipt["verdict"]["raw"] == bars.FAIL
+
+
+def test_the_rules_module_can_import_its_pinned_siblings(tmp_path):
+    kit = tmp_path / "kit"
+    kit.mkdir()
+    (kit / "sibling_helper.py").write_text("def norm(x):\n    return x\n")
+    (kit / "rules.py").write_text(
+        "from sibling_helper import norm\n"
+        "def identity(row):\n    return norm(row)\n"
+        "credits = ()\n"
+        "def covered(session_id):\n    return True\n"
+        "def configure_planning(**kwargs):\n    pass\n"
+        "def configure_bar1(**kwargs):\n    pass\n")
+    before = list(sys.path)
+    rules = r.LocalHost({"instrument_dir": str(kit), "rules_module": "rules.py"}, tmp_path / "run").rules()
+    assert rules["identity"]("x") == "x"
+    assert sys.path == before  # The kit dir is on the path only while the module loads.
+    sys.modules.pop("sibling_helper", None)

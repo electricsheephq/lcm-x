@@ -52,7 +52,7 @@ def build_config(settings, *, provider_url, home, aux, context_length, stored_ro
             "custom_providers": [{"name": n, **deepcopy(provider)} for n in dict.fromkeys(("d5", *stored_route_providers))],
             "auxiliary": {t: {"provider": "d5", "model": "d5-aux", "base_url": provider_url} for t in aux},
             "context": {"engine": "lcm-x"}, "compression": deepcopy(settings["compression"]),
-            "lcm": {**deepcopy(settings["lcm"]), "summary_model": "d5-summary"},
+            "lcm": deepcopy(settings["lcm"]),  # LCM-X reads its settings from the env only (build_env).
             "plugins": {"enabled": ["hermes-lcm-x", "d5-local"], "disabled": [], "isolation": "in_process"},
             "platforms": {"d5-local": {"enabled": True, "extra": {}}},
             "gateway": {"message_timestamps": {"enabled": False}},
@@ -97,13 +97,16 @@ def build_env(lcm_env, *, home, provider_url, host_bin, port_file, lcm_tree):
                      or (remote_recall and k == "LCM_PROACTIVE_RECALL_PROVIDER") or "/" in v
                      or any(m in k for m in _REDIRECT_MARKERS))
     env = {k: v for k, v in passed.items() if k not in dropped}
+    # The summariser is the provider's d5-summary; a dropped remote embedding provider never falls back to local ones.
+    pinned = {"LCM_SUMMARY_MODEL": "d5-summary", **({"LCM_EMBEDDINGS_ENABLED": "false"} if remote else {})}
+    env.update(pinned)
     env.update(PATH=f"{host_bin}:/usr/bin:/bin", HOME=str(home / "user-home"), HERMES_HOME=str(home),
                TMPDIR=str(home / "tmp"), D5_LOCAL_PORT_FILE=str(port_file), D5_LOCAL_ALLOW_ALL_USERS="1",
                HTTP_PROXY="http://127.0.0.1:9", HTTPS_PROXY="http://127.0.0.1:9", ALL_PROXY="http://127.0.0.1:9",
                NO_PROXY="127.0.0.1,localhost,::1", OPENAI_API_KEY="d5-dummy", OPENAI_BASE_URL=_local_url(provider_url),
                PYTHONDONTWRITEBYTECODE="1", PYTHONUNBUFFERED="1")
     env.update({k: str(home / v) for k, v in FORCED_LCM_PATHS.items()})
-    return env, {"env_names": sorted(env), "dropped_names": dropped, "overridden_names": sorted(FORCED_LCM_PATHS)}
+    return env, {"env_names": sorted(env), "dropped_names": dropped, "overridden_names": sorted([*FORCED_LCM_PATHS, *pinned])}
 
 
 def session_key(chat_id) -> str:
