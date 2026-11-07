@@ -169,16 +169,19 @@ def test_a_failed_output_record_drops_the_earlier_compactions_outputs(host, monk
     monkeypatch.setattr(engine, "_compress_bypassed", lambda *args: first)
     if child.compress(engine, stored) != first or not aux._DELEGATE_COMPACTION_OUTPUTS.get(engine._delegate_child_key("child")):
         pytest.fail("setup: the first compaction's outputs were not recorded")
+    later = {"role": "assistant", "content": "a row after the first compaction"}
+    child.turn(ctx, [*first, later], engine)  # stored before the failures, so the second pass's pre-store succeeds
+    calls = {}
     for name in ("_remember_delegate_child_outputs", "_remember_delegate_child_boundary"):
-        fail, _calls = _once(getattr(engine, name), RuntimeError(f"synthetic {name} failure"))
+        fail, calls[name] = _once(getattr(engine, name), RuntimeError(f"synthetic {name} failure"))
         monkeypatch.setattr(engine, name, fail)
     monkeypatch.setattr(engine, "_compress_bypassed", lambda *args: second)
-    later = {"role": "assistant", "content": "a row after the first compaction"}
-    result = child.compress(engine, [*first, later])  # the pre-store resumes after the first head: it stays unstored
+    result = child.compress(engine, [*first, later])  # the first head is exempt, so it stays unstored
     rows = [row["content"] for row in child_rows(engine)]
-    if result != second or engine._delegate_child_key("child") in aux._DELEGATE_RESUME_BOUNDARIES or \
-            rows.count(first[0]["content"]) or rows[-1] != later["content"]:
-        pytest.fail("setup: the second compaction did not run without a boundary over an unstored first head")
+    if result != second or rows.count(first[0]["content"]) or rows[-1] != later["content"]:
+        pytest.fail("setup: the second compaction did not run over a stored input with an unstored first head")
+    if not all(calls.values()):
+        pytest.fail("setup: the second pass did not reach both the output record and the boundary record")
     after = [{"role": "assistant" if i % 2 else "user", "content": f"after the second compaction {i}"} for i in range(3)]
     child.turn(ctx, [*second, *after], engine)  # stored: the anchor below can cover the second head and these rows
     for _ in range(2):

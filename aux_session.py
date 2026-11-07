@@ -1202,12 +1202,17 @@ class DelegateChildMixin:
                 if len(stored_tail) == _ANCHOR_ROWS:
                     break
             outputs = Counter(_DELEGATE_COMPACTION_OUTPUTS.get(key) or ())
+            lineage: list[Counter] = []  # the lineage's stored identities, read once per append (under the store lock)
 
             def unaccounted(front: list, end: int) -> list[int]:
                 # #2071: each row in front of the match must be stored in the lineage (apart from the anchor rows,
                 # the lineage's last stored rows) or be one of the last compaction's outputs, one occurrence each.
-                stored_ids = Counter(self._session_end_prefix_compare_identity(row, session_id=sid)
-                                     for sid in sessions for row in self._store.get_session_messages(sid, limit=-1))
+                if not front:
+                    return []
+                if not lineage:
+                    lineage.append(Counter(self._session_end_prefix_compare_identity(row, session_id=sid)
+                                           for sid in sessions for row in self._store.get_session_messages(sid, limit=-1)))
+                stored_ids = lineage[0].copy()
                 stored_ids.subtract(identities[len(front):end])
                 return self._delegate_child_unaccounted(front, stored_ids, outputs)
 
