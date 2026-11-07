@@ -24,11 +24,10 @@ while both runs hold identical rows, a plan relabels some delivered occurrences 
 conversation. Rows never change owner later, as on a real upgraded or shared store. The relabel is applied by true occurrence
 in both runs. A link into a row of another conversation is a failure of its own. Main's predicate
 may skip a row on another conversation's twin (a loss on main); v7 stores it and must not link
-across conversations. So the variant silent check is the per-key check above with one allowance:
-for each true occurrence and content version (scorer key) that main holds NO row of in this
-conversation (blank ids included), v7's first such row is that version's own row, not a copy. At
-most one row per (occurrence, key) is allowed; a second row of the same pair still counts.
-LCM_MULTI_VARIANT_PLANS sets that plan count (default 300).
+across conversations. So the variant silent check counts copies inside this conversation (blank ids
+included), pooled per key as the scorer counts: unlinked copies = rows - distinct true occurrences
+- linked rows, floored at 0; v7 must not exceed main on any key. An occurrence's own row is never a
+copy; which row of a key carries the link is not observable (the pooling rule above).
 """
 from copy import deepcopy
 from collections import Counter, defaultdict
@@ -171,8 +170,12 @@ def run_plan(ingests, folder, main_mode):
         rows = engine._store.get_session_messages("S")
         unlinked = Counter(key(r) for r in rows if r["store_id"] not in sources)
         local = {r["store_id"]: key(r) for r in rows if (r["conversation_id"] or "").strip() in ("", "conversation")}
-        versions = {(idx, local[sid]) for idx, ids in stored.items() for sid in ids if sid in local}
-        return set(stored), unlinked, sorted(foreign), versions
+        by_key = {sid: k[1:] for sid, k in local.items()}  # the blank and active spellings are one owner
+        rows_k, linked_k = Counter(by_key.values()), Counter(k for sid, k in by_key.items() if sid in sources)
+        occurrences_k = Counter(k for _idx, k in {(idx, by_key[sid]) for idx, ids in stored.items()
+                                                  for sid in ids if sid in by_key})
+        copies = {k: max(0, n - occurrences_k[k] - linked_k[k]) for k, n in rows_k.items()}
+        return set(stored), unlinked, sorted(foreign), copies
     finally:
         for engine in engines:
             engine.shutdown()
@@ -185,8 +188,7 @@ def check(seed, root, variant=False):
     loss, silent = compare(v7, main)
     if not variant:
         return loss, silent
-    allowance = Counter(k for _idx, k in v7[3] - main[3])
-    silent = sorted(k[2] for k, n in v7[1].items() if n - allowance[k] > main[1][k])
+    silent = sorted(k[1] for k, n in v7[3].items() if n > main[3].get(k, 0))
     return loss, silent, v7[2]
 
 
@@ -276,6 +278,5 @@ def test_multi_ingest_foreign_original_is_never_a_target(tmp_path):
     # Main skips the pair on the other conversation's row; v7 stores it, unlinked: it is new to this
     # conversation, and a link would cross conversations.
     assert compare(v7, main) == ([], ["", "X"])
-    allowance = Counter(k for _idx, k in v7[3] - main[3])
-    assert not [k for k, n in v7[1].items() if n - allowance[k] > main[1][k]]
+    assert not [k for k, n in v7[3].items() if n > main[3].get(k, 0)]
     assert v7[2] == []
