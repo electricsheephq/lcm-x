@@ -67,9 +67,13 @@ def test_r6_acp_334_335_cursor_zero_persisted_batch(tmp_path, caplog):
                         embeddings_enabled=False) as engine:
         seed(engine, [A, COMPOSITE, B])  # host pops the composite, exposing A and B
         before = multiset(engine)
+    with engine_context(tmp_path, window=200000, platform="acp", conversation_id="conv",
+                        embeddings_enabled=False) as engine:
         with caplog.at_level("INFO"):
             assert engine._ingest_cursor == 0
             assert ingest_added(engine, [FOLD, SNAP]) == 0
+        assert engine._last_ingest_reconciliation["action"] == "persisted batch"
+        assert engine._last_ingest_reconciliation["reason"] == "persisted ambiguous delta"
         assert multiset(engine) == before  # includes the prompt the host popped
         assert ingest_added(engine, [FOLD, SNAP]) == 0
         assert multiset(engine) == before
