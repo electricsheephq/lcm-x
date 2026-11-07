@@ -309,3 +309,28 @@ def test_a_file_named_like_a_marker_cannot_cancel_a_symlink(tmp_path):
     assert pins.verify(path, tmp_path)["mismatches"] == ["unpinnable_files"]
     (target / "rule.py").write_text("VALUE = 2\n", encoding="utf-8")
     assert pins.verify(path, tmp_path)["mismatches"] == ["unpinnable_files"]
+
+
+def test_an_unlistable_directory_fails_verify(tmp_path):
+    module, path = _pin(tmp_path, "def rule():\n    return 1\n")
+    hidden = tmp_path / "h"
+    hidden.mkdir()
+    (hidden / "x.py").write_text("VALUE = 1\n", encoding="utf-8")
+    hidden.chmod(0o311)
+    try:
+        assert pins.verify(path, tmp_path)["verdict"] == "FAIL"
+    finally:
+        hidden.chmod(0o755)
+
+
+def test_a_manifest_named_file_fails_when_the_manifest_lives_elsewhere(tmp_path):
+    module, path = _pin(tmp_path, "def rule():\n    return 1\n")
+    outside = tmp_path.parent / (tmp_path.name + "-manifest.json")
+    outside.write_bytes(path.read_bytes())
+    assert pins.verify(outside, tmp_path)["mismatches"] == ["unpinned_files"]
+
+
+def test_an_empty_bytecode_cache_dir_fails_verify(tmp_path):
+    module, path = _pin(tmp_path, "def rule():\n    return 1\n")
+    (tmp_path / "__pycache__").mkdir()
+    assert pins.verify(path, tmp_path)["mismatches"] == ["unpinnable_files"]

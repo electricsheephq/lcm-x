@@ -34,22 +34,28 @@ def _load_path(directory, name):
     return Path(directory).joinpath(*parts)
 
 
-def _scan(instrument_dir):
+def _raise(error):
+    raise error
+
+
+def _scan(instrument_dir, manifest_path=None):
     """(pinnable files, unpinnable count) under the instrument directory, never following a link.
 
     Bytecode caches and symlinks are never pinnable. They are counted apart from file names, so no file name
-    can stand in for one."""
+    can stand in for one. A directory that cannot be listed raises, so no file can hide in it. The manifest is
+    left out only when it is the manifest in use (default: the one in the directory)."""
     root = Path(instrument_dir)
+    own = Path(manifest_path).resolve() == (root / MANIFEST).resolve() if manifest_path is not None else True
     found, unpinnable = set(), 0
-    for directory, dirs, names in os.walk(root, followlinks=False):
+    for directory, dirs, names in os.walk(root, followlinks=False, onerror=_raise):
         for name in dirs + names:
             path = Path(directory) / name
             relative = path.relative_to(root)
             if path.is_symlink():
                 unpinnable += 1  # A link can point anywhere.
             elif "__pycache__" in relative.parts or path.suffix in (".pyc", ".pyo"):
-                unpinnable += name in names  # Cached bytecode can run instead of the pinned source.
-            elif name in names and path.is_file() and relative.as_posix() != MANIFEST:
+                unpinnable += 1  # Cached bytecode can run instead of the pinned source.
+            elif name in names and path.is_file() and not (own and relative.as_posix() == MANIFEST):
                 found.add(relative.as_posix())
     return found, unpinnable
 
@@ -325,7 +331,7 @@ def verify(manifest_path, instrument_dir, python_version=None, interpreter=None)
             safe = isinstance(name, str) and not Path(name).is_absolute() and ".." not in Path(name).parts
             mismatches.append(name if safe else "manifest")  # Only a relative name under the instrument dir.
         pinned = {f["name"] for f in manifest["files"]} | {m["name"] for f in manifest["files"] for m in f["loads"]}
-        found, unpinnable = _scan(instrument_dir)
+        found, unpinnable = _scan(instrument_dir, manifest_path)
         if unpinnable:
             mismatches.append("unpinnable_files")  # A symlink or bytecode: never pinnable, whatever its name.
         if found - pinned:
