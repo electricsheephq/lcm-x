@@ -500,7 +500,8 @@ def link_pending_ids(relations):
 def composite_witness(relations, rows):
     """#2212 ``composite_of`` witness (provisional format): the stored user rows C it credits. C holds one relation
     per segment, ordinals 0..n-1 contiguous with n >= 2, each naming the contained stored row of C's session, or NULL
-    for the host scaffold, at most once. With one NULL that leftover span starts with the todo injection header; with
+    for the host scaffold, at most once and only at ordinal 0 (the product renders the todo block first). With one
+    NULL that leftover span starts with the todo injection header; with
     none, ordinal 0 names a stored user row that starts with it. C's content is the segments joined by "\n\n" in
     ordinal order, byte for byte. Only C is credited: the contained rows are scored as ordinary rows."""
     header, segments, out = todo_header(), defaultdict(list), set()
@@ -515,7 +516,7 @@ def composite_witness(relations, rows):
             continue
         related = [r for _o, r in sorted(parts)]
         nulls = [i for i, r in enumerate(related) if r is None]
-        if len(nulls) > 1 or any(r not in rows or rows[r][0] != session for r in related if r is not None):
+        if nulls not in ([], [0]) or any(r not in rows or rows[r][0] != session for r in related if r is not None):
             continue
         texts, content = [None if r is None else rows[r][2] or "" for r in related], content or ""
         if nulls:  # the scaffold is the one span the contained rows leave

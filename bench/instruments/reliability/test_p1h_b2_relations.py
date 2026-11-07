@@ -592,8 +592,10 @@ def todo_rows(rows):
     (BLOCK + "\n\nprompt one", [(0, 5), (1, 1)], 1),
     ("plain first\n\nprompt one", [(0, 6), (1, 1)], 0),
     (BLOCK + "\n\nprompt two", [(0, 5), (1, 4)], 0),
+    ("prompt one\n\n" + BLOCK, [(0, 1), (1, None)], 0),
 ], ids=["P1", "P2", "N1-byte", "N2-no-header", "N3-order", "N3-gap", "N4-two-null", "N5-other-session",
-        "N6-none", "N7-single-newline", "P3-stored-todo", "N8-non-todo-first", "N9-other-session"])
+        "N6-none", "N7-single-newline", "P3-stored-todo", "N8-non-todo-first", "N9-other-session",
+        "N10-scaffold-not-first"])
 def test_composite_of_witness_credits_only_the_exact_shapes(content, segments, want):
     rows = todo_rows({**PARTS, 9: ("S", "user", content)})
     split = multiset.split_surplus([(("user", multiset.h(rows[9][2])), 1, [9])],

@@ -1182,6 +1182,22 @@ def test_a_stored_copy_of_a_displayed_todo_row_is_expected_once(tmp_path, copies
     assert (t["silent_surplus_rows"], t["host_todo_rows_expected"], t["missing_rows"]) == (*want, 0)
 
 
+@pytest.mark.parametrize("rotated", [False, True], ids=["same-session", "compression-child"])
+def test_a_same_stamp_double_display_of_a_todo_expects_one_copy(tmp_path, rotated):
+    """The host stamps each row of a batch 1e-6 s apart, so a todo displayed twice at one stamp, in one session or in
+    a compression child, is one occurrence and a carried copy: it expects one stored copy, matched once."""
+    todo = {"role": "user", "content": TODO}
+    sessions, second = (ROTATED, "P2") if rotated else (ONE, "S1")
+    first = "P" if rotated else "S1"
+    host = [(first, dict(todo, _ts=T0)), (second, dict(todo, _ts=T0))] + [
+        (second, dict(m, _ts=T0 + 2 + n)) for n, (_s, m) in enumerate(turn(1, second))]
+    stored = [(first, stamped(todo, T0)), (second, stamped(todo, T0))] + [
+        (second, stamped(m, m["_ts"])) for _s, m in host[2:]]
+    out = Home(tmp_path, sessions, host, stored=stored).run()
+    t = out["parity"]["totals"]
+    assert (t["silent_surplus_rows"], t["host_todo_rows_expected"], t["missing_rows"]) == (1, 1, 0)
+
+
 @pytest.mark.parametrize("relations,credited", [([(3, "composite_of", None, 0), (3, "composite_of", 1, 1)], 1),
                                                 ([], 0)], ids=["witnessed", "no-witness"])
 def test_a_witnessed_composite_is_a_visible_copy(tmp_path, relations, credited):
