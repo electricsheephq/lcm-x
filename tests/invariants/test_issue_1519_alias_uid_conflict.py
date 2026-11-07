@@ -57,7 +57,7 @@ def deterministic_host(tmp_path, monkeypatch):
         db.execute("INSERT INTO sessions VALUES ('parent', NULL, NULL)")
 
 
-def prepare(engine, case):
+def prepare(engine, case, *, sent=None):
     """Adapt the six-case probe: real recovery, publication and host rewrite, never imported."""
     source = message(TEXT, 20., _row_id=101, platform_message_id="platform-old")
     if case not in {"old_view_absent", "missing_to_known"}:
@@ -73,6 +73,8 @@ def prepare(engine, case):
         incoming = message(TEXT, 30.)
     initial = [message("Synthetic earlier request", 10.), message("Synthetic earlier reply", 11., "assistant"),
                source, message("Synthetic orphan result", 21., "tool", tool_call_id="synthetic-orphan")]
+    if sent is not None:
+        sent.extend(initial)
     engine.ingest(initial)
     view = engine._assemble_overflow_recovery_context(None, initial, assembly_cap_override=120)
     view = engine._finalize_forced_overflow_result(initial, view, assembly_cap_override=120)
@@ -83,6 +85,8 @@ def prepare(engine, case):
     engine.ingest(deepcopy(view))
     view[-1]["content"] = TEXT
     view.append(message("Synthetic recovery reply", 31., "assistant"))
+    if sent is not None:
+        sent.append(view[-1])
     engine.ingest(view)
     assert len(targets(engine)) == 1
     sid = targets(engine)[0]["store_id"]
@@ -137,19 +141,28 @@ def test_cold_alias_replay(tmp_path, case, record_property, caplog):
             assert any("would reject" in r.message for r in caplog.records)
 
 
-
 @pytest.mark.xfail(strict=True, raises=AssertionError, reason="#1519: the identity-anchor audit treats a distinct event with identical text at "
                                                               "a recorded alt_stamp as the aliased row once the original view is gone")
 def test_a_distinct_event_at_the_alias_stamp_is_stored(tmp_path):
     """#1519 (a v0.30.0 named loss limit): the old_view_absent shape above, a distinct platform message id with
     identical text at exactly the alias stamp, must store a second occurrence. The green case above keeps one."""
     with engine_context(tmp_path, window=128000, session_id="parent", conversation_id="conv") as engine:
-        replay = prepare(engine, "old_view_absent")
-    assert replay[0]["platform_message_id"] == "platform-new" and replay[0]["timestamp"] == 30.
+        try:
+            sent = []
+            replay = prepare(engine, "old_view_absent", sent=sent)
+            before = [(r["role"], r["content"]) for r in sent]
+            _expect_stored_shape([(r["role"], r["content"]) for r in rows(engine)], before, before, "setup")
+        except AssertionError as error:
+            pytest.fail(f"setup: the alias was not established: {error!r}")
+    if not (replay[0]["platform_message_id"] == "platform-new" and replay[0]["timestamp"] == 30.):
+        pytest.fail(f"setup: the replay is not the distinct event at the alias stamp: {replay[0]}")
     with engine_context(tmp_path, window=128000, session_id="parent", conversation_id="conv") as engine:
         engine.ingest(replay)
-        assert any(r["content"] == "Synthetic new reply" for r in rows(engine))  # the batch was ingested
-        assert len(targets(engine)) == 2
+        observed = [(r["role"], r["content"]) for r in rows(engine)]
+        fixed = before + [(r["role"], r["content"]) for r in replay]
+        known = before + [(replay[1]["role"], replay[1]["content"])]
+        diagnostic = [(role, "TEXT" if content == TEXT else content) for role, content in observed]
+        _expect_stored_shape(observed, fixed, known, f"#1519 known shape: {diagnostic}")
 
 
 @pytest.mark.parametrize("conflict_first", [True, False])
@@ -203,3 +216,32 @@ def test_lookup_provenance_preserves_public_rows(tmp_path):
         assert projected == [{**canonical, "observed_at": 30.}]
         assert projected.canonical_stamps == {canonical["store_id"]: 20.}
         assert engine._store.find_rows_by_observed_at("conv", ["parent"], []) == []
+
+
+def _expect_stored_shape(observed, fixed, known, message, error_type=AssertionError):
+    """Accept only the complete fixed list or the complete named-limit list, in store order."""
+    if observed == fixed:
+        return
+    if observed == known:
+        raise error_type(message)
+    differences = []
+    for label, expected in (("fixed", fixed), ("known", known)):
+        index = next((i for i, (actual, wanted) in enumerate(zip(observed, expected)) if actual != wanted),
+                     min(len(observed), len(expected)))
+        differences.append(f"{label}: first difference={index}, lengths={len(observed)}/{len(expected)}")
+    pytest.fail("unexpected stored shape; " + "; ".join(differences))
+
+
+@pytest.mark.parametrize("case", ["known", "fixed", "doubled", "swapped"])
+def test_stored_shape_comparison(case):
+    fixed = [("user", "first"), ("assistant", "second")]
+    known = [fixed[0]]
+    observed = {"known": known, "fixed": fixed, "doubled": [fixed[0], *fixed], "swapped": fixed[::-1]}[case]
+    if case == "known":
+        with pytest.raises(AssertionError, match="synthetic known shape"):
+            _expect_stored_shape(observed, fixed, known, "synthetic known shape", AssertionError)
+    elif case == "fixed":
+        _expect_stored_shape(observed, fixed, known, "synthetic known shape", AssertionError)
+    else:
+        with pytest.raises(pytest.fail.Exception, match="first difference=.*lengths="):
+            _expect_stored_shape(observed, fixed, known, "synthetic known shape", AssertionError)
