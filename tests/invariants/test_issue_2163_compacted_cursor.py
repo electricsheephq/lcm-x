@@ -277,3 +277,62 @@ def test_a_result_proves_replay_only_for_the_call_copy_it_follows(build):
             _poll(["d"], '{"c":1}', 5.0), y, {"role": "user", "content": "next"}]
     suppressed = engine._replayed_tool_segment_indexes_after_cursor(deepcopy(host), 2, consumed_pairs={1: stored_a})
     assert 7 not in suppressed, suppressed  # C's result is not owned by any stored C pair: it is stored
+
+
+
+def _pooled_shape(build, monkeypatch, source, host, cursor, bindings):
+    """Ingest ``source``, restart, pin the resume point and the ledger's bindings (host index -> stored row index),
+    ingest ``host``, and return the host indexes the cold ingest's tool-segment scan took for replays."""
+    engine = build()
+    engine.ingest(deepcopy(source))
+    rows = engine._store.get_session_messages(engine._session_id)
+    assert len(rows) == len(source)
+    engine.shutdown()
+    engine = build()
+    try:
+        pairs = {at: rows[stored] for at, stored in bindings.items()}
+        monkeypatch.setattr(engine, "_reconcile_ingest_cursor_from_store", lambda *args, **kwargs: cursor)
+        monkeypatch.setattr(engine, "_ledger_cold_cursor", lambda *args, **kwargs: dict(k=cursor, pairs=pairs))
+        scans, scan = [], engine._replayed_tool_segment_indexes_after_cursor
+
+        def tracked(messages, at, **kwargs):
+            replayed = scan(messages, at, **kwargs)
+            scans.append(set(replayed))
+            return replayed
+        monkeypatch.setattr(engine, "_replayed_tool_segment_indexes_after_cursor", tracked)
+        engine.ingest(deepcopy(host))
+        assert engine._ingest_failure_count == 0, engine._last_ingest_error
+        assert scans, "the cold ingest never ran the tool-segment scan"
+        return scans[0]
+    finally:
+        engine.shutdown()
+
+
+_U = {"role": "user", "content": "start", "timestamp": 0.5}
+_V = {"role": "user", "content": "next", "timestamp": 10.0}
+
+
+@pytest.mark.xfail(strict=True, reason="#2377: a vetoed occurrence's ownership stays spendable by another occurrence")
+def test_issue_2377_vetoed_ownership_stays_spendable(build, monkeypatch):
+    """Store A@2(c)·X, B@3(c)·X, A@4(c) dangling; the host's A@1 is another occurrence. The new X at host index 6 is
+    the dangling A@4's result: no single stored occurrence proves it, so it is not a replay."""
+    x = {"role": "tool", "tool_call_id": "c", "content": "X"}
+    y = {"role": "tool", "tool_call_id": "c", "content": "Y"}
+    a = lambda stamp: _poll(["c"], '{"a":1}', stamp)  # noqa: E731
+    b = lambda stamp: _poll(["c"], '{"b":1}', stamp)  # noqa: E731
+    replayed = _pooled_shape(build, monkeypatch, [_U, a(2.0), x, b(3.0), x, a(4.0)],
+                             [_U, a(1.0), x, b(3.0), y, a(4.0), x, _V], cursor=2, bindings={1: 1})
+    assert 6 not in replayed, replayed
+
+
+@pytest.mark.xfail(strict=True, reason="#2377: partial parallel occurrences pool their pairs into a false replay proof")
+def test_issue_2377_partial_parallel_occurrences_pool(build, monkeypatch):
+    """P(c,d)@2·X and P(c,d)@4·D are stored; neither occurrence holds both results. The host's first segment
+    P@2·X·D is not proven by one occurrence, so its D (host index 3) is not a replay."""
+    x = {"role": "tool", "tool_call_id": "c", "content": "X"}
+    d = {"role": "tool", "tool_call_id": "d", "content": "D"}
+    call = _poll(["c", "d"], "{}", 2.0)
+    later = {**call, "timestamp": 4.0}
+    replayed = _pooled_shape(build, monkeypatch, [_U, call, x, later, d], [_U, call, x, d, later, x, d, _V],
+                             cursor=1, bindings={})
+    assert 3 not in replayed, replayed
