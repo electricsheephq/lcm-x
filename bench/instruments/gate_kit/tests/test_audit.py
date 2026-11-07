@@ -1227,7 +1227,10 @@ def test_scaffold_provenance_metadata_never_clears_a_surplus_row(tmp_path):
     (LINK.format("source_store_id=1 target_store_id=3 reason=relation_write_failed"), 0, 0),
     (LINK.format("source_store_id=3 target_store_id=1 reason=other_failure"), 0, 1),
     (LINK.format("source_store_id=3x target_store_id=1 reason=relation_write_failed"), 0, 1),
-    ("", 0, 0)], ids=["relation", "pending", "target-only", "unknown-reason", "malformed", "no-line"])
+    (LINK.format("source_store_id=3 target_store_id=None reason=pending_write_failed"), 1, 0),
+    (LINK.format("source_store_id=3 target_store_id=None reason=relation_write_failed"), 0, 1),
+    ("", 0, 0)], ids=["relation", "pending", "target-only", "unknown-reason", "malformed", "pending-null-target",
+                      "relation-null-target", "no-line"])
 def test_a_logged_link_source_is_a_visible_copy(tmp_path, line, credited, unparsed):
     out = dup_home(tmp_path).run(logs=[line])
     t = out["parity"]["totals"]
@@ -1246,6 +1249,13 @@ def test_link_pending_marks_and_logged_links_hold_the_verdict_for_a_hand_check(t
     logged = dup_home(tmp_path / "logged").run(logs=[LINK.format(OK)])
     assert {"reason": "logged_link_failed", "store_ids": [3]} in logged["gate"]["hand_checks"]
     assert logged["gate"]["verdict"] != "GATE PASS"
+
+
+def test_a_link_computation_failure_line_is_counted_once(tmp_path):
+    line = "2099-01-01 10:00:01,000 WARNING [S1] hermes_lcm.engine: LCM tool replay computation failed reason=KeyError\n"
+    out = dup_home(tmp_path).run(logs=[line, line])  # the same line in two files is one ingest
+    assert out["recorder"]["link_computation_failed"] == 1
+    assert out["recorder"]["logged_link_unparsed"] == 0 and out["parity"]["totals"]["logged_link_rows"] == 0
 
 
 def test_route_link_pending_fields_are_summed(tmp_path):

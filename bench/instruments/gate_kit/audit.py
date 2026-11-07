@@ -70,10 +70,13 @@ ROUTE = re.compile(r"^LCM ingest route: session=(?P<session>\S+) route=(?P<route
                    r"stripped=(?P<stripped>\d+)")
 # A route line's optional ``link_pending=<n>`` field (#2377): the rows the ingest marked link_pending.
 ROUTE_LINK_PENDING = re.compile(r"\blink_pending=(\d+)\b")
-# #2377's logged intended link (provisional format): one WARNING per link the ingest meant to write, with no content.
+# #2377's logged intended link (final format): one WARNING per intended link that failed, logged after commit, with no
+# content. The pending marker has a NULL target, so a pending_write_failed line may name target_store_id=None.
 LINK_FAILED = "LCM tool replay link failed"
-LINK_LINE = re.compile(r"LCM tool replay link failed source_store_id=(\d+) target_store_id=(\d+) "
-                       r"reason=(relation_write_failed|pending_write_failed)")
+LINK_LINE = re.compile(r"LCM tool replay link failed source_store_id=(\d+) target_store_id=(?:\d+ "
+                       r"reason=(?:relation_write_failed|pending_write_failed)|None reason=pending_write_failed)")
+# #2377: link computation raised for one ingest; every row of that batch carries a link_pending relation instead.
+LINK_COMPUTATION_FAILED = re.compile(r"LCM tool replay computation failed reason=\w+")
 LINK_STORE_SLACK = 1.0  # seconds: a log stamp of one-second resolution can read just before the row's ingested_at
 # Route tokens: the reconciliation action of a re-bound engine's first ingest (reconcile.py: advanced cursor,
 # persisted batch, skipped batch), the warm default ``foreground``/``append``, and the tail routes: ``cold`` (a retried
@@ -459,7 +462,7 @@ def read_logs(paths, tz=None):
     """LCM-X's own log lines: compactions (deduplicated across files), AUXILIARY lines, recorder lines and logged
     intended links (``logged_link``)."""
     out, seen_ingests = {"compactions": set(), "auxiliary": defaultdict(set), "ingests": [], "links": set(),
-                         "links_unparsed": set()}, set()
+                         "links_unparsed": set(), "link_computation_failed": set()}, set()
     for path in paths:
         for line in Path(path).read_text(encoding="utf-8", errors="replace").splitlines():
             m = LOG_LINE.match(line)
@@ -485,6 +488,8 @@ def read_logs(paths, tz=None):
                 if identity not in seen_ingests:  # a line logged to two files is one ingest
                     seen_ingests.add(identity)
                     out["ingests"].append(record)
+            if LINK_COMPUTATION_FAILED.fullmatch(msg):  # a line logged to two files counts once
+                out["link_computation_failed"].add((at, msg))
             if (link := logged_link(msg)) is False:  # a line logged to two files counts once
                 out["links_unparsed"].add((at, msg))
             elif link is not None:
@@ -882,7 +887,8 @@ def audit(state_db: Path, lcm_db: Path, logs=(), since=None, events_path=None, l
                 # #2377 cross-checks: route lines' link_pending field (None when no line has it), malformed links.
                 "link_pending_logged": sum(i["link_pending"] for i in ingests if i["link_pending"] is not None)
                 if any(i["link_pending"] is not None for i in ingests) else None,
-                "logged_link_unparsed": len(log["links_unparsed"]), "logged_link_out_of_scope": links_out_of_scope}
+                "logged_link_unparsed": len(log["links_unparsed"]), "logged_link_out_of_scope": links_out_of_scope,
+                "link_computation_failed": len(log["link_computation_failed"])}
 
     observed = {r[0]: r[6] for r in stored}
     user_rows = {r[0]: (r[1], r[3]) for r in resolved if r[2] == "user"}
