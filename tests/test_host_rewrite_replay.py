@@ -90,8 +90,10 @@ CONTROLS = [
      BASE + [("S", "assistant", "alpha\n\nbeta", 100)]),
     ("consumed-part", [A, U, B], [A, FOLD], [],
      BASE + [("S", "assistant", "alpha\nbeta", 100)]),
-    ("ambiguous", [A, A, U, B], [FOLD], [],
-     BASE + [("S", "assistant", "alpha", 100), ("S", "assistant", "alpha\nbeta", 100)]),
+    ("ambiguous", [A, row("assistant", "alpha\nalpha", 100), row("assistant", "alpha", 102)],
+     [row("assistant", "alpha\nalpha\nalpha", 100)], [],
+     [("S", "assistant", "alpha", 100), ("S", "assistant", "alpha\nalpha", 100),
+      ("S", "assistant", "alpha", 102), ("S", "assistant", "alpha\nalpha\nalpha", 100)]),
     ("foreign-fold", [U, B], [FOLD], [A],
      [("S", "user", "prompt", 101), ("S", "assistant", "beta", 102),
       ("other", "assistant", "alpha", 100), ("S", "assistant", "alpha\nbeta", 100)]),
@@ -168,3 +170,13 @@ def test_full_scan_budget_stays_new(tmp_path):
     with engine_context(tmp_path, window=200000, conversation_id="conv", embeddings_enabled=False) as engine:
         seed(engine, [A, U, B] + [row("user", f"padding {i}", 200+i) for i in range(61)])
         assert ingest_added(engine, [FOLD]) == 1
+
+
+def test_unique_decomposition_with_repeated_anchor_stamp(tmp_path):
+    # The first head cannot fit; the second is the unique contiguous decomposition.
+    with engine_context(tmp_path, window=200000, conversation_id="conv", embeddings_enabled=False) as engine:
+        seed(engine, [A, A, U, B])
+        before = multiset(engine)
+        assert ingest_added(engine, [FOLD]) == 0
+        assert multiset(engine) == before
+        assert ingest_added(engine, [FOLD]) == 0
