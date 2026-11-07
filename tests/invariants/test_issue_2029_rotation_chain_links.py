@@ -11,8 +11,12 @@ import json
 
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
+from tests import test_issue_2305_cursor0_replay_links as replay_links
 from tests.test_issue_650_survival_fit_keeps_summary import _engine, _hidden_backlog, _turn
 from tests.test_issue_650_survival_fit_keeps_summary import host as host  # noqa: F401  (fixture)
+
+
+reconciled_host = replay_links.host  # Reuse #2305's reconciled-route fixture.
 
 
 def _rotate(engine, old, new, view):
@@ -181,3 +185,65 @@ def test_reconciled_cursor0_route_keeps_own_session_targets_with_a_chain(tmp_pat
         _assert_whole_store(host, before, view, added, 7)  # every target is in SID, none in P
     finally:
         host.close()
+
+
+def _reconciled_rotation(host):
+    from tests.test_issue_1286_cleanup_rewrite_proof import CID, SID
+
+    engine = host.engine
+    engine.on_session_start("P", platform="telegram", conversation_id=CID, context_length=200_000)
+    history = [{"role": "user", "content": "parent unrelated", "timestamp": 100.0}]
+    engine.ingest(history)
+    engine.on_session_end("P", history)
+    engine.on_session_start(SID, platform="telegram", conversation_id=CID, context_length=200_000,
+                            boundary_reason="compression", old_session_id="P")
+    assert engine._rotation_predecessor_session_ids(SID) == ["P"]
+    return history
+
+
+def test_reconciled_cursor0_route_does_not_link_a_parent_only_match(reconciled_host):
+    """A reconciled child must not annotate a new answer as a replay of its parent's answer."""
+    from tests.test_issue_1286_cleanup_rewrite_proof import SID
+    from tests.test_issue_2305_cursor0_replay_links import _ingest_copies, _pairs
+
+    host = reconciled_host
+    history = _reconciled_rotation(host)
+    host.turn(reply="own unrelated")
+    parent = host.bind("P")
+    parent.ingest([*history, {"role": "assistant", "content": "answer"}])
+    parent_before = _session_rows(parent, "P")
+    before = _session_rows(host.engine, SID)
+
+    sources = _ingest_copies(host, [{"role": "assistant", "content": "answer"}])
+
+    assert len(sources) == 1
+    rows = _session_rows(host.engine, SID)
+    assert rows == [*before, rows[-2], (sources[0], "assistant", "answer")]
+    assert rows[-2][1:] == ("user", "different head")
+    assert _session_rows(host.engine, "P") == parent_before
+    assert _pairs(host.engine) == []
+
+
+def test_reconciled_cursor0_route_own_stripped_match_beats_parent_exact_match(reconciled_host):
+    """An ancestor's exact bytes must not consume the child's reasoning-stripped match."""
+    from tests.test_issue_1286_cleanup_rewrite_proof import SID
+    from tests.test_issue_2305_cursor0_replay_links import _ingest_copies, _pairs
+
+    host = reconciled_host
+    history = _reconciled_rotation(host)
+    host.turn(reply="<think>own reasoning</think>answer")
+    before = _session_rows(host.engine, SID)
+    own_id = before[-1][0]
+    parent = host.bind("P")
+    parent.ingest([*history, {"role": "assistant", "content": "answer"}])
+    parent_before = _session_rows(parent, "P")
+
+    sources = _ingest_copies(host, [{"role": "assistant", "content": "answer"}])
+
+    assert len(sources) == 1
+    rows = _session_rows(host.engine, SID)
+    assert rows == [*before, rows[-2], (sources[0], "assistant", "answer")]
+    assert rows[-2][1:] == ("user", "different head")
+    assert _session_rows(host.engine, "P") == parent_before
+    assert _pairs(host.engine) == [(sources[0], own_id)]
+    assert _links(host.engine, SID) == [(sources[0], SID)]
