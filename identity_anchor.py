@@ -457,8 +457,10 @@ class IdentityAnchorMixin:
         or an unstamped user row the host inserted there (#633: a /steer row), that
         no stored occurrence explains (key, witness, alias, or a stored copy of its content -- up to
         edge whitespace, with the same stamp or a canonical host-uid binding for a NULL stamp --
-        in the tail of this session or a verified ancestor, each copy used once) and no ignore pattern drops was never stored. The cursor moves back
-        to the first such row; every other row of that range stays a replay (today's positional proof)."""
+        in the tail of this session or a verified ancestor, each copy used once) and no ignore pattern drops was never stored. When there
+        is such a row, every other row of the range must be accounted for too (#2071's rule, here for the parent
+        list): ``_identity_anchor_unaccounted`` adds the rows provably never stored, and keeps its unsure cases as
+        replays. The cursor moves back to the first row to store; every other row from there stays a replay."""
         from .reconcile import _proof_user_identity
 
         span = max(64, 2 * (cursor - start))
@@ -590,9 +592,12 @@ class IdentityAnchorMixin:
         copies the view's unchanged prefix ``[0, start)`` holds are reserved first. Counting stored copies, not
         bindings, keeps an upgraded store's pre-ledger rows from being stored again. The count compares a loose
         key (call ids, a result's call id, else role and stripped text), never fields a pre-ledger row can lack.
+        A stored row's reasoning-cleanup form counts as its copy. Absence from a ``capped`` tail proves nothing,
+        so there a row is unaccounted only by direct proof: a tool result whose call id no stored result holds, or
+        a call row whose call ids no stored result holds while one of its results is at or after the cursor.
         Unsure is accounted (the positional replay, as before): a row with no comparable key (a lossy identity),
-        a reserved key whose older copies a ``capped`` tail does not hold, and a tool result whose call is
-        neither in the view before it nor stored."""
+        any other row a ``capped`` tail lacks, and a tool result whose call is neither in the view before it nor
+        stored."""
         def calls(msg) -> tuple:
             value = msg.get("tool_calls") or ()
             if isinstance(value, str):
@@ -611,9 +616,27 @@ class IdentityAnchorMixin:
             identity = self._message_replay_identity(msg, stored_row=stored)
             return None if _lossy(identity) else (identity[0], identity[1].strip())
 
+        def stored_result(call_id) -> bool:  # an uncapped lookup by call id, in this session or a verified ancestor
+            return any(self._store.find_session_tool_rows(session, call_id, conversation_id=str(
+                self._conversation_id or ""), tool_name="") for session in [str(self._session_id), *chain])
+
+        def proven_new(idx, wanted) -> bool:
+            if not capped:
+                return True  # the tail holds every stored row: absence is proof
+            if wanted[0] == "tool":
+                return not stored_result(wanted[1])
+            return wanted[0] == "call" and not any(map(stored_result, wanted[1])) and any(
+                identity_messages[k].get("tool_call_id") in wanted[1] for k in range(cursor, len(messages)))
+
+        chain = self._identity_anchor_chain()
         index: dict = defaultdict(list)
         for row in {int(row["store_id"]): row for rows in held.values() for row in rows}.values():
-            index[key(row, stored=True)].append(row)
+            forms = {key(row, stored=True)}
+            identity = self._message_replay_identity(row, stored_row=True)
+            cleaned = None if calls(row) or _lossy(identity) else self._active_cleanup_replay_identity(identity)
+            forms |= {(cleaned[0], cleaned[1].strip())} if cleaned else set()  # the proven cleanup form (#1286)
+            for form in forms:
+                index[form].append(row)
         explained = set(excluded) | set(matched) | set(plan.get("matched", {})) | plan["replayed"] | set(missed)
         reserved = Counter(key(identity_messages[idx]) for idx in range(min(start, len(messages)))
                            if idx not in excluded and idx not in matched)
@@ -629,6 +652,8 @@ class IdentityAnchorMixin:
             copies = [row for row in index.get(wanted, ()) if int(row["store_id"]) not in consumed]
             if len(copies) > reserved[wanted]:
                 consumed.add(int(copies[-1]["store_id"]))
+                continue
+            if not proven_new(idx, wanted):
                 continue
             if wanted[0] == "tool" and not any(  # never store a result without its call
                     wanted[1] in calls(identity_messages[k]) for k in range(idx)) and not any(
