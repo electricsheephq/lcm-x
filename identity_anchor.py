@@ -594,7 +594,7 @@ class IdentityAnchorMixin:
         key (call ids, a result's call id, else role and stripped text), never fields a pre-ledger row can lack.
         A stored row's reasoning-cleanup form counts as its copy. Absence from a ``capped`` tail proves nothing,
         so there a row is unaccounted only by direct proof: a tool result whose call id no stored result holds, or
-        a call row whose call ids no stored result holds while one of its results is at or after the cursor.
+        a call row whose call ids no stored call row and no stored result hold.
         Unsure is accounted (the positional replay, as before): a row with no comparable key (a lossy identity),
         any other row a ``capped`` tail lacks, and a tool result whose call is neither in the view before it nor
         stored."""
@@ -616,17 +616,19 @@ class IdentityAnchorMixin:
             identity = self._message_replay_identity(msg, stored_row=stored)
             return None if _lossy(identity) else (identity[0], identity[1].strip())
 
-        def stored_result(call_id) -> bool:  # an uncapped lookup by call id, in this session or a verified ancestor
-            return any(self._store.find_session_tool_rows(session, call_id, conversation_id=str(
-                self._conversation_id or ""), tool_name="") for session in [str(self._session_id), *chain])
+        def stored(call_id, *, call_row=False) -> bool:  # uncapped, by call id, in this session or a verified ancestor
+            conversation = str(self._conversation_id or "")
+            return any(self._store.find_session_call_rows(session, call_id, conversation_id=conversation) if call_row
+                       else self._store.find_session_tool_rows(session, call_id, conversation_id=conversation,
+                                                               tool_name="")
+                       for session in [str(self._session_id), *chain])
 
         def proven_new(idx, wanted) -> bool:
             if not capped:
                 return True  # the tail holds every stored row: absence is proof
             if wanted[0] == "tool":
-                return not stored_result(wanted[1])
-            return wanted[0] == "call" and not any(map(stored_result, wanted[1])) and any(
-                identity_messages[k].get("tool_call_id") in wanted[1] for k in range(cursor, len(messages)))
+                return not stored(wanted[1])
+            return wanted[0] == "call" and not any(stored(i) or stored(i, call_row=True) for i in wanted[1])
 
         chain = self._identity_anchor_chain()
         index: dict = defaultdict(list)

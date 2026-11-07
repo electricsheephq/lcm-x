@@ -1298,6 +1298,29 @@ class MessageStore:
         ).fetchall()
         return [self._row_to_dict(row) for row in rows]
 
+    def find_session_call_rows(self, session_id: str, call_id: str, *, conversation_id: str) -> List[Dict[str, Any]]:
+        """This session's assistant rows whose ``tool_calls`` hold the call id ``call_id``, in store order, in a
+        conversation ``conversation_id`` owns (as ``find_session_tool_rows``). SQL narrows by substring; the exact id
+        is confirmed on the parsed calls."""
+        owned_clause, owned_args = owned_conversation_clause(self._conn, conversation_id)
+        rows = self._conn.execute(
+            f"""SELECT {_MESSAGE_SELECT_COLUMNS} FROM messages
+               WHERE session_id = ? AND role = 'assistant' AND instr(tool_calls, ?) > 0 AND {owned_clause}
+               ORDER BY store_id""",
+            (session_id, call_id, *owned_args),
+        ).fetchall()
+        found = []
+        for row in map(self._row_to_dict, rows):
+            try:
+                calls = json.loads(row.get("tool_calls") or "[]")
+            except ValueError:
+                found.append(row)  # unreadable: it may hold the id, so it counts as holding it
+                continue
+            if not isinstance(calls, list) or any(isinstance(c, dict) and str(c.get("id") or "") == call_id
+                                                  for c in calls):
+                found.append(row)
+        return found
+
     def write_generation(self) -> tuple:
         """A token that changes whenever a committed write may have changed rows this connection reads:
         this connection's own writes (``total_changes``) and another connection's commits
