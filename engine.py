@@ -7056,10 +7056,9 @@ class LCMEngine(
                             return True
                 return False
 
-            if all(claim(idx, set()) for idx in rows):
+            pairs = dict(zip(rows, free))  # the ordered first fit
+            if not all(pos in exact[idx] for idx, pos in pairs.items()) and all(claim(idx, set()) for idx in rows):
                 pairs = {idx: pos for pos, idx in owner.items()}
-            else:
-                pairs = dict(zip(rows, free))  # the ordered first fit
             for idx, pos in pairs.items():
                 used.add(pos)
                 result[idx] = (session, target[pos])
