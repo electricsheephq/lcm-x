@@ -7138,26 +7138,51 @@ class LCMEngine(
         order. Annotate the later copy only; no row is skipped or changed."""
         if not self._session_id:
             return
-        texts = {}  # A stored, stamped, non-empty user row of this ingest is a possible later copy.
+        texts, stamps = {}, {}  # A stored, stamped, non-empty user row of this ingest is a possible later copy.
         for idx, sid in stored_at.items():
             message = messages[idx] if sid and 0 <= idx < len(messages) else None
             if (isinstance(message, dict) and message.get("role") == "user" and message.get("content") is not None
-                    and self._host_occurrence_metadata(message)["timestamp"] is not None
+                    and (stamp := self._host_occurrence_metadata(message)["timestamp"]) is not None
                     and (text := (normalize_content_value(message["content"]) or "").strip())):
-                texts[int(sid)] = text
+                texts[int(sid)], stamps[int(sid)] = text, stamp
         if not texts:
             return
         try:
             conn, session = self._store._conn, str(self._session_id)
             conversation = _normalize_conversation_id_value(self._conversation_id)
-            needles, rows = sorted(set(texts.values())), {}
-            for start in range(0, len(needles), 64):
-                chunk = needles[start:start + 64]
+
+            def borrowed(at, carrier, text):
+                # An earlier user row of other text holds this stamp as its own (exact equality; indexed).
+                return any(isinstance(content, str) and content.strip() and content.strip() != text
+                           for (content,) in conn.execute(
+                               "SELECT content FROM messages WHERE conversation_id IN (?, '') AND observed_at=? "
+                               "AND +session_id=? AND role='user' AND +store_id<?", (conversation, at, session, carrier)))
+            # The stamp gate, through the (conversation_id, observed_at) index: the row's own stamp is borrowed,
+            # or an earlier stored copy of its text sits on a borrowed stamp that the host view still shows (the
+            # in-flight prompt's). Only a row that passes it reads the session's copies of its text. The unary
+            # '+' keeps the planner off the session indexes, which would walk every row of the session.
+            shown = sorted({stamp for message in messages if isinstance(message, dict)
+                            and message.get("role") == "user"
+                            and (stamp := self._host_occurrence_metadata(message)["timestamp"]) is not None})
+            gated = {}
+            for sid, text in sorted(texts.items()):
+                if borrowed(stamps[sid], sid, text) or any(
+                        at != stamps[sid] and borrowed(at, store_id, text)
+                        for start in range(0, len(shown), 500)
+                        for store_id, at in conn.execute(
+                            "SELECT store_id, observed_at FROM messages WHERE conversation_id IN (?, '') "
+                            f"AND observed_at IN ({','.join('?' * len(shown[start:start + 500]))}) "
+                            "AND +session_id=? AND role='user' AND +store_id<? AND instr(content, ?)>0",
+                            (conversation, *shown[start:start + 500], session, sid, text))):
+                    gated[sid] = text
+            if not gated:
+                return
+            texts, rows = gated, {}
+            for sid, text in sorted(texts.items()):
                 for store_id, content, observed_at in conn.execute(
                         "SELECT store_id, content, observed_at FROM messages WHERE conversation_id IN (?, '') "
-                        "AND session_id=? AND role='user' AND store_id<=? AND ("
-                        + " OR ".join(["instr(content, ?)>0"] * len(chunk)) + ")",
-                        (conversation, session, max(texts), *chunk)):
+                        "AND session_id=? AND role='user' AND store_id<=? AND instr(content, ?)>0",
+                        (conversation, session, sid, text)):
                     if isinstance(content, str) and content.strip() in texts.values():
                         rows[int(store_id)] = (content.strip(), observed_at)
             pairs = []
@@ -7184,11 +7209,6 @@ class LCMEngine(
                 return
             # The borrowed stamp: an earlier user row of other text holds the later or the earlier copy's
             # stamp as its own (exact equality).
-            def borrowed(at, carrier, text):
-                return any(isinstance(content, str) and content.strip() and content.strip() != text
-                           for (content,) in conn.execute(
-                               "SELECT content FROM messages WHERE conversation_id IN (?, '') AND observed_at=? "
-                               "AND session_id=? AND role='user' AND store_id<?", (conversation, at, session, carrier)))
             pairs = [(sid, target, next((at for at, carrier in carriers if borrowed(at, carrier, text)), None))
                      for sid, target, text, carriers in pairs]
             pairs = [(sid, target, at) for sid, target, at in pairs if at is not None]

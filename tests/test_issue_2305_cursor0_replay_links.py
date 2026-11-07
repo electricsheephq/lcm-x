@@ -416,10 +416,11 @@ def test_22_earlier_rows_are_read_in_one_linear_scan(host):
     _assert_cursor0(host.engine)
     assert len(_pairs(host.engine)) == 2
     earlier = [sql for sql in statements if "FROM messages" in sql and "store_id<" in sql.replace(" ", "")]
-    # #2055: the borrowed-stamp linker's text lookup for the stored user row is its own single bounded read.
-    borrowed = [sql for sql in earlier if "instr(content" in sql]
+    # #2055: the borrowed-stamp linker's reads (user rows only) are its own: with no borrowed stamp they are
+    # indexed stamp lookups, never a scan of the session's rows.
+    borrowed = [sql for sql in earlier if "role='user'" in sql]
     earlier = [sql for sql in earlier if sql not in borrowed]
-    assert len(borrowed) <= 1
+    assert borrowed and all("observed_at" in sql.split("WHERE", 1)[1] for sql in borrowed), borrowed
     assert len(earlier) == 1 and not any("json_extract(k.value" in sql for sql in statements)
 
 
