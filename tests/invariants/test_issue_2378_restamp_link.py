@@ -167,6 +167,27 @@ def test_different_user_turn_is_never_linked(build, caplog, mode):
 
 
 @pytest.mark.parametrize("mode", ["inplace", "rotating"])
+def test_model_switch_prefix_removed_restamp_is_stored_without_link(build, caplog, monkeypatch, mode):
+    plain = T
+    prefixed = "[Note: model was just switched from X to Y]\n\n" + plain
+    monkeypatch.setattr(__name__ + ".T", prefixed)
+
+    def strip_prefix(_engine, view):
+        next(row for row in view if row.get("content") == prefixed)["content"] = plain
+
+    engine, rows = run(build, caplog, mode=mode, uids=False, restamp=True, before_ingest=strip_prefix)
+    copies = [row for row in rows if row["content"] in (prefixed, plain)]
+    assert [(row["content"], row["observed_at"]) for row in copies] == [
+        (prefixed, T_REQ), (plain, T_COMMIT),
+    ]
+    stored = engine._store.get_batch([row["store_id"] for row in copies])
+    digests = [engine_module._commit_proof_identity_digest(engine_module._proof_user_identity(
+        engine._message_replay_identity(stored[row["store_id"]], stored_row=True))) for row in copies]
+    assert digests[0] == digests[1]
+    assert replay_links(engine) == set()
+
+
+@pytest.mark.parametrize("mode", ["inplace", "rotating"])
 @pytest.mark.parametrize("prior_copies", [1, 2])
 def test_restamp_links_are_one_to_one(build, caplog, mode, prior_copies):
     def duplicate(_engine, view):

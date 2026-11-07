@@ -7060,6 +7060,8 @@ class LCMEngine(
                         candidates = {int(target["store_id"]) for target in targets
                                       if target["session_id"] == session and target["observed_at"] == row["timestamp"]
                                       and target["store_id"] < sid
+                                      and all(target.get(key) == current[sid].get(key)
+                                              for key in ("role", "content", "tool_calls", "tool_call_id"))
                                       and self._message_replay_identity(target, stored_row=True) == identity}
                         if len(candidates) != 1:
                             continue
