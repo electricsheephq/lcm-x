@@ -21,6 +21,10 @@ from tests.test_issue_1116_stub_first_exit_commit_proof import (  # noqa: F401 (
 )
 
 
+class ScaffoldTurnSkipped(AssertionError):
+    """Only the complete #2110/#2418 loss shape, never a setup assertion."""
+
+
 def _legacy_restart(engine, tmp_path, host, version):
     """Store the host list, downgrade the durable proof to a legacy version (no emissions), restart."""
     engine.ingest(host)
@@ -44,20 +48,20 @@ def _stored(engine):
         (engine._session_id,)).fetchall()
 
 
-_LOST = pytest.mark.xfail(strict=True, raises=AssertionError, reason="#2110: under a legacy (v2/v3) proof a scaffold-shaped user turn placed "
+_LOST = pytest.mark.xfail(strict=True, raises=ScaffoldTurnSkipped, reason="#2110: under a legacy (v2/v3) proof a scaffold-shaped user turn placed "
                                                                      "before a stored row gets identity None and is skipped")
-_HEADER = pytest.mark.xfail(strict=True, raises=AssertionError, reason="#2418: a user turn that begins with the host's "
+_HEADER = pytest.mark.xfail(strict=True, raises=ScaffoldTurnSkipped, reason="#2418: a user turn that begins with the host's "
                                                                        "task-list header is skipped when reconciled")
-_HEADER_AND_LOST = pytest.mark.xfail(strict=True, raises=AssertionError, reason="#2418 (the task-list header) and "
+_HEADER_AND_LOST = pytest.mark.xfail(strict=True, raises=ScaffoldTurnSkipped, reason="#2418 (the task-list header) and "
                                                                                 "#2110 (no proof): both skip the turn")
 
 
 def _expect_stored_once(stored, fixed, known=None):
-    """Compare whole stored lists; only the exact known loss may raise AssertionError."""
+    """Compare whole stored lists; only the exact known loss may satisfy the xfail."""
     if stored == fixed:
         return
     if known is not None and stored == known:
-        raise AssertionError("#2110/#2418 known shape: the scaffold-shaped user turn is skipped")
+        raise ScaffoldTurnSkipped("#2110/#2418 known shape: the scaffold-shaped user turn is skipped")
     first_difference = next((i for i, (a, b) in enumerate(zip(stored, fixed)) if a != b),
                             min(len(stored), len(fixed)))
     pytest.fail(f"not the #2110/#2418 shape: stored rows={len(stored)}, fixed rows={len(fixed)}, "
@@ -158,7 +162,7 @@ def test_a_scaffold_shaped_user_turn_is_stored_past_a_stale_v4_proof(stub_first_
     _expect_stored_once(_stored(host.engine), fixed, prefix if shape == "todo-prefix" else None)
 
 
-_RETIRED_LOST = pytest.mark.xfail(strict=True, raises=AssertionError,
+_RETIRED_LOST = pytest.mark.xfail(strict=True, raises=ScaffoldTurnSkipped,
                                   reason="#2110: once a stale v4 proof is retired, the identity anchor treats a "
                                          "scaffold-shaped user turn placed before a stored row as LCM scaffold "
                                          "(identity None) and skips it")
