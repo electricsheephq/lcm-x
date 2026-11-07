@@ -351,3 +351,34 @@ def test_a_stored_call_whose_delayed_result_arrives_past_the_audited_tail_is_sto
         assert sum(1 for row in rows if row.get("tool_call_id") == "call_held") == 1
     finally:
         engine.shutdown()
+
+
+@pytest.mark.parametrize("variant", ["result-before-cursor", "no-result"])
+def test_a_moved_prompt_call_before_the_cursor_past_the_audited_tail_is_stored_once(tmp_path, variant):
+    """Review (Claude): the moved-prompt turn in a session past the audited tail, with the new call (and its result)
+    before the cursor. The call is proven new by direct lookup (no stored call row or result holds its id), so it
+    is stored once, and a result is never stored without it."""
+    engine = _engine(tmp_path)
+    try:
+        history = _history(40)
+        slot = 2 * 40 + 4
+        interim = {"role": "assistant", "content": "an interim note" + PAD}
+        turn_start = [*history, _u("P60 new prompt", 200), interim]
+        engine.ingest(history)
+        engine.ingest(turn_start)
+        if len(_stored(engine)) <= 64:
+            pytest.fail("setup: the session must hold more stored rows than the audited tail")
+        call, result = _call("call_new", 201), _result("call_new", "new file text", 202)
+        turn_end = list(history)
+        turn_end[slot] = _u("P60 new prompt", 120)
+        turn_end += [call, result] if variant == "result-before-cursor" else [call, _a("A60 reply", 203)]
+        if len(turn_end) != len(turn_start):
+            pytest.fail("setup: the list in front of the cursor must keep its length")
+        turn_end += [_a("A60 after the new call", 204)]
+        engine.ingest(turn_end)
+        rows = _stored(engine)
+        calls = sum(1 for row in rows if "call_new" in str(row.get("tool_calls") or ""))
+        results = sum(1 for row in rows if row.get("tool_call_id") == "call_new")
+        assert (calls, results) == ((1, 1) if variant == "result-before-cursor" else (1, 0))
+    finally:
+        engine.shutdown()
