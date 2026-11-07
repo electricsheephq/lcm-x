@@ -329,3 +329,25 @@ def test_a_stored_call_and_result_outside_the_audited_tail_are_not_stored_again(
         assert sum(1 for row in rows if "call_kept" in str(row.get("tool_calls") or "")) == 1
     finally:
         engine.shutdown()
+
+
+@pytest.mark.parametrize("ledger", ["off", "on"])
+def test_a_stored_call_whose_delayed_result_arrives_past_the_audited_tail_is_stored_once(tmp_path, monkeypatch, ledger):
+    """Review (Codex, Astra): an unstamped call is stored, then leaves the 64-row audited tail while the host replaces
+    the stamped user before it 70 times; its delayed result then arrives behind one more replacement. No stored
+    result is no proof that the call was never stored: the call stays stored once, the result is stored once."""
+    monkeypatch.setenv("LCM_INGEST_LEDGER", ledger)
+    engine = _engine(tmp_path)
+    try:
+        call, result = _call("call_held", 2), _result("call_held", "held file text", 3)
+        del call["timestamp"], result["timestamp"]
+        for index in range(70):
+            engine.ingest([_u(f"replacement user {index}", 1000 + index), call])
+        if len(_stored(engine)) <= 64:
+            pytest.fail("setup: the session must hold more stored rows than the audited tail")
+        engine.ingest([_u("one more replacement", 5000), call, result])
+        rows = _stored(engine)
+        assert sum(1 for row in rows if "call_held" in str(row.get("tool_calls") or "")) == 1
+        assert sum(1 for row in rows if row.get("tool_call_id") == "call_held") == 1
+    finally:
+        engine.shutdown()
