@@ -258,7 +258,7 @@ def _identities(path, order, host=False):
                 repeats[row["session_id"]] += slot in seen
                 seen.add(slot)
             # Each row counts once: an inactive row now, an active compacted row once its session is read.
-            inactive = "active" in row and not _flag(row["active"], False)  # Unknown (NULL) counts as not active.
+            inactive = "active" in row and not _flag(row["active"], True)  # NULL is active, as the host reads it.
             generation_rows[row["session_id"]] += inactive
             compacted[row["session_id"]].append((key, _flag(row.get("compacted"), False) and not inactive))
             sessions[row["session_id"]].append(key)
