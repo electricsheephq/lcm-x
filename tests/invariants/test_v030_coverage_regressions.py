@@ -1,7 +1,7 @@
 """v0.30.0 gate coverage: row-level regressions for fixes that shipped after v0.29.0.
 
-Each case uses only APIs present in both v0.29.0 and v0.30.0, so it runs on both
-trees: RED on v0.29.0 for the stored-row behaviour, GREEN on v0.30.0 defaults.
+Each case runs on both trees: RED on v0.29.0 for the stored-row behaviour, GREEN on
+v0.30.0 defaults. The #534 case also patches the ledger exit write, which v0.29.0 lacks.
 """
 
 import copy
@@ -149,6 +149,7 @@ def test_534_recovery_rows_after_failed_exit_write_are_not_restored_silently(tmp
         failed.append("exit")  # the write did not happen; the restart below drops any in-process retry
 
     reply = {"role": "assistant", "content": "recovery reply"}
+    has_exit = hasattr(LCMEngine, "_compress_exit_write")
     with monkeypatch.context() as patch:
         patch.setattr(engine, "_write_compress_commit_proof_payload", publish_fails_once)
         # v0.29.0 has no ledger exit write; there this patch adds an attribute nothing calls.
@@ -157,6 +158,7 @@ def test_534_recovery_rows_after_failed_exit_write_are_not_restored_silently(tmp
         note = out[-1]["content"]
         r534._commit(engine, pre)
         assert "proof" in failed
+        assert ("exit" in failed) == has_exit  # the exit-write fault fired wherever the write exists
         host = r534._merged(out) if merged else copy.deepcopy(out)
         engine.ingest(host + [reply])
         engine.shutdown()
@@ -170,6 +172,9 @@ def test_534_recovery_rows_after_failed_exit_write_are_not_restored_silently(tmp
         contents = [content for _sid, content in rows]
         # Nothing is lost. (The real rows' duplicate direction after a failed publication is a separate,
         # accepted #534 residual, so this case does not bound their count.)
-        assert all(content in contents for content in ("older request", "recovery reply", "next request"))
+        real = [row["content"] for row in pre if row.get("role") != "system"]
+        assert len(real) == 4  # older request, the oversized reply, the newest request, the orphan tool row
+        missing = [c[:40] for c in [*real, "recovery reply", "next request"] if c not in contents]
+        assert missing == []
     finally:
         replay.shutdown()
