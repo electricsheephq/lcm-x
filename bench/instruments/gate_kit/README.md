@@ -54,11 +54,15 @@ parent ended with `end_reason = 'compression'` on the same source), counted the 
 them. Hermes keeps a rotation parent's originals in the closed parent and gives the child only the compressed handoff;
 an in-place compaction archives the displayed history (`active = 0, compacted = 1`) and rewinds the originals of the
 carried tail (`active = 0, compacted = 0`). Other host versions keep the archived originals and their active carried
-copies displayed, sometimes with new timestamps. For those hosts the audit removes one insertion block per session:
-the active prefix immediately after the last displayed compacted row must match a complete ordered suffix of the
-archived rows, ignoring timestamps and summary/undisplayed rows. The longest matching suffix is consumed once,
-ending at the copy of the last archived row. Later identical resends still count, and a new unmatched user turn ends
-the block; the audit never searches later active rows for copies. Tool-calling assistant rows match by call ids.
+copies displayed, sometimes with new timestamps. For those hosts the audit handles every in-place compaction in host
+id order: each `_compressed_summary` row starts a block, bounded by the next summary or session end. The displayed
+non-summary prefix must match a complete ordered suffix of the displayed history before that boundary, ignoring
+timestamps and excluding copies already identified at earlier boundaries. Copies may themselves have been archived
+by a later compaction. User carriers (verified stripped remainders, empty text or LCM prefixes) are skipped while
+matching and remain handled by the carrier rules below. The longest matching suffix is consumed once. Later identical
+resends still count, and an unmatched row ends the matching prefix; the audit never searches later rows for copies.
+Tool-calling assistant rows match by call ids. No summary boundary or no compacted evidence means no deduction;
+active/compacted transitions alone cannot identify earlier blocks.
 The displayed rows are `active = 1 OR compacted = 1`, and the display
 collapses rows with the same display identity: role, content (edge-stripped, as B2 keys it), timestamp and tool
 fields, or a tool-calling assistant row's call ids. A carried handoff copy takes its original's timestamp, so it

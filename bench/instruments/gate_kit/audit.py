@@ -215,19 +215,27 @@ def carrier_remainder(content, header, nodes, same_lineage):
     return content
 
 
-def in_place_carried_ids(rows, strip):
-    """Same-session active copies immediately after the last displayed compacted row, in host id order.
+def in_place_carried_ids(rows, strip, prefixes):
+    """Same-session copies at EVERY ``_compressed_summary`` boundary, in host id order, even if later archived.
 
-    Ignoring summary/undisplayed rows, the insertion block must start with a complete ordered suffix of the archived
-    rows, comparing display_key WITHOUT timestamps (assistant tool calls still use call ids). Take the longest such
-    suffix once, ending at the copy of the last archived row; never search later active rows for matches. Thus a new
-    user row that does not continue the suffix ends the block, and a genuine identical resend after the block counts
-    separately, even with the same stamp. No compacted flag means no structural deduction.
+    Each summary starts an insertion block, bounded by the next summary or session end. Its displayed non-summary
+    prefix must equal a complete ordered suffix of the displayed history before that boundary, comparing display_key
+    WITHOUT timestamps (assistant tool calls still use call ids). Exclude previously identified copies from history;
+    skip user carriers (verified strip changes, empty text or LCM prefixes) on both sides, leaving them to the existing
+    carrier logic. Take the longest matching suffix once; never search later rows for another match. A genuine resend
+    after that prefix still counts, even with the original's stamp. No compacted evidence before the boundary, or no
+    summary boundary, means no structural deduction; active/compacted transitions alone cannot locate earlier blocks.
     """
     sessions = defaultdict(list)
     for row in rows:
-        if row[9] and not row[6]:
+        if row[9] or row[6]:
             sessions[row[1]].append(row)
+
+    def carrier(row):
+        if row[2] != "user":
+            return False
+        text = strip(row[3], row[1])
+        return text != row[3] or not (text or "").strip() or (text or "").lstrip().startswith(prefixes)
 
     def key(row):
         _rid, sid, role, content, calls, call_id = row[:6]
@@ -235,16 +243,19 @@ def in_place_carried_ids(rows, strip):
 
     carried = set()
     for segment in sessions.values():
-        archived = [r for r in segment if r[12]]
-        if not archived:
-            continue
-        live = [r for r in segment if r[0] > archived[-1][0] and r[11] and not r[12]]
-        archive_keys, live_keys = [key(r) for r in archived], [key(r) for r in live]
-        for start in range(len(archived)):
-            n = len(archived) - start
-            if n <= len(live) and archive_keys[start:] == live_keys[:n]:
-                carried.update(r[0] for r in live[:n])
-                break
+        segment.sort(key=lambda r: r[0])
+        boundaries = [i for i, r in enumerate(segment) if r[6]]
+        for boundary, end in zip(boundaries, boundaries[1:] + [len(segment)]):
+            before = [r for r in segment[:boundary] if r[9] and not r[6] and r[0] not in carried and not carrier(r)]
+            if not any(r[12] for r in before):
+                continue
+            block = [r for r in segment[boundary + 1:end] if r[9] and not carrier(r)]
+            before_keys, block_keys = [key(r) for r in before], [key(r) for r in block]
+            for start in range(len(before)):
+                n = len(before) - start
+                if n <= len(block) and before_keys[start:] == block_keys[:n]:
+                    carried.update(r[0] for r in block[:n])
+                    break
     return carried
 
 
@@ -275,7 +286,7 @@ def host_expected(rows, group, markers, strip, scored=None):
     _header, prefixes = markers
     per_segment, first, plain, merged = Counter(), {}, set(), set()
     merged_rows, earlier_texts = defaultdict(list), defaultdict(list)  # for the hand-check detectors only
-    carried = in_place_carried_ids(rows, strip)
+    carried = in_place_carried_ids(rows, strip, prefixes)
     for row in rows:
         rid, sid, role, content, calls, call_id, summary, ts, tool_name, displayed = row[:10]
         if summary or not displayed or rid in carried:

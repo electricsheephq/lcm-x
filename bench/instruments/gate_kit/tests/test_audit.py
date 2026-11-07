@@ -66,10 +66,10 @@ class Home:
                             (sid, source, parent, started[0] if started else 1000.0 + i, ended, reason))
             for n, (sid, m) in enumerate(host):
                 con.execute("insert into messages (session_id, role, content, tool_call_id, tool_calls, timestamp,"
-                            " active, compacted) values (?,?,?,?,?,?,?,?)",
+                            " active, compacted, _compressed_summary) values (?,?,?,?,?,?,?,?,?)",
                             (sid, m["role"], m.get("content"), m.get("tool_call_id"),
                              json.dumps(m["tool_calls"]) if m.get("tool_calls") else None, m.get("_ts", 2000.0 + n),
-                             m.get("_active", 1), m.get("_compacted", 0)))
+                             m.get("_active", 1), m.get("_compacted", 0), m.get("_compressed_summary", 0)))
         store = MessageStore(self.lcm)
         self.ids = [store.append(sid, {k: v for k, v in m.items() if not k.startswith("_")}
                                  | ({"timestamp": 1700000000.0 + n} if n in stamps else {})
@@ -226,7 +226,8 @@ def test_in_place_archived_tail_copies_ignore_stamps_but_keep_resend(tmp_path, l
         stored = original + resend[1:]
     elif lose == "original":
         stored = original[:3] + original[4:] + resend  # lose the tool call, not just its copied rendering
-    out = Home(tmp_path, ONE, archived + carried + resend, stored=stored).run()
+    boundary = [("S1", dict(a("host summary"), _compressed_summary=1))]
+    out = Home(tmp_path, ONE, archived + boundary + carried + resend, stored=stored).run()
     totals = out["parity"]["totals"]
     assert totals["expected_rows"] == len(original) + len(resend)
     assert totals["missing_rows"] == int(lose is not None)
@@ -238,9 +239,79 @@ def test_in_place_unmatched_user_ends_carry_block(tmp_path):
     archived = [("S1", dict(u("repeat"), _active=0, _compacted=1, _ts=3000.0))]
     # No carried tail here: a new user turn ends the insertion block. A later repeat is a real occurrence.
     live = [("S1", u("new turn")), ("S1", dict(u("repeat"), _ts=4000.0))]
-    out = Home(tmp_path, ONE, archived + live, stored=archived + live[:1]).run()
+    boundary = [("S1", dict(a("host summary"), _compressed_summary=1))]
+    out = Home(tmp_path, ONE, archived + boundary + live, stored=archived + live[:1]).run()
     assert out["parity"]["totals"]["expected_rows"] == 3
     assert out["parity"]["totals"]["missing_rows"] == 1
+
+
+def repeated_in_place():
+    """Two summary boundaries; the first carried block was archived by the second compaction."""
+    original = turn(0) + [("S1", dict(m, _ts=3000.0 + i)) for i, m in enumerate(
+        [u("retained question"), call("carried-call"), result("carried-call"), a("retained answer")])]
+    later = turn(2)
+    def archive(batch):
+        return [(s, dict(m, _active=0, _compacted=1)) for s, m in batch]
+
+    first = [(s, dict(m, _ts=m["_ts"] if i % 2 == 0 else 4000.0 + i))
+             for i, (s, m) in enumerate(original[2:])]
+    first[1][1]["content"] = f"{S} first carried rendering"
+    second = [(s, dict(m, _ts=5000.0 + i)) for i, (s, m) in enumerate(original + later)]
+    second[3][1]["content"] = f"{S} second carried rendering"
+    boundary = [("S1", dict(a("host summary"), _compressed_summary=1))]
+    host = (archive(original) + archive(boundary) + archive(first) + archive(later) + boundary + second)
+    return host, original + later
+
+
+@pytest.mark.parametrize("lose", [False, True], ids=["kept", "missing-original"])
+def test_in_place_multiple_compactions_deduplicate_archived_copies(tmp_path, lose):
+    host, original = repeated_in_place()
+    # Dropping a real tool call must remain visible even when both host carry blocks hold it.
+    stored = original[:3] + original[4:] if lose else original
+    out = Home(tmp_path, ONE, host, stored=stored).run()
+    totals = out["parity"]["totals"]
+    assert totals["expected_rows"] == len(original)
+    assert totals["missing_rows"] == int(lose)
+    assert totals["surplus_rows"] == 0
+    assert S not in json.dumps(out)
+
+
+@pytest.mark.parametrize("kind", ["merged", "pure", "prefix", "blank"])
+def test_in_place_carrier_at_block_start_does_not_stop_matching(tmp_path, kind):
+    original = turn(1)
+    archived = [(s, dict(m, _active=0, _compacted=1)) for s, m in original]
+    text = {"merged": CARRIER + "\n\n" + u("question 1")["content"], "pure": CARRIER,
+            "prefix": audit.plugin_tree.carrier_markers(REPO)[1][0] + S, "blank": "  "}[kind]
+    boundary = [("S1", dict(a("host summary"), _compressed_summary=1))]
+    host = archived + boundary + [("S1", {"role": "user", "content": text})] + original
+    out = Home(tmp_path, ONE, host, stored=original, nodes=NODE).run()
+    totals = out["parity"]["totals"]
+    assert totals["expected_rows"] == 2
+    assert totals["missing_rows"] == totals["surplus_rows"] == 0
+
+
+@pytest.mark.parametrize("stamp", [3000.0, 6000.0], ids=["same-stamp", "new-stamp"])
+def test_in_place_resend_after_second_block_still_counts(tmp_path, stamp):
+    host, original = repeated_in_place()
+    resend = ("S1", dict(u("retained question"), _ts=stamp))
+    out = Home(tmp_path, ONE, host + [resend], stored=original).run()
+    totals = out["parity"]["totals"]
+    assert totals["expected_rows"] == len(original) + 1
+    assert totals["missing_rows"] == 1
+    assert totals["surplus_rows"] == 0
+
+
+@pytest.mark.parametrize("signal", ["no-boundary", "no-compacted-column"])
+def test_in_place_requires_boundary_and_compacted_evidence(tmp_path, signal):
+    original = [("S1", dict(u("repeat"), _active=0, _compacted=1))]
+    boundary = [] if signal == "no-boundary" else [("S1", dict(a("host summary"), _compressed_summary=1))]
+    home = Home(tmp_path, ONE, original + boundary + [("S1", u("repeat"))], stored=original)
+    if signal == "no-compacted-column":
+        with sqlite3.connect(home.state) as con:
+            con.execute("alter table messages drop column compacted")
+    totals = home.run()["parity"]["totals"]
+    assert totals["expected_rows"] == 2
+    assert totals["missing_rows"] == 1
 
 
 ROTATED = {"P": ("cli", None, 1000.5, "compression", 100.0), "P2": ("cli", "P", 3000.0, "user_exit", 1001.0)}
