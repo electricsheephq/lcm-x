@@ -401,6 +401,17 @@ def test_a_second_stop_never_signals(fake_gateway, monkeypatch):
     assert signals == []
 
 
+def test_a_gateway_that_exits_by_itself_is_never_signalled_later(fake_gateway, monkeypatch):
+    fake_gateway.process = subprocess.Popen([sys.executable, "-c", "raise SystemExit(7)"], start_new_session=True)
+    deadline = time.monotonic() + 10
+    while fake_gateway.pids() and time.monotonic() < deadline:  # pids() is the poll that reaps the exited gateway.
+        time.sleep(0.02)
+    signals = []  # Reaped: its pid and group id are free, so stop() must send nothing.
+    monkeypatch.setattr(g.os, "killpg", lambda pid, sig: signals.append(sig))
+    assert fake_gateway.stop(0.01) == 7
+    assert signals == []
+
+
 @pytest.mark.parametrize("value, passed", [("voyage", False), ("openai", False), ("fastembed", True), ("", True)])
 def test_build_env_drops_a_remote_recall_provider(tmp_path, value, passed):
     env, declaration = g.build_env({"LCM_PROACTIVE_RECALL_PROVIDER": value}, home=tmp_path, provider_url=URL,

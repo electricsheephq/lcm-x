@@ -190,7 +190,7 @@ class Gateway:
             return json.load(response)
 
     def start(self, timeout):
-        if self.process and self.process.poll() is None:
+        if self.process and not self._exited():
             raise RuntimeError("gateway already running")
         if not self.home.resolve().is_relative_to(self.run_dir.resolve()) or not self.port_file.resolve().is_relative_to(self.run_dir.resolve()):
             raise ValueError("gateway home and port file must be inside run_dir")
@@ -207,7 +207,7 @@ class Gateway:
                                             stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
         self.exit_code = None  # A new gateway: the next stop() must signal it.
         deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline and self.process.poll() is None:
+        while time.monotonic() < deadline and not self._exited():
             try:
                 if self.port_file.stat().st_mtime_ns != previous:
                     self.port = int(self.port_file.read_text())
@@ -232,6 +232,15 @@ class Gateway:
         except ProcessLookupError:
             return False
 
+    def _exited(self):
+        """True once the gateway has exited. The poll that reaps it also kills its group and records the exit, so no
+        later stop() signals a group id that is then free for reuse (pids are handed out in sequence, so the id cannot
+        come back between the reap and this signal)."""
+        if self.exit_code is None and self.process.poll() is not None:
+            self._signal_group(signal.SIGKILL)  # Descendants still pin the group id; none of them outlives the gateway.
+            self.exit_code = self.process.returncode
+        return self.process.returncode is not None
+
     def stop(self, timeout=10):
         # Signal only on the first stop. The group SIGKILL follows at once, so a child that ignored SIGTERM still pins
         # the group id; once the exit is recorded, a later stop sends nothing to an id that may now be reused.
@@ -246,7 +255,7 @@ class Gateway:
         return self.exit_code
 
     def pids(self):
-        if not self.process or self.process.poll() is not None:
+        if not self.process or self._exited():
             return []
         rows = subprocess.check_output(["ps", "-A", "-o", "pid=,ppid="], text=True)
         pairs, found = [tuple(map(int, line.split())) for line in rows.splitlines()], {self.process.pid}
