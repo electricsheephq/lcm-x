@@ -18,7 +18,7 @@ import threading
 import time
 import uuid
 from bisect import bisect_left, bisect_right
-from collections import Counter, deque
+from collections import Counter, defaultdict, deque
 from contextlib import contextmanager
 from datetime import datetime
 from functools import lru_cache
@@ -7000,7 +7000,7 @@ class LCMEngine(
 
     def _rotation_restamp_metadata(self, messages):
         """#2378: a predecessor snapshot supplies doubt, never permission to skip."""
-        predecessors = self._rotation_predecessor_session_ids(str(self._session_id))
+        predecessors = self._rotation_predecessor_session_ids(str(self._session_id), max_hops=1)
         if not predecessors:
             return {}, False
         session = predecessors[0]
@@ -7024,12 +7024,57 @@ class LCMEngine(
                 pending.append((idx, digest))
             else:
                 used.add(position)
+        if not pending:
+            return result, False
+        # #2390: identity-equal occurrences can differ in content (a model-switch note, a todo
+        # fold), and the host may reorder carried rows. Content decides a digest group only when
+        # EVERY pending row has its own occurrence of exactly equal stored content (a full
+        # matching), and only through an occurrence whose stamp holds one stored content. A
+        # partial content match can be a coincidence of a host rewrite, so any other group keeps
+        # the ordered first fit.
+        stamps = [row["timestamp"] for row in target if row.get("timestamp") is not None]
+        stored = defaultdict(set)
+        for row in self._store.find_rows_by_observed_at(self._conversation_id, [session], stamps):
+            if row.get("session_id") == session:
+                content = row.get("content")  # non-text content never decides a pairing
+                stored[(row.get("observed_at"), row.get("role"))].add(content if isinstance(content, str) else object())
+        groups = defaultdict(list)
         for idx, digest in pending:
-            position = next((pos for pos, row in enumerate(target) if pos not in used
-                             and row["identity_sha256"] == digest), None)
-            if position is not None:
-                used.add(position)
-                result[idx] = (session, target[position])
+            groups[digest].append(idx)
+        for digest, rows in groups.items():
+            free = [pos for pos, row in enumerate(target) if pos not in used and row["identity_sha256"] == digest]
+            exact = {idx: [pos for pos in free if isinstance(messages[idx].get("content"), str)
+                           and stored.get((target[pos].get("timestamp"), messages[idx].get("role"))) == {
+                               messages[idx].get("content")}] for idx in rows}
+            # A position holds one stored content, so rows of equal content share their candidates
+            # and rows of different content never compete: the exact matching, when it covers every
+            # row, pairs each content's rows with its positions in order (identical copies never swap).
+            # The host's own retained message_uid names the occurrence outright: pair it first,
+            # but only a uid that names exactly one pending row and exactly one free occurrence.
+            uids = {idx: self._host_occurrence_metadata(messages[idx])["message_uid"] for idx in rows}
+            row_uses, pos_uses = Counter(uid for uid in uids.values() if uid), Counter(
+                target[pos].get("message_uid") for pos in free if target[pos].get("message_uid"))
+            by_uid = {}
+            for idx, uid in uids.items():
+                if uid and row_uses[uid] == 1 and pos_uses[uid] == 1:
+                    by_uid[idx] = next(pos for pos in free if target[pos].get("message_uid") == uid)
+            for idx, pos in by_uid.items():
+                used.add(pos)
+                result[idx] = (session, target[pos])
+            rows = [idx for idx in rows if idx not in by_uid]
+            free = [pos for pos in free if pos not in by_uid.values()]
+            exact = {idx: [pos for pos in exact[idx] if pos in free] for idx in rows}
+            pairs, by_content = dict(zip(rows, free)), defaultdict(list)  # default: the ordered first fit
+            for idx in rows:
+                content = messages[idx].get("content")
+                by_content[(messages[idx].get("role"), content if isinstance(content, str) else idx)].append(idx)
+            if not all(pos in exact[idx] for idx, pos in pairs.items()) and all(
+                    len(exact[members[0]]) >= len(members) for members in by_content.values()):
+                pairs = {idx: pos for members in by_content.values()
+                         for idx, pos in zip(members, exact[members[0]])}
+            for idx, pos in pairs.items():
+                used.add(pos)
+                result[idx] = (session, target[pos])
         return result, False
 
     def _link_restamped_occurrences(self, messages, stored_at, previous, recovery_fallback):
@@ -7062,7 +7107,8 @@ class LCMEngine(
                         matches = [target for target in targets
                                    if target["session_id"] == session and target["observed_at"] == row["timestamp"]
                                    and target["store_id"] < sid
-                                   and self._message_replay_identity(target, stored_row=True) == identity]
+                                   and _proof_user_identity(self._message_replay_identity(
+                                       target, stored_row=True)) == _proof_user_identity(identity)]
                         if len(matches) > 1:
                             # The host's volatile scaffolding (todo fold, model-switch note) is the
                             # replay itself; exact content only breaks a tie between equal identities.
@@ -8138,6 +8184,7 @@ class LCMEngine(
                 restamp_metadata, recovery_fallback = self._rotation_restamp_metadata(messages)
             except Exception:
                 logger.debug("LCM predecessor occurrence metadata load failed", exc_info=True)
+                restamp_metadata, recovery_fallback = {}, True  # degrade to the #1523 durable recovery
         new_prefix_occurrences = set()
         unchanged_prefix_occurrences = set()
         proven_cursor = 0  # Full matched prefix, before new occurrences rewind the cursor.
