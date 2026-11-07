@@ -976,6 +976,8 @@ class DelegateChildMixin:
             return messages
         try:
             with _DELEGATE_STORE_LOCK:
+                # An earlier compaction's outputs never exempt a row once this one has replaced the view.
+                _DELEGATE_COMPACTION_OUTPUTS.pop(self._delegate_child_key(session_id), None)
                 if self._delegate_child_link(session_id, platform=_DELEGATE_SOURCE, require_agent=True):
                     try:  # recorded apart from the boundary: it must survive a failed or dropped boundary
                         self._remember_delegate_child_outputs(session_id, messages, result)

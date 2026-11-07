@@ -157,3 +157,28 @@ def test_after_a_restart_the_compacted_head_is_stored_once_and_x_once(host, monk
     assert _send_x_then_a_repeat(ctx2, resumed, child, result) == 1
     assert [row["content"] for row in child_rows(resumed)] == [
         *(row["content"] for row in stored), COMPACTED[0]["content"], X["content"], stored[-1]["content"]]
+
+
+def test_a_failed_output_record_drops_the_earlier_compactions_outputs(host, monkeypatch):  # noqa: F811
+    """A second compaction whose output and boundary records both fail must not leave the first compaction's head
+    exempt: that head, sent again as a new row, is stored."""
+    ctx, aux, engine, child, stored = _child(host)
+    first, second = [{"role": "user", "content": "first compacted head"}], [{"role": "user", "content": "second head"}]
+    monkeypatch.setattr(engine, "_compress_bypassed", lambda *args: first)
+    if child.compress(engine, stored) != first or not aux._DELEGATE_COMPACTION_OUTPUTS.get(engine._delegate_child_key("child")):
+        pytest.fail("setup: the first compaction's outputs were not recorded")
+    for name in ("_remember_delegate_child_outputs", "_remember_delegate_child_boundary"):
+        fail, _calls = _once(getattr(engine, name), RuntimeError(f"synthetic {name} failure"))
+        monkeypatch.setattr(engine, name, fail)
+    monkeypatch.setattr(engine, "_compress_bypassed", lambda *args: second)
+    later = {"role": "assistant", "content": "a row after the first compaction"}
+    result = child.compress(engine, [*first, later])  # the pre-store resumes after the first head: it stays unstored
+    rows = [row["content"] for row in child_rows(engine)]
+    if result != second or engine._delegate_child_key("child") in aux._DELEGATE_RESUME_BOUNDARIES or \
+            rows.count(first[0]["content"]) or rows[-1] != later["content"]:
+        pytest.fail("setup: the second compaction did not run without a boundary over an unstored first head")
+    after = [{"role": "assistant" if i % 2 else "user", "content": f"after the second compaction {i}"} for i in range(3)]
+    child.turn(ctx, [*second, *after], engine)  # stored: the anchor below can cover the second head and these rows
+    for _ in range(2):
+        child.turn(ctx, [*second, *first, *after], engine)
+    assert [row["content"] for row in child_rows(engine)].count(first[0]["content"]) == 1
