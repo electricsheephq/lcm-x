@@ -4,6 +4,7 @@ from copy import deepcopy
 
 import pytest
 
+from hermes_lcm.message_content import normalize_content_value
 from hermes_lcm.reconcile import _PRESERVED_TODO_CONTEXT_PREFIX
 from tests.invariants.test_issue_2378_restamp_link import (
     T, T_COMMIT, T_REQ, all_rows, build as build, history, replay_links,
@@ -85,19 +86,23 @@ def test_625_todo_prompt_composite_with_stamp_transfer_copy_is_replay(build):
 
 
 @pytest.mark.parametrize("cold", [False, True], ids=["warm", "cold"])
-@pytest.mark.parametrize("host_form", ["trimmed", "raw"])
+@pytest.mark.parametrize("host_form", ["trimmed", "raw", "structured"])
 def test_retained_prompt_vetoes_a_genuine_repeat(build, cold, host_form):
-    """The host still shows the transferred prompt at its old stamp (trimmed, or byte-equal as the control), and the
-    user then really repeats it at a new stamp: that repeat is a new occurrence, never linked to the old copy."""
+    """The host still shows the transferred prompt at its old stamp (trimmed, byte-equal as the control, or as
+    structured content parts), and the user then really repeats it at a new stamp: that repeat is a new occurrence,
+    never linked to the old copy."""
+    first = [{"type": "text", "text": P}] if host_form == "structured" else P + "\n"
+    again = deepcopy(first) if host_form == "structured" else P
     engine = build()
     before = history(False) + [{"role": "user", "content": T, "timestamp": T_REQ}]
     engine.ingest(deepcopy(before))
     view = engine.compress(deepcopy(before), force=True)
     assert engine._last_compression_status == "compacted"
     view += [{"role": "assistant", "content": "compress finished", "timestamp": T_REQ + 1},
-             {"role": "user", "content": P + "\n", "timestamp": T_REQ}]
+             {"role": "user", "content": deepcopy(first), "timestamp": T_REQ}]
     engine.ingest(deepcopy(view))
-    old = [row["store_id"] for row in all_rows(engine) if row["content"].strip() == P]
+    old = [row["store_id"] for row in all_rows(engine)
+           if row["content"].strip() == normalize_content_value(first).strip()]
     assert len(old) == 1
     engine.on_session_end("S", deepcopy(view))
     if cold:
@@ -108,11 +113,12 @@ def test_retained_prompt_vetoes_a_genuine_repeat(build, cold, host_form):
     if host_form == "trimmed":
         next(row for row in view if row.get("content") == P + "\n")["content"] = P
     next(row for row in view if row.get("content") == T)["timestamp"] = T_COMMIT - 1
-    view += [{"role": "user", "content": P, "timestamp": T_COMMIT},
+    view += [{"role": "user", "content": again, "timestamp": T_COMMIT},
              {"role": "user", "content": NEW, "timestamp": T_COMMIT + 10}]
     engine.ingest(deepcopy(view))
     rows, links = all_rows(engine), replay_links(engine)
-    repeat = [row["store_id"] for row in rows if row["content"] == P and row["observed_at"] == T_COMMIT]
+    repeat = [row["store_id"] for row in rows
+              if row["content"] == normalize_content_value(again) and row["observed_at"] == T_COMMIT]
     evidence = {"old": old, "repeat": repeat, "relations": sorted(links)}
     assert sum(row["content"] == NEW for row in rows) == 1, evidence
     assert len(repeat) == 1, evidence
