@@ -216,7 +216,9 @@ def test_the_rule_fingerprint_freezes_every_pinned_file(tmp_path, monkeypatch):
 def test_a_turn_counts_only_when_it_completed_successfully(tmp_path, result, done):
     import threading
     from types import SimpleNamespace
-    ctx = {"provider": SimpleNamespace(lock=threading.Lock(), step=None), "chats": {"L": "chat-l"},
+    from collections import Counter
+    ctx = {"provider": SimpleNamespace(lock=threading.Lock(), step=None, stats={"calls_per_step": Counter({"e0-L-0": 1})}),
+           "chats": {"L": "chat-l"},
            "gateway": SimpleNamespace(turn=lambda chat, step, text: result)}
     assert r.LocalHost({}, tmp_path).turn(ctx, {"id": "e0-L-0", "conversation": "L", "user_text": "x"}) is done
 
