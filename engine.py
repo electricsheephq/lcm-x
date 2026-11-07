@@ -7207,8 +7207,13 @@ class LCMEngine(
             after_commit.append(count)
         return sources, targets
 
-    def _link_restamped_occurrences(self, messages, stored_at, previous, recovery_fallback, allocation=None):
-        """Annotate only rows already stored, in the ingest owner's transaction."""
+    def _link_restamped_occurrences(self, messages, stored_at, previous, recovery_fallback, allocation=None,
+                                    tool_sources=()):
+        """Annotate only rows already stored, in the ingest owner's transaction.
+
+        ``tool_sources`` are rows the tool writer linked in this batch. Main's loop below would have
+        linked them, so they still record their carried stamp for the transfer, with no second link.
+        """
         previous = {idx: row for idx, row in previous.items() if stored_at.get(idx)}
         if not previous and not recovery_fallback:
             return
@@ -7222,8 +7227,11 @@ class LCMEngine(
                               if row.get("timestamp") is not None]
                     targets = self._store.find_rows_by_observed_at(self._conversation_id, sorted(sessions), stamps)
                     current = self._store.get_batch([sid for idx, sid in stored_at.items() if idx in previous and sid])
-                    used = {row["related_store_id"] for row in self._store.get_message_relations(
-                        [row["store_id"] for row in targets], "possible_replay_of", related=True)}
+                    incoming = self._store.get_message_relations(
+                        [row["store_id"] for row in targets], "possible_replay_of", related=True)
+                    used = {row["related_store_id"] for row in incoming}
+                    # The targets main's loop sees: links main writes too, then its own (not this batch's tool links).
+                    main_used = {row["related_store_id"] for row in incoming if row["store_id"] not in tool_sources}
                     linked = {row["store_id"] for kind in ("possible_replay_of", "link_pending")
                               for row in self._store.get_message_relations(list(current), kind)}
                     used.update(allocated_targets)
@@ -7238,7 +7246,8 @@ class LCMEngine(
 
                     for idx, (session, row) in sorted(previous.items()):
                         sid = stored_at.get(idx)
-                        if not sid or sid not in current or sid in linked:
+                        carrier = sid in tool_sources
+                        if not sid or sid not in current or (sid in linked and not carrier):
                             continue
                         stamp = self._host_occurrence_metadata(messages[idx])["timestamp"]
                         if stamp is None or row.get("timestamp") is None or stamp == row["timestamp"]:
@@ -7256,8 +7265,11 @@ class LCMEngine(
                             unloaded = [s for s in predecessors if s not in sessions]  # rows already fetched stay
                             if unloaded:
                                 more = self._store.find_rows_by_observed_at(self._conversation_id, unloaded, stamps)
-                                used |= {relation["related_store_id"] for relation in self._store.get_message_relations(
-                                    [target["store_id"] for target in more], "possible_replay_of", related=True)}
+                                incoming = self._store.get_message_relations(
+                                    [target["store_id"] for target in more], "possible_replay_of", related=True)
+                                used |= {relation["related_store_id"] for relation in incoming}
+                                main_used |= {relation["related_store_id"] for relation in incoming
+                                              if relation["store_id"] not in tool_sources}
                                 targets = [*targets, *more]
                         for tier in [s for s in predecessors if s not in tiers] if not matches else ():
                             matches = matches or same_occurrence(tier, row["timestamp"], identity, sid)
@@ -7271,10 +7283,16 @@ class LCMEngine(
                         if len(candidates) != 1:
                             continue
                         target = candidates.pop()
+                        if carrier:
+                            if target not in main_used:  # main would link it here: keep its stamp, no link
+                                main_used.add(target)
+                                linked_stamps.add(row["timestamp"])
+                            continue
                         if target in used:
                             continue
                         self._store.add_message_relations([[(sid, "possible_replay_of", target, None, None)]])
                         used.add(target)
+                        main_used.add(target)
                         linked.add(sid)
                         allocated_targets.add(target)
                         allocated_sources.add(sid)
@@ -8963,7 +8981,9 @@ class LCMEngine(
                     messages_to_store_with_index, protected_messages, store_ids)
                 if (kind := self._ingest_precomputed_marker(idx, protected, (prepared or {}).get("view_only"))
                     or self._ingest_precomputed_marker(idx, msg, (prepared or {}).get("view_only"))) is not None}
-        self._link_restamped_occurrences(messages, stored_at, restamp_metadata, recovery_fallback, link_allocation)
+        tool_sources = {store_ids[pos] for pos, _target in tool_link_plan or ()}
+        self._link_restamped_occurrences(messages, stored_at, restamp_metadata, recovery_fallback, link_allocation,
+                                         tool_sources)
         if anchor_plan is not None:
             try:
                 with self._ingest_evidence():
