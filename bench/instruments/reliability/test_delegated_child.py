@@ -27,7 +27,7 @@ def chat(sid_of=lambda t: "S0"):
     return events, list(zip(tagged, sids))
 
 
-def make(tmp_path, *, child_rows=(("user", GOAL), ("assistant", REPLY)), child_sid="C1", sessions=None, link=True,
+def make(tmp_path, *, child_rows=(("user", GOAL), ("assistant", REPLY)), child_sid="C1", sessions=None, link="S0",
          events=None, extra=(), sid_of=lambda t: "S0"):
     parent_events, parent = chat(sid_of)
     rows = parent + [(r, child_sid) for r in child_rows] + list(extra)
@@ -49,7 +49,7 @@ def make(tmp_path, *, child_rows=(("user", GOAL), ("assistant", REPLY)), child_s
     if link:
         con.execute("create table session_lineage (child_session_id text primary key, parent_session_id text not null,"
                     " child_subagent_id text, parent_subagent_id text, child_role text, source text not null, created_at real)")
-        con.execute("insert into session_lineage values ('C1', 'S0', 'sa-0', NULL, 'leaf', 'subagent_start', 1.0)")
+        con.execute("insert into session_lineage values ('C1', ?, 'sa-0', NULL, 'leaf', 'subagent_start', 1.0)", (link,))
     con.commit()
     con.close()
     comp = [{"phase": "A", "turn": i + 1, "event": "compaction", "compression_status": "compacted", "depth0_nodes": i + 1}
@@ -104,8 +104,9 @@ def test_a_parent_row_copied_into_the_child_fails(tmp_path):
     assert out["numbers"]["B10"]["child_rows_outside_child_lineages"] == 0
 
 
-def test_a_missing_or_wrong_parent_link_fails(tmp_path):
-    out = make(tmp_path, link=False)
+@pytest.mark.parametrize("link", [None, "S9"], ids=["missing", "wrong-parent"])
+def test_a_missing_or_wrong_parent_link_fails(tmp_path, link):
+    out = make(tmp_path, link=link)
     assert out["verdict"] == "FAIL" and out["failed_bars"]["B10"]["children_without_parent_link"] == ["C1"]
     assert set(out["failed_bars"]) == {"B10"}
 
@@ -132,12 +133,17 @@ def test_a_child_compression_continuation_joins_the_child():
     assert [delegated.is_child_root(s, sessions) for s in ("S0", "C1", "C1b")] == [False, True, False]
 
 
-@pytest.mark.parametrize("drop", ["all", "turn_end", "failed"])
+@pytest.mark.parametrize("drop", ["all", "turn_end", "cancelled"])
 def test_a_child_that_never_ran_or_completed_is_unsupported(tmp_path, drop):
     events = [] if drop == "all" else CHILD_EVENTS[:2] if drop == "turn_end" else \
-        CHILD_EVENTS[:2] + [dict(CHILD_EVENTS[2], failed=True)]
+        CHILD_EVENTS[:2] + [dict(CHILD_EVENTS[2], kind="cancel")]
     out = make(tmp_path, events=events)
     assert out["verdict"] == "UNSUPPORTED" and "B10: D02" in out["reason"]
+
+
+def test_a_child_that_started_and_failed_fails(tmp_path):
+    out = make(tmp_path, events=CHILD_EVENTS[:2] + [dict(CHILD_EVENTS[2], failed=True)])
+    assert out["verdict"] == "FAIL" and out["failed_bars"]["B10"]["children_failed"] == ["D02"]
 
 
 def test_a_child_the_host_did_not_record_as_a_subagent_is_unsupported(tmp_path):

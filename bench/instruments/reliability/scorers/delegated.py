@@ -84,9 +84,14 @@ def score(cell: dict, events: list[dict], atts: list[dict], per: dict, full: lis
     issued = [m.group(1) for e in events if e["event"] == "tool_issue" and e.get("name") == "delegate_task"
               for m in [re.search(CHILD_TAG, str((e.get("args") or {}).get("goal", "")))] if m]
     gaps = [] if len(issued) == planned else [f"B10: {planned} delegates scripted, {len(issued)} issued"]
+    failed = {}
     for ctag in issued:
         ran = [a for a in kids if a["tag"] == ctag and tool_calls.completed(a) and a.get("session")]
-        if not ran:
+        # A child that started and ended failed is a FAIL (it may be LCM-X failing inside the child); one that never
+        # started, never ended or was cancelled leaves the scenario unproven.
+        if not ran and any(a["tag"] == ctag and a["ended"] and (a.get("end") or {}).get("failed") for a in kids):
+            failed.setdefault("children_failed", []).append(ctag)
+        elif not ran:
             gaps.append(f"B10: {ctag}: the host never ran or completed the delegated child")
         gaps += [f"B10: {ctag}: host session {a['session']} is not a subagent child in state.db"
                  for a in ran if a["session"] not in roots]
@@ -94,7 +99,6 @@ def score(cell: dict, events: list[dict], atts: list[dict], per: dict, full: lis
     child_lineages = {group(sid) for sid in roots}
     stored = Counter(group(r[1]) for r in full)
     numbers = {"scripted": planned, "issued": len(issued), "host_children": len(roots), "children": {}}
-    failed = {}
     if len(roots) != len(issued):
         failed["child_count_mismatch"] = {"issued": len(issued), "host_children": len(roots)}
     for sid, parent in sorted(roots.items()):
