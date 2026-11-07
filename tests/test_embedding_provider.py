@@ -10,7 +10,7 @@ import pytest
 
 import hermes_lcm.command as command_mod
 import hermes_lcm.embedding_provider as provider_mod
-from tests.timing_helpers import deadline_block, returns_while_blocked
+from tests.timing_helpers import deadline_block
 
 from hermes_lcm.command import handle_lcm_command
 from hermes_lcm.config import LCMConfig
@@ -1228,8 +1228,6 @@ def test_fastembed_normal_operation_is_deadline_bounded(monkeypatch, tmp_path, l
 
 def test_fastembed_timeout_capacity_is_bounded_until_worker_exits(monkeypatch, tmp_path):
     calls = 0
-    worker_started = threading.Event()
-    release_worker = threading.Event()
 
     class SlowFastembedModel:
         def __init__(self, **_kwargs):
@@ -1238,8 +1236,7 @@ def test_fastembed_timeout_capacity_is_bounded_until_worker_exits(monkeypatch, t
         def query_embed(self, texts):
             nonlocal calls
             calls += 1
-            worker_started.set()
-            release_worker.wait()
+            block()
             return ([1.0, 0.0] for _ in texts)
 
     monkeypatch.setattr(provider_mod, "_load_fastembed", lambda: SlowFastembedModel)
@@ -1255,23 +1252,22 @@ def test_fastembed_timeout_capacity_is_bounded_until_worker_exits(monkeypatch, t
 
     def bounded_acquire(blocking=True, timeout=None):
         capacity_timeouts.append(timeout)
-        assert timeout is not None and 0 < timeout <= 0.01, "capacity acquisition must use the request budget"
+        # 1e-9: the logical clock subtracts larger floats (1.02 - 1.01) than the real clock does.
+        assert timeout is not None and 0 < timeout <= 0.01 + 1e-9, "capacity acquisition must use the request budget"
         return original_acquire(blocking=blocking, timeout=timeout)
 
     monkeypatch.setattr(slots, "acquire", bounded_acquire)
-    try:
+    # A logical clock expires the first call only after its worker has reached the encoder and holds the
+    # slot; with the real 10 ms deadline a loaded runner could start the worker late, and the worker's
+    # pre-dispatch deadline check would then skip the encode and free the slot (the latency twin below
+    # keeps the real clock).
+    with deadline_block(monkeypatch, "lcm-fastembed-embedding", 0.01, False) as block:
         with pytest.raises(EmbeddingProviderError, match="deadline exceeded"):
             first.embed_query("slow")
-        assert worker_started.is_set()
-        def rejected_call():
-            with pytest.raises(EmbeddingProviderError, match="worker capacity exhausted"):
-                second.embed_query("must-not-start")
-
-        returns_while_blocked(rejected_call, release_worker)
+        with pytest.raises(EmbeddingProviderError, match="worker capacity exhausted"):
+            second.embed_query("must-not-start")
         assert len(capacity_timeouts) == 2
         assert calls == 1
-    finally:
-        release_worker.set()
 
 
 @pytest.mark.latency

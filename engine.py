@@ -704,6 +704,10 @@ def _lazy_storage_property(name: str) -> property:
     return property(get, set_)
 
 
+
+class _EvidenceFaultRetry(Exception):
+    """#1815: a classification-evidence fault on the first attempt; roll back and classify again once."""
+
 class LCMEngine(
     CompactionMixin,
     ResetStateMixin,
@@ -7046,8 +7050,10 @@ class LCMEngine(
                 lock_hold_ms=0.0, rows_written=0, bytes_written=0, busy_snapshot_retry=False,
                 ledger_digest_ms=0.0, ledger_ms=0.0)
             ledger_prepared = self._prepare_ingest_ledger(messages, attribution)
-            admission_retry = False
-            for attempt in range(2):
+            admission_retry = busy_retried = False
+            # One busy retry, plus one #1815 evidence-fault retry that only the first attempt can take.
+            for attempt in range(3):
+                self._ingest_attempt_index = attempt
                 # Keep the published frontier untouched until COMMIT. Helpers read
                 # and write the attempt-local holder through the legacy properties.
                 pending = copy.copy(self._frontier)
@@ -7134,8 +7140,11 @@ class LCMEngine(
                         maintenance_scheduler._PENDING_TAIL_ENGINES.discard(self)
                     attribution.update(rows_written=0, bytes_written=0)
                     rollback_ok = self._store._transaction_owner.rollback_failures == rollback_failures
-                    if rollback_ok and isinstance(exc, Exception) and attempt == 0 and (_is_ingest_busy_error(exc)
+                    if rollback_ok and attempt == 0 and isinstance(exc, _EvidenceFaultRetry):
+                        continue  # #1815: nothing of the faulted attempt is kept; the retry classifies again
+                    if rollback_ok and isinstance(exc, Exception) and not busy_retried and (_is_ingest_busy_error(exc)
                                                                       or held_at is None and isinstance(exc, sqlite3.Error)):
+                        busy_retried = True
                         attribution["busy_snapshot_retry"] = True
                         admission_retry = held_at is None and _is_ingest_busy_error(exc)
                         continue
@@ -7385,7 +7394,11 @@ class LCMEngine(
             lineage = persisted[0] if persisted else ingest_ledger.lineage_key(resolved, sid)
             entries, _stamps = self._ledger_view_entries(salt, returned)
             rows = [dict(output_index=i, descriptor_digest=entries[i].identity_digest,
-                         kind="scaffold" if d["kind"] == "objective" else d["kind"])
+                         kind="scaffold" if d["kind"] == "objective" else d["kind"],
+                         recovery_source=next(((str(sid), (self._conversation_id or "").strip(),
+                                                r.get("source_stamp"), r.get("max_store_id")) for r in
+                             getattr(self, "_identity_anchor_recoveries", ())
+                             if d["kind"] == "recovery" and r["row"] is returned[i] and not r.get("blocked")), None))
                     for i, d in zip(indices, fresh)]
             conversation_key = self._hold_conversation_key()
             payload = dict(session_id=sid, rows=rows, indices=indices, entries=list(entries),
@@ -7698,7 +7711,10 @@ class LCMEngine(
                                     candidates = index.get((conv, role, stripped if strip else content, call_id, calls, name), ())
                                     if candidates:
                                         candidate_ids.add(sid)
-                                    if stripped is None and (strip or not call_id and not calls):
+                                    # #588: a reasoning-only row is evidence only in the exact pass, on a byte-exact key
+                                    # with non-blank content; an empty or whitespace-only row never is.
+                                    exact_reasoning = not strip and bool(str(content or "").strip())
+                                    if stripped is None and not exact_reasoning and (strip or not call_id and not calls):
                                         continue
                                     # The oldest unused target that the stamp veto allows: any row for an unstamped
                                     # copy; otherwise an unstamped row or one with the same stamp.
@@ -7726,6 +7742,12 @@ class LCMEngine(
                 lineage = persisted[0] if persisted else attempt["lineage"]
                 if persisted and attempt["resolved"] is not None and lineage != attempt["resolved"]:
                     delta["ledger.lineage_drift"] += 1
+                if (attempt.get("recovery_probe") or getattr(self, "_identity_anchor_durable_recovery_pending", False)
+                        or "recovery" in attempt.get("stored_markers", {}).values()):
+                    pending = self._identity_anchor_link_durable_recovery(attempt, lineage)
+                    if pending is not None:
+                        after_commit.append(lambda pending=pending: setattr(
+                            self, "_identity_anchor_durable_recovery_pending", pending))
                 markers = {idx: kind for idx, kind in attempt.get("stored_markers", {}).items()
                            if idx in attempt["stored"]}
                 flagged = set(markers)
@@ -8289,6 +8311,12 @@ class LCMEngine(
                 self._raise_ingest_busy(exc)
                 read_only = getattr(self, "_ingest_read_only", None) is not None
                 deferred = read_only and str(exc) == "session-end evidence deferred"
+                if (audit_from is not None and not read_only
+                        and self.__dict__.get("_ingest_attempt_index") == 0
+                        and self._store._transaction_owner.owns_connection(self._store._conn)):
+                    # #1815: without the plan, the ordered-prefix path stores messages[cursor:] over a prefix the host
+                    # changed, which re-stores a shifted row. Abort this attempt once; a second fault falls open below.
+                    raise _EvidenceFaultRetry(f"{type(exc).__name__}: {exc}") from exc
                 (logger.debug if deferred else logger.warning)(
                     "LCM identity-anchor pre-match failed (%s); ordered-prefix path only", type(exc).__name__)
                 anchor_plan = None
@@ -8355,6 +8383,8 @@ class LCMEngine(
         if getattr(self, "_ingest_ledger_attempt", None) is not None:
             try:
                 # Freeze this transaction's decision; warm appends can retain an older status.
+                self._ingest_ledger_attempt["recovery_probe"] = (
+                    reconciled_existing_session and bool(bind_session_counts and bind_session_counts[0]))
                 self._ingest_ledger_attempt["cursor0_batch"] = (
                     reconciled_existing_session and cursor == 0
                     and self._last_ingest_reconciliation.get("action") == "persisted batch"

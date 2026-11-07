@@ -11,6 +11,7 @@ import os
 
 BARS = ("B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8", "B9")
 DRAIN_BARS = ("D1", "D2", "D3")  # scorers/drain.py: the host list drains under a hidden backlog (#597, #626)
+CHILD_BARS = ("B10",)  # scorers/delegated.py: delegated children stored under their own ids with a parent link (#1931)
 TRANSPORTS = ("acp", "gateway")
 FAULTS = {"crash_after_compaction_before_reply", "clean_exit_before_turn", "crash_mid_tool_call",
           "crash_after_rotation_before_child_row", "crash_between_session_end_and_start", "cancel_then_retry",
@@ -52,13 +53,15 @@ ISSUES = {
     1505: (("B1", "B2"), "forced-recovery user turn stored twice after the crash and cold restart (since #1328)"),
     1508: (("B1", "B2"), "T34 duplicate after the recovery crash on stamp-only rotation"),
     1506: (("B1", "B2"), "previous-GA composite of T12+T13 kept next to the replayed parts after the restart"),
+    1931: (("B1", "B2", "B10"), "delegated (subagent) children stored once under their own session id with a parent link"),
 }
 # issue -> host-name prefixes on which its bars are declared (absent: every host); ci.gate reads it
 ISSUE_HOSTS = {534: ("ref-", "floor-", "upstream-main"), 1501: ("ref-", "floor-", "upstream-main"),
                1797: ("r34.4-", "r34.10-", "r34.15-"), 1799: ("floor-",), 821: ("r34.4-", "upstream-uid"), 861: ("ref-", "customer-", "r34.4-", "r34.10-", "r34.15-", "upstream-uid"),
                871: ("r34.4-", "r34.10-", "r34.15-"), 1506: ("ref-", "floor-", "upstream-main"), 1508: ("ref-", "floor-", "upstream-main")}
 # issue -> transports on which its bars are declared (absent: every transport); ci.gate reads it
-ISSUE_TRANSPORTS = {1797: ("in-process",), 1798: ("acp-process",), 1799: ("acp-process",), 861: ("acp-process",)}
+ISSUE_TRANSPORTS = {1797: ("in-process",), 1798: ("acp-process",), 1799: ("acp-process",), 861: ("acp-process",),
+                    1931: ("acp-process",)}
 
 
 # #1013 changed the product defaults; a cell sized for the earlier trigger pins the old values here.
@@ -315,6 +318,16 @@ def registry() -> list[dict]:
              doc="os._exit between on_session_end and on_session_start of a rotation (#489). UNSUPPORTED where the "
                  "host's rotation path never calls on_session_end."),
     ]
+    cells += [cell(f"delegated-child/{m}", [1931], in_place=ip, delegate_plan=[{"turns": [5, 17, 29]}],
+                   toolsets=["todo", "context_engine", "file", "delegation"], bars=[*BARS, *CHILD_BARS],
+                   doc="#1931: turns 5, 17 and 29 call delegate_task; each child's goal is its own tagged user row "
+                       "and it answers with a scripted tagged reply. B1/B2 score every child as its own lineage "
+                       "(state.db source 'subagent' with a non-subagent parent) and the chat lineage without them; "
+                       "B10: one host child per scripted delegate, each with stored rows, a session_lineage link to "
+                       "its host parent, no child row in another lineage and no parent row copied into a child. "
+                       "acp-process only (the in-process probe's mocked client does not reach the child's own "
+                       "client); no child run is UNSUPPORTED.")
+              for m, ip in modes()]
     cells += [cell(f"p8-control/{v}", [], in_place=True, bars=["B9"],
                    faults=[] if v == "none" else [{"kind": "p8_inject", "variant": v}],
                    doc="P8 flush positive control; none is the negative control.")
@@ -324,13 +337,14 @@ def registry() -> list[dict]:
 
 def validate(c: dict) -> None:
     assert c["transport"] in TRANSPORTS, c["id"]
-    assert set(c["bars"]) <= set(BARS + DRAIN_BARS + ("C1", "F4")), c["id"]
+    assert set(c["bars"]) <= set(BARS + DRAIN_BARS + CHILD_BARS + ("C1", "F4")), c["id"]
+    assert not set(c["bars"]) & set(CHILD_BARS) or c.get("delegate_plan"), c["id"]
     assert {f["kind"] for f in c["faults"]} <= FAULTS, c["id"]
     assert c["window"] in (32000, 32768, 64000, 128000, 1000000), c["id"]
     assert all(t in ISSUES or t in (483, 494, 519) for t in c["targets"]), c["id"]
     # Native recovery was removed (O2): only a native-on-off cell (an older lcm-x ref with it ON) may set it.
     assert not c["native_recovery"] or c.get("from_ref"), c["id"]
-    for g in c["tool_plan"]:
+    for g in c["tool_plan"] + c.get("delegate_plan", []):
         assert g["turns"] == "restart" or all(1 <= t <= c["turns"] for t in g["turns"]), c["id"]
 
 

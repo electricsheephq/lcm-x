@@ -84,7 +84,16 @@ completed non-cancel attempt (a reply the host dropped is a deficit), plus the h
 the host reported `interrupted`. Any other assistant row is surplus.
 - **B1** every `[Tnn]` user tag (`[A-Z]\d{2,3}`: T100-T103 on 100-turn cells) and `reply to Tnn` sits in
   exactly as many stored rows as expected,
-  and every stored `continue` row is followed by the reply of its own turn (position-bound).
+  and every stored `continue` row has the reply of its own host occurrence.
+
+  A `continue` reply is identified by the row following it in the host record, then matched in the store by
+  lineage, role, content, tool-call fields and host timestamp (`observed_at`), with single-use reply capacity.
+  Store adjacency is not required: session-end head reconciliation can append earlier host rows after already
+  durable rows without losing any occurrence. Duplicate host copies bind when there is exactly one distinct
+  non-None successor binding; copies followed by a summary or session end add no choice. No binding or multiple
+  distinct reply bindings fail. If state.db is missing/unreadable, the store lacks `observed_at`, or a stored
+  continue or its host copy lacks a timestamp, that lineage uses the old store-order check instead; B1 details
+  record the lineage and reason in `continue_fallbacks`. Tag deficit and surplus checks still apply.
 - **B2** multiset-v1 (port of the gauntlet's `lossless_bar_multiset.py`), per session lineage: per (role,
   sha256(content with only leading/trailing whitespace stripped, the host's ACP prompt strip
   `acp_adapter/server.py` `_extract_text(prompt).strip()`)) stored count == expected count; internal whitespace
@@ -378,6 +387,17 @@ gateway cells are UNSUPPORTED with the reason; `--transport gateway-process` is 
 - **customer-0.21.2 lcm-tool-mid-turn is UNSUPPORTED over ACP.** That host defers plugin tools behind the
   `tool_search`/`tool_call` bridge by default (`tools.tool_search.enabled: "auto"`, `hermes_cli/config_defaults.py:1793`),
   so the scripted direct `lcm_grep` call is never dispatched ("scenario not proven"). The default is not changed.
+- **delegated-child/{in-place,rotation} (#1931, acp-process only).** Turns 5, 17 and 29 call `delegate_task` (the
+  `delegation` toolset); each goal is the child's own tagged user row (`[Dnn] user turn ...`, `probe.child_goal`), and
+  the provider answers a request whose last user row carries that tag with `reply to Dnn: child done.` before any
+  parent step. The observer records the child's run as `child_user_sent` / `child_turn_end` under its own session and
+  the parent's dispatch at `AIAgent._dispatch_delegate_task` (top-level delegations run in the background). A
+  state.db session with source `subagent` whose parent is not a subagent session roots its own lineage, so B1/B2
+  score each child apart from the chat lineage. B10 (`scorers/delegated.py`) fails on a host child count other than
+  the issued delegates, a child with no stored rows, a missing or different lcm.db `session_lineage` parent, a
+  child-tagged row in another lineage, or a chat-lineage prompt or reply stored under a child (its own goal excepted).
+  A delegate whose child never ran or completed, or a child the host did not record as `subagent`, is UNSUPPORTED.
+  R1 in-process reports the cells UNSUPPORTED: the host builds the child with its own provider client.
 
 ### Nightly CI (`.github/workflows/reliability-nightly.yml`)
 Triggers: daily schedule and `workflow_dispatch` (effective once on main), and `pull_request` path-filtered to
