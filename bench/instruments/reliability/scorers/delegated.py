@@ -79,7 +79,8 @@ def child_attempts(events: list[dict]) -> list[dict]:
 
 def score(cell: dict, events: list[dict], atts: list[dict], per: dict, full: list, db_dir: Path, group):
     """(numbers, failed or None, gaps). ``per``: lineage -> (expected items, stored rows) from bars.score."""
-    sessions = host_sessions(db_dir / "state.db")
+    unavailable = getattr(group, "host_error", None)
+    sessions = {} if unavailable else host_sessions(db_dir / "state.db")
     roots = {sid: v[0] for sid, v in sessions.items() if is_child_root(sid, sessions)}
     kids = [a for a in atts if a["prefix"] == "D"]
     planned = sum(len(g["turns"]) for g in cell.get("delegate_plan", []))
@@ -96,7 +97,10 @@ def score(cell: dict, events: list[dict], atts: list[dict], per: dict, full: lis
         elif not ran:
             gaps.append(f"B10: {ctag}: the host never ran or completed the delegated child")
         gaps += [f"B10: {ctag}: host session {a['session']} is not a subagent child in state.db"
-                 for a in ran if a["session"] not in roots]
+                 for a in ran if not unavailable and a["session"] not in roots]
+    if unavailable:
+        # Transcript-proven failures/gaps remain; unreadable host rows prove neither absence nor parity.
+        return {"scripted": planned, "issued": len(issued), "unavailable": unavailable}, failed or None, gaps
     linked = links(db_dir / "lcm.db")
     child_lineages = {group(sid) for sid in roots}
     stored = Counter(group(r[1]) for r in full)
