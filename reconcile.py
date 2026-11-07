@@ -3437,10 +3437,13 @@ class ReconcileMixin:
 
         The segment scan starts at an assistant row, so these results never join a group. One is a
         replay only on occurrence evidence, never on a matching identity alone (hosts reuse
-        ``tool_call_id``, #2172): the stored copy of the call -- the row the ledger bound to it, else
-        the session's latest stored copy in the tail -- must be followed directly by a stored result
-        with the same identity, unspent by the prefix, and the multiset must still hold a copy, which
-        is then spent. A host and stored stamp that differ veto the match. Anything unproven is stored.
+        ``tool_call_id``, #2172). The stored copy of the call is the row the ledger bound to it (a
+        binding outside the tail proves nothing); without a binding it is the call's only copy in the
+        tail, and its ids must sit on exactly one assistant row on each side, so no other occurrence
+        of the call can be the one replayed. That copy must be followed directly by a stored result
+        with the same literal identity (a borrowed placeholder alias is not evidence, #1385), unspent
+        by the prefix, and the multiset must still hold a copy, which is then spent. A host and stored
+        stamp that differ veto the match. Anything unproven is stored.
         """
         call_index = cursor - 1
         if call_index < 0 or str(messages[call_index].get("role") or "") != "assistant":
@@ -3451,10 +3454,18 @@ class ReconcileMixin:
         if not call_ids or _has_lossy_redacted_identity(call_identity):
             return set()
         position = {row["store_id"]: pos for pos, row in enumerate(tail_rows)}
-        at = position.get(consumed_pairs.get(call_index))
-        if at is None:
-            at = next((pos for pos in range(len(tail_rows) - 1, -1, -1)
-                       if self._message_replay_identity(tail_rows[pos], stored_row=True) == call_identity), None)
+
+        def carriers(rows):
+            return sum(str(row.get("role") or "") == "assistant" and any(
+                isinstance(call, dict) and str(call.get("id") or "") in call_ids
+                for call in row.get("tool_calls") or []) for row in rows)
+        if call_index in consumed_pairs:
+            at = position.get(consumed_pairs[call_index])
+        else:
+            copies = [pos for pos, row in enumerate(tail_rows)
+                      if self._message_replay_identity(row, stored_row=True) == call_identity]
+            unique = len(copies) == 1 and carriers(tail_rows) == 1 and carriers(messages) == 1
+            at = copies[0] if unique else None
         if at is None or self._message_replay_identity(tail_rows[at], stored_row=True) != call_identity:
             return set()
         stored_results = {}
@@ -3467,6 +3478,7 @@ class ReconcileMixin:
             result = messages[index]
             tool_call_id = str(result.get("tool_call_id") or "")
             identity = self._message_replay_identity(result)
+            literal = self._message_replay_identity(result, allow_pruned_tool_alias=False)
             stored = stored_results.pop(tool_call_id, None) if tool_call_id in call_ids else None
             host_stamp = self._host_occurrence_metadata(result)["timestamp"]
             stored_stamp = _normalize_observed_at(stored.get("observed_at")) if stored else None
@@ -3474,7 +3486,7 @@ class ReconcileMixin:
                     and not self._matches_ignore_message_patterns(stored, stored_row=True)
                     and not _is_hermes_persisted_output_marker(normalize_content_value(result.get("content")) or "")
                     and not _has_lossy_redacted_identity(identity)
-                    and self._message_replay_identity(stored, stored_row=True) == identity
+                    and self._message_replay_identity(stored, stored_row=True, allow_pruned_tool_alias=False) == literal
                     and (host_stamp is None or stored_stamp is None or host_stamp == stored_stamp)
                     and counts[identity] > 0):
                 counts[identity] -= 1

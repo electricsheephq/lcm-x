@@ -1,8 +1,11 @@
 """I1/I2: compacted history cannot prove a fresh reused-id tool occurrence."""
 
+from collections import Counter
 from copy import deepcopy
 
 import pytest
+
+from hermes_lcm.reconcile import _HERMES_PRUNED_TOOL_PLACEHOLDER
 
 from tests.invariants import test_issue_1529_warm_proof_salvage as shapes
 from tests.invariants.test_issue_1529_warm_proof_salvage import build as build, compact, stored
@@ -91,14 +94,15 @@ def test_cold_cursor_between_call_and_result_stores_no_silent_copy(build, monkey
     assert silent == []
 
 
-def _cold_boundary(build, monkeypatch, stored_rows, replay, cursor):
-    """Store ``stored_rows``, restart cold, pin the reconcile cursor and replay; returns the added rows."""
+def _cold_boundary(build, monkeypatch, stored_rows, replay, cursor=None):
+    """Store ``stored_rows``, restart cold, pin the reconcile cursor (unless None) and replay; the added rows."""
     engine = build()
     engine.ingest(deepcopy(stored_rows))
     engine.shutdown()
     engine = build()
     before = stored(engine)
-    monkeypatch.setattr(engine, "_reconcile_ingest_cursor_from_store", lambda *a, **kw: cursor)
+    if cursor is not None:
+        monkeypatch.setattr(engine, "_reconcile_ingest_cursor_from_store", lambda *a, **kw: cursor)
     engine.ingest(deepcopy(replay))
     assert engine._ingest_failure_count == 0, engine._last_ingest_error
     after = stored(engine)
@@ -157,3 +161,62 @@ def test_cold_compaction_cursor_keeps_changed_result_timestamp(build, monkeypatc
     assert after[:len(before)] == before
     added = after[len(before):]
     assert [(row["role"], row.get("tool_call_id"), row.get("observed_at")) for row in added] == [("tool", "c", 22)]
+
+
+def _distinct_pair():
+    return tool_pair("d", "distinct output", tool_name="lookup")
+
+
+def test_a_result_of_an_earlier_dangling_call_is_not_taken_for_a_later_stored_pair(build, monkeypatch):
+    """Reused ids: the store holds a dangling call, then a later identical call with its result. The host now shows
+    the first call's result. Its own call has no stored result, so it is stored (no stub: the natural cursor)."""
+    call, result = tool_pair("c", "OK", tool_name="poll")
+    head = [{"role": "user", "content": "start"}, *_distinct_pair(), call]
+    store = [*head, {"role": "user", "content": "again"}, call, result]
+    host = [*head, result, {"role": "user", "content": "again"}, call, result, {"role": "user", "content": "next"}]
+    added = _cold_boundary(build, monkeypatch, store, host)
+    assert ("tool", "OK", "c") in added and ("user", "next", None) in added, added
+
+
+def test_a_ledger_binding_outside_the_tail_proves_nothing(build):
+    engine = build()
+    call, result = tool_pair("c", "OK", tool_name="poll")
+    engine.ingest([{"role": "user", "content": "start"}, call, result])
+    tail = engine._store.get_session_tail(engine._session_id, limit=10)
+    counts = Counter(engine._message_replay_identity(row, stored_row=True) for row in tail)
+    host = [call, deepcopy(result), {"role": "user", "content": "next"}]
+    assert engine._replayed_results_at_cursor(host, 1, tail, set(), {0: 10**9}, counts) == set()
+    # Control: the same call bound to its stored copy in the tail proves the result.
+    bound = next(row["store_id"] for row in tail if row["role"] == "assistant")
+    assert engine._replayed_results_at_cursor(host, 1, tail, set(), {0: bound}, counts) == {1}
+
+
+def test_a_cleared_output_placeholder_is_not_evidence(build, monkeypatch):
+    """#1385: a placeholder borrows the stored payload's identity; it is no proof that this result was stored."""
+    call = tool_pair("c", "x", tool_name="read_file")[0]
+    stored_result = {"role": "tool", "tool_call_id": "c", "content": "x" * 300}
+    cleared = {"role": "tool", "tool_call_id": "c", "content": _HERMES_PRUNED_TOOL_PLACEHOLDER}
+    head = [{"role": "user", "content": "start"}, *_distinct_pair(), call]
+    added = _cold_boundary(build, monkeypatch, [*head, stored_result],
+                           [*head, cleared, {"role": "user", "content": "next"}])
+    assert ("tool", _HERMES_PRUNED_TOOL_PLACEHOLDER, "c") in added, added
+
+
+def test_a_later_identical_stored_pair_does_not_prove_an_earlier_dangling_call(build, monkeypatch):
+    """The cursor's call matches an earlier stored copy with no result; a later identical call and result is in the
+    store. Two stored copies of the call are ambiguous, so the host's result is stored (pinned at the boundary)."""
+    call, result = tool_pair("call_0", "OK", tool_name="poll")
+    first = [row for i in range(2) for row in _turn(i)] + [{"role": "user", "content": "poll"}, call]
+    engine = build()
+    engine.ingest(deepcopy(first))
+    engine.ingest(deepcopy([*first, {"role": "user", "content": "poll again"}, call, result]))
+    engine.shutdown()
+    engine = build()
+    before = stored(engine)
+    monkeypatch.setattr(engine, "_reconcile_ingest_cursor_from_store", lambda *a, **kw: len(first))
+    engine.ingest(deepcopy([*first, result, {"role": "user", "content": "next"}]))
+    assert engine._ingest_failure_count == 0, engine._last_ingest_error
+    after = stored(engine)
+    assert after[:len(before)] == before
+    added = [(row["role"], row.get("content"), row.get("tool_call_id")) for row in after[len(before):]]
+    assert added == [("tool", "OK", "call_0"), ("user", "next", None)], added
