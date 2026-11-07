@@ -51,6 +51,10 @@ def test_an_edit_inside_a_short_prefix_is_stored_once(tmp_path: Path, edited: in
     short = deepcopy(FULL[:5])
     short[edited]["content"] = f"edited row {edited} text"
     counts, texts = _counts(tmp_path, [FULL, short, FULL])
-    assert counts[0] == 8
-    assert texts.count(short[edited]["content"]) == 1, counts
-    assert counts == [8, 9, 9]
+    if counts[0] != 8:
+        pytest.fail(f"setup: the first view stored {counts[0]} rows, not 8")
+    if texts.count(short[edited]["content"]) == 1 and counts == [8, 9, 9]:
+        return  # fixed: the strict marker turns this into a loud XPASS
+    if (counts, texts) == ([8, 8, 8], [row["content"] for row in FULL]):
+        raise AssertionError(f"#1563 known shape: counts={counts}, edited text not stored")
+    pytest.fail(f"not the #1563 shape: counts={counts}; texts={texts}")

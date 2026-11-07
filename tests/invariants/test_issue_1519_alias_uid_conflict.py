@@ -144,12 +144,25 @@ def test_a_distinct_event_at_the_alias_stamp_is_stored(tmp_path):
     """#1519 (a v0.30.0 named loss limit): the old_view_absent shape above, a distinct platform message id with
     identical text at exactly the alias stamp, must store a second occurrence. The green case above keeps one."""
     with engine_context(tmp_path, window=128000, session_id="parent", conversation_id="conv") as engine:
-        replay = prepare(engine, "old_view_absent")
-    assert replay[0]["platform_message_id"] == "platform-new" and replay[0]["timestamp"] == 30.
+        try:
+            replay = prepare(engine, "old_view_absent")
+        except AssertionError as error:
+            pytest.fail(f"setup: the alias was not established: {error!r}")
+    if not (replay[0]["platform_message_id"] == "platform-new" and replay[0]["timestamp"] == 30.):
+        pytest.fail(f"setup: the replay is not the distinct event at the alias stamp: {replay[0]}")
     with engine_context(tmp_path, window=128000, session_id="parent", conversation_id="conv") as engine:
         engine.ingest(replay)
-        assert any(r["content"] == "Synthetic new reply" for r in rows(engine))  # the batch was ingested
-        assert len(targets(engine)) == 2
+        observed = [(r["role"], "TEXT" if r["content"] == TEXT else r["content"]) for r in rows(engine)]
+        if not any(r["content"] == "Synthetic new reply" for r in rows(engine)):
+            pytest.fail(f"setup: the batch was not ingested: {observed}")
+        if len(targets(engine)) == 2:
+            return  # fixed: the strict marker turns this into a loud XPASS
+        # Main keeps the one aliased copy and stores only the new reply.
+        if observed == [("user", "Synthetic earlier request"), ("assistant", "Synthetic earlier reply"), ("user", "TEXT"),
+                        ("tool", "Synthetic orphan result"), ("assistant", "Synthetic recovery reply"),
+                        ("assistant", "Synthetic new reply")]:
+            raise AssertionError(f"#1519 known shape: {observed}")
+        pytest.fail(f"not the #1519 shape: {observed}")
 
 
 @pytest.mark.parametrize("conflict_first", [True, False])

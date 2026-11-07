@@ -11,13 +11,28 @@ import tests.invariants.test_issue_1529_warm_proof_salvage as shapes
 from tests.invariants.test_issue_1529_warm_proof_salvage import (
     build as build, compact, CLEARED, LONG, stored as raw_stored,
 )
-from tests.invariants.test_issue_1540_bound_retry import stored
+from tests.invariants.test_issue_1540_bound_retry import assert_complete_segments, stored
 from tests.test_issue_671_stub_first_exit import tool_pair
 
 _COLD = pytest.mark.xfail(strict=True, raises=AssertionError, reason="#1837: in cold mode the durable-remap cursor advances past a result "
                                                                      "whose only change is a new UID, so the per-row veto never sees it")
 _SPLIT = pytest.mark.xfail(strict=True, raises=AssertionError, reason="#1837: warm mode stores the new-UID result without its call, so the "
                                                                       "stored segment is split (acceptance: segments stay whole)")
+
+
+def _label(row):
+    """A stored row as role plus its call ids, result id or content."""
+    calls = [call["id"] for call in row.get("tool_calls") or []]
+    return f"{row['role']} " + (f"calls {calls}" if calls else row.get("tool_call_id") or row["content"][:40])
+
+
+# Main's rows stored past the earlier ones by the first ingest; a repeat ingest adds nothing.
+FOLLOWING = ["assistant calls ['following-0']", "tool following-0", "assistant calls ['following-1']", "tool following-1"]
+KNOWN = {
+    ("warm", "result-only"): dict(prefix_kept=True, new=["tool c", *FOLLOWING], repeat_added=0, whole=False),  # split
+    ("cold", "result-only"): dict(prefix_kept=True, new=FOLLOWING, repeat_added=0, whole=True),  # result lost
+    ("cold", "later-pair"): dict(prefix_kept=True, new=FOLLOWING, repeat_added=0, whole=True),  # result lost
+}
 
 
 @pytest.mark.parametrize("mode,change", [
@@ -50,10 +65,29 @@ def test_a_retried_result_with_a_new_uid_is_stored(build, monkeypatch, mode, cha
     for index in range(2):
         host.extend(tool_pair(f"following-{index}", f"fresh {index}", tool_name="lookup"))
     engine.ingest(deepcopy(host))
-    assert engine._ingest_failure_count == 0, engine._last_ingest_error
+    if engine._ingest_failure_count:
+        pytest.fail(f"setup: the ingest failed: {engine._last_ingest_error}")
     after = raw_stored(engine)
-    assert after[:len(before)] == before
-    results = sum(row.get("tool_call_id") == cid for row in after[len(before):])
-    assert results == (0 if change == "equal-uids" else 1), "new UID result lost"
+    if (mode, change) not in KNOWN:  # the controls
+        assert after[:len(before)] == before
+        results = sum(row.get("tool_call_id") == cid for row in after[len(before):])
+        assert results == (0 if change == "equal-uids" else 1), "new UID result lost"
+        engine.ingest(deepcopy(host))
+        assert stored(engine) == after, "equal-UID repeat was stored again"
+        return
     engine.ingest(deepcopy(host))
-    assert stored(engine) == after, "equal-UID repeat was stored again"
+    repeat = raw_stored(engine)
+    try:
+        assert_complete_segments(repeat)
+        whole = True
+    except AssertionError:
+        whole = False
+    new = [_label(row) for row in after[len(before):]]
+    if (after[:len(before)] == before and sum(row.get("tool_call_id") == cid for row in after[len(before):]) == 1
+            and repeat == after and whole):
+        return  # fixed: the strict marker turns this into a loud XPASS
+    observed = dict(prefix_kept=after[:len(before)] == before, new=new, repeat_added=len(repeat) - len(after),
+                    whole=whole)
+    if observed == KNOWN[mode, change]:
+        raise AssertionError(f"#1837 known shape: {observed}")
+    pytest.fail(f"not the #1837 shape: {observed}")

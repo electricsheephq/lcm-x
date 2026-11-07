@@ -5,7 +5,7 @@ import pytest
 
 pytest.importorskip("hypothesis")
 from hermes_lcm import host_uid_emit
-from tests.invariants.test_exactly_once_machine import ExactlyOnceMachine, assert_occurrences
+from tests.invariants.test_exactly_once_machine import ExactlyOnceMachine, assert_occurrences, identity
 
 
 @pytest.fixture
@@ -97,13 +97,22 @@ def test_r4_1_uid_only_replacement_after_the_proof_is_consumed(machine, anchor):
     for text in ("alpha", "same text"):
         machine.new_turn(text, False, 0, False, "lookup")
     machine.compress()
-    assert machine.engine._last_compression_status == "compacted"
+    if machine.engine._last_compression_status != "compacted":
+        pytest.fail(f"setup: the compress was {machine.engine._last_compression_status!r}, not compacted")
     output = deepcopy(machine.host)
-    assert output[-2]["role"] == "user"
+    if output[-2]["role"] != "user":
+        pytest.fail(f"setup: the absorbed row is a {output[-2]['role']} row")
     machine.engine.ingest(_merge_absorbed(output))  # the unchanged merged output consumes the proof
-    assert_occurrences(machine.occurrences, machine.rows(), engine=machine.engine)
+    if list(map(identity, machine.rows())) != list(map(identity, machine.occurrences)):
+        pytest.fail("setup: the unchanged merged output changed the stored rows")
     output[-2] = dict(output[-2], message_uid="replacement-user")
     host = _merge_absorbed(output)
-    assert host[-2]["_absorbed_message_uids"] == ["replacement-user"]
+    if host[-2]["_absorbed_message_uids"] != ["replacement-user"]:
+        pytest.fail(f"setup: the merged row absorbed {host[-2]['_absorbed_message_uids']}")
     machine.engine.ingest(host)
-    assert_occurrences(machine.occurrences + [host[-2]], machine.rows(), engine=machine.engine)
+    observed = list(map(identity, machine.rows()))
+    if observed == list(map(identity, [*machine.occurrences, host[-2]])):
+        return  # fixed: the strict marker turns this into a loud XPASS
+    if observed == list(map(identity, machine.occurrences)):
+        raise AssertionError("#1428 known shape: the uid-only replacement was not stored")
+    pytest.fail(f"not the #1428 shape: {observed}")
