@@ -11,7 +11,8 @@ import json
 
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
-from tests.test_issue_650_survival_fit_keeps_summary import _engine, _hidden_backlog, _turn, host  # noqa: F401
+from tests.test_issue_650_survival_fit_keeps_summary import _engine, _hidden_backlog, _turn
+from tests.test_issue_650_survival_fit_keeps_summary import host as host  # noqa: F401  (fixture)
 
 
 def _rotate(engine, old, new, view):
