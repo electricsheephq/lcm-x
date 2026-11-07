@@ -1,9 +1,10 @@
 """#2110 characterization: under a legacy (v2/v3) proof, cursor reconciliation gives identity None to a row that
-passes the verified-scaffold test: a user row that exactly quotes one complete summary part of its own session, or
-one that starts with the preserved-objective or preserved-task-list prefix. Does a real user turn of that shape get skipped after a
-restart? Each case places the turn after the matched stored tail and before its last row. Controls: a plain user turn
-in the same places, and the current v4 proof. On main the legacy cells before the last row lose the turn (strict
-xfails); every other cell stores it once."""
+passes the verified-scaffold test: a user row that exactly quotes one complete summary part of its own session, or one
+that starts with the preserved-objective or preserved-task-list prefix. Does a real user turn of that shape get skipped
+after a restart? Each case places the turn after the matched stored tail and before its last row. Controls: a plain
+user turn in the same places, and the current v4 proof. Strict xfails on main: the legacy cells before the last row
+(#2110), the cells after a stale v4 proof is retired (#2110, through the identity anchor), and the task-list-header
+cells (#2418, apart from the legacy cells after the tail); every other cell stores the turn once."""
 from __future__ import annotations
 
 import json
