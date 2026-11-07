@@ -296,3 +296,31 @@ def test_a_large_leaf_s_summary_stays_under_lcm_x_s_extreme_ratio(provider, sour
         assert count(source) / count(body) < 400 and count(body) < count(source)
         if count(source) >= 100_000:
             assert count(body) >= 500
+
+
+@pytest.mark.parametrize("version", ["v1", "v2"])
+def test_a_leaf_whose_tool_output_was_externalized_is_not_reported_as_degraded(provider, version):
+    """The stored leaf counts a 204,800-character tool output whole; the prompt shows only its placeholder and a short
+    preview. The digest follows the prompt's stated budget, so the stored source/summary ratio stays under 400."""
+    import hermes_lcm.escalation as escalation
+    from hermes_lcm.tokens import count_tokens
+
+    stored = "user: run it\n[TOOL RESULT call_1]: " + "d" * 204_800
+    shown = ("user: run it\n[TOOL RESULT call_1]: [Externalized tool output: chars=204800; ref=x.json]\n"
+             + "d" * 900)
+    messages, nonce = escalation._summary_contract_messages(
+        escalation._build_l1_prompt(shown, 2000, 0, prompt_version=version))
+    body, failed, _ = escalation._check_summary_contract(_summary_reply(provider, messages), nonce, 2000)
+    assert failed == ""
+    assert count_tokens(stored) / count_tokens(body) < 400
+
+
+def test_an_unclipped_small_source_is_never_summarized_longer_than_itself(provider):
+    import hermes_lcm.escalation as escalation
+    from hermes_lcm.tokens import count_tokens
+
+    for lines in (30, 60, 120):
+        source = "\n".join(f"user: synthetic line {i} " + "word " * 12 for i in range(lines))
+        messages, nonce = escalation._summary_contract_messages(escalation._build_l1_prompt(source, 2000, 0))
+        body, failed, _ = escalation._check_summary_contract(_summary_reply(provider, messages), nonce, 2000)
+        assert failed == "" and count_tokens(body) < count_tokens(source)

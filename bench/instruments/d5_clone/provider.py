@@ -33,16 +33,25 @@ def _envelope_nonce(messages):
 
 
 BYTES_PER_SUMMARY_TOKEN = 160  # A token is at least one UTF-8 byte, so source/summary <= 160 even for the densest text.
+BUDGET = re.compile(r"(?:about |Target ~|Maximum )(\d+) tokens")  # The token budget LCM-X's summary prompts state.
 
 
 def _padding(messages):
-    """Deterministic filler lines that give the digest one token per BYTES_PER_SUMMARY_TOKEN request bytes. A fixed
-    40-token digest of a 20k-token leaf is a 500:1 summary, which LCM-X's summary_quality doctor check reports as
-    degraded (>= 400:1, or under 500 tokens for a 100k-token source), so every large leaf would warn in both arms and
-    hide a real regression. Sized from bytes, not a tokens estimate: dense text can be one token per byte."""
-    target = -(-len(_json(messages).encode("utf-8")) // BYTES_PER_SUMMARY_TOKEN)
+    """Deterministic filler lines that bring the digest to the length a real summarizer writes: the prompt's stated
+    budget, but at most half the visible transcript (so an unclipped source is never summarized longer than itself),
+    and at least one token per BYTES_PER_SUMMARY_TOKEN request bytes. The stored leaf can be far larger than what the
+    prompt shows (clipped chunks, externalized tool output), and LCM-X's summary_quality doctor check reports a
+    summary as degraded at >= 400:1, or under 500 tokens for a 100k-token source: a fixed 40-token digest would warn on
+    every large leaf in both arms and hide a real regression."""
+    system = [m["content"] for m in messages if isinstance(m, dict) and m.get("role") == "system"
+              and isinstance(m.get("content"), str)]
+    budgets = [int(b) for text in system for b in BUDGET.findall(text)]
+    transcript = sum(len(_json(m.get("content")).encode("utf-8")) for m in messages
+                     if isinstance(m, dict) and m.get("role") != "system")
+    target = max(-(-len(_json(messages).encode("utf-8")) // BYTES_PER_SUMMARY_TOKEN),
+                 min(min(budgets), transcript // 8) if budgets else 0)
     seed = _sha(messages)[:8]
-    return "".join(f"\nd5 pad {i:05d} {seed}" for i in range(-(-target // 6)))  # Each line is at least 6 tokens.
+    return "".join(f"\nd5 pad {i:05d} {seed}" for i in range(-(-target // 6)))  # About 6 tokens a line, or more.
 
 
 def _tool_call(call):
