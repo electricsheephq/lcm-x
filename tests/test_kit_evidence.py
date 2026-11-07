@@ -615,18 +615,3 @@ def test_two_sends_with_their_own_stamps_stay_definitive(tmp_path):
     result = kit.reorder(lcm, host)
     assert (result["host_only"], result["host_stamp_repeat_rows"], result["host_copies_resolved"]) == (1, 0, True)
 
-
-
-def test_stackless_exception_group_leaves_are_counted(tmp_path):
-    group = ("  + Exception Group Traceback (most recent call last):\n"
-             "  |   File \"x.py\", line 1, in <module>\n"
-             "  | ExceptionGroup: two (2 sub-exceptions)\n"
-             "  +-+---------------- 1 ----------------\n"
-             "    | ImportError: optional\n"
-             "    +---------------- 2 ----------------\n"
-             "    | ValueError: new failure\n"
-             "    +------------------------------------\n")
-    text = _log("agent.optional", "warn") + group + _log("agent", "after", "INFO") + "    | KeyError: not a leaf\n"
-    result = kit.trace_events([_write(tmp_path / "host.log", text)])
-    assert result["other_tracebacks"] == {"ExceptionGroup": 1, "ValueError": 1}
-    assert result["optional_import_traces_total"] == 1

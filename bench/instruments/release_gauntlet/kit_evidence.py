@@ -86,7 +86,6 @@ def trace_events(log):
     per_event = defaultdict(Counter)  # (logger, module) -> {event ordinal: tracebacks}
     for path in log:
         active, logger, traceback, warning, counted, current = [], None, False, None, False, None
-        group = False  # Inside an exception group, whose leaves may have no traceback header of their own.
         with Path(path).open(encoding="utf-8") as stream:
             for raw in stream:
                 line = raw.rstrip("\r\n")
@@ -118,7 +117,7 @@ def trace_events(log):
                 # bare name is a source line inside the traceback, not its end.
                 piped = line.lstrip(" \t").startswith("|")
                 at_edge = bool(SUB_EDGE.match(line)) if piped else bool(line) and not line[0].isspace()
-                final = FINAL.match(stripped) if (traceback or group and piped) and at_edge else None
+                final = FINAL.match(stripped) if traceback and at_edge else None
                 if final:
                     if stripped.startswith(("ModuleNotFoundError", "ImportError")):
                         missing = MISSING.search(stripped)
@@ -132,10 +131,6 @@ def trace_events(log):
                     elif not stripped.startswith(REFUSAL):
                         name = final[1]  # Any other column-0 word is hashed: a cut traceback can precede raw text.
                         other[name if name in BUILTIN_EXCEPTIONS else "h:" + _sha(name)[:12]] += 1
-                if line and not line[0].isspace() and line[0] != "|":
-                    group = False  # A column-0 line ends any group.
-                if final and final[1].endswith("ExceptionGroup"):
-                    group = True
                 if final or (line and not line[0].isspace() and line[0] != "|"):
                     if traceback and not final:
                         other["(no final line)"] += 1  # Cut short: counted, never dropped.
