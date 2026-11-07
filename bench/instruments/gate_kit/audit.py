@@ -379,7 +379,7 @@ def host_expected(rows, group, markers, strip, scored=None):
     return out, excluded, hand_checks
 
 
-# #2087: Hermes's empty-response recovery pair (host pin r34.15-0.21.5). After tool results with an empty reply, the
+# #2087: Hermes's empty-response recovery pair (host commit 8cfaaa8e). After tool results with an empty reply, the
 # loop appends an assistant row "(empty)" and a user row holding _EMPTY_TOOL_RESPONSE_NUDGE (agent/turn_empty_response.py:
 # 208-215, the text at agent/conversation_loop.py:900-903), both flagged _empty_recovery_synthetic, a flag the host's
 # persistence skips (agent/session_persistence.py:32-40): the host never saves them, so a stored copy is not expected.
