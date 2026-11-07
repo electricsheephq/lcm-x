@@ -760,7 +760,9 @@ def run(host, *, rc_id, prior=(), instrument_fix=None):
                           missing_receipts=[b["bind"] for b in binds if not isinstance(b["receipt"], dict)]),
         "bar2": bars.bar2([b["bar2"] for b in binds]),
         "bar3": bars.bar3(snap["store"], arms["rc"]["rows"]["store"], rules["identity"]),
-        "bar4": bars.bar4(arms["rc"]["logs"], arms["ga"]["logs"], arms["rc"]["roots"], arms["ga"]["roots"]),
+        "bar4": {**bars.bar4(arms["rc"]["logs"], arms["ga"]["logs"], arms["rc"]["roots"], arms["ga"]["roots"]),
+                 "raw_counts_note": "the host writes each log line to two files (agent.log and gateway.log), so the raw"
+                                    " counts are 2x on both arms; the verdict compares the arms and is unaffected"},
         "bar5": bars.bar5(arms["rc"]["checks"], arms["ga"]["checks"], ga_rerun and ga_rerun["checks"],
                           bool(ga_rerun) and bars.workload_items(ga_rerun["workload"])["turns_completed"]),
         "bar6": bars.bar6({a: arms[a]["workload"] for a in arms})}
