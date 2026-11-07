@@ -54,4 +54,10 @@ def host_rewrite_match(row, candidates, *, header, todo_span, prompts_stamped: b
                 break
             if not text.startswith(joined + "\n"):
                 break
-    return fits[0] if len(fits) == 1 else None
+    if len(fits) != 1:
+        return None
+    # A genuinely new reply is stamped at or after every stored part, so a fold is proven only when its last
+    # part is stamped strictly later than the row: the host's carried first-part dict (#2472 review). Applied
+    # after the ambiguity count, so it can only remove a match.
+    last = next(c for c in candidates if c["store_id"] == fits[0].consumed[-1])
+    return fits[0] if last.get("observed_at") is not None and last["observed_at"] > stamp else None
