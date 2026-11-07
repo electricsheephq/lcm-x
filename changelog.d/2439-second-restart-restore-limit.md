@@ -1,0 +1,1 @@
+- Changed: the exactly-once design doc names a known limit, pinned by a strict xfail: after a second restart with an identical rewritten view and no new row, a delegated child's kept rows can be stored again. That is surplus, never a loss (#2439).
