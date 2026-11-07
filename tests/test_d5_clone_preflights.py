@@ -54,6 +54,8 @@ class FakeHost:
         entries, (sid, home) = ctx["plan"]["provider"]["steps"][step["id"]], ("sess-l", ctx["home"])
         text = step["user_text"] if self.fault == "P7" else step["user_text"].strip()
         host = [("user", text, None), ("assistant", MARKER, None)]
+        if self.fault == "user-copy-first" and "pf-P7" in str(home):  # In P7: an in-place compaction's active copy of an older user row comes first.
+            host.insert(0, ("user", "older user row copy", None))
         lcm = [("user", step["user_text"], None), ("assistant", MARKER, None)]
         if step["tools"]:
             self.files += 1
@@ -111,7 +113,8 @@ class FakeHost:
 
 
 @pytest.mark.parametrize("fault", [None, "P3", "P4", "P6", "P7", "crash", "no-conversation", "replay-error",
-                                   "not-durable", "inactive-copy"])
+                                   "not-durable", "inactive-copy",
+                                   "user-copy-first"])
 def test_each_preflight_fails_on_its_own_fault(tmp_path, monkeypatch, fault):
     monkeypatch.setitem(sys.modules, "yaml", types.SimpleNamespace(safe_load=json.loads))  # Not in every test venv.
     if fault == "P3":  # A provider whose second reply differs from the first.
@@ -123,7 +126,7 @@ def test_each_preflight_fails_on_its_own_fault(tmp_path, monkeypatch, fault):
     assert host.removed == ([] if fault in ("crash", "replay-error", "not-durable") else ["T0", "H8"])
     expected = dict.fromkeys(pf.PREFLIGHTS, "INCONCLUSIVE" if fault == "crash" else "PASS")
     expected.update({fault: "FAIL"} if fault in pf.PREFLIGHTS else {"P6": "INCONCLUSIVE"}
-                    if fault and fault != "inactive-copy" else {})
+                    if fault and fault not in ("inactive-copy", "user-copy-first") else {})
     assert verdicts == expected
     for name in pf.PREFLIGHTS:
         text = (tmp_path / f"{name}.json").read_text()

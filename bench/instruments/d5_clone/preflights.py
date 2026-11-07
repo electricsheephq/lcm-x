@@ -216,10 +216,13 @@ def p7(host, plan):
     workload, (hosts, lcms) = host.facts(ctx), _tool_rows(ctx, plan, large)
     swap = len(hosts) == len(lcms) == 1 and run._swap_payload(ctx["home"], hosts[0]) == lcms[0]
     f = {**{k: workload[k] for k in ("whitespace_rewrites", "payload_swaps", "payload_files_created")},
-         "stored_user_sha256": _sha(users[0]) if users else None, "stripped_sha256": _sha(rewrite["user_text"].strip()),
+         # Every new user row, not the first: an in-place compaction also writes active copies of older user rows.
+         "stripped_stored": rewrite["user_text"].strip() in users, "raw_stored": rewrite["user_text"] in users,
+         "new_user_rows": len(users),
          "tool_rows": [len(hosts), len(lcms)], "host_row_is_the_stub": swap}
     return _failed([
-        ("the host did not store the stripped form", f["stored_user_sha256"] != f["stripped_sha256"]),
+        ("the host did not store the stripped form", not f["stripped_stored"]),
+        ("the host stored the unstripped form", f["raw_stored"]),
         ("no whitespace rewrite", f["whitespace_rewrites"] < 1), ("no payload swap", f["payload_swaps"] < 1),
         ("no payload file", f["payload_files_created"] < 1),
         ("the host row differs from the LCM-X row by more than the stub", not swap)]), [], f
