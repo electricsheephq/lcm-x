@@ -188,14 +188,19 @@ def test_bar5_warnings_are_not_judged_without_a_clean_ga_baseline():
 
 
 
-def test_bar5_a_ga_arm_missing_a_check_kind_is_no_baseline():
+def test_bar5_a_kind_the_ga_arm_does_not_show_is_judged_on_the_rc_alone():
     warn = {"kind": "doctor", "check": "survival_fit", "status": "warn"}
-    for ga in ([], checks()[1:]):
-        for rc in (checks(), checks(warn)):  # Never PASS on a missing baseline, and an rc warning is no FAIL.
-            result = b.bar5(rc, ga)
-            assert result["verdict"] == b.INCONCLUSIVE and result["warnings_judged"] is False and result["ga_kinds_missing"]
-        assert b.bar5(checks({"kind": "schema", "check": "core", "status": "fail"}), ga)["verdict"] == b.FAIL
-    ga_fail = checks({"kind": "integrity", "check": "fk", "status": "fail"})[1:]  # Failed and incomplete.
+    for ga in ([], checks()[1:]):  # checks()[0] is the doctor row: both miss the doctor kind.
+        ok = b.bar5(checks(), ga)
+        assert ok["verdict"] == b.PASS and "doctor" in ok["ga_kinds_missing"] and not ok["ga_rerun_needed"]
+        warned = b.bar5(checks(warn), ga)  # No baseline to show the warning already existed: never a FAIL.
+        assert warned["verdict"] == b.INCONCLUSIVE and warned["ga_kinds_missing_rc_warned"] == ["doctor"]
+        assert warned["warnings_judged"] is False and warned["warnings_over_ga"] == []
+        assert b.bar5(checks({"kind": "doctor", "check": "d", "status": "fail"}), ga)["verdict"] == b.FAIL
+    no_schema = [c for c in checks(warn, warn) if c["kind"] != "schema"]
+    assert b.bar5(checks(warn, warn), no_schema)["verdict"] == b.PASS  # Warnings of a kind GA shows still line up.
+    assert b.bar5(checks(warn, warn, warn), no_schema)["verdict"] == b.FAIL
+    ga_fail = checks({"kind": "integrity", "check": "fk", "status": "fail"})[1:]  # Failed and missing a kind.
     assert b.bar5(checks(warn), ga_fail, checks(warn))["verdict"] == b.PASS  # A clean re-run is the baseline.
     assert b.bar5(checks(), checks())["ga_kinds_missing"] == []
 
