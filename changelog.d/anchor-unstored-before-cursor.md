@@ -1,0 +1,1 @@
+- Fix: When the host changes its list before the ingest cursor, a row in front of the resume point (a tool-call row or a replaced reply included) is stored unless it is bound, matched to a stored row or a compaction output; it was taken as a replay by position and never stored (#2116). The audit line is now a WARNING naming the reason and the count.
