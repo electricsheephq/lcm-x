@@ -3337,30 +3337,16 @@ class ReconcileMixin:
         for number in exact:
             if number in owner_class:
                 classes[owner_class[number]]["claims"] += 1
-        # A stored copy linked possible_replay_of to another member of its class
-        # is that same occurrence: it adds no skip capacity (any writer's link,
-        # stamped or not). Fewer capacity can only store more.
+        # A stored copy carrying any possible_replay_of is never independent
+        # capacity, whatever its target's class or stamp (any writer's link).
+        # Less capacity can only store more.
         conn = self._store._conn
-        replay_links = list(conn.execute(
-            "SELECT store_id, related_store_id FROM message_relations WHERE kind='possible_replay_of' "
-            "AND store_id IN (SELECT value FROM json_each(?)) AND related_store_id IN (SELECT value FROM json_each(?))",
-            (json.dumps(sorted(row_owner)),) * 2)) if conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE name='message_relations'").fetchone() else []
-        parent = {}
-
-        def root(number):
-            while parent.get(number, number) != number:
-                number = parent[number]
-            return number
-        for source, target in replay_links:
-            a, b = row_owner.get(source), row_owner.get(target)
-            if a is not None and b is not None and a != b and owner_class.get(a) is not None \
-                    and owner_class.get(a) == owner_class.get(b):
-                ra, rb = root(a), root(b)
-                if ra != rb:
-                    parent[ra] = rb
+        copies = {row_owner[row[0]] for row in conn.execute(
+            "SELECT store_id FROM message_relations WHERE kind='possible_replay_of' "
+            "AND store_id IN (SELECT value FROM json_each(?))", (json.dumps(sorted(row_owner)),))} if conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE name='message_relations'").fetchone() else set()
         for cls in classes.values():
-            cls["capacity"] = len({root(number) for number in cls["members"]})
+            cls["capacity"] = sum(number not in copies for number in cls["members"])
         # Conservative claims are lazy counters: an unstamped prefix against
         # thousands of classes must not walk that population on every segment.
         all_claims, stamp_claims = Counter(), Counter()
