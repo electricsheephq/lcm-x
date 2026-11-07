@@ -7,6 +7,7 @@ xfails); every other cell stores it once."""
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 
 import pytest
 
@@ -31,7 +32,8 @@ def _legacy_restart(engine, tmp_path, host, version):
     engine.shutdown()
     resumed = LCMEngine(config=_config(tmp_path, fresh_tail_count=0), hermes_home=str(tmp_path / "home"))
     resumed.on_session_start("S0", platform="acp", context_length=200_000)
-    assert resumed._active_emission_proof()["version"] == version
+    if resumed._active_emission_proof()["version"] != version:
+        pytest.fail("setup: the restarted engine does not read the intended proof version")
     return resumed
 
 
@@ -59,7 +61,8 @@ def test_a_user_turn_shaped_like_scaffold_is_stored_after_a_legacy_restart(tmp_p
     engine = _legacy_restart(engine, tmp_path, host, version)
     try:
         turn = {"role": "user", "content": quoted}
-        assert engine._is_verified_replay_scaffold_message(turn) == (shape != "plain")  # what the no-proof path skips
+        if engine._is_verified_replay_scaffold_message(turn) != (shape != "plain"):  # what the no-proof path skips
+            pytest.fail("setup: the turn is not the shape under test")
         reply = {"role": "assistant", "content": "reply to the quoting turn"}
         view = [*host, turn, reply] if place == "after-tail" else [*host[:-1], turn, host[-1], reply]
         users_before = _contents(engine, "user").count(quoted)
@@ -84,8 +87,40 @@ def test_a_scaffold_shaped_user_turn_is_stored_past_a_stale_v4_proof(stub_first_
     quoted = {"summary-part": host.live[0]["content"].split("\n\n---\n\n")[0],
               "objective-prefix": f"{_PRESERVED_OBJECTIVE_CONTEXT_PREFIX}\nKeep this objective exactly as I wrote it.",
               "plain": "A plain user turn with no scaffold shape."}[shape]
+    if host.engine._is_verified_replay_scaffold_message({"role": "user", "content": quoted}) != (shape != "plain"):
+        pytest.fail("setup: the quoted turn is not the shape under test")
     host.clock += 0.5
     host.live = [*host.live[:-1], {"role": "user", "content": quoted, "timestamp": host.clock}, host.live[-1]]
     host.cold_rebind()
+    rows = host.engine._store.get_session_messages(host.engine._session_id)
+    assert sum(row["content"] == quoted for row in rows) == 1, "the quoting user turn was skipped"
+
+
+_RETIRED_LOST = pytest.mark.xfail(strict=True, raises=AssertionError,
+                                  reason="#2110: once a stale v4 proof is retired, a scaffold-shaped user turn placed "
+                                         "before a stored row reads with no proof (identity None) and is skipped")
+
+
+@pytest.mark.parametrize("shape", [pytest.param("summary-part", marks=_RETIRED_LOST),
+                                   pytest.param("objective-prefix", marks=_RETIRED_LOST), "plain"])
+def test_a_scaffold_shaped_user_turn_is_stored_after_a_v4_proof_is_retired(stub_first_session, caplog, shape):  # noqa: F811
+    """A stale v4 proof (left by an earlier version) is retired by a cold rebind that replays stored rows (here with a
+    plain new turn). A later scaffold-shaped turn before the last row must still be stored; a plain one is."""
+    host = stub_first_session("summary", stub_first=False)
+    leave_proof_stale(host, caplog)
+    host.clock += 0.5
+    host.live = [*host.live[:-1], {"role": "user", "content": "A plain user turn that retires the stale proof.",
+                                   "timestamp": host.clock}, host.live[-1]]
+    host.cold_rebind()
+    if getattr(host.engine, "_retired_durable_proof", None) is None:
+        pytest.fail("setup: the stale proof was not retired")
+    quoted = {"summary-part": host.live[0]["content"].split("\n\n---\n\n")[0],
+              "objective-prefix": f"{_PRESERVED_OBJECTIVE_CONTEXT_PREFIX}\nKeep this objective exactly as I wrote it.",
+              "plain": "A second plain user turn."}[shape]
+    if host.engine._is_verified_replay_scaffold_message({"role": "user", "content": quoted}) != (shape != "plain"):
+        pytest.fail("setup: the quoted turn is not the shape under test")
+    host.clock += 0.5
+    host.live = [*host.live[:-1], {"role": "user", "content": quoted, "timestamp": host.clock}, host.live[-1]]
+    host.engine.ingest(deepcopy(host.live))
     rows = host.engine._store.get_session_messages(host.engine._session_id)
     assert sum(row["content"] == quoted for row in rows) == 1, "the quoting user turn was skipped"
