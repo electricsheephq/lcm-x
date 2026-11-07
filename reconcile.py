@@ -3272,7 +3272,7 @@ class ReconcileMixin:
         copies can prove replay after the cursor, so every suppression is
         backed by a stored copy the host prefix does not account for.
         Over-reserving can keep a duplicate. Copies compacted out of the host
-        view cannot bind: #2377 restricts occurrences to the durable carry set.
+        view are not reserved; that known case is planned for v0.30.0.
 
         #2151: ``consumed_pairs`` maps host prefix indexes to the stored rows the
         ingest record proved for them. Each such row is held back once: by its
@@ -3449,34 +3449,19 @@ class ReconcileMixin:
         return replayed
 
     def _tool_segment_bindings(self, messages, tail_rows, consumed, consumed_pairs):
-        """#2377: bind in host order to one unspent, carry-visible stored occurrence.
+        """#2377: bind in host order to one unspent stored occurrence.
 
         Ledger pairs outrank equal stamps, then unstamped order. Conflicting stamps
         veto a pair; equally good copies with different results prove nothing.
         Binding reserves the whole occurrence even when its results do not replay.
         """
-        try:
-            proof = self._durable_commit_proof_payload()
-            ranges = self._coalesce_compression_carry_ranges((proof or {}).get("carry_ranges") or [])
-            last = int((proof or {}).get("last_store_id") or 0)
-        except Exception:
-            logger.debug("LCM tool-segment carry proof load failed", exc_info=True)
-            return {}  # Unreadable evidence cannot authorize suppression.
-
-        def visible(row):
-            return proof is None or row["store_id"] > last or any(
-                row.get("session_id") == source and start < row["store_id"] <= end
-                for source, start, end in ranges)
-
         segments, current = [], None
         for row in tail_rows:
             if str(row.get("role") or "") != "tool":
                 current = (row, []) if row.get("role") == "assistant" and row.get("tool_calls") else None
-                if current is not None and visible(row):
+                if current is not None:
                     segments.append(current)
-                else:
-                    current = None
-            elif current is not None and visible(row):
+            elif current is not None:
                 current[1].append(row)
         used, bindings = set(), {}
         for index, host in enumerate(messages):

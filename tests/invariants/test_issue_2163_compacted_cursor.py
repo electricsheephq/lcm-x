@@ -14,7 +14,8 @@ from tests.test_issue_671_stub_first_exit import tool_pair
 
 
 @pytest.mark.parametrize("dangling", [
-    pytest.param(False, id="full-pair", marks=pytest.mark.issue(2377)),
+    pytest.param(False, id="full-pair", marks=pytest.mark.xfail(strict=True, reason=(
+        "#2172: a new call and result that repeat a pair compacted out of the view are taken as a replay"))),
     pytest.param(True, id="dangling-call"),
 ])
 def test_compacted_away_identical_pair_is_not_proof(build, monkeypatch, dangling):

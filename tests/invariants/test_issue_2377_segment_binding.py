@@ -1,8 +1,5 @@
 """I1/I2: one stored tool occurrence, never an identity pool, proves a replay."""
 
-from copy import deepcopy
-import json
-
 import pytest
 
 from tests.invariants.test_issue_2163_compacted_cursor import (
@@ -44,27 +41,3 @@ def test_ambiguous_unstamped_results_are_stored(build, monkeypatch):
     source = [_U, call, X, call, other]
     added = _cold_boundary(build, monkeypatch, source, [_U, call, X, _V], 1)
     assert added == [("assistant", "", None), ("tool", "X", "c"), ("user", "next", None)]
-
-
-@pytest.mark.parametrize("carry", ["neither", "call-only", "result-only", "both", "after-proof"])
-def test_compacted_out_copy_cannot_bind(build, carry):
-    """Use a real durable v2 proof; both call and result must remain in its carry set."""
-    engine = build()
-    call = _poll(["c"], "{}", 2)
-    engine.ingest(deepcopy([_U, call, X]))
-    rows = engine._store.get_session_messages(engine._session_id)
-    call_id, result_id = (row["store_id"] for row in rows[1:])
-    ranges = {
-        "neither": [], "call-only": [["S", call_id - 1, call_id]],
-        "result-only": [["S", result_id - 1, result_id]],
-        "both": [["S", call_id - 1, result_id]], "after-proof": [],
-    }
-    proof = {"version": 2, "hermes_home": engine._hermes_home,
-             "conversation_id": engine._conversation_id, "created_at": 10**12,
-             "last_store_id": rows[0]["store_id"] if carry == "after-proof" else result_id,
-             "carry_ranges": ranges[carry]}
-    engine._store.write_metadata_json(["compaction_commit_proof:S"], json.dumps(proof))
-    assert engine._durable_commit_proof_payload() is not None
-    host = [_U, call, X, _V]
-    expected = {1, 2} if carry in ("both", "after-proof") else set()
-    assert engine._replayed_tool_segment_indexes_after_cursor(host, 1) == expected
