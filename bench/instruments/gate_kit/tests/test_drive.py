@@ -435,6 +435,16 @@ def test_compaction_during_paste_ageing_counts_for_the_attempt(tmp_path, monkeyp
     assert paste["t"] <= min(e["t"] for e in events if e["kind"] == "turn")  # its window opens before the paste
 
 
+@pytest.mark.parametrize("env,expected", [({"LCM_FRESH_TAIL_COUNT": "8"}, 4), ({}, 12), ({"LCM_FRESH_TAIL_COUNT": "24"}, 12),
+                                          ({"LCM_FRESH_TAIL_COUNT": "9"}, 5), ({"LCM_FRESH_TAIL_COUNT": "bad"}, 12),
+                                          ({"LCM_FRESH_TAIL_COUNT": "1"}, 1)])
+def test_default_age_turns_clears_the_effective_fresh_tail(env, expected):
+    age = drive.default_age_turns(env)
+    assert age == expected
+    tail = int(env.get("LCM_FRESH_TAIL_COUNT", "24")) if env.get("LCM_FRESH_TAIL_COUNT", "24").isdigit() else 24
+    assert 1 + 2 * age + 2 >= tail  # rows after the paste: its reply, the ageing turns, the trigger turn
+
+
 def test_shared_acp_restart_records_all_bound_sessions(tmp_path):
     d, ev, log = stub_driver(tmp_path)
     slots = [f"A{i}" for i in range(1, 7)]
@@ -899,7 +909,8 @@ def test_smoke_against_fake_provider_then_audit(tmp_path):
     kinds = Counter(e["kind"] for e in lines)
     assert {k: kinds[k] for k in audit.EVENT_KINDS if kinds[k]} == {"restart_cold": 1, "restart_warm": 1, "undo_resend": 1,
                                                         "delegate_prompt": 1, "compress_request": kinds["compress_request"]}
-    assert 1 <= kinds["compress_request"] <= 3  # host replies alone never stop retries
+    triggers = sum(e["kind"] == "compress_request" and e["detail"].endswith("phase=trigger") for e in lines)
+    assert 1 <= triggers <= 3 and kinds["compress_request"] == 2 * triggers  # a paste and a trigger request per attempt
     assert kinds["cancel_resend"] == 1  # recorded, never counted as an undo
     assert summary["delegate"]["children_in_state_db"] >= 1 and summary["context_length"] == 64000
     for db in ("state.db", "lcm.db"):  # the audit reads immutable files: open each once after the run to checkpoint

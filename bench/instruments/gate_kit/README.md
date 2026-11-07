@@ -192,7 +192,7 @@ attempts (including failed attempts and those made by the plan). The summary sep
 ```
 python -m bench.instruments.gate_kit.drive --hermes-python <host venv python> --hermes-src <host tree> \
   --home <HERMES_HOME> --workdir <dir> --events <events.jsonl> [--turns N] [--children N] [--compactions N] \
-  [--age-turns 4] [--seed 2055] [--max-hours 6] [--prompt-timeout 600] [--cancel-after 2] [--append-events] [--dry-run]
+  [--age-turns N] [--seed 2055] [--max-hours 6] [--prompt-timeout 600] [--cancel-after 2] [--append-events] [--dry-run]
 ```
 - `--dry-run` prints the targets and the planned counts and exits. `--turns`/`--children`/`--compactions` can raise a target, never
   lower it below the floor x1.2.
@@ -217,8 +217,9 @@ python -m bench.instruments.gate_kit.drive --hermes-python <host venv python> --
   undo that removed rows and a completed second send. A rejected
   first TUI send skips undo. After a successful close, a failed resume leaves the slot unbound so its next operation
   resumes it again. `--max-hours` stops the plan and still writes the summary.
-- Each compress attempt sends the long paste, then `--age-turns` plain turns (default 4, chosen without rng) so the paste
-  leaves LCM-X's eight-message fresh tail, then one plain triggering turn and `/compress`. It records two
+- Each compress attempt sends the long paste, then `--age-turns` plain turns (chosen without rng; the default is ceil(`LCM_FRESH_TAIL_COUNT` / 2) read from the hosts'
+  environment, 12 for the product's 24-row tail when it is unset, and the summary records it as `age_turns`) so the paste
+  leaves LCM-X's fresh tail, then one plain triggering turn and `/compress`. It records two
   `compress_request` events: `phase=paste` before the paste, and `phase=trigger` after the ageing turns, before the
   triggering turn. Both only open audit attribution windows; `requests` counts the `phase=trigger` one. So a
   sessionless compaction line from the paste, an ageing turn or the triggering turn has a request at most 2 s after

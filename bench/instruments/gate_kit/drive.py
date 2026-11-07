@@ -2,7 +2,7 @@
 prepared Hermes home, writing the events log that ``audit.py --events`` reads.
 
     python -m bench.instruments.gate_kit.drive --hermes-python <python> --hermes-src <host src> --home <HERMES_HOME>
-        --workdir <dir> --events <events.jsonl> [--turns N] [--children N] [--compactions N] [--age-turns 4]
+        --workdir <dir> --events <events.jsonl> [--turns N] [--children N] [--compactions N] [--age-turns N]
         [--seed 2055] [--max-hours 6] [--dry-run]
 
 Two host entry points, both real processes over newline-delimited JSON-RPC on stdio:
@@ -48,6 +48,17 @@ EXIT_GRACE = 60.0  # seconds a host gets to exit on stdin EOF at the end of the 
 # host stores nothing in lcm.db, so its rows would read as a loss: the run stops (exit 3) before it reaches the audit.
 INACTIVE = re.compile(r"LCM-X is NOT active in this process|Context engine 'lcm(?:-x)?' not found")
 STOP_REASON = re.compile(r"compaction stop: reason=(\w+)")
+PRODUCT_FRESH_TAIL = 24  # config.py LCMConfig.fresh_tail_count
+
+
+def default_age_turns(env: dict) -> int:
+    """Ageing turns that put the paste outside LCM-X's fresh tail. After the paste come its reply, two rows per ageing
+    turn and the triggering turn's prompt and reply, so ceil(tail / 2) turns leave at least the tail behind it."""
+    try:
+        tail = int(env.get("LCM_FRESH_TAIL_COUNT") or PRODUCT_FRESH_TAIL)
+    except ValueError:
+        tail = PRODUCT_FRESH_TAIL
+    return max(1, -(-tail // 2))
 EXIT_LCM_INACTIVE = 3
 EXIT_EVENT_LOG = 4
 PLANNED_FLOORS = ("turns", "delegated_children", "compactions", "compactions_then_restart", "restarts_cold",
@@ -649,7 +660,8 @@ class Driver:
                    "delegate": {"prompts": self.done["delegate"], "extra_prompts": extra,
                                 "attempts": self.attempts["delegate"],
                                 "children_in_state_db": self.children()},
-                   "context_length": self.context, "stopped": stopped, "sessions": len(self.slots)}
+                   "context_length": self.context, "stopped": stopped, "sessions": len(self.slots),
+                   "age_turns": self.age_turns}
         self.ev.write("summary", None, "end of run", **summary)
         summary["exit"] = EXIT_LCM_INACTIVE if stopped == "lcm_inactive" else 0
         return summary
@@ -666,14 +678,15 @@ def main(argv=None) -> int:
     ap.add_argument("--turns", type=int, help="at least this many prompts (never below the floor x1.2)")
     ap.add_argument("--children", type=int, help="at least this many delegated children (never below the floor x1.2)")
     ap.add_argument("--compactions", type=int, help="at least this many compaction ops (never below the floor x1.2)")
-    ap.add_argument("--age-turns", type=int, default=4, help="plain turns to age each paste before the triggering turn")
+    ap.add_argument("--age-turns", type=int, help="plain turns to age each paste before the triggering turn "
+                    "(default: ceil(LCM_FRESH_TAIL_COUNT / 2) from the hosts' environment, product tail 24 when unset)")
     ap.add_argument("--seed", type=int, default=2055)
     ap.add_argument("--max-hours", type=float, default=6.0)
     ap.add_argument("--prompt-timeout", type=float, default=600.0)
     ap.add_argument("--cancel-after", type=float, default=2.0, help="seconds into a prompt before session/cancel")
     ap.add_argument("--dry-run", action="store_true")
     a = ap.parse_args(argv)
-    if a.age_turns < 0:
+    if a.age_turns is not None and a.age_turns < 0:
         ap.error("--age-turns must be non-negative")
     for name in ("home", "workdir", "events"):
         if under_real_hermes(getattr(a, name)):
@@ -695,6 +708,8 @@ def main(argv=None) -> int:
     a.workdir.mkdir(parents=True, exist_ok=True)
     write_notes(a.workdir)
     env = host_env(dict(os.environ), a.home, a.workdir, a.hermes_src)
+    if a.age_turns is None:
+        a.age_turns = default_age_turns(env)
     d = Driver(python=a.hermes_python, src=a.hermes_src, home=a.home, workdir=a.workdir, events=events,
                env=env, prompt_timeout=a.prompt_timeout, max_hours=a.max_hours, cancel_after=a.cancel_after,
                age_turns=a.age_turns)
