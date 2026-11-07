@@ -29,6 +29,39 @@ def _engine(tmp_path):
     return engine
 
 
+def _expect_stored_once(stored, fixed, known=None):
+    """Only the complete known loss may satisfy the named-limit xfail."""
+    if stored == fixed:
+        return
+    if known is not None and stored == known:
+        raise AssertionError("#2110 known shape: the scaffold-shaped user turn is skipped (stored 0 times)")
+    first_difference = next((i for i, (a, b) in enumerate(zip(stored, fixed)) if a != b),
+                            min(len(stored), len(fixed)))
+    pytest.fail(f"not the #2110 shape: stored rows={len(stored)}, fixed rows={len(fixed)}, "
+                f"known rows={len(known) if known is not None else 0}, first difference={first_difference}")
+
+
+@pytest.mark.parametrize("order,outcome", [
+    pytest.param(["head", "last", "reply"], AssertionError, id="known"),
+    pytest.param(["head", "turn", "last", "reply"], None, id="fixed"),
+    pytest.param(["head", "turn", "last", "last", "reply"], pytest.fail.Exception, id="last-twice"),
+    pytest.param(["head", "last", "last", "reply"], pytest.fail.Exception, id="lost-and-last-twice"),
+    pytest.param(["head", "turn", "reply", "last"], pytest.fail.Exception, id="reply-before-last"),
+    pytest.param(["head", "reply", "last"], pytest.fail.Exception, id="lost-and-reply-before-last"),
+])
+def test_stored_once_accepts_only_the_known_or_fixed_list(order, outcome):
+    rows = {"head": ("user", "head"), "turn": ("user", "turn"),
+            "last": ("assistant", "last"), "reply": ("assistant", "reply")}
+    stored = [rows[name] for name in order]
+    fixed = [rows[name] for name in ("head", "turn", "last", "reply")]
+    known = [rows[name] for name in ("head", "last", "reply")]
+    if outcome is None:
+        _expect_stored_once(stored, fixed, known)
+    else:
+        with pytest.raises(outcome):
+            _expect_stored_once(stored, fixed, known)
+
+
 @pytest.mark.parametrize("shape,place,restart", _CELLS)
 def test_a_scaffold_shaped_user_turn_is_stored_in_a_never_compacted_session(tmp_path, shape, place, restart):
     engine = _engine(tmp_path)
@@ -45,15 +78,21 @@ def test_a_scaffold_shaped_user_turn_is_stored_in_a_never_compacted_session(tmp_
             pytest.fail("setup: the turn is not the shape under test")
         reply = {"role": "assistant", "content": "reply to the quoting turn"}
         view = [*host, turn, reply] if place == "after-tail" else [*host[:-1], turn, host[-1], reply]
+        additions = [turn, reply]
+        # Before-last: warm reconciliation replays the last row; the cold plain control replays the whole view.
+        if place == "before-last-row":
+            if restart and shape == "plain":
+                additions = view
+            elif not restart:
+                additions = view[-3:]
+        prefix = [(row["role"], row["content"]) for row in host]
+        fixed = prefix + [(row["role"], row["content"]) for row in additions]
+        known = (prefix + [(row["role"], row["content"]) for row in additions if row is not turn]
+                 if shape != "plain" and (restart or place == "before-last-row") else None)
         engine.ingest([dict(m) for m in view])
-        rows = engine._store._conn.execute("SELECT role, content FROM messages").fetchall()
-        if sum(c == reply["content"] for r, c in rows if r == "assistant") != 1:
-            pytest.fail("setup: the batch was not ingested")
-        count = sum(c == turn["content"] for r, c in rows if r == "user")
-        if count == 1:
-            return  # stored once (the controls today; a fix shows as a loud XPASS in the lost cells)
-        if count == 0 and shape != "plain" and (restart or place == "before-last-row"):
-            raise AssertionError("#2110 known shape: the scaffold-shaped user turn is skipped (stored 0 times)")
-        pytest.fail(f"not the #2110 shape: the user turn is stored {count} times")
+        rows = engine._store._conn.execute(
+            "SELECT role, content FROM messages WHERE session_id = ? AND role != 'system' ORDER BY store_id",
+            (engine._session_id,)).fetchall()
+        _expect_stored_once(rows, fixed, known)
     finally:
         engine.shutdown()

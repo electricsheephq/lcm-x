@@ -11,6 +11,38 @@ from tests.test_issue_1931_delegate_children import host  # noqa: F401 (the fixt
 from tests.test_issue_2071_delegate_tail_anchor import COMPACTED, X, _child, _once
 
 
+def _expect_recovered_tail(tail, later):
+    # X precedes the compaction output in host chronology; a fix may omit the stored summary.
+    if tail in ([X["content"], later], [X["content"], COMPACTED[0]["content"], later]):
+        return  # fixed: the strict marker turns this into a loud XPASS
+    if tail == [COMPACTED[0]["content"], later]:
+        raise AssertionError("#2440 known shape: X is lost; only its summary and the next row are stored")
+    pytest.fail(f"not the #2440 shape: tail rows={len(tail)}, X copies={tail.count(X['content'])}, "
+                f"summary copies={tail.count(COMPACTED[0]['content'])}, later copies={tail.count(later)}")
+
+
+@pytest.mark.parametrize("tail,outcome", [
+    pytest.param(["summary", "later"], AssertionError, id="known"),
+    pytest.param(["X", "later"], None, id="fixed-without-summary"),
+    pytest.param(["X", "summary", "later"], None, id="fixed-with-summary"),
+    pytest.param(["later", "X"], pytest.fail.Exception, id="X-after-later"),
+    pytest.param(["summary", "X", "later"], pytest.fail.Exception, id="X-after-summary"),
+    pytest.param(["X", "summary", "summary", "later"], pytest.fail.Exception, id="head-stored-again"),
+    pytest.param(["X", "X", "later"], pytest.fail.Exception, id="X-twice"),
+    pytest.param(["X", "later", "later"], pytest.fail.Exception, id="later-twice"),
+    pytest.param(["X", "later", "summary"], pytest.fail.Exception, id="later-not-last"),
+    pytest.param(["X", "other", "later"], pytest.fail.Exception, id="unexpected-row"),
+])
+def test_recovered_tail_accepts_only_the_known_or_fixed_shape(tail, outcome):
+    values = {"X": X["content"], "summary": COMPACTED[0]["content"], "later": "next reply", "other": "other"}
+    stored = [values[row] for row in tail]
+    if outcome is None:
+        _expect_recovered_tail(stored, values["later"])
+    else:
+        with pytest.raises(outcome):
+            _expect_recovered_tail(stored, values["later"])
+
+
 @pytest.mark.xfail(strict=True, raises=AssertionError,
                    reason="#2440: a row compacted away after a non-busy pre-store failure is lost (its summary is kept)")
 def test_a_row_compacted_away_after_a_failed_pre_store_is_stored(host, monkeypatch):  # noqa: F811
@@ -26,13 +58,8 @@ def test_a_row_compacted_away_after_a_failed_pre_store_is_stored(host, monkeypat
     contents = [row["content"] for row in child_rows(engine)]
     head = [row["content"] for row in stored]
     if contents[:len(head)] != head:
-        pytest.fail(f"setup: the stored rows changed: {contents[:len(head)]}")
-    tail = contents[len(head):]
-    if tail.count(X["content"]) == 1 and tail.count(later["content"]) == 1:
-        return  # fixed: the strict marker turns this into a loud XPASS
-    if tail == [COMPACTED[0]["content"], later["content"]]:
-        raise AssertionError("#2440 known shape: X is lost; only its summary and the next row are stored")
-    pytest.fail(f"not the #2440 shape: {tail}")
+        pytest.fail("setup: the stored rows changed")
+    _expect_recovered_tail(contents[len(head):], later["content"])
 
 
 def test_the_same_compaction_with_a_stored_input_keeps_the_row(host, monkeypatch):  # noqa: F811

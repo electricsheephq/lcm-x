@@ -38,9 +38,10 @@ def _legacy_restart(engine, tmp_path, host, version):
     return resumed
 
 
-def _contents(engine, role):
-    return [c for (c,) in engine._store._conn.execute(
-        "SELECT content FROM messages WHERE role = ? ORDER BY store_id", (role,))]
+def _stored(engine):
+    return engine._store._conn.execute(
+        "SELECT role, content FROM messages WHERE session_id = ? AND role != 'system' ORDER BY store_id",
+        (engine._session_id,)).fetchall()
 
 
 _LOST = pytest.mark.xfail(strict=True, raises=AssertionError, reason="#2110: under a legacy (v2/v3) proof a scaffold-shaped user turn placed "
@@ -51,14 +52,37 @@ _HEADER_AND_LOST = pytest.mark.xfail(strict=True, raises=AssertionError, reason=
                                                                                 "#2110 (no proof): both skip the turn")
 
 
-def _expect_stored_once(count, expected, lost):
-    """The exact-shape check: ``expected`` passes (a fix shows as a loud XPASS); in a lost cell, one copy short is the
-    known shape (the turn is skipped); anything else is a different defect."""
-    if count == expected:
+def _expect_stored_once(stored, fixed, known=None):
+    """Compare whole stored lists; only the exact known loss may raise AssertionError."""
+    if stored == fixed:
         return
-    if lost and count == expected - 1:
+    if known is not None and stored == known:
         raise AssertionError("#2110/#2418 known shape: the scaffold-shaped user turn is skipped")
-    pytest.fail(f"not the #2110/#2418 shape: the user turn is stored {count} times, expected {expected}")
+    first_difference = next((i for i, (a, b) in enumerate(zip(stored, fixed)) if a != b),
+                            min(len(stored), len(fixed)))
+    pytest.fail(f"not the #2110/#2418 shape: stored rows={len(stored)}, fixed rows={len(fixed)}, "
+                f"known rows={len(known) if known is not None else 0}, first difference={first_difference}")
+
+
+@pytest.mark.parametrize("order,outcome", [
+    pytest.param(["head", "last", "reply"], AssertionError, id="known"),
+    pytest.param(["head", "turn", "last", "reply"], None, id="fixed"),
+    pytest.param(["head", "turn", "last", "last", "reply"], pytest.fail.Exception, id="last-twice"),
+    pytest.param(["head", "last", "last", "reply"], pytest.fail.Exception, id="lost-and-last-twice"),
+    pytest.param(["head", "turn", "reply", "last"], pytest.fail.Exception, id="reply-before-last"),
+    pytest.param(["head", "reply", "last"], pytest.fail.Exception, id="lost-and-reply-before-last"),
+])
+def test_stored_once_accepts_only_the_known_or_fixed_list(order, outcome):
+    rows = {"head": ("user", "head"), "turn": ("user", "turn"),
+            "last": ("assistant", "last"), "reply": ("assistant", "reply")}
+    stored = [rows[name] for name in order]
+    fixed = [rows[name] for name in ("head", "turn", "last", "reply")]
+    known = [rows[name] for name in ("head", "last", "reply")]
+    if outcome is None:
+        _expect_stored_once(stored, fixed, known)
+    else:
+        with pytest.raises(outcome):
+            _expect_stored_once(stored, fixed, known)
 
 
 def _legacy_mark(place, shape, version):
@@ -90,15 +114,19 @@ def test_a_user_turn_shaped_like_scaffold_is_stored_after_a_legacy_restart(tmp_p
             pytest.fail("setup: the turn is not the shape under test")
         reply = {"role": "assistant", "content": "reply to the quoting turn"}
         view = [*host, turn, reply] if place == "after-tail" else [*host[:-1], turn, host[-1], reply]
-        users_before = _contents(engine, "user").count(quoted)
+        # Compaction keeps the original raw history; the emitted summary head is not stored.
+        prefix = [(row["role"], row["content"]) for row in [*_pre, host[-1]] if row["role"] != "system"]
+        _expect_stored_once(_stored(engine), prefix)
+        # Before-last reconciliation replays the last row, except the v4 task-header path, which appends only reply.
+        replay_last = place == "before-last-row" and not (shape == "todo-prefix" and version == 4)
+        additions = [row for row in view if row is turn or row is reply or (replay_last and row is host[-1])]
+        fixed = prefix + [(row["role"], row["content"]) for row in additions]
+        known = (prefix + [(row["role"], row["content"]) for row in additions if row is not turn]
+                 if _legacy_mark(place, shape, version) else None)
         engine.ingest([dict(m) for m in view])
-        if _contents(engine, "assistant").count(reply["content"]) != 1:
-            pytest.fail("setup: the batch was not ingested")
-        _expect_stored_once(_contents(engine, "user").count(quoted), users_before + 1,
-                            lost=bool(_legacy_mark(place, shape, version)))
+        _expect_stored_once(_stored(engine), fixed, known)
         engine.ingest([dict(m) for m in view])
-        if _contents(engine, "user").count(quoted) != users_before + 1:
-            pytest.fail("not the #2110 shape: re-ingesting the same view changed the stored count")
+        _expect_stored_once(_stored(engine), fixed)
     finally:
         engine.shutdown()
 
@@ -118,11 +146,14 @@ def test_a_scaffold_shaped_user_turn_is_stored_past_a_stale_v4_proof(stub_first_
               "plain": "A plain user turn with no scaffold shape."}[shape]
     if host.engine._is_verified_replay_scaffold_message({"role": "user", "content": quoted}) != (shape != "plain"):
         pytest.fail("setup: the quoted turn is not the shape under test")
+    prefix = _stored(host.engine)
     host.clock += 0.5
     host.live = [*host.live[:-1], {"role": "user", "content": quoted, "timestamp": host.clock}, host.live[-1]]
+    # Raw history stays in store order; stale-proof recovery also appends the summary head for these two shapes.
+    additions = ([host.live[0]] if stale and shape in ("summary-part", "objective-prefix") else []) + [host.live[-2]]
+    fixed = prefix + [(row["role"], row["content"]) for row in additions]
     host.cold_rebind()
-    rows = host.engine._store.get_session_messages(host.engine._session_id)
-    _expect_stored_once(sum(row["content"] == quoted for row in rows), 1, lost=shape == "todo-prefix")
+    _expect_stored_once(_stored(host.engine), fixed, prefix if shape == "todo-prefix" else None)
 
 
 _RETIRED_LOST = pytest.mark.xfail(strict=True, raises=AssertionError,
@@ -152,8 +183,10 @@ def test_a_scaffold_shaped_user_turn_is_stored_after_a_v4_proof_is_retired(stub_
               "plain": "A second plain user turn."}[shape]
     if host.engine._is_verified_replay_scaffold_message({"role": "user", "content": quoted}) != (shape != "plain"):
         pytest.fail("setup: the quoted turn is not the shape under test")
+    prefix = _stored(host.engine)
     host.clock += 0.5
     host.live = [*host.live[:-1], {"role": "user", "content": quoted, "timestamp": host.clock}, host.live[-1]]
+    # Retired-proof reconciliation appends only the new turn after the unchanged raw history.
+    fixed = prefix + [(host.live[-2]["role"], host.live[-2]["content"])]
     host.engine.ingest(deepcopy(host.live))
-    rows = host.engine._store.get_session_messages(host.engine._session_id)
-    _expect_stored_once(sum(row["content"] == quoted for row in rows), 1, lost=shape != "plain")
+    _expect_stored_once(_stored(host.engine), fixed, prefix if shape != "plain" else None)
