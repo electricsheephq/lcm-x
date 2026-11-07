@@ -267,7 +267,12 @@ class LocalHost:
             path = pins._load_path(self.c["instrument_dir"], self.c["rules_module"])  # Refuses absolute and '..'.
             spec = importlib.util.spec_from_file_location("d5_clone_rules", path)
             module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
+            root = str(Path(self.c["instrument_dir"]).resolve())  # Sibling kit modules, pinned by P1, import.
+            sys.path.insert(0, root)
+            try:
+                spec.loader.exec_module(module)
+            finally:
+                sys.path.remove(root)
             self._rules = {"identity": module.identity, "credits": tuple(module.credits), "covered": module.covered,
                            "configure_planning": module.configure_planning, "configure_bar1": module.configure_bar1}
         return self._rules
@@ -525,10 +530,14 @@ def run_arm(host, name, home, plan, extras):
                 "turns_completed": planned - len(not_completed), "turns_not_completed": not_completed,
                 "cron_job_sha256": cron_job_sha256, **host.facts(ctx)}
     checks = host.checks(ctx)
+    try:
+        rows = host.rows(home)
+    except (sqlite3.DatabaseError, capture.CaptureError, OSError, StopIteration):
+        rows = None  # A store gone bad after its checks: they are kept (bar 5), and bars 1 and 3 cannot pass.
     return {"binds": binds, "workload": workload, "egress": {"samples": len(egress), "non_local": sum(egress)},
             "provider": stats, "logs": host.logs(ctx), "roots": host.roots(ctx), "checks": checks,
             "doctor_not_exercised": ctx.get("doctor_not_exercised", []), "cron_paused": cron_paused,
-            "rows": host.rows(home), "wall_s": round(time.monotonic() - started, 3)}
+            "rows": rows, "wall_s": round(time.monotonic() - started, 3)}
 
 
 def run(host, *, rc_id, prior=(), instrument_fix=None):
@@ -565,6 +574,9 @@ def run(host, *, rc_id, prior=(), instrument_fix=None):
     if bars.failed_checks(arms["ga"]["checks"]):
         ga_rerun = run_arm(host, "ga", host.clone("ga-rerun"), plan, {"RC3/store.db": base / "store.db"})
     snap = host.rows(base)
+    unreadable = [a for a in arms if arms[a]["rows"] is None]
+    for a in unreadable:
+        arms[a]["rows"] = {"store": [], "host": []}  # Placeholders only: bars 1 and 3 are INCONCLUSIVE below.
     tops = {k: max((r[c] for r in snap[k]), default=0) for k, c in (("store", "store_id"), ("host", "id"))}
     new = {a: [r for r in arms[a]["rows"]["store"] if r["store_id"] > tops["store"]] for a in arms}
     binds, hosts = arms["rc"]["binds"], [r for r in arms["rc"]["rows"]["host"] if r["id"] > tops["host"]]
@@ -581,6 +593,9 @@ def run(host, *, rc_id, prior=(), instrument_fix=None):
         "bar5": bars.bar5(arms["rc"]["checks"], arms["ga"]["checks"], ga_rerun and ga_rerun["checks"],
                           bool(ga_rerun) and bars.workload_items(ga_rerun["workload"])["turns_completed"]),
         "bar6": bars.bar6({a: arms[a]["workload"] for a in arms})}
+    if unreadable:
+        for bar in ("bar1", "bar3"):
+            results[bar] = {"verdict": bars.INCONCLUSIVE, "rows_unreadable": unreadable}
     receipt.update(
         arms={a: {**{k: arms[a][k] for k in ("workload", "egress", "provider", "doctor_not_exercised", "cron_paused")},
                   "checks": bars.check_counts(arms[a]["checks"])} for a in arms},

@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+import sys
 
 import pytest
 
@@ -410,3 +411,52 @@ def test_a_not_shown_bind_is_inconclusive_never_pass(tmp_path, monkeypatch, rang
                                                                       "T0", "H8")
     result = bars.bar2_bind(receipt, range_new_rows=kept, error=error)
     assert (result["verdict"], result["range_new_rows"]) == (bars.INCONCLUSIVE, range_new)
+
+
+class UnreadableFinal(FakeHost):
+    """The arm's store goes bad after its checks: its final rows read raises, and its checks report the failure."""
+
+    def __init__(self, config, run_dir, arm):
+        super().__init__(config, run_dir)
+        self.bad = arm
+
+    def rows(self, path):
+        if Path(path).parent.name == self.bad:
+            raise sqlite3.DatabaseError("synthetic: malformed")
+        return super().rows(path)
+
+    def checks(self, ctx):
+        return [{**c, "status": "fail" if ctx["name"] == self.bad and c["kind"] == "integrity" else c["status"]}
+                for c in super().checks(ctx)]
+
+
+@pytest.mark.parametrize("arm", ["rc", "ga"])
+def test_an_unreadable_final_store_keeps_its_failed_checks_and_never_passes(setup, arm):
+    _, config, run_dir = setup
+    host = UnreadableFinal(config, run_dir, arm)
+    receipt = r.run(host, rc_id="rc-synthetic")  # A receipt, not a crash.
+    for bar in ("bar1", "bar3"):
+        assert receipt["bars"][bar] == {"verdict": bars.INCONCLUSIVE, "rows_unreadable": [arm]}
+    if arm == "rc":
+        assert receipt["bars"]["bar5"]["verdict"] == bars.FAIL and receipt["verdict"]["raw"] == bars.FAIL
+    else:
+        assert host.armed == ["rc", "ga", "ga"] and receipt["ga_rerun"] is not None  # The GA failure re-runs it.
+        assert receipt["verdict"]["raw"] != bars.PASS
+
+
+def test_the_rules_module_can_import_its_pinned_siblings(tmp_path):
+    kit = tmp_path / "kit"
+    kit.mkdir()
+    (kit / "sibling_helper.py").write_text("def norm(x):\n    return x\n")
+    (kit / "rules.py").write_text(
+        "from sibling_helper import norm\n"
+        "def identity(row):\n    return norm(row)\n"
+        "credits = ()\n"
+        "def covered(session_id):\n    return True\n"
+        "def configure_planning(**kwargs):\n    pass\n"
+        "def configure_bar1(**kwargs):\n    pass\n")
+    before = list(sys.path)
+    rules = r.LocalHost({"instrument_dir": str(kit), "rules_module": "rules.py"}, tmp_path / "run").rules()
+    assert rules["identity"]("x") == "x"
+    assert sys.path == before  # The kit dir is on the path only while the module loads.
+    sys.modules.pop("sibling_helper", None)
