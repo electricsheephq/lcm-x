@@ -340,8 +340,10 @@ def score(cell: dict, cell_dir: Path, db_dir: Path | None = None) -> dict:
     try:
         full = con.execute("select store_id, session_id, role, content, tool_calls, tool_call_id from messages"
                            " order by store_id").fetchall()
-        relations = con.execute("select store_id, kind, related_store_id from message_relations").fetchall() if \
-            con.execute("select 1 from sqlite_master where type='table' and name='message_relations'").fetchone() else []
+        ordinal = "ordinal" if any(r[1] == "ordinal" for r in con.execute("pragma table_info(message_relations)")) \
+            else "NULL"  # composite_of segments (multiset.composite_witness)
+        relations = con.execute(f"select store_id, kind, related_store_id, {ordinal} from message_relations").fetchall() \
+            if con.execute("select 1 from sqlite_master where type='table' and name='message_relations'").fetchone() else []
         stored = [r[:4] for r in full]
         stamp = "observed_at" if any(r[1] == "observed_at" for r in con.execute("pragma table_info(messages)")) else "NULL"
         stamps = dict(con.execute("select store_id, " + stamp + " from messages"))

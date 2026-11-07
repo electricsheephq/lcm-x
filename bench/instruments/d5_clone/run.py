@@ -18,6 +18,7 @@ import hashlib
 import importlib.util
 import json
 from contextlib import closing
+import os
 from pathlib import Path
 import re
 import shutil
@@ -223,7 +224,7 @@ class LocalHost:
     """The real effects. ``config`` is the run declaration; ``run_dir`` holds every clone, capture and log."""
 
     def __init__(self, config, run_dir):
-        self.c, self.run_dir, self._rules = config, Path(run_dir), None
+        self.c, self.run_dir, self._rules = config, Path(os.path.abspath(run_dir)), None  # Subprocesses run elsewhere.
 
     def _dir(self, *parts):
         path = self.run_dir.joinpath(*parts)
@@ -241,7 +242,7 @@ class LocalHost:
             return pins.verify(*args, **kwargs)
         manifest = json.loads(Path(self.c["manifest"]).read_text(encoding="utf-8"))
         return {**pins.verify(*args, **kwargs), "manifest_sha256": capture._sha256(self.c["manifest"]),
-                "functions_sha256": _sha_json(manifest["functions"])}
+                "rules_sha256": _sha_json({k: manifest[k] for k in ("functions", "extra_hashes")})}  # The whole closure.
 
     def snapshot(self):
         return snapshot.verify(self.c["snapshot_pin"], self.c["snapshot_dir"], self._dir("scratch"))
@@ -329,8 +330,8 @@ class LocalHost:
         with ctx["provider"].lock:
             ctx["provider"].step = step["id"]
         try:
-            return ctx["gateway"].turn(ctx["chats"][step["conversation"]], step["id"], step["user_text"]).get(
-                "completed") is True
+            result = ctx["gateway"].turn(ctx["chats"][step["conversation"]], step["id"], step["user_text"])
+            return result.get("completed") is True and result.get("outcome") == "success"  # A failed turn is not done.
         except OSError:
             return False
         finally:
@@ -346,8 +347,10 @@ class LocalHost:
     def replay(self, ctx, step, t0, h8):
         """The edition on both trees, under the sandbox: (receipt, error, range_new_rows)."""
         out = self._dir(ctx["name"], "replays", step["id"])
-        values = {"python": self.c["interpreter"], "instrument_dir": self.c["instrument_dir"], "t0": t0, "h8": h8,
-                  "out": out, "rc_tree": self.c["rc"]["lcm_tree"], "ga_tree": self.c["ga"]["lcm_tree"]}
+        python = self.c["interpreter"]
+        values = {"python": os.path.abspath(python) if os.sep in python else python, "t0": t0, "h8": h8, "out": out,
+                  "instrument_dir": os.path.abspath(self.c["instrument_dir"]),  # The argv runs with cwd=out.
+                  "rc_tree": os.path.abspath(self.c["rc"]["lcm_tree"]), "ga_tree": os.path.abspath(self.c["ga"]["lcm_tree"])}
         for key in ("constants_argv", "replay_argv"):
             argv = sandbox.wrap([a.format(**values) for a in self.c[key]], ports=[ctx["port"]], socket_roots=[out])
             env = {"PATH": "/usr/bin:/bin", "HOME": str(out), "PYTHONDONTWRITEBYTECODE": "1"}
@@ -511,9 +514,9 @@ def run(host, *, rc_id, prior=(), instrument_fix=None):
     receipt["preflights"] = steps = {"free_space": {"verdict": "PASS" if host.free_bytes() >= NEED_FREE else "FAIL"}}
     if refusal is None and steps["free_space"]["verdict"] == "PASS":
         steps["P1"] = receipt["pins"] = host.pins()
-        if instrument_fix and steps["P1"].get("verdict") == "PASS" and any(
-                p.get("pins", {}).get("functions_sha256") != steps["P1"].get("functions_sha256") for p in prior):  # Spec: a fix never changes the rule code on this rc.
-            refusal = "the instrument fix changed rule-function code; that applies from the next rc"
+        if steps["P1"].get("verdict") == "PASS" and any(
+                p.get("pins", {}).get("rules_sha256") != steps["P1"].get("rules_sha256") for p in prior):  # Spec: the rule code never changes on this rc.
+            refusal = "the rule code changed since an earlier attempt on this rc; that applies from the next rc"
     for name in ("P2", "plan", *PREFLIGHTS):
         if refusal or any(s.get("verdict") != "PASS" for s in steps.values()):
             break

@@ -68,6 +68,16 @@ AUX_PROVEN_REASONS = frozenset({"background_review", "toolsets_memory_only"})
 ROUTE = re.compile(r"^LCM ingest route: session=(?P<session>\S+) route=(?P<route>.+?) cursor=(?P<cursor>-?\d+) "
                    r"reason=(?P<reason>.*?) stored=(?P<a>\d+)-(?P<b>\d+) rows=(?P<rows>\d+) replay_pairs=(?P<pairs>\d+) "
                    r"stripped=(?P<stripped>\d+)")
+# A route line's optional ``link_pending=<n>`` field (#2377): the rows the ingest marked link_pending.
+ROUTE_LINK_PENDING = re.compile(r"\blink_pending=(\d+)\b")
+# #2377's logged intended link (final format): one WARNING per intended link that failed, logged after commit, with no
+# content. The pending marker has a NULL target, so a pending_write_failed line may name target_store_id=None.
+LINK_FAILED = "LCM tool replay link failed"
+LINK_LINE = re.compile(r"LCM tool replay link failed source_store_id=(\d+) target_store_id=(?:\d+ "
+                       r"reason=(?:relation_write_failed|pending_write_failed)|None reason=pending_write_failed)")
+# #2377: link computation raised for one ingest; every row of that batch carries a link_pending relation instead.
+LINK_COMPUTATION_FAILED = re.compile(r"LCM tool replay computation failed reason=\w+")
+LINK_STORE_SLACK = 1.0  # seconds: a log stamp of one-second resolution can read just before the row's ingested_at
 # Route tokens: the reconciliation action of a re-bound engine's first ingest (reconcile.py: advanced cursor,
 # persisted batch, skipped batch), the warm default ``foreground``/``append``, and the tail routes: ``cold`` (a retried
 # cold tail through the ingest), ``S3`` (the S3 tail retry), ``session_end`` and ``warm_tail``.
@@ -289,7 +299,7 @@ def host_expected(rows, group, markers, strip, scored=None):
     the host's merged copy of that row (a rotation handoff stamps it anew) or a resend: it is not counted, and it is
     listed for a hand check (``merged_carrier_repeat``); a text held only by merged rows counts its first. A row that begins
     with one of LCM-X's prefix carriers (objective, task list, overflow recovery) is not expected: where such a carrier
-    ends is not marked. ``scored``: the sessions in the audit window; only their rows are expected, and an identity's
+    ends is not marked (``todo_expected`` expects a stored copy of a displayed todo row). ``scored``: the sessions in the audit window; only their rows are expected, and an identity's
     copies in an unscored segment of the lineage (a row carried from a parent that started before the window) are the
     parent's rows: the scored segments expect only the occurrences beyond the most any unscored segment holds.
     Returns (expected per lineage, carrier rows excluded per lineage, hand checks)."""
@@ -369,6 +379,25 @@ def host_expected(rows, group, markers, strip, scored=None):
     return out, excluded, hand_checks
 
 
+def todo_expected(host_rows, stored_rows, group, header):
+    """Host-displayed todo rows a stored user row copies (#2377): a stored user row whose content equals, byte for
+    byte, a displayed host user row that starts with the todo injection header (``header``), of the same lineage and
+    at the same stamp (observed_at equals the host timestamp), is expected; each displayed occurrence matches one
+    stored row. Every other todo row stays out of the expected rows (``host_expected``), and a displayed one with no
+    stored copy is no deficit. ``stored_rows``: (store_id, session, role, content, tool_calls, tool_call_id,
+    observed_at). Returns {lineage: [store id of each matched row]}: the stamp-equal row is the kept copy, taken out
+    of scoring with its host occurrence, so an earlier copy of the same text stays surplus."""
+    shown = {(group(r[1]), r[3], float(r[7])) for r in host_rows if r[2] == "user" and r[9] and not r[6]
+             and r[7] is not None and (r[3] or "").startswith(header)}
+    out = defaultdict(list)
+    for _store_id, session, role, content, _calls, _call_id, observed in sorted(stored_rows):
+        slot = (group(session), content, float(observed)) if role == "user" and observed is not None else None
+        if slot in shown:
+            shown.discard(slot)
+            out[slot[0]].append(_store_id)
+    return out
+
+
 def read_store(path: Path):
     with ro(path) as con:
         mc = columns(con, "messages")
@@ -376,8 +405,10 @@ def read_store(path: Path):
                            ", ".join(opt(mc, c, "NULL") for c in ("observed_at", "ingested_at")) +
                            " from messages order by store_id").fetchall()
         # store.py:1321-1329 message_relations(store_id, kind, related_store_id, ...); store_id is the row the
-        # relation is on: engine.py:7486 writes (copy, 'possible_replay_of', target), engine.py:7547 (row, 'generated_unproven').
-        relations = con.execute("select store_id, kind, related_store_id from message_relations").fetchall() \
+        # relation is on: engine.py:7486 writes (copy, 'possible_replay_of', target), engine.py:7547 (row, 'generated_unproven');
+        # composite_of segments carry their ordinal (multiset.composite_witness).
+        relations = con.execute("select store_id, kind, related_store_id, " + opt(
+            columns(con, "message_relations"), "ordinal", "NULL") + " from message_relations").fetchall() \
             if has_table(con, "message_relations") else []
         uids = {r[0] for r in con.execute("select store_id from host_uid_bindings where kind = 'canonical'")} \
             if has_table(con, "host_uid_bindings") else None  # store.py:1477-1481
@@ -402,9 +433,36 @@ def log_time(stamp: str, tz, frac=None):
     return datetime.strptime(stamp, "%Y-%m-%d %H:%M:%S").replace(tzinfo=ZoneInfo(tz)).timestamp() + sub
 
 
+def logged_link(msg):
+    """#2377's logged intended link: the source store id of a well-formed line (integer ids, a known reason code),
+    False for a malformed one or an unknown reason (no credit, counted as unparsed), None for any other message."""
+    if not msg.startswith(LINK_FAILED):
+        return None
+    hit = LINK_LINE.fullmatch(msg)
+    return int(hit.group(1)) if hit else False
+
+
+def logged_link_credits(links, extra, since):
+    """#2377's logged intended links: the store ids they credit, and the well-formed lines out of scope. A line credits
+    its source row only when it is a WARNING, its session field names the row's session (exactly, as the route lines'
+    session is matched), and its time is in the run window (at or after ``since``) and not before the row was stored
+    (its ingested_at, less LINK_STORE_SLACK). ``links``: (source, session, at, level) of each well-formed line."""
+    credited, out = set(), 0
+    for source, session, at, level in links:
+        row = extra.get(source)
+        if row is not None and level == "WARNING" and session == row[1] and (since is None or at >= since) and (
+                row[7] is None or at >= row[7] - LINK_STORE_SLACK):
+            credited.add(source)
+        else:
+            out += 1
+    return credited, out
+
+
 def read_logs(paths, tz=None):
-    """LCM-X's own log lines: compactions (deduplicated across files), AUXILIARY lines and recorder lines."""
-    out, seen_ingests = {"compactions": set(), "auxiliary": defaultdict(set), "ingests": []}, set()
+    """LCM-X's own log lines: compactions (deduplicated across files), AUXILIARY lines, recorder lines and logged
+    intended links (``logged_link``)."""
+    out, seen_ingests = {"compactions": set(), "auxiliary": defaultdict(set), "ingests": [], "links": set(),
+                         "links_unparsed": set(), "link_computation_failed": set()}, set()
     for path in paths:
         for line in Path(path).read_text(encoding="utf-8", errors="replace").splitlines():
             m = LOG_LINE.match(line)
@@ -423,11 +481,19 @@ def read_logs(paths, tz=None):
                 record = {"session": hit["session"], "route": hit["route"].strip().replace(" ", "_"),
                           "reason": hit["reason"].strip(), "cursor": int(hit["cursor"]), "at": at,
                           "range": (int(hit["a"]), int(hit["b"])), "rows": int(hit["rows"]),
-                          "pairs": int(hit["pairs"]), "stripped": int(hit["stripped"])}
+                          "pairs": int(hit["pairs"]), "stripped": int(hit["stripped"]),
+                          "link_pending": int(pending.group(1)) if (
+                              pending := ROUTE_LINK_PENDING.search(msg, hit.end())) else None}
                 identity = tuple(sorted(record.items()))
                 if identity not in seen_ingests:  # a line logged to two files is one ingest
                     seen_ingests.add(identity)
                     out["ingests"].append(record)
+            if LINK_COMPUTATION_FAILED.fullmatch(msg):  # a line logged to two files counts once
+                out["link_computation_failed"].add((at, msg))
+            if (link := logged_link(msg)) is False:  # a line logged to two files counts once
+                out["links_unparsed"].add((at, msg))
+            elif link is not None:
+                out["links"].add((link, sid, at, m["level"] or m["level2"] or m["level3"]))
     # ACP stderr omits the session: prefer a matching session-bearing file record, while keeping distinct sessions.
     session_records = {(at, msg) for sid, at, msg in out["compactions"] if sid is not None}
     out["compactions"] = {(sid, at, msg) for sid, at, msg in out["compactions"]
@@ -648,28 +714,31 @@ def attribute_silent_surplus(silent, ingests, observed, user_rows, restarts, in_
     return {k: sorted(v) for k, v in out.items()}
 
 
-def score_lineage(g, items, tools, rows, relations, stored=None):
+def score_lineage(g, items, tools, rows, relations, stored=None, forms=None):
     """B2's instruments on one lineage; returns numbers and the silent rows [(store_id, ids of its key)].
 
     ``stored`` maps store_id -> (session, role, content) as stored: the product links replay copies on stored
-    bytes, so a link is checked against stored content, not resolved content (as in the B2 scorer)."""
+    bytes, so a link is checked against stored content, not resolved content (as in the B2 scorer). ``forms``:
+    ``multiset.attribution_forms`` of the whole store, computed once."""
     groups = []
     stored4 = [r[:4] for r in rows]
     ms = multiset.score(items, stored4, None, surplus_keys=groups)
     ids = {}
     tc = tool_calls.compare(tools, set(), tool_calls.stored_keys([r[:6] for r in rows], lambda _s: g, store_ids=ids),
                             store_ids=ids, surplus_keys=groups)
-    visible, silent, truncated = 0, [], 0
+    visible, silent, truncated, credited = 0, [], 0, Counter()
     for group in groups:  # split_surplus matches within one key, so one call per key loses nothing
-        split = multiset.split_surplus([group], relations, stored)
+        split = multiset.split_surplus([group], relations, stored, forms)
         visible += split["visible_surplus_rows"]
+        credited.update({k: split[k] for k in forms or ()})
         found = [e["store_id"] for e in split["silent_surplus_examples"]]
         truncated += split["silent_surplus_rows"] - len(found)  # over 10 in one key: left unattributable
         silent += [(sid, group[2]) for sid in found]
     return {"expected_rows": len(items) + sum(tools.values()), "stored_rows": len(rows),
             "missing_rows": ms["deficit_rows"] + tc["tool_missing_rows"], "split_assistant_keys": ms["split_keys"],
             "surplus_rows": ms["surplus_rows"] + tc["tool_surplus_rows"], "visible_surplus_rows": visible,
-            "silent_surplus_rows": len(silent) + truncated, "silent_unlisted_rows": truncated}, silent
+            "silent_surplus_rows": len(silent) + truncated, "silent_unlisted_rows": truncated,
+            **{k: credited[k] for k in forms or ()}}, silent
 
 
 def audit(state_db: Path, lcm_db: Path, logs=(), since=None, events_path=None, log_tz=None) -> dict:
@@ -711,24 +780,34 @@ def audit(state_db: Path, lcm_db: Path, logs=(), since=None, events_path=None, l
                                [r for r in host_rows if r[1] in scored], strip)
     for g, rows in by_lineage.items():  # kept rows of an undone occurrence: out of parity, surplus and M3's numerator
         by_lineage[g] = [r for r in rows if r[0] not in retained]
+    todo = todo_expected([r for r in host_rows if r[1] in scored], [r for rows in by_lineage.values() for r in rows],
+                         group, multiset.todo_header())
+    kept_todo = {i for ids in todo.values() for i in ids}
+    for g, rows in by_lineage.items():  # a matched todo row and its host occurrence: expected and stored, not scored
+        by_lineage[g] = [r for r in rows if r[0] not in kept_todo]
     lost = Counter(group(extra[s][1]) for s in lost_ids)
+    logged, links_out_of_scope = logged_link_credits(log["links"], extra, since)
+    forms = multiset.attribution_forms(relations, stored_content, logged)
     parity, silent_rows = {}, []
     for g in sorted(roots | set(by_lineage) | set(lost)):
         items, tools = expected.get(g, ([], Counter()))
-        numbers, silent = score_lineage(g, items, tools, by_lineage[g], relations, stored_content)
-        numbers["stored_rows"] += lost[g]
+        numbers, silent = score_lineage(g, items, tools, by_lineage[g], relations, stored_content, forms)
+        numbers["stored_rows"] += lost[g] + len(todo[g])
+        numbers["expected_rows"] += len(todo[g])
         numbers.update(externalized_unresolved=lost[g], host_carrier_rows_excluded=carriers[g],
+                       host_todo_rows_expected=len(todo[g]),
                        source=sessions.get(g, {}).get("source"), host_session=g in sessions)
         parity[g] = numbers
         silent_rows += [(sid, extra[sid][1], [(i, extra[i][1]) for i in ids]) for sid, ids in silent]
 
     # Whole-run parity: every scored lineage, #1931 bucket B children included (only PASS(A) is bucket A's own bar).
     keys = ("expected_rows", "stored_rows", "missing_rows", "split_assistant_keys", "surplus_rows",
-            "visible_surplus_rows", "silent_surplus_rows", "silent_unlisted_rows", "externalized_unresolved")
+            "visible_surplus_rows", "silent_surplus_rows", "silent_unlisted_rows", "externalized_unresolved",
+            "host_todo_rows_expected", *forms)
     totals = {k: sum(p[k] for p in parity.values()) for k in keys}
     zero = sorted(g for g, p in parity.items() if p["host_session"] and p["expected_rows"] and not p["stored_rows"])
     per_session = Counter(r[1] for r in stored)
-    window_ids = {r[0] for rows in by_lineage.values() for r in rows} | set(lost_ids) | retained
+    window_ids = {r[0] for rows in by_lineage.values() for r in rows} | set(lost_ids) | retained | kept_todo
     audited_sessions = scored | {extra[i][1] for i in window_ids}
     denominator = len(window_ids)
 
@@ -790,8 +869,8 @@ def audit(state_db: Path, lcm_db: Path, logs=(), since=None, events_path=None, l
 
     # M3: rows carrying generated_unproven, or the store_id side of a possible_replay_of pair.
     # An undo_retained row leaves M3 for a possible_replay_of only: a generated_unproven row is LCM's own output.
-    doubt = sorted(({s for s, kind, _o in relations if kind == "possible_replay_of"} - retained
-                    | {s for s, kind, _o in relations if kind == "generated_unproven"}) & window_ids)
+    doubt = sorted(({s for s, kind, *_rest in relations if kind == "possible_replay_of"} - retained
+                    | {s for s, kind, *_rest in relations if kind == "generated_unproven"}) & window_ids)
     m3 = {"numerator": len(doubt), "denominator": denominator, "store_ids": doubt,
           "rate": len(doubt) / denominator if denominator else 0.0}
 
@@ -804,7 +883,12 @@ def audit(state_db: Path, lcm_db: Path, logs=(), since=None, events_path=None, l
                 "rate_2305": sum(i["route"] == ROUTE_2305 and i["cursor"] == 0 for i in storing) / len(storing)
                 if storing else None,
                 "stripped_links": sum(i["stripped"] for i in ingests), "replay_pairs": pairs,
-                "stripped_per_replay_pair": sum(i["stripped"] for i in ingests) / pairs if pairs else None}
+                "stripped_per_replay_pair": sum(i["stripped"] for i in ingests) / pairs if pairs else None,
+                # #2377 cross-checks: route lines' link_pending field (None when no line has it), malformed links.
+                "link_pending_logged": sum(i["link_pending"] for i in ingests if i["link_pending"] is not None)
+                if any(i["link_pending"] is not None for i in ingests) else None,
+                "logged_link_unparsed": len(log["links_unparsed"]), "logged_link_out_of_scope": links_out_of_scope,
+                "link_computation_failed": len(log["link_computation_failed"])}
 
     observed = {r[0]: r[6] for r in stored}
     user_rows = {r[0]: (r[1], r[3]) for r in resolved if r[2] == "user"}
@@ -855,6 +939,12 @@ def audit(state_db: Path, lcm_db: Path, logs=(), since=None, events_path=None, l
             "coverage_floors": {"value": sorted(k for k, c in coverage.items() if not c["met"]),
                                 "pass": all(c["met"] for c in coverage.values())},
             "issue_1931_pass_A": {"value": issue_1931["pass_A"], "pass": issue_1931["pass_A"]}}
+    marked = sorted(forms["link_pending_rows"] & window_ids)
+    if marked:  # #2377: link computation raised for these rows, so a credited copy never reads as a clean pass
+        hand_checks.append({"reason": "link_pending_marked", "store_ids": marked})
+    failed_links = sorted(set(logged) & window_ids)
+    if failed_links:  # the relation write or the pending mark failed: logged, and held for a hand check
+        hand_checks.append({"reason": "logged_link_failed", "store_ids": failed_links})
     data_bars = [b for b in bars if b != "coverage_floors"]
     verdict = "GATE FAIL" if not all(bars[b]["pass"] for b in data_bars) else \
         "INCOMPLETE" if not bars["coverage_floors"]["pass"] or not ingests else \
@@ -862,6 +952,7 @@ def audit(state_db: Path, lcm_db: Path, logs=(), since=None, events_path=None, l
     return {"instrument": "gate-kit-audit-v1", "claim_class": "instrument",
             "inputs": {"since": since, "logs": len(logs), "events": events is not None, "log_tz": log_tz},
             "parity": {"totals": totals, "lineages": parity, "zero_row_lineages": zero,
+                       "link_pending_rows_total": len(forms["link_pending_rows"] & window_ids),
                        "sessions": {s: {"lineage": group(s), "source": v["source"], "stored_rows": per_session[s]}
                                     for s, v in sessions.items() if group(s) in parity}},
             "coverage": coverage, "coverage_basis": coverage_basis,
