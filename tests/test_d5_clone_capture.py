@@ -53,6 +53,28 @@ def test_backup_wal_readonly_and_exclusive(inputs, tmp_path):
             db.execute("DELETE FROM messages")
 
 
+def test_derived_files_are_made_from_the_filled_capture_and_hashed_with_it(inputs, tmp_path):
+    seen = []
+
+    def derived(out):
+        seen.append(sorted(p.name for p in out.iterdir()))  # Called once the stores and window.log are in place.
+        return {"doctor.log": b"host_uid_mode: synthetic\n", "filters.json": b'{"ignore_session_patterns": []}\n'}
+
+    out = tmp_path / "T0"
+    cap.capture("T0", out, store_db=inputs[0], host_db=inputs[1], payload_dir=None, derived=derived)
+    assert seen == [["host-0.db", "lcm-large-outputs", "store.db", "window.log"]]
+    manifest = json.loads((out / "capture-hashes.json").read_text())
+    assert manifest["files"]["doctor.log"] == digest(out / "doctor.log")
+    assert manifest["files"]["filters.json"] == digest(out / "filters.json")
+
+
+@pytest.mark.parametrize("name", ["store.db", "window.log", "capture-hashes.json", "lcm-large-outputs/x"])
+def test_a_derived_file_never_replaces_the_capture_layout(inputs, tmp_path, name):
+    with pytest.raises(cap.CaptureError, match="derived file collides"):
+        cap.capture("T0", tmp_path / "T0", store_db=inputs[0], host_db=inputs[1], payload_dir=None,
+                    derived=lambda out: {name: b"x"})
+
+
 @pytest.mark.parametrize("kind", ["T0", "H8"])
 def test_capture_layout_hashes_and_extras(inputs, tmp_path, kind):
     payload = tmp_path / "payload"

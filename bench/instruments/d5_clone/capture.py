@@ -97,7 +97,9 @@ def clone_tree(src, dest):
         shutil.copytree(src, dest, symlinks=True)  # Copy a link as a link, so the check below sees it.
 
 
-def capture(kind, out_dir, *, store_db, host_db, payload_dir, extras=None, home=None):
+def capture(kind, out_dir, *, store_db, host_db, payload_dir, extras=None, home=None, derived=None):
+    """*derived*, if given, is called with the filled capture dir and returns {name: bytes}: files made from the
+    capture itself (a T0 doctor.log), written before capture-hashes.json so they are hashed with it."""
     if kind not in ("T0", "H8"):
         raise CaptureError("unknown capture kind")
     out = Path(out_dir)
@@ -135,6 +137,12 @@ def capture(kind, out_dir, *, store_db, host_db, payload_dir, extras=None, home=
         if dest.exists():
             raise CaptureError("extra collides with capture layout")
         dest.write_text(json.dumps({"captured_at": captured_at}), encoding="utf-8")
+    for name, data in (derived(out) if derived else {}).items():
+        dest = _relative(out, name)
+        if dest.exists() or dest.relative_to(out).as_posix() == "capture-hashes.json" or dest.is_relative_to(payload):
+            raise CaptureError("derived file collides with capture layout")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(data)
     files, payload_lines = {}, []
     for path in sorted(out.rglob("*")):
         if path.is_file():
