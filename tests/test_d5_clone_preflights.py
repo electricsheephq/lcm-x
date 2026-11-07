@@ -18,7 +18,7 @@ class FakeHost:
     """The LocalHost seams the producer uses. Each turn stores the host and LCM-X rows a working arm would."""
 
     def __init__(self, root, fault=None):
-        self.run_dir, self.fault, self.files = root, fault, 0
+        self.run_dir, self.fault, self.files, self.removed = root, fault, 0, []
         (root / "pin.json").write_text("{}")
         self.c = {"snapshot_pin": str(root / "pin.json"), "context_length": 200000, "p3_context_length": 64000,
                   "rc": {"lcm_tree": str(root), "commit": "a" * 40}, "ga": {"lcm_tree": str(root), "commit": "a" * 40}}
@@ -86,6 +86,9 @@ class FakeHost:
         conversation = {} if self.fault == "no-conversation" else {"payload": {"conversation_id": "conv"}}
         return {"checks": {"validity": {"verdict": "PASS"}}, **conversation}, False, 0
 
+    def remove(self, path):
+        self.removed.append(path.name)
+
     def facts(self, ctx):
         return {**ctx["facts"], "payload_files_created": sum(1 for _ in (ctx["home"] / "lcm-large-outputs").iterdir())}
 
@@ -108,7 +111,9 @@ def test_each_preflight_fails_on_its_own_fault(tmp_path, monkeypatch, fault):
         complete = prov.Provider._complete
         monkeypatch.setattr(prov.Provider, "_complete", lambda self, request: {
             **complete(self, request), "created": len(self.stats["request_log"])})
-    verdicts = pf.produce(FakeHost(tmp_path, fault), list(pf.PREFLIGHTS))
+    host = FakeHost(tmp_path, fault)
+    verdicts = pf.produce(host, list(pf.PREFLIGHTS))
+    assert host.removed == ([] if fault in ("crash", "replay-error") else ["T0", "H8"])
     expected = dict.fromkeys(pf.PREFLIGHTS, "INCONCLUSIVE" if fault == "crash" else "PASS")
     expected.update({fault: "FAIL"} if fault in pf.PREFLIGHTS else {"P6": "INCONCLUSIVE"} if fault else {})
     assert verdicts == expected

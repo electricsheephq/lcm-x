@@ -160,6 +160,11 @@ def p6(host, plan):
         h8_dir, _ = host.capture(ctx, "H8", cold)
         receipt, error, range_new = host.replay(ctx, cold, t0_dir, h8_dir)  # As run_arm: right after its H8.
         bind, cold_anchors, mid = bars.bar2_bind(receipt, range_new_rows=range_new, error=error), anchors(), _tops(ctx)
+        # The edition's conversation_id is the T0 host session row's session_key (p_s6r_clone.py:1148).
+        keys = {k for k, in run._rows(Path(t0_dir) / "host-0.db", "SELECT session_key FROM sessions WHERE id = ?", (sid,))}
+        if receipt is not None:  # As run_arm: the captures go once the replay left its receipt.
+            host.remove(t0_dir)
+            host.remove(h8_dir)
         _turn(host, ctx, warm)
         warm_anchors = anchors() - cold_anchors
         ended = _rows(ctx, "state.db", "SELECT count(*) FROM sessions WHERE end_reason IS NOT NULL"
@@ -176,7 +181,7 @@ def p6(host, plan):
     enabled = ((yaml.safe_load((Path(ctx["home"]) / "config.yaml").read_text()) or {}).get("plugins") or {}).get("enabled")
     live = {c for c, in _rows(ctx, "lcm.db", "SELECT DISTINCT conversation_id FROM messages WHERE session_id = ?"
                               " AND store_id > ? AND store_id <= ?", (sid, before["store"], mid["store"]))}
-    replayed = {str(c) for c in _find(receipt or {}, "conversation_id")}
+    replayed = {str(c) for c in _find(receipt or {}, "conversation_id")} | {str(k) for k in keys if k}
     f = {"bind": bind, "cold_anchors": cold_anchors, "warm_anchors": warm_anchors, "ended_sessions": ended,
          "warm_rows": [new("lcm.db", "store_id", mid["store"]), new("state.db", "id", mid["host"])],
          "host_rows": [new("state.db", "id", before["host"], False), new("state.db", "id", before["host"])],
@@ -190,7 +195,7 @@ def p6(host, plan):
         ("new host rows outside L's session", len(set(f["host_rows"])) != 1 or f["host_rows"][0] < 2),
         ("the live and replayed conversation_id differ", replayed and live != replayed)]), \
         _failed([("the edition replay errored (no receipt to judge)", error),
-                 ("the edition receipt names no conversation_id: the live one is recorded, not compared", not replayed)]), f
+                 ("neither the T0 session row nor the edition receipt gives a conversation_id to compare", not replayed)]), f
 
 
 def p7(host, plan):
