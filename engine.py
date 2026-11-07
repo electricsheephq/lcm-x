@@ -8377,7 +8377,9 @@ class LCMEngine(
                     and self._last_ingest_reconciliation.get("cursor") == 0)
                 # #2029: a rotation child re-sent from cursor 0 without a commit proof (no reconciliation ran) stores
                 # its predecessors' rows again; annotate them against the recorded rotation chain.
-                ancestors = self._rotation_predecessor_session_ids(self._session_id) if cursor == 0 else []
+                # Only the unreconciled route gains the chain: #2305's reconciled route keeps its own-session targets.
+                ancestors = (self._rotation_predecessor_session_ids(self._session_id)
+                             if cursor == 0 and not reconciled_existing_session else [])
                 self._ingest_ledger_attempt["cursor0_batch"] = bool(
                     cursor0_batch or ancestors and not reconciled_existing_session)
                 self._ingest_ledger_attempt["replay_sessions"] = [self._session_id, *ancestors]
