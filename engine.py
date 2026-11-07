@@ -7027,29 +7027,42 @@ class LCMEngine(
         if not pending:
             return result, False
         # #2390: identity-equal occurrences can differ in content (a model-switch note, a todo
-        # fold). A re-stamped row first takes an occurrence whose stored row has its exact
-        # content, so reordered rows never cross; only then the first identity-equal one.
+        # fold), and the host may reorder carried rows. Content decides a digest group only when
+        # EVERY pending row has its own occurrence of exactly equal stored content (a full
+        # matching), and only through an occurrence whose stamp holds one stored content. A
+        # partial content match can be a coincidence of a host rewrite, so any other group keeps
+        # the ordered first fit.
         stamps = [row["timestamp"] for row in target if row.get("timestamp") is not None]
-        stored = defaultdict(list)
+        stored = defaultdict(set)
         for row in self._store.find_rows_by_observed_at(self._conversation_id, [session], stamps):
             if row.get("session_id") == session:
-                stored[row.get("observed_at")].append((row.get("role"), row.get("content")))
+                stored[(row.get("observed_at"), row.get("role"))].add(row.get("content"))
+        groups = defaultdict(list)
+        for idx, digest in pending:
+            groups[digest].append(idx)
+        for digest, rows in groups.items():
+            free = [pos for pos, row in enumerate(target) if pos not in used and row["identity_sha256"] == digest]
+            exact = {idx: [pos for pos in free
+                           if stored.get((target[pos].get("timestamp"), messages[idx].get("role"))) == {
+                               messages[idx].get("content")}] for idx in rows}
+            owner: dict = {}
 
-        def same_content(idx, row):
-            return (messages[idx].get("role"), messages[idx].get("content")) in stored.get(row.get("timestamp"), ())
+            def claim(idx, seen):
+                for pos in exact[idx]:
+                    if pos not in seen:
+                        seen.add(pos)
+                        if pos not in owner or claim(owner[pos], seen):
+                            owner[pos] = idx
+                            return True
+                return False
 
-        for exact in (True, False):
-            left = []
-            for idx, digest in pending:
-                position = next((pos for pos, row in enumerate(target) if pos not in used
-                                 and row["identity_sha256"] == digest
-                                 and (not exact or same_content(idx, row))), None)
-                if position is None:
-                    left.append((idx, digest))
-                else:
-                    used.add(position)
-                    result[idx] = (session, target[position])
-            pending = left
+            if all(claim(idx, set()) for idx in rows):
+                pairs = {idx: pos for pos, idx in owner.items()}
+            else:
+                pairs = dict(zip(rows, free))  # the ordered first fit
+            for idx, pos in pairs.items():
+                used.add(pos)
+                result[idx] = (session, target[pos])
         return result, False
 
     def _link_restamped_occurrences(self, messages, stored_at, previous, recovery_fallback):

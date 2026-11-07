@@ -356,31 +356,89 @@ def test_rotation_reordered_carried_rows_are_each_linked(build, caplog):
     assert len(links) == len({target for _source, target in links})
 
 
-@pytest.mark.issue(2390)
-def test_rotation_reordered_identity_equal_rows_with_different_content_link_to_their_own(build, caplog, monkeypatch):
-    """#2390: P (a model-switch note before T's text) and T share one replay identity. Both are carried,
-    re-stamped and reordered; each copy must link to its own original, never crossed."""
-    prefixed = "[Note: model was just switched from X to Y]\n\n" + T
+PREFIXED = "[Note: model was just switched from X to Y]\n\n" + T
+TODO_FOLD = "\n\n" + reconcile_module._PRESERVED_TODO_CONTEXT_PREFIX + "\n- [>] 1. deploy staging (in_progress)"
+
+
+def _with_prefixed_turn(monkeypatch) -> float:
+    """The predecessor's last carried user turn is T behind a model-switch note: one replay identity with T."""
     plain_history = history
 
     def history_with_prefixed_turn(uids):
         rows = plain_history(uids)
         last_user = max(i for i, row in enumerate(rows) if row["role"] == "user")
-        rows[last_user]["content"] = prefixed
+        rows[last_user]["content"] = PREFIXED
         return rows
 
     monkeypatch.setattr(__name__ + ".history", history_with_prefixed_turn)
+    rows = plain_history(False)
+    return rows[max(i for i, row in enumerate(rows) if row["role"] == "user")]["timestamp"]
+
+
+def _carried(view, content):
+    return next(i for i, row in enumerate(view) if row.get("role") == "user" and row.get("content") == content)
+
+
+def _original(rows, content):
+    return next(row["store_id"] for row in rows if row["session_id"] == "S" and row["content"] == content)
+
+
+@pytest.mark.issue(2390)
+def test_rotation_reordered_identity_equal_rows_with_different_content_link_to_their_own(build, caplog, monkeypatch):
+    """#2390: P (a model-switch note before T's text) and T share one replay identity. Both are carried,
+    re-stamped and reordered; each copy must link to its own original, never crossed."""
+    _with_prefixed_turn(monkeypatch)
 
     def reorder(_engine, view):
-        p_index = next(i for i, row in enumerate(view) if row.get("content") == prefixed)
-        t_index = next(i for i, row in enumerate(view) if row.get("role") == "user" and row.get("content") == T)
+        p_index, t_index = _carried(view, PREFIXED), _carried(view, T)
         view[p_index]["timestamp"] += 0.5  # re-stamped too
         view[p_index], view[t_index] = view[t_index], view[p_index]
 
     engine, rows = run(build, caplog, mode="rotating", uids=False, restamp=True, before_ingest=reorder)
     links = replay_links(engine)
-    for content in (prefixed, T):
+    for content in (PREFIXED, T):
         copies = [row for row in rows if row["role"] == "user" and row["content"] == content]
         assert [row["session_id"] for row in copies] == ["S", "rotated"], content[:30]
         assert (copies[1]["store_id"], copies[0]["store_id"]) in links, content[:30]
     assert len(links) == len({target for _source, target in links})
+
+
+@pytest.mark.issue(2390)
+def test_rotation_rewritten_identity_equal_rows_in_order_keep_their_own_originals(build, caplog, monkeypatch):
+    """Review probe: the host strips P's note (P' == T) and folds the todo into T (T' == T + todo), in order.
+    P' equals T's stored text only by coincidence of the rewrite; content must not cross the pair."""
+    _with_prefixed_turn(monkeypatch)
+
+    def rewrite(_engine, view):
+        p_index, t_index = _carried(view, PREFIXED), _carried(view, T)
+        view[p_index]["timestamp"] += 0.5
+        view[p_index]["content"] = T
+        view[t_index]["content"] = T + TODO_FOLD
+
+    engine, rows = run(build, caplog, mode="rotating", uids=False, restamp=True, before_ingest=rewrite)
+    links = replay_links(engine)
+    stripped = next(row["store_id"] for row in rows if row["session_id"] == "rotated" and row["content"] == T)
+    folded = next(row["store_id"] for row in rows if row["session_id"] == "rotated" and row["content"] == T + TODO_FOLD)
+    assert (stripped, _original(rows, PREFIXED)) in links
+    assert (folded, _original(rows, T)) in links
+
+
+@pytest.mark.issue(2390)
+def test_rotation_content_of_a_non_snapshot_row_at_a_stamp_never_redirects_a_link(build, caplog, monkeypatch):
+    """Review probe: a stored T that the snapshot never held sits at P's stamp. It must not let T' claim P's
+    occurrence: T' stays linked to its own original."""
+    p_stamp = _with_prefixed_turn(monkeypatch)
+
+    def add_stray_and_fold(engine, view):
+        engine._store.append("S", {"role": "user", "content": T, "timestamp": p_stamp},
+                             conversation_id=engine._conversation_id)
+        p_index = _carried(view, PREFIXED)
+        view[p_index]["timestamp"] += 0.5
+        view[p_index]["content"] = PREFIXED + TODO_FOLD
+
+    engine, rows = run(build, caplog, mode="rotating", uids=False, restamp=True, before_ingest=add_stray_and_fold)
+    links = replay_links(engine)
+    t_copy = next(row["store_id"] for row in rows if row["session_id"] == "rotated" and row["content"] == T)
+    t_original = next(row["store_id"] for row in rows if row["session_id"] == "S" and row["content"] == T
+                      and row["observed_at"] == T_REQ)
+    assert (t_copy, t_original) in links
