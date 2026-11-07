@@ -42,7 +42,7 @@ To turn capture off for a launch, set `LCMX_CAPTURE=off`, or start Claude Code w
 
 - **Claude Code's local transcript GC.** Lossless capture needs Claude Code's opt-in local transcript GC off (`CLAUDE_CODE_TRANSCRIPT_LOCAL_GC` unset, the default). With it on, capture is best effort and the audit lists those sessions without a lossless claim.
 - **A subagent transcript removed before the worker first reads it** cannot be captured, and the audit cannot see that it existed.
-- **Audit memory.** The audit needs memory roughly in proportion to the largest session in the store: about 1.3 GB for a 690,000-line session in our gate run. Capture itself stays under about 400 MB.
+- **Audit memory.** The audit needs memory roughly in proportion to the largest session in the store: about 1.3 GB for a 690,000-line session in our gate run. Capture itself peaked at about 0.4 GB in that run.
 - **Hook timing.** Hooks usually hand off in milliseconds, but the hook's write of its small pointer file sometimes stalls for a few seconds, at moderate as well as heavy machine load.
   - **The bound.** `PostToolBatch` runs in the background. The other hooks run before Claude Code goes on, with a 5-second limit (15 seconds for `PreCompact`), so a stall can add up to that limit to the turn.
   - **What we measured.** These figures are from two full release-gate runs on 0.1.0 candidates with the same hook code:
