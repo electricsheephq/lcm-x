@@ -290,8 +290,10 @@ def test_in_place_carrier_at_block_start_does_not_stop_matching(tmp_path, kind):
     assert totals["missing_rows"] == totals["surplus_rows"] == 0
 
 
-@pytest.mark.parametrize("stamp", [3000.0, 6000.0], ids=["same-stamp", "new-stamp"])
+@pytest.mark.parametrize("stamp", [3000.0, 6000.0], ids=["pool-used-by-its-copy", "new-stamp"])
 def test_in_place_resend_after_second_block_still_counts(tmp_path, stamp):
+    """A resend has a stamp of its own (new-stamp). At the original's exact stamp it still counts only because the
+    block's own copy used that pool row first (see the dropped-copy limit below)."""
     host, original = repeated_in_place()
     resend = ("S1", dict(u("retained question"), _ts=stamp))
     out = Home(tmp_path, ONE, host + [resend], stored=original).run()
@@ -299,6 +301,19 @@ def test_in_place_resend_after_second_block_still_counts(tmp_path, stamp):
     assert totals["expected_rows"] == len(original) + 1
     assert totals["missing_rows"] == 1
     assert totals["surplus_rows"] == 0
+
+
+def test_in_place_accepted_limit_a_row_at_an_unused_archived_stamp_is_a_copy(tmp_path):
+    """Accepted limit, pinned: the rule assumes a new row has a stamp of its own. If the host dropped a row's copy and
+    a later row carried that row's exact role, content and stamp, it would be taken for the dropped copy. The host
+    stamps new rows with time.time() (1e-6 apart in a batch), so it does not write such a row."""
+    host, original = repeated_in_place()
+    question = u("retained question")["content"]
+    copies = [i for i, (_s, m) in enumerate(host) if m.get("content") == question and not m.get("_compacted")]
+    assert len(copies) == 1  # the second block's copy of "retained question"
+    host = host[:copies[0]] + host[copies[0] + 1:] + [("S1", dict(u("retained question"), _ts=3000.0))]
+    totals = Home(tmp_path, ONE, host, stored=original).run()["parity"]["totals"]
+    assert totals["expected_rows"] == len(original) and totals["missing_rows"] == 0
 
 
 @pytest.mark.parametrize("signal", ["no-boundary", "no-compacted-column"])

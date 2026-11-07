@@ -167,8 +167,8 @@ def lineage_of(sessions: dict):
 def display_key(role, content, ts, call_id, calls, tool_name):
     """The host's display identity (hermes_state_messages.py _display_dedupe_key, hermes_state_identity.py
     _stable_tool_key): a tool-calling assistant row by its call ids, any other row by its content; both with the row's
-    timestamp. Rotation handoffs and in-place copies take their original's timestamp (_carry_parent_timestamps;
-    in-place copies are excluded by ``in_place_carried_ids``). The host's user-handoff normalisation
+    timestamp. Rotation handoffs take their original's timestamp (_carry_parent_timestamps); in-place copies keep it
+    because the host wrote the stamp back onto the message it later re-sends (excluded by ``in_place_carried_ids``). The host's user-handoff normalisation
     (split_user_originated_turn) is not repeated here: LCM-X's carriers are excluded by marker instead."""
     if role == "assistant" and calls:
         try:
@@ -220,12 +220,12 @@ def in_place_carried_ids(rows, strip, prefixes):
 
     A compaction archives the active rows (compacted = 1) and inserts its compressed list after a boundary: the host's
     ``_compressed_summary`` row or LCM's summary carrier (a user row whose verified strip changes it); a run of boundary
-    rows with no other displayed row between them is one compaction (this host pin flags no summary row, and LCM's
+    rows with no displayed non-carrier row between them is one compaction (this host pin flags no summary row, and LCM's
     carrier opens the block). Its pool is what it archived: the displayed non-carrier archived rows between the
     previous compaction and this one, earlier copies included (a chained compaction copies copies). A displayed
     non-carrier row after the boundary, up to the next compaction, is a copy when its full display_key (role,
-    content or call ids, and the exact stamp) matches an unused pool row: the host keeps the original's stamp
-    (``_carry_parent_timestamps``), and each pool row stands for one copy. Order is not required (the host can
+    content or call ids, and the exact stamp) matches an unused pool row: a copy keeps the original's stamp (the host
+    wrote it back onto the message), and each pool row stands for one copy. Order is not required (the host can
     reorder or drop rows of the list). A new row has a stamp of its own, so a resend or repeat is never a copy; a copy
     the host re-stamps stays expected (a false alarm, never a hidden loss). User carriers (verified strip changes,
     empty text or LCM prefixes) are left to the existing carrier logic. No compacted evidence means no deduction.
@@ -242,7 +242,7 @@ def in_place_carried_ids(rows, strip, prefixes):
         return text != row[3] or not (text or "").strip() or (text or "").lstrip().startswith(prefixes)
 
     def boundary(row):
-        return bool(row[6]) or (row[9] and row[2] == "user" and strip(row[3], row[1]) != row[3])
+        return bool(row[9]) and (bool(row[6]) or (row[2] == "user" and strip(row[3], row[1]) != row[3]))
 
     def key(row):
         _rid, sid, role, content, calls, call_id = row[:6]
