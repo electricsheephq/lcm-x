@@ -305,7 +305,10 @@ def build(instrument_dir, files, roots_by_file, loads_by_file, interpreter, data
         for name in files:
             reached = call_closure(_path(instrument_dir, name), sorted(roots[name]), (data_by_file or {}).get(name, []))
             for other, attr in cross_file_refs(instrument_dir, name, reached[0] | reached[1]):
-                if other in whole or attr in roots.get(other, ()) or attr in (data_by_file or {}).get(other, []):
+                if other in roots and attr in (data_by_file or {}).get(other, []):
+                    call_closure(_path(instrument_dir, other), [attr], (data_by_file or {}).get(other, []))  # A literal.
+                    continue
+                if other in whole or attr in roots.get(other, ()):
                     continue
                 try:
                     if other not in roots:
