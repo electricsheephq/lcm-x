@@ -1298,25 +1298,6 @@ class MessageStore:
         ).fetchall()
         return [self._row_to_dict(row) for row in rows]
 
-    def rows_with_call_ids(self, session_id: str, ids, *, conversation_id: str) -> List[Dict[str, Any]]:
-        """All owned call/result rows with an exact id in ``ids``, without a tail or row limit."""
-        if not ids:
-            return []
-        owned_clause, owned_args = owned_conversation_clause(self._conn, conversation_id)
-        wanted = json.dumps(sorted(ids))
-        rows = []
-        for predicate in (
-            "role = 'assistant' AND json_valid(tool_calls) AND EXISTS (SELECT 1 FROM json_each(tool_calls) "
-            "WHERE CAST(json_extract(value, '$.id') AS TEXT) IN (SELECT value FROM json_each(?)))",
-            "role = 'tool' AND tool_call_id IN (SELECT value FROM json_each(?))",
-        ):
-            rows.extend(self._conn.execute(
-                f"SELECT {_MESSAGE_SELECT_COLUMNS} FROM messages "
-                f"WHERE session_id = ? AND {predicate} AND {owned_clause} ORDER BY store_id",
-                (session_id, wanted, *owned_args),
-            ).fetchall())
-        return [self._row_to_dict(row) for row in sorted(rows, key=lambda row: row[0])]
-
     def write_generation(self) -> tuple:
         """A token that changes whenever a committed write may have changed rows this connection reads:
         this connection's own writes (``total_changes``) and another connection's commits

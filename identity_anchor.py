@@ -55,6 +55,7 @@ _RECENT_CAP = 16  # rows this process stored lately: the R5 current-turn window
 _POOL_WINDOW = 256  # store ids either side of a stamp donor searched for a composite's constituents
 _INSERT_DIFF_BUDGET = 1_000_000  # #633: old x new rows compared per insertion diff (quadratic worst case ~40 ms)
 _CARRIER_LEDGER_CAP = 256  # #1000: carrier emission keys remembered as seen / retired (process-local)
+_PRESENCE_WINDOW_ROWS = 10000  # total stored rows across the presence scope
 
 
 def _ws_equivalent(stored, identity) -> bool:
@@ -592,8 +593,10 @@ class IdentityAnchorMixin:
         copies the view's unchanged prefix ``[0, start)`` holds are reserved first. Counting stored copies, not
         bindings, keeps an upgraded store's pre-ledger rows from being stored again. The count compares a loose
         key (call ids, a result's call id, else role and stripped text), never fields a pre-ledger row can lack.
-        A stored row's reasoning-cleanup form counts as its copy. Exact tool-id reads cover the full scope;
-        text copies are paged only when that scope exceeds the tail and a text candidate remains.
+        A stored row's reasoning-cleanup form counts as its copy. Completeness is decided by the
+        _PRESENCE_WINDOW_ROWS window across this session, verified ancestors and recorded predecessors;
+        ``capped`` is retained for callers but unused. Past the window the audit adds nothing beyond
+        its own finds, as on main.
         Unsure is accounted (the positional replay, as before): a row with no comparable key (a lossy identity)
         and a tool result whose call is neither in the view before it nor stored."""
         def calls(msg, stored=False):
@@ -626,8 +629,6 @@ class IdentityAnchorMixin:
                           if idx not in explained and not (identity_at(idx) is None and
                           self._identity_is_lcm_scaffold(identity_messages[idx]))
                           and not self._matches_ignore_message_patterns(messages[idx])}
-            wanted = [key(message) for message in identity_messages[start:cursor]]
-            ids = {cid for k in wanted if k for cid in (k[1] if k[0] == "call" else (k[1],) if k[0] == "tool" else ())}
             session = str(self._session_id)
             chain = self._identity_anchor_chain()
             predecessors = self._rotation_predecessor_session_ids(session)
@@ -639,21 +640,15 @@ class IdentityAnchorMixin:
                     raise ValueError("incomplete rotation predecessor scope")
             scope = list(dict.fromkeys([session, *chain, *predecessors]))
             rows = {int(row["store_id"]): row for group in held.values() for row in group}
+            budget = _PRESENCE_WINDOW_ROWS
             for source in scope:
-                if source != session and source not in chain:
-                    tail = self._store.get_session_tail(source, limit=max(64, 2 * (cursor - start)))
-                    capped = capped or len(tail) >= max(64, 2 * (cursor - start))
-                    rows.update((int(row["store_id"]), row) for row in tail)
-                rows.update((int(row["store_id"]), row) for row in self._store.rows_with_call_ids(
-                    source, ids, conversation_id=str(self._conversation_id or "")))
-            if capped and any(k and k[0] not in ("call", "tool") for k in candidates.values()):
-                for source in scope:
-                    after = 0
-                    while page := self._store.get_session_messages_after(source, after, limit=2000):
-                        rows.update((int(row["store_id"]), row) for row in page)
-                        after = int(page[-1]["store_id"])
-                        if len(page) < 2000:
-                            break
+                tail = self._store.get_session_tail(source, limit=budget + 1)
+                if len(tail) > budget:
+                    logger.debug("LCM identity-anchor presence window incomplete: session=%s scope=%d budget=%d",
+                                 session, len(scope), budget)
+                    return []
+                rows.update((int(row["store_id"]), row) for row in tail)
+                budget -= len(tail)
             index: dict = defaultdict(list)
             for row in rows.values():
                 forms = {key(row, stored=True)}

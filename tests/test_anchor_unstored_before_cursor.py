@@ -551,7 +551,9 @@ def test_a_failed_presence_lookup_keeps_only_the_audits_own_finds(tmp_path, monk
             read_tail = store.get_session_tail
 
             def fail_presence_tail(session, *, limit):
-                return fail() if limit == getattr(identity_anchor, "_PRESENCE_WINDOW_ROWS", 10000) + 1 else read_tail(session, limit=limit)
+                if limit == getattr(identity_anchor, "_PRESENCE_WINDOW_ROWS", 10000) + 1:
+                    return fail()
+                return read_tail(session, limit=limit)
 
             monkeypatch.setattr(store, "get_session_tail", fail_presence_tail)
         with caplog.at_level(logging.WARNING):
@@ -683,6 +685,7 @@ def test_presence_window_counts_deduplicated_whole_scope(tmp_path, monkeypatch, 
             return read_tail(source, limit=limit)
 
         monkeypatch.setattr(store, "get_session_tail", tail)
+        caplog.clear()  # inspect only the presence check, excluding engine setup warnings
         with caplog.at_level(logging.DEBUG, logger=identity_anchor.__name__):
             found = _presence(engine, [_call("new", 10), _result("new", "result", 11)], capped=capped)
         assert found == ([] if extra else [0, 1])  # over budget: main's positional behavior
