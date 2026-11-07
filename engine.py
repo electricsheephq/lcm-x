@@ -7111,7 +7111,9 @@ class LCMEngine(
                     queue.popleft()
                 return queue[0] if queue else None
 
-            for tier in range(4):
+            # Earlier-ingest targets come last, but an equal-stamp copy still
+            # gets its own there before any other copy takes it (Astra F2).
+            for tier in range(5):
                 for pos in positions:
                     if pos in linked:
                         continue
@@ -7120,8 +7122,10 @@ class LCMEngine(
                         candidate = take((False, stamp))
                     elif tier == 1:
                         candidate = take((False, "all" if stamp is None else None))
+                    elif tier == 3:
+                        candidate = take((True, stamp)) if stamp is not None else None
                     else:
-                        candidate = take((tier == 3, "all"))
+                        candidate = take((tier == 4, "all"))
                     if candidate is not None:
                         used.add(candidate)
                         linked.add(pos)
