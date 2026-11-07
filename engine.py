@@ -7136,7 +7136,7 @@ class LCMEngine(
         """#2055: after a compaction the host can show the next user prompt on the stamp of the prompt that was
         in flight (the borrowed stamp), so one send is stored at its own stamp and at the borrowed one, in either
         order. Annotate the later copy only; no row is skipped or changed."""
-        if not self._session_id:
+        if not self._session_id or not identity_anchor_enabled():  # the kill switch writes no anchor state (R185)
             return
         texts, stamps = {}, {}  # A stored, stamped, non-empty user row of this ingest is a possible later copy.
         for idx, sid in stored_at.items():
