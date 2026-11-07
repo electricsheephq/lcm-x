@@ -7094,6 +7094,7 @@ class LCMEngine(
                         [row["store_id"] for row in targets], "possible_replay_of", related=True)}
                     linked = {row["store_id"] for row in self._store.get_message_relations(
                         list(current), "possible_replay_of")}
+                    linked_stamps = set()
                     for idx, (session, row) in sorted(previous.items()):
                         sid = stored_at.get(idx)
                         if not sid or sid not in current or sid in linked:
@@ -7124,6 +7125,35 @@ class LCMEngine(
                         self._store.add_message_relations([[(sid, "possible_replay_of", target, None, None)]])
                         used.add(target)
                         linked.add(sid)
+                        linked_stamps.add((session, row["timestamp"]))
+                    # #2378: the NEXT prompt can inherit the carried turn's stamp but
+                    # postdate the snapshot. Its later own-stamp copy needs doubt too.
+                    transfer_targets = [target for target in targets
+                                        if target["role"] == "user" and target["store_id"] not in used
+                                        and (target["session_id"], target["observed_at"]) in linked_stamps]
+                    if transfer_targets:
+                        sources = self._store.get_batch([sid for idx, sid in stored_at.items()
+                                                         if idx not in previous and sid])
+                        already_linked = {row["store_id"] for row in self._store.get_message_relations(
+                            list(sources), "possible_replay_of")}
+                        for sid, source in sorted(sources.items()):
+                            if source["role"] != "user" or sid in already_linked:
+                                continue
+                            candidates = [target for target in transfer_targets
+                                          if target["store_id"] < sid and target["store_id"] not in used
+                                          and source["observed_at"] is not None
+                                          and source["observed_at"] != target["observed_at"]
+                                          and isinstance(source["content"], str)
+                                          and isinstance(target["content"], str)
+                                          and source["content"].strip() == target["content"].strip()
+                                          and not any(message.get("role") == "user"
+                                                      and message.get("content") == target["content"]
+                                                      and self._host_occurrence_metadata(message)["timestamp"]
+                                                      == target["observed_at"] for message in messages)]
+                            if len(candidates) == 1:
+                                target = int(candidates[0]["store_id"])
+                                self._store.add_message_relations([[(sid, "possible_replay_of", target, None, None)]])
+                                used.add(target)
                 attempt = getattr(self, "_ingest_ledger_attempt", None)
                 if recovery_fallback and attempt is not None:
                     self._identity_anchor_link_durable_recovery(attempt, attempt["lineage"])
