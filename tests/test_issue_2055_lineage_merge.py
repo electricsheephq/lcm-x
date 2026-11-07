@@ -199,6 +199,22 @@ def test_merge_pairs_require_stamp(engines):
     assert len(sql_rows(engine, "message_relations")) == 2
 
 
+def test_merge_pairs_never_give_a_linked_source_a_second_link(engines):
+    """A provisional row another writer already linked (here B2 -> B1, as the session-end todo writer does)
+    keeps that one link when its lineage is adopted; adoption still pairs the unlinked source (B1 -> A1)."""
+    engine = engines()
+    row = _m("user", "ok", 1.)
+    targets, _ = seed(engine, L, [row, row])
+    sources, _ = seed(engine, P, [row, row])
+    with engine._store.ingest_atomic():
+        engine._store.add_message_relations([[(sources[1], "possible_replay_of", sources[0], None, None)]])
+    adopt(engine)
+    pairs = [(r["store_id"], r["related_store_id"]) for r in sql_rows(engine, "message_relations")
+             if r["kind"] == "possible_replay_of"]
+    assert Counter(source for source, _ in pairs) == {sources[0]: 1, sources[1]: 1}, pairs
+    assert sorted(pairs) == sorted([(sources[0], targets[0]), (sources[1], sources[0])])
+
+
 @pytest.mark.parametrize("target_session,expected", [("S", 1), ("other", 0)])
 def test_merge_late_counted(engines, target_session, expected):
     engine = engines()
