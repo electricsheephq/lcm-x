@@ -42,7 +42,7 @@ import time
 import pytest
 
 from tests.harness import make_engine
-from tests.invariants._ingest_shapes_2377 import U, call, key, relations
+from tests.invariants._ingest_shapes_2377 import U, X, call, key, relations
 
 pytestmark = pytest.mark.issue(2377)
 
@@ -105,6 +105,10 @@ def generate(seed, variant=False):
     return ingests
 
 
+def _computation_fault(*_args, **_kwargs):
+    raise ValueError("planned link computation fault")
+
+
 def run_plan(ingests, folder, main_mode):
     folder.mkdir(parents=True, exist_ok=True)
     engines = []
@@ -152,7 +156,10 @@ def run_plan(ingests, folder, main_mode):
                         at = step["cursor"]
                         patch.setattr(engine, "_reconcile_ingest_cursor_from_store", lambda *a, at=at, **kw: at)
                         patch.setattr(engine, "_ledger_cold_cursor", lambda *a, at=at, **kw: dict(k=at, pairs={}))
-                engine.ingest(deepcopy(step["view"]))
+                with pytest.MonkeyPatch.context() as fault:
+                    if step.get("fault") and not main_mode:  # a deterministic link-computation fault
+                        fault.setattr(engine, "_plan_tool_replay_links", _computation_fault)
+                    engine.ingest(deepcopy(step["view"]))
                 assert engine._ingest_failure_count == 0, engine._last_ingest_error
                 owner = dict(engine._store._conn.execute("SELECT store_id, conversation_id FROM messages"))
                 for link in relations(engine):
@@ -221,6 +228,18 @@ def compare(v7, main):
     loss = sorted(main[0] - v7[0])
     silent = sorted(k[2] for k, n in v7[1].items() if n > main[1][k])
     return loss, silent
+
+
+def test_link_pending_copy_is_never_skip_capacity(tmp_path):
+    """A copy stored link_pending after a computation fault never lets a later new pair be skipped."""
+    pair = [call(), dict(X)]
+    ingests = [dict(view=[U, call(2.0), dict(X, timestamp=2.0)], warm=False, cursor=0),
+               dict(view=[U, call(4.0), dict(X, timestamp=4.0)], warm=False, cursor=1, fault=True),
+               dict(view=[U, *pair, *pair], warm=False, cursor=1)]
+    v7 = run_plan(ingests, tmp_path / "v7", main_mode=False)
+    main = run_plan(ingests, tmp_path / "main", main_mode=True)
+    loss, silent = compare(v7, main)
+    assert (loss, silent) == ([], []), dict(v7=sorted(v7[0]), main=sorted(main[0]))
 
 
 @pytest.mark.parametrize("chunk", range(CHUNKS))
