@@ -342,5 +342,6 @@ def test_a_star_import_cannot_be_pinned(tmp_path):
 
 
 def test_decorator_lookup_ignores_non_newline_line_breaks(tmp_path):
-    module, path = _pin(tmp_path, "S = 'a\\x0cb'\n\ndef deco(f):\n    return f\n\n@deco\ndef rule():\n    return S\n")
+    module, path = _pin(tmp_path, "S = 'a\x0cb'\n\ndef deco(f):\n    return f\n\n@deco\ndef rule():\n    return S\n")
     assert pins.verify(path, tmp_path)["verdict"] == "PASS"
+

@@ -79,3 +79,13 @@ def test_unavailable_off_macos():
 def test_socket_roots_that_reach_system_sockets_are_refused(root):
     with pytest.raises(ValueError):
         sandbox.profile([], [Path(root).expanduser()])
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS per-user temp dir")
+def test_the_per_user_temp_dir_itself_is_refused_but_a_run_dir_inside_is_not():
+    import subprocess as sp
+    temp = Path(sp.run(["/usr/bin/getconf", "DARWIN_USER_TEMP_DIR"], capture_output=True, text=True).stdout.strip())
+    for root in (temp, temp.parent, Path(str(temp).replace("/var/", "/private/var/", 1))):
+        with pytest.raises(ValueError):
+            sandbox.profile([], [root])
+    assert "d5-run" in sandbox.profile([], [temp / "d5-run"])
