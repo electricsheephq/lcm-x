@@ -393,6 +393,63 @@ def test_the_hosts_loader_reads_paused_jobs_as_not_due(tmp_path):
     assert json.loads(host_python(code, env, tmp_path)) == [[], [False]]
 
 
+def edition_t0_reads(t0):
+    """The replay edition's two T0 reads besides the stores, as p_s6r_clone does them (observed bind evidence)."""
+    doctor = {}
+    for line in (t0 / "doctor.log").read_text(errors="replace").splitlines():
+        key, sep, value = line.partition(": ")
+        if sep and key in ("host_uid_mode", "sensitive_patterns_source", "sensitive_patterns_enabled"):
+            doctor[key] = value.strip()
+    filters = json.loads((t0 / "filters.json").read_text())
+    return doctor, {k: len(v) for k, v in filters.items()}
+
+
+def t0_ctx(tmp_path, env):
+    home = tmp_path / "arm" / "home"
+    (home / "lcm-large-outputs").mkdir(parents=True)
+    for name in ("lcm.db", "state.db"):
+        with closing(sqlite3.connect(home / name)) as db:
+            db.execute(f"CREATE TABLE messages ({'store_id' if name == 'lcm.db' else 'id'} INTEGER PRIMARY KEY)")
+    return {"name": "rc", "home": home, "gateway": type("G", (), {"env": env})(),
+            "tree": {"host_bin": str(tmp_path / "bin"), "lcm_tree": str(tmp_path / "tree")}}
+
+
+@pytest.mark.parametrize("exit_code", [0, 1])
+def test_a_t0_capture_carries_what_the_edition_reads(tmp_path, monkeypatch, exit_code):
+    """T0 gets filters.json from the arm's env and doctor.log from the arm tree's doctor (here a stand-in that
+    writes the file the runner names), both hashed with the capture; a failed doctor leaves doctor.log out."""
+    env = {"LCM_IGNORE_SESSION_PATTERNS": "cron-*, ,heartbeat", "LCM_STATELESS_SESSION_PATTERNS": "", "OTHER": "x"}
+    ctx, calls = t0_ctx(tmp_path, env), []
+    real_run = r.subprocess.run
+
+    def fake_run(argv, **kwargs):
+        if "--text" not in argv:
+            return real_run(argv, **kwargs)
+        calls.append({"argv": argv, "env": kwargs["env"]})
+        Path(argv[-1]).write_text("host_uid_mode: synthetic\nsensitive_patterns_enabled: True\n")
+        return subprocess.CompletedProcess(argv, exit_code)
+
+    monkeypatch.setattr(r.subprocess, "run", fake_run)
+    out, result = r.LocalHost({}, tmp_path).capture(ctx, "T0", {"id": "s1"})
+    (call,) = calls
+    clone = Path(call["env"]["HERMES_HOME"])
+    assert not clone.exists() and not clone.is_relative_to(out)  # The doctor ran on a clone outside the capture.
+    assert call["env"]["LCM_DATABASE_PATH"] == str(clone / "lcm.db") and call["argv"][-2] == str(clone)
+    assert any(r.sandbox.hermes_home() in a for a in call["argv"])  # The live agent's home is denied to it.
+    files = json.loads((out / "capture-hashes.json").read_text())["files"]
+    assert json.loads((out / "filters.json").read_text()) == {"ignore_session_patterns": ["cron-*", "heartbeat"],
+                                                             "stateless_session_patterns": []}
+    assert "filters.json" in files and ("doctor.log" in files) == (exit_code == 0)
+    if exit_code == 0:
+        assert edition_t0_reads(out) == ({"host_uid_mode": "synthetic", "sensitive_patterns_enabled": "True"},
+                                         {"ignore_session_patterns": 2, "stateless_session_patterns": 0})
+    else:
+        with pytest.raises(FileNotFoundError):  # That bind's replay errors: bar 2 INCONCLUSIVE, never a guess.
+            edition_t0_reads(out)
+    h8, _ = r.LocalHost({}, tmp_path).capture(ctx, "H8", {"id": "s1"})
+    assert not (h8 / "doctor.log").exists() and len(calls) == 1  # Only T0 carries them.
+
+
 @PINNED
 def test_the_real_probe_runs_the_doctor_on_a_clone_and_never_writes_the_arm_home(tmp_path):
     """The arm's stores are made by the pinned host and this tree's engine; the probe runs on a clone of them."""
@@ -429,6 +486,11 @@ def test_the_real_probe_runs_the_doctor_on_a_clone_and_never_writes_the_arm_home
         db.commit()
     checks, _ = r.probe_checks(r.LocalHost({}, tmp_path).probe({**ctx, "home": damaged}), [KEY])
     assert bars.failed_checks(checks) == ["messages_fts_integrity@pre_open"]
+    (home / "lcm-large-outputs").mkdir(exist_ok=True)  # An arm home made from a snapshot always has it.
+    t0, _ = r.LocalHost({}, tmp_path / "t0").capture({**ctx, "name": "rc"}, "T0", {"id": "s1"})  # The real doctor text.
+    doctor, filters = edition_t0_reads(t0)
+    assert set(doctor) == {"host_uid_mode", "sensitive_patterns_source", "sensitive_patterns_enabled"}
+    assert filters == {"ignore_session_patterns": 0, "stateless_session_patterns": 0}
 
 
 def test_a_store_the_read_only_open_refuses_is_never_read_as_empty(tmp_path):

@@ -185,6 +185,16 @@ def _doctor_rows(path):
         return None
 
 
+def _clone(src, dest):
+    """A copy-on-write copy of one capture file or directory (APFS clone on macOS)."""
+    if Path(src).is_dir():
+        capture.clone_tree(src, dest)
+    elif sys.platform == "darwin":
+        subprocess.run(["cp", "-c", str(src), str(dest)], check=True)
+    else:
+        shutil.copy2(src, dest)
+
+
 def probe_checks(out, sessions):
     """(bar-5 rows, not exercised) from the probe's files in *out*; *sessions* are the plan sessions' sha256 12 keys.
     A kind the probe did not produce is left out, so bar 5 reads it as not shown. Store-wide doctor checks come from
@@ -359,8 +369,44 @@ class LocalHost:
         if kind == "H8":  # The edition reads the bind's anchor and history lines from the window's host logs.
             extras = {**(extras or {}), **{f"native-{name}.log": home / "logs" / name
                                            for name in ("agent.log", "gateway.log") if (home / "logs" / name).is_file()}}
+        derived = (lambda filled: self.t0_evidence(ctx, filled)) if kind == "T0" else None
         return out, capture.capture(kind, out, store_db=home / "lcm.db", host_db=home / "state.db",
-                                    payload_dir=home / "lcm-large-outputs", extras=extras, home=home)
+                                    payload_dir=home / "lcm-large-outputs", extras=extras, home=home, derived=derived)
+
+    def t0_evidence(self, ctx, out):
+        """The two files the replay edition reads from T0 besides the stores (p_s6r_clone, "observed bind evidence"):
+        ``filters.json``, the two non-secret session-pattern settings from the arm's own env, and ``doctor.log``, the
+        arm tree's offline doctor text, run under the sandbox on a clone of the capture's stores outside the capture
+        dir. A doctor that fails or times out leaves doctor.log out, so that bind's replay errors (bar 2 INCONCLUSIVE)."""
+        env = ctx["gateway"].env
+        filters = {name: [v.strip() for v in str(env.get(key) or "").split(",") if v.strip()]
+                   for name, key in (("ignore_session_patterns", "LCM_IGNORE_SESSION_PATTERNS"),
+                                     ("stateless_session_patterns", "LCM_STATELESS_SESSION_PATTERNS"))}
+        files = {"filters.json": (json.dumps(filters) + "\n").encode()}
+        work = out.parent / f"{out.name}-doctor"
+        clone, text = work / "home", work / "doctor.log"
+        try:
+            clone.mkdir(parents=True)
+            for src, name in (("store.db", "lcm.db"), ("host-0.db", "state.db"), ("lcm-large-outputs", "lcm-large-outputs")):
+                _clone(out / src, clone / name)
+            for name in ("user-home", "tmp"):
+                (clone / name).mkdir()
+            tree = ctx["tree"]
+            argv = sandbox.wrap([str(Path(tree["host_bin"]) / "python"), "-P", "-B",
+                                 str(Path(__file__).with_name("doctor_probe.py")), "--text",
+                                 str(Path(tree["lcm_tree"]).resolve()), str(clone), str(text)],
+                                ports=[], deny_paths=[sandbox.hermes_home()])
+            child = {**env, "HERMES_HOME": str(clone), "HOME": str(clone / "user-home"), "TMPDIR": str(clone / "tmp"),
+                     **{k: str(clone / v) for k, v in gateway.FORCED_LCM_PATHS.items()}}
+            done = subprocess.run(["/usr/bin/nice", "-n", "19", *argv], cwd=clone, env=child, capture_output=True,
+                                  timeout=self.c.get("doctor_timeout", 1800))
+            if done.returncode == 0 and text.is_file():
+                files["doctor.log"] = text.read_bytes()
+        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            pass
+        finally:
+            shutil.rmtree(work, ignore_errors=True)  # The clone only: the capture itself is never touched here.
+        return files
 
     def replay(self, ctx, step, t0, h8):
         """The edition on both trees, under the sandbox: (receipt, error, range_new_rows)."""
@@ -374,7 +420,8 @@ class LocalHost:
         if Path(receipt_name).name != receipt_name:
             raise ValueError("replay_receipt must be a bare file name")
         for key in ("constants_argv", "replay_argv"):
-            argv = sandbox.wrap([a.format(**values) for a in self.c[key]], ports=[ctx["port"]], socket_roots=[out])
+            argv = sandbox.wrap([a.format(**values) for a in self.c[key]], ports=[ctx["port"]], socket_roots=[out],
+                                deny_paths=[sandbox.hermes_home()])  # The live agent's home is never read.
             env = {"PATH": "/usr/bin:/bin", "HOME": str(out), "PYTHONDONTWRITEBYTECODE": "1"}
             code = subprocess.run(["/usr/bin/nice", "-n", "19", *argv], cwd=out, env=env, capture_output=True).returncode
             if code:  # An error, or (constants exit 1) a NOT SHOWN bind: no replay runs after it. Either way the
@@ -432,7 +479,7 @@ class LocalHost:
         argv = sandbox.wrap([str(Path(tree["host_bin"]) / "python"), "-P", "-B",  # Never this dir's modules first.
                              str(Path(__file__).with_name("doctor_probe.py")),
                              str(Path(tree["lcm_tree"]).resolve()), str(clone), str(out),
-                             json.dumps(ctx["session_ids"])], ports=[])
+                             json.dumps(ctx["session_ids"])], ports=[], deny_paths=[sandbox.hermes_home()])
         try:
             done = subprocess.run(["/usr/bin/nice", "-n", "19", *argv], cwd=clone, env=env, capture_output=True,
                                   timeout=self.c.get("doctor_timeout", 1800))
