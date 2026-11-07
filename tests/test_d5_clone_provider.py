@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import http.client
 from urllib.error import HTTPError
 from urllib.request import ProxyHandler, Request, build_opener
 
@@ -139,19 +140,38 @@ def test_models_and_embeddings(provider):
     assert exc.value.code == 404
 
 
-@pytest.mark.parametrize("host", ["0.0.0.0", "1.1.1.1", "::", "example.invalid"])
+@pytest.mark.parametrize("host", ["0.0.0.0", "1.1.1.1", "::", "example.invalid", "127.0.0.2"])
 def test_refuse_nonloopback(host):
     with pytest.raises(ValueError):
         Provider({}, host=host)
 
 
-def test_configured_models_and_numeric_step():
+def test_configured_models_and_string_steps_only():
     instance = Provider({"agent_model": "agent", "cron_model": "cron", "models": ["digest"],
                          "steps": {"0": [{"text": "zero"}]}}).start()
     try:
-        request(instance, "/_d5/step", {"step": 0})
+        with pytest.raises(HTTPError) as refused:
+            request(instance, "/_d5/step", {"step": 0})  # 0 and "0" must not alias one step.
+        assert refused.value.code == 400
+        request(instance, "/_d5/step", {"step": "0"})
         assert complete(instance, "agent")["choices"][0]["message"]["content"] == "zero"
         complete(instance, "digest")
         assert request(instance, "/_d5/stats")["unknown_models"] == {}
     finally:
         instance.stop()
+
+
+def test_oversized_and_deeply_nested_bodies_are_refused(provider):
+    host, port = provider.server.server_address[:2]
+    connection = http.client.HTTPConnection(host, port, timeout=5)
+    connection.putrequest("POST", "/v1/chat/completions")
+    connection.putheader("Content-Length", "99999999999")
+    connection.endheaders()
+    assert connection.getresponse().status == 400
+    connection.close()
+    nested = "[" * 100000 + "]" * 100000
+    connection = http.client.HTTPConnection(host, port, timeout=5)
+    connection.request("POST", "/v1/chat/completions", body=nested, headers={"Content-Type": "application/json"})
+    assert connection.getresponse().status == 400
+    connection.close()
+    assert complete(provider, "d5-summary")["choices"][0]["message"]["content"].startswith("D5 digest v1")

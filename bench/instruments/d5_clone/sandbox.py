@@ -1,49 +1,50 @@
 """macOS egress restriction and an independently executed positive control.
 
-Outbound traffic is allowed only to loopback and local unix sockets. The system resolver's socket is denied too,
-so a host name lookup cannot leave the machine through the resolver; localhost still resolves locally.
+The profile denies all outbound network except the named loopback ports and unix sockets under the named
+directories. Other local services (other loopback ports, other unix sockets) are denied too, and so is the
+system resolver's socket, so a host name lookup cannot leave the machine through the resolver.
 """
 
 import json
 from pathlib import Path
+import socket
 import subprocess
 import sys
 from urllib.parse import urlsplit
-import ipaddress
 
 
-PROFILE = '''(version 1)
-(allow default)
-(deny network-outbound)
-(allow network-outbound (remote ip "localhost:*"))
-(allow network-outbound (remote unix-socket))
-(deny network-outbound (remote unix-socket (path-literal "/private/var/run/mDNSResponder")))
-'''
+def profile(ports, socket_roots=()):
+    lines = ["(version 1)", "(allow default)", "(deny network-outbound)"]
+    for port in ports:
+        if isinstance(port, bool) or not isinstance(port, int) or not 0 < port < 65536:
+            raise ValueError("expected a TCP port number")
+        lines.append(f'(allow network-outbound (remote ip "localhost:{port}"))')
+    for root in socket_roots:
+        resolved = str(Path(root).resolve())
+        if '"' in resolved or "\\" in resolved:
+            raise ValueError("unsupported socket directory name")
+        lines.append(f'(allow network-outbound (remote unix-socket (subpath "{resolved}")))')
+    return "\n".join(lines) + "\n"
 
 
-def wrap(argv):
-    return ["/usr/bin/sandbox-exec", "-p", PROFILE] + list(argv)
+def wrap(argv, *, ports, socket_roots=()):
+    return ["/usr/bin/sandbox-exec", "-p", profile(ports, socket_roots)] + list(argv)
 
 
 def available():
     return sys.platform == "darwin" and Path("/usr/bin/sandbox-exec").is_file()
 
 
-def positive_control(local_url):
-    if not available():
-        raise RuntimeError("macOS sandbox-exec is unavailable")
-    host = urlsplit(local_url).hostname
-    if urlsplit(local_url).scheme != "http" or (
-            host != "localhost" and not ipaddress.ip_address(host).is_loopback):
-        raise ValueError("positive control requires a loopback URL")
-    child = '''
+_CHILD = '''
 import errno, json, socket, sys, urllib.request
-blocked = False
-try:
-    with socket.create_connection(("1.1.1.1", 443), timeout=3):
-        pass
-except OSError as exc:
-    blocked = exc.errno in (errno.EPERM, errno.EACCES)
+def denied(address):
+    try:
+        with socket.create_connection(address, timeout=3):
+            return False
+    except OSError as exc:
+        return exc.errno in (errno.EPERM, errno.EACCES)
+blocked = denied(("1.1.1.1", 443))
+other_blocked = denied(("127.0.0.1", int(sys.argv[2])))
 dns_blocked = False
 try:
     socket.getaddrinfo("example.com", 443)
@@ -56,11 +57,28 @@ try:
         local_ok = response.status == 200
 except OSError:
     pass
-print(json.dumps({"external_blocked": blocked, "dns_blocked": dns_blocked, "local_ok": local_ok,
-                  "verdict": "PASS" if blocked and dns_blocked and local_ok else "FAIL"}))
+ok = blocked and other_blocked and dns_blocked and local_ok
+print(json.dumps({"external_blocked": blocked, "other_local_blocked": other_blocked, "dns_blocked": dns_blocked,
+                  "local_ok": local_ok, "verdict": "PASS" if ok else "FAIL"}))
 '''
-    result = subprocess.run(wrap([sys.executable, "-c", child, local_url]),
-                            capture_output=True, text=True, timeout=10)
+
+
+def positive_control(local_url):
+    """Under the profile that allows only *local_url*'s port: a public IP and a second local listener are
+    denied, a public name does not resolve, and *local_url* answers."""
+    if not available():
+        raise RuntimeError("macOS sandbox-exec is unavailable")
+    parts = urlsplit(local_url)
+    if parts.scheme != "http" or parts.hostname not in ("127.0.0.1", "::1") or not parts.port:
+        raise ValueError("positive control requires a loopback URL with a port")
+    other = socket.socket()
+    try:
+        other.bind(("127.0.0.1", 0))
+        other.listen(1)
+        argv = [sys.executable, "-c", _CHILD, local_url, str(other.getsockname()[1])]
+        result = subprocess.run(wrap(argv, ports=[parts.port]), capture_output=True, text=True, timeout=20)
+    finally:
+        other.close()
     if result.returncode:
         raise RuntimeError("sandbox-exec child failed: " + result.stderr.strip())
     return json.loads(result.stdout)

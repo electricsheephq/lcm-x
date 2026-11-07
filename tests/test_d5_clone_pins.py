@@ -3,6 +3,7 @@
 import hashlib
 import json
 from pathlib import Path
+import platform
 import sys
 
 import pytest
@@ -30,7 +31,7 @@ def instrument(tmp_path):
     (tmp_path / "helper.py").write_text("VALUE = 1\n", encoding="utf-8")
     manifest = pins.build(tmp_path, [module.name], {module.name: ["f"]},
                           {module.name: ["helper.py"]},
-                          {"path_basename": Path(sys.executable).name, "version": "3.test"})
+                          {"path_basename": Path(sys.executable).name, "version": platform.python_version()})
     return tmp_path, module, tmp_path / "d5-clone-pins.json", manifest
 
 
@@ -40,12 +41,12 @@ def save(path, manifest):
 
 def test_build_closure_and_verify(instrument):
     directory, module, path, manifest = instrument
-    assert pins.call_closure(module, ["f"]) == ({"f", "g"}, {"R"})
+    assert pins.call_closure(module, ["f"]) == ({"f", "g"}, {"R", "re"})  # The import is pinned too.
     assert manifest["schema"] == "d5-clone-pins/1"
     assert {f["qualname"] for f in manifest["functions"]} == {"f", "g"}
     assert manifest["extra_hashes"][0]["name"] == "R"
     assert json.loads(path.read_text()) == manifest
-    assert pins.verify(path, directory, "3.test") == {"verdict": "PASS", "mismatches": []}
+    assert pins.verify(path, directory) == {"verdict": "PASS", "mismatches": []}
 
 
 def test_helper_change_detected_even_with_updated_file_pin(instrument):
@@ -146,4 +147,77 @@ def test_bad_manifest_fails_closed(instrument, damage):
 def test_empty_manifest_fails(instrument):
     directory, _, path, manifest = instrument
     save(path, {**manifest, "files": [], "functions": [], "extra_hashes": []})
-    assert pins.verify(path, directory, "3.test") == {"verdict": "FAIL", "mismatches": ["empty"]}
+    assert pins.verify(path, directory) == {"verdict": "FAIL", "mismatches": ["empty"]}
+
+
+def _pin(tmp_path, source, roots=("rule",), loads=(), files=None):
+    module = tmp_path / "rules.py"
+    module.write_text(source, encoding="utf-8")
+    for name, text in (files or {}).items():
+        (tmp_path / name).write_text(text, encoding="utf-8")
+    pins.build(tmp_path, [module.name], {module.name: list(roots)}, {module.name: list(loads)},
+               {"path_basename": Path(sys.executable).name, "version": platform.python_version()})
+    return module, tmp_path / "d5-clone-pins.json"
+
+
+def _repin_file_only(path, module):
+    """Re-pin only the whole-file sha, as an edition with a changed helper would present itself."""
+    manifest = json.loads(path.read_text())
+    manifest["files"][0]["sha256"] = hashlib.sha256(module.read_bytes()).hexdigest()
+    save(path, manifest)
+
+
+@pytest.mark.parametrize("before,after", [
+    ("class Helper:\n    def run(self):\n        return 1\n", "class Helper:\n    def run(self):\n        return 2\n"),
+    ("from json import dumps as h\n", "from pickle import dumps as h\n"),
+    ("A, B = 1, 2\n", "A, B = 1, 3\n"),
+], ids=["class-method", "import-alias", "tuple-assign"])
+def test_closure_pins_classes_imports_and_tuple_targets(tmp_path, before, after):
+    use = {"class-method": "Helper().run()", "import-alias": "h", "tuple-assign": "B"}
+    key = next(k for k, v in {"class-method": "Helper", "import-alias": "h", "tuple-assign": "B"}.items()
+               if v in before)
+    rule = f"\n\ndef rule():\n    return {use[key]}\n"
+    module, path = _pin(tmp_path, before + rule)
+    assert pins.verify(path, tmp_path)["verdict"] == "PASS"
+    module.write_text(after + rule, encoding="utf-8")
+    _repin_file_only(path, module)
+    assert pins.verify(path, tmp_path)["verdict"] == "FAIL"
+
+
+@pytest.mark.parametrize("source", [
+    "if True:\n    def h():\n        return 1\n\ndef rule():\n    return h()\n",
+    "try:\n    X = 1\nexcept Exception:\n    X = 2\n\ndef rule():\n    return X\n",
+    "L = [1]\nL += [2]\n\ndef rule():\n    return L\n",
+    "D = {}\nD['k'] = 1\n\ndef rule():\n    return D\n",
+    "def h():\n    return 1\n\ndef rule():\n    return globals()['h']()\n",
+    "def h():\n    return 1\n\ndef h():\n    return 2\n\ndef rule():\n    return h()\n",
+], ids=["def-in-if", "assign-in-try", "augassign", "subscript-store", "globals-lookup", "rebound-def"])
+def test_closure_refuses_unpinnable_bindings(tmp_path, source):
+    with pytest.raises(ValueError):
+        _pin(tmp_path, source)
+
+
+def test_local_import_must_be_listed_in_loads(tmp_path):
+    source = "from . import sibling\n\ndef rule():\n    return sibling.VALUE\n"
+    with pytest.raises(ValueError, match="loads"):
+        _pin(tmp_path, source, files={"sibling.py": "VALUE = 1\n"})
+    _pin(tmp_path, source, loads=["sibling.py"])
+
+
+def test_version_checked_by_default_and_manifest_consistency(tmp_path):
+    module, path = _pin(tmp_path, "def rule():\n    return 1\n")
+    manifest = json.loads(path.read_text())
+    save(path, {**manifest, "interpreter": {**manifest["interpreter"], "version": "3.0.0"}})
+    assert pins.verify(path, tmp_path)["mismatches"] == ["interpreter"]
+    save(path, {**manifest, "files": manifest["files"] * 2})
+    assert "manifest" in pins.verify(path, tmp_path)["mismatches"]
+    stray = {**manifest["functions"][0], "file": "other.py"}
+    save(path, {**manifest, "functions": manifest["functions"] + [stray]})
+    assert "manifest" in pins.verify(path, tmp_path)["mismatches"]
+
+
+def test_decorator_with_space_after_at_is_in_the_segment(tmp_path):
+    path = tmp_path / "spaced.py"
+    function = "@ decorate\ndef f():\n    return 1"
+    path.write_text(function + "\n", encoding="utf-8")
+    assert pins.function_source_sha256(path, "f") == hashlib.sha256(function.encode()).hexdigest()

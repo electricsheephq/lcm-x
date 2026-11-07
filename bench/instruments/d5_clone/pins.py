@@ -4,6 +4,8 @@ import ast
 import hashlib
 import json
 from pathlib import Path
+import platform
+import subprocess
 import sys
 import symtable
 
@@ -18,25 +20,74 @@ def _path(directory, name):
     return Path(directory) / name
 
 
+_PINNABLE = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Assign, ast.AnnAssign, ast.Import,
+             ast.ImportFrom)
+_DYNAMIC = {"globals", "vars", "locals", "eval", "exec", "__import__"}
+
+
+def _bindings(body):
+    """Each module-level name -> the top-level statements that bind or touch it.
+
+    A name with exactly one pinnable binding statement can be pinned by that statement's source. A name also
+    touched by any other top-level statement (a second def, an augmented assignment, a subscript store, or a
+    binding inside if/try/for/with) has more than one entry, so the closure refuses it instead of dropping it."""
+    out = {}
+    for node in body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names = [node.name]
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            names = [(alias.asname or alias.name).split(".")[0] for alias in node.names]
+        elif isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            names = [n.id for t in targets for n in ast.walk(t) if isinstance(n, ast.Name)]
+        else:  # Any other top-level statement (if/try/for/with/...): every name it binds anywhere inside.
+            names = _stored_names(node)
+        for name in dict.fromkeys(names):
+            out.setdefault(name, []).append(node)
+    return out
+
+
+def _stored_names(node):
+    names = []
+    for n in ast.walk(node):
+        if isinstance(n, ast.Name) and isinstance(n.ctx, (ast.Store, ast.Del)):
+            names.append(n.id)
+        elif isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.append(n.name)
+        elif isinstance(n, ast.alias):
+            names.append((n.asname or n.name).split(".")[0])
+        elif isinstance(n, ast.ExceptHandler) and n.name:
+            names.append(n.name)
+    return names
+
+
+def _segment(source, node):
+    if getattr(node, "decorator_list", []):
+        first = node.decorator_list[0]
+        line = source.splitlines(keepends=True)[first.lineno - 1]
+        node.lineno, node.col_offset = first.lineno, line.rindex("@", 0, first.col_offset + 1)
+    return ast.get_source_segment(source, node)
+
+
 def _source_sha256(path, name, assignment=False):
     source = Path(path).read_text(encoding="utf-8")
-    nodes = ast.parse(source).body
+    body = ast.parse(source).body
+    if assignment:
+        nodes = _bindings(body).get(name, [])
+        if len(nodes) != 1 or not isinstance(nodes[0], _PINNABLE) or isinstance(
+                nodes[0], (ast.FunctionDef, ast.AsyncFunctionDef)):
+            raise ValueError("source name missing or ambiguous")
+        return _sha(_segment(source, nodes[0]).encode("utf-8"))
+    nodes = body
     for part in name.split("."):
         matches = [n for n in nodes if getattr(n, "name", None) == part]
-        if assignment:
-            matches = [n for n in nodes if isinstance(n, (ast.Assign, ast.AnnAssign))
-                       and any(isinstance(t, ast.Name) and t.id == part
-                               for t in (n.targets if isinstance(n, ast.Assign) else [n.target]))]
         if len(matches) != 1:
             raise ValueError("source name missing or ambiguous")
         node = matches[0]
         nodes = getattr(node, "body", [])
-    if not assignment and not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+    if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
         raise ValueError("expected a function")
-    if getattr(node, "decorator_list", []):
-        node.lineno = node.decorator_list[0].lineno
-        node.col_offset = node.decorator_list[0].col_offset - 1
-    return _sha(ast.get_source_segment(source, node).encode("utf-8"))
+    return _sha(_segment(source, node).encode("utf-8"))
 
 
 def function_source_sha256(path, qualname):
@@ -44,18 +95,23 @@ def function_source_sha256(path, qualname):
 
 
 def assign_source_sha256(path, name):
+    """The source of the one top-level statement binding *name*: an assignment, class or import."""
     return _source_sha256(path, name, assignment=True)
 
 
-def call_closure(path, roots):
-    """Return (function names, assignment names), following module-resolved loads."""
+def call_closure(path, roots, data=()):
+    """Return (function names, other pinned names) reachable from *roots*.
+
+    Names in *data* are run inputs (for example, constants loaded from a recorded constants file): they are
+    neither pinned nor followed. Raises ValueError when a reachable module-level name cannot be pinned by exactly one top-level statement,
+    or when a reachable function reads globals dynamically (globals(), vars(), eval, exec, __import__)."""
     source = Path(path).read_text(encoding="utf-8")
     body = ast.parse(source).body
-    scopes = {s.get_name(): s for s in symtable.symtable(source, "instrument", "exec").get_children()}
-    functions = {n.name: n for n in body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
-    assignments = {t.id: n for n in body if isinstance(n, (ast.Assign, ast.AnnAssign))
-                   for t in (n.targets if isinstance(n, ast.Assign) else [n.target])
-                   if isinstance(t, ast.Name)}
+    top = symtable.symtable(source, "instrument", "exec")
+    tables = {s.get_name(): s for s in top.get_children()}
+    bindings = _bindings(body)
+    # Every name the module binds anywhere (a def under if, an except target, ...); a reached one must be pinnable.
+    bound = {s.get_name() for s in top.get_symbols() if s.is_assigned() or s.is_imported() or s.is_namespace()}
     pending, seen = list(roots), set()
 
     def globals_read(scope):
@@ -64,31 +120,67 @@ def call_closure(path, roots):
 
     while pending:
         name = pending.pop()
-        if name in seen:
+        if name in seen or name in data:
             continue
-        node = functions.get(name, assignments.get(name))
-        if node is None:
-            raise ValueError("closure name missing")
+        nodes = bindings.get(name, [])
+        if len(nodes) != 1 or not isinstance(nodes[0], _PINNABLE):
+            raise ValueError(f"closure name missing or not pinnable: {name}")
+        node = nodes[0]
         seen.add(name)
-        expressions = ([node.args, *node.decorator_list, *([node.returns] if node.returns else [])]
-                       if name in functions else [node])
-        loads = {n.id for expr in expressions for n in ast.walk(expr)
-                 if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
-        if name in functions:
-            loads |= globals_read(scopes[name])
-        pending.extend(loads & (functions.keys() | assignments.keys()))
-    return seen & functions.keys(), seen & assignments.keys()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if any(isinstance(n, ast.Name) and n.id in _DYNAMIC for n in ast.walk(node)):
+                raise ValueError("closure reads globals dynamically")
+            # Outside the body (evaluated in module scope): decorators, defaults, annotations, bases.
+            outer = [*node.decorator_list, *((node.bases + [k.value for k in node.keywords])
+                                             if isinstance(node, ast.ClassDef) else
+                                             [node.args, *([node.returns] if node.returns else [])])]
+            loads = {n.id for expr in outer for n in ast.walk(expr)
+                     if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
+            loads |= globals_read(tables[name])  # Inside the body: the symbol table's free globals only.
+        else:
+            loads = {n.id for n in ast.walk(node) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
+        pending.extend(loads & (bindings.keys() | bound))
+    functions = {n for n in seen if isinstance(bindings[n][0], (ast.FunctionDef, ast.AsyncFunctionDef))}
+    return functions, seen - functions
 
 
-def build(instrument_dir, files, roots_by_file, loads_by_file, interpreter):
+def local_imports(path, instrument_dir):
+    """Basenames of instrument_dir modules that *path* imports (relative, or absolute with a sibling file)."""
+    found = set()
+    for node in ast.walk(ast.parse(Path(path).read_text(encoding="utf-8"))):
+        if isinstance(node, ast.ImportFrom) and node.level:
+            modules = [node.module] if node.module else [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            modules = [node.module or ""]
+        elif isinstance(node, ast.Import):
+            modules = [alias.name for alias in node.names]
+        else:
+            continue
+        for module in modules:
+            candidate = module.split(".")[0] + ".py"
+            if node_is_relative(node) or (Path(instrument_dir) / candidate).is_file():
+                found.add(candidate)
+    return found
+
+
+def node_is_relative(node):
+    return isinstance(node, ast.ImportFrom) and bool(node.level)
+
+
+def build(instrument_dir, files, roots_by_file, loads_by_file, interpreter, data_by_file=None):
     manifest = {"schema": "d5-clone-pins/1", "interpreter": dict(interpreter),
                 "files": [], "functions": [], "extra_hashes": []}
     for name in files:
         path = _path(instrument_dir, name)
+        unlisted = local_imports(path, instrument_dir) - set(loads_by_file.get(name, []))
+        if unlisted:
+            raise ValueError("a local import is not pinned in loads")
         manifest["files"].append({"name": name, "sha256": _sha(path.read_bytes()), "loads": [
             {"name": load, "sha256": _sha(_path(instrument_dir, load).read_bytes())}
             for load in loads_by_file.get(name, [])]})
-        functions, assignments = call_closure(path, roots_by_file.get(name, []))
+        data = sorted((data_by_file or {}).get(name, []))
+        manifest["files"][-1]["data"] = data
+        functions, assignments = call_closure(path, roots_by_file.get(name, []), data)
         manifest["functions"].extend(
             {"file": name, "qualname": f, "sha256": function_source_sha256(path, f)}
             for f in sorted(functions))
@@ -100,7 +192,17 @@ def build(instrument_dir, files, roots_by_file, loads_by_file, interpreter):
     return manifest
 
 
-def verify(manifest_path, instrument_dir, python_version=None):
+def _interpreter_version(interpreter):
+    if interpreter is None:
+        return platform.python_version()
+    probe = subprocess.run([str(interpreter), "-I", "-c", "import platform; print(platform.python_version())"],
+                           capture_output=True, text=True, timeout=30)
+    return probe.stdout.strip() if probe.returncode == 0 else None
+
+
+def verify(manifest_path, instrument_dir, python_version=None, interpreter=None):
+    """Check every pin. The interpreter is the one the instruments run under (default: this one); its basename
+    and its version (probed, unless *python_version* is given) must equal the manifest's."""
     mismatches = []
     try:
         manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
@@ -108,12 +210,16 @@ def verify(manifest_path, instrument_dir, python_version=None):
             mismatches.append("empty")  # A manifest that pins nothing proves nothing.
         if manifest["schema"] != "d5-clone-pins/1":
             mismatches.append("schema")
-        if manifest["interpreter"]["path_basename"] != Path(sys.executable).name:
+        if manifest["interpreter"]["path_basename"] != Path(interpreter or sys.executable).name:
             mismatches.append("interpreter")
-        if not isinstance(manifest["interpreter"]["version"], str):
+        version = python_version if python_version is not None else _interpreter_version(interpreter)
+        if not isinstance(manifest["interpreter"]["version"], str) or manifest["interpreter"]["version"] != version:
             mismatches.append("interpreter")
-        if python_version is not None and manifest["interpreter"]["version"] != python_version:
-            mismatches.append("interpreter")
+        names = [f["name"] for f in manifest["files"]]
+        listed = set(names)
+        if len(listed) != len(names) or any(
+                entry["file"] not in listed for entry in manifest["functions"] + manifest["extra_hashes"]):
+            mismatches.append("manifest")  # Duplicate files, or a member of a file the manifest does not pin.
         entries = [(f["name"], f["sha256"], None) for f in manifest["files"]]
         entries += [(m["name"], m["sha256"], None) for f in manifest["files"] for m in f["loads"]]
         entries += [(f["file"], f["sha256"], f["qualname"]) for f in manifest["functions"]]

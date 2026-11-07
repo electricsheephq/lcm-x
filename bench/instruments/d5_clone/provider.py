@@ -4,10 +4,12 @@ from collections import Counter
 from copy import deepcopy
 import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-import ipaddress
 import json
 import socket
 import threading
+
+
+MAX_BODY = 64 * 1024 * 1024
 
 
 def _json(value):
@@ -23,7 +25,7 @@ class Provider:
 
     def __init__(self, plan, host="127.0.0.1", port=0):
         host = "127.0.0.1" if host == "localhost" else host
-        if not ipaddress.ip_address(host).is_loopback:
+        if host not in ("127.0.0.1", "::1"):  # The sandbox profile allows exactly these loopback addresses.
             raise ValueError("provider requires a loopback host")
         self.plan = deepcopy(plan)
         self.agent = plan.get("agent_model", "d5-agent")
@@ -62,10 +64,16 @@ class Provider:
                     self.send_json({"error": "embeddings are not served"}, 404)
                     return
                 try:
-                    request = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+                    length = int(self.headers.get("Content-Length", 0))
+                    if not 0 <= length <= MAX_BODY:
+                        raise ValueError("request body size")
+                    request = json.loads(self.rfile.read(length) or b"{}")
                     if self.path in ("/_d5/step", "/_d5/end"):
+                        step = request["step"] if self.path.endswith("step") else None
+                        if step is not None and not isinstance(step, str):
+                            raise TypeError("step ids are strings")
                         with provider.lock:
-                            provider.step = request["step"] if self.path.endswith("step") else None
+                            provider.step = step
                         self.send_json({"ok": True})
                     elif self.path == "/v1/chat/completions":
                         reply = provider.complete(request)
@@ -87,10 +95,11 @@ class Provider:
                                           "data: [DONE]\n\n").encode("utf-8"))
                     else:
                         self.send_json({"error": "not found"}, 404)
-                except (ValueError, KeyError, TypeError):
+                except (ValueError, KeyError, TypeError, RecursionError, OSError):
                     self.send_json({"error": "invalid request"}, 400)
 
         class Server(ThreadingHTTPServer):
+            request_queue_size = 128
             address_family = socket.AF_INET6 if ":" in host else socket.AF_INET
 
         self.server = Server((host, port), Handler)
