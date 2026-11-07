@@ -258,3 +258,22 @@ def test_a_view_that_extends_the_last_one_appends_exactly_the_extension(host):  
         after = "".join(row["content"] for row in child_rows(resumed))
         assert after == before + letters[len(previous):], (letters, before, after)
         previous = letters
+
+
+def test_a_summary_of_an_unstored_input_row_is_stored(host, monkeypatch):  # noqa: F811
+    """NeonDiff's case: the pre-store fails (not busy) while the compaction input holds a request that was never
+    stored. The compaction replaces it with its summary, so the summary is that request's only survivor: it must not be
+    treated as an output of stored rows, and the next turn stores it."""
+    ctx, aux, engine, child, stored = _child(host)
+    unstored = {"role": "user", "content": "request never stored"}
+    fail, calls = _once(engine._append_delegate_child_rows, sqlite3.OperationalError("disk I/O error"))
+    monkeypatch.setattr(engine, "_append_delegate_child_rows", fail)
+    monkeypatch.setattr(engine, "_compress_bypassed", lambda *args: COMPACTED)
+    result = child.compress(engine, [*stored, unstored])
+    contents = [row["content"] for row in child_rows(engine)]
+    if not calls or result != COMPACTED or unstored["content"] in contents:
+        pytest.fail("setup: the compaction did not run over an unstored input row")
+    later = {"role": "assistant", "content": "reply after the summary"}
+    child.turn(ctx, [*result, later], engine)
+    contents = [row["content"] for row in child_rows(engine)]
+    assert contents.count(COMPACTED[0]["content"]) == 1 and contents.count(later["content"]) == 1

@@ -934,7 +934,15 @@ class DelegateChildMixin:
         def identities(rows):
             return [self._session_end_prefix_compare_identity(msg, session_id=session_id) for msg in rows
                     if isinstance(msg, dict) and not self._matches_ignore_message_patterns(msg)]
-        produced = Counter(identities(result)) - Counter(identities(messages))
+        given = Counter(identities(messages))
+        # An output exempts a row only when the compaction's whole input is stored in the lineage: a summary of a
+        # row that was never stored is that row's only survivor, so it must be stored like any other row.
+        stored = Counter(self._session_end_prefix_compare_identity(row, session_id=sid)
+                         for sid in self._delegate_child_store_sessions(session_id)
+                         for row in self._store.get_session_messages(sid, limit=-1))
+        if given - stored:
+            return
+        produced = Counter(identities(result)) - given
         _DELEGATE_COMPACTION_OUTPUTS[self._delegate_child_key(session_id)] = [
             self._delegate_child_boundary_digest(identity) for identity in produced.elements()]
 
