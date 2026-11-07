@@ -634,7 +634,8 @@ def _rewrites(path, overrides):
 @pytest.mark.parametrize("overrides,credited,lcm_only", [
     ([(2, "go", "go\n")], 1, 0),            # a valid recorded rewrite: the host form's identity
     ([], 0, 1),                              # no override: edge whitespace is never stripped
-    ([(2, "go", "other\n")], 0, 1)])        # the recorded hash does not match the stored content
+    ([(2, "go", "other\n")], 0, 1),         # the recorded hash does not match the stored content
+    ([(2, "stop", "go\n")], 0, 1)])         # a valid hash, but the recorded form is not an edge-whitespace rewrite
 def test_recorded_host_rewrites_are_credited(tmp_path, overrides, credited, lcm_only):
     lcm = _messages(tmp_path / "lcm.db", "store_id", [("s", "user", "hi", None, None), ("s", "user", "go\n", None, None),
                                                       ("s", "assistant", "ok", None, None)])
@@ -657,8 +658,27 @@ def test_a_reorder_among_credited_rows_is_counted(tmp_path):
 @pytest.mark.parametrize("root_a,root_b,a,b,verdict", [
     ("/root-a/", "/root-b/", "/root-a/cache", "/root-b/cache", "PATHS_ONLY"),
     ("/", "/root-b", "/cache", "/root-b/cache", "PATHS_ONLY"),
-    ("/", "/root-b/", "/cache", "/root-b/other", "OTHER")])
+    ("/", "/root-b/", "/cache", "/root-b/other", "OTHER"),
+    ("/a/", "/b", "/a/", "/b/", "PATHS_ONLY")])
 def test_config_roots_with_trailing_separators(tmp_path, root_a, root_b, a, b, verdict):
     yaml = pytest.importorskip("yaml")
     paths = [_write(tmp_path / name, yaml.safe_dump({"model": value})) for name, value in (("a.yaml", a), ("b.yaml", b))]
     assert kit.config_diff(paths[0], root_a, paths[1], root_b)["verdict"] == verdict
+
+
+def test_only_the_exact_override_key_is_read(tmp_path):
+    lcm = _messages(tmp_path / "lcm.db", "store_id", [("s", "user", "go\n", None, None)])
+    host = _messages(tmp_path / "state.db", "id", [("s", "user", "go", None, None)])
+    with sqlite3.connect(lcm) as conn:
+        conn.execute("CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT)")
+        conn.executemany("INSERT INTO metadata VALUES (?, ?)", [(key, json.dumps(
+            {"content": "go", "stored_sha256": hashlib.sha256(b"go\n").hexdigest()})) for key in (
+                "HOST_REWRITE_IDENTITY:1", "hostXrewriteXidentity:1")])
+    assert kit.reorder(lcm, host)["host_rewrites_credited"] == 0
+
+
+@pytest.mark.parametrize("value,missing,expected", [
+    (0, True, False), (1, False, True), ("0", True, False), ("false", True, False), (" 1 ", False, True),
+    (None, True, True), (None, False, False)])
+def test_generation_flags_read_any_storage_class(value, missing, expected):
+    assert kit._flag(value, missing) is expected

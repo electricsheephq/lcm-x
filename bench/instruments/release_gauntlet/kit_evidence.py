@@ -202,6 +202,8 @@ def _host_rewrites(conn):
         return {}
     overrides = {}
     for key, value in conn.execute("SELECT key, value FROM metadata WHERE key LIKE 'host_rewrite_identity:%'"):
+        if not str(key).startswith("host_rewrite_identity:"):  # LIKE ignores case and reads "_" as a wildcard.
+            continue
         try:
             payload = json.loads(str(value)) if value else None
             store_id = int(key.split(":", 1)[1])
@@ -210,6 +212,13 @@ def _host_rewrites(conn):
         if isinstance(payload, dict) and isinstance(payload.get("content"), str) and not payload.get("strip_payload"):
             overrides[store_id] = payload
     return overrides
+
+
+def _flag(value, missing):
+    """A 0/1 column read as a bool, whatever its storage class ("0" and "false" are false); NULL gives *missing*."""
+    if value is None:
+        return missing
+    return str(value).strip().lower() not in ("0", "false", "")
 
 
 def _identities(path, order, host=False):
@@ -236,8 +245,9 @@ def _identities(path, order, host=False):
             calls = [(c.get("id"), c.get("function", c).get("name"), c.get("function", c).get("arguments"))
                      for c in calls]
             content = row.get("content") or ""
-            override = overrides.get(row.get("store_id")) if row["role"] == "user" else None
-            if override and override.get("stored_sha256") == hashlib.sha256(content.encode()).hexdigest():
+            override = overrides.get(row.get("store_id")) if row["role"] == "user" and isinstance(content, str) else None
+            if (override and override.get("stored_sha256") == hashlib.sha256(content.encode()).hexdigest()
+                    and override["content"].strip() == content.strip()):  # An edge-whitespace rewrite only.
                 content = override["content"]  # Never stripped without a valid recorded override.
                 credited[row["session_id"]] += 1
             identity = (row["role"], _sha(content), calls,
@@ -248,9 +258,9 @@ def _identities(path, order, host=False):
                 repeats[row["session_id"]] += slot in seen
                 seen.add(slot)
             # Each row counts once: an inactive row now, an active compacted row once its session is read.
-            inactive = row.get("active") is not None and not row["active"]
+            inactive = "active" in row and not _flag(row["active"], False)  # Unknown (NULL) counts as not active.
             generation_rows[row["session_id"]] += inactive
-            compacted[row["session_id"]].append((key, bool(row.get("compacted")) and not inactive))
+            compacted[row["session_id"]].append((key, _flag(row.get("compacted"), False) and not inactive))
             sessions[row["session_id"]].append(key)
     for sid, marks in compacted.items():
         counts = Counter(key for key, _flag in marks)
@@ -312,7 +322,7 @@ def _below(value, root):
     if not isinstance(value, str) or not root:
         return None
     base = root.rstrip("/")
-    if value == root or base and value == base:
+    if value == root or value.rstrip("/") == base:
         return ""
     return value[len(base):] if value.startswith(base + "/") else None
 
