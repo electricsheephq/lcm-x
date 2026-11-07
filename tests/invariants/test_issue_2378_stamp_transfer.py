@@ -51,13 +51,55 @@ def test_next_prompt_stamp_transfer_is_not_silent(build, cold, restamp_t, retain
     evidence = {"rows": copies,
                 "relations": [(a, "possible_replay_of", b) for a, b in sorted(links)]}
     assert sum(row["content"] == NEW for row in rows) == 1, evidence
-    assert len(copies) in (1, 2), evidence
+    assert len(copies) == 2 if retained_p else len(copies) in (1, 2), evidence  # a genuine repeat is stored
     expected = set() if retained_p or len(copies) == 1 else {(copies[1], copies[0])}
     assert {(a, b) for a, b in links if a in copies} == expected, evidence
     by_id = {row["store_id"]: row for row in rows}
     assert all((by_id[a]["role"], by_id[a]["content"].strip()) ==
                (by_id[b]["role"], by_id[b]["content"].strip()) for a, b in links), evidence
     assert len({a for a, _b in links}) == len(links), evidence
+
+
+def test_unreadable_placeholder_never_links_and_keeps_primary_links(build, monkeypatch):
+    """Restoring a target's stored form can fail (an unreadable payload): the target is treated as retained, so the
+    transferred prompt stays unlinked, and the re-stamped T link written before it survives."""
+    engine = build()
+    before = history(False) + [{"role": "user", "content": T, "timestamp": T_REQ}]
+    engine.ingest(deepcopy(before))
+    view = engine.compress(deepcopy(before), force=True)
+    view += [{"role": "assistant", "content": "compress finished", "timestamp": T_REQ + 1},
+             {"role": "user", "content": P, "timestamp": T_REQ}]
+    engine.ingest(deepcopy(view))
+    engine.on_session_end("S", deepcopy(view))
+    engine.on_session_start("S", conversation_id="conversation", platform="cli")
+
+    restore, link, linking = (engine._stored_row_externalized_text_parts_for_pattern_matching,
+                              engine._link_restamped_occurrences, [])
+
+    def unreadable(*args, **kwargs):  # only the linker's read fails; other readers of the helper are unchanged
+        if linking:
+            raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+        return restore(*args, **kwargs)
+
+    def linker(*args):
+        linking.append(True)
+        try:
+            return link(*args)
+        finally:
+            linking.pop()
+
+    monkeypatch.setattr(engine, "_stored_row_externalized_text_parts_for_pattern_matching", unreadable)
+    monkeypatch.setattr(engine, "_link_restamped_occurrences", linker)
+    next(row for row in view if row.get("content") == P)["timestamp"] = T_COMMIT
+    next(row for row in view if row.get("content") == T)["timestamp"] = T_COMMIT - 1
+    view.append({"role": "user", "content": NEW, "timestamp": T_COMMIT + 10})
+    engine.ingest(deepcopy(view))
+    rows, links = all_rows(engine), replay_links(engine)
+    t_copies = [row["store_id"] for row in rows if row["content"] == T]
+    p_copies = [row["store_id"] for row in rows if row["content"] == P]
+    evidence = {"t": t_copies, "p": p_copies, "relations": sorted(links)}
+    assert len(t_copies) == 2 and (t_copies[1], t_copies[0]) in links, evidence
+    assert len(p_copies) == 2 and not any(a in p_copies for a, _b in links), evidence
 
 
 @pytest.mark.xfail(strict=True, raises=AssertionError, reason="625: TODO composite is scaffold before R2 "
