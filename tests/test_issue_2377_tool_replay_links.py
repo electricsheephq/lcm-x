@@ -107,11 +107,11 @@ def test_pending_counters_publish_only_committed_rows(build, monkeypatch):
         raise ValueError("synthetic deterministic planner fault")
 
     monkeypatch.setattr(engine, "_plan_tool_replay_links", failed)
-    engine.ingest([call(4), dict(X, timestamp=4), V])
+    engine.ingest([U, call(), X, call(4), dict(X, timestamp=4), V])
     assert engine._last_tool_link_pending_count == 3
     assert engine._ingest_ledger_counters["ledger.tool_link_pending"] == 3
     assert len([r for r in relations(engine) if r[1] == "link_pending"]) == 3
-    engine.ingest([dict(V, timestamp=1001)])
+    engine.ingest([U, call(), X, call(4), dict(X, timestamp=4), V, dict(V, timestamp=1001)])
     assert engine._last_tool_link_pending_count == 0
     assert engine._ingest_ledger_counters["ledger.tool_link_pending"] == 3
 
@@ -129,9 +129,9 @@ def test_computation_cancellation_rolls_back_before_retry(build, monkeypatch):
     with monkeypatch.context() as patch:
         patch.setattr(engine, "_plan_tool_replay_links", cancelled)
         with pytest.raises(sqlite3.OperationalError, match="interrupted"):
-            engine._ingest_messages([call(4), dict(X, timestamp=4)])
+            engine._ingest_messages([U, call(), X, call(4), dict(X, timestamp=4)])
     assert engine._store.get_session_messages("S") == before
     assert relations(engine) == []
-    engine._ingest_messages([call(4), dict(X, timestamp=4)])
+    engine._ingest_messages([U, call(), X, call(4), dict(X, timestamp=4)])
     assert engine._store.get_session_count("S") == 5
     assert len(relations(engine)) == 2
