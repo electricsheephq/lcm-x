@@ -62,3 +62,30 @@ def test_fresh_bind_maps_rows_to_their_own_copies(tmp_path, monkeypatch, copies,
                 "SELECT store_id FROM occurrence_bindings WHERE disposition='migrated'")}
             assert migrated == own, (sorted(migrated), sorted(own))
     engine.shutdown()
+
+
+@pytest.mark.xfail(strict=True, reason=(
+    "#588: with unstamped rows a later copy set defeats the replay match, so every fresh bind stores the replayed "
+    "history again (linked possible_replay_of when the ledger is on); open P1 half for hosts that send no stamps"))
+@pytest.mark.parametrize("ledger", ["shadow", "off"])
+def test_unstamped_fresh_bind_over_a_copy_set_stores_only_new_rows(tmp_path, monkeypatch, ledger):
+    monkeypatch.setenv("LCM_INGEST_LEDGER", "off")
+    engine = _engine(tmp_path)
+    view = [{"role": "user" if i % 2 == 0 else "assistant", "content": f"row-{i}"} for i in range(8)]
+    engine.ingest(deepcopy(view))
+    with getattr(engine._store, "ingest_atomic", contextlib.nullcontext)():
+        for i in (1, 2):
+            engine._store.append("S", deepcopy(view[i]), conversation_id="conv")
+    stored = len(engine._store.get_session_messages("S"))
+    monkeypatch.setenv("LCM_INGEST_LEDGER", ledger)
+    growth = []
+    for bind in (1, 2):
+        engine.shutdown()
+        engine = _engine(tmp_path)
+        view = [*view, {"role": "user", "content": f"new-{bind}"}]
+        engine.ingest(deepcopy(view))
+        rows = len(engine._store.get_session_messages("S"))
+        growth.append(rows - stored)
+        stored = rows
+    engine.shutdown()
+    assert growth == [1, 1], growth
