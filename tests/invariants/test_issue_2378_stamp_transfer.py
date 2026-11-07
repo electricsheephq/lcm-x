@@ -300,14 +300,10 @@ def test_rotation_widening_never_redirects_a_proof_session_link(build, caplog, m
                 and row["observed_at"] == T_COMMIT)
     evidence = {"original": original, "repeat": repeat["sid"], "copy": copy, "relations": sorted(links)}
     assert (copy, repeat["sid"]) not in links, evidence
-    assert {b for a, b in links if a == copy} <= {original}, evidence
+    assert {b for a, b in links if a == copy} == {original}, evidence
 
 
-@pytest.mark.parametrize("a_first", [True, False], ids=["A-then-B", "B-then-A"])
-def test_rotation_tiers_are_per_row_not_order_dependent(build, a_first):
-    """Two re-stamped rows recorded by the child's proof: A's original lives only in the predecessor; B's lives in
-    the child, and an equal B sits in the predecessor at the same stamp. Each links to its own original whatever the
-    row order. The ingest path admits one such row per bind today, so the linker is driven directly."""
+def _child_bound(build):
     engine = build(rotating=True)
     engine.on_session_end("S", [])
     engine.on_session_start("rotated", boundary_reason="compression", old_session_id="S",
@@ -317,20 +313,44 @@ def test_rotation_tiers_are_per_row_not_order_dependent(build, a_first):
         return engine._store.append(session, {"role": "user", "content": content, "timestamp": stamp},
                                     conversation_id="conversation")
 
-    a_orig, b_pred, b_child = store("S", "alpha prompt", 100.0), store("S", "beta prompt", 200.0), \
-        store("rotated", "beta prompt", 200.0)
-    a_new, b_new = store("rotated", "alpha prompt", 300.0), store("rotated", "beta prompt", 301.0)
-    stored = engine._store.get_batch([a_new, b_new])
-    order = [(a_new, 100.0, 300.0), (b_new, 200.0, 301.0)]
-    if not a_first:
-        order.reverse()
+    return engine, store
+
+
+def _drive_linker(engine, rows):
+    """Call the linker as ingest does: each row is (stored copy, proof session, proof stamp, host stamp)."""
+    stored = engine._store.get_batch([sid for sid, *_rest in rows])
     messages, stored_at, previous = [], {}, {}
-    for idx, (sid, old_stamp, new_stamp) in enumerate(order):
+    for idx, (sid, session, old_stamp, new_stamp) in enumerate(rows):
         identity = engine._message_replay_identity(stored[sid], stored_row=True)
         digest = engine_module._commit_proof_identity_digest(engine_module._proof_user_identity(identity))
         messages.append({"role": "user", "content": stored[sid]["content"], "timestamp": new_stamp})
         stored_at[idx] = sid
-        previous[idx] = ("rotated", {"timestamp": old_stamp, "identity_sha256": digest})
+        previous[idx] = (session, {"timestamp": old_stamp, "identity_sha256": digest})
     engine._link_restamped_occurrences(messages, stored_at, previous, False)
-    links = replay_links(engine)
+    return replay_links(engine)
+
+
+@pytest.mark.parametrize("a_first", [True, False], ids=["A-then-B", "B-then-A"])
+def test_rotation_tiers_are_per_row_not_order_dependent(build, a_first):
+    """Two re-stamped rows recorded by the child's proof: A's original lives only in the predecessor; B's lives in
+    the child, and an equal B sits in the predecessor at the same stamp. Each links to its own original whatever the
+    row order. The ingest path admits one such row per bind today, so the linker is driven directly."""
+    engine, store = _child_bound(build)
+    a_orig, b_pred, b_child = store("S", "alpha prompt", 100.0), store("S", "beta prompt", 200.0), \
+        store("rotated", "beta prompt", 200.0)
+    a_new, b_new = store("rotated", "alpha prompt", 300.0), store("rotated", "beta prompt", 301.0)
+    rows = [(a_new, "rotated", 100.0, 300.0), (b_new, "rotated", 200.0, 301.0)]
+    links = _drive_linker(engine, rows if a_first else rows[::-1])
     assert {(a_new, a_orig), (b_new, b_child)} <= links, {"b_pred": b_pred, "relations": sorted(links)}
+
+
+@pytest.mark.parametrize("x_first", [True, False], ids=["X-then-Y", "Y-then-X"])
+def test_rotation_mixed_proof_sessions_keep_the_predecessor_tier(build, x_first):
+    """One batch mixes proofs: X's names the child, Y's names the predecessor S, and both originals live in S. Y's
+    proof session must not empty X's predecessor tier. Driven directly (a mixed batch needs both proof sources)."""
+    engine, store = _child_bound(build)
+    x_orig, y_orig = store("S", "x prompt", 100.0), store("S", "y prompt", 200.0)
+    x_new, y_new = store("rotated", "x prompt", 300.0), store("rotated", "y prompt", 301.0)
+    rows = [(x_new, "rotated", 100.0, 300.0), (y_new, "S", 200.0, 301.0)]
+    links = _drive_linker(engine, rows if x_first else rows[::-1])
+    assert links == {(x_new, x_orig), (y_new, y_orig)}, sorted(links)
