@@ -147,7 +147,7 @@ from .message_patterns import compile_message_patterns, matches_message_pattern
 from .aux_session import AuxiliarySessionMixin, DelegateChildMixin
 from .placeholder_ledger import PlaceholderLedgerMixin
 from .reconcile import _COMPACTION_COMMIT_PROOF_METADATA_PREFIX, ReconcileMixin, _PRESERVED_OBJECTIVE_CONTEXT_PREFIX
-from .reconcile import _HERMES_PRUNED_TOOL_PLACEHOLDER, _emission_identity
+from .reconcile import _HERMES_PRUNED_TOOL_PLACEHOLDER, _emission_identity, _strip_volatile_host_scaffolding
 from .reconcile import _hermes_salvage_protected_positions
 from .reconcile import _commit_proof_identity_digest, _has_lossy_redacted_identity, _merge_append_cut, _proof_user_identity
 from .compaction import CompactionMixin
@@ -7085,15 +7085,25 @@ class LCMEngine(
         try:
             with self._ingest_evidence():
                 if previous:
-                    sessions = {session for session, _row in previous.values()}
+                    # A child row can sit at a predecessor stamp: look in the current session too.
+                    sessions = {session for session, _row in previous.values()} | {str(self._session_id)}
                     stamps = [row["timestamp"] for _session, row in previous.values()
                               if row.get("timestamp") is not None]
-                    targets = self._store.find_rows_by_observed_at(self._conversation_id, list(sessions), stamps)
+                    targets = self._store.find_rows_by_observed_at(self._conversation_id, sorted(sessions), stamps)
                     current = self._store.get_batch([sid for idx, sid in stored_at.items() if idx in previous and sid])
                     used = {row["related_store_id"] for row in self._store.get_message_relations(
-                        [row["store_id"] for row in targets], "possible_replay_of", related=True)}
+                        [row["store_id"] for row in targets], "possible_replay_of", related=True)
+                        if row["observed_at"] is None}  # a borrowed-stamp link never consumes its target
                     linked = {row["store_id"] for row in self._store.get_message_relations(
                         list(current), "possible_replay_of")}
+                    linked_stamps, predecessors = set(), None
+
+                    def same_occurrence(tier, stamp, identity, sid):
+                        return [target for target in targets
+                                if target["session_id"] == tier and target["observed_at"] == stamp
+                                and target["store_id"] < sid and _proof_user_identity(self._message_replay_identity(
+                                    target, stored_row=True)) == _proof_user_identity(identity)]
+
                     for idx, (session, row) in sorted(previous.items()):
                         sid = stored_at.get(idx)
                         if not sid or sid not in current or sid in linked:
@@ -7104,11 +7114,22 @@ class LCMEngine(
                         identity = self._message_replay_identity(current[sid], stored_row=True)
                         if _commit_proof_identity_digest(_proof_user_identity(identity)) != row.get("identity_sha256"):
                             continue
-                        matches = [target for target in targets
-                                   if target["session_id"] == session and target["observed_at"] == row["timestamp"]
-                                   and target["store_id"] < sid
-                                   and _proof_user_identity(self._message_replay_identity(
-                                       target, stored_row=True)) == _proof_user_identity(identity)]
+                        # Per row, in tiers: the proof's session, then the current session, then (a
+                        # carried row the child's proof records may live there) the one-hop predecessor.
+                        matches, tiers = [], [session, str(self._session_id)]
+                        for tier in dict.fromkeys(tiers):
+                            matches = matches or same_occurrence(tier, row["timestamp"], identity, sid)
+                        if not matches and predecessors is None:
+                            predecessors = self._rotation_predecessor_session_ids(str(self._session_id), max_hops=1)
+                            unloaded = [s for s in predecessors if s not in sessions]  # rows already fetched stay
+                            if unloaded:
+                                more = self._store.find_rows_by_observed_at(self._conversation_id, unloaded, stamps)
+                                used |= {relation["related_store_id"] for relation in self._store.get_message_relations(
+                                    [target["store_id"] for target in more], "possible_replay_of", related=True)
+                                    if relation["observed_at"] is None}  # a borrowed-stamp link never consumes
+                                targets = [*targets, *more]
+                        for tier in [s for s in predecessors if s not in tiers] if not matches else ():
+                            matches = matches or same_occurrence(tier, row["timestamp"], identity, sid)
                         if len(matches) > 1:
                             # The host's volatile scaffolding (todo fold, model-switch note) is the
                             # replay itself; exact content only breaks a tie between equal identities.
@@ -7124,12 +7145,203 @@ class LCMEngine(
                         self._store.add_message_relations([[(sid, "possible_replay_of", target, None, None)]])
                         used.add(target)
                         linked.add(sid)
+                        linked_stamps.add(row["timestamp"])
+                    # #2378: the NEXT prompt can inherit the carried turn's stamp but
+                    # postdate the snapshot. Its later own-stamp copy needs doubt too.
+                    transfer_targets = [target for target in targets
+                                        if target["role"] == "user" and target["store_id"] not in used
+                                        and target["observed_at"] in linked_stamps]
+                    if transfer_targets:
+                        sources = self._store.get_batch([sid for idx, sid in stored_at.items()
+                                                         if idx not in previous and sid])
+                        already_linked = {row["store_id"] for row in self._store.get_message_relations(
+                            list(sources), "possible_replay_of")}
+                        stored_forms = {}  # a target's stored content and, behind any placeholder, what it holds
+
+                        def shown_as(target):
+                            if target["store_id"] not in stored_forms:
+                                content = target["content"]
+                                try:
+                                    stored_forms[target["store_id"]] = {form.strip() for text in (
+                                        content, self._restore_ingest_payload_placeholders_in_content_identity(
+                                            content, session_id=target["session_id"]),
+                                        *self._stored_row_externalized_text_parts_for_pattern_matching(target))
+                                        for form in (text, _strip_volatile_host_scaffolding(text))}
+                                except Exception as exc:
+                                    self._raise_ingest_busy(exc)
+                                    stored_forms[target["store_id"]] = None  # unreadable: treated as retained
+                            return stored_forms[target["store_id"]]
+
+                        for sid, source in sorted(sources.items()):
+                            if source["role"] != "user" or sid in already_linked:
+                                continue
+                            candidates = [target for target in transfer_targets
+                                          if target["store_id"] < sid and target["store_id"] not in used
+                                          and source["observed_at"] is not None
+                                          and source["observed_at"] != target["observed_at"]
+                                          and isinstance(source["content"], str)
+                                          and isinstance(target["content"], str)
+                                          and source["content"].strip() == target["content"].strip()]
+                            if any(shown_as(target) is None for target in candidates):
+                                continue  # an unreadable candidate fails the whole source closed
+                            # One stored row can be found at several stamps (an alt_stamp): it is one candidate,
+                            # vetoed if the host still shows it at any of them.
+                            vetoed = {int(target["store_id"]) for target in candidates
+                                      if any(message.get("role") == "user" and message.get("content") is not None
+                                             # stored content is redacted as protect_message_for_ingest does; the
+                                             # raw form or the form without volatile scaffolding (a model-switch
+                                             # note) may match, so stripping only ever adds a veto
+                                             and any(form.strip() in shown_as(target) for host in [normalize_content_value(
+                                                 redact_sensitive_value(message["content"], self._config,
+                                                                        parse_json_strings=False)) or ""]
+                                                     for form in (host, _strip_volatile_host_scaffolding(host)))
+                                             and self._host_occurrence_metadata(message)["timestamp"]
+                                             == target["observed_at"] for message in messages)}
+                            remaining = {int(target["store_id"]) for target in candidates} - vetoed
+                            if len(remaining) == 1:
+                                target = remaining.pop()
+                                self._store.add_message_relations([[(sid, "possible_replay_of", target, None, None)]])
+                                used.add(target)
                 attempt = getattr(self, "_ingest_ledger_attempt", None)
                 if recovery_fallback and attempt is not None:
                     self._identity_anchor_link_durable_recovery(attempt, attempt["lineage"])
         except Exception as exc:
             self._raise_ingest_busy(exc)
             logger.warning("LCM re-stamped occurrence link write failed (%s)", type(exc).__name__)
+
+    def _link_borrowed_stamp_occurrences(self, messages, stored_at):
+        """#2055: after a compaction the host can show the next user prompt on the stamp of the prompt that was
+        in flight (the borrowed stamp), so one send is stored at its own stamp and at the borrowed one, in either
+        order. Annotate the later copy only; no row is skipped or changed."""
+        if not self._session_id or not identity_anchor_enabled():  # the kill switch writes no anchor state (R185)
+            return
+        texts, stamps = {}, {}  # A stored, stamped, non-empty user row of this ingest is a possible later copy.
+        for idx, sid in stored_at.items():
+            message = messages[idx] if sid and 0 <= idx < len(messages) else None
+            if (isinstance(message, dict) and message.get("role") == "user" and message.get("content") is not None
+                    and (stamp := self._host_occurrence_metadata(message)["timestamp"]) is not None
+                    and (text := (normalize_content_value(message["content"]) or "").strip())):
+                texts[int(sid)], stamps[int(sid)] = text, stamp
+        if not texts:
+            return
+        try:
+            conn, session = self._store._conn, str(self._session_id)
+            conversation = _normalize_conversation_id_value(self._conversation_id)
+
+            def borrowed(at, carrier, text):
+                # An earlier user row of other text holds this stamp as its own (exact equality; indexed). Two rows
+                # decide it; a cap can only miss a link, never write a wrong one.
+                return any(isinstance(content, str) and content.strip() and content.strip() != text
+                           for (content,) in conn.execute(
+                               "SELECT content FROM messages WHERE conversation_id IN (?, '') AND observed_at=? "
+                               "AND +session_id=? AND role='user' AND +store_id<? LIMIT 2",
+                               (conversation, at, session, carrier)))
+            # Every read goes through an index, so each stored row costs a bounded number of reads: earlier
+            # copies of its text come from the ingest ledger's identity digest, never from a scan of the
+            # session. The unary '+' and CROSS JOIN keep the planner off the session indexes. Without the
+            # ledger there is no indexed way to find the earlier copy, and no link is written.
+            attempt = getattr(self, "_ingest_ledger_attempt", None)
+            if attempt is None or not attempt.get("entries"):
+                return
+            index_of = {sid: idx for idx, sid in stored_at.items() if sid}
+            pairs, shown = [], None
+            for sid, text in sorted(texts.items()):
+                if index_of[sid] >= len(attempt["entries"]):
+                    continue
+                # The pairing needs exactly one earlier copy, so three bindings decide it: a full page means
+                # more copies (or bindings) than one, and the row is skipped.
+                found = conn.execute(
+                    "SELECT m.store_id, m.observed_at, m.content FROM occurrence_bindings b "
+                    "CROSS JOIN messages m ON m.store_id = b.store_id WHERE b.lineage=? AND b.identity_digest=? "
+                    "AND b.store_id<? AND m.role='user' AND +m.session_id=? AND m.conversation_id IN (?, '') LIMIT 3",
+                    (attempt["lineage"], attempt["entries"][index_of[sid]].identity_digest, sid, session,
+                     conversation)).fetchall()
+                copies = sorted({(int(store_id), observed_at) for store_id, observed_at, content in found
+                                 if isinstance(content, str) and content.strip() == text})
+                if len(found) > 2 or len(copies) != 1:
+                    continue
+                target, target_stamp = copies[0]
+                stored = conn.execute("SELECT content, observed_at FROM messages WHERE store_id=?", (sid,)).fetchone()
+                stamp = stored[1] if stored and isinstance(stored[0], str) and stored[0].strip() == text else None
+                # The earlier copy is at another stamp: a copy at this row's own stamp is a plain replay that the
+                # other linkers own.
+                if stamp is None or target_stamp is None or target_stamp == stamp:
+                    continue
+                # The borrowed stamp: an earlier user row of other text holds the later or the earlier copy's
+                # stamp as its own. Indexed, so it runs before the view veto.
+                at = next((at for at, carrier in ((stamp, sid), (target_stamp, target))
+                           if borrowed(at, carrier, text)), None)
+                if at is None:
+                    continue
+                # The veto: a host view that still shows this text at the earlier copy's stamp holds a
+                # second occurrence, so the later copy is a genuine repeat. Absent content never vetoes.
+                # The view's (text, stamp) pairs are built once per ingest.
+                if shown is None:
+                    # The host's volatile scaffolding (a model-switch note) does not make it another prompt: the
+                    # raw form and the form without it both veto, as in the #2378 transfer's veto.
+                    shown = {(form.strip(), self._host_occurrence_metadata(message)["timestamp"])
+                             for message in messages
+                             if isinstance(message, dict) and message.get("role") == "user"
+                             and message.get("content") is not None
+                             for host in [normalize_content_value(message["content"]) or ""]
+                             for form in (host, _strip_volatile_host_scaffolding(host))}
+                if (text, target_stamp) in shown:
+                    continue
+                pairs.append((sid, target, at))
+            if not pairs:
+                return
+            with self._ingest_evidence():
+                # The relations the other linkers already wrote are the shared reservations: a source keeps
+                # its one link, and this linker links a target once.
+                linked = {row["store_id"] for row in self._store.get_message_relations(
+                    [sid for sid, _target, _at in pairs], "possible_replay_of")}
+                used = {row["related_store_id"] for row in self._store.get_message_relations(
+                    [target for _sid, target, _at in pairs], "possible_replay_of", related=True)}
+                for sid, target, at in pairs:
+                    if sid in linked or target in used:
+                        continue
+                    # The borrowed stamp in observed_at marks the link as non-consuming: the other linkers
+                    # still give a later copy of E its own link to E.
+                    self._store.add_message_relations([[(sid, "possible_replay_of", target, None, at)]])
+                    linked.add(sid)
+                    used.add(target)
+        except Exception as exc:
+            self._raise_ingest_busy(exc)
+            logger.warning("LCM borrowed-stamp occurrence link write failed (%s)", type(exc).__name__)
+
+    def _link_stored_todo_replays(self, messages, stored_at):
+        """Todo scaffolds lack replay identity; annotate exact copies without suppressing rows."""
+        ids = [sid for idx, sid in stored_at.items() if sid and messages[idx].get("role") == "user"
+               and self._is_preserved_todo_context_message(messages[idx])]
+        if not ids:
+            return
+        try:
+            with self._ingest_evidence():
+                rows = self._store._conn.execute(
+                    "SELECT store_id,session_id,role,content,observed_at,tool_call_id,tool_calls,tool_name,conversation_id "
+                    "FROM messages WHERE store_id IN (SELECT value FROM json_each(?)) ORDER BY store_id",
+                    (json.dumps(ids),)).fetchall()
+                for sid, session, role, content, stamp, call_id, calls, name, conversation in rows:
+                    if self._store.get_message_relations([sid], "possible_replay_of"):
+                        continue  # The existing occurrence/ledger writers already attributed this row.
+                    candidates = self._store._conn.execute(
+                        "SELECT store_id,conversation_id FROM messages WHERE session_id=? AND store_id<? "
+                        "AND role=? AND content=? AND observed_at IS ? AND tool_call_id IS ? "
+                        "AND tool_calls IS ? AND tool_name IS ? ORDER BY store_id",
+                        (session, min(stored_at.values()), role, content, stamp, call_id, calls, name))
+                    conversation = _normalize_conversation_id_value(conversation)
+                    targets = [target for target, target_conversation in candidates
+                               if _normalize_conversation_id_value(target_conversation) == conversation]
+                    # One earlier occurrence supplies at most one replay link: one batched read of the spent targets.
+                    spent = {r["related_store_id"] for r in self._store.get_message_relations(
+                        targets, "possible_replay_of", related=True)
+                        if r["observed_at"] is None}  # a borrowed-stamp link never consumes its target
+                    target = next((t for t in targets if t not in spent), None)
+                    if target is not None:
+                        self._store.add_message_relations([[(sid, "possible_replay_of", target, None, None)]])
+        except Exception as exc:
+            self._raise_ingest_busy(exc)
+            logger.warning("LCM todo replay link write failed (%s)", type(exc).__name__)
 
     def _ingest_messages(
         self,
@@ -7250,6 +7462,7 @@ class LCMEngine(
                             allow_session_end_replay_proof=allow_session_end_replay_proof)
                         if self._ingest_ledger_attempt is not None:
                             self._write_ingest_ledger(self._ingest_ledger_attempt, after_commit, attribution)
+                        self._link_stored_todo_replays(messages, prepared.get("stored_at", {}))
                     emission_committed = True
                     if ledger_prepared is not None:
                         ingest_ledger.settle_pending_emissions(
@@ -7724,7 +7937,11 @@ class LCMEngine(
                 if any(conn.execute(f"SELECT 1 FROM {table} WHERE lineage=? LIMIT 1", (provisional,)).fetchone()
                        for table in ("occurrence_bindings", "ingest_views", "ledger_emissions")):
                     result = ingest_ledger.merge_provisional(conn, provisional, lineage)
-                    store.add_message_relations([[(p, "possible_replay_of", target, None, None)] for p, target in result["pairs"]])
+                    # One possible_replay_of per source: a row another writer already linked keeps its link.
+                    linked = {row["store_id"] for row in store.get_message_relations(
+                        [p for p, _target in result["pairs"]], "possible_replay_of")} if result["pairs"] else set()
+                    store.add_message_relations([[(p, "possible_replay_of", target, None, None)]
+                                                 for p, target in result["pairs"] if p not in linked])
                 if not persisted:
                     conn.execute("INSERT INTO ledger_meta(key,value) VALUES (?,?)", ("session_lineage:" + str(sid), lineage))
         except BaseException as exc:
@@ -7818,8 +8035,9 @@ class LCMEngine(
                             has_relations = conn.execute(
                                 "SELECT 1 FROM sqlite_master WHERE name='message_relations'").fetchone()
                             used = {row[0] for row in conn.execute(
-                                "SELECT related_store_id FROM message_relations "
-                                "WHERE kind='possible_replay_of' AND related_store_id<?", (first,))} if has_relations else set()
+                                "SELECT related_store_id FROM message_relations WHERE kind='possible_replay_of' "
+                                # A borrowed-stamp link (its stamp in observed_at) never consumes its target.
+                                "AND related_store_id<? AND observed_at IS NULL", (first,))} if has_relations else set()
                             # A copy another linker already annotated in this ingest (the #2378 rotation pairing)
                             # keeps that one link: one source row never carries two possible_replay_of links.
                             linked = {row[0] for row in conn.execute(
@@ -8682,6 +8900,8 @@ class LCMEngine(
         originals = [messages[idx] for idx, _msg in messages_to_store_with_index]
         after_commit.append(lambda: self._watch_stored_user_rows(zip(originals, protected_messages, store_ids)))
         stored_at = {idx: store_id for (idx, _msg), store_id in zip(messages_to_store_with_index, store_ids)}
+        if prepared is not None:
+            prepared["stored_at"] = stored_at
         if getattr(self, "_ingest_ledger_attempt", None) is not None:
             self._ingest_ledger_attempt["stored"] = stored_at
             # The remainder too: whole-row externalization replaces a large generated row's marker bytes.
@@ -8691,6 +8911,7 @@ class LCMEngine(
                 if (kind := self._ingest_precomputed_marker(idx, protected, (prepared or {}).get("view_only"))
                     or self._ingest_precomputed_marker(idx, msg, (prepared or {}).get("view_only"))) is not None}
         self._link_restamped_occurrences(messages, stored_at, restamp_metadata, recovery_fallback)
+        self._link_borrowed_stamp_occurrences(messages, stored_at)
         if anchor_plan is not None:
             try:
                 with self._ingest_evidence():
@@ -8712,6 +8933,18 @@ class LCMEngine(
             except Exception as exc:
                 self._raise_ingest_busy(exc)
                 logger.warning("LCM identity-anchor relation write failed (%s)", type(exc).__name__)
+            composite_ids = [stored_at[idx] for idx, message in messages_to_store_with_index
+                             if idx not in anchor_remainders and message.get("role") == "user"
+                             and _PRESERVED_TODO_CONTEXT_PREFIX in (
+                                 composite_text := normalize_content_value(message.get("content")) or "")
+                             and "\n\n" in composite_text]
+            if composite_ids:
+                try:
+                    with self._ingest_evidence():
+                        self._identity_anchor_record_composite_of(composite_ids)
+                except Exception as exc:
+                    self._raise_ingest_busy(exc)
+                    logger.warning("LCM composite-of relation write failed (%s)", type(exc).__name__)
         self._host_uid_shadow(host_uids, {idx: store_id for (idx, _msg), store_id in zip(messages_to_store_with_index,
                                                                                          store_ids)}, anchor_remainders)
         # Rollup staleness is driven by summary-node PUBLICATION

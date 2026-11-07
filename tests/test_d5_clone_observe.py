@@ -229,6 +229,21 @@ def test_a_doctor_that_did_not_run_leaves_the_kind_missing(tmp_path, value):
     assert r.probe_checks(None, [KEY]) == ([], [])
 
 
+@pytest.mark.parametrize("value", [None, {"error": "LCM engine not initialized"}, "not json"])
+@pytest.mark.parametrize("statuses, verdict", [(("fail", "pass"), bars.FAIL), (("pass", "pass"), bars.INCONCLUSIVE),
+                                               (("warn", "pass"), bars.INCONCLUSIVE)])
+def test_a_pre_open_fts_failure_counts_when_the_doctor_did_not_report(tmp_path, value, statuses, verdict):  # #2453 item 2
+    pre_open = {"overall": "healthy", "checks": [{"check": c, "status": s, "detail": "x"}
+                                                 for c, s in zip(r.DOCTOR_PRE_OPEN, statuses)]}
+    out = probe_out(tmp_path, None, {"lcm.db": OK_SCHEMA, "state.db": OK_SCHEMA}, pre_open=pre_open)
+    if value is not None:
+        (out / "doctor.json").write_text(value if isinstance(value, str) else json.dumps(value))
+    checks, _ = r.probe_checks(out, [KEY])
+    sqlite = [{"kind": k, "check": "lcm.db", "status": "ok"} for k in ("quick_check", "integrity")]
+    assert bars.bar5(sqlite + checks, sqlite + checks)["verdict"] == verdict
+    assert bars.failed_checks(checks) == ([r.DOCTOR_PRE_OPEN[0]] if verdict == bars.FAIL else [])
+
+
 @pytest.mark.parametrize("bad", [{"version": 4}, {"missing_tables": ["messages"]}, {"error": True}, {"version": None}])
 def test_a_schema_mismatch_fails_that_db(tmp_path, bad):
     checks, _ = r.probe_checks(probe_out(tmp_path, schema={"lcm.db": {**OK_SCHEMA, **bad}, "state.db": OK_SCHEMA}), [])

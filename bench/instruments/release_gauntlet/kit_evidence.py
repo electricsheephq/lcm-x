@@ -195,70 +195,137 @@ def lifecycle_rows(lcm_db):
                 "identity_order_check": "PASS" if safe else "NOT_EVALUATED"}
 
 
+def _host_rewrites(conn):
+    """LCM-X's recorded host rewrites, {store_id: host form's content}: an override is valid only while its recorded
+    hash of the stored content still matches the row (reconcile.py's rule). An externalized payload is not resolved."""
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='metadata'").fetchone():
+        return {}
+    overrides = {}
+    for key, value in conn.execute("SELECT key, value FROM metadata WHERE key LIKE 'host_rewrite_identity:%'"):
+        if not str(key).startswith("host_rewrite_identity:"):  # LIKE ignores case and reads "_" as a wildcard.
+            continue
+        try:
+            payload = json.loads(str(value)) if value else None
+            store_id = int(key.split(":", 1)[1])
+        except ValueError:
+            continue
+        if isinstance(payload, dict) and isinstance(payload.get("content"), str) and not payload.get("strip_payload"):
+            overrides[store_id] = payload
+    return overrides
+
+
+def _flag(value, missing):
+    """A 0/1 column read as a bool, whatever its storage class (0, 0.0, "0", "0.0" and "false" are false); NULL gives
+    *missing*."""
+    if value is None:
+        return missing
+    if isinstance(value, (bytes, bytearray)):
+        value = bytes(value).decode("utf-8", "replace")
+    if not isinstance(value, str):
+        return value != 0
+    text = value.strip().lower()
+    try:
+        return float(text) != 0
+    except ValueError:
+        return text not in ("false", "")
+
+
 def _identities(path, order, host=False):
     """Per session, each row's identity hash in order. On a host with transcript generations (an ``active`` or
     ``compacted`` column), a compaction writes rows back with carried stamps. The kit does not resolve those copies (a
     kit limit): a row repeating an earlier row's identity and ``timestamp`` in its session is kept and counted in
     ``repeats``, and that session's counts are not definitive. Without a ``timestamp`` column repeats cannot be seen:
-    ``resolved`` is False."""
-    sessions, repeats = defaultdict(list), Counter()
+    ``resolved`` is False. A host can also re-issue a row with a fresh stamp, so an inactive row, or a compacted row
+    whose identity repeats in its session, is counted in ``generation_rows`` and its session is not definitive too.
+    On LCM-X's side, a user row with a valid recorded host rewrite also has the host form's identity (``alts``, by
+    row index): the host can keep either form, so ``reorder`` uses it only where the stored form finds no host row."""
+    sessions, repeats, generation_rows, alts = defaultdict(list), Counter(), Counter(), defaultdict(dict)
     with _db(path) as conn:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(messages)")}
         fields = [name for name in ("session_id", "role", "content", "tool_calls", "tool_call_id") if name in columns]
         generations = host and bool({"active", "compacted"} & columns)
         stamped = generations and "timestamp" in columns
-        seen = set()
-        select = fields + ["timestamp"] * stamped
+        flags = sorted({"active", "compacted"} & columns) if generations else []
+        overrides = {} if host else _host_rewrites(conn)
+        seen, compacted = set(), defaultdict(list)
+        select = fields + ["timestamp"] * stamped + flags + (["store_id"] if overrides else [])
         for row in conn.execute(f"SELECT {', '.join(select)} FROM messages ORDER BY {order}"):
             row = dict(row)
             calls = json.loads(row.get("tool_calls") or "[]") if row["role"] == "assistant" else []
             calls = [(c.get("id"), c.get("function", c).get("name"), c.get("function", c).get("arguments"))
                      for c in calls]
-            identity = (row["role"], _sha(row.get("content") or ""), calls,
-                        row.get("tool_call_id") if row["role"] == "tool" else None)
-            key = _sha(json.dumps(identity, sort_keys=True))
+            raw = row.get("content")
+            content = raw or ""
+            # Only stored text with something besides edge whitespace: NULL, a number or a blob is never credited.
+            override = overrides.get(row.get("store_id")) if (
+                row["role"] == "user" and isinstance(raw, str) and raw.strip()) else None
+            def keyed(text):
+                identity = (row["role"], _sha(text), calls, row.get("tool_call_id") if row["role"] == "tool" else None)
+                return _sha(json.dumps(identity, sort_keys=True))
+
+            key = keyed(content)
+            if (override and override.get("stored_sha256") == hashlib.sha256(content.encode()).hexdigest()
+                    and override["content"] == content.strip()):  # An edge-trim rewrite only, as the host stores it.
+                alts[row["session_id"]][len(sessions[row["session_id"]])] = keyed(override["content"])
             if stamped and row["timestamp"] is not None:
                 slot = (row["session_id"], key, float(row["timestamp"]))
                 repeats[row["session_id"]] += slot in seen
                 seen.add(slot)
+            # Each row counts once: an inactive row now, an active compacted row once its session is read.
+            inactive = "active" in row and not _flag(row["active"], True)  # NULL is active, as the host reads it.
+            generation_rows[row["session_id"]] += inactive
+            compacted[row["session_id"]].append((key, _flag(row.get("compacted"), False) and not inactive))
             sessions[row["session_id"]].append(key)
-    return sessions, fields, repeats, stamped or not generations
+    for sid, marks in compacted.items():
+        counts = Counter(key for key, _flag in marks)
+        generation_rows[sid] += sum(1 for key, flag in marks if flag and counts[key] > 1)
+    return sessions, fields, repeats, stamped or not generations, generation_rows, alts
 
 
 def reorder(lcm_db, state_db):
-    (lcm, lc, *_), (host, hc, repeats, resolved) = _identities(lcm_db, "store_id"), _identities(state_db, "id", True)
+    (lcm, lc, _, _, _, alts), (host, hc, repeats, resolved, generation_rows, _) = (
+        _identities(lcm_db, "store_id"), _identities(state_db, "id", True))
     results = []
     only = {side: sorted(_sha(str(sid))[:12] for sid in keys) for side, keys in (
         ("lcm", lcm.keys() - host.keys()), ("host", host.keys() - lcm.keys()))}
     for sid in sorted(lcm.keys() | host.keys()):
-        a, b = lcm[sid], host[sid]
-        shared = sum((Counter(a) & Counter(b)).values())
+        a, b, forms = lcm[sid], host[sid], alts.get(sid, {})
+        # A recorded rewrite lets a row match the host form too, but only a stored form left over takes it, and only
+        # while the host holds an unmatched row of that form: a credit never makes an extra match.
+        over, spare, credited = Counter(a) - Counter(b), Counter(b) - Counter(a), 0
+        for i, alt in sorted(forms.items()):
+            if over[a[i]] > 0 and spare[alt] > 0:
+                over[a[i]] -= 1
+                spare[alt] -= 1
+                credited += 1
+        shared = sum((Counter(a) & Counter(b)).values()) + credited
         where = defaultdict(list)
         for j, key in enumerate(b):
             where[key].append(j)
         tails = []  # Hunt-Szymanski: the LCS is the longest increasing run of matched host positions.
-        for key in a:
-            for pos in reversed(where.get(key, ())):
-                i = bisect_left(tails, pos)
-                if i == len(tails):
+        for i, key in enumerate(a):  # A row with a recorded rewrite may sit at a host row of either form.
+            for pos in sorted({pos for k in {key, forms.get(i, key)} for pos in where.get(k, ())}, reverse=True):
+                at = bisect_left(tails, pos)
+                if at == len(tails):
                     tails.append(pos)
                 else:
-                    tails[i] = pos
+                    tails[at] = pos
         results.append({"session_h12": _sha(str(sid))[:12], "lcm_rows": len(a), "host_rows": len(b),
                         "matched": shared, "lcm_only": len(a) - shared, "host_only": len(b) - shared,
                         "reordered_rows": shared - len(tails), "host_stamp_repeat_rows": repeats[sid],
-                        "counts_definitive": resolved and not repeats[sid],
+                        "host_generation_rows": generation_rows[sid], "host_rewrites_credited": credited,
+                        "counts_definitive": resolved and not repeats[sid] and not generation_rows[sid],
                         # Rows sharing an identity are matched by count and order only: a lost occurrence that a
                         # duplicate of another occurrence replaces is not seen. This counts the rows where it could be.
                         "repeated_identity_rows": sum(n for n in Counter(b).values() if n > 1),
                         "columns_compared": {"lcm": lc, "host": hc}})
     missing = sorted({"tool_calls", "tool_call_id"} - set(hc))
     return {"sessions": len(results), "per_session": results, "identity_degraded": bool(missing),
-            "host_copies_resolved": resolved and not any(repeats.values()),
+            "host_copies_resolved": resolved and not any(repeats.values()) and not any(generation_rows.values()),
             "sessions_not_definitive": sum(1 for row in results if not row["counts_definitive"]),
             "missing_columns": missing, **{key: sum(row[key] for row in results) for key in (
                 "lcm_rows", "host_rows", "matched", "lcm_only", "host_only", "reordered_rows", "host_stamp_repeat_rows",
-                "repeated_identity_rows")},
+                "host_generation_rows", "host_rewrites_credited", "repeated_identity_rows")},
             **{side + "_only_sessions": len(ids) for side, ids in only.items()},
             **{side + "_only_sessions_h12": ids for side, ids in only.items()}}
 
@@ -269,6 +336,17 @@ def _flatten(value, prefix=""):
                  for k, v in value.items()] if isinstance(value, dict) else [(f"[{i}]", v) for i, v in enumerate(value)]
         return {key: leaf for segment, child in items for key, leaf in _flatten(child, prefix + segment).items()}
     return {prefix: value}
+
+
+def _below(value, root):
+    """A value's path below its root, or None when it is not under it. Trailing separators on the root are ignored;
+    a bare "/" stays the root."""
+    if not isinstance(value, str) or not value or not root:  # An empty value is not a path.
+        return None
+    base = root.rstrip("/")
+    if value == root or value.rstrip("/") == base:
+        return ""
+    return value[len(base):] if value.startswith(base + "/") else None
 
 
 def config_diff(a, root_a, b, root_b):
@@ -283,9 +361,8 @@ def config_diff(a, root_a, b, root_b):
         va, vb = (config.get(key, missing) for config in configs)
         if type(va) is type(vb) and va == vb:
             continue
-        rooted = all(isinstance(value, str) and root and (value == root or value.startswith(root + "/"))
-                     for value, root in ((va, root_a), (vb, root_b)))
-        path_only = rooted and va[len(root_a):] == vb[len(root_b):]
+        below = [_below(value, root) for value, root in ((va, root_a), (vb, root_b))]
+        path_only = None not in below and below[0] == below[1]
         (paths if path_only else others).append(key)
     return {"differing_keys": sorted(paths + others), "path_only_keys": paths, "other_keys": others,
             "verdict": "OTHER" if others else "PATHS_ONLY"}

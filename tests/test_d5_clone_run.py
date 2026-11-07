@@ -447,6 +447,31 @@ def test_an_unreadable_final_store_keeps_its_failed_checks_and_never_passes(setu
         assert receipt["verdict"]["raw"] != bars.PASS
 
 
+class RefusedFacts(UnreadableFinal):
+    """The stopped arm's store is one the read-only open refuses (a -wal with no -shm): its facts read raises."""
+
+    def rows(self, path):
+        return FakeHost.rows(self, path)
+
+    def facts(self, ctx):
+        if ctx["name"] == self.bad:
+            raise r.capture.CaptureError("synthetic: -wal without -shm")
+        return super().facts(ctx)
+
+
+@pytest.mark.parametrize("arm", ["rc", "ga"])
+def test_a_refused_workload_read_keeps_the_receipt_and_its_failed_checks(setup, arm):  # #2453 item 1
+    _, config, run_dir = setup
+    receipt = r.run(RefusedFacts(config, run_dir, arm), rc_id="rc-synthetic")  # A receipt, not a crash.
+    if arm == "rc":
+        assert receipt["bars"]["bar5"]["verdict"] == bars.FAIL and receipt["verdict"]["raw"] == bars.FAIL
+    else:  # GA's failed checks are kept and request the GA re-run; they never pass bar 5.
+        assert receipt["ga_rerun"] is not None and receipt["bars"]["bar5"]["verdict"] == bars.INCONCLUSIVE
+    bar6 = receipt["bars"]["bar6"]
+    assert bar6["verdict"] == bars.INCONCLUSIVE and not bar6["items"][arm]["cron_fired"]
+    assert all(bar6["items"]["ga" if arm == "rc" else "rc"].values())  # The other arm's facts are kept.
+
+
 class UnreadableGaRowsOnly(UnreadableFinal):
     def checks(self, ctx):  # GA's checks stay ok: no rerun, and only its rows are missing.
         return FakeHost.checks(self, ctx)

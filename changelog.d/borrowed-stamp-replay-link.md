@@ -1,0 +1,1 @@
+- Fix: when the host shows a user's next prompt on the stamp of the prompt that was in flight at a compaction, LCM stores that send twice; the later copy now carries one `possible_replay_of` link to the earlier one, which leaves the earlier copy free for other replay links (no row is skipped or changed).

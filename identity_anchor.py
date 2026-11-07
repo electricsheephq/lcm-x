@@ -660,7 +660,8 @@ class IdentityAnchorMixin:
         if self._store.get_message_relations([target], "alt_stamp"):
             return  # the live receipt already consumed this occurrence
         if conn.execute("SELECT 1 FROM sqlite_master WHERE name='message_relations'").fetchone() and conn.execute(
-                "SELECT 1 FROM message_relations WHERE kind='possible_replay_of' AND related_store_id=?", (target,)).fetchone():
+                "SELECT 1 FROM message_relations WHERE kind='possible_replay_of' AND related_store_id=? "
+                "AND observed_at IS NULL", (target,)).fetchone():  # a borrowed-stamp link never consumes its target
             return
         if generated:
             if observed is None:
@@ -668,7 +669,11 @@ class IdentityAnchorMixin:
                              (stamp, emission))
             return True  # Keep admitting the later warm rewrite; row guards still own every write.
         else:
-            self._store.add_message_relations([[(stored_id, "possible_replay_of", target, None, None)]])
+            # A source keeps its one link (the borrowed-stamp linker runs first); the alt_stamp read above
+            # ensured the relation table.
+            if not conn.execute("SELECT 1 FROM message_relations WHERE kind='possible_replay_of' AND store_id=? LIMIT 1",
+                                (stored_id,)).fetchone():
+                self._store.add_message_relations([[(stored_id, "possible_replay_of", target, None, None)]])
             return False
 
     @staticmethod
@@ -1586,6 +1591,52 @@ class IdentityAnchorMixin:
         if groups:
             self._store.add_message_relations(groups)
 
+    def _identity_anchor_record_composite_of(self, stored_ids) -> None:
+        """Provenance for stored todo composites; never participates in replay decisions.
+
+        A stored user row gets ``composite_of`` rows only when exactly one decomposition of its text fits
+        either rule, counted across both, with every part an earlier stored user row of its own session:
+        (i) the LEADING rendered todo block (the #516 span: header, item lines, optional reload notice),
+        unstored, then whole stored rows; (ii) whole stored rows only, the first a stored todo row. Parts join with exactly ``"\\n\\n"``. Ambiguity or an over-budget search
+        writes nothing. A part text held by more than one row resolves by the host's consecutive-turn merge: several
+        held parts link only to a unique run of consecutive session rows in text order, one held part only to the row
+        immediately before C (``_composite_of_holders``); anything else writes nothing."""
+        from .reconcile import _PRESERVED_TODO_CONTEXT_PREFIX as header, _todo_annotation_span
+
+        groups = []
+        for store_id, row in self._store.get_batch(stored_ids).items():
+            content = row.get("content")
+            if (row.get("role") != "user" or not isinstance(content, str)
+                    or header not in content or "\n\n" not in content):
+                continue
+            by_text = defaultdict(list)
+            for sid, text in self._store._conn.execute(
+                "SELECT store_id, content FROM messages WHERE conversation_id = ? AND session_id = ? "
+                "AND role = 'user' AND store_id < ? AND content != '' AND instr(?, content) > 0",
+                (row["conversation_id"], row["session_id"], store_id, content),
+            ):
+                by_text[text].append(sid)
+            fits = _composite_of_splits(content, by_text, header, _todo_annotation_span)
+            if fits is None or len(fits) != 1:
+                continue
+            choices = [by_text[part] for part, held in fits[0] if held]
+            if all(len(holders) == 1 for holders in choices):
+                chosen = [holders[0] for holders in choices]
+                if len(set(chosen)) != len(chosen):
+                    continue  # one stored occurrence never stands for two parts
+            else:  # identical texts held by several rows: the host merged CONSECUTIVE turns (ruling)
+                order = [sid for (sid,) in self._store._conn.execute(
+                    "SELECT store_id FROM messages WHERE session_id = ? AND store_id < ? ORDER BY store_id",
+                    (row["session_id"], store_id))]
+                chosen = _composite_of_holders(choices, order)
+                if chosen is None:
+                    continue
+            held_ids = iter(chosen)
+            groups.append([(store_id, "composite_of", next(held_ids) if held else None,
+                            ordinal, row.get("observed_at")) for ordinal, (part, held) in enumerate(fits[0])])
+        if groups:
+            self._store.add_message_relations(groups)
+
     def _identity_anchor_remember(self, stored) -> None:
         """R5 current-turn window: (session, identity, store_id, observed_at) of user rows just stored."""
         recent = list(getattr(self, "_identity_anchor_recent", ()))
@@ -1629,3 +1680,56 @@ def _raw_remainder(message, remainder) -> Optional[str]:
     raw = normalize_content_value(message.get("content")) or ""
     head = "\n\n".join(parts) + "\n\n"
     return raw[len(head):] if raw.startswith(head) and raw[len(head):] == rest else None
+
+
+def _composite_of_splits(content: str, by_text, header: str, todo_span) -> list[list[tuple[str, bool]]] | None:
+    """The decompositions of ``content`` that composite_of rule (i) or (ii) allows, as ``[(part, stored)]``.
+    None when a search is over budget or capped, so more splits may exist. A part whose text several rows
+    hold still yields its split here; the caller resolves its holder (``_composite_of_holders``) or writes nothing."""
+    texts = set(by_text)
+    whole = _decompositions(content, texts, partial=False)
+    if whole is None or len(whole) >= _MAX_DECOMPOSITIONS:
+        return None
+    found = [[(part, True) for part in parts] for parts, _rest in whole if parts[0].startswith(header)]
+    if not content.startswith(header):
+        return found
+    # Rule (i): the scaffold is exactly the rendered todo block the #516 identity cut strips; the header
+    # alone (no item line) is not a rendered block. It never holds a whole stored row (a stored todo row is
+    # rule (ii)), and the host's merge puts exactly one "\n\n" behind it.
+    end = todo_span(content, 0)
+    scaffold, rest = content[:end], content[end + 2:]
+    if (scaffold.split("\n", 1)[0] != header or "\n" not in scaffold or not content.startswith("\n\n", end) or not rest
+            or any(scaffold == text or scaffold.startswith(text + "\n\n") or scaffold.endswith("\n\n" + text)
+                   or "\n\n" + text + "\n\n" in scaffold for text in texts)):
+        return found
+    if rest in texts:
+        found.append([(scaffold, False), (rest, True)])
+    tails = _decompositions(rest, texts, partial=False)
+    if tails is None or len(tails) >= _MAX_DECOMPOSITIONS:
+        return None
+    return found + [[(scaffold, False)] + [(part, True) for part in parts] for parts, _rest in tails]
+
+
+def _composite_of_holders(choices: list[list[int]], order: list[int]) -> list[int] | None:
+    """One stored row per held part when some part's text is held by several rows of C's session
+    (``order``: the session's store ids before C, every role). Several parts: exactly one choice whose
+    rows are consecutive in store order with no row of any role between them, in text order. One part:
+    the row immediately before C, when it holds that text. Anything else: None (no relation)."""
+    if len(choices) == 1:
+        return [order[-1]] if order and order[-1] in choices[0] else None
+    position = {sid: index for index, sid in enumerate(order)}
+    rest = [set(holders) for holders in choices[1:]]  # O(1) membership: the walk stays linear in history
+    runs = []
+    for first in choices[0]:
+        run, at = [first], position[first]
+        for holders in rest:
+            nxt = order[at + 1] if at + 1 < len(order) else None
+            if nxt not in holders:
+                break
+            run.append(nxt)
+            at += 1
+        else:
+            runs.append(run)
+            if len(runs) > 1:
+                return None
+    return runs[0] if len(runs) == 1 else None

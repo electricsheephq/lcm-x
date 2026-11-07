@@ -609,9 +609,121 @@ def test_any_stamp_repeat_is_not_definitive(tmp_path, rows):
     assert result["host_copies_resolved"] is False and result["sessions_not_definitive"] == 1
 
 
-def test_two_sends_with_their_own_stamps_stay_definitive(tmp_path):
+@pytest.mark.parametrize("rows,generation_rows,definitive", [
+    ([("go", 1.0, 1, 0), ("go", 1.000001, 1, 0)], 0, True),     # two sends, all active, none compacted
+    ([("go", 1.0, 0, 0), ("go", 2.0, 1, 0)], 1, False),         # an inactive copy, then a fresh-stamped active one
+    ([("go", 1.0, 1, 1), ("go", 2.0, 1, 0)], 1, False)])        # a compacted row whose identity repeats
+def test_distinct_stamps_stay_definitive_only_without_generation_copies(tmp_path, rows, generation_rows, definitive):
     lcm = _messages(tmp_path / "lcm.db", "store_id", [("s", "user", "go", None, None)])
-    host = _host_generations(tmp_path / "state.db", [("go", 1.0, 1, 0), ("go", 1.000001, 1, 0)])
-    result = kit.reorder(lcm, host)
-    assert (result["host_only"], result["host_stamp_repeat_rows"], result["host_copies_resolved"]) == (1, 0, True)
+    result = kit.reorder(lcm, _host_generations(tmp_path / "state.db", rows))
+    assert (result["host_only"], result["host_stamp_repeat_rows"]) == (1, 0)
+    assert (result["per_session"][0]["counts_definitive"], result["host_copies_resolved"]) == (definitive, definitive)
+    assert result["host_generation_rows"] == result["per_session"][0]["host_generation_rows"] == generation_rows
 
+
+def _rewrites(path, overrides):
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT)")
+        conn.executemany("INSERT INTO metadata VALUES (?, ?)", [
+            (f"host_rewrite_identity:{store_id}", json.dumps({"version": 1, "content": content, "stripped": ["", "\n"],
+                                                              "stored_sha256": hashlib.sha256(stored.encode()).hexdigest()}))
+            for store_id, content, stored in overrides])
+    return path
+
+
+@pytest.mark.parametrize("overrides,credited,lcm_only", [
+    ([(2, "go", "go\n")], 1, 0),            # a valid recorded rewrite: the host form's identity
+    ([], 0, 1),                              # no override: edge whitespace is never stripped
+    ([(2, "go", "other\n")], 0, 1),         # the recorded hash does not match the stored content
+    ([(2, "stop", "go\n")], 0, 1),         # a valid hash, but the recorded form is not an edge-whitespace rewrite
+    ([(2, "go ", "go\n")], 0, 1)])         # a valid hash, but not the edge-trimmed form the host stores
+def test_recorded_host_rewrites_are_credited(tmp_path, overrides, credited, lcm_only):
+    lcm = _messages(tmp_path / "lcm.db", "store_id", [("s", "user", "hi", None, None), ("s", "user", "go\n", None, None),
+                                                      ("s", "assistant", "ok", None, None)])
+    host = _messages(tmp_path / "state.db", "id", [("s", "user", "hi", None, None), ("s", "user", "go", None, None),
+                                                   ("s", "assistant", "ok", None, None)])
+    result = kit.reorder(_rewrites(lcm, overrides), host)
+    row = result["per_session"][0]
+    assert (row["matched"], row["lcm_only"], row["host_only"]) == (3 - lcm_only, lcm_only, lcm_only)
+    assert row["host_rewrites_credited"] == result["host_rewrites_credited"] == credited
+
+
+def test_a_reorder_among_credited_rows_is_counted(tmp_path):
+    lcm = _messages(tmp_path / "lcm.db", "store_id", [("s", "user", "A\n", None, None), ("s", "user", " B", None, None)])
+    host = _messages(tmp_path / "state.db", "id", [("s", "user", "B", None, None), ("s", "user", "A", None, None)])
+    result = kit.reorder(_rewrites(lcm, [(1, "A", "A\n"), (2, "B", " B")]), host)
+    assert (result["matched"], result["lcm_only"], result["host_only"]) == (2, 0, 0)
+    assert (result["reordered_rows"], result["host_rewrites_credited"]) == (1, 2)
+
+
+@pytest.mark.parametrize("root_a,root_b,a,b,verdict", [
+    ("/root-a/", "/root-b/", "/root-a/cache", "/root-b/cache", "PATHS_ONLY"),
+    ("/", "/root-b", "/cache", "/root-b/cache", "PATHS_ONLY"),
+    ("/", "/root-b/", "/cache", "/root-b/other", "OTHER"),
+    ("/a/", "/b", "/a/", "/b/", "PATHS_ONLY"),
+    ("/", "/b/", "", "/b/", "OTHER")])          # an empty value is not a path, even under a bare "/" root
+def test_config_roots_with_trailing_separators(tmp_path, root_a, root_b, a, b, verdict):
+    yaml = pytest.importorskip("yaml")
+    paths = [_write(tmp_path / name, yaml.safe_dump({"model": value})) for name, value in (("a.yaml", a), ("b.yaml", b))]
+    assert kit.config_diff(paths[0], root_a, paths[1], root_b)["verdict"] == verdict
+
+
+def test_only_the_exact_override_key_is_read(tmp_path):
+    lcm = _messages(tmp_path / "lcm.db", "store_id", [("s", "user", "go\n", None, None)])
+    host = _messages(tmp_path / "state.db", "id", [("s", "user", "go", None, None)])
+    with sqlite3.connect(lcm) as conn:
+        conn.execute("CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT)")
+        conn.executemany("INSERT INTO metadata VALUES (?, ?)", [(key, json.dumps(
+            {"content": "go", "stored_sha256": hashlib.sha256(b"go\n").hexdigest()})) for key in (
+                "HOST_REWRITE_IDENTITY:1", "hostXrewriteXidentity:1")])
+    assert kit.reorder(lcm, host)["host_rewrites_credited"] == 0
+
+
+@pytest.mark.parametrize("value,missing,expected", [
+    (0, True, False), (1, False, True), ("0", True, False), ("false", True, False), (" 1 ", False, True),
+    (None, True, True), (None, False, False), (0.0, True, False), ("0.0", True, False), (b"0", True, False),
+    (1.0, False, True), (b"1", False, True)])
+def test_generation_flags_read_any_storage_class(value, missing, expected):
+    assert kit._flag(value, missing) is expected
+
+
+@pytest.mark.parametrize("stored", [None, "", b"", 0])
+def test_stored_content_without_text_is_never_credited(tmp_path, stored):
+    lcm = _messages(tmp_path / "lcm.db", "store_id", [("s", "user", stored, None, None)])
+    host = _messages(tmp_path / "state.db", "id", [("s", "user", " ", None, None)])
+    result = kit.reorder(_rewrites(lcm, [(1, " ", "")]), host)
+    assert (result["host_rewrites_credited"], result["lcm_only"], result["host_only"]) == (0, 1, 1)
+
+
+@pytest.mark.parametrize("host_forms,matched,credited", [
+    (["go\n"], 1, 0),            # the host kept the stored form (a compaction-turn prompt): it still matches
+    (["go"], 1, 1),               # the host kept the trimmed form: credited
+    (["go\n", "go"], 1, 0),      # both forms on the host, one stored row: one match, never two
+    (["x"], 0, 0)])               # neither form: lcm_only, never credited
+def test_either_recorded_form_matches_once(tmp_path, host_forms, matched, credited):
+    lcm = _messages(tmp_path / "lcm.db", "store_id", [("s", "user", "go\n", None, None)])
+    host = _messages(tmp_path / "state.db", "id", [("s", "user", form, None, None) for form in host_forms])
+    result = kit.reorder(_rewrites(lcm, [(1, "go", "go\n")]), host)
+    assert (result["matched"], result["lcm_only"], result["host_only"]) == (matched, 1 - matched, len(host_forms) - matched)
+    assert result["host_rewrites_credited"] == credited
+
+
+@pytest.mark.parametrize("lcm_rows,host_rows", [
+    (["go\n", "go\n"], ["go\n", "go"]),
+    (["go\n", "a", "go\n"], ["go\n", "a", "go"]),
+    (["go\n", "go\n", "go\n"], ["go\n", "go", "go\n"])])
+def test_credited_rows_in_host_order_are_not_reordered(tmp_path, lcm_rows, host_rows):
+    lcm = _messages(tmp_path / "lcm.db", "store_id", [("s", "user", text, None, None) for text in lcm_rows])
+    host = _messages(tmp_path / "state.db", "id", [("s", "user", text, None, None) for text in host_rows])
+    overrides = [(i, "go", "go\n") for i, text in enumerate(lcm_rows, 1) if text == "go\n"]
+    result = kit.reorder(_rewrites(lcm, overrides), host)
+    assert (result["matched"], result["lcm_only"], result["host_only"], result["reordered_rows"]) == (
+        len(lcm_rows), 0, 0, 0)
+    assert result["host_rewrites_credited"] == 1
+
+
+def test_credited_rows_out_of_host_order_are_reordered(tmp_path):
+    lcm = _messages(tmp_path / "lcm.db", "store_id", [("s", "user", "go\n", None, None), ("s", "user", "a", None, None)])
+    host = _messages(tmp_path / "state.db", "id", [("s", "user", "a", None, None), ("s", "user", "go", None, None)])
+    result = kit.reorder(_rewrites(lcm, [(1, "go", "go\n")]), host)
+    assert (result["matched"], result["reordered_rows"], result["host_rewrites_credited"]) == (2, 1, 1)
