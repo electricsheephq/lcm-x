@@ -125,6 +125,53 @@ def continue_positions(seq: list[tuple[str, str]], reply_pat: str) -> Counter:
     return out
 
 
+def continue_occurrences(rows, state: Path, group, reply_pat: str) -> Counter:
+    """Bind stored continues to their host successor's full occurrence, never to store order.
+
+    Missing timestamps, unavailable host evidence or an ambiguous successor cannot prove a reply.
+    Rotation copies with the same identity give the same binding, not extra reply capacity.
+    """
+    def key(row):
+        _id, sid, role, content, calls, call_id, stamp = row
+        return group(sid), role, multiset.h(content), tool_calls.canon(calls), call_id, stamp
+
+    continues = [r for r in rows if r[2] == "user" and multiset.norm(r[3]) == "continue"]
+    if not continues:
+        return Counter()
+    sessions, bindings = {}, {}
+    if state.exists():
+        try:
+            con = sqlite3.connect(f"file:{state}?mode=ro", uri=True)
+            try:
+                host = con.execute("select id, session_id, role, content, tool_calls, tool_call_id, timestamp"
+                                   " from messages where role in ('user', 'assistant') order by id").fetchall()
+            finally:
+                con.close()
+            for row in host:
+                sessions.setdefault(row[1], []).append(row)
+        except sqlite3.Error:
+            pass  # unavailable evidence never licenses an occurrence binding
+    for seq in sessions.values():
+        for i, row in enumerate(seq):
+            if row[2] != "user" or multiset.norm(row[3]) != "continue" or row[6] is None:
+                continue
+            nxt = seq[i + 1] if i + 1 < len(seq) else None
+            match = re.search(reply_pat, nxt[3] or "") if nxt and nxt[2] == "assistant" else None
+            binding = (key(nxt), match.group(1)) if match and nxt[6] is not None else None
+            bindings.setdefault(key(row), set()).add(binding)
+    available = Counter(key(r) for r in rows if r[2] == "assistant" and r[6] is not None)
+    out = Counter()
+    for row in continues:
+        choices = bindings.get(key(row), set()) if row[6] is not None else set()
+        binding = next(iter(choices)) if len(choices) == 1 else None
+        if binding is not None and available[binding[0]]:
+            available[binding[0]] -= 1
+            out[binding[1]] += 1
+        else:
+            out[None] += 1
+    return out
+
+
 def scenario_gaps(cell: dict, events: list[dict], atts: list[dict], tg: dict, bound: dict) -> list[str]:
     """What the cell was meant to exercise and did not: each gap makes the cell UNSUPPORTED."""
     gaps = [f"{a['tag']}: completed but the provider never returned its scripted reply" for a in atts
@@ -253,6 +300,8 @@ def score(cell: dict, cell_dir: Path, db_dir: Path | None = None) -> dict:
         relations = con.execute("select store_id, kind, related_store_id from message_relations").fetchall() if \
             con.execute("select 1 from sqlite_master where type='table' and name='message_relations'").fetchone() else []
         stored = [r[:4] for r in full]
+        stamp = "observed_at" if any(r[1] == "observed_at" for r in con.execute("pragma table_info(messages)")) else "NULL"
+        stamps = dict(con.execute("select store_id, " + stamp + " from messages"))
         nodes = con.execute("select node_id, session_id, source_ids from summary_nodes where source_type = 'messages'").fetchall()
     finally:
         con.close()
@@ -264,6 +313,7 @@ def score(cell: dict, cell_dir: Path, db_dir: Path | None = None) -> dict:
                                     if (cell_dir / "cell.json").exists() else None) or {}
     host, host_why = host_parity.load(db_dir / "state.db", group, plugin.get("tree"))
     b2_full, ext, ext_ids = externalized.resolve(full, db_dir.parent / "hermes-home")
+    occurrences = [(*r, stamps[r[0]]) for r in b2_full]
     b2_stored = [r[:4] for r in b2_full]
     projection_receipts = projections.verify(atts, b2_full, events, group, plugin.get("tree"))
     multiset.merge_witnesses(host, events, group)
@@ -295,7 +345,7 @@ def score(cell: dict, cell_dir: Path, db_dir: Path | None = None) -> dict:
         mism.update({f"reply {label}{k}": {"expected": want_a[k], "stored": have_a[k]}
                      for k in sorted(set(want_a) | set(have_a)) if want_a[k] != have_a[k]})
         want_c = continue_positions(items, reply_pat)
-        have_c = continue_positions([(r, c) for _s, _sid, r, c in rows if r in ("user", "assistant")], reply_pat)
+        have_c = continue_occurrences([r for r in occurrences if group(r[1]) == g], db_dir / "state.db", group, reply_pat)
         if want_c != have_c:
             mism[f"{label}continue"] = {"expected_replies_after": dict(want_c), "stored_replies_after": dict(have_c)}
         b1.update(mism)
