@@ -7815,11 +7815,18 @@ class LCMEngine(
                                 key = (conv, role, stripped, call_id, calls, name)
                                 if stripped is not None and key in stripped_wanted:
                                     stripped_earlier.setdefault(key, []).append((sid, stamp))
+                            has_relations = conn.execute(
+                                "SELECT 1 FROM sqlite_master WHERE name='message_relations'").fetchone()
                             used = {row[0] for row in conn.execute(
                                 "SELECT related_store_id FROM message_relations "
-                                "WHERE kind='possible_replay_of' AND related_store_id<?", (first,))} if conn.execute(
-                                    "SELECT 1 FROM sqlite_master WHERE name='message_relations'").fetchone() else set()
-                            pairs, linked, candidate_ids, stripped_count = [], set(), set(), 0
+                                "WHERE kind='possible_replay_of' AND related_store_id<?", (first,))} if has_relations else set()
+                            # A copy another linker already annotated in this ingest (the #2378 rotation pairing)
+                            # keeps that one link: one source row never carries two possible_replay_of links.
+                            linked = {row[0] for row in conn.execute(
+                                "SELECT store_id FROM message_relations WHERE kind='possible_replay_of' AND store_id IN "
+                                "(SELECT value FROM json_each(?))",
+                                (json.dumps([row[0] for row in new_rows]),))} if has_relations else set()
+                            pairs, candidate_ids, stripped_count = [], set(), 0
                             # Each candidate list is split into lanes: all rows, rows without a stamp, and rows per
                             # stamp. A lane's start skips its used leading targets once, not per row, so N copies of
                             # one payload match in linear time under the write lock, stamp-vetoed rows included.

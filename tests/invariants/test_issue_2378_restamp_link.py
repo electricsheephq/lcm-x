@@ -523,7 +523,10 @@ def test_rotation_acp_trimmed_restamp_is_linked(build, caplog, monkeypatch):
 
 @pytest.mark.issue(2390)
 def test_rotation_metadata_failure_degrades_to_durable_recovery(build, caplog, monkeypatch):
-    """Grok review thread on #2387: if the re-stamp helper raises, the #1523 durable recovery still runs."""
+    """Grok review thread on #2387: if the re-stamp helper raises, the #1523 durable recovery still runs.
+
+    The recovery links only rows of the current session, so a carried row whose original is in the predecessor
+    session stays unlinked, as on main before #2387 (#2392 review thread)."""
     called = []
 
     def break_helper(engine, _view):
@@ -543,6 +546,9 @@ def test_rotation_metadata_failure_degrades_to_durable_recovery(build, caplog, m
     assert called
     assert sum(row["content"] == T for row in rows) == 2
     assert engine._ingest_failure_count == 0
+    # Pins today's behaviour on this injected fault, a KNOWN gap rather than the desired outcome: the second T is a
+    # silent copy. Update this expectation if the gap is closed.
+    assert replay_links(engine) == set()
 
 
 @pytest.mark.issue(2390)
