@@ -303,3 +303,17 @@ def test_missing_or_ambiguous_prior_target_stores_without_link(build, caplog, mo
     assert sum(row["content"] == T for row in rows) == (3 if target_count == 2 else 2)
     assert replay_links(engine) == set()
     assert engine._ingest_failure_count == 0
+
+
+@pytest.mark.parametrize("uids", [False, True], ids=["no-uid", "same-uid"])
+def test_rotation_unmatched_row_before_the_restamp_keeps_the_link(build, caplog, uids):
+    """A child row the snapshot never held must not end the ordered alignment early."""
+    def insert_note(_engine, view):
+        index = next(i for i, row in enumerate(view) if row.get("role") == "user" and row.get("content") == T)
+        view.insert(index, {"role": "user", "content": "a host note the predecessor snapshot never held",
+                            "timestamp": T_COMMIT - 1})
+
+    engine, rows = run(build, caplog, mode="rotating", uids=uids, restamp=True, before_ingest=insert_note)
+    copies = [row for row in rows if row["role"] == "user" and row["content"] == T]
+    assert [(row["session_id"], row["observed_at"]) for row in copies] == [("S", T_REQ), ("rotated", T_COMMIT)]
+    assert replay_links(engine) == {(copies[1]["store_id"], copies[0]["store_id"])}

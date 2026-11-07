@@ -7014,15 +7014,16 @@ class LCMEngine(
             if identity is None:
                 continue
             digest = _commit_proof_identity_digest(_proof_user_identity(identity))
-            while matched < len(target) and target[matched]["identity_sha256"] != digest:
-                matched += 1  # Match the snapshot in order, as in _remapped_output_metadata.
-            if matched == len(target):
-                break
-            row = target[matched]
+            position = matched  # Match the snapshot in order, as in _remapped_output_metadata.
+            while position < len(target) and target[position]["identity_sha256"] != digest:
+                position += 1
+            if position == len(target):
+                continue  # A row the snapshot never held consumes no position.
+            row = target[position]
             if self._host_occurrence_changed(messages[idx], row):
                 result[idx] = (session, row)
             # A carried row consumes its snapshot position even when its stamp is kept.
-            matched += 1
+            matched = position + 1
         return result, False
 
     def _link_restamped_occurrences(self, messages, stored_at, previous, recovery_fallback):
