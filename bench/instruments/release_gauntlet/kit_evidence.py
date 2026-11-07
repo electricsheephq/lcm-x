@@ -17,9 +17,10 @@ LOG_FORMATS = (re.compile(rf"^{_STAMP} \[{_LEVEL}\] (?P<logger>[\w.]+): "),
                re.compile(rf"^{_STAMP} {_LEVEL}(?: \[[^\]]*\])? (?P<logger>[\w.]+): "),
                re.compile(rf"^(?:\d{{4}}-\d\d-\d\d[ T])?\d\d:\d\d:\d\d(?:[.,]\d+)? - (?P<logger>[\w.]+) - "
                           rf"{_LEVEL}(?: \[[^\]]*\])? - "))
-# A traceback's final line: any dotted exception name ending in Error, Exception, ExceptionGroup, Exit or
-# Interrupt, including the bare names (Exception, SystemExit, KeyboardInterrupt).
-FINAL = re.compile(r"^((?:[A-Za-z_]\w*\.)*(?:[A-Za-z_]\w*?)?(?:Error|Exception|ExceptionGroup|Exit|Interrupt))(?::|\s*$)")
+# A traceback's final line: a dotted or bare exception name, then ":" or the end of the line, at the traceback's edge.
+# The name need not end in Error (ProviderCircuitOpen, KeyboardInterrupt).
+FINAL = re.compile(r"^((?:[A-Za-z_]\w*\.)*[A-Za-z_]\w*)(?::|\s*$)")
+SUB_EDGE = re.compile(r"[ \t]*\| \S")  # An exception group's final line: one space after "|"; source lines have more.
 MISSING = re.compile(r"No module named '([\w.]+)'")
 REFUSAL = "NotImplementedError: LCM-X cannot detach a context engine"
 THREAD = re.compile(r"thread=bg-review(?::([^\s]+))?")
@@ -110,9 +111,10 @@ def trace_events(log):
                     if eligible:
                         active.remove(eligible[0])  # A tidless completion closes the oldest open run.
                 header = stripped.endswith("Traceback (most recent call last):")
-                # A final line starts at column 0, or after an exception group's "|" prefix; an indented bare name
-                # is a source line inside the traceback, not its end.
-                at_edge = bool(line) and (not line[0].isspace() or line.lstrip(" \t").startswith("|"))
+                # A final line starts at column 0, or one space after an exception group's "|" prefix; an indented
+                # bare name is a source line inside the traceback, not its end.
+                piped = line.lstrip(" \t").startswith("|")
+                at_edge = bool(SUB_EDGE.match(line)) if piped else bool(line) and not line[0].isspace()
                 final = FINAL.match(stripped) if traceback and at_edge else None
                 if final:
                     if stripped.startswith(("ModuleNotFoundError", "ImportError")):
@@ -125,8 +127,12 @@ def trace_events(log):
                     elif not stripped.startswith(REFUSAL):
                         other[final[1]] += 1
                 if final or (line and not line[0].isspace() and line[0] != "|"):
-                    traceback = False  # Includes non-Error terminators such as KeyboardInterrupt.
+                    if traceback and not final:
+                        other["(no final line)"] += 1  # Cut short: counted, never dropped.
+                    traceback = False
                 traceback = traceback or header
+            if traceback:
+                other["(no final line)"] += 1
         # An open run at end of file may have absorbed events from outside any run.
         unclosed += sum(1 for i in active if runs[i]["refusals"] or runs[i]["detach_warnings"])
     determined = not (overlapping or ambiguous or unclosed)
@@ -184,24 +190,39 @@ def lifecycle_rows(lcm_db):
                 "identity_order_check": "PASS" if safe else "NOT_EVALUATED"}
 
 
-def _identities(path, order):
-    sessions = defaultdict(list)
+def _identities(path, order, host=False):
+    """Per session, each row's identity hash in order. On a host with transcript generations (an ``active`` or
+    ``compacted`` column), a row whose identity and ``timestamp`` repeat an earlier row of its session is the same
+    occurrence's physical copy (a copy keeps its original's stamp; two sends get stamps of their own), so it counts
+    once. Without a ``timestamp`` column such copies cannot be told apart: ``resolved`` is False."""
+    sessions, copies = defaultdict(list), Counter()
     with _db(path) as conn:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(messages)")}
         fields = [name for name in ("session_id", "role", "content", "tool_calls", "tool_call_id") if name in columns]
-        for row in conn.execute(f"SELECT {', '.join(fields)} FROM messages ORDER BY {order}"):
+        generations = host and bool({"active", "compacted"} & columns)
+        stamped = generations and "timestamp" in columns
+        seen = set()
+        select = fields + ["timestamp"] * stamped
+        for row in conn.execute(f"SELECT {', '.join(select)} FROM messages ORDER BY {order}"):
             row = dict(row)
             calls = json.loads(row.get("tool_calls") or "[]") if row["role"] == "assistant" else []
             calls = [(c.get("id"), c.get("function", c).get("name"), c.get("function", c).get("arguments"))
                      for c in calls]
             identity = (row["role"], _sha(row.get("content") or ""), calls,
                         row.get("tool_call_id") if row["role"] == "tool" else None)
-            sessions[row["session_id"]].append(_sha(json.dumps(identity, sort_keys=True)))
-    return sessions, fields
+            key = _sha(json.dumps(identity, sort_keys=True))
+            if stamped and row["timestamp"] is not None:
+                slot = (row["session_id"], key, float(row["timestamp"]))
+                if slot in seen:
+                    copies[row["session_id"]] += 1
+                    continue
+                seen.add(slot)
+            sessions[row["session_id"]].append(key)
+    return sessions, fields, copies, stamped or not generations
 
 
 def reorder(lcm_db, state_db):
-    (lcm, lc), (host, hc) = _identities(lcm_db, "store_id"), _identities(state_db, "id")
+    (lcm, lc, _, _), (host, hc, copies, resolved) = _identities(lcm_db, "store_id"), _identities(state_db, "id", True)
     results = []
     only = {side: sorted(_sha(str(sid))[:12] for sid in keys) for side, keys in (
         ("lcm", lcm.keys() - host.keys()), ("host", host.keys() - lcm.keys()))}
@@ -221,11 +242,17 @@ def reorder(lcm_db, state_db):
                     tails[i] = pos
         results.append({"session_h12": _sha(str(sid))[:12], "lcm_rows": len(a), "host_rows": len(b),
                         "matched": shared, "lcm_only": len(a) - shared, "host_only": len(b) - shared,
-                        "reordered_rows": shared - len(tails), "columns_compared": {"lcm": lc, "host": hc}})
+                        "reordered_rows": shared - len(tails), "host_copy_rows": copies[sid],
+                        # Rows sharing an identity are matched by count and order only: a lost occurrence that a
+                        # duplicate of another occurrence replaces is not seen. This counts the rows where it could be.
+                        "repeated_identity_rows": sum(n for n in Counter(b).values() if n > 1),
+                        "columns_compared": {"lcm": lc, "host": hc}})
     missing = sorted({"tool_calls", "tool_call_id"} - set(hc))
     return {"sessions": len(results), "per_session": results, "identity_degraded": bool(missing),
+            "host_copies_resolved": resolved,
             "missing_columns": missing, **{key: sum(row[key] for row in results) for key in (
-                "lcm_rows", "host_rows", "matched", "lcm_only", "host_only", "reordered_rows")},
+                "lcm_rows", "host_rows", "matched", "lcm_only", "host_only", "reordered_rows", "host_copy_rows",
+                "repeated_identity_rows")},
             **{side + "_only_sessions": len(ids) for side, ids in only.items()},
             **{side + "_only_sessions_h12": ids for side, ids in only.items()}}
 

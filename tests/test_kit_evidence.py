@@ -501,3 +501,74 @@ def test_doctor_dict_string_causes(tmp_path, candidate, previous, verdict):
     assert result["verdict"] == verdict
     encoded = json.dumps(result)
     assert all(word not in encoded for word in ("sessions", "locked", "degraded", "/a/x.db", "48213"))
+
+
+@pytest.mark.parametrize("final,name", [("ProviderCircuitOpen: open", "ProviderCircuitOpen"),
+                                        ("pkg.ProviderRateLimited", "pkg.ProviderRateLimited")])
+def test_terminators_without_a_conventional_suffix_are_counted(tmp_path, final, name):
+    result = kit.trace_events([_write(tmp_path / "host.log", _log("agent", "start", "INFO") + _trace(final))])
+    assert result["other_tracebacks"] == {name: 1}
+
+
+def test_a_traceback_without_a_final_line_is_counted(tmp_path):
+    cut = 'Traceback (most recent call last):\n  File "synthetic.py", line 1\n'
+    text = _log("agent", "start", "INFO") + cut + _log("agent", "next", "INFO") + cut
+    result = kit.trace_events([_write(tmp_path / "host.log", text)])
+    assert result["other_tracebacks"] == {"(no final line)": 2}
+
+
+def test_exception_group_source_line_does_not_end_a_sub_traceback(tmp_path):
+    group = ("  + Exception Group Traceback (most recent call last):\n"
+             "  |   File \"x.py\", line 1, in <module>\n"
+             "  | ExceptionGroup: two (2 sub-exceptions)\n"
+             "  +-+---------------- 1 ----------------\n"
+             "    | Traceback (most recent call last):\n"
+             "    |   File \"x.py\", line 2, in f\n"
+             "    |     marker\n"
+             "    | ProviderRateLimited: slow\n"
+             "    +------------------------------------\n")
+    result = kit.trace_events([_write(tmp_path / "host.log", _log("agent", "start", "INFO") + group)])
+    assert result["other_tracebacks"] == {"ExceptionGroup": 1, "ProviderRateLimited": 1}
+
+
+def _host_generations(path, rows):
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, content TEXT, "
+                     "tool_calls TEXT, tool_call_id TEXT, timestamp REAL, active INTEGER, compacted INTEGER)")
+        conn.executemany("INSERT INTO messages VALUES (?, 's', 'user', ?, NULL, NULL, ?, ?, ?)",
+                         [(i, *row) for i, row in enumerate(rows, 1)])
+    return path
+
+
+def test_host_generation_copies_are_one_occurrence(tmp_path):
+    lcm = _messages(tmp_path / "lcm.db", "store_id", [("s", "user", ch, None, None) for ch in "ABC"])
+    host = _host_generations(tmp_path / "state.db", [("A", 1.0, 0, 1), ("B", 2.0, 0, 1),
+                                                     ("A", 1.0, 1, 0), ("B", 2.0, 1, 0), ("C", 3.0, 1, 0)])
+    result = kit.reorder(lcm, host)
+    assert (result["matched"], result["lcm_only"], result["host_only"], result["reordered_rows"]) == (3, 0, 0, 0)
+    assert result["host_copy_rows"] == 2
+    assert result["host_copies_resolved"] is True
+
+
+def test_two_sends_with_their_own_stamps_stay_two(tmp_path):
+    lcm = _messages(tmp_path / "lcm.db", "store_id", [("s", "user", "go", None, None)])
+    host = _host_generations(tmp_path / "state.db", [("go", 1.0, 1, 0), ("go", 1.000001, 1, 0)])
+    result = kit.reorder(lcm, host)
+    assert (result["host_only"], result["host_copy_rows"]) == (1, 0)
+
+
+def test_host_with_generations_but_no_stamp_is_unresolved(tmp_path):
+    lcm = _messages(tmp_path / "lcm.db", "store_id", [("s", "user", "A", None, None)])
+    host = tmp_path / "state.db"
+    with sqlite3.connect(host) as conn:
+        conn.execute("CREATE TABLE messages (id INTEGER, session_id TEXT, role TEXT, content TEXT, active INTEGER)")
+        conn.execute("INSERT INTO messages VALUES (1, 's', 'user', 'A', 1)")
+    assert kit.reorder(lcm, host)["host_copies_resolved"] is False
+
+
+def test_repeated_identities_are_counted(tmp_path):
+    rows = [("s", "user", ch, None, None) for ch in ("continue", "x", "continue")]
+    paths = [_messages(tmp_path / n, o, rows) for n, o in (("lcm.db", "store_id"), ("state.db", "id"))]
+    result = kit.reorder(*paths)
+    assert result["repeated_identity_rows"] == 2
+    assert result["per_session"][0]["repeated_identity_rows"] == 2
