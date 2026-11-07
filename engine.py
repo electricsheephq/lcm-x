@@ -7135,64 +7135,74 @@ class LCMEngine(
         """#2055: after a compaction the host can show the next user prompt on the stamp of the prompt that was
         in flight (the borrowed stamp), so one send is stored at its own stamp and at the borrowed one, in either
         order. Annotate the later copy only; no row is skipped or changed."""
-        if not stored_at or not self._session_id:
+        if not self._session_id:
+            return
+        texts = {}  # A stored, stamped, non-empty user row of this ingest is a possible later copy.
+        for idx, sid in stored_at.items():
+            message = messages[idx] if sid and 0 <= idx < len(messages) else None
+            if (isinstance(message, dict) and message.get("role") == "user" and message.get("content") is not None
+                    and self._host_occurrence_metadata(message)["timestamp"] is not None
+                    and (text := (normalize_content_value(message["content"]) or "").strip())):
+                texts[int(sid)] = text
+        if not texts:
             return
         try:
-            with self._ingest_evidence():
-                conn, session = self._store._conn, str(self._session_id)
-                sources = {sid: row for sid, row in self._store.get_batch(
-                    [sid for sid in stored_at.values() if sid]).items()
-                    if row.get("role") == "user" and str(row.get("session_id") or "") == session
-                    and row.get("observed_at") is not None
-                    and isinstance(row.get("content"), str) and row["content"].strip()}
-                if not sources:
-                    return
-                # The relations the other linkers wrote in this ingest are the shared reservations:
-                # a source keeps its one link, a target is spent once.
-                linked = {row["store_id"] for row in self._store.get_message_relations(
-                    list(sources), "possible_replay_of")}
-                pairs = []
-                for sid, source in sorted(sources.items()):
-                    if sid in linked:
-                        continue
-                    text, stamp = source["content"].strip(), source["observed_at"]
-                    conversation = _normalize_conversation_id_value(source.get("conversation_id"))
-                    equal = [(store_id, observed_at) for store_id, content, observed_at in conn.execute(
+            conn, session = self._store._conn, str(self._session_id)
+            conversation = _normalize_conversation_id_value(self._conversation_id)
+            needles, rows = sorted(set(texts.values())), {}
+            for start in range(0, len(needles), 64):
+                chunk = needles[start:start + 64]
+                for store_id, content, observed_at in conn.execute(
                         "SELECT store_id, content, observed_at FROM messages WHERE conversation_id IN (?, '') "
-                        "AND session_id=? AND role='user' AND store_id<? AND instr(content, ?)>0 ORDER BY store_id",
-                        (conversation, session, sid, text)) if isinstance(content, str) and content.strip() == text]
-                    # Exactly one earlier copy, at another stamp. A copy at this row's own stamp is a plain
-                    # replay that the other linkers own.
-                    if len(equal) != 1 or equal[0][1] is None or equal[0][1] == stamp:
+                        "AND session_id=? AND role='user' AND store_id<=? AND ("
+                        + " OR ".join(["instr(content, ?)>0"] * len(chunk)) + ")",
+                        (conversation, session, max(texts), *chunk)):
+                    if isinstance(content, str) and content.strip() in texts.values():
+                        rows[int(store_id)] = (content.strip(), observed_at)
+            pairs = []
+            for sid, text in sorted(texts.items()):
+                stamp = rows.get(sid, (None, None))[1]
+                equal = [(store_id, observed_at) for store_id, (content, observed_at) in sorted(rows.items())
+                         if store_id < sid and content == text]
+                # Exactly one earlier copy, at another stamp. A copy at this row's own stamp is a plain
+                # replay that the other linkers own.
+                if (rows.get(sid, (None,))[0] != text or stamp is None or len(equal) != 1
+                        or equal[0][1] is None or equal[0][1] == stamp):
+                    continue
+                target, target_stamp = equal[0]
+                # The veto: a host view that still shows this text at the earlier copy's stamp holds a
+                # second occurrence, so the later copy is a genuine repeat. Absent content never vetoes.
+                if any(isinstance(message, dict) and message.get("role") == "user"
+                       and message.get("content") is not None
+                       and (normalize_content_value(message["content"]) or "").strip() == text
+                       and self._host_occurrence_metadata(message)["timestamp"] == target_stamp
+                       for message in messages):
+                    continue
+                pairs.append((sid, target, text, ((stamp, sid), (target_stamp, target))))
+            if not pairs:
+                return
+            # The borrowed stamp: an earlier user row of other text holds the later or the earlier copy's
+            # stamp as its own (exact equality).
+            pairs = [(sid, target) for sid, target, text, carriers in pairs if any(
+                isinstance(content, str) and content.strip() and content.strip() != text
+                for at, carrier in carriers for (content,) in conn.execute(
+                    "SELECT content FROM messages WHERE conversation_id IN (?, '') AND observed_at=? "
+                    "AND session_id=? AND role='user' AND store_id<?", (conversation, at, session, carrier)))]
+            if not pairs:
+                return
+            with self._ingest_evidence():
+                # The relations the other linkers already wrote are the shared reservations: a source keeps
+                # its one link, and a target is spent once.
+                linked = {row["store_id"] for row in self._store.get_message_relations(
+                    [sid for sid, _target in pairs], "possible_replay_of")}
+                used = {row["related_store_id"] for row in self._store.get_message_relations(
+                    [target for _sid, target in pairs], "possible_replay_of", related=True)}
+                for sid, target in pairs:
+                    if sid in linked or target in used:
                         continue
-                    target, target_stamp = equal[0]
-
-                    def borrowed(at, carrier):
-                        # An earlier user row of other text holds exactly this stamp as its own.
-                        return any(isinstance(content, str) and content.strip() and content.strip() != text
-                                   for (content,) in conn.execute(
-                                       "SELECT content FROM messages WHERE conversation_id IN (?, '') AND observed_at=? "
-                                       "AND session_id=? AND role='user' AND store_id<?",
-                                       (conversation, at, session, carrier)))
-                    if not (borrowed(stamp, sid) or borrowed(target_stamp, target)):
-                        continue
-                    # The veto: a host view that still shows this text at the earlier copy's stamp holds a
-                    # second occurrence, so the later copy is a genuine repeat. Absent content never vetoes.
-                    if any(isinstance(message, dict) and message.get("role") == "user"
-                           and message.get("content") is not None
-                           and (normalize_content_value(message["content"]) or "").strip() == text
-                           and self._host_occurrence_metadata(message)["timestamp"] == target_stamp
-                           for message in messages):
-                        continue
-                    pairs.append((sid, target))
-                if pairs:
-                    used = {row["related_store_id"] for row in self._store.get_message_relations(
-                        [target for _sid, target in pairs], "possible_replay_of", related=True)}
-                    for sid, target in pairs:
-                        if target in used:
-                            continue
-                        self._store.add_message_relations([[(sid, "possible_replay_of", target, None, None)]])
-                        used.add(target)
+                    self._store.add_message_relations([[(sid, "possible_replay_of", target, None, None)]])
+                    linked.add(sid)
+                    used.add(target)
         except Exception as exc:
             self._raise_ingest_busy(exc)
             logger.warning("LCM borrowed-stamp occurrence link write failed (%s)", type(exc).__name__)
