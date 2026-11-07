@@ -114,6 +114,13 @@ def rekey_copy_conversations(lcm_db, conversations, *, run_dir):
             if group["new"] != new:
                 raise ValueError("shared conversation has different destinations: " + ", ".join(group["names"]))
         # Resolve and validate the whole plan against the original state before the first rename.
+        sources = {}
+        for old, group in groups.items():
+            sources.setdefault(group["new"], []).append(old)
+        for olds in sources.values():
+            if len(olds) > 1:
+                names = [name for old in olds for name in groups[old]["names"]]
+                raise ValueError("separate conversations share one destination: " + ", ".join(names))
         for old, group in groups.items():
             new = group["new"]
             if old == new:

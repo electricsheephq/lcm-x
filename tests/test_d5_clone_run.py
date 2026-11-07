@@ -626,6 +626,29 @@ def test_rekey_copy_resolves_shared_keys_before_any_update(rekey_copy, tmp_path,
             (key, "s2"), ("unrelated", "other")]
 
 
+@pytest.mark.parametrize("empty_lifecycle", [False, True])
+def test_rekey_copy_refuses_two_conversations_with_one_destination(rekey_copy, tmp_path, monkeypatch, empty_lifecycle):
+    path, conversations = rekey_copy
+    conversations.append({"name": "S1", "session_id": "other", "chat_id": "d5-L"})
+    if empty_lifecycle:  # With no lifecycle rows, no unique key stops the second rename.
+        with closing(sqlite3.connect(path)) as db, db:
+            db.execute("DELETE FROM lcm_lifecycle_state")
+    connect, updates = sqlite3.connect, []
+
+    def traced_connect(*args, **kwargs):
+        db = connect(*args, **kwargs)
+        db.set_trace_callback(lambda sql: updates.append(sql) if sql.startswith("UPDATE ") else None)
+        return db
+
+    monkeypatch.setattr(r.sqlite3, "connect", traced_connect)
+    before = inventory(path.parent)
+    with pytest.raises(ValueError, match="L.*S1") as error:
+        r.rekey_copy_conversations(path, conversations, run_dir=tmp_path)
+    assert "old" not in str(error.value) and "unrelated" not in str(error.value) and "agent:" not in str(error.value)
+    assert updates == []
+    assert inventory(path.parent) == before
+
+
 def test_local_arm_rekeys_after_routing_before_gateway_start(rekey_copy, tmp_path, monkeypatch):
     from types import SimpleNamespace
 
