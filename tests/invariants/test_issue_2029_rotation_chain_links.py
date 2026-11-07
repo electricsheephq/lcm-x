@@ -65,6 +65,11 @@ def test_held_fit_rotation_resend_links_every_predecessor_copy(tmp_path, host, m
         # The re-sent view is stored (the growth stays open under #2029): nothing is skipped.
         assert len(rows) == 73
         assert len(links) == 72 and {target for _sid, target in links} == {"S", "S2"}
+        # Nearest-first: each copy links into the nearest ancestor that holds an equal row.
+        chain = {sid: {(role, content) for _id, role, content in _session_rows(cold, sid)} for sid in ("S2", "S")}
+        by_id = {sid: (role, content) for sid, role, content in rows}
+        for sid, target in links:
+            assert target == next(s for s in ("S2", "S") if by_id[sid] in chain[s]), (sid, target)
         unlinked = [(sid, content) for sid, _role, content in rows if sid not in {s for s, _t in links}]
         # The one unlinked row is the re-emitted summary marker, which has no stored original.
         assert len(unlinked) == 1 and unlinked[0][1].startswith("[Recent Summary")
