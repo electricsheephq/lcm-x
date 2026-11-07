@@ -83,3 +83,18 @@ def test_new_todo_snapshot_is_not_linked(tmp_path, monkeypatch, ledger, change):
                  if row["content"] == fresh["content"] and row["observed_at"] == fresh["timestamp"]]
         assert len(added) == 1
         assert not any(s == added[0]["store_id"] and kind == "possible_replay_of" for s, kind, _t in _links(engine))
+
+
+def test_each_earlier_todo_occurrence_supplies_one_link(tmp_path):
+    """Three byte-equal todo copies at one stamp: R2 -> R1 already, so R3 links to R2, never a second link to R1."""
+    todo = {"role": "user", "content": _PRESERVED_TODO_CONTEXT_PREFIX + "\n- [ ] 1. task (pending)",
+            "timestamp": 103.0}
+    with engine_context(tmp_path, window=200_000, embeddings_enabled=False,
+                        deferred_maintenance_enabled=False) as engine:
+        store = engine._store
+        conversation = engine._conversation_id or ""
+        r1, r2, r3 = (store.append("S", deepcopy(todo), conversation_id=conversation) for _ in range(3))
+        store.add_message_relations([[(r2, "possible_replay_of", r1, None, None)]])
+        engine._link_stored_todo_replays([deepcopy(todo)], {0: r3})
+        replay = sorted((s, t) for s, kind, t in _links(engine) if kind == "possible_replay_of")
+        assert replay == [(r2, r1), (r3, r2)]
