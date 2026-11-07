@@ -226,7 +226,8 @@ def bar5(rc_checks, ga_checks, ga_rerun_checks=None, ga_rerun_turns_complete=Tru
             "ga_rerun_needed": bool(ga_failed) and rerun_failed is None,
             "ga_rerun_failed": rerun_failed or [], "ga_rerun_kinds_missing": rerun_missing or [],
             "ga_rerun_turns_complete": None if ga_rerun_checks is None else ga_rerun_turns_complete is True,
-            "warnings_judged": not ga_open and not missing_warned, "inherited_flags_not_judged": inherited,
+            "warnings_judged": not ga_open and not missing_warned and not inherited,
+            "inherited_flags_not_judged": inherited,
             "ga_disposition_needed": bool(ga_failed) and ga_rerun_checks is not None and not rerun_clean}
 
 

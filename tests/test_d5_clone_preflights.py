@@ -57,11 +57,14 @@ class FakeHost:
         if self.fault == "user-copy-first" and "pf-P7" in str(home):  # In P7: an in-place compaction's active copy of an older user row comes first.
             host.insert(0, ("user", "older user row copy", None))
         lcm = [("user", step["user_text"], None), ("assistant", MARKER, None)]
+        if self.fault == "warm-unstored" and step["kind"] == "warm" and "pf-P6" in str(home):  # Completed, stored nothing.
+            host, lcm = [], []
         if step["tools"]:
             self.files += 1
             content = MARKER * (2 if self.fault == "P4" and ctx["name"] == "ga" else 1)
             name, call = f"20261107_000000_t_{'b' * 12}_{self.files:x}.json", entries[0]["tool_calls"][0]["id"]
-            (home / "lcm-large-outputs" / name).write_text(json.dumps({"content": content, "content_chars": 1}))
+            (home / "lcm-large-outputs" / name).write_text(json.dumps(
+                {} if self.fault == "empty-payload" else {"content": content, "content_chars": 1, "content_bytes": 1}))
             host.append(("tool", f"[Externalized tool output: {MARKER}; ref={name}]", call))
             lcm.append(("tool", content, call))
             ctx["facts"]["payload_swaps"] += 1
@@ -79,6 +82,11 @@ class FakeHost:
         ctx["log"] += [stamp + ANCHOR] * 2 if step["kind"] == "cold" or self.fault == "P6" else []
         if self.fault == "hygiene":
             ctx["log"] += [f"{stamp}INFO gateway.run: Session hygiene compression for session sess-l started"] * 2
+        if self.fault == "hygiene-plain":  # The host's usual lines name no session (gateway/run_turn.py).
+            ctx["log"] += [f"{stamp}INFO gateway.run: Session hygiene: 40 messages, ~560,339 tokens (85%) —"
+                           " auto-compressing", f"{stamp}INFO gateway.run: Session hygiene: compressed 40 → 6 msgs"]
+        if self.fault == "hygiene-skip":  # A skip compresses nothing: P6 still judges.
+            ctx["log"] += [f"{stamp}INFO gateway.run: Session hygiene: skipping compression for sess-l; cooldown"]
         ctx["facts"]["compactions_published"] += 1
         ctx["facts"]["whitespace_rewrites"] += bool(step["rewrite"])
         ctx["stats"]["calls_per_step"][step["id"]] = len(entries)
@@ -117,7 +125,8 @@ class FakeHost:
 
 @pytest.mark.parametrize("fault", [None, "P3", "P4", "P6", "P7", "crash", "no-conversation", "replay-error",
                                    "not-durable", "inactive-copy",
-                                   "user-copy-first", "hygiene"])
+                                   "user-copy-first", "hygiene", "empty-payload", "warm-unstored",
+                                   "hygiene-plain", "hygiene-skip"])
 def test_each_preflight_fails_on_its_own_fault(tmp_path, monkeypatch, fault):
     monkeypatch.setitem(sys.modules, "yaml", types.SimpleNamespace(safe_load=json.loads))  # Not in every test venv.
     if fault == "P3":  # A provider whose second reply differs from the first.
@@ -128,8 +137,10 @@ def test_each_preflight_fails_on_its_own_fault(tmp_path, monkeypatch, fault):
     verdicts = pf.produce(host, list(pf.PREFLIGHTS))
     assert host.removed == ([] if fault in ("crash", "replay-error", "not-durable") else ["T0", "H8"])
     expected = dict.fromkeys(pf.PREFLIGHTS, "INCONCLUSIVE" if fault == "crash" else "PASS")
-    expected.update({fault: "FAIL"} if fault in pf.PREFLIGHTS else {"P6": "INCONCLUSIVE"}
-                    if fault and fault not in ("inactive-copy", "user-copy-first") else {})
+    fails = {"empty-payload": ("P4", "P7"), "warm-unstored": ("P6",)}  # Two empty payloads or no warm rows compare equal.
+    expected.update({fault: "FAIL"} if fault in pf.PREFLIGHTS else dict.fromkeys(fails[fault], "FAIL") if fault in fails
+                    else {"P6": "INCONCLUSIVE"} if fault and fault not in ("inactive-copy", "user-copy-first", "hygiene-skip")
+                    else {})
     assert verdicts == expected
     p6 = json.loads((tmp_path / "P6.json").read_text())["facts"]
     if fault is None:  # One distinct anchor record per turn, though each is written twice.
@@ -152,3 +163,14 @@ def test_no_plan_is_inconclusive_and_receipts_are_never_overwritten(tmp_path):
     assert "P1 pins did not pass" in json.loads((tmp_path / "P3.json").read_text())["reasons"][0]
     with pytest.raises(FileExistsError):
         pf.produce(host, ["P3"])
+
+
+def test_an_exception_s_text_never_enters_a_receipt(tmp_path, monkeypatch):
+    """An exception's message can quote its input (a parser error quotes the document): only its type is kept."""
+    def leaks(host, plan):
+        raise ValueError(f"could not parse: {MARKER}")
+
+    monkeypatch.setitem(pf.PREFLIGHTS, "P3", leaks)
+    assert pf.produce(FakeHost(tmp_path), ["P3"]) == {"P3": "INCONCLUSIVE"}
+    text = (tmp_path / "P3.json").read_text()
+    assert MARKER not in text and json.loads(text)["reasons"] == ["ValueError"]

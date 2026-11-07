@@ -251,7 +251,7 @@ def test_bar5_a_session_that_started_flagged_is_not_judged_and_never_passes():
     assert b.bar5(checks(flag, flag), checks(flag))["verdict"] == b.FAIL  # Not inherited: judged as before.
     result = b.bar5(checks(flag, flag), checks(flag), inherited=["summary_quality@abc"])
     assert result["verdict"] == b.INCONCLUSIVE and result["inherited_flags_not_judged"] == ["summary_quality@abc"]
-    assert result["warnings_over_ga"] == []
+    assert result["warnings_over_ga"] == [] and result["warnings_judged"] is False
     assert b.bar5(checks(), checks(), inherited=["summary_quality@abc"])["verdict"] == b.INCONCLUSIVE
     assert b.bar5(checks(other, other), checks(other), inherited=["summary_quality@abc"])["verdict"] == b.FAIL
     assert b.bar5(checks(), checks())["inherited_flags_not_judged"] == []

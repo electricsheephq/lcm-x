@@ -22,7 +22,13 @@ DIGEST12 = re.compile(r"_([0-9a-f]{12})_[0-9a-f]+\.json$")  # The payload filena
 
 
 class Inconclusive(Exception):
-    """The preflight could not run to its checks."""
+    """The preflight could not run to its checks. Its message is this module's own fixed text."""
+
+
+def _reason(exc):
+    """A receipt reason for an exception: this module's own message, else the exception's type only. Another
+    exception's text can quote its input (a parser error quotes the document), and receipts carry no content."""
+    return str(exc)[:200] if isinstance(exc, Inconclusive) else type(exc).__name__
 
 
 def _sha(value):
@@ -135,7 +141,10 @@ def p4(host, plan):
             "content_sha256": _sha(payload.get("content")), "content_chars": payload.get("content_chars"),
             "content_bytes": payload.get("content_bytes"), "digest12": [m[1] for m in map(DIGEST12.search, refs) if m]}
         reasons += _failed([(f"{tree}: not one tool row per store, one reference and one payload file",
-                             (f["rows"], f["refs"], f["files"]) != ([1, 1], 1, 1))])
+                             (f["rows"], f["refs"], f["files"]) != ([1, 1], 1, 1)),
+                            (f"{tree}: the payload file holds no content and sizes",  # Two empty payloads compare equal.
+                             not payload.get("content") or not all(isinstance(f[k], int) and f[k] > 0
+                                                                   for k in ("content_chars", "content_bytes")))])
     return reasons + [f"{k} differs between the trees" for k in ("stub_masked_sha256", "content_sha256",
                       "content_chars", "content_bytes", "digest12") if facts["rc"][k] != facts["ga"][k]], [], facts
 
@@ -175,7 +184,8 @@ def p6(host, plan):
             host.remove(h8_dir)
         _turn(host, ctx, warm)
         warm_anchors = anchors() - cold_anchors
-        hygiene = len({line for line in host.logs(ctx) if HYGIENE in line and sid in line})
+        # Any hygiene line but a skip: its usual lines name no session, and P6 drives only L.
+        hygiene = len({line for line in host.logs(ctx) if HYGIENE in line and "skipping compression" not in line})
         ended = _rows(ctx, "state.db", "SELECT count(*) FROM sessions WHERE end_reason IS NOT NULL"
                       f" AND id IN ({','.join('?' * len(ids))})", ids)[0][0]
     finally:
@@ -201,6 +211,7 @@ def p6(host, plan):
         ("range_new_rows is not 0", not error and range_new != 0),
         ("no anchor line at the cold bind", cold_anchors < 1), ("an anchor line after the warm turn", warm_anchors),
         ("the warm turn stored LCM-X rows beyond the host's", len(set(f["warm_rows"])) != 1),
+        ("the warm turn stored fewer than two rows", min(f["warm_rows"]) < 2),  # Its user row and its reply.
         ("a chosen session ended", ended), ("d5-local is not enabled", "d5-local" not in (enabled or ())),
         ("new host rows outside L's session", len(set(f["host_rows"])) != 1 or f["host_rows"][0] < 2),
         ("the live and replayed conversation_id differ", replayed and live != replayed)])
@@ -252,7 +263,7 @@ def produce(host, names):
         with (Path(host.run_dir) / "plan-counts.json").open("x", encoding="utf-8") as out:  # Readable before any check.
             json.dump(common["plan_conversations"], out, sort_keys=True, indent=2)
     except Exception as exc:
-        failed = f"no plan: {type(exc).__name__}: {str(exc)[:160]}"
+        failed = f"no plan: {_reason(exc)}"
     for name in names:
         try:
             if failed:
@@ -260,7 +271,7 @@ def produce(host, names):
             reasons, unsure, facts = PREFLIGHTS[name](host, plan)
             verdict, reasons = "FAIL" if reasons else "INCONCLUSIVE" if unsure else "PASS", reasons + unsure
         except Exception as exc:  # Never a PASS: the checks did not all run.
-            verdict, reasons, facts = "INCONCLUSIVE", [f"{type(exc).__name__}: {str(exc)[:160]}"], {}
+            verdict, reasons, facts = "INCONCLUSIVE", [_reason(exc)], {}
         with (Path(host.run_dir) / f"{name}.json").open("x", encoding="utf-8") as out:
             json.dump({"schema": SCHEMA, "name": name, "verdict": verdict, "reasons": reasons, **common,
                        "facts": facts}, out, sort_keys=True, indent=2, default=str)
