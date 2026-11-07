@@ -1,0 +1,105 @@
+"""Stored todo composites gain provenance without changing replay or stored bytes."""
+import pytest
+
+from hermes_lcm.reconcile import _PRESERVED_TODO_CONTEXT_PREFIX as HEADER
+from tests.test_issue_436_identity_anchor import _a, _engine, _relations, _rows, _u
+
+TODO = HEADER + "\n- [ ] retain context (pending)"
+P1, P2 = "first stored prompt\n\nwith whole paragraphs", "second stored prompt"
+
+
+@pytest.mark.parametrize("parts,stored_todo", [(1, False), (2, False), (1, True), (2, True)])
+def test_stored_composite_provenance(tmp_path, parts, stored_todo):
+    engine = _engine(tmp_path)
+    try:
+        texts = ([TODO] if stored_todo else []) + [P1, P2][:parts]
+        history = [_u(text, 500.0) for text in texts] + [_a("reply", 501.0)]
+        engine.ingest(history)
+        ids = {r["content"]: r["store_id"] for r in _rows(engine)}
+        composite = _u("\n\n".join([TODO, *[P1, P2][:parts]]), 500.0 if stored_todo else None)
+        engine.ingest([*history, composite])
+        row = _rows(engine)[-1]
+        assert row["content"] == composite["content"]
+        targets = ([ids[TODO]] if stored_todo else [None]) + [ids[p] for p in [P1, P2][:parts]]
+        relations = [r for r in _relations(engine) if r[1] == "composite_of"]
+        assert relations == [(row["store_id"], "composite_of", target, i) for i, target in enumerate(targets)]
+        assert all(r["observed_at"] == row["observed_at"] for r in engine._store.get_message_relations(
+            [row["store_id"]], "composite_of"))
+        engine.ingest([*history, composite])
+        assert [r for r in _relations(engine) if r[1] == "composite_of"] == relations
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("case", ["no-header", "two-leftovers", "duplicate", "byte", "separator",
+                                  "two-splits", "plain", "other-session", "other-conversation"])
+def test_no_relation_without_unique_allowed_decomposition(tmp_path, case):
+    engine = _engine(tmp_path)
+    try:
+        history = [_u(P1, 500.0), _a("reply", 501.0)]
+        if case == "duplicate":
+            history += [_u(P1, 502.0), _a("reply twice", 503.0)]
+        if case == "two-splits":
+            history += [_u(P2, 502.0), _a("reply two", 503.0), _u(P1 + "\n\n" + P2, 504.0)]
+        if case == "plain":
+            history += [_u(P2, 502.0)]
+        if case in {"other-session", "other-conversation"}:
+            engine.ingest(history)
+            engine.on_session_start("B", platform="cli", context_length=200_000,
+                                    conversation_id="other" if case == "other-conversation" else "conv")
+            history = [_u(TODO, 500.0), _a("new reply", 501.0)]
+        engine.ingest(history)
+        content = TODO + "\n\n" + P1
+        if case == "no-header":
+            content = "unknown scaffold\n\n" + P1
+        elif case == "two-leftovers":
+            content += "\n\nunknown tail"
+        elif case == "byte":
+            content += "!"
+        elif case == "separator":
+            content = TODO + "\n" + P1
+        elif case == "two-splits":
+            content += "\n\n" + P2
+        elif case == "plain":
+            content = P1 + "\n\n" + P2
+        engine.ingest([*history, _u(content, None)])
+        assert _rows(engine)[-1]["content"] == content
+        assert not [r for r in _relations(engine) if r[1] == "composite_of"]
+    finally:
+        engine.shutdown()
+
+
+def test_fully_decomposable_plain_replay_is_unchanged(tmp_path):
+    engine = _engine(tmp_path)
+    try:
+        history = [_u(P1, 500.0), _u(P2, 500.0)]
+        engine.ingest(history)
+        before = _rows(engine)
+        engine.ingest([_u(P1 + "\n\n" + P2, 500.0)])
+        assert _rows(engine) == before
+        assert [r[2] for r in _relations(engine) if r[1] == "composite"] == [r["store_id"] for r in before]
+        assert not [r for r in _relations(engine) if r[1] == "composite_of"]
+    finally:
+        engine.shutdown()
+
+
+def test_relation_failure_preserves_ingest(tmp_path, monkeypatch, caplog):
+    engine = _engine(tmp_path)
+    try:
+        history = [_u(P1, 500.0), _a("reply", 501.0)]
+        engine.ingest(history)
+        add = engine._store.add_message_relations
+
+        def fail(groups):
+            if any(r[1] == "composite_of" for group in groups for r in group):
+                add(groups)  # prove the evidence savepoint rolls back a partial write too
+                raise RuntimeError("synthetic relation failure")
+            return add(groups)
+
+        monkeypatch.setattr(engine._store, "add_message_relations", fail)
+        engine.ingest([*history, _u(TODO + "\n\n" + P1, None)])
+        assert [r["content"] for r in _rows(engine)] == [P1, "reply", TODO + "\n\n" + P1]
+        assert not [r for r in _relations(engine) if r[1] == "composite_of"]
+        assert "LCM composite-of relation write failed (RuntimeError)" in caplog.text
+    finally:
+        engine.shutdown()
