@@ -311,11 +311,13 @@ def test_2116_a_replaced_reply_past_the_audited_tail_is_stored_warm(tmp_path):
 
 def test_a_stored_call_and_result_outside_the_audited_tail_are_not_stored_again(tmp_path):
     """The capped proof's lookup by call id finds a stored result whatever its tool name. A warm view of a stamped
-    user, a call and its result; the host replaces the user 70 times, so the stored call and result leave the
+    user, an unstamped call and its unstamped result; the host replaces the user 70 times, so the stored call and result leave the
     64-row audited tail. Neither is stored again."""
     engine = _engine(tmp_path)
     try:
+        # Unstamped, as the host's in-memory rows are, so no stamp match accounts for them: only the count does.
         call, result = _call("call_kept", 2), _result("call_kept", "kept file text", 3)
+        del call["timestamp"], result["timestamp"]
         if not result.get("tool_name"):
             pytest.fail("setup: the stored result must carry a tool name")
         for index in range(70):
