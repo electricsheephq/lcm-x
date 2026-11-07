@@ -388,15 +388,21 @@ EMPTY_RECOVERY_NUDGE = ("You just executed tool calls but returned an empty resp
                         "results above and continue with the task.")
 
 
-def empty_recovery_rows(rows):
+def empty_recovery_rows(rows, host_rows=()):
     """Stored copies of the host's empty-response recovery pair (#2087), matched by structure and exact host text: in
     one session's store order, a tool row, then an assistant row whose content is exactly ``EMPTY_RECOVERY_REPLY`` with
     no tool calls, then a user row whose content is exactly ``EMPTY_RECOVERY_NUDGE``. A user row with the nudge's text
-    and no such pair in front of it is a real turn and stays scored. ``rows``: (store_id, session, role, content,
-    tool_calls, ...). Returns the pairs' store ids."""
+    and no such pair in front of it is a real turn and stays scored. The host never saves the flagged pair, so a session
+    whose host rows hold a saved row with either text matches nothing: such a row may be a real reply or turn, and its
+    stored copies stay scored. ``rows``: every stored row of the audited sessions, (store_id, session, role, content,
+    tool_calls, ...), so adjacency is the store's own order; ``host_rows``: (id, session, role, content, ...). Returns
+    the pairs' store ids."""
+    saved = {r[1] for r in host_rows if (r[2], r[3]) in {("assistant", EMPTY_RECOVERY_REPLY),
+                                                          ("user", EMPTY_RECOVERY_NUDGE)}}
     by_session = defaultdict(list)
     for r in sorted(rows):
-        by_session[r[1]].append(r)
+        if r[1] not in saved:
+            by_session[r[1]].append(r)
     out = set()
     for seq in by_session.values():
         for before, reply, nudge in zip(seq, seq[1:], seq[2:]):
@@ -807,7 +813,10 @@ def audit(state_db: Path, lcm_db: Path, logs=(), since=None, events_path=None, l
                                [r for r in host_rows if r[1] in scored], strip)
     for g, rows in by_lineage.items():  # kept rows of an undone occurrence: out of parity, surplus and M3's numerator
         by_lineage[g] = [r for r in rows if r[0] not in retained]
-    recovery = empty_recovery_rows([r for rows in by_lineage.values() for r in rows])
+    # Matched on every stored row of the audited sessions, before any is set aside, so a removed row never makes two
+    # rows adjacent; an undo's retained row stays the undo's.
+    recovery = empty_recovery_rows([r for r in stored if audited(r[0])],
+                                   [r for r in host_rows if r[1] in scored]) - retained
     for g, rows in by_lineage.items():  # the host's recovery scaffolding (#2087): out of parity, surplus and M3's numerator
         by_lineage[g] = [r for r in rows if r[0] not in recovery]
     todo = todo_expected([r for r in host_rows if r[1] in scored], [r for rows in by_lineage.values() for r in rows],
@@ -901,8 +910,8 @@ def audit(state_db: Path, lcm_db: Path, logs=(), since=None, events_path=None, l
         key = (r[1], r[2], r[5], r[4], r[3])
         message_of[r[0]] = first[key] if r[6] is None and key in first else r[0]
         first.setdefault(key, r[0])
-        if uids is not None and r[0] in uids:
-            bound_messages.add(message_of[r[0]])
+        if uids is not None and r[0] in uids and message_of[r[0]] == r[0]:
+            bound_messages.add(r[0])  # a copy's own binding covers no message: it counts in copy_rows_with_canonical_uid
     for sid in window_ids:
         src = sessions.get(extra[sid][1], {}).get("source") or "unknown"
         bound = int(uids is not None and sid in uids)
@@ -917,10 +926,14 @@ def audit(state_db: Path, lcm_db: Path, logs=(), since=None, events_path=None, l
 
     # M3: rows carrying generated_unproven, or the store_id side of a possible_replay_of pair.
     # An undo_retained row leaves M3 for a possible_replay_of only: a generated_unproven row is LCM's own output.
-    doubt = sorted(({s for s, kind, *_rest in relations if kind == "possible_replay_of"} - retained - recovery
-                    | {s for s, kind, *_rest in relations if kind == "generated_unproven"}) & window_ids)
+    # A recovery row (the full pair rule: host provenance plus adjacency) leaves M3 for either relation: the host wrote
+    # it, so neither label is a doubt about a host row. The rows it takes out are counted and named, never silent.
+    labelled = ({s for s, kind, *_rest in relations if kind == "possible_replay_of"} - retained
+                | {s for s, kind, *_rest in relations if kind == "generated_unproven"}) & window_ids
+    doubt, recovery_doubt = sorted(labelled - recovery), sorted(labelled & recovery)
     m3 = {"numerator": len(doubt), "denominator": denominator, "store_ids": doubt,
-          "rate": len(doubt) / denominator if denominator else 0.0}
+          "rate": len(doubt) / denominator if denominator else 0.0,
+          "recovery_rows_excluded": len(recovery_doubt), "recovery_store_ids_excluded": recovery_doubt}
 
     ingests = [i for i in log["ingests"] if i["session"] in audited_sessions and (since is None or i["at"] >= since)]
     storing = [i for i in ingests if i["rows"] > 0]

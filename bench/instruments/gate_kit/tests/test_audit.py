@@ -424,7 +424,8 @@ def test_a_generated_first_row_is_visible_only_with_its_relation(tmp_path, relat
 def test_m3_rate_and_ids(tmp_path):
     host = turn(1) + turn(2)
     out = Home(tmp_path, ONE, host, relations=[(2, "generated_unproven", None), (4, "supersedes", None)]).run()
-    assert out["m3"] == {"numerator": 1, "denominator": 4, "rate": 0.25, "store_ids": [2]}
+    assert out["m3"] == {"numerator": 1, "denominator": 4, "rate": 0.25, "store_ids": [2],
+                         "recovery_rows_excluded": 0, "recovery_store_ids_excluded": []}
     assert out["gate"]["bars"]["m3_rate"]["pass"] is False
 
 
@@ -1300,11 +1301,11 @@ EMPTY = {"role": "assistant", "content": audit.EMPTY_RECOVERY_REPLY}
 NUDGE = {"role": "user", "content": audit.EMPTY_RECOVERY_NUDGE}
 
 
-def recovery_home(tmp_path, pair):
+def recovery_home(tmp_path, pair, relations=()):
     """The host saves turn 1, a tool call and its result, then turn 2; the store also holds ``pair`` after the result."""
     host = turn(1) + [("S1", call("c1")), ("S1", result("c1"))] + turn(2)
     stored = host[:4] + [("S1", m) for m in pair] + host[4:]
-    return Home(tmp_path, ONE, host, stored=stored).run()
+    return Home(tmp_path, ONE, host, stored=stored, relations=relations).run()
 
 
 def test_the_hosts_empty_response_recovery_pair_is_listed_not_surplus(tmp_path):
@@ -1320,7 +1321,8 @@ def test_the_hosts_empty_response_recovery_pair_is_listed_not_surplus(tmp_path):
     [a("other reply"), NUDGE],  # no exact "(empty)" reply in front
     [dict(EMPTY, tool_calls=call("c2")["tool_calls"]), NUDGE],  # an "(empty)" reply that carries tool calls
     [EMPTY, dict(NUDGE, content=NUDGE["content"] + " ")],  # not the exact nudge text
-], ids=["lone-nudge", "no-empty-reply", "empty-with-tool-calls", "inexact-nudge"])
+    [dict(EMPTY, content=EMPTY["content"] + " extra"), NUDGE],  # not the exact reply text
+], ids=["lone-nudge", "no-empty-reply", "empty-with-tool-calls", "inexact-nudge", "inexact-reply"])
 def test_a_look_alike_of_the_recovery_pair_stays_scored(tmp_path, pair):
     out = recovery_home(tmp_path, pair)
     assert out["host_empty_recovery"] == {"rows": 0, "store_ids": []}
@@ -1366,3 +1368,50 @@ def test_a_stamped_repeat_is_its_own_message(tmp_path):
     _bind(home, [1])
     per = home.run()["uid_coverage"]["per_source"]["cli"]
     assert (per["messages"], per["copy_rows"], per["messages_with_canonical_uid"]) == (3, 0, 1)
+
+
+@pytest.mark.parametrize("kind,related", [("possible_replay_of", 1), ("generated_unproven", None)])
+def test_a_recovery_row_leaves_m3_for_either_relation(tmp_path, kind, related):
+    out = recovery_home(tmp_path, [EMPTY, NUDGE], relations=[(6, kind, related)])
+    assert out["host_empty_recovery"]["store_ids"] == [5, 6]
+    assert out["m3"]["numerator"] == 0 and out["m3"]["denominator"] == 8
+    assert (out["m3"]["recovery_rows_excluded"], out["m3"]["recovery_store_ids_excluded"]) == (1, [6])
+
+
+def test_a_session_whose_host_saved_the_texts_matches_nothing(tmp_path):
+    """A real "(empty)" reply and a real turn with the nudge's text, saved by the host, then stored twice: the pairs are
+    not proven to be the host's flagged scaffolding, so the second copies stay surplus."""
+    host = turn(1) + [("S1", call("c1")), ("S1", result("c1")), ("S1", EMPTY), ("S1", NUDGE)] + turn(2)
+    stored = host + [("S1", call("c1")), ("S1", result("c1")), ("S1", EMPTY), ("S1", NUDGE)]
+    out = Home(tmp_path, ONE, host, stored=stored).run()
+    assert out["host_empty_recovery"] == {"rows": 0, "store_ids": []}
+    assert out["parity"]["totals"]["surplus_rows"] == 4
+
+
+def test_a_pair_split_across_two_sessions_is_not_matched(tmp_path):
+    sessions = {"S1": ("cli", None, 2000.0, "user_exit"), "S2": ("telegram", None, 2000.0, "user_exit")}
+    host = turn(1) + [("S1", call("c1")), ("S1", result("c1"))] + turn(2, "S2")
+    stored = host[:4] + [("S1", EMPTY), ("S2", NUDGE)] + host[4:]
+    out = Home(tmp_path, sessions, host, stored=stored).run()
+    assert out["host_empty_recovery"]["rows"] == 0 and out["parity"]["totals"]["surplus_rows"] == 2
+
+
+def test_a_row_set_aside_between_the_rows_breaks_the_pair(tmp_path):
+    """An undo's retained row between the tool row and the reply: matched on the store's own order, the rows are not
+    adjacent, so the pair stays scored."""
+    host = turn(1) + [("S1", call("c1")), ("S1", result("c1")), ("S1", undone(u("undone turn"), 2100.0))] + turn(2)
+    stored = host[:4] + [("S1", stamped(u("undone turn"), 2100.0)), ("S1", EMPTY), ("S1", NUDGE)] + host[5:]
+    out = Home(tmp_path, ONE, host, stored=stored).run()
+    if out["undo_retained"]["store_ids"] != [5]:
+        pytest.fail("setup: the row between is not an undo's retained row")
+    assert out["host_empty_recovery"]["rows"] == 0
+
+
+def test_a_bound_copy_does_not_cover_its_unbound_message(tmp_path):
+    host = turn(1) + turn(2)
+    stored = [("S1", stamped(m, 2000.0 + n)) for n, (_s, m) in enumerate(host)] + [("S1", host[1][1])]
+    home = Home(tmp_path, ONE, host, stored=stored)
+    _bind(home, [5])  # only the copy of message 2 is bound
+    per = home.run()["uid_coverage"]["per_source"]["cli"]
+    assert (per["messages"], per["messages_with_canonical_uid"]) == (4, 0)
+    assert (per["copy_rows"], per["copy_rows_with_canonical_uid"]) == (1, 1)
