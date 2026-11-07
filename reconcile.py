@@ -3333,11 +3333,34 @@ class ReconcileMixin:
         # each suppression is then backed by a stored copy the prefix does not
         # account for. Over-reserving can keep a duplicate.
         stored_identity_counts.subtract(prefix_counts)
+        # Review round 4: a stored result proves a replay only for a stored copy of the call it follows. Count each
+        # stored result under the call that owns it, and reserve the host prefix's own pairs the same way.
+        owned = Counter()
+        for rows, stored_side, skip in ((tail_rows, True, consumed), (messages[:max(0, cursor)], False, held)):
+            owner = None
+            for pos, row in enumerate(rows):
+                role = str(row.get("role") or "")
+                if role != "tool":
+                    owner = (self._message_replay_identity(row, stored_row=stored_side)
+                             if role == "assistant" and row.get("tool_calls") else None)
+                    continue
+                key = row["store_id"] if stored_side else pos
+                if (owner is None or key in skip
+                        or self._matches_ignore_message_patterns(row, stored_row=stored_side)):
+                    continue
+                identity = self._message_replay_identity(row, stored_row=stored_side)
+                if not _has_lossy_redacted_identity(identity):
+                    owned[(owner, identity)] += 1 if stored_side else -1
         replayed: set[int] = set()
         metadata = None  # Loaded once, only when a borrowed pair binds.
         users = None  # Lazily index both views once per replay scan.
         protected = set()
         stored_uids: set[str] = set()
+        at_cursor = self._replayed_results_at_cursor(
+            messages, cursor, tail_rows, consumed, consumed_pairs, stored_identity_counts)
+        for idx in at_cursor:
+            owned[(self._message_replay_identity(messages[cursor - 1]), self._message_replay_identity(messages[idx]))] -= 1
+        replayed.update(at_cursor)
         index = max(0, cursor)
         while index < len(messages):
             assistant = messages[index]
@@ -3410,6 +3433,8 @@ class ReconcileMixin:
                     result_indexes[tool_call_id] = probe
                     segment_needs[result_identity] += 1
                 probe += 1
+            pair_needs = Counter((assistant_identity, self._message_replay_identity(messages[idx]))
+                                 for idx in result_indexes.values())
             if (
                 call_ids
                 and call_ids.issubset(result_indexes)
@@ -3423,11 +3448,99 @@ class ReconcileMixin:
                     stored_identity_counts[identity] >= needed
                     for identity, needed in segment_needs.items()
                 )
+                and all(owned[pair] >= needed for pair, needed in pair_needs.items())
             ):
                 stored_identity_counts.subtract(segment_needs)
+                owned.subtract(pair_needs)
                 replayed.add(index)
                 replayed.update(result_indexes.values())
             index = max(index + 1, probe)
+        return replayed
+
+    def _replayed_results_at_cursor(self, messages, cursor, tail_rows, consumed, consumed_pairs, counts) -> set[int]:
+        """#2163: tool results at the cursor whose call is the last row of the proven prefix.
+
+        The segment scan starts at an assistant row, so these results never join a group. One is a
+        replay only on occurrence evidence, never on a matching identity alone (hosts reuse
+        ``tool_call_id``, #2172). The stored copy of the call is the row the ledger bound to it (a
+        binding outside the tail proves nothing); without a binding it is the call's only copy in the
+        tail, and its ids must sit on exactly one assistant row on each side, so no other occurrence
+        of the call can be the one replayed. That copy must be followed directly by a stored result
+        with the same literal identity (a borrowed placeholder alias is not evidence, #1385), unspent
+        by the prefix, and the multiset must still hold a copy, which is then spent. A host and stored
+        stamp that differ, on the call or on the result, veto the match. Anything unproven is stored.
+        The stored results that follow the located call copy belong to that occurrence: each one this
+        helper does not spend is reserved from ``counts``, so it can never prove a later call's result
+        after the cursor (a reused id with other arguments, review round 3). Over-reserving can keep a
+        duplicate; it never drops a row.
+        """
+        call_index = cursor - 1
+        if call_index < 0 or str(messages[call_index].get("role") or "") != "assistant":
+            return set()
+        call_ids = {str(call.get("id") or "") for call in messages[call_index].get("tool_calls") or []
+                    if isinstance(call, dict) and str(call.get("id") or "")}
+        call_identity = self._message_replay_identity(messages[call_index])
+        if not call_ids or _has_lossy_redacted_identity(call_identity):
+            return set()
+        position = {row["store_id"]: pos for pos, row in enumerate(tail_rows)}
+
+        def carriers(rows):
+            return sum(str(row.get("role") or "") == "assistant" and any(
+                isinstance(call, dict) and str(call.get("id") or "") in call_ids
+                for call in row.get("tool_calls") or []) for row in rows)
+        if call_index in consumed_pairs:
+            at = position.get(consumed_pairs[call_index])
+        else:
+            copies = [pos for pos, row in enumerate(tail_rows)
+                      if self._message_replay_identity(row, stored_row=True) == call_identity]
+            unique = len(copies) == 1 and carriers(tail_rows) == 1 and carriers(messages) == 1
+            at = copies[0] if unique else None
+        if at is None or self._message_replay_identity(tail_rows[at], stored_row=True) != call_identity:
+            return set()
+        following = []
+        for row in tail_rows[at + 1:]:
+            if str(row.get("role") or "") != "tool":
+                break
+            following.append(row)
+        spent: set[int] = set()
+
+        def reserve_unspent():
+            for row in following:
+                if (row["store_id"] in spent or row["store_id"] in consumed
+                        or self._matches_ignore_message_patterns(row, stored_row=True)):
+                    continue
+                identity = self._message_replay_identity(row, stored_row=True)
+                if counts[identity] > 0:
+                    counts[identity] -= 1
+        call_stamp = self._host_occurrence_metadata(messages[call_index])["timestamp"]
+        stored_call_stamp = _normalize_observed_at(tail_rows[at].get("observed_at"))
+        if call_stamp is not None and stored_call_stamp is not None and call_stamp != stored_call_stamp:
+            reserve_unspent()
+            return set()  # a different occurrence of the same call
+        stored_results = {}
+        for row in following:
+            stored_results.setdefault(str(row.get("tool_call_id") or ""), row)
+        replayed, index = set(), cursor
+        while index < len(messages) and str(messages[index].get("role") or "") == "tool":
+            result = messages[index]
+            tool_call_id = str(result.get("tool_call_id") or "")
+            identity = self._message_replay_identity(result)
+            literal = self._message_replay_identity(result, allow_pruned_tool_alias=False)
+            stored = stored_results.pop(tool_call_id, None) if tool_call_id in call_ids else None
+            host_stamp = self._host_occurrence_metadata(result)["timestamp"]
+            stored_stamp = _normalize_observed_at(stored.get("observed_at")) if stored else None
+            if (stored is not None and stored["store_id"] not in consumed
+                    and not self._matches_ignore_message_patterns(stored, stored_row=True)
+                    and not _is_hermes_persisted_output_marker(normalize_content_value(result.get("content")) or "")
+                    and not _has_lossy_redacted_identity(identity)
+                    and self._message_replay_identity(stored, stored_row=True, allow_pruned_tool_alias=False) == literal
+                    and (host_stamp is None or stored_stamp is None or host_stamp == stored_stamp)
+                    and counts[identity] > 0):
+                counts[identity] -= 1
+                spent.add(stored["store_id"])
+                replayed.add(index)
+            index += 1
+        reserve_unspent()
         return replayed
 
     def _bound_retry_placeholder_replay(self, messages, call_index, result_index, stored_rows, users, protected) -> bool:
