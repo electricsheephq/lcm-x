@@ -915,11 +915,16 @@ def test_covered_view_reconciles_the_live_cursor(engines, monkeypatch):
 
 
 @pytest.mark.parametrize("stamped", [True, pytest.param(False, marks=pytest.mark.xfail(
-    strict=True, reason="#2203: an unstamped cold view that a resumed session rewrote is stored again"))])
+    strict=True, raises=AssertionError,
+    reason="#2203: an unstamped cold view that a resumed session rewrote is stored again"))])
 def test_resumed_session_that_rewrote_the_cold_view(engines, monkeypatch, stamped):
     old = engines()
     stamp = (lambda value: value) if stamped else (lambda value: None)
-    queue_cold(old, monkeypatch, [*history(stamped), _m("user", "Q", stamp(5.), "Q")])
+    queued = [*history(stamped), _m("user", "Q", stamp(5.), "Q")]
+    try:
+        queue_cold(old, monkeypatch, queued)
+    except AssertionError:
+        pytest.fail("setup: cold tail was not queued")
     resumed = LCMEngine(config=old._config, hermes_home=old._hermes_home)
     try:
         locker = sqlite3.connect(old._store.db_path, isolation_level=None)
@@ -930,11 +935,21 @@ def test_resumed_session_that_rewrote_the_cold_view(engines, monkeypatch, stampe
             locker.rollback()
             locker.close()
         # The resumed session undid Q and went on; the ended engine's exit drain runs afterwards.
-        resumed.ingest([*history(stamped), _m("user", "E", stamp(6.), "E"), _m("assistant", "F", stamp(7.), "F")])
+        resent = [*history(stamped), _m("user", "E", stamp(6.), "E"), _m("assistant", "F", stamp(7.), "F")]
+        resumed.ingest(resent)
         old._retry_pending_session_tails(exiting=True)
     finally:
         resumed.shutdown()
-    assert contents(old) == ["A", "B", "C", "D", "E", "F", "Q"]
+    desired = ["A", "B", "C", "D", "E", "F", "Q"]
+    if stamped:
+        assert contents(old) == desired  # the stamped control
+        return
+    observed = [_row(row) for row in old._store.get_session_messages("S")]
+    fixed = [(row["role"], row["content"], row.get("timestamp")) for row in [*resent, queued[-1]]]
+    # Main's unstamped exit drain appends the queued view after the resumed view, with NULL observed_at.
+    known = [(row["role"], row["content"], row.get("timestamp")) for row in [*resent, *queued]]
+    _expect_stored_shape(observed, fixed, known,
+                         f"#2203 known shape: the rewritten view was stored again: {[row[1] for row in observed]}")
 
 
 @pytest.mark.parametrize("frozen", ["read", "recovery"])
@@ -1137,9 +1152,14 @@ def test_committed_uid_disagreement_tail_removed_after_counter_interrupt(engines
 
 
 @contextmanager
-def resumed_cold_resend(engine, monkeypatch, queued, resent):
+def resumed_cold_resend(engine, monkeypatch, queued, resent, *, named_limit=False):
     """Queue a pre-append failure, then let a resumed engine commit before the retry."""
-    tail = queue_cold(engine, monkeypatch, queued)
+    try:
+        tail = queue_cold(engine, monkeypatch, queued)
+    except AssertionError:
+        if named_limit:
+            pytest.fail("setup: cold tail was not queued")
+        raise
     resumed = LCMEngine(config=engine._config, hermes_home=engine._hermes_home)
     if hasattr(engine, "_compiled_ignore_message_patterns"):
         resumed._compiled_ignore_message_patterns = engine._compiled_ignore_message_patterns
@@ -1155,6 +1175,10 @@ def resumed_cold_resend(engine, monkeypatch, queued, resent):
         yield tail, resumed
     finally:
         resumed.shutdown()
+
+
+def _row(row):
+    return row["role"], row["content"], row["observed_at"]
 
 
 def cold_resend_views(shape="uidless"):
@@ -1216,19 +1240,34 @@ def test_resumed_engine_resend_keeps_the_earlier_cold_occurrence(engines, monkey
 
 @pytest.mark.parametrize("then", ["same", "older"])
 @pytest.mark.parametrize("shape", ["uidless", "uids", "two_conflicts", "tool_conflict", "same_reply_text",
-    "scaffold_row", "store_longer", pytest.param("ignored_row", marks=pytest.mark.xfail(strict=True,
+    "scaffold_row", "store_longer", pytest.param("ignored_row", marks=pytest.mark.xfail(strict=True, raises=AssertionError,
         reason="#2247: known limit: an ignored row plus a stamp conflict takes the cold start; planned for v0.30.x (DECISION-1838 known limits)"))])
 def test_noop_ingest_after_a_resumed_resend_keeps_the_earlier_occurrence(engines, monkeypatch, then, shape):
     engine = ignoring(engines()) if shape == "ignored_row" else engines()
     queued, resent = cold_resend_views(shape)
-    with resumed_cold_resend(engine, monkeypatch, queued, resent) as (tail, _):
+    with resumed_cold_resend(engine, monkeypatch, queued, resent, named_limit=shape == "ignored_row") as (tail, _):
         before = committed_rows(tail["store"].db_path, "S")
         engine.ingest(copy.deepcopy(resent if then == "same" else queued[:4]))
-        assert committed_rows(tail["store"].db_path, "S") == before
+        if shape != "ignored_row":
+            assert committed_rows(tail["store"].db_path, "S") == before
+            engine._retry_pending_session_tails()
+            assert engine._pending_session_tails == [tail]
+            assert count(engine, "tail.cold_unmatched") >= 1
+            assert committed_rows(tail["store"].db_path, "S") == before
+            return
+        noop = committed_rows(tail["store"].db_path, "S")
         engine._retry_pending_session_tails()
-        assert engine._pending_session_tails == [tail]
-        assert count(engine, "tail.cold_unmatched") >= 1
-        assert committed_rows(tail["store"].db_path, "S") == before
+        retry = committed_rows(tail["store"].db_path, "S")
+        kept = engine._pending_session_tails == [tail]
+        unmatched = count(engine, "tail.cold_unmatched")
+        observed = [(stage, _row(row)) for stage, rows in (("noop", noop), ("retry", retry)) for row in rows]
+        # The configured ignore row is never stored; main drops the earlier Q occurrence's tail uncounted.
+        expected = [(row["role"], row["content"], row["timestamp"]) for row in resent if row["content"] != "ignore"]
+        fixed = [(stage, row) for stage in ("noop", "retry") for row in expected] + [("tail", True, True)]
+        known = [(stage, row) for stage in ("noop", "retry") for row in expected] + [("tail", False, 0)]
+        diagnostic = dict(noop=[_row(r) for r in noop], kept=kept, unmatched=unmatched, retry=[_row(r) for r in retry])
+        _expect_stored_shape([*observed, ("tail", kept, unmatched >= 1 if kept else unmatched)], fixed, known,
+                             f"#2247 known shape: {diagnostic}")
 
 
 def test_store_newer_restamp_stores_missing_rows_and_keeps_the_tail(engines, monkeypatch):
@@ -1589,3 +1628,32 @@ def test_repeated_cold_start_retry_after_storing_absent_suffix_adds_nothing(engi
             assert committed_rows(tail["store"].db_path, "S") == rows
         assert count(engine, "tail.cold_unmatched") == 3
         assert sum("conflicting stamp unplaced" in record.getMessage() for record in caplog.records) == 1
+
+
+def _expect_stored_shape(observed, fixed, known, message, error_type=AssertionError):
+    """Accept only the complete fixed list or the complete named-limit list, in store order."""
+    if observed == fixed:
+        return
+    if observed == known:
+        raise error_type(message)
+    differences = []
+    for label, expected in (("fixed", fixed), ("known", known)):
+        index = next((i for i, (actual, wanted) in enumerate(zip(observed, expected)) if actual != wanted),
+                     min(len(observed), len(expected)))
+        differences.append(f"{label}: first difference={index}, lengths={len(observed)}/{len(expected)}")
+    pytest.fail("unexpected stored shape; " + "; ".join(differences))
+
+
+@pytest.mark.parametrize("case", ["known", "fixed", "doubled", "swapped"])
+def test_stored_shape_comparison(case):
+    fixed = [("user", "first"), ("assistant", "second")]
+    known = [fixed[0]]
+    observed = {"known": known, "fixed": fixed, "doubled": [fixed[0], *fixed], "swapped": fixed[::-1]}[case]
+    if case == "known":
+        with pytest.raises(AssertionError, match="synthetic known shape"):
+            _expect_stored_shape(observed, fixed, known, "synthetic known shape", AssertionError)
+    elif case == "fixed":
+        _expect_stored_shape(observed, fixed, known, "synthetic known shape", AssertionError)
+    else:
+        with pytest.raises(pytest.fail.Exception, match="first difference=.*lengths="):
+            _expect_stored_shape(observed, fixed, known, "synthetic known shape", AssertionError)

@@ -2,9 +2,10 @@
 
 import hashlib
 import json
-import shlex
+import os
 import sqlite3
 import subprocess
+import sys
 
 import pytest
 
@@ -172,6 +173,24 @@ def test_determinism_and_declaration(plan):
 
 @pytest.mark.parametrize("command,size", [(LARGE_COMMAND, 204800), (SMALL_COMMAND, 64)])
 def test_tool_output(command, size):
-    result = subprocess.run(shlex.split(command), check=True, capture_output=True)
+    result = subprocess.run(["/bin/sh", "-c", command], check=True, capture_output=True)  # The terminal tool's shell.
     assert result.stdout == b"d" * size
     assert result.stderr == b""
+
+
+@pytest.mark.parametrize("command,size", [(LARGE_COMMAND, 204800), (SMALL_COMMAND, 64)])
+def test_the_new_commands_write_exactly_the_old_commands_bytes(command, size):
+    """The previous commands, run as they were (no shell), give the same stdout bytes as the new ones."""
+    old = f"import sys; sys.stdout.write('d' * {size})"
+    before = subprocess.run([sys.executable, "-c", old], check=True, capture_output=True).stdout
+    assert subprocess.run(["/bin/sh", "-c", command], check=True, capture_output=True).stdout == before
+
+
+@pytest.mark.skipif(not os.environ.get("D5_HOST_SRC"), reason="D5_HOST_SRC not set")
+@pytest.mark.parametrize("command", [LARGE_COMMAND, SMALL_COMMAND])
+def test_the_pinned_host_does_not_hold_the_tool_commands_for_approval(command, monkeypatch):
+    """The loopback platform answers no approval prompt, so a flagged command is blocked and its step stores no output."""
+    monkeypatch.syspath_prepend(os.environ["D5_HOST_SRC"])
+    from tools.approval_detection import detect_dangerous_command
+
+    assert detect_dangerous_command(command)[0] is False

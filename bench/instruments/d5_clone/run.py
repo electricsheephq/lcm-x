@@ -40,6 +40,7 @@ DOCTOR_STATUS = {"pass": "ok", "ok": "ok", "warn": "warn", "fail": "fail"}  # An
 EXTERNALIZED_REF = re.compile(r"\[(?:Externalized|GC'd externalized) (?:tool output|payload):.*?;\s*ref=([^;\]\s]+)\]")
 CRON_MODEL = "d5-cron"
 CRON_PAUSE_REASON = "d5 clone run: paused before the run"
+COLD_INGEST_TIMEOUT = 120
 # How the probe can exercise each lcm_doctor check on a stopped arm (both trees' tools.py lcm_doctor). Store-wide
 # checks read the store, the payload files or the arm's config once; per-session checks read the engine's current
 # session, so they run once per plan session, bound by on_session_start. The rest never see the run: they are left
@@ -83,6 +84,82 @@ def _json(value):
 
 def _sha(text):
     return hashlib.sha256(str(text).encode()).hexdigest()
+
+
+def _owned_key(value):
+    """The product's ownership reading of a stored conversation_id (db_bootstrap): NULL is '', edges are stripped."""
+    return str(value or "").strip()
+
+
+def rekey_copy_conversations(lcm_db, conversations, *, run_dir):
+    """Align only the arm copy's conversation keys with its edited routing, preserving all sessions and rows."""
+    path = Path(lcm_db).resolve()
+    if not path.is_relative_to(Path(run_dir).resolve()):
+        raise ValueError("conversation edits require an ARM COPY inside run_dir")
+    changes = []
+    with closing(sqlite3.connect(path.as_uri() + "?mode=rw", uri=True)) as db, db:
+        db.execute("BEGIN IMMEDIATE")
+        tables = []
+        for name, in db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall():
+            quoted = '"' + name.replace('"', '""') + '"'
+            if any(row[1] == "conversation_id" for row in db.execute(f"PRAGMA table_info({quoted})")):
+                if name not in ("messages", "lcm_lifecycle_state"):
+                    raise ValueError(f"unexpected conversation_id table: {name}")
+                tables.append(name)
+        resolved, groups = [], {}
+        for conversation in conversations:
+            keys = db.execute("SELECT DISTINCT conversation_id FROM messages WHERE session_id=?",
+                              (conversation["session_id"],)).fetchall()
+            if len(keys) != 1:
+                raise ValueError("copied session must carry exactly one conversation_id")
+            old, new = keys[0][0], gateway.session_key(conversation["chat_id"])
+            if not _owned_key(old):  # A legacy blank key is owned by every conversation: never a store-wide move.
+                raise ValueError("copied session has a legacy blank conversation_id: " + conversation["name"])
+            resolved.append((conversation["name"], old, new))
+            group = groups.setdefault(old, {"new": new, "names": []})
+            group["names"].append(conversation["name"])
+            if group["new"] != new:
+                raise ValueError("shared conversation has different destinations: " + ", ".join(group["names"]))
+        # Resolve and validate the whole plan against the original state before the first rename.
+        owned = {}  # Stored values by the key that owns them, as the product reads them (legacy variants included).
+        for table in tables:
+            for value, in db.execute(f"SELECT DISTINCT conversation_id FROM {table}"):
+                owned.setdefault(_owned_key(value), set()).add(value)
+        sources = {}
+        for old, group in groups.items():
+            sources.setdefault(group["new"], []).append(old)
+        for olds in sources.values():
+            if len(olds) > 1:
+                names = [name for old in olds for name in groups[old]["names"]]
+                raise ValueError("separate conversations share one destination: " + ", ".join(names))
+        for old, group in groups.items():
+            new = group["new"]
+            if old == new:
+                continue
+            if owned.get(_owned_key(old), set()) - {old}:  # A variant the exact rename would leave behind.
+                raise ValueError("copied conversation key has legacy variants: " + ", ".join(group["names"]))
+            if owned.get(_owned_key(new)):
+                raise ValueError("copied conversation destination already has rows")
+        for old, group in groups.items():
+            new = group["new"]
+            if old == new:
+                continue
+            counts = {}
+            for table in tables:
+                before = db.execute(f"SELECT count(*) FROM {table} WHERE conversation_id=?", (old,)).fetchone()[0]
+                db.execute(f"UPDATE {table} SET conversation_id=? WHERE conversation_id=?", (new, old))
+                after = db.execute(f"SELECT count(*) FROM {table} WHERE conversation_id=?", (new,)).fetchone()[0]
+                left = db.execute(f"SELECT count(*) FROM {table} WHERE conversation_id=?", (old,)).fetchone()[0]
+                counts[table] = {"before": before, "after": after, "old_remaining": left}
+            group["tables"] = counts
+        for name, old, new in resolved:
+            if old == new:
+                continue
+            entry = {"name": name, "old_h12": _sha(old)[:12], "new_h12": _sha(new)[:12], "tables": groups[old]["tables"]}
+            if len(groups[old]["names"]) > 1:
+                entry["shared_k1_with"] = [other for other in groups[old]["names"] if other != name]
+            changes.append(entry)
+    return changes
 
 
 def marks(home):
@@ -335,6 +412,8 @@ class LocalHost:
         server = prov.Provider(plan["provider"]).start()
         routing = gateway.edit_copy_routing(home / "state.db", plan["conversations"], sessions_dir=home / "sessions",
                                             run_dir=self.run_dir, provider_url=server.url)
+        routing["conversation_rekeys"] = rekey_copy_conversations(home / "lcm.db", plan["conversations"],
+                                                                 run_dir=self.run_dir)
         gateway.write_config(home, gateway.build_config(
             self.c["settings"], provider_url=server.url, home=home, aux=gateway.aux_tasks(tree["host_src"]),
             context_length=self.c["context_length"], stored_route_providers=routing["stored_route_providers"]))
@@ -342,6 +421,7 @@ class LocalHost:
                                    port_file=home.parent / "d5-local.port", lcm_tree=tree["lcm_tree"])
         port = server.server.server_address[1]
         return {"name": name, "home": home, "provider": server, "port": port, "tree": tree, "marks": marks(home),
+                "routing": routing,
                 "session_ids": [c["session_id"] for c in plan["conversations"]],
                 "gateway": gateway.Gateway(tree["host_bin"], home, env, home.parent, provider_port=port),
                 "payloads": sum(p.is_file() for p in (home / "lcm-large-outputs").rglob("*")),
@@ -377,6 +457,26 @@ class LocalHost:
         derived = (lambda filled: self.t0_evidence(ctx, filled)) if kind == "T0" else None
         return out, capture.capture(kind, out, store_db=home / "lcm.db", host_db=home / "state.db",
                                     payload_dir=home / "lcm-large-outputs", extras=extras, home=home, derived=derived)
+
+    def wait_cold_ingest(self, ctx, step, t0):
+        """Wait for this turn's new user row to be durable before taking the bind's H8 capture."""
+        started = time.monotonic()
+        deadline = started + self.c.get("cold_ingest_timeout", COLD_INGEST_TIMEOUT)
+        # Only cold steps wait today; trimming edge whitespace is defensive if a future step's text is rewritten.
+        args = (ctx["sessions"][step["conversation"]], t0["store_max_store_id"] or 0, step["user_text"].strip(" \t\r\n"))
+        while True:
+            try:
+                with closing(capture._readonly(ctx["home"] / "lcm.db", timeout=max(0, min(0.5, deadline - time.monotonic())))) as db:
+                    found = db.execute("SELECT 1 FROM messages WHERE session_id=? AND store_id>?"
+                                       " AND role='user' AND trim(content, ' ' || char(9, 13, 10))=? LIMIT 1", args).fetchone()
+                if found:
+                    return True, round(time.monotonic() - started, 1)
+            except (OSError, sqlite3.Error, capture.CaptureError):
+                pass
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False, round(time.monotonic() - started, 1)
+            time.sleep(min(0.5, remaining))
 
     def t0_evidence(self, ctx, out):
         """The two files the replay edition reads from T0 besides the stores (p_s6r_clone, "observed bind evidence"):
@@ -556,15 +656,26 @@ def run_arm(host, name, home, plan, extras):
                 cold += [step["conversation"]] if ok and step["kind"] == "cold" else []
                 tool_turns += bool(ok and step["tools"])
                 if bind:
-                    h8_dir, h8 = host.capture(ctx, "H8", step)
-                    receipt, error, range_new = host.replay(ctx, step, t0_dir, h8_dir)
+                    durable, waited = host.wait_cold_ingest(ctx, step, t0) if ok else (False, None)
+                    if durable:
+                        h8_dir, h8 = host.capture(ctx, "H8", step)
+                        receipt, error, range_new = host.replay(ctx, step, t0_dir, h8_dir)
+                    else:
+                        h8 = {"store_max_store_id": t0["store_max_store_id"], "capture_hashes_sha256": None}
+                        receipt, error, range_new = None, True, None
+                    bar2 = bars.bar2_bind(receipt, range_new_rows=range_new, error=error)
+                    if not durable:
+                        timeout = host.c.get("cold_ingest_timeout", COLD_INGEST_TIMEOUT)
+                        bar2["reason"] = (f"cold-turn ingest not durable within {timeout:g} s" if ok
+                                          else "cold turn not completed")
                     binds.append({"bind": step["id"], "session_id": sid[step["conversation"]],
+                                  "cold_ingest_wait_s": waited,
                                   "t0_max": t0["store_max_store_id"], "h8_max": h8["store_max_store_id"],
                                   "dup_store_ids": bars.dup_store_ids(receipt), "receipt": receipt,
                                   "t0_at": datetime.fromisoformat(t0["captured_at"]).timestamp(),
                                   "t0_capture_sha256": t0["capture_hashes_sha256"],
                                   "h8_capture_sha256": h8["capture_hashes_sha256"],
-                                  "bar2": bars.bar2_bind(receipt, range_new_rows=range_new, error=error)})
+                                  "bar2": bar2})
                     if receipt is not None:  # Kept for diagnosis when the replay left no receipt (r2.6).
                         host.remove(t0_dir)
                         host.remove(h8_dir)
@@ -593,6 +704,7 @@ def run_arm(host, name, home, plan, extras):
     return {"binds": binds, "workload": workload, "egress": {"samples": len(egress), "non_local": sum(egress)},
             "provider": stats, "logs": host.logs(ctx), "roots": host.roots(ctx), "checks": checks,
             "doctor_not_exercised": ctx.get("doctor_not_exercised", []), "cron_paused": cron_paused,
+            "routing": ctx.get("routing", {}),
             "rows": rows, "wall_s": round(time.monotonic() - started, 3)}
 
 
@@ -659,7 +771,7 @@ def run(host, *, rc_id, prior=(), instrument_fix=None):
         verdict = bars.FAIL if results["bar1"]["verdict"] == bars.FAIL else bars.INCONCLUSIVE
         results["bar1"] = {**results["bar1"], "verdict": verdict, "rows_unreadable": unreadable}
     receipt.update(
-        arms={a: {**{k: arms[a][k] for k in ("workload", "egress", "provider", "doctor_not_exercised", "cron_paused")},
+        arms={a: {**{k: arms[a][k] for k in ("workload", "egress", "provider", "doctor_not_exercised", "cron_paused", "routing")},
                   "checks": bars.check_counts(arms[a]["checks"])} for a in arms},
         ga_rerun=ga_rerun and {**{k: ga_rerun[k] for k in ("workload", "egress", "provider", "wall_s",
                                                          "doctor_not_exercised", "cron_paused")},

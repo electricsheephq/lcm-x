@@ -40,6 +40,19 @@ def _a(text, ts) -> dict:
     return {"role": "assistant", "content": text} if ts is None else {"role": "assistant", "content": text, "timestamp": ts}
 
 
+def _labels(rows) -> list[str]:
+    return [text.replace(PAD, "") for text in rows]
+
+
+def _stored_as_sent(engine, host) -> None:
+    if _labels(row["content"] for row in _stored(engine)) != _labels(row["content"] for row in host):
+        pytest.fail(f"setup: the first view was not stored as sent: {_labels(row['content'] for row in _stored(engine))}")
+
+
+def _expect_7_shape(texts, fixed, known) -> None:
+    _expect_stored_shape(texts, fixed, known, f"#7 known shape: {_labels(texts)}")
+
+
 def _repair(stamped=False):
     ts = (lambda n: float(n)) if stamped else (lambda n: None)
     host = [_u("U1" + PAD, ts(100)), _a("A1_1" + PAD, ts(101)), _u("U5" + PAD, ts(500)),
@@ -54,13 +67,12 @@ def test_497_repair_merge_before_cursor_unstamped_stores_the_new_user_row_once(t
     try:
         host, repaired = _repair()
         engine.ingest(host)
-        before = len(_stored(engine))
+        _stored_as_sent(engine, host)
         engine.ingest(repaired)
         texts = [row["content"] for row in _stored(engine)]
-        assert texts.count(repaired[4]["content"]) == 1
-        assert texts.count(repaired[5]["content"]) == 1
-        assert repaired[3]["content"] not in texts
-        assert len(texts) == before + 2
+        fixed = [row["content"] for row in [*host, *repaired[4:]]]
+        # Main drops U6 and stores only its reply; the merged assistant row adds nothing.
+        _expect_7_shape(texts, fixed, [row["content"] for row in [*host, repaired[5]]])
     finally:
         engine.shutdown()
 
@@ -71,12 +83,11 @@ def test_497_repair_merge_without_appended_reply_stores_the_new_user_row(tmp_pat
     try:
         host, repaired = _repair()
         engine.ingest(host)
-        before = len(_stored(engine))
+        _stored_as_sent(engine, host)
         engine.ingest(repaired[:-1])
         texts = [row["content"] for row in _stored(engine)]
-        assert texts.count(repaired[4]["content"]) == 1
-        assert repaired[3]["content"] not in texts
-        assert len(texts) == before + 1
+        fixed = [row["content"] for row in [*host, repaired[4]]]
+        _expect_7_shape(texts, fixed, [row["content"] for row in host])  # main drops U6
     finally:
         engine.shutdown()
 
@@ -90,13 +101,14 @@ def test_493_rollback_and_replace_unstamped_stores_the_replacement_once(tmp_path
         ts = (lambda n: float(n)) if turn_stamps == "host" else (lambda n: None)
         host = [_u("U1" + PAD, ts(100)), _a("A1_1" + PAD, ts(101)), _u("U_last" + PAD, None)]
         engine.ingest(host)
-        before = len(_stored(engine))
+        _stored_as_sent(engine, host)
         prime = _u("U_prime" + PAD, None)
-        engine.ingest([*host[:2], prime] + ([_a("reply" + PAD, ts(201))] if reply else []))
+        suffix = [_a("reply" + PAD, ts(201))] if reply else []
+        engine.ingest([*host[:2], prime, *suffix])
         texts = [row["content"] for row in _stored(engine)]
-        assert texts.count(prime["content"]) == 1
-        assert texts.count(host[2]["content"]) == 1
-        assert len(texts) == before + 1 + int(reply)
+        fixed = [row["content"] for row in [*host, prime, *suffix]]
+        # Main drops U_prime; the reply, when sent, is stored.
+        _expect_7_shape(texts, fixed, [row["content"] for row in [*host, *suffix]])
     finally:
         engine.shutdown()
 
@@ -107,13 +119,14 @@ def test_493_merge_onto_the_last_row_as_a_new_object_stores_the_new_text(tmp_pat
     try:
         host = [_u("U1" + PAD, None), _a("A1_1" + PAD, None), _u("U_last" + PAD, None)]
         engine.ingest(host)
+        _stored_as_sent(engine, host)
         new = "NEW instruction" + PAD
         composite = _u(host[2]["content"] + "\n\n" + new, None)
-        engine.ingest([*host[:2], composite, _a("reply" + PAD, None)])
+        reply = _a("reply" + PAD, None)
+        engine.ingest([*host[:2], composite, reply])
         texts = [row["content"] for row in _stored(engine)]
-        assert sum(new in text for text in texts) == 1
-        assert texts.count(composite["content"]) == 1  # #259: whole composite, no remainder splitting
-        assert texts.count(host[2]["content"]) == 1
+        fixed = [row["content"] for row in [*host, composite, reply]]  # #259: keep the whole composite
+        _expect_7_shape(texts, fixed, [row["content"] for row in [*host, reply]])  # main drops the composite
     finally:
         engine.shutdown()
 
@@ -248,8 +261,11 @@ def test_anchor_off_stores_the_new_user_row_out_of_scope_for_7(tmp_path, monkeyp
     try:
         host, repaired = _repair()
         engine.ingest(host)
+        _stored_as_sent(engine, host)
         engine.ingest(repaired)
-        assert any(row["content"] == repaired[4]["content"] for row in _stored(engine))
+        texts = [row["content"] for row in _stored(engine)]
+        _expect_7_shape(texts, [row["content"] for row in [*host, *repaired[4:]]],
+                        [row["content"] for row in [*host, repaired[5]]])
     finally:
         engine.shutdown()
 
@@ -262,8 +278,11 @@ def test_anchor_off_stores_a_stamped_new_user_row(tmp_path, monkeypatch):
     try:
         host, repaired = _repair(stamped=True)
         engine.ingest(host)
+        _stored_as_sent(engine, host)
         engine.ingest(repaired)
-        assert any(row["content"] == repaired[4]["content"] for row in _stored(engine))
+        texts = [row["content"] for row in _stored(engine)]
+        _expect_7_shape(texts, [row["content"] for row in [*host, *repaired[4:]]],
+                        [row["content"] for row in [*host, repaired[5]]])
     finally:
         engine.shutdown()
 
@@ -275,18 +294,26 @@ def test_truncated_then_replaced_row_stores_the_new_row(tmp_path):
     try:
         host = [_u("U1" + PAD, None), _a("A1" + PAD, None), _u("U2" + PAD, None), _a("A2" + PAD, None)]
         engine.ingest(host)
+        _stored_as_sent(engine, host)
         engine.ingest(host[:2])
         new = _u("NEW question" + PAD, None)
         engine.ingest([host[0], new])
         texts = [row["content"] for row in _stored(engine)]
-        assert texts.count(new["content"]) == 1
+        _expect_7_shape(texts, [row["content"] for row in [*host, new]],
+                        [row["content"] for row in host])  # main drops the new row
     finally:
         engine.shutdown()
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason="#7: a short user row equal to an older row's last paragraph is not audited")
+@pytest.mark.xfail(strict=True, raises=AssertionError,
+                   reason="#7: when every row is unstamped, a view that replaces all stored rows at the same length is "
+                          "taken as a replay and none of its rows is stored (Hermes leaves rows unstamped only with no "
+                          "session database or a failed transcript write)")
 def test_short_reply_matching_an_earlier_paragraph_is_stored(tmp_path):
-    """Review r4 shape 2: a new short user row equals the last paragraph of an older stored row."""
+    """Review r4 shape 2: a new short user row equals the last paragraph of an older stored row. On main the whole
+    second view (4 new rows) is not stored: with every row unstamped and the view as long as the stored rows, the
+    identity-anchor audit has no stamp to see that rows before the cursor changed (cursor=4, incoming=4), so the view is
+    a positional replay. The loss does not depend on the short row matching an earlier paragraph."""
     engine = _engine(tmp_path)
     try:
         host = [_u("old paragraph" + PAD + "\n\nyes", None), _a("A1" + PAD, None),
@@ -296,6 +323,37 @@ def test_short_reply_matching_an_earlier_paragraph_is_stored(tmp_path):
                   _u("yes", None), _a("new final" + PAD, None)]
         engine.ingest(replay)
         texts = [row["content"] for row in _stored(engine)]
-        assert texts.count("yes") == 1
+        sent = [row["content"] for row in host]
+        _expect_stored_shape(texts, sent + [row["content"] for row in replay], sent,
+                             "#7 known shape: none of the new-rows-only view is stored")
     finally:
         engine.shutdown()
+
+
+def _expect_stored_shape(observed, fixed, known, message, error_type=AssertionError):
+    """Accept only the complete fixed list or the complete named-limit list, in store order."""
+    if observed == fixed:
+        return
+    if observed == known:
+        raise error_type(message)
+    differences = []
+    for label, expected in (("fixed", fixed), ("known", known)):
+        index = next((i for i, (actual, wanted) in enumerate(zip(observed, expected)) if actual != wanted),
+                     min(len(observed), len(expected)))
+        differences.append(f"{label}: first difference={index}, lengths={len(observed)}/{len(expected)}")
+    pytest.fail("unexpected stored shape; " + "; ".join(differences))
+
+
+@pytest.mark.parametrize("case", ["known", "fixed", "doubled", "swapped"])
+def test_stored_shape_comparison(case):
+    fixed = [("user", "first"), ("assistant", "second")]
+    known = [fixed[0]]
+    observed = {"known": known, "fixed": fixed, "doubled": [fixed[0], *fixed], "swapped": fixed[::-1]}[case]
+    if case == "known":
+        with pytest.raises(AssertionError, match="synthetic known shape"):
+            _expect_stored_shape(observed, fixed, known, "synthetic known shape", AssertionError)
+    elif case == "fixed":
+        _expect_stored_shape(observed, fixed, known, "synthetic known shape", AssertionError)
+    else:
+        with pytest.raises(pytest.fail.Exception, match="first difference=.*lengths="):
+            _expect_stored_shape(observed, fixed, known, "synthetic known shape", AssertionError)

@@ -233,3 +233,168 @@ def test_a_failed_request_changes_no_counter():
         assert provider.stats["calls_per_step"]["s1"] == 1
     finally:
         provider.stop()
+
+
+def _summary_reply(provider, messages, model="d5-summary", **kwargs):
+    return complete(provider, model, messages=messages, **kwargs)["choices"][0]["message"]["content"]
+
+
+def _counters():
+    """LCM-X's estimate, plus the exact cl100k encoder when it is installed (LCM-X uses it then)."""
+    from hermes_lcm.tokens import count_tokens
+
+    counters = [count_tokens]
+    try:
+        import tiktoken
+        encoding = tiktoken.get_encoding("cl100k_base")
+        counters.append(lambda text: len(encoding.encode(text, disallowed_special=())))
+    except Exception:
+        pass
+    return counters
+
+
+def test_a_summary_request_gets_its_digest_inside_the_envelope_lcm_x_requires(provider):
+    """LCM-X's summary route sends its nonce in the system policy and rejects any reply outside that envelope; the
+    provider's fixed digest must pass the real validator, or every summary is a rejected no_content (#2199)."""
+    import hermes_lcm.escalation as escalation
+
+    prompt = "Summarize the history." + escalation._SUMMARY_CONTENT_SEPARATOR + "user: hello\nassistant: hi"
+    messages, nonce = escalation._summary_contract_messages(prompt)
+    assert nonce
+    reply = _summary_reply(provider, messages)
+    body, failed, tolerated = escalation._check_summary_contract(reply, nonce, 512)
+    assert (failed, tolerated) == ("", ())
+    assert body.startswith("D5 digest v1\nmessages=2\n") and body.endswith("Expand for details about: d5 digest")
+    assert _summary_reply(provider, messages) == reply  # Same request, same bytes.
+
+
+def test_only_the_system_policy_nonce_is_used_and_a_request_without_one_is_unchanged(provider):
+    """The transcript is untrusted and may quote an older envelope: its nonce is never echoed. Without exactly one
+    system nonce the reply is the plain digest, as before."""
+    quoted = '<lcm-summary nonce="0000aaaa">\nold\n</lcm-summary>'
+    policy = {"role": "system", "content": 'Its first line is exactly:\n<lcm-summary nonce="1234abcd">\n'}
+    reply = _summary_reply(provider, [policy, {"role": "user", "content": quoted}])
+    assert reply.startswith('<lcm-summary nonce="1234abcd">\nD5 digest v1\n') and "0000aaaa" not in reply
+    for messages in ([{"role": "user", "content": quoted}],
+                     [{"role": "system", "content": policy["content"] + '<lcm-summary nonce="99">'},
+                      {"role": "user", "content": "x"}]):
+        assert _summary_reply(provider, messages).startswith("D5 digest v1\n")
+
+
+@pytest.mark.parametrize("source_tokens,dense", [(2_000, False), (24_000, False), (120_000, False), (100_000, True)])
+def test_a_large_leaf_s_summary_stays_under_lcm_x_s_extreme_ratio(provider, source_tokens, dense):
+    """LCM-X's doctor reports a summary as degraded at source/summary >= 400, or a source of 100k tokens or more
+    summarized in under 500 (tools._summary_quality_stats). The digest is padded with the request's size, so a large
+    leaf is not reported in both arms, which would hide a real regression; the reply is still a fixed function of the
+    request and passes the validator."""
+    import hermes_lcm.escalation as escalation
+    from hermes_lcm.tokens import count_tokens
+
+    # Dense text defeats a bytes/4 estimate: "xQ" * 50000 is 100k cl100k tokens (the reviewer's boundary case).
+    source = "xQ" * source_tokens if dense else "\n".join(
+        f"user: synthetic leaf line {i} " + "word " * 12 for i in range(source_tokens // 20))
+    counters = [count_tokens]
+    try:  # The exact encoder when installed; LCM-X uses it then, and its fallback estimate otherwise.
+        import tiktoken
+        encoding = tiktoken.get_encoding("cl100k_base")
+        counters.append(lambda text: len(encoding.encode(text, disallowed_special=())))
+    except Exception:
+        pass
+    assert dense or count_tokens(source) >= source_tokens  # Dense text is 100k tokens only to the exact encoder.
+    messages, nonce = escalation._summary_contract_messages(escalation._build_l1_prompt(source, 2000, 0))
+    reply = _summary_reply(provider, messages)
+    assert _summary_reply(provider, messages) == reply
+    body, failed, _ = escalation._check_summary_contract(reply, nonce, 2000)
+    assert failed == "" and body.startswith("D5 digest v1\n")
+    for count in counters:
+        assert count(source) / count(body) < 400 and count(body) < count(source)
+        if count(source) >= 100_000:
+            assert count(body) >= 500
+
+
+@pytest.mark.parametrize("version", [1, 2])
+def test_a_leaf_whose_tool_output_was_externalized_is_not_reported_as_degraded(provider, version):
+    """The stored leaf counts a 204,800-character tool output whole; the prompt shows only its placeholder and a short
+    preview. The digest follows the prompt's stated budget, so the stored source/summary ratio stays under 400."""
+    import hermes_lcm.escalation as escalation
+    from hermes_lcm.tokens import count_tokens
+
+    stored = "user: run it\n[TOOL RESULT call_1]: " + "d" * 204_800
+    shown = ("user: run it\n[TOOL RESULT call_1]: [Externalized tool output: tool=terminal; tool_call_id=call_1; chars=204800;"
+             " bytes=204800; ref=x.json]\n"
+             + "d" * 900)
+    messages, nonce = escalation._summary_contract_messages(
+        escalation._build_l1_prompt(shown, 2000, 0, prompt_version=version))
+    body, failed, _ = escalation._check_summary_contract(_summary_reply(provider, messages), nonce, 2000)
+    assert failed == ""
+    assert count_tokens(stored) / count_tokens(body) < 400
+
+
+def test_an_unclipped_small_source_is_never_summarized_longer_than_itself(provider):
+    import hermes_lcm.escalation as escalation
+    from hermes_lcm.tokens import count_tokens
+
+    for lines in (30, 60, 120):
+        source = "\n".join(f"user: synthetic line {i} " + "word " * 12 for i in range(lines))
+        messages, nonce = escalation._summary_contract_messages(escalation._build_l1_prompt(source, 2000, 0))
+        body, failed, _ = escalation._check_summary_contract(_summary_reply(provider, messages), nonce, 2000)
+        assert failed == "" and count_tokens(body) < count_tokens(source)
+
+
+def test_a_clipped_leaf_gets_the_longest_summary_its_prompt_allows(provider):
+    """Default serialization clips a huge source with a marker that gives no size; the reviewer's case is a
+    1,000,005-token leaf. The digest then takes three times the stated budget (the v2 prompt's own maximum)."""
+    import hermes_lcm.escalation as escalation
+    from hermes_lcm.summary_input_clip import CLIP_MARKER
+    from hermes_lcm.tokens import count_tokens
+
+    stored = "word " * 800_000
+    shown = stored[:2_000] + CLIP_MARKER + stored[-800:]
+    for version in (1, 2):
+        messages, nonce = escalation._summary_contract_messages(
+            escalation._build_l1_prompt(shown, 2000, 0, prompt_version=version))
+        limit = 2000 * (3 if version == 2 else 2)  # The leaf call's max_tokens (escalation's L1 call).
+        body, failed, _ = escalation._check_summary_contract(
+            _summary_reply(provider, messages, max_tokens=limit), nonce, limit)
+        assert failed == "" and count_tokens(stored) / count_tokens(body) < 400
+
+
+@pytest.mark.parametrize("key", ["max_tokens", "max_completion_tokens"])
+@pytest.mark.parametrize("version", [1, 2])
+@pytest.mark.parametrize("case", ["clipped", "large", "externalized"])
+def test_a_padded_reply_never_exceeds_the_request_s_output_limit(provider, key, version, case):
+    """A real model stops at the request's output limit, so the digest stays under it too: v1 asks for twice the
+    budget, and a clipped leaf's pad alone is three times it. Without a limit the pad is as before."""
+    import hermes_lcm.escalation as escalation
+    from hermes_lcm.summary_input_clip import CLIP_MARKER
+
+    source = {"clipped": "word " * 400 + CLIP_MARKER + "word " * 160,
+              "large": "\n".join(f"user: synthetic leaf line {i} " + "word " * 12 for i in range(6_000)),
+              "externalized": "user: run it\n[TOOL RESULT call_1]: [Externalized tool output: tool=terminal; "
+                              "tool_call_id=call_1; chars=4000000; bytes=4000000; ref=x.json]\n"}[case]
+    messages, nonce = escalation._summary_contract_messages(
+        escalation._build_l1_prompt(source, 2000, 0, prompt_version=version))
+    limit = 2000 * (3 if version == 2 else 2)
+    reply = _summary_reply(provider, messages, **{key: limit})
+    body, failed, _ = escalation._check_summary_contract(reply, nonce, limit)
+    assert failed == ""
+    for count in _counters():
+        assert count(reply) <= limit
+    # cl100k spends a token on each line's newline, so a filler line costs 17 (the reply's other lines fit the reserve).
+    assert reply.count(" ".join(["pad"] * 16)) * 17 <= limit - 200
+    unlimited = _summary_reply(provider, messages)
+    assert len(unlimited) >= len(reply)
+    for small in (0, 150):  # A limit under the reserve leaves the digest without filler; it never fails.
+        assert escalation._check_summary_contract(_summary_reply(provider, messages, **{key: small}), nonce, 512)[1] == ""
+
+
+def test_the_placeholder_size_pattern_is_bounded():
+    """CodeQL: an unbounded lazy gap before chars= backtracks polynomially on a long bracket with no chars=."""
+    import time
+    from bench.instruments.d5_clone.provider import HIDDEN
+
+    start = time.perf_counter()
+    assert HIDDEN.findall("[Externalized " * 20_000) == []
+    assert time.perf_counter() - start < 1.0
+    assert HIDDEN.findall("[Externalized tool output: tool=" + "t" * 64 + "; tool_call_id=c; chars=12; bytes=12]") == ["12"]
+    assert HIDDEN.findall("[GC'd externalized tool output: tool_call_id=c; chars=7; ref=r]") == ["7"]
