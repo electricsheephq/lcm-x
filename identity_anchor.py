@@ -27,7 +27,7 @@ import hashlib
 import json
 import logging
 import sqlite3
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
 from difflib import SequenceMatcher
 from typing import Any, Dict, Optional
 
@@ -680,7 +680,7 @@ class IdentityAnchorMixin:
                 for page in reversed(pages):  # Preserve the previous chronological copy-consumption order.
                     rows.update((int(row["store_id"]), row) for row in page)
             # Per form, stored copies in store order: exact forms and cleanup aliases apart, so a replay takes an
-            # exact copy before an alias (#2466 review). ``avail`` counts unconsumed copies of either kind.
+            # exact copy before an alias (#2466 review).
             exact: dict = defaultdict(list)
             alias: dict = defaultdict(list)
             row_forms: dict = defaultdict(list)
@@ -702,23 +702,38 @@ class IdentityAnchorMixin:
                 if cleaned_form is not None and cleaned_form != own:
                     alias[cleaned_form].append(store_id)
                     row_forms[store_id].append(cleaned_form)
-            avail = Counter(form for store_id, forms in row_forms.items() if store_id not in consumed for form in forms)
+            alias_rows = {store_id for stack in alias.values() for store_id in stack}
+            if set(alias) & {row_forms[store_id][0] for store_id in alias_rows}:
+                # Exact-before-alias allocation is optimal only when a cleanup form is never itself the form of a
+                # row that has an alias (cleanup is idempotent); otherwise keep main's result (#2466 review).
+                raise ValueError("cleanup forms are not idempotent")
             stored_calls = {ident for form in exact if form and form[0] == "call" for ident in form[1]}
             reserved = Counter(key(identity_messages[idx]) for idx in range(min(start, len(messages)))
                                if idx not in excluded and idx not in matched)
         except Exception as exc:
             logger.warning("LCM identity-anchor presence unavailable (%s); keeping positional replays", type(exc).__name__)
             return []
-        def take(wanted) -> None:
-            # Newest unconsumed exact copy first, then the newest alias; amortized O(1) (#2466 review).
-            for stack in (exact.get(wanted), alias.get(wanted)):
-                while stack:
-                    store_id = stack.pop()
-                    if store_id not in consumed:
+        # Allocate stored copies per form: the prefix's reserved copies first, then candidates in view order. Every
+        # form takes its exact copies before any alias, so an alias goes only to demand its own row cannot meet
+        # (an exact form with an alias is never an alias target, checked above): a maximum allocation, linear time
+        # (#2466 review). A candidate left without a copy is unaccounted.
+        used, served = set(consumed), set()
+        queues: dict = {}
+        for idx, wanted in candidates.items():
+            if wanted is not None:
+                queues.setdefault(wanted, deque([None] * reserved[wanted])).append(idx)
+        for stacks in (exact, alias):
+            for form, queue in queues.items():
+                stack = stacks.get(form)
+                while queue and stack:
+                    store_id = stack.pop()  # newest first
+                    if store_id in used:
+                        continue
+                    used.add(store_id)
+                    idx = queue.popleft()
+                    if idx is not None:
                         consumed.add(store_id)
-                        for form in row_forms[store_id]:
-                            avail[form] -= 1
-                        return
+                        served.add(idx)
 
         def storing(k) -> tuple:
             # Call ids this ingest stores at view index ``k``: none for a row the ignore patterns drop.
@@ -730,10 +745,7 @@ class IdentityAnchorMixin:
             for ident in (storing(k) if 0 <= k < len(messages) else ()):
                 pending.setdefault(ident, k)
         for idx, wanted in candidates.items():
-            if wanted is None:
-                continue
-            if avail[wanted] > reserved[wanted]:
-                take(wanted)
+            if wanted is None or idx in served:
                 continue
             # Never store a result without its call: the call is stored, or this ingest stores it (the audit's own
             # finds or an earlier unaccounted row), and the ignore patterns do not drop it (#2466 review).
