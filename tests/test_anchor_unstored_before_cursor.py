@@ -59,37 +59,41 @@ def _stored(engine) -> list[dict]:
     return [row for row in engine._store.get_session_messages(SESSION) if row.get("role") != "system"]
 
 
-def _history() -> list[dict]:
-    """Two earlier turns, the in-flight prompt P14 at index 4, a stored tool turn, and the new prompt P60."""
-    return [_u("P1 first prompt", 100), _a("A1 first reply", 101),
+def _history(earlier: int = 0) -> list[dict]:
+    """``earlier`` long-ago turns, two earlier turns, the in-flight prompt P14, and a stored tool turn."""
+    return [*(row for i in range(earlier) for row in (_u(f"E{i} earlier prompt", 10 + i / 10), _a(f"E{i} reply", 10 + i / 10 + 0.01))),
+            _u("P1 first prompt", 100), _a("A1 first reply", 101),
             _u("P2 second prompt", 110), _a("A2 second reply", 111),
             _u("P14 in-flight prompt", 120), _a("A14 reply", 121),
             _call("call_old", 130), _result("call_old", "old file text", 131), _a("A15 after the old call", 132)]
 
 
-def _moved_turn(own_first: bool) -> tuple[list[dict], list[dict], list[dict]]:
+def _moved_turn(own_first: bool, earlier: int = 0) -> tuple[list[dict], list[dict], list[dict]]:
     """(earlier view, turn-start view, turn-end view) for one tool turn whose prompt took P14's slot.
 
     own_first: the turn-start view holds the prompt on its own stamp at the end, and the turn-end view holds it in
     P14's slot on P14's stamp. Otherwise the reverse: the turn-start view holds it at the end on P14's stamp, and the
     turn-end view holds it in P14's slot on its own stamp. Either way the turn's tool-call row takes the prompt's old
     index, so the list in front of the new rows keeps its length."""
-    history = _history()
+    history = _history(earlier)
+    slot = 2 * earlier + 4  # P14's index
     prompt = "P60 new prompt"
     start_stamp, moved_stamp = (200, 120) if own_first else (120, 200)
     turn_start = [*history, _u(prompt, start_stamp)]
     turn_end = list(history)
-    turn_end[4] = _u(prompt, moved_stamp)  # the host moved the prompt into the in-flight prompt's slot
+    turn_end[slot] = _u(prompt, moved_stamp)  # the host moved the prompt into the in-flight prompt's slot
     turn_end += [_call("call_new", 201), _result("call_new", "new file text", 202), _a("A60 after the new call", 203)]
     assert len(turn_end) == len(turn_start) + 2  # the list in front of the new rows kept its length
     return history, turn_start, turn_end
 
 
+@pytest.mark.parametrize("earlier", [0, 40], ids=["short", "past-the-audited-tail"])
 @pytest.mark.parametrize("own_first", [True, False], ids=["own-stamp-first", "carried-stamp-first"])
-def test_a_tool_call_row_in_a_moved_prompt_slot_is_stored_exactly_once(tmp_path, own_first):
+def test_a_tool_call_row_in_a_moved_prompt_slot_is_stored_exactly_once(tmp_path, own_first, earlier):
     engine = _engine(tmp_path)
     try:
-        history, turn_start, turn_end = _moved_turn(own_first)
+        history, turn_start, turn_end = _moved_turn(own_first, earlier)
+        slot = 2 * earlier + 4
         engine.ingest(history)
         engine.ingest(turn_start)
         before = Counter(_key(row) for row in _stored(engine))
@@ -102,10 +106,10 @@ def test_a_tool_call_row_in_a_moved_prompt_slot_is_stored_exactly_once(tmp_path,
         assert not before - after
         # The only other row is the moved prompt at its other stamp (the #2421 borrowed-stamp copy, unchanged here).
         assert sum(added.values()) <= 4, added
-        assert set(added) <= {new_call, new_result, new_reply, _key(turn_end[4])}, added
+        assert set(added) <= {new_call, new_result, new_reply, _key(turn_end[slot])}, added
         # Nothing stored twice except that moved prompt.
         twice = {key for key, count in after.items() if count > 1}
-        assert twice <= {_key(turn_end[4])}, twice
+        assert twice <= {_key(turn_end[slot])}, twice
         # A later ingest of the same view stores nothing more.
         engine.ingest(turn_end)
         assert Counter(_key(row) for row in _stored(engine)) == after
