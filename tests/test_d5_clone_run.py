@@ -55,6 +55,10 @@ class FakeHost(r.LocalHost):
     def free_bytes(self):
         return 0 if self.fail == "free_space" else r.NEED_FREE
 
+    def t0_evidence(self, ctx, out):  # No gateway env or arm tree here: the files the edition reads, synthetic.
+        return {"filters.json": b'{"ignore_session_patterns": [], "stateless_session_patterns": []}\n',
+                "doctor.log": b"host_uid_mode: synthetic\n"}
+
     def pins(self):
         if self.fail == "P1":
             return {"verdict": "FAIL", "mismatches": ["manifest"]}  # As pins.verify: no hashes on a failure.
@@ -216,7 +220,9 @@ def test_the_rule_fingerprint_freezes_every_pinned_file(tmp_path, monkeypatch):
 def test_a_turn_counts_only_when_it_completed_successfully(tmp_path, result, done):
     import threading
     from types import SimpleNamespace
-    ctx = {"provider": SimpleNamespace(lock=threading.Lock(), step=None), "chats": {"L": "chat-l"},
+    from collections import Counter
+    ctx = {"provider": SimpleNamespace(lock=threading.Lock(), step=None, stats={"calls_per_step": Counter({"e0-L-0": 1})}),
+           "chats": {"L": "chat-l"},
            "gateway": SimpleNamespace(turn=lambda chat, step, text: result)}
     assert r.LocalHost({}, tmp_path).turn(ctx, {"id": "e0-L-0", "conversation": "L", "user_text": "x"}) is done
 
@@ -290,7 +296,9 @@ def test_replay_runs_the_edition_under_the_sandbox(tmp_path, monkeypatch):
         return type("Done", (), {"returncode": 0})()
 
     monkeypatch.setattr(r.subprocess, "run", fake_run)
-    monkeypatch.setattr(r.sandbox, "profile", lambda ports, socket_roots=(): "".join(  # tmp_path may sit under /tmp.
+    denied = []
+    monkeypatch.setattr(r.sandbox, "profile", lambda ports, socket_roots=(), deny_paths=(): denied.append(list(deny_paths))
+                        or "".join(  # tmp_path may sit under /tmp.
         f'(allow network-outbound (remote ip "localhost:{port}"))' for port in ports))
     config = {"interpreter": "python3", "instrument_dir": "kit", "rc": {"lcm_tree": "rc"}, "ga": {"lcm_tree": "ga"},
               "constants_argv": ["{python}", "gen", "{t0}", "{h8}", "{out}"], "replay_argv": ["{python}", "replay"]}
@@ -298,6 +306,7 @@ def test_replay_runs_the_edition_under_the_sandbox(tmp_path, monkeypatch):
     receipt, error, range_new = host.replay({"name": "rc", "port": 4242, "sessions": {"L": "s"}},
                                             {"id": "e0-L-0", "conversation": "L"}, "T0", "H8")
     assert (receipt, error, range_new) == ({"checks": {}}, False, 0)
+    assert denied and all(d == [r.sandbox.hermes_home()] for d in denied)  # The live agent home is denied to both steps.
     assert [argv[:4] for argv in seen] == [["/usr/bin/nice", "-n", "19", "/usr/bin/sandbox-exec"]] * 2
     assert seen[0][-5:] == ["python3", "gen", "T0", "H8", os.fspath(tmp_path / "run" / "rc" / "replays" / "e0-L-0")]
     assert 'localhost:4242' in seen[0][5]
@@ -500,3 +509,26 @@ def test_the_rules_module_can_import_its_pinned_siblings(tmp_path):
     assert rules["identity"]("x") == "x"
     assert sys.path == before  # The kit dir is on the path only while the module loads.
     sys.modules.pop("sibling_helper", None)
+
+
+@pytest.mark.parametrize("calls, outcome, done", [(0, "success", False), (1, "success", True), (2, "failure", False)])
+def test_a_turn_the_agent_never_ran_is_not_completed(tmp_path, calls, outcome, done):
+    """The host reports a turn it only queued (startup restore) as completed with success; the scripted provider's
+    agent calls for the step are the ground truth, so a step with no agent call never counts as a completed turn."""
+    import threading
+    from collections import Counter
+
+    class Provider:
+        lock, step = threading.Lock(), None
+        stats = {"calls_per_step": Counter()}
+
+    provider = Provider()
+
+    class Gateway:
+        def turn(self, chat, step_id, text):
+            provider.stats["calls_per_step"][step_id] += calls
+            return {"step": step_id, "completed": True, "outcome": outcome}
+
+    ctx = {"provider": provider, "gateway": Gateway(), "chats": {"L": "d5-L"}}
+    assert r.LocalHost({}, tmp_path).turn(ctx, {"id": "e1-L-0", "conversation": "L", "user_text": "x"}) is done
+    assert provider.step is None

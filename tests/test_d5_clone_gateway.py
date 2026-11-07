@@ -302,7 +302,16 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header('Content-Length', str(len(body)))
         self.end_headers()
         self.wfile.write(body)
-    def do_GET(self): self.respond({'connected': self.path == '/health', 'path': self.path})
+    def do_GET(self):
+        restoring = os.environ.get('D5_FAKE_RESTORING', 'false')  # 'false', 'true', 'absent', or N polls of 'true'
+        polls = Path(os.environ['D5_LOCAL_PORT_FILE'] + '.polls')
+        n = int(polls.read_text()) + 1 if polls.exists() else 1
+        polls.write_text(str(n))
+        state = {'false': False, 'true': True}.get(restoring, n <= int(restoring) if restoring.isdigit() else None)
+        body = {'connected': self.path == '/health', 'path': self.path}
+        if restoring != 'absent':
+            body['restoring'] = state
+        self.respond(body)
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
         self.respond({'step': body['step'], 'completed': True, 'replies': 1,
@@ -473,3 +482,20 @@ def test_build_env_links_the_arm_tree_and_refuses_a_non_plugin_tree(tmp_path):
     with pytest.raises(ValueError):  # An existing link to another tree is never repointed.
         g.build_env({}, home=tmp_path / "home", provider_url=URL, host_bin="/synthetic/bin",
                     port_file=tmp_path / "port", lcm_tree=ROOT)
+
+
+@pytest.mark.parametrize("restoring, ready", [("false", True), ("3", True), ("true", False), ("absent", False)])
+def test_readiness_waits_for_the_host_restore_gate(fake_gateway, restoring, ready):
+    """A gateway is ready only once the host's startup-restore gate is open; a gate that stays shut or cannot be
+    read never reads ready, and the error names its last state."""
+    fake_gateway.env["D5_FAKE_RESTORING"] = restoring
+    try:
+        if ready:
+            fake_gateway.start(5)
+            polls = int(Path(f"{fake_gateway.port_file}.polls").read_text())
+            assert polls >= (4 if restoring == "3" else 1)  # It kept polling while the gate was shut.
+        else:
+            with pytest.raises(RuntimeError, match="host startup-restore gate: " + ("True" if restoring == "true" else "absent")):
+                fake_gateway.start(1.5)
+    finally:
+        fake_gateway.stop(1)

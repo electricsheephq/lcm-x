@@ -209,18 +209,23 @@ class Gateway:
             self.process = subprocess.Popen(["/usr/bin/nice", "-n", "19", *argv], env=self.env, cwd=self.home,
                                             stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
         self.exit_code = None  # A new gateway: the next stop() must signal it.
-        deadline = time.monotonic() + timeout
+        deadline, restoring = time.monotonic() + timeout, "never read"
         while time.monotonic() < deadline and not self._exited():
             try:
                 if self.port_file.stat().st_mtime_ns != previous:
                     self.port = int(self.port_file.read_text())
-                    if self._request("/health", timeout=min(1, timeout)).get("connected") is True:
+                    health = self._request("/health", timeout=min(1, timeout))
+                    restoring = health.get("restoring", "absent")
+                    # Ready only once the host's startup-restore gate is open: a turn sent before it is queued
+                    # and reported complete without the agent running. A gate that cannot be read never reads open.
+                    if health.get("connected") is True and health.get("restoring") is False:
                         return self
             except (OSError, ValueError):
                 pass
             time.sleep(0.05)
         self.stop(min(timeout, 5))
-        raise RuntimeError(f"gateway failed readiness; exit_code={self.exit_code}")
+        raise RuntimeError(f"gateway failed readiness; exit_code={self.exit_code}; "
+                           f"host startup-restore gate: {restoring}")  # None or absent: the gate was not found.
 
     def turn(self, chat_id, step, text, timeout=600):
         return self._request("/turn", {"chat_id": chat_id, "step": step, "text": text, "timeout": timeout}, timeout + 1)
