@@ -590,6 +590,96 @@ def test_rekey_copy_is_a_noop_when_keys_match(rekey_copy, tmp_path):
     assert inventory(path.parent) == before
 
 
+@pytest.mark.parametrize("same_destination", [False, True])
+def test_rekey_copy_resolves_shared_keys_before_any_update(rekey_copy, tmp_path, monkeypatch, same_destination):
+    path, conversations = rekey_copy
+    conversations.append({"name": "S1", "session_id": "s2",
+                          "chat_id": "d5-L" if same_destination else "d5-S1"})
+    connect, updates = sqlite3.connect, []
+
+    def traced_connect(*args, **kwargs):
+        db = connect(*args, **kwargs)
+        db.set_trace_callback(lambda sql: updates.append(sql) if sql.startswith("UPDATE ") else None)
+        return db
+
+    monkeypatch.setattr(r.sqlite3, "connect", traced_connect)
+    before = inventory(path.parent)
+    if not same_destination:
+        with pytest.raises(ValueError, match="L.*S1") as error:
+            r.rekey_copy_conversations(path, conversations, run_dir=tmp_path)
+        assert "old" not in str(error.value) and "agent:" not in str(error.value)
+        assert updates == []
+        assert inventory(path.parent) == before
+        return
+
+    receipt = r.rekey_copy_conversations(path, conversations, run_dir=tmp_path)
+    key = r.gateway.session_key("d5-L")
+    counts = {"messages": {"before": 2, "after": 2, "old_remaining": 0},
+              "lcm_lifecycle_state": {"before": 1, "after": 1, "old_remaining": 0}}
+    assert receipt == [{"name": name, "old_h12": r._sha("old")[:12], "new_h12": r._sha(key)[:12],
+                        "tables": counts, "shared_k1_with": [other]} for name, other in (("L", "S1"), ("S1", "L"))]
+    assert len(updates) == 2  # One rename per table, even with two plan entries.
+    with closing(connect(path)) as db:
+        assert db.execute("SELECT conversation_id FROM messages ORDER BY store_id").fetchall() == [
+            (key,), (key,), ("unrelated",)]
+        assert db.execute("SELECT * FROM lcm_lifecycle_state ORDER BY conversation_id").fetchall() == [
+            (key, "s2"), ("unrelated", "other")]
+
+
+def test_local_arm_rekeys_after_routing_before_gateway_start(rekey_copy, tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    path, conversations = rekey_copy
+    home = path.parent
+    path.rename(home / "store.db")
+    with closing(sqlite3.connect(home / "host-0.db")) as db, db:
+        db.executescript("CREATE TABLE sessions (id TEXT PRIMARY KEY, started_at REAL, session_key TEXT);"
+                         "CREATE TABLE gateway_routing (scope TEXT, session_key TEXT, entry_json TEXT, updated_at REAL,"
+                         " PRIMARY KEY (scope, session_key));"
+                         "INSERT INTO sessions VALUES ('s1', 0, 'old');")
+    host_src = tmp_path / "host"
+    (host_src / "hermes_cli").mkdir(parents=True)
+    (host_src / "hermes_cli" / "config.py").write_text("DEFAULT_CONFIG = {'auxiliary': {}}\n")
+    plugin = tmp_path / "plugin"
+    plugin.mkdir()
+    (plugin / "plugin.yaml").write_text("name: synthetic\n")
+    server = SimpleNamespace(url="http://127.0.0.1:12345/v1",
+                             server=SimpleNamespace(server_address=("127.0.0.1", 12345)))
+    monkeypatch.setattr(r.prov, "Provider", lambda plan: SimpleNamespace(start=lambda: server))
+    connect, events = sqlite3.connect, []
+    key = r.gateway.session_key("d5-L")
+
+    def traced_connect(*args, **kwargs):
+        db = connect(*args, **kwargs)
+
+        def trace(sql):
+            if sql.startswith("UPDATE sessions "):
+                events.append("routing")
+            if sql.startswith("UPDATE messages "):
+                # The routing transaction must already be committed when re-keying starts.
+                with closing(connect(home / "state.db")) as host:
+                    events.append(("rekey", host.execute("SELECT session_key FROM sessions").fetchone()[0]))
+
+        db.set_trace_callback(trace)
+        return db
+
+    def start(gateway, timeout):
+        with closing(connect(home / "lcm.db")) as db:
+            assert db.execute("SELECT DISTINCT conversation_id FROM messages WHERE session_id IN ('s1', 's2')").fetchall() == [(key,)]
+        events.append("start")
+
+    monkeypatch.setattr(r.sqlite3, "connect", traced_connect)
+    monkeypatch.setattr(r.gateway.Gateway, "start", start)
+    host = r.LocalHost({"rc": {"host_src": host_src, "host_bin": tmp_path / "bin", "lcm_tree": plugin},
+                        "settings": {"compression": {}, "lcm": {}}, "context_length": 32000, "lcm_env": {}}, tmp_path)
+    ctx = host.arm("rc", home, {"conversations": conversations, "provider": {"steps": {}, "cron": []}})
+    assert ctx["routing"]["sessions"] == 1
+    assert ctx["routing"]["conversation_rekeys"][0]["tables"]["messages"]["after"] == 2
+    assert events == ["routing", ("rekey", key)]
+    host.start(ctx)
+    assert events == ["routing", ("rekey", key), "start"]
+
+
 @pytest.mark.parametrize("appears", [True, False])
 def test_cold_bind_waits_for_durable_ingest_before_h8(setup, monkeypatch, appears):
     _, config, run_dir = setup

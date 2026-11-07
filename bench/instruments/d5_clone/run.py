@@ -101,25 +101,45 @@ def rekey_copy_conversations(lcm_db, conversations, *, run_dir):
                 if name not in ("messages", "lcm_lifecycle_state"):
                     raise ValueError(f"unexpected conversation_id table: {name}")
                 tables.append(name)
+        resolved, groups = [], {}
         for conversation in conversations:
             keys = db.execute("SELECT DISTINCT conversation_id FROM messages WHERE session_id=?",
                               (conversation["session_id"],)).fetchall()
             if len(keys) != 1:
                 raise ValueError("copied session must carry exactly one conversation_id")
             old, new = keys[0][0], gateway.session_key(conversation["chat_id"])
+            resolved.append((conversation["name"], old, new))
+            group = groups.setdefault(old, {"new": new, "names": []})
+            group["names"].append(conversation["name"])
+            if group["new"] != new:
+                raise ValueError("shared conversation has different destinations: " + ", ".join(group["names"]))
+        # Resolve and validate the whole plan against the original state before the first rename.
+        for old, group in groups.items():
+            new = group["new"]
+            if old == new:
+                continue
+            for table in tables:
+                if db.execute(f"SELECT 1 FROM {table} WHERE conversation_id=? LIMIT 1", (new,)).fetchone():
+                    raise ValueError("copied conversation destination already has rows")
+        for old, group in groups.items():
+            new = group["new"]
             if old == new:
                 continue
             counts = {}
             for table in tables:
-                if db.execute(f"SELECT 1 FROM {table} WHERE conversation_id=? LIMIT 1", (new,)).fetchone():
-                    raise ValueError("copied conversation destination already has rows")
                 before = db.execute(f"SELECT count(*) FROM {table} WHERE conversation_id=?", (old,)).fetchone()[0]
                 db.execute(f"UPDATE {table} SET conversation_id=? WHERE conversation_id=?", (new, old))
                 after = db.execute(f"SELECT count(*) FROM {table} WHERE conversation_id=?", (new,)).fetchone()[0]
                 left = db.execute(f"SELECT count(*) FROM {table} WHERE conversation_id=?", (old,)).fetchone()[0]
                 counts[table] = {"before": before, "after": after, "old_remaining": left}
-            changes.append({"name": conversation["name"], "old_h12": _sha(old)[:12], "new_h12": _sha(new)[:12],
-                            "tables": counts})
+            group["tables"] = counts
+        for name, old, new in resolved:
+            if old == new:
+                continue
+            entry = {"name": name, "old_h12": _sha(old)[:12], "new_h12": _sha(new)[:12], "tables": groups[old]["tables"]}
+            if len(groups[old]["names"]) > 1:
+                entry["shared_k1_with"] = [other for other in groups[old]["names"] if other != name]
+            changes.append(entry)
     return changes
 
 
@@ -423,7 +443,7 @@ class LocalHost:
         """Wait for this turn's new user row to be durable before taking the bind's H8 capture."""
         started = time.monotonic()
         deadline = started + self.c.get("cold_ingest_timeout", COLD_INGEST_TIMEOUT)
-        # Edge whitespace is compared away: a rewrite step's text ends in "  \r\n" (plan.py), which a host may strip.
+        # Only cold steps wait today; trimming edge whitespace is defensive if a future step's text is rewritten.
         args = (ctx["sessions"][step["conversation"]], t0["store_max_store_id"] or 0, step["user_text"].strip(" \t\r\n"))
         while True:
             try:
