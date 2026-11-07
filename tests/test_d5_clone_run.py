@@ -500,3 +500,26 @@ def test_the_rules_module_can_import_its_pinned_siblings(tmp_path):
     assert rules["identity"]("x") == "x"
     assert sys.path == before  # The kit dir is on the path only while the module loads.
     sys.modules.pop("sibling_helper", None)
+
+
+@pytest.mark.parametrize("calls, outcome, done", [(0, "success", False), (1, "success", True), (2, "failure", False)])
+def test_a_turn_the_agent_never_ran_is_not_completed(tmp_path, calls, outcome, done):
+    """The host reports a turn it only queued (startup restore) as completed with success; the scripted provider's
+    agent calls for the step are the ground truth, so a step with no agent call never counts as a completed turn."""
+    import threading
+    from collections import Counter
+
+    class Provider:
+        lock, step = threading.Lock(), None
+        stats = {"calls_per_step": Counter()}
+
+    provider = Provider()
+
+    class Gateway:
+        def turn(self, chat, step_id, text):
+            provider.stats["calls_per_step"][step_id] += calls
+            return {"step": step_id, "completed": True, "outcome": outcome}
+
+    ctx = {"provider": provider, "gateway": Gateway(), "chats": {"L": "d5-L"}}
+    assert r.LocalHost({}, tmp_path).turn(ctx, {"id": "e1-L-0", "conversation": "L", "user_text": "x"}) is done
+    assert provider.step is None
