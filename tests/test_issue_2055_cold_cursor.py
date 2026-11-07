@@ -97,15 +97,29 @@ def test_t2_tool_multiset_excludes_consumed_ids_not_equal_content(engines):
     helper = engine._replayed_tool_segment_indexes_after_cursor
     assert helper(view, 1) == {2, 3}
     assert helper(view, 1, consumed_store_ids={r["store_id"] for r in stored[1:]}) == set()
-    # Push a real equal-identity twin outside the helper's 64-row tail.
+    # Push a real equal-identity twin outside the helper's 64-row tail. It is unstamped: a stamped twin
+    # at another stamp is another occurrence and never stands in (#2377, asserted below).
     outside = stored[1]["store_id"]
     engine._ingest_messages([p, *old, *[_m("user", f"padding {i}", 20. + i) for i in range(65)],
-                             *tool_pair(100.)])
+                             *unstamped_pair()])
     tail = engine._store.get_session_tail("S", limit=64)
     assert outside not in {r["store_id"] for r in tail}
     identity = engine._message_replay_identity(stored[1], stored_row=True)
     assert any(engine._message_replay_identity(r, stored_row=True) == identity for r in tail)
     assert helper(view, 1, consumed_store_ids={outside}) == {2, 3}
+
+
+def test_t2_a_twin_at_another_stamp_never_stands_in(engines):
+    """#2377: a stamped twin outside the consumed ids, at a different stamp, proves no replay of host A@2."""
+    engine = engines()
+    p, old = _m("user", "P", 1.), tool_pair(2.)
+    engine._ingest_messages([p, *old])
+    stored = engine._store.get_session_messages("S")
+    engine._ingest_messages([p, *old, *[_m("user", f"padding {i}", 20. + i) for i in range(65)],
+                             *tool_pair(100.)])
+    view = [p, _m("user", "new", 9.), *old]
+    assert engine._replayed_tool_segment_indexes_after_cursor(
+        view, 1, consumed_store_ids={stored[1]["store_id"]}) == set()
 
 
 
