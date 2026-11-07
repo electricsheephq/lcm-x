@@ -21,7 +21,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections import Counter
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional
@@ -3473,6 +3473,15 @@ class ReconcileMixin:
                     segments.append(current)
             elif current is not None:
                 current[1].append(row)
+        # Each stored segment's identity, stamp and unspent results are computed once and indexed by
+        # call identity, so binding stays linear in the tail (a review thread measured O(H*S) here).
+        by_identity = defaultdict(list)
+        for call, results in segments:
+            by_identity[self._message_replay_identity(call, stored_row=True)].append((
+                call, results, _normalize_observed_at(call.get("observed_at")),
+                Counter((str(row.get("tool_call_id") or ""), self._message_replay_identity(row, stored_row=True))
+                        for row in results if row["store_id"] not in consumed
+                        and not self._matches_ignore_message_patterns(row, stored_row=True))))
         used, bindings = set(), {}
         for index, host in enumerate(messages):
             if host.get("role") != "assistant" or not host.get("tool_calls"):
@@ -3486,26 +3495,19 @@ class ReconcileMixin:
                     break
                 host_results.append(result)
             candidates, possible = [], []
-            for call, results in segments:
+            needed = Counter((str(row.get("tool_call_id") or ""), self._message_replay_identity(row))
+                             for row in host_results)
+            for call, results, stored_stamp, available in by_identity.get(identity, ()):
                 sid = call["store_id"]
                 if sid in used or (sid in consumed and sid != ledger_id):
                     continue
                 if ledger_id is not None and sid != ledger_id:
                     continue
-                if self._message_replay_identity(call, stored_row=True) != identity:
-                    continue
                 possible.append((call, results))
-                stored_stamp = _normalize_observed_at(call.get("observed_at"))
                 if stamp is not None and stored_stamp is not None and stamp != stored_stamp:
                     if sid == ledger_id:
                         used.add(sid)  # A vetoed ledger occurrence stays reserved.
                     continue
-                available = Counter(
-                    (str(row.get("tool_call_id") or ""), self._message_replay_identity(row, stored_row=True))
-                    for row in results if row["store_id"] not in consumed
-                    and not self._matches_ignore_message_patterns(row, stored_row=True))
-                needed = Counter((str(row.get("tool_call_id") or ""), self._message_replay_identity(row))
-                                 for row in host_results)
                 if all(available[key] >= count for key, count in needed.items()):
                     candidates.append((call, results))
             stamped = [pair for pair in candidates if stamp is not None
