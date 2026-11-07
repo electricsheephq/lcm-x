@@ -12271,26 +12271,39 @@ class LCMEngine(
         # check, so a retyped row never stands for the view's own.
         return self._retry_cold_tail_s3(tail, stamps=same, deadline=deadline)
 
+    def _cold_tail_ingest_drops(self, message):
+        """Whether ignore filtering excludes this incoming host row."""
+        text = text_content_for_pattern_matching(message.get("content")) or ""
+        return (self._matches_ignore_message_patterns(message)
+                or self._is_volatile_ignored_quarantine_placeholder(message, text)
+                or self._is_ignored_active_replay_placeholder(message, text))
+
     def _cold_tail_ingest_view(self, tail):
-        """Compare only the host rows that ingest keeps after ignore filtering."""
+        """Exclude ignored host rows and LCM's placeholders from the exit count."""
         view = tail["view"]
-        if not self._compiled_ignore_message_patterns:
-            return view
-        return [message for message in view if not self._matches_ignore_message_patterns(message)]
+        kept = [message for message in view if not self._cold_tail_ingest_drops(message)]
+        return view if len(kept) == len(view) else kept
 
     def _cold_tail_one_conflict(self, tail):
         """Return the sole unexplained user stamp conflict in an identity-matching prefix."""
-        view, session, home = self._cold_tail_ingest_view(tail), tail["session_id"], tail["hermes_home"]
+        view, session, home = tail["view"], tail["session_id"], tail["hermes_home"]
         stored = tail["store"].get_range(session, limit=len(view) + 1,
             conversation_id=_normalize_conversation_id_value(tail["conversation_id"]))
         conflicts = []
-        for index, (row, message) in enumerate(zip(stored, view)):
+        stored_index = index = 0
+        while stored_index < len(stored) and index < len(view):
+            row, message = stored[stored_index], view[index]
             if (self._session_end_prefix_compare_identity(row, session_id=session, hermes_home=home) !=
                     self._session_end_prefix_compare_identity(message, session_id=session, hermes_home=home)):
+                if self._cold_tail_ingest_drops(message):
+                    index += 1
+                    continue
                 return None
             stamp, seen = _normalize_observed_at(message.get("timestamp")), _normalize_observed_at(row.get("observed_at"))
             if None not in (stamp, seen) and stamp != seen:
                 conflicts.append((index, row, message, stamp))
+            stored_index += 1
+            index += 1
         if len(conflicts) != 1:
             return None
         index, row, message, stamp = conflicts[0]
