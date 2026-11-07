@@ -71,7 +71,10 @@ def test_capture_layout_hashes_and_extras(inputs, tmp_path, kind):
     assert manifest["kind"] == kind
     assert datetime.fromisoformat(manifest["captured_at"]).utcoffset().total_seconds() == 0
     assert len(manifest["captured_at"].split(".")[1].split("+")[0]) == 6
-    assert set(manifest["files"]) == {"store.db", "host-0.db", "doctor.log", "filters.json", "RC3/store.db"}
+    window = {"window.log"} if kind == "T0" else set()  # The edition reads T0_AT from it.
+    assert set(manifest["files"]) == {"store.db", "host-0.db", "doctor.log", "filters.json", "RC3/store.db"} | window
+    if kind == "T0":
+        assert json.loads((out / "window.log").read_text()) == {"captured_at": manifest["captured_at"]}
     for name, sha in manifest["files"].items():
         assert digest(out / name) == sha
     assert (out / "doctor.log").read_bytes() == log.read_bytes()
@@ -85,7 +88,7 @@ def test_capture_layout_hashes_and_extras(inputs, tmp_path, kind):
     assert "opaque" not in hashes.read_text()
     assert (out / "lcm-large-outputs/nested/opaque").read_bytes() == b"synthetic payload"
     assert result == dict(kind=kind, captured_at=manifest["captured_at"],
-                          capture_hashes_sha256=digest(hashes), files=5, payload_files=1,
+                          capture_hashes_sha256=digest(hashes), files=5 + len(window), payload_files=1,
                           store_max_store_id=7, host_max_id=7)
     with pytest.raises(FileExistsError):
         cap.capture(kind, out, store_db=inputs[0], host_db=inputs[1], payload_dir=payload)

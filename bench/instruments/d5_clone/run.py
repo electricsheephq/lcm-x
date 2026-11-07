@@ -8,18 +8,21 @@ opens the pinned snapshot itself, only its clones; P2 hashes its files and check
 
 The rules module (``rules_module`` in the run config, a pinned file in the instrument directory, imported only after
 P1) provides ``identity(row)``, ``credits`` (the two host-rewrite credits, each ``(row, host_row) -> bool``) and
-``covered(session_id)`` for planning. The edition steps are argv templates in the config: ``constants_argv`` writes
-``{out}/constants.json`` (with ``range_new_rows``) and ``replay_argv`` writes ``{out}/receipt.json``.
+``covered(session_id)`` for planning. The edition steps are argv templates in the config (placeholders ``{python}``,
+``{t0}``, ``{h8}``, ``{out}``, ``{instrument_dir}``, ``{rc_tree}``, ``{ga_tree}`` and ``{session_h12}``):
+``constants_argv`` must leave the generator's report, with ``range_new_rows``, at ``{out}/constants.json``, and
+``replay_argv`` writes the edition's receipt, named by ``replay_receipt`` (default ``receipt.json``), in ``{out}``.
 """
 
 import argparse
-from datetime import datetime
+from datetime import datetime, timedelta
 import hashlib
 import importlib.util
 import json
 from contextlib import closing
 import os
 from pathlib import Path
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -27,14 +30,201 @@ import sys
 import time
 
 from . import bars, capture, gateway, pins, plan as planner, provider as prov, sandbox, snapshot
+from ..release_gauntlet import kit_evidence
 
 SCHEMA = "d5-clone-receipt/1"
 NEED_FREE = 40 * 10**9
 PREFLIGHTS = ("P3", "P4", "P5", "P6", "P7")
+DOCTOR_STATUS = {"pass": "ok", "ok": "ok", "warn": "warn", "fail": "fail"}  # Any other status stays, and fails bar 5.
+# LCM-X's externalized-payload reference (externalize.py _EXTERNALIZED_REF_RE).
+EXTERNALIZED_REF = re.compile(r"\[(?:Externalized|GC'd externalized) (?:tool output|payload):.*?;\s*ref=([^;\]\s]+)\]")
+CRON_MODEL = "d5-cron"
+CRON_PAUSE_REASON = "d5 clone run: paused before the run"
+# How the probe can exercise each lcm_doctor check on a stopped arm (both trees' tools.py lcm_doctor). Store-wide
+# checks read the store, the payload files or the arm's config once; per-session checks read the engine's current
+# session, so they run once per plan session, bound by on_session_start. The rest never see the run: they are left
+# out of bar 5 and reported (release manager, 2026-11-07), and so is any check not named here.
+DOCTOR_STORE_WIDE = frozenset((
+    "database_integrity", "schema_core_tables", "messages_fts_integrity", "nodes_fts_integrity", "sqlite_storage",
+    "payload_storage", "source_lineage_hygiene", "lifecycle_fragmentation", "sensitive_pattern_handling",
+    "config_validation", "embedding_provider_health"))
+DOCTOR_PER_SESSION = ("fts_index_sync", "orphaned_dag_nodes", "summary_quality")
+DOCTOR_PRE_OPEN = ("messages_fts_integrity@pre_open", "nodes_fts_integrity@pre_open")  # Before the engine repairs FTS.
+DOCTOR_NOT_EXERCISED = {
+    "identity_migration": "no plugin registration step in the probe",
+    "inactive_process": "reads live processes; the arm's gateway has stopped",
+    "ingest_health": "the probe process's own counter", "ignore_pattern_drops": "the probe process's own counter",
+    "context_pressure": "the probe process's own counter", "compaction_progress": "the probe process's own counter",
+    "token_counter": "the probe process's tokenizer state"}
 
 
 def _sha_json(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def _rows(db, sql, args=()):
+    """A read-only query's rows; a store, table or column that is not there reads as no rows. A store the read-only
+    open refuses (CaptureError) raises: read as no rows, it would zero a mark and count history as the run's."""
+    try:
+        with closing(capture._readonly(db)) as con:
+            return con.execute(sql, args).fetchall()
+    except (OSError, sqlite3.Error):
+        return []
+
+
+def _json(value):
+    """A JSON object, else None."""
+    try:
+        value = json.loads(value)
+    except (TypeError, ValueError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _sha(text):
+    return hashlib.sha256(str(text).encode()).hexdigest()
+
+
+def marks(home):
+    """Where the arm's stores stand before its gateway first starts: what facts() counts from."""
+    lcm, host = Path(home) / "lcm.db", Path(home) / "state.db"
+
+    def top(db, sql):
+        return (_rows(db, sql) or [(0,)])[0][0] or 0
+
+    return {"store_id": top(lcm, "SELECT max(store_id) FROM messages"), "host_id": top(host, "SELECT max(id) FROM messages"),
+            "node_id": top(lcm, "SELECT max(node_id) FROM summary_nodes"),
+            "proofs": {k: _sha(v) for k, v in _rows(lcm, "SELECT key, value FROM metadata WHERE key GLOB 'compaction_commit_proof:*'")},
+            "rewrites": sorted(k for k, in _rows(lcm, "SELECT key FROM metadata WHERE key GLOB 'host_rewrite_identity:*'"))}
+
+
+def workload_facts(home, before, cron_id=None):
+    """Bar 6's host observations, counted from the stopped arm's own files against its marks (counts only)."""
+    lcm, host = Path(home) / "lcm.db", Path(home) / "state.db"
+    store_after, host_after = (before.get("store_id", 0),), (before.get("host_id", 0),)
+    # A published compaction: a session whose LCM-X commit proof row changed and is not native, with a new summary node.
+    nodes = {s for s, in _rows(lcm, "SELECT DISTINCT session_id FROM summary_nodes WHERE node_id > ?", (before.get("node_id", 0),))}
+    published = sum(key.partition(":")[2] in nodes and before.get("proofs", {}).get(key) != _sha(value)
+                    and (_json(value) or {}).get("native") is False
+                    for key, value in _rows(lcm, "SELECT key, value FROM metadata WHERE key GLOB 'compaction_commit_proof:*'"))
+    # A whitespace rewrite: a host_rewrite_identity row for a new user row, recording the edge whitespace stripped.
+    users = {str(i) for i, in _rows(lcm, "SELECT store_id FROM messages WHERE role = 'user' AND store_id > ?", store_after)}
+    rewrites = sum(key not in before.get("rewrites", ()) and key.partition(":")[2] in users
+                   and any((_json(value) or {}).get("stripped") or ())
+                   for key, value in _rows(lcm, "SELECT key, value FROM metadata WHERE key GLOB 'host_rewrite_identity:*'"))
+    # A payload swap, in the shape the pinned payload credit rewards: a new host tool row that is one reference to one
+    # payload file, whose content LCM-X stores in a row of the same session, role and tool_call_id.
+    swaps = 0
+    for s, c, text in _rows(host, "SELECT session_id, tool_call_id, content FROM messages WHERE role = 'tool'"
+                                  " AND tool_call_id IS NOT NULL AND id > ?", host_after):
+        payload = _swap_payload(home, text)
+        swaps += payload is not None and bool(_rows(lcm, "SELECT 1 FROM messages WHERE session_id = ? AND role = 'tool'"
+                                                         " AND tool_call_id = ? AND content = ? LIMIT 1", (s, c, payload)))
+    fired = 0
+    if cron_id:  # A run is the host's cron session for the job (cron/scheduler.py), or its saved output.
+        sessions = len(_rows(host, "SELECT id FROM sessions WHERE id GLOB ?", (f"cron_{cron_id}_*",)))
+        fired = max(sessions, sum(p.is_file() for p in (Path(home) / "cron" / "output" / cron_id).glob("*.md")))
+    return {"cron_fired": fired, "compactions_published": published, "whitespace_rewrites": rewrites,
+            "payload_swaps": swaps}
+
+
+def _swap_payload(home, text):
+    """The payload content a host row that is exactly one engine-form reference resolves to, else None (the pinned
+    payload credit: one whole marker, a basename ref, one payload file whose decoded content is a str)."""
+    marker = EXTERNALIZED_REF.fullmatch(text) if isinstance(text, str) else None
+    if marker is None or len(EXTERNALIZED_REF.findall(text)) != 1 or Path(marker[1]).name != marker[1] \
+            or "quarantined_assistant_output" in text:
+        return None
+    path = Path(home) / "lcm-large-outputs" / marker[1]
+    try:
+        payload = json.loads(path.read_bytes().decode("utf-8")) if path.is_file() else None
+    except (OSError, ValueError, UnicodeError):
+        return None
+    return payload["content"] if isinstance(payload, dict) and isinstance(payload.get("content"), str) else None
+
+
+def pause_cron_jobs(home, now):
+    """Pause every job already in the arm's host job file, as the host's pause_job does (cron/jobs.py), keeping the
+    file's shape: a declared copy edit, the same in both arms. Returns the paused job ids (ids, not content)."""
+    path = Path(home) / "cron" / "jobs.json"
+    data = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else []
+    jobs = data if isinstance(data, list) else data.get("jobs", [])
+    jobs = [j for j in (jobs.values() if isinstance(jobs, dict) else jobs) if isinstance(j, dict)]
+    for job in jobs:
+        job.update(enabled=False, state="paused", paused_at=now.isoformat(), paused_reason=CRON_PAUSE_REASON)
+    if jobs:
+        path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    ids = sorted(str(j.get("id")) for j in jobs)
+    return {"job_ids": ids, "count": len(ids)}
+
+
+def cron_job(cron, now):
+    """The plan's job as the host's create_job records it (cron/jobs.py). Its id comes from the plan, so both arms
+    create the same job; only the creation and next-run times differ."""
+    match = re.fullmatch(r"every (\d+)m", cron["schedule"])
+    if not match:
+        raise ValueError("only an 'every <n>m' cron schedule is supported")
+    minutes, empty = int(match[1]), dict.fromkeys((
+        "skill", "base_url", "script", "monitor_script", "monitor_url", "monitor_state", "context_from", "paused_at",
+        "paused_reason", "last_run_at", "last_status", "last_error", "last_delivery_error", "last_delivery_unverified",
+        "last_failure", "origin", "enabled_toolsets", "workdir"))
+    schedule = {"kind": "interval", "minutes": minutes, "display": f"every {minutes}m"}
+    return {**empty, "id": _sha(cron["prompt"])[:12], "name": cron["prompt"][:50].strip(), "prompt": cron["prompt"],
+            "skills": [], "model": CRON_MODEL, "provider": "d5", "no_agent": False, "schedule": schedule,
+            "schedule_display": schedule["display"], "repeat": {"times": cron["repeat"], "completed": 0},
+            "enabled": True, "state": "scheduled", "created_at": now.isoformat(),
+            "next_run_at": (now + timedelta(minutes=minutes)).isoformat(), "failure_streak": 0, "deliver": "local"}
+
+
+def _doctor_rows(path):
+    """A doctor result's (check, status) rows through the gauntlet's doctor-match parser, else None."""
+    try:
+        return [(r["check"], DOCTOR_STATUS.get(r["status"], r["status"]))
+                for r in kit_evidence.doctor_match(path, path)["candidate_signatures"]]
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        return None
+
+
+def probe_checks(out, sessions):
+    """(bar-5 rows, not exercised) from the probe's files in *out*; *sessions* are the plan sessions' sha256 12 keys.
+    A kind the probe did not produce is left out, so bar 5 reads it as not shown. Store-wide doctor checks come from
+    the unbound run, per-session ones from each session's run as ``<check>@<key>``; a check the probe cannot exercise
+    is never a row, only {check, reason}."""
+    found, skipped = [], []
+    if out is None:
+        return found, skipped
+    rows = _doctor_rows(out / "doctor.json")
+    if rows is not None:
+        bound = (_json((out / "sessions.json").read_text(encoding="utf-8")) if (out / "sessions.json").is_file()
+                 else None) or {}
+        for check, status in rows:
+            if check in DOCTOR_STORE_WIDE:
+                found.append({"kind": "doctor", "check": check, "status": status})
+            elif check not in DOCTOR_PER_SESSION:
+                if check not in DOCTOR_NOT_EXERCISED and status != "ok":
+                    found.append({"kind": "doctor", "check": check, "status": status})  # A new check's warn or fail counts.
+                else:
+                    skipped.append({"check": check,
+                                    "reason": DOCTOR_NOT_EXERCISED.get(check, "not classified for the probe")})
+        pre_open = dict(c for c in _doctor_rows(out / "fts-pre-open.json") or () if c[0] in DOCTOR_PRE_OPEN)
+        found += [{"kind": "doctor", "check": c, "status": pre_open[c]} for c in DOCTOR_PRE_OPEN if c in pre_open]
+        unbound = [] if set(DOCTOR_PRE_OPEN) <= set(pre_open) else ["fts-pre-open"]  # Else only a repaired index was seen.
+        for key in sessions:
+            scoped = _doctor_rows(out / f"doctor-{key}.json") if bound.get(key) is True else None
+            found += [{"kind": "doctor", "check": f"{c}@{key}", "status": st}  # Every reported row, a fail included,
+                      for c, st in scoped or () if c in DOCTOR_PER_SESSION]  # even when the report is incomplete.
+            reported = {c for c, _ in scoped or ()}
+            skipped += [{"check": f"{c}@{key}", "reason": "no session binding in this tree" if scoped is None
+                         else "not reported by the session run"} for c in DOCTOR_PER_SESSION if c not in reported]
+            unbound += [] if set(DOCTOR_PER_SESSION) <= reported else [key]  # Not looked at in full: never a PASS.
+        if unbound and all(r["status"] in ("ok", "warn") for r in found):
+            found = []  # A plan session, or the store's FTS before the engine opened it, not looked at: never a PASS.
+    schema = _json((out / "schema.json").read_text(encoding="utf-8")) if (out / "schema.json").is_file() else None
+    if isinstance(schema, dict) and set(schema) == {"lcm.db", "state.db"}:
+        found += [{"kind": "schema", "check": name, "status": "ok" if isinstance(s, dict) and s.get("error") is False
+                   and s.get("missing_tables") == [] and type(s.get("version")) is int and s["version"] == s.get("expected")
+                   else "fail"} for name, s in sorted(schema.items())]
+    return found, sorted(skipped, key=lambda item: item["check"])
 
 
 class LocalHost:
@@ -77,7 +267,12 @@ class LocalHost:
             path = pins._load_path(self.c["instrument_dir"], self.c["rules_module"])  # Refuses absolute and '..'.
             spec = importlib.util.spec_from_file_location("d5_clone_rules", path)
             module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
+            root = str(Path(self.c["instrument_dir"]).resolve())  # Sibling kit modules, pinned by P1, import.
+            sys.path.insert(0, root)
+            try:
+                spec.loader.exec_module(module)
+            finally:
+                sys.path.remove(root)
             self._rules = {"identity": module.identity, "credits": tuple(module.credits), "covered": module.covered,
                            "configure_planning": module.configure_planning, "configure_bar1": module.configure_bar1}
         return self._rules
@@ -133,10 +328,12 @@ class LocalHost:
         env, _ = gateway.build_env(self.c["lcm_env"], home=home, provider_url=server.url, host_bin=tree["host_bin"],
                                    port_file=home.parent / "d5-local.port", lcm_tree=tree["lcm_tree"])
         port = server.server.server_address[1]
-        return {"name": name, "home": home, "provider": server, "port": port, "tree": tree,
+        return {"name": name, "home": home, "provider": server, "port": port, "tree": tree, "marks": marks(home),
+                "session_ids": [c["session_id"] for c in plan["conversations"]],
                 "gateway": gateway.Gateway(tree["host_bin"], home, env, home.parent, provider_port=port),
                 "payloads": sum(p.is_file() for p in (home / "lcm-large-outputs").rglob("*")),
-                "chats": {c["name"]: c["chat_id"] for c in plan["conversations"]}}
+                "chats": {c["name"]: c["chat_id"] for c in plan["conversations"]},
+                "sessions": {c["name"]: c["session_id"] for c in plan["conversations"]}}
 
     def start(self, ctx):
         ctx["gateway"].start(self.c.get("start_timeout", 300))
@@ -159,6 +356,9 @@ class LocalHost:
     def capture(self, ctx, kind, step, extras=None):
         out = self._dir(ctx["name"], "captures") / f"{step['id']}-{kind}"
         home = ctx["home"]
+        if kind == "H8":  # The edition reads the bind's anchor and history lines from the window's host logs.
+            extras = {**(extras or {}), **{f"native-{name}.log": home / "logs" / name
+                                           for name in ("agent.log", "gateway.log") if (home / "logs" / name).is_file()}}
         return out, capture.capture(kind, out, store_db=home / "lcm.db", host_db=home / "state.db",
                                     payload_dir=home / "lcm-large-outputs", extras=extras, home=home)
 
@@ -168,17 +368,21 @@ class LocalHost:
         python = self.c["interpreter"]
         values = {"python": os.path.abspath(python) if os.sep in python else python, "t0": t0, "h8": h8, "out": out,
                   "instrument_dir": os.path.abspath(self.c["instrument_dir"]),  # The argv runs with cwd=out.
-                  "rc_tree": os.path.abspath(self.c["rc"]["lcm_tree"]), "ga_tree": os.path.abspath(self.c["ga"]["lcm_tree"])}
+                  "rc_tree": os.path.abspath(self.c["rc"]["lcm_tree"]), "ga_tree": os.path.abspath(self.c["ga"]["lcm_tree"]),
+                  "session_h12": hashlib.sha256(ctx["sessions"][step["conversation"]].encode()).hexdigest()[:12]}
+        receipt_name = self.c.get("replay_receipt", "receipt.json")  # The edition's receipt, by its declared name.
+        if Path(receipt_name).name != receipt_name:
+            raise ValueError("replay_receipt must be a bare file name")
         for key in ("constants_argv", "replay_argv"):
             argv = sandbox.wrap([a.format(**values) for a in self.c[key]], ports=[ctx["port"]], socket_roots=[out])
             env = {"PATH": "/usr/bin:/bin", "HOME": str(out), "PYTHONDONTWRITEBYTECODE": "1"}
-            if subprocess.run(["/usr/bin/nice", "-n", "19", *argv], cwd=out, env=env, capture_output=True).returncode:
-                return None, True, None
+            code = subprocess.run(["/usr/bin/nice", "-n", "19", *argv], cwd=out, env=env, capture_output=True).returncode
+            if code:  # An error, or (constants exit 1) a NOT SHOWN bind: no replay runs after it. Either way the
+                return None, True, _range_new_rows(out)  # report's range_new_rows is kept when it was written.
         try:
-            constants = json.loads((out / "constants.json").read_text(encoding="utf-8"))
-            return json.loads((out / "receipt.json").read_text(encoding="utf-8")), False, constants.get("range_new_rows")
+            return (json.loads((out / receipt_name).read_text(encoding="utf-8")), False, _range_new_rows(out))
         except (OSError, ValueError):
-            return None, True, None
+            return None, True, _range_new_rows(out)
 
     def remove(self, path):
         capture.remove_capture(path, receipt_written=True)
@@ -196,9 +400,48 @@ class LocalHost:
     def roots(self, ctx):
         return [str(ctx["home"] / "plugins" / "hermes-lcm-x"), str(Path(ctx["tree"]["lcm_tree"]).resolve())]
 
+    def schedule(self, ctx, cron):
+        """Add the plan's cron job to the arm home's host job file, as create_job adds one; returns its id's sha256."""
+        path = ctx["home"] / "cron" / "jobs.json"
+        data = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {"jobs": []}
+        job = cron_job(cron, datetime.now().astimezone())
+        if isinstance(data, list):  # The file's own shape is kept.
+            data.append(job)
+        else:
+            data.update(jobs=[*data.get("jobs", []), job], updated_at=job["created_at"])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        ctx["cron_id"] = job["id"]
+        return _sha(job["id"])
+
+    def pause_cron(self, ctx):
+        return pause_cron_jobs(ctx["home"], datetime.now().astimezone())
+
+    def probe(self, ctx):
+        """The doctor and schema probe, by the arm's host interpreter under the sandbox, on a clone of the stopped arm
+        home (the engine may write to the store it opens). Returns the probe's output dir, or None if it failed."""
+        clone, out = ctx["home"].parent / "doctor" / "home", ctx["home"].parent / "doctor" / "out"  # Per arm clone.
+        try:
+            out.mkdir(parents=True)
+            capture.clone_tree(ctx["home"], clone)
+        except (OSError, subprocess.CalledProcessError):
+            return None
+        env = {**ctx["gateway"].env, "HERMES_HOME": str(clone), "HOME": str(clone / "user-home"), "TMPDIR": str(clone / "tmp"),
+               **{k: str(clone / v) for k, v in gateway.FORCED_LCM_PATHS.items()}}
+        tree = ctx["tree"]
+        argv = sandbox.wrap([str(Path(tree["host_bin"]) / "python"), "-P", "-B",  # Never this dir's modules first.
+                             str(Path(__file__).with_name("doctor_probe.py")),
+                             str(Path(tree["lcm_tree"]).resolve()), str(clone), str(out),
+                             json.dumps(ctx["session_ids"])], ports=[])
+        try:
+            done = subprocess.run(["/usr/bin/nice", "-n", "19", *argv], cwd=clone, env=env, capture_output=True,
+                                  timeout=self.c.get("doctor_timeout", 1800))
+        except subprocess.TimeoutExpired:
+            return None
+        return out if done.returncode == 0 else None
+
     def checks(self, ctx):
-        """quick_check and integrity on both stores. Doctor and schema checks are not collected here yet, so bar 5
-        reads them as not shown (INCONCLUSIVE) until they are."""
+        """quick_check and integrity on both stores, then the doctor's checks and both stores' schema (probe_checks)."""
         out = []
         for name in ("lcm.db", "state.db"):
             for kind, pragma in (("quick_check", "quick_check"), ("integrity", "integrity_check")):
@@ -208,13 +451,14 @@ class LocalHost:
                 except (sqlite3.DatabaseError, capture.CaptureError):
                     ok = False  # A store too damaged, or in a state, to open read-only is a failed check, never a crash.
                 out.append({"kind": kind, "check": name, "status": "ok" if ok else "fail"})
-        return out
+        rows, ctx["doctor_not_exercised"] = probe_checks(self.probe(ctx), [_sha(s)[:12] for s in ctx["session_ids"]])
+        return out + rows
 
     def facts(self, ctx):
-        """Workload observations this host can count. Cron firing, published compactions and the two host rewrites
-        are not observed here yet, so bar 6 reads them as missing (INCONCLUSIVE) until they are."""
+        """Workload observations counted from the arm's own files after it ends (workload_facts)."""
         now = sum(p.is_file() for p in (ctx["home"] / "lcm-large-outputs").rglob("*"))
-        return {"payload_files_created": now - ctx["payloads"]}
+        return {"payload_files_created": now - ctx["payloads"],
+                **workload_facts(ctx["home"], ctx.get("marks") or {}, ctx.get("cron_id"))}
 
     def stats(self, ctx):
         with ctx["provider"].lock:
@@ -226,15 +470,25 @@ class LocalHost:
         ctx["provider"].stop()
 
 
+def _range_new_rows(out):
+    try:
+        return json.loads((Path(out) / "constants.json").read_text(encoding="utf-8")).get("range_new_rows")
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
 def run_arm(host, name, home, plan, extras):
     ctx = host.arm(name, home, plan)
+    cron_paused = host.pause_cron(ctx)  # Before the first gateway start: no snapshot job fires in the run.
     sid = {c["name"]: c["session_id"] for c in plan["conversations"]}
     binds, restarts, egress, tool_turns, started = [], [], [], 0, time.monotonic()
-    planned, not_completed = 0, []
+    planned, not_completed, cron_job_sha256 = 0, [], None
     try:
         for epoch in plan["epochs"]:
             if epoch["restart_before"]:
                 host.stop(ctx)
+            if epoch["epoch"] == plan["cron"]["created_before_epoch"]:  # Created while the gateway is stopped.
+                cron_job_sha256 = host.schedule(ctx, plan["cron"])
             host.start(ctx)
             begun, cold = time.monotonic(), []
             for step in epoch["steps"]:
@@ -274,10 +528,16 @@ def run_arm(host, name, home, plan, extras):
                 "large_conversation_rows": max(c["lcm_rows"] for c in plan["conversations"]),
                 "replay_misses": sum(stats.get("replay_misses", {}).values()), "turns_planned": planned,
                 "turns_completed": planned - len(not_completed), "turns_not_completed": not_completed,
-                **host.facts(ctx)}
+                "cron_job_sha256": cron_job_sha256, **host.facts(ctx)}
+    checks = host.checks(ctx)
+    try:
+        rows = host.rows(home)
+    except (sqlite3.DatabaseError, capture.CaptureError, OSError, StopIteration):
+        rows = None  # A store gone bad after its checks: they are kept (bar 5), and bars 1 and 3 cannot pass.
     return {"binds": binds, "workload": workload, "egress": {"samples": len(egress), "non_local": sum(egress)},
-            "provider": stats, "logs": host.logs(ctx), "roots": host.roots(ctx), "checks": host.checks(ctx),
-            "rows": host.rows(home), "wall_s": round(time.monotonic() - started, 3)}
+            "provider": stats, "logs": host.logs(ctx), "roots": host.roots(ctx), "checks": checks,
+            "doctor_not_exercised": ctx.get("doctor_not_exercised", []), "cron_paused": cron_paused,
+            "rows": rows, "wall_s": round(time.monotonic() - started, 3)}
 
 
 def run(host, *, rc_id, prior=(), instrument_fix=None):
@@ -314,6 +574,9 @@ def run(host, *, rc_id, prior=(), instrument_fix=None):
     if bars.failed_checks(arms["ga"]["checks"]):
         ga_rerun = run_arm(host, "ga", host.clone("ga-rerun"), plan, {"RC3/store.db": base / "store.db"})
     snap = host.rows(base)
+    unreadable = [a for a in arms if arms[a]["rows"] is None]
+    for a in unreadable:
+        arms[a]["rows"] = {"store": [], "host": []}  # Placeholders only: unreadable rc rows make bars 1 and 3 INCONCLUSIVE below; unreadable GA rows alone keep a bar 1 FAIL.
     tops = {k: max((r[c] for r in snap[k]), default=0) for k, c in (("store", "store_id"), ("host", "id"))}
     new = {a: [r for r in arms[a]["rows"]["store"] if r["store_id"] > tops["store"]] for a in arms}
     binds, hosts = arms["rc"]["binds"], [r for r in arms["rc"]["rows"]["host"] if r["id"] > tops["host"]]
@@ -321,7 +584,10 @@ def run(host, *, rc_id, prior=(), instrument_fix=None):
                         window_start=max((b["t0_at"] for b in binds), default=None),
                         bind_receipts=[b["receipt"] for b in binds if isinstance(b["receipt"], dict)])
     results = {
-        "bar1": bars.bar1(new["rc"], hosts, snap["store"] + snap["host"], new["ga"], binds,
+        # GA rows unreadable: GA's class-3 allowance is unknown, so it is set to the rc's own rows (never exceeded);
+        # a lost or settled unassigned row still fails, and the class-3 judgment is left INCONCLUSIVE below.
+        "bar1": bars.bar1(new["rc"], hosts, snap["store"] + snap["host"],
+                          new["rc"] if "ga" in unreadable else new["ga"], binds,
                           {b["bind"]: b["bar2"]["verdict"] for b in binds}, rules["identity"], rules["credits"],
                           missing_receipts=[b["bind"] for b in binds if not isinstance(b["receipt"], dict)]),
         "bar2": bars.bar2([b["bar2"] for b in binds]),
@@ -330,10 +596,17 @@ def run(host, *, rc_id, prior=(), instrument_fix=None):
         "bar5": bars.bar5(arms["rc"]["checks"], arms["ga"]["checks"], ga_rerun and ga_rerun["checks"],
                           bool(ga_rerun) and bars.workload_items(ga_rerun["workload"])["turns_completed"]),
         "bar6": bars.bar6({a: arms[a]["workload"] for a in arms})}
+    if "rc" in unreadable:  # Bars 1 and 3 judge the rc's rows: without them neither can pass or fail.
+        for bar in ("bar1", "bar3"):
+            results[bar] = {"verdict": bars.INCONCLUSIVE, "rows_unreadable": unreadable}
+    elif unreadable:  # Only GA's rows: bar 3 never reads them, and an rc failure bar 1 finds without GA stands.
+        verdict = bars.FAIL if results["bar1"]["verdict"] == bars.FAIL else bars.INCONCLUSIVE
+        results["bar1"] = {**results["bar1"], "verdict": verdict, "rows_unreadable": unreadable}
     receipt.update(
-        arms={a: {**{k: arms[a][k] for k in ("workload", "egress", "provider")},
+        arms={a: {**{k: arms[a][k] for k in ("workload", "egress", "provider", "doctor_not_exercised", "cron_paused")},
                   "checks": bars.check_counts(arms[a]["checks"])} for a in arms},
-        ga_rerun=ga_rerun and {**{k: ga_rerun[k] for k in ("workload", "egress", "provider", "wall_s")},
+        ga_rerun=ga_rerun and {**{k: ga_rerun[k] for k in ("workload", "egress", "provider", "wall_s",
+                                                         "doctor_not_exercised", "cron_paused")},
                                "checks": bars.check_counts(ga_rerun["checks"])},
         binds=[{k: v for k, v in b.items() if k not in ("dup_store_ids", "receipt")} for b in binds], bars=results,
         verdict=bars.verdict(results, prior_verdicts),
