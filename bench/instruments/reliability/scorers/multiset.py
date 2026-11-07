@@ -20,6 +20,7 @@ import json
 import re
 import sys
 import unicodedata
+from bisect import bisect_right
 from collections import Counter, defaultdict
 from pathlib import Path
 
@@ -394,9 +395,15 @@ def score(expected: list[tuple[str, str]], stored_rows: list[tuple], host: dict 
     }
 
 
+def _nonspace_nfd_len(text):
+    # Exact: NFD counts add across joins and vkey preserves them; isspace() agrees with regex \s.
+    return sum(not ch.isspace() for ch in unicodedata.normalize("NFD", text))
+
+
 def phase_c_score(expected: list[tuple[str, str]], rows: list[tuple]) -> dict:
     """Phase C adopts the release multiset-v2 split predicate (r2, sha256 8943a6a7…) without its own-turn
     prompt rule; unlike r2, user boundaries span the owning conversation. Store order guards own turns.
+    Runs are bounded by the turn (user rows), departing from r2's 8-fragment cap (#2214).
     Rows: (store_id, session_id, role, content, conversation_id). v2 normalization is split-only."""
     rows = sorted(rows, key=lambda r: r[0])
     items = [(i, r, t) for i, (r, t) in enumerate(expected) if norm(t)]
@@ -410,28 +417,39 @@ def phase_c_score(expected: list[tuple[str, str]], rows: list[tuple]) -> dict:
         return role, re.sub(r"\s+", " ", unicodedata.normalize("NFC", text or "").replace("\r\n", "\n")).strip()
     want = Counter(vkey(r, t) for r, t in expected)
     held = Counter(vkey(r, t) for _, _, r, t in owned if norm(t))
-    assistants, users = defaultdict(list), defaultdict(list)
+    assistants, user_ids = defaultdict(list), []
     for sid, session, role, text in owned:
         if role == "user":
-            users[session].append(sid)  # empty users remain turn boundaries (v2 MB1)
+            user_ids.append(sid)  # empty users remain turn boundaries (v2 MB1)
         if role == "assistant" and norm(text):
             assistants[session].append((sid, text))
+    user_ids.sort()
     used, replacements, splits = set(), [], []
     for index, role, text in items:
         vk = vkey(role, text)
         if role != "assistant" or held[vk] or want[vk] != 1:
             continue
         hits = []
+        limit = _nonspace_nfd_len(text)
         for session, arows in assistants.items():
             for k in range(len(arows)):
-                for n in range(2, 9):  # v2 MAX_FRAGMENTS = 8; consecutive non-empty assistant rows
-                    run = arows[k:k + n]
-                    if len(run) < n:
+                ids, parts = [arows[k][0]], [arows[k][1]]
+                next_user = bisect_right(user_ids, ids[0])
+                boundary = user_ids[next_user] if next_user < len(user_ids) else None
+                total = _nonspace_nfd_len(parts[0])
+                for j in range(k + 1, len(arows)):
+                    sid, content = arows[j]
+                    if boundary is not None and sid > boundary:
                         break
-                    if vk in (vkey(role, " ".join(c for _, c in run)), vkey(role, "".join(c for _, c in run))):
-                        ids = [s for s, _ in run]
-                        if not any(ids[0] < u < ids[-1] for ids_in_session in users.values() for u in ids_in_session) and all(
-                                vkey(role, c) not in want for _, c in run):
+                    ids.append(sid)
+                    parts.append(content)
+                    total += _nonspace_nfd_len(content)
+                    if total > limit:
+                        break
+                    if total < limit:
+                        continue
+                    if vk in (vkey(role, " ".join(parts)), vkey(role, "".join(parts))):
+                        if all(vkey(role, c) not in want for c in parts):
                             hits.append((ids, session))
                         break
         if len(hits) == 1 and not used.intersection(hits[0][0]):  # uniqueness before use (v2 MB2)
