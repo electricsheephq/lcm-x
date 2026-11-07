@@ -161,6 +161,23 @@ def test_inner_symlink_is_refused_on_the_portable_copy_path(inputs, tmp_path, mo
     assert not (tmp_path / "out" / "lcm-large-outputs" / "inner-link.json").exists()
 
 
+
+def test_a_wal_input_with_a_wal_but_no_shm_is_refused_and_left_unwritten(tmp_path):
+    live, copy = tmp_path / "live", tmp_path / "copy"
+    live.mkdir()
+    copy.mkdir()
+    with closing(sqlite3.connect(live / "s.db")) as conn:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA wal_autocheckpoint=0")
+        conn.execute("CREATE TABLE t (x)")
+        conn.execute("INSERT INTO t VALUES (1)")
+        conn.commit()
+        for name in ("s.db", "s.db-wal"):  # A copy that kept the -wal and dropped the -shm.
+            (copy / name).write_bytes((live / name).read_bytes())
+    with pytest.raises(cap.CaptureError, match="no -shm"):
+        cap._readonly(copy / "s.db")
+    assert sorted(p.name for p in copy.iterdir()) == ["s.db", "s.db-wal"]  # Nothing written beside the input.
+
 def test_reading_a_stopped_wal_input_writes_no_sidecar(tmp_path):
     db = tmp_path / "stopped.db"
     with closing(sqlite3.connect(db)) as conn:
