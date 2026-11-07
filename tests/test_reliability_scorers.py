@@ -56,16 +56,22 @@ def tool_cell(**dispatch):
         {"name": n, "args": a} for n, a in PLAN]}]}
 
 
-def make(tmp_path, *, rows, events, nodes=(), phase=None, sids=None, parents=None, host=None, **cell_kw):
+def make(tmp_path, *, rows, events, nodes=(), phase=None, sids=None, parents=None, host=None,
+         host_occurrences=None, observed=None, **cell_kw):
     d = tmp_path / "cell"
     (d / "db").mkdir(parents=True)
-    if parents is not None or host is not None:  # host: state.db (session, role, content, active) rows
+    if parents is not None or host is not None or host_occurrences is not None:
         con = sqlite3.connect(d / "db" / "state.db")
         con.execute("create table sessions (id text primary key, parent_session_id text)")
         con.executemany("insert into sessions values (?,?)", (parents or {"S0": None}).items())
         if host is not None:
             con.execute("create table messages (id integer primary key, session_id text, role text, content text, active integer)")
             con.executemany("insert into messages (session_id, role, content, active) values (?,?,?,?)", host)
+        elif host_occurrences is not None:
+            con.execute("create table messages (id integer primary key, session_id text, role text, content text,"
+                        " tool_calls text, tool_call_id text, timestamp real, active integer default 1)")
+            con.executemany("insert into messages (session_id, role, content, tool_calls, tool_call_id, timestamp)"
+                            " values (?,?,?,?,?,?)", host_occurrences)
         con.commit()
         con.close()
     con = sqlite3.connect(d / "db" / "lcm.db")
@@ -78,6 +84,9 @@ def make(tmp_path, *, rows, events, nodes=(), phase=None, sids=None, parents=Non
         con.execute("insert into messages values (?,?,?,?,?,?,?)", (i, sid, role, content, *(rest + [None, None])[:2], i * 10.0))
     for i, ids in enumerate(nodes, 1):
         con.execute("insert into summary_nodes values (?,?,?,?,?,?)", (i, "S0", 0, json.dumps(ids), "messages", 1.0))
+    if observed is not None:
+        con.execute("alter table messages add column observed_at real")
+        con.executemany("update messages set observed_at=? where store_id=?", [(ts, i) for i, ts in enumerate(observed, 1)])
     con.commit()
     con.close()
     comp = [{"phase": "A", "turn": i + 1, "event": "compaction", "compression_status": "compacted", "depth0_nodes": i + 1}
