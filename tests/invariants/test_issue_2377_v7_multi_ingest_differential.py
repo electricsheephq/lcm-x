@@ -202,13 +202,15 @@ def check(seed, root, variant=False):
 
 def ownership_flags(v7, main, other):
     """Strict per-key silent check inside the conversation, with the one exempt shape for 'other' plans."""
-    own = Counter(k for _idx, k in v7["own"] - main["held"])
+    # An (occurrence, key) with any linked row has no own row: its unlinked rows are copies.
+    own = Counter(k for _idx, k in (v7["own"] - v7["linked_pairs"]) - main["held"])
     flags, exempt = [], []
     for k, n in v7["unlinked"].items():
         if n - own[k] <= main["unlinked"][k]:
             continue
-        new_linked = any(pair[1] == k for pair in v7["linked_pairs"] - main["held"])
-        if other and new_linked and v7["links"][k] == v7["rows"][k] - v7["occurrences"][k]:
+        # Exempt at most one unlinked copy per link held by a row main lost (the disclosed shape).
+        new_linked = len({pair for pair in v7["linked_pairs"] - main["held"] if pair[1] == k})
+        if other and new_linked and n - own[k] - main["unlinked"][k] <= new_linked:
             exempt.append(k[1])
         else:
             flags.append(k[1])
