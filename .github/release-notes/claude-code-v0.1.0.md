@@ -6,7 +6,7 @@ LCM-X for Claude Code keeps a lossless, local record of your Claude Code session
 
 - **Captures every session.** Each message, tool call and tool result of your Claude Code sessions is written to a local LCM-X store, including the large tool outputs Claude Code saves to files, subagent sessions, resumed sessions and forks. Nothing is summarized away or dropped: the store keeps every transcript line it reads, and an audit command checks each captured line against its transcript file (see Known issues for the two cases it cannot see).
 - **Lets the agent recall it.** The plugin adds five read-only tools: `lcm_grep` (exact and full-text search), `lcm_recall`, `lcm_expand` (returns a stored message or tool output in full), `lcm_load_session` and `lcm_describe`. They work across sessions, so the agent can find what an earlier session said or ran.
-- **Leaves Claude Code alone.** Claude Code's own compaction is unchanged. The plugin never rewrites the conversation and adds nothing to the context by itself; the agent reads memory only when it calls a tool. The hooks print nothing: most run in a few milliseconds and hand the work to a background worker. Before Claude Code compacts, the `PreCompact` hook drains the session into the store first, which can delay compaction by up to 10 seconds (about 0.2 to 1 second in our runs).
+- **Leaves Claude Code alone.** Claude Code's own compaction is unchanged. The plugin never rewrites the conversation and adds nothing to the context by itself; the agent reads memory only when it calls a tool. The hooks print nothing: most run in a few milliseconds and hand the work to a background worker. Before Claude Code compacts, the `PreCompact` hook drains the session into the store first, which can delay compaction by up to about 12 seconds (the drain stops at 10 seconds; up to about 1.1 seconds in our runs).
 
 ## How to opt in
 
@@ -43,7 +43,14 @@ To turn capture off for a launch, set `LCMX_CAPTURE=off`, or start Claude Code w
 - **Claude Code's local transcript GC.** Lossless capture needs Claude Code's opt-in local transcript GC off (`CLAUDE_CODE_TRANSCRIPT_LOCAL_GC` unset, the default). With it on, capture is best effort and the audit lists those sessions without a lossless claim.
 - **A subagent transcript removed before the worker first reads it** cannot be captured, and the audit cannot see that it existed.
 - **Audit memory.** The audit needs memory roughly in proportion to the largest session in the store: about 1.2 GB for a 625,000-line session. Capture itself stays under about 400 MB.
-- **Hook timing under heavy load.** Hooks hand off in milliseconds on an idle machine. On a heavily loaded machine, hooks took up to about 0.6 s in our runs; `UserPromptSubmit` and `Stop` run before Claude Code goes on, so that time adds to the turn there. A quiet-host measurement is tracked in #2141.
+- **Hook timing under heavy load.** Hooks usually hand off in milliseconds. Under heavy disk and memory pressure from other work, the hook's write of its small pointer file can stall.
+  - In one full run of the release gate (on an earlier 0.1.0 candidate with the same hook code), 8 of 670 hook runs took over 2 s, all of them in that write. The runs with stalls started at 1-minute loads of 20 to 37.
+  - The slowest, 7.6 to 8.3 s, came from the background hook or during the stress tests' scripted hook bursts. In an ordinary session, the slowest blocking hook took 3.8 s.
+  - A rerun of the compaction session, with no other job from this gate running, saw the load go from 5 to 88 as other jobs started; the slowest of its 54 hooks took 526 ms.
+
+  `PostToolBatch` runs in the background. The other hooks run before Claude Code goes on, with a 5-second limit (15 seconds for `PreCompact`), so a stall there adds to the turn.
+
+  No audit lost anything. A hook cut off at its time limit is designed to be caught up by the session's next hook. If an earlier hook had already recorded the session, a later worker run, even one started from another session, also catches it up. If every hook of a new session were cut off before any of them recorded it, that session would not be captured. No hook was seen killed at its time limit, and the ones that ran past 5 s finished; that catch-up path was not exercised. Tracked in #2350.
 - **Leftover temporary files.** A hook that is killed mid-write can leave an empty `.tmp` file in the store's `spool` folder. It holds nothing and is safe to delete; capture is unaffected.
 
 ## What it bundles
@@ -52,4 +59,4 @@ Unit version 0.1.0, tag `claude-code-v0.1.0`, with LCM-X core vendored from the 
 
 ## Release evidence
 
-The unit gate ran on the tagged commit: ten real Claude Code sessions (multi-turn tool use, resume, forks, manual and automatic compaction, parallel subagents, four parallel sessions, killed workers and sessions, reruns, cross-session recall and a 24-hour lane), each audited with 0 lost and 0 duplicated lines; a growth check on a 670,000-line transcript; and the CLI smoke in both runtime modes. The result card is attached to this release.
+The unit gate ran on the tagged commit: ten real Claude Code sessions (multi-turn tool use, resume, forks, manual and automatic compaction, parallel subagents, four parallel sessions, killed workers and sessions, reruns, cross-session recall, and a driven 32-turn session with idle gaps and compactions). Each was audited with 0 lost and 0 duplicated lines. The gate also ran a growth check on one real transcript of about 690,000 lines, the CLI smoke in both runtime modes, and install records on macOS and Linux. The result card is attached to this release.
