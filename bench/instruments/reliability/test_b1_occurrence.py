@@ -159,3 +159,19 @@ def test_b1_nonempty_binding_stays_unambiguous_and_single_use(tmp_path, ambiguou
         con.executemany("insert into messages values (?,?,?,?,?,?,?)", host)
     out = bars.continue_occurrences(rows if ambiguous else rows + [rows[0]], state, lambda sid: sid, r"reply to (T\d+)\b")
     assert out == ({None: 1} if ambiguous else {"T01": 1, None: 1})
+
+
+def test_unreadable_host_evidence_is_reported_even_without_continues(tmp_path):
+    """An unreadable state.db never degrades a predicate silently: the result names it, continues or not."""
+    rows, events, host = continue_fixture()
+    plain = [(role, text) for role, text in rows if text != "continue"]
+    fixture.make(tmp_path, rows=plain, events=[e for e in events if e.get("content") != "continue"],
+                 host_occurrences=host, observed=[float(i + 1) * 10 for i in range(len(plain))], bars=["B1"])
+    state = tmp_path / "cell/db/state.db"
+    out = bars.score({"bars": ["B1"]}, tmp_path / "cell")
+    assert out["numbers"]["diagnostic"]["host_evidence_error"] is None
+    with sqlite3.connect(state) as con:
+        con.execute("drop table sessions")
+        con.execute("drop table messages")
+    out = bars.score({"bars": ["B1"]}, tmp_path / "cell")
+    assert out["numbers"]["diagnostic"]["host_evidence_error"] == "state.db unreadable (OperationalError)"

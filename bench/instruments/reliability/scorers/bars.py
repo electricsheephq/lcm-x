@@ -93,10 +93,13 @@ def attempts(events: list[dict]) -> list[dict]:
 def lineage(cell_dir: Path, root: str = "S0", db_dir: Path | None = None):
     """store session id -> lineage: "chat" for ``root`` (R1: S0; R2: the ACP session id) and its compression
     descendants, else the root session. A delegated child (#1931) roots its own lineage."""
+    host_error = None
     try:
         sessions = delegated.host_sessions(Path(db_dir or cell_dir / "db") / "state.db")
-    except sqlite3.Error:
-        sessions = {}  # unavailable host evidence: retain the store's session identities (B1 then falls back)
+    except sqlite3.Error as exc:
+        # Unavailable host evidence: keep the store's session identities (B1 then falls back), and say so in the
+        # result (numbers.diagnostic.host_evidence_error) so a gate reader never sees a silent degrade.
+        sessions, host_error = {}, f"state.db unreadable ({type(exc).__name__})"
     parents = {sid: parent for sid, (parent, _source) in sessions.items()}
 
     def group(sid):
@@ -105,6 +108,7 @@ def lineage(cell_dir: Path, root: str = "S0", db_dir: Path | None = None):
             seen.add(sid)
             sid = parents[sid]
         return "chat" if sid == root else sid
+    group.host_error = host_error
     return group
 
 
@@ -504,7 +508,8 @@ def score(cell: dict, cell_dir: Path, db_dir: Path | None = None) -> dict:
                        for k in ("resident_engine_conflict", "skipped_ingest_resident_conflict", "recorded_replaced")},
         "phases": len(phases), "session_count": phases[-1].get("session_count") if phases else None,
         "lcm_tool_calls": sum(p.get("counters", {}).get("lcm_tool_calls", 0) for p in phases),
-        "summary_nodes": summary.nodes_report(db), "chronology": chronology.report(stored, group)}
+        "summary_nodes": summary.nodes_report(db), "chronology": chronology.report(stored, group),
+        "host_evidence_error": getattr(group, "host_error", None)}
     inconclusive = {b: v for b, v in inconclusive.items() if b in applicable}
     numbers["diagnostic"]["native_rejections"] = dict(Counter(e.get("rejection") for e in events
                                                               if e["event"] == "compaction" and e.get("rejection")))
