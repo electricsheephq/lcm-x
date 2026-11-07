@@ -237,8 +237,9 @@ def _identities(path, order, host=False):
     ``repeats``, and that session's counts are not definitive. Without a ``timestamp`` column repeats cannot be seen:
     ``resolved`` is False. A host can also re-issue a row with a fresh stamp, so an inactive row, or a compacted row
     whose identity repeats in its session, is counted in ``generation_rows`` and its session is not definitive too.
-    On LCM-X's side, a user row with a valid recorded host rewrite takes the host form's identity (``credited``)."""
-    sessions, repeats, generation_rows, credited = defaultdict(list), Counter(), Counter(), Counter()
+    On LCM-X's side, a user row with a valid recorded host rewrite also has the host form's identity (``alts``, by
+    row index): the host can keep either form, so ``reorder`` uses it only where the stored form finds no host row."""
+    sessions, repeats, generation_rows, alts = defaultdict(list), Counter(), Counter(), defaultdict(dict)
     with _db(path) as conn:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(messages)")}
         fields = [name for name in ("session_id", "role", "content", "tool_calls", "tool_call_id") if name in columns]
@@ -258,13 +259,14 @@ def _identities(path, order, host=False):
             # Only stored text with something besides edge whitespace: NULL, a number or a blob is never credited.
             override = overrides.get(row.get("store_id")) if (
                 row["role"] == "user" and isinstance(raw, str) and raw.strip()) else None
+            def keyed(text):
+                identity = (row["role"], _sha(text), calls, row.get("tool_call_id") if row["role"] == "tool" else None)
+                return _sha(json.dumps(identity, sort_keys=True))
+
+            key = keyed(content)
             if (override and override.get("stored_sha256") == hashlib.sha256(content.encode()).hexdigest()
                     and override["content"] == content.strip()):  # An edge-trim rewrite only, as the host stores it.
-                content = override["content"]  # Never stripped without a valid recorded override.
-                credited[row["session_id"]] += 1
-            identity = (row["role"], _sha(content), calls,
-                        row.get("tool_call_id") if row["role"] == "tool" else None)
-            key = _sha(json.dumps(identity, sort_keys=True))
+                alts[row["session_id"]][len(sessions[row["session_id"]])] = keyed(override["content"])
             if stamped and row["timestamp"] is not None:
                 slot = (row["session_id"], key, float(row["timestamp"]))
                 repeats[row["session_id"]] += slot in seen
@@ -277,17 +279,25 @@ def _identities(path, order, host=False):
     for sid, marks in compacted.items():
         counts = Counter(key for key, _flag in marks)
         generation_rows[sid] += sum(1 for key, flag in marks if flag and counts[key] > 1)
-    return sessions, fields, repeats, stamped or not generations, generation_rows, credited
+    return sessions, fields, repeats, stamped or not generations, generation_rows, alts
 
 
 def reorder(lcm_db, state_db):
-    (lcm, lc, _, _, _, credited), (host, hc, repeats, resolved, generation_rows, _) = (
+    (lcm, lc, _, _, _, alts), (host, hc, repeats, resolved, generation_rows, _) = (
         _identities(lcm_db, "store_id"), _identities(state_db, "id", True))
     results = []
     only = {side: sorted(_sha(str(sid))[:12] for sid in keys) for side, keys in (
         ("lcm", lcm.keys() - host.keys()), ("host", host.keys() - lcm.keys()))}
     for sid in sorted(lcm.keys() | host.keys()):
-        a, b = lcm[sid], host[sid]
+        a, b, credited = list(lcm[sid]), host[sid], 0
+        # A recorded rewrite takes the host form only for a stored form left over, and only while the host holds an
+        # unmatched row of that form: either form can match, and a credit never makes an extra match.
+        over, spare = Counter(a) - Counter(b), Counter(b) - Counter(a)
+        for i, alt in sorted(alts.get(sid, {}).items()):
+            if over[a[i]] > 0 and spare[alt] > 0:
+                over[a[i]] -= 1
+                spare[alt] -= 1
+                a[i], credited = alt, credited + 1
         shared = sum((Counter(a) & Counter(b)).values())
         where = defaultdict(list)
         for j, key in enumerate(b):
@@ -303,7 +313,7 @@ def reorder(lcm_db, state_db):
         results.append({"session_h12": _sha(str(sid))[:12], "lcm_rows": len(a), "host_rows": len(b),
                         "matched": shared, "lcm_only": len(a) - shared, "host_only": len(b) - shared,
                         "reordered_rows": shared - len(tails), "host_stamp_repeat_rows": repeats[sid],
-                        "host_generation_rows": generation_rows[sid], "host_rewrites_credited": credited[sid],
+                        "host_generation_rows": generation_rows[sid], "host_rewrites_credited": credited,
                         "counts_definitive": resolved and not repeats[sid] and not generation_rows[sid],
                         # Rows sharing an identity are matched by count and order only: a lost occurrence that a
                         # duplicate of another occurrence replaces is not seen. This counts the rows where it could be.

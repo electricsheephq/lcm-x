@@ -693,3 +693,16 @@ def test_stored_content_without_text_is_never_credited(tmp_path, stored):
     host = _messages(tmp_path / "state.db", "id", [("s", "user", " ", None, None)])
     result = kit.reorder(_rewrites(lcm, [(1, " ", "")]), host)
     assert (result["host_rewrites_credited"], result["lcm_only"], result["host_only"]) == (0, 1, 1)
+
+
+@pytest.mark.parametrize("host_forms,matched,credited", [
+    (["go\n"], 1, 0),            # the host kept the stored form (a compaction-turn prompt): it still matches
+    (["go"], 1, 1),               # the host kept the trimmed form: credited
+    (["go\n", "go"], 1, 0),      # both forms on the host, one stored row: one match, never two
+    (["x"], 0, 0)])               # neither form: lcm_only, never credited
+def test_either_recorded_form_matches_once(tmp_path, host_forms, matched, credited):
+    lcm = _messages(tmp_path / "lcm.db", "store_id", [("s", "user", "go\n", None, None)])
+    host = _messages(tmp_path / "state.db", "id", [("s", "user", form, None, None) for form in host_forms])
+    result = kit.reorder(_rewrites(lcm, [(1, "go", "go\n")]), host)
+    assert (result["matched"], result["lcm_only"], result["host_only"]) == (matched, 1 - matched, len(host_forms) - matched)
+    assert result["host_rewrites_credited"] == credited
