@@ -1294,3 +1294,75 @@ def test_a_logged_link_before_the_window_credits_nothing(tmp_path, day, credited
     out = Home(tmp_path, sessions, turn(1), stored=turn(1) + [turn(1)[0]]).run(
         logs=[LINK.replace("2099-01-01", day).format(OK)], since=4102444800.0)
     assert out["parity"]["totals"]["visible_surplus_rows"] == credited
+
+
+EMPTY = {"role": "assistant", "content": audit.EMPTY_RECOVERY_REPLY}
+NUDGE = {"role": "user", "content": audit.EMPTY_RECOVERY_NUDGE}
+
+
+def recovery_home(tmp_path, pair):
+    """The host saves turn 1, a tool call and its result, then turn 2; the store also holds ``pair`` after the result."""
+    host = turn(1) + [("S1", call("c1")), ("S1", result("c1"))] + turn(2)
+    stored = host[:4] + [("S1", m) for m in pair] + host[4:]
+    return Home(tmp_path, ONE, host, stored=stored).run()
+
+
+def test_the_hosts_empty_response_recovery_pair_is_listed_not_surplus(tmp_path):
+    out = recovery_home(tmp_path, [EMPTY, NUDGE])
+    t = out["parity"]["totals"]
+    assert (t["missing_rows"], t["surplus_rows"], t["silent_surplus_rows"]) == (0, 0, 0)
+    assert out["host_empty_recovery"] == {"rows": 2, "store_ids": [5, 6]}  # every excluded row is named
+    assert out["m3"]["numerator"] == 0 and out["m3"]["denominator"] == 8
+
+
+@pytest.mark.parametrize("pair", [
+    [NUDGE],  # a lone user turn with the nudge's text
+    [a("other reply"), NUDGE],  # no exact "(empty)" reply in front
+    [dict(EMPTY, tool_calls=call("c2")["tool_calls"]), NUDGE],  # an "(empty)" reply that carries tool calls
+    [EMPTY, dict(NUDGE, content=NUDGE["content"] + " ")],  # not the exact nudge text
+], ids=["lone-nudge", "no-empty-reply", "empty-with-tool-calls", "inexact-nudge"])
+def test_a_look_alike_of_the_recovery_pair_stays_scored(tmp_path, pair):
+    out = recovery_home(tmp_path, pair)
+    assert out["host_empty_recovery"] == {"rows": 0, "store_ids": []}
+    assert out["parity"]["totals"]["surplus_rows"] >= 1
+
+
+def test_the_recovery_pair_needs_a_tool_row_in_front(tmp_path):
+    host = turn(1) + turn(2)
+    out = Home(tmp_path, ONE, host, stored=host[:2] + [("S1", EMPTY), ("S1", NUDGE)] + host[2:]).run()
+    assert out["host_empty_recovery"]["rows"] == 0 and out["parity"]["totals"]["surplus_rows"] == 2
+
+
+def _bind(home, store_ids):
+    with sqlite3.connect(home.lcm) as con:
+        con.execute("CREATE TABLE IF NOT EXISTS host_uid_bindings (store_id INTEGER NOT NULL, uid TEXT NOT NULL, "
+                    "lineage_key TEXT NOT NULL, kind TEXT NOT NULL, binding_version INTEGER NOT NULL, proof_kind TEXT, "
+                    "created_at REAL, first_check TEXT, disagree_seen INTEGER NOT NULL DEFAULT 0)")
+        for n, store_id in enumerate(store_ids):
+            con.execute("insert into host_uid_bindings (store_id, uid, lineage_key, kind, binding_version) "
+                        "values (?, ?, 'S1', 'canonical', 1)", (store_id, f"uid-{n}"))
+        con.commit()
+        con.execute("PRAGMA wal_checkpoint(TRUNCATE)")  # the audit refuses a store with a non-empty -wal file
+
+
+@pytest.mark.parametrize("copies", [0, 2])
+def test_uid_coverage_counts_distinct_messages_and_reports_copies_apart(tmp_path, copies):
+    """#2237 ruling A: an unstamped later copy of a stored row is a copy, not a message; the original's binding
+    covers the message."""
+    host = turn(1) + turn(2)
+    stored = [("S1", stamped(m, 2000.0 + n)) for n, (_s, m) in enumerate(host)] + [("S1", host[1][1])] * copies
+    home = Home(tmp_path, ONE, host, stored=stored)
+    _bind(home, [1, 2, 3])  # three of the four messages are bound; no copy is
+    per = home.run()["uid_coverage"]["per_source"]["cli"]
+    assert (per["messages"], per["messages_with_canonical_uid"]) == (4, 3)
+    assert (per["copy_rows"], per["copy_rows_with_canonical_uid"]) == (copies, 0)
+    assert (per["rows_stored"], per["rows_with_canonical_uid"]) == (4 + copies, 3)
+
+
+def test_a_stamped_repeat_is_its_own_message(tmp_path):
+    host = turn(1) + [("S1", u("question 1"))]
+    stored = [("S1", stamped(m, 2000.0 + n)) for n, (_s, m) in enumerate(host)]
+    home = Home(tmp_path, ONE, host, stored=stored)
+    _bind(home, [1])
+    per = home.run()["uid_coverage"]["per_source"]["cli"]
+    assert (per["messages"], per["copy_rows"], per["messages_with_canonical_uid"]) == (3, 0, 1)
