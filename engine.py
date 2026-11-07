@@ -7097,7 +7097,8 @@ class LCMEngine(
                 continue
             if row.get("role") != "tool" and not row.get("tool_calls"):
                 continue
-            key = ingest_ledger.tool_replay_scorer_key(row, conversation=self._conversation_id)
+            # Every incoming row is stored under the active conversation, whatever its own field says.
+            key = ingest_ledger.tool_replay_scorer_key(dict(row, conversation_id=self._conversation_id))
             source_buckets.setdefault(key, []).append(pos)
         for key, positions in source_buckets.items():
             lanes = {}
