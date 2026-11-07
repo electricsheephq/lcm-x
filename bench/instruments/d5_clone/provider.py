@@ -32,6 +32,18 @@ def _envelope_nonce(messages):
     return found.pop() if len(found) == 1 else None
 
 
+SUMMARY_RATIO = 100  # Source tokens per summary token in the padded digest: far under LCM-X's extreme 400.
+
+
+def _padding(messages):
+    """Deterministic filler lines that bring the digest to about 1/SUMMARY_RATIO of the request's estimated tokens
+    (UTF-8 bytes / 4). A fixed 40-token digest of a 20k-token leaf is a 500:1 summary, which LCM-X's summary_quality
+    doctor check reports as degraded, so every large leaf would warn in both arms and hide a real regression."""
+    target = -(-len(_json(messages).encode("utf-8")) // 4) // SUMMARY_RATIO
+    seed = _sha(messages)[:8]
+    return "".join(f"\nd5 pad {i:05d} {seed}" for i in range(-(-target // 6)))  # Each line is at least 6 tokens.
+
+
 def _tool_call(call):
     return (isinstance(call, dict) and isinstance(call.get("id"), str) and isinstance(call.get("name"), str)
             and isinstance(call.get("arguments"), (str, dict, list)))
@@ -200,6 +212,7 @@ class Provider:
                 text += f"\nrequest={_sha(messages)}"
                 nonce = _envelope_nonce(messages)
                 if nonce:  # The fixed digest inside the envelope LCM-X's summary route requires, with its closing hint.
+                    text += _padding(messages)
                     text = f'<lcm-summary nonce="{nonce}">\n{text}\nExpand for details about: d5 digest\n</lcm-summary>'
                 entry = {"text": text}
             message = _message(entry)
