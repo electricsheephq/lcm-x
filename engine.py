@@ -7077,11 +7077,136 @@ class LCMEngine(
                 result[idx] = (session, target[pos])
         return result, False
 
-    def _link_restamped_occurrences(self, messages, stored_at, previous, recovery_fallback):
+    def _plan_tool_replay_links(self, copies, targets, *, seeds):
+        """Pure tiered matching, returning batch positions and durable target ids."""
+        from collections import deque
+
+        linked_sources = {r[0] for r in seeds if r[1] in ("possible_replay_of", "link_pending")}
+        prior_targets = {r[2] for r in seeds if r[1] == "possible_replay_of"}
+        buckets = {}
+        for row in targets:
+            # A stored row keeps its own conversation; a blank (NULL, empty or whitespace) id belongs to the
+            # active conversation (#581), as in the skip proof, so a copy of a blank-id original is linked.
+            owner = _normalize_conversation_id_value(row.get("conversation_id")) or self._conversation_id
+            key = ingest_ledger.tool_replay_scorer_key(dict(row, conversation_id=owner))
+            buckets.setdefault(key, []).append(row)
+        used, linked, plan = set(), set(), []
+        source_buckets = {}
+        for pos, row in enumerate(copies):
+            if row.get("store_id") in linked_sources:
+                continue
+            if row.get("role") != "tool" and not row.get("tool_calls"):
+                continue
+            key = ingest_ledger.tool_replay_scorer_key(row, conversation=self._conversation_id)
+            source_buckets.setdefault(key, []).append(pos)
+        for key, positions in source_buckets.items():
+            lanes = {}
+            for row in buckets.get(key, ()):
+                sid = row["store_id"]
+                old = sid in prior_targets
+                stamp = _normalize_observed_at(row.get("observed_at"))
+                for lane in ((old, "all"), (old, stamp)):
+                    lanes.setdefault(lane, deque()).append(sid)
+
+            def take(lane):
+                queue = lanes.get(lane, ())
+                while queue and queue[0] in used:
+                    queue.popleft()
+                return queue[0] if queue else None
+
+            # A stamped copy's own equal-stamp original outranks every other
+            # target, even one an earlier ingest used; other earlier-ingest
+            # targets come last.
+            for tier in range(5):
+                for pos in positions:
+                    if pos in linked:
+                        continue
+                    stamp = _normalize_observed_at(copies[pos].get("timestamp"))
+                    if tier == 0:
+                        candidate = take((False, stamp))
+                    elif tier == 1:
+                        candidate = take((True, stamp)) if stamp is not None else None
+                    elif tier == 2:
+                        candidate = take((False, "all" if stamp is None else None))
+                    else:
+                        candidate = take((tier == 4, "all"))
+                    if candidate is not None:
+                        used.add(candidate)
+                        linked.add(pos)
+                        plan.append((pos, candidate))
+        return sorted(plan)
+
+    def _prepare_tool_replay_links(self, rows, tail_limit):
+        """Compute before insertion. Only a missing relation table means empty seeds."""
+        try:
+            conn = self._store._conn
+            targets = self._store.get_session_tail(self._session_id, limit=tail_limit)
+            # Lineage adoption can write links earlier in this transaction.
+            # Those targets are spent now; only earlier-ingest links get tier 4.
+            used = (getattr(self, "_ingest_ledger_attempt", None) or {}).get("link_targets_used", ())
+            targets = [row for row in targets if row["store_id"] not in used]
+            seeds = list(conn.execute(
+                "SELECT store_id,kind,related_store_id FROM message_relations "
+                "WHERE kind IN ('possible_replay_of','link_pending') "
+                "AND (store_id IN (SELECT value FROM json_each(?)) "
+                "OR related_store_id IN (SELECT value FROM json_each(?)))",
+                (json.dumps([r["store_id"] for r in targets]),) * 2)) if conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE name='message_relations'").fetchone() else []
+            return self._plan_tool_replay_links(rows, targets, seeds=seeds)
+        except Exception as exc:
+            if (_is_ingest_busy_error(exc)
+                    or (getattr(exc, "sqlite_errorcode", 0) or 0) & 255 == sqlite3.SQLITE_INTERRUPT):
+                raise
+            self._raise_ingest_busy(exc)
+            logger.warning("LCM tool replay computation failed reason=%s", type(exc).__name__)
+            return None
+
+    def _write_tool_replay_links(self, plan, ids, after_commit):
+        """Rows survive deterministic attribution faults; transient faults retry atomically."""
+        pending = len(ids) if plan is None else 0
+        groups = ([[(sid, "link_pending", None, None, None)] for sid in ids] if plan is None else
+                  [[(ids[pos], "possible_replay_of", target, None, None)] for pos, target in plan])
+        attempt = getattr(self, "_ingest_ledger_attempt", None)
+        sources = attempt.setdefault("link_sources_used", set()) if attempt is not None else set()
+        targets = attempt.setdefault("link_targets_used", set()) if attempt is not None else set()
+        # A failed deterministic write is attributed by its committed warning.
+        # Reserve its allocation too, so later writers cannot credit it again.
+        sources.update(group[0][0] for group in groups)
+        targets.update(group[0][2] for group in groups if group[0][2] is not None)
+        if not groups:
+            return sources, targets
+        try:
+            with self._ingest_evidence():
+                self._store.add_message_relations(groups)
+        except Exception as exc:
+            if (_is_ingest_busy_error(exc)
+                    or (getattr(exc, "sqlite_errorcode", 0) or 0) & 255 == sqlite3.SQLITE_INTERRUPT):
+                raise
+            self._raise_ingest_busy(exc)
+            reason = "pending_write_failed" if plan is None else "relation_write_failed"
+            failures = [dict(source_store_id=g[0][0], target_store_id=g[0][2], reason=reason) for g in groups]
+
+            def record():
+                self._last_tool_link_failures.extend(failures)
+                self._ledger_count("ledger.tool_link_failures", amount=len(failures))
+                for failure in failures:
+                    logger.warning("LCM tool replay link failed source_store_id=%s target_store_id=%s reason=%s",
+                                   failure["source_store_id"], failure["target_store_id"], failure["reason"])
+            after_commit.append(record)
+            return sources, targets
+        if pending:
+            def count():
+                self._last_tool_link_pending_count += pending
+                self._ledger_count("ledger.tool_link_pending", amount=pending)
+            after_commit.append(count)
+        return sources, targets
+
+    def _link_restamped_occurrences(self, messages, stored_at, previous, recovery_fallback, allocation=None):
         """Annotate only rows already stored, in the ingest owner's transaction."""
         previous = {idx: row for idx, row in previous.items() if stored_at.get(idx)}
         if not previous and not recovery_fallback:
             return
+        allocated_sources, allocated_targets = allocation if allocation is not None else (set(), set())
         try:
             with self._ingest_evidence():
                 if previous:
@@ -7092,8 +7217,10 @@ class LCMEngine(
                     current = self._store.get_batch([sid for idx, sid in stored_at.items() if idx in previous and sid])
                     used = {row["related_store_id"] for row in self._store.get_message_relations(
                         [row["store_id"] for row in targets], "possible_replay_of", related=True)}
-                    linked = {row["store_id"] for row in self._store.get_message_relations(
-                        list(current), "possible_replay_of")}
+                    linked = {row["store_id"] for kind in ("possible_replay_of", "link_pending")
+                              for row in self._store.get_message_relations(list(current), kind)}
+                    used.update(allocated_targets)
+                    linked.update(allocated_sources)
                     for idx, (session, row) in sorted(previous.items()):
                         sid = stored_at.get(idx)
                         if not sid or sid not in current or sid in linked:
@@ -7124,6 +7251,8 @@ class LCMEngine(
                         self._store.add_message_relations([[(sid, "possible_replay_of", target, None, None)]])
                         used.add(target)
                         linked.add(sid)
+                        allocated_targets.add(target)
+                        allocated_sources.add(sid)
                 attempt = getattr(self, "_ingest_ledger_attempt", None)
                 if recovery_fallback and attempt is not None:
                     self._identity_anchor_link_durable_recovery(attempt, attempt["lineage"])
@@ -7397,7 +7526,8 @@ class LCMEngine(
                 route = retried_tail["kind"] if retried_tail is not None else (
                     "session_end" if self._session_end_flush_active else "warm_tail" if no_view else route)
                 self._ingest_telemetry(self._log_ingest_route, self._session_id, route, cursor, reason,
-                                       prepared.get("stored_ids", ()), (emission_attempt or {}).get("replay_pairs", (0, 0)))
+                                       prepared.get("stored_ids", ()), (emission_attempt or {}).get("replay_pairs", (0, 0)),
+                                       self._last_tool_link_pending_count)
                 self._ingest_telemetry(self._record_ingest_attempt, record, sample, attribution)
                 if prepared.get("sender_update"):
                     sender_capture.try_update(self)
@@ -7409,13 +7539,13 @@ class LCMEngine(
             raise AssertionError("unreachable ingest retry state")
 
     @staticmethod
-    def _log_ingest_route(session, route, cursor, reason, ids, pairs=(0, 0)):
+    def _log_ingest_route(session, route, cursor, reason, ids, pairs=(0, 0), link_pending=0):
         if ids:
             route = str(route).replace(" ", "_")  # one token per route, so audits can parse the line
             level = logging.INFO if route in ("persisted_batch", "cold", "session_end", "warm_tail", "S3") else logging.DEBUG
             logger.log(level, "LCM ingest route: session=%s route=%s cursor=%d reason=%s stored=%d-%d rows=%d "
-                       "replay_pairs=%d stripped=%d", session, route, cursor, reason,
-                       min(ids), max(ids), len(ids), *pairs)
+                       "replay_pairs=%d stripped=%d link_pending=%d", session, route, cursor, reason,
+                       min(ids), max(ids), len(ids), *pairs, link_pending)
 
     def _ingest_telemetry(self, action, *args):
         try:
@@ -7773,6 +7903,10 @@ class LCMEngine(
             after_commit.append(lambda exc=exc: self._ledger_count("ledger.lineage_merge_failed", exc))
             return persisted or provisional
         if result is not None:
+            attempt = getattr(self, "_ingest_ledger_attempt", None)
+            if attempt is not None and result["pairs"]:
+                attempt.setdefault("link_targets_used", set()).update(target for _source, target in result["pairs"])
+                attempt.setdefault("link_sources_used", set()).update(source for source, _target in result["pairs"])
             after_commit.append(lambda: self._ledger_count("ledger.lineage_merged"))
             for key in ("bindings", "views", "emissions", "unstamped_skipped", "late"):
                 after_commit.append(lambda key=key, n=result[key]: self._ledger_count("ledger.lineage_merge." + key, amount=n))
@@ -7858,13 +7992,20 @@ class LCMEngine(
                             used = {row[0] for row in conn.execute(
                                 "SELECT related_store_id FROM message_relations "
                                 "WHERE kind='possible_replay_of' AND related_store_id<?", (first,))} if has_relations else set()
-                            # A copy another linker already annotated in this ingest (the #2378 rotation pairing)
-                            # keeps that one link: one source row never carries two possible_replay_of links.
-                            linked = {row[0] for row in conn.execute(
-                                "SELECT store_id FROM message_relations WHERE kind='possible_replay_of' AND store_id IN "
-                                "(SELECT value FROM json_each(?))",
-                                (json.dumps([row[0] for row in new_rows]),))} if has_relations else set()
-                            pairs, candidate_ids, stripped_count = [], set(), 0
+                            used.update(attempt.get("link_targets_used", ()))
+                            seeded = list(conn.execute(
+                                "SELECT r.store_id,r.kind,m.content FROM message_relations r "
+                                "LEFT JOIN messages m ON m.store_id=r.related_store_id "
+                                "WHERE r.kind IN ('possible_replay_of','link_pending') "
+                                "AND r.store_id>=?", (first,))) if has_relations else []
+                            linked = {row[0] for row in seeded}
+                            linked.update(attempt.get("link_sources_used", ()))
+                            prelinked = {sid: content for sid, kind, content in seeded if kind == "possible_replay_of"}
+                            pairs, candidate_ids = [], set()
+                            # Every link already written for this batch counts, whichever
+                            # writer made it (#2377 tool links, #2378 re-stamp, recovery).
+                            stripped_count = sum(content != prelinked[sid] for sid, _r, content, *_ in new_rows
+                                                 if sid in prelinked)
                             # Each candidate list is split into lanes: all rows, rows without a stamp, and rows per
                             # stamp. A lane's start skips its used leading targets once, not per row, so N copies of
                             # one payload match in linear time under the write lock, stamp-vetoed rows included.
@@ -7909,7 +8050,9 @@ class LCMEngine(
                                         used.add(target)
                                         stripped_count += int(strip)
                             written = store.add_message_relations(pairs)
-                        delta["ledger.replay_pairs.cursor0"] += written
+                            attempt.setdefault("link_sources_used", set()).update(group[0][0] for group in pairs)
+                            attempt.setdefault("link_targets_used", set()).update(group[0][2] for group in pairs)
+                        delta["ledger.replay_pairs.cursor0"] += written + len(prelinked)
                         delta["ledger.replay_pairs.cursor0_unlinked"] += len(candidate_ids - linked)
                         delta["ledger.replay_pairs.cursor0_stripped"] += stripped_count
                     except BaseException as exc:
@@ -8340,6 +8483,10 @@ class LCMEngine(
             if new_prefix_occurrences:
                 cursor = self._ingest_cursor = min(new_prefix_occurrences)
                 current_prefix_identities = current_prefix_identities[:cursor]
+        self._last_tool_skip_sets = (set(), set())
+        self._last_tool_class_cap_count = 0
+        self._last_tool_link_failures = []
+        self._last_tool_link_pending_count = 0
         scan_start, ignored_original_messages, replay_messages = self._build_ingest_replay(
             messages=messages, n=n, cursor=cursor,
         )
@@ -8696,6 +8843,9 @@ class LCMEngine(
         if prepared is not None:
             prepared.update(protected=protected_messages, replay=replay_messages)
 
+        tool_link_plan = (self._prepare_tool_replay_links(protected_messages, max(n * 4, 64))
+                          if any(row.get("role") == "tool" or row.get("tool_calls") for row in protected_messages)
+                          else [])
         store_ids = self._store_ingest_rows(
             messages_to_store_with_index=messages_to_store_with_index,
             protected_messages=protected_messages,
@@ -8704,6 +8854,7 @@ class LCMEngine(
             after_commit=after_commit,
             view_only=(prepared or {}).get("view_only"),
         )
+        link_allocation = self._write_tool_replay_links(tool_link_plan, store_ids, after_commit)
         attribution["rows_written"] = len(store_ids)
         if prepared is not None:
             prepared["stored_ids"] = tuple(store_ids)
@@ -8730,7 +8881,7 @@ class LCMEngine(
                     messages_to_store_with_index, protected_messages, store_ids)
                 if (kind := self._ingest_precomputed_marker(idx, protected, (prepared or {}).get("view_only"))
                     or self._ingest_precomputed_marker(idx, msg, (prepared or {}).get("view_only"))) is not None}
-        self._link_restamped_occurrences(messages, stored_at, restamp_metadata, recovery_fallback)
+        self._link_restamped_occurrences(messages, stored_at, restamp_metadata, recovery_fallback, link_allocation)
         if anchor_plan is not None:
             try:
                 with self._ingest_evidence():
