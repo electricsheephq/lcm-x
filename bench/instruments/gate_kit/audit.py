@@ -215,12 +215,16 @@ def carrier_remainder(content, header, nodes, same_lineage):
     return content
 
 
+CARRY_BATCH_S = 2.0  # a copy stamped at the compaction commit sits within this of the boundary row
+
+
 def in_place_carried_ids(rows, strip, prefixes):
-    """Same-session copies at EVERY ``_compressed_summary`` boundary, in host id order, even if later archived.
+    """Same-session copies at EVERY in-place boundary (the host's ``_compressed_summary`` row or LCM's summary carrier), in host id order, even if later archived.
 
     Each summary starts an insertion block, bounded by the next summary or session end. Its displayed non-summary
     prefix must equal a complete ordered suffix of the displayed history before that boundary, comparing display_key
-    WITHOUT timestamps (assistant tool calls still use call ids). Exclude previously identified copies from history;
+    without timestamps (assistant tool calls still use call ids), and each copy needs stamp evidence
+    (``stamped_copy``). Exclude previously identified copies from history;
     skip user carriers (verified strip changes, empty text or LCM prefixes) on both sides, leaving them to the existing
     carrier logic. Take the longest matching suffix once; never search later rows for another match. A genuine resend
     after that prefix still counts, even with the original's stamp. No compacted evidence before the boundary, or no
@@ -241,19 +245,34 @@ def in_place_carried_ids(rows, strip, prefixes):
         _rid, sid, role, content, calls, call_id = row[:6]
         return display_key(role, strip(content, sid) if role == "user" else content, None, call_id, calls, row[8])
 
+    def stamped_copy(original, copy, opened):
+        """Stamp evidence that ``copy`` is the host's carried copy of ``original``, not a new occurrence: it keeps the
+        original's stamp (``_carry_parent_timestamps``), or it carries the boundary's insert-batch stamp (a carried row
+        with no donor is stamped at commit, within ``CARRY_BATCH_S`` of the boundary row). A genuine resend has a stamp
+        of its own, so it is never taken for a copy (a re-stamped copy outside the batch stays expected: a false alarm,
+        never a hidden loss)."""
+        stamp = copy[7]
+        if stamp is None or original[7] is None:
+            return False
+        return stamp == original[7] or (opened is not None and abs(float(stamp) - float(opened)) <= CARRY_BATCH_S)
+
     carried = set()
     for segment in sessions.values():
         segment.sort(key=lambda r: r[0])
-        boundaries = [i for i, r in enumerate(segment) if r[6]]
+        # A boundary is the host's summary row, or the LCM summary carrier the compaction inserts at the start of the
+        # block (this host pin flags no summary row: the block opens with LCM's carrier user row).
+        boundaries = [i for i, r in enumerate(segment) if r[6] or (r[9] and carrier(r))]
         for boundary, end in zip(boundaries, boundaries[1:] + [len(segment)]):
             before = [r for r in segment[:boundary] if r[9] and not r[6] and r[0] not in carried and not carrier(r)]
             if not any(r[12] for r in before):
                 continue
             block = [r for r in segment[boundary + 1:end] if r[9] and not carrier(r)]
             before_keys, block_keys = [key(r) for r in before], [key(r) for r in block]
+            opened = segment[boundary][7]
             for start in range(len(before)):
                 n = len(before) - start
-                if n <= len(block) and before_keys[start:] == block_keys[:n]:
+                if n <= len(block) and before_keys[start:] == block_keys[:n] and all(
+                        stamped_copy(original, copy, opened) for original, copy in zip(before[start:], block[:n])):
                     carried.update(r[0] for r in block[:n])
                     break
     return carried

@@ -217,7 +217,8 @@ def test_in_place_archived_tail_copies_ignore_stamps_but_keep_resend(tmp_path, l
     tail = [u("retained question"), call("carried-call"), result("carried-call"), a("retained answer")]
     original = turn(0) + [("S1", dict(m, _ts=3000.0 + i)) for i, m in enumerate(tail)]
     archived = [(s, dict(m, _active=0, _compacted=1)) for s, m in original]
-    carried = [("S1", dict(m, _ts=3000.0 + i if i % 2 == 0 else 4000.0 + i)) for i, m in enumerate(tail)]
+    # Half keep the original's stamp; the rest carry the commit stamp of the boundary row (4000.0).
+    carried = [("S1", dict(m, _ts=3000.0 + i if i % 2 == 0 else 4000.0 + i / 1000)) for i, m in enumerate(tail)]
     # Tool-calling assistant identity uses call ids even when its rendered content changes.
     carried[1][1]["content"] = f"{S} carried rendering"
     resend = [("S1", dict(tail[0], _ts=5000.0)), ("S1", a("new answer"))]
@@ -226,7 +227,7 @@ def test_in_place_archived_tail_copies_ignore_stamps_but_keep_resend(tmp_path, l
         stored = original + resend[1:]
     elif lose == "original":
         stored = original[:3] + original[4:] + resend  # lose the tool call, not just its copied rendering
-    boundary = [("S1", dict(a("host summary"), _compressed_summary=1))]
+    boundary = [("S1", dict(a("host summary"), _compressed_summary=1, _ts=4000.0))]
     out = Home(tmp_path, ONE, archived + boundary + carried + resend, stored=stored).run()
     totals = out["parity"]["totals"]
     assert totals["expected_rows"] == len(original) + len(resend)
@@ -253,13 +254,14 @@ def repeated_in_place():
     def archive(batch):
         return [(s, dict(m, _active=0, _compacted=1)) for s, m in batch]
 
-    first = [(s, dict(m, _ts=m["_ts"] if i % 2 == 0 else 4000.0 + i))
+    first = [(s, dict(m, _ts=m["_ts"] if i % 2 == 0 else 4000.0 + i / 1000))
              for i, (s, m) in enumerate(original[2:])]
     first[1][1]["content"] = f"{S} first carried rendering"
-    second = [(s, dict(m, _ts=5000.0 + i)) for i, (s, m) in enumerate(original + later)]
+    second = [(s, dict(m, _ts=5000.0 + i / 1000)) for i, (s, m) in enumerate(original + later)]
     second[3][1]["content"] = f"{S} second carried rendering"
-    boundary = [("S1", dict(a("host summary"), _compressed_summary=1))]
-    host = (archive(original) + archive(boundary) + archive(first) + archive(later) + boundary + second)
+    first_boundary = [("S1", dict(a("host summary"), _compressed_summary=1, _ts=4000.0))]
+    boundary = [("S1", dict(a("host summary"), _compressed_summary=1, _ts=5000.0))]
+    host = (archive(original) + archive(first_boundary) + archive(first) + archive(later) + boundary + second)
     return host, original + later
 
 
@@ -278,7 +280,7 @@ def test_in_place_multiple_compactions_deduplicate_archived_copies(tmp_path, los
 
 @pytest.mark.parametrize("kind", ["merged", "pure", "prefix", "blank"])
 def test_in_place_carrier_at_block_start_does_not_stop_matching(tmp_path, kind):
-    original = turn(1)
+    original = [(s, dict(m, _ts=3000.0 + i)) for i, (s, m) in enumerate(turn(1))]
     archived = [(s, dict(m, _active=0, _compacted=1)) for s, m in original]
     text = {"merged": CARRIER + "\n\n" + u("question 1")["content"], "pure": CARRIER,
             "prefix": audit.plugin_tree.carrier_markers(REPO)[1][0] + S, "blank": "  "}[kind]
@@ -1032,3 +1034,48 @@ def test_replay_links_are_checked_against_stored_content():
     resolved = {r[0]: (r[1], r[2], r[3]) for r in rows}
     numbers, _silent = audit.score_lineage("S", [("assistant", "expanded")], {}, rows, relations, resolved)
     assert (numbers["visible_surplus_rows"], numbers["silent_surplus_rows"]) == (0, 1)
+
+
+def carrier_boundary_home(tmp_path, block, *, stored, history=None):
+    """This host pin's real in-place shape: no flagged summary row; the inserted block opens with LCM's pure summary
+    carrier (a user row), then the host's copies of the retained tail."""
+    history = history or [("S1", dict(m, _ts=3000.0 + i)) for i, (_s, m) in enumerate(turn(0) + turn(1))]
+    archived = [(s, dict(m, _active=0, _compacted=1)) for s, m in history]
+    opened = [("S1", {"role": "user", "content": CARRIER, "_ts": 3500.0})]
+    return Home(tmp_path, ONE, archived + opened + block, stored=stored, nodes=NODE)
+
+
+@pytest.mark.parametrize("lose", [False, True], ids=["kept", "missing-original"])
+def test_in_place_carrier_boundary_without_summary_row(tmp_path, lose):
+    history = [("S1", dict(m, _ts=3000.0 + i)) for i, (_s, m) in enumerate(turn(0) + turn(1))]
+    stored = history[:1] + history[2:] if lose else history
+    totals = carrier_boundary_home(tmp_path, history[2:], stored=stored).run()["parity"]["totals"]
+    assert totals["expected_rows"] == len(history)
+    assert totals["missing_rows"] == int(lose)
+    assert totals["surplus_rows"] == 0
+
+
+def test_in_place_repeated_turns_keep_a_genuine_repeat(tmp_path):
+    """Review: an unbounded longest-suffix match took a genuine new go/ok pair for copies. Stamps decide."""
+    go = [("S1", dict(u("go"), _ts=3000.0)), ("S1", dict(a("ok"), _ts=3001.0)),
+          ("S1", dict(u("go"), _ts=3002.0)), ("S1", dict(a("ok"), _ts=3003.0))]
+    copies = go[2:]
+    genuine = [("S1", dict(u("go"), _ts=3600.0)), ("S1", dict(a("ok"), _ts=3601.0))]
+    totals = carrier_boundary_home(tmp_path, copies + genuine, stored=go, history=go).run()["parity"]["totals"]
+    assert totals["missing_rows"] == 2
+
+
+@pytest.mark.parametrize("shape", ["unanswered-resend", "reused-call-id", "single-ok"])
+def test_in_place_new_rows_with_their_own_stamps_are_never_copies(tmp_path, shape):
+    if shape == "unanswered-resend":
+        history = turn(0) + [("S1", u("x"))]
+        new = [("S1", dict(u("x"), _ts=3600.0))]
+    elif shape == "reused-call-id":
+        history = turn(0) + [("S1", call("call_0")), ("S1", result("call_0"))]
+        new = [("S1", dict(call("call_0"), _ts=3600.0)), ("S1", dict(result("call_0"), _ts=3601.0))]
+    else:
+        history = turn(0) + [("S1", a("ok"))]
+        new = [("S1", {"role": "user", "content": CARRIER, "_ts": 3599.0}), ("S1", dict(a("ok"), _ts=3600.0))]
+    history = [(s, dict(m, _ts=3000.0 + i)) for i, (s, m) in enumerate(history)]
+    totals = carrier_boundary_home(tmp_path, new, stored=history, history=history).run()["parity"]["totals"]
+    assert totals["missing_rows"] == sum(1 for _s, m in new if m["content"] != CARRIER)
