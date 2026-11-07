@@ -317,7 +317,7 @@ def test_A18c_read_only_missing_relations(build, monkeypatch, caplog):
 
 
 @pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="#2377 follow-up: a warm tool-first view after [U, A, X] keeps main's positional "
+                   reason="#2419: a warm tool-first view after [U, A, X] keeps main's positional "
                           "cursor, so its new rows are never stored (pre-existing on main)")
 def test_warm_tool_first_view_is_stored(build):
     engine = build()
