@@ -38,8 +38,8 @@ def test_compression_resume_logs_debug_without_counting_fallback(host, monkeypat
 
 def test_rewritten_head_is_stored_once_with_a_reasoned_fallback(host, monkeypatch, caplog):
     """#2071: a head the host rewrote outside LCM's compaction is neither stored nor a compaction output, so the
-    stored-tail anchor may not skip it. One counted fallback stores it once, with a WARNING that names the reason;
-    the next turn resumes after the stored tail anchor."""
+    stored-tail anchor may not skip it. It is stored once with the rows after the anchor, with one counted fallback and
+    a WARNING that names the reason; later turns resume from the refreshed boundary."""
     load, clone = host
     ctx, module = load()
     engine = clone(ctx)
@@ -64,8 +64,9 @@ def test_rewritten_head_is_stored_once_with_a_reasoned_fallback(host, monkeypatc
     assert module("aux_session").delegate_child_store_counts().get("fallbacks", 0) == before + 1
     warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
     assert len(warnings) == 1 and "1 row(s) in front of the stored-tail anchor are neither stored nor compaction " \
-        "outputs" in warnings[0]
-    assert any(r.levelno == logging.DEBUG and "child: resuming after stored tail anchor" in r.message
+        "outputs; storing them with the rows after the anchor" in warnings[0]
+    # The store after the anchor refreshes the boundary, as an accepted anchor does: later turns resume from it.
+    assert any(r.levelno == logging.DEBUG and "child: resuming after compression boundary" in r.message
                for r in caplog.records)
 
 

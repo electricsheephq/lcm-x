@@ -182,3 +182,29 @@ def test_a_failed_output_record_drops_the_earlier_compactions_outputs(host, monk
     for _ in range(2):
         child.turn(ctx, [*second, *first, *after], engine)
     assert [row["content"] for row in child_rows(engine)].count(first[0]["content"]) == 1
+
+
+def test_kept_first_rows_and_a_repeated_new_row_survive_a_restart(host):  # noqa: F811
+    """The real compactors keep the first rows (protect_first_n) and add a summary. After a restart (no boundary, no
+    output record) the anchor check finds the kept rows stored in order, stores only the summary in front, and keeps
+    the new row behind the anchor even though it repeats an older stored row."""
+    load, clone = host
+    ctx, _module = load()
+    engine = clone(ctx)
+    engine.on_session_start("parent", platform="cli", context_length=200_000)
+    child = Agent("child", **DELEGATE)
+    stored = [{"role": "user" if i % 2 == 0 else "assistant", "content": f"turn {i}"} for i in range(12)]
+    stored[5] = {"role": "assistant", "content": "Let me check."}
+    child.turn(ctx, stored, engine)
+    if [row["content"] for row in child_rows(engine)] != [row["content"] for row in stored]:
+        pytest.fail("setup: the child's first turn was not stored")
+    ctx2, _ = load()  # fresh module and engines: no in-memory boundary or output record
+    resumed = clone(ctx2)
+    resumed.on_session_start("parent", platform="cli", context_length=200_000)
+    summary = {"role": "user", "content": "[CONTEXT SUMMARY] turns 3 to 5"}
+    repeat = {"role": "assistant", "content": "Let me check."}
+    view = [*stored[:3], summary, *stored[6:], repeat]
+    for _ in range(2):
+        child.turn(ctx2, view, resumed)
+    assert [row["content"] for row in child_rows(resumed)] == [
+        *(row["content"] for row in stored), summary["content"], repeat["content"]]

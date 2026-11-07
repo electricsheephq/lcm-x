@@ -1188,25 +1188,34 @@ class DelegateChildMixin:
                 start = None  # an empty continuation is not an empty logical child history
         if start is None:
             sessions = self._delegate_child_store_sessions(session_id)
-            stored_tail = self._delegate_child_lineage_tail(sessions, _ANCHOR_ROWS)
+            stored_tail = []
+            for sid in sessions:
+                stored_tail = [(sid, row) for row in self._store.get_session_tail(
+                    sid, limit=_ANCHOR_ROWS - len(stored_tail))] + stored_tail
+                if len(stored_tail) == _ANCHOR_ROWS:
+                    break
             outputs = Counter(_DELEGATE_COMPACTION_OUTPUTS.get(key) or ())
-            rejected: list[int] = []
+            rejected: list[tuple[int, list[int]]] = []
 
-            def unaccounted(front: list, end: int) -> int:
-                # #2071: each row in front of the match must be stored (the stored rows before the anchor, read
-                # as far back as the match reaches) or be one of the last compaction's outputs.
+            def unaccounted(front: list, end: int) -> list[int]:
+                # #2071: each row in front of the match must be stored in the lineage (apart from the anchor rows,
+                # the lineage's last stored rows) or be one of the last compaction's outputs, one occurrence each.
                 stored_ids = Counter(self._session_end_prefix_compare_identity(row, session_id=sid)
-                                     for sid, row in self._delegate_child_lineage_tail(sessions, end))
+                                     for sid in sessions for row in self._store.get_session_messages(sid, limit=-1))
                 stored_ids.subtract(identities[len(front):end])
                 return self._delegate_child_unaccounted(front, stored_ids, outputs)
 
             start = self._delegate_child_anchor_end(session_id, view, stored_tail, unaccounted, rejected)
-            anchored = start is not None
-            if start is None:
+            anchored = start is not None or bool(rejected)
+            if rejected:
+                end, missing = rejected[0]
                 self._note_delegate_child_fallback(
-                    session_id, f"{rejected[0]} row(s) in front of the stored-tail anchor are neither stored nor "
-                    "compaction outputs; resuming with counted identities" if rejected else
-                    "stored rows no longer match the child's view; resuming with counted identities")
+                    session_id, f"{len(missing)} row(s) in front of the stored-tail anchor are neither stored nor "
+                    "compaction outputs; storing them with the rows after the anchor")
+                suffix = [view[index] for index in missing] + view[end:]
+            elif start is None:
+                self._note_delegate_child_fallback(
+                    session_id, "stored rows no longer match the child's view; resuming with counted identities")
                 remaining = Counter(self._session_end_prefix_compare_identity(row, session_id=sid)
                                     for sid in sessions for row in self._store.get_session_messages(sid, limit=-1))
                 suffix = []
@@ -1233,25 +1242,17 @@ class DelegateChildMixin:
                      len(stored), session_id, link["parent_session_id"])
         return len(stored)
 
-    def _delegate_child_lineage_tail(self, sessions: list[str], limit: int) -> list[tuple[str, Dict[str, Any]]]:
-        """The last ``limit`` stored rows of the child's lineage (newest session first in ``sessions``), oldest first."""
-        rows: list[tuple[str, Dict[str, Any]]] = []
-        for sid in sessions:
-            if len(rows) >= limit:
-                break
-            rows = [(sid, row) for row in self._store.get_session_tail(sid, limit=limit - len(rows))] + rows
-        return rows
-
-    def _delegate_child_unaccounted(self, front: list, stored: Counter, outputs: Counter) -> int:
-        stored, outputs, missing = stored.copy(), outputs.copy(), 0
-        for identity in front:
+    def _delegate_child_unaccounted(self, front: list, stored: Counter, outputs: Counter) -> list[int]:
+        """Indexes of ``front`` rows that are neither stored nor a compaction output (one occurrence each)."""
+        stored, outputs, missing = stored.copy(), outputs.copy(), []
+        for index, identity in enumerate(front):
             digest = self._delegate_child_boundary_digest(identity)
             if stored[identity] > 0:
                 stored[identity] -= 1
             elif outputs[digest] > 0:
                 outputs[digest] -= 1
             else:
-                missing += 1
+                missing.append(index)
         return missing
 
     def _delegate_child_anchor_end(self, session_id: str, view: List[Dict[str, Any]],
@@ -1259,17 +1260,18 @@ class DelegateChildMixin:
                                   unaccounted=None, rejected: Optional[list] = None) -> Optional[int]:
         """After the host rewrote the child's head (native compaction), resume after the stored tail when
         it occurs exactly once in the view, and only when every row in front of it is accounted for (#2071):
-        ``unaccounted(front, end)`` counts the rows that are neither stored nor compaction outputs."""
+        ``unaccounted(front, end)`` lists the front rows that are neither stored nor compaction outputs; when it lists
+        any, ``(end, those indexes)`` goes to ``rejected`` and None is returned."""
         anchor = [self._session_end_prefix_compare_identity(row, session_id=sid)
                   for sid, row in stored_rows]
         identities = [self._session_end_prefix_compare_identity(msg, session_id=session_id) for msg in view]
         for width in range(len(anchor), 0, -1):
             end = self._delegate_child_unique_end(identities, anchor[-width:])
             if end is not None:
-                missing = unaccounted(identities[:end - width], end) if unaccounted is not None else 0
-                if missing:  # a narrower match would sit behind the same row
+                missing = unaccounted(identities[:end - width], end) if unaccounted is not None else []
+                if missing:  # a narrower match would sit behind the same rows
                     if rejected is not None:
-                        rejected.append(missing)
+                        rejected.append((end, missing))
                     return None
                 return end
         return None
