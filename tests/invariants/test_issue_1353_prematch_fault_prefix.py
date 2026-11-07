@@ -221,6 +221,8 @@ def test_partial_write_retry_is_idempotent(tmp_path, monkeypatch, stage):
             )
         real = getattr(owner, attribute)
 
+        at_fault = []
+
         def after_write(*args, **kwargs):
             result = real(*args, **kwargs)
             if not fired and (stage == "version-rewind" or args[0]):
@@ -228,6 +230,7 @@ def test_partial_write_retry_is_idempotent(tmp_path, monkeypatch, stage):
                     assert e._store.get_session_messages("S")[2]["observed_at"] == 12.0
                 elif stage == "commit-relation":
                     assert _relations(e)
+                    at_fault.extend(_relations(e))  # the first attempt's relations, inside its open transaction
                 fired.append(True)
                 raise sqlite3.OperationalError("synthetic fault after " + stage)
             return result
@@ -238,6 +241,9 @@ def test_partial_write_retry_is_idempotent(tmp_path, monkeypatch, stage):
         assert fired == [True], "fault must follow the real operation"
         observed_failures = e._ingest_failure_count
         relations_after_fault = _relations(e)
+        if stage == "commit-relation":
+            # Direct rollback check: the first attempt's relations were discarded, not kept beside the retry's.
+            assert at_fault and len(relations_after_fault) == len(at_fault)
         # #1815: the fault fires once, on the first attempt; that attempt rolls back (R2: this writer's partial
         # evidence is discarded) and the same ingest classifies again and succeeds, so no ingest failure is counted.
         e.ingest(deepcopy(host))
