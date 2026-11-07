@@ -2750,11 +2750,20 @@ class ReconcileMixin:
         the record as it was (today's carry)."""
         key = self._replay_snapshot_metadata_key(_COMPACTION_COMMIT_PROOF_METADATA_PREFIX)
         try:
-            with self._ingest_evidence():
+            with self._ingest_evidence(), self._store.atomic(immediate=True):
                 payload = self._store.read_metadata_json(key)
                 if isinstance(payload, dict):
+                    snapshot_key = self._replay_snapshot_metadata_key("host_occurrence_snapshot")
+                    snapshot = self._store.read_metadata_json(snapshot_key)
+                    digest = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
                     payload["carry_ranges"] = [list(item) for item in self._coalesce_compression_carry_ranges(carry_ranges)]
                     self._store.write_metadata_json([key], json.dumps(payload, sort_keys=True))
+                    # Only refresh evidence bound to the proof read under this transaction.
+                    # A replaced proof must never inherit an older occurrence snapshot.
+                    if isinstance(snapshot, dict) and snapshot.get("proof_sha256") == digest:
+                        snapshot["proof_sha256"] = hashlib.sha256(
+                            json.dumps(payload, sort_keys=True).encode()).hexdigest()
+                        self._store.write_metadata_json([snapshot_key], json.dumps(snapshot, sort_keys=True))
                     logger.info("LCM rewrote the rotation child's carry ranges (%s): store ids %s", reason, store_ids)
         except Exception as exc:
             self._raise_ingest_busy(exc)

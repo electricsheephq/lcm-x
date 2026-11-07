@@ -303,6 +303,24 @@ def tag_counts(texts, pattern):
     return counts
 
 
+def cap_host_evidence(applicable, failed, inconclusive, numbers, state):
+    """Cap only passing state.db-dependent bars; independent observer/log bars keep their verdicts.
+
+    B1/B2 use lineage, occurrences and parity; B4 uses lineage coverage; B5 checks cross-lineage
+    sources; B10 checks host child identities/parents. Only B10 explicitly requires host state
+    (delegated.py's bar definition, selected by delegate_plan). Missing state or optional
+    host_parity_licensed.unavailable alone does not cap other bars.
+    """
+    error = numbers["diagnostic"]["host_evidence_error"]
+    reasons = {b: f"host evidence unreadable: {error}" for b in ("B1", "B2", "B4", "B5", "B10")} if error else {}
+    if not state.exists():
+        reasons["B10"] = "B10 requires host state.db: missing"
+    capped = [b for b in applicable if b in reasons and b not in failed and b not in inconclusive]
+    if capped:
+        inconclusive.update({b: reasons[b] for b in capped})
+        numbers["diagnostic"]["verdict_capped"] = {"bars": capped, "reason": reasons[capped[0]]}
+
+
 def score(cell: dict, cell_dir: Path, db_dir: Path | None = None) -> dict:
     """``db_dir`` holds the cell's lcm.db / state.db copies (run_matrix: the cell's scratch dir); default <cell>/db."""
     events, phases = load(cell_dir)
@@ -519,6 +537,7 @@ def score(cell: dict, cell_dir: Path, db_dir: Path | None = None) -> dict:
         gaps += b10_gaps
         if b10_failed and "B10" in applicable:
             failed["B10"] = b10_failed
+    cap_host_evidence(applicable, failed, inconclusive, numbers, db_dir / "state.db")
     if gaps:
         return {"verdict": "UNSUPPORTED", "reason": "scenario not proven: " + "; ".join(gaps[:5]),
                 "applicable_bars": applicable, "failed_bars": failed, "inconclusive_bars": inconclusive, "numbers": numbers}

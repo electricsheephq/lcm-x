@@ -126,7 +126,9 @@ def test_b1_unavailable_evidence_falls_back_neutrally(tmp_path, cause, reason, o
         out = bars.score({"bars": ["B1"]}, tmp_path / "cell")
     seq = [(rows[i][0], rows[i][1]) for i in order]
     old_passes = bars.continue_positions(rows, r"reply to (T\d+)\b") == bars.continue_positions(seq, r"reply to (T\d+)\b")
-    assert (out["verdict"] == "PASS") == old_passes == ordered
+    assert old_passes == ordered
+    assert out["verdict"] == ("INCONCLUSIVE" if cause == "unreadable_host" and ordered
+                              else "PASS" if ordered else "FAIL")
     assert out["numbers"]["B1"]["continue_fallbacks"] == [{"lineage": "chat", "reason": reason}]
 
 

@@ -1,0 +1,1 @@
+- Fix: Carry-range maintenance keeps a compaction's occurrence snapshot bound to its proof, so an equal-content retry with a changed timestamp or message id is still stored after a restart.
