@@ -8828,6 +8828,18 @@ class LCMEngine(
             except Exception as exc:
                 self._raise_ingest_busy(exc)
                 logger.warning("LCM identity-anchor relation write failed (%s)", type(exc).__name__)
+            composite_ids = [stored_at[idx] for idx, message in messages_to_store_with_index
+                             if idx not in anchor_remainders and message.get("role") == "user"
+                             and _PRESERVED_TODO_CONTEXT_PREFIX in (
+                                 composite_text := normalize_content_value(message.get("content")) or "")
+                             and "\n\n" in composite_text]
+            if composite_ids:
+                try:
+                    with self._ingest_evidence():
+                        self._identity_anchor_record_composite_of(composite_ids)
+                except Exception as exc:
+                    self._raise_ingest_busy(exc)
+                    logger.warning("LCM composite-of relation write failed (%s)", type(exc).__name__)
         self._host_uid_shadow(host_uids, {idx: store_id for (idx, _msg), store_id in zip(messages_to_store_with_index,
                                                                                          store_ids)}, anchor_remainders)
         # Rollup staleness is driven by summary-node PUBLICATION
