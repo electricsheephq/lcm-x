@@ -19,6 +19,7 @@ avoid an import cycle (staticmethod resolution is identical).
 from __future__ import annotations
 
 import hashlib
+import itertools
 import json
 import re
 from collections import Counter, defaultdict
@@ -3497,7 +3498,7 @@ class ReconcileMixin:
             stamp = self._host_occurrence_metadata(host)["timestamp"]
             ledger_id = consumed_pairs.get(index)
             host_results = []
-            for result in messages[index + 1:]:
+            for result in itertools.islice(messages, index + 1, None):  # no suffix copy per call (review thread)
                 if result.get("role") != "tool":
                     break
                 host_results.append(result)
