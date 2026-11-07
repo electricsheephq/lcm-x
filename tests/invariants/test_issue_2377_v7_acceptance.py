@@ -2,6 +2,7 @@
 
 All acceptance rows exercise the implemented proof and attribution contracts.
 """
+from copy import deepcopy
 import sqlite3
 
 import pytest
@@ -499,3 +500,27 @@ def test_A30_stamped_run_prefix_claim(build, monkeypatch):
     run = ingest_shape(build, monkeypatch, source, [*source, V], 3)
     run.check({5})
     assert {3, 4} <= run.skips
+
+
+def _cold_ingest(build, monkeypatch, host, cursor=1):
+    engine = build()
+    with monkeypatch.context() as patch:
+        patch.setattr(engine, "_reconcile_ingest_cursor_from_store", lambda *a, **kw: cursor)
+        patch.setattr(engine, "_ledger_cold_cursor", lambda *a, **kw: dict(k=cursor, pairs={}))
+        engine.ingest(deepcopy(host))
+    assert engine._ingest_failure_count == 0, engine._last_ingest_error
+    rows = engine._store.get_session_messages(engine._session_id)
+    engine.shutdown()
+    return rows
+
+
+def test_A31_linked_replay_copy_is_not_independent_capacity(build, monkeypatch):
+    """Codex P1 (three cold ingests): the linked @4 copy of the @2 original must not add skip capacity."""
+    engine = build()
+    engine.ingest([U, call(2), dict(X, timestamp=2)])
+    engine.shutdown()
+    second = _cold_ingest(build, monkeypatch, [U, call(4), dict(X, timestamp=4), V])
+    third = _cold_ingest(build, monkeypatch, [U, call(), X, call(), X, dict(V, content="next2", timestamp=2000.0)])
+    xs = lambda rows: sum(r["role"] == "tool" and r["content"] == "X" for r in rows)  # noqa: E731
+    # Two true occurrences in the third view; the second ingest's copy replays the original.
+    assert xs(third) >= xs(second) + 1, "the genuinely new identical pair was skipped"
