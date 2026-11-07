@@ -463,3 +463,28 @@ def test_rotation_identical_copies_keep_their_order_inside_a_mixed_content_group
     assert {(copies[0], originals[0]), (copies[1], originals[1])} <= links
     p_copy = next(row["store_id"] for row in rows if row["session_id"] == "rotated" and row["content"] == PREFIXED)
     assert (p_copy, _original(rows, PREFIXED)) in links
+
+
+@pytest.mark.issue(2390)
+def test_rotation_list_content_row_keeps_its_links(build, caplog, monkeypatch):
+    """Review probe: multimodal (list) content never decides the pairing and never drops the bind's links."""
+    parts = [{"type": "text", "text": PREFIXED}]
+    plain_history = history
+
+    def history_with_list_turn(uids):
+        rows = plain_history(uids)
+        rows[max(i for i, row in enumerate(rows) if row["role"] == "user")]["content"] = parts
+        return rows
+
+    monkeypatch.setattr(__name__ + ".history", history_with_list_turn)
+
+    def reorder(_engine, view):
+        users = [i for i, row in enumerate(view) if row.get("role") == "user" and row.get("content") in (T, parts)]
+        p_index = next(i for i in users if view[i]["content"] == parts)
+        t_index = next(i for i in users if view[i]["content"] == T)
+        view[p_index]["timestamp"] += 0.5
+        view[p_index], view[t_index] = view[t_index], view[p_index]
+
+    engine, rows = run(build, caplog, mode="rotating", uids=False, restamp=True, before_ingest=reorder)
+    assert len(replay_links(engine)) == 2
+    assert not [record for record in caplog.records if "TypeError" in record.getMessage()]
