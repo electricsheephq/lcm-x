@@ -194,7 +194,11 @@ def probe_checks(out, sessions):
     if out is None:
         return found, skipped
     rows = _doctor_rows(out / "doctor.json")
-    if rows is not None:
+    pre_open = dict(c for c in _doctor_rows(out / "fts-pre-open.json") or () if c[0] in DOCTOR_PRE_OPEN)
+    pre_rows = [{"kind": "doctor", "check": c, "status": pre_open[c]} for c in DOCTOR_PRE_OPEN if c in pre_open]
+    if rows is None:  # The doctor did not report: only a failure the pre-open check saw counts (#2453).
+        found += [r for r in pre_rows if r["status"] not in ("ok", "warn")]
+    else:
         bound = (_json((out / "sessions.json").read_text(encoding="utf-8")) if (out / "sessions.json").is_file()
                  else None) or {}
         for check, status in rows:
@@ -206,8 +210,7 @@ def probe_checks(out, sessions):
                 else:
                     skipped.append({"check": check,
                                     "reason": DOCTOR_NOT_EXERCISED.get(check, "not classified for the probe")})
-        pre_open = dict(c for c in _doctor_rows(out / "fts-pre-open.json") or () if c[0] in DOCTOR_PRE_OPEN)
-        found += [{"kind": "doctor", "check": c, "status": pre_open[c]} for c in DOCTOR_PRE_OPEN if c in pre_open]
+        found += pre_rows
         unbound = [] if set(DOCTOR_PRE_OPEN) <= set(pre_open) else ["fts-pre-open"]  # Else only a repaired index was seen.
         for key in sessions:
             scoped = _doctor_rows(out / f"doctor-{key}.json") if bound.get(key) is True else None
@@ -528,7 +531,11 @@ def run_arm(host, name, home, plan, extras):
                 "large_conversation_rows": max(c["lcm_rows"] for c in plan["conversations"]),
                 "replay_misses": sum(stats.get("replay_misses", {}).values()), "turns_planned": planned,
                 "turns_completed": planned - len(not_completed), "turns_not_completed": not_completed,
-                "cron_job_sha256": cron_job_sha256, **host.facts(ctx)}
+                "cron_job_sha256": cron_job_sha256}
+    try:
+        workload.update(host.facts(ctx))
+    except (sqlite3.DatabaseError, capture.CaptureError) as error:  # A refused read: bar 6's facts are unavailable
+        workload["facts_unavailable"] = type(error).__name__  # (never zero), and the checks below still run (#2453).
     checks = host.checks(ctx)
     try:
         rows = host.rows(home)
