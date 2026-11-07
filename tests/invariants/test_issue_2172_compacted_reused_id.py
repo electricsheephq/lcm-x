@@ -12,7 +12,7 @@ from tests.test_issue_671_stub_first_exit import tool_pair
 
 @pytest.mark.parametrize("dangling", [
     pytest.param(False, id="full-pair", marks=pytest.mark.xfail(
-        strict=True,
+        strict=True, raises=AssertionError,
         reason="#2172 compacted variant: an identical earlier pair compacted out of the host view still proves a replay; planned for v0.30.x (design r3.8 named loss limit)",
     )),
     pytest.param(True, id="dangling-call"),
@@ -31,7 +31,8 @@ def test_compacted_away_identical_pair_is_not_proof(build, monkeypatch, dangling
 
     monkeypatch.setattr(shapes, "fixture", fixture)
     engine, host = compact(build, mode="cold")
-    assert not any(row.get("tool_call_id") == "call_0" for row in host)
+    if any(row.get("tool_call_id") == "call_0" for row in host):
+        pytest.fail("setup: the earlier call_0 pair was not compacted out of the host view")
     call, result = tool_pair("call_0", "OK", tool_name="poll")
     if dangling:
         host = deepcopy(host) + [{"role": "user", "content": "poll again"}, call]
@@ -45,9 +46,9 @@ def test_compacted_away_identical_pair_is_not_proof(build, monkeypatch, dangling
     before = stored(engine)
     engine.ingest(deepcopy(host) + new)
     after = stored(engine)
-    assert after[:len(before)] == before
-    added = after[len(before):]
-    assert [(row["role"], row["content"]) for row in added] == [
-        (row["role"], row["content"]) for row in new
-    ]
-    assert added[-2]["tool_call_id"] == "call_0"
+    added = [(row["role"], row["content"], row.get("tool_call_id")) for row in after[len(before):]]
+    if after[:len(before)] == before and added == [(row["role"], row["content"], row.get("tool_call_id")) for row in new]:
+        return  # fixed (the full-pair xfail then turns into a loud XPASS) or the dangling-call control
+    if not dangling and after[:len(before)] == before and added == [("user", "poll again", None), ("user", "next", None)]:
+        raise AssertionError(f"#2172 known shape: the new call and result were taken as a replay: {added}")
+    pytest.fail(f"not the #2172 shape: prefix kept={after[:len(before)] == before}; added={added}")
