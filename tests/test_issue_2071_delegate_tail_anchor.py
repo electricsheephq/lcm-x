@@ -27,7 +27,8 @@ def _child(harness):
     stored = [{"role": "user" if i % 2 == 0 else "assistant", "content": f"turn {i} " + "payload " * 400}
               for i in range(12)]
     child.turn(ctx, stored, engine)
-    assert [row["content"] for row in child_rows(engine)] == [row["content"] for row in stored]
+    if [row["content"] for row in child_rows(engine)] != [row["content"] for row in stored]:
+        pytest.fail("setup: the child's first turn was not stored")
     return ctx, module("aux_session"), engine, child, stored
 
 
@@ -71,8 +72,8 @@ def test_a_failed_pre_store_does_not_let_the_tail_anchor_skip_x(host, monkeypatc
     monkeypatch.setattr(engine, "_append_delegate_child_rows", fail)
     monkeypatch.setattr(engine, "_compress_bypassed", lambda *args: COMPACTED)
     result = child.compress(engine, stored)
-    assert calls and result == COMPACTED
-    assert engine._delegate_child_key("child") not in aux._DELEGATE_RESUME_BOUNDARIES
+    if not calls or result != COMPACTED or engine._delegate_child_key("child") in aux._DELEGATE_RESUME_BOUNDARIES:
+        pytest.fail("setup: the compaction did not run without a boundary")
     assert _send_x_then_a_repeat(ctx, engine, child, result) == 1
 
 
@@ -84,8 +85,8 @@ def test_a_failed_boundary_record_does_not_let_the_tail_anchor_skip_x(host, monk
     monkeypatch.setattr(engine, "_remember_delegate_child_boundary", fail)
     monkeypatch.setattr(engine, "_compress_bypassed", lambda *args: COMPACTED)
     result = child.compress(engine, stored)
-    assert calls and result == COMPACTED
-    assert engine._delegate_child_key("child") not in aux._DELEGATE_RESUME_BOUNDARIES
+    if not calls or result != COMPACTED or engine._delegate_child_key("child") in aux._DELEGATE_RESUME_BOUNDARIES:
+        pytest.fail("setup: the compaction did not run without a boundary")
     assert _send_x_then_a_repeat(ctx, engine, child, result) == 1
 
 
@@ -105,6 +106,6 @@ def test_a_concurrent_store_does_not_let_the_tail_anchor_skip_x(host, monkeypatc
 
     monkeypatch.setattr(engine, "_compress_bypassed", compress_with_store)
     result = child.compress(engine, stored)
-    assert result == COMPACTED
-    assert engine._delegate_child_key("child") not in aux._DELEGATE_RESUME_BOUNDARIES
+    if result != COMPACTED or engine._delegate_child_key("child") in aux._DELEGATE_RESUME_BOUNDARIES:
+        pytest.fail("setup: the compaction did not run without a boundary")
     assert _send_x_then_a_repeat(ctx, engine, child, result) == 1
