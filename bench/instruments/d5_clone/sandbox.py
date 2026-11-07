@@ -47,6 +47,7 @@ def profile(ports, socket_roots=()):
         subtrees = _SYSTEM_SOCKETS + (home + "/.hermes", os.path.realpath(home + "/.hermes"))  # Never inside these: other services' sockets live there.
         # Never these or above them; a dir made for the run INSIDE the per-user temp dir is fine.
         ancestors = subtrees + (home, "/private/var/folders") + _user_dirs()
+        ancestors += tuple("/System/Volumes/Data" + d for d in ancestors)  # The firmlink spelling of each.
         inside = any(resolved == d or resolved.startswith(d + "/") for d in subtrees)
         above = any(resolved == d or d.startswith(resolved.rstrip("/") + "/") for d in ancestors)
         if inside or above:
