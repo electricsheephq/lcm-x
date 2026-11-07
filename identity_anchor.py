@@ -1610,9 +1610,20 @@ class IdentityAnchorMixin:
             ):
                 by_text[text].append(sid)
             fits = _composite_of_splits(content, by_text, header, _todo_annotation_span)
-            if fits is None or len(fits) != 1 or any(len(by_text[part]) != 1 for part, held in fits[0] if held):
+            if fits is None or len(fits) != 1:
                 continue
-            groups.append([(store_id, "composite_of", by_text[part][0] if held else None,
+            choices = [by_text[part] for part, held in fits[0] if held]
+            if all(len(holders) == 1 for holders in choices):
+                chosen = [holders[0] for holders in choices]
+            else:  # identical texts held by several rows: the host merged CONSECUTIVE turns (ruling)
+                order = [sid for (sid,) in self._store._conn.execute(
+                    "SELECT store_id FROM messages WHERE session_id = ? AND store_id < ? ORDER BY store_id",
+                    (row["session_id"], store_id))]
+                chosen = _composite_of_holders(choices, order)
+                if chosen is None:
+                    continue
+            held_ids = iter(chosen)
+            groups.append([(store_id, "composite_of", next(held_ids) if held else None,
                             ordinal, row.get("observed_at")) for ordinal, (part, held) in enumerate(fits[0])])
         if groups:
             self._store.add_message_relations(groups)
@@ -1688,3 +1699,27 @@ def _composite_of_splits(content: str, by_text, header: str, todo_span) -> list[
     if tails is None or len(tails) >= _MAX_DECOMPOSITIONS:
         return None
     return found + [[(scaffold, False)] + [(part, True) for part in parts] for parts, _rest in tails]
+
+
+def _composite_of_holders(choices: list[list[int]], order: list[int]) -> list[int] | None:
+    """One stored row per held part when some part's text is held by several rows of C's session
+    (``order``: the session's store ids before C, every role). Several parts: exactly one choice whose
+    rows are consecutive in store order with no row of any role between them, in text order. One part:
+    the row immediately before C, when it holds that text. Anything else: None (no relation)."""
+    if len(choices) == 1:
+        return [order[-1]] if order and order[-1] in choices[0] else None
+    position = {sid: index for index, sid in enumerate(order)}
+    runs = []
+    for first in choices[0]:
+        run, at = [first], position[first]
+        for holders in choices[1:]:
+            nxt = order[at + 1] if at + 1 < len(order) else None
+            if nxt not in holders:
+                break
+            run.append(nxt)
+            at += 1
+        else:
+            runs.append(run)
+            if len(runs) > 1:
+                return None
+    return runs[0] if len(runs) == 1 else None
