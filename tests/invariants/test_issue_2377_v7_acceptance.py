@@ -466,6 +466,19 @@ def test_A29_restamped_rewritten_original(build, monkeypatch):
     run.check({3, 4, 5})
 
 
+@pytest.mark.xfail(strict=True, raises=AssertionError,
+                   reason="named residual (exactly-once-ingest §5): two different tool pairs that share call "
+                          "text and stamp; main skips the same new pair")
+def test_A29b_stamp_collision_residual(build, monkeypatch):
+    """Astra F1: the stored A@2·X@2 comes back re-stamped @4 and rewritten (Z), next to the real A@4·Y@4.
+    Both host segments claim only the @4 class, so the free @2·X member is spent on the new A·X."""
+    source = [U, call(2), dict(X, timestamp=2), call(4), dict(X, content="Y", timestamp=4)]
+    host = [U, call(4), dict(X, content="Z", timestamp=4), call(4), dict(X, content="Y", timestamp=4),
+            call(), X, V]
+    run = ingest_shape(build, monkeypatch, source, host)
+    run.check({5, 6, 7})
+
+
 def test_A30_stamped_run_prefix_claim(build, monkeypatch):
     source = [U, call(2), dict(X, timestamp=2), call(4), dict(X, timestamp=4)]
     run = ingest_shape(build, monkeypatch, source, [*source, V], 3)
