@@ -176,9 +176,11 @@ def test_t2_ledger_pair_out_of_the_tail_keeps_its_host_reservation(engines):
     pairs = {i: row["store_id"] for i, row in enumerate(engine._store.get_session_messages("S"))}
     helper = engine._replayed_tool_segment_indexes_after_cursor
     engine._ingest_messages([p, *tool_pair(2.), *tool_pair(100.)])
-    # The tail holds the pair's stored copy: that copy leaves the counts once,
-    # and the later stored pair proves the replay.
-    assert helper([p, *tool_pair(2.), new, *tool_pair(100.)], 3, consumed_pairs=pairs) == {4, 5}
+    # #2377 (release-manager option a): the warm ingest linked the stored @100 pair
+    # possible_replay_of to the @2 pair (same scorer key), and a copy carrying any
+    # such link is never independent skip capacity. Its replay is stored again as a
+    # linked copy: a visible duplicate, never a lost row (main skipped it).
+    assert helper([p, *tool_pair(2.), new, *tool_pair(100.)], 3, consumed_pairs=pairs) == set()
     engine._ingest_messages([p, *tool_pair(2.), *tool_pair(100.),
                              *[_m("user", f"padding {i}", 120. + i) for i in range(65)], *tool_pair(300.)])
     # Out of the tail's sight, the pair keeps its host reservation, as #2185 does
