@@ -219,3 +219,41 @@ def test_middle_block_characterization(tmp_path):
         assert _relations(engine) == [(4, "carried_stamp", 3, None)]
     finally:
         engine.shutdown()
+
+
+R, Q = "a repeated driver prompt", "another repeated prompt"
+# case: (earlier rows of session S [(role, text)], composite text, expected parts: index into rows / None)
+HOLDER_CASES = {
+    # Single part, text held twice: link only the row immediately before C.
+    "single-holder-just-before": ([("user", R), ("assistant", "a"), ("user", R)], TODO + "\n\n" + R, [None, 2]),
+    "single-holder-not-just-before": ([("user", R), ("assistant", "a"), ("user", R), ("assistant", "b")],
+                                      TODO + "\n\n" + R, []),
+    # Several parts: exactly one assignment of consecutive rows (no row of any role between), in text order.
+    "run-picks-the-second-occurrence": ([("user", TODO), ("assistant", "a"), ("user", TODO), ("user", R),
+                                         ("user", R)], TODO + "\n\n" + R, [2, 3]),
+    "two-runs-write-nothing": ([("user", TODO), ("user", R), ("assistant", "a"), ("user", TODO), ("user", R)],
+                               TODO + "\n\n" + R, []),
+    "holders-out-of-order": ([("user", Q), ("user", R), ("user", R)], TODO + "\n\n" + R + "\n\n" + Q, []),
+    "scaffold-then-run": ([("user", R), ("user", Q), ("assistant", "a"), ("user", R)],
+                          TODO + "\n\n" + R + "\n\n" + Q, [None, 0, 1]),
+    "assistant-between-parts": ([("user", R), ("assistant", "a"), ("user", Q), ("user", R)],
+                                TODO + "\n\n" + R + "\n\n" + Q, []),
+}
+
+
+@pytest.mark.parametrize("case", list(HOLDER_CASES))
+def test_holder_rule_for_identical_texts(tmp_path, case):
+    """Release-manager holder rule: when a part's text is held by several rows of C's session, the host's
+    merge of consecutive turns decides; anything else stays fail-closed."""
+    rows, content, expected = HOLDER_CASES[case]
+    engine = _engine(tmp_path)
+    try:
+        store, conversation = engine._store, engine._conversation_id
+        ids = [store.append("S", {"role": role, "content": text}, conversation_id=conversation) for role, text in rows]
+        target = store.append("S", _u(content, None), conversation_id=conversation)
+        engine._identity_anchor_record_composite_of([target])
+        assert [r for r in _relations(engine) if r[1] == "composite_of"] == [
+            (target, "composite_of", None if part is None else ids[part], ordinal)
+            for ordinal, part in enumerate(expected)]
+    finally:
+        engine.shutdown()
