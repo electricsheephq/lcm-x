@@ -99,7 +99,11 @@ def test_unreadable_placeholder_never_links_and_keeps_primary_links(build, monke
     p_copies = [row["store_id"] for row in rows if row["content"] == P]
     evidence = {"t": t_copies, "p": p_copies, "relations": sorted(links)}
     assert len(t_copies) == 2 and (t_copies[1], t_copies[0]) in links, evidence
-    assert len(p_copies) == 2 and not any(a in p_copies for a, _b in links), evidence
+    # The transfer fails closed: no consuming link from a P copy. The borrowed-stamp linker (#2421) reads no
+    # stored form, and may attribute the moved P with its non-consuming link (its borrowed stamp recorded).
+    consuming = {a for a, in engine._store._conn.execute(
+        "SELECT store_id FROM message_relations WHERE kind='possible_replay_of' AND observed_at IS NULL")}
+    assert len(p_copies) == 2 and not consuming & set(p_copies), evidence
 
 
 @pytest.mark.xfail(strict=True, raises=AssertionError, reason="625: TODO composite is scaffold before R2 "
