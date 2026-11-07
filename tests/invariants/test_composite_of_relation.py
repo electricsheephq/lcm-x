@@ -174,3 +174,26 @@ def test_writer_finds_every_split(tmp_path, case):
         assert not [r for r in _relations(engine) if r[1] == "composite_of"]
     finally:
         engine.shutdown()
+
+
+@pytest.mark.parametrize("case", ["scaffold-holds-leading-todo", "overlap-after-stored-todo"])
+def test_scaffold_bounds_at_the_writer(tmp_path, case):
+    """A scaffold that starts with a whole stored todo row is not unstored; with an overlapping separator after a
+    stored todo row, the next cut ("TODO\\n") is still tried, so the one allowed split is found."""
+    engine = _engine(tmp_path)
+    try:
+        store, conversation = engine._store, engine._conversation_id
+        todo = store.append("S", _u(TODO, None), conversation_id=conversation)
+        if case == "scaffold-holds-leading-todo":
+            store.append("S", _u(P1, None), conversation_id=conversation)
+            target = store.append("S", _u(TODO + "\n\nunstored note\n\n" + P1, None), conversation_id=conversation)
+            expected = []
+        else:
+            prompt = store.append("S", _u("P", None), conversation_id=conversation)
+            target = store.append("S", _u(TODO + "\n\n\nP", None), conversation_id=conversation)
+            expected = [(target, "composite_of", None, 0), (target, "composite_of", prompt, 1)]
+        assert todo < target
+        engine._identity_anchor_record_composite_of([target])
+        assert [r for r in _relations(engine) if r[1] == "composite_of"] == expected
+    finally:
+        engine.shutdown()
