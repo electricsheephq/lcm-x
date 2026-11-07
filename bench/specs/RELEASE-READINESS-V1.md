@@ -510,7 +510,7 @@ fixture requires new comparable measurements; it cannot restamp old results.
 **Rulings on bars 1, 2 and 5.** Each is fixed before any run's data:
 - Bar 1, class 3: only a row whose identity matches no host row and no snapshot row may be assigned to identical rows of the previous-GA arm, and per identity over the whole run the rc stores it no more times than the previous GA does.
 - Bar 1, order (from v0.30.0 rc1): host rows are matched in order within each session, which closes the reorder gap Phase B already treats as a regression; rows of other sessions, such as the scheduled job's, are ordered only within their own session.
-- Bar 1, credits (2026-11-07): the host-rewrite and payload-equivalence credits count only when the rc-side rule grants them and a replay receipt of that bind shows the same donor credited on both trees (equal base and candidate store ids); a bind without its previous-GA replay receipt makes bar 1 INCONCLUSIVE.
+- Bar 1, credits (2026-11-07): the host-rewrite and payload-equivalence credits count only when the rc-side rule grants them and a replay receipt of that bind shows the same donor credited on both trees (equal base and candidate store ids); a bind without its replay receipt makes bar 1 INCONCLUSIVE.
 - Bar 1, copies: the copies assigned at a cold bind are the copies bar 2 judged at that bind, and a leftover row at a bind whose bar 2 is INCONCLUSIVE, or whose replay receipt names no copies, makes bar 1 INCONCLUSIVE, not FAIL.
 - Bar 2, new rows in the copy range: when the bind's copy range holds a row that matches no pre-bind row by identity or credit, that bind's validity is NOT SHOWN.
 - Bar 2, a zero-copy bind: validity holds iff the rc's replay stores 0 copies, and a replay error is INCONCLUSIVE.

@@ -57,7 +57,8 @@ BACKUP_DEADLINE_S = 3600.0
 
 def backup(src, dest, deadline_s=BACKUP_DEADLINE_S):
     """An online backup bounded by deadline_s: a lock held past it (the step keeps returning busy or locked) fails
-    with CaptureError instead of waiting forever."""
+    with CaptureError instead of waiting forever. One step copies every page (pages=-1), because SQLite restarts a
+    multi-step backup whenever another connection writes between steps, which could stall a large live store."""
     dest, deadline = Path(dest), time.monotonic() + deadline_s
 
     def progress(status, remaining, total):
@@ -67,7 +68,7 @@ def backup(src, dest, deadline_s=BACKUP_DEADLINE_S):
     with dest.open("xb"):
         pass
     with closing(_readonly(src, timeout=min(5.0, deadline_s))) as source, closing(sqlite3.connect(dest)) as target:
-        source.backup(target, pages=1024, progress=progress)
+        source.backup(target, pages=-1, progress=progress)
         target.execute("PRAGMA journal_mode=DELETE")
     try:
         result = _quick_check(dest)

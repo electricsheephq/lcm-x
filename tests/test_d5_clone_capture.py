@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import sqlite3
 import time
+import types
 from datetime import datetime
 
 import pytest
@@ -220,6 +221,29 @@ def test_a_held_lock_fails_the_backup_at_its_deadline(tmp_path):
         assert time.monotonic() - started < 5
         writer.execute("ROLLBACK")
     cap.backup(db, tmp_path / "out2.db", deadline_s=5)  # Released: the same input backs up.
+
+
+def test_a_write_between_backup_steps_does_not_stall_the_backup(tmp_path, monkeypatch):
+    """SQLite restarts a multi-step online backup whenever another connection writes between steps, so a store with
+    a live writer could never finish. Here another connection writes at every progress callback."""
+    db = tmp_path / "live.db"
+    with closing(sqlite3.connect(db)) as setup:
+        setup.execute("PRAGMA journal_mode=WAL")
+        setup.execute("CREATE TABLE messages (store_id INTEGER PRIMARY KEY, content BLOB)")
+        setup.executemany("INSERT INTO messages (content) VALUES (?)", [(b"x" * 3000,) for _ in range(3000)])
+        setup.commit()
+    writer, clock = sqlite3.connect(db, isolation_level=None), time.monotonic
+    writer.execute("INSERT INTO messages (content) VALUES (x'00')")  # A live writer: the -wal exists, so no immutable read.
+
+    def write_then_tick():
+        writer.execute("INSERT INTO messages (content) VALUES (x'00')")
+        return clock()
+
+    monkeypatch.setattr(cap, "time", types.SimpleNamespace(monotonic=write_then_tick))
+    try:
+        cap.backup(db, tmp_path / "out.db", deadline_s=3)
+    finally:
+        writer.close()
 
 
 @pytest.mark.parametrize("inside", ["payload", "home"])
