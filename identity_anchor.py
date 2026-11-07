@@ -447,34 +447,43 @@ class IdentityAnchorMixin:
                 continue
             message, candidates = messages[idx], []
             text, stamp = message.get("content"), stamps.get(idx)
-            if (message.get("role") == "assistant" and not message.get("tool_calls") and stamp is not None
-                    and isinstance(text, str) and "\n" in text
-                    and any(r.get("session_id") == self._session_id and r.get("observed_at") == stamp
-                            for r, _f in by_stamp.get(stamp, ()))):
-                # The session/time index predates host stamps (observed_at); keep the bounded read
-                # schema-free. The predecessor subquery also sees unstamped/out-of-scan barriers.
-                candidates = [dict(zip(("store_id", "role", "content", "tool_calls", "observed_at", "previous"), r))
-                              for r in self._store._conn.execute(
-                    "SELECT m.store_id, m.role, m.content, m.tool_calls, m.observed_at, "
-                    "(SELECT MAX(p.store_id) FROM messages p WHERE p.session_id=m.session_id "
-                    "AND p.store_id<m.store_id AND p.role!='user') FROM messages m INDEXED BY idx_msg_session_ts "
-                    "WHERE m.session_id=? AND m.observed_at>=? ORDER BY m.observed_at, m.store_id LIMIT 64",
-                    (self._session_id, stamp))]
-                for c in candidates:
-                    c["consumed"] = c["store_id"] in consumed
-            elif idx in snapshots:
-                candidates = [dict(zip(("store_id", "role", "content"), r)) for r in self._store._conn.execute(
-                    "SELECT store_id, role, content FROM messages INDEXED BY idx_msg_session "
-                    "WHERE session_id=? AND role='user' AND substr(content, 1, ?)=? "
-                    "ORDER BY store_id DESC LIMIT ?",
-                    (self._session_id, len(header), header, _HOST_REWRITE_PRESENCE_ROWS))]
+            try:
+                if (message.get("role") == "assistant" and not message.get("tool_calls") and stamp is not None
+                        and isinstance(text, str) and "\n" in text
+                        and any(r.get("session_id") == self._session_id and r.get("observed_at") == stamp
+                                for r, _f in by_stamp.get(stamp, ()))):
+                    # The session/time index predates host stamps (observed_at); keep the bounded read
+                    # schema-free. The predecessor subquery also sees unstamped/out-of-scan barriers.
+                    candidates = [dict(zip(("store_id", "role", "content", "tool_calls", "observed_at", "previous"), r))
+                                  for r in self._store._conn.execute(
+                        "SELECT m.store_id, m.role, m.content, m.tool_calls, m.observed_at, "
+                        "(SELECT MAX(p.store_id) FROM messages p WHERE p.session_id=m.session_id "
+                        "AND p.store_id<m.store_id AND p.role!='user') FROM messages m INDEXED BY idx_msg_session_ts "
+                        "WHERE m.session_id=? AND m.observed_at>=? ORDER BY m.observed_at, m.store_id LIMIT 64",
+                        (self._session_id, stamp))]
+                    for c in candidates:
+                        c["consumed"] = c["store_id"] in consumed
+                elif idx in snapshots:
+                    if not any(messages[i].get("role") == "user" for i in stamps) and not self._store._conn.execute(
+                            "SELECT 1 FROM messages WHERE session_id=? AND role='user' "
+                            "AND observed_at IS NOT NULL LIMIT 1", (self._session_id,)).fetchone():
+                        continue
+                    candidates = [dict(zip(("store_id", "role", "content"), r)) for r in self._store._conn.execute(
+                        "SELECT store_id, role, content FROM messages INDEXED BY idx_msg_session "
+                        "WHERE session_id=? AND role='user' AND substr(content, 1, ?)=? "
+                        "ORDER BY store_id DESC LIMIT ?",
+                        (self._session_id, len(header), header, _HOST_REWRITE_PRESENCE_ROWS))]
+            except Exception:
+                logger.warning("LCM host-rewrite candidate read failed; keeping row new")
+                continue
             if not candidates:
                 continue
             match = host_rewrite_match({**message, "stamp": stamp}, candidates, header=header,
-                                      todo_span=len(text) if idx in snapshots else None)
+                                      todo_span=len(text) if idx in snapshots else None, prompts_stamped=True)
             if match is not None:
                 plan["replayed"].add(idx)
                 consumed.update(match.consumed)
+                self._note_identity_anchor_version(None, message)
                 logger.info("LCM host-rewrite replay: arm=%s parts=%s consumed=%s session=%s",
                             match.arm, match.k, list(match.consumed), self._session_id)
         self._identity_anchor_tool_segments(messages, plan["cursor"], plan["replayed"], matched, plan.get("positional", ()))
@@ -1590,18 +1599,18 @@ class IdentityAnchorMixin:
         self._capture_host_rewrite(store_id, identity, stored, message)
 
     def _note_identity_anchor_version(self, store_id, message) -> None:
-        """R6: this process stored ``store_id`` from ``message`` and now observes the SAME host object
-        with other content: positive evidence of an in-place rewrite. Held until the new version's store."""
+        """R6: track a changed stored object, or a replay (store_id=None) before its next change."""
         if identity_anchor_enabled():
             versions = [entry for entry in getattr(self, "_identity_anchor_versions", ()) if entry[0] is not message]
-            self._identity_anchor_versions = (versions + [(message, int(store_id))])[-_RECENT_CAP:]
+            entry = (message, int(store_id)) if store_id is not None else (message, None, message.get("content"))
+            self._identity_anchor_versions = (versions + [entry])[-_RECENT_CAP:]
 
     def _identity_anchor_rewritten(self, messages, cursor: int) -> list:
-        """Indexes before ``cursor`` holding a host object this process stored and has since seen
-        rewritten (R6 before/after evidence, stamped or not)."""
+        """Indexes before ``cursor`` holding a changed stored or replayed host object (R6)."""
         versions = getattr(self, "_identity_anchor_versions", ()) if identity_anchor_enabled() else ()
         return [idx for idx in range(min(cursor, len(messages)))
-                if any(message is messages[idx] for message, _store_id in versions)]
+                if any(entry[0] is messages[idx] and (entry[1] is not None or entry[2] != messages[idx].get("content"))
+                       for entry in versions)]
 
     def _identity_anchor_version_rewind(self, messages, plan) -> None:
         """R6: a rewritten host object whose new bytes the pre-match did not explain as stored
@@ -1629,7 +1638,8 @@ class IdentityAnchorMixin:
             old = next((entry for entry in versions if entry[0] is message), None)
             if old is not None:
                 versions.remove(old)
-                groups.append([(int(store_id), "supersedes", old[1], None, _normalize_observed_at(message.get("timestamp")))])
+                if old[1] is not None:  # a replay never represented the matched stored row
+                    groups.append([(int(store_id), "supersedes", old[1], None, _normalize_observed_at(message.get("timestamp")))])
         if after_commit is None:
             self._identity_anchor_versions = versions
         else:

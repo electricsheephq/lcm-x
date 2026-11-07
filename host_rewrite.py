@@ -10,7 +10,7 @@ class HostRewriteMatch:
     k: int
 
 
-def host_rewrite_match(row, candidates, *, header, todo_span) -> Optional[HostRewriteMatch]:
+def host_rewrite_match(row, candidates, *, header, todo_span, prompts_stamped: bool = False) -> Optional[HostRewriteMatch]:
     """Candidates belong to one session; consumed parts remain present with ``consumed=True``.
 
     ``previous`` optionally names the preceding non-user store row, including rows outside the
@@ -20,7 +20,8 @@ def host_rewrite_match(row, candidates, *, header, todo_span) -> Optional[HostRe
     text, stamp = row.get("content"), row.get("stamp")
     if not isinstance(text, str) or row.get("tool_calls"):
         return None
-    if row.get("role") == "user" and stamp is None and text.startswith(header) and todo_span == len(text):
+    if (prompts_stamped and row.get("role") == "user" and stamp is None
+            and text.startswith(header) and todo_span == len(text)):
         if any(c.get("role") == "user" and isinstance(c.get("content"), str)
                and (c["content"] == text or c["content"].startswith(text + "\n\n")) for c in candidates):
             return HostRewriteMatch("S", (), 1)

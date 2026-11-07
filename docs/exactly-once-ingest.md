@@ -304,10 +304,12 @@ Traces:
 - **Host-rewrite replay (I1, after R1 and the existing user rules):** Arm M recognises an assistant's
   single-newline fold of at least two unconsumed same-session assistant rows, anchored to the first
   part's host stamp, with only user rows between parts. Arm S recognises an unstamped whole todo
-  snapshot equal to a stored snapshot or a stored composite's leading scaffold span. M consumes
-  its parts; S consumes nothing. Every incoming byte is already reachable in that session's
+  snapshot equal to a stored snapshot or a stored composite's leading scaffold span, only when
+  the view or this session's store contains a stamped user prompt. M consumes its parts; S consumes nothing. Every incoming byte is already reachable in that session's
   stored parts (apart from M's fixed separator); no durable content is removed or overwritten.
   Ambiguity or a full 64-row M scan stays new. S reads at most 10,000 newest todo rows.
+  Optional read failures keep the candidate new and preserve proven rewinds. Both arms track
+  replayed host objects for later in-place changes, without superseding their matched stored rows.
   Controls preserve new stamps, missing parts, tool barriers, double-newline separators, consumed
   parts, ambiguous anchors, foreign sessions, changed items, suffix text and stamped TUI snapshots.
   Proof: `tests/test_host_rewrite_replay.py`; this is synthetic proof, not a live-host gate result.

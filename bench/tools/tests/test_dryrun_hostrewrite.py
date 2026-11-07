@@ -19,10 +19,10 @@ def test_flags_only_unexpected_fold_and_snapshot(tmp_path, capsys):
     lines = capsys.readouterr().out.splitlines()
     assert lines == ["store_id=4 role=assistant arm=M stamp=100.0 length=10 parts=[1, 3] EXPECTED=no",
                      f"store_id=5 role=user arm=S stamp=None length={len(TODO)} parts=[] EXPECTED=no",
-                     "summary M=1 S=1 EXPECTED=yes:0"]
+                     "summary M=1 S=1 EXPECTED=yes:0 merged_after_S=0"]
     assert {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in home.dir.iterdir()} == before
     run(home.state, home.lcm, "other")
-    assert capsys.readouterr().out == "summary M=0 S=0 EXPECTED=yes:0\n"
+    assert capsys.readouterr().out == "summary M=0 S=0 EXPECTED=yes:0 merged_after_S=0\n"
 
 
 def test_expected_fold_is_a_design_failure(tmp_path, capsys):

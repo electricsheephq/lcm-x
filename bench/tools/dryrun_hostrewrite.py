@@ -43,9 +43,13 @@ def run(state_db, lcm_db, session=None):
                              surplus_keys=surplus)
         excess = {i for _key, n, ids, *_ in surplus for i in sorted(ids)[-n:]}
         matched.update(r[0] for r in seq if r[2] == "assistant" and r[0] not in excess)
-    counts, expected_yes, prefixes = Counter(), 0, defaultdict(list)
+    counts, expected_yes, prefixes, snapshots, merged_after_s = Counter(), 0, defaultdict(list), defaultdict(list), 0
     for sid, owner, role, content, calls, _call_id, stamp, *_ in stored:
         prefix = prefixes[owner]
+        for flagged_id, text in snapshots[owner] if role == "user" and isinstance(content, str) else ():
+            if content.startswith(text + "\n\n"):
+                merged_after_s += 1
+                print(f"merged_after_S store_id={sid} of={flagged_id}")
         incoming = dict(role=role, content=content, tool_calls=calls, stamp=stamp)
         candidates = []
         if role == "assistant" and not calls and stamp is not None and isinstance(content, str) and "\n" in content:
@@ -55,8 +59,11 @@ def run(state_db, lcm_db, session=None):
             candidates = [r for r in reversed(prefix) if r["role"] == "user"
                           and (r["content"] or "").startswith(HEADER)][:10000]
         match = host_rewrite_match(incoming, candidates, header=HEADER,
-                                  todo_span=_todo_annotation_span(content, 0) if isinstance(content, str) else None)
+                                  todo_span=_todo_annotation_span(content, 0) if isinstance(content, str) else None,
+                                  prompts_stamped=any(r["role"] == "user" and r["observed_at"] is not None for r in prefix))
         if match and (session is None or owner == session):
+            if match.arm == "S":
+                snapshots[owner].append((sid, content))
             counts[match.arm] += 1
             expected_yes += sid in matched
             print(f"store_id={sid} role={role} arm={match.arm} stamp={stamp} length={len(content)} "
@@ -64,7 +71,7 @@ def run(state_db, lcm_db, session=None):
         previous = next((r["store_id"] for r in reversed(prefix) if r["role"] != "user"), None)
         prefix.append(dict(store_id=sid, role=role, content=content, tool_calls=calls, observed_at=stamp,
                            previous=previous))
-    print(f"summary M={counts['M']} S={counts['S']} EXPECTED=yes:{expected_yes}")
+    print(f"summary M={counts['M']} S={counts['S']} EXPECTED=yes:{expected_yes} merged_after_S={merged_after_s}")
 
 
 if __name__ == "__main__":
