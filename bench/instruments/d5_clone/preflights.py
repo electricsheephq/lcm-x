@@ -182,13 +182,15 @@ def p6(host, plan):
          "host_rows": [new("state.db", "id", before["host"], False), new("state.db", "id", before["host"])],
          "live_conversation_sha256": sorted(map(_sha, live)), "receipt_conversation_sha256": sorted(map(_sha, replayed))}
     return _failed([
-        ("bind validity is not PASS", bind["validity"] != "PASS"), ("range_new_rows is not 0", range_new != 0),
+        ("bind validity is not PASS", not error and bind["validity"] != "PASS"),
+        ("range_new_rows is not 0", not error and range_new != 0),
         ("no anchor line at the cold bind", cold_anchors < 1), ("an anchor line after the warm turn", warm_anchors),
         ("the warm turn stored LCM-X rows beyond the host's", len(set(f["warm_rows"])) != 1),
         ("a chosen session ended", ended), ("d5-local is not enabled", "d5-local" not in (enabled or ())),
         ("new host rows outside L's session", len(set(f["host_rows"])) != 1 or f["host_rows"][0] < 2),
         ("the live and replayed conversation_id differ", replayed and live != replayed)]), \
-        [] if replayed else ["the edition receipt names no conversation_id: the live one is recorded, not compared"], f
+        _failed([("the edition replay errored (no receipt to judge)", error),
+                 ("the edition receipt names no conversation_id: the live one is recorded, not compared", not replayed)]), f
 
 
 def p7(host, plan):

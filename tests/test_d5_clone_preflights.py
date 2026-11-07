@@ -81,6 +81,8 @@ class FakeHost:
         return self.run_dir / kind, {}
 
     def replay(self, ctx, step, t0, h8):
+        if self.fault == "replay-error":
+            return None, True, None
         conversation = {} if self.fault == "no-conversation" else {"payload": {"conversation_id": "conv"}}
         return {"checks": {"validity": {"verdict": "PASS"}}, **conversation}, False, 0
 
@@ -99,7 +101,7 @@ class FakeHost:
     start = stop = close = pause_cron
 
 
-@pytest.mark.parametrize("fault", [None, "P3", "P4", "P6", "P7", "crash", "no-conversation"])
+@pytest.mark.parametrize("fault", [None, "P3", "P4", "P6", "P7", "crash", "no-conversation", "replay-error"])
 def test_each_preflight_fails_on_its_own_fault(tmp_path, monkeypatch, fault):
     monkeypatch.setitem(sys.modules, "yaml", types.SimpleNamespace(safe_load=json.loads))  # Not in every test venv.
     if fault == "P3":  # A provider whose second reply differs from the first.
