@@ -22,13 +22,24 @@ def _sha(value):
 
 
 
+def _tool_call(call):
+    return (isinstance(call, dict) and isinstance(call.get("id"), str) and isinstance(call.get("name"), str)
+            and isinstance(call.get("arguments"), (str, dict, list)))
+
+
 def _scripted(script, index):
-    """The scripted reply at index, or None (a replay miss) when there is none or it is not a usable reply: a dict
-    with a str "text" or a list of "tool_calls". An empty or null entry is a miss, never a silent fallback."""
+    """The scripted reply at index, or None (a replay miss) when there is none or it is not a reply this provider can
+    serve: a dict whose "tool_calls" is a non-empty list of calls with a str id, a str name and arguments, or, when
+    "tool_calls" is absent or null, whose "text" is a str. Every other entry is a miss, never a silent fallback or
+    a failed request that the counter rollback would erase."""
     entry = script[index] if isinstance(script, list) and index < len(script) else None
-    if isinstance(entry, dict) and (isinstance(entry.get("text"), str) or isinstance(entry.get("tool_calls"), list)):
-        return entry
-    return None
+    if not isinstance(entry, dict):
+        return None
+    calls = entry.get("tool_calls")
+    if calls is not None:
+        return entry if isinstance(calls, list) and calls and all(map(_tool_call, calls)) else None
+    return entry if isinstance(entry.get("text"), str) else None
+
 
 class Provider:
     """Agent step indices are zero-based; log hashes cover canonical request/completion JSON."""
@@ -161,7 +172,7 @@ class Provider:
                 text += "\n".join(f"{m['role']} {_sha(m.get('content'))[:12]}" for m in messages)
                 entry = {"text": text + f"\nrequest={_sha(messages)}"}
             message = {"role": "assistant", "content": (entry or {}).get("text", "d5 replay miss")}
-            if entry is not None and "tool_calls" in entry:
+            if entry is not None and entry.get("tool_calls") is not None:
                 message = {"role": "assistant", "content": None, "tool_calls": [
                     {"id": c["id"], "type": "function", "function": {
                         "name": c["name"], "arguments": c["arguments"] if isinstance(c["arguments"], str)
