@@ -7085,8 +7085,10 @@ class LCMEngine(
         prior_targets = {r[2] for r in seeds if r[1] == "possible_replay_of"}
         buckets = {}
         for row in targets:
-            # A stored row's own id, blank included: unknown ownership is never the active conversation.
-            key = ingest_ledger.tool_replay_scorer_key(row)
+            # A stored row keeps its own conversation; a blank (NULL, empty or whitespace) id belongs to the
+            # active conversation (#581), as in the skip proof, so a copy of a blank-id original is linked.
+            owner = _normalize_conversation_id_value(row.get("conversation_id")) or self._conversation_id
+            key = ingest_ledger.tool_replay_scorer_key(dict(row, conversation_id=owner))
             buckets.setdefault(key, []).append(row)
         used, linked, plan = set(), set(), []
         source_buckets = {}

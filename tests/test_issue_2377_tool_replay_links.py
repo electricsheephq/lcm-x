@@ -175,10 +175,12 @@ def test_summary_coverage_matches_the_recursive_walk(build):
 
 @pytest.mark.parametrize("stored_id,links", [
     ("' ' || conversation_id || ' '", True),  # a padded id for the same conversation still matches
-    ("NULL", False),  # a legacy row with no conversation is not a wildcard for the active one
-    ("''", False),
-], ids=["padded", "null", "empty"])
-def test_blank_stored_conversation_is_not_the_active_one(build, stored_id, links):
+    ("NULL", True),  # a legacy blank id belongs to the active conversation (#581), as in the skip proof
+    ("''", True),
+    ("'  '", True),
+    ("'other'", False),  # another conversation's row is never a target
+], ids=["padded", "null", "empty", "spaces", "other"])
+def test_blank_stored_conversation_belongs_to_the_active_one(build, stored_id, links):
     engine = build()
     assert engine._conversation_id
     engine.ingest([U, call(), X])
