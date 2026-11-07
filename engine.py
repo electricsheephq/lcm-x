@@ -7008,22 +7008,28 @@ class LCMEngine(
         if not proof or "output_metadata" not in proof:
             return {}, True  # The existing #1523 emission-view reader owns this fallback.
         target = [row for row in proof["output_metadata"] if row.get("identity_sha256")]
-        result, matched = {}, 0
         _, identities = self._occurrence_replay_identities(messages, proof)
-        for idx, identity in enumerate(identities):
-            if identity is None:
-                continue
-            digest = _commit_proof_identity_digest(_proof_user_identity(identity))
-            position = matched  # Match the snapshot in order, as in _remapped_output_metadata.
-            while position < len(target) and target[position]["identity_sha256"] != digest:
-                position += 1
-            if position == len(target):
-                continue  # A row the snapshot never held consumes no position.
-            row = target[position]
-            if self._host_occurrence_changed(messages[idx], row):
-                result[idx] = (session, row)
-            # A carried row consumes its snapshot position even when its stamp is kept.
-            matched = position + 1
+        digests = [(idx, _commit_proof_identity_digest(_proof_user_identity(identity)))
+                   for idx, identity in enumerate(identities) if identity is not None]
+        # Each snapshot position is one carried occurrence and pairs with at most one
+        # incoming row, in any order (the host may reorder carried rows). A row that
+        # kept its stamp claims its own position first, so a later genuine equal turn
+        # finds it spent. A row the snapshot never held consumes nothing.
+        used, result, pending = set(), {}, []
+        for idx, digest in digests:
+            position = next((pos for pos, row in enumerate(target) if pos not in used
+                             and row["identity_sha256"] == digest
+                             and not self._host_occurrence_changed(messages[idx], row)), None)
+            if position is None:
+                pending.append((idx, digest))
+            else:
+                used.add(position)
+        for idx, digest in pending:
+            position = next((pos for pos, row in enumerate(target) if pos not in used
+                             and row["identity_sha256"] == digest), None)
+            if position is not None:
+                used.add(position)
+                result[idx] = (session, target[position])
         return result, False
 
     def _link_restamped_occurrences(self, messages, stored_at, previous, recovery_fallback):
@@ -7053,12 +7059,17 @@ class LCMEngine(
                         identity = self._message_replay_identity(current[sid], stored_row=True)
                         if _commit_proof_identity_digest(_proof_user_identity(identity)) != row.get("identity_sha256"):
                             continue
-                        candidates = {int(target["store_id"]) for target in targets
-                                      if target["session_id"] == session and target["observed_at"] == row["timestamp"]
-                                      and target["store_id"] < sid
-                                      and all(target.get(key) == current[sid].get(key)
-                                              for key in ("role", "content", "tool_calls", "tool_call_id"))
-                                      and self._message_replay_identity(target, stored_row=True) == identity}
+                        matches = [target for target in targets
+                                   if target["session_id"] == session and target["observed_at"] == row["timestamp"]
+                                   and target["store_id"] < sid
+                                   and self._message_replay_identity(target, stored_row=True) == identity]
+                        if len(matches) > 1:
+                            # The host's volatile scaffolding (todo fold, model-switch note) is the
+                            # replay itself; exact content only breaks a tie between equal identities.
+                            matches = [target for target in matches if all(
+                                target.get(key) == current[sid].get(key)
+                                for key in ("role", "content", "tool_calls", "tool_call_id"))]
+                        candidates = {int(target["store_id"]) for target in matches}
                         if len(candidates) != 1:
                             continue
                         target = candidates.pop()

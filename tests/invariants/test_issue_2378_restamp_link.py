@@ -19,6 +19,7 @@ from typing import Any
 import pytest
 
 import hermes_lcm.engine as engine_module
+import hermes_lcm.reconcile as reconcile_module
 from tests.harness import make_engine
 from tests.test_compression_boundary import _stub_summarizer
 
@@ -187,7 +188,7 @@ def test_different_user_turn_is_never_linked(build, caplog, mode):
 
 
 @pytest.mark.parametrize("mode", ["inplace", "rotating"])
-def test_model_switch_prefix_removed_restamp_is_stored_without_link(build, caplog, monkeypatch, mode):
+def test_model_switch_prefix_removed_restamp_is_stored_and_linked(build, caplog, monkeypatch, mode):
     plain = T
     prefixed = "[Note: model was just switched from X to Y]\n\n" + plain
     monkeypatch.setattr(__name__ + ".T", prefixed)
@@ -204,7 +205,22 @@ def test_model_switch_prefix_removed_restamp_is_stored_without_link(build, caplo
     digests = [engine_module._commit_proof_identity_digest(engine_module._proof_user_identity(
         engine._message_replay_identity(stored[row["store_id"]], stored_row=True))) for row in copies]
     assert digests[0] == digests[1]
-    assert replay_links(engine) == set()
+    # The host strips its model-switch note on the next turn: the same occurrence, so it is linked.
+    assert replay_links(engine) == {(copies[1]["store_id"], copies[0]["store_id"])}
+
+
+@pytest.mark.parametrize("mode", ["inplace", "rotating"])
+def test_todo_annotation_folded_into_restamped_row_is_linked(build, caplog, mode):
+    """The host folds its todo snapshot into the trailing user row; the re-stamped copy is still linked."""
+    annotation = "\n\n" + reconcile_module._PRESERVED_TODO_CONTEXT_PREFIX + "\n- [>] 1. deploy staging (in_progress)"
+
+    def fold(_engine, view):
+        next(row for row in view if row.get("role") == "user" and row.get("content") == T)["content"] = T + annotation
+
+    engine, rows = run(build, caplog, mode=mode, uids=False, restamp=True, before_ingest=fold)
+    copies = [row for row in rows if row["role"] == "user" and str(row["content"]).startswith(T)]
+    assert [(row["content"], row["observed_at"]) for row in copies] == [(T, T_REQ), (T + annotation, T_COMMIT)]
+    assert replay_links(engine) == {(copies[1]["store_id"], copies[0]["store_id"])}
 
 
 @pytest.mark.parametrize("mode", ["inplace", "rotating"])
@@ -317,3 +333,20 @@ def test_rotation_unmatched_row_before_the_restamp_keeps_the_link(build, caplog,
     copies = [row for row in rows if row["role"] == "user" and row["content"] == T]
     assert [(row["session_id"], row["observed_at"]) for row in copies] == [("S", T_REQ), ("rotated", T_COMMIT)]
     assert replay_links(engine) == {(copies[1]["store_id"], copies[0]["store_id"])}
+
+
+def test_rotation_reordered_carried_rows_are_each_linked(build, caplog):
+    """The host may reorder carried rows; each re-stamped copy still pairs with its own occurrence."""
+    def reorder(_engine, view):
+        users = [i for i, row in enumerate(view) if row.get("role") == "user"]
+        t_index = next(i for i in users if view[i].get("content") == T)
+        other = max(i for i in users if i < t_index)
+        view[other]["timestamp"] += 0.5  # re-stamped too
+        view[other], view[t_index] = view[t_index], view[other]
+
+    engine, rows = run(build, caplog, mode="rotating", uids=False, restamp=True, before_ingest=reorder)
+    links = replay_links(engine)
+    copies = [row for row in rows if row["role"] == "user" and row["content"] == T]
+    assert [row["session_id"] for row in copies] == ["S", "rotated"]
+    assert (copies[1]["store_id"], copies[0]["store_id"]) in links
+    assert len(links) == len({target for _source, target in links})
