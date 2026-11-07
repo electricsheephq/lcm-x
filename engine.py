@@ -7160,10 +7160,11 @@ class LCMEngine(
                             if target["store_id"] not in stored_forms:
                                 content = target["content"]
                                 try:
-                                    stored_forms[target["store_id"]] = {_strip_volatile_host_scaffolding(text).strip() for text in (
+                                    stored_forms[target["store_id"]] = {form.strip() for text in (
                                         content, self._restore_ingest_payload_placeholders_in_content_identity(
                                             content, session_id=target["session_id"]),
-                                        *self._stored_row_externalized_text_parts_for_pattern_matching(target))}
+                                        *self._stored_row_externalized_text_parts_for_pattern_matching(target))
+                                        for form in (text, _strip_volatile_host_scaffolding(text))}
                                 except Exception as exc:
                                     self._raise_ingest_busy(exc)
                                     stored_forms[target["store_id"]] = None  # unreadable: treated as retained
@@ -7185,12 +7186,13 @@ class LCMEngine(
                             # vetoed if the host still shows it at any of them.
                             vetoed = {int(target["store_id"]) for target in candidates
                                       if any(message.get("role") == "user" and message.get("content") is not None
-                                             # stored content is redacted as protect_message_for_ingest does, and
-                                             # the host's volatile scaffolding (a model-switch note) is not content
-                                             and _strip_volatile_host_scaffolding(normalize_content_value(
+                                             # stored content is redacted as protect_message_for_ingest does; the
+                                             # raw form or the form without volatile scaffolding (a model-switch
+                                             # note) may match, so stripping only ever adds a veto
+                                             and any(form.strip() in shown_as(target) for host in [normalize_content_value(
                                                  redact_sensitive_value(message["content"], self._config,
-                                                                        parse_json_strings=False)) or "").strip()
-                                             in shown_as(target)
+                                                                        parse_json_strings=False)) or ""]
+                                                     for form in (host, _strip_volatile_host_scaffolding(host)))
                                              and self._host_occurrence_metadata(message)["timestamp"]
                                              == target["observed_at"] for message in messages)}
                             remaining = {int(target["store_id"]) for target in candidates} - vetoed
