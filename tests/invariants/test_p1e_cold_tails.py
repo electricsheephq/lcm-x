@@ -1237,11 +1237,9 @@ def test_resumed_engine_resend_keeps_the_earlier_cold_occurrence(engines, monkey
         assert count(engine, "tail.cold_unmatched") == 1
         assert committed_rows(tail["store"].db_path, "S") == before
 
-
 @pytest.mark.parametrize("then", ["same", "older"])
 @pytest.mark.parametrize("shape", ["uidless", "uids", "two_conflicts", "tool_conflict", "same_reply_text",
-    "scaffold_row", "store_longer", pytest.param("ignored_row", marks=pytest.mark.xfail(strict=True, raises=AssertionError,
-        reason="#2247: known limit: an ignored row plus a stamp conflict takes the cold start; planned for v0.30.x (DECISION-1838 known limits)"))])
+    "scaffold_row", "store_longer", "ignored_row"])
 def test_noop_ingest_after_a_resumed_resend_keeps_the_earlier_occurrence(engines, monkeypatch, then, shape):
     engine = ignoring(engines()) if shape == "ignored_row" else engines()
     queued, resent = cold_resend_views(shape)
@@ -1261,13 +1259,50 @@ def test_noop_ingest_after_a_resumed_resend_keeps_the_earlier_occurrence(engines
         kept = engine._pending_session_tails == [tail]
         unmatched = count(engine, "tail.cold_unmatched")
         observed = [(stage, _row(row)) for stage, rows in (("noop", noop), ("retry", retry)) for row in rows]
-        # The configured ignore row is never stored; main drops the earlier Q occurrence's tail uncounted.
+        # The configured ignore row is never stored; the earlier Q occurrence stays pending and counted.
         expected = [(row["role"], row["content"], row["timestamp"]) for row in resent if row["content"] != "ignore"]
         fixed = [(stage, row) for stage in ("noop", "retry") for row in expected] + [("tail", True, True)]
         known = [(stage, row) for stage in ("noop", "retry") for row in expected] + [("tail", False, 0)]
         diagnostic = dict(noop=[_row(r) for r in noop], kept=kept, unmatched=unmatched, retry=[_row(r) for r in retry])
         _expect_stored_shape([*observed, ("tail", kept, unmatched >= 1 if kept else unmatched)], fixed, known,
                              f"#2247 known shape: {diagnostic}")
+
+
+@pytest.mark.parametrize("then", ["same", "older"])
+def test_ignored_row_without_a_stamp_conflict_takes_the_normal_path(engines, monkeypatch, then):
+    engine = ignoring(engines())
+    queued, resent = cold_resend_views("ignored_row")
+    resent[-1]["timestamp"] = queued[-1]["timestamp"]
+    with resumed_cold_resend(engine, monkeypatch, queued, resent) as (tail, _):
+        before = committed_rows(tail["store"].db_path, "S")
+        expected = [(m["role"], m["content"], m["timestamp"]) for m in queued if m["content"] != "ignore"]
+        assert [_row(row) for row in before] == expected
+        unmatched = count(engine, "tail.cold_unmatched")
+        engine.ingest(copy.deepcopy(resent if then == "same" else queued[:4]))
+        assert committed_rows(tail["store"].db_path, "S") == before
+        engine._retry_pending_session_tails()
+        assert not engine._pending_session_tails
+        assert count(engine, "tail.cold_unmatched") == unmatched
+        assert committed_rows(tail["store"].db_path, "S") == before
+        assert tail["view"] == queued
+
+
+def test_kept_ignored_row_conflict_exit_count_excludes_the_ignored_row(engines, monkeypatch, caplog):
+    engine = ignoring(engines())
+    queued, resent = cold_resend_views("ignored_row")
+    with resumed_cold_resend(engine, monkeypatch, queued, resent) as (tail, _):
+        before = committed_rows(tail["store"].db_path, "S")
+        engine.ingest(copy.deepcopy(resent))
+        engine._retry_pending_session_tails()
+        caplog.clear()
+        engine._warn_unflushed_session_tails("SQLite lock")
+        assert engine._pending_session_tails == [tail]
+        assert count(engine, "tail.cold_unmatched") >= 1
+        assert count(engine, "tail.unflushed") == 1
+        warning = [r.getMessage() for r in caplog.records if "after shutdown retry" in r.getMessage()]
+        assert len(warning) == 1 and "stamp conflict" in warning[0] and "unflushed=1" in warning[0]
+        assert committed_rows(tail["store"].db_path, "S") == before
+        assert tail["view"] == queued
 
 
 def test_store_newer_restamp_stores_missing_rows_and_keeps_the_tail(engines, monkeypatch):

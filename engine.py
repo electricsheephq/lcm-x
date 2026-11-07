@@ -12271,9 +12271,16 @@ class LCMEngine(
         # check, so a retyped row never stands for the view's own.
         return self._retry_cold_tail_s3(tail, stamps=same, deadline=deadline)
 
+    def _cold_tail_ingest_view(self, tail):
+        """Compare only the host rows that ingest keeps after ignore filtering."""
+        view = tail["view"]
+        if not self._compiled_ignore_message_patterns:
+            return view
+        return [message for message in view if not self._matches_ignore_message_patterns(message)]
+
     def _cold_tail_one_conflict(self, tail):
         """Return the sole unexplained user stamp conflict in an identity-matching prefix."""
-        view, session, home = tail["view"], tail["session_id"], tail["hermes_home"]
+        view, session, home = self._cold_tail_ingest_view(tail), tail["session_id"], tail["hermes_home"]
         stored = tail["store"].get_range(session, limit=len(view) + 1,
             conversation_id=_normalize_conversation_id_value(tail["conversation_id"]))
         conflicts = []
@@ -12459,7 +12466,7 @@ class LCMEngine(
                           if _normalize_conversation_id_value(row.get("conversation_id")) == conversation)
             start = rows[-1]["store_id"] + 1
         wanted = Counter((self._session_end_prefix_compare_identity(message, session_id=session, hermes_home=home),
-                          _normalize_observed_at(message.get("timestamp"))) for message in tail["view"])
+                          _normalize_observed_at(message.get("timestamp"))) for message in self._cold_tail_ingest_view(tail))
         missing, available = 0, Counter()
         for (identity, stamp), amount in wanted.items():
             if stamp is not None:
