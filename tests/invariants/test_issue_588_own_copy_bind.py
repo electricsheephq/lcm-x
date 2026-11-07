@@ -84,7 +84,8 @@ def test_unstamped_fresh_bind_over_a_copy_set_stores_only_new_rows(tmp_path, mon
         engine = _engine(tmp_path)
         view = [*view, {"role": "user", "content": f"new-{bind}"}]
         engine.ingest(deepcopy(view))
-        assert engine._ingest_failure_count == 0, engine._last_ingest_error  # a crash must not pass as the pin
+        if engine._ingest_failure_count:  # a swallowed ingest failure must not pass as the pin
+            pytest.fail(f"ingest failed: {engine._last_ingest_error}")
         rows = len(engine._store.get_session_messages("S"))
         growth.append(rows - stored)
         stored = rows
