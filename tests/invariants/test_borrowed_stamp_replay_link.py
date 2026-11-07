@@ -111,6 +111,35 @@ def test_579_own_stamp_first_then_borrowed_copy_links(build, cold):
     check(engine, stored, copies=copies, expected={(copies[1], copies[0])})
 
 
+@pytest.mark.parametrize("anchor", ["on", "off"])
+def test_the_identity_anchor_switch_turns_the_linker_off(build, monkeypatch, anchor):
+    """Codex P2: with LCM_IDENTITY_ANCHOR off the borrowed-stamp linker writes nothing (the 579 shape;
+    the switch flips inside the linker, so the rest of the ingest is unchanged and 'on' is the control)."""
+    engine = build()
+    real = engine._link_borrowed_stamp_occurrences
+
+    def switched(*args, **kwargs):
+        with pytest.MonkeyPatch.context() as env:
+            env.setenv("LCM_IDENTITY_ANCHOR", "true" if anchor == "on" else "false")
+            return real(*args, **kwargs)
+
+    monkeypatch.setattr(engine, "_link_borrowed_stamp_occurrences", switched)
+    before = history(False) + [{"role": "user", "content": T, "timestamp": T_LONG}]
+    engine.ingest(deepcopy(before))
+    view = compacted(engine, before)
+    view += [{"role": "assistant", "content": "compress finished", "timestamp": T_LONG + 1},
+             {"role": "user", "content": P, "timestamp": P_OWN}]
+    engine.ingest(deepcopy(view))
+    host = [row for row in view if row.get("content") != T]
+    next(row for row in host if row.get("content") == P)["timestamp"] = T_LONG
+    host += [{"role": "assistant", "content": "rollback: restore, verify", "timestamp": P_OWN + 5},
+             {"role": "user", "content": NEW, "timestamp": P_OWN + 10}]
+    engine.ingest(deepcopy(host))
+    copies = ids(engine, P)
+    assert len(copies) == 2, copies
+    assert bool(borrowed_links(engine)) == (anchor == "on"), borrowed_links(engine)
+
+
 @pytest.mark.parametrize("holder_shown", [True, False], ids=["holder-shown", "holder-gone"])
 @pytest.mark.parametrize("cold", [False, True], ids=["warm", "cold"])
 def test_383_borrowed_copy_first_then_own_stamp_after_restart_links(build, cold, holder_shown):
