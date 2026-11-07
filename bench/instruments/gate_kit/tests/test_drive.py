@@ -848,3 +848,21 @@ def test_smoke_against_fake_provider_then_audit(tmp_path):
         "expected_rows", "stored_rows", "missing_rows", "silent_surplus_rows")} for s in sessions
         for g in [result["parity"]["sessions"][s]["lineage"]]}
     print(json.dumps({"host": name, "parity_per_source": per_source}))  # reported, not a bar: the gate is audit's
+
+
+@pytest.mark.parametrize("slot", ["A1", "T1"])
+def test_compress_deadline_after_a_noop_attempt_still_counts_the_op(tmp_path, monkeypatch, slot):
+    """Review: a deadline before a retry must not drop the attempt that already ran from ``executed``."""
+    d, ev, _log = stub_driver(tmp_path)
+    compress_stub_log(d, slot, monkeypatch, ["LCM compression no-op: below leaf chunk threshold"] * 3)
+    real_write = d.ev.write
+
+    def write(kind, *args, **kw):
+        real_write(kind, *args, **kw)
+        if kind == "compress_result":
+            d.stop_at = 0  # the run's deadline passes right after the first attempt
+    monkeypatch.setattr(d.ev, "write", write)
+    d.op({"op": "compress", "slot": slot, "prompt": drive.CATS["long"][0]})
+    events = [json.loads(x) for x in ev.path.read_text().splitlines()]
+    assert [e["kind"] for e in events if e["kind"].startswith("compress")] == ["compress_request", "compress_result"]
+    assert d.done["compress"] == 1

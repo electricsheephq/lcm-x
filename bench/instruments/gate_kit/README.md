@@ -54,15 +54,19 @@ parent ended with `end_reason = 'compression'` on the same source), counted the 
 them. Hermes keeps a rotation parent's originals in the closed parent and gives the child only the compressed handoff;
 an in-place compaction archives the displayed history (`active = 0, compacted = 1`) and rewinds the originals of the
 carried tail (`active = 0, compacted = 0`). Other host versions keep the archived originals and their active carried
-copies displayed, sometimes with new timestamps. For those hosts the audit handles every in-place compaction in host
-id order: each `_compressed_summary` row starts a block, bounded by the next summary or session end. The displayed
-non-summary prefix must match a complete ordered suffix of the displayed history before that boundary, ignoring
-timestamps and excluding copies already identified at earlier boundaries. Copies may themselves have been archived
-by a later compaction. User carriers (verified stripped remainders, empty text or LCM prefixes) are skipped while
-matching and remain handled by the carrier rules below. The longest matching suffix is consumed once. Later identical
-resends still count, and an unmatched row ends the matching prefix; the audit never searches later rows for copies.
-Tool-calling assistant rows match by call ids. No summary boundary or no compacted evidence means no deduction;
-active/compacted transitions alone cannot identify earlier blocks.
+copies displayed. For those hosts the audit handles every in-place compaction in host id order. A compaction is a
+`_compressed_summary` row or LCM's verified summary carrier (this host pin flags no summary row: the inserted block
+opens with LCM's carrier user row); consecutive boundary rows with no displayed non-carrier row between them are one
+compaction. Its pool is what it archived: the displayed, non-carrier archived rows since the previous compaction,
+earlier copies included (a later compaction copies the earlier copies). A displayed non-carrier row after the boundary,
+up to the next compaction, is a copy only when its full display identity, including its EXACT timestamp, matches an
+unused pool row; each pool row stands for one copy, and order is not required (the compressed list can carry prefix
+or empty carriers inside it, drop a copy and move a row). The host keeps the original's timestamp on a copy; a resend
+or repeat has a timestamp of its own, so it is never taken for a copy. A copy the host stamps anew stays expected: a
+false alarm, never a hidden loss. Tool-calling assistant rows match by call ids. User carriers (verified stripped
+remainders, empty text or LCM prefixes) stay with the carrier rules below. No compacted evidence means no deduction.
+Accepted limit: a genuine row whose role, content and exact timestamp equal an archived row whose copy the host
+dropped would be taken for that copy; the host stamps new rows with the current time.
 The displayed rows are `active = 1 OR compacted = 1`, and the display
 collapses rows with the same display identity: role, content (edge-stripped, as B2 keys it), timestamp and tool
 fields, or a tool-calling assistant row's call ids. A carried handoff copy takes its original's timestamp, so it
@@ -225,7 +229,9 @@ python -m bench.instruments.gate_kit.drive --hermes-python <host venv python> --
   A confirmed `noop` sends the same planned long paste again and retries, at most twice, recording a fresh
   request/result pair per attempt with `retry=0|1|2`. This leaves the seeded op order unchanged. The summary's
   `compactions` separates `planned`, `requests`, `real` (log-confirmed), `noop` and `log_none`; unconfirmed host
-  successes never increase `real`. The audit remains authoritative for the whole run's compaction floor.
+  successes never increase `real`. The log windows are shared, so a compaction another session logs inside the
+  same request window also counts for this request (a rotation can change the session id, so lines are not filtered by
+  it). The audit remains authoritative for the whole run's compaction floor.
   Inactive-host scans restart at byte zero when a log shrinks below the saved offset.
 - The events log never holds prompt or reply text: a prompt is its bank index (a test plants a sentinel to hold this).
   The last line is `{"kind": "summary", "planned", "executed", "errors", "delegate", "context_length", ...}`.

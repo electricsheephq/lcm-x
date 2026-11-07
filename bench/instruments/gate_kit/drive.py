@@ -441,7 +441,7 @@ class Driver:
         self.acp_sid(slot) if slot.startswith("A") else self.tui_rt(slot)
         for retry in range(3):  # the planned attempt and at most two logged no-op retries
             if time.monotonic() >= self.stop_at:
-                return
+                return True if retry else None  # a no-op attempt already ran and was counted
             paths = (self.logs / ("acp.stderr" if slot.startswith("A") else "tui.stderr"),
                      self.home / "logs" / "agent.log")
             offsets = {}
