@@ -15,6 +15,7 @@ from copy import deepcopy
 import pytest
 
 from tests.invariants.test_issue_2378_restamp_link import all_rows, build as build, history, replay_links
+from tests.test_issue_2055_ingest_ledger_writes import engines as engines
 
 pytestmark = pytest.mark.issue(2055)
 
@@ -296,29 +297,51 @@ def test_two_links_into_one_target_both_count_visible():
     assert (split["visible_surplus_rows"], split["silent_surplus_rows"]) == (2, 0), split
 
 
+def bulk_turns(shape, n, start=0):
+    turns = []
+    for i in range(start, start + n):
+        text = {"distinct": f"distinct turn {i}", "repeated": "continue", "shared-stamp": f"batch row {i}"}[shape]
+        stamp = 5000.0 if shape == "shared-stamp" else 1000.0 + 2 * i
+        turns += [{"role": "user", "content": text, "timestamp": stamp},
+                  {"role": "assistant", "content": f"reply {i}", "timestamp": 1001.0 + 2 * i}]
+    return turns
+
+
+# Per stored user row, at most this many reads and SQLite VM steps (counted in units of 100 instructions). A
+# scan or a per-row loop over earlier copies grows with n and fails at n=2000.
+READS_PER_ROW, STEP_UNITS_PER_ROW = 3, 40
+
+
+@pytest.mark.parametrize("shape", ["distinct", "repeated", "shared-stamp"])
 @pytest.mark.parametrize("n", [500, 2000])
-def test_linker_reads_grow_linearly_on_a_bulk_ingest(build, monkeypatch, n):
-    """A cold first ingest of n distinct user turns: the linker issues a constant number of reads per row."""
+def test_linker_work_grows_linearly_on_a_bulk_ingest(build, monkeypatch, n, shape):
+    """n user rows stored in one ingest, after n stored the same way: distinct texts, one repeated text, or
+    distinct texts sharing one batch stamp. The linker's reads and SQLite steps stay linear in n."""
     import hermes_lcm.engine as engine_module
 
-    engine, statements = build(), []
+    engine, statements, steps = build(), [], [0]
     link = engine_module.LCMEngine._link_borrowed_stamp_occurrences
 
     def counted(self, *args):
-        self._store._conn.set_trace_callback(statements.append)
+        conn = self._store._conn
+        conn.set_trace_callback(statements.append)
+        conn.set_progress_handler(lambda: steps.__setitem__(0, steps[0] + 1), 100)
         try:
             return link(self, *args)
         finally:
-            self._store._conn.set_trace_callback(None)
+            conn.set_trace_callback(None)
+            conn.set_progress_handler(None, 100)
     monkeypatch.setattr(engine_module.LCMEngine, "_link_borrowed_stamp_occurrences", counted)
-    turns = []
-    for i in range(n):
-        turns += [{"role": "user", "content": f"distinct turn {i}", "timestamp": 1000.0 + 2 * i},
-                  {"role": "assistant", "content": f"reply {i}", "timestamp": 1001.0 + 2 * i}]
-    engine.ingest(turns)
-    assert len(ids(engine, f"distinct turn {n - 1}")) == 1
-    assert len(statements) <= 3 * n, len(statements)
-    # Every read is an index search on a stamp or an identity digest, never a walk of the session's rows.
+    first = bulk_turns(shape, n)
+    engine.ingest(deepcopy(first))
+    statements.clear()
+    steps[0] = 0
+    engine.ingest(deepcopy(first + bulk_turns(shape, n, start=n)))
+    users = [row for row in all_rows(engine) if row["role"] == "user"]
+    assert len(users) == 2 * n
+    assert len(statements) <= READS_PER_ROW * n, len(statements)
+    assert steps[0] <= STEP_UNITS_PER_ROW * n, steps[0]
+    # Every read is an index search on a stamp, an identity digest or a row id, never a walk of the session.
     conn = engine._store._conn
     for sql in {statement.split(" WHERE ", 1)[0]: statement for statement in statements}.values():
         plan = [row[-1] for row in conn.execute("EXPLAIN QUERY PLAN " + sql)]
@@ -402,3 +425,24 @@ def test_durable_recovery_never_gives_a_borrowed_source_a_second_link(tmp_path, 
         links = list(engine._store._conn.execute(
             "SELECT store_id, related_store_id, observed_at FROM message_relations WHERE kind='possible_replay_of'"))
         assert len(copies) == 2 and links == [(copies[1], recovered, 30.)], (copies, links)
+
+
+@pytest.mark.xfail(strict=True, reason="#2408: lineage adoption adds its stamp pair to a source that already holds "
+                   "a link; #2408's adoption guard (skip a source with any possible_replay_of) fixes it")
+def test_lineage_adoption_never_gives_a_borrowed_source_a_second_link(engines, monkeypatch):
+    """A provisional child stores E=P@10 and N=P@20 with the borrowed link N->E; the resolved lineage already
+    holds A=P@20. Adoption pairs N with A by stamp, and must leave N with its one link."""
+    from hermes_lcm import ingest_ledger
+    from tests.test_issue_2055_lineage_merge import adopt, seed
+
+    monkeypatch.setattr(ingest_ledger, "_PENDING_EMISSIONS", {})
+    engine = engines()
+    seed(engine, "home:root", [{"role": "user", "content": P, "timestamp": 20.}])
+    (earlier, later), _ = seed(engine, "provisional:S", [{"role": "user", "content": P, "timestamp": 10.},
+                                                         {"role": "user", "content": P, "timestamp": 20.}])
+    with engine._store.ingest_atomic():
+        engine._store.add_message_relations([[(later, "possible_replay_of", earlier, None, 20.)]])
+    adopt(engine)
+    links = list(engine._store._conn.execute(
+        "SELECT store_id, related_store_id FROM message_relations WHERE kind='possible_replay_of'"))
+    assert Counter(source for source, _target in links)[later] == 1, links
