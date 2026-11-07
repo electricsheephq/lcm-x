@@ -7656,12 +7656,13 @@ class LCMEngine(
                             earlier, stripped_earlier = {}, {}
                             # One linear scan over the session's earlier rows (index order), filtered by key in
                             # Python: a per-key join re-scans the key set for every row and holds the lock far longer.
-                            for sid, role, content, call_id, calls, name, stamp, conv in conn.execute(
-                                "SELECT store_id,role,content,tool_call_id,tool_calls,tool_name,observed_at,conversation_id "
-                                "FROM messages WHERE session_id IN (SELECT value FROM json_each(?)) AND store_id<? "
-                                # #2029: own rows first, so a copy with a target in its own session keeps that target.
-                                "ORDER BY session_id<>?, store_id",
-                                (json.dumps(attempt.get("replay_sessions") or [self._session_id]), first, self._session_id)):
+                            # #2029: then the recorded rotation chain, nearest first; own rows come first, so a copy
+                            # with a target in its own session keeps that target.
+                            for sid, role, content, call_id, calls, name, stamp, conv in itertools.chain.from_iterable(
+                                conn.execute(
+                                    "SELECT store_id,role,content,tool_call_id,tool_calls,tool_name,observed_at,conversation_id "
+                                    "FROM messages WHERE session_id=? AND store_id<? ORDER BY store_id", (session, first))
+                                for session in attempt.get("replay_sessions") or [self._session_id]):
                                 conv = _normalize_conversation_id_value(conv)
                                 if (conv, role, call_id, calls, name) not in keys:
                                     continue
