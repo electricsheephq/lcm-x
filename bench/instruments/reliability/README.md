@@ -140,8 +140,9 @@ the host reported `interrupted`. Any other assistant row is surplus.
   tool key without its lineage, with default JSON separators); call/malformed-call roles are `assistant`.
   Examples are deterministic representatives among rows left unexplained by the matching.
   Attribution forms (#2377, #2212; `multiset.attribution_forms`) are self witnesses too, each in one function:
-  `link_pending_ids` (a `link_pending` relation with `related_store_id` NULL; the ingest marks every row it
-  stores, so a surplus copy that carries one is visible) and `composite_witness` (a stored user row C with
+  `link_pending_ids` (a `link_pending` relation with `related_store_id` NULL; the ingest writes one only when
+  computing a row's links raised, and then over-marks, new rows of that ingest included, so a surplus copy that
+  carries one is visible) and `composite_witness` (a stored user row C with
   `composite_of` relations, ordinals 0..n-1 contiguous with n >= 2, each naming a stored row of C's session or NULL
   for the host scaffold, at most one NULL; with one NULL the leftover span starts with the todo injection header
   `_PRESERVED_TODO_CONTEXT_PREFIX`, with none ordinal 0 names a stored user row that starts with it; C's content is

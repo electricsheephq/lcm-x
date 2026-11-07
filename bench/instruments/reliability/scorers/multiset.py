@@ -491,8 +491,9 @@ def todo_header() -> str:
 
 
 def link_pending_ids(relations):
-    """#2377: rows the ingest marked ``link_pending`` (related_store_id NULL). It marks every row it stores, new rows
-    included, so a surplus row that carries one is a visible copy; the mark on any row is a defect signal."""
+    """#2377: rows the ingest marked ``link_pending`` (related_store_id NULL). It marks rows only when computing their
+    links raised, and then over-marks (a new row of that ingest is marked too), so a surplus row that carries one is a
+    visible copy; the mark on any row is a defect signal."""
     return {sid for sid, kind, other, *_ordinal in relations if kind == "link_pending" and other is None}
 
 
@@ -576,6 +577,7 @@ def split_surplus(groups, relations, rows=None, forms=None):
     forms = attribution_forms(relations, rows) if forms is None else forms
     held = {sid for group in groups for sid in group[2]}
     live = {name: ids & held for name, ids in forms.items()}
+    # Passes: one with every touched form, one without, one per touched form (up to 5 in the audit, 4 in B2).
     out = _matched(groups, relations, rows, set().union(*live.values()))
     base = _matched(groups, relations, rows, set())["visible_surplus_rows"] if any(live.values()) else 0
     for name, ids in live.items():

@@ -74,6 +74,7 @@ ROUTE_LINK_PENDING = re.compile(r"\blink_pending=(\d+)\b")
 LINK_FAILED = "LCM tool replay link failed"
 LINK_LINE = re.compile(r"LCM tool replay link failed source_store_id=(\d+) target_store_id=(\d+) "
                        r"reason=(relation_write_failed|pending_write_failed)")
+LINK_STORE_SLACK = 1.0  # seconds: a log stamp of one-second resolution can read just before the row's ingested_at
 # Route tokens: the reconciliation action of a re-bound engine's first ingest (reconcile.py: advanced cursor,
 # persisted batch, skipped batch), the warm default ``foreground``/``append``, and the tail routes: ``cold`` (a retried
 # cold tail through the ingest), ``S3`` (the S3 tail retry), ``session_end`` and ``warm_tail``.
@@ -381,7 +382,8 @@ def todo_expected(host_rows, stored_rows, group, header):
     at the same stamp (observed_at equals the host timestamp), is expected; each displayed occurrence matches one
     stored row. Every other todo row stays out of the expected rows (``host_expected``), and a displayed one with no
     stored copy is no deficit. ``stored_rows``: (store_id, session, role, content, tool_calls, tool_call_id,
-    observed_at). Returns {lineage: [content of each matched row]}."""
+    observed_at). Returns {lineage: [store id of each matched row]}: the stamp-equal row is the kept copy, taken out
+    of scoring with its host occurrence, so an earlier copy of the same text stays surplus."""
     shown = {(group(r[1]), r[3], float(r[7])) for r in host_rows if r[2] == "user" and r[9] and not r[6]
              and r[7] is not None and (r[3] or "").startswith(header)}
     out = defaultdict(list)
@@ -389,7 +391,7 @@ def todo_expected(host_rows, stored_rows, group, header):
         slot = (group(session), content, float(observed)) if role == "user" and observed is not None else None
         if slot in shown:
             shown.discard(slot)
-            out[slot[0]].append(content)
+            out[slot[0]].append(_store_id)
     return out
 
 
@@ -437,6 +439,22 @@ def logged_link(msg):
     return int(hit.group(1)) if hit else False
 
 
+def logged_link_credits(links, extra, since):
+    """#2377's logged intended links: the store ids they credit, and the well-formed lines out of scope. A line credits
+    its source row only when it is a WARNING, its session field names the row's session (exactly, as the route lines'
+    session is matched), and its time is in the run window (at or after ``since``) and not before the row was stored
+    (its ingested_at, less LINK_STORE_SLACK). ``links``: (source, session, at, level) of each well-formed line."""
+    credited, out = set(), 0
+    for source, session, at, level in links:
+        row = extra.get(source)
+        if row is not None and level == "WARNING" and session == row[1] and (since is None or at >= since) and (
+                row[7] is None or at >= row[7] - LINK_STORE_SLACK):
+            credited.add(source)
+        else:
+            out += 1
+    return credited, out
+
+
 def read_logs(paths, tz=None):
     """LCM-X's own log lines: compactions (deduplicated across files), AUXILIARY lines, recorder lines and logged
     intended links (``logged_link``)."""
@@ -470,7 +488,7 @@ def read_logs(paths, tz=None):
             if (link := logged_link(msg)) is False:  # a line logged to two files counts once
                 out["links_unparsed"].add((at, msg))
             elif link is not None:
-                out["links"].add(link)
+                out["links"].add((link, sid, at, m["level"] or m["level2"] or m["level3"]))
     # ACP stderr omits the session: prefer a matching session-bearing file record, while keeping distinct sessions.
     session_records = {(at, msg) for sid, at, msg in out["compactions"] if sid is not None}
     out["compactions"] = {(sid, at, msg) for sid, at, msg in out["compactions"]
@@ -757,16 +775,20 @@ def audit(state_db: Path, lcm_db: Path, logs=(), since=None, events_path=None, l
                                [r for r in host_rows if r[1] in scored], strip)
     for g, rows in by_lineage.items():  # kept rows of an undone occurrence: out of parity, surplus and M3's numerator
         by_lineage[g] = [r for r in rows if r[0] not in retained]
-    lost = Counter(group(extra[s][1]) for s in lost_ids)
     todo = todo_expected([r for r in host_rows if r[1] in scored], [r for rows in by_lineage.values() for r in rows],
                          group, multiset.todo_header())
-    forms = multiset.attribution_forms(relations, stored_content, log["links"])
+    kept_todo = {i for ids in todo.values() for i in ids}
+    for g, rows in by_lineage.items():  # a matched todo row and its host occurrence: expected and stored, not scored
+        by_lineage[g] = [r for r in rows if r[0] not in kept_todo]
+    lost = Counter(group(extra[s][1]) for s in lost_ids)
+    logged, links_out_of_scope = logged_link_credits(log["links"], extra, since)
+    forms = multiset.attribution_forms(relations, stored_content, logged)
     parity, silent_rows = {}, []
     for g in sorted(roots | set(by_lineage) | set(lost)):
         items, tools = expected.get(g, ([], Counter()))
-        items = items + [("user", text) for text in todo[g]]
         numbers, silent = score_lineage(g, items, tools, by_lineage[g], relations, stored_content, forms)
-        numbers["stored_rows"] += lost[g]
+        numbers["stored_rows"] += lost[g] + len(todo[g])
+        numbers["expected_rows"] += len(todo[g])
         numbers.update(externalized_unresolved=lost[g], host_carrier_rows_excluded=carriers[g],
                        host_todo_rows_expected=len(todo[g]),
                        source=sessions.get(g, {}).get("source"), host_session=g in sessions)
@@ -780,7 +802,7 @@ def audit(state_db: Path, lcm_db: Path, logs=(), since=None, events_path=None, l
     totals = {k: sum(p[k] for p in parity.values()) for k in keys}
     zero = sorted(g for g, p in parity.items() if p["host_session"] and p["expected_rows"] and not p["stored_rows"])
     per_session = Counter(r[1] for r in stored)
-    window_ids = {r[0] for rows in by_lineage.values() for r in rows} | set(lost_ids) | retained
+    window_ids = {r[0] for rows in by_lineage.values() for r in rows} | set(lost_ids) | retained | kept_todo
     audited_sessions = scored | {extra[i][1] for i in window_ids}
     denominator = len(window_ids)
 
@@ -860,7 +882,7 @@ def audit(state_db: Path, lcm_db: Path, logs=(), since=None, events_path=None, l
                 # #2377 cross-checks: route lines' link_pending field (None when no line has it), malformed links.
                 "link_pending_logged": sum(i["link_pending"] for i in ingests if i["link_pending"] is not None)
                 if any(i["link_pending"] is not None for i in ingests) else None,
-                "logged_link_unparsed": len(log["links_unparsed"])}
+                "logged_link_unparsed": len(log["links_unparsed"]), "logged_link_out_of_scope": links_out_of_scope}
 
     observed = {r[0]: r[6] for r in stored}
     user_rows = {r[0]: (r[1], r[3]) for r in resolved if r[2] == "user"}

@@ -1150,7 +1150,9 @@ def test_in_place_chained_compactions_with_inner_carriers(tmp_path, lose):
 
 
 TODO = _PRESERVED_TODO_CONTEXT_PREFIX + f"\n- [ ] {S} step"  # the todo injection header
-LINK = "2026-11-06 10:00:01,000 WARNING [S1] hermes_lcm.engine: LCM tool replay link failed {}\n"
+# Dated after the store's ingested_at (the time the test runs), as a link line follows the row it names.
+LINK = "2099-01-01 10:00:01,000 WARNING [S1] hermes_lcm.engine: LCM tool replay link failed {}\n"
+OK = "source_store_id=3 target_store_id=1 reason=relation_write_failed"
 
 
 def dup_home(tmp_path, **kw):
@@ -1223,3 +1225,33 @@ def test_route_link_pending_fields_are_summed(tmp_path):
         " link_pending=1\n"
     assert home.run(logs=[lines])["recorder"]["link_pending_logged"] == 3
     assert home.run(logs=[route("S1", "foreground", 0, 1, 3)])["recorder"]["link_pending_logged"] is None
+
+
+def test_the_stamp_equal_todo_copy_is_the_kept_one(tmp_path):
+    todo = {"role": "user", "content": TODO}
+    host = [("S1", dict(todo, _ts=T0 + 2))] + [("S1", dict(m, _ts=T0 + 3 + n)) for n, (_s, m) in enumerate(turn(1))]
+    stored = [("S1", stamped(m, m["_ts"])) for _s, m in host[1:]] + [("S1", stamped(todo, T0 - 500)),
+                                                                       ("S1", stamped(todo, T0 + 2))]
+    out = Home(tmp_path, ONE, host, stored=stored, relations=[(4, "link_pending", None)]).run()
+    t = out["parity"]["totals"]
+    assert (t["visible_surplus_rows"], t["silent_surplus_rows"], t["host_todo_rows_expected"]) == (0, 1, 1)
+    assert out["exempted_surplus"]["store_ids"]["unattributed"] == [3]
+
+
+@pytest.mark.parametrize("line", [LINK.replace("[S1]", "[S2]").format(OK), LINK.replace("WARNING", "INFO").format(OK),
+                                  LINK.replace("2099-01-01", "2026-01-01").format(OK),
+                                  LINK.replace(" [S1]", "").format(OK)],
+                         ids=["other-session", "info", "before-stored", "no-session"])
+def test_a_logged_link_out_of_scope_credits_nothing(tmp_path, line):
+    out = dup_home(tmp_path).run(logs=[line])
+    t = out["parity"]["totals"]
+    assert (t["visible_surplus_rows"], t["silent_surplus_rows"], t["logged_link_rows"]) == (0, 1, 0)
+    assert out["recorder"]["logged_link_out_of_scope"] == 1
+
+
+@pytest.mark.parametrize("day,credited", [("2099-06-01", 0), ("2100-06-01", 1)], ids=["before-window", "in-window"])
+def test_a_logged_link_before_the_window_credits_nothing(tmp_path, day, credited):
+    sessions = {"S1": ("cli", None, 4102444900.0, "user_exit", 4102444800.0)}  # started 2100-01-01
+    out = Home(tmp_path, sessions, turn(1), stored=turn(1) + [turn(1)[0]]).run(
+        logs=[LINK.replace("2099-01-01", day).format(OK)], since=4102444800.0)
+    assert out["parity"]["totals"]["visible_surplus_rows"] == credited
