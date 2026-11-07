@@ -616,12 +616,15 @@ class IdentityAnchorMixin:
             identity = self._message_replay_identity(msg, stored_row=stored)
             return None if _lossy(identity) else (identity[0], identity[1].strip())
 
-        def stored(call_id, *, call_row=False) -> bool:  # uncapped, by call id, in this session or a verified ancestor
-            conversation = str(self._conversation_id or "")
-            return any(self._store.find_session_call_rows(session, call_id, conversation_id=conversation) if call_row
-                       else self._store.find_session_tool_rows(session, call_id, conversation_id=conversation,
-                                                               tool_name="")
-                       for session in [str(self._session_id), *chain])
+        stored_ids: list = []
+
+        def stored(call_id) -> bool:  # an uncapped lookup by call id (result or call row), this session or an
+            if not stored_ids:  # ancestor: one scan per session for every call id in the audited range
+                wanted = {i for m in identity_messages[start:cursor] for i in (*calls(m), m.get("tool_call_id")) if i}
+                stored_ids.append(set().union(*(self._store.stored_call_ids(
+                    session, wanted, conversation_id=str(self._conversation_id or ""))
+                    for session in [str(self._session_id), *chain])))
+            return call_id in stored_ids[0]
 
         def proven_new(idx, wanted) -> bool:
             if not capped:
@@ -630,7 +633,7 @@ class IdentityAnchorMixin:
                 return not stored(wanted[1])
             return wanted[0] == "call" and any(  # a result at or after the cursor, and no stored call row or result
                 identity_messages[k].get("tool_call_id") in wanted[1] for k in range(cursor, len(messages))) and not any(
-                stored(i) or stored(i, call_row=True) for i in wanted[1])
+                map(stored, wanted[1]))
 
         chain = self._identity_anchor_chain()
         index: dict = defaultdict(list)
