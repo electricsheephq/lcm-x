@@ -7254,7 +7254,8 @@ class LCMEngine(
                                if _normalize_conversation_id_value(target_conversation) == conversation]
                     # One earlier occurrence supplies at most one replay link: one batched read of the spent targets.
                     spent = {r["related_store_id"] for r in self._store.get_message_relations(
-                        targets, "possible_replay_of", related=True)}
+                        targets, "possible_replay_of", related=True)
+                        if r["observed_at"] is None}  # a borrowed-stamp link never consumes its target
                     target = next((t for t in targets if t not in spent), None)
                     if target is not None:
                         self._store.add_message_relations([[(sid, "possible_replay_of", target, None, None)]])
