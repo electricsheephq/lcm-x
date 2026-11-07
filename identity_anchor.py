@@ -31,6 +31,8 @@ from collections import Counter, defaultdict
 from difflib import SequenceMatcher
 from typing import Any, Dict, Optional
 
+from .host_rewrite import host_rewrite_match
+
 from .recognition_matching import (
     _MAX_DECOMPOSITIONS as _MAX_DECOMPOSITIONS,
     _DECOMPOSE_BUDGET as _DECOMPOSE_BUDGET,
@@ -282,7 +284,13 @@ class IdentityAnchorMixin:
             if observed_at is not None:
                 stamps[idx] = observed_at
         wanted = {stamps[idx] for idx in range(fetch_start, n) if idx in stamps}
-        if not wanted and start >= cursor:
+        from .reconcile import _PRESERVED_TODO_CONTEXT_PREFIX as header, _todo_annotation_span
+
+        snapshots = {i for i in range(start, n) if i not in stamps and messages[i].get("role") == "user"
+                     and not messages[i].get("tool_calls") and isinstance(messages[i].get("content"), str)
+                     and messages[i]["content"].startswith(header)
+                     and _todo_annotation_span(messages[i]["content"], 0) == len(messages[i]["content"])}
+        if not wanted and start >= cursor and not snapshots:
             return plan
         # #633: nothing stamped from ``start`` on still leaves a changed prefix to audit (an unstamped row).
         chain = self._identity_anchor_chain()
@@ -431,6 +439,40 @@ class IdentityAnchorMixin:
         if start < cursor:
             self._identity_anchor_audit(messages, identity_messages, cursor, start, stamps, identity_at, consumed, plan,
                                         matched, excluded=ledger_pairs)
+        for idx in range(start, n):
+            if idx in plan["replayed"] or idx in ledger_pairs or idx in plan["remainders"]:
+                continue
+            message, candidates = messages[idx], []
+            text, stamp = message.get("content"), stamps.get(idx)
+            if (message.get("role") == "assistant" and not message.get("tool_calls") and stamp is not None
+                    and isinstance(text, str) and "\n" in text
+                    and any(r.get("session_id") == self._session_id and r.get("observed_at") == stamp
+                            for r, _f in by_stamp.get(stamp, ()))):
+                # The session/time index predates host stamps (observed_at); keep the bounded read
+                # schema-free. The predecessor subquery also sees unstamped/out-of-scan barriers.
+                candidates = [dict(zip(("store_id", "role", "content", "tool_calls", "observed_at", "previous"), r))
+                              for r in self._store._conn.execute(
+                    "SELECT m.store_id, m.role, m.content, m.tool_calls, m.observed_at, "
+                    "(SELECT MAX(p.store_id) FROM messages p WHERE p.session_id=m.session_id "
+                    "AND p.store_id<m.store_id AND p.role!='user') FROM messages m INDEXED BY idx_msg_session_ts "
+                    "WHERE m.session_id=? AND m.observed_at>=? ORDER BY m.observed_at, m.store_id LIMIT 64",
+                    (self._session_id, stamp))]
+                for c in candidates:
+                    c["consumed"] = c["store_id"] in consumed
+            elif idx in snapshots:
+                candidates = [dict(zip(("store_id", "role", "content"), r)) for r in self._store._conn.execute(
+                    "SELECT store_id, role, content FROM messages INDEXED BY idx_msg_session "
+                    "WHERE session_id=? AND role='user' AND substr(content, 1, ?)=? "
+                    "ORDER BY store_id DESC LIMIT 10000", (self._session_id, len(header), header))]
+            if not candidates:
+                continue
+            match = host_rewrite_match({**message, "stamp": stamp}, candidates, header=header,
+                                      todo_span=len(text) if idx in snapshots else None)
+            if match is not None:
+                plan["replayed"].add(idx)
+                consumed.update(match.consumed)
+                logger.info("LCM host-rewrite replay: arm=%s parts=%s consumed=%s session=%s",
+                            match.arm, match.k, list(match.consumed), self._session_id)
         self._identity_anchor_tool_segments(messages, plan["cursor"], plan["replayed"], matched, plan.get("positional", ()))
         for idx in list(plan["remainders"]):
             if idx in plan["replayed"]:

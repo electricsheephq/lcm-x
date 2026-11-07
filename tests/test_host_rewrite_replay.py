@@ -115,3 +115,56 @@ def test_control_equals_main(tmp_path, caplog, name, stored, incoming, foreign, 
             engine._ingest_messages(deepcopy(incoming))
         assert multiset(engine) == Counter(expected)
         assert not any("LCM host-rewrite replay:" in r.message for r in caplog.records)
+
+
+def test_recorder_exact_content_free_lines(tmp_path, caplog):
+    with engine_context(tmp_path, window=200000, conversation_id="conv", embeddings_enabled=False) as engine:
+        ids = seed(engine, [A, COMPOSITE, B])
+        with caplog.at_level("INFO"):
+            assert ingest_added(engine, [FOLD, SNAP]) == 0
+        records = [r for r in caplog.records if r.message.startswith("LCM host-rewrite replay:")]
+        assert [(r.levelname, r.message) for r in records] == [
+            ("INFO", f"LCM host-rewrite replay: arm=M parts=2 consumed={[ids[0], ids[2]]} session=S"),
+            ("INFO", "LCM host-rewrite replay: arm=S parts=1 consumed=[] session=S")]
+
+
+@pytest.mark.parametrize("incoming", [[row("assistant", "alpha\nbeta", 999)],
+                                     [row("user", "ordinary prompt")], [row("assistant", "single", 100)]])
+def test_no_candidate_zero_extra_queries(tmp_path, incoming):
+    with engine_context(tmp_path, window=200000, conversation_id="conv", embeddings_enabled=False) as engine:
+        seed(engine, [A, U, B])
+        sql = []
+        engine._store._conn.set_trace_callback(sql.append)
+        ingest_added(engine, incoming)
+        engine._store._conn.set_trace_callback(None)
+        assert not any("INDEXED BY idx_msg_session_ts" in q or "substr(content, 1," in q for q in sql)
+
+
+@pytest.mark.parametrize("barrier", [row("tool", "unstamped result"), row("system", "system", 99),
+                                    row("summary", "summary", 90)])
+def test_barriers_outside_stamp_scan(tmp_path, barrier):
+    with engine_context(tmp_path, window=200000, conversation_id="conv", embeddings_enabled=False) as engine:
+        seed(engine, [A, barrier, B])
+        before = multiset(engine)
+        assert ingest_added(engine, [FOLD]) == 1
+        assert multiset(engine) == before + Counter([("S", "assistant", "alpha\nbeta", 100)])
+
+
+def test_two_fold_views_consume_parts_once(tmp_path):
+    with engine_context(tmp_path, window=200000, conversation_id="conv", embeddings_enabled=False) as engine:
+        seed(engine, [A, U, B])
+        assert ingest_added(engine, [FOLD, FOLD]) == 1
+        assert multiset(engine) == Counter(BASE + [("S", "assistant", "alpha\nbeta", 100)])
+
+
+@pytest.mark.parametrize("text", ["alpha\nbeta ", " alpha\nbeta", "alpha\nmissing", "alpha\n\nbeta"])
+def test_inexact_fold_bytes_stay_new(tmp_path, text):
+    with engine_context(tmp_path, window=200000, conversation_id="conv", embeddings_enabled=False) as engine:
+        seed(engine, [A, U, B])
+        assert ingest_added(engine, [row("assistant", text, 100)]) == 1
+
+
+def test_full_scan_budget_stays_new(tmp_path):
+    with engine_context(tmp_path, window=200000, conversation_id="conv", embeddings_enabled=False) as engine:
+        seed(engine, [A, U, B] + [row("user", f"padding {i}", 200+i) for i in range(61)])
+        assert ingest_added(engine, [FOLD]) == 1
