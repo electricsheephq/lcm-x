@@ -89,3 +89,71 @@ def test_cold_cursor_between_call_and_result_stores_no_silent_copy(build, monkey
     silent = [row["store_id"] for row in added if row["role"] != "user"
               and _key(by_id.get(links.get(row["store_id"]), {"role": None})) != _key(row)]
     assert silent == []
+
+
+def _cold_boundary(build, monkeypatch, stored_rows, replay, cursor):
+    """Store ``stored_rows``, restart cold, pin the reconcile cursor and replay; returns the added rows."""
+    engine = build()
+    engine.ingest(deepcopy(stored_rows))
+    engine.shutdown()
+    engine = build()
+    before = stored(engine)
+    monkeypatch.setattr(engine, "_reconcile_ingest_cursor_from_store", lambda *a, **kw: cursor)
+    engine.ingest(deepcopy(replay))
+    assert engine._ingest_failure_count == 0, engine._last_ingest_error
+    after = stored(engine)
+    assert after[:len(before)] == before
+    return [(row["role"], row.get("content"), row.get("tool_call_id")) for row in after[len(before):]]
+
+
+def test_reused_id_result_after_a_dangling_stored_call_is_stored(build, monkeypatch):
+    """The call's latest stored copy has no result after it, so an identical older result proves nothing."""
+    call, result = tool_pair("call_0", "OK", tool_name="poll")
+    head = [row for i in range(2) for row in _turn(i)] + [{"role": "user", "content": "poll"}, call, result,
+                                                          {"role": "user", "content": "poll again"}, call]
+    added = _cold_boundary(build, monkeypatch, head, head + [result, {"role": "user", "content": "next"}], len(head))
+    assert added == [("tool", "OK", "call_0"), ("user", "next", None)]
+
+
+def test_two_calls_with_one_stored_result_suppress_only_that_result(build, monkeypatch):
+    call = {"role": "assistant", "content": "running tools", "tool_calls": [
+        {"id": cid, "type": "function", "function": {"name": "lookup", "arguments": "{}"}} for cid in ("a", "b")]}
+    first, second = ({"role": "tool", "tool_call_id": cid, "content": "result " + cid} for cid in ("a", "b"))
+    head = [row for i in range(2) for row in _turn(i)] + [{"role": "user", "content": "look"}, call]
+    added = _cold_boundary(build, monkeypatch, head + [first],
+                           head + [first, second, {"role": "user", "content": "next"}], len(head))
+    assert added == [("tool", "result b", "b"), ("user", "next", None)]
+
+
+def test_cold_compaction_cursor_keeps_changed_result_timestamp(build, monkeypatch):
+    """A real durable-proof rewind (no cursor stub) to a result whose host stamp changed: it is new."""
+    plain_fixture = shapes.fixture
+
+    def stamped_fixture(*, uids=False):
+        rows = plain_fixture(uids=uids)
+        rows[-2]["timestamp"], rows[-1]["timestamp"] = 11, 12
+        return rows
+
+    monkeypatch.setattr(shapes, "fixture", stamped_fixture)
+    engine, host = compact(build, mode="cold")
+    before = stored(engine)
+    previous = deepcopy(host)
+    result_index = len(host) - 1
+    host[result_index]["timestamp"] = 22
+    assert engine._host_occurrence_changed(host[result_index], previous[result_index])
+    scans = []
+    helper = engine._replayed_tool_segment_indexes_after_cursor
+
+    def observe(messages, cursor, **kwargs):
+        selected = helper(messages, cursor, **kwargs)
+        scans.append((cursor, selected))
+        return selected
+
+    monkeypatch.setattr(engine, "_replayed_tool_segment_indexes_after_cursor", observe)
+    engine.ingest(deepcopy(host))
+    assert engine._ingest_failure_count == 0, engine._last_ingest_error
+    assert scans and scans[0][0] == result_index
+    after = stored(engine)
+    assert after[:len(before)] == before
+    added = after[len(before):]
+    assert [(row["role"], row.get("tool_call_id"), row.get("observed_at")) for row in added] == [("tool", "c", 22)]
