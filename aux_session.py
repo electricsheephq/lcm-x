@@ -1236,9 +1236,12 @@ class DelegateChildMixin:
             if own_store is None or store is None or getattr(store, "_conn", None) is None \
                     or store.db_path != own_store.db_path:
                 return False
-            excluded = bool(owner.__dict__.get("_session_ignored")) or (
-                bool(owner.__dict__.get("_session_stateless")) and not self._is_known_delegate_child(parent))
-            if not excluded:
+            def excluded(known_child: bool) -> bool:
+                return bool(owner.__dict__.get("_session_ignored")) or (
+                    bool(owner.__dict__.get("_session_stateless")) and not known_child)
+
+            known_child = self._is_known_delegate_child(parent)
+            if not excluded(known_child):
                 return False
             # The flags were read first: the binding must still be the same one, so a rebind mid-read refuses nothing.
             with _ACTIVE_ENGINE_REGISTRY_LOCK:
@@ -1246,8 +1249,8 @@ class DelegateChildMixin:
                     return False
                 engines = [*_ACTIVE_ENGINES_BY_SESSION_ID.values(), *_ACTIVE_ENGINES_BY_CONVERSATION_ID.values(),
                            *_BOUND_ENGINES]
-            if str(owner.__dict__.get("_session_id") or "") != parent:
-                return False
+            if str(owner.__dict__.get("_session_id") or "") != parent or not excluded(known_child):
+                return False  # the second flag read: a rebind of the same id to a normal binding meanwhile
             return not any(engine is not owner and str(engine.__dict__.get("_session_id") or "") == parent
                            and not (engine.__dict__.get("_session_ignored") or engine.__dict__.get("_session_stateless"))
                            for engine in engines)

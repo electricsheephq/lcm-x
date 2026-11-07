@@ -93,8 +93,9 @@ def test_an_owner_on_another_store_refuses_nothing(host, monkeypatch):  # noqa: 
     assert _stored(engine)
 
 
-def test_an_owner_caught_between_its_id_write_and_its_registration_refuses_nothing(host, monkeypatch):  # noqa: F811
-    """The owner has written the new id but not yet registered it: the registry does not map the parent to it."""
+def test_an_owner_not_registered_for_the_parent_refuses_nothing(host, monkeypatch):  # noqa: F811
+    """Direct registry hits only: an excluded engine whose ``_session_id`` reads as the parent but that is not
+    registered for it (a foreground scan would find it) refuses nothing."""
     monkeypatch.setenv("LCM_IGNORE_SESSION_PATTERNS", "old-parent")
     load, clone = host
     ctx, _ = load()
@@ -128,4 +129,44 @@ def test_an_owner_whose_store_was_never_opened_is_not_opened(host, monkeypatch):
     monkeypatch.setitem(_registry(owner)._ACTIVE_ENGINES_BY_SESSION_ID, "parent", bare)
     _store_child_on_a_clone(ctx, clone)
     assert "_store" not in bare.__dict__
+    assert _stored(owner)
+
+
+def test_a_same_id_rebind_to_a_normal_binding_during_the_check_refuses_nothing(host, monkeypatch):  # noqa: F811
+    """The owner's flags are read as excluded, then the owner rebinds the same id normally while the check runs: the
+    second flag read sees the normal binding, so the child is stored."""
+    ctx, _module, clone, owner = _excluded_parent(host, monkeypatch)
+    engine = clone(ctx)
+    child = Agent("child", **DELEGATE)
+    child.start(engine)
+    known = engine._is_known_delegate_child
+    rebinds = []
+
+    def rebind_while_checking(session_id):
+        if session_id == "parent" and not rebinds:
+            rebinds.append(session_id)
+            owner.__dict__.update(_session_stateless=False, _session_ignored=False)  # the same id, now normal
+        return known(session_id)
+
+    monkeypatch.setattr(engine, "_is_known_delegate_child", rebind_while_checking)
+    child.turn(ctx, child_view(), engine)
+    if not rebinds:
+        pytest.fail("setup: the check did not run")
+    assert _stored(engine)
+
+
+def test_a_registered_owner_rebinding_to_an_excluded_id_refuses_nothing(host, monkeypatch):  # noqa: F811
+    """The owner is registered for a NORMAL parent and starts rebinding to an ignored id: the new id and flags are
+    written, the registry still maps the parent to it. The id re-check sees it no longer holds the parent."""
+    monkeypatch.setenv("LCM_IGNORE_SESSION_PATTERNS", "cron-x")
+    load, clone = host
+    ctx, _ = load()
+    owner = clone(ctx)
+    owner.on_session_start("parent", platform="cli", context_length=200_000)
+    if owner._session_stateless or owner._session_ignored or _registry(owner)._ACTIVE_ENGINES_BY_SESSION_ID.get(
+            "parent") is not owner:
+        pytest.fail("setup: the owner is not a registered normal binding of the parent")
+    monkeypatch.setitem(owner.__dict__, "_session_id", "cron-x")  # mid-rebind: id and flags written, not registered
+    monkeypatch.setitem(owner.__dict__, "_session_ignored", True)
+    _store_child_on_a_clone(ctx, clone)
     assert _stored(owner)
