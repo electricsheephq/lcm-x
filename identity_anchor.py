@@ -464,8 +464,11 @@ class IdentityAnchorMixin:
         span = max(64, 2 * (cursor - start))
         held: dict = defaultdict(list)
         chain = self._identity_anchor_chain()
+        capped = False  # a session holds more rows than the audited tail: its older copies are not in ``held``
         for session in [str(self._session_id), *chain]:
-            for row in self._store.get_session_tail(session, limit=span):
+            tail = self._store.get_session_tail(session, limit=span)
+            capped = capped or len(tail) >= span
+            for row in tail:
                 if int(row["store_id"]) not in consumed:
                     held[_proof_user_identity(self._message_replay_identity(row, stored_row=True))].append(row)
         bindings = None
@@ -571,7 +574,8 @@ class IdentityAnchorMixin:
             # Class A (#2071 rule): the cursor resumes only behind rows that are accounted for. A position no longer
             # proves a row stored once the host changed the list, and the audit above never examines tool rows.
             missed = sorted({*missed, *self._identity_anchor_unaccounted(
-                messages, identity_messages, cursor, start, identity_at, held, consumed, plan, matched, excluded, missed)})
+                messages, identity_messages, cursor, start, identity_at, held, capped, consumed, plan, matched, excluded,
+                missed)})
             plan["cursor"] = min(missed)
             plan["positional"] = {idx for idx in range(min(missed), cursor) if idx not in missed}
             plan["replayed"].update(plan["positional"])
@@ -579,17 +583,19 @@ class IdentityAnchorMixin:
                            "stored nor compaction outputs; storing them: session=%s",
                            len(missed), min(missed), self._session_id)
 
-    def _identity_anchor_unaccounted(self, messages, identity_messages, cursor, start, identity_at, held, consumed,
-                                     plan, matched, excluded, missed) -> list[int]:
+    def _identity_anchor_unaccounted(self, messages, identity_messages, cursor, start, identity_at, held, capped,
+                                     consumed, plan, matched, excluded, missed) -> list[int]:
         """Rows in ``[start, cursor)`` that are neither bound, matched to a stored row, a compaction output (LCM's
         own scaffold) nor ignored, and that no stored copy in the audited tail accounts for, one copy each. The
         copies the view's unchanged prefix ``[0, start)`` holds are reserved first. Counting stored copies, not
-        bindings, keeps an upgraded store's pre-ledger rows from being stored again."""
+        bindings, keeps an upgraded store's pre-ledger rows from being stored again. Unsure is accounted (the
+        positional replay, as before): a row with no comparable key (a lossy identity), and a reserved key whose
+        older copies a ``capped`` tail does not hold."""
         from .reconcile import _proof_user_identity
 
         def key(idx):
             identity = self._message_replay_identity(identity_messages[idx])
-            return None if _lossy(identity) else _proof_user_identity(identity)  # lossy: no proof of a copy
+            return None if _lossy(identity) else _proof_user_identity(identity)
 
         explained = set(excluded) | set(matched) | set(plan.get("matched", {})) | plan["replayed"] | set(missed)
         reserved = Counter(key(idx) for idx in range(min(start, len(messages)))
@@ -601,7 +607,9 @@ class IdentityAnchorMixin:
                     or self._matches_ignore_message_patterns(messages[idx])):
                 continue
             wanted = key(idx)
-            copies = [row for row in held.get(wanted, ()) if int(row["store_id"]) not in consumed] if wanted else []
+            if wanted is None or capped and reserved[wanted]:
+                continue
+            copies = [row for row in held.get(wanted, ()) if int(row["store_id"]) not in consumed]
             if len(copies) > reserved[wanted]:
                 consumed.add(int(copies[-1]["store_id"]))
                 continue
