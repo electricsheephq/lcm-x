@@ -17,6 +17,7 @@ from . import bars, capture, plan as planner, provider as prov, run
 
 SCHEMA = "d5-clone-preflight/1"
 ANCHOR = "identity-anchor recognised"
+HYGIENE = "Session hygiene"  # The host's own gateway session-hygiene compression (gateway/run_turn.py).
 DIGEST12 = re.compile(r"_([0-9a-f]{12})_[0-9a-f]+\.json$")  # The payload filename's content digest prefix.
 
 
@@ -152,8 +153,8 @@ def p6(host, plan):
     host.pause_cron(ctx)
     sid, ids = ctx["sessions"]["L"], ctx["session_ids"]
 
-    def anchors():
-        return sum(ANCHOR in line and f"session={sid}" in line for line in host.logs(ctx))
+    def anchors():  # Distinct records: the host writes each LCM-X line to more than one log file.
+        return len({line for line in host.logs(ctx) if ANCHOR in line and f"session={sid}" in line})
 
     try:
         host.start(ctx)
@@ -174,6 +175,7 @@ def p6(host, plan):
             host.remove(h8_dir)
         _turn(host, ctx, warm)
         warm_anchors = anchors() - cold_anchors
+        hygiene = len({line for line in host.logs(ctx) if HYGIENE in line and sid in line})
         ended = _rows(ctx, "state.db", "SELECT count(*) FROM sessions WHERE end_reason IS NOT NULL"
                       f" AND id IN ({','.join('?' * len(ids))})", ids)[0][0]
     finally:
@@ -193,18 +195,21 @@ def p6(host, plan):
          "warm_rows": [new("lcm.db", "store_id", mid["store"]), new("state.db", "id", mid["host"])],
          "host_rows": [new("state.db", "id", before["host"], False), new("state.db", "id", before["host"])],
          "live_conversation_sha256": sorted(map(_sha, live)), "receipt_conversation_sha256": sorted(map(_sha, replayed)),
-         "cold_ingest_durable": durable, "cold_ingest_wait_s": waited}
-    return _failed([
+         "cold_ingest_durable": durable, "cold_ingest_wait_s": waited, "hygiene_lines": hygiene}
+    fails = _failed([
         ("bind validity is not PASS", not error and bind["validity"] != "PASS"),
         ("range_new_rows is not 0", not error and range_new != 0),
         ("no anchor line at the cold bind", cold_anchors < 1), ("an anchor line after the warm turn", warm_anchors),
         ("the warm turn stored LCM-X rows beyond the host's", len(set(f["warm_rows"])) != 1),
         ("a chosen session ended", ended), ("d5-local is not enabled", "d5-local" not in (enabled or ())),
         ("new host rows outside L's session", len(set(f["host_rows"])) != 1 or f["host_rows"][0] < 2),
-        ("the live and replayed conversation_id differ", replayed and live != replayed)]), \
-        _failed([("the cold turn's ingest was not durable within the wait (no H8, no replay)", not durable),
+        ("the live and replayed conversation_id differ", replayed and live != replayed)])
+    unsure = _failed([("the cold turn's ingest was not durable within the wait (no H8, no replay)", not durable),
                  ("the edition replay errored (no receipt to judge)", durable and error),
-                 ("neither the T0 session row nor the edition receipt gives a conversation_id to compare", not replayed)]), f
+                 ("neither the T0 session row nor the edition receipt gives a conversation_id to compare", not replayed)])
+    if hygiene:  # The host's own compression rewrote L during the bind: what P6 saw is not the turn's own bind.
+        return [], [f"host session hygiene ran on L ({hygiene} lines); the checks are not judged"] + fails + unsure, f
+    return fails, unsure, f
 
 
 def p7(host, plan):

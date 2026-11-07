@@ -75,7 +75,10 @@ class FakeHost:
             if self.fault == "inactive-copy":  # An in-place compaction: the original stays, inactive, beside it.
                 db.executemany("INSERT INTO messages (session_id, role, content, tool_call_id, active) VALUES"
                                " (?, ?, ?, ?, 0)", [(sid, *r) for r in host if r[0] == "tool"])
-        ctx["log"] += [ANCHOR] if step["kind"] == "cold" or self.fault == "P6" else []
+        stamp = f"{step['id']} "  # A distinct record per turn; the host writes each one to two log files.
+        ctx["log"] += [stamp + ANCHOR] * 2 if step["kind"] == "cold" or self.fault == "P6" else []
+        if self.fault == "hygiene":
+            ctx["log"] += [f"{stamp}INFO gateway.run: Session hygiene compression for session sess-l started"] * 2
         ctx["facts"]["compactions_published"] += 1
         ctx["facts"]["whitespace_rewrites"] += bool(step["rewrite"])
         ctx["stats"]["calls_per_step"][step["id"]] = len(entries)
@@ -114,7 +117,7 @@ class FakeHost:
 
 @pytest.mark.parametrize("fault", [None, "P3", "P4", "P6", "P7", "crash", "no-conversation", "replay-error",
                                    "not-durable", "inactive-copy",
-                                   "user-copy-first"])
+                                   "user-copy-first", "hygiene"])
 def test_each_preflight_fails_on_its_own_fault(tmp_path, monkeypatch, fault):
     monkeypatch.setitem(sys.modules, "yaml", types.SimpleNamespace(safe_load=json.loads))  # Not in every test venv.
     if fault == "P3":  # A provider whose second reply differs from the first.
@@ -128,6 +131,9 @@ def test_each_preflight_fails_on_its_own_fault(tmp_path, monkeypatch, fault):
     expected.update({fault: "FAIL"} if fault in pf.PREFLIGHTS else {"P6": "INCONCLUSIVE"}
                     if fault and fault not in ("inactive-copy", "user-copy-first") else {})
     assert verdicts == expected
+    p6 = json.loads((tmp_path / "P6.json").read_text())["facts"]
+    if fault is None:  # One distinct anchor record per turn, though each is written twice.
+        assert (p6["cold_anchors"], p6["warm_anchors"], p6["hygiene_lines"]) == (1, 0, 0)
     for name in pf.PREFLIGHTS:
         text = (tmp_path / f"{name}.json").read_text()
         receipt = json.loads(text)
