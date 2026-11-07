@@ -11,6 +11,7 @@ edition's parity test (same verdicts on recorded inputs) and the review of its p
 import ast
 import hashlib
 import json
+import os
 from pathlib import Path
 import platform
 import subprocess
@@ -33,23 +34,33 @@ def _load_path(directory, name):
     return Path(directory).joinpath(*parts)
 
 
+def _scan(instrument_dir):
+    """(pinnable files, unpinnable count) under the instrument directory, never following a link.
+
+    Bytecode caches and symlinks are never pinnable. They are counted apart from file names, so no file name
+    can stand in for one."""
+    root = Path(instrument_dir)
+    found, unpinnable = set(), 0
+    for directory, dirs, names in os.walk(root, followlinks=False):
+        for name in dirs + names:
+            path = Path(directory) / name
+            relative = path.relative_to(root)
+            if path.is_symlink():
+                unpinnable += 1  # A link can point anywhere.
+            elif "__pycache__" in relative.parts or path.suffix in (".pyc", ".pyo"):
+                unpinnable += name in names  # Cached bytecode can run instead of the pinned source.
+            elif name in names and path.is_file() and relative.as_posix() != MANIFEST:
+                found.add(relative.as_posix())
+    return found, unpinnable
+
+
 def directory_files(instrument_dir):
     """Every file under the instrument directory except the manifest. The manifest must pin all of them, so a
     sibling file cannot change unnoticed however it is loaded (import, importlib, runpy). Bytecode caches and
     symlinks are never pinnable, so their presence fails: instruments run with -B and write no bytecode there."""
-    root = Path(instrument_dir)
-    found = set()
-    for path in root.rglob("*"):
-        relative = path.relative_to(root)
-        if relative.as_posix() == MANIFEST:
-            continue
-        if "__pycache__" in relative.parts or path.suffix in (".pyc", ".pyo"):
-            found.add("bytecode:" + relative.as_posix())  # Cached bytecode can run instead of the pinned source.
-            continue
-        if path.is_symlink():
-            found.add("symlink:" + relative.as_posix())  # Never pinnable: a link can point anywhere.
-        elif path.is_file():
-            found.add(relative.as_posix())
+    found, unpinnable = _scan(instrument_dir)
+    if unpinnable:
+        raise ValueError("the instrument directory holds a symlink or bytecode")
     return found
 
 
@@ -314,7 +325,10 @@ def verify(manifest_path, instrument_dir, python_version=None, interpreter=None)
             safe = isinstance(name, str) and not Path(name).is_absolute() and ".." not in Path(name).parts
             mismatches.append(name if safe else "manifest")  # Only a relative name under the instrument dir.
         pinned = {f["name"] for f in manifest["files"]} | {m["name"] for f in manifest["files"] for m in f["loads"]}
-        if directory_files(instrument_dir) - pinned:
+        found, unpinnable = _scan(instrument_dir)
+        if unpinnable:
+            mismatches.append("unpinnable_files")  # A symlink or bytecode: never pinnable, whatever its name.
+        if found - pinned:
             mismatches.append("unpinned_files")  # A file added beside the instruments, by name only in the count.
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         mismatches.append("manifest")
