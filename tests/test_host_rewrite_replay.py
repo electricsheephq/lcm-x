@@ -184,3 +184,112 @@ def test_unique_decomposition_with_repeated_anchor_stamp(tmp_path):
         assert ingest_added(engine, [FOLD]) == 0
         assert multiset(engine) == before
         assert ingest_added(engine, [FOLD]) == 0
+
+
+def assert_rewrite_kept(engine, view, text, matched_ids):
+    rows = engine._store.get_session_messages("S")
+    assert any(text in (r["content"] or "") for r in rows)
+    edges = engine._store._conn.execute(
+        "SELECT related_store_id FROM message_relations WHERE kind='supersedes'").fetchall()
+    assert not set(matched_ids).intersection(r[0] for r in edges)
+    before = multiset(engine)
+    engine.ingest(view)
+    assert multiset(engine) == before
+
+
+@pytest.mark.parametrize("marker", [False, True], ids=["plain", "host-markers"])
+@pytest.mark.parametrize("stamp_merged", [None, 102.0], ids=["merged-unstamped", "merged-stamped"])
+def test_fix1_f1_snapshot_inplace_merge(tmp_path, marker, stamp_merged):
+    with engine_context(tmp_path, window=200000, conversation_id="conv", embeddings_enabled=False) as engine:
+        view = [row("user", TODO + "\n\nprompt one", 100), row("assistant", "reply one", 101)]
+        engine.ingest(view)
+        matched_ids = [r["store_id"] for r in engine._store.get_session_messages("S")]
+        snap = deepcopy(SNAP)
+        if marker:
+            snap["_todo_snapshot_synthetic"] = True
+        view.append(snap)
+        engine.ingest(view)
+        snap["content"] += "\n\nprompt two"
+        if marker:
+            snap["_merged_turn_prefix"] = TODO
+        if stamp_merged:
+            snap["timestamp"] = stamp_merged
+        view.append(row("assistant", "reply two", 103))
+        engine.ingest(view)
+        assert_rewrite_kept(engine, view, "prompt two", matched_ids)
+
+
+@pytest.mark.parametrize("arm", ["S", "M"])
+def test_fix1_f1_cold_batch_then_warm_inplace_merge(tmp_path, arm):
+    with engine_context(tmp_path, window=200000, platform="acp", conversation_id="conv",
+                        embeddings_enabled=False) as engine:
+        matched_ids = seed(engine, [A, COMPOSITE, B])
+    with engine_context(tmp_path, window=200000, platform="acp", conversation_id="conv",
+                        embeddings_enabled=False) as engine:
+        view = deepcopy([FOLD, SNAP])
+        engine.ingest(view)
+        survivor = view[1 if arm == "S" else 0]
+        survivor["content"] += "\n\nprompt two" if arm == "S" else "\nnext reply"
+        if arm == "S":
+            survivor["_merged_turn_prefix"] = TODO
+        view.append(row("assistant", "reply two", 200))
+        engine.ingest(view)
+        assert_rewrite_kept(engine, view, "prompt two" if arm == "S" else "next reply", matched_ids)
+
+
+def test_fix1_a1_reused_stamp_is_new(tmp_path):
+    with engine_context(tmp_path, window=200000, conversation_id="conv", embeddings_enabled=False) as engine:
+        stored = [row("assistant", "alpha", 100), row("user", "prompt", 100), row("assistant", "beta", 100)]
+        seed(engine, stored)
+        before = multiset(engine)
+        assert ingest_added(engine, [FOLD]) == 1
+        assert multiset(engine) == before + Counter([("S", "assistant", "alpha\nbeta", 100)])
+        assert ingest_added(engine, [FOLD]) == 0
+
+
+def test_fix1_a2_unstamped_host_prompt_is_new(tmp_path):
+    with engine_context(tmp_path, window=200000, conversation_id="conv", embeddings_enabled=False) as engine:
+        seed(engine, [row("user", TODO + "\n\nearlier prompt")])
+        before = multiset(engine)
+        assert ingest_added(engine, [SNAP]) == 1
+        assert multiset(engine) == before + Counter([("S", "user", TODO, None)])
+        assert ingest_added(engine, [SNAP]) == 0
+
+
+@pytest.mark.parametrize("query", ["M", "S", "prompts"])
+def test_fix1_a3_read_failure_keeps_audit_rewind(tmp_path, monkeypatch, caplog, query):
+    with engine_context(tmp_path, window=200000, conversation_id="conv", embeddings_enabled=False) as engine:
+        view = deepcopy([A, COMPOSITE if query != "prompts" else SNAP, B])
+        engine.ingest(view)
+        view[0]["content"] = "alpha\nmissing" if query == "M" else "changed alpha"
+        if query != "M":
+            view.append(deepcopy(SNAP))
+        conn, failures, rewinds = engine._store._conn, [], []
+        audit = engine._identity_anchor_audit
+
+        def audited(*args, **kwargs):
+            audit(*args, **kwargs)
+            rewinds.append(args[8]["cursor"])
+
+        class FaultConnection:
+            def __getattr__(self, name):
+                return getattr(conn, name)
+
+            def execute(self, sql, *args, **kwargs):
+                target = {"M": "INDEXED BY idx_msg_session_ts", "S": "substr(content, 1,",
+                          "prompts": "observed_at IS NOT NULL"}[query]
+                if target in sql and (query != "prompts" or "LIMIT 1" in sql):
+                    failures.append(True)
+                    raise RuntimeError("synthetic optional read failure")
+                return conn.execute(sql, *args, **kwargs)
+
+        monkeypatch.setattr(engine, "_identity_anchor_audit", audited)
+        monkeypatch.setattr(engine._store, "_conn", FaultConnection())
+        with caplog.at_level("WARNING"):
+            engine.ingest(view)
+        assert failures
+        assert rewinds and min(rewinds) == 0
+        assert any(r["content"] == view[0]["content"] for r in engine._store.get_session_messages("S"))
+        warnings = [r.message for r in caplog.records if "host-rewrite" in r.message]
+        assert len(warnings) == 1
+        assert "pre-match failed" not in caplog.text
