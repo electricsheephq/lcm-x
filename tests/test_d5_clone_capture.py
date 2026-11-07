@@ -144,3 +144,14 @@ def test_dotted_extra_name_cannot_overwrite_the_manifest(inputs, tmp_path):
     with pytest.raises(cap.CaptureError):
         cap.capture("T0", tmp_path / "out", store_db=inputs[0], host_db=inputs[1], payload_dir=None,
                     extras={"./capture-hashes.json": extra})
+
+
+def test_inner_symlink_is_refused_on_the_portable_copy_path(inputs, tmp_path, monkeypatch):
+    monkeypatch.setattr(cap.sys, "platform", "linux")  # shutil.copytree would copy the link's target as a file.
+    real = tmp_path / "payload"
+    real.mkdir()
+    (tmp_path / "outside.json").write_text("{}")
+    (real / "inner-link.json").symlink_to(tmp_path / "outside.json")
+    with pytest.raises(cap.CaptureError):
+        cap.capture("T0", tmp_path / "out", store_db=inputs[0], host_db=inputs[1], payload_dir=real)
+    assert not (tmp_path / "out" / "lcm-large-outputs" / "inner-link.json").exists()

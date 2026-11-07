@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import os
 import shutil
 import sqlite3
 import subprocess
@@ -55,13 +56,19 @@ def backup(src, dest):
         raise CaptureError("backup quick_check failed")
 
 
+def _holds_symlink(root):
+    """True when any entry under root is a symlink; never follows one."""
+    return any((Path(directory) / name).is_symlink()
+               for directory, dirs, names in os.walk(root, followlinks=False) for name in dirs + names)
+
+
 def clone_tree(src, dest):
     if Path(dest).exists():
         raise FileExistsError("clone destination exists")
     if sys.platform == "darwin":
         subprocess.run(["cp", "-cR", str(src), str(dest)], check=True)
     else:
-        shutil.copytree(src, dest)
+        shutil.copytree(src, dest, symlinks=True)  # Copy a link as a link, so the check below sees it.
 
 
 def capture(kind, out_dir, *, store_db, host_db, payload_dir, extras=None):
@@ -76,6 +83,8 @@ def capture(kind, out_dir, *, store_db, host_db, payload_dir, extras=None):
         payload.mkdir()  # Only an explicit None means "no payload"; a wrong path must never read as empty.
     elif Path(payload_dir).is_symlink() or not Path(payload_dir).is_dir():
         raise CaptureError("payload dir must be an existing real directory")
+    elif _holds_symlink(payload_dir):
+        raise CaptureError("payload dir holds a symlink")  # Checked before any copy, on every platform.
     else:
         clone_tree(payload_dir, payload)
         if any(path.is_symlink() for path in payload.rglob("*")):
