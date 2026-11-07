@@ -170,6 +170,7 @@ def test_summary_coverage_matches_the_recursive_walk(build):
     expected = {row[0] for row in conn.execute(_RECURSIVE_SUMMARY_WALK)}
     assert expected == {*ids[:5], 10**6}
     assert _summary_covered_message_ids(conn) == expected
+    assert _summary_covered_message_ids(conn, {ids[0], ids[5], 10**6, 7}) == {ids[0], 10**6}
 
 
 @pytest.mark.parametrize("stored_id,links", [
@@ -202,7 +203,7 @@ def test_summary_coverage_is_combined_once_per_scan(build, monkeypatch):
             return set.__or__(other, self)
 
     real = reconcile._summary_covered_message_ids
-    monkeypatch.setattr(reconcile, "_summary_covered_message_ids", lambda conn: Coverage(real(conn)))
+    monkeypatch.setattr(reconcile, "_summary_covered_message_ids", lambda *a: Coverage(real(*a)))
     source = [U, call(2), dict(X, timestamp=2), call(3), dict(X, timestamp=3), call(4), dict(X, timestamp=4)]
     run = ingest_shape(build, monkeypatch, source, [*source, V])
     assert run.skips and len(unions) == 1
