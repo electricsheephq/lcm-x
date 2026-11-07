@@ -492,3 +492,35 @@ def test_lineage_adoption_never_gives_a_borrowed_source_a_second_link(engines, m
     links = list(engine._store._conn.execute(
         "SELECT store_id, related_store_id FROM message_relations WHERE kind='possible_replay_of'"))
     assert Counter(source for source, _target in links)[later] == 1, links
+
+
+@pytest.mark.parametrize("cold", [False, True], ids=["warm", "cold"])
+def test_rotation_predecessor_tier_still_links_to_a_target_of_a_borrowed_link(build, cold):
+    """Astra (merge with main): the re-stamp pairing's predecessor tier must not count a borrowed (non-consuming)
+    link as spending the parent original, or the child's re-stamped copy stays silent."""
+    from tests.invariants.test_issue_2378_restamp_link import T as T_RESTAMP, T_COMMIT, T_REQ
+    from tests.invariants.test_issue_2378_stamp_transfer import NEW as NEXT
+
+    engine = build(rotating=True)
+    before = history(False) + [{"role": "user", "content": T_RESTAMP, "timestamp": T_REQ}]
+    engine.ingest(deepcopy(before))
+    output = engine.compress(deepcopy(before), force=True)
+    assert engine._last_compression_status == "compacted"
+    original = next(row["store_id"] for row in all_rows(engine) if row["content"] == T_RESTAMP)
+    source = next(row["store_id"] for row in all_rows(engine) if row["role"] == "user" and row["observed_at"] == 1130.0)
+    # The parent original already carries a borrowed-stamp link, in the linker's format.
+    engine._store.add_message_relations([[(source, "possible_replay_of", original, None, 1130.0)]])
+    engine.on_session_end("S", deepcopy(before))
+    engine.on_session_start("rotated", boundary_reason="compression", old_session_id="S",
+                            conversation_id="conversation", platform="cli")
+    if cold:
+        engine.shutdown()
+        engine = build(rotating=True, session_id="rotated")
+    view = deepcopy(output)
+    next(row for row in view if row.get("role") == "user" and row.get("content") == T_RESTAMP)["timestamp"] = T_COMMIT
+    view.append({"role": "user", "content": NEXT, "timestamp": T_COMMIT + 10})
+    engine.ingest(deepcopy(view))
+    copies = [row["store_id"] for row in all_rows(engine) if row["content"] == T_RESTAMP]
+    links = replay_links(engine)
+    assert len(copies) == 2, (copies, sorted(links))
+    assert (copies[1], original) in links, (copies, sorted(links))
