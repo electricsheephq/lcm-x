@@ -449,3 +449,22 @@ def test_doctor_list_detail_new_cause_is_unmatched(tmp_path):
     assert new["verdict"] == "UNMATCHED"
     assert len(new["candidate_signatures"][0]["detail_fingerprints"]) == 2
     assert "condensation" not in json.dumps(new) and "root-a" not in json.dumps(new)
+
+
+def test_doctor_fingerprint_keeps_status_codes_and_url_hosts(tmp_path):
+    def doctor(name, text):
+        return _write(tmp_path / name, json.dumps({"checks": [{"check": "inactive_process", "status": "warn",
+                                                                "detail": text}]}))
+    for a, b in (("HTTP 401 from provider", "HTTP 500 from provider"),
+                 ("calls https://api.a.example/v1", "calls https://other.example/x")):
+        assert kit.doctor_match(doctor("c.json", b), doctor("p.json", a))["verdict"] == "UNMATCHED"
+    assert kit.doctor_match(doctor("c.json", "pid 48213 at /x/a"), doctor("p.json", "pid 51002 at /y/b")
+                            )["verdict"] == "MATCHED"
+
+
+def test_indented_bare_name_does_not_end_a_traceback(tmp_path):
+    trace = ("Traceback (most recent call last):\n  File \"x.py\", line 1, in <module>\n    raise (\n"
+             "    ValueError\n    )\nModuleNotFoundError: No module named 'opt'\n")
+    result = kit.trace_events([_write(tmp_path / "host.log", _log("agent.optional", "warn") + trace)])
+    assert result["optional_import_traces_total"] == 1
+    assert result["other_tracebacks"] == {}

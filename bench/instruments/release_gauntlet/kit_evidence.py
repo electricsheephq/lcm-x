@@ -31,9 +31,11 @@ KEY_NAME = re.compile(r"[a-z][a-z0-9_]{0,63}")  # Fixed doctor key names; anythi
 
 
 def _fingerprint(entry):
-    """A doctor detail entry's hash after paths and numbers are masked, so one cause hashes alike across cells."""
+    """A doctor detail entry's hash after absolute paths and long numbers are masked, so one cause hashes alike
+    across cells. Short numbers (status codes) and URL hosts stay significant."""
     text = entry if isinstance(entry, str) else json.dumps(entry, sort_keys=True, default=str)
-    return _sha(re.sub(r"\d+", "#", re.sub(r"(?:/[^\s'\"]+)+", "<path>", text)))[:12]
+    text = re.sub(r"(?<![\w:/.])/[^\s'\"]+", "<path>", text)  # Absolute paths only, never a URL's path.
+    return _sha(re.sub(r"\d{4,}", "#", text))[:12]
 
 
 def _sha(value):
@@ -88,7 +90,10 @@ def trace_events(log):
                     if eligible:
                         active.remove(eligible[0])  # A tidless completion closes the oldest open run.
                 header = stripped.endswith("Traceback (most recent call last):")
-                final = FINAL.match(stripped) if traceback else None
+                # A final line starts at column 0, or after an exception group's "|" prefix; an indented bare name
+                # is a source line inside the traceback, not its end.
+                at_edge = bool(line) and (not line[0].isspace() or line.lstrip(" \t").startswith("|"))
+                final = FINAL.match(stripped) if traceback and at_edge else None
                 if final:
                     if stripped.startswith(("ModuleNotFoundError", "ImportError")):
                         missing = MISSING.search(stripped)
