@@ -6,11 +6,11 @@ LCM-X for Claude Code keeps a lossless, local record of your Claude Code session
 
 - **Captures every session.** Each message, tool call and tool result of your Claude Code sessions is written to a local LCM-X store, including the large tool outputs Claude Code saves to files, subagent sessions, resumed sessions and forks. Nothing is summarized away or dropped: the store keeps every transcript line it reads, and an audit command checks each captured line against its transcript file (see Known issues for the two cases it cannot see).
 - **Lets the agent recall it.** The plugin adds five read-only tools: `lcm_grep` (exact and full-text search), `lcm_recall`, `lcm_expand` (returns a stored message or tool output in full), `lcm_load_session` and `lcm_describe`. They work across sessions, so the agent can find what an earlier session said or ran.
-- **Leaves Claude Code alone.** Claude Code's own compaction is unchanged. The plugin never rewrites the conversation and adds nothing to the context by itself; the agent reads memory only when it calls a tool. The hooks print nothing: most run in a few milliseconds and hand the work to a background worker. Before Claude Code compacts, the `PreCompact` hook drains the session into the store first, which can delay compaction by up to about 12 seconds (the drain stops at 10 seconds; up to about 1.1 seconds in our gate runs before release).
+- **Leaves Claude Code alone.** Claude Code's own compaction is unchanged. The plugin never rewrites the conversation and adds nothing to the context by itself; the agent reads memory only when it calls a tool. The hooks print nothing: most run in a few milliseconds and hand the work to a background worker. Before Claude Code compacts, the `PreCompact` hook drains the session into the store first. That can delay compaction: the drain stops after 10 seconds, and Claude Code stops the hook at its 15-second limit. In our gate runs before release it took up to about 1.1 seconds.
 
 ## How to opt in
 
-You need Claude Code 2.1.139 or later, `python3` 3.9 or later on `PATH` (the macOS system Python is fine), and Python 3.11 or later somewhere on `PATH` for capture and recall (for example from Homebrew or python.org). macOS and Linux are supported.
+You need Claude Code 2.1.139 or later (the release that added the hook `args` this plugin uses; this release was tested on 2.1.319), `python3` 3.9 or later on `PATH` (the macOS system Python is fine), and Python 3.11 or later somewhere on `PATH` for capture and recall (for example from Homebrew or python.org). macOS and Linux are supported.
 
 1. Download `lcm-x-claude-code-0.1.0.tar.gz` and its `.sha256` from this release, then check and unpack it:
    ```bash
@@ -45,14 +45,15 @@ To turn capture off for a launch, set `LCMX_CAPTURE=off`, or start Claude Code w
 - **Audit memory.** The audit needs memory roughly in proportion to the largest session in the store: about 1.3 GB for a 690,000-line session in our gate run. Capture itself peaked at about 0.4 GB in that run.
 - **Hook timing.** Hooks usually hand off in milliseconds, but the hook's write of its small pointer file sometimes stalls for a few seconds, at moderate as well as heavy machine load.
   - **The bound.** `PostToolBatch` runs in the background. The other hooks run before Claude Code goes on, with a 5-second limit (15 seconds for `PreCompact`), so a stall can add up to that limit to the turn.
-  - **What we measured.** These figures are from two full release-gate runs on 0.1.0 candidates with the same hook code:
-    - 8 of 670 and 2 of 679 hook runs took over 2 s, every one of them in that write.
-    - The slowest blocking hook in an ordinary session took 3.8 s in one run and 4.1 s in the other.
+  - **What we measured.** These figures are from three full release-gate runs on 0.1.0 candidates with the same hook code:
+    - 8 of 670, 2 of 679 and 5 of 682 hook runs took over 2 s, every one of them in that write.
+    - The slowest blocking hook in an ordinary session took 3.8 s, 4.1 s and 4.7 s.
     - The background hook and the stress tests' scripted hook bursts reached up to 8.3 s.
-    - The 1-minute load during the runs with stalls was about 10 to 37.
   - **This release's own run.** The result card attached to this release lists the hook timings measured on this release's own gate run.
 
-  In both runs no audit lost anything. A hook cut off at its time limit is designed to be caught up by the session's next hook. If an earlier hook had already recorded the session, a later worker run, even one started from another session, also catches it up. If every hook of a new session were cut off before any of them recorded it, that session would not be captured. In these runs no hook was seen killed at its time limit. The ones that ran past 5 s finished; they were the background hook, which does not hold up the turn, and the scripted bursts, which call the hook directly rather than through Claude Code. So that catch-up path was not exercised. Tracked in #2350.
+  In all three runs no audit lost anything. A hook cut off at its time limit is designed to be caught up by the session's next hook. If an earlier hook had already recorded the session, a later worker run, even one started from another session, also catches it up. If every hook of a new session were cut off before any of them recorded it, that session would not be captured.
+
+  The hook log records a hook only when it finishes, so these runs cannot show whether any hook was killed at its time limit. Every hook that ran past 5 s finished, and each one was either the background hook, which does not hold up the turn, or a scripted burst hook, which the test calls directly rather than through Claude Code. That catch-up path was not exercised. Tracked in #2350.
 - **Leftover temporary files.** A hook that is killed mid-write can leave an empty `.tmp` file in the store's `spool` folder. It holds nothing and is safe to delete; capture is unaffected.
 
 ## What it bundles
@@ -61,4 +62,4 @@ Unit version 0.1.0, tag `claude-code-v0.1.0`, with LCM-X core vendored from the 
 
 ## Release evidence
 
-The unit gate ran on the tagged commit: ten real Claude Code sessions (multi-turn tool use, resume, forks, manual and automatic compaction, parallel subagents, four parallel sessions, killed workers and sessions, reruns, cross-session recall, and a driven 32-turn session with idle gaps and compactions). Each was audited with 0 lost and 0 duplicated lines. The gate also ran the CLI smoke in both runtime modes and install records on macOS and Linux. Its growth check, on one real transcript of about 690,000 lines, ran on the tagged commit, or on an earlier candidate when nothing that shapes the stored bytes changed since; the result card says which. The result card is attached to this release.
+The unit gate made ten runs on the tagged commit: nine real Claude Code sessions (multi-turn tool use, resume, forks, manual and automatic compaction, parallel subagents, four parallel sessions, killed workers and sessions, cross-session recall, and a driven 32-turn session with idle gaps and compactions) and a capture rerun over every transcript. Each was audited with 0 lost and 0 duplicated lines. The gate also ran the CLI smoke in both runtime modes and install records on macOS and Linux. Its growth check, on one real transcript of about 690,000 lines, ran on the tagged commit, or on an earlier candidate when nothing that shapes the stored bytes changed since; the result card says which. The result card is attached to this release.
