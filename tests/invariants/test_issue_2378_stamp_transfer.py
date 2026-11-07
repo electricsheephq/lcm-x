@@ -528,3 +528,32 @@ def test_transfer_target_found_at_its_alt_stamp_too_links_once(build):
     evidence = {"copies": copies, "original": original, "relations": sorted(links)}
     assert all(len(ids) == 2 and (ids[1], ids[0]) in links for ids in copies.values()), evidence
     assert [(a, b) for a, b in sorted(links) if a == copies[P][1]] == [(copies[P][1], original)], evidence
+
+
+@pytest.mark.parametrize("cold", [False, True], ids=["warm", "cold"])
+def test_scaffold_stripping_never_removes_a_raw_veto(build, cold):
+    """The prompt itself is NOTE + P (stored and repeated as such); the host shows the retained old-stamp copy with a
+    leading space. The raw stripped forms match, so the veto holds: the genuine repeat stays unlinked. Through ingest
+    the leading-space row is re-stored and T's link is not formed, so the linker is driven directly."""
+    engine = build()
+
+    def store(content, stamp):
+        return engine._store.append("S", {"role": "user", "content": content, "timestamp": stamp},
+                                    conversation_id="conversation")
+
+    t_orig, p_orig = store(T, T_REQ), store(NOTE + P, T_REQ)
+    t_new, repeat = store(T, T_COMMIT - 1), store(NOTE + P, T_COMMIT)
+    if cold:
+        engine.shutdown()
+        engine = build()
+    identity = engine._message_replay_identity(engine._store.get_batch([t_new])[t_new], stored_row=True)
+    digest = engine_module._commit_proof_identity_digest(engine_module._proof_user_identity(identity))
+    messages = [{"role": "user", "content": T, "timestamp": T_COMMIT - 1},
+                {"role": "user", "content": " " + NOTE + P, "timestamp": T_REQ},
+                {"role": "user", "content": NOTE + P, "timestamp": T_COMMIT}]
+    engine._link_restamped_occurrences(messages, {0: t_new, 2: repeat},
+                                       {0: ("S", {"timestamp": T_REQ, "identity_sha256": digest})}, False)
+    links = replay_links(engine)
+    evidence = {"p_orig": p_orig, "repeat": repeat, "relations": sorted(links)}
+    assert (t_new, t_orig) in links, evidence
+    assert not any(a == repeat for a, _b in links), evidence
