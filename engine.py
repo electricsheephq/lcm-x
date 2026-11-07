@@ -7702,7 +7702,10 @@ class LCMEngine(
                                     candidates = index.get((conv, role, stripped if strip else content, call_id, calls, name), ())
                                     if candidates:
                                         candidate_ids.add(sid)
-                                    if stripped is None and (strip or not call_id and not calls):
+                                    # #588: a reasoning-only row is evidence only in the exact pass, on a byte-exact key
+                                    # with non-blank content; an empty or whitespace-only row never is.
+                                    exact_reasoning = not strip and bool(str(content or "").strip())
+                                    if stripped is None and not exact_reasoning and (strip or not call_id and not calls):
                                         continue
                                     # The oldest unused target that the stamp veto allows: any row for an unstamped
                                     # copy; otherwise an unstamped row or one with the same stamp.

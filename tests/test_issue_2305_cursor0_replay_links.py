@@ -291,11 +291,22 @@ def test_14_stripped_stamp_veto(host, monkeypatch):
 
 
 @pytest.mark.parametrize("text", ["<think>old</think>", "<think>old</think> \n"])
-def test_15_all_reasoning_never_links(host, text):
+def test_15_all_reasoning_links_only_byte_exact(host, text):
+    """#588 (release-manager ruling): a reasoning-only copy is evidence on a byte-exact match (exact pass only)."""
     host.turn(reply=text)
-    _ingest_copies(host, [{"role": "assistant", "content": text}])
+    sources = _ingest_copies(host, [{"role": "assistant", "content": text}])
+    target = next(row["store_id"] for row in host.engine._store.get_session_messages(SID)
+                  if row["content"] == text and row["store_id"] not in sources)
+    assert _pairs(host.engine) == [(sources[0], target)]
+    assert _counts(host.engine)["ledger.replay_pairs.cursor0_stripped"] == 0
+    assert _counts(host.engine)["ledger.replay_pairs.cursor0_unlinked"] == 0
+
+
+def test_15b_all_reasoning_with_other_bytes_never_links(host):
+    """The stripped pass is unchanged: two reasoning-only rows whose bytes differ are not each other's evidence."""
+    host.turn(reply="<think>old</think>")
+    _ingest_copies(host, [{"role": "assistant", "content": "<think>new</think>"}])
     assert _pairs(host.engine) == []
-    assert _counts(host.engine)["ledger.replay_pairs.cursor0_unlinked"] == 1
 
 
 @pytest.mark.parametrize("field,value", [("tool_call_id", "other"), ("tool_calls", [
