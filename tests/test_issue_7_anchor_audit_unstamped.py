@@ -306,11 +306,13 @@ def test_truncated_then_replaced_row_stores_the_new_row(tmp_path):
 
 
 @pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="#7 and ISSUE_TBD: a view of only new unstamped rows, as long as the stored rows, is taken as "
-                          "a replay; none of its rows is stored")
+                   reason="#7: an unstamped view that replaces stored rows at the same length is taken as a positional "
+                          "replay; none of its rows is stored")
 def test_short_reply_matching_an_earlier_paragraph_is_stored(tmp_path):
     """Review r4 shape 2: a new short user row equals the last paragraph of an older stored row. On main the whole
-    second view (4 new rows) is not stored, a wider loss than the short row alone."""
+    second view (4 new rows) is not stored: with every row unstamped and the view as long as the stored rows, the
+    identity-anchor audit has no stamp to see that rows before the cursor changed (cursor=4, incoming=4), so the view is
+    a positional replay. The loss does not depend on the short row matching an earlier paragraph."""
     engine = _engine(tmp_path)
     try:
         host = [_u("old paragraph" + PAD + "\n\nyes", None), _a("A1" + PAD, None),
