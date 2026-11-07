@@ -274,6 +274,7 @@ def test_holder_search_is_linear_in_session_history(tmp_path, monkeypatch):
             return list.__contains__(self, item)
 
     def counting(choices, order):
+        calls["walks"] = calls.get("walks", 0) + 1
         return original([CountingList(c) for c in choices], order)
 
     monkeypatch.setattr(anchor, "_composite_of_holders", counting)
@@ -286,6 +287,7 @@ def test_holder_search_is_linear_in_session_history(tmp_path, monkeypatch):
             store.append("S", {"role": "user", "content": Q}, conversation_id=conversation)
         target = store.append("S", _u(TODO + "\n\n" + R + "\n\n" + Q, None), conversation_id=conversation)
         engine._identity_anchor_record_composite_of([target])
+        assert calls.get("walks") == 1, "the holder walk was not reached"
         assert calls["n"] <= 8 * n, calls["n"]
     finally:
         engine.shutdown()
