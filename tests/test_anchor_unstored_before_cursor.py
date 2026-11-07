@@ -994,6 +994,51 @@ def test_presence_keeps_main_result_when_cleanup_forms_chain(tmp_path, monkeypat
         engine.shutdown()
 
 
+@pytest.mark.parametrize("kind", ["call", "result"])
+def test_presence_matches_a_reused_id_by_its_own_payload_first(tmp_path, kind):
+    # #2466 review: a new row reuses a stored row's id with another payload, shown BEFORE the stored one. The stored
+    # copy accounts for its own payload; the new row is the unaccounted one, never a second copy of the stored row.
+    engine = _engine(tmp_path)
+    try:
+        def call(args):
+            return {"role": "assistant", "content": "", "tool_calls": [
+                {"id": "call_x", "type": "function", "function": {"name": "read_file", "arguments": args}}]}
+
+        if kind == "call":
+            stored, new = call('{"path": "a.txt"}'), call('{"path": "b.txt"}')
+            engine._store.append_batch(SESSION, [stored])
+        else:
+            stored, new = _result("call_x", "first result", 2), _result("call_x", "second result", 3)
+            engine._store.append_batch(SESSION, [call('{"path": "a.txt"}'), stored])
+        assert _presence(engine, [new, stored]) == [0]
+        assert _presence(engine, [stored, new]) == [1]
+    finally:
+        engine.shutdown()
+
+
+def test_presence_text_budget_charges_expanded_identity_text(tmp_path, monkeypatch, caplog):
+    # #2466 review: a stored placeholder's identity may load its externalized payload; the expanded text is charged to
+    # the normalization budget, so an over-budget expansion keeps main's result.
+    engine = _engine(tmp_path)
+    try:
+        engine._store.append_batch(SESSION, [{"role": "assistant", "content": "small placeholder"}])
+        replay = engine._message_replay_identity
+
+        def expanded(msg, *, stored_row=False, **kwargs):
+            identity = replay(msg, stored_row=stored_row, **kwargs)
+            return (identity[0], "x" * 1000, *identity[2:]) if stored_row else identity
+
+        monkeypatch.setattr(engine, "_message_replay_identity", expanded)
+        monkeypatch.setattr(identity_anchor, "_PRESENCE_TEXT_BYTES", 999, raising=False)
+        with caplog.at_level(logging.INFO, logger=identity_anchor.__name__):
+            assert _presence(engine, [{"role": "assistant", "content": "a brand new reply"}]) == []
+        assert any("presence window incomplete" in r.message for r in caplog.records)
+        monkeypatch.setattr(identity_anchor, "_PRESENCE_TEXT_BYTES", 1000, raising=False)
+        assert _presence(engine, [{"role": "assistant", "content": "a brand new reply"}]) == [0]
+    finally:
+        engine.shutdown()
+
+
 def test_presence_never_stores_a_result_whose_call_the_ignore_patterns_drop(tmp_path, monkeypatch):
     # #2466 review: a call row the ignore patterns drop is never stored, so it cannot authorize storing its result.
     engine = _engine(tmp_path)
