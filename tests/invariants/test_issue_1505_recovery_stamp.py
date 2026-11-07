@@ -501,3 +501,38 @@ def test_durable_recovery_receipt_foreign_first(tmp_path: Path, monkeypatch: pyt
         assert {r["store_id"] for r in copies} == {recovered_id} | {
             rel["store_id"] for rel in engine._store.get_message_relations(
                 [r["store_id"] for r in copies], "possible_replay_of") if rel["related_store_id"] == recovered_id}
+
+
+@pytest.mark.parametrize("shape", ["legacy-null-conversation", "long-tool-run"])
+def test_durable_recovery_link_survives_legacy_rows_and_long_tool_runs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                                       shape: str) -> None:
+    """Review of #1523: a recovered row stored without a conversation id, or followed by more than 256 tool rows,
+    still gets its re-stored copy linked after a restart."""
+    pin_char_counter(monkeypatch)
+    ScriptedSummarizer("outage").install(monkeypatch)
+    lineage(tmp_path)
+    current = message("[T32] rebuild the index " * 500, 20.)
+    source = [message("[T31] earlier request", 10.), message("earlier reply", 11., "assistant"), current,
+              {"role": "tool", "content": "orphan result", "tool_call_id": "orphan", "timestamp": 21.}]
+    with engine_context(tmp_path, window=128000, session_id="parent", conversation_id="conv") as engine:
+        engine.ingest(source)
+        recovered_id = next(r["store_id"] for r in users(engine) if r["content"] == current["content"])
+        if shape == "legacy-null-conversation":
+            engine._store._conn.execute("UPDATE messages SET conversation_id=NULL WHERE store_id=?", (recovered_id,))
+        engine._config.fresh_tail_count, engine._config.max_assembly_tokens = 64, 120
+        view = list(engine.compress(source, current_tokens=100, force=True))
+        assert engine._last_compression_status == "overflow_recovery"
+        assert engine._store._conn.execute(
+            "SELECT recovered_store_id FROM ledger_emissions WHERE kind='recovery'").fetchall() == [(recovered_id,)]
+        if shape == "long-tool-run":  # more than one 256-row page of tool rows between the turn and its re-store
+            with engine._store.ingest_atomic():
+                for i in range(300):
+                    engine._store.append("parent", {"role": "tool", "content": f"result {i}", "tool_call_id": f"t{i}",
+                                                    "timestamp": 22. + i / 1000}, conversation_id="conv")
+    with engine_context(tmp_path, window=128000, session_id="parent", conversation_id="conv") as engine:
+        view[-1].update(content=current["content"], timestamp=30.)
+        engine.ingest([*deepcopy(view), message("reply", 31., "assistant")])
+        copies = [r["store_id"] for r in users(engine) if r["content"] == current["content"]]
+        linked = {rel["store_id"] for rel in engine._store.get_message_relations(copies, "possible_replay_of")
+                  if rel["related_store_id"] == recovered_id}
+        assert len(copies) == 2 and set(copies) - {recovered_id} == linked, (copies, linked)

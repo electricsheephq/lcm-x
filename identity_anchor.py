@@ -638,20 +638,27 @@ class IdentityAnchorMixin:
         prior, current = rows.get(target), rows.get(stored_id)
         conversation = _normalize_conversation_id_value(self._conversation_id)
         if (not prior or not current or prior.get("role") != "user" or current.get("role") != "user"
-                or any(r.get("session_id") != self._session_id
-                       or _normalize_conversation_id_value(r.get("conversation_id")) != conversation
-                       for r in (prior, current))
+                or any(r.get("session_id") != self._session_id for r in (prior, current))
+                # A legacy recovered row may carry no conversation id (NULL or blank); the new row never may.
+                or _normalize_conversation_id_value(prior.get("conversation_id")) not in (conversation, "")
+                or _normalize_conversation_id_value(current.get("conversation_id")) != conversation
                 or prior.get("observed_at") is None or prior["observed_at"] == current.get("observed_at")
                 or not generated and self._message_replay_identity(prior, stored_row=True)
                 != self._message_replay_identity(current, stored_row=True)):
             return
         # Only assistant/tool followers or the observed generated note may intervene.
-        followers = self._store.get_range(str(self._session_id), start_id=target + 1, end_id=stored_id - 1,
-                                          limit=257, conversation_id=conversation, include_blank_conversation=True)
-        if len(followers) == 257 or any(r.get("role") not in {"assistant", "tool"} and not (
-                observed is not None and ingest_ledger.stamp_text(r.get("observed_at")) == observed
-                and ingest_ledger.identity_digest(salt, r) == digest) for r in followers):
-            return
+        # Page through every row between them: a long tool run must not hide the link (review: no follower cap).
+        start = target + 1
+        while start < stored_id:
+            followers = self._store.get_range(str(self._session_id), start_id=start, end_id=stored_id - 1,
+                                              limit=256, conversation_id=conversation, include_blank_conversation=True)
+            if any(r.get("role") not in {"assistant", "tool"} and not (
+                    observed is not None and ingest_ledger.stamp_text(r.get("observed_at")) == observed
+                    and ingest_ledger.identity_digest(salt, r) == digest) for r in followers):
+                return
+            if len(followers) < 256:
+                break
+            start = followers[-1]["store_id"] + 1
         if self._store.get_message_relations([target], "alt_stamp"):
             return  # the live receipt already consumed this occurrence
         if conn.execute("SELECT 1 FROM sqlite_master WHERE name='message_relations'").fetchone() and conn.execute(
