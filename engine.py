@@ -7962,8 +7962,8 @@ class LCMEngine(
                             linked.update(attempt.get("link_sources_used", ()))
                             prelinked = {sid: content for sid, kind, content in seeded if kind == "possible_replay_of"}
                             pairs, candidate_ids = [], set()
-                            # Tool links already written by v7 belong to this same
-                            # cursor-zero batch's established replay telemetry.
+                            # Every link already written for this batch counts, whichever
+                            # writer made it (#2377 tool links, #2378 re-stamp, recovery).
                             stripped_count = sum(content != prelinked[sid] for sid, _r, content, *_ in new_rows
                                                  if sid in prelinked)
                             # Each candidate list is split into lanes: all rows, rows without a stamp, and rows per
