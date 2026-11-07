@@ -252,7 +252,7 @@ def test_doctor_signatures(tmp_path, candidate, previous, verdict):
     assert "private" not in json.dumps(result)
 
 
-def test_doctor_signature_conditions_are_booleans(tmp_path):
+def test_doctor_signature_causes_hold_no_values(tmp_path):
     paths = [_write(tmp_path / name, json.dumps({"checks": [
         {"check": "lifecycle_fragmentation", "status": "WARN",
          "detail": {"empty_lifecycle_rows": count, "state_db_error": "PRIVATE_STATE"}}]}))
@@ -262,7 +262,7 @@ def test_doctor_signature_conditions_are_booleans(tmp_path):
     assert result["candidate_signatures"] == [{
         "check": "lifecycle_fragmentation", "status": "warn", "detail_type": "dict",
         "detail_keys": ["empty_lifecycle_rows", "state_db_error"],
-        "causes": {"empty_lifecycle_rows": True, "state_db_error": True}}]
+        "causes": {"empty_lifecycle_rows": True, "state_db_error": "f:" + kit._fingerprint("PRIVATE_STATE")}}]
     assert "PRIVATE_STATE" not in json.dumps(result)
 
 
@@ -484,3 +484,20 @@ def test_empty_candidate_checks_are_refused(tmp_path, candidate):
     previous = _write(tmp_path / "p.json", json.dumps({"checks": [{"check": "x", "status": "fail"}]}))
     with pytest.raises(ValueError):
         kit.doctor_match(_write(tmp_path / "c.json", json.dumps(candidate)), previous)
+
+
+@pytest.mark.parametrize("candidate,previous,verdict", [
+    ({"state_db_error": "no such table: sessions"}, {"state_db_error": "database is locked"}, "UNMATCHED"),
+    ({"status": "degraded"}, {"status": "ok"}, "UNMATCHED"),
+    ({"sub": {"new_err": 1}}, {"sub": {"old": 1}}, "UNMATCHED"),
+    ({"count": -1}, {"count": 0}, "UNMATCHED"),
+    ({"state_db_error": "locked at /a/x.db pid 48213"}, {"state_db_error": "locked at /b/y.db pid 51002"}, "MATCHED"),
+], ids=["string-cause", "status-string", "nested-dict", "negative", "same-cause"])
+def test_doctor_dict_string_causes(tmp_path, candidate, previous, verdict):
+    def doctor(name, detail):
+        return _write(tmp_path / name, json.dumps({"checks": [
+            {"check": "lifecycle_fragmentation", "status": "warn", "detail": detail}]}))
+    result = kit.doctor_match(doctor("c.json", candidate), doctor("p.json", previous))
+    assert result["verdict"] == verdict
+    encoded = json.dumps(result)
+    assert all(word not in encoded for word in ("sessions", "locked", "degraded", "/a/x.db", "48213"))

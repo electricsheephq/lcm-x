@@ -27,7 +27,7 @@ SECTIONS = set("model providers custom_providers compression lcm context plugins
                "terminal auxiliary platforms gateway cron memory display agent tools toolsets".split())
 
 
-KEY_NAME = re.compile(r"[a-z][a-z0-9_]{0,63}")  # Fixed doctor key names; anything else is hashed.
+KEY_NAME = re.compile(r"[a-z][a-z_]{0,63}")  # Fixed doctor key names; digits (ids, hashes) or anything else is hashed.
 
 
 def _key_name(key):
@@ -35,10 +35,19 @@ def _key_name(key):
 
 
 def _cause(value):
-    """A detail value reduced to whether its cause is present: a number above 0, or any other non-empty value."""
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return bool(value)
-    return value > 0
+    """A detail value reduced to its cause: a bool or None as such, a number as whether it is non-zero (NaN counts),
+    a string as its masked fingerprint, and a dict or list recursively. Same cause, same output; values never leak."""
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return "f:" + _fingerprint(value)
+    if isinstance(value, dict):
+        return {_key_name(key): _cause(item) for key, item in sorted(value.items(), key=lambda kv: str(kv[0]))}
+    if isinstance(value, list):
+        return [_cause(item) for item in value]
+    return "t:" + type(value).__name__
 
 
 def _fingerprint(entry):
@@ -271,7 +280,8 @@ def doctor_match(candidate, previous):
             shape = (type(detail).__name__, ())
         conditions = ()
         if isinstance(detail, dict):  # Every dict value as a cause flag, so a new cause cannot hide in a warning.
-            conditions = tuple(sorted((_key_name(key), _cause(value)) for key, value in detail.items()))
+            conditions = tuple(sorted((_key_name(key), json.dumps(_cause(value), sort_keys=True))
+                                      for key, value in detail.items()))
         return row["check"], row["status"], shape, conditions
 
     warnings = [Counter(signature(row) for row in rows if row["status"] == "warn") for rows in checks]
@@ -284,7 +294,8 @@ def doctor_match(candidate, previous):
     signatures = [{"check": sig[0], "status": sig[1] if sig[1] in statuses else "unknown_status",
                    "detail_keys": [_key_name(key) for key in sig[2][1]] if sig[2][0] == "dict" else [],
                    **({"detail_fingerprints": list(sig[2][1])} if sig[2][0] in ("list", "str") else {}),
-                   "detail_type": sig[2][0], "causes": dict(sig[3])}
+                   "detail_type": sig[2][0],
+                   "causes": {key: json.loads(value) for key, value in sig[3]}}
                   for sig in sorted({signature(row) for row in checks[0]}, key=repr)]
     return {"warnings": results, "unmatched": unmatched, "failed_checks": failed, "unknown_status": unknown,
             "candidate_signatures": signatures,
