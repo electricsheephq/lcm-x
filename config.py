@@ -212,7 +212,7 @@ def _parse_int_env(key: str, default: int, *, warnings: list[str] | None = None)
 
 def _recall_snippet_window_hits(
     value: Any, *, warnings: list[str] | None = None, allow_string: bool = True,
-    source: str = "recall_snippet_window_hits",
+    source: str = "recall_snippet_window_hits", name: str = "recall_snippet_window_hits",
 ) -> int:
     """Validate the opt-in window count; match tools._LCM_RECALL_LIMIT_CAP."""
     try:
@@ -223,10 +223,16 @@ def _recall_snippet_window_hits(
             raise ValueError
     except (TypeError, ValueError):
         if warnings is not None:
-            warnings.append(f"invalid {source}={value!r} ignored; using recall_snippet_window_hits=0")
+            warnings.append(f"invalid {source}={value!r} ignored; using {name}=0")
         return 0
     # Mirrors tools._LCM_RECALL_LIMIT_CAP (25).
     return min(count, 25)
+
+
+def _recall_extra_entries(value: Any, **kwargs) -> int:
+    return _recall_snippet_window_hits(value, **{
+        "source": "recall_extra_entries", "name": "recall_extra_entries", **kwargs,
+    })
 
 
 def _parse_float_env(key: str, default: float, *, warnings: list[str] | None = None) -> float:
@@ -509,6 +515,7 @@ _SUPPORTED_LCM_CONFIG_YAML_KEYS = {
     "embedding_query_prefix", "embedding_document_prefix",
     "recall_adjacent_reply",
     "recall_snippet_window_hits",
+    "recall_extra_entries",
     "large_output_active_replay_stub_threshold_tokens",
     "large_output_active_replay_stub_aged_threshold_tokens",
     "recall_summary_event_time",
@@ -999,6 +1006,7 @@ ENV_FIELD_SPECS: tuple[_EnvFieldSpec, ...] = (
     _EnvFieldSpec("recall_summary_event_time", "LCM_RECALL_SUMMARY_EVENT_TIME", bool),
     _EnvFieldSpec("recall_adjacent_reply", "LCM_RECALL_ADJACENT_REPLY", bool),
     _EnvFieldSpec("recall_snippet_window_hits", "LCM_RECALL_SNIPPET_WINDOW_HITS", int),
+    _EnvFieldSpec("recall_extra_entries", "LCM_RECALL_EXTRA_ENTRIES", int),
     _EnvFieldSpec("recall_fts_anchor", "LCM_RECALL_FTS_ANCHOR", bool),
     _EnvFieldSpec("proactive_recall_enabled", "LCM_PROACTIVE_RECALL_ENABLED", bool),
     _EnvFieldSpec("proactive_recall_min_score", "LCM_PROACTIVE_RECALL_MIN_SCORE", float),
@@ -1058,6 +1066,7 @@ _PARSER_BY_TYPE = {
 # ``from_env`` handles these explicitly, so the uniform loop skips them.
 _SOURCE_TRACKED_ENV_FIELDS = frozenset({
     "recall_snippet_window_hits",
+    "recall_extra_entries",
     "large_output_active_replay_stub_threshold_tokens",
     "large_output_active_replay_stub_aged_threshold_tokens",
     "fresh_tail_count",
@@ -1383,6 +1392,7 @@ class LCMConfig:
     recall_summary_event_time: bool = False
     recall_adjacent_reply: bool = False
     recall_snippet_window_hits: int = 0
+    recall_extra_entries: int = 0
     # lcm_recall FTS anchor slot: with two or more arms, the FTS arm's best
     # message is kept inside the delivered window (at most one session evicted).
     # Evidence (#950): frozen LongMemEval-M LOCAL replay, R@10 0.898 -> 0.905 (470 q).
@@ -1599,6 +1609,23 @@ class LCMConfig:
             else "config.yaml lcm.recall_snippet_window_hits",
         )
         _record("recall_snippet_window_hits", window_source
+                if len(config_source_warnings) == warning_count else "default")
+
+        window_hits = prefix_yaml.get("recall_extra_entries", 0) if isinstance(prefix_yaml, dict) else 0
+        window_env = env.get("LCM_RECALL_EXTRA_ENTRIES", "")
+        window_source = (
+            "env:LCM_RECALL_EXTRA_ENTRIES" if window_env.strip()
+            else "config_yaml:lcm.recall_extra_entries"
+            if isinstance(prefix_yaml, dict) and "recall_extra_entries" in prefix_yaml else "default"
+        )
+        warning_count = len(config_source_warnings)
+        c.recall_extra_entries = _recall_extra_entries(
+            window_env if window_env.strip() else window_hits, warnings=config_source_warnings,
+            allow_string=bool(window_env.strip()),
+            source="env LCM_RECALL_EXTRA_ENTRIES" if window_env.strip()
+            else "config.yaml lcm.recall_extra_entries",
+        )
+        _record("recall_extra_entries", window_source
                 if len(config_source_warnings) == warning_count else "default")
 
         c.ignored_config_yaml_lcm_keys = _ignored_lcm_config_yaml_keys(cfg_yaml, env=env)

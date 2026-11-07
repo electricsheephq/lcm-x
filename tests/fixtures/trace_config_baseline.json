@@ -97,6 +97,7 @@
     "query_views_enabled": false,
     "recall_adjacent_reply": false,
     "recall_snippet_window_hits": 0,
+    "recall_extra_entries": 0,
     "recall_arm_weights": {
       "chunk": 1.0,
       "fts": 0.5,
