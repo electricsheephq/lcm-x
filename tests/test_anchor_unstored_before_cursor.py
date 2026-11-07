@@ -706,3 +706,115 @@ def test_tool_only_presence_uses_the_same_bounded_tail(tmp_path, monkeypatch):
         assert _presence(engine, [_call("new", 4), _result("new", "new result", 5)]) == []
     finally:
         engine.shutdown()
+
+
+@pytest.mark.parametrize("failure", ["chain", "write"], ids=["state-db-read-fails", "predecessor-write-fails"])
+def test_incomplete_rotation_lineage_keeps_main_multiset(tmp_path, monkeypatch, caplog, failure):
+    """I1/I2: incomplete ancestry cannot prove a carried call/result absent from its parent."""
+    earlier = 6
+    import hermes_lcm.engine as lcm_engine
+
+    monkeypatch.setattr(lcm_engine, "summarize_with_escalation", lambda **kw: (
+        "Earlier turns.\nExpand for details about: turns", 1))
+    if failure == "chain":
+        with sqlite3.connect(tmp_path / "state.db") as conn:
+            conn.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, parent_session_id TEXT, end_reason TEXT)")
+            conn.executemany("INSERT INTO sessions VALUES (?,?,?)", [("P", None, "compression"), ("C", "P", None)])
+    config = LCMConfig(fresh_tail_count=4, leaf_chunk_tokens=1, database_path=str(tmp_path / "lcm.db"),
+                       large_output_externalization_enabled=False)
+    engine = LCMEngine(config=config, hermes_home=str(tmp_path))
+    engine.on_session_start("P", platform="cli", context_length=200_000, conversation_id="conv")
+    try:
+        live = [{"role": "system", "content": "stable system prompt"}]
+        for i in range(earlier):
+            live += [_u(f"T{i} prompt", 10 * i), _a(f"R{i} reply", 10 * i + 1)]
+        live += [_u("TQ tool prompt", 100), _call("call_p", 101), _result("call_p", "Pfile text", 102),
+                 _a("RQ after call", 103)]
+        engine.ingest(live)
+        out = engine.compress(live)
+        engine.on_session_end("P", list(live))
+        if failure == "write":
+            write = engine._store.write_metadata_json
+
+            def write_metadata(keys, *args, **kwargs):
+                if "rotation_predecessor_session:C" in keys:
+                    raise OSError("synthetic predecessor write failure")
+                return write(keys, *args, **kwargs)
+
+            monkeypatch.setattr(engine._store, "write_metadata_json", write_metadata)
+        elif failure == "chain":
+            # Both lineage sources are unavailable: the prior process never wrote the record.
+            monkeypatch.setattr(engine, "_record_rotation_predecessor", lambda *args: None)
+            from hermes_lcm import identity_anchor as anchor_module
+            monkeypatch.setattr(anchor_module.sqlite3, "connect", lambda *a, **kw: (_ for _ in ()).throw(
+                sqlite3.OperationalError("synthetic ancestry read failure")))
+        engine.on_session_start("C", boundary_reason="compression", old_session_id="P", platform="cli",
+                                context_length=200_000, conversation_id="conv")
+
+        engine.ingest([*out, _u("N1 prompt", 500), _a("N1 reply", 501)])
+        before = Counter(_key(r) for r in engine._store.get_session_messages("C") if r["role"] != "system")
+        ins = next((i for i, m in enumerate(out) if m["role"] == "user" and "timestamp" in m), 1)
+        changed = [*out[:ins], _u("X inserted prompt", 450), *out[ins:], _u("N1 prompt", 500), _a("N1 reply", 501),
+                   _u("N2 prompt", 600), _a("N2 reply", 601)]
+        caplog.clear()
+        with caplog.at_level(logging.WARNING):
+            engine.ingest(changed)
+        after = Counter(_key(r) for r in engine._store.get_session_messages("C") if r["role"] != "system")
+        parent = Counter(_key(r) for r in engine._store.get_session_messages("P") if r["role"] != "system")
+        added = after - before
+        dup_of_p = sum(count for key, count in after.items() if parent[key])
+        # Literal main multiset: inserted prompt, the two carried text rows, and the fresh turn.
+        expected = Counter(_key(r) for r in (changed[ins], *changed[-2:]))
+        expected.update(_key(r) for r in out if _key(r) in parent and r["role"] in {"user", "assistant"}
+                        and not r.get("tool_calls"))
+        assert added == expected
+        assert (sum(added.values()), dup_of_p) == (5, 2)
+        assert any("presence unavailable" in r.message and r.levelno == logging.WARNING for r in caplog.records)
+        assert not before - after
+        added_roles = Counter((key[0], key[2], key[3]) for key in added.elements())
+        assert added_roles[("assistant", "", "call_p")] == added_roles[("tool", "call_p", "")] == 0
+        engine.ingest(changed)
+        assert Counter(_key(r) for r in engine._store.get_session_messages("C") if r["role"] != "system") == after
+    finally:
+        engine.shutdown()
+
+
+
+@pytest.mark.parametrize("over", [0, 1], ids=["exact-bytes", "one-byte-over"])
+def test_presence_byte_budget_ingest_boundary(tmp_path, monkeypatch, caplog, over):
+    # The V1 setup has ten rows; count the stored representation, including tool-call JSON.
+    original = LCMEngine._identity_anchor_unaccounted
+    budgets = []
+
+    def bounded(self, *args, **kwargs):
+        rows = self._store.get_session_messages(SESSION)
+        size = sum(len(r.get("content") or "") + len(r.get("tool_calls") or "") for r in rows)
+        budgets.append(size)
+        monkeypatch.setattr(identity_anchor, "_PRESENCE_WINDOW_BYTES", size - over, raising=False)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(LCMEngine, "_identity_anchor_unaccounted", bounded)
+    with caplog.at_level(logging.INFO, logger=identity_anchor.__name__):
+        after, main, missing = _window_ingest(tmp_path, monkeypatch, "V1", 10000)
+    assert budgets
+    assert after == main + Counter({missing: 0 if over else 1})
+    limits = [r for r in caplog.records if "presence window incomplete" in r.message]
+    assert len(limits) == over
+    assert all(r.levelno == logging.INFO for r in limits)
+    assert not any("presence window" in r.message and r.levelno >= logging.WARNING for r in caplog.records)
+
+
+def test_tool_only_presence_computes_no_stored_text_identity(tmp_path, monkeypatch):
+    engine = _engine(tmp_path)
+    try:
+        engine._store.append_batch(SESSION, [_a("irrelevant reply", 1), _call("kept", 2), _result("kept", "held", 3)])
+        replay = engine._message_replay_identity
+
+        def identity(msg, *, stored_row=False):
+            assert not stored_row, "a tool-only presence audit needs no stored text identity"
+            return replay(msg, stored_row=stored_row)
+
+        monkeypatch.setattr(engine, "_message_replay_identity", identity)
+        assert _presence(engine, [_call("new", 4), _result("new", "new result", 5)]) == [0, 1]
+    finally:
+        engine.shutdown()
