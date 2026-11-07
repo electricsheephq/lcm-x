@@ -1617,6 +1617,8 @@ class IdentityAnchorMixin:
             choices = [by_text[part] for part, held in fits[0] if held]
             if all(len(holders) == 1 for holders in choices):
                 chosen = [holders[0] for holders in choices]
+                if len(set(chosen)) != len(chosen):
+                    continue  # one stored occurrence never stands for two parts
             else:  # identical texts held by several rows: the host merged CONSECUTIVE turns (ruling)
                 order = [sid for (sid,) in self._store._conn.execute(
                     "SELECT store_id FROM messages WHERE session_id = ? AND store_id < ? ORDER BY store_id",
@@ -1711,10 +1713,11 @@ def _composite_of_holders(choices: list[list[int]], order: list[int]) -> list[in
     if len(choices) == 1:
         return [order[-1]] if order and order[-1] in choices[0] else None
     position = {sid: index for index, sid in enumerate(order)}
+    rest = [set(holders) for holders in choices[1:]]  # O(1) membership: the walk stays linear in history
     runs = []
     for first in choices[0]:
         run, at = [first], position[first]
-        for holders in choices[1:]:
+        for holders in rest:
             nxt = order[at + 1] if at + 1 < len(order) else None
             if nxt not in holders:
                 break
