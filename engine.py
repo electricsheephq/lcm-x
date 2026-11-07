@@ -7167,7 +7167,7 @@ class LCMEngine(
             if attempt is None or not attempt.get("entries"):
                 return
             index_of = {sid: idx for idx, sid in stored_at.items() if sid}
-            pairs = []
+            pairs, shown = [], None
             for sid, text in sorted(texts.items()):
                 if index_of[sid] >= len(attempt["entries"]):
                     continue
@@ -7190,20 +7190,24 @@ class LCMEngine(
                 # other linkers own.
                 if stamp is None or target_stamp is None or target_stamp == stamp:
                     continue
-                # The veto: a host view that still shows this text at the earlier copy's stamp holds a
-                # second occurrence, so the later copy is a genuine repeat. Absent content never vetoes.
-                if any(isinstance(message, dict) and message.get("role") == "user"
-                       and message.get("content") is not None
-                       and (normalize_content_value(message["content"]) or "").strip() == text
-                       and self._host_occurrence_metadata(message)["timestamp"] == target_stamp
-                       for message in messages):
-                    continue
                 # The borrowed stamp: an earlier user row of other text holds the later or the earlier copy's
-                # stamp as its own.
+                # stamp as its own. Indexed, so it runs before the view veto.
                 at = next((at for at, carrier in ((stamp, sid), (target_stamp, target))
                            if borrowed(at, carrier, text)), None)
-                if at is not None:
-                    pairs.append((sid, target, at))
+                if at is None:
+                    continue
+                # The veto: a host view that still shows this text at the earlier copy's stamp holds a
+                # second occurrence, so the later copy is a genuine repeat. Absent content never vetoes.
+                # The view's (text, stamp) pairs are built once per ingest.
+                if shown is None:
+                    shown = {((normalize_content_value(message["content"]) or "").strip(),
+                              self._host_occurrence_metadata(message)["timestamp"])
+                             for message in messages
+                             if isinstance(message, dict) and message.get("role") == "user"
+                             and message.get("content") is not None}
+                if (text, target_stamp) in shown:
+                    continue
+                pairs.append((sid, target, at))
             if not pairs:
                 return
             with self._ingest_evidence():
