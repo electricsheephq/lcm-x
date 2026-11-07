@@ -193,6 +193,19 @@ def test_blank_stored_conversation_belongs_to_the_active_one(build, stored_id, l
     assert (linked == set(targets)) if links else not (linked & set(targets))
 
 
+def test_incoming_row_metadata_never_moves_its_owner(build):
+    """Codex P2: an incoming row is stored under the active conversation, whatever its own field says."""
+    engine = build()
+    engine.ingest([U, call(), X])
+    targets = [r["store_id"] for r in engine._store.get_session_messages("S")[1:]]
+    conn = engine._store._conn
+    conn.execute("UPDATE messages SET conversation_id = 'other' WHERE session_id = 'S'")
+    conn.commit()
+    engine.ingest([U, call(), X, dict(call(), conversation_id="other"), dict(X, conversation_id="other")])
+    linked = {target for _source, kind, target in relations(engine) if kind == "possible_replay_of"}
+    assert not linked & set(targets)
+
+
 def test_summary_coverage_is_combined_once_per_scan(build, monkeypatch):
     """Codex P2: the ownership union is built once, not copied for every tail tool row."""
     from hermes_lcm import reconcile
