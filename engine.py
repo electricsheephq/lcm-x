@@ -7276,11 +7276,14 @@ class LCMEngine(
                 # second occurrence, so the later copy is a genuine repeat. Absent content never vetoes.
                 # The view's (text, stamp) pairs are built once per ingest.
                 if shown is None:
-                    shown = {((normalize_content_value(message["content"]) or "").strip(),
-                              self._host_occurrence_metadata(message)["timestamp"])
+                    # The host's volatile scaffolding (a model-switch note) does not make it another prompt: the
+                    # raw form and the form without it both veto, as in the #2378 transfer's veto.
+                    shown = {(form.strip(), self._host_occurrence_metadata(message)["timestamp"])
                              for message in messages
                              if isinstance(message, dict) and message.get("role") == "user"
-                             and message.get("content") is not None}
+                             and message.get("content") is not None
+                             for host in [normalize_content_value(message["content"]) or ""]
+                             for form in (host, _strip_volatile_host_scaffolding(host))}
                 if (text, target_stamp) in shown:
                     continue
                 pairs.append((sid, target, at))
