@@ -18,13 +18,16 @@ occurrence.
   equal-stamp evidence exists (the oracle's pooling rule), so this is a count per key.
 LCM_MULTI_PLANS sets the plan count (default 600, split over six chunks for xdist).
 
-Ownership variants (blank-id stores and a second conversation): after an ingest, a plan may
-relabel delivered occurrences to one value chosen per plan: NULL, '', whitespace (legacy blank
-ids, which the active conversation owns, #581) or another conversation. The relabel is applied by true occurrence
-in both runs. A link into a row of another conversation is a failure of its own. Main's
-predicate may skip a pair on another conversation's row; v7 stores it and must not link across
-conversations, so an unlinked row whose only twin lives in another conversation is new to this
-conversation and is not counted as a silent copy (the foreign-original test pins this).
+Ownership variants (blank-id stores and a second conversation): right after the first ingest,
+while both runs hold identical rows, a plan relabels some delivered occurrences to one value: NULL,
+'', whitespace (legacy blank ids, which the active conversation owns, #581) or another
+conversation. Rows never change owner later, as on a real upgraded or shared store. The relabel is applied by true occurrence
+in both runs. A link into a row of another conversation is a failure of its own. Main's predicate
+may skip a row on another conversation's twin (a loss on main); v7 stores it and must not link
+across conversations. So the variant silent check is the per-key check above with one allowance:
+for each true occurrence and content version (scorer key) that main holds NO row of in this
+conversation (blank ids included), v7's first such row is that version's own row, not a copy. At
+most one row per (occurrence, key) is allowed; a second row of the same pair still counts.
 LCM_MULTI_VARIANT_PLANS sets that plan count (default 300).
 """
 from copy import deepcopy
@@ -94,7 +97,7 @@ def generate(seed, variant=False):
         cursor = rng.choice(sorted(set(b for b in boundaries if 1 <= b <= delivered))) if number else 0
         ingests.append(dict(view=view, warm=warm, cursor=cursor))
         delivered = len(true)
-        if variant and relabel_rng.random() < 0.6:
+        if variant and number == 0:
             chosen = sorted(relabel_rng.sample(range(delivered), relabel_rng.randint(1, delivered)))
             ingests[-1]["relabel"] = (label, chosen)
     return ingests
@@ -167,8 +170,9 @@ def run_plan(ingests, folder, main_mode):
         sources = {s for s, _kind, _t in relations(engine)}
         rows = engine._store.get_session_messages("S")
         unlinked = Counter(key(r) for r in rows if r["store_id"] not in sources)
-        twins = {key(r)[1:] for r in rows if (r["conversation_id"] or "").strip() not in ("", "conversation")}
-        return set(stored), unlinked, sorted(foreign), twins
+        local = {r["store_id"]: key(r) for r in rows if (r["conversation_id"] or "").strip() in ("", "conversation")}
+        versions = {(idx, local[sid]) for idx, ids in stored.items() for sid in ids if sid in local}
+        return set(stored), unlinked, sorted(foreign), versions
     finally:
         for engine in engines:
             engine.shutdown()
@@ -181,12 +185,14 @@ def check(seed, root, variant=False):
     loss, silent = compare(v7, main)
     if not variant:
         return loss, silent
-    return loss, compare(v7, main, foreign_twins=v7[3])[1], v7[2]
+    allowance = Counter(k for _idx, k in v7[3] - main[3])
+    silent = sorted(k[2] for k, n in v7[1].items() if n - allowance[k] > main[1][k])
+    return loss, silent, v7[2]
 
 
-def compare(v7, main, foreign_twins=()):
+def compare(v7, main):
     loss = sorted(main[0] - v7[0])
-    silent = sorted(k[2] for k, n in v7[1].items() if n > main[1][k] and k[1:] not in foreign_twins)
+    silent = sorted(k[2] for k, n in v7[1].items() if n > main[1][k])
     return loss, silent
 
 
@@ -270,5 +276,6 @@ def test_multi_ingest_foreign_original_is_never_a_target(tmp_path):
     # Main skips the pair on the other conversation's row; v7 stores it, unlinked: it is new to this
     # conversation, and a link would cross conversations.
     assert compare(v7, main) == ([], ["", "X"])
-    assert compare(v7, main, foreign_twins=v7[3]) == ([], [])
+    allowance = Counter(k for _idx, k in v7[3] - main[3])
+    assert not [k for k, n in v7[1].items() if n - allowance[k] > main[1][k]]
     assert v7[2] == []
