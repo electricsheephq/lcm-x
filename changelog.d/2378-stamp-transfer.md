@@ -1,0 +1,1 @@
+- Fix: Link a post-compression prompt re-stored at its own stamp when its first copy inherited a re-stamped turn's stamp.
