@@ -52,6 +52,7 @@ class Run:
     inserted: dict
     skips: set
     host: list
+    bound: frozenset = frozenset()  # ledger-bound HOST indexes (distinguishable by proof)
 
     def violations(self, new):
         """Return both invariant failures without short-circuiting the batch."""
@@ -72,17 +73,38 @@ class Run:
         invalid += [(s, ts, "multiple links") for s, ts in links.items() if len(ts) > 1]
         originals = {key(r) for r in self.before}
         genuinely_new_ids = {self.inserted[i] for i in new if i in self.inserted}
-        # Multiset attribution, the scorer's basis: per scorer key, the stored replay copies must be
-        # matched by as many linked/pending rows of that key. Rows of one key are interchangeable to
-        # the scorer and to the link writer (NOTE §3 I-link), so WHICH row of the key carries the
-        # link is not observable; only an unattributed surplus is a silent copy.
+        # Attribution. A replay copy the product CAN tell apart from its key-mates (its own stamp, or
+        # a ledger-bound host occurrence) is checked per row: it must carry the link itself, and a
+        # stamped copy whose own equal-stamp original exists must link to that original (§2.5's
+        # first tier). Only rows the product cannot tell apart (same scorer key, same stamp or none,
+        # not ledger-bound) are checked as a multiset: their replay copies must be matched by as many
+        # linked/pending rows of the group, because WHICH of them carries the link is not observable
+        # (NOTE §3 I-link) and the scorer counts per key. A group is never widened across stamps.
+        bound_ids = {self.inserted[i] for i in self.bound if i in self.inserted}
         silent = []
-        for k in sorted({key(r) for r in self.added if key(r) in originals}, key=repr):
-            rows = [r["store_id"] for r in self.added if key(r) == k]
+        groups = {}
+        for r in self.added:
+            if key(r) not in originals:
+                continue
+            sid = r["store_id"]
+            distinct = sid in bound_ids or (r.get("observed_at") is not None and sum(
+                key(o) == key(r) and o.get("observed_at") == r["observed_at"] for o in self.added) == 1)
+            if distinct:
+                if sid not in genuinely_new_ids and sid not in links and sid not in pending:
+                    silent.append(sid)
+                own = [o["store_id"] for o in self.before
+                       if key(o) == key(r) and r.get("observed_at") is not None
+                       and o.get("observed_at") == r["observed_at"]]
+                if sid not in genuinely_new_ids and len(own) == 1 and links.get(sid, own) != own:
+                    invalid.append((sid, links[sid], "replay not linked to its own equal-stamp original"))
+                continue
+            groups.setdefault((key(r), r.get("observed_at")), []).append(sid)
+        for rows in groups.values():
             replays = sum(sid not in genuinely_new_ids for sid in rows)
             attributed = [sid for sid in rows if sid in links or sid in pending]
             unattributed = [sid for sid in rows if sid not in links and sid not in pending]
             silent += sorted(unattributed)[:max(0, replays - len(attributed))]
+        silent.sort()
         return dict(missing=missing, silent=silent, invalid=invalid)
 
     def check(self, new):
@@ -155,4 +177,5 @@ def ingest_shape(build, monkeypatch, source, host, cursor=1, bindings=None,
     added = after[len(before):]
     assert scans, "the cold ingest never ran the tool-segment scan"
     assert Counter(inserted.values()) == Counter(r["store_id"] for r in added), "capture missed inserted rows"
-    return Run(engine, before, added, inserted, scans[0] if scans else set(), host)
+    return Run(engine, before, added, inserted, scans[0] if scans else set(), host,
+               frozenset(bindings or ()))
