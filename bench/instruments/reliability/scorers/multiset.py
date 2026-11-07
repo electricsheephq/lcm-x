@@ -20,6 +20,7 @@ import json
 import re
 import sys
 import unicodedata
+from bisect import bisect_right
 from collections import Counter, defaultdict
 from pathlib import Path
 
@@ -416,12 +417,13 @@ def phase_c_score(expected: list[tuple[str, str]], rows: list[tuple]) -> dict:
         return role, re.sub(r"\s+", " ", unicodedata.normalize("NFC", text or "").replace("\r\n", "\n")).strip()
     want = Counter(vkey(r, t) for r, t in expected)
     held = Counter(vkey(r, t) for _, _, r, t in owned if norm(t))
-    assistants, users = defaultdict(list), defaultdict(list)
+    assistants, user_ids = defaultdict(list), []
     for sid, session, role, text in owned:
         if role == "user":
-            users[session].append(sid)  # empty users remain turn boundaries (v2 MB1)
+            user_ids.append(sid)  # empty users remain turn boundaries (v2 MB1)
         if role == "assistant" and norm(text):
             assistants[session].append((sid, text))
+    user_ids.sort()
     used, replacements, splits = set(), [], []
     for index, role, text in items:
         vk = vkey(role, text)
@@ -432,16 +434,20 @@ def phase_c_score(expected: list[tuple[str, str]], rows: list[tuple]) -> dict:
         for session, arows in assistants.items():
             for k in range(len(arows)):
                 ids, parts = [arows[k][0]], [arows[k][1]]
+                next_user = bisect_right(user_ids, ids[0])
+                boundary = user_ids[next_user] if next_user < len(user_ids) else None
                 total = _nonspace_nfd_len(parts[0])
                 for j in range(k + 1, len(arows)):
                     sid, content = arows[j]
-                    if any(ids[0] < u < sid for ids_in_session in users.values() for u in ids_in_session):
+                    if boundary is not None and sid > boundary:
                         break
                     ids.append(sid)
                     parts.append(content)
                     total += _nonspace_nfd_len(content)
                     if total > limit:
                         break
+                    if total < limit:
+                        continue
                     if vk in (vkey(role, " ".join(parts)), vkey(role, "".join(parts))):
                         if all(vkey(role, c) not in want for c in parts):
                             hits.append((ids, session))

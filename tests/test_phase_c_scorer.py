@@ -158,6 +158,13 @@ def test_rotated_session_user_breaks_split_in_owning_conversation():
     assert out["phase_c_split_matches"] == []
 
 
+@pytest.mark.parametrize("user_id,match", [(1, True), (2, True), (2.5, False), (3, True), (4, True)])
+def test_split_user_boundary_is_strictly_between_fragment_ids(user_id, match):
+    rows = split_rows(("a", "b")) + [(user_id, "other-session", "user", "", 1)]
+    out = multiset.phase_c_score([("user", "prompt"), ("assistant", "ab")], rows)
+    assert [s["split_match"] for s in out["phase_c_split_matches"]] == ([[2, 3]] if match else [])
+
+
 def test_claimed_fragment_cannot_be_borrowed():
     expected = [("user", "prompt"), ("assistant", "one\n\ntwo\n\nthree"), ("assistant", "two")]
     assert multiset.phase_c_score(expected, split_rows())["verdict"] == "FAIL"
@@ -228,6 +235,22 @@ def test_long_unmatched_run_cost():
     elapsed = time.monotonic() - start
     assert out["verdict"] == "FAIL"
     assert elapsed < 5, f"phase_c_score took {elapsed:.3f}s"
+
+
+@pytest.mark.parametrize("missing,verdict", [(False, "PASS"), (True, "FAIL")])
+def test_long_target_split_cost(missing, verdict):
+    parts = ("x" * 100,) * 1000
+    expected = [("user", "prompt"), ("assistant", "".join(parts))]
+    if missing:
+        expected.append(("assistant", "y" * 100000))
+    rows = split_rows(parts)
+    start = time.monotonic()
+    out = multiset.phase_c_score(expected, rows)
+    elapsed = time.monotonic() - start
+    assert out["verdict"] == verdict
+    assert out["phase_c_split_matches"][0]["split_match"] == list(range(2, 1002))
+    assert out["deficit_rows"] == int(missing)
+    assert elapsed < 10, f"phase_c_score took {elapsed:.3f}s"
 
 
 def test_two_twelve_fragment_answers_use_distinct_rows():
