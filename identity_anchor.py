@@ -1592,8 +1592,10 @@ class IdentityAnchorMixin:
         A stored user row gets ``composite_of`` rows only when exactly one decomposition of its text fits
         either rule, counted across both, with every part an earlier stored user row of its own session:
         (i) the LEADING rendered todo block (the #516 span: header, item lines, optional reload notice),
-        unstored, then whole stored rows; (ii) whole stored rows only, the first a stored todo row. Parts join with exactly ``"\\n\\n"``. Ambiguity, an over-budget search or a part text held
-        by more than one row writes nothing."""
+        unstored, then whole stored rows; (ii) whole stored rows only, the first a stored todo row. Parts join with exactly ``"\\n\\n"``. Ambiguity or an over-budget search
+        writes nothing. A part text held by more than one row resolves by the host's consecutive-turn merge: several
+        held parts link only to a unique run of consecutive session rows in text order, one held part only to the row
+        immediately before C (``_composite_of_holders``); anything else writes nothing."""
         from .reconcile import _PRESERVED_TODO_CONTEXT_PREFIX as header, _todo_annotation_span
 
         groups = []
@@ -1676,7 +1678,7 @@ def _raw_remainder(message, remainder) -> Optional[str]:
 def _composite_of_splits(content: str, by_text, header: str, todo_span) -> list[list[tuple[str, bool]]] | None:
     """The decompositions of ``content`` that composite_of rule (i) or (ii) allows, as ``[(part, stored)]``.
     None when a search is over budget or capped, so more splits may exist. A part whose text several rows
-    hold still yields its split here; the caller then writes nothing."""
+    hold still yields its split here; the caller resolves its holder (``_composite_of_holders``) or writes nothing."""
     texts = set(by_text)
     whole = _decompositions(content, texts, partial=False)
     if whole is None or len(whole) >= _MAX_DECOMPOSITIONS:
