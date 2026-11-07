@@ -181,3 +181,9 @@ def test_multi_ingest_catches_the_codex_p1_chain(tmp_path):
     loss, silent = compare(run_plan(plan, tmp_path / "v7", main_mode=False),
                            run_plan(plan, tmp_path / "main", main_mode=True))
     assert (loss, silent) == ([], [])
+
+
+def test_multi_ingest_seed_26092_cross_class_copy(tmp_path):
+    """A replay copy linked to an original in ANOTHER class (re-delivered unstamped) must not fund a skip:
+    the unstamped class held that copy plus two new pairs, and a later new A@16 pair was lost."""
+    assert check(26092, tmp_path) == ([], [])
