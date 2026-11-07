@@ -433,3 +433,36 @@ def test_one_unreadable_equal_target_fails_the_whole_source(build, monkeypatch):
     evidence = {"t": t_copies, "p": p_copies, "unreadable": unreadable_id, "relations": sorted(links)}
     assert len(t_copies) == 2 and (t_copies[1], t_copies[0]) in links, evidence
     assert len(p_copies) == 3 and not any(a in p_copies for a, _b in links), evidence
+
+
+@pytest.mark.parametrize("cold", [False, True], ids=["warm", "cold"])
+def test_rotation_fast_path_restamp_links_to_the_parent_original(build, cold):
+    """End to end: the host compresses with no ingest after it, ends S with exactly the compress input (the fast
+    end path marks the proof consumed), starts the child with a compression boundary, and the child's FIRST ingest
+    carries T re-stamped. That copy links once, to S's original, and no row is lost."""
+    engine = build(rotating=True)
+    before = history(False) + [{"role": "user", "content": T, "timestamp": T_REQ}]
+    engine.ingest(deepcopy(before))
+    output = engine.compress(deepcopy(before), force=True)
+    assert engine._last_compression_status == "compacted"
+    stored_before = all_rows(engine)
+    engine.on_session_end("S", deepcopy(before))
+    assert engine._compress_commit_proof["end_consumed"]  # the fast end path took it
+    engine.on_session_start("rotated", boundary_reason="compression", old_session_id="S",
+                            conversation_id="conversation", platform="cli")
+    if cold:
+        engine.shutdown()
+        engine = build(rotating=True, session_id="rotated")
+    view = deepcopy(output)
+    carried = [row for row in view if row.get("role") == "user" and row.get("content") == T]
+    assert len(carried) == 1
+    carried[0]["timestamp"] = T_COMMIT
+    view.append({"role": "user", "content": NEW, "timestamp": T_COMMIT + 10})
+    engine.ingest(deepcopy(view))
+    rows, links = all_rows(engine), replay_links(engine)
+    copies = [(row["store_id"], row["session_id"], row["observed_at"]) for row in rows if row["content"] == T]
+    evidence = {"copies": copies, "relations": sorted(links)}
+    assert {row["store_id"] for row in stored_before} <= {row["store_id"] for row in rows}, evidence
+    assert sum(row["content"] == NEW for row in rows) == 1, evidence
+    assert [(session, stamp) for _sid, session, stamp in copies] == [("S", T_REQ), ("rotated", T_COMMIT)], evidence
+    assert {(a, b) for a, b in links if a == copies[1][0]} == {(copies[1][0], copies[0][0])}, evidence
