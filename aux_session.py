@@ -833,6 +833,9 @@ _DELEGATE_STORE_LOCK = threading.RLock()
 _DELEGATE_AUXILIARY_IDS: set[tuple[str, str]] = set()
 _DELEGATE_RESUME_BOUNDARIES: dict[tuple[str, str], list[bytes]] = {}
 _DELEGATE_COMPRESSION_PARENTS: dict[tuple[str, str], str] = {}
+# #2071: digests of the rows the child's last bypassed compaction produced (absent from its input). They are the only
+# rows the stored-tail anchor may pass over without finding them stored.
+_DELEGATE_COMPACTION_OUTPUTS: dict[tuple[str, str], list[bytes]] = {}
 
 
 def delegate_child_store_counts() -> Dict[str, int]:
@@ -927,6 +930,14 @@ class DelegateChildMixin:
         _DELEGATE_RESUME_BOUNDARIES[self._delegate_child_key(session_id)] = [
             self._delegate_child_boundary_digest(identity) for identity in boundary]
 
+    def _remember_delegate_child_outputs(self, session_id: str, messages, result) -> None:
+        def identities(rows):
+            return [self._session_end_prefix_compare_identity(msg, session_id=session_id) for msg in rows
+                    if isinstance(msg, dict) and not self._matches_ignore_message_patterns(msg)]
+        produced = Counter(identities(result)) - Counter(identities(messages))
+        _DELEGATE_COMPACTION_OUTPUTS[self._delegate_child_key(session_id)] = [
+            self._delegate_child_boundary_digest(identity) for identity in produced.elements()]
+
     def _compress_delegate_child_bypassed(self, messages, current_tokens, focus_topic, force):
         session_id = self._bypass_lcm_session_id()
         stored_tail = None
@@ -966,6 +977,10 @@ class DelegateChildMixin:
         try:
             with _DELEGATE_STORE_LOCK:
                 if self._delegate_child_link(session_id, platform=_DELEGATE_SOURCE, require_agent=True):
+                    try:  # recorded apart from the boundary: it must survive a failed or dropped boundary
+                        self._remember_delegate_child_outputs(session_id, messages, result)
+                    except Exception as exc:
+                        self._note_delegate_child_fallback(session_id, f"compaction outputs not recorded: {exc}")
                     if stored_tail and self._store.get_session_tail(session_id, limit=1) == stored_tail:
                         self._remember_delegate_child_boundary(session_id, result)
                     else:
@@ -998,6 +1013,8 @@ class DelegateChildMixin:
                 _DELEGATE_COMPRESSION_PARENTS[new_key] = old_session_id
                 if old_key in _DELEGATE_RESUME_BOUNDARIES:
                     _DELEGATE_RESUME_BOUNDARIES[new_key] = _DELEGATE_RESUME_BOUNDARIES[old_key]
+                if old_key in _DELEGATE_COMPACTION_OUTPUTS:
+                    _DELEGATE_COMPACTION_OUTPUTS[new_key] = _DELEGATE_COMPACTION_OUTPUTS[old_key]
                 self._store.record_session_lineage(new_session_id, old_session_id, source="compression")
                 try:
                     stored_link = self._stored_delegate_child_link(new_session_id)
@@ -1169,23 +1186,33 @@ class DelegateChildMixin:
                 start = None  # an empty continuation is not an empty logical child history
         if start is None:
             sessions = self._delegate_child_store_sessions(session_id)
-            stored_tail = []
-            for sid in sessions:
-                stored_tail = [(sid, row) for row in self._store.get_session_tail(
-                    sid, limit=_ANCHOR_ROWS - len(stored_tail))] + stored_tail
-                if len(stored_tail) == _ANCHOR_ROWS:
-                    break
-            start = self._delegate_child_anchor_end(session_id, view, stored_tail)
+            stored_tail = self._delegate_child_lineage_tail(sessions, _ANCHOR_ROWS)
+            outputs = Counter(_DELEGATE_COMPACTION_OUTPUTS.get(key) or ())
+            rejected: list[int] = []
+
+            def unaccounted(front: list, end: int) -> int:
+                # #2071: each row in front of the match must be stored (the stored rows before the anchor, read
+                # as far back as the match reaches) or be one of the last compaction's outputs.
+                stored_ids = Counter(self._session_end_prefix_compare_identity(row, session_id=sid)
+                                     for sid, row in self._delegate_child_lineage_tail(sessions, end))
+                stored_ids.subtract(identities[len(front):end])
+                return self._delegate_child_unaccounted(front, stored_ids, outputs)
+
+            start = self._delegate_child_anchor_end(session_id, view, stored_tail, unaccounted, rejected)
             anchored = start is not None
             if start is None:
                 self._note_delegate_child_fallback(
-                    session_id, "stored rows no longer match the child's view; resuming with counted identities")
+                    session_id, f"{rejected[0]} row(s) in front of the stored-tail anchor are neither stored nor "
+                    "compaction outputs; resuming with counted identities" if rejected else
+                    "stored rows no longer match the child's view; resuming with counted identities")
                 remaining = Counter(self._session_end_prefix_compare_identity(row, session_id=sid)
                                     for sid in sessions for row in self._store.get_session_messages(sid, limit=-1))
                 suffix = []
                 for msg, identity in zip(view, identities):
                     if remaining[identity] > 0:
                         remaining[identity] -= 1
+                    elif outputs[self._delegate_child_boundary_digest(identity)] > 0:  # a compacted head
+                        outputs[self._delegate_child_boundary_digest(identity)] -= 1
                     else:
                         suffix.append(msg)
             else:
@@ -1204,16 +1231,44 @@ class DelegateChildMixin:
                      len(stored), session_id, link["parent_session_id"])
         return len(stored)
 
+    def _delegate_child_lineage_tail(self, sessions: list[str], limit: int) -> list[tuple[str, Dict[str, Any]]]:
+        """The last ``limit`` stored rows of the child's lineage (newest session first in ``sessions``), oldest first."""
+        rows: list[tuple[str, Dict[str, Any]]] = []
+        for sid in sessions:
+            if len(rows) >= limit:
+                break
+            rows = [(sid, row) for row in self._store.get_session_tail(sid, limit=limit - len(rows))] + rows
+        return rows
+
+    def _delegate_child_unaccounted(self, front: list, stored: Counter, outputs: Counter) -> int:
+        stored, outputs, missing = stored.copy(), outputs.copy(), 0
+        for identity in front:
+            digest = self._delegate_child_boundary_digest(identity)
+            if stored[identity] > 0:
+                stored[identity] -= 1
+            elif outputs[digest] > 0:
+                outputs[digest] -= 1
+            else:
+                missing += 1
+        return missing
+
     def _delegate_child_anchor_end(self, session_id: str, view: List[Dict[str, Any]],
-                                  stored_rows: list[tuple[str, Dict[str, Any]]]) -> Optional[int]:
+                                  stored_rows: list[tuple[str, Dict[str, Any]]],
+                                  unaccounted=None, rejected: Optional[list] = None) -> Optional[int]:
         """After the host rewrote the child's head (native compaction), resume after the stored tail when
-        it occurs exactly once in the view."""
+        it occurs exactly once in the view, and only when every row in front of it is accounted for (#2071):
+        ``unaccounted(front, end)`` counts the rows that are neither stored nor compaction outputs."""
         anchor = [self._session_end_prefix_compare_identity(row, session_id=sid)
                   for sid, row in stored_rows]
         identities = [self._session_end_prefix_compare_identity(msg, session_id=session_id) for msg in view]
         for width in range(len(anchor), 0, -1):
             end = self._delegate_child_unique_end(identities, anchor[-width:])
             if end is not None:
+                missing = unaccounted(identities[:end - width], end) if unaccounted is not None else 0
+                if missing:  # a narrower match would sit behind the same row
+                    if rejected is not None:
+                        rejected.append(missing)
+                    return None
                 return end
         return None
 

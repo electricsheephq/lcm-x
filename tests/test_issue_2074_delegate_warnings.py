@@ -36,7 +36,10 @@ def test_compression_resume_logs_debug_without_counting_fallback(host, monkeypat
                for r in caplog.records)
 
 
-def test_rewritten_head_resume_logs_debug_without_counting_fallback(host, monkeypatch, caplog):
+def test_rewritten_head_is_stored_once_with_a_reasoned_fallback(host, monkeypatch, caplog):
+    """#2071: a head the host rewrote outside LCM's compaction is neither stored nor a compaction output, so the
+    stored-tail anchor may not skip it. One counted fallback stores it once, with a WARNING that names the reason;
+    the next turn resumes after the stored tail anchor."""
     load, clone = host
     ctx, module = load()
     engine = clone(ctx)
@@ -55,11 +58,13 @@ def test_rewritten_head_resume_logs_debug_without_counting_fallback(host, monkey
             view = [*view, {"role": "assistant", "content": f"after rewrite {i}"}]
             child.turn(ctx, view, engine)
             child.turn(ctx, view, engine)
-    expected = [*original, *view[-2:]]
+    expected = [*original, view[0], *view[-2:]]
     assert [(r["role"], r["content"]) for r in child_rows(engine)] == [
         (r["role"], r["content"]) for r in expected]
-    assert module("aux_session").delegate_child_store_counts().get("fallbacks", 0) == before
-    assert not any(r.levelno >= logging.WARNING for r in caplog.records)
+    assert module("aux_session").delegate_child_store_counts().get("fallbacks", 0) == before + 1
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warnings) == 1 and "1 row(s) in front of the stored-tail anchor are neither stored nor compaction " \
+        "outputs" in warnings[0]
     assert any(r.levelno == logging.DEBUG and "child: resuming after stored tail anchor" in r.message
                for r in caplog.records)
 

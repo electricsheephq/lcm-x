@@ -174,13 +174,14 @@ def test_exactly_once_resend_retry_resume_and_host_rewrite(host):
     parent2.on_session_start("parent", platform="cli", context_length=200_000)
     child.turn(ctx2, child_view(2), parent2)
     assert [m["content"] for m in child_rows(parent2)] == [m["content"] for m in child_view(2)]
-    # The host's native compaction rewrote the head: resume after the unique stored tail.
+    # The host's native compaction rewrote the head: LCM did not produce it, so it is stored once (#2071), then
+    # later turns resume after the unique stored tail.
     rewritten = [{"role": "user", "content": "[CONTEXT COMPACTION] earlier turns summarised"},
                  *child_view(2)[-3:], {"role": "assistant", "content": "after compaction"}]
     child.turn(ctx2, rewritten, parent2)
     child.turn(ctx2, rewritten, parent2)
     contents = [m["content"] for m in child_rows(parent2)]
-    assert contents == [m["content"] for m in child_view(2)] + ["after compaction"]
+    assert contents == [m["content"] for m in child_view(2)] + [rewritten[0]["content"], "after compaction"]
 
 
 def test_unmatched_child_view_is_a_visible_fallback(host, caplog):
@@ -499,8 +500,9 @@ def test_short_stored_tail_recovers_later_turns(host, kept):
         rewritten = [*rewritten, {"role": "assistant", "content": f"later {i}"}]
         child.turn(ctx, rewritten, parent)
         child.turn(ctx, rewritten, parent)
+    # #2071: the host's rewritten head is neither stored nor an LCM compaction output, so it is stored once.
     assert [row["content"] for row in child_rows(parent)] == (
-        [row["content"] for row in original] + ["later 0", "later 1"])
+        [row["content"] for row in original] + ["rewritten head", "later 0", "later 1"])
 
 
 @pytest.mark.parametrize("shape", ["repeated", "rewritten"])
