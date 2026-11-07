@@ -99,7 +99,7 @@ class FakeHost(r.LocalHost):
                 lcm.execute("INSERT INTO messages (session_id, role, content) SELECT session_id, role, content FROM"
                             " messages WHERE session_id = ? ORDER BY store_id LIMIT 1", (sid,))
                 ctx.setdefault("copies", {})[step["id"]] = [lcm.execute("SELECT max(store_id) FROM messages").fetchone()[0]]
-            rows = [(sid, "user", f"{MARKER} {step['id']}"), (sid, "assistant", f"{MARKER} reply {step['id']}")]
+            rows = [(sid, "user", step["user_text"]), (sid, "assistant", f"{MARKER} reply {step['id']}")]
             for db in (host,) if self.fail == "lose" and ctx["name"] == "rc" and step["id"] == "e1-S1-1" else (lcm, host):
                 db.executemany("INSERT INTO messages (session_id, role, content) VALUES (?, ?, ?)", rows)
                 db.commit()
@@ -532,3 +532,110 @@ def test_a_turn_the_agent_never_ran_is_not_completed(tmp_path, calls, outcome, d
     ctx = {"provider": provider, "gateway": Gateway(), "chats": {"L": "d5-L"}}
     assert r.LocalHost({}, tmp_path).turn(ctx, {"id": "e1-L-0", "conversation": "L", "user_text": "x"}) is done
     assert provider.step is None
+
+
+@pytest.fixture
+def rekey_copy(tmp_path):
+    home = tmp_path / "arm"
+    home.mkdir()
+    path = home / "lcm.db"
+    with closing(sqlite3.connect(path)) as db, db:
+        db.executescript("CREATE TABLE messages (store_id INTEGER PRIMARY KEY, session_id TEXT, conversation_id TEXT, content TEXT);"
+                         "CREATE TABLE lcm_lifecycle_state (conversation_id TEXT PRIMARY KEY, last_finalized_session_id TEXT);")
+        db.executemany("INSERT INTO messages VALUES (?, ?, ?, ?)",
+                       [(1, "s1", "old", "first"), (2, "s2", "old", "second"), (3, "other", "unrelated", "third")])
+        db.executemany("INSERT INTO lcm_lifecycle_state VALUES (?, ?)", [("old", "s2"), ("unrelated", "other")])
+    return path, [{"name": "L", "session_id": "s1", "chat_id": "d5-L"}]
+
+
+def test_rekey_copy_moves_the_whole_conversation_and_receipts_counts(rekey_copy, tmp_path):
+    path, conversations = rekey_copy
+    key = r.gateway.session_key("d5-L")
+    receipt = r.rekey_copy_conversations(path, conversations, run_dir=tmp_path)
+    assert receipt == [{"name": "L", "old_h12": r._sha("old")[:12], "new_h12": r._sha(key)[:12],
+                        "tables": {"messages": {"before": 2, "after": 2, "old_remaining": 0},
+                                   "lcm_lifecycle_state": {"before": 1, "after": 1, "old_remaining": 0}}}]
+    with closing(sqlite3.connect(path)) as db:
+        assert db.execute("SELECT * FROM messages ORDER BY store_id").fetchall() == [
+            (1, "s1", key, "first"), (2, "s2", key, "second"), (3, "other", "unrelated", "third")]
+        assert db.execute("SELECT * FROM lcm_lifecycle_state ORDER BY conversation_id").fetchall() == [
+            (key, "s2"), ("unrelated", "other")]
+
+
+@pytest.mark.parametrize("fault", ["messages_destination", "lifecycle_destination", "ambiguous", "outside", "third_table"])
+def test_rekey_copy_refuses_unsafe_inputs_without_updates(rekey_copy, tmp_path, fault):
+    path, conversations = rekey_copy
+    with closing(sqlite3.connect(path)) as db, db:
+        if fault == "messages_destination":
+            db.execute("INSERT INTO messages VALUES (4, 'other', ?, 'collision')", (r.gateway.session_key("d5-L"),))
+        elif fault == "lifecycle_destination":
+            db.execute("INSERT INTO lcm_lifecycle_state VALUES (?, 'other')", (r.gateway.session_key("d5-L"),))
+        elif fault == "ambiguous":
+            db.execute("INSERT INTO messages VALUES (4, 's1', 'second-key', 'ambiguous')")
+        elif fault == "third_table":
+            db.execute("CREATE TABLE unexpected (conversation_id TEXT)")
+    before = inventory(path.parent)
+    with pytest.raises(ValueError, match="unexpected" if fault == "third_table" else None):
+        r.rekey_copy_conversations(path, conversations, run_dir=tmp_path / "elsewhere" if fault == "outside" else tmp_path)
+    assert inventory(path.parent) == before
+
+
+def test_rekey_copy_is_a_noop_when_keys_match(rekey_copy, tmp_path):
+    path, conversations = rekey_copy
+    with closing(sqlite3.connect(path)) as db, db:
+        for table in ("messages", "lcm_lifecycle_state"):
+            db.execute(f"UPDATE {table} SET conversation_id=? WHERE conversation_id='old'", (r.gateway.session_key("d5-L"),))
+    before = inventory(path.parent)
+    assert r.rekey_copy_conversations(path, conversations, run_dir=tmp_path) == []
+    assert inventory(path.parent) == before
+
+
+@pytest.mark.parametrize("appears", [True, False])
+def test_cold_bind_waits_for_durable_ingest_before_h8(setup, monkeypatch, appears):
+    _, config, run_dir = setup
+    config["cold_ingest_timeout"] = 1
+    clock = [0.0]
+    monkeypatch.setattr(r.time, "monotonic", lambda: clock[0])
+
+    class DelayedHost(FakeHost):
+        def turn(self, ctx, step):
+            self.pending = (ctx, step)
+            # Wrong role, text, session, and pre-T0 rows cannot satisfy the wait.
+            with closing(sqlite3.connect(ctx["home"] / "lcm.db")) as db, db:
+                db.executemany("INSERT INTO messages (session_id, role, content) VALUES (?, ?, ?)",
+                               [("sess-l", "assistant", step["user_text"]), ("sess-l", "user", "other"),
+                                ("sess-a", "user", step["user_text"])])
+            return True
+
+        def capture(self, ctx, kind, step, extras=None):
+            self.calls.append(kind)
+            if kind == "T0":
+                with closing(sqlite3.connect(ctx["home"] / "lcm.db")) as db, db:
+                    db.execute("INSERT INTO messages (session_id, role, content) VALUES ('sess-l', 'user', ?)",
+                               (step["user_text"],))
+            if kind == "H8":
+                assert clock[0] >= 0.5
+            return super().capture(ctx, kind, step, extras)
+
+    host = DelayedHost(config, run_dir)
+
+    def tick(seconds):
+        assert seconds == 0.5
+        clock[0] += seconds
+        if appears:
+            FakeHost.turn(host, *host.pending)
+
+    monkeypatch.setattr(r.time, "sleep", tick)
+    plan = r.planner.build_plan([{"name": "L", "session_id": "sess-l", "chat_id": "d5-L", "lcm_rows": 1000}],
+                                epochs=1, warm_turns=0, nonce="synthetic")
+    result = r.run_arm(host, "rc", host.clone("rc"), plan, {})
+    bind = result["binds"][0]
+    assert bind["cold_ingest_wait_s"] == (0.5 if appears else 1.0)
+    assert host.calls.count("H8") == int(appears)
+    assert host.replays == ([plan["epochs"][0]["steps"][0]["id"]] if appears else [])
+    if appears:
+        assert bind["bar2"]["verdict"] == bars.PASS
+    else:
+        assert bind["bar2"]["verdict"] == bars.INCONCLUSIVE
+        assert bind["bar2"]["error"] is True
+        assert bind["bar2"]["reason"] == "cold-turn ingest not durable within 1 s"
