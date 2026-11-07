@@ -1,13 +1,16 @@
 """A post-compress prompt inherits the prior turn's stamp, then returns at its own."""
 
+import base64
 from copy import deepcopy
 
 import pytest
 
+import hermes_lcm.engine as engine_module
 from hermes_lcm.message_content import normalize_content_value
 from hermes_lcm.reconcile import _PRESERVED_TODO_CONTEXT_PREFIX
+import tests.invariants.test_issue_2378_restamp_link as restamp_link
 from tests.invariants.test_issue_2378_restamp_link import (
-    T, T_COMMIT, T_REQ, all_rows, build as build, history, replay_links,
+    T, T_COMMIT, T_REQ, all_rows, build as build, history, replay_links, run,
 )
 
 pytestmark = pytest.mark.issue(2378)
@@ -230,3 +233,104 @@ def test_rotation_child_genuine_repeat_is_not_linked(build, cold):
              {"role": "user", "content": NEW, "timestamp": T_COMMIT + 10}]
     engine.ingest(deepcopy(view))
     _assert_no_silent_copy(engine, linked=False)
+
+
+# The stored form of a long prompt is a whole-message placeholder; of inline media, a substring placeholder.
+STORED_FORMS = {
+    "long": (P + " " + "word " * 25_000, {"large_output_externalization_enabled": True}),
+    "inline-media": (P + " data:image/png;base64," + base64.b64encode(bytes(range(256)) * 16).decode(), {}),
+}
+
+
+@pytest.mark.parametrize("cold", [False, True], ids=["warm", "cold"])
+@pytest.mark.parametrize("form", sorted(STORED_FORMS))
+def test_retained_externalized_prompt_vetoes_a_genuine_repeat(build, cold, form):
+    """The retained original is stored as a placeholder; the host still shows it in full. It must still veto, so a
+    genuine repeat at a new stamp (stored as the same placeholder) stays unlinked."""
+    prompt, overrides = STORED_FORMS[form]
+    engine = build(**overrides)
+    before = history(False) + [{"role": "user", "content": T, "timestamp": T_REQ}]
+    engine.ingest(deepcopy(before))
+    view = engine.compress(deepcopy(before), force=True)
+    assert engine._last_compression_status == "compacted"
+    view += [{"role": "assistant", "content": "compress finished", "timestamp": T_REQ + 1},
+             {"role": "user", "content": prompt, "timestamp": T_REQ}]
+    engine.ingest(deepcopy(view))
+    old = [row for row in all_rows(engine) if row["observed_at"] == T_REQ and row["role"] == "user"
+           and row["content"] != T]
+    assert len(old) == 1 and old[0]["content"] != prompt  # stored as a placeholder
+    engine.on_session_end("S", deepcopy(view))
+    if cold:
+        engine.shutdown()
+        engine = build(**overrides)
+    else:
+        engine.on_session_start("S", conversation_id="conversation", platform="cli")
+    next(row for row in view if row.get("content") == T)["timestamp"] = T_COMMIT - 1
+    view += [{"role": "user", "content": prompt, "timestamp": T_COMMIT},
+             {"role": "user", "content": NEW, "timestamp": T_COMMIT + 10}]
+    engine.ingest(deepcopy(view))
+    rows, links = all_rows(engine), replay_links(engine)
+    repeat = [row["store_id"] for row in rows if row["observed_at"] == T_COMMIT and row["role"] == "user"]
+    evidence = {"old": old[0]["store_id"], "repeat": repeat, "relations": sorted(links)}
+    assert sum(row["content"] == NEW for row in rows) == 1, evidence
+    assert len(repeat) == 1, evidence
+    assert not any(a == repeat[0] for a, _b in links), evidence
+
+
+NOTE = "[Note: model was just switched from X to Y]\n\n"
+
+
+def test_rotation_widening_never_redirects_a_proof_session_link(build, caplog, monkeypatch):
+    """The predecessor S holds a model-switch note + T at the carried stamp; the child holds a genuine repeat of T that
+    inherited that stamp. The host strips the note from the re-stamped carried row: it links to S's original, never
+    to the child's repeat."""
+    monkeypatch.setattr(restamp_link, "T", NOTE + T)
+    repeat = {}
+
+    def strip_and_repeat(engine, view):
+        next(row for row in view if row.get("content") == NOTE + T)["content"] = T
+        repeat["sid"] = engine._store.append("rotated", {"role": "user", "content": T, "timestamp": T_REQ},
+                                             conversation_id=engine._conversation_id)
+        view.append({"role": "user", "content": T, "timestamp": T_COMMIT + 5})
+
+    engine, rows = run(build, caplog, mode="rotating", uids=False, restamp=True, before_ingest=strip_and_repeat)
+    links = replay_links(engine)
+    original = next(row["store_id"] for row in rows if row["session_id"] == "S" and row["content"] == NOTE + T)
+    copy = next(row["store_id"] for row in rows if row["session_id"] == "rotated" and row["content"] == T
+                and row["observed_at"] == T_COMMIT)
+    evidence = {"original": original, "repeat": repeat["sid"], "copy": copy, "relations": sorted(links)}
+    assert (copy, repeat["sid"]) not in links, evidence
+    assert {b for a, b in links if a == copy} <= {original}, evidence
+
+
+@pytest.mark.parametrize("a_first", [True, False], ids=["A-then-B", "B-then-A"])
+def test_rotation_tiers_are_per_row_not_order_dependent(build, a_first):
+    """Two re-stamped rows recorded by the child's proof: A's original lives only in the predecessor; B's lives in
+    the child, and an equal B sits in the predecessor at the same stamp. Each links to its own original whatever the
+    row order. The ingest path admits one such row per bind today, so the linker is driven directly."""
+    engine = build(rotating=True)
+    engine.on_session_end("S", [])
+    engine.on_session_start("rotated", boundary_reason="compression", old_session_id="S",
+                            conversation_id="conversation", platform="cli")
+
+    def store(session, content, stamp):
+        return engine._store.append(session, {"role": "user", "content": content, "timestamp": stamp},
+                                    conversation_id="conversation")
+
+    a_orig, b_pred, b_child = store("S", "alpha prompt", 100.0), store("S", "beta prompt", 200.0), \
+        store("rotated", "beta prompt", 200.0)
+    a_new, b_new = store("rotated", "alpha prompt", 300.0), store("rotated", "beta prompt", 301.0)
+    stored = engine._store.get_batch([a_new, b_new])
+    order = [(a_new, 100.0, 300.0), (b_new, 200.0, 301.0)]
+    if not a_first:
+        order.reverse()
+    messages, stored_at, previous = [], {}, {}
+    for idx, (sid, old_stamp, new_stamp) in enumerate(order):
+        identity = engine._message_replay_identity(stored[sid], stored_row=True)
+        digest = engine_module._commit_proof_identity_digest(engine_module._proof_user_identity(identity))
+        messages.append({"role": "user", "content": stored[sid]["content"], "timestamp": new_stamp})
+        stored_at[idx] = sid
+        previous[idx] = ("rotated", {"timestamp": old_stamp, "identity_sha256": digest})
+    engine._link_restamped_occurrences(messages, stored_at, previous, False)
+    links = replay_links(engine)
+    assert {(a_new, a_orig), (b_new, b_child)} <= links, {"b_pred": b_pred, "relations": sorted(links)}
