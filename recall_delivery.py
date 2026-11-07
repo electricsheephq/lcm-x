@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from datetime import datetime, timezone
 import json
+import logging
 from typing import Any
 
 from .reasoning import resolve_occurrence_time
@@ -69,6 +70,8 @@ def deliver_recall(
     adjacent_reply_unavailable: str | None = None,
     snippet_window_hits: int = 0,
     read_snippet_windows: Callable[..., tuple[dict, str | None]] | None = None,
+    extra_entries: int = 0,
+    read_extra_entries: Callable[..., tuple[dict, str | None]] | None = None,
 ) -> str:
     """Deliver ranked entries without changing retrieval or host-read policy."""
     if session_delivery is not None:
@@ -239,7 +242,7 @@ def deliver_recall(
     response_chars = 0
     response_cap_truncated = False
     unreferenced_omitted = 0
-    for entry in selected_entries:
+    for consumed, entry in enumerate(selected_entries, 1):
         hit = entry["hit"]
         arms = sorted({arm_order[index] for index in entry["ranks"].keys()})
         item: dict[str, Any] = {
@@ -534,7 +537,7 @@ def deliver_recall(
         )
         if delivery_order != "time":
             return encoded
-    elif delivery_order != "time":
+    elif delivery_order != "time" and extra_entries <= 0:
         return json.dumps(response)
 
     # Both size-cap passes and event-time stripping run in score order first.
@@ -548,16 +551,55 @@ def deliver_recall(
         )
         return observed_at is None, observed_at if observed_at is not None else 0.0
 
-    hits_out.sort(key=event_time_key)
+    if delivery_order == "time":
+        hits_out.sort(key=event_time_key)
     ensure_ascii = detail != "answer_ready"
     # Reordering keeps the encoded length; the marker is extra, so it is added
     # only when it still fits the response cap (never by dropping a hit).
     unmarked = json.dumps(response, ensure_ascii=ensure_ascii)
-    response["provenance"]["delivery_order"] = "time"
+    if delivery_order == "time":
+        response["provenance"]["delivery_order"] = "time"
     marked = json.dumps(response, ensure_ascii=ensure_ascii)
     # answer_ready caps the whole envelope; snippets budgets hits only.
     if detail == "answer_ready" and len(marked) > response_char_cap:
         return unmarked
+    if (detail == "snippets" and extra_entries > 0 and len(hits_out) == limit
+            and not response_cap_truncated and not response.get("response_cap_truncated")):
+        seen = {hit["store_id"] for hit in hits_out if hit.get("store_id") is not None}
+        seen.update(sid for hit in hits_out for sid in hit.get("duplicate_store_ids", []))
+        candidates = []
+        for entry in selected_entries[consumed:consumed + min(extra_entries, limit // 2)]:
+            sid = entry["hit"].get("store_id")
+            if sid is not None and sid in seen:
+                continue
+            if sid is not None:
+                seen.add(sid)
+            candidates.append(entry)
+        if candidates:
+            try:
+                content, skipped = read_extra_entries(
+                    candidates, query=query, expanded_limit=len(candidates),
+                    fts_arm_index=fts_arm_index, deadline=deadline, char_cap=300,
+                ) if read_extra_entries is not None else ({}, "read_error")
+                extras = []
+                for entry in candidates if skipped is None else []:
+                    hit = entry["hit"]
+                    window = content[_hit_identity(hit)]
+                    extras.append({
+                        "kind": hit.get("kind"), "store_id": hit.get("store_id"),
+                        "session_id": hit.get("session_id"), "event_time": window.get("event_time"),
+                        "window": window["content"], "extra": True,
+                    })
+            except Exception as exc:  # noqa: BLE001 - optional extras must never fail recall
+                logging.getLogger(__name__).warning("lcm_recall extra entries read failed: %s", type(exc).__name__)
+                skipped = "read_error"
+            if skipped is not None:
+                response["extra_entries_skipped"] = skipped
+            else:
+                hits_out.extend(extras)
+                while len(hits_out) > limit and len(json.dumps(response)) > response_char_cap:
+                    hits_out.pop()
+            return json.dumps(response)
     return marked
 
 

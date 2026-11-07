@@ -1,0 +1,1 @@
+- New: Add public-clean release-kit evidence records for host traces, lifecycle rows, stored row order, configuration differences, and previous-GA doctor warnings.

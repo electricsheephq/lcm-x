@@ -1,0 +1,1 @@
+- Fix: a rotation child's re-stamped carried rows that share a replay identity but differ in content are each linked to their own original, never crossed (#2390).

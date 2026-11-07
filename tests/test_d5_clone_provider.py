@@ -193,6 +193,33 @@ def test_a_step_named_none_is_not_the_outside_counter():
         instance.stop()
 
 
+@pytest.mark.parametrize("bad", [{}, None, {"text": None}, {"tool_calls": "x"}, "reply",
+                                 {"text": "x", "tool_calls": "abc"}, {"tool_calls": []}, {"tool_calls": [{"id": "c"}]},
+                                 {"tool_calls": [{"id": "c", "name": "n", "arguments": 5}]}, {"text": "x\ud800"},
+                                 {"tool_calls": [{"id": "c", "name": "n", "arguments": "\udc00"}]},
+                                 {"tool_calls": [{"id": "c", "name": "n", "arguments": {"k": {1, 2}}}]}])
+def test_an_unusable_script_entry_is_a_counted_miss(bad):
+    instance = Provider({"steps": {"turn": [bad]}, "cron": [bad]}).start()
+    try:
+        request(instance, "/_d5/step", {"step": "turn"})
+        assert complete(instance)["choices"][0]["message"]["content"] == "d5 replay miss"
+        assert complete(instance, "d5-cron")["choices"][0]["message"]["content"] == "d5 replay miss"
+        assert request(instance, "/_d5/stats")["replay_misses"] == {"turn": 1, "cron": 1}
+    finally:
+        instance.stop()
+
+
+@pytest.mark.parametrize("calls", [None, []])
+def test_a_text_reply_with_null_or_empty_tool_calls_is_served(calls):
+    instance = Provider({"steps": {"turn": [{"text": "hi", "tool_calls": calls}]}}).start()
+    try:
+        request(instance, "/_d5/step", {"step": "turn"})
+        assert complete(instance)["choices"][0]["message"] == {"role": "assistant", "content": "hi"}
+        assert request(instance, "/_d5/stats")["replay_misses"] == {}
+    finally:
+        instance.stop()
+
+
 def test_a_failed_request_changes_no_counter():
     provider = Provider({"steps": {"s1": [{"text": "one"}]}})
     try:
