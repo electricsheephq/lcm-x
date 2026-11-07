@@ -198,12 +198,13 @@ def bar5(rc_checks, ga_checks, ga_rerun_checks=None, ga_rerun_turns_complete=Tru
     the previous-GA arm is never PASS (release manager, 2026-11-07): the GA arm is re-run once; if the re-run fails
     too, the bar stays INCONCLUSIVE until the release manager records a disposition. A re-run is clean only when it
     completed every planned turn, shows every check kind and fails none; a clean re-run supplies the doctor-warning
-    baseline."""
-    failed, ga_failed = failed_checks(rc_checks), failed_checks(ga_checks)
+    baseline. A GA arm that shows no check of some kind is no baseline either: warnings are not judged, so the bar
+    is INCONCLUSIVE unless the rc arm fails a check."""
+    failed, ga_failed, ga_missing = failed_checks(rc_checks), failed_checks(ga_checks), kinds_missing(ga_checks)
     rerun_failed = failed_checks(ga_rerun_checks) if ga_rerun_checks is not None else None
     rerun_missing = kinds_missing(ga_rerun_checks) if ga_rerun_checks is not None else None
     rerun_clean = rerun_failed == [] and rerun_missing == [] and ga_rerun_turns_complete is True
-    ga_open = bool(ga_failed) and not rerun_clean  # No clean GA arm: there is no warning baseline to judge against.
+    ga_open = (bool(ga_failed) and not rerun_clean) or (bool(ga_missing) and not ga_failed)  # No clean GA baseline.
     baseline = ga_rerun_checks if ga_failed and rerun_clean else ga_checks
     rc_w, ga_w = (Counter(c["check"] for c in checks if c["kind"] == "doctor" and c["status"] == "warn")
                   for checks in (rc_checks, baseline))
@@ -211,7 +212,7 @@ def bar5(rc_checks, ga_checks, ga_rerun_checks=None, ga_rerun_turns_complete=Tru
     missing = kinds_missing(rc_checks)
     verdict = FAIL if failed or over else INCONCLUSIVE if missing or ga_open else PASS
     return {"verdict": verdict, "failed": failed, "warnings_over_ga": over, "kinds_missing": missing,
-            "ga_failed": ga_failed, "ga_rerun_needed": bool(ga_failed) and rerun_failed is None,
+            "ga_failed": ga_failed, "ga_kinds_missing": ga_missing, "ga_rerun_needed": bool(ga_failed) and rerun_failed is None,
             "ga_rerun_failed": rerun_failed or [], "ga_rerun_kinds_missing": rerun_missing or [],
             "ga_rerun_turns_complete": None if ga_rerun_checks is None else ga_rerun_turns_complete is True,
             "warnings_judged": not ga_open,

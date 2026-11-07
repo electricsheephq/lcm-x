@@ -187,6 +187,18 @@ def test_bar5_warnings_are_not_judged_without_a_clean_ga_baseline():
         assert result["ga_disposition_needed"] is (rerun is not None)  # Every unclean re-run needs a disposition.
 
 
+
+def test_bar5_a_ga_arm_missing_a_check_kind_is_no_baseline():
+    warn = {"kind": "doctor", "check": "survival_fit", "status": "warn"}
+    for ga in ([], checks()[1:]):
+        for rc in (checks(), checks(warn)):  # Never PASS on a missing baseline, and an rc warning is no FAIL.
+            result = b.bar5(rc, ga)
+            assert result["verdict"] == b.INCONCLUSIVE and result["warnings_judged"] is False and result["ga_kinds_missing"]
+        assert b.bar5(checks({"kind": "schema", "check": "core", "status": "fail"}), ga)["verdict"] == b.FAIL
+    ga_fail = checks({"kind": "integrity", "check": "fk", "status": "fail"})[1:]  # Failed and incomplete.
+    assert b.bar5(checks(warn), ga_fail, checks(warn))["verdict"] == b.PASS  # A clean re-run is the baseline.
+    assert b.bar5(checks(), checks())["ga_kinds_missing"] == []
+
 def workload(**change):
     names = ["L", "S1", "S2"]
     return {"conversation_names": names, "large_conversation_rows": 1000, "cron_fired": 1, "tool_heavy_turns": 2,

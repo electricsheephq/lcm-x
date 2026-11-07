@@ -57,7 +57,7 @@ class FakeHost(r.LocalHost):
     def pins(self):
         if self.fail == "P1":
             return {"verdict": "FAIL", "mismatches": ["manifest"]}  # As pins.verify: no hashes on a failure.
-        return {"verdict": "PASS", "mismatches": [], "functions_sha256": "f" * 64}
+        return {"verdict": "PASS", "mismatches": [], "rules_sha256": "f" * 64}
 
     def rules(self):  # The real configure seams call these, so the test sees the order and the inputs.
         return {"identity": lambda row: (row["role"], row["content"]), "credits": (),
@@ -181,10 +181,48 @@ def test_rerun_rules(setup):
     _, config, run_dir = setup
     prior = {"rc": "rc-synthetic", "verdict": {"raw": bars.FAIL}}
     assert r.run(FakeHost(config, run_dir), rc_id="rc-synthetic", prior=[prior])["stopped_at"].startswith("a FAIL")
-    twice = [{"rc": "rc-synthetic", "verdict": {"raw": bars.INCONCLUSIVE}, "pins": {"functions_sha256": "e" * 64}}] * 2
+    twice = [{"rc": "rc-synthetic", "verdict": {"raw": bars.INCONCLUSIVE}, "pins": {"rules_sha256": "e" * 64}}] * 2
     assert "defect" in r.run(FakeHost(config, run_dir), rc_id="rc-synthetic", prior=twice)["stopped_at"]
     fixed = r.run(FakeHost(config, run_dir), rc_id="rc-synthetic", prior=twice, instrument_fix="fix-1")
-    assert "rule-function" in fixed["stopped_at"]
+    assert "rule code changed" in fixed["stopped_at"]
+    once = twice[:1]  # An ordinary second attempt, with no instrument fix, may not change the rules either.
+    assert "rule code changed" in r.run(FakeHost(config, run_dir), rc_id="rc-synthetic", prior=once)["stopped_at"]
+    same = [{**once[0], "pins": {"rules_sha256": "f" * 64}}]
+    assert r.run(FakeHost(config, run_dir), rc_id="rc-synthetic", prior=same).get("stopped_at") is None
+
+
+def test_the_rule_fingerprint_covers_the_rule_closure(tmp_path, monkeypatch):
+    manifest = {"functions": [{"name": "identity", "sha256": "a" * 64}], "extra_hashes": [{"name": "RX", "sha256": "b" * 64}]}
+    path = tmp_path / "manifest.json"
+    monkeypatch.setattr(r.pins, "require", lambda *a, **k: None)
+    monkeypatch.setattr(r.pins, "verify", lambda *a, **k: {"verdict": "PASS", "mismatches": []})
+    host = r.LocalHost({"manifest": str(path), "instrument_dir": str(tmp_path)}, tmp_path / "run")
+    path.write_text(json.dumps(manifest))
+    first = host.pins()["rules_sha256"]
+    path.write_text(json.dumps({**manifest, "extra_hashes": [{"name": "RX", "sha256": "c" * 64}]}))
+    assert host.pins()["rules_sha256"] != first  # A changed constant or regex is a changed rule.
+
+
+@pytest.mark.parametrize("result, done", [({"completed": True, "outcome": "success"}, True),
+                                          ({"completed": True, "outcome": "failure"}, False),
+                                          ({"completed": True}, False), ({"completed": False, "outcome": "success"}, False)])
+def test_a_turn_counts_only_when_it_completed_successfully(tmp_path, result, done):
+    import threading
+    from types import SimpleNamespace
+    ctx = {"provider": SimpleNamespace(lock=threading.Lock(), step=None), "chats": {"L": "chat-l"},
+           "gateway": SimpleNamespace(turn=lambda chat, step, text: result)}
+    assert r.LocalHost({}, tmp_path).turn(ctx, {"id": "e0-L-0", "conversation": "L", "user_text": "x"}) is done
+
+
+def test_replay_paths_are_absolute_whatever_the_cli_was_given(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    host = r.LocalHost({"interpreter": "venv/bin/python", "instrument_dir": "inst", "rc": {"lcm_tree": "rc"},
+                        "ga": {"lcm_tree": "ga"}, "constants_argv": ["{python}", "{instrument_dir}", "{rc_tree}",
+                        "{ga_tree}", "{out}"], "replay_argv": ["true"]}, "run")
+    seen = []
+    monkeypatch.setattr(r.sandbox, "wrap", lambda argv, **k: seen.append(argv) or ["/usr/bin/false"])
+    host.replay({"name": "rc", "port": 1}, {"id": "e0-L-0"}, "t0", "h8")
+    assert seen and all(os.path.isabs(a) for a in seen[0]), seen
 
 
 def test_the_rules_module_is_configured_before_planning_and_before_bar1(setup):
@@ -221,7 +259,7 @@ def test_a_turn_not_completed_is_never_swallowed(setup, fail, missing):
 
 def test_p1_failure_with_an_instrument_fix_stops_cleanly(setup):
     _, config, run_dir = setup
-    twice = [{"rc": "rc-synthetic", "verdict": {"raw": bars.INCONCLUSIVE}, "pins": {"functions_sha256": "f" * 64}}] * 2
+    twice = [{"rc": "rc-synthetic", "verdict": {"raw": bars.INCONCLUSIVE}, "pins": {"rules_sha256": "f" * 64}}] * 2
     receipt = r.run(FakeHost(config, run_dir, fail="P1"), rc_id="rc-synthetic", prior=twice, instrument_fix="fix-1")
     assert receipt["stopped_at"] == "P1" and "verdict" not in receipt
 
