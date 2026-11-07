@@ -2,6 +2,7 @@
 import hashlib
 import json
 import sqlite3
+import time
 
 import pytest
 
@@ -195,6 +196,7 @@ def test_split_fragment_has_no_cap(n, verdict):
 
 @pytest.mark.parametrize("change,verdict", [
     ("tools", "PASS"), ("deleted", "FAIL"), ("duplicated", "FAIL"), ("user", "FAIL"),
+    ("duplicated_after", "FAIL"), ("other_user", "FAIL"),
 ])
 def test_twenty_fragment_answer_integrity(change, verdict):
     parts = tuple(f"part{i}" for i in range(20))
@@ -205,12 +207,27 @@ def test_twenty_fragment_answer_integrity(change, verdict):
         rows = [r for r in rows if r[0] != 11]
     elif change == "duplicated":
         rows += [(11.5, "S", "assistant", parts[9], 1)]
+    elif change == "duplicated_after":
+        rows += [(21.5, "S", "assistant", parts[9], 1)]
     else:
-        rows += [(11.5, "S", "user", "", 1)]
+        rows += [(11.5, "other" if change == "other_user" else "S", "user", "", 1)]
     out = multiset.phase_c_score([("user", "prompt"), ("assistant", "\n\n".join(parts))], rows)
     assert out["verdict"] == verdict
     if change == "deleted":
         assert out["deficit_rows"] == 1
+    if change == "duplicated_after":
+        assert (out["accepted_split_keys"], out["surplus_rows"]) == (1, 1)
+    if change == "other_user":
+        assert out["accepted_split_keys"] == 0
+
+
+def test_long_unmatched_run_cost():
+    rows = split_rows(("x" * 100,) * 1000)
+    start = time.monotonic()
+    out = multiset.phase_c_score([("user", "prompt"), ("assistant", "y" * 200)], rows)
+    elapsed = time.monotonic() - start
+    assert out["verdict"] == "FAIL"
+    assert elapsed < 5, f"phase_c_score took {elapsed:.3f}s"
 
 
 def test_two_twelve_fragment_answers_use_distinct_rows():
@@ -243,6 +260,7 @@ def test_split_cannot_cross_sessions_or_reverse_fragments():
     ("onetwothree", ("one", "two", "three")),
     ("one \t two\r\nthree", ("one", "two", "three")),
     ("é two", ("e\u0301", "two")),
+    ("é ö", ("e", "\u0301 o", "\u0308")),
     (" one two ", ("one", "two")),
 ])
 def test_inherited_v2_normalized_joins_are_phase_c_only(answer, parts):

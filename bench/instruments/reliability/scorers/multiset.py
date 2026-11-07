@@ -394,6 +394,11 @@ def score(expected: list[tuple[str, str]], stored_rows: list[tuple], host: dict 
     }
 
 
+def _nonspace_nfd_len(text):
+    # Exact: NFD counts add across joins and vkey preserves them; isspace() agrees with regex \s.
+    return sum(not ch.isspace() for ch in unicodedata.normalize("NFD", text))
+
+
 def phase_c_score(expected: list[tuple[str, str]], rows: list[tuple]) -> dict:
     """Phase C adopts the release multiset-v2 split predicate (r2, sha256 8943a6a7…) without its own-turn
     prompt rule; unlike r2, user boundaries span the owning conversation. Store order guards own turns.
@@ -423,15 +428,20 @@ def phase_c_score(expected: list[tuple[str, str]], rows: list[tuple]) -> dict:
         if role != "assistant" or held[vk] or want[vk] != 1:
             continue
         hits = []
+        limit = _nonspace_nfd_len(text)
         for session, arows in assistants.items():
             for k in range(len(arows)):
                 ids, parts = [arows[k][0]], [arows[k][1]]
+                total = _nonspace_nfd_len(parts[0])
                 for j in range(k + 1, len(arows)):
                     sid, content = arows[j]
                     if any(ids[0] < u < sid for ids_in_session in users.values() for u in ids_in_session):
                         break
                     ids.append(sid)
                     parts.append(content)
+                    total += _nonspace_nfd_len(content)
+                    if total > limit:
+                        break
                     if vk in (vkey(role, " ".join(parts)), vkey(role, "".join(parts))):
                         if all(vkey(role, c) not in want for c in parts):
                             hits.append((ids, session))
