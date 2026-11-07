@@ -660,7 +660,8 @@ class IdentityAnchorMixin:
         if self._store.get_message_relations([target], "alt_stamp"):
             return  # the live receipt already consumed this occurrence
         if conn.execute("SELECT 1 FROM sqlite_master WHERE name='message_relations'").fetchone() and conn.execute(
-                "SELECT 1 FROM message_relations WHERE kind='possible_replay_of' AND related_store_id=?", (target,)).fetchone():
+                "SELECT 1 FROM message_relations WHERE kind='possible_replay_of' AND related_store_id=? "
+                "AND observed_at IS NULL", (target,)).fetchone():  # a borrowed-stamp link never consumes its target
             return
         if generated:
             if observed is None:

@@ -7091,7 +7091,8 @@ class LCMEngine(
                     targets = self._store.find_rows_by_observed_at(self._conversation_id, list(sessions), stamps)
                     current = self._store.get_batch([sid for idx, sid in stored_at.items() if idx in previous and sid])
                     used = {row["related_store_id"] for row in self._store.get_message_relations(
-                        [row["store_id"] for row in targets], "possible_replay_of", related=True)}
+                        [row["store_id"] for row in targets], "possible_replay_of", related=True)
+                        if row["observed_at"] is None}  # a borrowed-stamp link never consumes its target
                     linked = {row["store_id"] for row in self._store.get_message_relations(
                         list(current), "possible_replay_of")}
                     for idx, (session, row) in sorted(previous.items()):
@@ -7183,24 +7184,29 @@ class LCMEngine(
                 return
             # The borrowed stamp: an earlier user row of other text holds the later or the earlier copy's
             # stamp as its own (exact equality).
-            pairs = [(sid, target) for sid, target, text, carriers in pairs if any(
-                isinstance(content, str) and content.strip() and content.strip() != text
-                for at, carrier in carriers for (content,) in conn.execute(
-                    "SELECT content FROM messages WHERE conversation_id IN (?, '') AND observed_at=? "
-                    "AND session_id=? AND role='user' AND store_id<?", (conversation, at, session, carrier)))]
+            def borrowed(at, carrier, text):
+                return any(isinstance(content, str) and content.strip() and content.strip() != text
+                           for (content,) in conn.execute(
+                               "SELECT content FROM messages WHERE conversation_id IN (?, '') AND observed_at=? "
+                               "AND session_id=? AND role='user' AND store_id<?", (conversation, at, session, carrier)))
+            pairs = [(sid, target, next((at for at, carrier in carriers if borrowed(at, carrier, text)), None))
+                     for sid, target, text, carriers in pairs]
+            pairs = [(sid, target, at) for sid, target, at in pairs if at is not None]
             if not pairs:
                 return
             with self._ingest_evidence():
                 # The relations the other linkers already wrote are the shared reservations: a source keeps
-                # its one link, and a target is spent once.
+                # its one link, and this linker links a target once.
                 linked = {row["store_id"] for row in self._store.get_message_relations(
-                    [sid for sid, _target in pairs], "possible_replay_of")}
+                    [sid for sid, _target, _at in pairs], "possible_replay_of")}
                 used = {row["related_store_id"] for row in self._store.get_message_relations(
-                    [target for _sid, target in pairs], "possible_replay_of", related=True)}
-                for sid, target in pairs:
+                    [target for _sid, target, _at in pairs], "possible_replay_of", related=True)}
+                for sid, target, at in pairs:
                     if sid in linked or target in used:
                         continue
-                    self._store.add_message_relations([[(sid, "possible_replay_of", target, None, None)]])
+                    # The borrowed stamp in observed_at marks the link as non-consuming: the other linkers
+                    # still give a later copy of E its own link to E.
+                    self._store.add_message_relations([[(sid, "possible_replay_of", target, None, at)]])
                     linked.add(sid)
                     used.add(target)
         except Exception as exc:
@@ -7894,8 +7900,9 @@ class LCMEngine(
                             has_relations = conn.execute(
                                 "SELECT 1 FROM sqlite_master WHERE name='message_relations'").fetchone()
                             used = {row[0] for row in conn.execute(
-                                "SELECT related_store_id FROM message_relations "
-                                "WHERE kind='possible_replay_of' AND related_store_id<?", (first,))} if has_relations else set()
+                                "SELECT related_store_id FROM message_relations WHERE kind='possible_replay_of' "
+                                # A borrowed-stamp link (its stamp in observed_at) never consumes its target.
+                                "AND related_store_id<? AND observed_at IS NULL", (first,))} if has_relations else set()
                             # A copy another linker already annotated in this ingest (the #2378 rotation pairing)
                             # keeps that one link: one source row never carries two possible_replay_of links.
                             linked = {row[0] for row in conn.execute(
