@@ -388,18 +388,20 @@ EMPTY_RECOVERY_NUDGE = ("You just executed tool calls but returned an empty resp
                         "results above and continue with the task.")
 
 
-def empty_recovery_rows(rows, host_rows=(), group=lambda session: session):
+def empty_recovery_rows(rows, host_rows=(), group=lambda session: session, strip=lambda content, session: content):
     """Stored copies of the host's empty-response recovery pair (#2087), matched by structure and exact host text: in
     one session's store order, a tool row, then an assistant row whose content is exactly ``EMPTY_RECOVERY_REPLY`` with
     no tool calls, then a user row whose content is exactly ``EMPTY_RECOVERY_NUDGE``. A user row with the nudge's text
     and no such pair in front of it is a real turn and stays scored. The host never saves the flagged pair, so a pair in a
     lineage (``group``: a compression rotation joins its parent) whose host rows hold a saved row with either text is
-    ambiguous: it may be a copy of a real reply or turn, or the host's scaffolding standing in for a lost real row. It
+    ambiguous: it may be a copy of a real reply or turn, or the host's scaffolding standing in for a lost real row. A
+    saved user row is read behind its verified summary carrier (``strip``), as parity reads it. It
     is not excluded (it stays scored) and it is returned apart, for a hand check. ``rows``: every stored row of the
     audited sessions, (store_id, session, role, content, tool_calls, ...), so adjacency is the store's own order;
     ``host_rows``: (id, session, role, content, ...). Returns (matched store ids, ambiguous store ids)."""
-    saved = {group(r[1]) for r in host_rows if (r[2], r[3]) in {("assistant", EMPTY_RECOVERY_REPLY),
-                                                                 ("user", EMPTY_RECOVERY_NUDGE)}}
+    saved = {group(r[1]) for r in host_rows
+             if (r[2], strip(r[3], r[1]) if r[2] == "user" else r[3]) in {("assistant", EMPTY_RECOVERY_REPLY),
+                                                                         ("user", EMPTY_RECOVERY_NUDGE)}}
     by_session = defaultdict(list)
     for r in sorted(rows):
         by_session[r[1]].append(r)
@@ -816,7 +818,7 @@ def audit(state_db: Path, lcm_db: Path, logs=(), since=None, events_path=None, l
     # Matched on every stored row of the audited sessions, before any is set aside, so a removed row never makes two
     # rows adjacent; an undo's retained row stays the undo's.
     recovery, ambiguous_recovery = empty_recovery_rows([r for r in stored if audited(r[0])],
-                                                       [r for r in host_rows if group(r[1]) in roots], group)
+                                                       [r for r in host_rows if group(r[1]) in roots], group, strip)
     recovery, ambiguous_recovery = recovery - retained, ambiguous_recovery - retained
     if ambiguous_recovery:  # scored, but parity alone cannot tell a copy of a real row from scaffolding for a lost one
         hand_checks.append({"reason": "host_empty_recovery_ambiguous", "store_ids": sorted(ambiguous_recovery)})

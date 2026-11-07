@@ -1456,6 +1456,21 @@ def test_a_synthetic_pair_in_a_lineage_that_lost_a_real_pair_is_a_hand_check(tmp
     assert {"reason": "host_empty_recovery_ambiguous", "store_ids": [9, 10]} in out["gate"]["hand_checks"]
 
 
+def test_a_nudge_the_host_saved_behind_a_summary_carrier_makes_the_pair_ambiguous(tmp_path):
+    """The host merged LCM's summary carrier with a nudge-text turn and saved that row; the store holds the turn's own
+    text after an "(empty)" reply and a tool row. Read behind the verified carrier, the host saved the nudge's text, so
+    the pair is ambiguous: kept scored (the turn is expected, not a deficit) and a hand check."""
+    merged = {"role": "user", "content": CARRIER + "\n\n" + audit.EMPTY_RECOVERY_NUDGE}
+    host = turn(1) + [("S1", call("c1")), ("S1", result("c1")), ("S1", merged)] + turn(2)
+    stored = host[:4] + [("S1", EMPTY), ("S1", NUDGE)] + host[5:]
+    out = Home(tmp_path, ONE, host, stored=stored, nodes=NODE).run()
+    if out["parity"]["lineages"]["S1"]["expected_rows"] != 7:
+        pytest.fail("setup: the merged row is not expected behind its verified carrier")
+    assert out["host_empty_recovery"] == {"rows": 0, "store_ids": [], "ambiguous_store_ids": [5, 6]}
+    assert out["parity"]["totals"]["missing_rows"] == 0
+    assert {"reason": "host_empty_recovery_ambiguous", "store_ids": [5, 6]} in out["gate"]["hand_checks"]
+
+
 def test_a_recovery_pair_in_front_of_a_replay_copy_does_not_unplace_it(tmp_path):
     """The proven recovery rows are out of parity, so they must not break the view-order condition either: a #2203
     copy stored after a recovery pair is still attributed (not unplaced, which would fail the silent-surplus bar)."""
