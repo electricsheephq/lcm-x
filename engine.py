@@ -5829,7 +5829,7 @@ class LCMEngine(
         handler = handlers.get(name)
         if handler:
             return handler(args, engine=self,
-                           **{k: v for k, v in kwargs.items() if k in {"delivery_unit", "delivery_order", "adjacent_reply", "summary_event_time", "snippet_window_hits"}})
+                           **{k: v for k, v in kwargs.items() if k in {"delivery_unit", "delivery_order", "adjacent_reply", "summary_event_time", "snippet_window_hits", "extra_entries"}})
         return json.dumps({"error": f"Unknown LCM tool: {name}"})
 
     def _database_path_source(self) -> str:
@@ -7941,17 +7941,17 @@ class LCMEngine(
                                 key = (conv, role, stripped, call_id, calls, name)
                                 if stripped is not None and key in stripped_wanted:
                                     stripped_earlier.setdefault(key, []).append((sid, stamp))
+                            has_relations = conn.execute(
+                                "SELECT 1 FROM sqlite_master WHERE name='message_relations'").fetchone()
                             used = {row[0] for row in conn.execute(
                                 "SELECT related_store_id FROM message_relations "
-                                "WHERE kind='possible_replay_of' AND related_store_id<?", (first,))} if conn.execute(
-                                    "SELECT 1 FROM sqlite_master WHERE name='message_relations'").fetchone() else set()
+                                "WHERE kind='possible_replay_of' AND related_store_id<?", (first,))} if has_relations else set()
                             used.update(attempt.get("link_targets_used", ()))
                             seeded = list(conn.execute(
                                 "SELECT r.store_id,r.kind,m.content FROM message_relations r "
                                 "LEFT JOIN messages m ON m.store_id=r.related_store_id "
                                 "WHERE r.kind IN ('possible_replay_of','link_pending') "
-                                "AND r.store_id>=?", (first,))) if conn.execute(
-                                    "SELECT 1 FROM sqlite_master WHERE name='message_relations'").fetchone() else []
+                                "AND r.store_id>=?", (first,))) if has_relations else []
                             linked = {row[0] for row in seeded}
                             linked.update(attempt.get("link_sources_used", ()))
                             prelinked = {sid: content for sid, kind, content in seeded if kind == "possible_replay_of"}
@@ -10615,7 +10615,7 @@ class LCMEngine(
                 fts_anchor=False,
                 delivery_unit="hits",
                 delivery_order="score", adjacent_reply=False,
-                snippet_window_hits=0,
+                snippet_window_hits=0, extra_entries=0,
                 summary_event_time=False,
             )
             payload = json.loads(raw)

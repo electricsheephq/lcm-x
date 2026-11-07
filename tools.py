@@ -104,7 +104,7 @@ from .search_query import (
 from .store import _normalize_observed_at, build_message_fts_spec
 from .vector_store import VectorStore, _interrupt_read_on_deadline
 from .config import effective_embedding_model, LCMConfig, embedding_provider_id, normalize_embedding_provider, profile_bound
-from .config import _recall_snippet_window_hits
+from .config import _recall_extra_entries, _recall_snippet_window_hits
 
 if TYPE_CHECKING:
     from .engine import LCMEngine
@@ -3313,6 +3313,7 @@ def _lcm_recall_answer_ready_content(
     expanded_limit: int = _LCM_RECALL_ANSWER_READY_EXPANDED_HIT_LIMIT,
     rows_by_id: dict[int, dict[str, Any]] | None = None,
     fts_arm_index: int | None = None,
+    char_cap: int = _LCM_RECALL_ANSWER_READY_CONTENT_CHARS,
 ) -> dict[tuple, dict[str, Any]]:
     """Hydrate selected exact refs with bounded reads and no retrieval search.
 
@@ -3349,7 +3350,7 @@ def _lcm_recall_answer_ready_content(
                 content,
                 match_start=0,
                 match_end=min(len(content), _LCM_RECALL_SNIPPET_CHARS),
-                char_cap=_LCM_RECALL_ANSWER_READY_CONTENT_CHARS,
+                char_cap=char_cap,
             )
             hydrated[identity] = {
                 **window,
@@ -3365,7 +3366,7 @@ def _lcm_recall_answer_ready_content(
             continue
         content = str(stored.get("content") or "")
         span = hit.get("chunk_span") or {}
-        if not span and len(content) > _LCM_RECALL_ANSWER_READY_CONTENT_CHARS:
+        if not span and len(content) > char_cap:
             # Short rows keep their legacy evidence_span and output bytes.
             # Emoji has no lexical hydration terms; use LIKE's verified span.
             for candidate in [hit, *entry.get("_alternates", [])]:
@@ -3412,7 +3413,7 @@ def _lcm_recall_answer_ready_content(
             content,
             match_start=match_start,
             match_end=match_end,
-            char_cap=_LCM_RECALL_ANSWER_READY_CONTENT_CHARS,
+            char_cap=char_cap,
         )
         hydrated[identity] = {
             **window,
@@ -3425,29 +3426,50 @@ def _lcm_recall_answer_ready_content(
 
 
 def _lcm_recall_snippet_windows(
-    engine: "LCMEngine", entries: list[dict[str, Any]], *, deadline: float, **kwargs,
+    engine: "LCMEngine", entries: list[dict[str, Any]], *, deadline: float,
+    extra_entries: bool = False, **kwargs,
 ) -> tuple[dict[tuple, dict[str, Any]], str | None]:
     """Optional content read on a private connection, bounded by recall's budget."""
     if time.monotonic() >= deadline:
         return {}, "deadline"
     try:
+        messages = [entry for entry in entries if entry["hit"].get("kind") == "message_excerpt"
+                    and entry["hit"].get("store_id") is not None] if extra_entries else entries
         db_path = Path(engine._store.db_path).resolve()
         with closing(sqlite3.connect(
             f"{db_path.as_uri()}?mode=ro", uri=True,
             timeout=max(0.001, deadline - time.monotonic()),
-        )) as conn:
-            conn.execute("PRAGMA query_only=ON")
-            conn.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
-            ids = [int(entry["hit"]["store_id"]) for entry in entries]
+        )) if messages else nullcontext() as conn:
+            if conn is not None:
+                conn.execute("PRAGMA query_only=ON")
+                conn.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
+            ids = [int(entry["hit"]["store_id"]) for entry in messages]
+            columns = "content, role, source" + (", observed_at, observed_at_source" if extra_entries else "")
             rows = conn.execute(
-                "SELECT store_id, content, role, source FROM messages WHERE store_id IN ("
+                "SELECT store_id, " + columns + " FROM messages WHERE store_id IN ("
                 + ",".join("?" for _ in ids) + ")", ids,
-            ).fetchall()
-            rows_by_id = {row[0]: dict(zip(("content", "role", "source"), row[1:])) for row in rows}
-            content = _lcm_recall_answer_ready_content(engine, entries, rows_by_id=rows_by_id, **kwargs)
+            ).fetchall() if conn is not None else []
+            rows_by_id = {row[0]: dict(zip(columns.split(", "), row[1:])) for row in rows}
+            # An extra shows only event_time, so a carried (borrowed) stamp is
+            # shown as no time rather than as the row's own.
+            timed = [int(sid) for sid, row in rows_by_id.items() if row.get("observed_at") is not None]
+            carried = (engine._store.get_carried_stamp_ids(timed, connection=conn)
+                       if extra_entries and timed else set())
+            for sid in carried:
+                rows_by_id[sid]["observed_at"] = None
+            content = _lcm_recall_answer_ready_content(engine, messages, rows_by_id=rows_by_id, **kwargs)
     except Exception as exc:  # noqa: BLE001 - optional read must never fail recall
-        logger.warning("lcm_recall snippet window read failed: %s", type(exc).__name__)
+        logger.warning("lcm_recall %s read failed: %s",
+                       "extra entries" if extra_entries else "snippet window", type(exc).__name__)
         return {}, "deadline" if time.monotonic() >= deadline else "read_error"
+    if extra_entries:
+        for entry in entries:
+            hit = entry["hit"]
+            if _hit_identity(hit) not in content:
+                snippet = hit.get("snippet") or ""
+                content[_hit_identity(hit)] = _lcm_recall_content_window(
+                    snippet, match_start=0, match_end=len(snippet), char_cap=300,
+                )
     return ({}, "deadline") if time.monotonic() >= deadline else (content, None)
 
 
@@ -4928,6 +4950,7 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
         strict_selector_factory=partial(_LcmRecallStrictSelector, engine=engine),
         hydrate=partial(_lcm_recall_answer_ready_content, engine),
         read_snippet_windows=partial(_lcm_recall_snippet_windows, engine),
+        read_extra_entries=partial(_lcm_recall_snippet_windows, engine, extra_entries=True),
         read_event_time=partial(_lcm_recall_event_time_rows, engine),
         event_time_fields=_lcm_recall_event_time,
         read_occurrence_source=lambda store_id: (
@@ -4938,6 +4961,9 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
         session_delivery=session_delivery,
         adjacent_reply=adjacent_pairs,
         adjacent_reply_unavailable=adjacent_unavailable,
+        extra_entries=_recall_extra_entries(
+            kwargs.get("extra_entries", getattr(engine._config, "recall_extra_entries", 0)),
+        ),
         snippet_window_hits=_recall_snippet_window_hits(
             kwargs.get("snippet_window_hits", getattr(engine._config, "recall_snippet_window_hits", 0)),
         ),
