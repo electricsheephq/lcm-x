@@ -1,9 +1,10 @@
 """Pins the #2377 v7 attribution oracle's scope (release manager condition on 2c80642f).
 
-The per-key (multiset) silent check applies ONLY to rows the product cannot tell apart: same scorer
-key, same stamp or none, not ledger-bound. Rows with their own stamp keep the per-row check, and a
-stamped replay whose equal-stamp original exists must link to that original. These tests run the
-oracle on synthetic rows, so a later edit cannot silently widen the multiset scope.
+Per-row checks apply to the rows the product CAN tell apart: a ledger-bound occurrence, or a stamped
+copy unique among the added rows of its key that has an equal-stamp original; such a replay must carry
+its own link, to that original when exactly one exists. Every other replay pools with its scorer key,
+across stamps (release-manager ruling: a group is never widened across stamps that carry evidence).
+These tests run the oracle on synthetic rows, so a later edit cannot silently move either boundary.
 """
 
 import sqlite3
@@ -54,3 +55,20 @@ def test_distinguishable_rows_keep_the_per_row_check():
     unstamped = [_row(8), _row(11)]
     bound = _run([_row(5)], unstamped, {3: 8, 6: 11}, links=[(8, 5)], bound={6})
     assert bound.violations({3})["silent"] == [11]
+
+
+def test_restamped_replay_without_an_equal_stamp_original_pools_with_its_key():
+    """A29 in miniature, with the link-removal control. The original is stored at stamp 2 (row 5); the
+    host re-stamps the replay to 4 (row 8, host 6) and also sends a genuinely new unstamped key-mate
+    (row 11, host 3). No original has stamp 4, so nothing tells the replay from the new row."""
+    clean = dict(missing=[], silent=[], invalid=[])
+    before, added = [_row(5, stamp=2.0)], [_row(8, stamp=4.0), _row(11)]
+    assert _run(before, added, {6: 8, 3: 11}, links=[(11, 5)]).violations({3}) == clean
+    # Control 1: removing that link leaves a real silent copy of the key, and it is flagged.
+    assert _run(before, added, {6: 8, 3: 11}).violations({3})["silent"] == [8]
+    # Control 2: a replay WITH a unique equal-stamp original is checked per row: a key-mate's link
+    # does not cover it, and removing its own link is flagged.
+    evident = [_row(8, stamp=2.0), _row(11)]
+    assert _run(before, evident, {6: 8, 3: 11}, links=[(11, 5)]).violations({3})["silent"] == [8]
+    assert _run(before, evident, {6: 8, 3: 11}).violations({3})["silent"] == [8]
+    assert _run(before, evident, {6: 8, 3: 11}, links=[(8, 5)]).violations({3}) == clean

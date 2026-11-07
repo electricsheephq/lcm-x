@@ -73,32 +73,34 @@ class Run:
         invalid += [(s, ts, "multiple links") for s, ts in links.items() if len(ts) > 1]
         originals = {key(r) for r in self.before}
         genuinely_new_ids = {self.inserted[i] for i in new if i in self.inserted}
-        # Attribution. A replay copy the product CAN tell apart from its key-mates (its own stamp, or
-        # a ledger-bound host occurrence) is checked per row: it must carry the link itself, and a
-        # stamped copy whose own equal-stamp original exists must link to that original (§2.5's
-        # first tier). Only rows the product cannot tell apart (same scorer key, same stamp or none,
-        # not ledger-bound) are checked as a multiset: their replay copies must be matched by as many
-        # linked/pending rows of the group, because WHICH of them carries the link is not observable
-        # (NOTE §3 I-link) and the scorer counts per key. A group is never widened across stamps.
+        # Attribution. A replay copy the product CAN tell apart from its key-mates is checked per row:
+        # a ledger-bound host occurrence, or a stamped copy that is unique among the added rows of its
+        # key AND has an equal-stamp original (the evidence §2.5's first tier uses). It must carry the
+        # link itself, and must link to its own equal-stamp original when exactly one exists. Every
+        # other replay row pools with its scorer KEY, across stamps: a stamp no original carries is no
+        # evidence, so WHICH row of the key carries the link is not observable (NOTE §3 I-link) and the
+        # scorer counts per key. A group is never widened across stamps that carry evidence (an
+        # equal-stamp original). Pooling's blind spot, shared with the gate scorer: within one key in
+        # one batch, a dropped new row and an unlinked replay cancel in the count (no text is missing:
+        # the content is identical).
         bound_ids = {self.inserted[i] for i in self.bound if i in self.inserted}
         silent = []
         groups = {}
         for r in self.added:
             if key(r) not in originals:
                 continue
-            sid = r["store_id"]
-            distinct = sid in bound_ids or (r.get("observed_at") is not None and sum(
-                key(o) == key(r) and o.get("observed_at") == r["observed_at"] for o in self.added) == 1)
-            if distinct:
+            sid, stamp = r["store_id"], r.get("observed_at")
+            own = [o["store_id"] for o in self.before
+                   if stamp is not None and key(o) == key(r) and o.get("observed_at") == stamp]
+            unique = stamp is not None and sum(
+                key(o) == key(r) and o.get("observed_at") == stamp for o in self.added) == 1
+            if sid in bound_ids or (unique and own):
                 if sid not in genuinely_new_ids and sid not in links and sid not in pending:
                     silent.append(sid)
-                own = [o["store_id"] for o in self.before
-                       if key(o) == key(r) and r.get("observed_at") is not None
-                       and o.get("observed_at") == r["observed_at"]]
                 if sid not in genuinely_new_ids and len(own) == 1 and links.get(sid, own) != own:
                     invalid.append((sid, links[sid], "replay not linked to its own equal-stamp original"))
                 continue
-            groups.setdefault((key(r), r.get("observed_at")), []).append(sid)
+            groups.setdefault(key(r), []).append(sid)
         for rows in groups.values():
             replays = sum(sid not in genuinely_new_ids for sid in rows)
             attributed = [sid for sid in rows if sid in links or sid in pending]
