@@ -517,9 +517,6 @@ def _cold_ingest(build, monkeypatch, host, cursor=1):
     return rows
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="Codex P1: across cold ingests a linked replay copy counts as independent skip "
-                          "capacity, so a new identical pair is lost (cross-ingest capacity loss)")
 def test_A31_linked_replay_copy_is_not_independent_capacity(build, monkeypatch):
     """Codex P1 (three cold ingests): the linked @4 copy of the @2 original must not add skip capacity."""
     engine = build()
