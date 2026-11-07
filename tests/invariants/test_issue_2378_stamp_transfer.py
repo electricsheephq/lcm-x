@@ -60,6 +60,48 @@ def test_next_prompt_stamp_transfer_is_not_silent(build, cold, restamp_t, retain
     assert len({a for a, _b in links}) == len(links), evidence
 
 
+@pytest.mark.parametrize("fault", [False, True], ids=["control", "fault"])
+def test_link_pending_source_is_not_also_linked_by_the_transfer(build, monkeypatch, fault):
+    """#2377 v7: a failed link computation marks the batch link_pending; the transfer never links one too.
+
+    The re-stamped row is link_pending as well, so no per-row link records a carried stamp and the
+    transfer has no target. The control shows the same shape links without the fault.
+    """
+    engine = build()
+    before = history(False) + [{"role": "user", "content": T, "timestamp": T_REQ}]
+    engine.ingest(deepcopy(before))
+    view = engine.compress(deepcopy(before), force=True)
+    view += [{"role": "assistant", "content": "compress finished", "timestamp": T_REQ + 1},
+             {"role": "user", "content": P, "timestamp": T_REQ}]
+    engine.ingest(deepcopy(view))
+    engine.on_session_end("S", deepcopy(view))
+    engine.shutdown()
+    engine = build()
+    next(row for row in view if row.get("content") == P)["timestamp"] = T_COMMIT
+    next(row for row in view if row.get("content") == T)["timestamp"] = T_COMMIT - 1  # T re-stamped and linked
+    call = {"id": "call-2377", "type": "function", "function": {"name": "lookup", "arguments": "{}"}}
+    view += [{"role": "assistant", "content": "", "tool_calls": [call], "timestamp": T_COMMIT + 5},
+             {"role": "tool", "tool_call_id": "call-2377", "content": "lookup done", "timestamp": T_COMMIT + 6},
+             {"role": "user", "content": NEW, "timestamp": T_COMMIT + 10}]
+
+    def fail(*_args, **_kwargs):
+        raise ValueError("planned computation fault")
+
+    if fault:
+        monkeypatch.setattr(engine, "_plan_tool_replay_links", fail)
+    engine.ingest(deepcopy(view))
+    copies = [row["store_id"] for row in all_rows(engine) if row["content"] == P]
+    pending = {row["store_id"] for row in engine._store.get_message_relations(copies, "link_pending")}
+    linked = {a for a, _b in replay_links(engine)}
+    evidence = {"rows": copies, "pending": sorted(pending), "linked": sorted(linked & set(copies))}
+    assert len(copies) == 2, evidence
+    if not fault:  # the control: this shape takes the transfer link
+        assert copies[1] in linked and not pending, evidence
+        return
+    assert copies[1] in pending, evidence  # the fault path marked the new copy
+    assert not pending & linked, evidence
+
+
 def test_unreadable_placeholder_never_links_and_keeps_primary_links(build, monkeypatch):
     """Restoring a target's stored form can fail (an unreadable payload): the target is treated as retained, so the
     transferred prompt stays unlinked, and the re-stamped T link written before it survives."""
