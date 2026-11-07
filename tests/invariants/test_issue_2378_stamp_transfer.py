@@ -466,3 +466,65 @@ def test_rotation_fast_path_restamp_links_to_the_parent_original(build, cold):
     assert sum(row["content"] == NEW for row in rows) == 1, evidence
     assert [(session, stamp) for _sid, session, stamp in copies] == [("S", T_REQ), ("rotated", T_COMMIT)], evidence
     assert {(a, b) for a, b in links if a == copies[1][0]} == {(copies[1][0], copies[0][0])}, evidence
+
+
+@pytest.mark.parametrize("cold", [False, True], ids=["warm", "cold"])
+def test_retained_prompt_with_a_model_switch_note_still_vetoes(build, cold):
+    """The host prefixes a model-switch note to the retained old-stamp prompt; it is still that prompt, so a genuine
+    repeat at a new stamp stays unlinked."""
+    engine = build()
+    before = history(False) + [{"role": "user", "content": T, "timestamp": T_REQ}]
+    engine.ingest(deepcopy(before))
+    view = engine.compress(deepcopy(before), force=True)
+    assert engine._last_compression_status == "compacted"
+    view += [{"role": "assistant", "content": "compress finished", "timestamp": T_REQ + 1},
+             {"role": "user", "content": P, "timestamp": T_REQ}]
+    engine.ingest(deepcopy(view))
+    old = [row["store_id"] for row in all_rows(engine) if row["content"] == P]
+    assert len(old) == 1
+    engine.on_session_end("S", deepcopy(view))
+    if cold:
+        engine.shutdown()
+        engine = build()
+    else:
+        engine.on_session_start("S", conversation_id="conversation", platform="cli")
+    next(row for row in view if row.get("content") == P)["content"] = NOTE + P
+    next(row for row in view if row.get("content") == T)["timestamp"] = T_COMMIT - 1
+    view += [{"role": "user", "content": P, "timestamp": T_COMMIT},
+             {"role": "user", "content": NEW, "timestamp": T_COMMIT + 10}]
+    engine.ingest(deepcopy(view))
+    rows, links = all_rows(engine), replay_links(engine)
+    repeat = [row["store_id"] for row in rows if row["content"] == P and row["observed_at"] == T_COMMIT]
+    evidence = {"old": old, "repeat": repeat, "relations": sorted(links)}
+    assert sum(row["content"] == NEW for row in rows) == 1, evidence
+    assert len(repeat) == 1, evidence
+    assert not any(a == repeat[0] for a, _b in links), evidence
+
+
+def test_transfer_target_found_at_its_alt_stamp_too_links_once(build):
+    """Two carried turns are re-stamped and linked; the transferred prompt's original carries an alt_stamp at the
+    second turn's stamp, so the stamp lookup returns it once per stamp. It is one occurrence: link exactly once."""
+    t2, t2_req = "and then also check the staging logs please", T_REQ + 0.5
+    engine = build()
+    before = history(False) + [{"role": "user", "content": T, "timestamp": T_REQ},
+                               {"role": "user", "content": t2, "timestamp": t2_req}]
+    engine.ingest(deepcopy(before))
+    view = engine.compress(deepcopy(before), force=True)
+    assert engine._last_compression_status == "compacted"
+    view += [{"role": "assistant", "content": "compress finished", "timestamp": T_REQ + 1},
+             {"role": "user", "content": P, "timestamp": T_REQ}]
+    engine.ingest(deepcopy(view))
+    original = next(row["store_id"] for row in all_rows(engine) if row["content"] == P)
+    engine._store.add_message_relations([[(original, "alt_stamp", None, None, t2_req)]])
+    engine.on_session_end("S", deepcopy(view))
+    engine.on_session_start("S", conversation_id="conversation", platform="cli")
+    next(row for row in view if row.get("content") == T)["timestamp"] = T_COMMIT - 2
+    next(row for row in view if row.get("content") == t2)["timestamp"] = T_COMMIT - 1
+    next(row for row in view if row.get("content") == P)["timestamp"] = T_COMMIT
+    view.append({"role": "user", "content": NEW, "timestamp": T_COMMIT + 10})
+    engine.ingest(deepcopy(view))
+    rows, links = all_rows(engine), replay_links(engine)
+    copies = {content: [row["store_id"] for row in rows if row["content"] == content] for content in (T, t2, P)}
+    evidence = {"copies": copies, "original": original, "relations": sorted(links)}
+    assert all(len(ids) == 2 and (ids[1], ids[0]) in links for ids in copies.values()), evidence
+    assert [(a, b) for a, b in sorted(links) if a == copies[P][1]] == [(copies[P][1], original)], evidence
