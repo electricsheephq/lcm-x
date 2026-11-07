@@ -179,3 +179,104 @@ def test_a_row_in_another_session_never_links(build):
     sessions = {row["store_id"]: row["session_id"] for row in all_rows(engine)}
     assert [sessions[sid] for sid in copies] == ["S", "S2"]
     check(engine, stored, copies=copies, expected=set())
+
+
+# The link never consumes E. A later copy R of E must still take its own link from the re-stamp pairing, the
+# cursor-0 scan and the durable-recovery link, which each allow one consuming link per target.
+def borrowed_links(engine):
+    return {(a, b, stamp) for a, b, stamp in engine._store._conn.execute(
+        "SELECT store_id, related_store_id, observed_at FROM message_relations WHERE kind='possible_replay_of'")}
+
+
+@pytest.mark.parametrize("cold", [False, True], ids=["warm", "cold"])
+def test_the_link_records_its_borrowed_stamp(build, cold):
+    engine, _stored = borrowed_first(build, cold)
+    copies = ids(engine, P)
+    assert borrowed_links(engine) == {(copies[1], copies[0], T_LONG)}
+
+
+@pytest.mark.parametrize("rebind", [False, True], ids=["warm", "rebind"])
+def test_restamped_copy_still_links_to_a_target_of_a_borrowed_link(build, caplog, rebind):
+    from bench.instruments.reliability.scorers.multiset import split_surplus
+    from tests.invariants.test_issue_2378_restamp_link import T as T_RESTAMP, T_COMMIT, T_REQ, run
+
+    made = {}
+
+    def borrow(engine, _view):
+        # 302 shape: E (T at its own stamp) is stored; the host then shows T on an earlier turn's stamp.
+        target = next(row["store_id"] for row in all_rows(engine)
+                      if row["content"] == T_RESTAMP and row["observed_at"] == T_REQ)
+        shown = {"role": "user", "content": T_RESTAMP, "timestamp": 1130.0}
+        source = engine._store.append(engine._session_id, dict(shown), conversation_id=engine._conversation_id)
+        engine._link_borrowed_stamp_occurrences([shown], {0: source})
+        made.update(source=source, target=target)
+        if rebind:
+            engine.on_session_start("S", conversation_id=engine._conversation_id, platform="cli")
+
+    engine, rows = run(build, caplog, mode="inplace", uids=False, restamp=True, before_ingest=borrow)
+    restamped = [row["store_id"] for row in rows if row["content"] == T_RESTAMP and row["observed_at"] == T_COMMIT]
+    assert len(restamped) == 1
+    links = replay_links(engine)
+    assert {(made["source"], made["target"]), (restamped[0], made["target"])} <= links, sorted(links)
+    assert all(count == 1 for count in Counter(a for a, _b in links).values()), sorted(links)
+    held = [row["store_id"] for row in rows if row["content"] == T_RESTAMP]
+    evidence = {row["store_id"]: (row["session_id"], row["role"], row["content"]) for row in rows}
+    split = split_surplus([(("user", T_RESTAMP), len(held) - 1, held, [], evidence)],
+                          [(a, "possible_replay_of", b) for a, b in links])
+    assert (split["visible_surplus_rows"], split["silent_surplus_rows"]) == (len(held) - 1, 0), split
+
+
+@pytest.mark.parametrize("cold", [False, True], ids=["warm", "cold"])
+def test_cursor0_copies_still_link_to_targets_of_borrowed_links(cold, tmp_path, monkeypatch):
+    from hermes_lcm.engine import LCMEngine
+    from tests.test_issue_1286_cleanup_rewrite_proof import SID, Host
+    from tests.test_issue_2305_cursor0_replay_links import _assert_cursor0, _counts, _insert_case, _pairs
+
+    monkeypatch.setenv("LCM_INGEST_LEDGER", "shadow")
+    monkeypatch.setenv("LCM_IDENTITY_ANCHOR", "on")
+    monkeypatch.setenv("LCM_HOST_MESSAGE_UID", "off")
+    for name in ("_schedule_rollup_maintenance", "_schedule_embedding_maintenance"):
+        monkeypatch.setattr(LCMEngine, name, lambda *args: None)
+    host = Host(tmp_path, embeddings_enabled=False)
+    try:
+        _before, view, _added = _insert_case(host, cold=cold)
+        rows = [row["store_id"] for row in host.engine._store.get_session_messages(SID)]
+        # A borrowed-stamp link into every earlier row, in the linker's format (the borrowed stamp in observed_at).
+        host.engine._store.add_message_relations([[(rows[0], "possible_replay_of", target, None, T_LONG)]
+                                                  for target in rows[1:]])
+        host.engine.ingest(view)
+        _assert_cursor0(host.engine)
+        assert _counts(host.engine)["ledger.replay_pairs.cursor0"] == 7
+        assert len([pair for pair in _pairs(host.engine) if pair[0] != rows[0]]) == 7
+    finally:
+        host.close()
+
+
+def test_durable_recovery_still_links_to_a_target_of_a_borrowed_link(tmp_path, monkeypatch):
+    from tests.harness import ScriptedSummarizer, engine_context, pin_char_counter
+    from tests.invariants.test_issue_1505_recovery_stamp import lineage, message, users
+
+    pin_char_counter(monkeypatch)
+    ScriptedSummarizer("outage").install(monkeypatch)
+    lineage(tmp_path)
+    current = message("[T32] rebuild the index " * 500, 20.)
+    source = [message("[T31] earlier request", 10.), message("earlier reply", 11., "assistant"), current,
+              {"role": "tool", "content": "orphan result", "tool_call_id": "orphan", "timestamp": 21.}]
+    with engine_context(tmp_path, window=128000, session_id="parent", conversation_id="conv") as engine:
+        engine.ingest(source)
+        recovered = next(r["store_id"] for r in users(engine) if r["content"] == current["content"])
+        first = next(r["store_id"] for r in users(engine) if r["content"] == source[0]["content"])
+        engine._config.fresh_tail_count, engine._config.max_assembly_tokens = 64, 120
+        view = list(engine.compress(source, current_tokens=100, force=True))
+        assert engine._last_compression_status == "overflow_recovery"
+        view[-1]["timestamp"] = 30.
+        # A borrowed-stamp link into the recovered row, in the linker's format.
+        engine._store.add_message_relations([[(first, "possible_replay_of", recovered, None, 10.)]])
+    with engine_context(tmp_path, window=128000, session_id="parent", conversation_id="conv") as engine:
+        view[-1]["content"] = current["content"]
+        view.append(message("reply", 31., "assistant"))
+        engine.ingest(deepcopy(view))
+        copies = {r["store_id"] for r in users(engine) if r["content"] == current["content"]}
+        linked = {r["store_id"] for r in engine._store.get_message_relations(list(copies), "possible_replay_of")
+                  if r["related_store_id"] == recovered}
+        assert len(copies) == 2 and copies - {recovered} == linked, (sorted(copies), sorted(linked))
