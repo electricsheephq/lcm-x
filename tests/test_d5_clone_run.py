@@ -563,7 +563,7 @@ def test_rekey_copy_moves_the_whole_conversation_and_receipts_counts(rekey_copy,
 
 
 @pytest.mark.parametrize("fault", ["messages_destination", "lifecycle_destination", "ambiguous", "outside", "third_table",
-                                   "blank_key", "null_key"])
+                                   "blank_key", "null_key", "space_key", "old_variant", "destination_variant"])
 def test_rekey_copy_refuses_unsafe_inputs_without_updates(rekey_copy, tmp_path, fault):
     path, conversations = rekey_copy
     with closing(sqlite3.connect(path)) as db, db:
@@ -580,9 +580,19 @@ def test_rekey_copy_refuses_unsafe_inputs_without_updates(rekey_copy, tmp_path, 
             db.execute("INSERT INTO messages VALUES (4, 'other2', '', 'legacy')")
         elif fault == "null_key":
             db.execute("UPDATE messages SET conversation_id=NULL WHERE session_id='s1'")
+        elif fault == "space_key":  # Whitespace-only reads as blank, shared here with an unrelated session.
+            db.execute("UPDATE messages SET conversation_id=' \t' WHERE session_id='s1'")
+            db.execute("INSERT INTO messages VALUES (4, 'other2', ' \t', 'legacy')")
+        elif fault == "old_variant":  # A padded legacy copy of the key, owned by the same conversation.
+            db.execute("INSERT INTO messages VALUES (4, 'other2', ' old', 'legacy')")
+        elif fault == "destination_variant":
+            db.execute("INSERT INTO lcm_lifecycle_state VALUES (?, 'other')", (" " + r.gateway.session_key("d5-L") + " ",))
     before = inventory(path.parent)
     with pytest.raises(ValueError, match={"third_table": "unexpected", "blank_key": "legacy blank conversation_id: L$",
-                                          "null_key": "legacy blank conversation_id: L$"}.get(fault)):
+                                          "null_key": "legacy blank conversation_id: L$",
+                                          "space_key": "legacy blank conversation_id: L$",
+                                          "old_variant": "legacy variants: L$",
+                                          "destination_variant": "destination already has rows"}.get(fault)):
         r.rekey_copy_conversations(path, conversations, run_dir=tmp_path / "elsewhere" if fault == "outside" else tmp_path)
     assert inventory(path.parent) == before
 
@@ -659,6 +669,10 @@ def test_rekey_copy_refuses_two_conversations_with_one_destination(rekey_copy, t
 def test_local_arm_rekeys_after_routing_before_gateway_start(rekey_copy, tmp_path, monkeypatch):
     from types import SimpleNamespace
 
+    try:
+        import yaml  # noqa: F401
+    except ImportError:  # CI's main test job has no PyYAML; JSON is valid YAML for the config the arm writes.
+        monkeypatch.setitem(sys.modules, "yaml", SimpleNamespace(safe_dump=lambda data, **_: json.dumps(data)))
     path, conversations = rekey_copy
     home = path.parent
     path.rename(home / "store.db")
