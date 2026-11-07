@@ -1,0 +1,1 @@
+- Changed: the Claude Code unit 0.1.0 release notes give the time after which Claude Code stopped hooks (5.5 to 11.5 seconds) only for the three gate runs they name, and leave this release's own run to the result card.
