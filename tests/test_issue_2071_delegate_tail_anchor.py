@@ -231,3 +231,30 @@ def test_a_rejection_without_a_boundary_does_not_store_the_kept_tail_again(host)
         child.turn(ctx2, [*view, new], resumed)
     assert [row["content"] for row in child_rows(resumed)] == [
         *(row["content"] for row in stored), summary["content"], new["content"]]
+
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason="#2422: with many equal rows, a boundary recorded after a "
+                                                              "rejection can become ambiguous in a later view, and the "
+                                                              "counted fallback then credits a hidden stored row against a "
+                                                              "new one (main fails this sequence one view earlier)")
+def test_a_view_that_extends_the_last_one_appends_exactly_the_extension(host):  # noqa: F811
+    """Many equal rows after a restart (no boundary, no output record): each view extends the one before by a few new
+    rows, and exactly those rows must be appended."""
+    load, clone = host
+    ctx, _module = load()
+    engine = clone(ctx)
+    engine.on_session_start("parent", platform="cli", context_length=200_000)
+    child = Agent("child", **DELEGATE)
+    child.turn(ctx, [{"role": "user", "content": c} for c in "CCBA"], engine)
+    ctx2, _ = load()  # fresh module and engines: no in-memory boundary or output record
+    resumed = clone(ctx2)
+    resumed.on_session_start("parent", platform="cli", context_length=200_000)
+    child.turn(ctx2, [{"role": "user", "content": c} for c in "CABABB"], resumed)
+    previous = "CABABB"
+    for letters in ("CABABBAB", "CABABBABCHC", "CABABBABCHCHCC"):
+        before = "".join(row["content"] for row in child_rows(resumed))
+        child.turn(ctx2, [{"role": "user", "content": c} for c in letters], resumed)
+        after = "".join(row["content"] for row in child_rows(resumed))
+        assert after == before + letters[len(previous):], (letters, before, after)
+        previous = letters
