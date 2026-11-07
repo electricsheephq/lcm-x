@@ -135,3 +135,38 @@ def test_computation_cancellation_rolls_back_before_retry(build, monkeypatch):
     engine._ingest_messages([U, call(), X, call(4), dict(X, timestamp=4)])
     assert engine._store.get_session_count("S") == 5
     assert len(relations(engine)) == 2
+
+
+_RECURSIVE_SUMMARY_WALK = """
+    WITH RECURSIVE walk(kind,id) AS (
+        SELECT n.source_type, CAST(j.value AS INTEGER)
+        FROM summary_nodes n, json_each(n.source_ids) j
+        UNION SELECT n.source_type, CAST(j.value AS INTEGER)
+        FROM summary_nodes n JOIN walk w ON w.kind='nodes' AND n.node_id=w.id
+        JOIN json_each(n.source_ids) j
+    ) SELECT DISTINCT id FROM walk WHERE kind='messages'"""
+
+
+def test_summary_coverage_matches_the_recursive_walk(build):
+    """Every node is a root, so the flat read of message sources equals the transitive walk."""
+    from hermes_lcm.dag import SummaryNode
+    from hermes_lcm.reconcile import _summary_covered_message_ids
+
+    engine = build()
+    engine.ingest([U, call(), X, call(2), dict(X, timestamp=2), V])
+    ids = [r["store_id"] for r in engine._store.get_session_messages("S")]
+    leaves = []
+    for chunk in (ids[0:2], ids[2:4], [ids[4], 10**6]):  # one source id has no message row
+        leaf = SummaryNode(session_id="S", summary="leaf", source_ids=chunk)
+        engine._dag.add_node(leaf)
+        leaves.append(leaf.node_id)
+    node = SummaryNode(session_id="S", depth=1, summary="d1", source_ids=leaves[:2], source_type="nodes")
+    engine._dag.add_node(node)
+    for depth in range(2, 9):  # a deep condensed chain, each level also naming a missing node
+        node = SummaryNode(session_id="S", depth=depth, summary=f"d{depth}",
+                           source_ids=[node.node_id, 10**6 + depth], source_type="nodes")
+        engine._dag.add_node(node)
+    conn = engine._store._conn
+    expected = {row[0] for row in conn.execute(_RECURSIVE_SUMMARY_WALK)}
+    assert expected == {*ids[:5], 10**6}
+    assert _summary_covered_message_ids(conn) == expected
