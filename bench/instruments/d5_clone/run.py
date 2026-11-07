@@ -203,8 +203,8 @@ class LocalHost:
                 try:
                     with closing(capture._readonly(ctx["home"] / name)) as db:
                         ok = db.execute(f"PRAGMA {pragma}").fetchall() == [("ok",)]
-                except sqlite3.DatabaseError:
-                    ok = False  # A store too damaged to open or check is a failed check, never a crash.
+                except (sqlite3.DatabaseError, capture.CaptureError):
+                    ok = False  # A store too damaged, or in a state, to open read-only is a failed check, never a crash.
                 out.append({"kind": kind, "check": name, "status": "ok" if ok else "fail"})
         return out
 
