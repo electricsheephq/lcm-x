@@ -933,6 +933,12 @@ def audit(state_db: Path, lcm_db: Path, logs=(), since=None, events_path=None, l
             "coverage_floors": {"value": sorted(k for k, c in coverage.items() if not c["met"]),
                                 "pass": all(c["met"] for c in coverage.values())},
             "issue_1931_pass_A": {"value": issue_1931["pass_A"], "pass": issue_1931["pass_A"]}}
+    marked = sorted(forms["link_pending_rows"] & window_ids)
+    if marked:  # #2377: link computation raised for these rows, so a credited copy never reads as a clean pass
+        hand_checks.append({"reason": "link_pending_marked", "store_ids": marked})
+    failed_links = sorted(set(logged) & window_ids)
+    if failed_links:  # the relation write or the pending mark failed: logged, and held for a hand check
+        hand_checks.append({"reason": "logged_link_failed", "store_ids": failed_links})
     data_bars = [b for b in bars if b != "coverage_floors"]
     verdict = "GATE FAIL" if not all(bars[b]["pass"] for b in data_bars) else \
         "INCOMPLETE" if not bars["coverage_floors"]["pass"] or not ingests else \

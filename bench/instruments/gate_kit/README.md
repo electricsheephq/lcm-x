@@ -156,6 +156,8 @@ data bar fails or a floor is unmet). The detectors marked "detector" only add an
 | Reason | Ids | What to check |
 |---|---|---|
 | `exempted_1674`, `exempted_2203` | store ids | the exempted rows (see "Surplus limits") |
+| `link_pending_marked` | store ids | every audited row with a `link_pending` relation (`parity.link_pending_rows_total`): link computation raised for it, a defect signal even when the copy is credited as visible |
+| `logged_link_failed` | store ids | rows a logged `LCM tool replay link failed` line credits: the relation write or the pending mark failed |
 | `view_order_ambiguous` | store ids | repeated text allowed more than one in-order matching |
 | `merged_carrier_repeat` | host ids | a merged row of a text the lineage also holds at another time was not counted: a merged copy or a resend |
 | `merged_carrier_window_repeat` (detector) | host ids | with `--since`, a merged row in the window whose text an earlier, unscored segment holds: the window does not expect the parent's occurrence, so a resend and a replay look alike |

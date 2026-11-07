@@ -1235,6 +1235,19 @@ def test_a_logged_link_source_is_a_visible_copy(tmp_path, line, credited, unpars
         credited, credited, unparsed)
 
 
+def test_link_pending_marks_and_logged_links_hold_the_verdict_for_a_hand_check(tmp_path):
+    for name in ("clean", "marked", "logged"):
+        (tmp_path / name).mkdir()
+    clean = dup_home(tmp_path / "clean").run()
+    assert not [c for c in clean["gate"]["hand_checks"] if c["reason"] in ("link_pending_marked", "logged_link_failed")]
+    marked = dup_home(tmp_path / "marked", relations=[(3, "link_pending", None)]).run()
+    assert {"reason": "link_pending_marked", "store_ids": [3]} in marked["gate"]["hand_checks"]
+    assert marked["gate"]["verdict"] != "GATE PASS"
+    logged = dup_home(tmp_path / "logged").run(logs=[LINK.format(OK)])
+    assert {"reason": "logged_link_failed", "store_ids": [3]} in logged["gate"]["hand_checks"]
+    assert logged["gate"]["verdict"] != "GATE PASS"
+
+
 def test_route_link_pending_fields_are_summed(tmp_path):
     home = dup_home(tmp_path)
     lines = route("S1", "foreground", 0, 1, 2)[:-1] + " link_pending=2\n" + route("S1", "append", 2, 3, 3)[:-1] + \
