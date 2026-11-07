@@ -592,50 +592,83 @@ class IdentityAnchorMixin:
         copies the view's unchanged prefix ``[0, start)`` holds are reserved first. Counting stored copies, not
         bindings, keeps an upgraded store's pre-ledger rows from being stored again. The count compares a loose
         key (call ids, a result's call id, else role and stripped text), never fields a pre-ledger row can lack.
-        A stored row's reasoning-cleanup form counts as its copy. Past the audited tail this returns nothing.
+        A stored row's reasoning-cleanup form counts as its copy. Exact tool-id reads cover the full scope;
+        text copies are paged only when that scope exceeds the tail and a text candidate remains.
         Unsure is accounted (the positional replay, as before): a row with no comparable key (a lossy identity)
         and a tool result whose call is neither in the view before it nor stored."""
-        if capped:
-            # Past the audited tail, absence proves nothing: the audit adds nothing beyond its own finds, as on
-            # main. Long-session class A is a named limit (docs/exactly-once-ingest.md §5, #2455).
-            return []
-
-        def calls(msg) -> tuple:
+        def calls(msg, stored=False):
             value = msg.get("tool_calls") or ()
             if isinstance(value, str):
                 try:
                     value = json.loads(value)
                 except ValueError:
                     return ("?",)  # unreadable: equal to nothing, so never proof of a copy
+            if not stored and isinstance(value, list) and any(
+                    not isinstance(c.get("id"), str) for c in value if isinstance(c, dict)):
+                return None  # non-string host ids cannot prove absence against SQLite's JSON casts
             return tuple(sorted(str(c.get("id") or "") for c in value if isinstance(c, dict))) if isinstance(
                 value, list) else ()
 
         def key(msg, stored=False):
-            if calls(msg):
-                return ("call", calls(msg))
+            ids = calls(msg, stored=stored)
+            if ids is None:
+                return None
+            if ids:
+                return ("call", ids)
             if msg.get("role") == "tool" and msg.get("tool_call_id"):
-                return ("tool", str(msg["tool_call_id"]))
+                return ("tool", str(msg["tool_call_id"])) if stored or isinstance(msg["tool_call_id"], str) else None
             identity = self._message_replay_identity(msg, stored_row=stored)
             return None if _lossy(identity) else (identity[0], identity[1].strip())
 
-        index: dict = defaultdict(list)
-        for row in {int(row["store_id"]): row for rows in held.values() for row in rows}.values():
-            forms = {key(row, stored=True)}
-            identity = self._message_replay_identity(row, stored_row=True)
-            cleaned = None if calls(row) or _lossy(identity) else self._active_cleanup_replay_identity(identity)
-            forms |= {(cleaned[0], cleaned[1].strip())} if cleaned else set()  # the proven cleanup form (#1286)
-            for form in forms:
-                index[form].append(row)
         explained = set(excluded) | set(matched) | set(plan.get("matched", {})) | plan["replayed"] | set(missed)
-        reserved = Counter(key(identity_messages[idx]) for idx in range(min(start, len(messages)))
-                           if idx not in excluded and idx not in matched)
+        try:
+            candidates = {idx: key(identity_messages[idx]) for idx in range(start, cursor)
+                          if idx not in explained and not (identity_at(idx) is None and
+                          self._identity_is_lcm_scaffold(identity_messages[idx]))
+                          and not self._matches_ignore_message_patterns(messages[idx])}
+            wanted = [key(message) for message in identity_messages[start:cursor]]
+            ids = {cid for k in wanted if k for cid in (k[1] if k[0] == "call" else (k[1],) if k[0] == "tool" else ())}
+            session = str(self._session_id)
+            chain = self._identity_anchor_chain()
+            predecessors = self._rotation_predecessor_session_ids(session)
+            # The helper swallows read errors. Verify its reads before trusting the scope as complete.
+            for hop, source in enumerate([session, *predecessors]):
+                value = self._store.read_metadata_json(self._rotation_predecessor_metadata_key(source))
+                next_source = value if isinstance(value, str) and value and value not in [session, *predecessors[:hop]] else None
+                if next_source != (predecessors[hop] if hop < len(predecessors) else None):
+                    raise ValueError("incomplete rotation predecessor scope")
+            scope = list(dict.fromkeys([session, *chain, *predecessors]))
+            rows = {int(row["store_id"]): row for group in held.values() for row in group}
+            for source in scope:
+                if source != session and source not in chain:
+                    tail = self._store.get_session_tail(source, limit=max(64, 2 * (cursor - start)))
+                    capped = capped or len(tail) >= max(64, 2 * (cursor - start))
+                    rows.update((int(row["store_id"]), row) for row in tail)
+                rows.update((int(row["store_id"]), row) for row in self._store.rows_with_call_ids(
+                    source, ids, conversation_id=str(self._conversation_id or "")))
+            if capped and any(k and k[0] not in ("call", "tool") for k in candidates.values()):
+                for source in scope:
+                    after = 0
+                    while page := self._store.get_session_messages_after(source, after, limit=2000):
+                        rows.update((int(row["store_id"]), row) for row in page)
+                        after = int(page[-1]["store_id"])
+                        if len(page) < 2000:
+                            break
+            index: dict = defaultdict(list)
+            for row in rows.values():
+                forms = {key(row, stored=True)}
+                identity = self._message_replay_identity(row, stored_row=True)
+                cleaned = None if calls(row, stored=True) or _lossy(identity) else self._active_cleanup_replay_identity(identity)
+                forms |= {(cleaned[0], cleaned[1].strip())} if cleaned else set()  # proven cleanup form (#1286)
+                for form in forms:
+                    index[form].append(row)
+            reserved = Counter(key(identity_messages[idx]) for idx in range(min(start, len(messages)))
+                               if idx not in excluded and idx not in matched)
+        except Exception as exc:
+            logger.warning("LCM identity-anchor presence unavailable (%s); keeping positional replays", type(exc).__name__)
+            return []
         unaccounted = []
-        for idx in range(start, cursor):
-            message = identity_messages[idx]
-            if (idx in explained or identity_at(idx) is None and self._identity_is_lcm_scaffold(message)
-                    or self._matches_ignore_message_patterns(messages[idx])):
-                continue
-            wanted = key(message)
+        for idx, wanted in candidates.items():
             if wanted is None:
                 continue
             copies = [row for row in index.get(wanted, ()) if int(row["store_id"]) not in consumed]
@@ -643,7 +676,7 @@ class IdentityAnchorMixin:
                 consumed.add(int(copies[-1]["store_id"]))
                 continue
             if wanted[0] == "tool" and not any(  # never store a result without its call
-                    wanted[1] in calls(identity_messages[k]) for k in range(idx)) and not any(
+                    wanted[1] in (calls(identity_messages[k]) or ()) for k in range(idx)) and not any(
                     wanted[1] in k[1] for k in index if k and k[0] == "call"):
                 continue
             unaccounted.append(idx)
