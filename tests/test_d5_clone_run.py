@@ -220,7 +220,9 @@ def test_the_rule_fingerprint_freezes_every_pinned_file(tmp_path, monkeypatch):
 def test_a_turn_counts_only_when_it_completed_successfully(tmp_path, result, done):
     import threading
     from types import SimpleNamespace
-    ctx = {"provider": SimpleNamespace(lock=threading.Lock(), step=None), "chats": {"L": "chat-l"},
+    from collections import Counter
+    ctx = {"provider": SimpleNamespace(lock=threading.Lock(), step=None, stats={"calls_per_step": Counter({"e0-L-0": 1})}),
+           "chats": {"L": "chat-l"},
            "gateway": SimpleNamespace(turn=lambda chat, step, text: result)}
     assert r.LocalHost({}, tmp_path).turn(ctx, {"id": "e0-L-0", "conversation": "L", "user_text": "x"}) is done
 
@@ -507,3 +509,26 @@ def test_the_rules_module_can_import_its_pinned_siblings(tmp_path):
     assert rules["identity"]("x") == "x"
     assert sys.path == before  # The kit dir is on the path only while the module loads.
     sys.modules.pop("sibling_helper", None)
+
+
+@pytest.mark.parametrize("calls, outcome, done", [(0, "success", False), (1, "success", True), (2, "failure", False)])
+def test_a_turn_the_agent_never_ran_is_not_completed(tmp_path, calls, outcome, done):
+    """The host reports a turn it only queued (startup restore) as completed with success; the scripted provider's
+    agent calls for the step are the ground truth, so a step with no agent call never counts as a completed turn."""
+    import threading
+    from collections import Counter
+
+    class Provider:
+        lock, step = threading.Lock(), None
+        stats = {"calls_per_step": Counter()}
+
+    provider = Provider()
+
+    class Gateway:
+        def turn(self, chat, step_id, text):
+            provider.stats["calls_per_step"][step_id] += calls
+            return {"step": step_id, "completed": True, "outcome": outcome}
+
+    ctx = {"provider": provider, "gateway": Gateway(), "chats": {"L": "d5-L"}}
+    assert r.LocalHost({}, tmp_path).turn(ctx, {"id": "e1-L-0", "conversation": "L", "user_text": "x"}) is done
+    assert provider.step is None

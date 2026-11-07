@@ -34,6 +34,26 @@ class D5LocalAdapter(BasePlatformAdapter):
             await self.server.wait_closed()
         self._mark_disconnected()
 
+    def _host_restoring(self):
+        """The host's startup-restore gate: True while it queues every inbound turn (and later reports it complete
+        without running the agent), False once it opens, None when the gate cannot be found. The pinned host keeps
+        it on GatewayRunner (``_startup_restore_in_progress``), reached through the message handler it gave us."""
+        seen, todo = set(), [getattr(self, "_message_handler", None)]
+        while todo and len(seen) < 64:
+            obj = todo.pop()
+            if obj is None or id(obj) in seen:
+                continue
+            seen.add(id(obj))
+            if hasattr(type(obj), "_startup_restore_in_progress"):
+                return bool(obj._startup_restore_in_progress)
+            todo += [getattr(obj, "__self__", None), getattr(obj, "__wrapped__", None)]
+            for cell in getattr(obj, "__closure__", None) or ():
+                try:
+                    todo.append(cell.cell_contents)
+                except ValueError:  # An empty cell.
+                    pass
+        return None
+
     async def on_processing_complete(self, event, outcome):
         turn = self.turns.get(event.source.chat_id)
         if turn and turn[0] is event:
@@ -82,7 +102,7 @@ class D5LocalAdapter(BasePlatformAdapter):
             headers = {k.lower(): v.strip() for k, v in headers.items()}
             url = urlsplit(path)
             if method == "GET" and path == "/health":
-                status, result = 200, {"connected": True}
+                status, result = 200, {"connected": True, "restoring": self._host_restoring()}
             elif method == "GET" and url.path == "/replies":
                 chat = parse_qs(url.query, strict_parsing=True)["chat_id"][0]
                 hashes = list(self.replies.get(chat, ()))
