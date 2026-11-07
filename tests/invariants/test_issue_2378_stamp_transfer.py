@@ -123,3 +123,76 @@ def test_retained_prompt_vetoes_a_genuine_repeat(build, cold, host_form):
     assert sum(row["content"] == NEW for row in rows) == 1, evidence
     assert len(repeat) == 1, evidence
     assert not any(a == repeat[0] and b == old[0] for a, b in links), evidence
+
+
+def _rotate_then_store_p_at_carried_stamp(build):
+    """The compaction commits by rotating S into the child ``rotated``; the next prompt P then inherits T's
+    carried stamp and is stored first in the child."""
+    engine = build(rotating=True)
+    before = history(False) + [{"role": "user", "content": T, "timestamp": T_REQ}]
+    engine.ingest(deepcopy(before))
+    view = engine.compress(deepcopy(before), force=True)
+    assert engine._last_compression_status == "compacted"
+    engine.on_session_end("S", deepcopy(before))
+    engine.on_session_start("rotated", boundary_reason="compression", old_session_id="S",
+                            conversation_id="conversation", platform="cli")
+    view += [{"role": "assistant", "content": "compress finished", "timestamp": T_REQ + 1},
+             {"role": "user", "content": P, "timestamp": T_REQ}]
+    engine.ingest(deepcopy(view))
+    assert [row["session_id"] for row in all_rows(engine) if row["content"] == P] == ["rotated"]
+    return engine, view
+
+
+def _rebind_child(build, engine, view, cold):
+    """As the in-place cells: the child session ends, then binds again (warm) or after a restart (cold)."""
+    engine.on_session_end("rotated", deepcopy(view))
+    if cold:
+        engine.shutdown()
+        return build(rotating=True, session_id="rotated")
+    engine.on_session_start("rotated", conversation_id="conversation", platform="cli")
+    return engine
+
+
+def _assert_no_silent_copy(engine, *, linked):
+    rows, links = all_rows(engine), replay_links(engine)
+    copies = [row["store_id"] for row in rows if row["content"] == P]
+    # Content-free failure evidence: ids, sessions and relation kinds only.
+    evidence = {"rows": [(row["store_id"], row["session_id"]) for row in rows if row["content"] in (P, T)],
+                "relations": [(a, "possible_replay_of", b) for a, b in sorted(links)]}
+    assert sum(row["content"] == NEW for row in rows) == 1, evidence
+    t_copies = [row["store_id"] for row in rows if row["content"] == T]
+    assert len(t_copies) == 2 and (t_copies[1], t_copies[0]) in links, evidence
+    assert len(copies) == 2, evidence
+    expected = {(copies[1], copies[0])} if linked else set()
+    assert {(a, b) for a, b in links if a in copies} == expected, evidence
+    by_id = {row["store_id"]: row for row in rows}
+    assert all((by_id[a]["role"], by_id[a]["content"].strip()) ==
+               (by_id[b]["role"], by_id[b]["content"].strip()) for a, b in links), evidence
+    assert len({a for a, _b in links}) == len(links), evidence
+    assert len({b for _a, b in links}) == len(links), evidence
+
+
+@pytest.mark.parametrize("cold", [False, True], ids=["warm", "cold"])
+def test_rotation_child_stamp_transfer_is_not_silent(build, cold):
+    """The child holds P at T's carried stamp; the host then shows T re-stamped and P at its own stamp.
+    The child's own-stamp copy of P is the same occurrence, so it is linked to the child's first copy."""
+    engine, view = _rotate_then_store_p_at_carried_stamp(build)
+    engine = _rebind_child(build, engine, view, cold)
+    next(row for row in view if row.get("content") == P)["timestamp"] = T_COMMIT
+    next(row for row in view if row.get("content") == T)["timestamp"] = T_COMMIT - 1
+    view.append({"role": "user", "content": NEW, "timestamp": T_COMMIT + 10})
+    engine.ingest(deepcopy(view))
+    _assert_no_silent_copy(engine, linked=True)
+
+
+@pytest.mark.parametrize("cold", [False, True], ids=["warm", "cold"])
+def test_rotation_child_genuine_repeat_is_not_linked(build, cold):
+    """Control: the host still shows the child's P at the carried stamp and the user really repeats P at a new
+    stamp. That repeat is a new occurrence, never linked to the old copy."""
+    engine, view = _rotate_then_store_p_at_carried_stamp(build)
+    engine = _rebind_child(build, engine, view, cold)
+    next(row for row in view if row.get("content") == T)["timestamp"] = T_COMMIT - 1
+    view += [{"role": "user", "content": P, "timestamp": T_COMMIT},
+             {"role": "user", "content": NEW, "timestamp": T_COMMIT + 10}]
+    engine.ingest(deepcopy(view))
+    _assert_no_silent_copy(engine, linked=False)
