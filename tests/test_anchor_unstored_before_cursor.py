@@ -928,6 +928,63 @@ def test_text_presence_only_normalizes_matching_role_text_rows(tmp_path, monkeyp
 
 
 
+@pytest.mark.parametrize("seeded", [False, True], ids=["exact-then-alias", "held-seeded-tail"])
+def test_presence_takes_an_exact_copy_before_a_cleanup_alias(tmp_path, monkeypatch, seeded):
+    # #2466 review: an exact stored copy is consumed before another row's cleanup alias, in store order, also when
+    # the audited tail (``held``) seeds the newest row first. Both displayed replies are stored: nothing is new.
+    engine = _engine(tmp_path)
+    try:
+        old = {"role": "assistant", "content": "old reasoning then reply"}
+        reply = {"role": "assistant", "content": "reply"}
+        first, second = (old, reply) if seeded else (reply, old)
+        engine._store.append_batch(SESSION, [first, *[{"role": "user", "content": f"padding {i}"}
+                                                     for i in range(598)], second])
+
+        def cleanup(identity):
+            return (identity[0], "reply", *identity[2:]) if identity[1] == old["content"] else None
+
+        monkeypatch.setattr(engine, "_active_cleanup_replay_identity", cleanup)
+        held = {}
+        if seeded:
+            newest = [r for r in engine._store.get_session_messages(SESSION) if r["content"] == "reply"]
+            held = {("assistant", "reply"): newest}
+        assert _presence(engine, [reply, old], held=held) == []
+    finally:
+        engine.shutdown()
+
+
+def test_presence_never_stores_a_result_whose_call_the_ignore_patterns_drop(tmp_path, monkeypatch):
+    # #2466 review: a call row the ignore patterns drop is never stored, so it cannot authorize storing its result.
+    engine = _engine(tmp_path)
+    try:
+        engine._store.append_batch(SESSION, [_a("irrelevant reply", 1)])
+        dropped = {**_call("call_new", 2), "content": "IGNORE this call"}
+        monkeypatch.setattr(engine, "_matches_ignore_message_patterns",
+                            lambda msg, **_k: str(msg.get("content") or "").startswith("IGNORE"))
+        assert _presence(engine, [dropped, _result("call_new", "new result", 3)]) == []
+        assert _presence(engine, [_call("call_kept", 4), _result("call_kept", "kept result", 5)]) == [0, 1]
+    finally:
+        engine.shutdown()
+
+
+def test_presence_with_many_identical_copies_is_linear(tmp_path):
+    # #2466 review: ~10k identical replies in one key bucket; every displayed copy is stored, nothing is new, and the
+    # audit does not rescan the bucket per row (quadratic took seconds). The bound here is loose for CI; the measured
+    # lock-time figure is in the PR body.
+    import time
+
+    engine = _engine(tmp_path)
+    try:
+        rows = [{"role": "assistant", "content": "OK"} for _ in range(9990)]
+        for k in range(0, len(rows), 1000):
+            engine._store.append_batch(SESSION, rows[k:k + 1000])
+        began = time.perf_counter()
+        assert _presence(engine, rows) == []
+        assert time.perf_counter() - began < 1.5
+    finally:
+        engine.shutdown()
+
+
 def test_paged_presence_preserves_cleanup_copy_consumption_order(tmp_path, monkeypatch):
     engine = _engine(tmp_path)
     try:
