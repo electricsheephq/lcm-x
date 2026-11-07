@@ -44,16 +44,17 @@ To turn capture off for a launch, set `LCMX_CAPTURE=off`, or start Claude Code w
 - **A subagent transcript removed before the worker first reads it** cannot be captured, and the audit cannot see that it existed.
 - **Audit memory.** The audit needs memory roughly in proportion to the largest session in the store: about 1.3 GB for a 690,000-line session in our gate run. Capture itself peaked at about 0.4 GB in that run.
 - **Hook timing.** Hooks usually hand off in milliseconds, but the hook's write of its small pointer file sometimes stalls for a few seconds, at moderate as well as heavy machine load.
-  - **The bound.** `PostToolBatch` runs in the background. The other hooks run before Claude Code goes on, with a 5-second limit (15 seconds for `PreCompact`), so a stall can add up to that limit to the turn.
+  - **The bound.** `PostToolBatch` runs in the background. The other hooks run before Claude Code goes on, with a 5-second limit (15 seconds for `PreCompact`), so a stall holds up the turn until the hook finishes or Claude Code stops it. In our runs Claude Code recorded the hooks it stopped after 5.5 to 11.5 seconds.
   - **What we measured.** These figures are from three full release-gate runs on 0.1.0 candidates with the same hook code:
-    - 8 of 670, 2 of 679 and 5 of 682 hook runs took over 2 s, every one of them in that write.
-    - The slowest blocking hook in an ordinary session took 3.8 s, 4.1 s and 4.7 s.
+    - Of the hook runs that finished, 8 of 670, 2 of 679 and 5 of 682 took over 2 s, every one of them in that write.
+    - The slowest blocking hook that finished in an ordinary session took 3.8 s, 4.1 s and 4.7 s.
     - The background hook and the stress tests' scripted hook bursts reached up to 8.3 s.
+    - Claude Code's transcripts record 3, 0 and 3 hooks stopped at their time limit, all `Stop` or `SubagentStop` hooks in ordinary sessions. The hook log has no line for them, because it records a hook only when it finishes.
   - **This release's own run.** The result card attached to this release lists the hook timings measured on this release's own gate run.
 
   In all three runs no audit lost anything. A hook cut off at its time limit is designed to be caught up by the session's next hook. If an earlier hook had already recorded the session, a later worker run, even one started from another session, also catches it up. If every hook of a new session were cut off before any of them recorded it, that session would not be captured.
 
-  The hook log records a hook only when it finishes, so these runs cannot show whether any hook was killed at its time limit. Every hook that ran past 5 s finished, and each one was either the background hook, which does not hold up the turn, or a scripted burst hook, which the test calls directly rather than through Claude Code. That catch-up path was not exercised. Tracked in #2350.
+  For each of the six hooks Claude Code stopped, the session's next hook ran within half a second and started the worker, and that session's audit was verified with 0 lost and 0 duplicated lines. Tracked in #2350.
 - **Leftover temporary files.** A hook that is killed mid-write can leave a hidden temporary file (`.<id>.<pid>.tmp`, empty or partly written) in the store's `spool` folder. Capture ignores it, and it is safe to delete.
 
 ## What it bundles
