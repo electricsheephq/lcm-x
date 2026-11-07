@@ -205,6 +205,7 @@ class Gateway:
         with (self.run_dir / f"gateway-{self.starts}.out").open("xb") as output:
             self.process = subprocess.Popen(["/usr/bin/nice", "-n", "19", *argv], env=self.env, cwd=self.home,
                                             stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
+        self.exit_code = None  # A new gateway: the next stop() must signal it.
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline and self.process.poll() is None:
             try:

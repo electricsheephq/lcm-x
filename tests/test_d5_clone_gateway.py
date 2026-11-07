@@ -379,6 +379,19 @@ def test_stop_kills_exact_pid_after_timeout(fake_gateway):
         fake_gateway.stop(0.01)
 
 
+def test_a_restarted_gateway_is_stopped(fake_gateway, monkeypatch):
+    monkeypatch.setattr(g.sandbox, "available", lambda: False)
+    try:
+        fake_gateway.start(3)
+        assert fake_gateway.stop(2) == -signal.SIGTERM
+        fake_gateway.start(3)
+        second = fake_gateway.process
+        assert fake_gateway.stop(2) == -signal.SIGTERM
+        assert second.poll() is not None and fake_gateway.pids() == []
+    finally:
+        fake_gateway.stop(1)
+
+
 def test_a_second_stop_never_signals(fake_gateway, monkeypatch):
     fake_gateway.process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=True)
     assert fake_gateway.stop(5) == -signal.SIGTERM
