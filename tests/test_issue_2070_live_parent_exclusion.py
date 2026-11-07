@@ -47,11 +47,17 @@ def _stored(engine):
     return [row["content"] for row in child_rows(engine)] == [row["content"] for row in child_view()]
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason="#2070 deferred to v0.30.x")
+@pytest.mark.xfail(strict=True, raises=AssertionError,
+                   reason="#2070 deferred to v0.30.x: the clone route stores the excluded parent's child")
 def test_the_excluded_live_parent_refuses_its_child(host, monkeypatch):  # noqa: F811
     ctx, _module, clone, owner = _excluded_parent(host, monkeypatch)
     _store_child_on_a_clone(ctx, clone)
-    assert child_rows(owner) == []
+    rows = [row["content"] for row in child_rows(owner)]
+    if rows == []:
+        return  # fixed: the strict marker turns this into a loud XPASS
+    if _stored(owner):
+        raise AssertionError("#2070 known shape: the excluded parent's child view is stored whole")
+    pytest.fail(f"not the #2070 shape: {rows}")
 
 
 def test_a_normal_reuse_of_the_id_on_another_engine_stores_the_child(host, monkeypatch):  # noqa: F811

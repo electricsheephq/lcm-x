@@ -256,13 +256,20 @@ def test_a_view_that_extends_the_last_one_appends_exactly_the_extension(host):  
     resumed = clone(ctx2)
     resumed.on_session_start("parent", platform="cli", context_length=200_000)
     child.turn(ctx2, [{"role": "user", "content": c} for c in "CABABB"], resumed)
-    previous = "CABABB"
+    if "".join(row["content"] for row in child_rows(resumed)) != "CCBAABB":
+        pytest.fail("setup: the first view after the restart did not append its three new rows")
+    previous, desired, observed = "CABABB", [], []
     for letters in ("CABABBAB", "CABABBABCHC", "CABABBABCHCHCC"):
         before = "".join(row["content"] for row in child_rows(resumed))
         child.turn(ctx2, [{"role": "user", "content": c} for c in letters], resumed)
-        after = "".join(row["content"] for row in child_rows(resumed))
-        assert after == before + letters[len(previous):], (letters, before, after)
+        observed.append("".join(row["content"] for row in child_rows(resumed)))
+        desired.append(before + letters[len(previous):])
         previous = letters
+    if observed == desired:
+        return  # fixed: the strict marker turns this into a loud XPASS
+    if observed == ["CCBAABBAB", "CCBAABBABCHC", "CCBAABBABCHCHC"]:  # the last view's extension "HCC" stores "HC"
+        raise AssertionError("#2422 known shape: one occurrence of a repeated row in the last extension is not stored")
+    pytest.fail(f"not the #2422 shape: {observed}")
 
 
 def test_a_summary_of_an_unstored_input_row_is_stored(host, monkeypatch):  # noqa: F811

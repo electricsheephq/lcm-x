@@ -51,6 +51,16 @@ _HEADER_AND_LOST = pytest.mark.xfail(strict=True, raises=AssertionError, reason=
                                                                                 "#2110 (no proof): both skip the turn")
 
 
+def _expect_stored_once(count, expected, lost):
+    """The exact-shape check: ``expected`` passes (a fix shows as a loud XPASS); in a lost cell, one copy short is the
+    known shape (the turn is skipped); anything else is a different defect."""
+    if count == expected:
+        return
+    if lost and count == expected - 1:
+        raise AssertionError("#2110/#2418 known shape: the scaffold-shaped user turn is skipped")
+    pytest.fail(f"not the #2110/#2418 shape: the user turn is stored {count} times, expected {expected}")
+
+
 def _legacy_mark(place, shape, version):
     if shape == "todo-prefix":
         if version == 4:
@@ -84,9 +94,11 @@ def test_a_user_turn_shaped_like_scaffold_is_stored_after_a_legacy_restart(tmp_p
         engine.ingest([dict(m) for m in view])
         if _contents(engine, "assistant").count(reply["content"]) != 1:
             pytest.fail("setup: the batch was not ingested")
-        assert _contents(engine, "user").count(quoted) == users_before + 1, "the quoting user turn was skipped"
+        _expect_stored_once(_contents(engine, "user").count(quoted), users_before + 1,
+                            lost=bool(_legacy_mark(place, shape, version)))
         engine.ingest([dict(m) for m in view])
-        assert _contents(engine, "user").count(quoted) == users_before + 1
+        if _contents(engine, "user").count(quoted) != users_before + 1:
+            pytest.fail("not the #2110 shape: re-ingesting the same view changed the stored count")
     finally:
         engine.shutdown()
 
@@ -110,7 +122,7 @@ def test_a_scaffold_shaped_user_turn_is_stored_past_a_stale_v4_proof(stub_first_
     host.live = [*host.live[:-1], {"role": "user", "content": quoted, "timestamp": host.clock}, host.live[-1]]
     host.cold_rebind()
     rows = host.engine._store.get_session_messages(host.engine._session_id)
-    assert sum(row["content"] == quoted for row in rows) == 1, "the quoting user turn was skipped"
+    _expect_stored_once(sum(row["content"] == quoted for row in rows), 1, lost=shape == "todo-prefix")
 
 
 _RETIRED_LOST = pytest.mark.xfail(strict=True, raises=AssertionError,
@@ -144,4 +156,4 @@ def test_a_scaffold_shaped_user_turn_is_stored_after_a_v4_proof_is_retired(stub_
     host.live = [*host.live[:-1], {"role": "user", "content": quoted, "timestamp": host.clock}, host.live[-1]]
     host.engine.ingest(deepcopy(host.live))
     rows = host.engine._store.get_session_messages(host.engine._session_id)
-    assert sum(row["content"] == quoted for row in rows) == 1, "the quoting user turn was skipped"
+    _expect_stored_once(sum(row["content"] == quoted for row in rows), 1, lost=shape != "plain")

@@ -49,6 +49,11 @@ def test_a_scaffold_shaped_user_turn_is_stored_in_a_never_compacted_session(tmp_
         rows = engine._store._conn.execute("SELECT role, content FROM messages").fetchall()
         if sum(c == reply["content"] for r, c in rows if r == "assistant") != 1:
             pytest.fail("setup: the batch was not ingested")
-        assert sum(c == turn["content"] for r, c in rows if r == "user") == 1, "the user turn was skipped"
+        count = sum(c == turn["content"] for r, c in rows if r == "user")
+        if count == 1:
+            return  # stored once (the controls today; a fix shows as a loud XPASS in the lost cells)
+        if count == 0 and shape != "plain" and (restart or place == "before-last-row"):
+            raise AssertionError("#2110 known shape: the scaffold-shaped user turn is skipped (stored 0 times)")
+        pytest.fail(f"not the #2110 shape: the user turn is stored {count} times")
     finally:
         engine.shutdown()
