@@ -190,16 +190,17 @@ def check_counts(checks):
             "warnings": dict(Counter(c["check"] for c in checks if c["status"] == "warn"))}
 
 
-def bar5(rc_checks, ga_checks, ga_rerun_checks=None):
+def bar5(rc_checks, ga_checks, ga_rerun_checks=None, ga_rerun_turns_complete=True):
     """No failed doctor, quick_check, integrity or schema check in the rc arm; doctor warnings by check name, with
     rc <= GA. Checks are {kind, check, status}; a kind with no check is not shown (INCONCLUSIVE). A failed check in
     the previous-GA arm is never PASS (release manager, 2026-11-07): the GA arm is re-run once; if the re-run fails
     too, the bar stays INCONCLUSIVE until the release manager records a disposition. A re-run is clean only when it
-    shows every check kind and fails none; a clean re-run supplies the doctor-warning baseline."""
+    completed every planned turn, shows every check kind and fails none; a clean re-run supplies the doctor-warning
+    baseline."""
     failed, ga_failed = failed_checks(rc_checks), failed_checks(ga_checks)
     rerun_failed = failed_checks(ga_rerun_checks) if ga_rerun_checks is not None else None
     rerun_missing = kinds_missing(ga_rerun_checks) if ga_rerun_checks is not None else None
-    rerun_clean = rerun_failed == [] and rerun_missing == []
+    rerun_clean = rerun_failed == [] and rerun_missing == [] and ga_rerun_turns_complete is True
     baseline = ga_rerun_checks if ga_failed and rerun_clean else ga_checks
     rc_w, ga_w = (Counter(c["check"] for c in checks if c["kind"] == "doctor" and c["status"] == "warn")
                   for checks in (rc_checks, baseline))
@@ -210,6 +211,7 @@ def bar5(rc_checks, ga_checks, ga_rerun_checks=None):
     return {"verdict": verdict, "failed": failed, "warnings_over_ga": over, "kinds_missing": missing,
             "ga_failed": ga_failed, "ga_rerun_needed": bool(ga_failed) and rerun_failed is None,
             "ga_rerun_failed": rerun_failed or [], "ga_rerun_kinds_missing": rerun_missing or [],
+            "ga_rerun_turns_complete": None if ga_rerun_checks is None else ga_rerun_turns_complete is True,
             "ga_disposition_needed": bool(rerun_failed)}
 
 

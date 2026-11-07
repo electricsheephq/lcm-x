@@ -81,6 +81,8 @@ class FakeHost(r.LocalHost):
     def turn(self, ctx, step):
         if self.fail == "warm" and step["kind"] != "cold" and not step["tools"]:
             return False  # Timed out or not completed: nothing stored.
+        if self.fail == "ga_hollow" and "ga-rerun" in str(ctx["home"]):
+            return False  # A GA re-run that completes no turn.
         if self.fail == "raise" and step["id"] == "e2-S2-2":
             raise RuntimeError("synthetic turn failure")
         sid = ctx["sessions"][step["conversation"]]
@@ -115,7 +117,7 @@ class FakeHost(r.LocalHost):
 
     def checks(self, ctx):
         self.ga_checks = getattr(self, "ga_checks", 0) + (ctx["name"] == "ga")
-        broken = ctx["name"] == "ga" and (self.fail == "ga_twice" or (self.fail == "ga_once" and self.ga_checks == 1))
+        broken = ctx["name"] == "ga" and (self.fail == "ga_twice" or (self.fail in ("ga_once", "ga_hollow") and self.ga_checks == 1))
         return [{"kind": k, "check": k, "status": "fail" if broken and k == "schema" else "ok"}
                 for k in bars.CHECK_KINDS]
 
@@ -235,3 +237,11 @@ def test_a_failed_ga_check_reruns_the_ga_arm_once(setup, fail, verdict):
     bar5 = receipt["bars"]["bar5"]
     assert bar5["verdict"] == verdict and bar5["ga_failed"] == ["schema"]
     assert bar5["ga_disposition_needed"] is (fail == "ga_twice") and bar5["ga_rerun_needed"] is False
+
+
+def test_a_ga_rerun_that_completes_no_turn_is_not_clean(setup):
+    _, config, run_dir = setup
+    receipt = r.run(FakeHost(config, run_dir, fail="ga_hollow"), rc_id="rc-synthetic")
+    bar5 = receipt["bars"]["bar5"]
+    assert bar5["ga_failed"] == ["schema"] and bar5["ga_rerun_failed"] == [] and bar5["ga_rerun_turns_complete"] is False
+    assert bar5["verdict"] == bars.INCONCLUSIVE and receipt["verdict"]["raw"] != bars.PASS

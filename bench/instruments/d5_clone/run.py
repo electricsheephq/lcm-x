@@ -303,7 +303,8 @@ def run(host, *, rc_id, prior=(), instrument_fix=None):
         "bar2": bars.bar2([b["bar2"] for b in binds]),
         "bar3": bars.bar3(snap["store"], arms["rc"]["rows"]["store"], rules["identity"]),
         "bar4": bars.bar4(arms["rc"]["logs"], arms["ga"]["logs"], arms["rc"]["roots"], arms["ga"]["roots"]),
-        "bar5": bars.bar5(arms["rc"]["checks"], arms["ga"]["checks"], ga_rerun and ga_rerun["checks"]),
+        "bar5": bars.bar5(arms["rc"]["checks"], arms["ga"]["checks"], ga_rerun and ga_rerun["checks"],
+                          bool(ga_rerun) and bars.workload_items(ga_rerun["workload"])["turns_completed"]),
         "bar6": bars.bar6({a: arms[a]["workload"] for a in arms})}
     receipt.update(
         arms={a: {**{k: arms[a][k] for k in ("workload", "egress", "provider")},
