@@ -392,3 +392,21 @@ def test_an_h8_capture_carries_the_window_host_logs(tmp_path, monkeypatch):
         host.capture({"name": "rc", "home": home}, kind, {"id": f"e0-L-{kind}"}, {"RC3/store.db": "x"})
     assert seen["T0"] == {"RC3/store.db": "x"}
     assert seen["H8"] == {"RC3/store.db": "x", "native-agent.log.log": home / "logs" / "agent.log"}  # gateway.log absent
+
+
+@pytest.mark.parametrize("range_new", [0, 3, None])
+def test_a_not_shown_bind_is_inconclusive_never_pass(tmp_path, monkeypatch, range_new):
+    def fake_run(argv, **kwargs):  # The generator exits 1 (NOT SHOWN) and leaves its report; no replay runs.
+        if range_new is not None:
+            (Path(kwargs["cwd"]) / "constants.json").write_text(json.dumps({"range_new_rows": range_new}))
+        return type("Done", (), {"returncode": 1})()
+
+    monkeypatch.setattr(r.subprocess, "run", fake_run)
+    monkeypatch.setattr(r.sandbox, "wrap", lambda argv, **k: argv)
+    config = {"interpreter": "python3", "instrument_dir": "kit", "rc": {"lcm_tree": "rc"}, "ga": {"lcm_tree": "ga"},
+              "constants_argv": ["gen"], "replay_argv": ["replay"]}
+    ctx = {"name": "rc", "port": 1, "sessions": {"L": "s"}}
+    receipt, error, kept = r.LocalHost(config, tmp_path / "run").replay(ctx, {"id": "e0-L-0", "conversation": "L"},
+                                                                      "T0", "H8")
+    result = bars.bar2_bind(receipt, range_new_rows=kept, error=error)
+    assert (result["verdict"], result["range_new_rows"]) == (bars.INCONCLUSIVE, range_new)
