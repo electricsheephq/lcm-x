@@ -351,3 +351,32 @@ def test_a_stored_call_whose_delayed_result_arrives_past_the_audited_tail_is_sto
         assert sum(1 for row in rows if row.get("tool_call_id") == "call_held") == 1
     finally:
         engine.shutdown()
+
+
+def test_past_the_audited_tail_a_moved_prompt_result_is_never_stored_without_its_call(tmp_path):
+    """Review (Codex P1, NeonDiff P2): in a session past the audited tail, the moved-prompt turn's new call and its
+    result are both before the cursor. The call is not proven new there (#2455 tracks storing it), so its result must
+    not be stored alone either: a result is stored only beside its call, as on main."""
+    engine = _engine(tmp_path)
+    try:
+        history = _history(40)
+        slot = 2 * 40 + 4
+        interim = {"role": "assistant", "content": "an interim note" + PAD}
+        turn_start = [*history, _u("P60 new prompt", 200), interim]
+        engine.ingest(history)
+        engine.ingest(turn_start)
+        if len(_stored(engine)) <= 64:
+            pytest.fail("setup: the session must hold more stored rows than the audited tail")
+        turn_end = list(history)
+        turn_end[slot] = _u("P60 new prompt", 120)
+        turn_end += [_call("call_new", 201), _result("call_new", "new file text", 202)]
+        if len(turn_end) != len(turn_start):
+            pytest.fail("setup: the list in front of the cursor must keep its length")
+        turn_end += [_a("A60 after the new call", 204)]
+        engine.ingest(turn_end)
+        rows = _stored(engine)
+        calls = sum(1 for row in rows if "call_new" in str(row.get("tool_calls") or ""))
+        results = sum(1 for row in rows if row.get("tool_call_id") == "call_new")
+        assert results == calls, (calls, results)
+    finally:
+        engine.shutdown()
