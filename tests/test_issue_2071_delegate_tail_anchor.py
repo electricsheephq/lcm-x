@@ -100,12 +100,16 @@ def test_a_concurrent_store_does_not_let_the_tail_anchor_skip_x(host, monkeypatc
     other.on_session_start("parent", platform="cli", context_length=200_000)
     concurrent = {"role": "assistant", "content": "concurrently stored row"}
 
+    concurrent_stores = []
+
     def compress_with_store(*args):
-        assert (other._store_delegate_child_turn("child", [*stored, concurrent], platform="subagent") or 0) == 1
+        concurrent_stores.append(other._store_delegate_child_turn("child", [*stored, concurrent], platform="subagent") or 0)
         return COMPACTED
 
     monkeypatch.setattr(engine, "_compress_bypassed", compress_with_store)
     result = child.compress(engine, stored)
+    if concurrent_stores != [1]:
+        pytest.fail("setup: the other engine did not store the concurrent row")
     if result != COMPACTED or engine._delegate_child_key("child") in aux._DELEGATE_RESUME_BOUNDARIES:
         pytest.fail("setup: the compaction did not run without a boundary")
     assert _send_x_then_a_repeat(ctx, engine, child, result) == 1
