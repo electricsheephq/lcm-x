@@ -442,3 +442,24 @@ def test_rotation_content_of_a_non_snapshot_row_at_a_stamp_never_redirects_a_lin
     t_original = next(row["store_id"] for row in rows if row["session_id"] == "S" and row["content"] == T
                       and row["observed_at"] == T_REQ)
     assert (t_copy, t_original) in links
+
+
+@pytest.mark.issue(2390)
+def test_rotation_identical_copies_keep_their_order_inside_a_mixed_content_group(build, caplog, monkeypatch):
+    """Review probe: carried [T, T, P] (P = T behind a model-switch note, one replay identity), re-stamped and
+    carried as [T, P, T]. The two identical T copies keep their order; P links to P."""
+    _with_prefixed_turn(monkeypatch)
+
+    def mix(_engine, view):
+        prefixed = view.pop(_carried(view, PREFIXED))
+        prefixed["timestamp"] += 0.5
+        view.insert(_carried(view, T) + 1, prefixed)  # carried order: T, P, T
+
+    engine, rows = run(build, caplog, mode="rotating", uids=False, restamp=True, prior_copies=2, before_ingest=mix)
+    links = replay_links(engine)
+    originals = [row["store_id"] for row in rows if row["session_id"] == "S" and row["content"] == T]
+    copies = [row["store_id"] for row in rows if row["session_id"] == "rotated" and row["content"] == T]
+    assert len(originals) == len(copies) == 2
+    assert {(copies[0], originals[0]), (copies[1], originals[1])} <= links
+    p_copy = next(row["store_id"] for row in rows if row["session_id"] == "rotated" and row["content"] == PREFIXED)
+    assert (p_copy, _original(rows, PREFIXED)) in links

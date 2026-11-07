@@ -7036,29 +7036,27 @@ class LCMEngine(
         stored = defaultdict(set)
         for row in self._store.find_rows_by_observed_at(self._conversation_id, [session], stamps):
             if row.get("session_id") == session:
-                stored[(row.get("observed_at"), row.get("role"))].add(row.get("content"))
+                content = row.get("content")  # non-text content never decides a pairing
+                stored[(row.get("observed_at"), row.get("role"))].add(content if isinstance(content, str) else object())
         groups = defaultdict(list)
         for idx, digest in pending:
             groups[digest].append(idx)
         for digest, rows in groups.items():
             free = [pos for pos, row in enumerate(target) if pos not in used and row["identity_sha256"] == digest]
-            exact = {idx: [pos for pos in free
-                           if stored.get((target[pos].get("timestamp"), messages[idx].get("role"))) == {
+            exact = {idx: [pos for pos in free if isinstance(messages[idx].get("content"), str)
+                           and stored.get((target[pos].get("timestamp"), messages[idx].get("role"))) == {
                                messages[idx].get("content")}] for idx in rows}
-            owner: dict = {}
-
-            def claim(idx, seen):
-                for pos in exact[idx]:
-                    if pos not in seen:
-                        seen.add(pos)
-                        if pos not in owner or claim(owner[pos], seen):
-                            owner[pos] = idx
-                            return True
-                return False
-
-            pairs = dict(zip(rows, free))  # the ordered first fit
-            if not all(pos in exact[idx] for idx, pos in pairs.items()) and all(claim(idx, set()) for idx in rows):
-                pairs = {idx: pos for pos, idx in owner.items()}
+            # A position holds one stored content, so rows of equal content share their candidates
+            # and rows of different content never compete: the exact matching, when it covers every
+            # row, pairs each content's rows with its positions in order (identical copies never swap).
+            pairs, by_content = dict(zip(rows, free)), defaultdict(list)  # default: the ordered first fit
+            for idx in rows:
+                content = messages[idx].get("content")
+                by_content[(messages[idx].get("role"), content if isinstance(content, str) else idx)].append(idx)
+            if not all(pos in exact[idx] for idx, pos in pairs.items()) and all(
+                    len(exact[members[0]]) >= len(members) for members in by_content.values()):
+                pairs = {idx: pos for members in by_content.values()
+                         for idx, pos in zip(members, exact[members[0]])}
             for idx, pos in pairs.items():
                 used.add(pos)
                 result[idx] = (session, target[pos])
