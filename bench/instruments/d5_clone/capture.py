@@ -18,11 +18,16 @@ class CaptureError(ValueError):
 
 
 def _readonly(path):
-    """A read-only connection that never writes beside the input. With no -wal file there is no pending WAL content,
-    so immutable=1 is exact and keeps SQLite from creating sidecars next to a stopped input."""
+    """A read-only connection that never writes beside the input. immutable=1 (no locks, no sidecars) is used only for
+    a WAL-mode file with neither -wal nor -journal beside it: no connection has it open and nothing is pending. A
+    rollback-journal file keeps plain mode=ro, so a held lock reads as "database is locked" and a hot journal fails
+    loudly instead of being read past."""
     path = Path(path).absolute()
-    flags = "mode=ro" + ("" if Path(str(path) + "-wal").exists() else "&immutable=1")
-    return sqlite3.connect(f"file:{quote(str(path))}?{flags}", uri=True)
+    with path.open("rb") as stream:
+        header = stream.read(20)
+    wal_mode = len(header) == 20 and header[18] == 2 and header[19] == 2
+    quiet = wal_mode and not any(Path(str(path) + s).exists() for s in ("-wal", "-journal"))
+    return sqlite3.connect(f"file:{quote(str(path))}?mode=ro" + ("&immutable=1" if quiet else ""), uri=True)
 
 
 def _sha256(path):

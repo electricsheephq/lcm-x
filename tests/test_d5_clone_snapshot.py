@@ -201,3 +201,26 @@ def test_an_unreadable_pinned_file_fails_without_raising(tmp_path):
         leaf.chmod(0o644)
     assert result["verdict"] == "FAIL" and result["unreadable"] is True
     assert "x.json" not in json.dumps(result)
+
+
+def test_a_snapshot_with_a_hot_rollback_journal_fails(tmp_path):
+    root, scratch, pin = tmp_path / "snapshot", tmp_path / "scratch", tmp_path / "pin.json"
+    scratch.mkdir()
+    live = tmp_path / "live"
+    live.mkdir()
+    with sqlite3.connect(live / "store.db", isolation_level=None) as conn:
+        conn.execute("CREATE TABLE t (x TEXT)")
+        conn.executemany("INSERT INTO t VALUES (?)", [("a" * 900,)] * 400)
+        conn.execute("PRAGMA cache_size=1")
+        conn.execute("BEGIN")
+        conn.execute("UPDATE t SET x = ?", ("b" * 900,))
+        root.mkdir()
+        for suffix in ("", "-journal"):
+            (root / ("store.db" + suffix)).write_bytes((live / ("store.db" + suffix)).read_bytes())
+        conn.execute("ROLLBACK")
+    conn.close()
+    _pin_of(root, pin)
+    result = snapshot.verify(pin, root, scratch)
+    assert result["verdict"] == "FAIL"
+    assert result["quick_check"]["store.db"] == "failed"
+    assert list(scratch.iterdir()) == []

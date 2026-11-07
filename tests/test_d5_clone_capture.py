@@ -170,3 +170,39 @@ def test_reading_a_stopped_wal_input_writes_no_sidecar(tmp_path):
     with closing(cap._readonly(db)) as conn:
         assert conn.execute("SELECT count(*) FROM t").fetchone() == (1,)
     assert sorted(p.name for p in tmp_path.iterdir()) == ["stopped.db"]
+
+
+def _hot_journal_copy(tmp_path, name="hot.db"):
+    """A rollback-journal store copied mid-write: its main file holds uncommitted pages, its -journal is hot."""
+    live, copy = tmp_path / "live", tmp_path / "copy"
+    live.mkdir()
+    copy.mkdir()
+    with closing(sqlite3.connect(live / name, isolation_level=None)) as conn:
+        conn.execute("CREATE TABLE t (x TEXT)")
+        conn.executemany("INSERT INTO t VALUES (?)", [("a" * 900,)] * 400)
+        conn.execute("PRAGMA cache_size=1")
+        conn.execute("BEGIN")
+        conn.execute("UPDATE t SET x = ?", ("b" * 900,))  # The tiny cache spills pages into the main file.
+        assert Path(str(live / name) + "-journal").exists()
+        for suffix in ("", "-journal"):
+            (copy / (name + suffix)).write_bytes((live / (name + suffix)).read_bytes())
+        conn.execute("ROLLBACK")
+    assert "b" * 900 in (copy / name).read_bytes().decode("latin-1")  # Uncommitted content reached the copy.
+    return copy / name
+
+
+def test_a_hot_rollback_journal_fails_loudly_instead_of_being_read_past(tmp_path):
+    source = _hot_journal_copy(tmp_path)
+    with pytest.raises(sqlite3.DatabaseError):
+        cap.backup(source, tmp_path / "out.db")
+
+
+def test_a_locked_rollback_journal_input_is_not_read_without_its_lock(tmp_path):
+    db = tmp_path / "locked.db"
+    with closing(sqlite3.connect(db, isolation_level=None)) as writer:
+        writer.execute("CREATE TABLE t (x)")
+        writer.execute("BEGIN EXCLUSIVE")
+        writer.execute("INSERT INTO t VALUES (1)")
+        with closing(cap._readonly(db)) as reader, pytest.raises(sqlite3.OperationalError, match="locked"):
+            reader.execute("SELECT count(*) FROM t").fetchone()
+        writer.execute("ROLLBACK")
