@@ -306,7 +306,8 @@ def test_a_leaf_whose_tool_output_was_externalized_is_not_reported_as_degraded(p
     from hermes_lcm.tokens import count_tokens
 
     stored = "user: run it\n[TOOL RESULT call_1]: " + "d" * 204_800
-    shown = ("user: run it\n[TOOL RESULT call_1]: [Externalized tool output: chars=204800; ref=x.json]\n"
+    shown = ("user: run it\n[TOOL RESULT call_1]: [Externalized tool output: tool=terminal; tool_call_id=call_1; chars=204800;"
+             " bytes=204800; ref=x.json]\n"
              + "d" * 900)
     messages, nonce = escalation._summary_contract_messages(
         escalation._build_l1_prompt(shown, 2000, 0, prompt_version=version))

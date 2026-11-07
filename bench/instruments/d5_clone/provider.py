@@ -34,24 +34,28 @@ def _envelope_nonce(messages):
 
 BYTES_PER_SUMMARY_TOKEN = 160  # A token is at least one UTF-8 byte, so source/summary <= 160 even for the densest text.
 BUDGET = re.compile(r"(?:about |Target ~|Maximum )(\d+) tokens")  # The token budget LCM-X's summary prompts state.
+HIDDEN = re.compile(r"\[(?:GC'd )?[Ee]xternalized [^\]]*?\bchars=(\d+)")  # The size a tool-output placeholder hides.
 
 
 def _padding(messages):
-    """Deterministic filler lines that bring the digest to the length a real summarizer writes: the prompt's stated
-    budget, but at most half the visible transcript (so an unclipped source is never summarized longer than itself),
-    and at least one token per BYTES_PER_SUMMARY_TOKEN request bytes. The stored leaf can be far larger than what the
-    prompt shows (clipped chunks, externalized tool output), and LCM-X's summary_quality doctor check reports a
-    summary as degraded at >= 400:1, or under 500 tokens for a 100k-token source: a fixed 40-token digest would warn on
-    every large leaf in both arms and hide a real regression."""
+    """Deterministic filler that brings the digest to the length a real summarizer writes.
+
+    The stored leaf can be far larger than the prompt shows (clipped chunks, externalized tool output), and LCM-X's
+    summary_quality doctor check reports a summary as degraded at >= 400:1, or under 500 tokens for a 100k-token
+    source. A fixed 40-token digest would warn on every large leaf in both arms and hide a real regression. So the
+    length is the prompt's stated budget, at most 40% of the visible transcript (an unclipped source is never
+    summarized longer than itself), and at least one token per BYTES_PER_SUMMARY_TOKEN bytes of the request plus the
+    characters its placeholders hide."""
     system = [m["content"] for m in messages if isinstance(m, dict) and m.get("role") == "system"
               and isinstance(m.get("content"), str)]
+    shown = [_json(m.get("content")) for m in messages if isinstance(m, dict) and m.get("role") != "system"]
     budgets = [int(b) for text in system for b in BUDGET.findall(text)]
-    transcript = sum(len(_json(m.get("content")).encode("utf-8")) for m in messages
-                     if isinstance(m, dict) and m.get("role") != "system")
-    target = max(-(-len(_json(messages).encode("utf-8")) // BYTES_PER_SUMMARY_TOKEN),
-                 min(min(budgets), transcript // 8) if budgets else 0)
-    seed = _sha(messages)[:8]
-    return "".join(f"\nd5 pad {i:05d} {seed}" for i in range(-(-target // 6)))  # About 6 tokens a line, or more.
+    hidden = sum(int(n) for text in shown for n in HIDDEN.findall(text))
+    transcript = sum(len(text.encode("utf-8")) for text in shown)
+    target = max(-(-(len(_json(messages).encode("utf-8")) + hidden) // BYTES_PER_SUMMARY_TOKEN),
+                 min(min(budgets), transcript // 10) if budgets else 0)
+    # One token per word under both counters (cl100k encodes " pad" as one token; the estimate counts 4 characters).
+    return f"\nd5 pad {_sha(messages)[:8]}" + "".join("\n" + " ".join(["pad"] * 16) for _ in range(-(-target // 16)))
 
 
 def _tool_call(call):
