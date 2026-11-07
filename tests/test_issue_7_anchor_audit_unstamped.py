@@ -305,9 +305,12 @@ def test_truncated_then_replaced_row_stores_the_new_row(tmp_path):
         engine.shutdown()
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason="#7: a short user row equal to an older row's last paragraph is not audited")
+@pytest.mark.xfail(strict=True, raises=AssertionError,
+                   reason="#7 and ISSUE_TBD: a view of only new unstamped rows, as long as the stored rows, is taken as "
+                          "a replay; none of its rows is stored")
 def test_short_reply_matching_an_earlier_paragraph_is_stored(tmp_path):
-    """Review r4 shape 2: a new short user row equals the last paragraph of an older stored row."""
+    """Review r4 shape 2: a new short user row equals the last paragraph of an older stored row. On main the whole
+    second view (4 new rows) is not stored, a wider loss than the short row alone."""
     engine = _engine(tmp_path)
     try:
         host = [_u("old paragraph" + PAD + "\n\nyes", None), _a("A1" + PAD, None),
@@ -317,7 +320,9 @@ def test_short_reply_matching_an_earlier_paragraph_is_stored(tmp_path):
                   _u("yes", None), _a("new final" + PAD, None)]
         engine.ingest(replay)
         texts = [row["content"] for row in _stored(engine)]
-        assert texts.count("yes") == 1
+        sent = [row["content"] for row in host]
+        _expect_stored_shape(texts, sent + [row["content"] for row in replay], sent,
+                             "#7 known shape: none of the new-rows-only view is stored")
     finally:
         engine.shutdown()
 
