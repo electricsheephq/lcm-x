@@ -387,6 +387,17 @@ gateway cells are UNSUPPORTED with the reason; `--transport gateway-process` is 
 - **customer-0.21.2 lcm-tool-mid-turn is UNSUPPORTED over ACP.** That host defers plugin tools behind the
   `tool_search`/`tool_call` bridge by default (`tools.tool_search.enabled: "auto"`, `hermes_cli/config_defaults.py:1793`),
   so the scripted direct `lcm_grep` call is never dispatched ("scenario not proven"). The default is not changed.
+- **delegated-child/{in-place,rotation} (#1931, acp-process only).** Turns 5, 17 and 29 call `delegate_task` (the
+  `delegation` toolset); each goal is the child's own tagged user row (`[Dnn] user turn ...`, `probe.child_goal`), and
+  the provider answers a request whose last user row carries that tag with `reply to Dnn: child done.` before any
+  parent step. The observer records the child's run as `child_user_sent` / `child_turn_end` under its own session and
+  the parent's dispatch at `AIAgent._dispatch_delegate_task` (top-level delegations run in the background). A
+  state.db session with source `subagent` whose parent is not a subagent session roots its own lineage, so B1/B2
+  score each child apart from the chat lineage. B10 (`scorers/delegated.py`) fails on a host child count other than
+  the issued delegates, a child with no stored rows, a missing or different lcm.db `session_lineage` parent, a
+  child-tagged row in another lineage, or a chat-lineage prompt or reply stored under a child (its own goal excepted).
+  A delegate whose child never ran or completed, or a child the host did not record as `subagent`, is UNSUPPORTED.
+  R1 in-process reports the cells UNSUPPORTED: the host builds the child with its own provider client.
 
 ### Nightly CI (`.github/workflows/reliability-nightly.yml`)
 Triggers: daily schedule and `workflow_dispatch` (effective once on main), and `pull_request` path-filtered to
