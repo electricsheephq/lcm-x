@@ -427,8 +427,6 @@ def test_durable_recovery_never_gives_a_borrowed_source_a_second_link(tmp_path, 
         assert len(copies) == 2 and links == [(copies[1], recovered, 30.)], (copies, links)
 
 
-@pytest.mark.xfail(strict=True, reason="#2408: lineage adoption adds its stamp pair to a source that already holds "
-                   "a link; #2408's adoption guard (skip a source with any possible_replay_of) fixes it")
 def test_lineage_adoption_never_gives_a_borrowed_source_a_second_link(engines, monkeypatch):
     """A provisional child stores E=P@10 and N=P@20 with the borrowed link N->E; the resolved lineage already
     holds A=P@20. Adoption pairs N with A by stamp, and must leave N with its one link."""
