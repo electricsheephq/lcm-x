@@ -81,20 +81,33 @@ LCM-X matches it, only when every part matches its node in the store byte for by
 content. A merged row is one occurrence with a row of the same text and timestamp. A merged row of a text the lineage
 also holds at another timestamp may be the host's merged copy (a rotation handoff stamps it anew) or a resend: it is
 not counted and is listed for a hand check (`merged_carrier_repeat`). A row that is only a verified carrier, or begins with one of LCM-X's prefix carriers (objective,
-task list, overflow recovery), is not expected.
+task list, overflow recovery), is not expected, with one exception (`todo_expected`, #2377): a stored user row equal
+byte for byte to a displayed host user row that starts with the todo injection header (`_PRESERVED_TODO_CONTEXT_PREFIX`),
+of the same lineage and with `observed_at` equal to the host timestamp, is expected, one stored row per displayed
+occurrence; a second copy is surplus, and a todo row with no stored copy is no deficit.
 
 Stored rows are scored with the reliability harness's B2 instruments, unchanged: `multiset.score` (user and assistant
 rows), `tool_calls.stored_keys`/`compare` (tool calls and results), `externalized.resolve` (externalized payloads) and
 `multiset.split_surplus` (visible versus silent surplus).
 
+Besides the relation witnesses, three attribution forms make a surplus row a visible copy (each rule is one
+function): a `link_pending` relation (`multiset.link_pending_ids`), a `composite_of` witness
+(`multiset.composite_witness`; both are described in the reliability README) and a logged intended link
+(`logged_link`, #2377; the format is provisional): an LCM-X line `LCM tool replay link failed source_store_id=<int>
+target_store_id=<int> reason=<relation_write_failed|pending_write_failed>` credits the row named as its source, never
+its target. A line with that start that does not parse that way (an unknown reason, a non-integer id) credits nothing
+and counts in `recorder.logged_link_unparsed`. Each form's count is the visible surplus it adds to the relation
+witnesses alone, so a row two forms credit counts in both. Scaffold provenance metadata
+(`real_user_scaffold_store_id:<id>`) is not accounting and never clears a row.
+
 | Output | Fields |
 |---|---|
-| `parity` | per lineage and in total (every scored lineage, #1931 bucket B children included): `expected_rows`, `stored_rows`, `missing_rows` (exact-content deficit), `surplus_rows`, `visible_surplus_rows`, `silent_surplus_rows`, `split_assistant_keys`, `externalized_unresolved`; `zero_row_lineages` (expected rows but none stored); per session: lineage, source, stored rows. |
+| `parity` | per lineage and in total (every scored lineage, #1931 bucket B children included): `expected_rows`, `stored_rows`, `missing_rows` (exact-content deficit), `surplus_rows`, `visible_surplus_rows`, `silent_surplus_rows`, `split_assistant_keys`, `externalized_unresolved`, `host_todo_rows_expected` (stored todo copies `todo_expected` expects; their host rows also count in `host_carrier_rows_excluded`), `link_pending_rows`, `composite_rows`, `logged_link_rows` (the visible surplus each attribution form adds); `link_pending_rows_total` (every audited row with a `link_pending` relation, surplus or not: non-zero is a defect signal); `zero_row_lineages` (expected rows but none stored); per session: lineage, source, stored rows. |
 | `coverage` | each floor's `value`, `floor`, `met`; `unknown` when its input is missing (never met). Compactions are LCM-X's `LCM compaction #` lines tagged with a scored session; delegated children are the ended, scored bucket A children; host sources count scored sessions only, leaving out `subagent` and `tool`. `coverage_basis` names each basis and gives the store's depth-0 message leaves (a pass may write several, so they are not the count). |
 | `uid_coverage` | per host source: rows stored, rows with a canonical `host_uid_bindings` row; `table absent` when the store has none. |
 | `m3` | rows in the window's lineages that carry `generated_unproven` or are the `store_id` side of `possible_replay_of`, over the rows stored there; the rate and every store id. An `undo_retained` row leaves the numerator for `possible_replay_of` only. |
 | `undo_retained` | `rows` and `store_ids`: stored rows that are a host undo's retained occurrence (`undo_retained_rows`). A TUI undo soft-deletes the undone rows in the host (`active = 0`, `compacted = 0`), so they are not expected; LCM-X keeps its copy and stores the resend as a new occurrence. A stored row is excused when the host holds such an undone row of the same session and row key and the stored row's `observed_at` equals that row's timestamp; each undone row excuses one stored copy, and a row with NULL `observed_at` is never excused. An inactive row with the same session, key and timestamp as a displayed row (the original an in-place compaction, `replace_messages` or `deactivate_message` leaves beside its live clone) excuses nothing. Excused rows are neither expected nor surplus and stay out of M3's numerator (they count in its denominator). `host_rewind_count`: the host's `sessions.rewind_count` per audited session, as a cross-check. |
-| `recorder` | `LCM ingest route:` lines per route; the #2305 rate (`persisted_batch` at cursor 0 over storing ingests); stripped links per replay pair; `recorder absent` when there is no line. |
+| `recorder` | `LCM ingest route:` lines per route; the #2305 rate (`persisted_batch` at cursor 0 over storing ingests); stripped links per replay pair; `link_pending_logged`, the sum of the route lines' `link_pending=<n>` fields, to cross-check `parity.link_pending_rows_total` (null when no line has the field); `logged_link_unparsed`; `recorder absent` when there is no line. |
 | `exempted_surplus` | silent surplus rows exempted under #1674 or #2203, rows listed for a hand check, unattributed rows, store ids for each, and the exempted fraction against the 1% bar. The fraction counts distinct store rows: a row with content and a tool call is one row under two keys. `unattributed_silent_rows` (the bar's value) counts key copies; `unattributed_silent_distinct_rows` counts store rows. The rules are `attribute_silent_surplus`. |
 | `issue_1931` | buckets A (`source = 'subagent'`) and B (any other source) of ended non-rotation children: n, children with 0 rows, missing, silent surplus, lineage rows matching the host parent; `pass_A`; AUXILIARY sessions excluded. |
 | `gate` | each bar's value and pass, the verdict, and `hand_checks`: each reason the verdict is held for a hand check (see "Hand checks"). |

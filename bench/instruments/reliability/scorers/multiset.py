@@ -13,6 +13,8 @@ nothing.
 """
 from __future__ import annotations
 
+import ast
+import functools
 import hashlib
 import importlib
 import importlib.util
@@ -480,7 +482,67 @@ def phase_c_score(expected: list[tuple[str, str]], rows: list[tuple]) -> dict:
     return out
 
 
-def split_surplus(groups, relations, rows=None):
+@functools.cache
+def todo_header() -> str:
+    """The todo injection header: the product's ``_PRESERVED_TODO_CONTEXT_PREFIX`` (engine.py), read, never copied."""
+    tree = ast.parse((Path(__file__).resolve().parents[4] / "engine.py").read_text())
+    return next(ast.literal_eval(n.value) for n in ast.walk(tree) if isinstance(n, ast.Assign)
+                and [getattr(t, "id", None) for t in n.targets] == ["_PRESERVED_TODO_CONTEXT_PREFIX"])
+
+
+def link_pending_ids(relations):
+    """#2377: rows the ingest marked ``link_pending`` (related_store_id NULL). It marks every row it stores, new rows
+    included, so a surplus row that carries one is a visible copy; the mark on any row is a defect signal."""
+    return {sid for sid, kind, other, *_ordinal in relations if kind == "link_pending" and other is None}
+
+
+def composite_witness(relations, rows):
+    """#2212 ``composite_of`` witness (provisional format): the stored user rows C it credits. C holds one relation
+    per segment, ordinals 0..n-1 contiguous with n >= 2, each naming the contained stored row of C's session, or NULL
+    for the host scaffold, at most once. With one NULL that leftover span starts with the todo injection header; with
+    none, ordinal 0 names a stored user row that starts with it. C's content is the segments joined by "\n\n" in
+    ordinal order, byte for byte. Only C is credited: the contained rows are scored as ordinary rows."""
+    header, segments, out = todo_header(), defaultdict(list), set()
+    for sid, kind, other, *ordinal in relations:
+        if kind == "composite_of":
+            segments[sid].append((ordinal[0] if ordinal else None, other))
+    for c, parts in segments.items():
+        session, role, content = rows.get(c, (None, None, None))
+        ordinals = [o for o, _r in parts]
+        if role != "user" or len(parts) < 2 or not all(type(o) is int for o in ordinals) \
+                or sorted(ordinals) != list(range(len(parts))):
+            continue
+        related = [r for _o, r in sorted(parts)]
+        nulls = [i for i, r in enumerate(related) if r is None]
+        if len(nulls) > 1 or any(r not in rows or rows[r][0] != session for r in related if r is not None):
+            continue
+        texts, content = [None if r is None else rows[r][2] or "" for r in related], content or ""
+        if nulls:  # the scaffold is the one span the contained rows leave
+            i = nulls[0]
+            head = "".join(t + "\n\n" for t in texts[:i])
+            tail = "".join("\n\n" + t for t in texts[i + 1:])
+            if len(content) < len(head) + len(tail) or not (content.startswith(head) and content.endswith(tail)):
+                continue
+            texts[i] = content[len(head):len(content) - len(tail)]
+            first_ok = texts[i].startswith(header)
+        else:
+            first_ok = rows[related[0]][1] == "user" and texts[0].startswith(header)
+        if first_ok and "\n\n".join(texts) == content:
+            out.add(c)
+    return out
+
+
+def attribution_forms(relations, rows, logged=None):
+    """The witnesses that credit a surplus row as a visible copy beyond the relation witnesses: store id sets keyed
+    by their output count. ``logged``: the store ids the LCM-X log names as a failed link's source (the gate audit's
+    log input); None leaves the form out."""
+    forms = {"link_pending_rows": link_pending_ids(relations), "composite_rows": composite_witness(relations, rows)}
+    if logged is not None:
+        forms["logged_link_rows"] = set(logged)
+    return forms
+
+
+def split_surplus(groups, relations, rows=None, forms=None):
     """Maximum matching of relation witnesses to rows, with each key capped at its unlicensed surplus.
 
     Flow: key quota -> unique self/pair witness -> stored row. Witness and row nodes belong to one key, so a row
@@ -499,16 +561,9 @@ def split_surplus(groups, relations, rows=None):
     accounting chose out of store order: those a #823 merge record consumed and those an embedded credit reserved.
     A key with any takes the worst case whatever it keeps, because #823 merges and #804 licensed parts pick their
     copies around reserved rows, so store order no longer identifies the kept copy.
+    Each ``attribution_forms`` set (``forms``, computed from the relations when None) is a self witness too; a form's
+    count is the visible surplus it adds to the relation witnesses alone, so two forms on one row both count it.
     """
-    graph, source, sink = defaultdict(dict), ("source",), ("sink",)
-
-    def edge(a, b, capacity=1):
-        if b not in graph[a]:
-            graph[a][b], graph[b][a] = capacity, 0
-
-    self_ids = {sid for sid, kind, _other in relations if kind in ("supersedes", "generated_unproven")}
-    pairs = sorted({tuple(sorted((sid, other))) for sid, kind, other in relations
-                    if kind == "possible_replay_of" and other is not None and sid != other})
     # Stored text only verifies an existing directed witness; it never creates one.
     # ``rows`` (store_id -> (session, role, content)) covers every stored row, tool results included; without it,
     # the evidence maps attached to surplus groups are merged once each (score() shares one map across groups).
@@ -518,8 +573,29 @@ def split_surplus(groups, relations, rows=None):
             if len(group) > 4 and id(group[4]) not in seen:
                 seen.add(id(group[4]))
                 rows.update(group[4])
+    forms = attribution_forms(relations, rows) if forms is None else forms
+    held = {sid for group in groups for sid in group[2]}
+    live = {name: ids & held for name, ids in forms.items()}
+    out = _matched(groups, relations, rows, set().union(*live.values()))
+    base = _matched(groups, relations, rows, set())["visible_surplus_rows"] if any(live.values()) else 0
+    for name, ids in live.items():
+        out[name] = _matched(groups, relations, rows, ids)["visible_surplus_rows"] - base if ids else 0
+    out["link_pending_rows_total"] = len(forms["link_pending_rows"])
+    return out
+
+
+def _matched(groups, relations, rows, credited):
+    graph, source, sink = defaultdict(dict), ("source",), ("sink",)
+
+    def edge(a, b, capacity=1):
+        if b not in graph[a]:
+            graph[a][b], graph[b][a] = capacity, 0
+
+    self_ids = {sid for sid, kind, *_rest in relations if kind in ("supersedes", "generated_unproven")} | credited
+    pairs = sorted({tuple(sorted((sid, other))) for sid, kind, other, *_rest in relations
+                    if kind == "possible_replay_of" and other is not None and sid != other})
     replay_rows = rows
-    stripped_pairs = [(other, sid) for sid, kind, other in relations
+    stripped_pairs = [(other, sid) for sid, kind, other, *_rest in relations
                       if kind == "possible_replay_of" and other in replay_rows and sid in replay_rows and other < sid
                       and replay_rows[sid][:2] == replay_rows[other][:2]
                       and stripped_replay_content(replay_rows[sid][2]) is not None

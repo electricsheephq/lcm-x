@@ -76,7 +76,8 @@ class Home:
                                  | ({"timestamp": m["_obs"]} if "_obs" in m else {}))
                     for n, (sid, m) in enumerate(host if stored is None else stored)]
         if relations:
-            store.add_message_relations([[(s, kind, o, None, None)] for s, kind, o in relations])
+            store.add_message_relations([[(r[0], r[1], r[2], r[3] if len(r) > 3 else None, None)]
+                                         for r in relations])  # (store_id, kind, related[, ordinal])
         for child, parent in lineage:
             store.record_session_lineage(child, parent, source="subagent_start")
         store.close()
@@ -1145,3 +1146,79 @@ def test_in_place_chained_compactions_with_inner_carriers(tmp_path, lose):
     assert totals["expected_rows"] == len(genuine)
     assert totals["missing_rows"] == int(lose)
     assert totals["surplus_rows"] == 0
+
+
+TODO = audit.multiset.todo_header() + f"\n- [ ] {S} step"
+LINK = "2026-11-06 10:00:01,000 WARNING [S1] hermes_lcm.engine: LCM tool replay link failed {}\n"
+
+
+def dup_home(tmp_path, **kw):
+    """Turn 1, its prompt stored again as store id 3 (a surplus copy)."""
+    return Home(tmp_path, ONE, turn(1), stored=turn(1) + [turn(1)[0]], **kw)
+
+
+@pytest.mark.parametrize("relations,credited", [([(3, "link_pending", None)], 1), ([], 0),
+                                                ([(1, "link_pending", None)], 0), ([(3, "link_pending", 1)], 0)],
+                         ids=["on-surplus", "none", "on-expected-copy", "related-not-null"])
+def test_a_link_pending_surplus_row_is_a_visible_copy(tmp_path, relations, credited):
+    out = dup_home(tmp_path, relations=relations + [(2, "link_pending", None)]).run()
+    t = out["parity"]["totals"]
+    assert (t["visible_surplus_rows"], t["silent_surplus_rows"], t["link_pending_rows"]) == (credited, 1 - credited,
+                                                                                          credited)
+    assert out["parity"]["link_pending_rows_total"] == 1 + sum(o is None for _s, _k, o in relations)  # row 2 too
+
+
+@pytest.mark.parametrize("copies,want", [([T0], (0, 1)), ([T0, T0], (1, 1)), ([], (0, 0)), ([T0 + 1], (1, 0))],
+                         ids=["one-copy", "second-copy", "no-copy", "other-stamp"])
+def test_a_stored_copy_of_a_displayed_todo_row_is_expected_once(tmp_path, copies, want):
+    todo = {"role": "user", "content": TODO}
+    host = [("S1", dict(todo, _ts=T0))] + [("S1", dict(m, _ts=T0 + 2 + n)) for n, (_s, m) in enumerate(turn(1))]
+    stored = [("S1", stamped(todo, t)) for t in copies] + [("S1", stamped(m, m["_ts"])) for _s, m in host[1:]]
+    out = Home(tmp_path, ONE, host, stored=stored).run()
+    t = out["parity"]["totals"]
+    assert (t["silent_surplus_rows"], t["host_todo_rows_expected"], t["missing_rows"]) == (*want, 0)
+
+
+@pytest.mark.parametrize("relations,credited", [([(3, "composite_of", None, 0), (3, "composite_of", 1, 1)], 1),
+                                                ([], 0)], ids=["witnessed", "no-witness"])
+def test_a_witnessed_composite_is_a_visible_copy(tmp_path, relations, credited):
+    composite = {"role": "user", "content": TODO + "\n\n" + u("question 1")["content"]}
+    out = Home(tmp_path, ONE, turn(1), stored=turn(1) + [("S1", composite)], relations=relations).run()
+    t = out["parity"]["totals"]
+    assert (t["visible_surplus_rows"], t["silent_surplus_rows"], t["composite_rows"]) == (credited, 1 - credited,
+                                                                                       credited)
+
+
+def test_scaffold_provenance_metadata_never_clears_a_surplus_row(tmp_path):
+    home = dup_home(tmp_path)
+    con = sqlite3.connect(home.lcm)
+    con.execute("insert into metadata (key, value) values (?, ?)",
+                ("real_user_scaffold_store_id:3", json.dumps({"version": 1, "kind": "user-authored-scaffold"})))
+    con.commit()
+    con.execute("pragma wal_checkpoint(truncate)")
+    con.close()
+    out = home.run()
+    assert out["parity"]["totals"]["silent_surplus_rows"] == 1
+    assert out["exempted_surplus"]["store_ids"]["unattributed"] == [3]
+
+
+@pytest.mark.parametrize("line,credited,unparsed", [
+    (LINK.format("source_store_id=3 target_store_id=1 reason=relation_write_failed"), 1, 0),
+    (LINK.format("source_store_id=3 target_store_id=1 reason=pending_write_failed"), 1, 0),
+    (LINK.format("source_store_id=1 target_store_id=3 reason=relation_write_failed"), 0, 0),
+    (LINK.format("source_store_id=3 target_store_id=1 reason=other_failure"), 0, 1),
+    (LINK.format("source_store_id=3x target_store_id=1 reason=relation_write_failed"), 0, 1),
+    ("", 0, 0)], ids=["relation", "pending", "target-only", "unknown-reason", "malformed", "no-line"])
+def test_a_logged_link_source_is_a_visible_copy(tmp_path, line, credited, unparsed):
+    out = dup_home(tmp_path).run(logs=[line])
+    t = out["parity"]["totals"]
+    assert (t["visible_surplus_rows"], t["logged_link_rows"], out["recorder"]["logged_link_unparsed"]) == (
+        credited, credited, unparsed)
+
+
+def test_route_link_pending_fields_are_summed(tmp_path):
+    home = dup_home(tmp_path)
+    lines = route("S1", "foreground", 0, 1, 2)[:-1] + " link_pending=2\n" + route("S1", "append", 2, 3, 3)[:-1] + \
+        " link_pending=1\n"
+    assert home.run(logs=[lines])["recorder"]["link_pending_logged"] == 3
+    assert home.run(logs=[route("S1", "foreground", 0, 1, 3)])["recorder"]["link_pending_logged"] is None

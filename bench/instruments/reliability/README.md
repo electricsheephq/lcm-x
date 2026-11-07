@@ -139,6 +139,18 @@ the host reported `interrupted`. Any other assistant row is surplus.
   `{store_id, role, sha256}`. Tool hashes are SHA256 of `json.dumps(key[1:], sort_keys=True)` (the existing
   tool key without its lineage, with default JSON separators); call/malformed-call roles are `assistant`.
   Examples are deterministic representatives among rows left unexplained by the matching.
+  Attribution forms (#2377, #2212; `multiset.attribution_forms`) are self witnesses too, each in one function:
+  `link_pending_ids` (a `link_pending` relation with `related_store_id` NULL; the ingest marks every row it
+  stores, so a surplus copy that carries one is visible) and `composite_witness` (a stored user row C with
+  `composite_of` relations, ordinals 0..n-1 contiguous with n >= 2, each naming a stored row of C's session or NULL
+  for the host scaffold, at most one NULL; with one NULL the leftover span starts with the todo injection header
+  `_PRESERVED_TODO_CONTEXT_PREFIX`, with none ordinal 0 names a stored user row that starts with it; C's content is
+  the segments joined by `\n\n`, byte for byte; only C is credited, never its parts). The relation format is
+  provisional. `link_pending_rows` and `composite_rows` count the visible surplus each form adds to the relation
+  witnesses alone (a row two forms credit counts in both); `link_pending_rows_total` counts every store row with a
+  `link_pending` relation, surplus or not: non-zero is a defect signal of its own. The scorer has no log input, so
+  logged intended links are credited by the gate audit only. Scaffold provenance metadata
+  (`real_user_scaffold_store_id:<id>`) is not accounting and credits nothing.
 - **Host-parity licence (D-A, DESIGN-436 REVISION 2 P-HOST; `scorers/host_parity.py`).** A stored USER-row surplus
   of a B2 key (or a B1 user tag) in lineage L is licensed only up to what the cell's own host state.db holds in L:
   `min(surplus, host_count - expected)`, floored at 0. host_count is what one host view holds: the most ACTIVE rows
