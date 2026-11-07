@@ -7,8 +7,8 @@ session folded into a composite row (and no other held row still carries its tag
 composite: that is the host merge (agent/agent_runtime_helpers.py ``_merge_consecutive_users``).
 
 B1/B2 are scored per session lineage: the chat lineage is S0 and its compression children (state.db
-``parent_session_id``), each cron fire is its own lineage. A row stored under the wrong lineage is a loss in
-one and a surplus in the other. A user-row surplus the host's own state.db holds at the same multiplicity is
+``parent_session_id``), each cron fire and each delegated child (scorers/delegated.py) is its own lineage. A row
+stored under the wrong lineage is a loss in one and a surplus in the other. A user-row surplus the host's own state.db holds at the same multiplicity is
 licensed and reported (``host_parity_licensed``, scorers/host_parity.py). A cell that cannot prove its scenario
 ran (tool dispatch, native attempts, tool groups) is UNSUPPORTED, never PASS.
 """
@@ -21,7 +21,7 @@ import sqlite3
 from collections import Counter
 from pathlib import Path
 
-from . import chronology, continuity, drain, externalized, host_parity, multiset, projections, summary, tool_calls, tool_groups, host_rewrite
+from . import chronology, continuity, delegated, drain, externalized, host_parity, multiset, projections, summary, tool_calls, tool_groups, host_rewrite
 
 ALL_BARS = ("B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8", "B9")
 
@@ -92,18 +92,13 @@ def attempts(events: list[dict]) -> list[dict]:
 
 def lineage(cell_dir: Path, root: str = "S0", db_dir: Path | None = None):
     """store session id -> lineage: "chat" for ``root`` (R1: S0; R2: the ACP session id) and its compression
-    descendants, else the root session."""
-    parents, state = {}, Path(db_dir or cell_dir / "db") / "state.db"
-    if state.exists():
-        con = sqlite3.connect(f"file:{state}?mode=ro", uri=True)
-        try:
-            parents = dict(con.execute("select id, parent_session_id from sessions"))
-        finally:
-            con.close()
+    descendants, else the root session. A delegated child (#1931) roots its own lineage."""
+    sessions = delegated.host_sessions(Path(db_dir or cell_dir / "db") / "state.db")
+    parents = {sid: parent for sid, (parent, _source) in sessions.items()}
 
     def group(sid):
         seen = set()
-        while parents.get(sid) and sid not in seen:
+        while parents.get(sid) and sid not in seen and not delegated.is_child_root(sid, sessions):
             seen.add(sid)
             sid = parents[sid]
         return "chat" if sid == root else sid
@@ -111,6 +106,8 @@ def lineage(cell_dir: Path, root: str = "S0", db_dir: Path | None = None):
 
 
 def attempt_group(a: dict, group) -> str:
+    if a["prefix"] == "D":  # a delegated child: its host session's lineage
+        return group(a["session"]) if a.get("session") else f"delegate:{a['tag']}"
     return "chat" if a["prefix"] == "T" else group((a.get("end") or {}).get("session") or f"cron_job_{int(a['tag'][1:]):02d}")
 
 
@@ -257,6 +254,7 @@ def score(cell: dict, cell_dir: Path, db_dir: Path | None = None) -> dict:
     finally:
         con.close()
     atts = attempts(events)
+    atts += delegated.child_attempts(events)  # after the parents: projections.verify indexes atts by user_sent order
     group = lineage(cell_dir, cell.get("chat_root", "S0"), db_dir)
     groups = sorted({attempt_group(a, group) for a in atts} | {group(sid) for _s, sid, _r, _c in stored})
     notices = {x for p in phases for x in p.get("failed_turn_notices") or []}
@@ -271,7 +269,7 @@ def score(cell: dict, cell_dir: Path, db_dir: Path | None = None) -> dict:
                [r for r in b2_stored if group(r[1]) == g]) for g in groups}
     applicable = [b for b in cell.get("bars") or ALL_BARS
                   if (b != "B6" or cell.get("tool_plan")) and (b != "B7" or cell.get("native_recovery"))
-                  and (b != "B5" or cell.get("min_compactions", 5) > 0)]
+                  and (b != "B5" or cell.get("min_compactions", 5) > 0) and (b != "B10" or cell.get("delegate_plan"))]
     failed, numbers = {}, {}
 
     user_pat, reply_pat = r"\[([A-Z]\d{2,3})\] user turn", r"reply to ([A-Z]\d{2,3})\b"
@@ -441,6 +439,11 @@ def score(cell: dict, cell_dir: Path, db_dir: Path | None = None) -> dict:
     numbers["diagnostic"]["native_rejections"] = dict(Counter(e.get("rejection") for e in events
                                                               if e["event"] == "compaction" and e.get("rejection")))
     gaps = scenario_gaps(cell, events, atts, tg, bound)
+    if cell.get("delegate_plan"):  # B10 (#1931): admission, parent links and no cross-lineage copies
+        numbers["B10"], b10_failed, b10_gaps = delegated.score(cell, events, atts, per, full, db_dir, group)
+        gaps += b10_gaps
+        if b10_failed and "B10" in applicable:
+            failed["B10"] = b10_failed
     if gaps:
         return {"verdict": "UNSUPPORTED", "reason": "scenario not proven: " + "; ".join(gaps[:5]),
                 "applicable_bars": applicable, "failed_bars": failed, "inconclusive_bars": inconclusive, "numbers": numbers}

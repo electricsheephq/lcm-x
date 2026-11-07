@@ -174,10 +174,26 @@ class Scenario:
         for group in self.cell.get("tool_plan", []):
             turns = ([first] if phase != "A" else []) if group["turns"] == "restart" else group["turns"]
             out += [group["calls"]] if t in turns else []
+        # #1931: one delegate_task step; its child answers from child() while this turn waits for the tool result
+        out += [[{"name": "delegate_task", "args": {"goal": P1.child_goal(t)}}]
+                for group in self.cell.get("delegate_plan", []) if t in group["turns"]]
         return out
+
+    def child(self, messages: list[dict]) -> dict | None:
+        """A request from a delegated child (its last user row is a ``[Dnn]`` goal): the scripted child reply, never a
+        parent step and never ``unexpected``."""
+        last_user = next((m["content"] for m in reversed(messages) if m["role"] == "user"), "")
+        m = re.search(P1.CHILD_TAG, last_user if isinstance(last_user, str) else json.dumps(last_user))
+        if not m or not self.cell.get("delegate_plan"):
+            return None
+        text = P1.child_reply(int(m.group(1)[1:]))
+        self.run.event(turn=self.st["t"], event="child_emit", tag=m.group(1), session_prefix="D", text=text)
+        return {"content": text, "log": {"turn": self.st["t"], "kind": "child", "child": m.group(1)}}
 
     def main(self, messages: list[dict]) -> dict:
         st, run = self.st, self.run
+        if (reply := self.child(messages)) is not None:  # before any parent step or result is recorded
+            return reply
         t, text_tag = st["t"], run.text_tag
         for m in messages:  # record received results even when the scripted reply returns early
             cid = m.get("tool_call_id") if m["role"] == "tool" else None
@@ -485,6 +501,7 @@ def accounting(d: Path, events: list[dict]) -> dict:
     implied = {"emit": sum(1 for e in events if e["event"] == "emit"),
                "tool_steps": len({(e["phase"], e["id"].rsplit("_", 1)[0]) for e in events if e["event"] == "tool_issue"}),
                "crash_holds": sum(1 for e in events if e.get("fault") == "crash_after_compaction_before_reply"),
+               "child_emit": sum(1 for e in events if e["event"] == "child_emit"),
                "unexpected": len({r["rid"] for r in reqs if r.get("unexpected")})}
     kills = sorted(e["kill_monotonic_ns"] for e in events
                    if e.get("event") == "crash" and e.get("kill_monotonic_ns") is not None)
