@@ -7,6 +7,9 @@
     },
     "categories": {
       "abstention": {
+        "INCOMPLETE": false,
+        "b": 0,
+        "b_failed": 0,
         "baseline": {
           "INCOMPLETE": false,
           "degraded": 0,
@@ -14,6 +17,9 @@
           "rate_points": 0.0,
           "total": 1
         },
+        "c": 0,
+        "c_failed": 0,
+        "can_fail": false,
         "candidate": {
           "INCOMPLETE": false,
           "degraded": 0,
@@ -22,14 +28,26 @@
           "total": 1
         },
         "clusters": 1,
+        "count_pass": true,
         "difference_points": 0.0,
-        "interval_pass": true,
+        "discordance_rate": 0.0,
+        "discordant": 0,
+        "gating": false,
+        "interval_gates": false,
+        "interval_inside_band": true,
         "lower_bound_points": 0.0,
+        "margin_points": 300.0,
+        "margin_questions": 3,
+        "mcnemar_p": 1.0,
+        "net": 0,
         "paired_n": 1,
-        "pass": true,
+        "pass": false,
         "upper_bound_points": 0.0
       },
       "knowledge-update": {
+        "INCOMPLETE": false,
+        "b": 0,
+        "b_failed": 0,
         "baseline": {
           "INCOMPLETE": false,
           "degraded": 0,
@@ -37,6 +55,9 @@
           "rate_points": 0.0,
           "total": 1
         },
+        "c": 0,
+        "c_failed": 0,
+        "can_fail": false,
         "candidate": {
           "INCOMPLETE": false,
           "degraded": 0,
@@ -45,14 +66,24 @@
           "total": 1
         },
         "clusters": 1,
+        "count_pass": true,
         "difference_points": 0.0,
-        "interval_pass": true,
+        "discordance_rate": 0.0,
+        "discordant": 0,
+        "gating": false,
+        "interval_gates": false,
+        "interval_inside_band": true,
         "lower_bound_points": 0.0,
+        "margin_points": 300.0,
+        "margin_questions": 3,
+        "mcnemar_p": 1.0,
+        "net": 0,
         "paired_n": 1,
-        "pass": true,
+        "pass": false,
         "upper_bound_points": 0.0
       }
     },
+    "claim": "count-margin",
     "d8_row": false,
     "excluded_absent_from_baseline": 0,
     "identities_missing_both": [
@@ -67,12 +98,13 @@
       "judgeProvenance.reasoningEffort"
     ],
     "mode": "non-inferiority",
-    "pass": true,
+    "pass": false,
     "rate_pass": true,
     "recall_configs": {
       "baseline": "OFF",
       "candidate": "OFF"
     },
+    "rule_id": "d8-count-margin-v1",
     "runs": {
       "baseline": {
         "INCOMPLETE": false,
@@ -98,6 +130,9 @@
     },
     "categories": {
       "abstention": {
+        "INCOMPLETE": false,
+        "b": 0,
+        "b_failed": 0,
         "baseline": {
           "INCOMPLETE": false,
           "degraded": 0,
@@ -105,6 +140,9 @@
           "rate_points": 0.0,
           "total": 1
         },
+        "c": 0,
+        "c_failed": 0,
+        "can_fail": false,
         "candidate": {
           "INCOMPLETE": false,
           "degraded": 0,
@@ -113,14 +151,26 @@
           "total": 1
         },
         "clusters": 1,
+        "count_pass": true,
         "difference_points": 0.0,
-        "interval_pass": true,
+        "discordance_rate": 0.0,
+        "discordant": 0,
+        "gating": false,
+        "interval_gates": false,
+        "interval_inside_band": true,
         "lower_bound_points": 0.0,
+        "margin_points": 300.0,
+        "margin_questions": 3,
+        "mcnemar_p": 1.0,
+        "net": 0,
         "paired_n": 1,
-        "pass": true,
+        "pass": false,
         "upper_bound_points": 0.0
       },
       "knowledge-update": {
+        "INCOMPLETE": false,
+        "b": 0,
+        "b_failed": 0,
         "baseline": {
           "INCOMPLETE": false,
           "degraded": 0,
@@ -128,6 +178,9 @@
           "rate_points": 0.0,
           "total": 1
         },
+        "c": 0,
+        "c_failed": 0,
+        "can_fail": false,
         "candidate": {
           "INCOMPLETE": false,
           "degraded": 0,
@@ -136,14 +189,24 @@
           "total": 1
         },
         "clusters": 1,
+        "count_pass": true,
         "difference_points": 0.0,
-        "interval_pass": true,
+        "discordance_rate": 0.0,
+        "discordant": 0,
+        "gating": false,
+        "interval_gates": false,
+        "interval_inside_band": true,
         "lower_bound_points": 0.0,
+        "margin_points": 300.0,
+        "margin_questions": 3,
+        "mcnemar_p": 1.0,
+        "net": 0,
         "paired_n": 1,
-        "pass": true,
+        "pass": false,
         "upper_bound_points": 0.0
       }
     },
+    "claim": "count-margin",
     "d8_row": false,
     "excluded_absent_from_baseline": 0,
     "identities_missing_both": [
@@ -158,12 +221,13 @@
       "judgeProvenance.reasoningEffort"
     ],
     "mode": "placebo",
-    "pass": true,
+    "pass": false,
     "rate_pass": null,
     "recall_configs": {
       "baseline": "OFF",
       "candidate": "OFF"
     },
+    "rule_id": "d8-count-margin-v1",
     "runs": {
       "baseline": {
         "INCOMPLETE": false,

@@ -49,7 +49,9 @@ def test_partial_annotations_keep_report_verdict_and_health(tmp_path, source, an
     overlay(candidate, source, [{"question_id": "a_abs", **annotation}])
     result = d8_guard.compare_runs(candidate, baseline, subset=True)
     assert not result["INCOMPLETE"]
-    assert result["pass"] is (not failed)
+    # d8-count-margin-v1: was `pass is (not failed)`; a failed annotation is a failed loss.
+    assert (result["categories"]["abstention"]["c"], result["categories"]["abstention"]["c_failed"]) == (
+        int(failed), int(failed))
     assert result["runs"]["candidate"]["missing"] == 0
     assert result["runs"]["candidate"]["degraded"] == int(failed)
     loaded = failclose.load_rows(candidate)[0]
@@ -115,7 +117,8 @@ def test_verdict_unit_in_both_consumers(tmp_path, source, report_verdict, detail
     assert d8_guard._unscorable(loaded) is (expected is None)
     result = d8_guard.compare_runs(candidate, baseline, subset=True)
     assert result["INCOMPLETE"] is (expected is None)
-    assert result["pass"] is (expected is True)
+    if expected is not None:  # d8-count-margin-v1: was `pass is (expected is True)`.
+        assert result["categories"]["abstention"]["c"] == int(not expected)
     if expected is None:
         with pytest.raises(ValueError, match="unrecognised label"):
             failclose.account_run(candidate)

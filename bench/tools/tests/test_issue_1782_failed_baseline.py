@@ -59,7 +59,9 @@ def test_failure_after_overlay_outside_categories_is_incomplete(tmp_path, source
     assert result["INCOMPLETE"]
     assert not result["pass"]
     assert result["reason"] == "baseline: failed rows: 1 (rerun the baseline)"
-    assert all(category["pass"] for category in result["categories"].values())
+    # d8-count-margin-v1: a failure no category owns makes every category INCOMPLETE; counts stay clean.
+    assert all(category["INCOMPLETE"] and category["count_pass"] and not category["pass"]
+               for category in result["categories"].values())
 
 
 @pytest.mark.parametrize("placebo", [False, True])
