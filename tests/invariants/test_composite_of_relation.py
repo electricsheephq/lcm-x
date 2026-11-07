@@ -143,3 +143,30 @@ def test_scaffold_never_holds_a_whole_stored_row(tmp_path):
             (row["store_id"], "composite_of", target, i) for i, target in enumerate([None, ids[note], ids[P1]])]
     finally:
         engine.shutdown()
+
+
+@pytest.mark.parametrize("case", ["cross-session-copy", "overlapping-separator", "header-not-leading"])
+def test_writer_finds_every_split(tmp_path, case):
+    """Writer-level shapes: a rule (ii) split still counts when a part also has a copy outside C's session; cuts
+    at overlapping separators ("\\n\\n\\n") are all tried; text before the header is never a scaffold."""
+    engine = _engine(tmp_path)
+    try:
+        store, conversation = engine._store, engine._conversation_id
+
+        def put(session, text):
+            return store.append(session, _u(text, None), conversation_id=conversation)
+
+        if case == "cross-session-copy":  # (i) [scaffold, P1, P2] and (ii) [R in B, P2]: two splits
+            composite = TODO + "\n\n" + P1
+            put("A", P1), put("A", composite), put("B", composite), put("B", P2)
+            target = put("B", composite + "\n\n" + P2)
+        elif case == "overlapping-separator":  # [TODO, "\nP"] and [TODO + "\n", "P"]: two splits
+            put("S", "\nP"), put("S", "P")
+            target = put("S", TODO + "\n\n\nP")
+        else:
+            put("S", P1)
+            target = put("S", "intro\n\n" + TODO + "\n\n" + P1)
+        engine._identity_anchor_record_composite_of([target])
+        assert not [r for r in _relations(engine) if r[1] == "composite_of"]
+    finally:
+        engine.shutdown()
