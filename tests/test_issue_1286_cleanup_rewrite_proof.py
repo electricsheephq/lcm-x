@@ -520,6 +520,24 @@ def test_a_later_cleanup_pass_does_not_prove_away_a_reply_the_warm_path_never_st
     assert host.count(reply) == 2
 
 
+def test_a_reasoning_cleaned_reply_in_front_of_the_anchor_is_not_stored_again(host):
+    """Review (NeonDiff): after a committed reasoning cleanup, the host's reply is the cleaned form of a stored
+    row. A stamped user replaced before it adds that user only; the cleaned reply is not stored again."""
+    _turns(host, "reasoning")
+    _commit_cleanup(host, "reasoning")
+    host.turn()  # consumes the one-shot cleanup proof
+    reply = next(m for m in host.live if m["role"] == "assistant" and m["content"].startswith("reply to T2"))
+    assert THINK not in reply["content"]
+    index = host.live.index(reply) - 1
+    assert host.live[index]["role"] == "user" and "timestamp" in host.live[index]
+    before = Counter((row[0], row[1]) for row in host.rows())
+    host.live[index] = {"role": "user", "content": "a replaced user before the cleaned reply" + PAD,
+                        "timestamp": host.stamp()}
+    host.engine.ingest(host.live)
+    added = Counter((row[0], row[1]) for row in host.rows()) - before
+    assert added == Counter([("user", host.live[index]["content"])]), added
+
+
 def _carried(payload, session_id):
     """The store ids of ``session_id`` that a durable proof's carry ranges cover."""
     return {store_id for sid, start, end in payload["carry_ranges"] if sid == session_id

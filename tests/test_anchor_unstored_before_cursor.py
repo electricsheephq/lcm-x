@@ -252,3 +252,20 @@ def test_an_upgrade_with_a_tool_result_the_store_holds_without_its_name_stores_o
         assert added == Counter([_key(changed[4])]), added
     finally:
         engine.shutdown()
+
+
+def test_a_reply_that_left_the_audited_tail_is_not_stored_again(tmp_path):
+    """Review (NeonDiff): a warm two-row view, a stamped user and an unstamped reply, whose user the host replaces
+    more often than the audited tail holds rows. The reply's stored copy leaves the capped tail; absence from a
+    capped tail is no proof that a row was never stored, so the reply is stored once, and each user once."""
+    engine = _engine(tmp_path)
+    try:
+        reply = {"role": "assistant", "content": "the one reply" + PAD}
+        users = [_u(f"replacement user {index}", 1000 + index) for index in range(70)]
+        for user in users:
+            engine.ingest([user, reply])
+        assert _count(engine, reply["content"]) == 1
+        assert all(_count(engine, user["content"]) == 1 for user in users)
+    finally:
+        engine.shutdown()
+
