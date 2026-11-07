@@ -957,8 +957,9 @@ def audit(state_db: Path, lcm_db: Path, logs=(), since=None, events_path=None, l
     observed = {r[0]: r[6] for r in stored}
     user_rows = {r[0]: (r[1], r[3]) for r in resolved if r[2] == "user"}
     session_restarts = None if restarts is None else {s: restarts.get(group(s), []) for s in sessions}
+    # The proven recovery rows are out of parity, so they stay out of the view-order condition too (#2087).
     attributed = attribute_silent_surplus(sorted(silent_rows, key=lambda r: r[0]), ingests, observed, user_rows,
-                                          session_restarts, view_order(host_rows, resolved, strip))
+                                          session_restarts, view_order(host_rows, [r for r in resolved if r[0] not in recovery], strip))
     # Silent surplus counts copies per key, so a row holding two keys (content and a tool call) is listed once per
     # key; the gate's unattributed count stays in copies, and the row-based fraction counts distinct store ids.
     # An order_ambiguous row is held for a hand check: not unattributed, and counted in the fraction like an exemption.

@@ -1454,3 +1454,16 @@ def test_a_synthetic_pair_in_a_lineage_that_lost_a_real_pair_is_a_hand_check(tmp
     assert out["host_empty_recovery"]["ambiguous_store_ids"] == [9, 10]
     assert out["gate"]["verdict"] != "GATE PASS"
     assert {"reason": "host_empty_recovery_ambiguous", "store_ids": [9, 10]} in out["gate"]["hand_checks"]
+
+
+def test_a_recovery_pair_in_front_of_a_replay_copy_does_not_unplace_it(tmp_path):
+    """The proven recovery rows are out of parity, so they must not break the view-order condition either: a #2203
+    copy stored after a recovery pair is still attributed (not unplaced, which would fail the silent-surplus bar)."""
+    host = turn(1) + [("S1", call("c1")), ("S1", result("c1"))]
+    stored_extra = [("S1", EMPTY), ("S1", NUDGE), ("S1", u("question 1"))]
+    line = route("S1", "S3", 0, 7, 7).replace("reason=some reason text", "reason=tail retry")
+    out = Home(tmp_path, ONE, host, stored=host + stored_extra, stamps=frozenset({0})).run([line], RESTART_BEFORE)
+    if out["host_empty_recovery"]["store_ids"] != [5, 6]:
+        pytest.fail("setup: the recovery pair was not matched")
+    assert out["exempted_surplus"]["store_ids"]["#2203"] == [7]
+    assert out["gate"]["bars"]["unattributed_silent_surplus"]["pass"]
