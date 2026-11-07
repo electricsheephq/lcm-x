@@ -29,6 +29,8 @@ def _readonly(path, timeout=5.0):
     with path.open("rb") as stream:
         header = stream.read(20)
     wal_mode = len(header) == 20 and header[18] == 2 and header[19] == 2
+    if wal_mode and Path(str(path) + "-wal").exists() and not Path(str(path) + "-shm").exists():
+        raise CaptureError("WAL input has a -wal but no -shm: reading it would create a -shm beside it")
     quiet = wal_mode and not any(Path(str(path) + s).exists() for s in ("-wal", "-journal"))
     return sqlite3.connect(f"file:{quote(str(path))}?mode=ro" + ("&immutable=1" if quiet else ""), uri=True,
                            timeout=timeout)

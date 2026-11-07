@@ -179,9 +179,13 @@ def call_closure(path, roots, data=()):
     while pending:
         name = pending.pop()
         if name in data:
-            if any(isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Import, ast.ImportFrom))
-                   for n in bindings.get(name, [])):
-                raise ValueError(f"data names must be plain values, not code: {name}")
+            for n in bindings.get(name, []):  # A literal only: a lambda or an alias to a function is code.
+                try:
+                    if not isinstance(n, (ast.Assign, ast.AnnAssign)) or n.value is None:
+                        raise ValueError
+                    ast.literal_eval(n.value)
+                except ValueError:
+                    raise ValueError(f"data names must be plain values, not code: {name}") from None
             continue
         if name in seen:
             continue
@@ -284,7 +288,7 @@ def build(instrument_dir, files, roots_by_file, loads_by_file, interpreter, data
             if current in scanned:
                 continue
             scanned.add(current)
-            imported = local_imports(Path(instrument_dir) / current, instrument_dir) - {current}
+            imported = local_imports(Path(instrument_dir) / current, instrument_dir) - {current, name}  # The root is pinned.
             if imported - listed:
                 raise ValueError("a local import is not pinned in loads")
             pending.extend(imported)
