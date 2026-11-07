@@ -52,13 +52,16 @@ class D5LocalAdapter(BasePlatformAdapter):
 
     async def _turn(self, body):
         chat, step, text = body["chat_id"], body["step"], body["text"]
-        if not all(isinstance(v, str) for v in (chat, step, text)) or text.lstrip().startswith("/"):
-            raise ValueError("invalid turn")  # A leading "/" would run as a host command.
+        if not all(isinstance(v, str) for v in (chat, step, text)):
+            raise ValueError("invalid turn")
         if chat in self.turns and not self.turns[chat][1].is_set():
             return 409, {"completed": False}
         source = self.build_source(chat_id=chat, chat_name=chat, chat_type="dm", user_id="d5-user",
                                    user_name="d5-user", message_id=step)
-        event = MessageEvent(text=text, message_type=MessageType.TEXT, source=source, message_id=step)
+        # Replayed text is user text, never gateway control: no slash command, no plain-text restart, and no
+        # approval or clarify answer, whatever the text holds after the host strips its media prefixes.
+        event = MessageEvent(text=text, message_type=MessageType.TEXT, source=source, message_id=step,
+                             allow_gateway_control=False)
         done = asyncio.Event()
         self.turns[chat] = turn = [event, done, None]
         try:

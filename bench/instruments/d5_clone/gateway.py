@@ -88,10 +88,13 @@ def build_env(lcm_env, *, home, provider_url, host_bin, port_file, lcm_tree):
             link.symlink_to(target, target_is_directory=True)
         elif link.resolve() != target.resolve():
             raise ValueError("scratch plugin link has a different target")
-    remote = str(lcm_env.get("LCM_EMBEDDING_PROVIDER") or "").strip().lower() not in ("", "none", "fastembed", "fast-embed", "local", "ollama")
+    local = ("", "none", "fastembed", "fast-embed", "local", "ollama")
+    remote = str(lcm_env.get("LCM_EMBEDDING_PROVIDER") or "").strip().lower() not in local
+    remote_recall = str(lcm_env.get("LCM_PROACTIVE_RECALL_PROVIDER") or "").strip().lower() not in local
     passed = {k: str(v) for k, v in lcm_env.items() if k.startswith("LCM_") and k not in FORCED_LCM_PATHS and v is not None}
     # A name or value that could redirect a write, a model or an endpoint never reaches the gateway.
-    dropped = sorted(k for k, v in passed.items() if (remote and k.startswith("LCM_EMBEDDING")) or "/" in v
+    dropped = sorted(k for k, v in passed.items() if (remote and k.startswith("LCM_EMBEDDING"))
+                     or (remote_recall and k == "LCM_PROACTIVE_RECALL_PROVIDER") or "/" in v
                      or any(m in k for m in _REDIRECT_MARKERS))
     env = {k: v for k, v in passed.items() if k not in dropped}
     env.update(PATH=f"{host_bin}:/usr/bin:/bin", HOME=str(home / "user-home"), HERMES_HOME=str(home),
@@ -229,7 +232,9 @@ class Gateway:
             return False
 
     def stop(self, timeout=10):
-        if self.process:
+        # Signal only on the first stop. The group SIGKILL follows at once, so a child that ignored SIGTERM still pins
+        # the group id; once the exit is recorded, a later stop sends nothing to an id that may now be reused.
+        if self.process and self.exit_code is None:
             if self._signal_group(signal.SIGTERM):
                 try:
                     self.process.wait(timeout=timeout)

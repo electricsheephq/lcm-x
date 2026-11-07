@@ -59,6 +59,7 @@ def adapter_module(monkeypatch):
         message_type: str
         source: object
         message_id: str
+        allow_gateway_control: bool = True
 
     for name, members in {
         "gateway": {}, "gateway.platforms": {},
@@ -107,9 +108,21 @@ def test_turn_reports_the_hook_outcome_and_refuses_bad_input(adapter_module):
         adapter.handle_message = fail
         body = {"chat_id": "chat-a", "step": "one", "text": "synthetic", "timeout": 1}
         assert (await adapter._turn(body))[1] == {"step": "one", "completed": True, "outcome": "failure"}
-        for bad in ({"step": 1}, {"text": "/new"}, {"text": " \n/reset"}):
+        for bad in ({"step": 1}, {"text": None}, {"chat_id": 2}):
             with pytest.raises(ValueError):
                 await adapter._turn({**body, **bad})
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("text", ["/new", " \n/reset", "@file:x\n/new", "restart gateway"])
+def test_replayed_text_is_never_gateway_control(adapter_module, text):
+    async def exercise():
+        adapter = adapter_module.D5LocalAdapter(SimpleNamespace(extra={}))
+        status, result = await adapter._turn({"chat_id": "chat-a", "step": "one", "text": text, "timeout": 1})
+        assert status == 200 and result["completed"]
+        (event,) = adapter.seen
+        assert event.text == text and event.allow_gateway_control is False
 
     asyncio.run(exercise())
 
@@ -252,3 +265,27 @@ def test_real_host_session_key(real_host):
         assert build_session_key(source) == session_key("chat-a")
     finally:
         platform_registry.restore_registration("d5-local", current, previous, scope=scope)
+
+
+@pytest.mark.skipif(not os.environ.get("D5_HOST_SRC"), reason="D5_HOST_SRC not set")
+@pytest.mark.parametrize("text", ["/new", "@file:x\n/new", "restart gateway"])
+def test_real_host_never_reads_replayed_text_as_a_command(real_host, text):
+    from gateway.platforms.base import coerce_plaintext_gateway_command
+
+    async def exercise():
+        adapter = real_host.D5LocalAdapter(SimpleNamespace(extra={}))
+        seen = []
+
+        async def handle(event):
+            seen.append(event)
+            await adapter.on_processing_complete(event, "success")
+
+        adapter.handle_message = handle
+        await adapter._turn({"chat_id": "chat-a", "step": "one", "text": text, "timeout": 1})
+        (event,) = seen
+        assert not event.is_command() and event.get_command() is None
+        if event.allow_gateway_control:  # The host's own gate in handle_message.
+            coerce_plaintext_gateway_command(event)
+        assert event.text == text
+
+    asyncio.run(exercise())

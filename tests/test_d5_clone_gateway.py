@@ -379,6 +379,23 @@ def test_stop_kills_exact_pid_after_timeout(fake_gateway):
         fake_gateway.stop(0.01)
 
 
+def test_a_second_stop_never_signals(fake_gateway, monkeypatch):
+    fake_gateway.process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=True)
+    assert fake_gateway.stop(5) == -signal.SIGTERM
+    signals = []  # The exit is recorded: the pid and group id may now belong to another process.
+    monkeypatch.setattr(g.os, "killpg", lambda pid, sig: signals.append(sig))
+    assert fake_gateway.stop(0.01) == -signal.SIGTERM
+    assert signals == []
+
+
+@pytest.mark.parametrize("value, passed", [("voyage", False), ("openai", False), ("fastembed", True), ("", True)])
+def test_build_env_drops_a_remote_recall_provider(tmp_path, value, passed):
+    env, declaration = g.build_env({"LCM_PROACTIVE_RECALL_PROVIDER": value}, home=tmp_path, provider_url=URL,
+                                   host_bin="/b", port_file=tmp_path / "p", lcm_tree=ROOT)
+    assert ("LCM_PROACTIVE_RECALL_PROVIDER" in env) is passed
+    assert ("LCM_PROACTIVE_RECALL_PROVIDER" in declaration["dropped_names"]) is not passed
+
+
 def test_nonlocal_connections(monkeypatch):
     calls = []
 
