@@ -42,7 +42,7 @@ To turn capture off for a launch, set `LCMX_CAPTURE=off`, or start Claude Code w
 
 - **Claude Code's local transcript GC.** Lossless capture needs Claude Code's opt-in local transcript GC off (`CLAUDE_CODE_TRANSCRIPT_LOCAL_GC` unset, the default). With it on, capture is best effort and the audit lists those sessions without a lossless claim.
 - **A subagent transcript removed before the worker first reads it** cannot be captured, and the audit cannot see that it existed.
-- **Audit memory.** The audit needs memory roughly in proportion to the largest session in the store: about 1.2 to 1.3 GB for sessions of 625,000 to 690,000 lines in our gate runs. Capture itself stays under about 400 MB.
+- **Audit memory.** The audit needs memory roughly in proportion to the largest session in the store: about 1.3 GB for a 690,000-line session in our gate run. Capture itself stays under about 400 MB.
 - **Hook timing.** Hooks usually hand off in milliseconds, but the hook's write of its small pointer file sometimes stalls for a few seconds, at moderate as well as heavy machine load.
   - **The bound.** `PostToolBatch` runs in the background. The other hooks run before Claude Code goes on, with a 5-second limit (15 seconds for `PreCompact`), so a stall can add up to that limit to the turn.
   - **What we measured.** These figures are from two full release-gate runs on 0.1.0 candidates with the same hook code:
@@ -52,7 +52,7 @@ To turn capture off for a launch, set `LCMX_CAPTURE=off`, or start Claude Code w
     - The 1-minute load during the runs with stalls was about 10 to 37.
   - **This release's own run.** The result card attached to this release lists the hook timings measured on this release's own gate run.
 
-  In both runs no audit lost anything. A hook cut off at its time limit is designed to be caught up by the session's next hook. If an earlier hook had already recorded the session, a later worker run, even one started from another session, also catches it up. If every hook of a new session were cut off before any of them recorded it, that session would not be captured. In these runs no hook was seen killed at its time limit. The ones that ran past 5 s finished; they were the background hook and the scripted bursts, which run outside Claude Code's 5-second limit. So that catch-up path was not exercised. Tracked in #2350.
+  In both runs no audit lost anything. A hook cut off at its time limit is designed to be caught up by the session's next hook. If an earlier hook had already recorded the session, a later worker run, even one started from another session, also catches it up. If every hook of a new session were cut off before any of them recorded it, that session would not be captured. In these runs no hook was seen killed at its time limit. The ones that ran past 5 s finished; they were the background hook, which does not hold up the turn, and the scripted bursts, which call the hook directly rather than through Claude Code. So that catch-up path was not exercised. Tracked in #2350.
 - **Leftover temporary files.** A hook that is killed mid-write can leave an empty `.tmp` file in the store's `spool` folder. It holds nothing and is safe to delete; capture is unaffected.
 
 ## What it bundles
