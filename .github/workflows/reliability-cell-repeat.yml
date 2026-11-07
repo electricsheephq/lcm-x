@@ -43,7 +43,7 @@ jobs:
         run: python -m bench.instruments.reliability.ci prep --host "$HOST" --root "$RUNNER_TEMP/hosts" --out "$RUNNER_TEMP/hosts.json"
 
       - name: R1 in-process, all cells (failing cells keep their stores)
-        run: python bench/instruments/reliability/run_matrix.py --hosts-file "$RUNNER_TEMP/hosts.json" --hosts "$HOST" --plugin-ref HEAD --cells all --jobs 4 --out "$OUT/r1" --keep-dbs fail --lcm-env LCM_RELIABILITY_DEBUG_LOGGERS=hermes_plugins.hermes_lcm_x.engine,hermes_plugins.hermes_lcm_x.reconcile
+        run: python bench/instruments/reliability/run_matrix.py --hosts-file "$RUNNER_TEMP/hosts.json" --hosts "$HOST" --plugin-ref HEAD --cells all --jobs 4 --out "$OUT/r1" --keep-dbs fail --lcm-env LCM_RELIABILITY_DEBUG_LOGGERS=hermes_plugins.hermes_lcm_x.engine,hermes_plugins.hermes_lcm_x.reconcile,hermes_plugins.hermes_lcm_x.compaction
 
       - name: Rotation cell verdict
         if: always()
