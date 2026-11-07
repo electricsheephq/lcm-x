@@ -10,9 +10,16 @@ import re
 import sqlite3
 
 
-LOG = re.compile(r"^\d{4}-\d\d-\d\d[ T]\d\d:\d\d:\d\d(?:[.,]\d+)? "
-                 r"\[(WARNING|ERROR|INFO|DEBUG|CRITICAL)\] ([\w.]+): ")
-FINAL = re.compile(r"^([A-Za-z_][\w.]*(?:Error|Exception))\b")
+_STAMP, _LEVEL = r"\d{4}-\d\d-\d\d[ T]\d\d:\d\d:\d\d(?:[.,]\d+)?", r"(?P<level>WARNING|ERROR|INFO|DEBUG|CRITICAL)"
+# The ACP stderr format, then the host's file format and its verbose console format (hermes_logging.py
+# _LOG_FORMAT and _LOG_FORMAT_VERBOSE; both may carry a " [session]" tag after the level).
+LOG_FORMATS = (re.compile(rf"^{_STAMP} \[{_LEVEL}\] (?P<logger>[\w.]+): "),
+               re.compile(rf"^{_STAMP} {_LEVEL}(?: \[[^\]]*\])? (?P<logger>[\w.]+): "),
+               re.compile(rf"^(?:\d{{4}}-\d\d-\d\d[ T])?\d\d:\d\d:\d\d(?:[.,]\d+)? - (?P<logger>[\w.]+) - "
+                          rf"{_LEVEL}(?: \[[^\]]*\])? - "))
+# A traceback's final line: any dotted exception name ending in Error, Exception, ExceptionGroup, Exit or
+# Interrupt, including the bare names (Exception, SystemExit, KeyboardInterrupt).
+FINAL = re.compile(r"^((?:[A-Za-z_]\w*\.)*(?:[A-Za-z_]\w*?)?(?:Error|Exception|ExceptionGroup|Exit|Interrupt))(?::|\s*$)")
 MISSING = re.compile(r"No module named '([\w.]+)'")
 REFUSAL = "NotImplementedError: LCM-X cannot detach a context engine"
 THREAD = re.compile(r"thread=bg-review(?::([^\s]+))?")
@@ -21,6 +28,12 @@ SECTIONS = set("model providers custom_providers compression lcm context plugins
 
 
 KEY_NAME = re.compile(r"[a-z][a-z0-9_]{0,63}")  # Fixed doctor key names; anything else is hashed.
+
+
+def _fingerprint(entry):
+    """A doctor detail entry's hash after paths and numbers are masked, so one cause hashes alike across cells."""
+    text = entry if isinstance(entry, str) else json.dumps(entry, sort_keys=True, default=str)
+    return _sha(re.sub(r"\d+", "#", re.sub(r"(?:/[^\s'\"]+)+", "<path>", text)))[:12]
 
 
 def _sha(value):
@@ -38,19 +51,25 @@ def _db(path):
         conn.close()
 
 
+def _log_event(line):
+    return next((match for match in (form.match(line) for form in LOG_FORMATS) if match), None)
+
+
 def trace_events(log):
     runs, outside, imports, other, events = [], Counter(), Counter(), Counter(), Counter()
-    overlapping = ambiguous = unclosed = 0
+    overlapping = ambiguous = unclosed = sequence = 0
+    per_event = defaultdict(Counter)  # (logger, module) -> {event ordinal: tracebacks}
     for path in log:
-        active, logger, traceback, warning, counted = [], None, False, None, False
+        active, logger, traceback, warning, counted, current = [], None, False, None, False, None
         with Path(path).open(encoding="utf-8") as stream:
             for raw in stream:
                 line = raw.rstrip("\r\n")
                 stripped = line.lstrip(" \t|")
-                event = LOG.match(line)
+                event = _log_event(line)
                 if event:
-                    logger = event[2]
-                    warning, counted = logger if event[1] in {"WARNING", "ERROR"} else None, False
+                    logger, sequence = event["logger"], sequence + 1
+                    current = sequence
+                    warning, counted = logger if event["level"] in {"WARNING", "ERROR"} else None, False
                 thread = THREAD.search(line)
                 if thread and "OpenAI client created" in line:
                     overlapping += bool(active)
@@ -74,6 +93,7 @@ def trace_events(log):
                     if stripped.startswith(("ModuleNotFoundError", "ImportError")):
                         missing = MISSING.search(stripped)
                         imports[(logger, missing[1] if missing else None)] += 1
+                        per_event[(logger, missing[1] if missing else None)][current] += 1
                         if warning is not None and not counted:
                             events[warning] += 1
                             counted = True
@@ -95,7 +115,8 @@ def trace_events(log):
             "unclosed_runs_with_events": unclosed, "rule_determined": determined,
             "per_event_rule_holds": holds if determined else None,
             "optional_import_traces_total": sum(imports.values()), "events_by_logger": dict(sorted(events.items())),
-            "by_event": [{"logger": key[0], "missing_module": key[1], "count": count}
+            "by_event": [{"logger": key[0], "missing_module": key[1], "count": count,
+                          "per_event_counts": sorted(per_event[key].values())}
                          for key, count in sorted(imports.items(), key=lambda item: tuple(x or "" for x in item[0]))],
             "unattributed": sum(n for (logger, _), n in imports.items() if logger is None),
             "other_tracebacks": dict(sorted(other.items()))}
@@ -110,8 +131,14 @@ def lifecycle_rows(lcm_db):
         rows = conn.execute("SELECT conversation_id, current_session_id, last_finalized_session_id "
                             "FROM lcm_lifecycle_state ORDER BY conversation_id").fetchall()
         columns = {row[1] for row in conn.execute("PRAGMA table_info(messages)")}
-        conversations = Counter(dict(conn.execute("SELECT conversation_id, COUNT(*) FROM messages "
-                                                  "GROUP BY conversation_id"))) if "conversation_id" in columns else Counter()
+        conversations = Counter()  # Normalized as db_bootstrap.owned_conversation_values does: strip, NULL -> ''.
+        if "conversation_id" in columns:
+            for value, count in conn.execute("SELECT conversation_id, COUNT(*) FROM messages GROUP BY conversation_id"):
+                conversations[str(value or "").strip()] += count
+
+        def owned(conversation_id):  # A conversation owns its own id and the blank id.
+            key = str(conversation_id or "").strip()
+            return conversations[key] + (conversations[""] if key else 0)
         empty = []
         for row in rows:
             refs = {str(value) for value in (row[1], row[2]) if value}
@@ -121,13 +148,14 @@ def lifecycle_rows(lcm_db):
                               "last_finalized_session_h12": _sha(str(row[2]))[:12] if row[2] else None,
                               "messages_in_referenced_sessions": sum(counts[0][sid] for sid in refs),
                               "nodes_in_referenced_sessions": sum(counts[1][sid] for sid in refs),
-                              "affected_stored_rows": conversations[row[0]] if row[0] is not None else 0})
+                              "affected_stored_rows": owned(row[0])})
         affected = sum(row["affected_stored_rows"] for row in empty)
         safe = all(not any(row[key] for key in ("affected_stored_rows", "messages_in_referenced_sessions",
                                                "nodes_in_referenced_sessions")) for row in empty)
         safe = safe and "conversation_id" in columns  # Without the column, affected rows cannot be counted.
         return {"lifecycle_rows": len(rows), "empty_lifecycle_rows": len(empty), "empty_rows": empty,
                 "conversation_column": "conversation_id" in columns, "affected_stored_rows": affected,
+                "blank_conversation_rows": conversations[""],
                 "identity_order_check": "PASS" if safe else "NOT_EVALUATED"}
 
 
@@ -153,27 +181,22 @@ def reorder(lcm_db, state_db):
     only = {side: sorted(_sha(str(sid))[:12] for sid in keys) for side, keys in (
         ("lcm", lcm.keys() - host.keys()), ("host", host.keys() - lcm.keys()))}
     for sid in sorted(lcm.keys() | host.keys()):
-        sequences = []
-        for rows in (lcm[sid], host[sid]):
-            seen, sequence = Counter(), []
-            for key in rows:
-                seen[key] += 1
-                sequence.append((key, seen[key]))
-            sequences.append(sequence)
-        a, b = sequences
-        shared = set(a) & set(b)
-        positions = {key: i for i, key in enumerate(b) if key in shared}
-        tails = []  # Occurrence keys turn the LCS into an increasing subsequence of host positions.
-        for key in (key for key in a if key in shared):
-            pos = positions[key]
-            i = bisect_left(tails, pos)
-            if i == len(tails):
-                tails.append(pos)
-            else:
-                tails[i] = pos
+        a, b = lcm[sid], host[sid]
+        shared = sum((Counter(a) & Counter(b)).values())
+        where = defaultdict(list)
+        for j, key in enumerate(b):
+            where[key].append(j)
+        tails = []  # Hunt-Szymanski: the LCS is the longest increasing run of matched host positions.
+        for key in a:
+            for pos in reversed(where.get(key, ())):
+                i = bisect_left(tails, pos)
+                if i == len(tails):
+                    tails.append(pos)
+                else:
+                    tails[i] = pos
         results.append({"session_h12": _sha(str(sid))[:12], "lcm_rows": len(a), "host_rows": len(b),
-                        "matched": len(shared), "lcm_only": len(a) - len(shared), "host_only": len(b) - len(shared),
-                        "reordered_rows": len(shared) - len(tails), "columns_compared": {"lcm": lc, "host": hc}})
+                        "matched": shared, "lcm_only": len(a) - shared, "host_only": len(b) - shared,
+                        "reordered_rows": shared - len(tails), "columns_compared": {"lcm": lc, "host": hc}})
     missing = sorted({"tool_calls", "tool_call_id"} - set(hc))
     return {"sessions": len(results), "per_session": results, "identity_degraded": bool(missing),
             "missing_columns": missing, **{key: sum(row[key] for row in results) for key in (
@@ -221,7 +244,13 @@ def doctor_match(candidate, previous):
 
     def signature(row):
         detail = row.get("detail")
-        shape = tuple(sorted(detail)) if isinstance(detail, dict) else type(detail).__name__
+        if isinstance(detail, dict):
+            shape = ("dict", tuple(sorted(detail)))
+        elif isinstance(detail, (list, str)):  # Each entry's normalized text, as a hash: a new cause stays unmatched.
+            shape = (type(detail).__name__, tuple(sorted(_fingerprint(entry) for entry in (
+                detail if isinstance(detail, list) else [detail]))))
+        else:
+            shape = (type(detail).__name__, ())
         conditions = ()
         if row["check"] == "lifecycle_fragmentation" and isinstance(detail, dict):
             conditions = tuple((key, detail[key] > 0 if key == "empty_lifecycle_rows" else bool(detail[key]))
@@ -237,8 +266,9 @@ def doctor_match(candidate, previous):
     unknown = sorted({row["check"] for rows in checks for row in rows if row["status"] not in statuses})
     signatures = [{"check": sig[0], "status": sig[1] if sig[1] in statuses else "unknown_status",
                    "detail_keys": [key if KEY_NAME.fullmatch(str(key)) else "h:" + _sha(str(key))[:12]
-                                   for key in sig[2]] if isinstance(sig[2], tuple) else [],
-                   "detail_type": "dict" if isinstance(sig[2], tuple) else sig[2], **dict(sig[3])}
+                                   for key in sig[2][1]] if sig[2][0] == "dict" else [],
+                   **({"detail_fingerprints": list(sig[2][1])} if sig[2][0] in ("list", "str") else {}),
+                   "detail_type": sig[2][0], **dict(sig[3])}
                   for sig in sorted({signature(row) for row in checks[0]}, key=repr)]
     return {"warnings": results, "unmatched": unmatched, "failed_checks": failed, "unknown_status": unknown,
             "candidate_signatures": signatures,

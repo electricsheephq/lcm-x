@@ -55,8 +55,8 @@ def test_import_events_and_privacy(tmp_path):
     result = kit.trace_events([_write(tmp_path / "host.log", text)])
     assert result["optional_import_traces_total"] == 3
     assert result["by_event"] == [
-        {"logger": "agent.optional", "missing_module": None, "count": 1},
-        {"logger": "agent.relay_runtime", "missing_module": "optional.module", "count": 2}]
+        {"logger": "agent.optional", "missing_module": None, "count": 1, "per_event_counts": [1]},
+        {"logger": "agent.relay_runtime", "missing_module": "optional.module", "count": 2, "per_event_counts": [2]}]
     assert result["other_tracebacks"] == {"ValueError": 1}
     assert result["unattributed"] == 0
     assert result["events_by_logger"] == {"agent.optional": 1, "agent.relay_runtime": 1}
@@ -377,3 +377,75 @@ def test_doctor_detail_keys_from_data_are_hashed(tmp_path):
     assert result["candidate_signatures"][0]["detail_keys"] == [
         "h:" + hashlib.sha256(key.encode()).hexdigest()[:12], "rows"]
     assert "PRIVATE_KEY_NAME" not in json.dumps(result)
+
+
+@pytest.mark.parametrize("final,name", [("Exception: failed", "Exception"), ("SystemExit: 2", "SystemExit"),
+                                        ("KeyboardInterrupt", "KeyboardInterrupt"),
+                                        ("pkg.mod.CustomError: x", "pkg.mod.CustomError")])
+def test_bare_and_dotted_traceback_terminators_are_counted(tmp_path, final, name):
+    result = kit.trace_events([_write(tmp_path / "host.log", _log("agent", "start", "INFO") + _trace(final))])
+    assert result["other_tracebacks"] == {name: 1}
+
+
+@pytest.mark.parametrize("line", [
+    "2026-01-01 01:02:03,123 WARNING agent.optional: optional import failed\n",
+    "2026-01-01 01:02:03,123 WARNING [sess-1] agent.optional: optional import failed\n",
+    "01:02:03 - agent.optional - WARNING - optional import failed\n",
+    "01:02:03 - agent.optional - WARNING [sess-1] - optional import failed\n",
+], ids=["file", "file-tagged", "verbose", "verbose-tagged"])
+def test_host_log_formats_attribute_import_events(tmp_path, line):
+    text = line + _trace("ModuleNotFoundError: No module named 'opt'")
+    result = kit.trace_events([_write(tmp_path / "host.log", text)])
+    assert result["events_by_logger"] == {"agent.optional": 1}
+    assert result["unattributed"] == 0
+
+
+def test_import_counts_kept_per_triggering_event(tmp_path):
+    def events(*counts):
+        return "".join(_log("agent.optional", "warn") + _trace("ModuleNotFoundError: No module named 'opt'") * n
+                       for n in counts)
+    a = kit.trace_events([_write(tmp_path / "a.log", events(2, 2))])["by_event"]
+    b = kit.trace_events([_write(tmp_path / "b.log", events(1, 3))])["by_event"]
+    assert a[0]["count"] == b[0]["count"] == 4
+    assert (a[0]["per_event_counts"], b[0]["per_event_counts"]) == ([2, 2], [1, 3])
+
+
+@pytest.mark.parametrize("lcm,host,reordered,lcm_only,host_only", [
+    ("abab", "baba", 1, 0, 0), ("aba", "ba", 0, 1, 0), ("abc", "cab", 1, 0, 0), ("aab", "aab", 0, 0, 0)])
+def test_reorder_is_true_lcs_shortfall_with_repeats(tmp_path, lcm, host, reordered, lcm_only, host_only):
+    paths = [_messages(tmp_path / name, order, [("s", "user", ch, None, None) for ch in rows])
+             for name, order, rows in (("lcm.db", "store_id", lcm), ("state.db", "id", host))]
+    result = kit.reorder(*paths)
+    assert (result["reordered_rows"], result["lcm_only"], result["host_only"]) == (reordered, lcm_only, host_only)
+
+
+def test_lifecycle_counts_legacy_padded_and_blank_conversation_ids(tmp_path):
+    path = _messages(tmp_path / "lcm.db", "store_id", [("old", "user", "synthetic", None, None)])
+    with sqlite3.connect(path) as conn:
+        conn.execute("ALTER TABLE messages ADD COLUMN conversation_id TEXT")
+        conn.execute("UPDATE messages SET conversation_id = ' conv '")
+        conn.execute("CREATE TABLE summary_nodes (session_id TEXT)")
+        conn.execute("CREATE TABLE lcm_lifecycle_state (conversation_id TEXT, current_session_id TEXT, "
+                     "last_finalized_session_id TEXT)")
+        conn.execute("INSERT INTO lcm_lifecycle_state VALUES ('conv', NULL, NULL)")
+    result = kit.lifecycle_rows(path)
+    assert (result["affected_stored_rows"], result["identity_order_check"]) == (1, "NOT_EVALUATED")
+    with sqlite3.connect(path) as conn:
+        conn.execute("UPDATE messages SET conversation_id = NULL")
+    result = kit.lifecycle_rows(path)
+    assert (result["affected_stored_rows"], result["blank_conversation_rows"]) == (1, 1)
+    assert result["identity_order_check"] == "NOT_EVALUATED"
+
+
+def test_doctor_list_detail_new_cause_is_unmatched(tmp_path):
+    old = "ignored config key 'lcm.foo' in /root-a/config.yaml"
+    def doctor(name, entries):
+        return _write(tmp_path / name, json.dumps({"checks": [
+            {"check": "config_validation", "status": "warn", "detail": entries}]}))
+    same = kit.doctor_match(doctor("c1.json", [old.replace("/root-a", "/root-b")]), doctor("p.json", [old]))
+    assert same["verdict"] == "MATCHED"
+    new = kit.doctor_match(doctor("c2.json", [old, "incremental_max_depth=0 disables condensation"]),
+                           doctor("p2.json", [old]))
+    assert new["verdict"] == "UNMATCHED"
+    assert len(new["candidate_signatures"][0]["detail_fingerprints"]) == 2
+    assert "condensation" not in json.dumps(new) and "root-a" not in json.dumps(new)
