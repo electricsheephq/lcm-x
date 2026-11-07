@@ -1,13 +1,16 @@
 """Synthetic copies and fake executables only; never start a real gateway."""
 
 from copy import deepcopy
+from datetime import datetime
 import json
 import os
 from pathlib import Path
+import re
 import signal
 import sqlite3
 import subprocess
 import sys
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -156,11 +159,27 @@ def test_minimal_env(tmp_path, monkeypatch, provider, drop):
     assert env["LCM_CONTEXT_THRESHOLD"] == "0.5"
     assert env["PYTHONDONTWRITEBYTECODE"] == env["PYTHONUNBUFFERED"] == "1"
     assert declaration["env_names"] == sorted(env)
-    assert declaration["dropped_names"] == (["LCM_EMBEDDING_MODEL", "LCM_EMBEDDING_PROVIDER"] if drop else [])
+    assert declaration["dropped_names"] == ["LCM_EMBEDDING_MODEL", *(["LCM_EMBEDDING_PROVIDER"] if drop else [])]
     assert ("LCM_EMBEDDING_PROVIDER" not in env) is drop
     assert all(isinstance(names, list) and all(isinstance(n, str) for n in names) for names in declaration.values())
     assert (tmp_path / "plugins/hermes-lcm-x").resolve() == ROOT
     assert (tmp_path / "plugins/d5-local/adapter.py").is_file()
+
+
+def test_build_env_drops_every_redirecting_lcm_key(tmp_path):
+    lcm = {"LCM_EMBEDDING_PROVIDER": "fastembed", "LCM_EMBEDDING_BASE_URL": "http://192.0.2.1", "LCM_SUMMARY_MODEL": "x",
+           "LCM_SUMMARY_FALLBACK_MODELS": "x", "LCM_EXPANSION_MODEL": "x", "LCM_EXTRACTION_MODEL": "x",
+           "LCM_OLLAMA_BASE_URL": "x", "LCM_CUSTOM_INSTRUCTIONS": "see /etc", "LCM_FRESH_TAIL_COUNT": "8",
+           **{k: "/outside" for k in g.FORCED_LCM_PATHS}}
+    env, declaration = g.build_env(lcm, home=tmp_path, provider_url=URL, host_bin="/b", port_file=tmp_path / "p", lcm_tree=ROOT)
+    assert declaration["dropped_names"] == sorted(set(lcm) - {"LCM_EMBEDDING_PROVIDER", "LCM_FRESH_TAIL_COUNT", *g.FORCED_LCM_PATHS})
+    assert {k: v for k, v in env.items() if k.startswith("LCM_") and k not in g.FORCED_LCM_PATHS} == {
+        "LCM_EMBEDDING_PROVIDER": "fastembed", "LCM_FRESH_TAIL_COUNT": "8"}
+    assert declaration["overridden_names"] == sorted(g.FORCED_LCM_PATHS)
+    assert all(Path(env[k]).is_relative_to(tmp_path) for k in g.FORCED_LCM_PATHS)
+    # Every write-location key the LCM-X tree reads is forced.
+    named = {m for f in ROOT.glob("*.py") for m in re.findall(r"LCM_[A-Z0-9_]*(?:PATH|DIR)\b", f.read_text())}
+    assert named and named <= set(g.FORCED_LCM_PATHS)
 
 
 @pytest.mark.parametrize("url", ["https://127.0.0.1/v1", "http://192.0.2.1/v1"])
@@ -176,7 +195,9 @@ def test_copy_routing(tmp_path):
     original = {"session_id": "session-a", "session_key": "old-key", "created_at": "2000-01-01T00:00:00+00:00",
                 "updated_at": "2001-01-01T00:00:00+00:00", "platform": "old-platform", "chat_type": "dm",
                 "origin": {"platform": "old-platform", "chat_id": "old-chat", "chat_type": "dm", "extra": "retain"},
-                "metadata": {"watermark": 7}, "input_tokens": 123, "resume_pending": True,
+                "metadata": {"watermark": 7}, "input_tokens": 123, "resume_pending": True, "resume_reason": "restart",
+                "active_turn_token": "t", "active_turn_started_at": "2000-01-01T00:00:00", "suspended": True,
+                "last_resume_marked_at": "2000-01-01T00:00:00",
                 "model_override": {"model": "old-model", "provider": "override-provider", "base_url": "https://example.invalid"}}
     route = {"provider": "stored-provider", "base_url": "https://example.invalid", "api_mode": "old-mode",
              "gateway_runtime": {"provider": "runtime-provider", "model": "old-model"},
@@ -221,9 +242,12 @@ def test_copy_routing(tmp_path):
             assert set(("created_at", "updated_at", "session_key", "session_id")) <= entry.keys()
             if conversation["name"] == "a":
                 changed = result["changes"][0]["routing_fields"]
-                assert changed == ["model_override", "origin", "platform", "session_key"]
+                assert changed == sorted(["model_override", "origin", "platform", "session_key", *g._CLEARED_ENTRY])
+                assert {k: entry[k] for k in g._CLEARED_ENTRY} == g._CLEARED_ENTRY
                 assert {k: v for k, v in entry.items() if k not in changed} == {k: v for k, v in original.items() if k not in changed}
                 assert entry["model_override"]["model"] == "d5-agent"
+            else:  # A synthesized entry uses the host's naive local timestamps.
+                assert entry["created_at"] == entry["updated_at"] == datetime.fromtimestamp(946684800).isoformat()
 
 
 def test_copy_refusal_and_symlink(tmp_path):
@@ -252,6 +276,10 @@ def test_copy_collision_rolls_back(tmp_path):
     with pytest.raises(ValueError, match="belongs to another session"):
         g.edit_copy_routing(path, conversations, sessions_dir=scope, run_dir=tmp_path, provider_url=URL)
     with sqlite3.connect(path) as db:
+        db.execute("UPDATE sessions SET end_reason='user_exit' WHERE id='session-a'")
+    with pytest.raises(ValueError, match="has ended"):
+        g.edit_copy_routing(path, conversations[:1], sessions_dir=scope, run_dir=tmp_path, provider_url=URL)
+    with sqlite3.connect(path) as db:
         assert db.execute("SELECT model FROM sessions ORDER BY id").fetchall() == [("old-model",), ("old-model",)]
         assert db.execute("SELECT count(*) FROM gateway_routing").fetchone()[0] == 1
 
@@ -274,11 +302,14 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header('Content-Length', str(len(body)))
         self.end_headers()
         self.wfile.write(body)
-    def do_GET(self): self.respond({'connected': self.path == '/health'})
+    def do_GET(self): self.respond({'connected': self.path == '/health', 'path': self.path})
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
         self.respond({'step': body['step'], 'completed': True, 'replies': 1,
                       'reply_sha256': [hashlib.sha256(body['text'].encode()).hexdigest()]})
+import subprocess  # A group member that ignores SIGTERM.
+child = subprocess.Popen([sys.executable, '-c', 'import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)'])
+Path(os.environ['D5_LOCAL_PORT_FILE'] + '.child').write_text(str(child.pid))
 server = HTTPServer(('127.0.0.1', 0), Handler)
 Path(os.environ['D5_LOCAL_PORT_FILE']).write_text(str(server.server_port))
 server.serve_forever()
@@ -299,11 +330,17 @@ def test_gateway_process(fake_gateway, monkeypatch, wrapped):
         pid = fake_gateway.process.pid
         assert pid in fake_gateway.pids()
         assert fake_gateway.turn("chat-a", "one", "synthetic\r\n  ", 2)["completed"] is True
+        assert fake_gateway.replies("chat a&b")["path"] == "/replies?chat_id=chat+a%26b"
+        assert os.getpgid(pid) == pid
         assert len(calls) == int(wrapped)
         if wrapped:
             assert calls[0] == {"ports": [9], "socket_roots": [fake_gateway.run_dir]}
         assert fake_gateway.stop(2) == -signal.SIGTERM
         assert fake_gateway.pids() == []
+        child, deadline = int(Path(f"{fake_gateway.port_file}.child").read_text()), time.monotonic() + 5
+        while time.monotonic() < deadline and subprocess.run(["ps", "-p", str(child)], capture_output=True).returncode == 0:
+            time.sleep(0.01)
+        assert subprocess.run(["ps", "-p", str(child)], capture_output=True).returncode == 1
         assert (fake_gateway.run_dir / "gateway-1.out").exists()
         with pytest.raises(ProcessLookupError):
             os.kill(pid, 0)
@@ -329,7 +366,8 @@ def test_stop_kills_exact_pid_after_timeout(fake_gateway):
     # No sockets: a child confirms SIGTERM is ignored before the parent stops it.
     marker = fake_gateway.run_dir / "ready"
     script = "import signal,time,pathlib; signal.signal(signal.SIGTERM, signal.SIG_IGN); pathlib.Path(__import__('sys').argv[1]).touch(); time.sleep(30)"
-    fake_gateway.process = subprocess.Popen([sys.executable, "-c", script, str(marker)], env=fake_gateway.env)
+    fake_gateway.process = subprocess.Popen([sys.executable, "-c", script, str(marker)], env=fake_gateway.env,
+                                            start_new_session=True)
     try:
         import time
         deadline = time.monotonic() + 2
@@ -346,7 +384,7 @@ def test_nonlocal_connections(monkeypatch):
 
     def run(argv, **kwargs):
         calls.append(argv)
-        return SimpleNamespace(stdout="""COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME
+        return SimpleNamespace(returncode=0, stdout="""COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME
 python 11 user 1 IPv4 0 0 TCP 127.0.0.1:40->127.0.0.1:41 (ESTABLISHED)
 python 11 user 2 IPv6 0 0 TCP [::1]:40->[::1]:41 (ESTABLISHED)
 python 12 user 3 IPv4 0 0 TCP 127.0.0.1:40->192.0.2.1:443 (ESTABLISHED)
@@ -358,6 +396,9 @@ python 12 user 5 IPv4 0 0 TCP *:40 (LISTEN)
     assert g.nonlocal_connections([]) == 0 and calls == []
     assert g.nonlocal_connections([11, 12]) == 2
     assert calls == [["lsof", "-a", "-p", "11,12", "-i", "TCP", "-n", "-P"]]
+    monkeypatch.setattr(g.subprocess, "run", lambda argv, **kwargs: SimpleNamespace(returncode=2, stdout=""))
+    with pytest.raises(RuntimeError, match="lsof"):
+        g.nonlocal_connections([11])
 
 
 def test_build_env_links_the_arm_tree_and_refuses_a_non_plugin_tree(tmp_path):

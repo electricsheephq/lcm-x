@@ -76,16 +76,16 @@ def test_verbatim_completion_and_chat_identity(adapter_module, caplog):
     async def exercise():
         adapter = adapter_module.D5LocalAdapter(SimpleNamespace(extra={}))
         text = "  synthetic marker\r\nsecond line   "
-        for step in ("one", 2):
+        for step in ("one", "2"):
             status, result = await adapter._turn({"chat_id": "chat-a", "step": step, "text": text, "timeout": 1})
             assert status == 200
-            assert result == {"step": step, "completed": True, "replies": 1,
-                              "reply_sha256": [hashlib.sha256(b"synthetic reply").hexdigest()]}
+            assert result == {"step": step, "completed": True, "outcome": "success"}
+        assert adapter.replies == {"chat-a": [hashlib.sha256(b"synthetic reply").hexdigest()] * 2}
         assert [e.text for e in adapter.seen] == [text, text]
         assert all(e.message_type == "text" for e in adapter.seen)
         first, second = [vars(e.source).copy() for e in adapter.seen]
         assert first.pop("message_id") == "one"
-        assert second.pop("message_id") == 2
+        assert second.pop("message_id") == "2"
         assert first == second == {"platform": "d5-local", "chat_id": "chat-a", "chat_name": "chat-a",
                                    "chat_type": "dm", "user_id": "d5-user", "user_name": "d5-user"}
         assert "synthetic reply" not in json.dumps(result)
@@ -95,6 +95,23 @@ def test_verbatim_completion_and_chat_identity(adapter_module, caplog):
     with caplog.at_level("INFO"):
         asyncio.run(exercise())
     assert "sha256=" in caplog.text
+
+
+def test_turn_reports_the_hook_outcome_and_refuses_bad_input(adapter_module):
+    async def exercise():
+        adapter = adapter_module.D5LocalAdapter(SimpleNamespace(extra={}))
+
+        async def fail(event):
+            await adapter.on_processing_complete(event, SimpleNamespace(value="failure"))
+
+        adapter.handle_message = fail
+        body = {"chat_id": "chat-a", "step": "one", "text": "synthetic", "timeout": 1}
+        assert (await adapter._turn(body))[1] == {"step": "one", "completed": True, "outcome": "failure"}
+        for bad in ({"step": 1}, {"text": "/new"}, {"text": " \n/reset"}):
+            with pytest.raises(ValueError):
+                await adapter._turn({**body, **bad})
+
+    asyncio.run(exercise())
 
 
 def test_timeout_retains_message_ownership(adapter_module):
@@ -136,7 +153,7 @@ def test_http_framing_without_socket(adapter_module):
 
         for method, path, body, expected in (
             ("GET", "/health", b"", {"connected": True}),
-            ("POST", "/turn", json.dumps({"chat_id": "chat-a", "step": 1, "text": "verbatim\r\n  "}).encode(), None),
+            ("POST", "/turn", json.dumps({"chat_id": "chat-a", "step": "1", "text": "verbatim\r\n  "}).encode(), None),
         ):
             reader, writer = asyncio.StreamReader(), Writer()
             reader.feed_data(f"{method} {path} HTTP/1.1\r\nContent-Length: {len(body)}\r\n\r\n".encode() + body)
@@ -176,9 +193,13 @@ def test_http_and_port_file(adapter_module, tmp_path, monkeypatch, from_env):
                 return json.loads(response.split(b"\r\n\r\n", 1)[1])
 
             assert await request("GET", "/health") == {"connected": True}
+            await adapter.send("chat-b", "outside any turn")
             body = {"chat_id": "chat-a", "step": "one", "text": "verbatim\r\n  ", "timeout": 1}
             result = await request("POST", "/turn", json.dumps(body).encode())
-            assert result["completed"] is True and result["replies"] == 1
+            assert result["completed"] is True and result["outcome"] == "success"
+            for chat, text in (("chat-a", "synthetic reply"), ("chat-b", "outside any turn")):
+                assert await request("GET", f"/replies?chat_id={chat}") == {
+                    "chat_id": chat, "count": 1, "reply_sha256": [hashlib.sha256(text.encode()).hexdigest()]}
             assert adapter.seen[0].text == body["text"]
         finally:
             await adapter.disconnect()

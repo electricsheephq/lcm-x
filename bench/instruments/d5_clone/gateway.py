@@ -3,14 +3,16 @@
 import ast
 from contextlib import closing
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import datetime
 import ipaddress
 import json
+import os
 from pathlib import Path
+import signal
 import sqlite3
 import subprocess
 import time
-from urllib.parse import urlsplit
+from urllib.parse import urlencode, urlsplit
 from urllib.request import ProxyHandler, Request, build_opener
 
 from . import sandbox
@@ -65,6 +67,13 @@ def write_config(home, config):
     (Path(home) / "config.yaml").write_text(yaml.safe_dump(config, sort_keys=False))
 
 
+# Every LCM-X key that names a write location, forced under the scratch home (config.py, recorder.py).
+FORCED_LCM_PATHS = {"LCM_DATABASE_PATH": "lcm.db", "LCM_HERMES_BASE_DIR": ".",
+                    "LCM_LARGE_OUTPUT_EXTERNALIZATION_PATH": "lcm-large-outputs", "LCM_RECORDER_DIR": "lcm-recorder",
+                    "LCM_EXTRACTION_OUTPUT_PATH": "lcm-extractions"}
+_REDIRECT_MARKERS = ("PATH", "DIR", "FILE", "MODEL", "URL", "ENDPOINT", "HOST", "BASE")
+
+
 def build_env(lcm_env, *, home, provider_url, host_bin, port_file, lcm_tree):
     """Prepare the isolated layout; return (child env, declaration of key names). ``lcm_tree`` is the arm's LCM-X
     checkout (the rc or the previous GA), never this instrument's own tree."""
@@ -80,16 +89,18 @@ def build_env(lcm_env, *, home, provider_url, host_bin, port_file, lcm_tree):
         elif link.resolve() != target.resolve():
             raise ValueError("scratch plugin link has a different target")
     remote = str(lcm_env.get("LCM_EMBEDDING_PROVIDER") or "").strip().lower() not in ("", "none", "fastembed", "fast-embed", "local", "ollama")
-    dropped = sorted(k for k in lcm_env if k.startswith("LCM_EMBEDDING") and remote)
-    env = {k: str(v) for k, v in lcm_env.items() if k.startswith("LCM_") and k not in dropped and v is not None}
+    passed = {k: str(v) for k, v in lcm_env.items() if k.startswith("LCM_") and k not in FORCED_LCM_PATHS and v is not None}
+    # A name or value that could redirect a write, a model or an endpoint never reaches the gateway.
+    dropped = sorted(k for k, v in passed.items() if (remote and k.startswith("LCM_EMBEDDING")) or "/" in v
+                     or any(m in k for m in _REDIRECT_MARKERS))
+    env = {k: v for k, v in passed.items() if k not in dropped}
     env.update(PATH=f"{host_bin}:/usr/bin:/bin", HOME=str(home / "user-home"), HERMES_HOME=str(home),
                TMPDIR=str(home / "tmp"), D5_LOCAL_PORT_FILE=str(port_file), D5_LOCAL_ALLOW_ALL_USERS="1",
                HTTP_PROXY="http://127.0.0.1:9", HTTPS_PROXY="http://127.0.0.1:9", ALL_PROXY="http://127.0.0.1:9",
                NO_PROXY="127.0.0.1,localhost,::1", OPENAI_API_KEY="d5-dummy", OPENAI_BASE_URL=_local_url(provider_url),
-               LCM_DATABASE_PATH=str(home / "lcm.db"), LCM_HERMES_BASE_DIR=str(home),
                PYTHONDONTWRITEBYTECODE="1", PYTHONUNBUFFERED="1")
-    return env, {"env_names": sorted(env), "dropped_names": dropped,
-                 "overridden_names": ["LCM_DATABASE_PATH", "LCM_HERMES_BASE_DIR"]}
+    env.update({k: str(home / v) for k, v in FORCED_LCM_PATHS.items()})
+    return env, {"env_names": sorted(env), "dropped_names": dropped, "overridden_names": sorted(FORCED_LCM_PATHS)}
 
 
 def session_key(chat_id) -> str:
@@ -108,6 +119,11 @@ def _route(route, url, providers):
     route.update(provider="d5", base_url=url, api_mode="chat_completions")
 
 
+# SessionEntry turn/resume state and its host empty values (gateway/session.py); a copy never inherits it.
+_CLEARED_ENTRY = {"resume_pending": False, "resume_reason": None, "active_turn_token": None,
+                  "active_turn_started_at": None, "last_resume_marked_at": None, "suspended": False}
+
+
 def edit_copy_routing(host_db, conversations, *, sessions_dir, run_dir, provider_url) -> dict:
     """Normalize only an ARM COPY; provider_url is the caller's bound replay URL."""
     path = Path(host_db).resolve()
@@ -123,9 +139,11 @@ def edit_copy_routing(host_db, conversations, *, sessions_dir, run_dir, provider
             row = db.execute("SELECT * FROM sessions WHERE id=?", (sid,)).fetchone()
             if row is None:
                 raise ValueError("copied session missing")
+            if "end_reason" in columns and row["end_reason"] is not None:
+                raise ValueError("copied session has ended")
             candidates = [json.loads(r[0]) for r in db.execute("SELECT entry_json FROM gateway_routing ORDER BY scope, session_key")]
             entry = next((e for e in candidates if e.get("session_id") == sid), None)
-            stamp = datetime.fromtimestamp(row["started_at"], timezone.utc).isoformat()
+            stamp = datetime.fromtimestamp(row["started_at"]).isoformat()  # host naive local form
             entry = entry or {"session_id": sid, "created_at": stamp, "updated_at": stamp, "metadata": {}}
             original = deepcopy(entry)
             existing = db.execute("SELECT entry_json FROM gateway_routing WHERE scope=? AND session_key=?",
@@ -135,6 +153,7 @@ def edit_copy_routing(host_db, conversations, *, sessions_dir, run_dir, provider
             origin = {**(entry.get("origin") or {}), "platform": "d5-local", "chat_id": chat,
                       "chat_name": chat, "chat_type": "dm", "user_id": "d5-user", "user_name": "d5-user"}
             entry.update(session_key=session_key(chat), platform="d5-local", chat_type="dm", origin=origin)
+            entry.update((k, v) for k, v in _CLEARED_ENTRY.items() if k in entry)
             for key in ("model_override", "model_config", "gateway_runtime", "browser_model_lock"):
                 if isinstance(entry.get(key), dict):
                     _route(entry[key], provider_url, providers)
@@ -181,8 +200,8 @@ class Gateway:
         previous = self.port_file.stat().st_mtime_ns if self.port_file.exists() else None
         self.starts += 1
         with (self.run_dir / f"gateway-{self.starts}.out").open("xb") as output:
-            self.process = subprocess.Popen(["/usr/bin/nice", "-n", "19", *argv], env=self.env,
-                                            cwd=self.home, stdout=output, stderr=subprocess.STDOUT)
+            self.process = subprocess.Popen(["/usr/bin/nice", "-n", "19", *argv], env=self.env, cwd=self.home,
+                                            stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline and self.process.poll() is None:
             try:
@@ -199,14 +218,24 @@ class Gateway:
     def turn(self, chat_id, step, text, timeout=600):
         return self._request("/turn", {"chat_id": chat_id, "step": step, "text": text, "timeout": timeout}, timeout + 1)
 
+    def replies(self, chat_id):
+        return self._request("/replies?" + urlencode({"chat_id": chat_id}))
+
+    def _signal_group(self, sig):
+        try:  # The gateway leads its own session, so its pid is exactly its process group.
+            os.killpg(self.process.pid, sig)
+            return True
+        except ProcessLookupError:
+            return False
+
     def stop(self, timeout=10):
         if self.process:
-            if self.process.poll() is None:
-                self.process.terminate()
+            if self._signal_group(signal.SIGTERM):
                 try:
                     self.process.wait(timeout=timeout)
                 except subprocess.TimeoutExpired:
-                    self.process.kill()
+                    pass
+            self._signal_group(signal.SIGKILL)
             self.exit_code = self.process.wait()
         return self.exit_code
 
@@ -224,6 +253,8 @@ def nonlocal_connections(pids) -> int:
     if not pids:
         return 0
     result = subprocess.run(["lsof", "-a", "-p", ",".join(map(str, pids)), "-i", "TCP", "-n", "-P"], capture_output=True, text=True)
+    if result.returncode not in (0, 1):  # 1 means no matching files
+        raise RuntimeError(f"lsof failed; exit_code={result.returncode}")
     count = 0
     for line in result.stdout.splitlines():
         if "->" in line:
