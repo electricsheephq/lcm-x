@@ -133,10 +133,11 @@ def test_a_child_compression_continuation_joins_the_child():
     assert [delegated.is_child_root(s, sessions) for s in ("S0", "C1", "C1b")] == [False, True, False]
 
 
-@pytest.mark.parametrize("drop", ["all", "turn_end", "cancelled"])
+@pytest.mark.parametrize("drop", ["all", "turn_end", "interrupted"])
 def test_a_child_that_never_ran_or_completed_is_unsupported(tmp_path, drop):
+    # The observer's own shape for a stopped child: interrupted, with failed set as well.
     events = [] if drop == "all" else CHILD_EVENTS[:2] if drop == "turn_end" else \
-        CHILD_EVENTS[:2] + [dict(CHILD_EVENTS[2], kind="cancel")]
+        CHILD_EVENTS[:2] + [dict(CHILD_EVENTS[2], interrupted=True, failed=True)]
     out = make(tmp_path, events=events)
     assert out["verdict"] == "UNSUPPORTED" and "B10: D02" in out["reason"]
 
@@ -177,3 +178,9 @@ def test_registry_cells_are_acp_process_only_and_declared():
     assert all("delegation" in x["toolsets"] and x["targets"] == [1931] for x in cells.select("delegated-child/*"))
     assert not any(x.get("delegate_plan") or "B10" in x["bars"] for x in cells.select("all")
                    if not x["id"].startswith("delegated-child/"))
+
+
+def test_b6_applies_to_delegate_cells(tmp_path):
+    """The delegate call and its result are a tool group: B6 scores it even with an empty tool_plan."""
+    out = make(tmp_path)
+    assert "B6" in out["applicable_bars"]

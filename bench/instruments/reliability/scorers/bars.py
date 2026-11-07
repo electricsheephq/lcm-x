@@ -268,7 +268,7 @@ def score(cell: dict, cell_dir: Path, db_dir: Path | None = None) -> dict:
     per = {g: (expected_items([a for a in atts if attempt_group(a, group) == g], notices),
                [r for r in b2_stored if group(r[1]) == g]) for g in groups}
     applicable = [b for b in cell.get("bars") or ALL_BARS
-                  if (b != "B6" or cell.get("tool_plan")) and (b != "B7" or cell.get("native_recovery"))
+                  if (b != "B6" or cell.get("tool_plan") or cell.get("delegate_plan")) and (b != "B7" or cell.get("native_recovery"))
                   and (b != "B5" or cell.get("min_compactions", 5) > 0) and (b != "B10" or cell.get("delegate_plan"))]
     failed, numbers = {}, {}
 

@@ -365,7 +365,21 @@ class ProcessCell:
                 killer.stop.set()
                 killer.join()
         self.event(turn=t, event="acp_response", tag=f"T{t:02d}", stop_reason=stop, chars=len(answer))
+        self.wait_for_child(t)
         return stop
+
+    def wait_for_child(self, t: int, timeout: float = 60.0) -> None:
+        """#1931: top-level delegations run in the background on current hosts, so the parent turn can end first.
+        Wait (bounded) for the child's end before the next turn or phase exit; a child that never ends is left to
+        the scorer, which reports the scenario UNSUPPORTED."""
+        if not any(t in plan.get("turns", ()) for plan in self.cell.get("delegate_plan", ())):
+            return
+        tag, deadline = f"D{t:02d}", time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if any(e.get("event") == "child_turn_end" and e.get("tag") == tag for e in read_jsonl(self.transcript)):
+                return
+            time.sleep(0.2)
+        self.event(turn=t, event="child_wait_timeout", tag=tag, timeout_s=timeout)
 
     def final_check(self) -> dict:
         """The ACP ``/compress`` command, re-sent once after a cleanup-only ``sanitized`` pass (R1 final_check)."""

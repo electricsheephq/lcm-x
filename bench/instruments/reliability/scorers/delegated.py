@@ -70,7 +70,9 @@ def child_attempts(events: list[dict]) -> list[dict]:
             open_[e["tag"]]["emitted"].append(e["text"])
         elif e["event"] == "child_turn_end" and e.get("tag") in open_:
             a = open_.pop(e["tag"])
-            a.update(held=e.get("held"), ended=True, end=e, user_tags={a["tag"]: 1} if e.get("held") else {})
+            # The observer marks an interrupted child (stopped, not failed); like a cancelled turn it did not complete.
+            end = {**e, "kind": "cancel", "failed": False} if e.get("interrupted") else e
+            a.update(held=e.get("held"), ended=True, end=end, user_tags={a["tag"]: 1} if e.get("held") else {})
             a["reply"] = a["emitted"][-1] if tool_calls.completed(a) and a["emitted"] else None
     return out
 
