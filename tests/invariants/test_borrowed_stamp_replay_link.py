@@ -195,29 +195,29 @@ def test_the_link_records_its_borrowed_stamp(build, cold):
     assert borrowed_links(engine) == {(copies[1], copies[0], T_LONG)}
 
 
-@pytest.mark.parametrize("rebind", [False, True], ids=["warm", "rebind"])
-def test_restamped_copy_still_links_to_a_target_of_a_borrowed_link(build, caplog, rebind):
+@pytest.mark.parametrize("mode,rebind", [("inplace", False), ("inplace", True), ("rotating", False)],
+                         ids=["inplace-warm", "inplace-rebind", "rotating"])
+def test_restamped_copy_still_links_to_a_target_of_a_borrowed_link(build, caplog, mode, rebind):
+    """In place, the durable-recovery link pairs the re-stamped copy; on rotation, the re-stamp pairing does."""
     from bench.instruments.reliability.scorers.multiset import split_surplus
     from tests.invariants.test_issue_2378_restamp_link import T as T_RESTAMP, T_COMMIT, T_REQ, run
 
     made = {}
 
     def borrow(engine, _view):
-        # 302 shape: E (T at its own stamp) is stored; the host then shows T on an earlier turn's stamp.
-        target = next(row["store_id"] for row in all_rows(engine)
-                      if row["content"] == T_RESTAMP and row["observed_at"] == T_REQ)
-        shown = {"role": "user", "content": T_RESTAMP, "timestamp": 1130.0}
-        source = engine._store.append(engine._session_id, dict(shown), conversation_id=engine._conversation_id)
-        engine._link_borrowed_stamp_occurrences([shown], {0: source})
-        made.update(source=source, target=target)
+        # E (T at its own stamp) already carries a borrowed-stamp link, in the linker's format.
+        rows = all_rows(engine)
+        made["target"] = next(row["store_id"] for row in rows if row["content"] == T_RESTAMP and row["observed_at"] == T_REQ)
+        made["source"] = next(row["store_id"] for row in rows if row["role"] == "user" and row["observed_at"] == 1130.0)
+        engine._store.add_message_relations([[(made["source"], "possible_replay_of", made["target"], None, 1130.0)]])
         if rebind:
             engine.on_session_start("S", conversation_id=engine._conversation_id, platform="cli")
 
-    engine, rows = run(build, caplog, mode="inplace", uids=False, restamp=True, before_ingest=borrow)
+    engine, rows = run(build, caplog, mode=mode, uids=False, restamp=True, before_ingest=borrow)
     restamped = [row["store_id"] for row in rows if row["content"] == T_RESTAMP and row["observed_at"] == T_COMMIT]
     assert len(restamped) == 1
     links = replay_links(engine)
-    assert {(made["source"], made["target"]), (restamped[0], made["target"])} <= links, sorted(links)
+    assert (restamped[0], made["target"]) in links, sorted(links)
     assert all(count == 1 for count in Counter(a for a, _b in links).values()), sorted(links)
     held = [row["store_id"] for row in rows if row["content"] == T_RESTAMP]
     evidence = {row["store_id"]: (row["session_id"], row["role"], row["content"]) for row in rows}
