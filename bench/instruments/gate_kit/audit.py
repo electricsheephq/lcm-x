@@ -384,13 +384,13 @@ def todo_expected(host_rows, stored_rows, group, header):
     stored copy is no deficit. ``stored_rows``: (store_id, session, role, content, tool_calls, tool_call_id,
     observed_at). Returns {lineage: [store id of each matched row]}: the stamp-equal row is the kept copy, taken out
     of scoring with its host occurrence, so an earlier copy of the same text stays surplus."""
-    shown = {(group(r[1]), r[3], float(r[7])) for r in host_rows if r[2] == "user" and r[9] and not r[6]
-             and r[7] is not None and (r[3] or "").startswith(header)}
+    shown = Counter((group(r[1]), r[3], float(r[7])) for r in host_rows if r[2] == "user" and r[9] and not r[6]
+                    and r[7] is not None and (r[3] or "").startswith(header))  # Occurrences, not distinct texts.
     out = defaultdict(list)
     for _store_id, session, role, content, _calls, _call_id, observed in sorted(stored_rows):
         slot = (group(session), content, float(observed)) if role == "user" and observed is not None else None
-        if slot in shown:
-            shown.discard(slot)
+        if shown[slot] > 0:
+            shown[slot] -= 1
             out[slot[0]].append(_store_id)
     return out
 

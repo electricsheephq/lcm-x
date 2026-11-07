@@ -1182,6 +1182,17 @@ def test_a_stored_copy_of_a_displayed_todo_row_is_expected_once(tmp_path, copies
     assert (t["silent_surplus_rows"], t["host_todo_rows_expected"], t["missing_rows"]) == (*want, 0)
 
 
+@pytest.mark.parametrize("copies,want", [([T0, T0], (0, 2)), ([T0, T0, T0], (1, 2))], ids=["two-shown", "one-extra"])
+def test_two_displayed_occurrences_of_one_todo_each_expect_a_copy(tmp_path, copies, want):
+    todo = {"role": "user", "content": TODO}
+    host = [("S1", dict(todo, _ts=T0)), ("S1", dict(todo, _ts=T0))] + [
+        ("S1", dict(m, _ts=T0 + 2 + n)) for n, (_s, m) in enumerate(turn(1))]
+    stored = [("S1", stamped(todo, t)) for t in copies] + [("S1", stamped(m, m["_ts"])) for _s, m in host[2:]]
+    out = Home(tmp_path, ONE, host, stored=stored).run()
+    t = out["parity"]["totals"]
+    assert (t["silent_surplus_rows"], t["host_todo_rows_expected"], t["missing_rows"]) == (*want, 0)
+
+
 @pytest.mark.parametrize("relations,credited", [([(3, "composite_of", None, 0), (3, "composite_of", 1, 1)], 1),
                                                 ([], 0)], ids=["witnessed", "no-witness"])
 def test_a_witnessed_composite_is_a_visible_copy(tmp_path, relations, credited):
