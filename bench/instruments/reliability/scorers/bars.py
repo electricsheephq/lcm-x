@@ -93,7 +93,10 @@ def attempts(events: list[dict]) -> list[dict]:
 def lineage(cell_dir: Path, root: str = "S0", db_dir: Path | None = None):
     """store session id -> lineage: "chat" for ``root`` (R1: S0; R2: the ACP session id) and its compression
     descendants, else the root session. A delegated child (#1931) roots its own lineage."""
-    sessions = delegated.host_sessions(Path(db_dir or cell_dir / "db") / "state.db")
+    try:
+        sessions = delegated.host_sessions(Path(db_dir or cell_dir / "db") / "state.db")
+    except sqlite3.Error:
+        sessions = {}  # unavailable host evidence: retain the store's session identities (B1 then falls back)
     parents = {sid: parent for sid, (parent, _source) in sessions.items()}
 
     def group(sid):
