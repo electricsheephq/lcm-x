@@ -143,7 +143,7 @@ def _presence_read_fails(monkeypatch, engine):
     monkeypatch.setattr(engine, "_rotation_predecessor_session_ids", boom)
 
 
-@pytest.mark.xfail(strict=True, reason="#2468: when a call row was not stored at its turn (past the presence window or "
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason="#2468: when a call row was not stored at its turn (past the presence window or "
                    "after a failed presence read), a later full-history ingest stores the call and a second, unlinked "
                    "copy of its tool result")
 @pytest.mark.parametrize("cause", ["window", "read_failure"])

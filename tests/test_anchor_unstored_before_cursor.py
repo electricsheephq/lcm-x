@@ -825,6 +825,23 @@ def test_presence_byte_budget_ingest_boundary(tmp_path, monkeypatch, caplog, ove
     assert not any("presence window" in r.message and r.levelno >= logging.WARNING for r in caplog.records)
 
 
+@pytest.mark.parametrize("over", [0, 1], ids=["exact-text", "one-char-over"])
+def test_presence_text_budget_counts_only_the_candidate_role(tmp_path, monkeypatch, caplog, over):
+    # The normalization bound counts only stored rows of a candidate's text role: user text here is not normalized.
+    engine = _engine(tmp_path)
+    try:
+        engine._store.append_batch(SESSION, [{"role": "user", "content": "u" * 500}, _a("stored reply one", 2),
+                                             _a("stored reply two", 3)])
+        size = sum(len(r["content"]) for r in engine._store.get_session_messages(SESSION) if r["role"] == "assistant")
+        monkeypatch.setattr(identity_anchor, "_PRESENCE_TEXT_BYTES", size - over, raising=False)
+        with caplog.at_level(logging.INFO, logger=identity_anchor.__name__):
+            assert _presence(engine, [_a("a brand new reply", 4)]) == ([] if over else [0])
+        limits = [r for r in caplog.records if "presence window incomplete" in r.message]
+        assert len(limits) == over
+    finally:
+        engine.shutdown()
+
+
 def test_tool_only_presence_computes_no_stored_text_identity(tmp_path, monkeypatch):
     engine = _engine(tmp_path)
     try:

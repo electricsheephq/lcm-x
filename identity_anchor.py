@@ -57,6 +57,7 @@ _INSERT_DIFF_BUDGET = 1_000_000  # #633: old x new rows compared per insertion d
 _CARRIER_LEDGER_CAP = 256  # #1000: carrier emission keys remembered as seen / retired (process-local)
 _PRESENCE_WINDOW_ROWS = 10000  # total stored rows across the presence scope
 _PRESENCE_WINDOW_BYTES = 104_000_000  # stored content and tool-call text across the scope
+_PRESENCE_TEXT_BYTES = 16_000_000  # stored text the audit normalizes (rows of a candidate's text role)
 _PRESENCE_WINDOW_LOGGED: set[tuple[str, int, str]] = set()  # store file and session, once per process
 
 
@@ -648,7 +649,8 @@ class IdentityAnchorMixin:
                 # Any session of the scope whose own predecessor write failed ends the scope early (#2466 review).
                 raise ValueError("unrecorded rotation lineage")
             rows = {int(row["store_id"]): row for group in held.values() for row in group}
-            budget, byte_budget = _PRESENCE_WINDOW_ROWS, _PRESENCE_WINDOW_BYTES
+            text_roles = {wanted[0] for wanted in candidates.values() if wanted and wanted[0] not in {"call", "tool"}}
+            budget, byte_budget, text_budget = _PRESENCE_WINDOW_ROWS, _PRESENCE_WINDOW_BYTES, _PRESENCE_TEXT_BYTES
             for source in scope:
                 end, pages = None, []
                 while True:
@@ -661,11 +663,14 @@ class IdentityAnchorMixin:
                         if not isinstance(tool_text, str):
                             tool_text = json.dumps(tool_text)
                         byte_budget -= len(row.get("content") or "") + len(tool_text)
-                    if budget < 0 or byte_budget < 0:
+                        if row.get("role") in text_roles and not (row.get("role") == "tool" and row.get("tool_call_id")):
+                            text_budget -= len(row.get("content") or "")  # normalization cost bound (#2466 review)
+                    if budget < 0 or byte_budget < 0 or text_budget < 0:
                         notice = (str(self._db_path), self._db_path.stat().st_ino, session)
                         if notice not in _PRESENCE_WINDOW_LOGGED:
                             logger.info("LCM identity-anchor presence window incomplete: session=%s scope=%d "
-                                        "budget=%d bytes=%d", session, len(scope), budget + len(tail), byte_budget)
+                                        "budget=%d bytes=%d text=%d", session, len(scope), budget + len(tail), byte_budget,
+                                        text_budget)
                             _PRESENCE_WINDOW_LOGGED.add(notice)
                         return []
                     pages.append(tail)
@@ -674,7 +679,6 @@ class IdentityAnchorMixin:
                     end = int(tail[0]["store_id"]) - 1
                 for page in reversed(pages):  # Preserve the previous chronological copy-consumption order.
                     rows.update((int(row["store_id"]), row) for row in page)
-            text_roles = {wanted[0] for wanted in candidates.values() if wanted and wanted[0] not in {"call", "tool"}}
             index: dict = defaultdict(list)
             for row in rows.values():
                 if calls(row, stored=True) or row.get("role") == "tool" and row.get("tool_call_id"):
