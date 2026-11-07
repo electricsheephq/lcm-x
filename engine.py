@@ -7757,7 +7757,11 @@ class LCMEngine(
                 if any(conn.execute(f"SELECT 1 FROM {table} WHERE lineage=? LIMIT 1", (provisional,)).fetchone()
                        for table in ("occurrence_bindings", "ingest_views", "ledger_emissions")):
                     result = ingest_ledger.merge_provisional(conn, provisional, lineage)
-                    store.add_message_relations([[(p, "possible_replay_of", target, None, None)] for p, target in result["pairs"]])
+                    # One possible_replay_of per source: a row another writer already linked keeps its link.
+                    linked = {row["store_id"] for row in store.get_message_relations(
+                        [p for p, _target in result["pairs"]], "possible_replay_of")} if result["pairs"] else set()
+                    store.add_message_relations([[(p, "possible_replay_of", target, None, None)]
+                                                 for p, target in result["pairs"] if p not in linked])
                 if not persisted:
                     conn.execute("INSERT INTO ledger_meta(key,value) VALUES (?,?)", ("session_lineage:" + str(sid), lineage))
         except BaseException as exc:
