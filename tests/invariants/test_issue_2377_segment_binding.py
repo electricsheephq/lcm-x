@@ -45,13 +45,15 @@ def test_full_result_match_beats_other_unstamped_results(build, monkeypatch):
     assert added == [("user", "next", None)]
 
 
-def _ingest_shape(build, monkeypatch, source, host, cursor=1, pairs=None, relation_fault=False):
+def _ingest_shape(build, monkeypatch, source, host, cursor=1, pairs=None, relation_fault=False, before_ingest=None):
     engine = build()
     engine.ingest(deepcopy(source))
     before = engine._store.get_session_messages(engine._session_id)
     assert len(before) == len(source)
     engine.shutdown()
     engine = build()
+    if before_ingest is not None:
+        before_ingest(engine)
     if relation_fault:
         write = engine._store.add_message_relations
 
@@ -95,6 +97,23 @@ def test_ambiguous_copies_spend_link_targets_once_in_store_order(build, monkeypa
     pairs = list(engine._store._conn.execute(
         "SELECT store_id,related_store_id FROM message_relations WHERE kind='possible_replay_of'"))
     assert len(pairs) == len({p[0] for p in pairs}) == len({p[1] for p in pairs})
+
+
+def test_a_target_linked_by_an_earlier_ingest_still_takes_the_new_copy(build, monkeypatch):
+    """A stored original that an earlier ingest already linked must not leave a new copy silent."""
+    call = _poll(["c", "d"], "{}", None)
+
+    def prelink(engine):
+        rows = engine._store.get_session_messages(engine._session_id)
+        x_rows = [row["store_id"] for row in rows if row.get("content") == "X"]
+        # An earlier replay of the stored X, recorded before this ingest.
+        engine._store.add_message_relations([[(rows[-1]["store_id"], "possible_replay_of", x_rows[0], None, None)]])
+
+    engine, before, added = _ingest_shape(
+        build, monkeypatch, [_U, call, X, call, D], [_U, call, X, D, _V], before_ingest=prelink)
+    links = _replay_links(engine)
+    x_copy = next(row for row in added if row.get("content") == "X")
+    assert links[x_copy["store_id"]] == next(row for row in before if row.get("content") == "X")["store_id"]
 
 
 def test_ambiguous_link_failure_keeps_ingest_and_rolls_back_links(build, monkeypatch):

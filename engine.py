@@ -8526,26 +8526,38 @@ class LCMEngine(
             try:
                 with self._ingest_evidence():
                     conn = self._store._conn
-                    existing = list(conn.execute(
-                        "SELECT store_id,related_store_id FROM message_relations WHERE kind='possible_replay_of'"
-                    )) if conn.execute("SELECT 1 FROM sqlite_master WHERE name='message_relations'").fetchone() else []
+                    sources = [sid for idx, sid in stored_at.items() if idx in replay_candidates]
+                    targets = sorted({row["store_id"] for rows in replay_candidates.values() for row in rows})
+                    existing = []
+                    if sources and conn.execute("SELECT 1 FROM sqlite_master WHERE name='message_relations'").fetchone():
+                        # Only the relations of this batch's sources and their candidate targets.
+                        ids = sorted({*sources, *targets})
+                        marks = ",".join("?" * len(ids))
+                        existing = list(conn.execute(
+                            "SELECT store_id,related_store_id FROM message_relations WHERE kind='possible_replay_of'"
+                            f" AND (store_id IN ({marks}) OR related_store_id IN ({marks}))", (*ids, *ids)))
                     linked, used = {row[0] for row in existing}, {row[1] for row in existing}
-                    groups = []
+                    groups, batch_used = [], set()
                     # Compare durable identities after protection; links never authorize skipping.
-                    durable = self._store.get_batch([sid for idx, sid in stored_at.items() if idx in replay_candidates])
+                    durable = self._store.get_batch(sources)
                     for idx, sid in stored_at.items():
                         if sid not in durable or sid in linked:
                             continue
                         identity = self._message_replay_identity(durable[sid], stored_row=True, allow_pruned_tool_alias=False)
-                        for row in replay_candidates.get(idx, ()):
-                            target = row["store_id"]
-                            if (target not in used and target < sid
+                        eligible = [row["store_id"] for row in replay_candidates.get(idx, ())
+                                    if row["store_id"] < sid
                                     and row.get("conversation_id") == durable[sid].get("conversation_id")
-                                    and self._message_replay_identity(row, stored_row=True, allow_pruned_tool_alias=False) == identity):
-                                groups.append([(sid, "possible_replay_of", target, None, None)])
-                                linked.add(sid)
-                                used.add(target)
-                                break
+                                    and self._message_replay_identity(
+                                        row, stored_row=True, allow_pruned_tool_alias=False) == identity]
+                        # Prefer an unlinked target. A target linked by an EARLIER ingest still
+                        # beats leaving this copy silent; within this batch links stay one-to-one.
+                        target = next((t for t in eligible if t not in used),
+                                      next((t for t in eligible if t not in batch_used), None))
+                        if target is not None:
+                            groups.append([(sid, "possible_replay_of", target, None, None)])
+                            linked.add(sid)
+                            used.add(target)
+                            batch_used.add(target)
                     if groups:
                         self._store.add_message_relations(groups)
             except Exception as exc:
