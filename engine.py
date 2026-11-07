@@ -7152,13 +7152,14 @@ class LCMEngine(
                         "AND tool_calls IS ? AND tool_name IS ? ORDER BY store_id",
                         (session, min(stored_at.values()), role, content, stamp, call_id, calls, name))
                     conversation = _normalize_conversation_id_value(conversation)
-                    for target, target_conversation in candidates:
-                        if _normalize_conversation_id_value(target_conversation) != conversation:
-                            continue
-                        if self._store.get_message_relations([target], "possible_replay_of", related=True):
-                            continue  # One earlier occurrence supplies at most one replay link.
+                    targets = [target for target, target_conversation in candidates
+                               if _normalize_conversation_id_value(target_conversation) == conversation]
+                    # One earlier occurrence supplies at most one replay link: one batched read of the spent targets.
+                    spent = {r["related_store_id"] for r in self._store.get_message_relations(
+                        targets, "possible_replay_of", related=True)}
+                    target = next((t for t in targets if t not in spent), None)
+                    if target is not None:
                         self._store.add_message_relations([[(sid, "possible_replay_of", target, None, None)]])
-                        break
         except Exception as exc:
             self._raise_ingest_busy(exc)
             logger.warning("LCM todo replay link write failed (%s)", type(exc).__name__)
