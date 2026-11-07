@@ -27,18 +27,35 @@ def _tool_call(call):
             and isinstance(call.get("arguments"), (str, dict, list)))
 
 
+def _message(entry):
+    """The assistant message for a reply entry (None is a miss). It is encoded once here, so an entry the provider
+    cannot serve fails before any reply is sent."""
+    message = {"role": "assistant", "content": (entry or {}).get("text", "d5 replay miss")}
+    if entry is not None and entry.get("tool_calls"):
+        message = {"role": "assistant", "content": None, "tool_calls": [
+            {"id": c["id"], "type": "function", "function": {
+                "name": c["name"], "arguments": c["arguments"] if isinstance(c["arguments"], str)
+                else _json(c["arguments"])}} for c in entry["tool_calls"]]}
+    _json(message).encode("utf-8")
+    return message
+
+
 def _scripted(script, index):
     """The scripted reply at index, or None (a replay miss) when there is none or it is not a reply this provider can
     serve: a dict whose "tool_calls" is a non-empty list of calls with a str id, a str name and arguments, or, when
-    "tool_calls" is absent or null, whose "text" is a str. Every other entry is a miss, never a silent fallback or
-    a failed request that the counter rollback would erase."""
+    "tool_calls" is absent, null or empty, whose "text" is a str; and whose message encodes. Every other entry is a
+    miss, never a silent fallback or a failed request that the counter rollback would erase."""
     entry = script[index] if isinstance(script, list) and index < len(script) else None
     if not isinstance(entry, dict):
         return None
     calls = entry.get("tool_calls")
-    if calls is not None:
-        return entry if isinstance(calls, list) and calls and all(map(_tool_call, calls)) else None
-    return entry if isinstance(entry.get("text"), str) else None
+    if not (isinstance(calls, list) and all(map(_tool_call, calls)) if calls else isinstance(entry.get("text"), str)):
+        return None
+    try:
+        _message(entry)
+    except (ValueError, TypeError, RecursionError):  # A lone surrogate, an unencodable argument value, deep nesting.
+        return None
+    return entry
 
 
 class Provider:
@@ -171,12 +188,7 @@ class Provider:
                 text = f"D5 digest v1\nmessages={len(messages)}\n"
                 text += "\n".join(f"{m['role']} {_sha(m.get('content'))[:12]}" for m in messages)
                 entry = {"text": text + f"\nrequest={_sha(messages)}"}
-            message = {"role": "assistant", "content": (entry or {}).get("text", "d5 replay miss")}
-            if entry is not None and entry.get("tool_calls") is not None:
-                message = {"role": "assistant", "content": None, "tool_calls": [
-                    {"id": c["id"], "type": "function", "function": {
-                        "name": c["name"], "arguments": c["arguments"] if isinstance(c["arguments"], str)
-                        else _json(c["arguments"])}} for c in entry["tool_calls"]]}
+            message = _message(entry)
             # Token counts are a fixed estimate (UTF-8 bytes / 4, rounded up), so host pre-checks see realistic sizes.
             prompt, completion = (-(-len(_json(value).encode("utf-8")) // 4) for value in (messages, message))
             reply = {"id": "chatcmpl-" + _sha(message), "object": "chat.completion", "created": 0,
