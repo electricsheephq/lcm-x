@@ -133,7 +133,9 @@ def read_host(path: Path):
         undone = "(active = 0 AND compacted = 0)" if {"active", "compacted"} <= mc else "0"
         rows = con.execute("select id, session_id, role, content, " + ", ".join(opt(mc, c, d) for c, d in (
             ("tool_calls", "NULL"), ("tool_call_id", "NULL"), ("_compressed_summary", "0"), ("timestamp", "NULL"),
-            ("tool_name", "NULL"))) + f", {displayed}, {undone} from messages order by id").fetchall()
+            ("tool_name", "NULL"))) + f", {displayed}, {undone}, " +
+                           ", ".join(opt(mc, c, "0") for c in ("active", "compacted")) +
+                           " from messages order by id").fetchall()
     return sessions, rows, "compacted" in mc
 
 
@@ -165,8 +167,8 @@ def lineage_of(sessions: dict):
 def display_key(role, content, ts, call_id, calls, tool_name):
     """The host's display identity (hermes_state_messages.py _display_dedupe_key, hermes_state_identity.py
     _stable_tool_key): a tool-calling assistant row by its call ids, any other row by its content; both with the row's
-    timestamp. A carried handoff copy takes its original's timestamp (_carry_parent_timestamps), so it collapses with
-    it, while a genuine repeat has a timestamp of its own. The host's user-handoff normalisation
+    timestamp. Rotation handoffs normally take their original's timestamp (_carry_parent_timestamps). In-place
+    copies with new stamps are handled structurally by ``in_place_carried_ids``. The host's user-handoff normalisation
     (split_user_originated_turn) is not repeated here: LCM-X's carriers are excluded by marker instead."""
     if role == "assistant" and calls:
         try:
@@ -213,13 +215,48 @@ def carrier_remainder(content, header, nodes, same_lineage):
     return content
 
 
+def in_place_carried_ids(rows, strip):
+    """Same-session active copies immediately after the last displayed compacted row, in host id order.
+
+    Ignoring summary/undisplayed rows, the insertion block must start with a complete ordered suffix of the archived
+    rows, comparing display_key WITHOUT timestamps (assistant tool calls still use call ids). Take the longest such
+    suffix once, ending at the copy of the last archived row; never search later active rows for matches. Thus a new
+    user row that does not continue the suffix ends the block, and a genuine identical resend after the block counts
+    separately, even with the same stamp. No compacted flag means no structural deduction.
+    """
+    sessions = defaultdict(list)
+    for row in rows:
+        if row[9] and not row[6]:
+            sessions[row[1]].append(row)
+
+    def key(row):
+        _rid, sid, role, content, calls, call_id = row[:6]
+        return display_key(role, strip(content, sid) if role == "user" else content, None, call_id, calls, row[8])
+
+    carried = set()
+    for segment in sessions.values():
+        archived = [r for r in segment if r[12]]
+        if not archived:
+            continue
+        live = [r for r in segment if r[0] > archived[-1][0] and r[11] and not r[12]]
+        archive_keys, live_keys = [key(r) for r in archived], [key(r) for r in live]
+        for start in range(len(archived)):
+            n = len(archived) - start
+            if n <= len(live) and archive_keys[start:] == live_keys[:n]:
+                carried.update(r[0] for r in live[:n])
+                break
+    return carried
+
+
 def host_expected(rows, group, markers, strip, scored=None):
     """Per lineage: (role, text) items and the tool-key Counter, counted as the host's lineage display counts rows.
 
     Hermes keeps a rotation parent's originals in the closed parent and gives the child only the compressed handoff
     (hermes_state_compression.py _publish_compression_child_on_conn); an in-place compaction archives the displayed
-    history (active = 0, compacted = 1) and rewinds the originals of the carried tail (active = 0, compacted = 0)
-    (hermes_state_messages.py). The displayed rows are ``active = 1 OR compacted = 1``, and the lineage display collapses
+    history (active = 0, compacted = 1). Some hosts rewind the carried originals (active = 0, compacted = 0);
+    others keep both originals and active copies displayed, sometimes with new timestamps. ``in_place_carried_ids``
+    excludes those copies using their insertion block, not global text deduplication. The displayed rows are
+    ``active = 1 OR compacted = 1``, and the lineage display collapses
     rows by display identity (``display_key``) across segments. The host stamps each row of an insert batch 1e-6 s
     after the one before it (hermes_state_messages.py _insert_message_rows), so two identical sends have identities of
     their own; an identity's count is the most displayed rows any one segment (session) holds of it, and a key's
@@ -238,9 +275,10 @@ def host_expected(rows, group, markers, strip, scored=None):
     _header, prefixes = markers
     per_segment, first, plain, merged = Counter(), {}, set(), set()
     merged_rows, earlier_texts = defaultdict(list), defaultdict(list)  # for the hand-check detectors only
+    carried = in_place_carried_ids(rows, strip)
     for row in rows:
         rid, sid, role, content, calls, call_id, summary, ts, tool_name, displayed = row[:10]
-        if summary or not displayed:
+        if summary or not displayed or rid in carried:
             continue
         text = strip(content, sid) if role == "user" else content
         identity = (group(sid), display_key(role, text, ts, call_id, calls, tool_name))

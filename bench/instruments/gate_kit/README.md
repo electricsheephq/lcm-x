@@ -53,7 +53,13 @@ Expected rows come from the host's own `state.db`, per lineage (a session plus i
 parent ended with `end_reason = 'compression'` on the same source), counted the way the host's lineage display counts
 them. Hermes keeps a rotation parent's originals in the closed parent and gives the child only the compressed handoff;
 an in-place compaction archives the displayed history (`active = 0, compacted = 1`) and rewinds the originals of the
-carried tail (`active = 0, compacted = 0`). The displayed rows are `active = 1 OR compacted = 1`, and the display
+carried tail (`active = 0, compacted = 0`). Other host versions keep the archived originals and their active carried
+copies displayed, sometimes with new timestamps. For those hosts the audit removes one insertion block per session:
+the active prefix immediately after the last displayed compacted row must match a complete ordered suffix of the
+archived rows, ignoring timestamps and summary/undisplayed rows. The longest matching suffix is consumed once,
+ending at the copy of the last archived row. Later identical resends still count, and a new unmatched user turn ends
+the block; the audit never searches later active rows for copies. Tool-calling assistant rows match by call ids.
+The displayed rows are `active = 1 OR compacted = 1`, and the display
 collapses rows with the same display identity: role, content (edge-stripped, as B2 keys it), timestamp and tool
 fields, or a tool-calling assistant row's call ids. A carried handoff copy takes its original's timestamp, so it
 collapses with it; a genuine repeat has its own timestamp (the host offsets each row of an insert batch by 1e-6 s). An
@@ -206,6 +212,16 @@ python -m bench.instruments.gate_kit.drive --hermes-python <host venv python> --
 - `compress_request` is recorded before the triggering long-text turn; `compress_result` records the later manual
   compression outcome separately, so the audit's attribution window starts before automatic compaction can occur.
   A failed long-text turn writes `compress_request_failed`; the audit excludes that request from attribution.
+  Each attempt reads only log bytes added since its request, from the entry point's stderr and
+  `<home>/logs/agent.log`, accepting only LCM-X logger lines. `LCM compaction #` or `in-place compression boundary kept`
+  labels it `compressed`; `LCM compression no-op` or `compaction stop: reason=noop` labels it `noop`. A compaction
+  wins if both occur (automatic compaction during the long turn, followed by a manual no-op). Without either,
+  the host answer is retained with `log=none`. Results keep `detail="slot=.. manual=.. log=.."` and add `log`,
+  `host_answer`, `compactions` (observed log count, or one for a boundary-only success) and `retry` fields.
+  A confirmed `noop` sends the same planned long paste again and retries, at most twice, recording a fresh
+  request/result pair per attempt with `retry=0|1|2`. This leaves the seeded op order unchanged. The summary's
+  `compactions` separates `planned`, `requests`, `real` (log-confirmed), `noop` and `log_none`; unconfirmed host
+  successes never increase `real`. The audit remains authoritative for the whole run's compaction floor.
   Inactive-host scans restart at byte zero when a log shrinks below the saved offset.
 - The events log never holds prompt or reply text: a prompt is its bank index (a test plants a sentinel to hold this).
   The last line is `{"kind": "summary", "planned", "executed", "errors", "delegate", "context_length", ...}`.

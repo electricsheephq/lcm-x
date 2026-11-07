@@ -212,6 +212,37 @@ def test_in_place_rewound_rows_are_not_expected(tmp_path):
     assert out["parity"]["totals"]["missing_rows"] == 0 and out["parity"]["totals"]["expected_rows"] == 3
 
 
+@pytest.mark.parametrize("lose", [None, "original", "resend"])
+def test_in_place_archived_tail_copies_ignore_stamps_but_keep_resend(tmp_path, lose):
+    tail = [u("retained question"), call("carried-call"), result("carried-call"), a("retained answer")]
+    original = turn(0) + [("S1", dict(m, _ts=3000.0 + i)) for i, m in enumerate(tail)]
+    archived = [(s, dict(m, _active=0, _compacted=1)) for s, m in original]
+    carried = [("S1", dict(m, _ts=3000.0 + i if i % 2 == 0 else 4000.0 + i)) for i, m in enumerate(tail)]
+    # Tool-calling assistant identity uses call ids even when its rendered content changes.
+    carried[1][1]["content"] = f"{S} carried rendering"
+    resend = [("S1", dict(tail[0], _ts=5000.0)), ("S1", a("new answer"))]
+    stored = original + resend
+    if lose == "resend":
+        stored = original + resend[1:]
+    elif lose == "original":
+        stored = original[:3] + original[4:] + resend  # lose the tool call, not just its copied rendering
+    out = Home(tmp_path, ONE, archived + carried + resend, stored=stored).run()
+    totals = out["parity"]["totals"]
+    assert totals["expected_rows"] == len(original) + len(resend)
+    assert totals["missing_rows"] == int(lose is not None)
+    assert totals["surplus_rows"] == 0
+    assert S not in json.dumps(out)
+
+
+def test_in_place_unmatched_user_ends_carry_block(tmp_path):
+    archived = [("S1", dict(u("repeat"), _active=0, _compacted=1, _ts=3000.0))]
+    # No carried tail here: a new user turn ends the insertion block. A later repeat is a real occurrence.
+    live = [("S1", u("new turn")), ("S1", dict(u("repeat"), _ts=4000.0))]
+    out = Home(tmp_path, ONE, archived + live, stored=archived + live[:1]).run()
+    assert out["parity"]["totals"]["expected_rows"] == 3
+    assert out["parity"]["totals"]["missing_rows"] == 1
+
+
 ROTATED = {"P": ("cli", None, 1000.5, "compression", 100.0), "P2": ("cli", "P", 3000.0, "user_exit", 1001.0)}
 
 

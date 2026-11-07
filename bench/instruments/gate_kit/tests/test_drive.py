@@ -291,6 +291,85 @@ def test_compress_request_precedes_triggering_turn(tmp_path, monkeypatch, slot):
     assert any(e["kind"] == "compress_result" and "manual=compressed" in e["detail"] for e in events)
 
 
+def compress_stub_log(d, slot, monkeypatch, messages, host_answer=True, logger="hermes_lcm.engine"):
+    """Append only while the fake host handles /compress, using the entry point's real log destination."""
+    d.acp_sid(slot) if slot.startswith("A") else d.tui_rt(slot)
+    path = d.logs / "acp.stderr" if slot.startswith("A") else d.home / "logs" / "agent.log"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("2026-11-06 10:00:00 INFO hermes_lcm.engine: LCM compaction #99: stale\n")
+    pending = iter(messages)
+    attempts = []
+
+    def write():
+        attempts.append(1)
+        with path.open("a") as fh:
+            fh.write(f"2026-11-06 10:00:01 INFO {logger}: {next(pending)}\n")
+
+    if slot.startswith("A"):
+        prompt = d.acp.prompt
+
+        def wrapped(sid, text, timeout):
+            if text == "/compress":
+                write()
+                return ("Context compressed" if host_answer else "No compression"), "end_turn"
+            return prompt(sid, text, timeout)
+
+        monkeypatch.setattr(d.acp, "prompt", wrapped)
+    else:
+        call = d.tui.call
+
+        def wrapped(method, params, timeout):
+            if method == "session.compress":
+                write()
+                return {"compressed": host_answer}
+            return call(method, params, timeout)
+
+        monkeypatch.setattr(d.tui, "call", wrapped)
+    return attempts
+
+
+@pytest.mark.parametrize("slot", ["A1", "T1"])
+@pytest.mark.parametrize("message,label,logger", [
+    ("LCM compaction #1: published", "compressed", "hermes_lcm.compaction"),
+    ("in-place compression boundary kept session bound", "compressed", "hermes_lcm.engine"),
+    ("LCM compression no-op: below leaf chunk threshold", "noop", "hermes_lcm.engine"),
+    ("compaction stop: reason=noop", "noop", "hermes_lcm.compaction"),
+    ("unrelated line", "none", "hermes_lcm.engine"),
+    ("LCM compaction #1: quoted", "none", "other_logger"),
+])
+def test_compress_result_uses_new_lcm_log_lines(tmp_path, monkeypatch, slot, message, label, logger):
+    d, ev, _log = stub_driver(tmp_path)
+    host_answer = label != "compressed"  # make the host disagree with the logged outcome
+    attempts = compress_stub_log(d, slot, monkeypatch, [message] * 3, host_answer, logger)
+    d.op({"op": "compress", "slot": slot, "prompt": drive.CATS["long"][0]})
+    events = [json.loads(x) for x in ev.path.read_text().splitlines()]
+    results = [e for e in events if e["kind"] == "compress_result"]
+    assert len(attempts) == len(results) == (3 if label == "noop" else 1)
+    for e in results:
+        assert e["log"] == label
+        assert e["host_answer"] == ("compressed" if host_answer else "not_compressed")
+        assert e["detail"] == f"slot={slot} manual={label if label != 'none' else 'compressed'} log={label}"
+    assert S not in ev.path.read_text()
+
+
+@pytest.mark.parametrize("slot", ["A1", "T1"])
+@pytest.mark.parametrize("noops", [0, 1, 2, 3])
+def test_compress_noop_retries_are_bounded_and_summary_counts_real(tmp_path, monkeypatch, slot, noops):
+    d, ev, _log = stub_driver(tmp_path)
+    messages = ["LCM compression no-op: below leaf chunk threshold"] * noops + ["LCM compaction #1: published"]
+    attempts = compress_stub_log(d, slot, monkeypatch, messages)
+    summary = d.run([{"op": "compress", "slot": slot, "prompt": drive.CATS["long"][0]}], {"delegated_children": 0})
+    n = min(noops + 1, 3)
+    events = [json.loads(x) for x in ev.path.read_text().splitlines()]
+    sequence = [e for e in events if e["kind"] in ("compress_request", "turn", "compress_result")]
+    assert [e["kind"] for e in sequence] == ["compress_request", "turn", "compress_result"] * n
+    assert [e["retry"] for e in sequence if e["kind"] == "compress_request"] == list(range(n))
+    assert len(attempts) == n and summary["prompts_by_category"] == {"long": n}
+    assert summary["executed"] == {"compress": 1}  # retries do not change the seeded plan's op counts
+    assert summary["compactions"] == {"planned": 1, "requests": n, "real": int(noops < 3),
+                                      "noop": min(noops, 3), "log_none": 0}
+
+
 def test_shared_acp_restart_records_all_bound_sessions(tmp_path):
     d, ev, log = stub_driver(tmp_path)
     slots = [f"A{i}" for i in range(1, 7)]

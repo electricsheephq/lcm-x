@@ -1,0 +1,1 @@
+- Fix: Count in-place carried tails once in the bench gate-kit audit, label compression results from LCM logs, and retry confirmed no-ops with bounded filler turns; no product change.

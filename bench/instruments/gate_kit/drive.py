@@ -307,6 +307,7 @@ class Driver:
         self.killed_at: dict[str, float] = {}
         self.slots: dict[str, dict] = {}
         self.done, self.prompts, self.attempts = Counter(), Counter(), Counter()
+        self.compactions = Counter()
         self.context = None
 
     # processes and sessions
@@ -410,6 +411,73 @@ class Driver:
         self.context = int(m.group(1).replace(",", "")) if m else None
         self.ev.write("context_window", self.slots[slot]["session"], f"context_length={self.context}")
 
+    def compress_log_result(self, offsets):
+        """Only new bytes of this entry's stderr and the home's agent.log; never classify quoted host replies.
+        A published compaction wins over a manual no-op after automatic compaction in the triggering turn.
+        """
+        compactions, boundary, noop = set(), False, False
+        for path, (inode, offset) in offsets.items():
+            try:
+                with path.open("rb") as fh:
+                    stat = os.fstat(fh.fileno())
+                    fh.seek(offset if stat.st_ino == inode and stat.st_size >= offset else 0)
+                    lines = fh.read().decode("utf-8", "replace").splitlines()
+            except OSError:
+                continue
+            for line in lines:
+                hit = AUDIT.LOG_LINE.match(line)
+                if not hit or not AUDIT.LCM_LOGGER.search(hit["logger"] or hit["logger2"] or hit["logger3"]):
+                    continue
+                msg = hit["msg"]
+                if AUDIT.COMPACTION.search(msg):
+                    compactions.add((hit["ts"], hit["frac"], hit["sid"] or hit["sid2"], msg))
+                boundary |= "in-place compression boundary kept" in msg
+                noop |= "LCM compression no-op" in msg or "compaction stop: reason=noop" in msg
+        n = len(compactions) or int(boundary)
+        return ("compressed" if n else "noop" if noop else "none"), n
+
+    def compress(self, o):
+        slot = o["slot"]
+        self.acp_sid(slot) if slot.startswith("A") else self.tui_rt(slot)
+        for retry in range(3):  # the planned attempt and at most two logged no-op retries
+            if time.monotonic() >= self.stop_at:
+                return
+            paths = (self.logs / ("acp.stderr" if slot.startswith("A") else "tui.stderr"),
+                     self.home / "logs" / "agent.log")
+            offsets = {}
+            for path in paths:
+                try:
+                    stat = path.stat()
+                    offsets[path] = (stat.st_ino, stat.st_size)
+                except FileNotFoundError:
+                    offsets[path] = (None, 0)
+            self.ev.write("compress_request", self.slots[slot]["session"], f"slot={slot}", retry=retry)
+            self.compactions["requests"] += 1
+            try:
+                stop = self.send(slot, o["prompt"])
+            except (AD.DriverError, OSError, KeyError, ValueError):
+                self.ev.write("compress_request_failed", self.slots[slot]["session"], f"slot={slot}")
+                raise
+            if stop not in ("end_turn", "complete"):
+                self.ev.write("compress_request_failed", self.slots[slot]["session"], f"slot={slot}")
+                return False
+            if slot.startswith("A"):
+                reply, _stop = self.acp.prompt(self.acp_sid(slot), "/compress", self.timeout)
+                host = "compressed" if reply.startswith("Context compressed") else "not_compressed"
+            else:
+                res = self.tui.call("session.compress", {"session_id": self.tui_rt(slot)}, self.timeout)
+                host = "compressed" if res.get("compressed") else "not_compressed"
+            logged, n = self.compress_log_result(offsets)
+            result = host if logged == "none" else logged
+            self.compactions["real"] += n
+            self.compactions["noop"] += int(logged == "noop")
+            self.compactions["log_none"] += int(logged == "none")
+            self.ev.write("compress_result", self.slots[slot]["session"], f"slot={slot} manual={result} log={logged}",
+                          log=logged, host_answer=host, compactions=n, retry=retry)
+            if result != "noop":
+                break
+        return True
+
     # operations
     def op(self, o: dict) -> None:
         kind, slot = o["op"], o["slot"]
@@ -420,23 +488,8 @@ class Driver:
             if self.context is None and slot.startswith("A") and stop == "end_turn":
                 self.probe_context(slot)
         elif kind == "compress":
-            self.acp_sid(slot) if slot.startswith("A") else self.tui_rt(slot)
-            self.ev.write("compress_request", self.slots[slot]["session"], f"slot={slot}")
-            try:
-                stop = self.send(slot, o["prompt"])
-            except (AD.DriverError, OSError, KeyError, ValueError):
-                self.ev.write("compress_request_failed", self.slots[slot]["session"], f"slot={slot}")
-                raise
-            if stop not in ("end_turn", "complete"):
-                self.ev.write("compress_request_failed", self.slots[slot]["session"], f"slot={slot}")
+            if not self.compress(o):
                 return
-            if slot.startswith("A"):
-                reply, _stop = self.acp.prompt(self.acp_sid(slot), "/compress", self.timeout)
-                result = "compressed" if reply.startswith("Context compressed") else "not_compressed"
-            else:
-                res = self.tui.call("session.compress", {"session_id": self.tui_rt(slot)}, self.timeout)
-                result = "compressed" if res.get("compressed") else "not_compressed"
-            self.ev.write("compress_result", self.slots[slot]["session"], f"slot={slot} manual={result}")
         elif kind == "cancel_resend":  # ACP: cancel mid-turn, then the same prompt; never counted as an undo
             if self.send(slot, o["prompt"], cancel=True) != "cancelled":
                 self.ev.write("error", self.slots[slot]["session"], f"cancel_late slot={slot}")
@@ -564,6 +617,8 @@ class Driver:
         if stopped != "lcm_inactive" and self.stop_if_inactive("tui"):  # lines written while the hosts exited
             stopped = "lcm_inactive"
         summary = {"planned": planned_counts(ops), "executed": dict(self.done), "errors": dict(self.ev.errors),
+                   "compactions": {"planned": sum(o["op"] == "compress" for o in ops),
+                                   **{k: self.compactions[k] for k in ("requests", "real", "noop", "log_none")}},
                    "prompts_by_category": dict(self.prompts),
                    "delegate": {"prompts": self.done["delegate"], "extra_prompts": extra,
                                 "attempts": self.attempts["delegate"],
