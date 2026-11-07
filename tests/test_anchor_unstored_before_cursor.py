@@ -488,8 +488,13 @@ def test_rotation_predecessor_scope_equals_main(tmp_path, monkeypatch, statedb, 
         engine.shutdown()
 
 
-def test_a_capped_session_reusing_a_stored_call_id_stays_a_replay(tmp_path):
-    """#2172 host shape: a changed call body with an old id remains accounted for, as on main."""
+def test_a_capped_session_reusing_a_stored_call_id_stores_the_new_call_once(tmp_path):
+    """#2172 host shape: the view holds the earlier call and a new call under the same id, the store holds one.
+
+    The earlier call stays in the view's unchanged prefix, which reserves its stored copy, so the new call
+    (other arguments) has no stored copy and is stored once. Main takes it as a replay and stores its result
+    without it (the #2172 loss family); the candidate stores the call, each argument set exactly once.
+    """
     engine = _engine(tmp_path)
     try:
         history, turn_start, turn_end = _moved_turn(True, earlier=40)
@@ -501,8 +506,16 @@ def test_a_capped_session_reusing_a_stored_call_id_stays_a_replay(tmp_path):
         before = Counter(_key(row) for row in _stored(engine))
         engine.ingest(turn_end)
         after = Counter(_key(row) for row in _stored(engine))
-        assert after - before == Counter(_key(row) for row in (turn_end[84], result, reply))
+        assert after - before == Counter(_key(row) for row in (turn_end[84], call, result, reply))
         assert not before - after
+        shown = Counter(c["function"]["arguments"] for row in turn_end for c in (row.get("tool_calls") or [])
+                        if c["id"] == "call_old")
+        stored = Counter()
+        for row in _stored(engine):
+            calls = row.get("tool_calls") or []
+            calls = json.loads(calls) if isinstance(calls, str) else calls
+            stored.update(c["function"]["arguments"] for c in calls if c.get("id") == "call_old")
+        assert shown == stored and set(shown.values()) == {1}
         engine.ingest(turn_end)
         assert Counter(_key(row) for row in _stored(engine)) == after
     finally:
