@@ -655,8 +655,11 @@ class IdentityAnchorMixin:
                     tail = (self._store.get_session_tail(source, limit=limit) if end is None else
                             self._store.get_session_rows_through(source, end, limit))
                     budget -= len(tail)
-                    byte_budget -= sum(len(row.get("content") or "") + len(row.get("tool_calls") or "")
-                                       for row in tail)
+                    for row in tail:
+                        tool_text = row.get("tool_calls") or ""
+                        if not isinstance(tool_text, str):
+                            tool_text = json.dumps(tool_text)
+                        byte_budget -= len(row.get("content") or "") + len(tool_text)
                     if budget < 0 or byte_budget < 0:
                         notice = (str(self._db_path), self._db_path.stat().st_ino, session)
                         if notice not in _PRESENCE_WINDOW_LOGGED:

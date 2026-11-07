@@ -787,8 +787,9 @@ def test_presence_byte_budget_ingest_boundary(tmp_path, monkeypatch, caplog, ove
     budgets = []
 
     def bounded(self, *args, **kwargs):
-        rows = self._store.get_session_messages(SESSION)
-        size = sum(len(r.get("content") or "") + len(r.get("tool_calls") or "") for r in rows)
+        size = self._store._conn.execute(
+            "SELECT SUM(length(content) + COALESCE(length(tool_calls), 0)) FROM messages WHERE session_id=?",
+            (SESSION,)).fetchone()[0]
         budgets.append(size)
         monkeypatch.setattr(identity_anchor, "_PRESENCE_WINDOW_BYTES", size - over, raising=False)
         return original(self, *args, **kwargs)
