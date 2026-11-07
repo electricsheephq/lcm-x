@@ -666,6 +666,9 @@ class IdentityAnchorMixin:
                     wanted[1] in calls(identity_messages[k]) for k in range(idx)) and not any(
                     wanted[1] in k[1] for k in index if k and k[0] == "call"):
                 continue
+            if wanted[0] == "tool" and capped and not any(  # proven new: no stored row holds its call id, so in a
+                    wanted[1] in calls(identity_messages[k]) for k in (*missed, *unaccounted)):  # capped tail a
+                continue  # result is stored only beside a call this ingest stores (#2455 tracks such calls)
             unaccounted.append(idx)
         return unaccounted
 
