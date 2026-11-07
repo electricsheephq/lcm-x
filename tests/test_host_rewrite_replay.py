@@ -269,7 +269,7 @@ def test_fix1_a3_read_failure_keeps_audit_rewind(tmp_path, monkeypatch, caplog, 
 
         def audited(*args, **kwargs):
             audit(*args, **kwargs)
-            rewinds.append(args[8]["cursor"])
+            rewinds.append(args[7]["cursor"])
 
         class FaultConnection:
             def __getattr__(self, name):
