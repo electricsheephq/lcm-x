@@ -398,3 +398,15 @@ def test_a_rule_reading_a_module_with_no_closure_freezes_it_whole(tmp_path):
     assert pins.verify(path, tmp_path)["verdict"] == "PASS"
     save(path, {**manifest, "rule_files": [r for r in manifest["rule_files"] if r["name"] != "helper.py"]})
     assert "closure" in pins.verify(path, tmp_path)["mismatches"]  # Dropping a frozen file fails verify.
+
+
+def test_a_frozen_file_freezes_what_it_imports_too(tmp_path):
+    (tmp_path / "rules.py").write_text("import helper\n\ndef rule(x):\n    return helper.norm(x)\n", encoding="utf-8")
+    (tmp_path / "helper.py").write_text("import leaf\n\ndef norm(x):\n    return leaf.VERDICT\n", encoding="utf-8")
+    (tmp_path / "leaf.py").write_text("VERDICT = 'FAIL'\n", encoding="utf-8")
+    interpreter = {"path_basename": Path(sys.executable).name, "version": platform.python_version()}
+    args = (["rules.py"], {"rules.py": ["rule"]}, {"rules.py": ["helper.py", "leaf.py"]}, interpreter)
+    first = pins.build(tmp_path, *args)
+    assert [r["name"] for r in first["rule_files"]] == ["helper.py", "leaf.py"]
+    (tmp_path / "leaf.py").write_text("VERDICT = 'PASS'\n", encoding="utf-8")
+    assert pins.build(tmp_path, *args)["rule_files"] != first["rule_files"]  # So rules_sha256 moves with the leaf.

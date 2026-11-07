@@ -299,8 +299,13 @@ def build(instrument_dir, files, roots_by_file, loads_by_file, interpreter, data
                         raise ValueError("pinned only as a load")
                     call_closure(_path(instrument_dir, other), [attr], (data_by_file or {}).get(other, []))
                     roots[other].add(attr)
-                except ValueError:  # No closure to pin it by (a load, or dynamic): the rule freezes the whole file.
-                    whole.add(other)
+                except ValueError:  # No closure to pin it by (a load, or dynamic): the rule freezes the whole file,
+                    pending = [other]  # and every local module it imports, transitively.
+                    while pending:
+                        current = pending.pop()
+                        if current not in whole:
+                            whole.add(current)
+                            pending.extend(local_imports(Path(instrument_dir) / current, instrument_dir))
                 grown = True
         if not grown:
             break
