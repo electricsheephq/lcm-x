@@ -49,7 +49,7 @@ class FakeHost(r.LocalHost):
 
     def __init__(self, config, run_dir, fail=None):
         super().__init__(config, run_dir)
-        self.fail, self.armed, self.replays = fail, [], []
+        self.fail, self.armed, self.replays, self.calls = fail, [], [], []
 
     def free_bytes(self):
         return 0 if self.fail == "free_space" else r.NEED_FREE
@@ -59,8 +59,11 @@ class FakeHost(r.LocalHost):
             return {"verdict": "FAIL", "mismatches": ["manifest"]}  # As pins.verify: no hashes on a failure.
         return {"verdict": "PASS", "mismatches": [], "functions_sha256": "f" * 64}
 
-    def rules(self):
-        return {"identity": lambda row: (row["role"], row["content"]), "credits": (), "covered": lambda sid: True}
+    def rules(self):  # The real configure seams call these, so the test sees the order and the inputs.
+        return {"identity": lambda row: (row["role"], row["content"]), "credits": (),
+                "covered": lambda sid: self.calls.append(("covered", sid)) or True,
+                "configure_planning": lambda **kw: self.calls.append(("configure_planning", kw)),
+                "configure_bar1": lambda **kw: self.calls.append(("configure_bar1", kw))}
 
     def preflight(self, name, plan):
         return {"verdict": "FAIL" if name == self.fail else "PASS"}
@@ -99,6 +102,8 @@ class FakeHost(r.LocalHost):
 
     def replay(self, ctx, step, t0, h8):
         self.replays.append(step["id"])
+        if self.fail == "no_receipt" and step["id"] == "e1-S1-0":
+            return None, True, None  # The previous-GA replay left no receipt.
         assert (Path(t0) / "capture-hashes.json").is_file() and (Path(h8) / "RC3").exists() is False
         checks = {k: {"verdict": "PASS"} for k in (bars.VALIDITY, *bars.COMPARISONS)}
         return {"checks": checks, "bind_identity": {"dup_store_ids": ctx.get("copies", {}).get(step["id"], [])}}, False, 0
@@ -180,6 +185,28 @@ def test_rerun_rules(setup):
     assert "defect" in r.run(FakeHost(config, run_dir), rc_id="rc-synthetic", prior=twice)["stopped_at"]
     fixed = r.run(FakeHost(config, run_dir), rc_id="rc-synthetic", prior=twice, instrument_fix="fix-1")
     assert "rule-function" in fixed["stopped_at"]
+
+
+def test_the_rules_module_is_configured_before_planning_and_before_bar1(setup):
+    _, config, run_dir = setup
+    host = FakeHost(config, run_dir)
+    receipt = r.run(host, rc_id="rc-synthetic")
+    names = [c[0] for c in host.calls]
+    assert names[0] == "configure_planning" and names.count("covered") == 3 and names[-1] == "configure_bar1"
+    planning, bar1 = host.calls[0][1], host.calls[-1][1]
+    assert planning["plan_home"] == run_dir / "plan" / "home" and planning["scratch"] == run_dir / "planning"
+    assert bar1["snapshot_store"] == run_dir / "plan" / "home" / "store.db"  # A clone, never the snapshot.
+    assert len(bar1["rc_rows"]) == receipt["bars"]["bar1"]["rows"]
+    assert len(bar1["host_rows"]) == receipt["bars"]["bar1"]["host_occurrences"]
+    assert len(bar1["bind_receipts"]) == 12 and bar1["window_start"] == max(b["t0_at"] for b in receipt["binds"])
+
+
+def test_a_bind_without_its_replay_receipt_makes_bar1_inconclusive(setup):
+    _, config, run_dir = setup
+    receipt = r.run(FakeHost(config, run_dir, fail="no_receipt"), rc_id="rc-synthetic")
+    bar1 = receipt["bars"]["bar1"]
+    assert (bar1["verdict"], bar1["binds_missing_receipt"]) == (bars.INCONCLUSIVE, ["e1-S1-0"])
+    assert receipt["verdict"]["raw"] == bars.INCONCLUSIVE
 
 
 @pytest.mark.parametrize("fail, missing", [("warm", 20), ("raise", 1)])

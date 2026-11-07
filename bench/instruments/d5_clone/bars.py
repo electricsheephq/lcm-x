@@ -70,13 +70,14 @@ def _ordered(rows, hosts, same):
     return pairs
 
 
-def bar1(rc_rows, host_rows, snapshot_rows, ga_rows, binds, bar2_by_bind, identity, credits):
+def bar1(rc_rows, host_rows, snapshot_rows, ga_rows, binds, bar2_by_bind, identity, credits, missing_receipts=()):
     """Message rows in the rc arm (spec bar 1, with the bar-1 ruling and RM ruling (b)).
 
     rc_rows and ga_rows are the rows each arm stored during the run, in store order; host_rows are the run's host
     rows in host order; snapshot_rows are the snapshot's store and host rows. Each bind is
     {bind, session_id, t0_max, h8_max, dup_store_ids}: the copies bar 2 judged at that bind (the edition's
-    positional, credited set; None when its receipt has none)."""
+    positional, credited set; None when its receipt has none). missing_receipts names the binds with no replay
+    receipt: a run fault, so bar 1 is INCONCLUSIVE, never FAIL or PASS (release manager, 2026-11-07)."""
     dups = {b["bind"]: set(b["dup_store_ids"]) for b in binds if b.get("dup_store_ids") is not None}
 
     def key(row):
@@ -120,8 +121,9 @@ def bar1(rc_rows, host_rows, snapshot_rows, ga_rows, binds, bar2_by_bind, identi
 
     pending = [g for g in groups if all(open_bind(r) for r in g)]
     verdict = FAIL if lost or len(pending) < len(groups) else INCONCLUSIVE if pending else PASS
+    verdict = INCONCLUSIVE if missing_receipts else verdict
     return {"verdict": verdict, "rows": len(rc_rows), "host_occurrences": len(host_rows), "matched": matched,
-            "copies_by_bind": dict(copies), "lost": lost, "class3_rows": sum(map(len, class3.values())),
+            "copies_by_bind": dict(copies), "lost": lost, "binds_missing_receipt": sorted(missing_receipts), "class3_rows": sum(map(len, class3.values())),
             "class3_over_ga": len(over), "unassigned": len(unassigned), "inconclusive_leftover_groups": len(pending)}
 
 

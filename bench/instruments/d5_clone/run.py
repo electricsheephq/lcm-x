@@ -13,6 +13,7 @@ P1) provides ``identity(row)``, ``credits`` (the two host-rewrite credits, each 
 """
 
 import argparse
+from datetime import datetime
 import hashlib
 import importlib.util
 import json
@@ -74,10 +75,21 @@ class LocalHost:
             spec = importlib.util.spec_from_file_location("d5_clone_rules", path)
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
-            self._rules = {"identity": module.identity, "credits": tuple(module.credits), "covered": module.covered}
+            self._rules = {"identity": module.identity, "credits": tuple(module.credits), "covered": module.covered,
+                           "configure_planning": module.configure_planning, "configure_bar1": module.configure_bar1}
         return self._rules
 
+    def configure_planning(self, copy):
+        """The rules module's planning setup (the pinned host rebuilds each history), before choose_sessions."""
+        self.rules()["configure_planning"](plan_home=copy, host_py=self.c.get("host_py"), pin=self.c.get("host_pin"),
+                                           scratch=self.run_dir / "planning")
+
+    def configure_bar1(self, **inputs):
+        """The rules module's credit maps over the rows bar 1 gets, immediately before bars.bar1."""
+        self.rules()["configure_bar1"](**inputs)
+
     def plan(self, copy):
+        self.configure_planning(copy)
         chosen = planner.choose_sessions(copy / "host-0.db", copy / "store.db", self.rules()["covered"])
         return planner.build_plan(chosen, nonce=self.c["nonce"])
 
@@ -145,7 +157,7 @@ class LocalHost:
         out = self._dir(ctx["name"], "captures") / f"{step['id']}-{kind}"
         home = ctx["home"]
         return out, capture.capture(kind, out, store_db=home / "lcm.db", host_db=home / "state.db",
-                                    payload_dir=home / "lcm-large-outputs", extras=extras)
+                                    payload_dir=home / "lcm-large-outputs", extras=extras, home=home)
 
     def replay(self, ctx, step, t0, h8):
         """The edition on both trees, under the sandbox: (receipt, error, range_new_rows)."""
@@ -234,7 +246,8 @@ def run_arm(host, name, home, plan, extras):
                     receipt, error, range_new = host.replay(ctx, step, t0_dir, h8_dir)
                     binds.append({"bind": step["id"], "session_id": sid[step["conversation"]],
                                   "t0_max": t0["store_max_store_id"], "h8_max": h8["store_max_store_id"],
-                                  "dup_store_ids": bars.dup_store_ids(receipt),
+                                  "dup_store_ids": bars.dup_store_ids(receipt), "receipt": receipt,
+                                  "t0_at": datetime.fromisoformat(t0["captured_at"]).timestamp(),
                                   "t0_capture_sha256": t0["capture_hashes_sha256"],
                                   "h8_capture_sha256": h8["capture_hashes_sha256"],
                                   "bar2": bars.bar2_bind(receipt, range_new_rows=range_new, error=error)})
@@ -295,11 +308,14 @@ def run(host, *, rc_id, prior=(), instrument_fix=None):
     snap = host.rows(base)
     tops = {k: max((r[c] for r in snap[k]), default=0) for k, c in (("store", "store_id"), ("host", "id"))}
     new = {a: [r for r in arms[a]["rows"]["store"] if r["store_id"] > tops["store"]] for a in arms}
-    binds = arms["rc"]["binds"]
+    binds, hosts = arms["rc"]["binds"], [r for r in arms["rc"]["rows"]["host"] if r["id"] > tops["host"]]
+    host.configure_bar1(rc_rows=new["rc"], host_rows=hosts, snapshot_store=base / "store.db",  # the plan clone's
+                        window_start=max((b["t0_at"] for b in binds), default=None),
+                        bind_receipts=[b["receipt"] for b in binds if isinstance(b["receipt"], dict)])
     results = {
-        "bar1": bars.bar1(new["rc"], [r for r in arms["rc"]["rows"]["host"] if r["id"] > tops["host"]],
-                          snap["store"] + snap["host"], new["ga"], binds,
-                          {b["bind"]: b["bar2"]["verdict"] for b in binds}, rules["identity"], rules["credits"]),
+        "bar1": bars.bar1(new["rc"], hosts, snap["store"] + snap["host"], new["ga"], binds,
+                          {b["bind"]: b["bar2"]["verdict"] for b in binds}, rules["identity"], rules["credits"],
+                          missing_receipts=[b["bind"] for b in binds if not isinstance(b["receipt"], dict)]),
         "bar2": bars.bar2([b["bar2"] for b in binds]),
         "bar3": bars.bar3(snap["store"], arms["rc"]["rows"]["store"], rules["identity"]),
         "bar4": bars.bar4(arms["rc"]["logs"], arms["ga"]["logs"], arms["rc"]["roots"], arms["ga"]["roots"]),
@@ -311,7 +327,7 @@ def run(host, *, rc_id, prior=(), instrument_fix=None):
                   "checks": bars.check_counts(arms[a]["checks"])} for a in arms},
         ga_rerun=ga_rerun and {**{k: ga_rerun[k] for k in ("workload", "egress", "provider", "wall_s")},
                                "checks": bars.check_counts(ga_rerun["checks"])},
-        binds=[{k: v for k, v in b.items() if k != "dup_store_ids"} for b in binds], bars=results,
+        binds=[{k: v for k, v in b.items() if k not in ("dup_store_ids", "receipt")} for b in binds], bars=results,
         verdict=bars.verdict(results, prior_verdicts),
         wall_s={**{a: arms[a]["wall_s"] for a in arms}, "total": round(time.monotonic() - started, 3)})
     return receipt

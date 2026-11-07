@@ -5,6 +5,7 @@ import hashlib
 import json
 from pathlib import Path
 import sqlite3
+import time
 from datetime import datetime
 
 import pytest
@@ -206,3 +207,27 @@ def test_a_locked_rollback_journal_input_is_not_read_without_its_lock(tmp_path):
         with closing(cap._readonly(db)) as reader, pytest.raises(sqlite3.OperationalError, match="locked"):
             reader.execute("SELECT count(*) FROM t").fetchone()
         writer.execute("ROLLBACK")
+
+
+def test_a_held_lock_fails_the_backup_at_its_deadline(tmp_path):
+    db = tmp_path / "held.db"
+    with closing(sqlite3.connect(db, isolation_level=None)) as writer:
+        writer.execute("CREATE TABLE messages (store_id INTEGER PRIMARY KEY)")
+        writer.execute("BEGIN EXCLUSIVE")
+        started = time.monotonic()
+        with pytest.raises(cap.CaptureError, match="deadline"):
+            cap.backup(db, tmp_path / "out.db", deadline_s=0.3)
+        assert time.monotonic() - started < 5
+        writer.execute("ROLLBACK")
+    cap.backup(db, tmp_path / "out2.db", deadline_s=5)  # Released: the same input backs up.
+
+
+@pytest.mark.parametrize("inside", ["payload", "home"])
+def test_a_capture_inside_its_payload_source_or_the_home_is_refused_before_mkdir(inputs, tmp_path, inside):
+    home, payload = tmp_path / "home", tmp_path / "home" / "lcm-large-outputs"
+    payload.mkdir(parents=True)
+    out = (payload if inside == "payload" else home) / "T0"
+    with pytest.raises(cap.CaptureError, match="inside"):
+        cap.capture("T0", out, store_db=inputs[0], host_db=inputs[1], payload_dir=payload,
+                    **({"home": home} if inside == "home" else {}))
+    assert not out.exists()

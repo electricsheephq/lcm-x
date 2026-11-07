@@ -91,6 +91,14 @@ def test_bar1_reserves_exactly_the_copies_bar2_judged():
     assert b.dup_store_ids({"bind_identity": {}}) is None and b.dup_store_ids(None) is None
 
 
+def test_bar1_a_bind_without_its_replay_receipt_is_never_fail_or_pass():
+    lost = [x for x in rc_rows() if x["store_id"] != 13]
+    for rows in (rc_rows(), lost):
+        result = b.bar1(rows, HOSTS, SNAPSHOT, [store(99, "S", "assistant", "digest")], [BIND], {"e1-L-0": b.PASS},
+                        identity, (whitespace, swap), missing_receipts=["e1-L-0"])
+        assert (result["verdict"], result["binds_missing_receipt"]) == (b.INCONCLUSIVE, ["e1-L-0"])
+
+
 def receipt(validity="PASS", comparison="PASS", **extra):
     checks = {"validity": {"verdict": validity}, **{k: {"verdict": comparison} for k in b.COMPARISONS}}
     return {"checks": checks, "bind_identity": {"dup_store_ids": [10]}, "range_new_rows": 0, **extra}
