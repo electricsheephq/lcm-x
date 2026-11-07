@@ -833,6 +833,9 @@ _DELEGATE_STORE_LOCK = threading.RLock()
 _DELEGATE_AUXILIARY_IDS: set[tuple[str, str]] = set()
 _DELEGATE_RESUME_BOUNDARIES: dict[tuple[str, str], list[bytes]] = {}
 _DELEGATE_COMPRESSION_PARENTS: dict[tuple[str, str], str] = {}
+# #2071: digests of the rows the child's last bypassed compaction produced (absent from its input). They are the only
+# rows the stored-tail anchor may pass over without finding them stored.
+_DELEGATE_COMPACTION_OUTPUTS: dict[tuple[str, str], list[bytes]] = {}
 
 
 def delegate_child_store_counts() -> Dict[str, int]:
@@ -927,6 +930,22 @@ class DelegateChildMixin:
         _DELEGATE_RESUME_BOUNDARIES[self._delegate_child_key(session_id)] = [
             self._delegate_child_boundary_digest(identity) for identity in boundary]
 
+    def _remember_delegate_child_outputs(self, session_id: str, messages, result) -> None:
+        def identities(rows):
+            return [self._session_end_prefix_compare_identity(msg, session_id=session_id) for msg in rows
+                    if isinstance(msg, dict) and not self._matches_ignore_message_patterns(msg)]
+        given = Counter(identities(messages))
+        # An output exempts a row only when the compaction's whole input is stored in the lineage: a summary of a
+        # row that was never stored is that row's only survivor, so it must be stored like any other row.
+        stored = Counter(self._session_end_prefix_compare_identity(row, session_id=sid)
+                         for sid in self._delegate_child_store_sessions(session_id)
+                         for row in self._store.get_session_messages(sid, limit=-1))
+        if given - stored:
+            return
+        produced = Counter(identities(result)) - given
+        _DELEGATE_COMPACTION_OUTPUTS[self._delegate_child_key(session_id)] = [
+            self._delegate_child_boundary_digest(identity) for identity in produced.elements()]
+
     def _compress_delegate_child_bypassed(self, messages, current_tokens, focus_topic, force):
         session_id = self._bypass_lcm_session_id()
         stored_tail = None
@@ -965,7 +984,13 @@ class DelegateChildMixin:
             return messages
         try:
             with _DELEGATE_STORE_LOCK:
+                # An earlier compaction's outputs never exempt a row once this one has replaced the view.
+                _DELEGATE_COMPACTION_OUTPUTS.pop(self._delegate_child_key(session_id), None)
                 if self._delegate_child_link(session_id, platform=_DELEGATE_SOURCE, require_agent=True):
+                    try:  # recorded apart from the boundary: it must survive a failed or dropped boundary
+                        self._remember_delegate_child_outputs(session_id, messages, result)
+                    except Exception as exc:
+                        self._note_delegate_child_fallback(session_id, f"compaction outputs not recorded: {exc}")
                     if stored_tail and self._store.get_session_tail(session_id, limit=1) == stored_tail:
                         self._remember_delegate_child_boundary(session_id, result)
                     else:
@@ -998,6 +1023,8 @@ class DelegateChildMixin:
                 _DELEGATE_COMPRESSION_PARENTS[new_key] = old_session_id
                 if old_key in _DELEGATE_RESUME_BOUNDARIES:
                     _DELEGATE_RESUME_BOUNDARIES[new_key] = _DELEGATE_RESUME_BOUNDARIES[old_key]
+                if old_key in _DELEGATE_COMPACTION_OUTPUTS:
+                    _DELEGATE_COMPACTION_OUTPUTS[new_key] = _DELEGATE_COMPACTION_OUTPUTS[old_key]
                 self._store.record_session_lineage(new_session_id, old_session_id, source="compression")
                 try:
                     stored_link = self._stored_delegate_child_link(new_session_id)
@@ -1160,7 +1187,7 @@ class DelegateChildMixin:
         identities = [self._session_end_prefix_compare_identity(msg, session_id=session_id) for msg in view]
         start = self._delegate_child_unique_end(
             [self._delegate_child_boundary_digest(identity) for identity in identities], boundary) if boundary else None
-        anchored = start is not None
+        anchored, rejected = start is not None, []
         if start is not None:
             logger.debug("LCM delegated child %s: resuming after compression boundary", session_id)
         else:
@@ -1175,9 +1202,25 @@ class DelegateChildMixin:
                     sid, limit=_ANCHOR_ROWS - len(stored_tail))] + stored_tail
                 if len(stored_tail) == _ANCHOR_ROWS:
                     break
-            start = self._delegate_child_anchor_end(session_id, view, stored_tail)
-            anchored = start is not None
-            if start is None:
+            outputs = Counter(_DELEGATE_COMPACTION_OUTPUTS.get(key) or ())
+
+            def unaccounted(front: list, end: int) -> list[int]:
+                # #2071: each row in front of the match must be stored in the lineage (apart from the anchor rows,
+                # the lineage's last stored rows) or be one of the last compaction's outputs, one occurrence each.
+                stored_ids = Counter(self._session_end_prefix_compare_identity(row, session_id=sid)
+                                     for sid in sessions for row in self._store.get_session_messages(sid, limit=-1))
+                stored_ids.subtract(identities[len(front):end])
+                return self._delegate_child_unaccounted(front, stored_ids, outputs)
+
+            start = self._delegate_child_anchor_end(session_id, view, stored_tail, unaccounted, rejected)
+            anchored = start is not None or bool(rejected)
+            if rejected:
+                end, missing = rejected[0]
+                self._note_delegate_child_fallback(
+                    session_id, f"{len(missing)} row(s) in front of the stored-tail anchor are neither stored nor "
+                    "compaction outputs; storing them with the rows after the anchor")
+                suffix = [view[index] for index in missing] + view[end:]
+            elif start is None:
                 self._note_delegate_child_fallback(
                     session_id, "stored rows no longer match the child's view; resuming with counted identities")
                 remaining = Counter(self._session_end_prefix_compare_identity(row, session_id=sid)
@@ -1186,6 +1229,8 @@ class DelegateChildMixin:
                 for msg, identity in zip(view, identities):
                     if remaining[identity] > 0:
                         remaining[identity] -= 1
+                    elif outputs[self._delegate_child_boundary_digest(identity)] > 0:  # a compacted head
+                        outputs[self._delegate_child_boundary_digest(identity)] -= 1
                     else:
                         suffix.append(msg)
             else:
@@ -1197,23 +1242,44 @@ class DelegateChildMixin:
             return 0
         stored = self._append_off_current_session_end_suffix(
             session_id, suffix, source=_DELEGATE_SOURCE, conversation_id=session_id)
-        if boundary and anchored:
+        if (boundary and anchored) or rejected:  # a rejection stores rows out of view order: always mark the end
             self._remember_delegate_child_boundary(session_id, view)
         _count("rows_stored", len(stored))
         logger.debug("LCM stored %d delegated-child rows: session=%s parent=%s",
                      len(stored), session_id, link["parent_session_id"])
         return len(stored)
 
+    def _delegate_child_unaccounted(self, front: list, stored: Counter, outputs: Counter) -> list[int]:
+        """Indexes of ``front`` rows that are neither stored nor a compaction output (one occurrence each)."""
+        stored, outputs, missing = stored.copy(), outputs.copy(), []
+        for index, identity in enumerate(front):
+            digest = self._delegate_child_boundary_digest(identity)
+            if stored[identity] > 0:
+                stored[identity] -= 1
+            elif outputs[digest] > 0:
+                outputs[digest] -= 1
+            else:
+                missing.append(index)
+        return missing
+
     def _delegate_child_anchor_end(self, session_id: str, view: List[Dict[str, Any]],
-                                  stored_rows: list[tuple[str, Dict[str, Any]]]) -> Optional[int]:
+                                  stored_rows: list[tuple[str, Dict[str, Any]]],
+                                  unaccounted=None, rejected: Optional[list] = None) -> Optional[int]:
         """After the host rewrote the child's head (native compaction), resume after the stored tail when
-        it occurs exactly once in the view."""
+        it occurs exactly once in the view, and only when every row in front of it is accounted for (#2071):
+        ``unaccounted(front, end)`` lists the front rows that are neither stored nor compaction outputs; when it lists
+        any, ``(end, those indexes)`` goes to ``rejected`` and None is returned."""
         anchor = [self._session_end_prefix_compare_identity(row, session_id=sid)
                   for sid, row in stored_rows]
         identities = [self._session_end_prefix_compare_identity(msg, session_id=session_id) for msg in view]
         for width in range(len(anchor), 0, -1):
             end = self._delegate_child_unique_end(identities, anchor[-width:])
             if end is not None:
+                missing = unaccounted(identities[:end - width], end) if unaccounted is not None else []
+                if missing:  # a narrower match would sit behind the same rows
+                    if rejected is not None:
+                        rejected.append((end, missing))
+                    return None
                 return end
         return None
 
