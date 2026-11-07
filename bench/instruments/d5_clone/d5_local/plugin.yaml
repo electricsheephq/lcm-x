@@ -1,0 +1,6 @@
+name: d5-local
+label: d5-local
+kind: platform
+version: 1.0.0
+description: Loopback-only D5 clone-run transport with content-free receipts.
+requires_env: []
