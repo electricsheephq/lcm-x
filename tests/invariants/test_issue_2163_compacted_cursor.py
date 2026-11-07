@@ -238,15 +238,18 @@ def test_a_result_proves_replay_only_for_the_call_copy_it_follows(build):
     assert 7 not in suppressed, suppressed  # C's result is not owned by any stored C pair: it is stored
 
 
+def _shape_row(row):
+    return (*_key(row), row.get("observed_at", row.get("timestamp")))
+
 
 def _pooled_shape(build, monkeypatch, source, host, cursor, bindings):
     """Ingest ``source``, restart, pin the resume point and the ledger's bindings (host index -> stored row index),
-    ingest ``host``, and return the host indexes the cold ingest's tool-segment scan took for replays."""
+    ingest ``host``, and return its whole stored list and the first scan's replay indexes."""
     engine = build()
     engine.ingest(deepcopy(source))
     rows = engine._store.get_session_messages(engine._session_id)
-    if len(rows) != len(source):
-        pytest.fail(f"setup: the source stored {len(rows)} rows, not {len(source)}")
+    expected = [_shape_row(row) for row in source]
+    _expect_stored_shape([_shape_row(row) for row in rows], expected, expected, "setup")
     engine.shutdown()
     engine = build()
     try:
@@ -265,18 +268,14 @@ def _pooled_shape(build, monkeypatch, source, host, cursor, bindings):
             pytest.fail(f"setup: the ingest failed: {engine._last_ingest_error}")
         if not scans:
             pytest.fail("setup: the cold ingest never ran the tool-segment scan")
-        return scans[0]
+        return [_shape_row(row) for row in engine._store.get_session_messages(engine._session_id)], scans[0]
     finally:
         engine.shutdown()
 
 
-def _expect_2377_shape(replayed, new, known):
-    """Only main's exact #2377 replay set is the expected failure; a fix shows as a loud XPASS."""
-    if new not in replayed:
-        return
-    if replayed == known:
-        raise AssertionError(f"#2377 known shape: host index {new} taken for a replay: {replayed}")
-    pytest.fail(f"not the #2377 shape: {replayed}")
+def _expect_2377_shape(observed, fixed, known, new, replayed):
+    _expect_stored_shape(observed, [_shape_row(row) for row in fixed], [_shape_row(row) for row in known],
+                         f"#2377 known shape: host index {new} taken for a replay: {replayed}")
 
 
 _U = {"role": "user", "content": "start", "timestamp": 0.5}
@@ -292,9 +291,10 @@ def test_issue_2377_vetoed_ownership_stays_spendable(build, monkeypatch):
     y = {"role": "tool", "tool_call_id": "c", "content": "Y"}
     a = lambda stamp: _poll(["c"], '{"a":1}', stamp)  # noqa: E731
     b = lambda stamp: _poll(["c"], '{"b":1}', stamp)  # noqa: E731
-    replayed = _pooled_shape(build, monkeypatch, [_U, a(2.0), x, b(3.0), x, a(4.0)],
-                             [_U, a(1.0), x, b(3.0), y, a(4.0), x, _V], cursor=2, bindings={1: 1})
-    _expect_2377_shape(replayed, 6, {5, 6})  # main also takes the new X for a replay of the stored A@4 segment
+    source = [_U, a(2.0), x, b(3.0), x, a(4.0)]
+    host = [_U, a(1.0), x, b(3.0), y, a(4.0), x, _V]
+    observed, replayed = _pooled_shape(build, monkeypatch, source, host, cursor=2, bindings={1: 1})
+    _expect_2377_shape(observed, [*source, *host[2:]], [*source, *host[2:5], host[-1]], 6, replayed)
 
 
 @pytest.mark.xfail(strict=True, raises=AssertionError,
@@ -306,6 +306,36 @@ def test_issue_2377_partial_parallel_occurrences_pool(build, monkeypatch):
     d = {"role": "tool", "tool_call_id": "d", "content": "D"}
     call = _poll(["c", "d"], "{}", 2.0)
     later = {**call, "timestamp": 4.0}
-    replayed = _pooled_shape(build, monkeypatch, [_U, call, x, later, d], [_U, call, x, d, later, x, d, _V],
-                             cursor=1, bindings={})
-    _expect_2377_shape(replayed, 3, {1, 2, 3})  # main takes the whole first segment for a replay
+    source = [_U, call, x, later, d]
+    host = [_U, call, x, d, later, x, d, _V]
+    observed, replayed = _pooled_shape(build, monkeypatch, source, host, cursor=1, bindings={})
+    _expect_2377_shape(observed, [*source, *host[1:]], [*source, *host[4:]], 3, replayed)
+
+
+def _expect_stored_shape(observed, fixed, known, message, error_type=AssertionError):
+    """Accept only the complete fixed list or the complete named-limit list, in store order."""
+    if observed == fixed:
+        return
+    if observed == known:
+        raise error_type(message)
+    differences = []
+    for label, expected in (("fixed", fixed), ("known", known)):
+        index = next((i for i, (actual, wanted) in enumerate(zip(observed, expected)) if actual != wanted),
+                     min(len(observed), len(expected)))
+        differences.append(f"{label}: first difference={index}, lengths={len(observed)}/{len(expected)}")
+    pytest.fail("unexpected stored shape; " + "; ".join(differences))
+
+
+@pytest.mark.parametrize("case", ["known", "fixed", "doubled", "swapped"])
+def test_stored_shape_comparison(case):
+    fixed = [("user", "first"), ("assistant", "second")]
+    known = [fixed[0]]
+    observed = {"known": known, "fixed": fixed, "doubled": [fixed[0], *fixed], "swapped": fixed[::-1]}[case]
+    if case == "known":
+        with pytest.raises(AssertionError, match="synthetic known shape"):
+            _expect_stored_shape(observed, fixed, known, "synthetic known shape", AssertionError)
+    elif case == "fixed":
+        _expect_stored_shape(observed, fixed, known, "synthetic known shape", AssertionError)
+    else:
+        with pytest.raises(pytest.fail.Exception, match="first difference=.*lengths="):
+            _expect_stored_shape(observed, fixed, known, "synthetic known shape", AssertionError)

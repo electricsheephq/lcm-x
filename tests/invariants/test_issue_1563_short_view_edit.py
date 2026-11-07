@@ -15,7 +15,7 @@ def message(content: str, role: str = "user") -> dict[str, Any]:
     return {"role": role, "content": content}
 
 
-def _counts(tmp_path: Path, views: list) -> tuple[list[int], list[str]]:
+def _counts(tmp_path: Path, views: list, stored_views=None) -> tuple[list[int], list[str]]:
     home = tmp_path / "home"
     home.mkdir()
     with sqlite3.connect(home / "state.db") as db:
@@ -24,9 +24,14 @@ def _counts(tmp_path: Path, views: list) -> tuple[list[int], list[str]]:
     counts = []
     context: Any = engine_context
     with context(tmp_path, window=128000, session_id="parent", conversation_id="conv") as engine:
-        for view in views:
+        for index, view in enumerate(views):
             engine.ingest(deepcopy(view))
-            counts.append(len(engine._store.get_session_messages("parent")))
+            rows = engine._store.get_session_messages("parent")
+            counts.append(len(rows))
+            if stored_views is not None:
+                if engine._ingest_failure_count:
+                    pytest.fail("setup: a short-view ingest failed")
+                stored_views.extend((index, row["role"], row["content"]) for row in rows)
         texts = [row["content"] for row in engine._store.get_session_messages("parent")]
     return counts, texts
 
@@ -50,11 +55,39 @@ def test_an_edit_inside_a_short_prefix_is_stored_once(tmp_path: Path, edited: in
     Today every release stores 8 -> 8 -> 8; the goal is 8 -> 9 -> 9."""
     short = deepcopy(FULL[:5])
     short[edited]["content"] = f"edited row {edited} text"
-    counts, texts = _counts(tmp_path, [FULL, short, FULL])
-    if counts[0] != 8:
-        pytest.fail(f"setup: the first view stored {counts[0]} rows, not 8")
-    if texts.count(short[edited]["content"]) == 1 and counts == [8, 9, 9]:
-        return  # fixed: the strict marker turns this into a loud XPASS
-    if (counts, texts) == ([8, 8, 8], [row["content"] for row in FULL]):
-        raise AssertionError(f"#1563 known shape: counts={counts}, edited text not stored")
-    pytest.fail(f"not the #1563 shape: counts={counts}; texts={texts}")
+    observed = []
+    counts, _ = _counts(tmp_path, [FULL, short, FULL], observed)
+    fixed = [(index, row["role"], row["content"]) for index, view in enumerate(
+        [FULL, [*FULL, short[edited]], [*FULL, short[edited]]]) for row in view]
+    known = [(index, row["role"], row["content"]) for index in range(3) for row in FULL]
+    _expect_stored_shape(observed, fixed, known,
+                         f"#1563 known shape: counts={counts}, edited text not stored")
+
+
+def _expect_stored_shape(observed, fixed, known, message, error_type=AssertionError):
+    """Accept only the complete fixed list or the complete named-limit list, in store order."""
+    if observed == fixed:
+        return
+    if observed == known:
+        raise error_type(message)
+    differences = []
+    for label, expected in (("fixed", fixed), ("known", known)):
+        index = next((i for i, (actual, wanted) in enumerate(zip(observed, expected)) if actual != wanted),
+                     min(len(observed), len(expected)))
+        differences.append(f"{label}: first difference={index}, lengths={len(observed)}/{len(expected)}")
+    pytest.fail("unexpected stored shape; " + "; ".join(differences))
+
+
+@pytest.mark.parametrize("case", ["known", "fixed", "doubled", "swapped"])
+def test_stored_shape_comparison(case):
+    fixed = [("user", "first"), ("assistant", "second")]
+    known = [fixed[0]]
+    observed = {"known": known, "fixed": fixed, "doubled": [fixed[0], *fixed], "swapped": fixed[::-1]}[case]
+    if case == "known":
+        with pytest.raises(AssertionError, match="synthetic known shape"):
+            _expect_stored_shape(observed, fixed, known, "synthetic known shape", AssertionError)
+    elif case == "fixed":
+        _expect_stored_shape(observed, fixed, known, "synthetic known shape", AssertionError)
+    else:
+        with pytest.raises(pytest.fail.Exception, match="first difference=.*lengths="):
+            _expect_stored_shape(observed, fixed, known, "synthetic known shape", AssertionError)

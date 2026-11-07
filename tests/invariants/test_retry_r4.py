@@ -111,8 +111,35 @@ def test_r4_1_uid_only_replacement_after_the_proof_is_consumed(machine, anchor):
         pytest.fail(f"setup: the merged row absorbed {host[-2]['_absorbed_message_uids']}")
     machine.engine.ingest(host)
     observed = list(map(identity, machine.rows()))
-    if observed == list(map(identity, [*machine.occurrences, host[-2]])):
-        return  # fixed: the strict marker turns this into a loud XPASS
-    if observed == list(map(identity, machine.occurrences)):
-        raise AssertionError("#1428 known shape: the uid-only replacement was not stored")
-    pytest.fail(f"not the #1428 shape: {observed}")
+    _expect_stored_shape(observed, list(map(identity, [*machine.occurrences, host[-2]])),
+                         list(map(identity, machine.occurrences)),
+                         "#1428 known shape: the uid-only replacement was not stored")
+
+
+def _expect_stored_shape(observed, fixed, known, message, error_type=AssertionError):
+    """Accept only the complete fixed list or the complete named-limit list, in store order."""
+    if observed == fixed:
+        return
+    if observed == known:
+        raise error_type(message)
+    differences = []
+    for label, expected in (("fixed", fixed), ("known", known)):
+        index = next((i for i, (actual, wanted) in enumerate(zip(observed, expected)) if actual != wanted),
+                     min(len(observed), len(expected)))
+        differences.append(f"{label}: first difference={index}, lengths={len(observed)}/{len(expected)}")
+    pytest.fail("unexpected stored shape; " + "; ".join(differences))
+
+
+@pytest.mark.parametrize("case", ["known", "fixed", "doubled", "swapped"])
+def test_stored_shape_comparison(case):
+    fixed = [("user", "first"), ("assistant", "second")]
+    known = [fixed[0]]
+    observed = {"known": known, "fixed": fixed, "doubled": [fixed[0], *fixed], "swapped": fixed[::-1]}[case]
+    if case == "known":
+        with pytest.raises(AssertionError, match="synthetic known shape"):
+            _expect_stored_shape(observed, fixed, known, "synthetic known shape", AssertionError)
+    elif case == "fixed":
+        _expect_stored_shape(observed, fixed, known, "synthetic known shape", AssertionError)
+    else:
+        with pytest.raises(pytest.fail.Exception, match="first difference=.*lengths="):
+            _expect_stored_shape(observed, fixed, known, "synthetic known shape", AssertionError)
