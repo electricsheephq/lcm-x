@@ -287,6 +287,25 @@ def test_durable_recovery_still_links_to_a_target_of_a_borrowed_link(tmp_path, m
         assert len(copies) == 2 and copies - {recovered} == linked, (sorted(copies), sorted(linked))
 
 
+def test_todo_copy_still_links_to_a_target_of_a_borrowed_link(tmp_path):
+    """#2441: N=P@20 carries a borrowed link to E=P@10; a later exact todo copy R=P@10 still takes R -> E."""
+    from hermes_lcm.reconcile import _PRESERVED_TODO_CONTEXT_PREFIX
+    from tests.harness import engine_context
+
+    todo = _PRESERVED_TODO_CONTEXT_PREFIX + "\n- [ ] 1. task (pending)"
+    with engine_context(tmp_path, window=200_000, embeddings_enabled=False,
+                        deferred_maintenance_enabled=False) as engine:
+        store, conversation = engine._store, engine._conversation_id or ""
+        target, source = (store.append("S", {"role": "user", "content": todo, "timestamp": at},
+                                       conversation_id=conversation) for at in (10.0, 20.0))
+        # The borrowed-stamp link, in the linker's format (the borrowed stamp in observed_at).
+        store.add_message_relations([[(source, "possible_replay_of", target, None, 20.0)]])
+        later = {"role": "user", "content": todo, "timestamp": 10.0}
+        copy = store.append("S", deepcopy(later), conversation_id=conversation)
+        engine._link_stored_todo_replays([later], {0: copy})
+        assert replay_links(engine) == {(source, target), (copy, target)}
+
+
 def test_two_links_into_one_target_both_count_visible():
     """The kit's split_surplus needs no distinct targets: E kept, N and R both linked to E, both visible."""
     from bench.instruments.reliability.scorers.multiset import split_surplus
