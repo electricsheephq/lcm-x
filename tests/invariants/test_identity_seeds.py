@@ -273,6 +273,26 @@ class StaleProofCarrierStored(AssertionError):
     """Only an extra carrier after cold resume with a stale durable proof."""
 
 
+def stored_relations(machine):
+    """Every relation row, as (row position, kind, related row position); positions follow store_id order."""
+    connection = machine.engine._store.connection
+    ids = [sid for sid, in connection.execute(
+        "SELECT store_id FROM messages WHERE conversation_id = ? ORDER BY store_id", ("identity-conversation",))]
+    at = {sid: index for index, sid in enumerate(ids)}
+    return [(at.get(sid, f"store {sid}"), kind, None if related is None else at.get(related, f"store {related}"))
+            for sid, kind, related in connection.execute(
+                "SELECT store_id, kind, related_store_id FROM message_relations ORDER BY relation_id")]
+
+
+def expect_known_shape(machine, error, issue, rows, relations, shape):
+    """Only main's exact shape (the stored rows and their relations) is the expected failure; a fix makes
+    exactly_once pass, so the strict marker turns it into a loud XPASS."""
+    observed = list(map(identity, machine.rows())), stored_relations(machine)
+    if observed == (list(map(identity, rows)), relations):
+        raise shape(f"#{issue} known shape: {error}") from error
+    pytest.fail(f"not the #{issue} shape: rows={observed[0]}; relations={observed[1]}")
+
+
 @pytest.mark.xfail(strict=True, reason="#1286: changed sanitized output leaves the durable commit proof stale; visible surplus "
                    "(generated_unproven); fix planned v0.30.x",
                    raises=StaleProofCarrierStored)
@@ -290,8 +310,10 @@ def test_cold_stale_proof_1286_does_not_store_carrier(counts, compress_after):
             for _ in range(compressions):
                 machine.compress()
                 machine.exactly_once()
-        assert machine.engine._last_compression_status == "sanitized"
-        assert KNOWN_OPEN[1286](machine.stale_proof, "cold_resume")
+        if machine.engine._last_compression_status != "sanitized":
+            pytest.fail(f"setup: the last compress was {machine.engine._last_compression_status!r}, not sanitized")
+        if not KNOWN_OPEN[1286](machine.stale_proof, "cold_resume"):
+            pytest.fail("setup: the durable commit proof is not stale")
         carrier = deepcopy(machine.host[0])
         # Exercise the excluded transition without going through its rule guard.
         machine.engine.shutdown()
@@ -301,9 +323,9 @@ def test_cold_stale_proof_1286_does_not_store_carrier(counts, compress_after):
         try:
             machine.exactly_once()
         except AssertionError as error:
-            if list(map(identity, machine.rows())) == list(map(identity, [*machine.occurrences, carrier])):
-                raise StaleProofCarrierStored(str(error)) from error
-            raise
+            # Visible surplus: the carrier is stored again after the occurrences, marked generated_unproven.
+            expect_known_shape(machine, error, 1286, [*machine.occurrences, carrier],
+                               [(len(machine.occurrences), "generated_unproven", None)], StaleProofCarrierStored)
     finally:
         machine.teardown()
 
@@ -1165,13 +1187,13 @@ class RestartScaffoldStored(AssertionError):
 
 
 def check_restart_scaffold(machine):
-    expected, actual = list(map(identity, machine.occurrences)), list(map(identity, machine.rows()))
     try:
         machine.exactly_once()
     except AssertionError as error:
-        if actual == expected[:-2] + [identity(machine.host[0])] + expected[-2:]:
-            raise RestartScaffoldStored(str(error)) from error
-        raise
+        # Visible surplus: the restored carrier is stored before the next turn, marked generated_unproven.
+        expected = machine.occurrences
+        expect_known_shape(machine, error, 1286, [*expected[:-2], machine.host[0], *expected[-2:]],
+                           [(len(expected) - 2, "generated_unproven", None)], RestartScaffoldStored)
 
 
 @pytest.mark.xfail(strict=True, reason="#1286: cold published child lacks its parent emission proof; visible surplus "
@@ -1269,13 +1291,13 @@ def test_restart_pending_prompt_849():
     try:
         machine.new_turn("alpha", False, 0, False, "lookup")
         machine.restart("user-persisted", "X pending")
-        expected, actual = list(map(identity, machine.occurrences)), list(map(identity, machine.rows()))
         try:
             machine.exactly_once()
         except AssertionError as error:
-            if actual == expected[:-3] + [identity(machine.host[-2]), expected[-1]]:
-                raise RestartMergedStored(str(error)) from error
-            raise
+            # The host's held-plus-new composite stands in for both prompts, with no relation.
+            expected = machine.occurrences
+            expect_known_shape(machine, error, 849, [*expected[:-3], machine.host[-2], expected[-1]], [],
+                               RestartMergedStored)
     finally:
         machine.teardown()
 
