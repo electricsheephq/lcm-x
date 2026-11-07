@@ -7131,6 +7131,39 @@ class LCMEngine(
             self._raise_ingest_busy(exc)
             logger.warning("LCM re-stamped occurrence link write failed (%s)", type(exc).__name__)
 
+    def _link_stored_todo_replays(self, messages, stored_at):
+        """Todo scaffolds lack replay identity; annotate exact copies without suppressing rows."""
+        ids = [sid for idx, sid in stored_at.items() if sid and messages[idx].get("role") == "user"
+               and self._is_preserved_todo_context_message(messages[idx])]
+        if not ids:
+            return
+        try:
+            with self._ingest_evidence():
+                rows = self._store._conn.execute(
+                    "SELECT store_id,session_id,role,content,observed_at,tool_call_id,tool_calls,tool_name,conversation_id "
+                    "FROM messages WHERE store_id IN (SELECT value FROM json_each(?)) ORDER BY store_id",
+                    (json.dumps(ids),)).fetchall()
+                for sid, session, role, content, stamp, call_id, calls, name, conversation in rows:
+                    if self._store.get_message_relations([sid], "possible_replay_of"):
+                        continue  # The existing occurrence/ledger writers already attributed this row.
+                    candidates = self._store._conn.execute(
+                        "SELECT store_id,conversation_id FROM messages WHERE session_id=? AND store_id<? "
+                        "AND role=? AND content=? AND observed_at IS ? AND tool_call_id IS ? "
+                        "AND tool_calls IS ? AND tool_name IS ? ORDER BY store_id",
+                        (session, min(stored_at.values()), role, content, stamp, call_id, calls, name))
+                    conversation = _normalize_conversation_id_value(conversation)
+                    targets = [target for target, target_conversation in candidates
+                               if _normalize_conversation_id_value(target_conversation) == conversation]
+                    # One earlier occurrence supplies at most one replay link: one batched read of the spent targets.
+                    spent = {r["related_store_id"] for r in self._store.get_message_relations(
+                        targets, "possible_replay_of", related=True)}
+                    target = next((t for t in targets if t not in spent), None)
+                    if target is not None:
+                        self._store.add_message_relations([[(sid, "possible_replay_of", target, None, None)]])
+        except Exception as exc:
+            self._raise_ingest_busy(exc)
+            logger.warning("LCM todo replay link write failed (%s)", type(exc).__name__)
+
     def _ingest_messages(
         self,
         messages: List[Dict[str, Any]],
@@ -7250,6 +7283,7 @@ class LCMEngine(
                             allow_session_end_replay_proof=allow_session_end_replay_proof)
                         if self._ingest_ledger_attempt is not None:
                             self._write_ingest_ledger(self._ingest_ledger_attempt, after_commit, attribution)
+                        self._link_stored_todo_replays(messages, prepared.get("stored_at", {}))
                     emission_committed = True
                     if ledger_prepared is not None:
                         ingest_ledger.settle_pending_emissions(
@@ -7724,7 +7758,11 @@ class LCMEngine(
                 if any(conn.execute(f"SELECT 1 FROM {table} WHERE lineage=? LIMIT 1", (provisional,)).fetchone()
                        for table in ("occurrence_bindings", "ingest_views", "ledger_emissions")):
                     result = ingest_ledger.merge_provisional(conn, provisional, lineage)
-                    store.add_message_relations([[(p, "possible_replay_of", target, None, None)] for p, target in result["pairs"]])
+                    # One possible_replay_of per source: a row another writer already linked keeps its link.
+                    linked = {row["store_id"] for row in store.get_message_relations(
+                        [p for p, _target in result["pairs"]], "possible_replay_of")} if result["pairs"] else set()
+                    store.add_message_relations([[(p, "possible_replay_of", target, None, None)]
+                                                 for p, target in result["pairs"] if p not in linked])
                 if not persisted:
                     conn.execute("INSERT INTO ledger_meta(key,value) VALUES (?,?)", ("session_lineage:" + str(sid), lineage))
         except BaseException as exc:
@@ -8682,6 +8720,8 @@ class LCMEngine(
         originals = [messages[idx] for idx, _msg in messages_to_store_with_index]
         after_commit.append(lambda: self._watch_stored_user_rows(zip(originals, protected_messages, store_ids)))
         stored_at = {idx: store_id for (idx, _msg), store_id in zip(messages_to_store_with_index, store_ids)}
+        if prepared is not None:
+            prepared["stored_at"] = stored_at
         if getattr(self, "_ingest_ledger_attempt", None) is not None:
             self._ingest_ledger_attempt["stored"] = stored_at
             # The remainder too: whole-row externalization replaces a large generated row's marker bytes.
