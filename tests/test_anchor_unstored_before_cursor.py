@@ -273,3 +273,57 @@ def test_a_reply_that_left_the_audited_tail_is_not_stored_again(tmp_path):
     finally:
         engine.shutdown()
 
+
+
+def _long_resend(engine) -> dict[str, str]:
+    """40 warm turns (80 stored rows, more than the 64-row audited tail), stamped users with unstamped replies;
+    then the host replaces the last turn with a resent user and a new reply, and one more turn follows."""
+    view = []
+    for index in range(40):
+        view += [_u(f"T{index} user turn", 1000 + index), {"role": "assistant", "content": f"reply to T{index}" + PAD}]
+        engine.ingest(view)
+    if len(_stored(engine)) <= 64:
+        pytest.fail("setup: the session must hold more stored rows than the audited tail")
+    rows = {"user": _u("the resent user turn", 3000), "reply": {"role": "assistant", "content": "a new reply" + PAD},
+            "next user": _u("the next user turn", 3001), "next reply": {"role": "assistant", "content": "next" + PAD}}
+    view[-2:] = [rows["user"], rows["reply"]]
+    view += [rows["next user"], rows["next reply"]]
+    engine.ingest(view)
+    return {name: row["content"] for name, row in rows.items()}
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError,
+                   reason="#2116 named limit past the audit tail: in a session with more stored rows than the 64-row "
+                          "audited tail, a replaced unstamped reply below the cursor stays a positional replay")
+def test_2116_a_replaced_reply_past_the_audited_tail_is_stored_warm(tmp_path):
+    engine = _engine(tmp_path)
+    try:
+        texts = _long_resend(engine)
+        failures = {name: _count(engine, text) for name, text in texts.items() if _count(engine, text) != 1}
+        if not failures:
+            return  # fixed: the strict xfail turns into XPASS
+        if failures == {"reply": 0}:
+            raise AssertionError(f"#2116 past the audit tail: {failures}")
+        pytest.fail(f"not the #2116 shape: {failures}")
+    finally:
+        engine.shutdown()
+
+
+def test_a_stored_call_and_result_outside_the_audited_tail_are_not_stored_again(tmp_path):
+    """The capped proof's lookup by call id finds a stored result whatever its tool name. A warm view of a stamped
+    user, a call and its result; the host replaces the user 70 times, so the stored call and result leave the
+    64-row audited tail. Neither is stored again."""
+    engine = _engine(tmp_path)
+    try:
+        call, result = _call("call_kept", 2), _result("call_kept", "kept file text", 3)
+        if not result.get("tool_name"):
+            pytest.fail("setup: the stored result must carry a tool name")
+        for index in range(70):
+            engine.ingest([_u(f"replacement user {index}", 1000 + index), call, result])
+        rows = _stored(engine)
+        if len(rows) <= 64:
+            pytest.fail("setup: the session must hold more stored rows than the audited tail")
+        assert sum(1 for row in rows if row.get("tool_call_id") == "call_kept") == 1
+        assert sum(1 for row in rows if "call_kept" in str(row.get("tool_calls") or "")) == 1
+    finally:
+        engine.shutdown()
