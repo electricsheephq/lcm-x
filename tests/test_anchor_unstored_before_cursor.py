@@ -1022,6 +1022,10 @@ def test_presence_with_many_identical_copies_is_linear(tmp_path):
         began = time.perf_counter()
         assert _presence(engine, rows) == []
         assert time.perf_counter() - began < 1.5
+        # Half the view is the unchanged prefix: its reserved copies are queued once per key, not per candidate.
+        began = time.perf_counter()
+        assert _presence(engine, rows, start=len(rows) // 2) == []
+        assert time.perf_counter() - began < 1.5
     finally:
         engine.shutdown()
 
