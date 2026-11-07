@@ -27,6 +27,12 @@ def multiset(engine):
                    for r in engine._store.get_session_messages("S") + engine._store.get_session_messages("other"))
 
 
+def ingest_added(engine, rows):
+    before = engine._store.get_session_count("S")
+    engine._ingest_messages(deepcopy(rows))
+    return engine._store.get_session_count("S") - before
+
+
 def seed(engine, rows, session="S"):
     return engine._store.append_batch(session, deepcopy(rows), conversation_id="conv")
 
@@ -39,9 +45,9 @@ def test_m_red(tmp_path, parts):
         before = multiset(engine)
         incoming = [row("assistant", "\n".join(r["content"] for r in original if r["role"] == "assistant"), 100)]
         assert engine._ingest_cursor == 0
-        assert len(engine._ingest_messages(deepcopy(incoming))) == 0
+        assert ingest_added(engine, incoming) == 0
         assert multiset(engine) == before
-        assert len(engine._ingest_messages(deepcopy(incoming))) == 0
+        assert ingest_added(engine, incoming) == 0
         assert multiset(engine) == before
 
 
@@ -50,9 +56,9 @@ def test_s_red(tmp_path, stored):
     with engine_context(tmp_path, window=200000, conversation_id="conv", embeddings_enabled=False) as engine:
         seed(engine, [stored])
         before = multiset(engine)
-        assert len(engine._ingest_messages([deepcopy(SNAP)])) == 0
+        assert ingest_added(engine, [SNAP]) == 0
         assert multiset(engine) == before
-        assert len(engine._ingest_messages([deepcopy(SNAP)])) == 0
+        assert ingest_added(engine, [SNAP]) == 0
         assert multiset(engine) == before
 
 
@@ -63,9 +69,9 @@ def test_r6_acp_334_335_cursor_zero_persisted_batch(tmp_path, caplog):
         before = multiset(engine)
         with caplog.at_level("INFO"):
             assert engine._ingest_cursor == 0
-            assert len(engine._ingest_messages(deepcopy([FOLD, SNAP]))) == 0
+            assert ingest_added(engine, [FOLD, SNAP]) == 0
         assert multiset(engine) == before  # includes the prompt the host popped
-        assert len(engine._ingest_messages(deepcopy([FOLD, SNAP]))) == 0
+        assert ingest_added(engine, [FOLD, SNAP]) == 0
         assert multiset(engine) == before
 
 
