@@ -3339,10 +3339,11 @@ class ReconcileMixin:
                 classes[owner_class[number]]["claims"] += 1
         # A stored copy carrying any possible_replay_of is never independent
         # capacity, whatever its target's class or stamp (any writer's link).
-        # Less capacity can only store more.
+        # Nor is a link_pending row: its link computation failed, so it may be
+        # a copy. Less capacity can only store more.
         conn = self._store._conn
         copies = {row_owner[row[0]] for row in conn.execute(
-            "SELECT store_id FROM message_relations WHERE kind='possible_replay_of' "
+            "SELECT store_id FROM message_relations WHERE kind IN ('possible_replay_of','link_pending') "
             "AND store_id IN (SELECT value FROM json_each(?))", (json.dumps(sorted(row_owner)),))} if conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE name='message_relations'").fetchone() else set()
         for cls in classes.values():
