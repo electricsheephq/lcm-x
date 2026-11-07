@@ -337,16 +337,20 @@ def test_rotation_unmatched_row_before_the_restamp_keeps_the_link(build, caplog,
 
 def test_rotation_reordered_carried_rows_are_each_linked(build, caplog):
     """The host may reorder carried rows; each re-stamped copy still pairs with its own occurrence."""
+    moved = {}
+
     def reorder(_engine, view):
         users = [i for i, row in enumerate(view) if row.get("role") == "user"]
         t_index = next(i for i in users if view[i].get("content") == T)
         other = max(i for i in users if i < t_index)
         view[other]["timestamp"] += 0.5  # re-stamped too
+        moved["content"] = view[other]["content"]
         view[other], view[t_index] = view[t_index], view[other]
 
     engine, rows = run(build, caplog, mode="rotating", uids=False, restamp=True, before_ingest=reorder)
     links = replay_links(engine)
-    copies = [row for row in rows if row["role"] == "user" and row["content"] == T]
-    assert [row["session_id"] for row in copies] == ["S", "rotated"]
-    assert (copies[1]["store_id"], copies[0]["store_id"]) in links
+    for content in (T, moved["content"]):
+        copies = [row for row in rows if row["role"] == "user" and row["content"] == content]
+        assert [row["session_id"] for row in copies] == ["S", "rotated"], content[:30]
+        assert (copies[1]["store_id"], copies[0]["store_id"]) in links, content[:30]
     assert len(links) == len({target for _source, target in links})
