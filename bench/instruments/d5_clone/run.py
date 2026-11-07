@@ -424,10 +424,13 @@ class LocalHost:
         """quick_check and integrity on both stores, then the doctor's checks and both stores' schema (probe_checks)."""
         out = []
         for name in ("lcm.db", "state.db"):
-            with closing(capture._readonly(ctx["home"] / name)) as db:
-                for kind, pragma in (("quick_check", "quick_check"), ("integrity", "integrity_check")):
-                    ok = db.execute(f"PRAGMA {pragma}").fetchall() == [("ok",)]
-                    out.append({"kind": kind, "check": name, "status": "ok" if ok else "fail"})
+            for kind, pragma in (("quick_check", "quick_check"), ("integrity", "integrity_check")):
+                try:
+                    with closing(capture._readonly(ctx["home"] / name)) as db:
+                        ok = db.execute(f"PRAGMA {pragma}").fetchall() == [("ok",)]
+                except sqlite3.DatabaseError:
+                    ok = False  # A store too damaged to open or check is a failed check, never a crash.
+                out.append({"kind": kind, "check": name, "status": "ok" if ok else "fail"})
         rows, ctx["doctor_not_exercised"] = probe_checks(self.probe(ctx), [_sha(s)[:12] for s in ctx["session_ids"]])
         return out + rows
 
