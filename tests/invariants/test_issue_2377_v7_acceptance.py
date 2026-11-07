@@ -446,6 +446,21 @@ def test_A28_prior_ingest_target_is_last_priority(build):
 
 
 
+@pytest.mark.parametrize("targets, seeds", [
+    ([(1, 2.0), (2, 9.0)], [(2, 1)]),  # Astra r3: the fresh wrong-stamp target
+    ([(1, 2.0), (3, None)], [(3, 1)]),  # Claude C1: the fresh unstamped target
+    ([(1, 2.0), (5, 5.0)], [(99, 1)]),  # Claude C2b: a fresh other-stamp target
+], ids=["astra-wrong-stamp", "c1-unstamped", "c2b-other-stamp"])
+def test_A28c_own_equal_stamp_original_outranks_fresh_targets(build, targets, seeds):
+    """An earlier ingest's use never demotes a copy's own equal-stamp original below other targets."""
+    from tests.invariants.test_issue_2377_v7_oracle import _row
+    rows = [_row(sid, stamp) for sid, stamp in targets]
+    copies = [dict(_row(None), timestamp=2.0)]
+    plan = build()._plan_tool_replay_links(
+        copies, rows, seeds=[(s, "possible_replay_of", t) for s, t in seeds])
+    assert plan == [(0, 1)]
+
+
 def test_A28b_equal_stamp_replays_beat_prior_targets(build):
     """Astra F2: prior-used targets must not lose their equal-stamp replays to other copies."""
     from tests.invariants.test_issue_2377_v7_oracle import _row, _run

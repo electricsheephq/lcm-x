@@ -79,7 +79,9 @@ class Run:
         # link itself, and must link to its own equal-stamp original when exactly one exists. A stamped
         # copy that shares its stamp with other added key-mates AND has an equal-stamp original is
         # counted per (key, stamp) group: its members are interchangeable, but the group as a whole is
-        # distinguishable from rows of other stamps, so another stamp's link never covers it. Every
+        # distinguishable from rows of other stamps, so another stamp's link never covers it. On a host
+        # that re-stamps (originals X@2 and X@None, copies [@None, @2, @2] with host 0 new) this can flag a
+        # correct plan; it fails closed (it flags, never hides) and no current test reaches it. Every
         # other replay row pools with its scorer KEY, across stamps: a stamp no original carries is no
         # evidence, so WHICH row of the key carries the link is not observable (NOTE §3 I-link) and the
         # scorer counts per key. Pooling's blind spot, shared with the gate scorer: within one pooled
