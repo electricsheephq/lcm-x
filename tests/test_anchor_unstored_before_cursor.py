@@ -953,6 +953,47 @@ def test_presence_takes_an_exact_copy_before_a_cleanup_alias(tmp_path, monkeypat
         engine.shutdown()
 
 
+def test_presence_gives_an_alias_only_to_demand_an_exact_copy_cannot_meet(tmp_path, monkeypatch):
+    # #2466 review (adversarial): two reasoning rows clean to the same reply. The clean reply must take the older
+    # row's alias, not the newer row that the displayed newer reasoning reply needs exactly. Nothing is new.
+    engine = _engine(tmp_path)
+    try:
+        older = {"role": "assistant", "content": "older reasoning then reply"}
+        newer = {"role": "assistant", "content": "newer reasoning then reply"}
+        engine._store.append_batch(SESSION, [older, *[{"role": "user", "content": f"padding {i}"}
+                                                     for i in range(598)], newer])
+
+        def cleanup(identity):
+            return (identity[0], "reply", *identity[2:]) if identity[1] in {older["content"], newer["content"]} else None
+
+        monkeypatch.setattr(engine, "_active_cleanup_replay_identity", cleanup)
+        held = {("assistant", newer["content"]): [r for r in engine._store.get_session_messages(SESSION)
+                                                  if r["content"] == newer["content"]]}
+        assert _presence(engine, [{"role": "assistant", "content": "reply"}, newer], held=held) == []
+    finally:
+        engine.shutdown()
+
+
+def test_presence_keeps_main_result_when_cleanup_forms_chain(tmp_path, monkeypatch, caplog):
+    # A cleanup form that is itself the form of a row with an alias breaks the exact-first allocation's optimality:
+    # the audit then keeps main's result (only its own finds) with a WARNING.
+    engine = _engine(tmp_path)
+    try:
+        engine._store.append_batch(SESSION, [{"role": "assistant", "content": "x one"},
+                                             {"role": "assistant", "content": "x two"}])
+        chain = {"x one": "x two", "x two": "x three"}
+
+        def cleanup(identity):
+            return (identity[0], chain[identity[1]], *identity[2:]) if identity[1] in chain else None
+
+        monkeypatch.setattr(engine, "_active_cleanup_replay_identity", cleanup)
+        with caplog.at_level(logging.WARNING, logger=identity_anchor.__name__):
+            assert _presence(engine, [{"role": "assistant", "content": "a brand new reply"}]) == []
+        assert any("presence unavailable" in r.message for r in caplog.records)
+    finally:
+        engine.shutdown()
+
+
 def test_presence_never_stores_a_result_whose_call_the_ignore_patterns_drop(tmp_path, monkeypatch):
     # #2466 review: a call row the ignore patterns drop is never stored, so it cannot authorize storing its result.
     engine = _engine(tmp_path)
