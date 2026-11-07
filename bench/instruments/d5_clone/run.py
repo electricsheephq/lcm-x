@@ -86,6 +86,11 @@ def _sha(text):
     return hashlib.sha256(str(text).encode()).hexdigest()
 
 
+def _owned_key(value):
+    """The product's ownership reading of a stored conversation_id (db_bootstrap): NULL is '', edges are stripped."""
+    return str(value or "").strip()
+
+
 def rekey_copy_conversations(lcm_db, conversations, *, run_dir):
     """Align only the arm copy's conversation keys with its edited routing, preserving all sessions and rows."""
     path = Path(lcm_db).resolve()
@@ -108,7 +113,7 @@ def rekey_copy_conversations(lcm_db, conversations, *, run_dir):
             if len(keys) != 1:
                 raise ValueError("copied session must carry exactly one conversation_id")
             old, new = keys[0][0], gateway.session_key(conversation["chat_id"])
-            if old is None or old == "":  # A legacy blank key is owned by every conversation: never a store-wide move.
+            if not _owned_key(old):  # A legacy blank key is owned by every conversation: never a store-wide move.
                 raise ValueError("copied session has a legacy blank conversation_id: " + conversation["name"])
             resolved.append((conversation["name"], old, new))
             group = groups.setdefault(old, {"new": new, "names": []})
@@ -116,6 +121,10 @@ def rekey_copy_conversations(lcm_db, conversations, *, run_dir):
             if group["new"] != new:
                 raise ValueError("shared conversation has different destinations: " + ", ".join(group["names"]))
         # Resolve and validate the whole plan against the original state before the first rename.
+        owned = {}  # Stored values by the key that owns them, as the product reads them (legacy variants included).
+        for table in tables:
+            for value, in db.execute(f"SELECT DISTINCT conversation_id FROM {table}"):
+                owned.setdefault(_owned_key(value), set()).add(value)
         sources = {}
         for old, group in groups.items():
             sources.setdefault(group["new"], []).append(old)
@@ -127,9 +136,10 @@ def rekey_copy_conversations(lcm_db, conversations, *, run_dir):
             new = group["new"]
             if old == new:
                 continue
-            for table in tables:
-                if db.execute(f"SELECT 1 FROM {table} WHERE conversation_id=? LIMIT 1", (new,)).fetchone():
-                    raise ValueError("copied conversation destination already has rows")
+            if owned.get(_owned_key(old), set()) - {old}:  # A variant the exact rename would leave behind.
+                raise ValueError("copied conversation key has legacy variants: " + ", ".join(group["names"]))
+            if owned.get(_owned_key(new)):
+                raise ValueError("copied conversation destination already has rows")
         for old, group in groups.items():
             new = group["new"]
             if old == new:
