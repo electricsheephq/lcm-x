@@ -14,10 +14,10 @@ from tests.invariants.test_issue_1529_warm_proof_salvage import (
 from tests.invariants.test_issue_1540_bound_retry import stored
 from tests.test_issue_671_stub_first_exit import tool_pair
 
-_COLD = pytest.mark.xfail(strict=True, reason="#1837: in cold mode the durable-remap cursor advances past a result "
-                                              "whose only change is a new UID, so the per-row veto never sees it")
-_SPLIT = pytest.mark.xfail(strict=True, reason="#1837: warm mode stores the new-UID result without its call, so the "
-                                               "stored segment is split (acceptance: segments stay whole)")
+_COLD = pytest.mark.xfail(strict=True, raises=AssertionError, reason="#1837: in cold mode the durable-remap cursor advances past a result "
+                                                                     "whose only change is a new UID, so the per-row veto never sees it")
+_SPLIT = pytest.mark.xfail(strict=True, raises=AssertionError, reason="#1837: warm mode stores the new-UID result without its call, so the "
+                                                                      "stored segment is split (acceptance: segments stay whole)")
 
 
 @pytest.mark.parametrize("mode,change", [

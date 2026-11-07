@@ -138,8 +138,8 @@ def test_cold_alias_replay(tmp_path, case, record_property, caplog):
 
 
 
-@pytest.mark.xfail(strict=True, reason="#1519: the identity-anchor audit treats a distinct event with identical text at "
-                                       "a recorded alt_stamp as the aliased row once the original view is gone")
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason="#1519: the identity-anchor audit treats a distinct event with identical text at "
+                                                              "a recorded alt_stamp as the aliased row once the original view is gone")
 def test_a_distinct_event_at_the_alias_stamp_is_stored(tmp_path):
     """#1519 (a v0.30.0 named loss limit): the old_view_absent shape above, a distinct platform message id with
     identical text at exactly the alias stamp, must store a second occurrence. The green case above keeps one."""

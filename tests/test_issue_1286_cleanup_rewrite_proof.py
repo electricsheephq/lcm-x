@@ -404,8 +404,8 @@ def _resend_the_last_turn(host, variant, reply):
     return user
 
 
-@pytest.mark.xfail(strict=True, reason="#2116: the warm anchor keeps the replaced unstamped reply below the cursor as a "
-                                       "positional replay, so the warm path never stores it")
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason="#2116: the warm anchor keeps the replaced unstamped reply below the cursor as a "
+                                                              "positional replay, so the warm path never stores it")
 @_RESENT_REPLIES
 @pytest.mark.parametrize("variant", ["stub", "reasoning"])
 def test_a_reply_the_warm_path_never_stored_is_not_proven_away(host, variant, reply):

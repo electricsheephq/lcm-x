@@ -85,9 +85,9 @@ def _merge_absorbed(output):
     return host
 
 
-@pytest.mark.xfail(strict=True, reason="#1428: after the unchanged merged output consumes the compaction proof, the "
-                                       "cached-prefix check compares the cached copy, which lacks the absorbed user's "
-                                       "uid, so a uid-only replacement is not stored")
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason="#1428: after the unchanged merged output consumes the compaction proof, the "
+                                                              "cached-prefix check compares the cached copy, which lacks the absorbed user's "
+                                                              "uid, so a uid-only replacement is not stored")
 @pytest.mark.parametrize("anchor", [False, True])
 def test_r4_1_uid_only_replacement_after_the_proof_is_consumed(machine, anchor):
     """#1428 (a v0.30.0 named loss limit): compress, ingest the unchanged merged output, then replace only the
