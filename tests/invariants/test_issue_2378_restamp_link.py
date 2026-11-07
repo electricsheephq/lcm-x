@@ -543,3 +543,29 @@ def test_rotation_metadata_failure_degrades_to_durable_recovery(build, caplog, m
     assert called
     assert sum(row["content"] == T for row in rows) == 2
     assert engine._ingest_failure_count == 0
+
+
+@pytest.mark.issue(2390)
+def test_rotation_a_shared_uid_never_decides_the_pairing(build, caplog, monkeypatch):
+    """Review probe: the stored P and T share one uid (bad host input) and keep it when re-stamped and
+    reordered. The uid names no single occurrence, so content decides: each copy links to its own original."""
+    plain_history = history
+
+    def history_with_shared_uid(uids):
+        rows = plain_history(uids)
+        last_user = max(i for i, row in enumerate(rows) if row["role"] == "user")
+        rows[last_user]["content"], rows[last_user]["message_uid"] = PREFIXED, "a" * 32  # T's uid too
+        return rows
+
+    monkeypatch.setattr(__name__ + ".history", history_with_shared_uid)
+
+    def reorder(_engine, view):
+        p_index, t_index = _carried(view, PREFIXED), _carried(view, T)
+        view[p_index]["timestamp"] += 0.5
+        view[p_index], view[t_index] = view[t_index], view[p_index]
+
+    engine, rows = run(build, caplog, mode="rotating", uids=True, restamp=True, before_ingest=reorder)
+    links = replay_links(engine)
+    for content in (PREFIXED, T):
+        copy = next(r["store_id"] for r in rows if r["session_id"] == "rotated" and r["content"] == content)
+        assert (copy, _original(rows, content)) in links, content[:30]

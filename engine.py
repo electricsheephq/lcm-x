@@ -7049,14 +7049,15 @@ class LCMEngine(
             # A position holds one stored content, so rows of equal content share their candidates
             # and rows of different content never compete: the exact matching, when it covers every
             # row, pairs each content's rows with its positions in order (identical copies never swap).
-            # The host's own retained message_uid names the occurrence outright: pair it first.
+            # The host's own retained message_uid names the occurrence outright: pair it first,
+            # but only a uid that names exactly one pending row and exactly one free occurrence.
+            uids = {idx: self._host_occurrence_metadata(messages[idx])["message_uid"] for idx in rows}
+            row_uses, pos_uses = Counter(uid for uid in uids.values() if uid), Counter(
+                target[pos].get("message_uid") for pos in free if target[pos].get("message_uid"))
             by_uid = {}
-            for idx in rows:
-                uid = self._host_occurrence_metadata(messages[idx])["message_uid"]
-                position = next((pos for pos in free if uid and pos not in by_uid.values()
-                                 and target[pos].get("message_uid") == uid), None)
-                if position is not None:
-                    by_uid[idx] = position
+            for idx, uid in uids.items():
+                if uid and row_uses[uid] == 1 and pos_uses[uid] == 1:
+                    by_uid[idx] = next(pos for pos in free if target[pos].get("message_uid") == uid)
             for idx, pos in by_uid.items():
                 used.add(pos)
                 result[idx] = (session, target[pos])
