@@ -329,6 +329,10 @@ that carries tool calls adds each call's id, name and arguments; inside one fixt
 and a multi-session fixture adds the session and, for a tool result, its tool-call id), not
 only by count:
 the candidate is no worse only when its affected rows are the base's rows or a subset of them.
+Amended 2026-11-07 (#2212): where a comparison has no turn number on both sides, as in the
+release kit's lifecycle-row and reorder records on a cell's stores, the identity is the role and
+content hash plus the tool-call fields above, and the record reports `repeated_identity_rows`,
+the rows where a duplicate of one occurrence could hide a lost occurrence of the same identity.
 A pre-existing shape is recorded as KNOWN with a tracked issue and does not force a respin. A
 cell where the candidate is worse than the base follows the P0/P1 rule above. A shape the base does not show follows the P0/P1 rule above; in
 particular the candidate respins when, against the base, it adds loss, a wedge, a session reset,
