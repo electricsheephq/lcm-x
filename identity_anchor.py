@@ -1678,7 +1678,7 @@ def _composite_of_splits(content: str, by_text, header: str, todo_span) -> list[
     # rule (ii)), and the host's merge puts exactly one "\n\n" behind it.
     end = todo_span(content, 0)
     scaffold, rest = content[:end], content[end + 2:]
-    if ("\n" not in scaffold or not content.startswith("\n\n", end) or not rest
+    if (scaffold.split("\n", 1)[0] != header or "\n" not in scaffold or not content.startswith("\n\n", end) or not rest
             or any(scaffold == text or scaffold.startswith(text + "\n\n") or scaffold.endswith("\n\n" + text)
                    or "\n\n" + text + "\n\n" in scaffold for text in texts)):
         return found
