@@ -197,8 +197,8 @@ def probe_checks(out, sessions):
             if check in DOCTOR_STORE_WIDE:
                 found.append({"kind": "doctor", "check": check, "status": status})
             elif check not in DOCTOR_PER_SESSION:
-                if check not in DOCTOR_NOT_EXERCISED and status not in ("ok", "warn"):
-                    found.append({"kind": "doctor", "check": check, "status": status})  # a failing new check counts
+                if check not in DOCTOR_NOT_EXERCISED and status != "ok":
+                    found.append({"kind": "doctor", "check": check, "status": status})  # A new check's warn or fail counts.
                 else:
                     skipped.append({"check": check,
                                     "reason": DOCTOR_NOT_EXERCISED.get(check, "not classified for the probe")})

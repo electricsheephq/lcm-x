@@ -158,6 +158,16 @@ def test_a_failing_unclassified_check_fails_bar5(tmp_path):
     assert {s["check"] for s in skipped} == {"another_new_check", "identity_migration"}  # Ruled not exercised.
 
 
+
+def test_an_unclassified_check_that_warns_is_a_row_judged_against_ga(tmp_path):
+    names = ("database_integrity", "brand_new_check", "identity_migration")
+    rc = r.probe_checks(probe_out(tmp_path / "rc", doctor("pass", "warn", "warn", names=names)), [])[0]
+    assert {c["check"] for c in rc} == {"database_integrity", "brand_new_check"}  # The ruled check stays out.
+    sqlite = [{"kind": k, "check": "lcm.db", "status": "ok"} for k in ("quick_check", "integrity", "schema")]
+    for ga_status, verdict in (("pass", bars.FAIL), ("warn", bars.PASS)):  # Only the rc warns: over GA's count.
+        ga = r.probe_checks(probe_out(tmp_path / ga_status, doctor("pass", ga_status, names=names[:2])), [])[0]
+        assert bars.bar5(sqlite + rc, sqlite + ga)["verdict"] == verdict
+
 def test_an_unbound_plan_session_leaves_the_doctor_unshown_but_a_fail_still_fails(tmp_path):
     out = probe_out(tmp_path, doctor("pass", "warn"), {"lcm.db": OK_SCHEMA, "state.db": OK_SCHEMA})
     per_session(out, KEY, "pass", "pass", "pass", bound=False)
