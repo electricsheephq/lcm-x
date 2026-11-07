@@ -5829,7 +5829,7 @@ class LCMEngine(
         handler = handlers.get(name)
         if handler:
             return handler(args, engine=self,
-                           **{k: v for k, v in kwargs.items() if k in {"delivery_unit", "delivery_order", "adjacent_reply", "summary_event_time"}})
+                           **{k: v for k, v in kwargs.items() if k in {"delivery_unit", "delivery_order", "adjacent_reply", "summary_event_time", "snippet_window_hits"}})
         return json.dumps({"error": f"Unknown LCM tool: {name}"})
 
     def _database_path_source(self) -> str:
@@ -10405,6 +10405,7 @@ class LCMEngine(
                 fts_anchor=False,
                 delivery_unit="hits",
                 delivery_order="score", adjacent_reply=False,
+                snippet_window_hits=0,
                 summary_event_time=False,
             )
             payload = json.loads(raw)

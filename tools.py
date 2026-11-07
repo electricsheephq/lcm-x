@@ -11,7 +11,7 @@ import re
 import sqlite3
 import threading
 import time
-from contextlib import nullcontext
+from contextlib import closing, nullcontext
 from types import SimpleNamespace
 from datetime import datetime, timezone
 from functools import partial
@@ -104,6 +104,7 @@ from .search_query import (
 from .store import _normalize_observed_at, build_message_fts_spec
 from .vector_store import VectorStore, _interrupt_read_on_deadline
 from .config import effective_embedding_model, LCMConfig, embedding_provider_id, normalize_embedding_provider, profile_bound
+from .config import _recall_snippet_window_hits
 
 if TYPE_CHECKING:
     from .engine import LCMEngine
@@ -3423,6 +3424,33 @@ def _lcm_recall_answer_ready_content(
     return hydrated
 
 
+def _lcm_recall_snippet_windows(
+    engine: "LCMEngine", entries: list[dict[str, Any]], *, deadline: float, **kwargs,
+) -> tuple[dict[tuple, dict[str, Any]], str | None]:
+    """Optional content read on a private connection, bounded by recall's budget."""
+    if time.monotonic() >= deadline:
+        return {}, "deadline"
+    try:
+        db_path = Path(engine._store.db_path).resolve()
+        with closing(sqlite3.connect(
+            f"{db_path.as_uri()}?mode=ro", uri=True,
+            timeout=max(0.001, deadline - time.monotonic()),
+        )) as conn:
+            conn.execute("PRAGMA query_only=ON")
+            conn.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
+            ids = [int(entry["hit"]["store_id"]) for entry in entries]
+            rows = conn.execute(
+                "SELECT store_id, content, role, source FROM messages WHERE store_id IN ("
+                + ",".join("?" for _ in ids) + ")", ids,
+            ).fetchall()
+            rows_by_id = {row[0]: dict(zip(("content", "role", "source"), row[1:])) for row in rows}
+            content = _lcm_recall_answer_ready_content(engine, entries, rows_by_id=rows_by_id, **kwargs)
+    except Exception as exc:  # noqa: BLE001 - optional read must never fail recall
+        logger.warning("lcm_recall snippet window read failed: %s", type(exc).__name__)
+        return {}, "deadline" if time.monotonic() >= deadline else "read_error"
+    return ({}, "deadline") if time.monotonic() >= deadline else (content, None)
+
+
 def _lcm_recall_bounded_reason(
     arm: str, scanned: int | None, total: int | None
 ) -> str:
@@ -4899,6 +4927,7 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
         content_chars=_LCM_RECALL_ANSWER_READY_CONTENT_CHARS,
         strict_selector_factory=partial(_LcmRecallStrictSelector, engine=engine),
         hydrate=partial(_lcm_recall_answer_ready_content, engine),
+        read_snippet_windows=partial(_lcm_recall_snippet_windows, engine),
         read_event_time=partial(_lcm_recall_event_time_rows, engine),
         event_time_fields=_lcm_recall_event_time,
         read_occurrence_source=lambda store_id: (
@@ -4909,6 +4938,9 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
         session_delivery=session_delivery,
         adjacent_reply=adjacent_pairs,
         adjacent_reply_unavailable=adjacent_unavailable,
+        snippet_window_hits=_recall_snippet_window_hits(
+            kwargs.get("snippet_window_hits", getattr(engine._config, "recall_snippet_window_hits", 0)),
+        ),
         delivery_order=kwargs.get("delivery_order", getattr(engine._config, "recall_delivery_order", "score")),
         **({"read_summary_event_time": read_summary_event_time} if read_summary_event_time else {}),
     )

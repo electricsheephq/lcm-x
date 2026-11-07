@@ -157,6 +157,7 @@
       "LCM_LEAF_TARGET_RATIO has no effect while the minimum equals the maximum; set LCM_LEAF_TARGET_MAX_TOKENS"
     ],
     "config_sources": {
+      "recall_snippet_window_hits": "default",
       "absolute_threshold_tokens": "env:LCM_ABSOLUTE_THRESHOLD_TOKENS",
       "codex_gpt55_autoraise_enabled": "default",
       "context_threshold": "env:LCM_CONTEXT_THRESHOLD",
@@ -269,6 +270,7 @@
     "recall_delivery_unit": "hits",
     "recall_delivery_order": "score",
     "recall_adjacent_reply": false,
+    "recall_snippet_window_hits": 0,
     "recall_fts_anchor": true,
     "recall_query_timeout_s": 8.0,
     "recall_reference_strict": true,
