@@ -1,11 +1,14 @@
 """#7: unstamped replacements before the steady-state cursor (#497/#493), a v0.30.0 named loss limit.
 
 The loss cases are strict xfails until the v0.30.x fix lands (taken from draft PR #742, which also lists the shapes
-a fix must keep). The stamped controls show the same shapes are stored when the host stamps its rows; the #561
-control shows the retained-row merge persist compacts and loses nothing.
+a fix must keep). The stamped controls show the same shapes are stored when the host stamps its rows; the unstamped
+controls show a merge or re-show of stored rows adds no row (the duplicate side a fix must keep); the #561 control
+shows the retained-row merge persist compacts and loses nothing.
 New host objects exercise the prefix audit, not the R6 same-object rewrite path.
 """
 from __future__ import annotations
+
+from difflib import SequenceMatcher
 
 import pytest
 
@@ -142,6 +145,45 @@ def test_493_stamped_control_stores_the_replacement_once(tmp_path):
         assert texts.count(prime["content"]) == 1
         assert texts.count(host[2]["content"]) == 1
         assert len(texts) == before + 2
+    finally:
+        engine.shutdown()
+
+
+def test_unstamped_merge_of_two_ingested_user_rows_adds_no_row(tmp_path):
+    engine = _engine(tmp_path)
+    try:
+        host = [_u("U1" + PAD, None), _a("A1_1" + PAD, None),
+                _u("Ua" + PAD, None), _u("Ub" + PAD, None)]
+        engine.ingest(host)
+        before = len(_stored(engine))
+        assert [row["content"] for row in _stored(engine)].count(host[3]["content"]) == 1
+        composite = _u(host[2]["content"] + "\n\n" + host[3]["content"], None)
+        engine.ingest([*host[:2], composite])
+        texts = [row["content"] for row in _stored(engine)]
+        assert len(texts) == before
+        assert composite["content"] not in texts
+    finally:
+        engine.shutdown()
+
+
+def test_unstamped_stored_user_row_reshown_with_edge_whitespace_is_not_stored_again(tmp_path):
+    engine = _engine(tmp_path)
+    try:
+        host = [_u("U1" + PAD, None), _a("A1_1" + PAD, None),
+                _u("Ua" + PAD, None), _a("A_x" + PAD, None)]
+        engine.ingest(host)
+        before = len(_stored(engine))
+        reshown = [*host[:2], _u(host[2]["content"] + "\n", None),
+                   _a("rewritten " + host[3]["content"], None)]
+        def identities(rows):
+            return [engine._message_replay_identity(row, strip_carrier=False) for row in rows]
+
+        assert ("replace", 2, 4, 2, 4) in SequenceMatcher(
+            None, identities(host), identities(reshown), autojunk=False).get_opcodes()
+        engine.ingest(reshown)
+        texts = [row["content"].strip() for row in _stored(engine)]
+        assert texts.count(host[2]["content"].strip()) == 1
+        assert len(texts) == before
     finally:
         engine.shutdown()
 
