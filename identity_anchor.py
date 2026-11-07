@@ -1664,26 +1664,29 @@ def _raw_remainder(message, remainder) -> Optional[str]:
 
 def _composite_of_splits(content: str, by_text, session, header: str) -> list[list[tuple[str, bool]]] | None:
     """The decompositions of ``content`` that composite_of rule (i) or (ii) allows, as ``[(part, stored)]``.
-    None when a search is over budget or capped, so more splits may exist; stops once two are found."""
+    None when a search is over budget or capped, so more splits may exist; stops once two are found.
+    A part whose text several rows hold still yields its split here; the caller then writes nothing."""
     texts = set(by_text)
     whole = _decompositions(content, texts, partial=False)
     if whole is None or len(whole) >= _MAX_DECOMPOSITIONS:
         return None
     found = [[(part, True) for part in parts] for parts, _rest in whole
              if parts[0].lstrip().startswith(header)
-             and all(held == session for part in parts for _sid, held in by_text[part])]
-    paragraphs = content.split("\n\n")
+             and all(any(held == session for _sid, held in by_text[part]) for part in parts)]
     if not content.lstrip().startswith(header):
         return found
-    if len(paragraphs) > _DECOMPOSE_MAX_PARTS:
+    # Every separator position, overlapping ones too ("\n\n\n" has two).
+    cuts = [i for i in range(1, len(content) - 2) if content.startswith("\n\n", i)]
+    if len(cuts) > _DECOMPOSE_MAX_PARTS:
         return None
-    # The scaffold is unstored text: it never holds a whole stored row (a stored todo row is rule (ii)).
-    ends = [start + len(pieces) for pieces in (text.split("\n\n") for text in texts)
-            for start in range(len(paragraphs) - len(pieces) + 1) if paragraphs[start:start + len(pieces)] == pieces]
-    for cut in range(1, len(paragraphs)):
-        if len(found) > 1 or any(end <= cut for end in ends):
+    for cut in cuts:
+        if len(found) > 1:
             break
-        scaffold, rest = "\n\n".join(paragraphs[:cut]), "\n\n".join(paragraphs[cut:])
+        scaffold, rest = content[:cut], content[cut + 2:]
+        # The scaffold is unstored text: it never holds a whole stored row (a stored todo row is rule (ii)).
+        if any(scaffold == text or scaffold.startswith(text + "\n\n") or scaffold.endswith("\n\n" + text)
+               or "\n\n" + text + "\n\n" in scaffold for text in texts):
+            continue
         if rest in texts:
             found.append([(scaffold, False), (rest, True)])
         tails = _decompositions(rest, texts, partial=False)
