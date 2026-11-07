@@ -306,6 +306,17 @@ def _todo_annotation_span(content: str, start: int) -> int:
     return end
 
 
+def _summary_covered_message_ids(conn) -> set[int]:
+    """Raw store ids covered by any summary, transitively through condensed nodes.
+
+    Every summary node is a root, so each node a condensed walk would reach
+    contributes its message sources directly: the flat read equals the walk.
+    """
+    return {row[0] for row in conn.execute(
+        "SELECT DISTINCT CAST(j.value AS INTEGER) FROM summary_nodes n, json_each(n.source_ids) j "
+        "WHERE n.source_type='messages'")}
+
+
 @dataclass(eq=False, repr=False)
 class _TailReplayRun:
     """Stack-local inputs and prepared identities for one tail replay scan."""
@@ -3294,14 +3305,7 @@ class ReconcileMixin:
         borrowed_hosts = {i for pair in self._tool_borrow_proofs for i in pair}
         borrowed_ids = {sid for ids in self._tool_borrow_proofs.values() for sid in ids}
         # All summaries, including invisible and condensed roots, own their raw sources.
-        covered = {r[0] for r in self._store._conn.execute("""
-            WITH RECURSIVE walk(kind,id) AS (
-                SELECT n.source_type, CAST(j.value AS INTEGER)
-                FROM summary_nodes n, json_each(n.source_ids) j
-                UNION SELECT n.source_type, CAST(j.value AS INTEGER)
-                FROM summary_nodes n JOIN walk w ON w.kind='nodes' AND n.node_id=w.id
-                JOIN json_each(n.source_ids) j
-            ) SELECT DISTINCT id FROM walk WHERE kind='messages'""")}
+        covered = _summary_covered_message_ids(self._store._conn)
         classes, by_identity, row_owner = {}, defaultdict(list), {}
         exact, owner_class = set(), {}
         for number, group in enumerate(occurrences):
