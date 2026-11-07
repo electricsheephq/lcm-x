@@ -314,7 +314,8 @@ def test_a_ga_rerun_that_completes_no_turn_is_not_clean(setup):
     assert bar5["verdict"] == bars.INCONCLUSIVE and receipt["verdict"]["raw"] != bars.PASS
 
 
-def test_a_store_too_damaged_to_check_is_a_failed_check(tmp_path):
+def test_a_store_too_damaged_to_check_is_a_failed_check(tmp_path, monkeypatch):
+    monkeypatch.setattr(r.LocalHost, "probe", lambda self, ctx: None)  # The doctor probe has its own tests.
     home = tmp_path / "home"
     home.mkdir()
     for name in ("lcm.db", "state.db"):
@@ -323,7 +324,7 @@ def test_a_store_too_damaged_to_check_is_a_failed_check(tmp_path):
             db.commit()
     with open(home / "lcm.db", "r+b") as f:  # A damaged header: SQLite refuses to read the file.
         f.write(b"not a sqlite database at all")
-    checks = r.LocalHost({}, tmp_path / "run").checks({"home": home})
+    checks = r.LocalHost({}, tmp_path / "run").checks({"home": home, "session_ids": []})
     assert {(c["kind"], c["check"]): c["status"] for c in checks} == {
         ("quick_check", "lcm.db"): "fail", ("integrity", "lcm.db"): "fail",
         ("quick_check", "state.db"): "ok", ("integrity", "state.db"): "ok"}

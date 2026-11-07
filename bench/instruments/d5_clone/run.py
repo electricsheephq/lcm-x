@@ -47,6 +47,7 @@ DOCTOR_STORE_WIDE = frozenset((
     "payload_storage", "source_lineage_hygiene", "lifecycle_fragmentation", "sensitive_pattern_handling",
     "config_validation", "embedding_provider_health"))
 DOCTOR_PER_SESSION = ("fts_index_sync", "orphaned_dag_nodes", "summary_quality")
+DOCTOR_PRE_OPEN = ("messages_fts_integrity@pre_open", "nodes_fts_integrity@pre_open")  # Before the engine repairs FTS.
 DOCTOR_NOT_EXERCISED = {
     "identity_migration": "no plugin registration step in the probe",
     "inactive_process": "reads live processes; the arm's gateway has stopped",
@@ -202,7 +203,9 @@ def probe_checks(out, sessions):
                 else:
                     skipped.append({"check": check,
                                     "reason": DOCTOR_NOT_EXERCISED.get(check, "not classified for the probe")})
-        unbound = []
+        pre_open = dict(c for c in _doctor_rows(out / "fts-pre-open.json") or () if c[0] in DOCTOR_PRE_OPEN)
+        found += [{"kind": "doctor", "check": c, "status": pre_open[c]} for c in DOCTOR_PRE_OPEN if c in pre_open]
+        unbound = [] if set(DOCTOR_PRE_OPEN) <= set(pre_open) else ["fts-pre-open"]  # Else only a repaired index was seen.
         for key in sessions:
             scoped = _doctor_rows(out / f"doctor-{key}.json") if bound.get(key) is True else None
             if scoped is not None and not set(DOCTOR_PER_SESSION) <= {c for c, _ in scoped}:
@@ -213,7 +216,7 @@ def probe_checks(out, sessions):
                         for c in DOCTOR_PER_SESSION if scoped is None]
             unbound += [key] if scoped is None else []
         if unbound and all(r["status"] in ("ok", "warn") for r in found):
-            found = []  # A plan session the doctor could not look at: the doctor kind is not shown, never a PASS.
+            found = []  # A plan session, or the store's FTS before the engine opened it, not looked at: never a PASS.
     schema = _json((out / "schema.json").read_text(encoding="utf-8")) if (out / "schema.json").is_file() else None
     if isinstance(schema, dict) and set(schema) == {"lcm.db", "state.db"}:
         found += [{"kind": "schema", "check": name, "status": "ok" if isinstance(s, dict) and s.get("error") is False

@@ -1,7 +1,8 @@
 """Doctor and schema facts for a clone of one stopped arm home, run by that arm's host interpreter.
 
 argv: <lcm_tree> <home> <out_dir> <session ids, JSON>. It writes ``schema.json`` (both stores' schema version and
-required tables, read before anything opens the store), then ``doctor.json`` (the ``lcm_doctor`` tool's result,
+required tables, read before anything opens the store), then ``fts-pre-open.json`` (the doctor's two FTS
+integrity checks, before the engine opens the store and rebuilds a damaged index), then ``doctor.json`` (the ``lcm_doctor`` tool's result,
 through the engine, as the release gauntlet runs it), then, per session, ``doctor-<sha256 12>.json`` with the engine
 bound to that session by its public ``on_session_start``, and ``sessions.json`` ({sha256 12: bound}). Opening the engine may write to the store it opens, so the runner points this at a
 clone and never at the arm home.
@@ -39,6 +40,22 @@ def schema(home, boot, host_sql, host_version):
     return out
 
 
+def fts_pre_open(home, boot, store, dag):
+    """The doctor's two FTS integrity checks, run on the clone before the engine opens it: opening the engine
+    rebuilds a damaged FTS index, so the doctor's own run of these checks can no longer see the damage."""
+    checks = []
+    with closing(sqlite3.connect(home / "lcm.db")) as conn:  # The clone: the check runs inside a rolled-back savepoint.
+        for name, spec in (("messages_fts_integrity", store.build_message_fts_spec),
+                           ("nodes_fts_integrity", dag.build_nodes_fts_spec)):
+            try:
+                status = boot.check_external_content_fts_integrity(conn, spec())["status"]
+            except Exception:
+                status = "fail"
+            checks.append({"check": f"{name}@pre_open", "status": "warn" if status == "unchecked" else status,
+                           "detail": "before the engine opened the store"})
+    return {"overall": "healthy", "checks": checks}
+
+
 def main(tree, home, out, sessions="[]"):
     tree, home, out = Path(tree), Path(home), Path(out)
     spec = importlib.util.spec_from_file_location("hermes_lcm_x", tree / "__init__.py",
@@ -50,6 +67,8 @@ def main(tree, home, out, sessions="[]"):
         host = importlib.import_module("hermes_state")
     boot = importlib.import_module("hermes_lcm_x.db_bootstrap")
     (out / "schema.json").write_text(json.dumps(schema(home, boot, host.SCHEMA_SQL, host.SCHEMA_VERSION)))
+    store, dag = (importlib.import_module(f"hermes_lcm_x.{name}") for name in ("store", "dag"))
+    (out / "fts-pre-open.json").write_text(json.dumps(fts_pre_open(home, boot, store, dag)))
     config, engine = (importlib.import_module(f"hermes_lcm_x.{name}") for name in ("config", "engine"))
     lcm = engine.LCMEngine(config=config.LCMConfig.from_env(), hermes_home=str(home))
     (out / "doctor.json").write_text(lcm.handle_tool_call("lcm_doctor", {}))

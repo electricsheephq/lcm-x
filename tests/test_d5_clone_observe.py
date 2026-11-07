@@ -96,10 +96,15 @@ def test_only_the_pinned_credits_payload_swap_shape_counts(tmp_path, kwargs):
     assert r.workload_facts(home, before)["payload_swaps"] == 0
 
 
-def probe_out(path, doctor=None, schema=None):
+PRE_OPEN_OK = {"overall": "healthy", "checks": [{"check": c, "status": "pass", "detail": "x"} for c in r.DOCTOR_PRE_OPEN]}
+
+
+def probe_out(path, doctor=None, schema=None, pre_open=PRE_OPEN_OK):
     path.mkdir(parents=True, exist_ok=True)
     if doctor is not None:
         (path / "doctor.json").write_text(json.dumps(doctor))
+    if pre_open is not None:
+        (path / "fts-pre-open.json").write_text(json.dumps(pre_open))
     if schema is not None:
         (path / "schema.json").write_text(json.dumps(schema))
     return path
@@ -119,7 +124,8 @@ def test_doctor_checks_map_to_bar5_statuses(tmp_path):
     out = probe_out(tmp_path, doctor("pass", "warn"), {"lcm.db": OK_SCHEMA, "state.db": OK_SCHEMA})
     checks, skipped = r.probe_checks(out, [])
     assert [c for c in checks if c["kind"] == "doctor"] == [{"kind": "doctor", "check": "database_integrity", "status": "ok"},
-                                                            {"kind": "doctor", "check": "payload_storage", "status": "warn"}]
+                                                            {"kind": "doctor", "check": "payload_storage", "status": "warn"},
+                                                            *({"kind": "doctor", "check": c, "status": "ok"} for c in r.DOCTOR_PRE_OPEN)]
     assert [c["status"] for c in checks if c["kind"] == "schema"] == ["ok", "ok"] and skipped == []
     assert bars.failed_checks(checks) == [] and not {"doctor", "schema"} & set(bars.kinds_missing(checks))
 
@@ -138,8 +144,9 @@ def test_checks_the_probe_cannot_exercise_are_reported_never_rows(tmp_path):
     out = probe_out(tmp_path, doctor(*["pass"] * len(names), names=names))
     per_session(out, KEY, "pass", "warn", "pass")
     checks, skipped = r.probe_checks(out, [KEY])
-    assert [c["check"] for c in checks] == ["database_integrity", *(f"{c}@{KEY}" for c in r.DOCTOR_PER_SESSION)]
-    assert checks[2]["status"] == "warn"  # The bound session's own result.
+    assert [c["check"] for c in checks] == ["database_integrity", *r.DOCTOR_PRE_OPEN,
+                                            *(f"{c}@{KEY}" for c in r.DOCTOR_PER_SESSION)]
+    assert checks[4]["status"] == "warn"  # The bound session's own result.
     not_exercised = {"context_pressure": "the probe process's own counter",
                      "identity_migration": "no plugin registration step in the probe",
                      "ingest_health": "the probe process's own counter", "new_check": "not classified for the probe"}
@@ -162,11 +169,23 @@ def test_a_failing_unclassified_check_fails_bar5(tmp_path):
 def test_an_unclassified_check_that_warns_is_a_row_judged_against_ga(tmp_path):
     names = ("database_integrity", "brand_new_check", "identity_migration")
     rc = r.probe_checks(probe_out(tmp_path / "rc", doctor("pass", "warn", "warn", names=names)), [])[0]
-    assert {c["check"] for c in rc} == {"database_integrity", "brand_new_check"}  # The ruled check stays out.
+    assert {c["check"] for c in rc} == {"database_integrity", "brand_new_check", *r.DOCTOR_PRE_OPEN}  # Ruled one out.
     sqlite = [{"kind": k, "check": "lcm.db", "status": "ok"} for k in ("quick_check", "integrity", "schema")]
     for ga_status, verdict in (("pass", bars.FAIL), ("warn", bars.PASS)):  # Only the rc warns: over GA's count.
         ga = r.probe_checks(probe_out(tmp_path / ga_status, doctor("pass", ga_status, names=names[:2])), [])[0]
         assert bars.bar5(sqlite + rc, sqlite + ga)["verdict"] == verdict
+
+
+@pytest.mark.parametrize("pre_open, verdict", [
+    (None, bars.INCONCLUSIVE),  # The probe never checked FTS before the engine opened (and repaired) the store.
+    ({"overall": "healthy", "checks": [{"check": r.DOCTOR_PRE_OPEN[0], "status": "pass", "detail": "x"}]}, bars.INCONCLUSIVE),
+    ({"overall": "healthy", "checks": [{"check": c, "status": s, "detail": "x"} for c, s in
+                                       zip(r.DOCTOR_PRE_OPEN, ("fail", "pass"))]}, bars.FAIL)])
+def test_fts_damage_the_engine_would_repair_is_still_seen(tmp_path, pre_open, verdict):
+    out = probe_out(tmp_path, doctor("pass", "pass"), {"lcm.db": OK_SCHEMA, "state.db": OK_SCHEMA}, pre_open=pre_open)
+    checks, _ = r.probe_checks(out, [])  # The doctor's own run saw the index after the engine rebuilt it: all pass.
+    sqlite = [{"kind": k, "check": "lcm.db", "status": "ok"} for k in ("quick_check", "integrity")]
+    assert bars.bar5(sqlite + checks, sqlite + checks)["verdict"] == verdict
 
 def test_an_unbound_plan_session_leaves_the_doctor_unshown_but_a_fail_still_fails(tmp_path):
     out = probe_out(tmp_path, doctor("pass", "warn"), {"lcm.db": OK_SCHEMA, "state.db": OK_SCHEMA})
@@ -307,7 +326,7 @@ def test_a_full_fake_run_with_every_observation_passes_bars_5_and_6(setup):  # n
     assert work["cron_job_sha256"] == receipt["arms"]["ga"]["workload"]["cron_job_sha256"]
     for arm in ("rc", "ga"):
         assert receipt["arms"][arm]["checks"]["by_kind_status"] == {
-            "doctor:ok": 10, "doctor:warn": 1, "integrity:ok": 2, "quick_check:ok": 2, "schema:ok": 2}  # 1 + 3 x 3 ok
+            "doctor:ok": 12, "doctor:warn": 1, "integrity:ok": 2, "quick_check:ok": 2, "schema:ok": 2}  # 1 + 2 + 3 x 3 ok
         assert receipt["arms"][arm]["doctor_not_exercised"] == [
             {"check": "identity_migration", "reason": "no plugin registration step in the probe"}]
         assert receipt["arms"][arm]["cron_paused"] == {"job_ids": ["snap-job"], "count": 1}
@@ -395,3 +414,12 @@ def test_the_real_probe_runs_the_doctor_on_a_clone_and_never_writes_the_arm_home
     assert {s["check"] for s in skipped} == set(r.DOCTOR_NOT_EXERCISED) - {"context_pressure"}  # Not emitted here.
     scoped = json.loads((out / f"doctor-{KEY}.json").read_text())["checks"]
     assert next(c for c in scoped if c["check"] == "fts_index_sync")["detail"].startswith("2 session FTS rows")
+    assert set(r.DOCTOR_PRE_OPEN) <= names
+    damaged = tmp_path / "arm2" / "home"  # A second arm (each arm probes once), with FTS damage that opening repairs.
+    damaged.parent.mkdir()
+    r.capture.clone_tree(home, damaged)
+    with closing(sqlite3.connect(damaged / "lcm.db")) as db:
+        db.execute("INSERT INTO messages_fts(messages_fts) VALUES('delete-all')")
+        db.commit()
+    checks, _ = r.probe_checks(r.LocalHost({}, tmp_path).probe({**ctx, "home": damaged}), [KEY])
+    assert bars.failed_checks(checks) == ["messages_fts_integrity@pre_open"]
