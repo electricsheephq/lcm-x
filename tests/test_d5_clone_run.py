@@ -200,7 +200,11 @@ def test_the_rule_fingerprint_covers_the_rule_closure(tmp_path, monkeypatch):
     path.write_text(json.dumps(manifest))
     first = host.pins()["rules_sha256"]
     path.write_text(json.dumps({**manifest, "extra_hashes": [{"name": "RX", "sha256": "c" * 64}]}))
-    assert host.pins()["rules_sha256"] != first  # A changed constant or regex is a changed rule.
+    second = host.pins()["rules_sha256"]
+    assert second != first  # A changed constant or regex is a changed rule.
+    path.write_text(json.dumps({**manifest, "extra_hashes": [{"name": "RX", "sha256": "c" * 64}],
+                                "rule_files": [{"name": "helper.py", "sha256": "d" * 64}]}))
+    assert host.pins()["rules_sha256"] != second  # So is a file a rule reads whole.
 
 
 @pytest.mark.parametrize("result, done", [({"completed": True, "outcome": "success"}, True),

@@ -359,3 +359,42 @@ def test_a_new_binding_that_shadows_a_builtin_fails_after_a_whole_file_repin(tmp
     save(path, manifest)
     assert pins.function_source_sha256(module, "rule") == manifest["functions"][0]["sha256"]
     assert pins.verify(path, tmp_path)["mismatches"] == ["closure"]
+
+
+def test_a_rule_that_calls_into_another_pinned_file_pins_that_function_too(tmp_path):
+    (tmp_path / "rules.py").write_text("import helper as h\nfrom shared import LIMIT\n\ndef rule(x):\n"
+                                       "    return h.norm(x)[:LIMIT]\n", encoding="utf-8")
+    (tmp_path / "helper.py").write_text("def norm(x):\n    return x.strip()\n\ndef unused():\n    return 0\n",
+                                        encoding="utf-8")
+    (tmp_path / "shared.py").write_text("LIMIT = 5\n", encoding="utf-8")
+    interpreter = {"path_basename": Path(sys.executable).name, "version": platform.python_version()}
+    args = (["rules.py", "helper.py", "shared.py"], {"rules.py": ["rule"]}, {"rules.py": ["helper.py", "shared.py"]},
+            interpreter)
+    first = pins.build(tmp_path, *args)
+    assert {(m["file"], m["qualname"]) for m in first["functions"]} == {("rules.py", "rule"), ("helper.py", "norm")}
+    assert ("shared.py", "LIMIT") in {(a["file"], a["name"]) for a in first["extra_hashes"]}
+    path = tmp_path / "d5-clone-pins.json"
+    assert pins.verify(path, tmp_path)["verdict"] == "PASS"
+    dropped = {**first, "functions": [m for m in first["functions"] if m["file"] != "helper.py"]}
+    save(path, dropped)  # A manifest that leaves the helper out no longer verifies.
+    assert "closure" in pins.verify(path, tmp_path)["mismatches"]
+    (tmp_path / "helper.py").write_text("def norm(x):\n    return x\n\ndef unused():\n    return 0\n",
+                                        encoding="utf-8")
+    second = pins.build(tmp_path, *args)  # The helper changed: the rule closure's hashes change with it.
+    assert [m["sha256"] for m in second["functions"]] != [m["sha256"] for m in first["functions"]]
+
+
+def test_a_rule_reading_a_module_with_no_closure_freezes_it_whole(tmp_path):
+    (tmp_path / "rules.py").write_text("import helper\nimport dyn\n\ndef rule(x):\n    return helper.norm(dyn.load(x))\n",
+                                       encoding="utf-8")
+    (tmp_path / "helper.py").write_text("def norm(x):\n    return x\n", encoding="utf-8")  # Pinned only as a load.
+    (tmp_path / "dyn.py").write_text("import importlib\n\ndef load(x):\n    return importlib.import_module(x)\n",
+                                     encoding="utf-8")  # A file whose closure cannot be pinned.
+    interpreter = {"path_basename": Path(sys.executable).name, "version": platform.python_version()}
+    manifest = pins.build(tmp_path, ["rules.py", "dyn.py"], {"rules.py": ["rule"]}, {"rules.py": ["helper.py", "dyn.py"]},
+                          interpreter)
+    assert [r["name"] for r in manifest["rule_files"]] == ["dyn.py", "helper.py"]
+    path = tmp_path / "d5-clone-pins.json"
+    assert pins.verify(path, tmp_path)["verdict"] == "PASS"
+    save(path, {**manifest, "rule_files": [r for r in manifest["rule_files"] if r["name"] != "helper.py"]})
+    assert "closure" in pins.verify(path, tmp_path)["mismatches"]  # Dropping a frozen file fails verify.
