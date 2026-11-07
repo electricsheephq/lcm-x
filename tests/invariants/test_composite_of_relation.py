@@ -103,3 +103,29 @@ def test_relation_failure_preserves_ingest(tmp_path, monkeypatch, caplog):
         assert "LCM composite-of relation write failed (RuntimeError)" in caplog.text
     finally:
         engine.shutdown()
+
+
+@pytest.mark.parametrize("case", ["both-rules", "trailing-scaffold", "stored-todo-second", "gap", "scaffold-paragraph"])
+def test_no_relation_when_rules_overlap_or_scaffold_is_not_leading(tmp_path, case):
+    """Uniqueness is across both rules, and the scaffold must lead (the host folds the todo list in first)."""
+    engine = _engine(tmp_path)
+    try:
+        note = "a stored note"
+        stored = {"both-rules": [P1, TODO + "\n\n" + P1, P2], "trailing-scaffold": [P1],
+                  "stored-todo-second": [P1, TODO], "gap": [P1, P2], "scaffold-paragraph": [note, P1]}[case]
+        content = {"both-rules": TODO + "\n\n" + P1 + "\n\n" + P2,  # (i) [scaffold, P1, P2] and (ii) [TODO+P1, P2]
+                   "trailing-scaffold": P1 + "\n\n" + TODO,
+                   "stored-todo-second": P1 + "\n\n" + TODO,
+                   "gap": TODO + "\n\n" + P1 + "\n\nunknown middle\n\n" + P2,
+                   "scaffold-paragraph": TODO + "\n\n" + note + "\n\n" + P1}[case]  # the scaffold may hold `note`
+        history = []
+        for i, text in enumerate(stored):
+            history += [_u(text, 500.0 + 2 * i), _a(f"reply {i}", 501.0 + 2 * i)]
+        engine.ingest(history)
+        assert [r["content"] for r in _rows(engine) if r["role"] == "user"] == stored
+        engine.ingest([*history, _u(content, None)])
+        row = _rows(engine)[-1]
+        assert row["content"] == content
+        assert not [r for r in _relations(engine) if r[1] == "composite_of" and r[0] == row["store_id"]]
+    finally:
+        engine.shutdown()
