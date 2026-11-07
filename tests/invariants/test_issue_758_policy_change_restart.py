@@ -52,6 +52,10 @@ def test_policy_change_between_restarts_stores_only_new_rows(tmp_path, shape):
             assert engine._ingest_failure_count == 0, engine._last_ingest_error
             rows = engine._store.get_session_messages("S")
             counts.append(len(rows))
+            # Every row once, in order: no lost row hidden behind a duplicate. A stored row keeps the text its
+            # write-time policy produced, so compare the text before the first colon (the secret comes after it).
+            assert [(r["role"], r["content"].split(":")[0]) for r in rows] == [
+                (m["role"], m["content"].split(":")[0]) for m in history], [(r["role"], r["content"][:40]) for r in rows]
             if step:  # positive control: the policy in force is the one this step set
                 redacted = enabled and "api_key" in patterns
                 assert (SECRET.split("=")[1] not in rows[-1]["content"]) == redacted, rows[-1]["content"]
