@@ -1,2 +1,1 @@
-### Fixed
-- Reliability B1 binds each `continue` reply by its host occurrence, including its timestamp, so lossless out-of-order head reconciliation is accepted while missing and surplus replies still fail.
+- Changed: the reliability bar B1 now finds each `continue` row's reply by its host occurrence (lineage, role, content, tool fields and host timestamp), not by the next row in store order. A lossless session-end head reconcile that stores earlier rows after durable ones no longer fails B1, while a missing, duplicated or surplus reply still does. Where host evidence is unavailable, B1 keeps the old store-order check for that lineage and records why in `continue_fallbacks`.
