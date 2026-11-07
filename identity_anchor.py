@@ -660,7 +660,8 @@ class IdentityAnchorMixin:
         if self._store.get_message_relations([target], "alt_stamp"):
             return  # the live receipt already consumed this occurrence
         if conn.execute("SELECT 1 FROM sqlite_master WHERE name='message_relations'").fetchone() and conn.execute(
-                "SELECT 1 FROM message_relations WHERE kind='possible_replay_of' AND related_store_id=?", (target,)).fetchone():
+                "SELECT 1 FROM message_relations WHERE kind='possible_replay_of' AND related_store_id=? "
+                "AND observed_at IS NULL", (target,)).fetchone():  # a borrowed-stamp link never consumes its target
             return
         if generated:
             if observed is None:
@@ -668,7 +669,11 @@ class IdentityAnchorMixin:
                              (stamp, emission))
             return True  # Keep admitting the later warm rewrite; row guards still own every write.
         else:
-            self._store.add_message_relations([[(stored_id, "possible_replay_of", target, None, None)]])
+            # A source keeps its one link (the borrowed-stamp linker runs first); the alt_stamp read above
+            # ensured the relation table.
+            if not conn.execute("SELECT 1 FROM message_relations WHERE kind='possible_replay_of' AND store_id=? LIMIT 1",
+                                (stored_id,)).fetchone():
+                self._store.add_message_relations([[(stored_id, "possible_replay_of", target, None, None)]])
             return False
 
     @staticmethod
