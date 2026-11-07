@@ -396,3 +396,40 @@ def test_rotation_mixed_proof_sessions_keep_the_predecessor_tier(build, x_first)
     rows = [(x_new, "rotated", 100.0, 300.0), (y_new, "S", 200.0, 301.0)]
     links = _drive_linker(engine, rows if x_first else rows[::-1])
     assert links == {(x_new, x_orig), (y_new, y_orig)}, sorted(links)
+
+
+def test_one_unreadable_equal_target_fails_the_whole_source(build, monkeypatch):
+    """P's carried-stamp copy sits in the child and an equal P sits in the predecessor at the same stamp: two
+    candidates, so nothing links. When the child copy's stored form cannot be read, the predecessor copy must not
+    become the unique candidate: the source links nothing, and the re-stamped T link survives."""
+    engine, view = _rotate_then_store_p_at_carried_stamp(build)
+    engine = _rebind_child(build, engine, view, False)
+    unreadable_id = next(row["store_id"] for row in all_rows(engine) if row["content"] == P)
+    engine._store.append("S", {"role": "user", "content": P, "timestamp": T_REQ}, conversation_id="conversation")
+    parts, link, linking = (engine._stored_row_externalized_text_parts_for_pattern_matching,
+                            engine._link_restamped_occurrences, [])
+
+    def unreadable(target):  # only the linker's read of the child copy fails
+        if linking and target["store_id"] == unreadable_id:
+            raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+        return parts(target)
+
+    def linker(*args):
+        linking.append(True)
+        try:
+            return link(*args)
+        finally:
+            linking.pop()
+
+    monkeypatch.setattr(engine, "_stored_row_externalized_text_parts_for_pattern_matching", unreadable)
+    monkeypatch.setattr(engine, "_link_restamped_occurrences", linker)
+    next(row for row in view if row.get("content") == P)["timestamp"] = T_COMMIT
+    next(row for row in view if row.get("content") == T)["timestamp"] = T_COMMIT - 1
+    view.append({"role": "user", "content": NEW, "timestamp": T_COMMIT + 10})
+    engine.ingest(deepcopy(view))
+    rows, links = all_rows(engine), replay_links(engine)
+    t_copies = [row["store_id"] for row in rows if row["content"] == T]
+    p_copies = [row["store_id"] for row in rows if row["content"] == P]
+    evidence = {"t": t_copies, "p": p_copies, "unreadable": unreadable_id, "relations": sorted(links)}
+    assert len(t_copies) == 2 and (t_copies[1], t_copies[0]) in links, evidence
+    assert len(p_copies) == 3 and not any(a in p_copies for a, _b in links), evidence
