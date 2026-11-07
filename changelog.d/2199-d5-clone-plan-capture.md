@@ -1,0 +1,1 @@
+- New: Add deterministic D5 clone workload plans, retained SQLite captures, and read-only snapshot preflight checks.
