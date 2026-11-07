@@ -45,7 +45,8 @@ class D5LocalAdapter(BasePlatformAdapter):
                 continue
             seen.add(id(obj))
             if hasattr(type(obj), "_startup_restore_in_progress"):
-                return bool(obj._startup_restore_in_progress)
+                value = obj._startup_restore_in_progress
+                return value if isinstance(value, bool) else None
             todo += [getattr(obj, "__self__", None), getattr(obj, "__wrapped__", None)]
             for cell in getattr(obj, "__closure__", None) or ():
                 try:

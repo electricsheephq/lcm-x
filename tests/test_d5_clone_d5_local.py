@@ -298,7 +298,7 @@ class _Runner:  # The pinned host keeps the gate on GatewayRunner as a class att
         return None
 
 
-@pytest.mark.parametrize("gate", [True, False])
+@pytest.mark.parametrize("gate", [None, 0, "", 1, "false", True, False])
 def test_health_reports_the_host_restore_gate_through_the_wrapped_handler(adapter_module, gate):
     runner = _Runner()
     runner._startup_restore_in_progress = gate
@@ -309,7 +309,9 @@ def test_health_reports_the_host_restore_gate_through_the_wrapped_handler(adapte
 
     adapter = adapter_module.D5LocalAdapter(SimpleNamespace(extra={}))
     adapter._message_handler = scoped
-    assert adapter._host_restoring() is gate
+    restoring = adapter._host_restoring()
+    assert restoring is (gate if isinstance(gate, bool) else None)
+    assert (restoring is False) is (gate is False)  # The gateway readiness condition stays closed for unknown values.
 
 
 def test_health_reports_no_gate_when_the_host_has_none(adapter_module):
