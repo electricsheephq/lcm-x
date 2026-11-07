@@ -107,7 +107,9 @@ def test_relation_failure_preserves_ingest(tmp_path, monkeypatch, caplog):
 
 @pytest.mark.parametrize("case", ["both-rules", "trailing-scaffold", "stored-todo-second", "gap"])
 def test_no_relation_when_rules_overlap_or_scaffold_is_not_leading(tmp_path, case):
-    """Uniqueness is across both rules, and the scaffold must lead (the host folds the todo list in first)."""
+    """Uniqueness is across both rules, and the scaffold must lead: the only todo-first composite the host makes is
+    its consecutive-user merge of a standalone snapshot row with the next prompt. A block the host appends after a
+    real user turn ("U\\n\\nBLOCK") is matched by the #516 identity cut instead (see the trailing test below)."""
     engine = _engine(tmp_path)
     try:
         stored = {"both-rules": [P1, TODO + "\n\n" + P1, P2], "trailing-scaffold": [P1],
@@ -145,55 +147,73 @@ def test_scaffold_never_holds_a_whole_stored_row(tmp_path):
         engine.shutdown()
 
 
-@pytest.mark.parametrize("case", ["cross-session-copy", "overlapping-separator", "header-not-leading",
-                                  "blank-scaffold"])
-def test_writer_finds_every_split(tmp_path, case):
-    """Writer-level shapes: a rule (ii) split still counts when a part also has a copy outside C's session; cuts
-    at overlapping separators ("\\n\\n\\n") are all tried; text before the header is never a scaffold."""
+NOTICE = "[Skills pruned during compression — reload before acting on these tasks]\n- skill-a"
+# case: (earlier stored user rows [(session, text)], composite text stored in session S,
+#        expected parts in order: an index into the rows, None for the scaffold; [] means no relation)
+WRITER_CASES = {
+    "own-session-parts-only": ([("A", P1), ("A", TODO + "\n\n" + P1), ("S", TODO + "\n\n" + P1), ("S", P2)],
+                               TODO + "\n\n" + P1 + "\n\n" + P2, [2, 3]),
+    "sibling-todo-row-does-not-block": ([("A", TODO), ("S", P1)], TODO + "\n\n" + P1, [None, 1]),
+    "overlapping-separator": ([("S", "\nP"), ("S", "P")], TODO + "\n\n\nP", [None, 0]),
+    "stored-todo-then-overlap": ([("S", TODO), ("S", "P")], TODO + "\n\n\nP", []),
+    "blank-scaffold": ([("S", TODO)], "\n\n\n" + TODO, []),
+    "header-not-leading": ([("S", P1)], "intro\n\n" + TODO + "\n\n" + P1, []),
+    "scaffold-holds-leading-todo": ([("S", TODO), ("S", P1)], TODO + "\n\nunstored note\n\n" + P1, []),
+    "absorbed-unstored-text": ([("S", P1)], TODO + "\n\nreal user words\n\n" + P1, []),
+    "absorbed-stored-text": ([("S", "real user words"), ("S", P1)], TODO + "\n\nreal user words\n\n" + P1,
+                             [None, 0, 1]),
+    "header-only": ([("S", P1)], HEADER + "\n\n" + P1, []),
+    "header-prefixed-user-text": ([("S", P1)], HEADER + " and my own words\n\n" + P1, []),
+    "reload-notice": ([("S", P1)], TODO + "\n\n" + NOTICE + "\n\n" + P1, [None, 0]),
+    "item-with-blank-line": ([("S", P1)], HEADER + "\n- [ ] 1. first line\n\nsecond line (pending)\n\n" + P1,
+                             [None, 0]),
+    "open-item-without-status": ([("S", P1)], HEADER + "\n- [ ] 1. open item\n\n" + P1, []),
+}
+
+
+@pytest.mark.parametrize("case", list(WRITER_CASES))
+def test_writer_scaffold_and_scope(tmp_path, case):
+    """The scaffold is exactly the rendered todo block (#516 span: header, item lines, optional reload notice);
+    parts and the uniqueness count are C's own session; overlapping separators and blank cuts are handled."""
+    rows, content, expected = WRITER_CASES[case]
     engine = _engine(tmp_path)
     try:
         store, conversation = engine._store, engine._conversation_id
-
-        def put(session, text):
-            return store.append(session, _u(text, None), conversation_id=conversation)
-
-        if case == "cross-session-copy":  # (i) [scaffold, P1, P2] and (ii) [R in B, P2]: two splits
-            composite = TODO + "\n\n" + P1
-            put("A", P1), put("A", composite), put("B", composite), put("B", P2)
-            target = put("B", composite + "\n\n" + P2)
-        elif case == "overlapping-separator":  # [TODO, "\nP"] and [TODO + "\n", "P"]: two splits
-            put("S", "\nP"), put("S", "P")
-            target = put("S", TODO + "\n\n\nP")
-        elif case == "blank-scaffold":  # cut 1 of "\n\n\n" + TODO leaves the scaffold "\n", which is no todo block
-            put("S", TODO)
-            target = put("S", "\n\n\n" + TODO)
-        else:
-            put("S", P1)
-            target = put("S", "intro\n\n" + TODO + "\n\n" + P1)
+        ids = [store.append(session, _u(text, None), conversation_id=conversation) for session, text in rows]
+        target = store.append("S", _u(content, None), conversation_id=conversation)
         engine._identity_anchor_record_composite_of([target])
+        assert [r for r in _relations(engine) if r[1] == "composite_of"] == [
+            (target, "composite_of", None if part is None else ids[part], ordinal)
+            for ordinal, part in enumerate(expected)]
+    finally:
+        engine.shutdown()
+
+
+def test_trailing_block_on_a_stored_turn_is_not_stored_again(tmp_path):
+    """Characterization: the host appends its todo block after a real trailing user turn ("U\\n\\nBLOCK"); the
+    #516 identity cut matches it to the stored U, so no new row (and no composite) is written."""
+    engine = _engine(tmp_path)
+    try:
+        engine.ingest([_u(P2, 500.0), _a("reply", 501.0)])
+        before = _rows(engine)
+        engine.ingest([_u(P2 + "\n\n" + TODO, 500.0), _a("reply", 501.0)])
+        assert _rows(engine) == before
         assert not [r for r in _relations(engine) if r[1] == "composite_of"]
     finally:
         engine.shutdown()
 
 
-@pytest.mark.parametrize("case", ["scaffold-holds-leading-todo", "overlap-after-stored-todo"])
-def test_scaffold_bounds_at_the_writer(tmp_path, case):
-    """A scaffold that starts with a whole stored todo row is not unstored; with an overlapping separator after a
-    stored todo row, the next cut ("TODO\\n") is still tried, so the one allowed split is found."""
+def test_middle_block_characterization(tmp_path):
+    """Characterization: a cancel or error before the reply, then the host merges the next prompt V behind
+    "U\\n\\nBLOCK". Today the merged row is stored as a new row carrying U's stamp (carried_stamp -> U), with
+    no composite_of: the writer does not cover this shape (it is not todo-first)."""
     engine = _engine(tmp_path)
     try:
-        store, conversation = engine._store, engine._conversation_id
-        todo = store.append("S", _u(TODO, None), conversation_id=conversation)
-        if case == "scaffold-holds-leading-todo":
-            store.append("S", _u(P1, None), conversation_id=conversation)
-            target = store.append("S", _u(TODO + "\n\nunstored note\n\n" + P1, None), conversation_id=conversation)
-            expected = []
-        else:
-            prompt = store.append("S", _u("P", None), conversation_id=conversation)
-            target = store.append("S", _u(TODO + "\n\n\nP", None), conversation_id=conversation)
-            expected = [(target, "composite_of", None, 0), (target, "composite_of", prompt, 1)]
-        assert todo < target
-        engine._identity_anchor_record_composite_of([target])
-        assert [r for r in _relations(engine) if r[1] == "composite_of"] == expected
+        engine.ingest([_u(P1, 500.0), _a("reply", 501.0), _u(P2, 502.0)])
+        merged = P2 + "\n\n" + TODO + "\n\nthe next prompt"
+        engine.ingest([_u(P1, 500.0), _a("reply", 501.0), _u(merged, 502.0)])
+        assert [(r["store_id"], r["content"]) for r in _rows(engine)] == [
+            (1, P1), (2, "reply"), (3, P2), (4, merged)]
+        assert _relations(engine) == [(4, "carried_stamp", 3, None)]
     finally:
         engine.shutdown()
