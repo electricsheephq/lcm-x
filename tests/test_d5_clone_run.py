@@ -336,5 +336,6 @@ def test_a_store_too_damaged_to_check_is_a_failed_check(tmp_path, monkeypatch):
         db.execute("PRAGMA journal_mode=WAL")
     (home / "state.db-shm").unlink(missing_ok=True)
     (home / "state.db-wal").write_bytes(b"")
-    assert {c["check"] for c in r.LocalHost({}, tmp_path / "run").checks({"home": home}) if c["status"] == "fail"} == {
+    assert {c["check"] for c in r.LocalHost({}, tmp_path / "run").checks({"home": home, "session_ids": []})
+            if c["status"] == "fail"} == {
         "lcm.db", "state.db"}
