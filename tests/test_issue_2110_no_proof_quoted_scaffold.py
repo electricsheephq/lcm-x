@@ -67,7 +67,8 @@ def test_a_user_turn_shaped_like_scaffold_is_stored_after_a_legacy_restart(tmp_p
         view = [*host, turn, reply] if place == "after-tail" else [*host[:-1], turn, host[-1], reply]
         users_before = _contents(engine, "user").count(quoted)
         engine.ingest([dict(m) for m in view])
-        assert _contents(engine, "assistant").count(reply["content"]) == 1  # the batch was ingested
+        if _contents(engine, "assistant").count(reply["content"]) != 1:
+            pytest.fail("setup: the batch was not ingested")
         assert _contents(engine, "user").count(quoted) == users_before + 1, "the quoting user turn was skipped"
         engine.ingest([dict(m) for m in view])
         assert _contents(engine, "user").count(quoted) == users_before + 1
@@ -97,15 +98,17 @@ def test_a_scaffold_shaped_user_turn_is_stored_past_a_stale_v4_proof(stub_first_
 
 
 _RETIRED_LOST = pytest.mark.xfail(strict=True, raises=AssertionError,
-                                  reason="#2110: once a stale v4 proof is retired, a scaffold-shaped user turn placed "
-                                         "before a stored row reads with no proof (identity None) and is skipped")
+                                  reason="#2110: once a stale v4 proof is retired, the identity anchor treats a "
+                                         "scaffold-shaped user turn placed before a stored row as LCM scaffold "
+                                         "(identity None) and skips it")
 
 
 @pytest.mark.parametrize("shape", [pytest.param("summary-part", marks=_RETIRED_LOST),
                                    pytest.param("objective-prefix", marks=_RETIRED_LOST), "plain"])
 def test_a_scaffold_shaped_user_turn_is_stored_after_a_v4_proof_is_retired(stub_first_session, caplog, shape):  # noqa: F811
     """A stale v4 proof (left by an earlier version) is retired by a cold rebind that replays stored rows (here with a
-    plain new turn). A later scaffold-shaped turn before the last row must still be stored; a plain one is."""
+    plain new turn). A later scaffold-shaped turn before the last row must still be stored; a plain one is. The loss
+    runs through the identity anchor's scaffold check (``_identity_is_lcm_scaffold``), not the no-proof cursor."""
     host = stub_first_session("summary", stub_first=False)
     leave_proof_stale(host, caplog)
     host.clock += 0.5
