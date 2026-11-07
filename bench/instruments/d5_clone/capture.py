@@ -23,6 +23,8 @@ def _readonly(path):
     rollback-journal file keeps plain mode=ro, so a held lock reads as "database is locked" and a hot journal fails
     loudly instead of being read past."""
     path = Path(path).absolute()
+    if path.is_symlink():  # SQLite follows the link to its target's -wal; the sidecar checks below would not.
+        raise CaptureError("database input is a symlink")
     with path.open("rb") as stream:
         header = stream.read(20)
     wal_mode = len(header) == 20 and header[18] == 2 and header[19] == 2

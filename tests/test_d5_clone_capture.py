@@ -206,3 +206,21 @@ def test_a_locked_rollback_journal_input_is_not_read_without_its_lock(tmp_path):
         with closing(cap._readonly(db)) as reader, pytest.raises(sqlite3.OperationalError, match="locked"):
             reader.execute("SELECT count(*) FROM t").fetchone()
         writer.execute("ROLLBACK")
+
+
+def test_a_symlinked_database_input_is_refused_before_any_read(tmp_path):
+    real = tmp_path / "real.db"
+    with closing(sqlite3.connect(real)) as conn:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA wal_autocheckpoint=0")
+        conn.execute("CREATE TABLE t (x)")
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        conn.execute("INSERT INTO t VALUES (1)")
+        conn.commit()
+        assert Path(str(real) + "-wal").stat().st_size > 0  # A committed row lives only in the target's WAL.
+        link = tmp_path / "link.db"
+        link.symlink_to(real)
+        with pytest.raises(cap.CaptureError, match="symlink"):
+            cap._readonly(link)
+        with pytest.raises(cap.CaptureError, match="symlink"):
+            cap.backup(link, tmp_path / "out.db")
