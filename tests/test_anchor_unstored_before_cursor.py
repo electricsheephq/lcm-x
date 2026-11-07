@@ -832,6 +832,9 @@ def test_presence_window_info_is_once_per_session_without_warning(tmp_path, monk
             engine.on_session_start("another-session", platform="cli", context_length=1_000_000)
             engine._store.append_batch("another-session", [_a("over budget too", 3)])
             assert _presence(engine, [_call("new", 4)]) == []
+            engine.shutdown()
+            engine = _engine(tmp_path)
+            assert _presence(engine, [_call("new", 5)]) == []
         limits = [r for r in caplog.records if "presence window incomplete" in r.message]
         assert len(limits) == 2
         assert all(r.levelno == logging.INFO for r in limits)

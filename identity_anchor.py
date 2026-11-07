@@ -57,6 +57,7 @@ _INSERT_DIFF_BUDGET = 1_000_000  # #633: old x new rows compared per insertion d
 _CARRIER_LEDGER_CAP = 256  # #1000: carrier emission keys remembered as seen / retired (process-local)
 _PRESENCE_WINDOW_ROWS = 10000  # total stored rows across the presence scope
 _PRESENCE_WINDOW_BYTES = 4_000_000  # stored content and tool-call text across the scope
+_PRESENCE_WINDOW_LOGGED: set[tuple[str, str]] = set()  # (store path, session), once per process
 
 
 def _ws_equivalent(stored, identity) -> bool:
@@ -657,11 +658,11 @@ class IdentityAnchorMixin:
                     byte_budget -= sum(len(row.get("content") or "") + len(row.get("tool_calls") or "")
                                        for row in tail)
                     if budget < 0 or byte_budget < 0:
-                        logged = getattr(self, "_presence_window_logged", set())
-                        if session not in logged:
+                        notice = (str(self._db_path), session)
+                        if notice not in _PRESENCE_WINDOW_LOGGED:
                             logger.info("LCM identity-anchor presence window incomplete: session=%s scope=%d "
                                         "budget=%d bytes=%d", session, len(scope), budget + len(tail), byte_budget)
-                            self._presence_window_logged = logged | {session}
+                            _PRESENCE_WINDOW_LOGGED.add(notice)
                         return []
                     rows.update((int(row["store_id"]), row) for row in tail)
                     if len(tail) < limit:
