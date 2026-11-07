@@ -568,11 +568,45 @@ class IdentityAnchorMixin:
                     continue
                 missed.append(idx)
         if missed:
+            # Class A (#2071 rule): the cursor resumes only behind rows that are accounted for. A position no longer
+            # proves a row stored once the host changed the list, and the audit above never examines tool rows.
+            missed = sorted({*missed, *self._identity_anchor_unaccounted(
+                messages, identity_messages, cursor, start, identity_at, held, consumed, plan, matched, excluded, missed)})
             plan["cursor"] = min(missed)
             plan["positional"] = {idx for idx in range(min(missed), cursor) if idx not in missed}
             plan["replayed"].update(plan["positional"])
-            logger.info("LCM identity-anchor: host changed its list before the cursor; %d unstored rows from %d: session=%s",
-                        len(missed), min(missed), self._session_id)
+            logger.warning("LCM identity-anchor: host changed its list before the cursor; %d row(s) from %d are neither "
+                           "stored nor compaction outputs; storing them: session=%s",
+                           len(missed), min(missed), self._session_id)
+
+    def _identity_anchor_unaccounted(self, messages, identity_messages, cursor, start, identity_at, held, consumed,
+                                     plan, matched, excluded, missed) -> list[int]:
+        """Rows in ``[start, cursor)`` that are neither bound, matched to a stored row, a compaction output (LCM's
+        own scaffold) nor ignored, and that no stored copy in the audited tail accounts for, one copy each. The
+        copies the view's unchanged prefix ``[0, start)`` holds are reserved first. Counting stored copies, not
+        bindings, keeps an upgraded store's pre-ledger rows from being stored again."""
+        from .reconcile import _proof_user_identity
+
+        def key(idx):
+            identity = self._message_replay_identity(identity_messages[idx])
+            return None if _lossy(identity) else _proof_user_identity(identity)  # lossy: no proof of a copy
+
+        explained = set(excluded) | set(matched) | set(plan.get("matched", {})) | plan["replayed"] | set(missed)
+        reserved = Counter(key(idx) for idx in range(min(start, len(messages)))
+                           if idx not in excluded and idx not in matched)
+        unaccounted = []
+        for idx in range(start, cursor):
+            message = identity_messages[idx]
+            if (idx in explained or identity_at(idx) is None and self._identity_is_lcm_scaffold(message)
+                    or self._matches_ignore_message_patterns(messages[idx])):
+                continue
+            wanted = key(idx)
+            copies = [row for row in held.get(wanted, ()) if int(row["store_id"]) not in consumed] if wanted else []
+            if len(copies) > reserved[wanted]:
+                consumed.add(int(copies[-1]["store_id"]))
+                continue
+            unaccounted.append(idx)
+        return unaccounted
 
     def _identity_anchor_record_recovery(self, result, emissions, messages=()) -> None:
         """#1505: keep the actual published recovery object, never a displaced-occurrence mapping."""
