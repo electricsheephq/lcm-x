@@ -349,7 +349,9 @@ class LocalHost:
             ctx["provider"].step = step["id"]
         try:
             result = ctx["gateway"].turn(ctx["chats"][step["conversation"]], step["id"], step["user_text"])
-            return result.get("completed") is True and result.get("outcome") == "success"  # A failed turn is not done.
+            with ctx["provider"].lock:  # An agent that never called the model never ran the turn, whatever the
+                ran = ctx["provider"].stats["calls_per_step"][step["id"]] > 0  # host reports (a queued turn).
+            return result.get("completed") is True and result.get("outcome") == "success" and ran
         except OSError:
             return False
         finally:
