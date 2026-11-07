@@ -20,6 +20,9 @@ SECTIONS = set("model providers custom_providers compression lcm context plugins
                "terminal auxiliary platforms gateway cron memory display agent tools toolsets".split())
 
 
+KEY_NAME = re.compile(r"[a-z][a-z0-9_]{0,63}")  # Fixed doctor key names; anything else is hashed.
+
+
 def _sha(value):
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
@@ -37,7 +40,7 @@ def _db(path):
 
 def trace_events(log):
     runs, outside, imports, other, events = [], Counter(), Counter(), Counter(), Counter()
-    overlapping = ambiguous = 0
+    overlapping = ambiguous = unclosed = 0
     for path in log:
         active, logger, traceback, warning, counted = [], None, False, None, False
         with Path(path).open(encoding="utf-8") as stream:
@@ -79,6 +82,9 @@ def trace_events(log):
                 if final or (line and not line[0].isspace() and line[0] != "|"):
                     traceback = False  # Includes non-Error terminators such as KeyboardInterrupt.
                 traceback = traceback or header
+        # An open run at end of file may have absorbed events from outside any run.
+        unclosed += sum(1 for i in active if runs[i]["refusals"] or runs[i]["detach_warnings"])
+    determined = not (overlapping or ambiguous or unclosed)
     holds = all(r["refusals"] == r["detach_warnings"] <= 1 for r in runs) and not any(outside.values())
     return {"bg_review_runs": len(runs), "refusals_total": sum(r["refusals"] for r in runs) + outside["refusals"],
             "detach_warnings_total": sum(r["detach_warnings"] for r in runs) + outside["detach_warnings"],
@@ -86,7 +92,8 @@ def trace_events(log):
             "per_run": [{k: v for k, v in r.items() if k != "tid"} for r in runs],
             "refusals_outside_runs": outside["refusals"], "detach_warnings_outside_runs": outside["detach_warnings"],
             "overlapping_runs": overlapping, "ambiguous_completions": ambiguous,
-            "per_event_rule_holds": "undetermined" if overlapping or ambiguous else holds,
+            "unclosed_runs_with_events": unclosed, "rule_determined": determined,
+            "per_event_rule_holds": holds if determined else None,
             "optional_import_traces_total": sum(imports.values()), "events_by_logger": dict(sorted(events.items())),
             "by_event": [{"logger": key[0], "missing_module": key[1], "count": count}
                          for key, count in sorted(imports.items(), key=lambda item: tuple(x or "" for x in item[0]))],
@@ -118,8 +125,10 @@ def lifecycle_rows(lcm_db):
         affected = sum(row["affected_stored_rows"] for row in empty)
         safe = all(not any(row[key] for key in ("affected_stored_rows", "messages_in_referenced_sessions",
                                                "nodes_in_referenced_sessions")) for row in empty)
+        safe = safe and "conversation_id" in columns  # Without the column, affected rows cannot be counted.
         return {"lifecycle_rows": len(rows), "empty_lifecycle_rows": len(empty), "empty_rows": empty,
-                "affected_stored_rows": affected, "identity_order_check": "PASS" if safe else "NOT_EVALUATED"}
+                "conversation_column": "conversation_id" in columns, "affected_stored_rows": affected,
+                "identity_order_check": "PASS" if safe else "NOT_EVALUATED"}
 
 
 def _identities(path, order):
@@ -227,7 +236,8 @@ def doctor_match(candidate, previous):
     statuses = {"pass", "warn", "fail", "ok", "skip"}
     unknown = sorted({row["check"] for rows in checks for row in rows if row["status"] not in statuses})
     signatures = [{"check": sig[0], "status": sig[1] if sig[1] in statuses else "unknown_status",
-                   "detail_keys": list(sig[2]) if isinstance(sig[2], tuple) else [],
+                   "detail_keys": [key if KEY_NAME.fullmatch(str(key)) else "h:" + _sha(str(key))[:12]
+                                   for key in sig[2]] if isinstance(sig[2], tuple) else [],
                    "detail_type": "dict" if isinstance(sig[2], tuple) else sig[2], **dict(sig[3])}
                   for sig in sorted({signature(row) for row in checks[0]}, key=repr)]
     return {"warnings": results, "unmatched": unmatched, "failed_checks": failed, "unknown_status": unknown,

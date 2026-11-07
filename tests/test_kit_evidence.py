@@ -42,6 +42,7 @@ def test_detach_runs(tmp_path, text, counts, outside, holds):
     assert result["refusals_total"] == sum(int(n) * count for n, count in counts.items()) + outside
     assert result["refusals_outside_runs"] == outside
     assert result["per_event_rule_holds"] is holds
+    assert result["rule_determined"] is True
     assert result["other_tracebacks"] == {}
 
 
@@ -78,6 +79,8 @@ def _messages(path, order, rows):
 def test_lifecycle_doctor_rule(tmp_path):
     path = _messages(tmp_path / "lcm.db", "store_id", [("stored", "user", "synthetic content", None, None)])
     with sqlite3.connect(path) as conn:
+        conn.execute("ALTER TABLE messages ADD COLUMN conversation_id TEXT")
+        conn.execute("UPDATE messages SET conversation_id = 'has-message'")
         conn.execute("CREATE TABLE summary_nodes (session_id TEXT)")
         conn.execute("INSERT INTO summary_nodes VALUES ('summarized')")
         conn.execute("CREATE TABLE lcm_lifecycle_state (conversation_id TEXT, current_session_id TEXT, "
@@ -268,7 +271,7 @@ def test_doctor_signature_conditions_are_booleans(tmp_path):
     (_log("agent", "thread=bg-review:A OpenAI client created", "INFO") + _trace(kit.REFUSAL)
      + _log("agent", "thread=bg-review:B OpenAI client created", "INFO") + _trace(kit.REFUSAL)
      + _log("agent", "Background review complete: thread=bg-review", "INFO") * 2,
-     "undetermined", 1, 1, 0, 2),
+     None, 1, 1, 0, 2),
     (_run(1).replace(_trace(kit.REFUSAL),
                     _log("agent", "background-review compressor detachment failed") + _trace(kit.REFUSAL)),
      False, 0, 0, 2, 1),
@@ -280,7 +283,8 @@ def test_doctor_signature_conditions_are_booleans(tmp_path):
 ], ids=["overlap", "warning-mismatch", "exception-group", "outside-warning", "explicit-completion"])
 def test_trace_interleaving_and_warnings(tmp_path, text, holds, overlap, ambiguous, warnings, refusals):
     result = kit.trace_events([_write(tmp_path / "host.log", text)])
-    assert result["per_event_rule_holds"] == holds
+    assert result["per_event_rule_holds"] is holds
+    assert result["rule_determined"] is (holds is not None)
     assert result["overlapping_runs"] == overlap
     assert result["ambiguous_completions"] == ambiguous
     assert result["detach_warnings_total"] == warnings
@@ -341,3 +345,35 @@ def test_cli(tmp_path):
     assert proc.returncode == 2
     assert proc.stdout == ""
     assert proc.stderr == "Evidence input/output error\n"
+
+
+def test_unclosed_run_with_events_is_undetermined(tmp_path):
+    text = (_run(1) + _log("agent", "thread=bg-review OpenAI client created", "INFO")
+            + _log("host.fork", "background-review compressor detachment failed") + _trace(kit.REFUSAL))
+    result = kit.trace_events([_write(tmp_path / "host.log", text)])
+    assert result["unclosed_runs_with_events"] == 1
+    assert result["rule_determined"] is False
+    assert result["per_event_rule_holds"] is None
+
+
+def test_lifecycle_without_conversation_column_is_not_evaluated(tmp_path):
+    path = _messages(tmp_path / "lcm.db", "store_id", [("stored", "user", "synthetic content", None, None)])
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE summary_nodes (session_id TEXT)")
+        conn.execute("CREATE TABLE lcm_lifecycle_state (conversation_id TEXT, current_session_id TEXT, "
+                     "last_finalized_session_id TEXT)")
+        conn.execute("INSERT INTO lcm_lifecycle_state VALUES ('empty', NULL, NULL)")
+    result = kit.lifecycle_rows(path)
+    assert result["conversation_column"] is False
+    assert result["identity_order_check"] == "NOT_EVALUATED"
+
+
+def test_doctor_detail_keys_from_data_are_hashed(tmp_path):
+    key = "/private/store/PRIVATE_KEY_NAME.db"
+    paths = [_write(tmp_path / name, json.dumps({"checks": [
+        {"check": "storage", "status": "warn", "detail": {key: 1, "rows": 2}}]}))
+             for name in ("candidate.json", "previous.json")]
+    result = kit.doctor_match(*paths)
+    assert result["candidate_signatures"][0]["detail_keys"] == [
+        "h:" + hashlib.sha256(key.encode()).hexdigest()[:12], "rows"]
+    assert "PRIVATE_KEY_NAME" not in json.dumps(result)
