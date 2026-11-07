@@ -1,5 +1,6 @@
 """Real sandbox controls; never substitute a mock for the egress proof."""
 
+import os
 from pathlib import Path
 import socket
 import subprocess
@@ -22,11 +23,12 @@ def test_positive_control():
         provider.stop()
 
 
-def test_profile_allows_only_named_ports_and_socket_roots(tmp_path):
-    text = sandbox.profile([8123], [tmp_path])
+def test_profile_allows_only_named_ports_and_socket_roots():
+    run_dir = Path.home() / "d5-clone-synthetic-run"  # Never created; outside every refused tree on macOS and Linux.
+    text = sandbox.profile([8123], [run_dir])
     assert "(deny network-outbound)" in text
     assert '(remote ip "localhost:8123")' in text
-    assert f'(subpath "{tmp_path.resolve()}")' in text
+    assert f'(subpath "{run_dir.resolve()}")' in text
     assert '"localhost:*"' not in text and "(remote unix-socket))" not in text
     argv = ["python", "-c", "pass"]
     assert sandbox.wrap(argv, ports=[8123]) == ["/usr/bin/sandbox-exec", "-p", sandbox.profile([8123])] + argv
@@ -72,8 +74,21 @@ def test_unavailable_off_macos():
         sandbox.positive_control("http://127.0.0.1:1/")
 
 
-@pytest.mark.parametrize("root", ["/", "/private", "/private/var/run", "/private/tmp/some-gateway", "/var/run",
+@pytest.mark.parametrize("root", ["/", "/private", "/private/var/run", "/private/tmp/some-gateway", "/var/run", "/run",
+                                  "/run/user", "/tmp/some-gateway", "/var/tmp",
                                   "~", "~/.hermes", "~/.hermes/profiles", "/private/var/folders"])
 def test_socket_roots_that_reach_system_sockets_are_refused(root):
     with pytest.raises(ValueError):
         sandbox.profile([], [Path(root).expanduser()])
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS per-user temp dir")
+def test_the_per_user_temp_dir_itself_is_refused_but_a_run_dir_inside_is_not():
+    import subprocess as sp
+    temp = Path(sp.run(["/usr/bin/getconf", "DARWIN_USER_TEMP_DIR"], capture_output=True, text=True).stdout.strip())
+    private = Path(os.path.realpath(temp))
+    for root in (temp, temp.parent, private, Path("/System/Volumes/Data" + str(private)),
+                 Path("/System/Volumes/Data/private/var/folders"), Path("/System/Volumes/Data" + str(Path.home()))):
+        with pytest.raises(ValueError):
+            sandbox.profile([], [root])
+    assert "d5-run" in sandbox.profile([], [temp / "d5-run"])

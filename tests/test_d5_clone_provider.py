@@ -191,3 +191,18 @@ def test_a_step_named_none_is_not_the_outside_counter():
         assert refused.value.code == 400
     finally:
         instance.stop()
+
+
+def test_a_failed_request_changes_no_counter():
+    provider = Provider({"steps": {"s1": [{"text": "one"}]}})
+    try:
+        provider.step = "s1"
+        before = json.dumps(provider.stats, sort_keys=True, default=str)
+        with pytest.raises(KeyError):  # A message without a role fails after the model was counted.
+            provider.complete({"model": "d5-summary", "messages": [{"content": "x"}]})
+        assert json.dumps(provider.stats, sort_keys=True, default=str) == before
+        reply = provider.complete({"model": "d5-agent", "messages": []})
+        assert reply["choices"][0]["message"]["content"] == "one"
+        assert provider.stats["calls_per_step"]["s1"] == 1
+    finally:
+        provider.stop()

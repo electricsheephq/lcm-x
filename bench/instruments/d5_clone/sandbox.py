@@ -6,6 +6,7 @@ system resolver's socket, so a host name lookup cannot leave the machine through
 """
 
 import json
+import os
 from pathlib import Path
 import socket
 import subprocess
@@ -13,7 +14,23 @@ import sys
 from urllib.parse import urlsplit
 
 
-_SYSTEM_SOCKETS = ("/private/var/run", "/private/tmp", "/private/var/tmp", "/var/run", "/tmp")
+# Both spellings and their resolved forms, so the guard holds where /var/run or /tmp is a link (macOS, Linux).
+_SYSTEM_SOCKETS = tuple(dict.fromkeys(d for raw in ("/private/var/run", "/private/tmp", "/private/var/tmp", "/var/run",
+                                                   "/run", "/tmp", "/var/tmp")
+                                      for d in (raw, os.path.realpath(raw), "/System/Volumes/Data" + raw)))
+
+
+def _user_dirs():
+    """macOS's per-user temp and cache dirs (the counterparts of /tmp, holding other apps' sockets), resolved."""
+    if sys.platform != "darwin":
+        return ()
+    found = []
+    for name in ("DARWIN_USER_TEMP_DIR", "DARWIN_USER_CACHE_DIR"):
+        out = subprocess.run(["/usr/bin/getconf", name], capture_output=True, text=True).stdout.strip()
+        if not out:
+            raise ValueError("cannot resolve the per-user temp dirs")
+        found.append(os.path.realpath(out))
+    return tuple(found)
 
 
 def profile(ports, socket_roots=()):
@@ -27,8 +44,10 @@ def profile(ports, socket_roots=()):
         if '"' in resolved or "\\" in resolved:
             raise ValueError("unsupported socket directory name")
         home = str(Path.home().resolve())
-        subtrees = _SYSTEM_SOCKETS + (home + "/.hermes",)  # Never inside these: other services' sockets live there.
-        ancestors = subtrees + (home, "/private/var/folders")  # Never these or above them.
+        subtrees = _SYSTEM_SOCKETS + (home + "/.hermes", os.path.realpath(home + "/.hermes"))  # Never inside these: other services' sockets live there.
+        # Never these or above them; a dir made for the run INSIDE the per-user temp dir is fine.
+        ancestors = subtrees + (home, "/private/var/folders") + _user_dirs()
+        ancestors += tuple("/System/Volumes/Data" + d for d in ancestors)  # The firmlink spelling of each.
         inside = any(resolved == d or resolved.startswith(d + "/") for d in subtrees)
         above = any(resolved == d or d.startswith(resolved.rstrip("/") + "/") for d in ancestors)
         if inside or above:
