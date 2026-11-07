@@ -153,6 +153,26 @@ def test_control_kept_stamp_stores_once(build, caplog, mode):
     assert replay_links(_engine) == set()
 
 
+@pytest.mark.parametrize("uids", [False, True], ids=["no-uid", "new-uid"])
+def test_rotation_kept_stamp_then_equal_new_turn_is_not_linked(build, caplog, uids):
+    later_stamp = 2200.0
+
+    def append_equal_turn(_engine, view):
+        later = {"role": "user", "content": T, "timestamp": later_stamp}
+        if uids:
+            later["message_uid"] = "d" * 32
+        view.append(later)
+
+    engine, rows = run(build, caplog, mode="rotating", uids=uids, restamp=False,
+                       before_ingest=append_equal_turn)
+    copies = [row for row in rows if row["role"] == "user" and row["content"] == T]
+    assert [(row["session_id"], row["observed_at"]) for row in copies] == [
+        ("S", T_REQ), ("rotated", later_stamp),
+    ]
+    assert replay_links(engine) == set()
+    assert engine._ingest_failure_count == 0
+
+
 @pytest.mark.parametrize("mode", ["inplace", "rotating"])
 def test_different_user_turn_is_never_linked(build, caplog, mode):
     different = "please cancel staging and deploy a different service"

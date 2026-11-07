@@ -7007,27 +7007,22 @@ class LCMEngine(
         proof = self._durable_commit_proof_payload(session)
         if not proof or "output_metadata" not in proof:
             return {}, True  # The existing #1523 emission-view reader owns this fallback.
-        previous, incoming = {}, {}
-        for row in proof["output_metadata"]:
-            if row.get("identity_sha256"):
-                previous.setdefault(row["identity_sha256"], []).append(row)
+        target = [row for row in proof["output_metadata"] if row.get("identity_sha256")]
+        result, matched = {}, 0
         _, identities = self._occurrence_replay_identities(messages, proof)
         for idx, identity in enumerate(identities):
-            if identity is not None:
-                digest = _commit_proof_identity_digest(_proof_user_identity(identity))
-                incoming.setdefault(digest, []).append(idx)
-        result = {}
-        for digest, indexes in incoming.items():
-            candidates = previous.get(digest, ())
-            # Equal identities retain occurrence order. Unequal multiplicities with
-            # several prior occurrences cannot identify a prior stamp safely.
-            if len(candidates) == 1:
-                candidates = candidates * len(indexes)
-            if len(candidates) != len(indexes):
+            if identity is None:
                 continue
-            for idx, row in zip(indexes, candidates):
-                if self._host_occurrence_changed(messages[idx], row):
-                    result[idx] = (session, row)
+            digest = _commit_proof_identity_digest(_proof_user_identity(identity))
+            while matched < len(target) and target[matched]["identity_sha256"] != digest:
+                matched += 1  # Match the snapshot in order, as in _remapped_output_metadata.
+            if matched == len(target):
+                break
+            row = target[matched]
+            if self._host_occurrence_changed(messages[idx], row):
+                result[idx] = (session, row)
+            # A carried row consumes its snapshot position even when its stamp is kept.
+            matched += 1
         return result, False
 
     def _link_restamped_occurrences(self, messages, stored_at, previous, recovery_fallback):
