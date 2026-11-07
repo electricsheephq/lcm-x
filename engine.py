@@ -7147,8 +7147,9 @@ class LCMEngine(
                                           and isinstance(target["content"], str)
                                           and source["content"].strip() == target["content"].strip()
                                           and not any(message.get("role") == "user"
-                                                      and (normalize_content_value(message.get("content"))
-                                                           or "").strip() == target["content"].strip()
+                                                      and message.get("content") is not None
+                                                      and normalize_content_value(message["content"]).strip()
+                                                      == target["content"].strip()
                                                       and self._host_occurrence_metadata(message)["timestamp"]
                                                       == target["observed_at"] for message in messages)]
                             if len(candidates) == 1:
