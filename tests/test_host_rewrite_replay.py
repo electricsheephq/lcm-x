@@ -229,6 +229,8 @@ def test_fix1_f1_cold_batch_then_warm_inplace_merge(tmp_path, arm):
         view = deepcopy([FOLD, SNAP])
         engine.ingest(view)
         survivor = view[1 if arm == "S" else 0]
+        if arm == "M":
+            assert any(e[0] is survivor and e[1] is None for e in engine._identity_anchor_versions)
         survivor["content"] += "\n\nprompt two" if arm == "S" else "\nnext reply"
         if arm == "S":
             survivor["_merged_turn_prefix"] = TODO

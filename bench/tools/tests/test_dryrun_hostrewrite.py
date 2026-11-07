@@ -39,3 +39,18 @@ def test_expected_fold_is_a_design_failure(tmp_path, capsys):
             assert "readonly" in str(exc)
         else:
             raise AssertionError("dry-run connection allowed a write")
+
+
+def test_merged_prompt_after_snapshot_ids_only(tmp_path, capsys):
+    merged = row("user", TODO + "\n\nprompt two", 120)
+    original = [("S", A), ("S", COMPOSITE), ("S", B)]
+    stored = original + [("S", SNAP), ("other", merged), ("S", merged)]
+    host = [(s, dict(m, _ts=m["timestamp"])) for s, m in original + [("S", merged)]]
+    home = Home(tmp_path, {"S": ("acp", None, 2000, "exit"), "other": ("acp", None, 2000, "exit")},
+                host, [(s, dict(m, _obs=m.get("timestamp"))) for s, m in stored])
+    run(home.state, home.lcm)
+    lines = capsys.readouterr().out.splitlines()
+    assert "merged_after_S store_id=6 of=4" in lines
+    assert not any("store_id=5" in line for line in lines)
+    assert lines[-1] == "summary M=0 S=1 EXPECTED=yes:0 merged_after_S=1"
+    assert not any("prompt two" in line or TODO in line for line in lines)
