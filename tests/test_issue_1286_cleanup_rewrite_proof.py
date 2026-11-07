@@ -385,17 +385,15 @@ def test_a_row_changed_inside_the_committed_list_is_not_stored_again_after_a_res
     assert host.count(changed) == 1
 
 
-@pytest.mark.parametrize("reply", [
+_RESENT_REPLIES = pytest.mark.parametrize("reply", [
     f"a new reply to the resent turn{PAD}",
     # Summary-shaped text that no DAG node verifies is real content (#486), not a scaffold.
     f"as the summary said: [Recent Summary (d0, node 7)] the plan [Expand for details: lcm_expand 7]{PAD}",
 ], ids=["plain", "quotes-summary"])
-@pytest.mark.parametrize("variant", ["stub", "reasoning"])
-def test_a_reply_the_warm_path_never_stored_is_not_proven_away(host, variant, reply):
-    """I1: a retry or an edit-resend replaces the stamped user row and its unstamped reply between two ingests.
-    The warm anchor stores the new user row out of host order but keeps the new reply as a positional replay, so
-    it is never stored warm (a gap that predates the re-key). No proof may claim that reply: the restart stores it
-    (with duplicates, as before the re-key), and a second restart stores only the next turn."""
+
+
+def _resend_the_last_turn(host, variant, reply):
+    """A retry or an edit-resend replaces the stamped user row and its unstamped reply between two ingests."""
     _turns(host, variant)
     _commit_cleanup(host, variant)
     host.turn()
@@ -403,10 +401,39 @@ def test_a_reply_the_warm_path_never_stored_is_not_proven_away(host, variant, re
     user = f"[resent] the user resent this turn{PAD}"
     host.live[-2:] = [{"role": "user", "content": user, "timestamp": host.stamp()},
                       {"role": "assistant", "content": reply}]
+    return user
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason="#2116: the warm anchor keeps the replaced unstamped reply below the cursor as a "
+                                                              "positional replay, so the warm path never stores it")
+@_RESENT_REPLIES
+@pytest.mark.parametrize("variant", ["stub", "reasoning"])
+def test_a_reply_the_warm_path_never_stored_is_not_proven_away(host, variant, reply):
+    """I1 (#2116, a v0.30.0 named loss limit): the warm anchor stores the new user row out of host order but keeps
+    the new reply as a positional replay, so today it is never stored warm. The correct behaviour stores it on the
+    warm ingest, once, and the restarts after it store only the next turn."""
+    user = _resend_the_last_turn(host, variant, reply)
+    host.turn()
+    assert (host.count(user), host.count(reply)) == (1, 1)
+    host.restart()
+    host.turn()
+    assert host.count(reply) == 1
+    _restart_stores_only_the_next_turn(host)
+    assert host.count(reply) == 1
+
+
+@_RESENT_REPLIES
+@pytest.mark.parametrize("variant", ["stub", "reasoning"])
+def test_no_proof_claims_a_reply_the_warm_path_never_stored(host, variant, reply):
+    """The guard that holds with or without the #2116 gap: no proof may claim the resent reply while it is unstored,
+    the restart stores it (with duplicates, as before the re-key), and a second restart stores only the next
+    turn."""
+    user = _resend_the_last_turn(host, variant, reply)
     proof = host.engine._durable_commit_proof_payload()
     host.turn()
-    assert (host.count(user), host.count(reply)) == (1, 0)
-    assert host.engine._durable_commit_proof_payload() == proof  # not re-keyed over the unstored reply
+    assert host.count(user) == 1
+    # not re-keyed over an unstored reply
+    assert host.count(reply) == 1 or host.engine._durable_commit_proof_payload() == proof
     host.restart()
     host.turn()
     assert host.count(reply) == 1

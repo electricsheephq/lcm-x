@@ -2,7 +2,8 @@
 prepared Hermes home, writing the events log that ``audit.py --events`` reads.
 
     python -m bench.instruments.gate_kit.drive --hermes-python <python> --hermes-src <host src> --home <HERMES_HOME>
-        --workdir <dir> --events <events.jsonl> [--turns N] [--children N] [--seed 2055] [--max-hours 6] [--dry-run]
+        --workdir <dir> --events <events.jsonl> [--turns N] [--children N] [--compactions N] [--age-turns N]
+        [--seed 2055] [--max-hours 6] [--dry-run]
 
 Two host entry points, both real processes over newline-delimited JSON-RPC on stdio:
 - ``hermes acp`` (acp_driver.AcpProcess): turns, repeated tool calls, ``/compress``, delegate prompts,
@@ -46,6 +47,40 @@ EXIT_GRACE = 60.0  # seconds a host gets to exit on stdin EOF at the end of the 
 # plugins.load_timeout_seconds (LCM-X __init__.py), and the host's fallback warning (agent/agent_init.py:1901). Such a
 # host stores nothing in lcm.db, so its rows would read as a loss: the run stops (exit 3) before it reaches the audit.
 INACTIVE = re.compile(r"LCM-X is NOT active in this process|Context engine 'lcm(?:-x)?' not found")
+STOP_REASON = re.compile(r"compaction stop: reason=(\w+)")
+PRODUCT_FRESH_TAIL = 24  # config.py LCMConfig.fresh_tail_count
+
+
+def fresh_tail(env: dict, home: Path | None = None) -> tuple[int, str]:
+    """LCM-X's effective fresh tail for the hosts and where it came from. The hosts load ``<home>/.env`` over their
+    process environment at startup, so that file's LCM_FRESH_TAIL_COUNT wins. Only that one key is read; the file is
+    never printed."""
+    value, source = env.get("LCM_FRESH_TAIL_COUNT") or None, "env"
+    dotenv = home / ".env" if home is not None else None
+    try:
+        lines = dotenv.read_text(errors="replace").splitlines() if dotenv is not None and dotenv.is_file() else []
+    except OSError:
+        lines = []
+    if lines:
+        for line in lines:
+            key, sep, raw = line.strip().removeprefix("export ").partition("=")
+            if sep and key.strip() == "LCM_FRESH_TAIL_COUNT":
+                raw = raw.strip()
+                if raw[:1] in ("'", '"') and raw.find(raw[0], 1) > 0:  # quoted: the text between the quotes
+                    raw = raw[1:raw.find(raw[0], 1)]
+                else:  # unquoted, as dotenv reads it: an inline comment starts at whitespace then '#'
+                    raw = re.split(r"\s+#", raw, maxsplit=1)[0].strip()
+                value, source = raw or None, ".env"
+    try:
+        return int(value), source
+    except (TypeError, ValueError):
+        return PRODUCT_FRESH_TAIL, "product default"
+
+
+def default_age_turns(env: dict, home: Path | None = None) -> int:
+    """Ageing turns that put the paste outside LCM-X's fresh tail. After the paste come its reply, two rows per ageing
+    turn and the triggering turn's prompt and reply, so ceil(tail / 2) turns leave at least the tail behind it."""
+    return max(1, -(-fresh_tail(env, home)[0] // 2))
 EXIT_LCM_INACTIVE = 3
 EXIT_EVENT_LOG = 4
 PLANNED_FLOORS = ("turns", "delegated_children", "compactions", "compactions_then_restart", "restarts_cold",
@@ -104,10 +139,11 @@ def margin(n: int) -> int:
     return (n * 6 + 4) // 5  # ceil(n * 1.2) in integers (200 * 1.2 is 240.00000000000003 in floats)
 
 
-def targets(turns: int | None = None, children: int | None = None) -> dict:
-    """Every section 5 floor x1.2, rounded up; ``turns``/``children`` may raise those two, never lower them."""
+def targets(turns: int | None = None, children: int | None = None, compactions: int | None = None) -> dict:
+    """Every section 5 floor x1.2, rounded up; optional targets may raise those floors, never lower them."""
     t = {k: margin(FLOORS[k]) for k in PLANNED_FLOORS}
     t["turns"], t["delegated_children"] = max(t["turns"], turns or 0), max(t["delegated_children"], children or 0)
+    t["compactions"] = max(t["compactions"], compactions or 0)
     return t
 
 
@@ -283,9 +319,10 @@ def host_env(base: dict, home: Path, workdir: Path, src: Path) -> dict:
 class Driver:
     def __init__(self, *, python: str, src: Path, home: Path, workdir: Path, events: Events, env: dict,
                  prompt_timeout: float = 600.0, max_hours: float = 6.0, cancel_after: float = 2.0, wrap=(),
-                 acp_factory=None, tui_factory=None):
+                 acp_factory=None, tui_factory=None, age_turns: int = 4):
         self.src, self.home, self.workdir, self.ev = Path(src), Path(home), Path(workdir), events
         self.timeout, self.cancel_after = prompt_timeout, cancel_after
+        self.age_turns = age_turns
         self.stop_at = time.monotonic() + max_hours * 3600
         # Children of an earlier run in a retained home are outside this run, as the audit's --since excludes them.
         self.run_start = time.time()
@@ -415,7 +452,7 @@ class Driver:
         """Only new bytes of this entry's stderr and the home's agent.log; never classify quoted host replies.
         A published compaction wins over a manual no-op after automatic compaction in the triggering turn.
         """
-        compactions, boundary, noop = set(), False, False
+        compactions, boundary, noop, reasons = set(), False, False, []
         for path, (inode, offset) in offsets.items():
             try:
                 with path.open("rb") as fh:
@@ -433,15 +470,18 @@ class Driver:
                     compactions.add((hit["ts"], hit["frac"], hit["sid"] or hit["sid2"], msg))
                 boundary |= "in-place compression boundary kept" in msg
                 noop |= "LCM compression no-op" in msg or "compaction stop: reason=noop" in msg
+                stop = STOP_REASON.search(msg)
+                if stop:
+                    reasons.append(stop.group(1))
         n = len(compactions) or int(boundary)
-        return ("compressed" if n else "noop" if noop else "none"), n
+        return ("compressed" if n else "noop" if noop else "none"), n, sorted(reasons)
 
     def compress(self, o):
         slot = o["slot"]
         self.acp_sid(slot) if slot.startswith("A") else self.tui_rt(slot)
-        for retry in range(3):  # the planned attempt and at most two logged no-op retries
+        for retry in range(3):  # the planned attempt and at most two retries without a real compaction
             if time.monotonic() >= self.stop_at:
-                return True if retry else None  # a no-op attempt already ran and was counted
+                return True if retry else None  # an attempt already ran and was counted
             paths = (self.logs / ("acp.stderr" if slot.startswith("A") else "tui.stderr"),
                      self.home / "logs" / "agent.log")
             offsets = {}
@@ -451,10 +491,29 @@ class Driver:
                     offsets[path] = (stat.st_ino, stat.st_size)
                 except FileNotFoundError:
                     offsets[path] = (None, 0)
-            self.ev.write("compress_request", self.slots[slot]["session"], f"slot={slot}", retry=retry)
+            # The paste or an ageing turn may compact automatically: that publication belongs to this attempt (the
+            # offsets above), and the audit ties a sessionless compaction line only to a compress_request at most
+            # 2 s after it, so a phase=paste request opens an attribution window before the paste. It is a window
+            # only: requests counts the phase=trigger request below.
+            self.ev.write("compress_request", self.slots[slot]["session"], f"slot={slot} phase=paste", retry=retry)
+            # Age the paste outside LCM-X's eight-message fresh tail before the measured triggering turn.
+            for ix in (o["prompt"], *(CATS["plain"][(o["prompt"] + j) % len(CATS["plain"])] for j in range(self.age_turns))):
+                try:
+                    stop = self.send(slot, ix)
+                except (AD.DriverError, OSError, KeyError, ValueError):
+                    self.ev.write("compress_request_failed", self.slots[slot]["session"], f"slot={slot} phase=paste")
+                    raise
+                if stop not in ("end_turn", "complete"):
+                    self.ev.write("compress_request_failed", self.slots[slot]["session"], f"slot={slot} phase=paste")
+                    return False
+            if not self.compress_log_result(offsets)[1]:
+                # Nothing compacted during the paste or ageing turns: close the paste window, so it cannot claim
+                # another session's sessionless line (the audit drops a session's latest request on this event).
+                self.ev.write("compress_request_failed", self.slots[slot]["session"], f"slot={slot} phase=paste unused")
+            self.ev.write("compress_request", self.slots[slot]["session"], f"slot={slot} phase=trigger", retry=retry)
             self.compactions["requests"] += 1
             try:
-                stop = self.send(slot, o["prompt"])
+                stop = self.send(slot, CATS["plain"][(o["prompt"] + self.age_turns) % len(CATS["plain"])])
             except (AD.DriverError, OSError, KeyError, ValueError):
                 self.ev.write("compress_request_failed", self.slots[slot]["session"], f"slot={slot}")
                 raise
@@ -466,15 +525,17 @@ class Driver:
                 host = "compressed" if reply.startswith("Context compressed") else "not_compressed"
             else:
                 res = self.tui.call("session.compress", {"session_id": self.tui_rt(slot)}, self.timeout)
-                host = "compressed" if res.get("compressed") else "not_compressed"
-            logged, n = self.compress_log_result(offsets)
+                host = "compressed" if res.get("status") == "compressed" else "not_compressed"
+            logged, n, reasons = self.compress_log_result(offsets)
             result = host if logged == "none" else logged
             self.compactions["real"] += n
             self.compactions["noop"] += int(logged == "noop")
             self.compactions["log_none"] += int(logged == "none")
+            for reason in reasons:  # LCM-X's own stop reasons (sanitized, time_budget_exhausted, error, ...)
+                self.compactions[f"stop_{reason}"] += 1
             self.ev.write("compress_result", self.slots[slot]["session"], f"slot={slot} manual={result} log={logged}",
-                          log=logged, host_answer=host, compactions=n, retry=retry)
-            if result != "noop":
+                          log=logged, host_answer=host, compactions=n, retry=retry, stop_reasons=reasons)
+            if n:
                 break
         return True
 
@@ -618,12 +679,15 @@ class Driver:
             stopped = "lcm_inactive"
         summary = {"planned": planned_counts(ops), "executed": dict(self.done), "errors": dict(self.ev.errors),
                    "compactions": {"planned": sum(o["op"] == "compress" for o in ops),
-                                   **{k: self.compactions[k] for k in ("requests", "real", "noop", "log_none")}},
+                                   **{k: self.compactions[k] for k in ("requests", "real", "noop", "log_none")},
+                                   "stop_reasons": {k[5:]: v for k, v in sorted(self.compactions.items())
+                                                    if k.startswith("stop_")}},
                    "prompts_by_category": dict(self.prompts),
                    "delegate": {"prompts": self.done["delegate"], "extra_prompts": extra,
                                 "attempts": self.attempts["delegate"],
                                 "children_in_state_db": self.children()},
-                   "context_length": self.context, "stopped": stopped, "sessions": len(self.slots)}
+                   "context_length": self.context, "stopped": stopped, "sessions": len(self.slots),
+                   "age_turns": self.age_turns, "fresh_tail": getattr(self, "fresh_tail", None)}
         self.ev.write("summary", None, "end of run", **summary)
         summary["exit"] = EXIT_LCM_INACTIVE if stopped == "lcm_inactive" else 0
         return summary
@@ -639,19 +703,24 @@ def main(argv=None) -> int:
     ap.add_argument("--append-events", action="store_true", help="explicitly retain and append to a non-empty events file")
     ap.add_argument("--turns", type=int, help="at least this many prompts (never below the floor x1.2)")
     ap.add_argument("--children", type=int, help="at least this many delegated children (never below the floor x1.2)")
+    ap.add_argument("--compactions", type=int, help="at least this many compaction ops (never below the floor x1.2)")
+    ap.add_argument("--age-turns", type=int, help="plain turns to age each paste before the triggering turn "
+                    "(default: ceil(LCM_FRESH_TAIL_COUNT / 2) from the hosts' environment, product tail 24 when unset)")
     ap.add_argument("--seed", type=int, default=2055)
     ap.add_argument("--max-hours", type=float, default=6.0)
     ap.add_argument("--prompt-timeout", type=float, default=600.0)
     ap.add_argument("--cancel-after", type=float, default=2.0, help="seconds into a prompt before session/cancel")
     ap.add_argument("--dry-run", action="store_true")
     a = ap.parse_args(argv)
+    if a.age_turns is not None and a.age_turns < 0:
+        ap.error("--age-turns must be non-negative")
     for name in ("home", "workdir", "events"):
         if under_real_hermes(getattr(a, name)):
             ap.error(f"--{name} must not be at or under the live ~/.hermes")
     for name in ("home", "workdir", "events", "hermes_src"):
         setattr(a, name, getattr(a, name).expanduser().resolve())
     a.hermes_python = str(Path(a.hermes_python).expanduser().absolute())  # retain the venv executable's symlink
-    tg = targets(a.turns, a.children)
+    tg = targets(a.turns, a.children, a.compactions)
     ops = plan(a.seed, tg)
     if a.dry_run:
         print(json.dumps({"targets": tg, "planned": planned_counts(ops)}, indent=1, sort_keys=True))
@@ -665,8 +734,13 @@ def main(argv=None) -> int:
     a.workdir.mkdir(parents=True, exist_ok=True)
     write_notes(a.workdir)
     env = host_env(dict(os.environ), a.home, a.workdir, a.hermes_src)
+    tail, tail_source = fresh_tail(env, a.home)
+    if a.age_turns is None:
+        a.age_turns = default_age_turns(env, a.home)
     d = Driver(python=a.hermes_python, src=a.hermes_src, home=a.home, workdir=a.workdir, events=events,
-               env=env, prompt_timeout=a.prompt_timeout, max_hours=a.max_hours, cancel_after=a.cancel_after)
+               env=env, prompt_timeout=a.prompt_timeout, max_hours=a.max_hours, cancel_after=a.cancel_after,
+               age_turns=a.age_turns)
+    d.fresh_tail = {"count": tail, "source": tail_source}
     try:
         summary = d.run(ops, tg)
     except EventLogError as exc:
