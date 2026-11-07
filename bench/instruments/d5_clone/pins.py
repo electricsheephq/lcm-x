@@ -271,7 +271,9 @@ def local_imports(path, instrument_dir):
     return {f.relative_to(directory).as_posix() for f in found}
 
 
-def build(instrument_dir, files, roots_by_file, loads_by_file, interpreter, data_by_file=None):
+def build(instrument_dir, files, roots_by_file, loads_by_file, interpreter, data_by_file=None, frozen=()):
+    """*frozen* names pinned files that shape a verdict without being called as functions (a script the rules run
+    as a subprocess, say): they go in ``rule_files`` whole, with their local imports, like a file a rule reads."""
     manifest = {"schema": "d5-clone-pins/1", "interpreter": dict(interpreter),
                 "files": [], "functions": [], "extra_hashes": []}
     for name in files:
@@ -287,6 +289,13 @@ def build(instrument_dir, files, roots_by_file, loads_by_file, interpreter, data
                 raise ValueError("a local import is not pinned in loads")
             pending.extend(imported)
     roots, whole = {name: set(roots_by_file.get(name, [])) for name in files}, set()
+    pending = list(frozen)
+    while pending:
+        current = pending.pop()
+        if current not in whole:
+            _load_path(instrument_dir, current).read_bytes()  # A frozen name must be a file here.
+            whole.add(current)
+            pending.extend(local_imports(Path(instrument_dir) / current, instrument_dir))
     while True:  # A rule that calls into another pinned file roots that file's closure there too, to a fixpoint.
         grown = False
         for name in files:

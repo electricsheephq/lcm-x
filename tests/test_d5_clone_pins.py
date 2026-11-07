@@ -410,3 +410,17 @@ def test_a_frozen_file_freezes_what_it_imports_too(tmp_path):
     assert [r["name"] for r in first["rule_files"]] == ["helper.py", "leaf.py"]
     (tmp_path / "leaf.py").write_text("VERDICT = 'PASS'\n", encoding="utf-8")
     assert pins.build(tmp_path, *args)["rule_files"] != first["rule_files"]  # So rules_sha256 moves with the leaf.
+
+
+def test_a_file_named_frozen_is_in_rule_files(tmp_path):
+    (tmp_path / "rules.py").write_text("def rule(x):\n    return x\n", encoding="utf-8")
+    (tmp_path / "script.py").write_text("import leaf\nprint(leaf.X)\n", encoding="utf-8")
+    (tmp_path / "leaf.py").write_text("X = 1\n", encoding="utf-8")
+    interpreter = {"path_basename": Path(sys.executable).name, "version": platform.python_version()}
+    manifest = pins.build(tmp_path, ["rules.py", "script.py"], {"rules.py": ["rule"]}, {"script.py": ["leaf.py"]},
+                          interpreter, frozen=["script.py"])
+    assert [r["name"] for r in manifest["rule_files"]] == ["leaf.py", "script.py"]
+    assert pins.verify(tmp_path / "d5-clone-pins.json", tmp_path)["verdict"] == "PASS"
+    with pytest.raises(OSError):
+        pins.build(tmp_path, ["rules.py", "script.py"], {"rules.py": ["rule"]}, {"script.py": ["leaf.py"]},
+                   interpreter, frozen=["missing.py"])
