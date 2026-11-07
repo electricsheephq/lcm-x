@@ -7,6 +7,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import time
 from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,7 +18,7 @@ class CaptureError(ValueError):
     """A capture failed its safety or integrity precondition."""
 
 
-def _readonly(path):
+def _readonly(path, timeout=5.0):
     """A read-only connection that never writes beside the input. immutable=1 (no locks, no sidecars) is used only for
     a WAL-mode file with neither -wal nor -journal beside it: no connection has it open and nothing is pending. A
     rollback-journal file keeps plain mode=ro, so a held lock reads as "database is locked" and a hot journal fails
@@ -28,8 +29,11 @@ def _readonly(path):
     with path.open("rb") as stream:
         header = stream.read(20)
     wal_mode = len(header) == 20 and header[18] == 2 and header[19] == 2
+    if wal_mode and Path(str(path) + "-wal").exists() and not Path(str(path) + "-shm").exists():
+        raise CaptureError("WAL input has a -wal but no -shm: reading it would create a -shm beside it")
     quiet = wal_mode and not any(Path(str(path) + s).exists() for s in ("-wal", "-journal"))
-    return sqlite3.connect(f"file:{quote(str(path))}?mode=ro" + ("&immutable=1" if quiet else ""), uri=True)
+    return sqlite3.connect(f"file:{quote(str(path))}?mode=ro" + ("&immutable=1" if quiet else ""), uri=True,
+                           timeout=timeout)
 
 
 def _sha256(path):
@@ -52,12 +56,23 @@ def _relative(root, name):
     return root / path
 
 
-def backup(src, dest):
-    dest = Path(dest)
+BACKUP_DEADLINE_S = 3600.0
+
+
+def backup(src, dest, deadline_s=BACKUP_DEADLINE_S):
+    """An online backup bounded by deadline_s: a lock held past it (the step keeps returning busy or locked) fails
+    with CaptureError instead of waiting forever. One step copies every page (pages=-1), because SQLite restarts a
+    multi-step backup whenever another connection writes between steps, which could stall a large live store."""
+    dest, deadline = Path(dest), time.monotonic() + deadline_s
+
+    def progress(status, remaining, total):
+        if time.monotonic() > deadline:
+            raise CaptureError("backup deadline passed")
+
     with dest.open("xb"):
         pass
-    with closing(_readonly(src)) as source, closing(sqlite3.connect(dest)) as target:
-        source.backup(target)
+    with closing(_readonly(src, timeout=min(5.0, deadline_s))) as source, closing(sqlite3.connect(dest)) as target:
+        source.backup(target, pages=-1, progress=progress)
         target.execute("PRAGMA journal_mode=DELETE")
     try:
         result = _quick_check(dest)
@@ -82,10 +97,13 @@ def clone_tree(src, dest):
         shutil.copytree(src, dest, symlinks=True)  # Copy a link as a link, so the check below sees it.
 
 
-def capture(kind, out_dir, *, store_db, host_db, payload_dir, extras=None):
+def capture(kind, out_dir, *, store_db, host_db, payload_dir, extras=None, home=None):
     if kind not in ("T0", "H8"):
         raise CaptureError("unknown capture kind")
     out = Path(out_dir)
+    for source in (payload_dir, home):  # Refused before any mkdir: a capture never lands inside what it copies.
+        if source is not None and out.resolve().is_relative_to(Path(source).resolve()):
+            raise CaptureError("capture dir is inside the payload source or the gateway home")
     out.mkdir()
     backup(store_db, out / "store.db")
     backup(host_db, out / "host-0.db")

@@ -258,6 +258,23 @@ def test_data_names_cannot_exempt_code(tmp_path):
         pins.call_closure(module, ["rule"], data=["h"])
 
 
+
+@pytest.mark.parametrize("name", ["PRED", "ALIAS", "BOTH"])
+def test_a_data_name_must_be_a_literal(tmp_path, name):
+    module = tmp_path / "rules.py"
+    module.write_text("def h():\n    return 1\n\nPRED = lambda row: True\nALIAS = h\nBOTH = (1, h)\nLIMIT = (3, 'x')\n\n"
+                      "def rule():\n    return PRED(1) or ALIAS() or BOTH or LIMIT\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="plain values"):
+        pins.call_closure(module, ["rule"], data=[name])
+    functions, _ = pins.call_closure(module, ["rule"], data=["LIMIT"])  # A literal is a run input.
+    assert "rule" in functions
+
+
+def test_an_import_cycle_back_into_the_root_builds(tmp_path):
+    _, path = _pin(tmp_path, "import helper\n\nY = 2\n\ndef rule():\n    return helper.X\n", loads=["helper.py"],
+                   files={"helper.py": "from rules import Y\nX = Y\n"})
+    assert pins.verify(path, tmp_path)["verdict"] == "PASS"
+
 @pytest.mark.parametrize("loader", [
     "import sibpkg\n\ndef rule():\n    return sibpkg.h()\n",
     "import runpy\n\ndef rule():\n    return runpy.run_path('sibpkg/mod.py')\n",
@@ -359,3 +376,77 @@ def test_a_new_binding_that_shadows_a_builtin_fails_after_a_whole_file_repin(tmp
     save(path, manifest)
     assert pins.function_source_sha256(module, "rule") == manifest["functions"][0]["sha256"]
     assert pins.verify(path, tmp_path)["mismatches"] == ["closure"]
+
+
+def test_a_rule_that_calls_into_another_pinned_file_pins_that_function_too(tmp_path):
+    (tmp_path / "rules.py").write_text("import helper as h\nfrom shared import LIMIT\n\ndef rule(x):\n"
+                                       "    return h.norm(x)[:LIMIT]\n", encoding="utf-8")
+    (tmp_path / "helper.py").write_text("def norm(x):\n    return x.strip()\n\ndef unused():\n    return 0\n",
+                                        encoding="utf-8")
+    (tmp_path / "shared.py").write_text("LIMIT = 5\n", encoding="utf-8")
+    interpreter = {"path_basename": Path(sys.executable).name, "version": platform.python_version()}
+    args = (["rules.py", "helper.py", "shared.py"], {"rules.py": ["rule"]}, {"rules.py": ["helper.py", "shared.py"]},
+            interpreter)
+    first = pins.build(tmp_path, *args)
+    assert {(m["file"], m["qualname"]) for m in first["functions"]} == {("rules.py", "rule"), ("helper.py", "norm")}
+    assert ("shared.py", "LIMIT") in {(a["file"], a["name"]) for a in first["extra_hashes"]}
+    path = tmp_path / "d5-clone-pins.json"
+    assert pins.verify(path, tmp_path)["verdict"] == "PASS"
+    dropped = {**first, "functions": [m for m in first["functions"] if m["file"] != "helper.py"]}
+    save(path, dropped)  # A manifest that leaves the helper out no longer verifies.
+    assert "closure" in pins.verify(path, tmp_path)["mismatches"]
+    (tmp_path / "helper.py").write_text("def norm(x):\n    return x\n\ndef unused():\n    return 0\n",
+                                        encoding="utf-8")
+    second = pins.build(tmp_path, *args)  # The helper changed: the rule closure's hashes change with it.
+    assert [m["sha256"] for m in second["functions"]] != [m["sha256"] for m in first["functions"]]
+
+
+def test_a_rule_reading_a_module_with_no_closure_freezes_it_whole(tmp_path):
+    (tmp_path / "rules.py").write_text("import helper\nimport dyn\n\ndef rule(x):\n    return helper.norm(dyn.load(x))\n",
+                                       encoding="utf-8")
+    (tmp_path / "helper.py").write_text("def norm(x):\n    return x\n", encoding="utf-8")  # Pinned only as a load.
+    (tmp_path / "dyn.py").write_text("import importlib\n\ndef load(x):\n    return importlib.import_module(x)\n",
+                                     encoding="utf-8")  # A file whose closure cannot be pinned.
+    interpreter = {"path_basename": Path(sys.executable).name, "version": platform.python_version()}
+    manifest = pins.build(tmp_path, ["rules.py", "dyn.py"], {"rules.py": ["rule"]}, {"rules.py": ["helper.py", "dyn.py"]},
+                          interpreter)
+    assert [r["name"] for r in manifest["rule_files"]] == ["dyn.py", "helper.py"]
+    path = tmp_path / "d5-clone-pins.json"
+    assert pins.verify(path, tmp_path)["verdict"] == "PASS"
+    save(path, {**manifest, "rule_files": [r for r in manifest["rule_files"] if r["name"] != "helper.py"]})
+    assert "closure" in pins.verify(path, tmp_path)["mismatches"]  # Dropping a frozen file fails verify.
+
+
+def test_a_frozen_file_freezes_what_it_imports_too(tmp_path):
+    (tmp_path / "rules.py").write_text("import helper\n\ndef rule(x):\n    return helper.norm(x)\n", encoding="utf-8")
+    (tmp_path / "helper.py").write_text("import leaf\n\ndef norm(x):\n    return leaf.VERDICT\n", encoding="utf-8")
+    (tmp_path / "leaf.py").write_text("VERDICT = 'FAIL'\n", encoding="utf-8")
+    interpreter = {"path_basename": Path(sys.executable).name, "version": platform.python_version()}
+    args = (["rules.py"], {"rules.py": ["rule"]}, {"rules.py": ["helper.py", "leaf.py"]}, interpreter)
+    first = pins.build(tmp_path, *args)
+    assert [r["name"] for r in first["rule_files"]] == ["helper.py", "leaf.py"]
+    (tmp_path / "leaf.py").write_text("VERDICT = 'PASS'\n", encoding="utf-8")
+    assert pins.build(tmp_path, *args)["rule_files"] != first["rule_files"]  # So rules_sha256 moves with the leaf.
+
+
+def test_a_file_named_frozen_is_in_rule_files(tmp_path):
+    (tmp_path / "rules.py").write_text("def rule(x):\n    return x\n", encoding="utf-8")
+    (tmp_path / "script.py").write_text("import leaf\nprint(leaf.X)\n", encoding="utf-8")
+    (tmp_path / "leaf.py").write_text("X = 1\n", encoding="utf-8")
+    interpreter = {"path_basename": Path(sys.executable).name, "version": platform.python_version()}
+    manifest = pins.build(tmp_path, ["rules.py", "script.py"], {"rules.py": ["rule"]}, {"script.py": ["leaf.py"]},
+                          interpreter, frozen=["script.py"])
+    assert [r["name"] for r in manifest["rule_files"]] == ["leaf.py", "script.py"]
+    assert pins.verify(tmp_path / "d5-clone-pins.json", tmp_path)["verdict"] == "PASS"
+    with pytest.raises(OSError):
+        pins.build(tmp_path, ["rules.py", "script.py"], {"rules.py": ["rule"]}, {"script.py": ["leaf.py"]},
+                   interpreter, frozen=["missing.py"])
+
+
+def test_a_cross_file_data_name_must_be_a_literal(tmp_path):
+    (tmp_path / "rules.py").write_text("import helper\n\ndef rule(x):\n    return helper.PRED(x)\n", encoding="utf-8")
+    (tmp_path / "helper.py").write_text("PRED = lambda row: False\n", encoding="utf-8")
+    interpreter = {"path_basename": Path(sys.executable).name, "version": platform.python_version()}
+    with pytest.raises(ValueError, match="plain values"):
+        pins.build(tmp_path, ["rules.py", "helper.py"], {"rules.py": ["rule"]}, {"rules.py": ["helper.py"]}, interpreter,
+                   {"helper.py": ["PRED"]})
