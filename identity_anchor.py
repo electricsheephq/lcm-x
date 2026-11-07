@@ -669,7 +669,10 @@ class IdentityAnchorMixin:
                              (stamp, emission))
             return True  # Keep admitting the later warm rewrite; row guards still own every write.
         else:
-            if not self._store.get_message_relations([stored_id], "possible_replay_of"):  # a source keeps one link
+            # A source keeps its one link (the borrowed-stamp linker runs first); the alt_stamp read above
+            # ensured the relation table.
+            if not conn.execute("SELECT 1 FROM message_relations WHERE kind='possible_replay_of' AND store_id=? LIMIT 1",
+                                (stored_id,)).fetchone():
                 self._store.add_message_relations([[(stored_id, "possible_replay_of", target, None, None)]])
             return False
 
