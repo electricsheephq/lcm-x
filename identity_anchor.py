@@ -764,7 +764,7 @@ class IdentityAnchorMixin:
         # (a reasoning-cleanup form, or a call's or result's id). An exact form with an alias is never an alias
         # target (checked above), so this is a maximum allocation, in linear time (#2466 review). A candidate left
         # without a copy is unaccounted.
-        used, served, done = set(consumed), set(), set()
+        used, served, done, served_exact = set(consumed), set(), set(), set()
         for stacks, pick in ((exact, 1), (alias, 2)):
             queues: dict = {}
             for pos, item in enumerate(demand):
@@ -782,27 +782,50 @@ class IdentityAnchorMixin:
                     if demand[pos][0] is not None:
                         consumed.add(store_id)
                         served.add(demand[pos][0])
+                        if pick == 1:
+                            served_exact.add(demand[pos][0])
 
-        def storing(k) -> tuple:
-            # Call ids this ingest stores at view index ``k``: none for a row the ignore patterns drop.
-            return () if self._matches_ignore_message_patterns(messages[k]) else (calls(identity_messages[k]) or ())
+        # Tool grouping (#2466 review): a new call is stored only with every result of its view group, and a new result
+        # only with its own view call, stored now (the audit's finds or an unaccounted row, not dropped by the ignore
+        # patterns) or matched by its exact payload. Anything else keeps main's result, never a split pair.
+        new = {idx for idx, wanted in candidates.items() if wanted is not None and idx not in served}
+        stored_now = set(missed) | new
 
-        unaccounted = []
-        pending: dict = {}  # call id -> the earliest view index this ingest stores it at
-        for k in sorted(missed):
-            for ident in (storing(k) if 0 <= k < len(messages) else ()):
-                pending.setdefault(ident, k)
-        for idx, wanted in candidates.items():
-            if wanted is None or idx in served:
-                continue
-            # Never store a result without its call: the call is stored, or this ingest stores it (the audit's own
-            # finds or an earlier unaccounted row), and the ignore patterns do not drop it (#2466 review).
-            if wanted[0] == "tool" and wanted[1] not in stored_calls and not pending.get(wanted[1], idx) < idx:
-                continue
-            unaccounted.append(idx)
-            for ident in (storing(idx) if wanted[0] == "call" else ()):
-                pending.setdefault(ident, idx)
-        return unaccounted
+        def group_call(j):
+            k = j - 1
+            while k >= 0 and identity_messages[k].get("role") == "tool":
+                k -= 1
+            return k if k >= 0 and calls(identity_messages[k]) else None
+
+        def group_results(k):
+            j, out = k + 1, []
+            while j < len(identity_messages) and identity_messages[j].get("role") == "tool":
+                out.append(j)
+                j += 1
+            return out
+
+        changed = True
+        while changed:
+            changed = False
+            for idx in sorted(new):
+                wanted = candidates[idx]
+                if wanted[0] == "call":
+                    ids = set(wanted[1])
+                    ok = all(j in stored_now or j >= cursor and j not in plan["replayed"] for j in group_results(idx)
+                             if str(identity_messages[j].get("tool_call_id") or "") in ids)
+                elif wanted[0] == "tool":
+                    k = group_call(idx)
+                    ok = wanted[1] in stored_calls if k is None else (
+                        wanted[1] in (calls(identity_messages[k]) or ())
+                        and not self._matches_ignore_message_patterns(messages[k])
+                        and (k in stored_now or k in served_exact))
+                else:
+                    continue
+                if not ok:
+                    new.discard(idx)
+                    stored_now.discard(idx)
+                    changed = True
+        return sorted(new)
 
     def _identity_anchor_record_recovery(self, result, emissions, messages=()) -> None:
         """#1505: keep the actual published recovery object, never a displaced-occurrence mapping."""
