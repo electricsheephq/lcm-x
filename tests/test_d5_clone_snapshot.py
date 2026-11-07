@@ -166,3 +166,21 @@ def test_scratch_inside_snapshot_is_refused(fixture):
     (root / "scratch").mkdir()
     with pytest.raises(ValueError):
         snapshot.verify(pin, root, root / "scratch")
+
+
+def test_an_unreadable_subdirectory_fails(tmp_path):
+    snap = tmp_path / "snap"
+    (snap / "lcm-large-outputs" / "hidden").mkdir(parents=True)
+    (snap / "lcm-large-outputs" / "hidden" / "x.json").write_text("{}")
+    pin = tmp_path / "pin.json"
+    pin.write_text(json.dumps({"schema": "d5-clone-snapshot-pin/1", "files": [
+        {"name": "lcm-large-outputs/hidden/x.json", "size": 2,
+         "sha256": hashlib.sha256(b"{}").hexdigest()}]}))
+    (snap / "unpinned").mkdir()
+    (snap / "unpinned" / "extra.txt").write_text("x")
+    (snap / "unpinned").chmod(0o000)
+    try:
+        result = snapshot.verify(pin, snap, tmp_path / "scratch")
+    finally:
+        (snap / "unpinned").chmod(0o755)
+    assert result["verdict"] == "FAIL" and result["unreadable"] is True

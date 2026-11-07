@@ -17,10 +17,15 @@ from .capture import _quick_check, _relative, _sha256
 PAYLOAD = "lcm-large-outputs/"
 
 
+def _raise(error):
+    raise error
+
+
 def _walk(root):
-    """(regular files, symlinks) under root, relative POSIX names; never follows a link."""
+    """(regular files, symlinks) under root, relative POSIX names; never follows a link. A directory that cannot be
+    listed raises, so an unread subtree can never pass as empty."""
     files, links = set(), set()
-    for directory, dirs, names in os.walk(root, followlinks=False):
+    for directory, dirs, names in os.walk(root, followlinks=False, onerror=_raise):
         for name in dirs + names:
             path = Path(directory) / name
             relative = path.relative_to(root).as_posix()
@@ -53,7 +58,11 @@ def verify(pin_path, snapshot_dir, scratch_dir):
 
     if not pin["files"]:
         result["verdict"] = "FAIL"  # A pin that names nothing proves nothing.
-    disk, links = _walk(root)
+    try:
+        disk, links = _walk(root)
+    except OSError:
+        result.update(verdict="FAIL", unreadable=True)  # No message: it could carry a payload path.
+        return result
     for name in sorted(links):
         report("symlinks", name)
     pinned = set()
