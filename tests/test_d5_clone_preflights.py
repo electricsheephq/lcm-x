@@ -40,7 +40,7 @@ class FakeHost:
                               " tool_call_id, conversation_id); CREATE TABLE summary_nodes (node_id INTEGER PRIMARY"
                               " KEY, session_id, summary);")
             host.executescript("CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id, role, content,"
-                               " tool_call_id); CREATE TABLE sessions (id, end_reason);"
+                               " tool_call_id, active DEFAULT 1); CREATE TABLE sessions (id, end_reason);"
                                " INSERT INTO sessions VALUES ('sess-l', NULL);")
         (home / "lcm-large-outputs").mkdir()
         (home / "config.yaml").write_text(json.dumps({"plugins": {"enabled": ["hermes-lcm-x", "d5-local"]}}))  # JSON is YAML.
@@ -70,6 +70,9 @@ class FakeHost:
         with closing(sqlite3.connect(home / "state.db")) as db, db:
             db.executemany("INSERT INTO messages (session_id, role, content, tool_call_id) VALUES (?, ?, ?, ?)",
                            [(sid, *r) for r in host])
+            if self.fault == "inactive-copy":  # An in-place compaction: the original stays, inactive, beside it.
+                db.executemany("INSERT INTO messages (session_id, role, content, tool_call_id, active) VALUES"
+                               " (?, ?, ?, ?, 0)", [(sid, *r) for r in host if r[0] == "tool"])
         ctx["log"] += [ANCHOR] if step["kind"] == "cold" or self.fault == "P6" else []
         ctx["facts"]["compactions_published"] += 1
         ctx["facts"]["whitespace_rewrites"] += bool(step["rewrite"])
@@ -108,7 +111,7 @@ class FakeHost:
 
 
 @pytest.mark.parametrize("fault", [None, "P3", "P4", "P6", "P7", "crash", "no-conversation", "replay-error",
-                                   "not-durable"])
+                                   "not-durable", "inactive-copy"])
 def test_each_preflight_fails_on_its_own_fault(tmp_path, monkeypatch, fault):
     monkeypatch.setitem(sys.modules, "yaml", types.SimpleNamespace(safe_load=json.loads))  # Not in every test venv.
     if fault == "P3":  # A provider whose second reply differs from the first.
@@ -119,7 +122,8 @@ def test_each_preflight_fails_on_its_own_fault(tmp_path, monkeypatch, fault):
     verdicts = pf.produce(host, list(pf.PREFLIGHTS))
     assert host.removed == ([] if fault in ("crash", "replay-error", "not-durable") else ["T0", "H8"])
     expected = dict.fromkeys(pf.PREFLIGHTS, "INCONCLUSIVE" if fault == "crash" else "PASS")
-    expected.update({fault: "FAIL"} if fault in pf.PREFLIGHTS else {"P6": "INCONCLUSIVE"} if fault else {})
+    expected.update({fault: "FAIL"} if fault in pf.PREFLIGHTS else {"P6": "INCONCLUSIVE"}
+                    if fault and fault != "inactive-copy" else {})
     assert verdicts == expected
     for name in pf.PREFLIGHTS:
         text = (tmp_path / f"{name}.json").read_text()

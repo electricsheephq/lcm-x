@@ -70,11 +70,13 @@ def _tops(ctx):
 
 
 def _tool_rows(ctx, plan, step):
-    """(host contents, LCM-X contents) for the step's scripted tool call, stored after the arm's marks."""
+    """(host contents, LCM-X contents) for the step's scripted tool call, stored after the arm's marks. Host rows are the
+    active ones: an in-place compaction keeps the original row, inactive, beside its active copy."""
     call = plan["provider"]["steps"][step["id"]][0]["tool_calls"][0]["id"]
     return tuple([t for t, in _rows(ctx, db, f"SELECT content FROM messages WHERE role = 'tool' AND tool_call_id = ?"
-                                    f" AND {col} > ?", (call, ctx["marks"][mark]))]
-                 for db, col, mark in (("state.db", "id", "host_id"), ("lcm.db", "store_id", "store_id")))
+                                    f" AND {col} > ?{extra}", (call, ctx["marks"][mark]))]
+                 for db, col, mark, extra in (("state.db", "id", "host_id", " AND active = 1"),
+                                              ("lcm.db", "store_id", "store_id", "")))
 
 
 def p3(host, plan):
@@ -105,6 +107,7 @@ def p3(host, plan):
                 "summary_calls": stats["calls_by_model"].get("d5-summary", 0),
                 "outside_step": stats["agent_calls_outside_step"], "replay_misses": sum(stats["replay_misses"].values()),
                 "unknown_models": sum(stats["unknown_models"].values()),
+                "unknown_model_names": sorted(stats["unknown_models"]),  # Config strings only.
                 "off_script": [s for s in ran if stats["calls_per_step"][s] != len(plan["provider"]["steps"][s])]}
             reasons += [f"{tree}: {k}" for k in _failed([
                 ("no published compaction", published < 1), ("no d5-summary call", f["summary_calls"] < 1),
