@@ -61,11 +61,12 @@ def _sha_json(value):
 
 
 def _rows(db, sql, args=()):
-    """A read-only query's rows; a store, table or column that is not there reads as no rows."""
+    """A read-only query's rows; a store, table or column that is not there reads as no rows. A store the read-only
+    open refuses (CaptureError) raises: read as no rows, it would zero a mark and count history as the run's."""
     try:
         with closing(capture._readonly(db)) as con:
             return con.execute(sql, args).fetchall()
-    except (OSError, sqlite3.Error, capture.CaptureError):
+    except (OSError, sqlite3.Error):
         return []
 
 

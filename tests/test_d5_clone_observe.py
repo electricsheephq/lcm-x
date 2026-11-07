@@ -429,3 +429,14 @@ def test_the_real_probe_runs_the_doctor_on_a_clone_and_never_writes_the_arm_home
         db.commit()
     checks, _ = r.probe_checks(r.LocalHost({}, tmp_path).probe({**ctx, "home": damaged}), [KEY])
     assert bars.failed_checks(checks) == ["messages_fts_integrity@pre_open"]
+
+
+def test_a_store_the_read_only_open_refuses_is_never_read_as_empty(tmp_path):
+    db = tmp_path / "lcm.db"
+    with closing(sqlite3.connect(db)) as conn:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("CREATE TABLE messages (store_id INTEGER)")
+    Path(str(db) + "-shm").unlink(missing_ok=True)
+    Path(str(db) + "-wal").write_bytes(b"")
+    with pytest.raises(r.capture.CaptureError):
+        r._rows(db, "SELECT max(store_id) FROM messages")
