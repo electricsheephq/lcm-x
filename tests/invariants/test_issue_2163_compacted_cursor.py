@@ -231,7 +231,26 @@ def test_a_call_whose_stamp_differs_from_its_stored_copy_proves_nothing(build):
     tail = engine._store.get_session_tail(engine._session_id, limit=10)
     counts = Counter(engine._message_replay_identity(row, stored_row=True) for row in tail)
     host = [{**call, "timestamp": 1.0}, deepcopy(result), {"role": "user", "content": "next"}]
-    assert engine._replayed_results_at_cursor(host, 1, tail, set(), {}, counts) == set()
+    assert engine._replayed_results_at_cursor(host, 1, tail, set(), {}, Counter(counts)) == set()
     # Control: the same call with its stored stamp is the stored occurrence.
     host[0]["timestamp"] = 2.0
-    assert engine._replayed_results_at_cursor(host, 1, tail, set(), {}, counts) == {1}
+    assert engine._replayed_results_at_cursor(host, 1, tail, set(), {}, Counter(counts)) == {1}
+
+
+def test_a_vetoed_call_keeps_its_stored_result_from_proving_a_later_call(build):
+    """Review round 3: A and B reuse id ``c`` with other arguments. The host's A is another occurrence (its stamp
+    differs), so the cursor result is stored; A's stored result must not then prove B's new result as a replay."""
+    engine = build()
+    call_a, result = tool_pair("c", "OK", tool_name="poll")
+    call_b = deepcopy(call_a)
+    call_b["tool_calls"][0]["function"]["arguments"] = '{"again": true}'
+    start = {"role": "user", "content": "start", "timestamp": 0.5}
+    engine.ingest([start, {**call_a, "timestamp": 2.0}, deepcopy(result), {**call_b, "timestamp": 4.0}])
+    rows = engine._store.get_session_messages(engine._session_id)
+    stored_a = next(row["store_id"] for row in rows if row["role"] == "assistant")
+    host = [start, {**call_a, "timestamp": 1.0}, deepcopy(result), {**call_b, "timestamp": 4.0}, deepcopy(result),
+            {"role": "user", "content": "next"}]
+    assert engine._replayed_tool_segment_indexes_after_cursor(host, 2, consumed_pairs={1: stored_a}) == set()
+    # Control: with A's stamp agreeing, A's result is the replay and B's new result still is not.
+    host[1]["timestamp"] = 2.0
+    assert engine._replayed_tool_segment_indexes_after_cursor(host, 2, consumed_pairs={1: stored_a}) == {2}

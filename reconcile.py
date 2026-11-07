@@ -3444,6 +3444,10 @@ class ReconcileMixin:
         with the same literal identity (a borrowed placeholder alias is not evidence, #1385), unspent
         by the prefix, and the multiset must still hold a copy, which is then spent. A host and stored
         stamp that differ, on the call or on the result, veto the match. Anything unproven is stored.
+        The stored results that follow the located call copy belong to that occurrence: each one this
+        helper does not spend is reserved from ``counts``, so it can never prove a later call's result
+        after the cursor (a reused id with other arguments, review round 3). Over-reserving can keep a
+        duplicate; it never drops a row.
         """
         call_index = cursor - 1
         if call_index < 0 or str(messages[call_index].get("role") or "") != "assistant":
@@ -3468,14 +3472,28 @@ class ReconcileMixin:
             at = copies[0] if unique else None
         if at is None or self._message_replay_identity(tail_rows[at], stored_row=True) != call_identity:
             return set()
-        call_stamp = self._host_occurrence_metadata(messages[call_index])["timestamp"]
-        stored_call_stamp = _normalize_observed_at(tail_rows[at].get("observed_at"))
-        if call_stamp is not None and stored_call_stamp is not None and call_stamp != stored_call_stamp:
-            return set()  # a different occurrence of the same call
-        stored_results = {}
+        following = []
         for row in tail_rows[at + 1:]:
             if str(row.get("role") or "") != "tool":
                 break
+            following.append(row)
+        spent: set[int] = set()
+
+        def reserve_unspent():
+            for row in following:
+                if (row["store_id"] in spent or row["store_id"] in consumed
+                        or self._matches_ignore_message_patterns(row, stored_row=True)):
+                    continue
+                identity = self._message_replay_identity(row, stored_row=True)
+                if counts[identity] > 0:
+                    counts[identity] -= 1
+        call_stamp = self._host_occurrence_metadata(messages[call_index])["timestamp"]
+        stored_call_stamp = _normalize_observed_at(tail_rows[at].get("observed_at"))
+        if call_stamp is not None and stored_call_stamp is not None and call_stamp != stored_call_stamp:
+            reserve_unspent()
+            return set()  # a different occurrence of the same call
+        stored_results = {}
+        for row in following:
             stored_results.setdefault(str(row.get("tool_call_id") or ""), row)
         replayed, index = set(), cursor
         while index < len(messages) and str(messages[index].get("role") or "") == "tool":
@@ -3494,8 +3512,10 @@ class ReconcileMixin:
                     and (host_stamp is None or stored_stamp is None or host_stamp == stored_stamp)
                     and counts[identity] > 0):
                 counts[identity] -= 1
+                spent.add(stored["store_id"])
                 replayed.add(index)
             index += 1
+        reserve_unspent()
         return replayed
 
     def _bound_retry_placeholder_replay(self, messages, call_index, result_index, stored_rows, users, protected) -> bool:
