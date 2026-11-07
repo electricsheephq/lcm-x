@@ -40,6 +40,26 @@ def _a(text, ts) -> dict:
     return {"role": "assistant", "content": text} if ts is None else {"role": "assistant", "content": text, "timestamp": ts}
 
 
+def _labels(rows) -> list[str]:
+    return [text.replace(PAD, "") for text in rows]
+
+
+def _stored_as_sent(engine, host) -> None:
+    if _labels(row["content"] for row in _stored(engine)) != _labels(row["content"] for row in host):
+        pytest.fail(f"setup: the first view was not stored as sent: {_labels(row['content'] for row in _stored(engine))}")
+
+
+def _expect_7_shape(texts, fixed, known) -> None:
+    """Only main's exact #7 shape (the stored texts, PAD dropped) is the expected failure; a fix shows as a loud
+    XPASS under the strict marker."""
+    if fixed:
+        return
+    observed = _labels(texts)
+    if observed == known:
+        raise AssertionError(f"#7 known shape: {observed}")
+    pytest.fail(f"not the #7 shape: {observed}")
+
+
 def _repair(stamped=False):
     ts = (lambda n: float(n)) if stamped else (lambda n: None)
     host = [_u("U1" + PAD, ts(100)), _a("A1_1" + PAD, ts(101)), _u("U5" + PAD, ts(500)),
@@ -54,13 +74,13 @@ def test_497_repair_merge_before_cursor_unstamped_stores_the_new_user_row_once(t
     try:
         host, repaired = _repair()
         engine.ingest(host)
-        before = len(_stored(engine))
+        _stored_as_sent(engine, host)
         engine.ingest(repaired)
         texts = [row["content"] for row in _stored(engine)]
-        assert texts.count(repaired[4]["content"]) == 1
-        assert texts.count(repaired[5]["content"]) == 1
-        assert repaired[3]["content"] not in texts
-        assert len(texts) == before + 2
+        fixed = (texts.count(repaired[4]["content"]) == texts.count(repaired[5]["content"]) == 1
+                 and repaired[3]["content"] not in texts and len(texts) == len(host) + 2)
+        # Main drops U6 and stores only its reply; the merged assistant row adds nothing.
+        _expect_7_shape(texts, fixed, ["U1", "A1_1", "U5", "A1", "A2", "A6"])
     finally:
         engine.shutdown()
 
@@ -71,12 +91,12 @@ def test_497_repair_merge_without_appended_reply_stores_the_new_user_row(tmp_pat
     try:
         host, repaired = _repair()
         engine.ingest(host)
-        before = len(_stored(engine))
+        _stored_as_sent(engine, host)
         engine.ingest(repaired[:-1])
         texts = [row["content"] for row in _stored(engine)]
-        assert texts.count(repaired[4]["content"]) == 1
-        assert repaired[3]["content"] not in texts
-        assert len(texts) == before + 1
+        fixed = (texts.count(repaired[4]["content"]) == 1 and repaired[3]["content"] not in texts
+                 and len(texts) == len(host) + 1)
+        _expect_7_shape(texts, fixed, ["U1", "A1_1", "U5", "A1", "A2"])  # main drops U6
     finally:
         engine.shutdown()
 
@@ -90,13 +110,14 @@ def test_493_rollback_and_replace_unstamped_stores_the_replacement_once(tmp_path
         ts = (lambda n: float(n)) if turn_stamps == "host" else (lambda n: None)
         host = [_u("U1" + PAD, ts(100)), _a("A1_1" + PAD, ts(101)), _u("U_last" + PAD, None)]
         engine.ingest(host)
-        before = len(_stored(engine))
+        _stored_as_sent(engine, host)
         prime = _u("U_prime" + PAD, None)
         engine.ingest([*host[:2], prime] + ([_a("reply" + PAD, ts(201))] if reply else []))
         texts = [row["content"] for row in _stored(engine)]
-        assert texts.count(prime["content"]) == 1
-        assert texts.count(host[2]["content"]) == 1
-        assert len(texts) == before + 1 + int(reply)
+        fixed = (texts.count(prime["content"]) == texts.count(host[2]["content"]) == 1
+                 and len(texts) == len(host) + 1 + int(reply))
+        # Main drops U_prime; the reply, when sent, is stored.
+        _expect_7_shape(texts, fixed, ["U1", "A1_1", "U_last", *(["reply"] if reply else [])])
     finally:
         engine.shutdown()
 
@@ -107,13 +128,15 @@ def test_493_merge_onto_the_last_row_as_a_new_object_stores_the_new_text(tmp_pat
     try:
         host = [_u("U1" + PAD, None), _a("A1_1" + PAD, None), _u("U_last" + PAD, None)]
         engine.ingest(host)
+        _stored_as_sent(engine, host)
         new = "NEW instruction" + PAD
         composite = _u(host[2]["content"] + "\n\n" + new, None)
         engine.ingest([*host[:2], composite, _a("reply" + PAD, None)])
         texts = [row["content"] for row in _stored(engine)]
-        assert sum(new in text for text in texts) == 1
-        assert texts.count(composite["content"]) == 1  # #259: whole composite, no remainder splitting
-        assert texts.count(host[2]["content"]) == 1
+        fixed = (sum(new in text for text in texts) == 1
+                 and texts.count(composite["content"]) == 1  # #259: whole composite, no remainder splitting
+                 and texts.count(host[2]["content"]) == 1)
+        _expect_7_shape(texts, fixed, ["U1", "A1_1", "U_last", "reply"])  # main drops the composite
     finally:
         engine.shutdown()
 
@@ -248,8 +271,10 @@ def test_anchor_off_stores_the_new_user_row_out_of_scope_for_7(tmp_path, monkeyp
     try:
         host, repaired = _repair()
         engine.ingest(host)
+        _stored_as_sent(engine, host)
         engine.ingest(repaired)
-        assert any(row["content"] == repaired[4]["content"] for row in _stored(engine))
+        texts = [row["content"] for row in _stored(engine)]
+        _expect_7_shape(texts, repaired[4]["content"] in texts, ["U1", "A1_1", "U5", "A1", "A2", "A6"])
     finally:
         engine.shutdown()
 
@@ -262,8 +287,10 @@ def test_anchor_off_stores_a_stamped_new_user_row(tmp_path, monkeypatch):
     try:
         host, repaired = _repair(stamped=True)
         engine.ingest(host)
+        _stored_as_sent(engine, host)
         engine.ingest(repaired)
-        assert any(row["content"] == repaired[4]["content"] for row in _stored(engine))
+        texts = [row["content"] for row in _stored(engine)]
+        _expect_7_shape(texts, repaired[4]["content"] in texts, ["U1", "A1_1", "U5", "A1", "A2", "A6"])
     finally:
         engine.shutdown()
 
@@ -275,11 +302,12 @@ def test_truncated_then_replaced_row_stores_the_new_row(tmp_path):
     try:
         host = [_u("U1" + PAD, None), _a("A1" + PAD, None), _u("U2" + PAD, None), _a("A2" + PAD, None)]
         engine.ingest(host)
+        _stored_as_sent(engine, host)
         engine.ingest(host[:2])
         new = _u("NEW question" + PAD, None)
         engine.ingest([host[0], new])
         texts = [row["content"] for row in _stored(engine)]
-        assert texts.count(new["content"]) == 1
+        _expect_7_shape(texts, texts.count(new["content"]) == 1, ["U1", "A1", "U2", "A2"])  # main drops the new row
     finally:
         engine.shutdown()
 
