@@ -254,3 +254,26 @@ def test_a_vetoed_call_keeps_its_stored_result_from_proving_a_later_call(build):
     # Control: with A's stamp agreeing, A's result is the replay and B's new result still is not.
     host[1]["timestamp"] = 2.0
     assert engine._replayed_tool_segment_indexes_after_cursor(host, 2, consumed_pairs={1: stored_a}) == {2}
+
+
+def _poll(ids, args, stamp):
+    return {"role": "assistant", "content": "", "timestamp": stamp, "tool_calls": [
+        {"id": i, "type": "function", "function": {"name": "poll", "arguments": args}} for i in ids]}
+
+
+def test_a_result_proves_replay_only_for_the_call_copy_it_follows(build):
+    """Review round 4: the store holds A(c)·X, B(c,d)·Y, C(d). The host's A is another occurrence (its stamp
+    differs), so the X after it is new. B's stored segment owns one X and one Y; the host repeats X and Y after B and
+    after C. Only the (call, result) pairs the tail still owns prove a segment replayed; C's Y is not owned by C."""
+    engine = build()
+    x = {"role": "tool", "tool_call_id": "c", "content": "X"}
+    y = {"role": "tool", "tool_call_id": "d", "content": "Y"}
+    start = {"role": "user", "content": "start", "timestamp": 0.5}
+    engine.ingest(deepcopy([start, _poll(["c"], '{"a":1}', 2.0), x, _poll(["c", "d"], '{"b":1}', 4.0), y,
+                            _poll(["d"], '{"c":1}', 5.0)]))
+    rows = engine._store.get_session_messages(engine._session_id)
+    stored_a = next(row["store_id"] for row in rows if row["role"] == "assistant")
+    host = [start, _poll(["c"], '{"a":1}', 1.0), x, _poll(["c", "d"], '{"b":1}', 4.0), x, y,
+            _poll(["d"], '{"c":1}', 5.0), y, {"role": "user", "content": "next"}]
+    suppressed = engine._replayed_tool_segment_indexes_after_cursor(deepcopy(host), 2, consumed_pairs={1: stored_a})
+    assert 7 not in suppressed, suppressed  # C's result is not owned by any stored C pair: it is stored

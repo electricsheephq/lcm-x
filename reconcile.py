@@ -3333,13 +3333,34 @@ class ReconcileMixin:
         # each suppression is then backed by a stored copy the prefix does not
         # account for. Over-reserving can keep a duplicate.
         stored_identity_counts.subtract(prefix_counts)
+        # Review round 4: a stored result proves a replay only for a stored copy of the call it follows. Count each
+        # stored result under the call that owns it, and reserve the host prefix's own pairs the same way.
+        owned = Counter()
+        for rows, stored_side, skip in ((tail_rows, True, consumed), (messages[:max(0, cursor)], False, held)):
+            owner = None
+            for pos, row in enumerate(rows):
+                role = str(row.get("role") or "")
+                if role != "tool":
+                    owner = (self._message_replay_identity(row, stored_row=stored_side)
+                             if role == "assistant" and row.get("tool_calls") else None)
+                    continue
+                key = row["store_id"] if stored_side else pos
+                if (owner is None or key in skip
+                        or self._matches_ignore_message_patterns(row, stored_row=stored_side)):
+                    continue
+                identity = self._message_replay_identity(row, stored_row=stored_side)
+                if not _has_lossy_redacted_identity(identity):
+                    owned[(owner, identity)] += 1 if stored_side else -1
         replayed: set[int] = set()
         metadata = None  # Loaded once, only when a borrowed pair binds.
         users = None  # Lazily index both views once per replay scan.
         protected = set()
         stored_uids: set[str] = set()
-        replayed.update(self._replayed_results_at_cursor(
-            messages, cursor, tail_rows, consumed, consumed_pairs, stored_identity_counts))
+        at_cursor = self._replayed_results_at_cursor(
+            messages, cursor, tail_rows, consumed, consumed_pairs, stored_identity_counts)
+        for idx in at_cursor:
+            owned[(self._message_replay_identity(messages[cursor - 1]), self._message_replay_identity(messages[idx]))] -= 1
+        replayed.update(at_cursor)
         index = max(0, cursor)
         while index < len(messages):
             assistant = messages[index]
@@ -3412,6 +3433,8 @@ class ReconcileMixin:
                     result_indexes[tool_call_id] = probe
                     segment_needs[result_identity] += 1
                 probe += 1
+            pair_needs = Counter((assistant_identity, self._message_replay_identity(messages[idx]))
+                                 for idx in result_indexes.values())
             if (
                 call_ids
                 and call_ids.issubset(result_indexes)
@@ -3425,8 +3448,10 @@ class ReconcileMixin:
                     stored_identity_counts[identity] >= needed
                     for identity, needed in segment_needs.items()
                 )
+                and all(owned[pair] >= needed for pair, needed in pair_needs.items())
             ):
                 stored_identity_counts.subtract(segment_needs)
+                owned.subtract(pair_needs)
                 replayed.add(index)
                 replayed.update(result_indexes.values())
             index = max(index + 1, probe)
