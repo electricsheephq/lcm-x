@@ -7,8 +7,8 @@ import pytest
 
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
-from tests.test_issue_1286_cleanup_rewrite_proof import SID
-from tests.test_issue_2305_cursor0_replay_links import _counts, _ingest_copies, _pairs, host  # noqa: F401
+from tests.test_issue_2305_cursor0_replay_links import _counts, _ingest_copies, _pairs
+from tests.test_issue_2305_cursor0_replay_links import host as host  # noqa: F401  (pytest fixture)
 
 
 def _engine(tmp_path):
