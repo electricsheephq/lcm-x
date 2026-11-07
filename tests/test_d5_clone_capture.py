@@ -5,6 +5,8 @@ import hashlib
 import json
 from pathlib import Path
 import sqlite3
+import time
+import types
 from datetime import datetime
 
 import pytest
@@ -159,6 +161,23 @@ def test_inner_symlink_is_refused_on_the_portable_copy_path(inputs, tmp_path, mo
     assert not (tmp_path / "out" / "lcm-large-outputs" / "inner-link.json").exists()
 
 
+
+def test_a_wal_input_with_a_wal_but_no_shm_is_refused_and_left_unwritten(tmp_path):
+    live, copy = tmp_path / "live", tmp_path / "copy"
+    live.mkdir()
+    copy.mkdir()
+    with closing(sqlite3.connect(live / "s.db")) as conn:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA wal_autocheckpoint=0")
+        conn.execute("CREATE TABLE t (x)")
+        conn.execute("INSERT INTO t VALUES (1)")
+        conn.commit()
+        for name in ("s.db", "s.db-wal"):  # A copy that kept the -wal and dropped the -shm.
+            (copy / name).write_bytes((live / name).read_bytes())
+    with pytest.raises(cap.CaptureError, match="no -shm"):
+        cap._readonly(copy / "s.db")
+    assert sorted(p.name for p in copy.iterdir()) == ["s.db", "s.db-wal"]  # Nothing written beside the input.
+
 def test_reading_a_stopped_wal_input_writes_no_sidecar(tmp_path):
     db = tmp_path / "stopped.db"
     with closing(sqlite3.connect(db)) as conn:
@@ -206,6 +225,53 @@ def test_a_locked_rollback_journal_input_is_not_read_without_its_lock(tmp_path):
         with closing(cap._readonly(db)) as reader, pytest.raises(sqlite3.OperationalError, match="locked"):
             reader.execute("SELECT count(*) FROM t").fetchone()
         writer.execute("ROLLBACK")
+
+
+def test_a_held_lock_fails_the_backup_at_its_deadline(tmp_path):
+    db = tmp_path / "held.db"
+    with closing(sqlite3.connect(db, isolation_level=None)) as writer:
+        writer.execute("CREATE TABLE messages (store_id INTEGER PRIMARY KEY)")
+        writer.execute("BEGIN EXCLUSIVE")
+        started = time.monotonic()
+        with pytest.raises(cap.CaptureError, match="deadline"):
+            cap.backup(db, tmp_path / "out.db", deadline_s=0.3)
+        assert time.monotonic() - started < 5
+        writer.execute("ROLLBACK")
+    cap.backup(db, tmp_path / "out2.db", deadline_s=5)  # Released: the same input backs up.
+
+
+def test_a_write_between_backup_steps_does_not_stall_the_backup(tmp_path, monkeypatch):
+    """SQLite restarts a multi-step online backup whenever another connection writes between steps, so a store with
+    a live writer could never finish. Here another connection writes at every progress callback."""
+    db = tmp_path / "live.db"
+    with closing(sqlite3.connect(db)) as setup:
+        setup.execute("PRAGMA journal_mode=WAL")
+        setup.execute("CREATE TABLE messages (store_id INTEGER PRIMARY KEY, content BLOB)")
+        setup.executemany("INSERT INTO messages (content) VALUES (?)", [(b"x" * 3000,) for _ in range(3000)])
+        setup.commit()
+    writer, clock = sqlite3.connect(db, isolation_level=None), time.monotonic
+    writer.execute("INSERT INTO messages (content) VALUES (x'00')")  # A live writer: the -wal exists, so no immutable read.
+
+    def write_then_tick():
+        writer.execute("INSERT INTO messages (content) VALUES (x'00')")
+        return clock()
+
+    monkeypatch.setattr(cap, "time", types.SimpleNamespace(monotonic=write_then_tick))
+    try:
+        cap.backup(db, tmp_path / "out.db", deadline_s=3)
+    finally:
+        writer.close()
+
+
+@pytest.mark.parametrize("inside", ["payload", "home"])
+def test_a_capture_inside_its_payload_source_or_the_home_is_refused_before_mkdir(inputs, tmp_path, inside):
+    home, payload = tmp_path / "home", tmp_path / "home" / "lcm-large-outputs"
+    payload.mkdir(parents=True)
+    out = (payload if inside == "payload" else home) / "T0"
+    with pytest.raises(cap.CaptureError, match="inside"):
+        cap.capture("T0", out, store_db=inputs[0], host_db=inputs[1], payload_dir=payload,
+                    **({"home": home} if inside == "home" else {}))
+    assert not out.exists()
 
 
 def test_a_symlinked_database_input_is_refused_before_any_read(tmp_path):

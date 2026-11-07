@@ -179,9 +179,13 @@ def call_closure(path, roots, data=()):
     while pending:
         name = pending.pop()
         if name in data:
-            if any(isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Import, ast.ImportFrom))
-                   for n in bindings.get(name, [])):
-                raise ValueError(f"data names must be plain values, not code: {name}")
+            for n in bindings.get(name, []):  # A literal only: a lambda or an alias to a function is code.
+                try:
+                    if not isinstance(n, (ast.Assign, ast.AnnAssign)) or n.value is None:
+                        raise ValueError
+                    ast.literal_eval(n.value)
+                except ValueError:
+                    raise ValueError(f"data names must be plain values, not code: {name}") from None
             continue
         if name in seen:
             continue
@@ -206,6 +210,32 @@ def call_closure(path, roots, data=()):
         pending.extend(loads & (bindings.keys() | bound))
     functions = {n for n in seen if isinstance(bindings[n][0], (ast.FunctionDef, ast.AsyncFunctionDef))}
     return functions, seen - functions
+
+
+def cross_file_refs(instrument_dir, name, members):
+    """(file, name) pairs that the closure *members* of pinned file *name* read from another top-level module of
+    the instrument directory: ``alias.attr`` through an ``import module [as alias]`` member, or a ``from module
+    import attr`` member. The closure layer is per file, so these are what carry a rule into another file."""
+    body = ast.parse(_path(instrument_dir, name).read_text(encoding="utf-8")).body
+    bindings, aliases, refs = _bindings(body), {}, set()
+
+    def target(module):
+        return f"{module}.py" if module and "." not in module and (Path(instrument_dir) / f"{module}.py").is_file() else None
+
+    for member in members:
+        nodes = bindings.get(member, [])
+        if len(nodes) != 1:
+            continue
+        if isinstance(nodes[0], ast.Import):
+            aliases.update({member: target(a.name) for a in nodes[0].names
+                            if (a.asname or a.name.split(".")[0]) == member and target(a.name)})
+        elif isinstance(nodes[0], ast.ImportFrom) and not nodes[0].level and target(nodes[0].module):
+            refs |= {(target(nodes[0].module), a.name) for a in nodes[0].names if (a.asname or a.name) == member}
+    for member in members:
+        for node in bindings.get(member, []):
+            refs |= {(aliases[n.value.id], n.attr) for n in ast.walk(node) if isinstance(n, ast.Attribute)
+                     and isinstance(n.value, ast.Name) and n.value.id in aliases}
+    return refs
 
 
 def _module_file(directory, parts):
@@ -245,11 +275,12 @@ def local_imports(path, instrument_dir):
     return {f.relative_to(directory).as_posix() for f in found}
 
 
-def build(instrument_dir, files, roots_by_file, loads_by_file, interpreter, data_by_file=None):
+def build(instrument_dir, files, roots_by_file, loads_by_file, interpreter, data_by_file=None, frozen=()):
+    """*frozen* names pinned files that shape a verdict without being called as functions (a script the rules run
+    as a subprocess, say): they go in ``rule_files`` whole, with their local imports, like a file a rule reads."""
     manifest = {"schema": "d5-clone-pins/1", "interpreter": dict(interpreter),
                 "files": [], "functions": [], "extra_hashes": []}
     for name in files:
-        path = _path(instrument_dir, name)
         listed = set(loads_by_file.get(name, []))
         pending, scanned = [name], set()
         while pending:  # Imports of the file and, transitively, of every module it loads must all be listed.
@@ -257,16 +288,53 @@ def build(instrument_dir, files, roots_by_file, loads_by_file, interpreter, data
             if current in scanned:
                 continue
             scanned.add(current)
-            imported = local_imports(Path(instrument_dir) / current, instrument_dir) - {current}
+            imported = local_imports(Path(instrument_dir) / current, instrument_dir) - {current, name}  # The root is pinned.
             if imported - listed:
                 raise ValueError("a local import is not pinned in loads")
             pending.extend(imported)
+    roots, whole = {name: set(roots_by_file.get(name, [])) for name in files}, set()
+    pending = list(frozen)
+    while pending:
+        current = pending.pop()
+        if current not in whole:
+            _load_path(instrument_dir, current).read_bytes()  # A frozen name must be a file here.
+            whole.add(current)
+            pending.extend(local_imports(Path(instrument_dir) / current, instrument_dir))
+    while True:  # A rule that calls into another pinned file roots that file's closure there too, to a fixpoint.
+        grown = False
+        for name in files:
+            reached = call_closure(_path(instrument_dir, name), sorted(roots[name]), (data_by_file or {}).get(name, []))
+            for other, attr in cross_file_refs(instrument_dir, name, reached[0] | reached[1]):
+                if other in roots and attr in (data_by_file or {}).get(other, []):
+                    call_closure(_path(instrument_dir, other), [attr], (data_by_file or {}).get(other, []))  # A literal.
+                    continue
+                if other in whole or attr in roots.get(other, ()):
+                    continue
+                try:
+                    if other not in roots:
+                        raise ValueError("pinned only as a load")
+                    call_closure(_path(instrument_dir, other), [attr], (data_by_file or {}).get(other, []))
+                    roots[other].add(attr)
+                except ValueError:  # No closure to pin it by (a load, or dynamic): the rule freezes the whole file,
+                    pending = [other]  # and every local module it imports, transitively.
+                    while pending:
+                        current = pending.pop()
+                        if current not in whole:
+                            whole.add(current)
+                            pending.extend(local_imports(Path(instrument_dir) / current, instrument_dir))
+                grown = True
+        if not grown:
+            break
+    manifest["rule_files"] = [{"name": name, "sha256": _sha(_load_path(instrument_dir, name).read_bytes())}
+                              for name in sorted(whole)]
+    for name in files:
+        path = _path(instrument_dir, name)
         manifest["files"].append({"name": name, "sha256": _sha(path.read_bytes()), "loads": [
             {"name": load, "sha256": _sha(_load_path(instrument_dir, load).read_bytes())}
             for load in loads_by_file.get(name, [])]})
         data = sorted((data_by_file or {}).get(name, []))
         manifest["files"][-1]["data"] = data
-        functions, assignments = call_closure(path, roots_by_file.get(name, []), data)
+        functions, assignments = call_closure(path, sorted(roots[name]), data)
         manifest["functions"].extend(
             {"file": name, "qualname": f, "sha256": function_source_sha256(path, f)}
             for f in sorted(functions))
@@ -315,6 +383,7 @@ def verify(manifest_path, instrument_dir, python_version=None, interpreter=None)
             mismatches.append("manifest")  # Duplicate files, or a member of a file the manifest does not pin.
         entries = [(f["name"], f["sha256"], None) for f in manifest["files"]]
         entries += [(m["name"], m["sha256"], None) for f in manifest["files"] for m in f["loads"]]
+        entries += [(r["name"], r["sha256"], None) for r in manifest.get("rule_files", [])]  # Frozen whole by a rule.
         entries += [(f["file"], f["sha256"], f["qualname"]) for f in manifest["functions"]]
         entries += [(a["file"], a["sha256"], (a["name"],)) for a in manifest["extra_hashes"]
                     if a["kind"] == "assign"]
@@ -338,9 +407,16 @@ def verify(manifest_path, instrument_dir, python_version=None, interpreter=None)
             if not members:  # shadows a builtin) changes a rule while every recorded hash still matches.
                 continue
             try:
-                reached = call_closure(_path(instrument_dir, f["name"]), functions, f.get("data", []))
+                reached = call_closure(_path(instrument_dir, f["name"]), sorted(members), f.get("data", []))
                 if reached[0] | reached[1] != members:
                     mismatches.append("closure")
+                for other, attr in cross_file_refs(instrument_dir, f["name"], members):  # Into another file: there
+                    pinned_there = {m["qualname"] for m in manifest["functions"] if m["file"] == other} | {  # too.
+                        a["name"] for a in manifest["extra_hashes"] if a["file"] == other}
+                    data_there = next((g.get("data", []) for g in manifest["files"] if g["name"] == other), [])
+                    frozen = {r["name"] for r in manifest.get("rule_files", [])}
+                    if other not in frozen and attr not in pinned_there and attr not in data_there:
+                        mismatches.append("closure")
             except (OSError, ValueError, SyntaxError):
                 mismatches.append("closure")
         pinned = {f["name"] for f in manifest["files"]} | {m["name"] for f in manifest["files"] for m in f["loads"]}
