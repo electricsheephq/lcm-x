@@ -582,6 +582,26 @@ def test_non_string_view_call_ids_are_unsure(tmp_path, call_id):
         engine.shutdown()
 
 
+@pytest.mark.parametrize("flagged", [False, True], ids=["recorded", "earlier-hop-unrecorded"])
+def test_an_unrecorded_earlier_rotation_ends_the_scope(tmp_path, caplog, flagged):
+    """#2466 review: P -> C's predecessor write failed (C flagged), then C -> D was recorded. D's scope ends at C,
+    so P's stored call would be invisible: the presence check must fall back to main, not report the call absent."""
+    engine = _engine(tmp_path)
+    try:
+        engine._store.append_batch("P", [_call("call_parent", 1), _result("call_parent", "held", 2)])
+        engine._record_rotation_predecessor(SESSION, "C")
+        if flagged:
+            engine._rotation_lineage_unrecorded = {"C"}
+        else:
+            engine._record_rotation_predecessor("C", "P")
+        with caplog.at_level(logging.WARNING):
+            found = _presence(engine, [_call("call_parent", 1), _result("call_parent", "held", 2)])
+        assert found == []
+        assert any("presence unavailable" in r.getMessage() for r in caplog.records) is flagged
+    finally:
+        engine.shutdown()
+
+
 def test_a_transient_predecessor_read_failure_cannot_hide_a_scope_session(tmp_path, monkeypatch, caplog):
     engine = _engine(tmp_path)
     try:

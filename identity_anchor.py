@@ -636,8 +636,6 @@ class IdentityAnchorMixin:
             cached = getattr(self, "_identity_anchor_chain_cache", None)
             if self._state_db_path().exists() and (cached is None or cached[0] != session):
                 raise ValueError("incomplete ancestry read")
-            if session in getattr(self, "_rotation_lineage_unrecorded", set()):
-                raise ValueError("unrecorded rotation lineage")
             predecessors = self._rotation_predecessor_session_ids(session)
             # The helper swallows read errors. Verify its reads before trusting the scope as complete.
             for hop, source in enumerate([session, *predecessors]):
@@ -646,6 +644,9 @@ class IdentityAnchorMixin:
                 if next_source != (predecessors[hop] if hop < len(predecessors) else None):
                     raise ValueError("incomplete rotation predecessor scope")
             scope = list(dict.fromkeys([session, *chain, *predecessors]))
+            if set(scope) & getattr(self, "_rotation_lineage_unrecorded", set()):
+                # Any session of the scope whose own predecessor write failed ends the scope early (#2466 review).
+                raise ValueError("unrecorded rotation lineage")
             rows = {int(row["store_id"]): row for group in held.values() for row in group}
             budget, byte_budget = _PRESENCE_WINDOW_ROWS, _PRESENCE_WINDOW_BYTES
             for source in scope:
