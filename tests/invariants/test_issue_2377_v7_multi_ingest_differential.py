@@ -24,10 +24,13 @@ while both runs hold identical rows, a plan relabels some delivered occurrences 
 conversation. Rows never change owner later, as on a real upgraded or shared store. The relabel is applied by true occurrence
 in both runs. A link into a row of another conversation is a failure of its own. Main's predicate
 may skip a row on another conversation's twin (a loss on main); v7 stores it and must not link
-across conversations. So the variant silent check counts copies inside this conversation (blank ids
-included), pooled per key as the scorer counts: unlinked copies = rows - distinct true occurrences
-- linked rows, floored at 0; v7 must not exceed main on any key. An occurrence's own row is never a
-copy; which row of a key carries the link is not observable (the pooling rule above).
+across conversations. The variant silent check is strict, per key inside this conversation (blank
+and active spellings are one owner): v7's unlinked rows, less its OWN rows, may not exceed main's
+unlinked rows. An own row is an unlinked row of an (occurrence, key) that main never held in this
+conversation, so main lost it and v7 kept it; a linked row is never an own row. In a plan with
+another named conversation, one strict flag shape is exempt and counted (the disclosed limit): v7
+stored a row of that key that main lost, the link went to that new row, and per key links equal
+copies (rows - occurrences), so a later replay of the key is the unlinked one. Any other flag fails.
 """
 from copy import deepcopy
 from collections import Counter, defaultdict
@@ -169,13 +172,17 @@ def run_plan(ingests, folder, main_mode):
         sources = {s for s, _kind, _t in relations(engine)}
         rows = engine._store.get_session_messages("S")
         unlinked = Counter(key(r) for r in rows if r["store_id"] not in sources)
-        local = {r["store_id"]: key(r) for r in rows if (r["conversation_id"] or "").strip() in ("", "conversation")}
-        by_key = {sid: k[1:] for sid, k in local.items()}  # the blank and active spellings are one owner
-        rows_k, linked_k = Counter(by_key.values()), Counter(k for sid, k in by_key.items() if sid in sources)
-        occurrences_k = Counter(k for _idx, k in {(idx, by_key[sid]) for idx, ids in stored.items()
-                                                  for sid in ids if sid in by_key})
-        copies = {k: max(0, n - occurrences_k[k] - linked_k[k]) for k, n in rows_k.items()}
-        return set(stored), unlinked, sorted(foreign), copies
+        # This conversation's rows (blank ids included), keyed without the conversation spelling.
+        local = {r["store_id"]: key(r)[1:] for r in rows if (r["conversation_id"] or "").strip() in ("", "conversation")}
+        pairs = [(idx, local[sid], sid in sources) for idx, ids in stored.items() for sid in ids if sid in local]
+        ownership = dict(
+            unlinked=Counter(k for sid, k in local.items() if sid not in sources),
+            held={(idx, k) for idx, k, _linked in pairs},
+            own={(idx, k) for idx, k, linked in pairs if not linked},
+            linked_pairs={(idx, k) for idx, k, linked in pairs if linked},
+            rows=Counter(local.values()), links=Counter(k for sid, k in local.items() if sid in sources),
+            occurrences=Counter(k for _idx, k in {(idx, k) for idx, k, _linked in pairs}))
+        return set(stored), unlinked, sorted(foreign), ownership
     finally:
         for engine in engines:
             engine.shutdown()
@@ -188,8 +195,24 @@ def check(seed, root, variant=False):
     loss, silent = compare(v7, main)
     if not variant:
         return loss, silent
-    silent = sorted(k[1] for k, n in v7[3].items() if n > main[3].get(k, 0))
-    return loss, silent, v7[2]
+    flags, exempt = ownership_flags(v7[3], main[3], other=any(
+        (step.get("relabel") or ("",))[0] == "'other'" for step in ingests))
+    return loss, flags, v7[2], exempt
+
+
+def ownership_flags(v7, main, other):
+    """Strict per-key silent check inside the conversation, with the one exempt shape for 'other' plans."""
+    own = Counter(k for _idx, k in v7["own"] - main["held"])
+    flags, exempt = [], []
+    for k, n in v7["unlinked"].items():
+        if n - own[k] <= main["unlinked"][k]:
+            continue
+        new_linked = any(pair[1] == k for pair in v7["linked_pairs"] - main["held"])
+        if other and new_linked and v7["links"][k] == v7["rows"][k] - v7["occurrences"][k]:
+            exempt.append(k[1])
+        else:
+            flags.append(k[1])
+    return sorted(flags), sorted(exempt)
 
 
 def compare(v7, main):
@@ -241,12 +264,17 @@ def test_multi_ingest_ownership_variants(tmp_path, chunk, record_property):
     seeds = range(VARIANT_FIRST_SEED + chunk, VARIANT_FIRST_SEED + VARIANT_PLANS, CHUNKS)
     started = time.perf_counter()
     failures = {"loss": [], "silent": [], "foreign": []}
+    exempt = []
     for seed in seeds:
-        for name, found in zip(("loss", "silent", "foreign"), check(seed, tmp_path, variant=True)):
+        loss, silent, foreign, shape = check(seed, tmp_path, variant=True)
+        for name, found in zip(("loss", "silent", "foreign"), (loss, silent, foreign)):
             if found:
                 failures[name].append(seed)
+        if shape:
+            exempt.append(seed)
     result = dict(chunk=chunk, plans=len(seeds), seconds=round(time.perf_counter() - started, 3),
-                  failed={k: len(v) for k, v in failures.items()}, first_ten={k: v[:10] for k, v in failures.items()})
+                  failed={k: len(v) for k, v in failures.items()}, first_ten={k: v[:10] for k, v in failures.items()},
+                  exempt_disclosed_shape=len(exempt), exempt_seeds=exempt[:10])
     record_property("multi_ingest_variant_result", json.dumps(result, sort_keys=True))
     print("\nMULTI_INGEST_VARIANT_RESULT " + json.dumps(result, sort_keys=True))
     assert not any(failures.values()), json.dumps(result, sort_keys=True)
@@ -278,5 +306,5 @@ def test_multi_ingest_foreign_original_is_never_a_target(tmp_path):
     # Main skips the pair on the other conversation's row; v7 stores it, unlinked: it is new to this
     # conversation, and a link would cross conversations.
     assert compare(v7, main) == ([], ["", "X"])
-    assert not [k for k, n in v7[3].items() if n > main[3].get(k, 0)]
+    assert ownership_flags(v7[3], main[3], other=True) == ([], [])
     assert v7[2] == []
