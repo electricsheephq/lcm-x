@@ -704,6 +704,10 @@ def _lazy_storage_property(name: str) -> property:
     return property(get, set_)
 
 
+
+class _EvidenceFaultRetry(Exception):
+    """#1815: a classification-evidence fault on the first attempt; roll back and classify again once."""
+
 class LCMEngine(
     CompactionMixin,
     ResetStateMixin,
@@ -7046,8 +7050,10 @@ class LCMEngine(
                 lock_hold_ms=0.0, rows_written=0, bytes_written=0, busy_snapshot_retry=False,
                 ledger_digest_ms=0.0, ledger_ms=0.0)
             ledger_prepared = self._prepare_ingest_ledger(messages, attribution)
-            admission_retry = False
-            for attempt in range(2):
+            admission_retry = busy_retried = False
+            # One busy retry, plus one #1815 evidence-fault retry that only the first attempt can take.
+            for attempt in range(3):
+                self._ingest_attempt_index = attempt
                 # Keep the published frontier untouched until COMMIT. Helpers read
                 # and write the attempt-local holder through the legacy properties.
                 pending = copy.copy(self._frontier)
@@ -7134,8 +7140,11 @@ class LCMEngine(
                         maintenance_scheduler._PENDING_TAIL_ENGINES.discard(self)
                     attribution.update(rows_written=0, bytes_written=0)
                     rollback_ok = self._store._transaction_owner.rollback_failures == rollback_failures
-                    if rollback_ok and isinstance(exc, Exception) and attempt == 0 and (_is_ingest_busy_error(exc)
+                    if rollback_ok and attempt == 0 and isinstance(exc, _EvidenceFaultRetry):
+                        continue  # #1815: nothing of the faulted attempt is kept; the retry classifies again
+                    if rollback_ok and isinstance(exc, Exception) and not busy_retried and (_is_ingest_busy_error(exc)
                                                                       or held_at is None and isinstance(exc, sqlite3.Error)):
+                        busy_retried = True
                         attribution["busy_snapshot_retry"] = True
                         admission_retry = held_at is None and _is_ingest_busy_error(exc)
                         continue
@@ -8289,6 +8298,12 @@ class LCMEngine(
                 self._raise_ingest_busy(exc)
                 read_only = getattr(self, "_ingest_read_only", None) is not None
                 deferred = read_only and str(exc) == "session-end evidence deferred"
+                if (audit_from is not None and not read_only
+                        and self.__dict__.get("_ingest_attempt_index") == 0
+                        and self._store._transaction_owner.owns_connection(self._store._conn)):
+                    # #1815: without the plan, the ordered-prefix path stores messages[cursor:] over a prefix the host
+                    # changed, which re-stores a shifted row. Abort this attempt once; a second fault falls open below.
+                    raise _EvidenceFaultRetry(f"{type(exc).__name__}: {exc}") from exc
                 (logger.debug if deferred else logger.warning)(
                     "LCM identity-anchor pre-match failed (%s); ordered-prefix path only", type(exc).__name__)
                 anchor_plan = None

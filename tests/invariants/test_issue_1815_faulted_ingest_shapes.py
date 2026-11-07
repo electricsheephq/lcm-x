@@ -43,24 +43,25 @@ def _rows(engine):
     return [(r["role"], r["content"], r["observed_at"]) for r in engine._store.get_session_messages("S")]
 
 
-def _run(tmp_path, monkeypatch, shape, fault):
+def _run(tmp_path, monkeypatch, shape, fault, *, persistent=False):
     engine = _engine(tmp_path / f"{fault}.db", monkeypatch)
     try:
         engine.ingest(deepcopy(BASE))
         view = _shape(shape)
-        fired = []
+        fired, healthy = [], []
         if fault != "none":
             target = engine if fault == "prematch" else engine._store
             name = "_identity_anchor_prematch" if fault == "prematch" else "backfill_observed_at_many"
             original = getattr(target, name)
 
             def once(*args, **kwargs):
-                if not fired:
+                if (persistent and not healthy) or not fired:
                     fired.append(1)
                     raise sqlite3.OperationalError("disk I/O error")
                 return original(*args, **kwargs)
             monkeypatch.setattr(target, name, once)
             engine.ingest(deepcopy(view))  # the faulted ingest
+            healthy.append(1)
         engine.ingest(deepcopy(view))  # the next healthy ingest
         engine.ingest(deepcopy([*view, _m("user", "next question", 9.)]))
         return _rows(engine), fired
@@ -77,3 +78,13 @@ def test_faulted_ingest_matches_the_fault_free_run(tmp_path, monkeypatch, shape,
     assert faulted == oracle, (faulted, oracle)
     assert len({(role, content) for role, content, _ in faulted if role == "assistant"}) == sum(
         role == "assistant" for role, _, _ in faulted), "an assistant row is stored twice"
+
+
+@pytest.mark.parametrize("fault", ["prematch", "backfill"])
+def test_a_fault_that_persists_still_falls_open_and_loses_nothing(tmp_path, monkeypatch, fault):
+    """The retry is once only: a fault on both attempts takes the ordered-prefix path as before (a visible #1815
+    limit), and after the next healthy ingest every row of the view is stored."""
+    faulted, fired = _run(tmp_path, monkeypatch, "1-prefix-insert", fault, persistent=True)
+    assert len(fired) >= 2, "the retry did not run"
+    stored = [(role, content) for role, content, _ in faulted]
+    assert all((row["role"], row["content"]) in stored for row in _shape("1-prefix-insert"))
