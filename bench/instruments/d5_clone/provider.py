@@ -21,6 +21,43 @@ def _sha(value):
     return hashlib.sha256(_json(value).encode("utf-8")).hexdigest()
 
 
+
+def _tool_call(call):
+    return (isinstance(call, dict) and isinstance(call.get("id"), str) and isinstance(call.get("name"), str)
+            and isinstance(call.get("arguments"), (str, dict, list)))
+
+
+def _message(entry):
+    """The assistant message for a reply entry (None is a miss). It is encoded once here, so an entry the provider
+    cannot serve fails before any reply is sent."""
+    message = {"role": "assistant", "content": (entry or {}).get("text", "d5 replay miss")}
+    if entry is not None and entry.get("tool_calls"):
+        message = {"role": "assistant", "content": None, "tool_calls": [
+            {"id": c["id"], "type": "function", "function": {
+                "name": c["name"], "arguments": c["arguments"] if isinstance(c["arguments"], str)
+                else _json(c["arguments"])}} for c in entry["tool_calls"]]}
+    _json(message).encode("utf-8")
+    return message
+
+
+def _scripted(script, index):
+    """The scripted reply at index, or None (a replay miss) when there is none or it is not a reply this provider can
+    serve: a dict whose "tool_calls" is a non-empty list of calls with a str id, a str name and arguments, or, when
+    "tool_calls" is absent, null or empty, whose "text" is a str; and whose message encodes. Every other entry is a
+    miss, never a silent fallback or a failed request that the counter rollback would erase."""
+    entry = script[index] if isinstance(script, list) and index < len(script) else None
+    if not isinstance(entry, dict):
+        return None
+    calls = entry.get("tool_calls")
+    if not (isinstance(calls, list) and all(map(_tool_call, calls)) if calls else isinstance(entry.get("text"), str)):
+        return None
+    try:
+        _message(entry)
+    except (ValueError, TypeError, RecursionError):  # A lone surrogate, an unencodable argument value, deep nesting.
+        return None
+    return entry
+
+
 class Provider:
     """Agent step indices are zero-based; log hashes cover canonical request/completion JSON."""
 
@@ -135,17 +172,15 @@ class Provider:
                     index = self.stats["calls_per_step"][self.step]
                     self.stats["calls_per_step"][self.step] += 1
                     script = self.plan.get("steps", {}).get(self.step, [])
-                    if index < len(script):
-                        entry = script[index]
-                    else:
+                    entry = _scripted(script, index)
+                    if entry is None:
                         self.stats["replay_misses"][self.step] += 1
             elif model == self.cron:
                 index = self.cron_index
                 self.cron_index += 1
                 script = self.plan.get("cron", [])
-                if index < len(script):
-                    entry = script[index]
-                else:
+                entry = _scripted(script, index)
+                if entry is None:
                     self.stats["replay_misses"]["cron"] += 1
             else:
                 if model not in self.models:
@@ -153,12 +188,7 @@ class Provider:
                 text = f"D5 digest v1\nmessages={len(messages)}\n"
                 text += "\n".join(f"{m['role']} {_sha(m.get('content'))[:12]}" for m in messages)
                 entry = {"text": text + f"\nrequest={_sha(messages)}"}
-            message = {"role": "assistant", "content": (entry or {}).get("text", "d5 replay miss")}
-            if entry is not None and "tool_calls" in entry:
-                message = {"role": "assistant", "content": None, "tool_calls": [
-                    {"id": c["id"], "type": "function", "function": {
-                        "name": c["name"], "arguments": c["arguments"] if isinstance(c["arguments"], str)
-                        else _json(c["arguments"])}} for c in entry["tool_calls"]]}
+            message = _message(entry)
             # Token counts are a fixed estimate (UTF-8 bytes / 4, rounded up), so host pre-checks see realistic sizes.
             prompt, completion = (-(-len(_json(value).encode("utf-8")) // 4) for value in (messages, message))
             reply = {"id": "chatcmpl-" + _sha(message), "object": "chat.completion", "created": 0,

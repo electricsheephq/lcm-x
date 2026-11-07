@@ -345,3 +345,17 @@ def test_decorator_lookup_ignores_non_newline_line_breaks(tmp_path):
     module, path = _pin(tmp_path, "S = 'a\x0cb'\n\ndef deco(f):\n    return f\n\n@deco\ndef rule():\n    return S\n")
     assert pins.verify(path, tmp_path)["verdict"] == "PASS"
 
+
+
+def test_a_new_binding_that_shadows_a_builtin_fails_after_a_whole_file_repin(tmp_path):
+    module = tmp_path / "rule.py"
+    module.write_text("def rule(xs):\n    return len(xs)\n", encoding="utf-8")
+    pins.build(tmp_path, [module.name], {module.name: ["rule"]}, {},
+               {"path_basename": Path(sys.executable).name, "version": platform.python_version()})
+    path = tmp_path / "d5-clone-pins.json"
+    manifest = json.loads(path.read_text())
+    module.write_text("def rule(xs):\n    return len(xs)\n\nlen = lambda xs: 0\n", encoding="utf-8")
+    manifest["files"][0]["sha256"] = hashlib.sha256(module.read_bytes()).hexdigest()  # Only the file pin is updated.
+    save(path, manifest)
+    assert pins.function_source_sha256(module, "rule") == manifest["functions"][0]["sha256"]
+    assert pins.verify(path, tmp_path)["mismatches"] == ["closure"]

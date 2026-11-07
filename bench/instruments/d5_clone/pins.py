@@ -332,6 +332,17 @@ def verify(manifest_path, instrument_dir, python_version=None, interpreter=None)
                 pass
             safe = isinstance(name, str) and not Path(name).is_absolute() and ".." not in Path(name).parts
             mismatches.append(name if safe else "manifest")  # Only a relative name under the instrument dir.
+        for f in manifest["files"]:  # The closure must still be exactly the recorded members: a new module binding
+            functions = sorted(m["qualname"] for m in manifest["functions"] if m["file"] == f["name"])  # (say, one
+            members = set(functions) | {a["name"] for a in manifest["extra_hashes"] if a["file"] == f["name"]}  # that
+            if not members:  # shadows a builtin) changes a rule while every recorded hash still matches.
+                continue
+            try:
+                reached = call_closure(_path(instrument_dir, f["name"]), functions, f.get("data", []))
+                if reached[0] | reached[1] != members:
+                    mismatches.append("closure")
+            except (OSError, ValueError, SyntaxError):
+                mismatches.append("closure")
         pinned = {f["name"] for f in manifest["files"]} | {m["name"] for f in manifest["files"] for m in f["loads"]}
         found, unpinnable = _scan(instrument_dir, manifest_path)
         if unpinnable:

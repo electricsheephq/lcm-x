@@ -354,3 +354,224 @@ def test_rotation_reordered_carried_rows_are_each_linked(build, caplog):
         assert [row["session_id"] for row in copies] == ["S", "rotated"], content[:30]
         assert (copies[1]["store_id"], copies[0]["store_id"]) in links, content[:30]
     assert len(links) == len({target for _source, target in links})
+
+
+PREFIXED = "[Note: model was just switched from X to Y]\n\n" + T
+TODO_FOLD = "\n\n" + reconcile_module._PRESERVED_TODO_CONTEXT_PREFIX + "\n- [>] 1. deploy staging (in_progress)"
+
+
+def _with_prefixed_turn(monkeypatch) -> float:
+    """The predecessor's last carried user turn is T behind a model-switch note: one replay identity with T."""
+    plain_history = history
+
+    def history_with_prefixed_turn(uids):
+        rows = plain_history(uids)
+        last_user = max(i for i, row in enumerate(rows) if row["role"] == "user")
+        rows[last_user]["content"] = PREFIXED
+        return rows
+
+    monkeypatch.setattr(__name__ + ".history", history_with_prefixed_turn)
+    rows = plain_history(False)
+    return rows[max(i for i, row in enumerate(rows) if row["role"] == "user")]["timestamp"]
+
+
+def _carried(view, content):
+    return next(i for i, row in enumerate(view) if row.get("role") == "user" and row.get("content") == content)
+
+
+def _original(rows, content):
+    return next(row["store_id"] for row in rows if row["session_id"] == "S" and row["content"] == content)
+
+
+@pytest.mark.issue(2390)
+def test_rotation_reordered_identity_equal_rows_with_different_content_link_to_their_own(build, caplog, monkeypatch):
+    """#2390: P (a model-switch note before T's text) and T share one replay identity. Both are carried,
+    re-stamped and reordered; each copy must link to its own original, never crossed."""
+    _with_prefixed_turn(monkeypatch)
+
+    def reorder(_engine, view):
+        p_index, t_index = _carried(view, PREFIXED), _carried(view, T)
+        view[p_index]["timestamp"] += 0.5  # re-stamped too
+        view[p_index], view[t_index] = view[t_index], view[p_index]
+
+    engine, rows = run(build, caplog, mode="rotating", uids=False, restamp=True, before_ingest=reorder)
+    links = replay_links(engine)
+    for content in (PREFIXED, T):
+        copies = [row for row in rows if row["role"] == "user" and row["content"] == content]
+        assert [row["session_id"] for row in copies] == ["S", "rotated"], content[:30]
+        assert (copies[1]["store_id"], copies[0]["store_id"]) in links, content[:30]
+    assert len(links) == len({target for _source, target in links})
+
+
+@pytest.mark.issue(2390)
+def test_rotation_rewritten_identity_equal_rows_in_order_keep_their_own_originals(build, caplog, monkeypatch):
+    """Review probe: the host strips P's note (P' == T) and folds the todo into T (T' == T + todo), in order.
+    P' equals T's stored text only by coincidence of the rewrite; content must not cross the pair."""
+    _with_prefixed_turn(monkeypatch)
+
+    def rewrite(_engine, view):
+        p_index, t_index = _carried(view, PREFIXED), _carried(view, T)
+        view[p_index]["timestamp"] += 0.5
+        view[p_index]["content"] = T
+        view[t_index]["content"] = T + TODO_FOLD
+
+    engine, rows = run(build, caplog, mode="rotating", uids=False, restamp=True, before_ingest=rewrite)
+    links = replay_links(engine)
+    stripped = next(row["store_id"] for row in rows if row["session_id"] == "rotated" and row["content"] == T)
+    folded = next(row["store_id"] for row in rows if row["session_id"] == "rotated" and row["content"] == T + TODO_FOLD)
+    assert (stripped, _original(rows, PREFIXED)) in links
+    assert (folded, _original(rows, T)) in links
+
+
+@pytest.mark.issue(2390)
+def test_rotation_content_of_a_non_snapshot_row_at_a_stamp_never_redirects_a_link(build, caplog, monkeypatch):
+    """Review probe: a stored T that the snapshot never held sits at P's stamp. It must not let T' claim P's
+    occurrence: T' stays linked to its own original."""
+    p_stamp = _with_prefixed_turn(monkeypatch)
+
+    def add_stray_and_fold(engine, view):
+        engine._store.append("S", {"role": "user", "content": T, "timestamp": p_stamp},
+                             conversation_id=engine._conversation_id)
+        p_index = _carried(view, PREFIXED)
+        view[p_index]["timestamp"] += 0.5
+        view[p_index]["content"] = PREFIXED + TODO_FOLD
+
+    engine, rows = run(build, caplog, mode="rotating", uids=False, restamp=True, before_ingest=add_stray_and_fold)
+    links = replay_links(engine)
+    t_copy = next(row["store_id"] for row in rows if row["session_id"] == "rotated" and row["content"] == T)
+    t_original = next(row["store_id"] for row in rows if row["session_id"] == "S" and row["content"] == T
+                      and row["observed_at"] == T_REQ)
+    assert (t_copy, t_original) in links
+
+
+@pytest.mark.issue(2390)
+def test_rotation_identical_copies_keep_their_order_inside_a_mixed_content_group(build, caplog, monkeypatch):
+    """Review probe: carried [T, T, P] (P = T behind a model-switch note, one replay identity), re-stamped and
+    carried as [T, P, T]. The two identical T copies keep their order; P links to P."""
+    _with_prefixed_turn(monkeypatch)
+
+    def mix(_engine, view):
+        prefixed = view.pop(_carried(view, PREFIXED))
+        prefixed["timestamp"] += 0.5
+        view.insert(_carried(view, T) + 1, prefixed)  # carried order: T, P, T
+
+    engine, rows = run(build, caplog, mode="rotating", uids=False, restamp=True, prior_copies=2, before_ingest=mix)
+    links = replay_links(engine)
+    originals = [row["store_id"] for row in rows if row["session_id"] == "S" and row["content"] == T]
+    copies = [row["store_id"] for row in rows if row["session_id"] == "rotated" and row["content"] == T]
+    assert len(originals) == len(copies) == 2
+    assert {(copies[0], originals[0]), (copies[1], originals[1])} <= links
+    p_copy = next(row["store_id"] for row in rows if row["session_id"] == "rotated" and row["content"] == PREFIXED)
+    assert (p_copy, _original(rows, PREFIXED)) in links
+
+
+@pytest.mark.issue(2390)
+def test_rotation_list_content_row_keeps_its_links(build, caplog, monkeypatch):
+    """Review probe: multimodal (list) content never decides the pairing and never drops the bind's links."""
+    parts = [{"type": "text", "text": PREFIXED}]
+    plain_history = history
+
+    def history_with_list_turn(uids):
+        rows = plain_history(uids)
+        rows[max(i for i, row in enumerate(rows) if row["role"] == "user")]["content"] = parts
+        return rows
+
+    monkeypatch.setattr(__name__ + ".history", history_with_list_turn)
+
+    def reorder(_engine, view):
+        users = [i for i, row in enumerate(view) if row.get("role") == "user" and row.get("content") in (T, parts)]
+        p_index = next(i for i in users if view[i]["content"] == parts)
+        t_index = next(i for i in users if view[i]["content"] == T)
+        view[p_index]["timestamp"] += 0.5
+        view[p_index], view[t_index] = view[t_index], view[p_index]
+
+    engine, rows = run(build, caplog, mode="rotating", uids=False, restamp=True, before_ingest=reorder)
+    assert len(replay_links(engine)) == 2
+    assert not [record for record in caplog.records if "TypeError" in record.getMessage()]
+
+
+@pytest.mark.issue(2390)
+def test_rotation_retained_uids_pair_reordered_equal_copies_with_their_own(build, caplog):
+    """#2387 review thread: two equal T copies keep distinct message_uids, are re-stamped and reversed.
+    The host's uid names each occurrence, so each copy links to its own original."""
+    def reverse(_engine, view):
+        carried = [i for i, row in enumerate(view) if row.get("role") == "user" and row.get("content") == T]
+        view[carried[0]], view[carried[1]] = view[carried[1]], view[carried[0]]
+
+    engine, rows = run(build, caplog, mode="rotating", uids=True, restamp=True, prior_copies=2, before_ingest=reverse)
+    links = replay_links(engine)
+    by_stamp = {(row["session_id"], row["observed_at"]): row["store_id"] for row in rows if row["content"] == T}
+    # restamp gives carried copy k the stamp T_COMMIT + k in its original order (k=0: uid c, k=1: uid a)
+    assert (by_stamp[("rotated", T_COMMIT)], by_stamp[("S", T_REQ - 2)]) in links
+    assert (by_stamp[("rotated", T_COMMIT + 1)], by_stamp[("S", T_REQ)]) in links
+
+
+@pytest.mark.issue(2390)
+def test_rotation_acp_trimmed_restamp_is_linked(build, caplog, monkeypatch):
+    """#2387 review thread: ACP persists prompt.strip(); a trimmed re-stamped carried row is still linked."""
+    padded = "  " + T + "  \n"
+    monkeypatch.setattr(__name__ + ".T", padded)
+
+    def trim(_engine, view):
+        next(row for row in view if row.get("role") == "user" and row.get("content") == padded)["content"] = padded.strip()
+
+    engine, rows = run(build, caplog, mode="rotating", uids=True, restamp=True, before_ingest=trim)
+    original = next(row["store_id"] for row in rows if row["session_id"] == "S" and row["content"] == padded)
+    copy = next(row["store_id"] for row in rows if row["session_id"] == "rotated" and row["content"] == padded.strip())
+    assert (copy, original) in replay_links(engine)
+
+
+@pytest.mark.issue(2390)
+def test_rotation_metadata_failure_degrades_to_durable_recovery(build, caplog, monkeypatch):
+    """Grok review thread on #2387: if the re-stamp helper raises, the #1523 durable recovery still runs.
+
+    The recovery links only rows of the current session, so a carried row whose original is in the predecessor
+    session stays unlinked, as on main before #2387 (#2392 review thread)."""
+    called = []
+
+    def break_helper(engine, _view):
+        def boom(_messages):
+            raise RuntimeError("synthetic snapshot read failure")
+
+        link = engine._identity_anchor_link_durable_recovery
+
+        def spy(attempt, lineage):
+            called.append(True)
+            return link(attempt, lineage)
+
+        monkeypatch.setattr(engine, "_rotation_restamp_metadata", boom)
+        monkeypatch.setattr(engine, "_identity_anchor_link_durable_recovery", spy)
+
+    engine, rows = run(build, caplog, mode="rotating", uids=False, restamp=True, before_ingest=break_helper)
+    assert called
+    assert sum(row["content"] == T for row in rows) == 2
+    assert engine._ingest_failure_count == 0
+    # Pins today's behaviour on this injected fault, a KNOWN gap rather than the desired outcome: the second T is a
+    # silent copy. Update this expectation if the gap is closed.
+    assert replay_links(engine) == set()
+
+
+@pytest.mark.issue(2390)
+def test_rotation_a_shared_uid_never_decides_the_pairing(build, caplog, monkeypatch):
+    """Review probe: the stored P and T share one uid (bad host input) and keep it when re-stamped and
+    reordered. The uid names no single occurrence, so content decides: each copy links to its own original."""
+    plain_history = history
+
+    def history_with_shared_uid(uids):
+        rows = plain_history(uids)
+        last_user = max(i for i, row in enumerate(rows) if row["role"] == "user")
+        rows[last_user]["content"], rows[last_user]["message_uid"] = PREFIXED, "a" * 32  # T's uid too
+        return rows
+
+    monkeypatch.setattr(__name__ + ".history", history_with_shared_uid)
+
+    def reorder(_engine, view):
+        p_index, t_index = _carried(view, PREFIXED), _carried(view, T)
+        view[p_index]["timestamp"] += 0.5
+        view[p_index], view[t_index] = view[t_index], view[p_index]
+
+    engine, rows = run(build, caplog, mode="rotating", uids=True, restamp=True, before_ingest=reorder)
+    links = replay_links(engine)
+    for content in (PREFIXED, T):
+        copy = next(r["store_id"] for r in rows if r["session_id"] == "rotated" and r["content"] == content)
+        assert (copy, _original(rows, content)) in links, content[:30]

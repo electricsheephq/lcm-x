@@ -329,6 +329,15 @@ that carries tool calls adds each call's id, name and arguments; inside one fixt
 and a multi-session fixture adds the session and, for a tool result, its tool-call id), not
 only by count:
 the candidate is no worse only when its affected rows are the base's rows or a subset of them.
+Amended 2026-11-07 (#2212): this identity, turn included, is unchanged for base-versus-candidate
+probes. Only the release kit's reorder record, which compares a cell's LCM-X store with that cell's
+host store and has no turn number shared by the two, uses the identity without the turn: role and
+content hash, plus each tool call's id, name and arguments for an assistant row and the tool-call
+id for a tool row, within one session. A record that lacks those tool-call columns
+(`identity_degraded`), or that marks a session not definitive, does not meet the identity/order
+rule for that session. The record reports `repeated_identity_rows`, the host rows whose identity
+repeats in their session; there a duplicate of one occurrence could hide a lost occurrence of the
+same identity. Those rows are not proven free of loss and must be dispositioned or disclosed.
 A pre-existing shape is recorded as KNOWN with a tracked issue and does not force a respin. A
 cell where the candidate is worse than the base follows the P0/P1 rule above. A shape the base does not show follows the P0/P1 rule above; in
 particular the candidate respins when, against the base, it adds loss, a wedge, a session reset,
@@ -374,8 +383,8 @@ one threshold, doctor at close. Minimum 30 turns. Green =
   Missing copies, surplus copies and unexpected stored rows fail. Phase C alone adopts the release
   multiset-v2 split predicate (r2, sha256 8943a6a7…) without its own-turn prompt rule; the store-order
   check below fails the borrowed-turn case that rule guarded. A missing, unique assistant item may match exactly
-  one run of 2–8 consecutive non-empty assistant rows in one session, joined with a space or directly
-  under v2's NFC, CRLF and whitespace-run normalization. Tool rows may intervene; every user row,
+  one run of two or more consecutive non-empty assistant rows in one session, with no user row between its first and last fragment, joined with a space or directly
+  under v2's NFC, CRLF and whitespace-run normalization. Unlike r2, the run has no fragment cap (#2214, from v0.30.0 rc1). Tool rows may intervene; every user row,
   even empty, across any owned session is a turn boundary. No fragment key may be a transcript item; no row may serve two answers;
   extra copies of used fragments fail. Whole-row absence, uniqueness and fragment ownership use
   v2-normalized keys for this split exception only. The transcript must also be a subsequence of

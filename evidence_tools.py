@@ -489,7 +489,7 @@ def lcm_evidence_pack(args: Dict[str, Any], **kwargs: Any) -> str:
     return build_evidence_pack(
         args,
         engine=engine,
-        retrieve=lambda recall_args: _tools.lcm_recall(recall_args, engine=engine, delivery_unit="hits", delivery_order="score", adjacent_reply=False, summary_event_time=False),
+        retrieve=lambda recall_args: _tools.lcm_recall(recall_args, engine=engine, delivery_unit="hits", delivery_order="score", adjacent_reply=False, summary_event_time=False, extra_entries=0),
     )
 
 
@@ -511,7 +511,7 @@ def lcm_compile_evidence(args: Dict[str, Any], **kwargs: Any) -> str:
                 engine=engine,
                 baseline_refs=args.get("baseline_refs") or (),
                 question_as_of=args.get("question_date"),
-                retrieve=lambda recall_args: _tools.lcm_recall(recall_args, engine=engine, delivery_unit="hits", delivery_order="score", adjacent_reply=False, summary_event_time=False),
+                retrieve=lambda recall_args: _tools.lcm_recall(recall_args, engine=engine, delivery_unit="hits", delivery_order="score", adjacent_reply=False, summary_event_time=False, extra_entries=0),
                 enabled=True,
                 budgets=args.get("budgets"),
             )
@@ -531,7 +531,7 @@ def lcm_compile_evidence(args: Dict[str, Any], **kwargs: Any) -> str:
             baseline_refs=args.get("baseline_refs") or (),
             question_date=args.get("question_date"),
             selector=lambda _request: proposal,
-            retrieve=lambda recall_args: _tools.lcm_recall(recall_args, engine=engine, delivery_unit="hits", delivery_order="score", adjacent_reply=False, summary_event_time=False),
+            retrieve=lambda recall_args: _tools.lcm_recall(recall_args, engine=engine, delivery_unit="hits", delivery_order="score", adjacent_reply=False, summary_event_time=False, extra_entries=0),
             enabled=True,
             persist_view=args.get("persist_view") is True,
             budgets=args.get("budgets"),

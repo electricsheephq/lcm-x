@@ -92,3 +92,10 @@ def test_the_per_user_temp_dir_itself_is_refused_but_a_run_dir_inside_is_not():
         with pytest.raises(ValueError):
             sandbox.profile([], [root])
     assert "d5-run" in sandbox.profile([], [temp / "d5-run"])
+
+
+@pytest.mark.parametrize("inside", ["/.hermes/profiles", "/.hermes"])
+def test_a_firmlink_spelling_inside_a_refused_subtree_is_refused(inside):
+    for root in ("/System/Volumes/Data" + str(Path.home().resolve()) + inside, "/System/Volumes/Data/private/var/run/x"):
+        with pytest.raises(ValueError):
+            sandbox.profile([], [root])
