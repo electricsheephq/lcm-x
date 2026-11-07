@@ -379,6 +379,33 @@ def host_expected(rows, group, markers, strip, scored=None):
     return out, excluded, hand_checks
 
 
+# #2087: Hermes's empty-response recovery pair (host pin r34.15-0.21.5). After tool results with an empty reply, the
+# loop appends an assistant row "(empty)" and a user row holding _EMPTY_TOOL_RESPONSE_NUDGE (agent/turn_empty_response.py:
+# 208-215, the text at agent/conversation_loop.py:900-903), both flagged _empty_recovery_synthetic, a flag the host's
+# persistence skips (agent/session_persistence.py:32-40): the host never saves them, so a stored copy is not expected.
+EMPTY_RECOVERY_REPLY = "(empty)"
+EMPTY_RECOVERY_NUDGE = ("You just executed tool calls but returned an empty response. Please process the tool "
+                        "results above and continue with the task.")
+
+
+def empty_recovery_rows(rows):
+    """Stored copies of the host's empty-response recovery pair (#2087), matched by structure and exact host text: in
+    one session's store order, a tool row, then an assistant row whose content is exactly ``EMPTY_RECOVERY_REPLY`` with
+    no tool calls, then a user row whose content is exactly ``EMPTY_RECOVERY_NUDGE``. A user row with the nudge's text
+    and no such pair in front of it is a real turn and stays scored. ``rows``: (store_id, session, role, content,
+    tool_calls, ...). Returns the pairs' store ids."""
+    by_session = defaultdict(list)
+    for r in sorted(rows):
+        by_session[r[1]].append(r)
+    out = set()
+    for seq in by_session.values():
+        for before, reply, nudge in zip(seq, seq[1:], seq[2:]):
+            if before[2] == "tool" and reply[2] == "assistant" and reply[3] == EMPTY_RECOVERY_REPLY and not reply[4] \
+                    and nudge[2] == "user" and nudge[3] == EMPTY_RECOVERY_NUDGE:
+                out |= {reply[0], nudge[0]}
+    return out
+
+
 def todo_expected(host_rows, stored_rows, group, header):
     """Host-displayed todo rows a stored user row copies (#2377): a stored user row whose content equals, byte for
     byte, a displayed host user row that starts with the todo injection header (``header``), of the same lineage and
@@ -780,6 +807,9 @@ def audit(state_db: Path, lcm_db: Path, logs=(), since=None, events_path=None, l
                                [r for r in host_rows if r[1] in scored], strip)
     for g, rows in by_lineage.items():  # kept rows of an undone occurrence: out of parity, surplus and M3's numerator
         by_lineage[g] = [r for r in rows if r[0] not in retained]
+    recovery = empty_recovery_rows([r for rows in by_lineage.values() for r in rows])
+    for g, rows in by_lineage.items():  # the host's recovery scaffolding (#2087): out of parity, surplus and M3's numerator
+        by_lineage[g] = [r for r in rows if r[0] not in recovery]
     todo = todo_expected([r for r in host_rows if r[1] in scored], [r for rows in by_lineage.values() for r in rows],
                          group, multiset.todo_header())
     kept_todo = {i for ids in todo.values() for i in ids}
@@ -807,7 +837,7 @@ def audit(state_db: Path, lcm_db: Path, logs=(), since=None, events_path=None, l
     totals = {k: sum(p[k] for p in parity.values()) for k in keys}
     zero = sorted(g for g, p in parity.items() if p["host_session"] and p["expected_rows"] and not p["stored_rows"])
     per_session = Counter(r[1] for r in stored)
-    window_ids = {r[0] for rows in by_lineage.values() for r in rows} | set(lost_ids) | retained | kept_todo
+    window_ids = {r[0] for rows in by_lineage.values() for r in rows} | set(lost_ids) | retained | kept_todo | recovery
     audited_sessions = scored | {extra[i][1] for i in window_ids}
     denominator = len(window_ids)
 
@@ -860,16 +890,34 @@ def audit(state_db: Path, lcm_db: Path, logs=(), since=None, events_path=None, l
                       "expected_rows": "host display identity per lineage" if has_compacted else
                                        "host display identity per lineage (no compacted column: every row displayed)"}
 
-    # Uid coverage per host source (store rows in the window, canonical host_uid_bindings rows).
-    uid = defaultdict(lambda: {"rows_stored": 0, "rows_with_canonical_uid": 0})
+    # Uid coverage per host source (#2237 ruling A): per distinct message, with copies reported apart. A copy is an
+    # unstamped row (no observed_at) with the role, tool call id, tool calls and content of an earlier stored row of
+    # its session; every other row is a distinct message. A message is covered when any of its stored rows has a
+    # canonical host_uid_bindings row (a uid binds one row of a lineage, so its copies stay unbound).
+    uid = defaultdict(lambda: {"rows_stored": 0, "rows_with_canonical_uid": 0, "messages": 0,
+                               "messages_with_canonical_uid": 0, "copy_rows": 0, "copy_rows_with_canonical_uid": 0})
+    message_of, bound_messages, first = {}, set(), {}
+    for r in sorted(stored):  # every stored row, so a copy of a row stored before the window is still a copy
+        key = (r[1], r[2], r[5], r[4], r[3])
+        message_of[r[0]] = first[key] if r[6] is None and key in first else r[0]
+        first.setdefault(key, r[0])
+        if uids is not None and r[0] in uids:
+            bound_messages.add(message_of[r[0]])
     for sid in window_ids:
         src = sessions.get(extra[sid][1], {}).get("source") or "unknown"
+        bound = int(uids is not None and sid in uids)
         uid[src]["rows_stored"] += 1
-        uid[src]["rows_with_canonical_uid"] += int(uids is not None and sid in uids)
+        uid[src]["rows_with_canonical_uid"] += bound
+        if message_of[sid] == sid:
+            uid[src]["messages"] += 1
+            uid[src]["messages_with_canonical_uid"] += int(sid in bound_messages)
+        else:
+            uid[src]["copy_rows"] += 1
+            uid[src]["copy_rows_with_canonical_uid"] += bound
 
     # M3: rows carrying generated_unproven, or the store_id side of a possible_replay_of pair.
     # An undo_retained row leaves M3 for a possible_replay_of only: a generated_unproven row is LCM's own output.
-    doubt = sorted(({s for s, kind, *_rest in relations if kind == "possible_replay_of"} - retained
+    doubt = sorted(({s for s, kind, *_rest in relations if kind == "possible_replay_of"} - retained - recovery
                     | {s for s, kind, *_rest in relations if kind == "generated_unproven"}) & window_ids)
     m3 = {"numerator": len(doubt), "denominator": denominator, "store_ids": doubt,
           "rate": len(doubt) / denominator if denominator else 0.0}
@@ -958,6 +1006,7 @@ def audit(state_db: Path, lcm_db: Path, logs=(), since=None, events_path=None, l
             "coverage": coverage, "coverage_basis": coverage_basis,
             "uid_coverage": {"table": "present" if uids is not None else "table absent", "per_source": dict(uid)},
             "m3": m3, "recorder": recorder,
+            "host_empty_recovery": {"rows": len(recovery), "store_ids": sorted(recovery)},
             "undo_retained": {"rows": len(retained), "store_ids": sorted(retained),
                               "host_rewind_count": {s: sessions[s]["rewind_count"] for s in sorted(scored)
                                                     if sessions[s]["rewind_count"]}}, "exempted_surplus": exempted, "issue_1931": issue_1931,
