@@ -30,26 +30,27 @@ def host_rewrite_match(row, candidates, *, header, todo_span) -> Optional[HostRe
                       and c["observed_at"] >= stamp), key=lambda c: (c["observed_at"], c["store_id"]))
     heads = [c for c in ordered if c["observed_at"] == stamp and c.get("role") == "assistant"
              and not c.get("consumed")]
-    if len(heads) != 1:  # a borrowed stamp with several possible anchors is ambiguous
-        return None
-    head, parts, joined = heads[0], [], ""
-    for c in ordered[ordered.index(head):]:
-        if c.get("role") == "user":
-            continue
-        if c.get("role") != "assistant" or c.get("tool_calls") or c.get("consumed"):
-            break
-        if parts:
-            previous = c.get("previous", max((r["store_id"] for r in candidates
-                           if r["store_id"] < c["store_id"] and r.get("role") != "user"), default=None))
-            if previous != parts[-1]:
+    fits = []
+    for head in heads:
+        parts, joined = [], ""
+        for c in ordered[ordered.index(head):]:
+            if c.get("role") == "user":
+                continue
+            if c.get("role") != "assistant" or c.get("tool_calls") or c.get("consumed"):
                 break
-        part = c.get("content")
-        if not isinstance(part, str) or not part.strip():
-            break
-        joined += ("\n" if parts else "") + part.strip()
-        parts.append(c["store_id"])
-        if joined == text and len(parts) >= 2:
-            return HostRewriteMatch("M", tuple(parts), len(parts))
-        if not text.startswith(joined + "\n"):
-            break
-    return None
+            if parts:
+                previous = c.get("previous", max((r["store_id"] for r in candidates
+                               if r["store_id"] < c["store_id"] and r.get("role") != "user"), default=None))
+                if previous != parts[-1]:
+                    break
+            part = c.get("content")
+            if not isinstance(part, str) or not part.strip():
+                break
+            joined += ("\n" if parts else "") + part.strip()
+            parts.append(c["store_id"])
+            if joined == text and len(parts) >= 2:
+                fits.append(HostRewriteMatch("M", tuple(parts), len(parts)))
+                break
+            if not text.startswith(joined + "\n"):
+                break
+    return fits[0] if len(fits) == 1 else None

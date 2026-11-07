@@ -64,6 +64,9 @@ def _ws_equivalent(stored, identity) -> bool:
             and stored[1].strip() == identity[1].strip() and tuple(stored[2:]) == tuple(identity[2:]))
 
 
+_HOST_REWRITE_PRESENCE_ROWS = 10_000
+
+
 class IdentityAnchorMixin:
     """Mixed into LCMEngine; reads ``self._store``, the reconcile identity helpers and ``_state_db_path``."""
 
@@ -463,7 +466,8 @@ class IdentityAnchorMixin:
                 candidates = [dict(zip(("store_id", "role", "content"), r)) for r in self._store._conn.execute(
                     "SELECT store_id, role, content FROM messages INDEXED BY idx_msg_session "
                     "WHERE session_id=? AND role='user' AND substr(content, 1, ?)=? "
-                    "ORDER BY store_id DESC LIMIT 10000", (self._session_id, len(header), header))]
+                    "ORDER BY store_id DESC LIMIT ?",
+                    (self._session_id, len(header), header, _HOST_REWRITE_PRESENCE_ROWS))]
             if not candidates:
                 continue
             match = host_rewrite_match({**message, "stamp": stamp}, candidates, header=header,
