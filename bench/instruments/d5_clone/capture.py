@@ -129,6 +129,12 @@ def capture(kind, out_dir, *, store_db, host_db, payload_dir, extras=None, home=
         else:
             with Path(source).open("rb") as reader, dest.open("xb") as writer:
                 shutil.copyfileobj(reader, writer)
+    captured_at = datetime.now(timezone.utc).isoformat(timespec="microseconds")
+    if kind == "T0":  # The edition reads T0_AT from the capture's window.log, so it carries the same stamp.
+        dest = out / "window.log"
+        if dest.exists():
+            raise CaptureError("extra collides with capture layout")
+        dest.write_text(json.dumps({"captured_at": captured_at}), encoding="utf-8")
     files, payload_lines = {}, []
     for path in sorted(out.rglob("*")):
         if path.is_file():
@@ -137,7 +143,6 @@ def capture(kind, out_dir, *, store_db, host_db, payload_dir, extras=None, home=
                 payload_lines.append(f"{name} {digest}\n")
             else:
                 files[name] = digest
-    captured_at = datetime.now(timezone.utc).isoformat(timespec="microseconds")
     manifest = dict(schema="d5-clone-capture/1", kind=kind, captured_at=captured_at, files=files,
                     payload_files=len(payload_lines),
                     payload_sha256=hashlib.sha256("".join(payload_lines).encode()).hexdigest())

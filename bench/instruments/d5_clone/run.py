@@ -325,7 +325,8 @@ class LocalHost:
                 "session_ids": [c["session_id"] for c in plan["conversations"]],
                 "gateway": gateway.Gateway(tree["host_bin"], home, env, home.parent, provider_port=port),
                 "payloads": sum(p.is_file() for p in (home / "lcm-large-outputs").rglob("*")),
-                "chats": {c["name"]: c["chat_id"] for c in plan["conversations"]}}
+                "chats": {c["name"]: c["chat_id"] for c in plan["conversations"]},
+                "sessions": {c["name"]: c["session_id"] for c in plan["conversations"]}}
 
     def start(self, ctx):
         ctx["gateway"].start(self.c.get("start_timeout", 300))
@@ -348,6 +349,9 @@ class LocalHost:
     def capture(self, ctx, kind, step, extras=None):
         out = self._dir(ctx["name"], "captures") / f"{step['id']}-{kind}"
         home = ctx["home"]
+        if kind == "H8":  # The edition reads the bind's anchor and history lines from the window's host logs.
+            extras = {**(extras or {}), **{f"native-{name}.log": home / "logs" / name
+                                           for name in ("agent.log", "gateway.log") if (home / "logs" / name).is_file()}}
         return out, capture.capture(kind, out, store_db=home / "lcm.db", host_db=home / "state.db",
                                     payload_dir=home / "lcm-large-outputs", extras=extras, home=home)
 
@@ -357,17 +361,21 @@ class LocalHost:
         python = self.c["interpreter"]
         values = {"python": os.path.abspath(python) if os.sep in python else python, "t0": t0, "h8": h8, "out": out,
                   "instrument_dir": os.path.abspath(self.c["instrument_dir"]),  # The argv runs with cwd=out.
-                  "rc_tree": os.path.abspath(self.c["rc"]["lcm_tree"]), "ga_tree": os.path.abspath(self.c["ga"]["lcm_tree"])}
+                  "rc_tree": os.path.abspath(self.c["rc"]["lcm_tree"]), "ga_tree": os.path.abspath(self.c["ga"]["lcm_tree"]),
+                  "session_h12": hashlib.sha256(ctx["sessions"][step["conversation"]].encode()).hexdigest()[:12]}
+        receipt_name = self.c.get("replay_receipt", "receipt.json")  # The edition's receipt, by its declared name.
+        if Path(receipt_name).name != receipt_name:
+            raise ValueError("replay_receipt must be a bare file name")
         for key in ("constants_argv", "replay_argv"):
             argv = sandbox.wrap([a.format(**values) for a in self.c[key]], ports=[ctx["port"]], socket_roots=[out])
             env = {"PATH": "/usr/bin:/bin", "HOME": str(out), "PYTHONDONTWRITEBYTECODE": "1"}
-            if subprocess.run(["/usr/bin/nice", "-n", "19", *argv], cwd=out, env=env, capture_output=True).returncode:
-                return None, True, None
+            code = subprocess.run(["/usr/bin/nice", "-n", "19", *argv], cwd=out, env=env, capture_output=True).returncode
+            if code:  # An error, or (constants exit 1) a NOT SHOWN bind: no replay runs after it. Either way the
+                return None, True, _range_new_rows(out)  # report's range_new_rows is kept when it was written.
         try:
-            constants = json.loads((out / "constants.json").read_text(encoding="utf-8"))
-            return json.loads((out / "receipt.json").read_text(encoding="utf-8")), False, constants.get("range_new_rows")
+            return (json.loads((out / receipt_name).read_text(encoding="utf-8")), False, _range_new_rows(out))
         except (OSError, ValueError):
-            return None, True, None
+            return None, True, _range_new_rows(out)
 
     def remove(self, path):
         capture.remove_capture(path, receipt_written=True)
@@ -453,6 +461,13 @@ class LocalHost:
 
     def close(self, ctx):
         ctx["provider"].stop()
+
+
+def _range_new_rows(out):
+    try:
+        return json.loads((Path(out) / "constants.json").read_text(encoding="utf-8")).get("range_new_rows")
+    except (OSError, ValueError, AttributeError):
+        return None
 
 
 def run_arm(host, name, home, plan, extras):

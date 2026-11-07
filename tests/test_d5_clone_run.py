@@ -227,7 +227,7 @@ def test_replay_paths_are_absolute_whatever_the_cli_was_given(tmp_path, monkeypa
                         "{ga_tree}", "{out}"], "replay_argv": ["true"]}, "run")
     seen = []
     monkeypatch.setattr(r.sandbox, "wrap", lambda argv, **k: seen.append(argv) or ["/usr/bin/false"])
-    host.replay({"name": "rc", "port": 1}, {"id": "e0-L-0"}, "t0", "h8")
+    host.replay({"name": "rc", "port": 1, "sessions": {"L": "s"}}, {"id": "e0-L-0", "conversation": "L"}, "t0", "h8")
     assert seen and all(os.path.isabs(a) for a in seen[0]), seen
 
 
@@ -294,7 +294,8 @@ def test_replay_runs_the_edition_under_the_sandbox(tmp_path, monkeypatch):
     config = {"interpreter": "python3", "instrument_dir": "kit", "rc": {"lcm_tree": "rc"}, "ga": {"lcm_tree": "ga"},
               "constants_argv": ["{python}", "gen", "{t0}", "{h8}", "{out}"], "replay_argv": ["{python}", "replay"]}
     host = r.LocalHost(config, tmp_path / "run")
-    receipt, error, range_new = host.replay({"name": "rc", "port": 4242}, {"id": "e0-L-0"}, "T0", "H8")
+    receipt, error, range_new = host.replay({"name": "rc", "port": 4242, "sessions": {"L": "s"}},
+                                            {"id": "e0-L-0", "conversation": "L"}, "T0", "H8")
     assert (receipt, error, range_new) == ({"checks": {}}, False, 0)
     assert [argv[:4] for argv in seen] == [["/usr/bin/nice", "-n", "19", "/usr/bin/sandbox-exec"]] * 2
     assert seen[0][-5:] == ["python3", "gen", "T0", "H8", os.fspath(tmp_path / "run" / "rc" / "replays" / "e0-L-0")]
@@ -341,3 +342,53 @@ def test_a_store_too_damaged_to_check_is_a_failed_check(tmp_path, monkeypatch):
     assert {c["check"] for c in r.LocalHost({}, tmp_path / "run").checks({"home": home, "session_ids": []})
             if c["status"] == "fail"} == {
         "lcm.db", "state.db"}
+
+
+@pytest.mark.parametrize("codes, receipt_written, expected", [
+    ((0, 0), True, ({"checks": {}}, False, 0)),     # the edition's receipt, read by its declared name
+    ((1,), False, (None, True, 3)),                 # constants exit 1: NOT SHOWN, its report's range_new_rows kept
+    ((2,), False, (None, True, None)),              # refused: no constants, no report
+    ((0, 1), False, (None, True, 0)),               # a replay that fails is an error, range_new_rows still kept
+    ((0, 0), False, (None, True, 0))])              # no receipt under the declared name: an error
+def test_replay_feeds_the_edition_and_reads_its_outcome(tmp_path, monkeypatch, codes, receipt_written, expected):
+    seen, results = [], list(codes)
+
+    def fake_run(argv, **kwargs):
+        seen.append(argv)
+        out, code = Path(kwargs["cwd"]), results.pop(0)
+        if len(seen) == 1 and code in (0, 1):
+            (out / "constants.json").write_text(json.dumps({"range_new_rows": 3 if code else 0}))
+        if len(seen) == 2 and receipt_written:
+            (out / "p-s6r-d5.json").write_text(json.dumps({"checks": {}}))
+        return type("Done", (), {"returncode": code})()
+
+    monkeypatch.setattr(r.subprocess, "run", fake_run)
+    monkeypatch.setattr(r.sandbox, "wrap", lambda argv, **k: argv)
+    config = {"interpreter": "python3", "instrument_dir": "kit", "rc": {"lcm_tree": "rc"}, "ga": {"lcm_tree": "ga"},
+              "replay_receipt": "p-s6r-d5.json", "constants_argv": ["gen", "--session-hash", "{session_h12}"],
+              "replay_argv": ["replay"]}
+    ctx = {"name": "rc", "port": 1, "sessions": {"L": "host-session-1"}}
+    assert r.LocalHost(config, tmp_path / "run").replay(ctx, {"id": "e0-L-0", "conversation": "L"}, "T0", "H8") == expected
+    assert seen[0][-1] == hashlib.sha256(b"host-session-1").hexdigest()[:12]
+    assert len(seen) == len(codes)  # NOT SHOWN or refused: the replay never runs.
+
+
+def test_replay_receipt_must_be_a_bare_name(tmp_path):
+    host = r.LocalHost({"interpreter": "python3", "instrument_dir": "kit", "rc": {"lcm_tree": "rc"},
+                        "ga": {"lcm_tree": "ga"}, "replay_receipt": "../receipt.json",
+                        "constants_argv": ["gen"], "replay_argv": ["replay"]}, tmp_path / "run")
+    with pytest.raises(ValueError):
+        host.replay({"name": "rc", "port": 1, "sessions": {"L": "s"}}, {"id": "e0-L-0", "conversation": "L"}, "T0", "H8")
+
+
+def test_an_h8_capture_carries_the_window_host_logs(tmp_path, monkeypatch):
+    home = tmp_path / "arm" / "home"
+    (home / "logs").mkdir(parents=True)
+    (home / "logs" / "agent.log").write_text("synthetic agent line\n")
+    seen = {}
+    monkeypatch.setattr(r.capture, "capture", lambda kind, out, **k: seen.setdefault(kind, k["extras"]) and {})
+    host = r.LocalHost({}, tmp_path / "run")
+    for kind in ("T0", "H8"):
+        host.capture({"name": "rc", "home": home}, kind, {"id": f"e0-L-{kind}"}, {"RC3/store.db": "x"})
+    assert seen["T0"] == {"RC3/store.db": "x"}
+    assert seen["H8"] == {"RC3/store.db": "x", "native-agent.log.log": home / "logs" / "agent.log"}  # gateway.log absent
