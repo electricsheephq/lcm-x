@@ -612,3 +612,22 @@ def test_data_shaped_lowercase_doctor_keys_are_hashed(tmp_path):
     result = kit.doctor_match(*paths)
     assert "customer_secret_token" not in json.dumps(result)
     assert result["verdict"] == "MATCHED"
+
+
+def test_a_reordered_compaction_list_is_a_reorder(tmp_path):
+    lcm = _messages(tmp_path / "lcm.db", "store_id", [("s", "user", ch, None, None) for ch in "AB"])
+    host = _host_generations(tmp_path / "state.db", [("A", 1.0, 0, 1), ("B", 2.0, 0, 1),
+                                                     ("B", 2.0, 1, 0), ("A", 1.0, 1, 0)])
+    result = kit.reorder(lcm, host)
+    assert (result["host_copy_rows"], result["host_copy_reordered_rows"], result["reordered_rows"]) == (2, 1, 1)
+
+
+def test_chained_compactions_are_copies_not_duplicates(tmp_path):
+    lcm = _messages(tmp_path / "lcm.db", "store_id", [("s", "user", ch, None, None) for ch in "ABCD"])
+    host = _host_generations(tmp_path / "state.db", [
+        ("A", 1.0, 0, 1), ("B", 2.0, 0, 1),                      # generation 1, archived
+        ("A", 1.0, 0, 1), ("B", 2.0, 0, 1), ("C", 3.0, 0, 1),    # generation 2 (copies, then a new row), archived
+        ("A", 1.0, 1, 0), ("B", 2.0, 1, 0), ("C", 3.0, 1, 0), ("D", 4.0, 1, 0)])  # generation 3, active
+    result = kit.reorder(lcm, host)
+    assert (result["host_rows"], result["host_copy_rows"], result["host_duplicate_rows"]) == (4, 5, 0)
+    assert (result["matched"], result["reordered_rows"], result["host_copy_reordered_rows"]) == (4, 0, 0)
