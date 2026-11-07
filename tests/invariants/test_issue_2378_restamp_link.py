@@ -546,6 +546,8 @@ def test_rotation_metadata_failure_degrades_to_durable_recovery(build, caplog, m
     assert called
     assert sum(row["content"] == T for row in rows) == 2
     assert engine._ingest_failure_count == 0
+    # Pins today's behaviour on this injected fault, a KNOWN gap rather than the desired outcome: the second T is a
+    # silent copy. Update this expectation if the gap is closed.
     assert replay_links(engine) == set()
 
 
