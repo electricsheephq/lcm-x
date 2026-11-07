@@ -167,8 +167,8 @@ def lineage_of(sessions: dict):
 def display_key(role, content, ts, call_id, calls, tool_name):
     """The host's display identity (hermes_state_messages.py _display_dedupe_key, hermes_state_identity.py
     _stable_tool_key): a tool-calling assistant row by its call ids, any other row by its content; both with the row's
-    timestamp. Rotation handoffs normally take their original's timestamp (_carry_parent_timestamps). In-place
-    copies with new stamps are handled structurally by ``in_place_carried_ids``. The host's user-handoff normalisation
+    timestamp. Rotation handoffs and in-place copies take their original's timestamp (_carry_parent_timestamps;
+    in-place copies are excluded by ``in_place_carried_ids``). The host's user-handoff normalisation
     (split_user_originated_turn) is not repeated here: LCM-X's carriers are excluded by marker instead."""
     if role == "assistant" and calls:
         try:
@@ -215,20 +215,20 @@ def carrier_remainder(content, header, nodes, same_lineage):
     return content
 
 
-CARRY_BATCH_S = 2.0  # a copy stamped at the compaction commit sits within this of the boundary row
-
-
 def in_place_carried_ids(rows, strip, prefixes):
-    """Same-session copies at EVERY in-place boundary (the host's ``_compressed_summary`` row or LCM's summary carrier), in host id order, even if later archived.
+    """Same-session copies at EVERY in-place compaction, in host id order, even if later archived.
 
-    Each summary starts an insertion block, bounded by the next summary or session end. Its displayed non-summary
-    prefix must equal a complete ordered suffix of the displayed history before that boundary, comparing display_key
-    without timestamps (assistant tool calls still use call ids), and each copy needs stamp evidence
-    (``stamped_copy``). Exclude previously identified copies from history;
-    skip user carriers (verified strip changes, empty text or LCM prefixes) on both sides, leaving them to the existing
-    carrier logic. Take the longest matching suffix once; never search later rows for another match. A genuine resend
-    after that prefix still counts, even with the original's stamp. No compacted evidence before the boundary, or no
-    summary boundary, means no structural deduction; active/compacted transitions alone cannot locate earlier blocks.
+    A compaction archives the active rows (compacted = 1) and inserts its compressed list after a boundary: the host's
+    ``_compressed_summary`` row or LCM's summary carrier (a user row whose verified strip changes it); a run of boundary
+    rows with no other displayed row between them is one compaction (this host pin flags no summary row, and LCM's
+    carrier opens the block). Its pool is what it archived: the displayed non-carrier archived rows between the
+    previous compaction and this one, earlier copies included (a chained compaction copies copies). A displayed
+    non-carrier row after the boundary, up to the next compaction, is a copy when its full display_key (role,
+    content or call ids, and the exact stamp) matches an unused pool row: the host keeps the original's stamp
+    (``_carry_parent_timestamps``), and each pool row stands for one copy. Order is not required (the host can
+    reorder or drop rows of the list). A new row has a stamp of its own, so a resend or repeat is never a copy; a copy
+    the host re-stamps stays expected (a false alarm, never a hidden loss). User carriers (verified strip changes,
+    empty text or LCM prefixes) are left to the existing carrier logic. No compacted evidence means no deduction.
     """
     sessions = defaultdict(list)
     for row in rows:
@@ -241,42 +241,31 @@ def in_place_carried_ids(rows, strip, prefixes):
         text = strip(row[3], row[1])
         return text != row[3] or not (text or "").strip() or (text or "").lstrip().startswith(prefixes)
 
+    def boundary(row):
+        return bool(row[6]) or (row[9] and row[2] == "user" and strip(row[3], row[1]) != row[3])
+
     def key(row):
         _rid, sid, role, content, calls, call_id = row[:6]
-        return display_key(role, strip(content, sid) if role == "user" else content, None, call_id, calls, row[8])
-
-    def stamped_copy(original, copy, opened):
-        """Stamp evidence that ``copy`` is the host's carried copy of ``original``, not a new occurrence: it keeps the
-        original's stamp (``_carry_parent_timestamps``), or it carries the boundary's insert-batch stamp (a carried row
-        with no donor is stamped at commit, within ``CARRY_BATCH_S`` of the boundary row). A genuine resend has a stamp
-        of its own, so it is never taken for a copy (a re-stamped copy outside the batch stays expected: a false alarm,
-        never a hidden loss)."""
-        stamp = copy[7]
-        if stamp is None or original[7] is None:
-            return False
-        return stamp == original[7] or (opened is not None and abs(float(stamp) - float(opened)) <= CARRY_BATCH_S)
+        return display_key(role, strip(content, sid) if role == "user" else content, row[7], call_id, calls, row[8])
 
     carried = set()
     for segment in sessions.values():
         segment.sort(key=lambda r: r[0])
-        # A boundary is the host's summary row, or the LCM summary carrier the compaction inserts at the start of the
-        # block (this host pin flags no summary row: the block opens with LCM's carrier user row).
-        boundaries = [i for i, r in enumerate(segment) if r[6] or (r[9] and carrier(r))]
-        for boundary, end in zip(boundaries, boundaries[1:] + [len(segment)]):
-            before = [r for r in segment[:boundary] if r[9] and not r[6] and r[0] not in carried and not carrier(r)]
-            if not any(r[12] for r in before):
+        window, pool, opened = [], Counter(), False
+        for row in segment:
+            if boundary(row):
+                if not opened:  # a new compaction: it archived the window since the previous one
+                    pool = Counter(key(r) for r in window if r[12] and r[7] is not None)
+                    window, opened = [], True
                 continue
-            block = [r for r in segment[boundary + 1:end] if r[9] and not carrier(r)]
-            before_keys, block_keys = [key(r) for r in before], [key(r) for r in block]
-            # The insert-batch stamp counts only at a host-flagged summary row: an LCM carrier can also open a
-            # genuine new turn (#1961's merge), so after a carrier boundary a copy must keep its original's stamp.
-            opened = segment[boundary][7] if segment[boundary][6] else None
-            for start in range(len(before)):
-                n = len(before) - start
-                if n <= len(block) and before_keys[start:] == block_keys[:n] and all(
-                        stamped_copy(original, copy, opened) for original, copy in zip(before[start:], block[:n])):
-                    carried.update(r[0] for r in block[:n])
-                    break
+            if not row[9] or carrier(row):
+                continue
+            opened = False
+            window.append(row)
+            k = key(row)
+            if row[7] is not None and pool[k] > 0:
+                pool[k] -= 1
+                carried.add(row[0])
     return carried
 
 
@@ -286,8 +275,8 @@ def host_expected(rows, group, markers, strip, scored=None):
     Hermes keeps a rotation parent's originals in the closed parent and gives the child only the compressed handoff
     (hermes_state_compression.py _publish_compression_child_on_conn); an in-place compaction archives the displayed
     history (active = 0, compacted = 1). Some hosts rewind the carried originals (active = 0, compacted = 0);
-    others keep both originals and active copies displayed, sometimes with new timestamps. ``in_place_carried_ids``
-    excludes those copies using their insertion block, not global text deduplication. The displayed rows are
+    others keep both originals and active copies displayed. ``in_place_carried_ids`` excludes those copies by
+    their exact stamp against what each compaction archived, not by global text deduplication. The displayed rows are
     ``active = 1 OR compacted = 1``, and the lineage display collapses
     rows by display identity (``display_key``) across segments. The host stamps each row of an insert batch 1e-6 s
     after the one before it (hermes_state_messages.py _insert_message_rows), so two identical sends have identities of
