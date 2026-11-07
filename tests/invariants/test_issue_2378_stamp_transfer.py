@@ -57,7 +57,7 @@ def test_next_prompt_stamp_transfer_is_not_silent(build, cold, restamp_t, retain
     assert len({a for a, _b in links}) == len(links), evidence
 
 
-@pytest.mark.xfail(strict=True, reason="625: TODO composite is scaffold before R2 "
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason="625: TODO composite is scaffold before R2 "
                    "(engine.py:6663; identity_anchor.py:312), so no composite witness is recorded")
 def test_625_todo_prompt_composite_with_stamp_transfer_copy_is_replay(build):
     engine = build()
