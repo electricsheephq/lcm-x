@@ -129,6 +129,14 @@ def continue_positions(seq: list[tuple[str, str]], reply_pat: str) -> Counter:
     return out
 
 
+def host_read_failed(group, error):
+    """Any failed read of the host's state.db is host evidence the scorer never read (#2382): record the first
+    failure on ``group`` (numbers.diagnostic.host_evidence_error), so ``cap_host_evidence`` caps a passing
+    host-dependent bar at INCONCLUSIVE. A missing state.db is not a failed read."""
+    if getattr(group, "host_error", None) is None:
+        group.host_error = error
+
+
 def continue_occurrences(rows, state: Path, group, reply_pat: str, *, observed_at=True, fallback=None) -> Counter:
     """Bind stored continues to their host successor's full occurrence, never to store order.
 
@@ -154,8 +162,9 @@ def continue_occurrences(rows, state: Path, group, reply_pat: str, *, observed_a
                 con.close()
             for row in host:
                 sessions.setdefault(row[1], []).append(row)
-        except sqlite3.Error:
+        except sqlite3.Error as exc:
             reason = "state.db unreadable"
+            host_read_failed(group, f"state.db messages unreadable ({type(exc).__name__})")
     if not observed_at:
         reason = "store has no observed_at column"
     elif any(r[6] is None for r in continues):
@@ -346,6 +355,8 @@ def score(cell: dict, cell_dir: Path, db_dir: Path | None = None) -> dict:
     plugin = cell.get("plugin") or (json.loads((cell_dir / "cell.json").read_text()).get("plugin")
                                     if (cell_dir / "cell.json").exists() else None) or {}
     host, host_why = host_parity.load(db_dir / "state.db", group, plugin.get("tree"))
+    if host is None and host_why.startswith("host state.db unreadable"):
+        host_read_failed(group, "state.db unreadable for host parity")
     b2_full, ext, ext_ids = externalized.resolve(full, db_dir.parent / "hermes-home")
     occurrences = [(*r, stamps[r[0]]) for r in b2_full]
     b2_stored = [r[:4] for r in b2_full]
