@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 import re
 import sys
+import time
 from urllib.request import ProxyHandler, Request, build_opener
 
 from . import bars, capture, plan as planner, provider as prov, run
@@ -39,8 +40,9 @@ def _failed(checks):
     return [name for name, bad in checks if bad]
 
 
-def _steps(plan, epoch=None):
-    return [s for e in plan["epochs"] if epoch in (None, e["epoch"]) for s in e["steps"] if s["conversation"] == "L"]
+def _steps(plan, epoch=None, conversation="L"):
+    return [s for e in plan["epochs"] if epoch in (None, e["epoch"]) for s in e["steps"]
+            if s["conversation"] == conversation]
 
 
 def _turn(host, ctx, step):
@@ -48,8 +50,10 @@ def _turn(host, ctx, step):
         raise Inconclusive(f"turn {step['id']} not completed")
 
 
-def _session(host, tree, clone, plan, steps, *, until=None, restart_before=()):
-    """Arm a fresh clone, run the steps (restarting the gateway before those named), stop; returns the context."""
+def _session(host, tree, clone, plan, steps, *, until=None, restart_before=(), settle=0):
+    """Arm a fresh clone, run the steps (restarting the gateway before those named), stop; returns the context. With
+    *settle*, a gateway whose steps all ran without *until* holding stays up for at most that many seconds while it
+    does (a compression the host finishes in the background); ctx["settle_s"] is the time it waited."""
     ctx = host.arm(tree, host.clone(clone), plan)
     host.pause_cron(ctx)  # As run_arm: no snapshot job fires.
     try:
@@ -61,6 +65,11 @@ def _session(host, tree, clone, plan, steps, *, until=None, restart_before=()):
             _turn(host, ctx, step)
             if until and until(ctx):
                 break
+        else:
+            started = time.monotonic()
+            while settle and until and not until(ctx) and time.monotonic() - started < settle:
+                time.sleep(min(5.0, settle / 10))
+            ctx["settle_s"] = round(time.monotonic() - started, 1)
     finally:
         host.stop(ctx)
         host.close(ctx)
@@ -100,10 +109,16 @@ def p3(host, plan):
     finally:
         server.stop()
     host.c = {**saved, "context_length": saved["p3_context_length"]}  # Only P3 crosses the threshold early: the declared context_length (1,000,000) keeps the others below it.
+    # P3 drives S2, not L. Over the small context, L's ~560k-token history also starts the host's own session-hygiene
+    # compression, which holds the compression lock in the background, so LCM-X's compaction is skipped and whether
+    # one publishes depended on load (run 4 yes, run 5 no). S2's ~65k-token history crosses LCM-X's threshold and
+    # compresses quickly. A compaction still running after the last turn gets a bounded wait; a miss is INCONCLUSIVE.
+    unsure, wait = [], saved.get("p3_publish_wait", 300)
     try:
         for tree in ("rc", "ga"):
-            ctx = _session(host, tree, f"pf-P3-{tree}", plan, _steps(plan)[:saved.get("p3_max_turns", 6)],
-                           until=lambda c: host.facts(c)["compactions_published"] >= 1)
+            ctx = _session(host, tree, f"pf-P3-{tree}", plan,
+                           _steps(plan, conversation="S2")[:saved.get("p3_max_turns", 6)],
+                           until=lambda c: host.facts(c)["compactions_published"] >= 1, settle=wait)
             stats, published = host.stats(ctx), host.facts(ctx)["compactions_published"]
             ran = [s for s in plan["provider"]["steps"] if s in stats["calls_per_step"]]
             nodes = [s for s, in _rows(ctx, "lcm.db", "SELECT summary FROM summary_nodes WHERE node_id > ?",
@@ -115,15 +130,27 @@ def p3(host, plan):
                 "outside_step": stats["agent_calls_outside_step"], "replay_misses": sum(stats["replay_misses"].values()),
                 "unknown_models": sum(stats["unknown_models"].values()),
                 "unknown_model_names": sorted(stats["unknown_models"]),  # Config strings only.
-                "off_script": [s for s in ran if stats["calls_per_step"][s] != len(plan["provider"]["steps"][s])]}
+                "off_script": [s for s in ran if stats["calls_per_step"][s] != len(plan["provider"]["steps"][s])],
+                "publish_wait_s": ctx.get("settle_s", 0)}
+            unsure += [f"{tree}: no compaction published within {wait} s of the last turn"] if published < 1 else []
             reasons += [f"{tree}: {k}" for k in _failed([
-                ("no published compaction", published < 1), ("no d5-summary call", f["summary_calls"] < 1),
-                ("a new summary node not from the fixed rule", not nodes or f["fixed_rule_nodes"] != len(nodes)),
+                ("no d5-summary call", published >= 1 and f["summary_calls"] < 1),
+                ("a new summary node not from the fixed rule",
+                 published >= 1 and (not nodes or f["fixed_rule_nodes"] != len(nodes))),
                 ("agent calls outside a step", f["outside_step"]), ("replay misses", f["replay_misses"]),
                 ("unknown models", f["unknown_models"]), ("step calls != planned entries", f["off_script"])])]
     finally:
         host.c = saved
-    return reasons, [], facts
+    return reasons, unsure, facts
+
+
+def _home_paths(text, home):
+    """*text* with each absolute path under this arm's own home masked. The host's terminal tool truncates a large
+    output and names the file that keeps it in full, under the arm's home and with a timestamp, so the same output
+    differs between the trees only there."""
+    for root in sorted({str(home), str(Path(home).resolve())}, key=len, reverse=True):
+        text = re.sub(re.escape(root) + r"""[^\s"'\])]*""", "<home-path>", text)
+    return text
 
 
 def p4(host, plan):
@@ -136,17 +163,21 @@ def p4(host, plan):
         payload = json.loads(path.read_bytes()) if refs and path.is_file() else {}
         f = facts[tree] = {
             "rows": [len(hosts), len(lcms)], "refs": len(refs), "files": host.facts(ctx)["payload_files_created"],
-            "stub_masked_sha256": [_sha(run.EXTERNALIZED_REF.sub(lambda m: m[0].replace(m[1], "<ref>"), t or ""))
-                                   for t in hosts + lcms],
-            "content_sha256": _sha(payload.get("content")), "content_chars": payload.get("content_chars"),
+            "stub_masked_sha256": [_sha(_home_paths(run.EXTERNALIZED_REF.sub(
+                lambda m: m[0].replace(m[1], "<ref>"), t or ""), ctx["home"])) for t in hosts + lcms],
+            "content_sha256": _sha(payload.get("content")),
+            "content_masked_sha256": _sha(_home_paths(payload["content"], ctx["home"]))
+            if isinstance(payload.get("content"), str) else None, "content_chars": payload.get("content_chars"),
             "content_bytes": payload.get("content_bytes"), "digest12": [m[1] for m in map(DIGEST12.search, refs) if m]}
         reasons += _failed([(f"{tree}: not one tool row per store, one reference and one payload file",
                              (f["rows"], f["refs"], f["files"]) != ([1, 1], 1, 1)),
                             (f"{tree}: the payload file holds no content and sizes",  # Two empty payloads compare equal.
                              not payload.get("content") or not all(isinstance(f[k], int) and f[k] > 0
-                                                                   for k in ("content_chars", "content_bytes")))])
-    return reasons + [f"{k} differs between the trees" for k in ("stub_masked_sha256", "content_sha256",
-                      "content_chars", "content_bytes", "digest12") if facts["rc"][k] != facts["ga"][k]], [], facts
+                                                                   for k in ("content_chars", "content_bytes"))),
+                            (f"{tree}: the reference's digest is not its own content's hash",  # LCM-X names the
+                             f["digest12"] != [f["content_sha256"][:12]])])  # payload by the content it holds.
+    return reasons + [f"{k} differs between the trees" for k in ("stub_masked_sha256", "content_masked_sha256",
+                      "content_chars", "content_bytes") if facts["rc"][k] != facts["ga"][k]], [], facts
 
 
 def _find(value, key):

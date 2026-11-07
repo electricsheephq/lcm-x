@@ -1,6 +1,7 @@
 """The P3, P4, P6 and P7 preflight producer on a fake host: real stores and a real provider, no gateway."""
 
 from contextlib import closing
+import hashlib
 import json
 import sqlite3
 import sys
@@ -20,7 +21,9 @@ class FakeHost:
     def __init__(self, root, fault=None):
         self.run_dir, self.fault, self.files, self.removed = root, fault, 0, []
         (root / "pin.json").write_text("{}")
+        self.p3_conversations = []
         self.c = {"snapshot_pin": str(root / "pin.json"), "context_length": 200000, "p3_context_length": 64000,
+                  "p3_publish_wait": 0.3,
                   "rc": {"lcm_tree": str(root), "commit": "a" * 40}, "ga": {"lcm_tree": str(root), "commit": "a" * 40}}
 
     def pins(self):
@@ -59,10 +62,18 @@ class FakeHost:
         lcm = [("user", step["user_text"], None), ("assistant", MARKER, None)]
         if self.fault == "warm-unstored" and step["kind"] == "warm" and "pf-P6" in str(home):  # Completed, stored nothing.
             host, lcm = [], []
+        if "pf-P3" in str(home):
+            self.p3_conversations.append(step["conversation"])
         if step["tools"]:
             self.files += 1
             content = MARKER * (2 if self.fault == "P4" and ctx["name"] == "ga" else 1)
-            name, call = f"20261107_000000_t_{'b' * 12}_{self.files:x}.json", entries[0]["tool_calls"][0]["id"]
+            if self.fault == "home-paths":  # The terminal tool's truncation result, as the pinned host writes it.
+                saved = f"{home}/tool_output/terminal-{ctx['name']}-1762556{len(ctx['name'])}-4242.txt"
+                content = json.dumps({"output": MARKER + "\n\n... [OUTPUT TRUNCATED - 204,800 chars] ...",
+                                      "exit_code": 0, "full_output_path": saved,
+                                      "truncation_note": f"Full output saved to {saved}"})
+            digest = "b" * 12 if self.fault == "wrong-digest" else hashlib.sha256(content.encode()).hexdigest()[:12]
+            name, call = f"20261107_000000_t_{digest}_{self.files:x}.json", entries[0]["tool_calls"][0]["id"]
             (home / "lcm-large-outputs" / name).write_text(json.dumps(
                 {} if self.fault == "empty-payload" else {"content": content, "content_chars": 1, "content_bytes": 1}))
             host.append(("tool", f"[Externalized tool output: {MARKER}; ref={name}]", call))
@@ -87,7 +98,7 @@ class FakeHost:
                            " auto-compressing", f"{stamp}INFO gateway.run: Session hygiene: compressed 40 → 6 msgs"]
         if self.fault == "hygiene-skip":  # A skip compresses nothing: P6 still judges.
             ctx["log"] += [f"{stamp}INFO gateway.run: Session hygiene: skipping compression for sess-l; cooldown"]
-        ctx["facts"]["compactions_published"] += 1
+        ctx["facts"]["compactions_published"] += self.fault not in ("no-publish", "late-publish")
         ctx["facts"]["whitespace_rewrites"] += bool(step["rewrite"])
         ctx["stats"]["calls_per_step"][step["id"]] = len(entries)
         ctx["stats"]["calls_by_model"]["d5-summary"] = 1
@@ -109,6 +120,9 @@ class FakeHost:
         self.removed.append(path.name)
 
     def facts(self, ctx):
+        if self.fault == "late-publish" and "pf-P3" in str(ctx["home"]):  # The compaction lands after the last turn.
+            ctx["polls"] = ctx.get("polls", 0) + 1
+            ctx["facts"]["compactions_published"] = int(ctx["polls"] > 7)
         return {**ctx["facts"], "payload_files_created": sum(1 for _ in (ctx["home"] / "lcm-large-outputs").iterdir())}
 
     def stats(self, ctx):
@@ -126,7 +140,8 @@ class FakeHost:
 @pytest.mark.parametrize("fault", [None, "P3", "P4", "P6", "P7", "crash", "no-conversation", "replay-error",
                                    "not-durable", "inactive-copy",
                                    "user-copy-first", "hygiene", "empty-payload", "warm-unstored",
-                                   "hygiene-plain", "hygiene-skip"])
+                                   "hygiene-plain", "hygiene-skip", "no-publish", "late-publish", "home-paths",
+                                   "wrong-digest"])
 def test_each_preflight_fails_on_its_own_fault(tmp_path, monkeypatch, fault):
     monkeypatch.setitem(sys.modules, "yaml", types.SimpleNamespace(safe_load=json.loads))  # Not in every test venv.
     if fault == "P3":  # A provider whose second reply differs from the first.
@@ -137,12 +152,15 @@ def test_each_preflight_fails_on_its_own_fault(tmp_path, monkeypatch, fault):
     verdicts = pf.produce(host, list(pf.PREFLIGHTS))
     assert host.removed == ([] if fault in ("crash", "replay-error", "not-durable") else ["T0", "H8"])
     expected = dict.fromkeys(pf.PREFLIGHTS, "INCONCLUSIVE" if fault == "crash" else "PASS")
-    fails = {"empty-payload": ("P4", "P7"), "warm-unstored": ("P6",)}  # Two empty payloads or no warm rows compare equal.
+    fails = {"empty-payload": ("P4", "P7"), "warm-unstored": ("P6",), "wrong-digest": ("P4",)}  # Two empty payloads or no warm rows compare equal.
+    passing = ("inactive-copy", "user-copy-first", "hygiene-skip", "late-publish", "home-paths")
     expected.update({fault: "FAIL"} if fault in pf.PREFLIGHTS else dict.fromkeys(fails[fault], "FAIL") if fault in fails
-                    else {"P6": "INCONCLUSIVE"} if fault and fault not in ("inactive-copy", "user-copy-first", "hygiene-skip")
-                    else {})
+                    else {"P3": "INCONCLUSIVE"} if fault == "no-publish"
+                    else {"P6": "INCONCLUSIVE"} if fault and fault not in passing else {})
     assert verdicts == expected
     p6 = json.loads((tmp_path / "P6.json").read_text())["facts"]
+    if fault != "crash":  # P3 drives S2 only: L's history starts the host's own hygiene compression (run 5).
+        assert set(host.p3_conversations) == {"S2"}
     if fault is None:  # One distinct anchor record per turn, though each is written twice.
         assert (p6["cold_anchors"], p6["warm_anchors"], p6["hygiene_lines"]) == (1, 0, 0)
     if fault != "crash":  # The plan's counts are written before any check runs (#2471): counts and hashes only.
