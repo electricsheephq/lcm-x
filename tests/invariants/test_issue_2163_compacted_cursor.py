@@ -220,3 +220,18 @@ def test_a_later_identical_stored_pair_does_not_prove_an_earlier_dangling_call(b
     assert after[:len(before)] == before
     added = [(row["role"], row.get("content"), row.get("tool_call_id")) for row in after[len(before):]]
     assert added == [("tool", "OK", "call_0"), ("user", "next", None)], added
+
+
+def test_a_call_whose_stamp_differs_from_its_stored_copy_proves_nothing(build):
+    """Review round 2: the only copy of the call in the tail is a different occurrence when the stamps disagree."""
+    engine = build()
+    call, result = tool_pair("c", "OK", tool_name="poll")
+    engine.ingest([{"role": "user", "content": "start", "timestamp": 1.0},
+                   {**call, "timestamp": 2.0}, {**result, "timestamp": 3.0}])
+    tail = engine._store.get_session_tail(engine._session_id, limit=10)
+    counts = Counter(engine._message_replay_identity(row, stored_row=True) for row in tail)
+    host = [{**call, "timestamp": 1.0}, deepcopy(result), {"role": "user", "content": "next"}]
+    assert engine._replayed_results_at_cursor(host, 1, tail, set(), {}, counts) == set()
+    # Control: the same call with its stored stamp is the stored occurrence.
+    host[0]["timestamp"] = 2.0
+    assert engine._replayed_results_at_cursor(host, 1, tail, set(), {}, counts) == {1}

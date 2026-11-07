@@ -3443,7 +3443,7 @@ class ReconcileMixin:
         of the call can be the one replayed. That copy must be followed directly by a stored result
         with the same literal identity (a borrowed placeholder alias is not evidence, #1385), unspent
         by the prefix, and the multiset must still hold a copy, which is then spent. A host and stored
-        stamp that differ veto the match. Anything unproven is stored.
+        stamp that differ, on the call or on the result, veto the match. Anything unproven is stored.
         """
         call_index = cursor - 1
         if call_index < 0 or str(messages[call_index].get("role") or "") != "assistant":
@@ -3468,6 +3468,10 @@ class ReconcileMixin:
             at = copies[0] if unique else None
         if at is None or self._message_replay_identity(tail_rows[at], stored_row=True) != call_identity:
             return set()
+        call_stamp = self._host_occurrence_metadata(messages[call_index])["timestamp"]
+        stored_call_stamp = _normalize_observed_at(tail_rows[at].get("observed_at"))
+        if call_stamp is not None and stored_call_stamp is not None and call_stamp != stored_call_stamp:
+            return set()  # a different occurrence of the same call
         stored_results = {}
         for row in tail_rows[at + 1:]:
             if str(row.get("role") or "") != "tool":
