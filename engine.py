@@ -7152,51 +7152,44 @@ class LCMEngine(
             conversation = _normalize_conversation_id_value(self._conversation_id)
 
             def borrowed(at, carrier, text):
-                # An earlier user row of other text holds this stamp as its own (exact equality; indexed).
+                # An earlier user row of other text holds this stamp as its own (exact equality; indexed). Two rows
+                # decide it; a cap can only miss a link, never write a wrong one.
                 return any(isinstance(content, str) and content.strip() and content.strip() != text
                            for (content,) in conn.execute(
                                "SELECT content FROM messages WHERE conversation_id IN (?, '') AND observed_at=? "
-                               "AND +session_id=? AND role='user' AND +store_id<?", (conversation, at, session, carrier)))
-            # The stamp gate, from the store and through indexes only: the row's own stamp is borrowed, or an
-            # earlier stored copy of its text (found by the ingest ledger's identity digest) sits on a borrowed
-            # stamp. Each row costs a constant number of lookups; only a row that passes reads the session's
-            # copies of its text. The unary '+' (and CROSS JOIN, which fixes the join order) keeps the planner
-            # off the session indexes, which would walk every row of the session.
+                               "AND +session_id=? AND role='user' AND +store_id<? LIMIT 2",
+                               (conversation, at, session, carrier)))
+            # Every read goes through an index, so each stored row costs a bounded number of reads: earlier
+            # copies of its text come from the ingest ledger's identity digest, never from a scan of the
+            # session. The unary '+' and CROSS JOIN keep the planner off the session indexes. Without the
+            # ledger there is no indexed way to find the earlier copy, and no link is written.
             attempt = getattr(self, "_ingest_ledger_attempt", None)
-            index_of = {sid: idx for idx, sid in stored_at.items() if sid}
-            gated = {}
-            for sid, text in sorted(texts.items()):
-                copies = []
-                if attempt is not None and attempt.get("entries") and index_of[sid] < len(attempt["entries"]):
-                    copies = conn.execute(
-                        "SELECT m.store_id, m.observed_at FROM occurrence_bindings b "
-                        "CROSS JOIN messages m ON m.store_id = b.store_id WHERE b.lineage=? AND b.identity_digest=? "
-                        "AND b.store_id<? AND m.role='user' AND +m.session_id=? AND m.observed_at IS NOT NULL",
-                        (attempt["lineage"], attempt["entries"][index_of[sid]].identity_digest, sid, session))
-                if borrowed(stamps[sid], sid, text) or any(
-                        at != stamps[sid] and borrowed(at, store_id, text) for store_id, at in copies):
-                    gated[sid] = text
-            if not gated:
+            if attempt is None or not attempt.get("entries"):
                 return
-            texts, rows = gated, {}
-            for sid, text in sorted(texts.items()):
-                for store_id, content, observed_at in conn.execute(
-                        "SELECT store_id, content, observed_at FROM messages WHERE conversation_id IN (?, '') "
-                        "AND session_id=? AND role='user' AND store_id<=? AND instr(content, ?)>0",
-                        (conversation, session, sid, text)):
-                    if isinstance(content, str) and content.strip() in texts.values():
-                        rows[int(store_id)] = (content.strip(), observed_at)
+            index_of = {sid: idx for idx, sid in stored_at.items() if sid}
             pairs = []
             for sid, text in sorted(texts.items()):
-                stamp = rows.get(sid, (None, None))[1]
-                equal = [(store_id, observed_at) for store_id, (content, observed_at) in sorted(rows.items())
-                         if store_id < sid and content == text]
-                # Exactly one earlier copy, at another stamp. A copy at this row's own stamp is a plain
-                # replay that the other linkers own.
-                if (rows.get(sid, (None,))[0] != text or stamp is None or len(equal) != 1
-                        or equal[0][1] is None or equal[0][1] == stamp):
+                if index_of[sid] >= len(attempt["entries"]):
                     continue
-                target, target_stamp = equal[0]
+                # The pairing needs exactly one earlier copy, so three bindings decide it: a full page means
+                # more copies (or bindings) than one, and the row is skipped.
+                found = conn.execute(
+                    "SELECT m.store_id, m.observed_at, m.content FROM occurrence_bindings b "
+                    "CROSS JOIN messages m ON m.store_id = b.store_id WHERE b.lineage=? AND b.identity_digest=? "
+                    "AND b.store_id<? AND m.role='user' AND +m.session_id=? AND m.conversation_id IN (?, '') LIMIT 3",
+                    (attempt["lineage"], attempt["entries"][index_of[sid]].identity_digest, sid, session,
+                     conversation)).fetchall()
+                copies = sorted({(int(store_id), observed_at) for store_id, observed_at, content in found
+                                 if isinstance(content, str) and content.strip() == text})
+                if len(found) > 2 or len(copies) != 1:
+                    continue
+                target, target_stamp = copies[0]
+                stored = conn.execute("SELECT content, observed_at FROM messages WHERE store_id=?", (sid,)).fetchone()
+                stamp = stored[1] if stored and isinstance(stored[0], str) and stored[0].strip() == text else None
+                # The earlier copy is at another stamp: a copy at this row's own stamp is a plain replay that the
+                # other linkers own.
+                if stamp is None or target_stamp is None or target_stamp == stamp:
+                    continue
                 # The veto: a host view that still shows this text at the earlier copy's stamp holds a
                 # second occurrence, so the later copy is a genuine repeat. Absent content never vetoes.
                 if any(isinstance(message, dict) and message.get("role") == "user"
@@ -7205,14 +7198,12 @@ class LCMEngine(
                        and self._host_occurrence_metadata(message)["timestamp"] == target_stamp
                        for message in messages):
                     continue
-                pairs.append((sid, target, text, ((stamp, sid), (target_stamp, target))))
-            if not pairs:
-                return
-            # The borrowed stamp: an earlier user row of other text holds the later or the earlier copy's
-            # stamp as its own (exact equality).
-            pairs = [(sid, target, next((at for at, carrier in carriers if borrowed(at, carrier, text)), None))
-                     for sid, target, text, carriers in pairs]
-            pairs = [(sid, target, at) for sid, target, at in pairs if at is not None]
+                # The borrowed stamp: an earlier user row of other text holds the later or the earlier copy's
+                # stamp as its own.
+                at = next((at for at, carrier in ((stamp, sid), (target_stamp, target))
+                           if borrowed(at, carrier, text)), None)
+                if at is not None:
+                    pairs.append((sid, target, at))
             if not pairs:
                 return
             with self._ingest_evidence():
