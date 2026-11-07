@@ -7665,10 +7665,13 @@ class LCMEngine(
                             earlier, stripped_earlier = {}, {}
                             # One linear scan over the session's earlier rows (index order), filtered by key in
                             # Python: a per-key join re-scans the key set for every row and holds the lock far longer.
-                            for sid, role, content, call_id, calls, name, stamp, conv in conn.execute(
-                                "SELECT store_id,role,content,tool_call_id,tool_calls,tool_name,observed_at,conversation_id "
-                                "FROM messages WHERE session_id=? AND store_id<? ORDER BY store_id",
-                                (self._session_id, first)):
+                            # #2029: then the recorded rotation chain, nearest first; own rows come first, so a copy
+                            # with a target in its own session keeps that target.
+                            for sid, role, content, call_id, calls, name, stamp, conv in itertools.chain.from_iterable(
+                                conn.execute(
+                                    "SELECT store_id,role,content,tool_call_id,tool_calls,tool_name,observed_at,conversation_id "
+                                    "FROM messages WHERE session_id=? AND store_id<? ORDER BY store_id", (session, first))
+                                for session in attempt.get("replay_sessions") or [self._session_id]):
                                 conv = _normalize_conversation_id_value(conv)
                                 if (conv, role, call_id, calls, name) not in keys:
                                     continue
@@ -8385,11 +8388,19 @@ class LCMEngine(
                 # Freeze this transaction's decision; warm appends can retain an older status.
                 self._ingest_ledger_attempt["recovery_probe"] = (
                     reconciled_existing_session and bool(bind_session_counts and bind_session_counts[0]))
-                self._ingest_ledger_attempt["cursor0_batch"] = (
+                cursor0_batch = (
                     reconciled_existing_session and cursor == 0
                     and self._last_ingest_reconciliation.get("action") == "persisted batch"
                     and self._last_ingest_reconciliation.get("reason") == "persisted ambiguous delta"
                     and self._last_ingest_reconciliation.get("cursor") == 0)
+                # #2029: a rotation child re-sent from cursor 0 without a commit proof (no reconciliation ran) stores
+                # its predecessors' rows again; annotate them against the recorded rotation chain.
+                # Only the unreconciled route gains the chain: #2305's reconciled route keeps its own-session targets.
+                ancestors = (self._rotation_predecessor_session_ids(self._session_id)
+                             if cursor == 0 and not reconciled_existing_session else [])
+                self._ingest_ledger_attempt["cursor0_batch"] = bool(
+                    cursor0_batch or ancestors and not reconciled_existing_session)
+                self._ingest_ledger_attempt["replay_sessions"] = [self._session_id, *ancestors]
                 self._ingest_ledger_attempt["matched"] = {
                     idx: int(rows[0]["store_id"]) for idx, rows in (anchor_plan or {}).get("matched", {}).items() if len(rows) == 1}
             except Exception as exc:

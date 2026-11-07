@@ -112,6 +112,16 @@ def test_p1h_pairs_do_not_cross_lineages(tmp_path):
     assert out["visible_surplus_rows"] == 0 and out["silent_surplus_rows"] == 2
 
 
+def test_p1h_pairs_across_a_compression_chain_are_visible(tmp_path):
+    # #2029: a rotation child's re-stored copy links to its predecessor's row; the host records the child under
+    # its parent, so both rows are one lineage and the link explains the copy. A foreign session stays refused.
+    out = score(tmp_path, [("user", "same")] * 2, [(2, "possible_replay_of", 1)], sids=["S0", "S1"],
+                parents={"S0": None, "S1": "S0"})
+    # No turn expects "same" here, so both rows are surplus (the foreign case above explains neither); the
+    # cross-session link explains the later copy.
+    assert (out["surplus_rows"], out["visible_surplus_rows"], out["silent_surplus_rows"]) == (2, 1, 1)
+
+
 @pytest.mark.parametrize("related", [True, False])
 @pytest.mark.parametrize("kind", ["tool", "call", "malformed"])
 def test_p1h_tool_surplus_with_and_without_relation(tmp_path, related, kind):
