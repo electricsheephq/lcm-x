@@ -1683,6 +1683,8 @@ def _composite_of_splits(content: str, by_text, session, header: str) -> list[li
         if len(found) > 1:
             break
         scaffold, rest = content[:cut], content[cut + 2:]
+        if not scaffold.lstrip().startswith(header):
+            continue  # the scaffold itself is the todo block, never blank text before it
         # The scaffold is unstored text: it never holds a whole stored row (a stored todo row is rule (ii)).
         if any(scaffold == text or scaffold.startswith(text + "\n\n") or scaffold.endswith("\n\n" + text)
                or "\n\n" + text + "\n\n" in scaffold for text in texts):
