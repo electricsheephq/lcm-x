@@ -201,3 +201,54 @@ def test_a_redacted_reply_in_front_of_the_anchor_is_not_stored_again(tmp_path):
         assert len(_stored(engine)) == 16
     finally:
         engine.shutdown()
+
+
+def _pre_ledger(tmp_path, monkeypatch, view) -> LCMEngine:
+    monkeypatch.setenv("LCM_INGEST_LEDGER", "off")
+    engine = _engine(tmp_path)
+    engine.ingest(view)
+    monkeypatch.setenv("LCM_INGEST_LEDGER", "on")
+    return engine
+
+
+@pytest.mark.parametrize("cold", [False, True], ids=["warm", "cold"])
+def test_an_upgrade_past_the_audited_tail_stores_only_the_replaced_prompt(tmp_path, monkeypatch, cold):
+    """Review: 50 pre-ledger turns with the same unstamped reply; the host replaces the last prompt. Only the new
+    prompt is stored, as on main, on the warm and the cold upgrade path."""
+    view = []
+    for index in range(50):
+        view += [_u(f"T{index} user turn", 1000 + index), {"role": "assistant", "content": "OK"}]
+    engine = _pre_ledger(tmp_path, monkeypatch, view)
+    try:
+        before = Counter(_key(row) for row in _stored(engine))
+        if cold:
+            engine.shutdown()
+            engine = _engine(tmp_path)
+        changed = list(view)
+        changed[-2] = _u("a replaced last prompt", 2000)
+        engine.ingest(changed)
+        added = Counter(_key(row) for row in _stored(engine)) - before
+        # Cold: with no proof and no stamps on the replies, the restart's first ingest stores the replies again
+        # as one persisted batch (#259), the same 50 rows on main; the audit adds nothing to it.
+        assert added == Counter({_key(changed[-2]): 1, **({_key(view[1]): 50} if cold else {})}), added
+    finally:
+        engine.shutdown()
+
+
+def test_an_upgrade_with_a_tool_result_the_store_holds_without_its_name_stores_only_the_prompt(tmp_path, monkeypatch):
+    """Review: a pre-ledger tool result whose host form names its tool as ``name`` (the stored row has no tool
+    name) has no equal stored identity. It is stored, so it counts as accounted for; only the new prompt is
+    stored, and no tool result is ever stored without its call."""
+    history = _history()
+    history[7] = {"role": "tool", "content": "old file text", "tool_call_id": "call_old", "name": "read_file",
+                  "timestamp": 131.0}
+    engine = _pre_ledger(tmp_path, monkeypatch, history)
+    try:
+        before = Counter(_key(row) for row in _stored(engine))
+        changed = list(history)
+        changed[4] = _u("P61 a prompt the host put in the in-flight slot", 125)
+        engine.ingest(changed)
+        added = Counter(_key(row) for row in _stored(engine)) - before
+        assert added == Counter([_key(changed[4])]), added
+    finally:
+        engine.shutdown()
