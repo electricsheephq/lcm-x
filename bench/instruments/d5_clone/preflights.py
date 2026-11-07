@@ -93,7 +93,7 @@ def p3(host, plan):
             reasons += _failed([(f"{model}: the same request gave different bytes", replies[0] != replies[1])])
     finally:
         server.stop()
-    host.c = {**saved, "context_length": saved["p3_context_length"]}  # Only P3's clones cross the threshold early.
+    host.c = {**saved, "context_length": saved["p3_context_length"]}  # Only P3 crosses the threshold early: the declared context_length (1,000,000) keeps the others below it.
     try:
         for tree in ("rc", "ga"):
             ctx = _session(host, tree, f"pf-P3-{tree}", plan, _steps(plan)[:saved.get("p3_max_turns", 6)],
