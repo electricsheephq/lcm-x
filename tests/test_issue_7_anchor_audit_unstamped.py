@@ -306,8 +306,9 @@ def test_truncated_then_replaced_row_stores_the_new_row(tmp_path):
 
 
 @pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="#7: an unstamped view that replaces stored rows at the same length is taken as a positional "
-                          "replay; none of its rows is stored")
+                   reason="#7: when every row is unstamped, a view that replaces all stored rows at the same length is "
+                          "taken as a replay and none of its rows is stored (Hermes leaves rows unstamped only with no "
+                          "session database or a failed transcript write)")
 def test_short_reply_matching_an_earlier_paragraph_is_stored(tmp_path):
     """Review r4 shape 2: a new short user row equals the last paragraph of an older stored row. On main the whole
     second view (4 new rows) is not stored: with every row unstamped and the view as long as the stored rows, the
