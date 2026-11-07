@@ -56,6 +56,7 @@ _POOL_WINDOW = 256  # store ids either side of a stamp donor searched for a comp
 _INSERT_DIFF_BUDGET = 1_000_000  # #633: old x new rows compared per insertion diff (quadratic worst case ~40 ms)
 _CARRIER_LEDGER_CAP = 256  # #1000: carrier emission keys remembered as seen / retired (process-local)
 _PRESENCE_WINDOW_ROWS = 10000  # total stored rows across the presence scope
+_PRESENCE_WINDOW_BYTES = 4_000_000  # stored content and tool-call text across the scope
 
 
 def _ws_equivalent(stored, identity) -> bool:
@@ -594,7 +595,7 @@ class IdentityAnchorMixin:
         bindings, keeps an upgraded store's pre-ledger rows from being stored again. The count compares a loose
         key (call ids, a result's call id, else role and stripped text), never fields a pre-ledger row can lack.
         A stored row's reasoning-cleanup form counts as its copy. Completeness is decided by the
-        _PRESENCE_WINDOW_ROWS window across this session, verified ancestors and recorded predecessors;
+        row and stored-text byte budgets across this session, verified ancestors and recorded predecessors;
         ``capped`` is retained for callers but unused. Past the window the audit adds nothing beyond
         its own finds, as on main.
         Unsure is accounted (the positional replay, as before): a row with no comparable key (a lossy identity)
@@ -631,6 +632,11 @@ class IdentityAnchorMixin:
                           and not self._matches_ignore_message_patterns(messages[idx])}
             session = str(self._session_id)
             chain = self._identity_anchor_chain()
+            cached = getattr(self, "_identity_anchor_chain_cache", None)
+            if self._state_db_path().exists() and (cached is None or cached[0] != session):
+                raise ValueError("incomplete ancestry read")
+            if session in getattr(self, "_rotation_lineage_unrecorded", set()):
+                raise ValueError("unrecorded rotation lineage")
             predecessors = self._rotation_predecessor_session_ids(session)
             # The helper swallows read errors. Verify its reads before trusting the scope as complete.
             for hop, source in enumerate([session, *predecessors]):
@@ -640,21 +646,42 @@ class IdentityAnchorMixin:
                     raise ValueError("incomplete rotation predecessor scope")
             scope = list(dict.fromkeys([session, *chain, *predecessors]))
             rows = {int(row["store_id"]): row for group in held.values() for row in group}
-            budget = _PRESENCE_WINDOW_ROWS
+            budget, byte_budget = _PRESENCE_WINDOW_ROWS, _PRESENCE_WINDOW_BYTES
             for source in scope:
-                tail = self._store.get_session_tail(source, limit=budget + 1)
-                if len(tail) > budget:
-                    logger.debug("LCM identity-anchor presence window incomplete: session=%s scope=%d budget=%d",
-                                 session, len(scope), budget)
-                    return []
-                rows.update((int(row["store_id"]), row) for row in tail)
-                budget -= len(tail)
+                end = None
+                while True:
+                    limit = min(256, budget + 1)
+                    tail = (self._store.get_session_tail(source, limit=limit) if end is None else
+                            self._store.get_session_rows_through(source, end, limit))
+                    budget -= len(tail)
+                    byte_budget -= sum(len(row.get("content") or "") + len(row.get("tool_calls") or "")
+                                       for row in tail)
+                    if budget < 0 or byte_budget < 0:
+                        logged = getattr(self, "_presence_window_logged", set())
+                        if session not in logged:
+                            logger.info("LCM identity-anchor presence window incomplete: session=%s scope=%d "
+                                        "budget=%d bytes=%d", session, len(scope), budget + len(tail), byte_budget)
+                            self._presence_window_logged = logged | {session}
+                        return []
+                    rows.update((int(row["store_id"]), row) for row in tail)
+                    if len(tail) < limit:
+                        break
+                    end = int(tail[0]["store_id"]) - 1
+            text_roles = {wanted[0] for wanted in candidates.values() if wanted and wanted[0] not in {"call", "tool"}}
             index: dict = defaultdict(list)
             for row in rows.values():
-                forms = {key(row, stored=True)}
-                identity = self._message_replay_identity(row, stored_row=True)
-                cleaned = None if calls(row, stored=True) or _lossy(identity) else self._active_cleanup_replay_identity(identity)
-                forms |= {(cleaned[0], cleaned[1].strip())} if cleaned else set()  # proven cleanup form (#1286)
+                if calls(row, stored=True) or row.get("role") == "tool" and row.get("tool_call_id"):
+                    forms = {key(row, stored=True)}
+                elif row.get("role") in text_roles:
+                    identity = self._message_replay_identity(row, stored_row=True)
+                    if _lossy(identity):
+                        continue
+                    forms = {(identity[0], identity[1].strip())}
+                    cleaned = self._active_cleanup_replay_identity(identity)
+                    if cleaned:
+                        forms.add((cleaned[0], cleaned[1].strip()))  # proven cleanup form (#1286)
+                else:
+                    continue
                 for form in forms:
                     index[form].append(row)
             reserved = Counter(key(identity_messages[idx]) for idx in range(min(start, len(messages)))

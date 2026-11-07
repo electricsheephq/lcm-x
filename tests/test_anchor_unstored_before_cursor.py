@@ -551,7 +551,7 @@ def test_a_failed_presence_lookup_keeps_only_the_audits_own_finds(tmp_path, monk
             read_tail = store.get_session_tail
 
             def fail_presence_tail(session, *, limit):
-                if limit == getattr(identity_anchor, "_PRESENCE_WINDOW_ROWS", 10000) + 1:
+                if limit == min(256, getattr(identity_anchor, "_PRESENCE_WINDOW_ROWS", 10000) + 1):
                     return fail()
                 return read_tail(session, limit=limit)
 
@@ -816,5 +816,71 @@ def test_tool_only_presence_computes_no_stored_text_identity(tmp_path, monkeypat
 
         monkeypatch.setattr(engine, "_message_replay_identity", identity)
         assert _presence(engine, [_call("new", 4), _result("new", "new result", 5)]) == [0, 1]
+    finally:
+        engine.shutdown()
+
+
+def test_presence_window_info_is_once_per_session_without_warning(tmp_path, monkeypatch, caplog):
+    engine = _engine(tmp_path)
+    try:
+        monkeypatch.setattr(identity_anchor, "_PRESENCE_WINDOW_BYTES", 1, raising=False)
+        engine._store.append_batch(SESSION, [_a("over budget", 1)])
+        caplog.clear()
+        with caplog.at_level(logging.INFO, logger=identity_anchor.__name__):
+            for _ in range(2):
+                assert _presence(engine, [_call("new", 2)]) == []
+            engine.on_session_start("another-session", platform="cli", context_length=1_000_000)
+            engine._store.append_batch("another-session", [_a("over budget too", 3)])
+            assert _presence(engine, [_call("new", 4)]) == []
+        limits = [r for r in caplog.records if "presence window incomplete" in r.message]
+        assert len(limits) == 2
+        assert all(r.levelno == logging.INFO for r in limits)
+        assert not any("presence window" in r.message and r.levelno >= logging.WARNING for r in caplog.records)
+    finally:
+        engine.shutdown()
+
+
+def test_presence_reads_pages_newest_first_and_finds_an_old_copy(tmp_path, monkeypatch):
+    engine = _engine(tmp_path)
+    try:
+        store = engine._store
+        store.append_batch(SESSION, [{"role": "assistant", "content": f"reply {i}"} for i in range(600)])
+        tail, through, pages = store.get_session_tail, store.get_session_rows_through, []
+
+        def read_tail(source, *, limit):
+            rows = tail(source, limit=limit)
+            pages.append([r["store_id"] for r in rows])
+            return rows
+
+        def read_through(source, end, limit):
+            rows = through(source, end, limit)
+            pages.append([r["store_id"] for r in rows])
+            return rows
+
+        monkeypatch.setattr(store, "get_session_tail", read_tail)
+        monkeypatch.setattr(store, "get_session_rows_through", read_through)
+        assert _presence(engine, [{"role": "assistant", "content": "reply 0"}]) == []
+        assert list(map(len, pages)) == [256, 256, 88]
+        assert pages[0][0] > pages[1][-1] > pages[2][-1]
+        assert len({sid for page in pages for sid in page}) == 600
+    finally:
+        engine.shutdown()
+
+
+def test_text_presence_only_normalizes_matching_role_text_rows(tmp_path, monkeypatch):
+    engine = _engine(tmp_path)
+    try:
+        engine._store.append_batch(SESSION, [_u("other role", 1), _a("kept reply", 2),
+                                             _call("kept", 3), _result("kept", "held", 4)])
+        replay, seen = engine._message_replay_identity, []
+
+        def identity(msg, *, stored_row=False):
+            if stored_row:
+                seen.append((msg["role"], bool(msg.get("tool_calls"))))
+            return replay(msg, stored_row=stored_row)
+
+        monkeypatch.setattr(engine, "_message_replay_identity", identity)
+        assert _presence(engine, [{"role": "assistant", "content": "new reply"}]) == [0]
+        assert seen == [("assistant", False)]
     finally:
         engine.shutdown()
