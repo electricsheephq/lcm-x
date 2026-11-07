@@ -392,24 +392,24 @@ def empty_recovery_rows(rows, host_rows=(), group=lambda session: session):
     """Stored copies of the host's empty-response recovery pair (#2087), matched by structure and exact host text: in
     one session's store order, a tool row, then an assistant row whose content is exactly ``EMPTY_RECOVERY_REPLY`` with
     no tool calls, then a user row whose content is exactly ``EMPTY_RECOVERY_NUDGE``. A user row with the nudge's text
-    and no such pair in front of it is a real turn and stays scored. The host never saves the flagged pair, so a session
-    whose lineage (``group``: a compression rotation joins its parent) holds a saved host row with either text matches
-    nothing: such a row may be a real reply or turn, and its stored copies, in any session of the lineage, stay scored. ``rows``: every stored row of the audited sessions, (store_id, session, role, content,
-    tool_calls, ...), so adjacency is the store's own order; ``host_rows``: (id, session, role, content, ...). Returns
-    the pairs' store ids."""
+    and no such pair in front of it is a real turn and stays scored. The host never saves the flagged pair, so a pair in a
+    lineage (``group``: a compression rotation joins its parent) whose host rows hold a saved row with either text is
+    ambiguous: it may be a copy of a real reply or turn, or the host's scaffolding standing in for a lost real row. It
+    is not excluded (it stays scored) and it is returned apart, for a hand check. ``rows``: every stored row of the
+    audited sessions, (store_id, session, role, content, tool_calls, ...), so adjacency is the store's own order;
+    ``host_rows``: (id, session, role, content, ...). Returns (matched store ids, ambiguous store ids)."""
     saved = {group(r[1]) for r in host_rows if (r[2], r[3]) in {("assistant", EMPTY_RECOVERY_REPLY),
                                                                  ("user", EMPTY_RECOVERY_NUDGE)}}
     by_session = defaultdict(list)
     for r in sorted(rows):
-        if group(r[1]) not in saved:
-            by_session[r[1]].append(r)
-    out = set()
-    for seq in by_session.values():
+        by_session[r[1]].append(r)
+    matched, ambiguous = set(), set()
+    for session, seq in by_session.items():
         for before, reply, nudge in zip(seq, seq[1:], seq[2:]):
             if before[2] == "tool" and reply[2] == "assistant" and reply[3] == EMPTY_RECOVERY_REPLY and not reply[4] \
                     and nudge[2] == "user" and nudge[3] == EMPTY_RECOVERY_NUDGE:
-                out |= {reply[0], nudge[0]}
-    return out
+                (ambiguous if group(session) in saved else matched).update({reply[0], nudge[0]})
+    return matched, ambiguous
 
 
 def todo_expected(host_rows, stored_rows, group, header):
@@ -815,8 +815,11 @@ def audit(state_db: Path, lcm_db: Path, logs=(), since=None, events_path=None, l
         by_lineage[g] = [r for r in rows if r[0] not in retained]
     # Matched on every stored row of the audited sessions, before any is set aside, so a removed row never makes two
     # rows adjacent; an undo's retained row stays the undo's.
-    recovery = empty_recovery_rows([r for r in stored if audited(r[0])],
-                                   [r for r in host_rows if group(r[1]) in roots], group) - retained
+    recovery, ambiguous_recovery = empty_recovery_rows([r for r in stored if audited(r[0])],
+                                                       [r for r in host_rows if group(r[1]) in roots], group)
+    recovery, ambiguous_recovery = recovery - retained, ambiguous_recovery - retained
+    if ambiguous_recovery:  # scored, but parity alone cannot tell a copy of a real row from scaffolding for a lost one
+        hand_checks.append({"reason": "host_empty_recovery_ambiguous", "store_ids": sorted(ambiguous_recovery)})
     for g, rows in by_lineage.items():  # the host's recovery scaffolding (#2087): out of parity, surplus and M3's numerator
         by_lineage[g] = [r for r in rows if r[0] not in recovery]
     todo = todo_expected([r for r in host_rows if r[1] in scored], [r for rows in by_lineage.values() for r in rows],
@@ -1019,7 +1022,8 @@ def audit(state_db: Path, lcm_db: Path, logs=(), since=None, events_path=None, l
             "coverage": coverage, "coverage_basis": coverage_basis,
             "uid_coverage": {"table": "present" if uids is not None else "table absent", "per_source": dict(uid)},
             "m3": m3, "recorder": recorder,
-            "host_empty_recovery": {"rows": len(recovery), "store_ids": sorted(recovery)},
+            "host_empty_recovery": {"rows": len(recovery), "store_ids": sorted(recovery),
+                                    "ambiguous_store_ids": sorted(ambiguous_recovery)},
             "undo_retained": {"rows": len(retained), "store_ids": sorted(retained),
                               "host_rewind_count": {s: sessions[s]["rewind_count"] for s in sorted(scored)
                                                     if sessions[s]["rewind_count"]}}, "exempted_surplus": exempted, "issue_1931": issue_1931,

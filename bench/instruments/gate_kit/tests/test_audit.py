@@ -1312,7 +1312,7 @@ def test_the_hosts_empty_response_recovery_pair_is_listed_not_surplus(tmp_path):
     out = recovery_home(tmp_path, [EMPTY, NUDGE])
     t = out["parity"]["totals"]
     assert (t["missing_rows"], t["surplus_rows"], t["silent_surplus_rows"]) == (0, 0, 0)
-    assert out["host_empty_recovery"] == {"rows": 2, "store_ids": [5, 6]}  # every excluded row is named
+    assert out["host_empty_recovery"] == {"rows": 2, "store_ids": [5, 6], "ambiguous_store_ids": []}  # every excluded row is named
     assert out["m3"]["numerator"] == 0 and out["m3"]["denominator"] == 8
 
 
@@ -1325,7 +1325,7 @@ def test_the_hosts_empty_response_recovery_pair_is_listed_not_surplus(tmp_path):
 ], ids=["lone-nudge", "no-empty-reply", "empty-with-tool-calls", "inexact-nudge", "inexact-reply"])
 def test_a_look_alike_of_the_recovery_pair_stays_scored(tmp_path, pair):
     out = recovery_home(tmp_path, pair)
-    assert out["host_empty_recovery"] == {"rows": 0, "store_ids": []}
+    assert out["host_empty_recovery"] == {"rows": 0, "store_ids": [], "ambiguous_store_ids": []}
     assert out["parity"]["totals"]["surplus_rows"] >= 1
 
 
@@ -1380,12 +1380,14 @@ def test_a_recovery_row_leaves_m3_for_either_relation(tmp_path, kind, related):
 
 def test_a_session_whose_host_saved_the_texts_matches_nothing(tmp_path):
     """A real "(empty)" reply and a real turn with the nudge's text, saved by the host, then stored twice: the pairs are
-    not proven to be the host's flagged scaffolding, so the second copies stay surplus."""
+    not proven to be the host's flagged scaffolding: they stay scored (the second copies surplus) and go to a hand
+    check."""
     host = turn(1) + [("S1", call("c1")), ("S1", result("c1")), ("S1", EMPTY), ("S1", NUDGE)] + turn(2)
     stored = host + [("S1", call("c1")), ("S1", result("c1")), ("S1", EMPTY), ("S1", NUDGE)]
     out = Home(tmp_path, ONE, host, stored=stored).run()
-    assert out["host_empty_recovery"] == {"rows": 0, "store_ids": []}
+    assert out["host_empty_recovery"] == {"rows": 0, "store_ids": [], "ambiguous_store_ids": [5, 6, 11, 12]}
     assert out["parity"]["totals"]["surplus_rows"] == 4
+    assert {"reason": "host_empty_recovery_ambiguous", "store_ids": [5, 6, 11, 12]} in out["gate"]["hand_checks"]
 
 
 def test_a_pair_split_across_two_sessions_is_not_matched(tmp_path):
@@ -1426,5 +1428,29 @@ def test_a_rotation_child_of_a_parent_that_saved_the_texts_matches_nothing(tmp_p
     out = Home(tmp_path, sessions, host, stored=stored).run()
     if out["parity"]["sessions"]["P2"]["lineage"] != "P":
         pytest.fail("setup: the rotation child does not join its parent's lineage")
-    assert out["host_empty_recovery"] == {"rows": 0, "store_ids": []}
+    assert out["host_empty_recovery"]["rows"] == 0 and len(out["host_empty_recovery"]["ambiguous_store_ids"]) == 4
     assert out["parity"]["totals"]["surplus_rows"] == 4
+
+
+def test_a_parent_before_the_window_that_saved_the_texts_still_counts(tmp_path):
+    """The same, with the parent started before --since (so not scored): its saved rows are still the lineage's
+    provenance, and the in-window child's copies stay surplus."""
+    host = turn(1, "P") + [("P", call("c1")), ("P", result("c1")), ("P", EMPTY), ("P", NUDGE)] + turn(2, "P2")
+    stored = turn(1, "P") + turn(2, "P2") + [("P2", call("c2")), ("P2", result("c2")), ("P2", EMPTY), ("P2", NUDGE)]
+    out = Home(tmp_path, ROTATED, host, stored=stored).run(since=1000.8)
+    if out["parity"]["lineages"]["P"]["expected_rows"] != 2 or out["parity"]["sessions"]["P2"]["lineage"] != "P":
+        pytest.fail("setup: the parent's rows are expected, or the child does not join its lineage")
+    assert out["host_empty_recovery"]["rows"] == 0 and len(out["host_empty_recovery"]["ambiguous_store_ids"]) == 2
+
+
+def test_a_synthetic_pair_in_a_lineage_that_lost_a_real_pair_is_a_hand_check(tmp_path):
+    """The round-3 case: the parent saved a real "(empty)" reply and nudge-text turn and LCM lost both; the rotation
+    child stores the host's own recovery pair after a tool row. Kept scored, the pair stands in for the lost rows, so
+    parity alone reads clean: the ambiguous match makes the gate wait for a hand check."""
+    sessions = {"P": ("cli", None, 1000.5, "compression"), "P2": ("cli", "P", 3000.0, "user_exit")}
+    host = turn(1, "P") + [("P", call("c1")), ("P", result("c1")), ("P", EMPTY), ("P", NUDGE)] + turn(2, "P2")
+    stored = host[:4] + turn(2, "P2") + [("P2", call("c2")), ("P2", result("c2")), ("P2", EMPTY), ("P2", NUDGE)]
+    out = Home(tmp_path, sessions, host, stored=stored).run()
+    assert out["host_empty_recovery"]["ambiguous_store_ids"] == [9, 10]
+    assert out["gate"]["verdict"] != "GATE PASS"
+    assert {"reason": "host_empty_recovery_ambiguous", "store_ids": [9, 10]} in out["gate"]["hand_checks"]
