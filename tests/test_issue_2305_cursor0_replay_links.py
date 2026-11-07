@@ -299,6 +299,7 @@ def test_15_all_reasoning_links_only_byte_exact(host, text):
                   if row["content"] == text and row["store_id"] not in sources)
     assert _pairs(host.engine) == [(sources[0], target)]
     assert _counts(host.engine)["ledger.replay_pairs.cursor0_stripped"] == 0
+    assert _counts(host.engine)["ledger.replay_pairs.cursor0_unlinked"] == 0
 
 
 def test_15b_all_reasoning_with_other_bytes_never_links(host):

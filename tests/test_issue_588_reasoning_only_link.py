@@ -7,6 +7,7 @@ import pytest
 
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
+from tests.test_issue_1286_cleanup_rewrite_proof import SID
 from tests.test_issue_2305_cursor0_replay_links import _counts, _ingest_copies, _pairs
 from tests.test_issue_2305_cursor0_replay_links import host as host  # noqa: F401  (pytest fixture)
 
@@ -44,9 +45,15 @@ def test_unstamped_copy_set_links_every_extra_copy_including_reasoning_only(tmp_
 
 @pytest.mark.parametrize("text", ["", "   \n"])
 def test_blank_rows_are_never_evidence(host, text):
-    host.turn(reply=text)
+    # Seed the blank row directly: ``host.turn(reply="")`` substitutes a default reply (review nit).
+    host.live += [{"role": "user", "content": "say nothing", "timestamp": host.stamp()},
+                  {"role": "assistant", "content": text}]
+    host.engine.ingest(host.live)
+    assert any(row["role"] == "assistant" and row["content"] == text
+               for row in host.engine._store.get_session_messages(SID)), "the blank target must be stored"
     _ingest_copies(host, [{"role": "assistant", "content": text}])
     assert _pairs(host.engine) == []
+    assert _counts(host.engine)["ledger.replay_pairs.cursor0_unlinked"] == 1  # a candidate existed and stayed unlinked
 
 
 def test_reasoning_only_copy_with_another_stamp_is_vetoed(host, monkeypatch):
