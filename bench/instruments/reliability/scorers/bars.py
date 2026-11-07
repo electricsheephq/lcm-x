@@ -95,11 +95,14 @@ def lineage(cell_dir: Path, root: str = "S0", db_dir: Path | None = None):
     descendants, else the root session."""
     parents, state = {}, Path(db_dir or cell_dir / "db") / "state.db"
     if state.exists():
-        con = sqlite3.connect(f"file:{state}?mode=ro", uri=True)
         try:
-            parents = dict(con.execute("select id, parent_session_id from sessions"))
-        finally:
-            con.close()
+            con = sqlite3.connect(f"file:{state}?mode=ro", uri=True)
+            try:
+                parents = dict(con.execute("select id, parent_session_id from sessions"))
+            finally:
+                con.close()
+        except sqlite3.Error:
+            pass  # unavailable host evidence: retain the store's session identities
 
     def group(sid):
         seen = set()
@@ -125,11 +128,11 @@ def continue_positions(seq: list[tuple[str, str]], reply_pat: str) -> Counter:
     return out
 
 
-def continue_occurrences(rows, state: Path, group, reply_pat: str) -> Counter:
+def continue_occurrences(rows, state: Path, group, reply_pat: str, *, observed_at=True, fallback=None) -> Counter:
     """Bind stored continues to their host successor's full occurrence, never to store order.
 
-    Missing timestamps, unavailable host evidence or an ambiguous successor cannot prove a reply.
-    Rotation copies with the same identity give the same binding, not extra reply capacity.
+    Unavailable evidence falls back to store order for this lineage, recording the reason.
+    Host copies contribute only non-None bindings, never extra reply capacity.
     """
     def key(row):
         _id, sid, role, content, calls, call_id, stamp = row
@@ -138,7 +141,8 @@ def continue_occurrences(rows, state: Path, group, reply_pat: str) -> Counter:
     continues = [r for r in rows if r[2] == "user" and multiset.norm(r[3]) == "continue"]
     if not continues:
         return Counter()
-    sessions, bindings = {}, {}
+    sessions, bindings, host = {}, {}, []
+    reason = None if state.exists() else "state.db missing"
     if state.exists():
         try:
             con = sqlite3.connect(f"file:{state}?mode=ro", uri=True)
@@ -150,7 +154,17 @@ def continue_occurrences(rows, state: Path, group, reply_pat: str) -> Counter:
             for row in host:
                 sessions.setdefault(row[1], []).append(row)
         except sqlite3.Error:
-            pass  # unavailable evidence never licenses an occurrence binding
+            reason = "state.db unreadable"
+    if not observed_at:
+        reason = "store has no observed_at column"
+    elif any(r[6] is None for r in continues):
+        reason = "stored continue has no timestamp"
+    elif any(r[6] is None and key(r)[:-1] in {key(c)[:-1] for c in continues} for r in host):
+        reason = "host continue copy has no timestamp"
+    if reason:
+        if fallback is not None:
+            fallback["reason"] = reason
+        return continue_positions([(r[2], r[3]) for r in rows if r[2] in ("user", "assistant")], reply_pat)
     for seq in sessions.values():
         for i, row in enumerate(seq):
             if row[2] != "user" or multiset.norm(row[3]) != "continue" or row[6] is None:
@@ -162,7 +176,7 @@ def continue_occurrences(rows, state: Path, group, reply_pat: str) -> Counter:
     available = Counter(key(r) for r in rows if r[2] == "assistant" and r[6] is not None)
     out = Counter()
     for row in continues:
-        choices = bindings.get(key(row), set()) if row[6] is not None else set()
+        choices = bindings.get(key(row), set()) - {None}
         binding = next(iter(choices)) if len(choices) == 1 else None
         if binding is not None and available[binding[0]]:
             available[binding[0]] -= 1
@@ -326,6 +340,7 @@ def score(cell: dict, cell_dir: Path, db_dir: Path | None = None) -> dict:
 
     user_pat, reply_pat = r"\[([A-Z]\d{2,3})\] user turn", r"reply to ([A-Z]\d{2,3})\b"
     b1, b1_tags, b1_per, b2_parts, b1_lic = {}, [0, 0], {}, {}, []
+    b1_fallbacks = []
     surplus_keys = []
     for g, (items, rows) in per.items():
         label = "" if g == "chat" else f"{g}:"
@@ -345,7 +360,11 @@ def score(cell: dict, cell_dir: Path, db_dir: Path | None = None) -> dict:
         mism.update({f"reply {label}{k}": {"expected": want_a[k], "stored": have_a[k]}
                      for k in sorted(set(want_a) | set(have_a)) if want_a[k] != have_a[k]})
         want_c = continue_positions(items, reply_pat)
-        have_c = continue_occurrences([r for r in occurrences if group(r[1]) == g], db_dir / "state.db", group, reply_pat)
+        fallback = {}
+        have_c = continue_occurrences([r for r in occurrences if group(r[1]) == g], db_dir / "state.db", group, reply_pat,
+                                      observed_at=stamp != "NULL", fallback=fallback)
+        if fallback:
+            b1_fallbacks.append(dict(fallback, lineage=g))
         if want_c != have_c:
             mism[f"{label}continue"] = {"expected_replies_after": dict(want_c), "stored_replies_after": dict(have_c)}
         b1.update(mism)
@@ -355,6 +374,7 @@ def score(cell: dict, cell_dir: Path, db_dir: Path | None = None) -> dict:
         b2_parts[g] = multiset.score(items, rows, None if host is None else host.get(g, {}).get("keys", {}),
                                       surplus_keys=surplus_keys)
     numbers["B1"] = {"user_tags": b1_tags[0], "reply_tags": b1_tags[1], "mismatched": len(b1), "per_session": b1_per,
+                     "continue_fallbacks": b1_fallbacks,
                      "host_parity_licensed": host_parity.summary(b1_lic, host_why)}
     if b1:
         failed["B1"] = dict(sorted(b1.items())[:30])

@@ -89,8 +89,11 @@ the host reported `interrupted`. Any other assistant row is surplus.
   A `continue` reply is identified by the row following it in the host record, then matched in the store by
   lineage, role, content, tool-call fields and host timestamp (`observed_at`), with single-use reply capacity.
   Store adjacency is not required: session-end head reconciliation can append earlier host rows after already
-  durable rows without losing any occurrence. Missing or ambiguous occurrence evidence fails the binding;
-  the existing tag deficit and surplus checks still apply, so a missing reply or a duplicate still fails B1.
+  durable rows without losing any occurrence. Duplicate host copies bind when there is exactly one distinct
+  non-None successor binding; copies followed by a summary or session end add no choice. No binding or multiple
+  distinct reply bindings fail. If state.db is missing/unreadable, the store lacks `observed_at`, or a stored
+  continue or its host copy lacks a timestamp, that lineage uses the old store-order check instead; B1 details
+  record the lineage and reason in `continue_fallbacks`. Tag deficit and surplus checks still apply.
 - **B2** multiset-v1 (port of the gauntlet's `lossless_bar_multiset.py`), per session lineage: per (role,
   sha256(content with only leading/trailing whitespace stripped, the host's ACP prompt strip
   `acp_adapter/server.py` `_extract_text(prompt).strip()`)) stored count == expected count; internal whitespace

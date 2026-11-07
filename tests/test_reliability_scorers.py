@@ -514,11 +514,9 @@ def test_f3_continue_rows_are_position_bound(tmp_path):
     events[3]["content"] = events[3]["persist"] = events[5]["held"] = "continue"
     rows = [("user", U.format(1, 1)), ("assistant", R.format(1, 1)), ("user", "continue"), ("assistant", R.format(2, 2)),
             ("user", U.format(3, 3)), ("assistant", R.format(3, 3))]
-    host = [("S0", r, c, None, None, i * 10.0) for i, (r, c) in enumerate(rows, 1)]
-    stamps = [r[-1] for r in host]
-    assert make(tmp_path, rows=rows, events=events, host_occurrences=host, observed=stamps)["verdict"] == "PASS"
+    assert make(tmp_path, rows=rows, events=events)["verdict"] == "PASS"
     moved = [rows[0], rows[1], rows[3], rows[2], rows[4], rows[5]]  # same multiset, continue after the wrong reply
-    out = make(tmp_path / "m", rows=moved, events=events, host_occurrences=host, observed=stamps)
+    out = make(tmp_path / "m", rows=moved, events=events)
     assert "continue" in out["failed_bars"]["B1"] and "B2" not in out["failed_bars"]
 
 
