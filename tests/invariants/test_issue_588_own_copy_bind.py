@@ -66,7 +66,8 @@ def test_fresh_bind_maps_rows_to_their_own_copies(tmp_path, monkeypatch, copies,
 
 @pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
     "#588: with unstamped rows a later copy set defeats the replay match, so every fresh bind stores the replayed "
-    "history again (linked possible_replay_of when the ledger is on); open P1 half for hosts that send no stamps"))
+    "history again (linked possible_replay_of when the ledger is on); the v0.30.0 named limit for unstamped copy "
+    "sets (linked duplicates), fixed in v0.30.x"))
 @pytest.mark.parametrize("ledger", ["shadow", "off"])
 def test_unstamped_fresh_bind_over_a_copy_set_stores_only_new_rows(tmp_path, monkeypatch, ledger):
     monkeypatch.setenv("LCM_INGEST_LEDGER", "off")

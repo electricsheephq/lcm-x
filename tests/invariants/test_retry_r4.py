@@ -72,3 +72,38 @@ def test_r4_2_uid_only_replacement_keeps_unchanged_suffix(machine, anchor, compa
     for batch in (host, deepcopy(host)):
         machine.engine.ingest(batch)
         assert_occurrences(expected, [row for row in machine.rows() if row["role"] == "assistant"], engine=machine.engine)
+
+
+def _merge_absorbed(output):
+    host = []
+    for row in output:
+        if host and host[-1]["role"] == row["role"] == "user":
+            host_uid_emit.record_absorbed_message(host[-1], row)
+            host[-1]["content"] += "\n\n" + row["content"]
+        else:
+            host.append(deepcopy(row))
+    return host
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason="#1428: after the unchanged merged output consumes the compaction proof, the "
+                                                              "cached-prefix check compares the cached copy, which lacks the absorbed user's "
+                                                              "uid, so a uid-only replacement is not stored")
+@pytest.mark.parametrize("anchor", [False, True])
+def test_r4_1_uid_only_replacement_after_the_proof_is_consumed(machine, anchor):
+    """#1428 (a v0.30.0 named loss limit): compress, ingest the unchanged merged output, then replace only the
+    absorbed user row's host uid and ingest again. The new occurrence must be stored."""
+    machine.patch.setenv("LCM_IDENTITY_ANCHOR", str(int(anchor)))
+    machine.patch.setattr(host_uid_emit, "_host_uid_capability", True)
+    for text in ("alpha", "same text"):
+        machine.new_turn(text, False, 0, False, "lookup")
+    machine.compress()
+    assert machine.engine._last_compression_status == "compacted"
+    output = deepcopy(machine.host)
+    assert output[-2]["role"] == "user"
+    machine.engine.ingest(_merge_absorbed(output))  # the unchanged merged output consumes the proof
+    assert_occurrences(machine.occurrences, machine.rows(), engine=machine.engine)
+    output[-2] = dict(output[-2], message_uid="replacement-user")
+    host = _merge_absorbed(output)
+    assert host[-2]["_absorbed_message_uids"] == ["replacement-user"]
+    machine.engine.ingest(host)
+    assert_occurrences(machine.occurrences + [host[-2]], machine.rows(), engine=machine.engine)

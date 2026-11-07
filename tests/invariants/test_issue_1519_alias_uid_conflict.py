@@ -131,10 +131,25 @@ def test_cold_alias_replay(tmp_path, case, record_property, caplog):
                  "bindings_hash": digest([bindings(engine, r["store_id"]) for r in rows(engine)])}
         record_property("byte_identity", json.dumps(proof, sort_keys=True))
         assert digest(next(r for r in rows(engine) if r["store_id"] == sid)) == digest(old)
+        # old_view_absent pins today's behaviour (one copy); the #1519 fix flips it with the strict xfail below.
         assert len(targets(engine)) == 1
         if case == "different_known_key":
             assert any("would reject" in r.message for r in caplog.records)
 
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason="#1519: the identity-anchor audit treats a distinct event with identical text at "
+                                                              "a recorded alt_stamp as the aliased row once the original view is gone")
+def test_a_distinct_event_at_the_alias_stamp_is_stored(tmp_path):
+    """#1519 (a v0.30.0 named loss limit): the old_view_absent shape above, a distinct platform message id with
+    identical text at exactly the alias stamp, must store a second occurrence. The green case above keeps one."""
+    with engine_context(tmp_path, window=128000, session_id="parent", conversation_id="conv") as engine:
+        replay = prepare(engine, "old_view_absent")
+    assert replay[0]["platform_message_id"] == "platform-new" and replay[0]["timestamp"] == 30.
+    with engine_context(tmp_path, window=128000, session_id="parent", conversation_id="conv") as engine:
+        engine.ingest(replay)
+        assert any(r["content"] == "Synthetic new reply" for r in rows(engine))  # the batch was ingested
+        assert len(targets(engine)) == 2
 
 
 @pytest.mark.parametrize("conflict_first", [True, False])
