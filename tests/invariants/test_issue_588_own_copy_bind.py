@@ -73,6 +73,8 @@ def test_unstamped_fresh_bind_over_a_copy_set_stores_only_new_rows(tmp_path, mon
     engine = _engine(tmp_path)
     view = [{"role": "user" if i % 2 == 0 else "assistant", "content": f"row-{i}"} for i in range(8)]
     engine.ingest(deepcopy(view))
+    if engine._ingest_failure_count:  # a swallowed setup failure must not pass as the pin
+        pytest.fail(f"setup ingest failed: {engine._last_ingest_error}")
     with getattr(engine._store, "ingest_atomic", contextlib.nullcontext)():
         for i in (1, 2):
             engine._store.append("S", deepcopy(view[i]), conversation_id="conv")
@@ -87,6 +89,8 @@ def test_unstamped_fresh_bind_over_a_copy_set_stores_only_new_rows(tmp_path, mon
         if engine._ingest_failure_count:  # a swallowed ingest failure must not pass as the pin
             pytest.fail(f"ingest failed: {engine._last_ingest_error}")
         rows = len(engine._store.get_session_messages("S"))
+        if rows <= stored:  # a bind that stored nothing (bypass path) must not pass as the pin
+            pytest.fail(f"bind {bind} stored no row")
         growth.append(rows - stored)
         stored = rows
     engine.shutdown()
