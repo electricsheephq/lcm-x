@@ -99,21 +99,27 @@ def test_ambiguous_copies_spend_link_targets_once_in_store_order(build, monkeypa
     assert len(pairs) == len({p[0] for p in pairs}) == len({p[1] for p in pairs})
 
 
-def test_a_target_linked_by_an_earlier_ingest_still_takes_the_new_copy(build, monkeypatch):
-    """A stored original that an earlier ingest already linked must not leave a new copy silent."""
+@pytest.mark.parametrize("host_stamp,linked", [(10.0, True), (None, True), (20.0, False)],
+                         ids=["same-stamp", "unstamped", "new-stamp"])
+def test_a_target_linked_by_an_earlier_ingest_still_takes_the_new_copy(build, monkeypatch, host_stamp, linked):
+    """A stored original an earlier ingest already linked must not leave a copy silent.
+
+    A different stamp says the row is another occurrence, so it is stored without that fallback link."""
     call = _poll(["c", "d"], "{}", None)
+    stored_x = {**X, "timestamp": 10.0}
+    host_x = {**X, **({"timestamp": host_stamp} if host_stamp is not None else {})}
 
     def prelink(engine):
         rows = engine._store.get_session_messages(engine._session_id)
-        x_rows = [row["store_id"] for row in rows if row.get("content") == "X"]
+        x_row = next(row["store_id"] for row in rows if row.get("content") == "X")
         # An earlier replay of the stored X, recorded before this ingest.
-        engine._store.add_message_relations([[(rows[-1]["store_id"], "possible_replay_of", x_rows[0], None, None)]])
+        engine._store.add_message_relations([[(rows[-1]["store_id"], "possible_replay_of", x_row, None, None)]])
 
     engine, before, added = _ingest_shape(
-        build, monkeypatch, [_U, call, X, call, D], [_U, call, X, D, _V], before_ingest=prelink)
-    links = _replay_links(engine)
+        build, monkeypatch, [_U, call, stored_x, call, D], [_U, call, host_x, D, _V], before_ingest=prelink)
     x_copy = next(row for row in added if row.get("content") == "X")
-    assert links[x_copy["store_id"]] == next(row for row in before if row.get("content") == "X")["store_id"]
+    x_original = next(row for row in before if row.get("content") == "X")["store_id"]
+    assert (_replay_links(engine).get(x_copy["store_id"]) == x_original) is linked
 
 
 def test_ambiguous_link_failure_keeps_ingest_and_rolls_back_links(build, monkeypatch):

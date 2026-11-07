@@ -8544,15 +8544,19 @@ class LCMEngine(
                         if sid not in durable or sid in linked:
                             continue
                         identity = self._message_replay_identity(durable[sid], stored_row=True, allow_pruned_tool_alias=False)
-                        eligible = [row["store_id"] for row in replay_candidates.get(idx, ())
+                        eligible = [row for row in replay_candidates.get(idx, ())
                                     if row["store_id"] < sid
                                     and row.get("conversation_id") == durable[sid].get("conversation_id")
                                     and self._message_replay_identity(
                                         row, stored_row=True, allow_pruned_tool_alias=False) == identity]
+                        stamp = durable[sid].get("observed_at")
                         # Prefer an unlinked target. A target linked by an EARLIER ingest still
-                        # beats leaving this copy silent; within this batch links stay one-to-one.
-                        target = next((t for t in eligible if t not in used),
-                                      next((t for t in eligible if t not in batch_used), None))
+                        # beats leaving this copy silent, but only when no stamp says the copy is
+                        # a different occurrence; within this batch links stay one-to-one.
+                        target = next((row["store_id"] for row in eligible if row["store_id"] not in used),
+                                      next((row["store_id"] for row in eligible if row["store_id"] not in batch_used
+                                            and (stamp is None or row.get("observed_at") is None
+                                                 or row.get("observed_at") == stamp)), None))
                         if target is not None:
                             groups.append([(sid, "possible_replay_of", target, None, None)])
                             linked.add(sid)
