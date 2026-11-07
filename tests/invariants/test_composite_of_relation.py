@@ -164,6 +164,7 @@ WRITER_CASES = {
                              [None, 0, 1]),
     "header-only": ([("S", P1)], HEADER + "\n\n" + P1, []),
     "header-prefixed-user-text": ([("S", P1)], HEADER + " and my own words\n\n" + P1, []),
+    "words-on-the-header-line": ([("S", P1)], HEADER + " and my own words\n- [ ] 1. task (pending)\n\n" + P1, []),
     "reload-notice": ([("S", P1)], TODO + "\n\n" + NOTICE + "\n\n" + P1, [None, 0]),
     "item-with-blank-line": ([("S", P1)], HEADER + "\n- [ ] 1. first line\n\nsecond line (pending)\n\n" + P1,
                              [None, 0]),
