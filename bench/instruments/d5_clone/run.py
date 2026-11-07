@@ -50,6 +50,19 @@ DOCTOR_STORE_WIDE = frozenset((
     "payload_storage", "source_lineage_hygiene", "lifecycle_fragmentation", "sensitive_pattern_handling",
     "config_validation", "embedding_provider_health"))
 DOCTOR_PER_SESSION = ("fts_index_sync", "orphaned_dag_nodes", "summary_quality")
+# The nodes the doctor's summary_quality check flags (tools._summary_quality_stats): source/summary >= 400, or a
+# source of 100k tokens or more summarized in under 500.
+FLAGGED_NODES = ("SELECT count(*) FROM summary_nodes WHERE session_id = ? AND ((source_token_count >= 100000"
+                 " AND token_count < 500) OR (token_count > 0 AND CAST(source_token_count AS REAL) / token_count >= 400))")
+
+
+def flagged_summary_nodes(store, session_ids):
+    """{session id: flagged summary nodes} in *store*, read-only (#2471); None for a store that cannot be read."""
+    try:
+        with closing(capture._readonly(store)) as db:
+            return {sid: db.execute(FLAGGED_NODES, (sid,)).fetchone()[0] for sid in session_ids}
+    except (sqlite3.DatabaseError, capture.CaptureError, OSError):
+        return None
 DOCTOR_PRE_OPEN = ("messages_fts_integrity@pre_open", "nodes_fts_integrity@pre_open")  # Before the engine repairs FTS.
 DOCTOR_NOT_EXERCISED = {
     "identity_migration": "no plugin registration step in the probe",
@@ -80,6 +93,11 @@ def _json(value):
     except (TypeError, ValueError):
         return None
     return value if isinstance(value, dict) else None
+
+
+def _keyed(counts):
+    """A {session id: count} map keyed by the ids' sha256 12, as the receipt names sessions; None stays None."""
+    return None if counts is None else {_sha(sid)[:12]: n for sid, n in counts.items()}
 
 
 def _sha(text):
@@ -379,7 +397,9 @@ class LocalHost:
     def plan(self, copy):
         self.configure_planning(copy)
         chosen = planner.choose_sessions(copy / "host-0.db", copy / "store.db", self.rules()["covered"])
-        return planner.build_plan(chosen, nonce=self.c["nonce"])
+        flagged = flagged_summary_nodes(copy / "store.db", [c["session_id"] for c in chosen]) or {}
+        return planner.build_plan([dict(c, flagged_summary_nodes=flagged.get(c["session_id"])) for c in chosen],
+                                  nonce=self.c["nonce"])
 
     def rows(self, path):
         out = {}
@@ -705,6 +725,9 @@ def run_arm(host, name, home, plan, extras):
             "provider": stats, "logs": host.logs(ctx), "roots": host.roots(ctx), "checks": checks,
             "doctor_not_exercised": ctx.get("doctor_not_exercised", []), "cron_paused": cron_paused,
             "routing": ctx.get("routing", {}),
+            "flagged_summary_nodes": _keyed(flagged_summary_nodes(
+                next((Path(home) / n for n in ("lcm.db", "store.db") if (Path(home) / n).is_file()), Path(home) / "lcm.db"),
+                [c["session_id"] for c in plan["conversations"]])),
             "rows": rows, "wall_s": round(time.monotonic() - started, 3)}
 
 
@@ -763,8 +786,13 @@ def run(host, *, rc_id, prior=(), instrument_fix=None):
         "bar4": {**bars.bar4(arms["rc"]["logs"], arms["ga"]["logs"], arms["rc"]["roots"], arms["ga"]["roots"]),
                  "raw_counts_note": "the host writes each log line to two files (agent.log and gateway.log), so the raw"
                                     " counts are 2x on both arms; the verdict compares the arms and is unaffected"},
-        "bar5": bars.bar5(arms["rc"]["checks"], arms["ga"]["checks"], ga_rerun and ga_rerun["checks"],
-                          bool(ga_rerun) and bars.workload_items(ga_rerun["workload"])["turns_completed"]),
+        "bar5": {**bars.bar5(arms["rc"]["checks"], arms["ga"]["checks"], ga_rerun and ga_rerun["checks"],
+                             bool(ga_rerun) and bars.workload_items(ga_rerun["workload"])["turns_completed"],
+                             inherited=[f"summary_quality@{_sha(c['session_id'])[:12]}" for c in plan["conversations"]
+                                        if c.get("flagged_summary_nodes") != 0]),
+                 "flagged_summary_nodes": {  # Per driven session: at the start, and in each arm at its end (#2471).
+                     "start": _keyed({c["session_id"]: c.get("flagged_summary_nodes") for c in plan["conversations"]}),
+                     **{a: arms[a]["flagged_summary_nodes"] for a in arms}}},
         "bar6": bars.bar6({a: arms[a]["workload"] for a in arms})}
     if "rc" in unreadable:  # Bars 1 and 3 judge the rc's rows: without them neither can pass or fail.
         for bar in ("bar1", "bar3"):

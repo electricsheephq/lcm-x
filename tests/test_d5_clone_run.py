@@ -15,7 +15,8 @@ from bench.instruments.d5_clone import bars, run as r
 MARKER = "synthetic-marker-7f3a9c"
 
 
-def make_snapshot(root):
+def make_snapshot(root, flagged=()):
+    """*flagged*: sessions given one summary node the doctor's summary_quality check flags (#2471)."""
     root.mkdir()
     (root / "lcm-large-outputs").mkdir()
     (root / "lcm-large-outputs" / "out-1.json").write_text(MARKER)
@@ -25,6 +26,10 @@ def make_snapshot(root):
                     " observed_at REAL)")
         host.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, end_reason TEXT)")
         host.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, content TEXT)")
+        lcm.execute("CREATE TABLE summary_nodes (node_id INTEGER PRIMARY KEY, session_id TEXT, token_count INTEGER,"
+                    " source_token_count INTEGER)")
+        lcm.executemany("INSERT INTO summary_nodes (session_id, token_count, source_token_count) VALUES (?, ?, ?)",
+                        [(sid, 100, 4_000) for sid in sessions] + [(sid, 10, 4_000) for sid in flagged])
         for sid, count in sessions.items():
             host.execute("INSERT INTO sessions VALUES (?, NULL)", (sid,))
             rows = [(sid, "user" if i % 2 else "assistant", f"{MARKER} {sid} {i}") for i in range(count)]
@@ -797,3 +802,34 @@ def test_a_cold_bind_whose_turn_did_not_complete_skips_the_wait(setup, monkeypat
     assert bind["bar2"]["verdict"] == bars.INCONCLUSIVE and bind["bar2"]["error"] is True
     assert bind["bar2"]["reason"] == "cold turn not completed"
     assert result["workload"]["turns_not_completed"] == [step_id]
+
+
+def test_flagged_summary_nodes_counts_what_the_doctor_flags(tmp_path):
+    """The doctor's summary_quality predicate (tools._summary_quality_stats), at its boundaries."""
+    store = tmp_path / "store.db"
+    with closing(sqlite3.connect(store)) as db, db:
+        db.execute("CREATE TABLE summary_nodes (node_id INTEGER PRIMARY KEY, session_id TEXT, token_count INTEGER,"
+                   " source_token_count INTEGER)")
+        db.executemany("INSERT INTO summary_nodes (session_id, token_count, source_token_count) VALUES (?, ?, ?)", [
+            ("s", 10, 4_000), ("s", 10, 3_999), ("s", 499, 100_000), ("s", 500, 100_000), ("s", 499, 99_999),
+            ("s", 0, 50_000), ("s", 0, 100_000), ("t", 10, 4_000)])
+    assert r.flagged_summary_nodes(store, ["s", "t", "u"]) == {"s": 3, "t": 1, "u": 0}
+    assert r.flagged_summary_nodes(tmp_path / "missing.db", ["s"]) is None
+
+
+@pytest.mark.parametrize("flagged", [(), ("sess-a",)])
+def test_a_driven_session_that_starts_flagged_makes_bar5_inconclusive(tmp_path, flagged):
+    """#2471: the plan records each driven session's starting count of flagged summary nodes, and the receipt shows
+    it with each arm's count at its end; a session that starts flagged leaves bar 5 INCONCLUSIVE."""
+    snap = tmp_path / "snapshot"
+    config = {"snapshot_dir": str(snap), "snapshot_pin": str(make_snapshot(snap, flagged)), "nonce": "synthetic"}
+    receipt = r.run(FakeHost(config, tmp_path / "run"), rc_id="rc-synthetic")
+    keys = {sid: r._sha(sid)[:12] for sid in ("sess-l", "sess-a", "sess-b")}
+    counts = receipt["bars"]["bar5"]["flagged_summary_nodes"]
+    assert counts["start"] == {keys[s]: int(s in flagged) for s in keys}
+    assert set(counts) == {"start", "rc", "ga"}
+    assert {c["name"]: c["flagged_summary_nodes"] for c in receipt["plan"]["declaration"]["conversations"]} == {
+        "L": 0, "S1": int(bool(flagged)), "S2": 0}  # S1 is sess-a, the larger of the two small sessions.
+    expected = [f"summary_quality@{keys['sess-a']}"] if flagged else []
+    assert receipt["bars"]["bar5"]["inherited_flags_not_judged"] == expected
+    assert (receipt["bars"]["bar5"]["verdict"] == bars.INCONCLUSIVE) == bool(flagged), receipt["bars"]["bar5"]

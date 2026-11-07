@@ -240,3 +240,18 @@ def test_verdict_rerun_and_instrument_defect():
     assert b.verdict(passing, [b.INCONCLUSIVE])["raw"] == b.PASS
     assert b.may_run([b.FAIL], None) and b.may_run([b.INCONCLUSIVE] * 2, None)
     assert b.may_run([], None) is None and b.may_run([b.INCONCLUSIVE] * 2, "fix") is None
+
+
+def test_bar5_a_session_that_started_flagged_is_not_judged_and_never_passes():
+    """#2471: a driven session whose store already had a flagged summary node keeps summary_quality warning, so a
+    further flag in that session would not show. Its warnings are not judged: INCONCLUSIVE, never PASS or a FAIL from
+    that check alone; the release manager judges the node counts."""
+    flag = {"kind": "doctor", "check": "summary_quality@abc", "status": "warn"}
+    other = {"kind": "doctor", "check": "survival_fit", "status": "warn"}
+    assert b.bar5(checks(flag, flag), checks(flag))["verdict"] == b.FAIL  # Not inherited: judged as before.
+    result = b.bar5(checks(flag, flag), checks(flag), inherited=["summary_quality@abc"])
+    assert result["verdict"] == b.INCONCLUSIVE and result["inherited_flags_not_judged"] == ["summary_quality@abc"]
+    assert result["warnings_over_ga"] == []
+    assert b.bar5(checks(), checks(), inherited=["summary_quality@abc"])["verdict"] == b.INCONCLUSIVE
+    assert b.bar5(checks(other, other), checks(other), inherited=["summary_quality@abc"])["verdict"] == b.FAIL
+    assert b.bar5(checks(), checks())["inherited_flags_not_judged"] == []

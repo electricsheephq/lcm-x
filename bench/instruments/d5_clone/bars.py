@@ -193,7 +193,7 @@ def check_counts(checks):
             "warnings": dict(Counter(c["check"] for c in checks if c["status"] == "warn"))}
 
 
-def bar5(rc_checks, ga_checks, ga_rerun_checks=None, ga_rerun_turns_complete=True):
+def bar5(rc_checks, ga_checks, ga_rerun_checks=None, ga_rerun_turns_complete=True, inherited=()):
     """No failed doctor, quick_check, integrity or schema check in the rc arm; doctor warnings by check name, with
     rc <= GA. Checks are {kind, check, status}; a kind with no check is not shown (INCONCLUSIVE). A failed check in
     the previous-GA arm is never PASS (release manager, 2026-11-07): the GA arm is re-run once; if the re-run fails
@@ -201,7 +201,11 @@ def bar5(rc_checks, ga_checks, ga_rerun_checks=None, ga_rerun_turns_complete=Tru
     completed every planned turn, shows every check kind and fails none; a clean re-run supplies the doctor-warning
     baseline. A kind the GA arm does not show (and no clean re-run supplies) is judged on the rc arm alone (release
     manager, 2026-11-07): ok is PASS, since a new check cannot regress; a warning is INCONCLUSIVE, with no baseline
-    to show it already existed; a failure is FAIL. A missing kind starts no re-run: its absence is deterministic."""
+    to show it already existed; a failure is FAIL. A missing kind starts no re-run: its absence is deterministic.
+    *inherited* names the per-session summary_quality checks of driven sessions whose store already had flagged summary
+    nodes before the run (or an unknown count): one such node keeps the check warning, so it would hide a further
+    flag. Their warnings are not judged and the bar is INCONCLUSIVE; the release manager judges them from the node
+    counts in both arms (#2471)."""
     failed, ga_failed = failed_checks(rc_checks), failed_checks(ga_checks)
     rerun_failed = failed_checks(ga_rerun_checks) if ga_rerun_checks is not None else None
     rerun_missing = kinds_missing(ga_rerun_checks) if ga_rerun_checks is not None else None
@@ -212,15 +216,17 @@ def bar5(rc_checks, ga_checks, ga_rerun_checks=None, ga_rerun_turns_complete=Tru
     missing_warned = sorted({c["kind"] for c in rc_checks if c["kind"] in ga_missing and c["status"] == "warn"})
     rc_w, ga_w = (Counter(c["check"] for c in checks if c["kind"] == "doctor" and c["status"] == "warn")
                   for checks in (rc_checks, baseline))
-    over = [] if ga_open or "doctor" in ga_missing else sorted(name for name, n in rc_w.items() if n > ga_w[name])
+    inherited = sorted(set(inherited))
+    over = [] if ga_open or "doctor" in ga_missing else sorted(
+        name for name, n in rc_w.items() if n > ga_w[name] and name not in inherited)
     missing = kinds_missing(rc_checks)
-    verdict = FAIL if failed or over else INCONCLUSIVE if missing or ga_open or missing_warned else PASS
+    verdict = FAIL if failed or over else INCONCLUSIVE if missing or ga_open or missing_warned or inherited else PASS
     return {"verdict": verdict, "failed": failed, "warnings_over_ga": over, "kinds_missing": missing,
             "ga_failed": ga_failed, "ga_kinds_missing": ga_missing, "ga_kinds_missing_rc_warned": missing_warned,
             "ga_rerun_needed": bool(ga_failed) and rerun_failed is None,
             "ga_rerun_failed": rerun_failed or [], "ga_rerun_kinds_missing": rerun_missing or [],
             "ga_rerun_turns_complete": None if ga_rerun_checks is None else ga_rerun_turns_complete is True,
-            "warnings_judged": not ga_open and not missing_warned,
+            "warnings_judged": not ga_open and not missing_warned, "inherited_flags_not_judged": inherited,
             "ga_disposition_needed": bool(ga_failed) and ga_rerun_checks is not None and not rerun_clean}
 
 

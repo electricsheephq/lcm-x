@@ -246,6 +246,11 @@ def produce(host, names):
             raise Inconclusive("P1 pins did not pass")
         plan = host.plan(host.clone("pf-plan"))
         common["plan_sha256"] = planner.plan_sha256(plan)
+        common["plan_conversations"] = [  # Counts and the session id's sha256 12 only (#2471).
+            {**d, "session_sha256_12": hashlib.sha256(c["session_id"].encode()).hexdigest()[:12]}
+            for d, c in zip(planner.declaration(plan)["conversations"], plan["conversations"])]
+        with (Path(host.run_dir) / "plan-counts.json").open("x", encoding="utf-8") as out:  # Readable before any check.
+            json.dump(common["plan_conversations"], out, sort_keys=True, indent=2)
     except Exception as exc:
         failed = f"no plan: {type(exc).__name__}: {str(exc)[:160]}"
     for name in names:

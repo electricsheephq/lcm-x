@@ -134,6 +134,10 @@ def test_each_preflight_fails_on_its_own_fault(tmp_path, monkeypatch, fault):
     p6 = json.loads((tmp_path / "P6.json").read_text())["facts"]
     if fault is None:  # One distinct anchor record per turn, though each is written twice.
         assert (p6["cold_anchors"], p6["warm_anchors"], p6["hygiene_lines"]) == (1, 0, 0)
+    if fault != "crash":  # The plan's counts are written before any check runs (#2471): counts and hashes only.
+        counts = (tmp_path / "plan-counts.json").read_text()
+        assert MARKER not in counts and [set(c) for c in json.loads(counts)] == [
+            {"name", "lcm_rows", "host_rows", "flagged_summary_nodes", "session_sha256_12"}] * 3
     for name in pf.PREFLIGHTS:
         text = (tmp_path / f"{name}.json").read_text()
         receipt = json.loads(text)
