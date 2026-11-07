@@ -161,3 +161,16 @@ def test_issue_2377_preserved_rows_have_replay_links(build, monkeypatch, shape):
     assert [(r["role"], r["content"], r.get("tool_call_id")) for r in added] == [
         (r["role"], r["content"], r.get("tool_call_id")) for r in expected_rows]
     assert _replay_links(engine) == {added[i]["store_id"]: before[j]["store_id"] for i, j in expected}
+
+
+def test_a_prefix_segment_keeps_its_stored_occurrence_from_a_later_new_call(build, monkeypatch):
+    """Review thread (P1): the prefix A·X owns the only complete stored A·X. A later new A@1·X must not spend
+    it: a dangling A@2 and another call's X (same id, other arguments) never stand in for it."""
+    a = _poll(["c"], "{}", None)
+    dangling = _poll(["c"], "{}", 2)
+    other = _poll(["c"], '{"b":1}', 3)
+    new_call = _poll(["c"], "{}", 1)
+    engine, before, added = _ingest_shape(
+        build, monkeypatch, [_U, a, X, dangling, other, X], [_U, a, X, new_call, X, _V], cursor=3)
+    assert [(r["role"], r.get("tool_call_id"), r["content"]) for r in added] == [
+        ("assistant", None, ""), ("tool", "c", "X"), ("user", None, "next")]
