@@ -669,6 +669,10 @@ def test_rekey_copy_refuses_two_conversations_with_one_destination(rekey_copy, t
 def test_local_arm_rekeys_after_routing_before_gateway_start(rekey_copy, tmp_path, monkeypatch):
     from types import SimpleNamespace
 
+    try:
+        import yaml  # noqa: F401
+    except ImportError:  # CI's main test job has no PyYAML; JSON is valid YAML for the config the arm writes.
+        monkeypatch.setitem(sys.modules, "yaml", SimpleNamespace(safe_dump=lambda data, **_: json.dumps(data)))
     path, conversations = rekey_copy
     home = path.parent
     path.rename(home / "store.db")
