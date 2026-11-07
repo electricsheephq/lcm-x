@@ -55,7 +55,9 @@ class FakeHost(r.LocalHost):
         return 0 if self.fail == "free_space" else r.NEED_FREE
 
     def pins(self):
-        return {"verdict": "FAIL" if self.fail == "P1" else "PASS", "mismatches": [], "functions_sha256": "f" * 64}
+        if self.fail == "P1":
+            return {"verdict": "FAIL", "mismatches": ["manifest"]}  # As pins.verify: no hashes on a failure.
+        return {"verdict": "PASS", "mismatches": [], "functions_sha256": "f" * 64}
 
     def rules(self):
         return {"identity": lambda row: (row["role"], row["content"]), "credits": (), "covered": lambda sid: True}
@@ -77,11 +79,16 @@ class FakeHost(r.LocalHost):
         pass
 
     def turn(self, ctx, step):
+        if self.fail == "warm" and step["kind"] != "cold" and not step["tools"]:
+            return False  # Timed out or not completed: nothing stored.
+        if self.fail == "raise" and step["id"] == "e2-S2-2":
+            raise RuntimeError("synthetic turn failure")
         sid = ctx["sessions"][step["conversation"]]
         with closing(sqlite3.connect(ctx["home"] / "lcm.db")) as lcm, closing(sqlite3.connect(ctx["home"] / "state.db")) as host:
             if step["kind"] == "cold" and ctx["epoch"]:  # A cold-bind re-store of one old row (a bar-2 copy).
                 lcm.execute("INSERT INTO messages (session_id, role, content) SELECT session_id, role, content FROM"
                             " messages WHERE session_id = ? ORDER BY store_id LIMIT 1", (sid,))
+                ctx.setdefault("copies", {})[step["id"]] = [lcm.execute("SELECT max(store_id) FROM messages").fetchone()[0]]
             rows = [(sid, "user", f"{MARKER} {step['id']}"), (sid, "assistant", f"{MARKER} reply {step['id']}")]
             for db in (host,) if self.fail == "lose" and ctx["name"] == "rc" and step["id"] == "e1-S1-1" else (lcm, host):
                 db.executemany("INSERT INTO messages (session_id, role, content) VALUES (?, ?, ?)", rows)
@@ -92,7 +99,7 @@ class FakeHost(r.LocalHost):
         self.replays.append(step["id"])
         assert (Path(t0) / "capture-hashes.json").is_file() and (Path(h8) / "RC3").exists() is False
         checks = {k: {"verdict": "PASS"} for k in (bars.VALIDITY, *bars.COMPARISONS)}
-        return {"checks": checks, "bind_identity": {"dup_store_ids": [1]}}, False, 0
+        return {"checks": checks, "bind_identity": {"dup_store_ids": ctx.get("copies", {}).get(step["id"], [])}}, False, 0
 
     def egress(self, ctx):
         return 0
@@ -141,6 +148,8 @@ def test_full_fake_run_passes_reads_only_clones_and_carries_no_content(setup):
     assert receipt["schema"] == "d5-clone-receipt/1" and receipt["verdict"]["raw"] == bars.PASS, receipt["bars"]
     assert receipt["bars"]["bar1"]["copies_by_bind"] and receipt["bars"]["bar1"]["lost"] == 0
     assert receipt["preflights"]["P2"]["verdict"] == "PASS" and receipt["plan"]["sha256"]
+    assert receipt["arms"]["ga"]["checks"]["by_kind_status"]["schema:ok"] == 1
+    assert receipt["arms"]["rc"]["workload"]["turns_completed"] == 36
     assert not list((run_dir / "rc" / "captures").iterdir())  # Each bind's captures go after its replay.
     text = json.dumps(receipt)
     assert MARKER not in text and "synthetic log" not in text
@@ -169,6 +178,29 @@ def test_rerun_rules(setup):
     assert "defect" in r.run(FakeHost(config, run_dir), rc_id="rc-synthetic", prior=twice)["stopped_at"]
     fixed = r.run(FakeHost(config, run_dir), rc_id="rc-synthetic", prior=twice, instrument_fix="fix-1")
     assert "rule-function" in fixed["stopped_at"]
+
+
+@pytest.mark.parametrize("fail, missing", [("warm", 20), ("raise", 1)])
+def test_a_turn_not_completed_is_never_swallowed(setup, fail, missing):
+    _, config, run_dir = setup
+    receipt = r.run(FakeHost(config, run_dir, fail=fail), rc_id="rc-synthetic")
+    assert receipt["verdict"]["raw"] != bars.PASS and receipt["bars"]["bar6"]["verdict"] == bars.INCONCLUSIVE
+    work = receipt["arms"]["rc"]["workload"]
+    assert (work["turns_planned"], len(work["turns_not_completed"])) == (36, missing)
+    assert receipt["bars"]["bar6"]["items"]["ga"]["turns_completed"] is False
+
+
+def test_p1_failure_with_an_instrument_fix_stops_cleanly(setup):
+    _, config, run_dir = setup
+    twice = [{"rc": "rc-synthetic", "verdict": {"raw": bars.INCONCLUSIVE}, "pins": {"functions_sha256": "f" * 64}}] * 2
+    receipt = r.run(FakeHost(config, run_dir, fail="P1"), rc_id="rc-synthetic", prior=twice, instrument_fix="fix-1")
+    assert receipt["stopped_at"] == "P1" and "verdict" not in receipt
+
+
+@pytest.mark.parametrize("name", ["/abs/rules.py", "../rules.py", "sub/../../rules.py"])
+def test_rules_module_must_stay_inside_the_instrument_dir(tmp_path, name):
+    with pytest.raises(ValueError):
+        r.LocalHost({"instrument_dir": str(tmp_path), "rules_module": name}, tmp_path / "run").rules()
 
 
 def test_replay_runs_the_edition_under_the_sandbox(tmp_path, monkeypatch):

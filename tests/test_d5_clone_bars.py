@@ -28,7 +28,7 @@ def host(host_id, session, role, content, **extra):
 SNAPSHOT = [store(1, "S", "assistant", "old"), store(2, "S", "user", "older")]
 HOSTS = [host(51, "S", "user", "a"), host(52, "C", "assistant", "cron"), host(53, "S", "assistant", "b"),
          host(54, "S", "tool", "big", ref="x1")]
-BIND = {"bind": "e1-L-0", "session_id": "S", "t0_max": 9, "h8_max": 13, "t0_keys": b.keys(SNAPSHOT, identity)}
+BIND = {"bind": "e1-L-0", "session_id": "S", "t0_max": 9, "h8_max": 13, "dup_store_ids": [10]}
 
 
 def rc_rows():
@@ -69,6 +69,28 @@ def test_bar1_class3_needs_ga_and_inconclusive_bind():
     assert bar1(leftover, bind2=b.PASS)["verdict"] == b.FAIL
 
 
+def test_bar1_reserves_exactly_the_copies_bar2_judged():
+    # Probe A: an old row re-stored after the bind's user row is outside the edition's set, so it is a leftover.
+    hosts = [host(51, "S", "user", "u1"), host(52, "S", "assistant", "r1")]
+    rows = [store(10, "S", "user", "u1"), store(11, "S", "assistant", "r1"), store(12, "S", "assistant", "old")]
+    bind = {"bind": "B", "session_id": "S", "t0_max": 9, "h8_max": 20, "dup_store_ids": []}
+    assert b.bar1(rows, hosts, SNAPSHOT, [], [bind], {"B": b.PASS}, identity, (whitespace,))["verdict"] == b.FAIL
+    # Unknown copies at the bind (no dup_store_ids) or an INCONCLUSIVE bar 2: never FAIL.
+    unknown = {**bind, "dup_store_ids": None}
+    assert b.bar1(rows, hosts, SNAPSHOT, [], [unknown], {"B": b.PASS}, identity, ())["verdict"] == b.INCONCLUSIVE
+    assert b.bar1(rows, hosts, SNAPSHOT, [], [bind], {"B": b.INCONCLUSIVE}, identity, ())["verdict"] == b.INCONCLUSIVE
+    # Probe B: a whitespace-credited copy the edition put in its set is reserved, not failed.
+    hosts = [host(50, "S", "user", "a"), host(51, "S", "assistant", "x"), host(52, "S", "user", "u2"),
+             host(53, "S", "assistant", "r2")]
+    rows = [store(1, "S", "user", "a  \r\n"), store(2, "S", "assistant", "x"), store(3, "S", "user", "a"),
+            store(4, "S", "user", "u2"), store(5, "S", "assistant", "r2")]
+    bind = {"bind": "B2", "session_id": "S", "t0_max": 2, "h8_max": 20, "dup_store_ids": [3]}
+    result = b.bar1(rows, hosts, [], rows, [bind], {"B2": b.PASS}, identity, (whitespace,))
+    assert (result["verdict"], result["copies_by_bind"]) == (b.PASS, {"B2": 1})
+    assert b.dup_store_ids({"bind_identity": {"dup_store_ids": [3]}}) == [3]
+    assert b.dup_store_ids({"bind_identity": {}}) is None and b.dup_store_ids(None) is None
+
+
 def receipt(validity="PASS", comparison="PASS", **extra):
     checks = {"validity": {"verdict": validity}, **{k: {"verdict": comparison} for k in b.COMPARISONS}}
     return {"checks": checks, "bind_identity": {"dup_store_ids": [10]}, "range_new_rows": 0, **extra}
@@ -84,6 +106,8 @@ def test_bar2_pass_and_each_inconclusive_or_fail():
         assert b.bar2_bind(case)["verdict"] == b.INCONCLUSIVE
     assert b.bar2_bind(receipt(), error=True)["verdict"] == b.INCONCLUSIVE
     assert b.bar2_bind(receipt(range_new_rows=None), range_new_rows=0)["verdict"] == b.PASS
+    for odd in (False, True, 0.0, "0"):  # Only an int 0 is zero.
+        assert b.bar2_bind(receipt(range_new_rows=odd))["verdict"] == b.INCONCLUSIVE
     assert b.bar2([b.bar2_bind(receipt())])["verdict"] == b.PASS
     assert b.bar2([])["verdict"] == b.INCONCLUSIVE
 
@@ -134,18 +158,32 @@ def test_bar5_a_failed_ga_check_is_never_pass():
     assert b.bar5(rc_fail, ga_fail, ga_fail)["verdict"] == b.FAIL  # An rc failure is FAIL whatever the GA arm shows.
 
 
+def test_bar5_unknown_status_fails_and_a_rerun_must_show_every_kind():
+    assert b.bar5(checks({"kind": "doctor", "check": "d", "status": "error"}), checks())["verdict"] == b.FAIL
+    ga_fail = checks({"kind": "integrity", "check": "fk", "status": "fail"})
+    for rerun in ([], [{"kind": "quick_check", "check": "q", "status": "ok"}]):
+        result = b.bar5(checks(), ga_fail, rerun)
+        assert result["verdict"] == b.INCONCLUSIVE and result["ga_rerun_kinds_missing"]
+    warn = {"kind": "doctor", "check": "w", "status": "warn"}
+    assert b.bar5(checks(warn), ga_fail + [warn, warn], checks())["verdict"] == b.FAIL  # The clean re-run's baseline.
+    assert b.check_counts(checks(warn)) == {"by_kind_status": {"doctor:ok": 1, "quick_check:ok": 1,
+                                            "integrity:ok": 1, "schema:ok": 1, "doctor:warn": 1}, "warnings": {"w": 1}}
+
+
 def workload(**change):
     names = ["L", "S1", "S2"]
     return {"conversation_names": names, "large_conversation_rows": 1000, "cron_fired": 1, "tool_heavy_turns": 2,
             "restarts": [{"epoch": e, "cold_binds": names} for e in (1, 2, 3)], "payload_files_created": 1,
-            "compactions_published": 1, "whitespace_rewrites": 1, "payload_swaps": 1, "replay_misses": 0, **change}
+            "compactions_published": 1, "whitespace_rewrites": 1, "payload_swaps": 1, "replay_misses": 0,
+            "turns_planned": 36, "turns_completed": 36, **change}
 
 
 def test_bar6_items_per_arm():
     assert b.bar6({"rc": workload(), "ga": workload()})["verdict"] == b.PASS
     short = [{"epoch": e, "cold_binds": ["L", "S1"] if e == 2 else ["L", "S1", "S2"]} for e in (1, 2, 3)]
     for bad in (workload(replay_misses=1), workload(cron_fired=None), workload(restarts=short),
-                workload(payload_swaps=0), workload(large_conversation_rows=999)):
+                workload(payload_swaps=0), workload(large_conversation_rows=999), workload(turns_completed=35),
+                workload(turns_planned=0, turns_completed=0)):
         assert b.bar6({"rc": workload(), "ga": bad})["verdict"] == b.INCONCLUSIVE
     assert b.bar6({"rc": workload()})["verdict"] == b.INCONCLUSIVE
 

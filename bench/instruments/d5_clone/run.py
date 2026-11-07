@@ -70,8 +70,8 @@ class LocalHost:
     def rules(self):
         if self._rules is None:
             sys.dont_write_bytecode = True  # Bytecode beside a pinned file would fail the pins.
-            spec = importlib.util.spec_from_file_location(
-                "d5_clone_rules", Path(self.c["instrument_dir"]) / self.c["rules_module"])
+            path = pins._load_path(self.c["instrument_dir"], self.c["rules_module"])  # Refuses absolute and '..'.
+            spec = importlib.util.spec_from_file_location("d5_clone_rules", path)
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
             self._rules = {"identity": module.identity, "credits": tuple(module.credits), "covered": module.covered}
@@ -206,10 +206,11 @@ class LocalHost:
         ctx["provider"].stop()
 
 
-def run_arm(host, name, home, plan, rules, extras):
+def run_arm(host, name, home, plan, extras):
     ctx = host.arm(name, home, plan)
     sid = {c["name"]: c["session_id"] for c in plan["conversations"]}
     binds, restarts, egress, tool_turns, started = [], [], [], 0, time.monotonic()
+    planned, not_completed = 0, []
     try:
         for epoch in plan["epochs"]:
             if epoch["restart_before"]:
@@ -220,17 +221,20 @@ def run_arm(host, name, home, plan, rules, extras):
                 bind = name == "rc" and step["kind"] == "cold"
                 if bind:
                     t0_dir, t0 = host.capture(ctx, "T0", step, extras)
-                    session = sid[step["conversation"]]
-                    t0_keys = bars.keys([r for r in host.rows(t0_dir)["store"] if r["session_id"] == session],
-                                        rules["identity"])
-                ok = host.turn(ctx, step)
+                planned += 1
+                try:
+                    ok = host.turn(ctx, step) is True
+                except Exception:  # A turn that raises or times out is not completed; it is never swallowed.
+                    ok = False
+                not_completed += [] if ok else [step["id"]]
                 cold += [step["conversation"]] if ok and step["kind"] == "cold" else []
                 tool_turns += bool(ok and step["tools"])
                 if bind:
                     h8_dir, h8 = host.capture(ctx, "H8", step)
                     receipt, error, range_new = host.replay(ctx, step, t0_dir, h8_dir)
-                    binds.append({"bind": step["id"], "session_id": session, "t0_max": t0["store_max_store_id"],
-                                  "h8_max": h8["store_max_store_id"], "t0_keys": t0_keys,
+                    binds.append({"bind": step["id"], "session_id": sid[step["conversation"]],
+                                  "t0_max": t0["store_max_store_id"], "h8_max": h8["store_max_store_id"],
+                                  "dup_store_ids": bars.dup_store_ids(receipt),
                                   "t0_capture_sha256": t0["capture_hashes_sha256"],
                                   "h8_capture_sha256": h8["capture_hashes_sha256"],
                                   "bar2": bars.bar2_bind(receipt, range_new_rows=range_new, error=error)})
@@ -247,7 +251,9 @@ def run_arm(host, name, home, plan, rules, extras):
     host.close(ctx)
     workload = {"conversation_names": list(sid), "restarts": restarts, "tool_heavy_turns": tool_turns,
                 "large_conversation_rows": max(c["lcm_rows"] for c in plan["conversations"]),
-                "replay_misses": sum(stats.get("replay_misses", {}).values()), **host.facts(ctx)}
+                "replay_misses": sum(stats.get("replay_misses", {}).values()), "turns_planned": planned,
+                "turns_completed": planned - len(not_completed), "turns_not_completed": not_completed,
+                **host.facts(ctx)}
     return {"binds": binds, "workload": workload, "egress": {"samples": len(egress), "non_local": sum(egress)},
             "provider": stats, "logs": host.logs(ctx), "roots": host.roots(ctx), "checks": host.checks(ctx),
             "rows": host.rows(home), "wall_s": round(time.monotonic() - started, 3)}
@@ -263,8 +269,8 @@ def run(host, *, rc_id, prior=(), instrument_fix=None):
     receipt["preflights"] = steps = {"free_space": {"verdict": "PASS" if host.free_bytes() >= NEED_FREE else "FAIL"}}
     if refusal is None and steps["free_space"]["verdict"] == "PASS":
         steps["P1"] = receipt["pins"] = host.pins()
-        if instrument_fix and any(p.get("pins", {}).get("functions_sha256") != steps["P1"]["functions_sha256"]
-                                  for p in prior):  # Spec: a fix never changes the rule code on this rc.
+        if instrument_fix and steps["P1"].get("verdict") == "PASS" and any(
+                p.get("pins", {}).get("functions_sha256") != steps["P1"].get("functions_sha256") for p in prior):  # Spec: a fix never changes the rule code on this rc.
             refusal = "the instrument fix changed rule-function code; that applies from the next rc"
     for name in ("P2", "plan", *PREFLIGHTS):
         if refusal or any(s.get("verdict") != "PASS" for s in steps.values()):
@@ -281,11 +287,11 @@ def run(host, *, rc_id, prior=(), instrument_fix=None):
     if stopped or len(steps) != 4 + len(PREFLIGHTS):
         return {**receipt, "stopped_at": stopped, "wall_s": {"total": round(time.monotonic() - started, 3)}}
     rules, base = host.rules(), host.run_dir / "plan" / "home"
-    arms = {name: run_arm(host, name, host.clone(name), plan, rules, {"RC3/store.db": base / "store.db"})
+    arms = {name: run_arm(host, name, host.clone(name), plan, {"RC3/store.db": base / "store.db"})
             for name in ("rc", "ga")}
     ga_rerun = None  # Bar 5: a failed check in the GA arm re-runs that arm once (release manager, 2026-11-07).
     if bars.failed_checks(arms["ga"]["checks"]):
-        ga_rerun = run_arm(host, "ga", host.clone("ga-rerun"), plan, rules, {"RC3/store.db": base / "store.db"})
+        ga_rerun = run_arm(host, "ga", host.clone("ga-rerun"), plan, {"RC3/store.db": base / "store.db"})
     snap = host.rows(base)
     tops = {k: max((r[c] for r in snap[k]), default=0) for k, c in (("store", "store_id"), ("host", "id"))}
     new = {a: [r for r in arms[a]["rows"]["store"] if r["store_id"] > tops["store"]] for a in arms}
@@ -300,9 +306,11 @@ def run(host, *, rc_id, prior=(), instrument_fix=None):
         "bar5": bars.bar5(arms["rc"]["checks"], arms["ga"]["checks"], ga_rerun and ga_rerun["checks"]),
         "bar6": bars.bar6({a: arms[a]["workload"] for a in arms})}
     receipt.update(
-        arms={a: {k: arms[a][k] for k in ("workload", "egress", "provider")} for a in arms},
-        ga_rerun=ga_rerun and {k: ga_rerun[k] for k in ("workload", "egress", "provider", "wall_s")},
-        binds=[{k: v for k, v in b.items() if k != "t0_keys"} for b in binds], bars=results,
+        arms={a: {**{k: arms[a][k] for k in ("workload", "egress", "provider")},
+                  "checks": bars.check_counts(arms[a]["checks"])} for a in arms},
+        ga_rerun=ga_rerun and {**{k: ga_rerun[k] for k in ("workload", "egress", "provider", "wall_s")},
+                               "checks": bars.check_counts(ga_rerun["checks"])},
+        binds=[{k: v for k, v in b.items() if k != "dup_store_ids"} for b in binds], bars=results,
         verdict=bars.verdict(results, prior_verdicts),
         wall_s={**{a: arms[a]["wall_s"] for a in arms}, "total": round(time.monotonic() - started, 3)})
     return receipt

@@ -36,8 +36,14 @@ def bar2_bind(receipt, *, range_new_rows=None, error=False):
     out = {"validity": (checks.get(VALIDITY) or {}).get("verdict"), "range_new_rows": range_new_rows,
            "error": bool(error), "comparison": {k: (checks.get(k) or {}).get("verdict") for k in COMPARISONS},
            "copies": len((receipt.get("bind_identity") or {}).get("dup_store_ids") or [])}
-    shown = isinstance(range_new_rows, int) and range_new_rows == 0 and out["validity"] == PASS
+    shown = type(range_new_rows) is int and range_new_rows == 0 and out["validity"] == PASS  # Never a bool.
     return {**out, "verdict": _worst(out["comparison"].values()) if shown and not error else INCONCLUSIVE}
+
+
+def dup_store_ids(receipt):
+    """The copies the edition judged at a bind (its positional, credited set), or None when the receipt has none."""
+    ids = ((receipt if isinstance(receipt, dict) else {}).get("bind_identity") or {}).get("dup_store_ids")
+    return ids if isinstance(ids, list) and all(type(i) is int for i in ids) else None
 
 
 def bar2(binds):
@@ -69,7 +75,10 @@ def bar1(rc_rows, host_rows, snapshot_rows, ga_rows, binds, bar2_by_bind, identi
 
     rc_rows and ga_rows are the rows each arm stored during the run, in store order; host_rows are the run's host
     rows in host order; snapshot_rows are the snapshot's store and host rows. Each bind is
-    {bind, session_id, t0_max, h8_max, t0_keys}, with t0_keys = keys(the pre-bind capture's rows, identity)."""
+    {bind, session_id, t0_max, h8_max, dup_store_ids}: the copies bar 2 judged at that bind (the edition's
+    positional, credited set; None when its receipt has none)."""
+    dups = {b["bind"]: set(b["dup_store_ids"]) for b in binds if b.get("dup_store_ids") is not None}
+
     def key(row):
         return row["session_id"], identity(row)
 
@@ -85,7 +94,7 @@ def bar1(rc_rows, host_rows, snapshot_rows, ga_rows, binds, bar2_by_bind, identi
         rest = []
         for row in (r for r in rc_rows if r["session_id"] == session):
             bind = bind_of(row)
-            if bind and key(row) in bind["t0_keys"]:  # 1. A copy as the spec defines it, whatever bar 2 says.
+            if bind and row["store_id"] in dups.get(bind["bind"], ()):  # 1. The copies bar 2 judged at the bind.
                 copies[bind["bind"]] += 1
             else:
                 rest.append(row)
@@ -103,8 +112,13 @@ def bar1(rc_rows, host_rows, snapshot_rows, ga_rows, binds, bar2_by_bind, identi
             class3.setdefault(key(row), []).append(row)
     over = [k for k, rows in class3.items() if len(rows) > ga[k]]  # Per identity over the whole run, rc <= GA.
     groups = [[row] for row in unassigned] + [class3[k] for k in over]
-    # A leftover at a bind whose bar 2 is INCONCLUSIVE makes the bar INCONCLUSIVE, never FAIL (design r4 I-2).
-    pending = [g for g in groups if all(bar2_by_bind.get((bind_of(r) or {}).get("bind")) == INCONCLUSIVE for r in g)]
+    # A leftover at a bind whose bar 2 is INCONCLUSIVE, or whose copies are unknown, makes the bar INCONCLUSIVE,
+    # never FAIL (design r4 I-2).
+    def open_bind(row):
+        bind = bind_of(row)
+        return bind is not None and (bar2_by_bind.get(bind["bind"]) == INCONCLUSIVE or bind["bind"] not in dups)
+
+    pending = [g for g in groups if all(open_bind(r) for r in g)]
     verdict = FAIL if lost or len(pending) < len(groups) else INCONCLUSIVE if pending else PASS
     return {"verdict": verdict, "rows": len(rc_rows), "host_occurrences": len(host_rows), "matched": matched,
             "copies_by_bind": dict(copies), "lost": lost, "class3_rows": sum(map(len, class3.values())),
@@ -163,26 +177,40 @@ def bar4(rc_lines, ga_lines, rc_roots, ga_roots):
 
 
 def failed_checks(checks):
-    return sorted({c["check"] for c in checks if c["status"] == "fail"})
+    return sorted({c["check"] for c in checks if c["status"] not in ("ok", "warn")})  # Any other status fails.
+
+
+def kinds_missing(checks):
+    return [k for k in CHECK_KINDS if not any(c["kind"] == k for c in checks)]
+
+
+def check_counts(checks):
+    """Counts only: checks by kind and status, and warnings by check name."""
+    return {"by_kind_status": dict(Counter(f"{c['kind']}:{c['status']}" for c in checks)),
+            "warnings": dict(Counter(c["check"] for c in checks if c["status"] == "warn"))}
 
 
 def bar5(rc_checks, ga_checks, ga_rerun_checks=None):
     """No failed doctor, quick_check, integrity or schema check in the rc arm; doctor warnings by check name, with
     rc <= GA. Checks are {kind, check, status}; a kind with no check is not shown (INCONCLUSIVE). A failed check in
     the previous-GA arm is never PASS (release manager, 2026-11-07): the GA arm is re-run once; if the re-run fails
-    too, the bar stays INCONCLUSIVE until the release manager records a disposition."""
+    too, the bar stays INCONCLUSIVE until the release manager records a disposition. A re-run is clean only when it
+    shows every check kind and fails none; a clean re-run supplies the doctor-warning baseline."""
     failed, ga_failed = failed_checks(rc_checks), failed_checks(ga_checks)
     rerun_failed = failed_checks(ga_rerun_checks) if ga_rerun_checks is not None else None
-    baseline = ga_rerun_checks if ga_failed and ga_rerun_checks is not None and not rerun_failed else ga_checks
+    rerun_missing = kinds_missing(ga_rerun_checks) if ga_rerun_checks is not None else None
+    rerun_clean = rerun_failed == [] and rerun_missing == []
+    baseline = ga_rerun_checks if ga_failed and rerun_clean else ga_checks
     rc_w, ga_w = (Counter(c["check"] for c in checks if c["kind"] == "doctor" and c["status"] == "warn")
                   for checks in (rc_checks, baseline))
     over = sorted(name for name, n in rc_w.items() if n > ga_w[name])
-    missing = [k for k in CHECK_KINDS if not any(c["kind"] == k for c in rc_checks)]
-    ga_open = bool(ga_failed) and (rerun_failed is None or bool(rerun_failed))
+    missing = kinds_missing(rc_checks)
+    ga_open = bool(ga_failed) and not rerun_clean
     verdict = FAIL if failed or over else INCONCLUSIVE if missing or ga_open else PASS
     return {"verdict": verdict, "failed": failed, "warnings_over_ga": over, "kinds_missing": missing,
             "ga_failed": ga_failed, "ga_rerun_needed": bool(ga_failed) and rerun_failed is None,
-            "ga_rerun_failed": rerun_failed or [], "ga_disposition_needed": bool(rerun_failed)}
+            "ga_rerun_failed": rerun_failed or [], "ga_rerun_kinds_missing": rerun_missing or [],
+            "ga_disposition_needed": bool(rerun_failed)}
 
 
 def workload_items(w):
@@ -195,7 +223,8 @@ def workload_items(w):
             "payload_created": (w.get("payload_files_created") or 0) >= 1,
             "compaction_published": (w.get("compactions_published") or 0) >= 1,
             "whitespace_rewrite": (w.get("whitespace_rewrites") or 0) >= 1,
-            "payload_swap": (w.get("payload_swaps") or 0) >= 1, "replay_misses_zero": w.get("replay_misses") == 0}
+            "payload_swap": (w.get("payload_swaps") or 0) >= 1, "replay_misses_zero": w.get("replay_misses") == 0,
+            "turns_completed": bool(w.get("turns_planned")) and w.get("turns_completed") == w.get("turns_planned")}
 
 
 def bar6(arms):
