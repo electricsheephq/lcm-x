@@ -7146,12 +7146,17 @@ class LCMEngine(
             # Those targets are spent now; only earlier-ingest links get tier 4.
             used = (getattr(self, "_ingest_ledger_attempt", None) or {}).get("link_targets_used", ())
             targets = [row for row in targets if row["store_id"] not in used]
+            # Two lookups, each on its own index (store_id or related_store_id first), so the
+            # store's other replay history is never scanned; the second skips rows the first returned.
             seeds = list(conn.execute(
                 "SELECT store_id,kind,related_store_id FROM message_relations "
-                "WHERE kind IN ('possible_replay_of','link_pending') "
-                "AND (store_id IN (SELECT value FROM json_each(?)) "
-                "OR related_store_id IN (SELECT value FROM json_each(?)))",
-                (json.dumps([r["store_id"] for r in targets]),) * 2)) if conn.execute(
+                "WHERE store_id IN (SELECT value FROM json_each(?1)) "
+                "AND kind IN ('possible_replay_of','link_pending') "
+                "UNION ALL SELECT store_id,kind,related_store_id FROM message_relations "
+                "WHERE related_store_id IN (SELECT value FROM json_each(?1)) "
+                "AND kind IN ('possible_replay_of','link_pending') "
+                "AND store_id NOT IN (SELECT value FROM json_each(?1))",
+                (json.dumps([r["store_id"] for r in targets]),))) if conn.execute(
                     "SELECT 1 FROM sqlite_master WHERE name='message_relations'").fetchone() else []
             return self._plan_tool_replay_links(rows, targets, seeds=seeds)
         except Exception as exc:
