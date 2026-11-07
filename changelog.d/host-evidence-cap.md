@@ -1,0 +1,1 @@
+- Fix: Cap host-dependent reliability bars at INCONCLUSIVE when host state evidence is unreadable, preserving failures.
