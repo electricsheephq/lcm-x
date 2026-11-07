@@ -7095,15 +7095,15 @@ class LCMEngine(
                         [row["store_id"] for row in targets], "possible_replay_of", related=True)}
                     linked = {row["store_id"] for row in self._store.get_message_relations(
                         list(current), "possible_replay_of")}
-                    linked_stamps, widened = set(), False
+                    linked_stamps, predecessors = set(), None
 
-                    def same_occurrence(stamp, identity, sid):
+                    def same_occurrence(tier, stamp, identity, sid):
                         return [target for target in targets
-                                if target["observed_at"] == stamp and target["store_id"] < sid
-                                and _proof_user_identity(self._message_replay_identity(
+                                if target["session_id"] == tier and target["observed_at"] == stamp
+                                and target["store_id"] < sid and _proof_user_identity(self._message_replay_identity(
                                     target, stored_row=True)) == _proof_user_identity(identity)]
 
-                    for idx, (_session, row) in sorted(previous.items()):
+                    for idx, (session, row) in sorted(previous.items()):
                         sid = stored_at.get(idx)
                         if not sid or sid not in current or sid in linked:
                             continue
@@ -7113,19 +7113,21 @@ class LCMEngine(
                         identity = self._message_replay_identity(current[sid], stored_row=True)
                         if _commit_proof_identity_digest(_proof_user_identity(identity)) != row.get("identity_sha256"):
                             continue
-                        matches = same_occurrence(row["timestamp"], identity, sid)
-                        if not matches and not widened:
-                            # A carried row can live in the rotation predecessor while the
-                            # child's own proof records it under the child session.
-                            widened = True
-                            extra = set(self._rotation_predecessor_session_ids(
-                                str(self._session_id), max_hops=1)) - sessions
-                            if extra:
-                                more = self._store.find_rows_by_observed_at(self._conversation_id, sorted(extra), stamps)
+                        # Per row, in tiers: the proof's session, then the current session, then (a
+                        # carried row the child's proof records may live there) the one-hop predecessor.
+                        matches, tiers = [], [session, str(self._session_id)]
+                        for tier in dict.fromkeys(tiers):
+                            matches = matches or same_occurrence(tier, row["timestamp"], identity, sid)
+                        if not matches and predecessors is None:
+                            predecessors = [s for s in self._rotation_predecessor_session_ids(
+                                str(self._session_id), max_hops=1) if s not in sessions]
+                            if predecessors:
+                                more = self._store.find_rows_by_observed_at(self._conversation_id, predecessors, stamps)
                                 used |= {relation["related_store_id"] for relation in self._store.get_message_relations(
                                     [target["store_id"] for target in more], "possible_replay_of", related=True)}
-                                targets, sessions = [*targets, *more], sessions | extra
-                                matches = same_occurrence(row["timestamp"], identity, sid)
+                                targets = [*targets, *more]
+                        for tier in predecessors if not matches else ():
+                            matches = matches or same_occurrence(tier, row["timestamp"], identity, sid)
                         if len(matches) > 1:
                             # The host's volatile scaffolding (todo fold, model-switch note) is the
                             # replay itself; exact content only breaks a tie between equal identities.
@@ -7152,6 +7154,17 @@ class LCMEngine(
                                                          if idx not in previous and sid])
                         already_linked = {row["store_id"] for row in self._store.get_message_relations(
                             list(sources), "possible_replay_of")}
+                        stored_forms = {}  # a target's stored content and, behind any placeholder, what it holds
+
+                        def shown_as(target):
+                            if target["store_id"] not in stored_forms:
+                                content = target["content"]
+                                stored_forms[target["store_id"]] = {text.strip() for text in (
+                                    content, self._restore_ingest_payload_placeholders_in_content_identity(
+                                        content, session_id=target["session_id"]),
+                                    *self._stored_row_externalized_text_parts_for_pattern_matching(target))}
+                            return stored_forms[target["store_id"]]
+
                         for sid, source in sorted(sources.items()):
                             if source["role"] != "user" or sid in already_linked:
                                 continue
@@ -7167,7 +7180,7 @@ class LCMEngine(
                                                       # stored content is redacted as protect_message_for_ingest does
                                                       and normalize_content_value(redact_sensitive_value(
                                                           message["content"], self._config, parse_json_strings=False
-                                                      )).strip() == target["content"].strip()
+                                                      )).strip() in shown_as(target)
                                                       and self._host_occurrence_metadata(message)["timestamp"]
                                                       == target["observed_at"] for message in messages)]
                             if len(candidates) == 1:
