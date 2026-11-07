@@ -388,20 +388,20 @@ EMPTY_RECOVERY_NUDGE = ("You just executed tool calls but returned an empty resp
                         "results above and continue with the task.")
 
 
-def empty_recovery_rows(rows, host_rows=()):
+def empty_recovery_rows(rows, host_rows=(), group=lambda session: session):
     """Stored copies of the host's empty-response recovery pair (#2087), matched by structure and exact host text: in
     one session's store order, a tool row, then an assistant row whose content is exactly ``EMPTY_RECOVERY_REPLY`` with
     no tool calls, then a user row whose content is exactly ``EMPTY_RECOVERY_NUDGE``. A user row with the nudge's text
     and no such pair in front of it is a real turn and stays scored. The host never saves the flagged pair, so a session
-    whose host rows hold a saved row with either text matches nothing: such a row may be a real reply or turn, and its
-    stored copies stay scored. ``rows``: every stored row of the audited sessions, (store_id, session, role, content,
+    whose lineage (``group``: a compression rotation joins its parent) holds a saved host row with either text matches
+    nothing: such a row may be a real reply or turn, and its stored copies, in any session of the lineage, stay scored. ``rows``: every stored row of the audited sessions, (store_id, session, role, content,
     tool_calls, ...), so adjacency is the store's own order; ``host_rows``: (id, session, role, content, ...). Returns
     the pairs' store ids."""
-    saved = {r[1] for r in host_rows if (r[2], r[3]) in {("assistant", EMPTY_RECOVERY_REPLY),
-                                                          ("user", EMPTY_RECOVERY_NUDGE)}}
+    saved = {group(r[1]) for r in host_rows if (r[2], r[3]) in {("assistant", EMPTY_RECOVERY_REPLY),
+                                                                 ("user", EMPTY_RECOVERY_NUDGE)}}
     by_session = defaultdict(list)
     for r in sorted(rows):
-        if r[1] not in saved:
+        if group(r[1]) not in saved:
             by_session[r[1]].append(r)
     out = set()
     for seq in by_session.values():
@@ -816,7 +816,7 @@ def audit(state_db: Path, lcm_db: Path, logs=(), since=None, events_path=None, l
     # Matched on every stored row of the audited sessions, before any is set aside, so a removed row never makes two
     # rows adjacent; an undo's retained row stays the undo's.
     recovery = empty_recovery_rows([r for r in stored if audited(r[0])],
-                                   [r for r in host_rows if r[1] in scored]) - retained
+                                   [r for r in host_rows if group(r[1]) in roots], group) - retained
     for g, rows in by_lineage.items():  # the host's recovery scaffolding (#2087): out of parity, surplus and M3's numerator
         by_lineage[g] = [r for r in rows if r[0] not in recovery]
     todo = todo_expected([r for r in host_rows if r[1] in scored], [r for rows in by_lineage.values() for r in rows],

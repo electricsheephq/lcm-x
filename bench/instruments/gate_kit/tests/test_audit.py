@@ -1415,3 +1415,16 @@ def test_a_bound_copy_does_not_cover_its_unbound_message(tmp_path):
     per = home.run()["uid_coverage"]["per_source"]["cli"]
     assert (per["messages"], per["messages_with_canonical_uid"]) == (4, 0)
     assert (per["copy_rows"], per["copy_rows_with_canonical_uid"]) == (1, 1)
+
+
+def test_a_rotation_child_of_a_parent_that_saved_the_texts_matches_nothing(tmp_path):
+    """The parent saved a real "(empty)" reply and a real nudge-text turn; its compression rotation child stores copies
+    after a tool row. Provenance is the lineage's: the copies stay surplus."""
+    sessions = {"P": ("cli", None, 1000.5, "compression"), "P2": ("cli", "P", 3000.0, "user_exit")}
+    host = turn(1, "P") + [("P", call("c1")), ("P", result("c1")), ("P", EMPTY), ("P", NUDGE)] + turn(2, "P2")
+    stored = host + [("P2", call("c2")), ("P2", result("c2")), ("P2", EMPTY), ("P2", NUDGE)]
+    out = Home(tmp_path, sessions, host, stored=stored).run()
+    if out["parity"]["sessions"]["P2"]["lineage"] != "P":
+        pytest.fail("setup: the rotation child does not join its parent's lineage")
+    assert out["host_empty_recovery"] == {"rows": 0, "store_ids": []}
+    assert out["parity"]["totals"]["surplus_rows"] == 4
