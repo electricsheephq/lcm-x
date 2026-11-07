@@ -121,12 +121,12 @@ def _compact_after_a_failed_pre_store(host, monkeypatch):  # noqa: F811
     return ctx, aux, engine, child, stored, result
 
 
-def test_the_compacted_head_is_not_stored_and_the_repeat_follows_x(host, monkeypatch):  # noqa: F811
-    """The counted fallback consumes the compaction's own output: rows end [..., last, X, repeat]."""
+def test_the_compacted_head_is_not_stored_and_x_is_stored_once(host, monkeypatch):  # noqa: F811
+    """The anchor check consumes the compaction's own output: only X is stored. The copy of the last stored row is the
+    anchor itself: equal identities cannot be told apart, so it reads as that stored row (on main X is lost too)."""
     ctx, aux, engine, child, stored, result = _compact_after_a_failed_pre_store(host, monkeypatch)
     assert _send_x_then_a_repeat(ctx, engine, child, result) == 1
-    assert [row["content"] for row in child_rows(engine)] == [
-        *(row["content"] for row in stored), X["content"], stored[-1]["content"]]
+    assert [row["content"] for row in child_rows(engine)] == [*(row["content"] for row in stored), X["content"]]
 
 
 def test_the_output_record_follows_a_compression_handoff(host, monkeypatch):  # noqa: F811
@@ -144,7 +144,7 @@ def test_the_output_record_follows_a_compression_handoff(host, monkeypatch):  # 
     repeat = {"role": stored[-1]["role"], "content": stored[-1]["content"]}
     for _ in range(2):
         child.turn(ctx, [*result, X, repeat], engine)
-    assert [row["content"] for row in child_rows(engine, "child-2")] == [X["content"], repeat["content"]]
+    assert [row["content"] for row in child_rows(engine, "child-2")] == [X["content"]]
 
 
 def test_after_a_restart_the_compacted_head_is_stored_once_and_x_once(host, monkeypatch):  # noqa: F811
@@ -156,7 +156,7 @@ def test_after_a_restart_the_compacted_head_is_stored_once_and_x_once(host, monk
     resumed.on_session_start("parent", platform="cli", context_length=200_000)
     assert _send_x_then_a_repeat(ctx2, resumed, child, result) == 1
     assert [row["content"] for row in child_rows(resumed)] == [
-        *(row["content"] for row in stored), COMPACTED[0]["content"], X["content"], stored[-1]["content"]]
+        *(row["content"] for row in stored), COMPACTED[0]["content"], X["content"]]
 
 
 def test_a_failed_output_record_drops_the_earlier_compactions_outputs(host, monkeypatch):  # noqa: F811
@@ -208,3 +208,26 @@ def test_kept_first_rows_and_a_repeated_new_row_survive_a_restart(host):  # noqa
         child.turn(ctx2, view, resumed)
     assert [row["content"] for row in child_rows(resumed)] == [
         *(row["content"] for row in stored), summary["content"], repeat["content"]]
+
+
+def test_a_rejection_without_a_boundary_does_not_store_the_kept_tail_again(host):  # noqa: F811
+    """After a restart (no boundary), a rejection stores the summary after the kept tail, out of view order. The view's
+    end is then recorded as the boundary, so the next turn stores only its new row, not the kept tail a second time."""
+    load, clone = host
+    ctx, _module = load()
+    engine = clone(ctx)
+    engine.on_session_start("parent", platform="cli", context_length=200_000)
+    child = Agent("child", **DELEGATE)
+    stored = [{"role": "user" if i % 2 == 0 else "assistant", "content": f"turn {i}"} for i in range(12)]
+    child.turn(ctx, stored, engine)
+    ctx2, _ = load()  # fresh module and engines: no in-memory boundary or output record
+    resumed = clone(ctx2)
+    resumed.on_session_start("parent", platform="cli", context_length=200_000)
+    summary = {"role": "user", "content": "[CONTEXT SUMMARY] turns 3 to 5"}
+    view = [*stored[:3], summary, *stored[6:]]
+    child.turn(ctx2, view, resumed)
+    new = {"role": "user", "content": "a new turn"}
+    for _ in range(2):
+        child.turn(ctx2, [*view, new], resumed)
+    assert [row["content"] for row in child_rows(resumed)] == [
+        *(row["content"] for row in stored), summary["content"], new["content"]]

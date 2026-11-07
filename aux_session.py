@@ -1179,7 +1179,7 @@ class DelegateChildMixin:
         identities = [self._session_end_prefix_compare_identity(msg, session_id=session_id) for msg in view]
         start = self._delegate_child_unique_end(
             [self._delegate_child_boundary_digest(identity) for identity in identities], boundary) if boundary else None
-        anchored = start is not None
+        anchored, rejected = start is not None, []
         if start is not None:
             logger.debug("LCM delegated child %s: resuming after compression boundary", session_id)
         else:
@@ -1195,7 +1195,6 @@ class DelegateChildMixin:
                 if len(stored_tail) == _ANCHOR_ROWS:
                     break
             outputs = Counter(_DELEGATE_COMPACTION_OUTPUTS.get(key) or ())
-            rejected: list[tuple[int, list[int]]] = []
 
             def unaccounted(front: list, end: int) -> list[int]:
                 # #2071: each row in front of the match must be stored in the lineage (apart from the anchor rows,
@@ -1235,7 +1234,7 @@ class DelegateChildMixin:
             return 0
         stored = self._append_off_current_session_end_suffix(
             session_id, suffix, source=_DELEGATE_SOURCE, conversation_id=session_id)
-        if boundary and anchored:
+        if (boundary and anchored) or rejected:  # a rejection stores rows out of view order: always mark the end
             self._remember_delegate_child_boundary(session_id, view)
         _count("rows_stored", len(stored))
         logger.debug("LCM stored %d delegated-child rows: session=%s parent=%s",
