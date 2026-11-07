@@ -110,7 +110,7 @@ def test_a_concurrent_store_does_not_let_the_tail_anchor_skip_x(host, monkeypatc
     assert _send_x_then_a_repeat(ctx, engine, child, result) == 1
 
 
-def _compact_after_a_failed_pre_store(host, monkeypatch):
+def _compact_after_a_failed_pre_store(host, monkeypatch):  # noqa: F811
     ctx, aux, engine, child, stored = _child(host)
     fail, calls = _once(engine._append_delegate_child_rows, sqlite3.OperationalError("disk I/O error"))
     monkeypatch.setattr(engine, "_append_delegate_child_rows", fail)
