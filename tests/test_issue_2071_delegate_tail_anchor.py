@@ -277,3 +277,44 @@ def test_a_summary_of_an_unstored_input_row_is_stored(host, monkeypatch):  # noq
     child.turn(ctx, [*result, later], engine)
     contents = [row["content"] for row in child_rows(engine)]
     assert contents.count(COMPACTED[0]["content"]) == 1 and contents.count(later["content"]) == 1
+
+
+def test_a_later_compactions_head_is_not_stored_after_a_failed_boundary_record(host, monkeypatch):  # noqa: F811
+    """The first compaction's head is never stored (the boundary resumes after it), so it is in every later input. A
+    second compaction over a covered input still records its outputs: when its boundary record fails, the next turn
+    stores only the new row, not the second head."""
+    ctx, aux, engine, child, stored = _child(host)
+    first, second = [{"role": "user", "content": "first head"}], [{"role": "user", "content": "second head"}]
+    monkeypatch.setattr(engine, "_compress_bypassed", lambda *args: first)
+    if child.compress(engine, stored) != first:
+        pytest.fail("setup: the first compaction did not run")
+    later = {"role": "assistant", "content": "later"}
+    child.turn(ctx, [*first, later], engine)
+    fail, calls = _once(engine._remember_delegate_child_boundary, RuntimeError("synthetic boundary failure"))
+    monkeypatch.setattr(engine, "_remember_delegate_child_boundary", fail)
+    monkeypatch.setattr(engine, "_compress_bypassed", lambda *args: second)
+    result = child.compress(engine, [*first, later])
+    if not calls or result != second:
+        pytest.fail("setup: the second compaction did not run with a failed boundary record")
+    after = {"role": "assistant", "content": "after the second compaction"}
+    for _ in range(2):
+        child.turn(ctx, [*result, after], engine)
+    contents = [row["content"] for row in child_rows(engine)]
+    assert contents.count(second[0]["content"]) == 0 and contents.count(after["content"]) == 1
+
+
+def test_an_unstored_last_row_equal_to_an_older_row_keeps_its_summary(host, monkeypatch):  # noqa: F811
+    """The input's last row is a new turn whose identity equals an older stored row, and the pre-store fails: the
+    input is not covered (its last row is not the stored tail), so the summary is stored as that turn's only trace."""
+    ctx, aux, engine, child, stored = _child(host)
+    again = {"role": "user", "content": stored[0]["content"]}  # equal to a stored row, but a new turn
+    fail, calls = _once(engine._append_delegate_child_rows, sqlite3.OperationalError("disk I/O error"))
+    monkeypatch.setattr(engine, "_append_delegate_child_rows", fail)
+    monkeypatch.setattr(engine, "_compress_bypassed", lambda *args: COMPACTED)
+    result = child.compress(engine, [*stored, again])
+    if not calls or result != COMPACTED:
+        pytest.fail("setup: the compaction did not run after a failed pre-store")
+    later = {"role": "assistant", "content": "reply after the summary"}
+    child.turn(ctx, [*result, later], engine)
+    contents = [row["content"] for row in child_rows(engine)]
+    assert contents.count(COMPACTED[0]["content"]) == 1 and contents.count(later["content"]) == 1

@@ -934,21 +934,13 @@ class DelegateChildMixin:
         def identities(rows):
             return [self._session_end_prefix_compare_identity(msg, session_id=session_id) for msg in rows
                     if isinstance(msg, dict) and not self._matches_ignore_message_patterns(msg)]
-        given = Counter(identities(messages))
-        # An output exempts a row only when the compaction's whole input is stored in the lineage: a summary of a
-        # row that was never stored is that row's only survivor, so it must be stored like any other row.
-        stored = Counter(self._session_end_prefix_compare_identity(row, session_id=sid)
-                         for sid in self._delegate_child_store_sessions(session_id)
-                         for row in self._store.get_session_messages(sid, limit=-1))
-        if given - stored:
-            return
-        produced = Counter(identities(result)) - given
+        produced = Counter(identities(result)) - Counter(identities(messages))
         _DELEGATE_COMPACTION_OUTPUTS[self._delegate_child_key(session_id)] = [
             self._delegate_child_boundary_digest(identity) for identity in produced.elements()]
 
     def _compress_delegate_child_bypassed(self, messages, current_tokens, focus_topic, force):
         session_id = self._bypass_lcm_session_id()
-        stored_tail = None
+        stored_tail, covered = None, False
         with _DELEGATE_STORE_LOCK:
             # Closing may have begun while this pass waited for the child-store lock.
             if self._compaction_is_closing():
@@ -970,9 +962,12 @@ class DelegateChildMixin:
                     tail = self._store.get_session_tail(session_id, limit=1)
                     view = [msg for msg in messages
                             if isinstance(msg, dict) and not self._matches_ignore_message_patterns(msg)]
-                    if pre_store is not None and tail and view and self._session_end_prefix_compare_identity(
+                    # The input is covered when its last row is the stored tail: then its rows were stored before
+                    # this pass, even when this pass's own store failed.
+                    covered = bool(tail and view and self._session_end_prefix_compare_identity(
                         tail[-1], session_id=session_id,
-                    ) == self._session_end_prefix_compare_identity(view[-1], session_id=session_id):
+                    ) == self._session_end_prefix_compare_identity(view[-1], session_id=session_id))
+                    if pre_store is not None and covered:
                         stored_tail = tail
                     else:
                         self._note_delegate_child_fallback(
@@ -988,7 +983,10 @@ class DelegateChildMixin:
                 _DELEGATE_COMPACTION_OUTPUTS.pop(self._delegate_child_key(session_id), None)
                 if self._delegate_child_link(session_id, platform=_DELEGATE_SOURCE, require_agent=True):
                     try:  # recorded apart from the boundary: it must survive a failed or dropped boundary
-                        self._remember_delegate_child_outputs(session_id, messages, result)
+                        # Only over a covered input: a summary of a row that was never stored is that row's only
+                        # trace, so it must be stored like any other row.
+                        if covered:
+                            self._remember_delegate_child_outputs(session_id, messages, result)
                     except Exception as exc:
                         self._note_delegate_child_fallback(session_id, f"compaction outputs not recorded: {exc}")
                     if stored_tail and self._store.get_session_tail(session_id, limit=1) == stored_tail:
