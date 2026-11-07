@@ -332,3 +332,9 @@ def test_a_store_too_damaged_to_check_is_a_failed_check(tmp_path, monkeypatch):
     assert {(c["kind"], c["check"]): c["status"] for c in checks} == {
         ("quick_check", "lcm.db"): "fail", ("integrity", "lcm.db"): "fail",
         ("quick_check", "state.db"): "ok", ("integrity", "state.db"): "ok"}
+    with closing(sqlite3.connect(home / "state.db")) as db:  # A -wal with no -shm: refused read-only, a failed check.
+        db.execute("PRAGMA journal_mode=WAL")
+    (home / "state.db-shm").unlink(missing_ok=True)
+    (home / "state.db-wal").write_bytes(b"")
+    assert {c["check"] for c in r.LocalHost({}, tmp_path / "run").checks({"home": home}) if c["status"] == "fail"} == {
+        "lcm.db", "state.db"}
