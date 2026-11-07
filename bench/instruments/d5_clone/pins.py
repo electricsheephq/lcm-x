@@ -34,13 +34,17 @@ def _load_path(directory, name):
 
 
 def directory_files(instrument_dir):
-    """Every file under the instrument directory except the manifest and bytecode caches. The manifest must pin
-    all of them, so a sibling file cannot change unnoticed however it is loaded (import, importlib, runpy)."""
+    """Every file under the instrument directory except the manifest. The manifest must pin all of them, so a
+    sibling file cannot change unnoticed however it is loaded (import, importlib, runpy). Bytecode caches and
+    symlinks are never pinnable, so their presence fails: instruments run with -B and write no bytecode there."""
     root = Path(instrument_dir)
     found = set()
     for path in root.rglob("*"):
         relative = path.relative_to(root)
-        if "__pycache__" in relative.parts or relative.as_posix() == MANIFEST:
+        if relative.as_posix() == MANIFEST:
+            continue
+        if "__pycache__" in relative.parts or path.suffix in (".pyc", ".pyo"):
+            found.add("bytecode:" + relative.as_posix())  # Cached bytecode can run instead of the pinned source.
             continue
         if path.is_symlink():
             found.add("symlink:" + relative.as_posix())  # Never pinnable: a link can point anywhere.

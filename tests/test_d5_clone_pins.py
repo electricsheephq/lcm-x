@@ -286,3 +286,11 @@ def test_added_file_or_symlink_fails_verify(tmp_path):
     (tmp_path / "late.py").unlink()
     (tmp_path / "link.py").symlink_to(module)
     assert pins.verify(path, tmp_path)["mismatches"] == ["unpinned_files"]
+
+
+@pytest.mark.parametrize("planted", ["__pycache__/rules.cpython-312.pyc", "stray.pyc"])
+def test_bytecode_under_the_instrument_dir_fails_verify(tmp_path, planted):
+    module, path = _pin(tmp_path, "def rule():\n    return 1\n")
+    (tmp_path / planted).parent.mkdir(exist_ok=True)
+    (tmp_path / planted).write_bytes(b"\x00planted")
+    assert pins.verify(path, tmp_path)["mismatches"] == ["unpinned_files"]
