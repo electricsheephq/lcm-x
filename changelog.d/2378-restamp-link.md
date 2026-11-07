@@ -1,0 +1,1 @@
+- Fix: Link stored host re-stamps of carried rows to their prior occurrences after compaction, including session rotation, without skipping storage.
