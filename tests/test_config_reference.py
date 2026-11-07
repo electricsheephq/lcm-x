@@ -305,3 +305,38 @@ def test_doctor_context_threshold_reproduction(monkeypatch, tmp_path, threshold)
             if isinstance(check["detail"], (str, list))
             and "context_threshold" in json.dumps(check["detail"]).lower()
         ], sort_keys=True))
+
+
+@pytest.mark.parametrize("raw,expected,warning", [
+    ("5", 5, False), ("0", 0, False), ("-1", 0, True), ("x", 0, True),
+    ("true", 0, True), ("1.5", 0, True), ("99", 25, False),
+])
+def test_snippet_window_env(monkeypatch, raw, expected, warning):
+    monkeypatch.setenv("LCM_RECALL_SNIPPET_WINDOW_HITS", raw)
+    cfg = config.LCMConfig.from_env()
+    assert cfg.recall_snippet_window_hits == expected
+    assert bool([w for w in cfg.config_source_warnings if "recall_snippet_window_hits" in w]) == warning
+
+
+@pytest.mark.parametrize("raw,expected,warning", [
+    (5, 5, False), (0, 0, False), (99, 25, False), (-1, 0, True),
+    (True, 0, True), (False, 0, True), (1.5, 0, True), ("5", 0, True), ("x", 0, True),
+])
+def test_snippet_window_yaml(monkeypatch, tmp_path, raw, expected, warning):
+    import json
+
+    (tmp_path / "config.yaml").write_text("lcm:\n  recall_snippet_window_hits: " + json.dumps(raw) + "\n")
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    cfg = config.LCMConfig.from_env()
+    assert cfg.recall_snippet_window_hits == expected
+    assert "recall_snippet_window_hits" not in cfg.ignored_config_yaml_lcm_keys
+    assert bool([w for w in cfg.config_source_warnings if "recall_snippet_window_hits" in w]) == warning
+    monkeypatch.setenv("LCM_RECALL_SNIPPET_WINDOW_HITS", "2")
+    assert config.LCMConfig.from_env().recall_snippet_window_hits == 2
+
+
+def test_snippet_window_default_and_spec():
+    assert config.LCMConfig().recall_snippet_window_hits == 0
+    assert config.LCMConfig.from_env().recall_snippet_window_hits == 0
+    assert any(s.name == "recall_snippet_window_hits" and s.env_key == "LCM_RECALL_SNIPPET_WINDOW_HITS"
+               and s.py_type is int for s in config.ENV_FIELD_SPECS)
