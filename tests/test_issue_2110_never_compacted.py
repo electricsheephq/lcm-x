@@ -14,11 +14,12 @@ from tests.test_compression_boundary import _config, _turn
 _SHAPES = {"objective-prefix": f"{_PRESERVED_OBJECTIVE_CONTEXT_PREFIX}\nKeep this objective exactly as I wrote it.",
            "todo-prefix": f"{_PRESERVED_TODO_CONTEXT_PREFIX}\n- [ ] write the report",
            "plain": "A plain user turn with no scaffold shape."}
-_LOST = pytest.mark.xfail(strict=True, raises=AssertionError,
-                          reason="#2110: with no proof in force (never compacted) a scaffold-shaped user turn gets "
-                                 "identity None and is skipped")
+_REASON = ("with no proof in force (never compacted) a scaffold-shaped user turn gets identity None and is "
+           "skipped when it is reconciled against stored rows")
+_LOST = {"objective-prefix": pytest.mark.xfail(strict=True, raises=AssertionError, reason=f"#2110: {_REASON}"),
+         "todo-prefix": pytest.mark.xfail(strict=True, raises=AssertionError, reason=f"#2418 and #2110: {_REASON}")}
 _CELLS = [pytest.param(shape, place, restart, id=f"{shape}-{place}-{'restart' if restart else 'warm'}",
-                       marks=_LOST if shape != "plain" and (restart or place == "before-last-row") else ())
+                       marks=_LOST[shape] if shape != "plain" and (restart or place == "before-last-row") else ())
           for shape in _SHAPES for place in ("after-tail", "before-last-row") for restart in (False, True)]
 
 
