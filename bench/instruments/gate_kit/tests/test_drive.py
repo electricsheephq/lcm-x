@@ -442,6 +442,8 @@ def test_compaction_during_paste_ageing_counts_for_the_attempt(tmp_path, monkeyp
     ("OTHER=1\n# LCM_FRESH_TAIL_COUNT=2\n", {"LCM_FRESH_TAIL_COUNT": "8"}, (8, "env")),
     (None, {}, (24, "product default")),
     ("LCM_FRESH_TAIL_COUNT=\n", {}, (24, "product default")),
+    ("LCM_FRESH_TAIL_COUNT=48 # retain recent rows\n", {}, (48, ".env")),  # dotenv inline comment
+    ('LCM_FRESH_TAIL_COUNT="16" # quoted\n', {}, (16, ".env")),
 ])
 def test_fresh_tail_reads_the_home_env_file_first(tmp_path, dotenv, env, expected):
     if dotenv is not None:

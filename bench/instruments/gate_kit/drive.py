@@ -57,11 +57,20 @@ def fresh_tail(env: dict, home: Path | None = None) -> tuple[int, str]:
     never printed."""
     value, source = env.get("LCM_FRESH_TAIL_COUNT") or None, "env"
     dotenv = home / ".env" if home is not None else None
-    if dotenv is not None and dotenv.is_file():
-        for line in dotenv.read_text(errors="replace").splitlines():
+    try:
+        lines = dotenv.read_text(errors="replace").splitlines() if dotenv is not None and dotenv.is_file() else []
+    except OSError:
+        lines = []
+    if lines:
+        for line in lines:
             key, sep, raw = line.strip().removeprefix("export ").partition("=")
             if sep and key.strip() == "LCM_FRESH_TAIL_COUNT":
-                value, source = raw.strip().strip("'\"") or None, ".env"
+                raw = raw.strip()
+                if raw[:1] in ("'", '"') and raw.find(raw[0], 1) > 0:  # quoted: the text between the quotes
+                    raw = raw[1:raw.find(raw[0], 1)]
+                else:  # unquoted, as dotenv reads it: an inline comment starts at whitespace then '#'
+                    raw = re.split(r"\s+#", raw, maxsplit=1)[0].strip()
+                value, source = raw or None, ".env"
     try:
         return int(value), source
     except (TypeError, ValueError):
