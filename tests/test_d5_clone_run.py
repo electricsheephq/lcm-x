@@ -562,7 +562,8 @@ def test_rekey_copy_moves_the_whole_conversation_and_receipts_counts(rekey_copy,
             (key, "s2"), ("unrelated", "other")]
 
 
-@pytest.mark.parametrize("fault", ["messages_destination", "lifecycle_destination", "ambiguous", "outside", "third_table"])
+@pytest.mark.parametrize("fault", ["messages_destination", "lifecycle_destination", "ambiguous", "outside", "third_table",
+                                   "blank_key", "null_key"])
 def test_rekey_copy_refuses_unsafe_inputs_without_updates(rekey_copy, tmp_path, fault):
     path, conversations = rekey_copy
     with closing(sqlite3.connect(path)) as db, db:
@@ -574,8 +575,14 @@ def test_rekey_copy_refuses_unsafe_inputs_without_updates(rekey_copy, tmp_path, 
             db.execute("INSERT INTO messages VALUES (4, 's1', 'second-key', 'ambiguous')")
         elif fault == "third_table":
             db.execute("CREATE TABLE unexpected (conversation_id TEXT)")
+        elif fault == "blank_key":  # Legacy blank rows belong to every conversation, one of them outside the plan.
+            db.execute("UPDATE messages SET conversation_id='' WHERE session_id='s1'")
+            db.execute("INSERT INTO messages VALUES (4, 'other2', '', 'legacy')")
+        elif fault == "null_key":
+            db.execute("UPDATE messages SET conversation_id=NULL WHERE session_id='s1'")
     before = inventory(path.parent)
-    with pytest.raises(ValueError, match="unexpected" if fault == "third_table" else None):
+    with pytest.raises(ValueError, match={"third_table": "unexpected", "blank_key": "legacy blank conversation_id: L$",
+                                          "null_key": "legacy blank conversation_id: L$"}.get(fault)):
         r.rekey_copy_conversations(path, conversations, run_dir=tmp_path / "elsewhere" if fault == "outside" else tmp_path)
     assert inventory(path.parent) == before
 
@@ -752,3 +759,27 @@ def test_cold_bind_waits_for_durable_ingest_before_h8(setup, monkeypatch, appear
         assert bind["bar2"]["verdict"] == bars.INCONCLUSIVE
         assert bind["bar2"]["error"] is True
         assert bind["bar2"]["reason"] == "cold-turn ingest not durable within 1 s"
+
+
+@pytest.mark.parametrize("failure", ["false", "raises"])
+def test_a_cold_bind_whose_turn_did_not_complete_skips_the_wait(setup, monkeypatch, failure):
+    _, config, run_dir = setup
+    config["cold_ingest_timeout"] = 1
+    monkeypatch.setattr(r.time, "sleep", lambda seconds: pytest.fail("a cold turn that did not complete must not wait"))
+
+    class FailedHost(FakeHost):
+        def turn(self, ctx, step):
+            if failure == "raises":
+                raise TimeoutError("the turn timed out")
+            return False
+
+    host = FailedHost(config, run_dir)
+    plan = r.planner.build_plan([{"name": "L", "session_id": "sess-l", "chat_id": "d5-L", "lcm_rows": 1000}],
+                                epochs=1, warm_turns=0, nonce="synthetic")
+    result = r.run_arm(host, "rc", host.clone("rc"), plan, {})
+    bind, step_id = result["binds"][0], plan["epochs"][0]["steps"][0]["id"]
+    assert "H8" not in host.calls and host.replays == []
+    assert bind["cold_ingest_wait_s"] is None
+    assert bind["bar2"]["verdict"] == bars.INCONCLUSIVE and bind["bar2"]["error"] is True
+    assert bind["bar2"]["reason"] == "cold turn not completed"
+    assert result["workload"]["turns_not_completed"] == [step_id]

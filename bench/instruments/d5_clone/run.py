@@ -108,6 +108,8 @@ def rekey_copy_conversations(lcm_db, conversations, *, run_dir):
             if len(keys) != 1:
                 raise ValueError("copied session must carry exactly one conversation_id")
             old, new = keys[0][0], gateway.session_key(conversation["chat_id"])
+            if old is None or old == "":  # A legacy blank key is owned by every conversation: never a store-wide move.
+                raise ValueError("copied session has a legacy blank conversation_id: " + conversation["name"])
             resolved.append((conversation["name"], old, new))
             group = groups.setdefault(old, {"new": new, "names": []})
             group["names"].append(conversation["name"])
@@ -644,7 +646,7 @@ def run_arm(host, name, home, plan, extras):
                 cold += [step["conversation"]] if ok and step["kind"] == "cold" else []
                 tool_turns += bool(ok and step["tools"])
                 if bind:
-                    durable, waited = host.wait_cold_ingest(ctx, step, t0)
+                    durable, waited = host.wait_cold_ingest(ctx, step, t0) if ok else (False, None)
                     if durable:
                         h8_dir, h8 = host.capture(ctx, "H8", step)
                         receipt, error, range_new = host.replay(ctx, step, t0_dir, h8_dir)
@@ -654,7 +656,8 @@ def run_arm(host, name, home, plan, extras):
                     bar2 = bars.bar2_bind(receipt, range_new_rows=range_new, error=error)
                     if not durable:
                         timeout = host.c.get("cold_ingest_timeout", COLD_INGEST_TIMEOUT)
-                        bar2["reason"] = f"cold-turn ingest not durable within {timeout:g} s"
+                        bar2["reason"] = (f"cold-turn ingest not durable within {timeout:g} s" if ok
+                                          else "cold turn not completed")
                     binds.append({"bind": step["id"], "session_id": sid[step["conversation"]],
                                   "cold_ingest_wait_s": waited,
                                   "t0_max": t0["store_max_store_id"], "h8_max": h8["store_max_store_id"],
