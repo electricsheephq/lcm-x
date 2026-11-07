@@ -105,8 +105,8 @@
       "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "durable-metadata-conflict": {
-      "outcome_sha": "c011c058510f146eb96fe4fe3bae603214738626b466ae0398d3fee182ec77cb",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "386c88feb8145c74ce645f977116569c784e5a4d7b77c425d2256b58d5044d76",
+      "reason": "#2378: re-stamped carried row linked possible_replay_of; stored rows unchanged"
     },
     "durable-v2-allow-end": {
       "outcome_sha": "7812ba51b6aa7e0ed4a99221d14d45f20e9939da25bdfcab579b507176896ea8",
@@ -429,8 +429,8 @@
       "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "proof-consumed-new-stamp": {
-      "outcome_sha": "08dcd26a03130270a6a3dd74d05c9abf964788f5222469cb08edebef91bc8c47",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "e5fc5788c1c7ef6e625cf9975c1cc8dfdf6e3252bb2396fe8499fd9961798873",
+      "reason": "#2378: re-stamped carried row linked possible_replay_of; stored rows unchanged"
     },
     "proof-consumed-new-uid": {
       "outcome_sha": "11f9c6bf8237786258ee731230d6106f5b2ccf57098d1a2ffe38c7ddf6f84c68",
@@ -485,8 +485,8 @@
       "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "proof-native-new-stamp": {
-      "outcome_sha": "08dcd26a03130270a6a3dd74d05c9abf964788f5222469cb08edebef91bc8c47",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "e5fc5788c1c7ef6e625cf9975c1cc8dfdf6e3252bb2396fe8499fd9961798873",
+      "reason": "#2378: re-stamped carried row linked possible_replay_of; stored rows unchanged"
     },
     "proof-native-new-uid": {
       "outcome_sha": "11f9c6bf8237786258ee731230d6106f5b2ccf57098d1a2ffe38c7ddf6f84c68",
@@ -497,8 +497,8 @@
       "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "proof-native-remap-new-stamp": {
-      "outcome_sha": "0648d15a9fd72b897dfc9e7f096aa8dc9359fc05b8f542ac455f1adda6efa750",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "f673378c2a26abd2970c6d220b408e28c0b3f215b0fc19273fcd10efc558ebeb",
+      "reason": "#2378: re-stamped carried row linked possible_replay_of; stored rows unchanged"
     },
     "proof-native-repair": {
       "outcome_sha": "e8402a3833bc0674effbe8f88aef6fa66798a0aef081eca6cf681a620137e3bb",
@@ -545,8 +545,8 @@
       "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "proof-output-new-stamp": {
-      "outcome_sha": "08dcd26a03130270a6a3dd74d05c9abf964788f5222469cb08edebef91bc8c47",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "e5fc5788c1c7ef6e625cf9975c1cc8dfdf6e3252bb2396fe8499fd9961798873",
+      "reason": "#2378: re-stamped carried row linked possible_replay_of; stored rows unchanged"
     },
     "proof-output-new-uid": {
       "outcome_sha": "11f9c6bf8237786258ee731230d6106f5b2ccf57098d1a2ffe38c7ddf6f84c68",

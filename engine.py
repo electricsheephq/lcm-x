@@ -5829,7 +5829,7 @@ class LCMEngine(
         handler = handlers.get(name)
         if handler:
             return handler(args, engine=self,
-                           **{k: v for k, v in kwargs.items() if k in {"delivery_unit", "delivery_order", "adjacent_reply", "summary_event_time"}})
+                           **{k: v for k, v in kwargs.items() if k in {"delivery_unit", "delivery_order", "adjacent_reply", "summary_event_time", "snippet_window_hits"}})
         return json.dumps({"error": f"Unknown LCM tool: {name}"})
 
     def _database_path_source(self) -> str:
@@ -6998,6 +6998,93 @@ class LCMEngine(
     def _current_binding_stores_nothing(self) -> bool:
         return not self._session_id or self._session_ignored or self._session_stateless
 
+    def _rotation_restamp_metadata(self, messages):
+        """#2378: a predecessor snapshot supplies doubt, never permission to skip."""
+        predecessors = self._rotation_predecessor_session_ids(str(self._session_id))
+        if not predecessors:
+            return {}, False
+        session = predecessors[0]
+        proof = self._durable_commit_proof_payload(session)
+        if not proof or "output_metadata" not in proof:
+            return {}, True  # The existing #1523 emission-view reader owns this fallback.
+        target = [row for row in proof["output_metadata"] if row.get("identity_sha256")]
+        _, identities = self._occurrence_replay_identities(messages, proof)
+        digests = [(idx, _commit_proof_identity_digest(_proof_user_identity(identity)))
+                   for idx, identity in enumerate(identities) if identity is not None]
+        # Each snapshot position is one carried occurrence and pairs with at most one
+        # incoming row, in any order (the host may reorder carried rows). A row that
+        # kept its stamp claims its own position first, so a later genuine equal turn
+        # finds it spent. A row the snapshot never held consumes nothing.
+        used, result, pending = set(), {}, []
+        for idx, digest in digests:
+            position = next((pos for pos, row in enumerate(target) if pos not in used
+                             and row["identity_sha256"] == digest
+                             and not self._host_occurrence_changed(messages[idx], row)), None)
+            if position is None:
+                pending.append((idx, digest))
+            else:
+                used.add(position)
+        for idx, digest in pending:
+            position = next((pos for pos, row in enumerate(target) if pos not in used
+                             and row["identity_sha256"] == digest), None)
+            if position is not None:
+                used.add(position)
+                result[idx] = (session, target[position])
+        return result, False
+
+    def _link_restamped_occurrences(self, messages, stored_at, previous, recovery_fallback):
+        """Annotate only rows already stored, in the ingest owner's transaction."""
+        previous = {idx: row for idx, row in previous.items() if stored_at.get(idx)}
+        if not previous and not recovery_fallback:
+            return
+        try:
+            with self._ingest_evidence():
+                if previous:
+                    sessions = {session for session, _row in previous.values()}
+                    stamps = [row["timestamp"] for _session, row in previous.values()
+                              if row.get("timestamp") is not None]
+                    targets = self._store.find_rows_by_observed_at(self._conversation_id, list(sessions), stamps)
+                    current = self._store.get_batch([sid for idx, sid in stored_at.items() if idx in previous and sid])
+                    used = {row["related_store_id"] for row in self._store.get_message_relations(
+                        [row["store_id"] for row in targets], "possible_replay_of", related=True)}
+                    linked = {row["store_id"] for row in self._store.get_message_relations(
+                        list(current), "possible_replay_of")}
+                    for idx, (session, row) in sorted(previous.items()):
+                        sid = stored_at.get(idx)
+                        if not sid or sid not in current or sid in linked:
+                            continue
+                        stamp = self._host_occurrence_metadata(messages[idx])["timestamp"]
+                        if stamp is None or row.get("timestamp") is None or stamp == row["timestamp"]:
+                            continue
+                        identity = self._message_replay_identity(current[sid], stored_row=True)
+                        if _commit_proof_identity_digest(_proof_user_identity(identity)) != row.get("identity_sha256"):
+                            continue
+                        matches = [target for target in targets
+                                   if target["session_id"] == session and target["observed_at"] == row["timestamp"]
+                                   and target["store_id"] < sid
+                                   and self._message_replay_identity(target, stored_row=True) == identity]
+                        if len(matches) > 1:
+                            # The host's volatile scaffolding (todo fold, model-switch note) is the
+                            # replay itself; exact content only breaks a tie between equal identities.
+                            matches = [target for target in matches if all(
+                                target.get(key) == current[sid].get(key)
+                                for key in ("role", "content", "tool_calls", "tool_call_id"))]
+                        candidates = {int(target["store_id"]) for target in matches}
+                        if len(candidates) != 1:
+                            continue
+                        target = candidates.pop()
+                        if target in used:
+                            continue
+                        self._store.add_message_relations([[(sid, "possible_replay_of", target, None, None)]])
+                        used.add(target)
+                        linked.add(sid)
+                attempt = getattr(self, "_ingest_ledger_attempt", None)
+                if recovery_fallback and attempt is not None:
+                    self._identity_anchor_link_durable_recovery(attempt, attempt["lineage"])
+        except Exception as exc:
+            self._raise_ingest_busy(exc)
+            logger.warning("LCM re-stamped occurrence link write failed (%s)", type(exc).__name__)
+
     def _ingest_messages(
         self,
         messages: List[Dict[str, Any]],
@@ -7665,10 +7752,13 @@ class LCMEngine(
                             earlier, stripped_earlier = {}, {}
                             # One linear scan over the session's earlier rows (index order), filtered by key in
                             # Python: a per-key join re-scans the key set for every row and holds the lock far longer.
-                            for sid, role, content, call_id, calls, name, stamp, conv in conn.execute(
-                                "SELECT store_id,role,content,tool_call_id,tool_calls,tool_name,observed_at,conversation_id "
-                                "FROM messages WHERE session_id=? AND store_id<? ORDER BY store_id",
-                                (self._session_id, first)):
+                            # #2029: then the recorded rotation chain, nearest first; own rows come first, so a copy
+                            # with a target in its own session keeps that target.
+                            for sid, role, content, call_id, calls, name, stamp, conv in itertools.chain.from_iterable(
+                                conn.execute(
+                                    "SELECT store_id,role,content,tool_call_id,tool_calls,tool_name,observed_at,conversation_id "
+                                    "FROM messages WHERE session_id=? AND store_id<? ORDER BY store_id", (session, first))
+                                for session in attempt.get("replay_sessions") or [self._session_id]):
                                 conv = _normalize_conversation_id_value(conv)
                                 if (conv, role, call_id, calls, name) not in keys:
                                     continue
@@ -8035,6 +8125,12 @@ class LCMEngine(
         self._capture_host_rewrites(messages)
         n = len(messages)
         cursor = entry_cursor = min(max(self._ingest_cursor, 0), n)
+        restamp_metadata, recovery_fallback = {}, False
+        if self._ingest_cursor_needs_reconcile and entry_cursor == 0:
+            try:
+                restamp_metadata, recovery_fallback = self._rotation_restamp_metadata(messages)
+            except Exception:
+                logger.debug("LCM predecessor occurrence metadata load failed", exc_info=True)
         new_prefix_occurrences = set()
         unchanged_prefix_occurrences = set()
         proven_cursor = 0  # Full matched prefix, before new occurrences rewind the cursor.
@@ -8085,6 +8181,8 @@ class LCMEngine(
                     idx for idx, previous in enumerate(proof.get("output_metadata", ()))
                     if self._host_occurrence_changed(messages[idx], previous)
                 }
+                restamp_metadata.update({idx: (self._session_id, proof["output_metadata"][idx])
+                                         for idx in new_prefix_occurrences})
                 if new_prefix_occurrences:
                     unchanged_prefix_occurrences = {
                         idx for idx, previous in enumerate(proof.get("output_metadata", ()))
@@ -8112,6 +8210,7 @@ class LCMEngine(
                         idx for idx, previous in metadata.items()
                         if self._host_occurrence_changed(messages[idx], previous)
                     }
+                    restamp_metadata.update({idx: (self._session_id, metadata[idx]) for idx in new_prefix_occurrences})
                     unchanged_prefix_occurrences = {
                         idx for idx, previous in metadata.items()
                         if self._host_occurrence_metadata(messages[idx]) == self._host_occurrence_metadata(previous)
@@ -8188,6 +8287,7 @@ class LCMEngine(
                     idx for idx, previous in metadata.items()
                     if self._host_occurrence_changed(messages[idx], previous)
                 }
+                restamp_metadata.update({idx: (self._session_id, metadata[idx]) for idx in new_prefix_occurrences})
                 if new_prefix_occurrences:
                     unchanged_prefix_occurrences = {
                         idx for idx, previous in metadata.items()
@@ -8387,11 +8487,19 @@ class LCMEngine(
                 # Freeze this transaction's decision; warm appends can retain an older status.
                 self._ingest_ledger_attempt["recovery_probe"] = (
                     reconciled_existing_session and bool(bind_session_counts and bind_session_counts[0]))
-                self._ingest_ledger_attempt["cursor0_batch"] = (
+                cursor0_batch = (
                     reconciled_existing_session and cursor == 0
                     and self._last_ingest_reconciliation.get("action") == "persisted batch"
                     and self._last_ingest_reconciliation.get("reason") == "persisted ambiguous delta"
                     and self._last_ingest_reconciliation.get("cursor") == 0)
+                # #2029: a rotation child re-sent from cursor 0 without a commit proof (no reconciliation ran) stores
+                # its predecessors' rows again; annotate them against the recorded rotation chain.
+                # Only the unreconciled route gains the chain: #2305's reconciled route keeps its own-session targets.
+                ancestors = (self._rotation_predecessor_session_ids(self._session_id)
+                             if cursor == 0 and not reconciled_existing_session else [])
+                self._ingest_ledger_attempt["cursor0_batch"] = bool(
+                    cursor0_batch or ancestors and not reconciled_existing_session)
+                self._ingest_ledger_attempt["replay_sessions"] = [self._session_id, *ancestors]
                 self._ingest_ledger_attempt["matched"] = {
                     idx: int(rows[0]["store_id"]) for idx, rows in (anchor_plan or {}).get("matched", {}).items() if len(rows) == 1}
             except Exception as exc:
@@ -8573,6 +8681,7 @@ class LCMEngine(
                     messages_to_store_with_index, protected_messages, store_ids)
                 if (kind := self._ingest_precomputed_marker(idx, protected, (prepared or {}).get("view_only"))
                     or self._ingest_precomputed_marker(idx, msg, (prepared or {}).get("view_only"))) is not None}
+        self._link_restamped_occurrences(messages, stored_at, restamp_metadata, recovery_fallback)
         if anchor_plan is not None:
             try:
                 with self._ingest_evidence():
@@ -10341,6 +10450,7 @@ class LCMEngine(
                 fts_anchor=False,
                 delivery_unit="hits",
                 delivery_order="score", adjacent_reply=False,
+                snippet_window_hits=0,
                 summary_event_time=False,
             )
             payload = json.loads(raw)

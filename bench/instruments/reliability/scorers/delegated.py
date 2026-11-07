@@ -79,7 +79,9 @@ def child_attempts(events: list[dict]) -> list[dict]:
 
 def score(cell: dict, events: list[dict], atts: list[dict], per: dict, full: list, db_dir: Path, group):
     """(numbers, failed or None, gaps). ``per``: lineage -> (expected items, stored rows) from bars.score."""
-    unavailable = getattr(group, "host_error", None)
+    # Only an unreadable sessions table removes B10's host checks; another failed host read (#2382) leaves the
+    # readable sessions in force and is capped by cap_host_evidence instead.
+    unavailable = getattr(group, "sessions_error", getattr(group, "host_error", None))
     sessions = {} if unavailable else host_sessions(db_dir / "state.db")
     roots = {sid: v[0] for sid, v in sessions.items() if is_child_root(sid, sessions)}
     kids = [a for a in atts if a["prefix"] == "D"]
