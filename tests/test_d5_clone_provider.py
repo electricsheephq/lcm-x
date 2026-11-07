@@ -53,9 +53,9 @@ def test_script_order_misses_and_stats(provider):
     request(provider, "/_d5/end", method="POST")
     complete(provider)
     stats = request(provider, "/_d5/stats")
-    assert stats["replay_misses"] == {"none": 2, "turn": 1}
+    assert stats["replay_misses"] == {"(outside a step)": 2, "turn": 1}
     assert stats["agent_calls_outside_step"] == 2
-    assert stats["calls_per_step"] == {"none": 2, "turn": 3}
+    assert stats["calls_per_step"] == {"turn": 3}
     assert stats["calls_by_model"] == {"d5-agent": 5, "d5-summary": 1}
     assert [r[2] for r in stats["request_log"] if r[0] == "d5-agent"] == [0, 0, 1, 2, 1]
 
@@ -178,3 +178,16 @@ def test_oversized_and_deeply_nested_bodies_are_refused(provider):
     assert connection.getresponse().status == 400
     connection.close()
     assert complete(provider, "d5-summary")["choices"][0]["message"]["content"].startswith("D5 digest v1")
+
+
+def test_a_step_named_none_is_not_the_outside_counter():
+    instance = Provider({"steps": {"none": [{"text": "first"}, {"text": "second"}]}}).start()
+    try:
+        complete(instance, "d5-agent")  # Outside any step: a miss.
+        request(instance, "/_d5/step", {"step": "none"})
+        assert complete(instance, "d5-agent")["choices"][0]["message"]["content"] == "first"
+        with pytest.raises(HTTPError) as refused:
+            request(instance, "/_d5/step", {"step": "(outside a step)"})
+        assert refused.value.code == 400
+    finally:
+        instance.stop()

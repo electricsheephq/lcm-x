@@ -10,6 +10,7 @@ import threading
 
 
 MAX_BODY = 64 * 1024 * 1024
+OUTSIDE = "(outside a step)"  # The stats key for agent calls with no active step; never a valid step id.
 
 
 def _json(value):
@@ -70,7 +71,7 @@ class Provider:
                     request = json.loads(self.rfile.read(length) or b"{}")
                     if self.path in ("/_d5/step", "/_d5/end"):
                         step = request["step"] if self.path.endswith("step") else None
-                        if self.path.endswith("step") and not isinstance(step, str):
+                        if self.path.endswith("step") and (not isinstance(step, str) or step == OUTSIDE):
                             raise TypeError("step ids are strings")
                         with provider.lock:
                             provider.step = step
@@ -114,15 +115,18 @@ class Provider:
             index = self.stats["calls_by_model"][model] - 1
             entry = None
             if model == self.agent:
-                step = str(self.step) if self.step is not None else "none"
-                index = self.stats["calls_per_step"][step]
-                self.stats["calls_per_step"][step] += 1
-                script = self.plan.get("steps", {}).get(str(self.step), []) if self.step is not None else []
-                if index < len(script):
-                    entry = script[index]
+                if self.step is None:  # Outside any step: always a miss, and never counted under a step id.
+                    index = self.stats["agent_calls_outside_step"]
+                    self.stats["agent_calls_outside_step"] += 1
+                    self.stats["replay_misses"][OUTSIDE] += 1
                 else:
-                    self.stats["replay_misses"][step] += 1
-                self.stats["agent_calls_outside_step"] += int(self.step is None)
+                    index = self.stats["calls_per_step"][self.step]
+                    self.stats["calls_per_step"][self.step] += 1
+                    script = self.plan.get("steps", {}).get(self.step, [])
+                    if index < len(script):
+                        entry = script[index]
+                    else:
+                        self.stats["replay_misses"][self.step] += 1
             elif model == self.cron:
                 index = self.cron_index
                 self.cron_index += 1

@@ -1,4 +1,12 @@
-"""Source pins; build writes d5-clone-pins.json and returns its contents."""
+"""Source pins; build writes d5-clone-pins.json and returns its contents.
+
+Two layers. The whole-file layer pins every file under the instrument directory, so any edit there, however the
+file is loaded, fails ``verify``. The closure layer hashes each listed rule function and the top-level code it
+reaches statically, so a rule function copied into a different file can be shown equal to the reviewed one. The
+closure layer does not see runtime mutation of module state (a top-level ``X.append(...)``, a ``global`` write in
+an unreached function, class-body aliases); in one file the whole-file layer catches those, and across files the
+edition's parity test (same verdicts on recorded inputs) and the review of its plumbing diff do.
+"""
 
 import ast
 import hashlib
