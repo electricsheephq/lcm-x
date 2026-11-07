@@ -57,7 +57,7 @@ _INSERT_DIFF_BUDGET = 1_000_000  # #633: old x new rows compared per insertion d
 _CARRIER_LEDGER_CAP = 256  # #1000: carrier emission keys remembered as seen / retired (process-local)
 _PRESENCE_WINDOW_ROWS = 10000  # total stored rows across the presence scope
 _PRESENCE_WINDOW_BYTES = 104_000_000  # characters (code points) of stored content and tool-call text across the scope
-_PRESENCE_TEXT_BYTES = 16_000_000  # characters of stored text the audit normalizes (rows of a candidate's text role)
+_PRESENCE_TEXT_BYTES = 8_000_000  # characters of stored text the audit normalizes (rows of a candidate's text role)
 _PRESENCE_WINDOW_LOGGED: set[tuple[str, int, str]] = set()  # store file and session, once per process
 
 
@@ -721,7 +721,9 @@ class IdentityAnchorMixin:
         queues: dict = {}
         for idx, wanted in candidates.items():
             if wanted is not None:
-                queues.setdefault(wanted, deque([None] * reserved[wanted])).append(idx)
+                if wanted not in queues:  # the reserved phantoms once per form, never per candidate
+                    queues[wanted] = deque([None] * reserved[wanted])
+                queues[wanted].append(idx)
         for stacks in (exact, alias):
             for form, queue in queues.items():
                 stack = stacks.get(form)
