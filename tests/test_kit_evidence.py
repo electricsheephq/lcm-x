@@ -26,6 +26,7 @@ def _trace(final):
 
 def _run(count):
     return (_log("agent.background_review", "thread=bg-review OpenAI client created", "INFO")
+            + _log("agent.background_review", "background-review compressor detachment failed") * count
             + _trace(kit.REFUSAL) * count
             + _log("agent.background_review", "Background review complete: thread=bg-review", "INFO"))
 
@@ -57,6 +58,7 @@ def test_import_events_and_privacy(tmp_path):
         {"logger": "agent.relay_runtime", "missing_module": "optional.module", "count": 2}]
     assert result["other_tracebacks"] == {"ValueError": 1}
     assert result["unattributed"] == 0
+    assert result["events_by_logger"] == {"agent.optional": 1, "agent.relay_runtime": 1}
     assert marker not in json.dumps(result)
     isolated = _write(tmp_path / "isolated.log", _trace("ModuleNotFoundError: No module named 'alone'"))
     result = kit.trace_events([tmp_path / "host.log", isolated])
@@ -93,7 +95,7 @@ def test_lifecycle_doctor_rule(tmp_path):
     assert result["empty_rows"][0] == {
         "conversation_id_h12": hashlib.sha256(b"empty").hexdigest()[:12],
         "current_session_h12": None, "last_finalized_session_h12": None,
-        "messages_in_referenced_sessions": 0, "nodes_in_referenced_sessions": 0}
+        "messages_in_referenced_sessions": 0, "nodes_in_referenced_sessions": 0, "affected_stored_rows": 0}
     assert result["empty_rows"][1]["current_session_h12"] == hashlib.sha256(b"absent").hexdigest()[:12]
     assert all(row["messages_in_referenced_sessions"] == row["nodes_in_referenced_sessions"] == 0
                for row in result["empty_rows"])
@@ -109,15 +111,17 @@ def test_lifecycle_doctor_rule(tmp_path):
 @pytest.mark.parametrize("left,right,matched,reordered", [
     (["a", "b", "c"], ["a", "b", "c"], 3, 0),
     (["a", "b", "c"], ["b", "a", "c"], 3, 1),
-    (["a", "a", "b", "c"], ["c", "b", "a"], 2, 1),
+    (["a", "a", "b", "c"], ["c", "b", "a"], 3, 2),
 ])
 def test_reorder_unique_rows(tmp_path, left, right, matched, reordered):
     paths = [_messages(tmp_path / name, order, [("session", "user", text, None, None) for text in texts])
              for name, order, texts in (("lcm.db", "store_id", left), ("state.db", "id", right))]
     result = kit.reorder(*paths)
-    assert result == {"sessions": 1, "matched": matched, "reordered_rows": reordered, "per_session": [
-        {"session_h12": hashlib.sha256(b"session").hexdigest()[:12], "matched": matched,
-         "reordered_rows": reordered}]}
+    assert (result["sessions"], result["matched"], result["reordered_rows"]) == (1, matched, reordered)
+    row = result["per_session"][0]
+    assert (row["lcm_rows"], row["host_rows"], row["matched"], row["reordered_rows"]) == (
+        len(left), len(right), matched, reordered)
+    assert row["session_h12"] == hashlib.sha256(b"session").hexdigest()[:12]
 
 
 def test_reorder_tool_identity_and_session_isolation(tmp_path):
@@ -128,7 +132,7 @@ def test_reorder_tool_identity_and_session_isolation(tmp_path):
             ("shared", "assistant", "", calls, None), ("shared", "tool", "result", None, call_id),
             ("shared", "user", "matched", None, None), (name, "user", "isolated", None, None)]))
     result = kit.reorder(*paths)
-    assert (result["sessions"], result["matched"], result["reordered_rows"]) == (1, 1, 0)
+    assert (result["sessions"], result["matched"], result["reordered_rows"]) == (3, 1, 0)
     assert all(value not in json.dumps(result) for value in ("one", "two", "call-a", "result", "isolated"))
 
 
@@ -138,7 +142,11 @@ def test_reorder_without_optional_host_columns(tmp_path):
     with sqlite3.connect(host) as conn:
         conn.execute("CREATE TABLE messages (session_id TEXT, role TEXT, content TEXT, id INTEGER)")
         conn.execute("INSERT INTO messages VALUES ('s', 'user', 'text', 1)")
-    assert kit.reorder(lcm, host)["matched"] == 1
+    result = kit.reorder(lcm, host)
+    assert result["matched"] == 1
+    assert result["identity_degraded"] is True
+    assert result["missing_columns"] == ["tool_call_id", "tool_calls"]
+    assert result["per_session"][0]["columns_compared"]["host"] == ["session_id", "role", "content"]
 
 
 @pytest.mark.parametrize("changed,verdict", [(False, "PATHS_ONLY"), (True, "OTHER")])
@@ -148,8 +156,9 @@ def test_config_diff(tmp_path, changed, verdict):
     yaml = pytest.importorskip("yaml")
     paths = [_write(tmp_path / name, yaml.safe_dump(value)) for name, value in (("a.yaml", a), ("b.yaml", b))]
     result = kit.config_diff(paths[0], "/root-a", paths[1], "/root-b")
-    assert result == {"differing_keys": ["files.0", "knob"] if changed else ["files.0"],
-                      "path_only_keys": ["files.0"], "other_keys": ["knob"] if changed else [], "verdict": verdict}
+    files, knob = ".h:" + kit._sha("files")[:8] + "[0]", ".h:" + kit._sha("knob")[:8]
+    assert result == {"differing_keys": sorted([files, knob]) if changed else [files],
+                      "path_only_keys": [files], "other_keys": [knob] if changed else [], "verdict": verdict}
     assert all(value not in json.dumps(result) for value in ("912345", "998877", "/root-a", "/root-b"))
 
 
@@ -165,12 +174,155 @@ def test_doctor_match(tmp_path, candidate, previous, verdict, unmatched, failed)
     for name, statuses in (("candidate.json", candidate), ("previous.json", previous)):
         value = {"checks": [{"check": "shape", "status": status, "detail": "PRIVATE_DETAIL"} for status in statuses],
                  "overall": "ignored"}
-        paths.append(_write(tmp_path / name, json.dumps([{}, value] if name == "previous.json" else value)))
+        paths.append(_write(tmp_path / name, json.dumps([{"checks": []}, value] if name == "previous.json" else value)))
     result = kit.doctor_match(*paths)
     assert (result["verdict"], result["unmatched"], result["failed_checks"]) == (verdict, unmatched, failed)
     assert result["warnings"] == ([{"check": "shape", "candidate": candidate.count("warn"),
                                    "previous": previous.count("warn"), "matched": not unmatched}] if "warn" in candidate else [])
     assert "PRIVATE_DETAIL" not in json.dumps(result)
+
+
+@pytest.mark.parametrize("left,right,lcm_only,host_only,reordered", [
+    (["a", "b"], ["a", "b", "c"], 0, 1, 0),
+    (["a", "b", "b"], ["a", "b"], 1, 0, 0),
+    (["continue", "A1", "continue", "A2"], ["continue", "continue", "A1", "A2"], 0, 0, 1),
+])
+def test_reorder_occurrences(tmp_path, left, right, lcm_only, host_only, reordered):
+    paths = [_messages(tmp_path / name, order, [("s", "user", text, None, None) for text in texts])
+             for name, order, texts in (("lcm.db", "store_id", left), ("host.db", "id", right))]
+    result = kit.reorder(*paths)
+    for row in (result, result["per_session"][0]):
+        assert (row["lcm_rows"], row["host_rows"]) == (len(left), len(right))
+        assert (row["lcm_only"], row["host_only"], row["reordered_rows"]) == (lcm_only, host_only, reordered)
+        assert row["matched"] == min(len(left), len(right))
+
+
+def test_reorder_wrong_session(tmp_path):
+    paths = [_messages(tmp_path / name, order, [(sid, "user", "x", None, None)])
+             for name, order, sid in (("lcm.db", "store_id", "s"), ("host.db", "id", "t"))]
+    result = kit.reorder(*paths)
+    assert (result["matched"], result["lcm_only"], result["host_only"]) == (0, 1, 1)
+    assert result["lcm_only_sessions"] == result["host_only_sessions"] == 1
+    assert result["lcm_only_sessions_h12"] == [kit._sha("s")[:12]]
+    assert result["host_only_sessions_h12"] == [kit._sha("t")[:12]]
+
+
+def test_lifecycle_affected_conversation(tmp_path):
+    path = _messages(tmp_path / "lcm.db", "store_id", [("old", "user", "private", None, None)])
+    with sqlite3.connect(path) as conn:
+        conn.execute("ALTER TABLE messages ADD COLUMN conversation_id TEXT")
+        conn.execute("UPDATE messages SET conversation_id = 'conv'")
+        conn.execute("CREATE TABLE summary_nodes (session_id TEXT)")
+        conn.execute("CREATE TABLE lcm_lifecycle_state "
+                     "(conversation_id TEXT, current_session_id TEXT, last_finalized_session_id TEXT)")
+        conn.execute("INSERT INTO lcm_lifecycle_state VALUES ('conv', 'new', NULL)")
+    result = kit.lifecycle_rows(path)
+    assert result["identity_order_check"] == "NOT_EVALUATED"
+    assert result["affected_stored_rows"] == result["empty_rows"][0]["affected_stored_rows"] == 1
+    assert result["empty_rows"][0]["messages_in_referenced_sessions"] == 0
+
+
+@pytest.mark.parametrize("candidate,previous,verdict", [
+    ({"checks": [{"check": "shape", "status": "WARN", "detail": {"a": 1}}]},
+     {"checks": [{"check": "shape", "status": "warn", "detail": {"b": 1}}]}, "UNMATCHED"),
+    ({"checks": [{"check": "shape", "status": "WARN", "detail": {"a": 2}}]},
+     {"checks": [{"check": "shape", "status": "warn", "detail": {"a": 1}}]}, "MATCHED"),
+    ({"checks": [{"check": "shape", "status": "warn", "detail": []}]},
+     {"checks": [{"check": "shape", "status": "warn", "detail": "private"}]}, "UNMATCHED"),
+    ({"checks": [{"check": "lifecycle_fragmentation", "status": "warn",
+                  "detail": {"empty_lifecycle_rows": 1, "state_db_error": False}}]},
+     {"checks": [{"check": "lifecycle_fragmentation", "status": "warn",
+                  "detail": {"empty_lifecycle_rows": 0, "state_db_error": True}}]}, "UNMATCHED"),
+    ({"checks": [{"check": "shape", "status": "unexpected"}]}, {"checks": []}, "UNMATCHED"),
+    ({"checks": []}, {"checks": [{"check": "shape", "status": "unexpected"}]}, "UNMATCHED"),
+    ([{"checks": [{"check": "shape", "status": "FAIL"}]}, {"checks": []}], {"checks": []}, "UNMATCHED"),
+    ([{"checks": [{"check": "shape", "status": "warn"}]}] * 2,
+     {"checks": [{"check": "shape", "status": "warn"}]}, "UNMATCHED"),
+])
+def test_doctor_signatures(tmp_path, candidate, previous, verdict):
+    paths = [_write(tmp_path / name, json.dumps(value))
+             for name, value in (("candidate.json", candidate), ("previous.json", previous))]
+    result = kit.doctor_match(*paths)
+    assert result["verdict"] == verdict
+    assert "candidate_signatures" in result
+    if isinstance(candidate, dict) and any(row["status"] == "unexpected" for row in candidate["checks"]):
+        assert result["unknown_status"] == ["shape"]
+    assert "private" not in json.dumps(result)
+
+
+def test_doctor_signature_conditions_are_booleans(tmp_path):
+    paths = [_write(tmp_path / name, json.dumps({"checks": [
+        {"check": "lifecycle_fragmentation", "status": "WARN",
+         "detail": {"empty_lifecycle_rows": count, "state_db_error": "PRIVATE_STATE"}}]}))
+             for name, count in (("candidate.json", 2), ("previous.json", 1))]
+    result = kit.doctor_match(*paths)
+    assert result["verdict"] == "MATCHED"
+    assert result["candidate_signatures"] == [{
+        "check": "lifecycle_fragmentation", "status": "warn", "detail_type": "dict",
+        "detail_keys": ["empty_lifecycle_rows", "state_db_error"],
+        "empty_lifecycle_rows": True, "state_db_error": True}]
+    assert "PRIVATE_STATE" not in json.dumps(result)
+
+
+@pytest.mark.parametrize("text,holds,overlap,ambiguous,warnings,refusals", [
+    (_log("agent", "thread=bg-review:A OpenAI client created", "INFO") + _trace(kit.REFUSAL)
+     + _log("agent", "thread=bg-review:B OpenAI client created", "INFO") + _trace(kit.REFUSAL)
+     + _log("agent", "Background review complete: thread=bg-review", "INFO") * 2,
+     "undetermined", 1, 1, 0, 2),
+    (_run(1).replace(_trace(kit.REFUSAL),
+                    _log("agent", "background-review compressor detachment failed") + _trace(kit.REFUSAL)),
+     False, 0, 0, 2, 1),
+    (_run(1).replace(kit.REFUSAL, "  | " + kit.REFUSAL), True, 0, 0, 1, 1),
+    (_log("agent", "background-review compressor detachment failed"), False, 0, 0, 1, 0),
+    (_log("agent", "thread=bg-review:A OpenAI client created", "INFO") + _trace(kit.REFUSAL)
+     + _log("agent", "Background review complete: thread=bg-review:A", "INFO")
+     + _trace(kit.REFUSAL), False, 0, 0, 0, 2),
+], ids=["overlap", "warning-mismatch", "exception-group", "outside-warning", "explicit-completion"])
+def test_trace_interleaving_and_warnings(tmp_path, text, holds, overlap, ambiguous, warnings, refusals):
+    result = kit.trace_events([_write(tmp_path / "host.log", text)])
+    assert result["per_event_rule_holds"] == holds
+    assert result["overlapping_runs"] == overlap
+    assert result["ambiguous_completions"] == ambiguous
+    assert result["detach_warnings_total"] == warnings
+    assert result["refusals_total"] == refusals
+
+
+def test_import_event_counts_and_trace_boundaries(tmp_path):
+    text = (_log("agent.one", "private").replace("01-01 ", "01-01T").replace(",123", ".123")
+            + _trace("ModuleNotFoundError: No module named 'one'") * 2
+            + _log("agent.one", "private", "ERROR") + _trace("ImportError: private")
+            + _log("agent.debug", "private", "DEBUG") + _trace("ImportError: private")
+            + _log("agent.critical", "private", "CRITICAL") + _trace("KeyboardInterrupt")
+            + "ModuleNotFoundError: No module named 'not_a_trace'\n")
+    result = kit.trace_events([_write(tmp_path / "host.log", text)])
+    assert result["events_by_logger"] == {"agent.one": 2}
+    assert result["optional_import_traces_total"] == 4
+    assert {row["logger"] for row in result["by_event"]} == {"agent.one", "agent.debug"}
+
+
+@pytest.mark.parametrize("a,b,root_a,root_b,verdict", [
+    ({"a.b": 1}, {"a": {"b": 1}}, "", "", "OTHER"),
+    ({"a": [1]}, {"a": {"0": 1}}, "", "", "OTHER"),
+    ({"model": "/root-a-extra"}, {"model": "/root-b-extra"}, "/root-a", "/root-b", "OTHER"),
+    ({"model": "/root-a"}, {"model": "/root-b"}, "/root-a", "/root-b", "PATHS_ONLY"),
+    ({"model": "/root-a/cache"}, {"model": "<ROOT>/cache"}, "/root-a", "/root-b", "OTHER"),
+    ({"model": {"private_name": 1}}, {"model": {"private_name": 2}}, "", "", "OTHER"),
+])
+def test_config_shape_and_privacy(tmp_path, a, b, root_a, root_b, verdict):
+    yaml = pytest.importorskip("yaml")
+    paths = [_write(tmp_path / name, yaml.safe_dump(value)) for name, value in (("a.yaml", a), ("b.yaml", b))]
+    result = kit.config_diff(paths[0], root_a, paths[1], root_b)
+    assert result["verdict"] == verdict
+    assert "private_name" not in json.dumps(result)
+    if isinstance(a.get("model"), dict):
+        assert result["other_keys"] == [".model.h:" + kit._sha("private_name")[:8]]
+
+
+def test_config_recursive_alias(tmp_path):
+    pytest.importorskip("yaml")
+    path = _write(tmp_path / "recursive.yaml", "model: &loop\n  nested: *loop\n")
+    with pytest.raises(ValueError, match="^unreadable config$"):
+        kit.config_diff(path, "", path, "")
 
 
 def test_cli(tmp_path):

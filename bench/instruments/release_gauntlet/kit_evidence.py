@@ -10,10 +10,14 @@ import re
 import sqlite3
 
 
-LOG = re.compile(r"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:,\d+)? \[(WARNING|ERROR|INFO)\] ([\w.]+): ")
+LOG = re.compile(r"^\d{4}-\d\d-\d\d[ T]\d\d:\d\d:\d\d(?:[.,]\d+)? "
+                 r"\[(WARNING|ERROR|INFO|DEBUG|CRITICAL)\] ([\w.]+): ")
 FINAL = re.compile(r"^([A-Za-z_][\w.]*(?:Error|Exception))\b")
 MISSING = re.compile(r"No module named '([\w.]+)'")
 REFUSAL = "NotImplementedError: LCM-X cannot detach a context engine"
+THREAD = re.compile(r"thread=bg-review(?::([^\s]+))?")
+SECTIONS = set("model providers custom_providers compression lcm context plugins mcp_servers auth telemetry "
+               "terminal auxiliary platforms gateway cron memory display agent tools toolsets".split())
 
 
 def _sha(value):
@@ -32,43 +36,61 @@ def _db(path):
 
 
 def trace_events(log):
-    runs, outside, events, other = [], 0, Counter(), Counter()
+    runs, outside, imports, other, events = [], Counter(), Counter(), Counter(), Counter()
+    overlapping = ambiguous = 0
     for path in log:
-        active, logger, traceback = None, None, False
+        active, logger, traceback, warning, counted = [], None, False, None, False
         with Path(path).open(encoding="utf-8") as stream:
             for raw in stream:
                 line = raw.rstrip("\r\n")
+                stripped = line.lstrip(" \t|")
                 event = LOG.match(line)
                 if event:
                     logger = event[2]
-                if "thread=bg-review" in line and "OpenAI client created" in line:
-                    runs.append(0)
-                    active = len(runs) - 1
-                if line.startswith(REFUSAL):
-                    if active is None:
-                        outside += 1
-                    else:
-                        runs[active] += 1
-                if "Background review complete: thread=bg-review" in line:
-                    active = None
-                if line == "Traceback (most recent call last):":
-                    traceback = True
-                final = FINAL.match(line) if traceback else None
+                    warning, counted = logger if event[1] in {"WARNING", "ERROR"} else None, False
+                thread = THREAD.search(line)
+                if thread and "OpenAI client created" in line:
+                    overlapping += bool(active)
+                    runs.append({"tid": thread[1], "refusals": 0, "detach_warnings": 0})
+                    active.append(len(runs) - 1)
+                eligible = [i for i in active if not thread or not thread[1] or runs[i]["tid"] == thread[1]]
+                for name, seen in (("refusals", stripped.startswith(REFUSAL)),
+                                   ("detach_warnings", "background-review compressor detachment failed" in line)):
+                    if seen:
+                        if eligible:
+                            runs[eligible[-1]][name] += 1
+                        else:
+                            outside[name] += 1
+                if "Background review complete:" in line:
+                    ambiguous += bool(len(active) > 1 and (not thread or not thread[1]))
+                    if eligible:
+                        active.remove(eligible[0])  # A tidless completion closes the oldest open run.
+                header = stripped.endswith("Traceback (most recent call last):")
+                final = FINAL.match(stripped) if traceback else None
                 if final:
-                    if line.startswith(("ModuleNotFoundError", "ImportError")):
-                        missing = MISSING.search(line)
-                        events[(logger, missing[1] if missing else None)] += 1
-                    elif not line.startswith(REFUSAL):
+                    if stripped.startswith(("ModuleNotFoundError", "ImportError")):
+                        missing = MISSING.search(stripped)
+                        imports[(logger, missing[1] if missing else None)] += 1
+                        if warning is not None and not counted:
+                            events[warning] += 1
+                            counted = True
+                    elif not stripped.startswith(REFUSAL):
                         other[final[1]] += 1
-                    traceback = False
-    return {"bg_review_runs": len(runs), "refusals_total": sum(runs) + outside,
-            "runs_by_refusal_count": dict(sorted(Counter(map(str, runs)).items())),
-            "refusals_outside_runs": outside,
-            "per_event_rule_holds": all(n <= 1 for n in runs) and outside == 0,
-            "optional_import_traces_total": sum(events.values()),
+                if final or (line and not line[0].isspace() and line[0] != "|"):
+                    traceback = False  # Includes non-Error terminators such as KeyboardInterrupt.
+                traceback = traceback or header
+    holds = all(r["refusals"] == r["detach_warnings"] <= 1 for r in runs) and not any(outside.values())
+    return {"bg_review_runs": len(runs), "refusals_total": sum(r["refusals"] for r in runs) + outside["refusals"],
+            "detach_warnings_total": sum(r["detach_warnings"] for r in runs) + outside["detach_warnings"],
+            "runs_by_refusal_count": dict(sorted(Counter(str(r["refusals"]) for r in runs).items())),
+            "per_run": [{k: v for k, v in r.items() if k != "tid"} for r in runs],
+            "refusals_outside_runs": outside["refusals"], "detach_warnings_outside_runs": outside["detach_warnings"],
+            "overlapping_runs": overlapping, "ambiguous_completions": ambiguous,
+            "per_event_rule_holds": "undetermined" if overlapping or ambiguous else holds,
+            "optional_import_traces_total": sum(imports.values()), "events_by_logger": dict(sorted(events.items())),
             "by_event": [{"logger": key[0], "missing_module": key[1], "count": count}
-                         for key, count in sorted(events.items(), key=lambda item: tuple(x or "" for x in item[0]))],
-            "unattributed": sum(n for (logger, _), n in events.items() if logger is None),
+                         for key, count in sorted(imports.items(), key=lambda item: tuple(x or "" for x in item[0]))],
+            "unattributed": sum(n for (logger, _), n in imports.items() if logger is None),
             "other_tracebacks": dict(sorted(other.items()))}
 
 
@@ -80,19 +102,24 @@ def lifecycle_rows(lcm_db):
         stored = set(counts[0]) | set(counts[1])
         rows = conn.execute("SELECT conversation_id, current_session_id, last_finalized_session_id "
                             "FROM lcm_lifecycle_state ORDER BY conversation_id").fetchall()
-        empty, affected_sessions = [], set()
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(messages)")}
+        conversations = Counter(dict(conn.execute("SELECT conversation_id, COUNT(*) FROM messages "
+                                                  "GROUP BY conversation_id"))) if "conversation_id" in columns else Counter()
+        empty = []
         for row in rows:
             refs = {str(value) for value in (row[1], row[2]) if value}
             if not refs or refs.isdisjoint(stored):
-                affected_sessions.update(refs)
                 empty.append({"conversation_id_h12": _sha(str(row[0]))[:12] if row[0] else None,
                               "current_session_h12": _sha(str(row[1]))[:12] if row[1] else None,
                               "last_finalized_session_h12": _sha(str(row[2]))[:12] if row[2] else None,
                               "messages_in_referenced_sessions": sum(counts[0][sid] for sid in refs),
-                              "nodes_in_referenced_sessions": sum(counts[1][sid] for sid in refs)})
-        affected = sum(counts[0][sid] for sid in affected_sessions)
+                              "nodes_in_referenced_sessions": sum(counts[1][sid] for sid in refs),
+                              "affected_stored_rows": conversations[row[0]] if row[0] is not None else 0})
+        affected = sum(row["affected_stored_rows"] for row in empty)
+        safe = all(not any(row[key] for key in ("affected_stored_rows", "messages_in_referenced_sessions",
+                                               "nodes_in_referenced_sessions")) for row in empty)
         return {"lifecycle_rows": len(rows), "empty_lifecycle_rows": len(empty), "empty_rows": empty,
-                "affected_stored_rows": affected, "identity_order_check": "PASS" if affected == 0 else "FAIL"}
+                "affected_stored_rows": affected, "identity_order_check": "PASS" if safe else "NOT_EVALUATED"}
 
 
 def _identities(path, order):
@@ -108,36 +135,49 @@ def _identities(path, order):
             identity = (row["role"], _sha(row.get("content") or ""), calls,
                         row.get("tool_call_id") if row["role"] == "tool" else None)
             sessions[row["session_id"]].append(_sha(json.dumps(identity, sort_keys=True)))
-    return sessions
+    return sessions, fields
 
 
 def reorder(lcm_db, state_db):
-    lcm, host = _identities(lcm_db, "store_id"), _identities(state_db, "id")
+    (lcm, lc), (host, hc) = _identities(lcm_db, "store_id"), _identities(state_db, "id")
     results = []
-    for sid in sorted(lcm.keys() & host.keys()):
-        a, b = lcm[sid], host[sid]
-        ca, cb = Counter(a), Counter(b)
-        unique = {key for key in ca.keys() & cb.keys() if ca[key] == cb[key] == 1}
-        positions = {key: i for i, key in enumerate(key for key in b if key in unique)}
-        tails = []  # Unique identities turn the LCS into an increasing subsequence of host positions.
-        for key in (key for key in a if key in unique):
+    only = {side: sorted(_sha(str(sid))[:12] for sid in keys) for side, keys in (
+        ("lcm", lcm.keys() - host.keys()), ("host", host.keys() - lcm.keys()))}
+    for sid in sorted(lcm.keys() | host.keys()):
+        sequences = []
+        for rows in (lcm[sid], host[sid]):
+            seen, sequence = Counter(), []
+            for key in rows:
+                seen[key] += 1
+                sequence.append((key, seen[key]))
+            sequences.append(sequence)
+        a, b = sequences
+        shared = set(a) & set(b)
+        positions = {key: i for i, key in enumerate(b) if key in shared}
+        tails = []  # Occurrence keys turn the LCS into an increasing subsequence of host positions.
+        for key in (key for key in a if key in shared):
             pos = positions[key]
             i = bisect_left(tails, pos)
             if i == len(tails):
                 tails.append(pos)
             else:
                 tails[i] = pos
-        results.append({"session_h12": _sha(str(sid))[:12], "matched": len(unique),
-                        "reordered_rows": len(unique) - len(tails)})
-    return {"sessions": len(results), "matched": sum(row["matched"] for row in results),
-            "reordered_rows": sum(row["reordered_rows"] for row in results), "per_session": results}
+        results.append({"session_h12": _sha(str(sid))[:12], "lcm_rows": len(a), "host_rows": len(b),
+                        "matched": len(shared), "lcm_only": len(a) - len(shared), "host_only": len(b) - len(shared),
+                        "reordered_rows": len(shared) - len(tails), "columns_compared": {"lcm": lc, "host": hc}})
+    missing = sorted({"tool_calls", "tool_call_id"} - set(hc))
+    return {"sessions": len(results), "per_session": results, "identity_degraded": bool(missing),
+            "missing_columns": missing, **{key: sum(row[key] for row in results) for key in (
+                "lcm_rows", "host_rows", "matched", "lcm_only", "host_only", "reordered_rows")},
+            **{side + "_only_sessions": len(ids) for side, ids in only.items()},
+            **{side + "_only_sessions_h12": ids for side, ids in only.items()}}
 
 
 def _flatten(value, prefix=""):
     if isinstance(value, (dict, list)) and value:
-        items = value.items() if isinstance(value, dict) else enumerate(value)
-        return {key: leaf for name, child in items
-                for key, leaf in _flatten(child, f"{prefix}.{name}" if prefix else str(name)).items()}
+        items = [("." + (str(k) if not prefix and k in SECTIONS else "h:" + _sha(str(k))[:8]), v)
+                 for k, v in value.items()] if isinstance(value, dict) else [(f"[{i}]", v) for i, v in enumerate(value)]
+        return {key: leaf for segment, child in items for key, leaf in _flatten(child, prefix + segment).items()}
     return {prefix: value}
 
 
@@ -146,16 +186,17 @@ def config_diff(a, root_a, b, root_b):
 
     try:
         configs = [_flatten(yaml.safe_load(Path(path).read_text(encoding="utf-8"))) for path in (a, b)]
-    except yaml.YAMLError:
+    except (yaml.YAMLError, RecursionError):
         raise ValueError("unreadable config") from None  # never echo config text
     missing, paths, others = object(), [], []
     for key in sorted(configs[0].keys() | configs[1].keys()):
         va, vb = (config.get(key, missing) for config in configs)
         if type(va) is type(vb) and va == vb:
             continue
-        normalized = ["<ROOT>" + value[len(root):] if root and value.startswith(root) else value
-                      for value, root in ((va, root_a), (vb, root_b))] if isinstance(va, str) and isinstance(vb, str) else []
-        (paths if normalized and normalized[0] == normalized[1] else others).append(key)
+        rooted = all(isinstance(value, str) and root and (value == root or value.startswith(root + "/"))
+                     for value, root in ((va, root_a), (vb, root_b)))
+        path_only = rooted and va[len(root_a):] == vb[len(root_b):]
+        (paths if path_only else others).append(key)
     return {"differing_keys": sorted(paths + others), "path_only_keys": paths, "other_keys": others,
             "verdict": "OTHER" if others else "PATHS_ONLY"}
 
@@ -164,16 +205,34 @@ def doctor_match(candidate, previous):
     checks = []
     for path in (candidate, previous):
         value = json.loads(Path(path).read_text(encoding="utf-8"))
-        checks.append((value[-1] if isinstance(value, list) else value)["checks"])
-    warnings = [Counter(row["check"] for row in rows if row["status"] == "warn") for rows in checks]
-    results = [{"check": name, "candidate": count, "previous": warnings[1][name],
-                "matched": count <= warnings[1][name] and warnings[1][name] > 0}
-               for name, count in sorted(warnings[0].items())]
-    unmatched = [row["check"] for row in results if not row["matched"]]
+        if value == []:
+            raise ValueError("empty doctor input")
+        checks.append([{**row, "status": row["status"].lower()} for item in (value if isinstance(value, list) else [value])
+                       for row in item["checks"]])
+
+    def signature(row):
+        detail = row.get("detail")
+        shape = tuple(sorted(detail)) if isinstance(detail, dict) else type(detail).__name__
+        conditions = ()
+        if row["check"] == "lifecycle_fragmentation" and isinstance(detail, dict):
+            conditions = tuple((key, detail[key] > 0 if key == "empty_lifecycle_rows" else bool(detail[key]))
+                               for key in ("empty_lifecycle_rows", "state_db_error") if key in detail)
+        return row["check"], row["status"], shape, conditions
+
+    warnings = [Counter(signature(row) for row in rows if row["status"] == "warn") for rows in checks]
+    results = [{"check": sig[0], "candidate": count, "previous": warnings[1][sig], "matched": count <= warnings[1][sig]}
+               for sig, count in sorted(warnings[0].items(), key=lambda item: repr(item[0]))]
+    unmatched = sorted({row["check"] for row in results if not row["matched"]})
     failed = sorted({row["check"] for rows in checks for row in rows if row["status"] == "fail"})
-    candidate_failed = any(row["status"] == "fail" for row in checks[0])
-    return {"warnings": results, "unmatched": unmatched, "failed_checks": failed,
-            "verdict": "UNMATCHED" if unmatched or candidate_failed else "MATCHED"}
+    statuses = {"pass", "warn", "fail", "ok", "skip"}
+    unknown = sorted({row["check"] for rows in checks for row in rows if row["status"] not in statuses})
+    signatures = [{"check": sig[0], "status": sig[1] if sig[1] in statuses else "unknown_status",
+                   "detail_keys": list(sig[2]) if isinstance(sig[2], tuple) else [],
+                   "detail_type": "dict" if isinstance(sig[2], tuple) else sig[2], **dict(sig[3])}
+                  for sig in sorted({signature(row) for row in checks[0]}, key=repr)]
+    return {"warnings": results, "unmatched": unmatched, "failed_checks": failed, "unknown_status": unknown,
+            "candidate_signatures": signatures,
+            "verdict": "UNMATCHED" if unmatched or unknown or any(row["status"] == "fail" for row in checks[0]) else "MATCHED"}
 
 
 def main():
