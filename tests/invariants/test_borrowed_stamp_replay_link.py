@@ -318,6 +318,12 @@ def test_linker_reads_grow_linearly_on_a_bulk_ingest(build, monkeypatch, n):
     engine.ingest(turns)
     assert len(ids(engine, f"distinct turn {n - 1}")) == 1
     assert len(statements) <= 3 * n, len(statements)
+    # Every read is an index search on a stamp or an identity digest, never a walk of the session's rows.
+    conn = engine._store._conn
+    for sql in {statement.split(" WHERE ", 1)[0]: statement for statement in statements}.values():
+        plan = [row[-1] for row in conn.execute("EXPLAIN QUERY PLAN " + sql)]
+        assert all(step.startswith("SEARCH") and ("idx_msg_conversation_observed" in step or "idx_occ_lineage_digest"
+                   in step or "INTEGER PRIMARY KEY" in step) for step in plan), (sql.split(" WHERE ", 1)[0], plan)
 
 
 def test_known_limit_a_genuine_repeat_sharing_a_stamp_with_other_text_is_linked(build):

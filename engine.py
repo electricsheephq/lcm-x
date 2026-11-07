@@ -7157,23 +7157,24 @@ class LCMEngine(
                            for (content,) in conn.execute(
                                "SELECT content FROM messages WHERE conversation_id IN (?, '') AND observed_at=? "
                                "AND +session_id=? AND role='user' AND +store_id<?", (conversation, at, session, carrier)))
-            # The stamp gate, through the (conversation_id, observed_at) index: the row's own stamp is borrowed,
-            # or an earlier stored copy of its text sits on a borrowed stamp that the host view still shows (the
-            # in-flight prompt's). Only a row that passes it reads the session's copies of its text. The unary
-            # '+' keeps the planner off the session indexes, which would walk every row of the session.
-            shown = sorted({stamp for message in messages if isinstance(message, dict)
-                            and message.get("role") == "user"
-                            and (stamp := self._host_occurrence_metadata(message)["timestamp"]) is not None})
+            # The stamp gate, from the store and through indexes only: the row's own stamp is borrowed, or an
+            # earlier stored copy of its text (found by the ingest ledger's identity digest) sits on a borrowed
+            # stamp. Each row costs a constant number of lookups; only a row that passes reads the session's
+            # copies of its text. The unary '+' (and CROSS JOIN, which fixes the join order) keeps the planner
+            # off the session indexes, which would walk every row of the session.
+            attempt = getattr(self, "_ingest_ledger_attempt", None)
+            index_of = {sid: idx for idx, sid in stored_at.items() if sid}
             gated = {}
             for sid, text in sorted(texts.items()):
+                copies = []
+                if attempt is not None and attempt.get("entries") and index_of[sid] < len(attempt["entries"]):
+                    copies = conn.execute(
+                        "SELECT m.store_id, m.observed_at FROM occurrence_bindings b "
+                        "CROSS JOIN messages m ON m.store_id = b.store_id WHERE b.lineage=? AND b.identity_digest=? "
+                        "AND b.store_id<? AND m.role='user' AND +m.session_id=? AND m.observed_at IS NOT NULL",
+                        (attempt["lineage"], attempt["entries"][index_of[sid]].identity_digest, sid, session))
                 if borrowed(stamps[sid], sid, text) or any(
-                        at != stamps[sid] and borrowed(at, store_id, text)
-                        for start in range(0, len(shown), 500)
-                        for store_id, at in conn.execute(
-                            "SELECT store_id, observed_at FROM messages WHERE conversation_id IN (?, '') "
-                            f"AND observed_at IN ({','.join('?' * len(shown[start:start + 500]))}) "
-                            "AND +session_id=? AND role='user' AND +store_id<? AND instr(content, ?)>0",
-                            (conversation, *shown[start:start + 500], session, sid, text))):
+                        at != stamps[sid] and borrowed(at, store_id, text) for store_id, at in copies):
                     gated[sid] = text
             if not gated:
                 return

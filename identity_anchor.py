@@ -669,7 +669,8 @@ class IdentityAnchorMixin:
                              (stamp, emission))
             return True  # Keep admitting the later warm rewrite; row guards still own every write.
         else:
-            self._store.add_message_relations([[(stored_id, "possible_replay_of", target, None, None)]])
+            if not self._store.get_message_relations([stored_id], "possible_replay_of"):  # a source keeps one link
+                self._store.add_message_relations([[(stored_id, "possible_replay_of", target, None, None)]])
             return False
 
     @staticmethod
