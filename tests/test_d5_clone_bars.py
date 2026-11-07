@@ -178,6 +178,15 @@ def test_bar5_unknown_status_fails_and_a_rerun_must_show_every_kind():
                                             "integrity:ok": 1, "schema:ok": 1, "doctor:warn": 1}, "warnings": {"w": 1}}
 
 
+def test_bar5_warnings_are_not_judged_without_a_clean_ga_baseline():
+    warn = {"kind": "doctor", "check": "survival_fit", "status": "warn"}
+    ga_fail = checks({"kind": "integrity", "check": "fk", "status": "fail"})
+    for rerun, complete in ((None, True), (ga_fail, True), (checks(), False), (checks()[1:], True)):
+        result = b.bar5(checks(warn), ga_fail, rerun, complete)  # A healthy rc with an ordinary warning.
+        assert result["verdict"] == b.INCONCLUSIVE and result["warnings_judged"] is False
+        assert result["ga_disposition_needed"] is (rerun is not None)  # Every unclean re-run needs a disposition.
+
+
 def workload(**change):
     names = ["L", "S1", "S2"]
     return {"conversation_names": names, "large_conversation_rows": 1000, "cron_fired": 1, "tool_heavy_turns": 2,

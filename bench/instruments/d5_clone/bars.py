@@ -203,18 +203,19 @@ def bar5(rc_checks, ga_checks, ga_rerun_checks=None, ga_rerun_turns_complete=Tru
     rerun_failed = failed_checks(ga_rerun_checks) if ga_rerun_checks is not None else None
     rerun_missing = kinds_missing(ga_rerun_checks) if ga_rerun_checks is not None else None
     rerun_clean = rerun_failed == [] and rerun_missing == [] and ga_rerun_turns_complete is True
+    ga_open = bool(ga_failed) and not rerun_clean  # No clean GA arm: there is no warning baseline to judge against.
     baseline = ga_rerun_checks if ga_failed and rerun_clean else ga_checks
     rc_w, ga_w = (Counter(c["check"] for c in checks if c["kind"] == "doctor" and c["status"] == "warn")
                   for checks in (rc_checks, baseline))
-    over = sorted(name for name, n in rc_w.items() if n > ga_w[name])
+    over = [] if ga_open else sorted(name for name, n in rc_w.items() if n > ga_w[name])
     missing = kinds_missing(rc_checks)
-    ga_open = bool(ga_failed) and not rerun_clean
     verdict = FAIL if failed or over else INCONCLUSIVE if missing or ga_open else PASS
     return {"verdict": verdict, "failed": failed, "warnings_over_ga": over, "kinds_missing": missing,
             "ga_failed": ga_failed, "ga_rerun_needed": bool(ga_failed) and rerun_failed is None,
             "ga_rerun_failed": rerun_failed or [], "ga_rerun_kinds_missing": rerun_missing or [],
             "ga_rerun_turns_complete": None if ga_rerun_checks is None else ga_rerun_turns_complete is True,
-            "ga_disposition_needed": bool(rerun_failed)}
+            "warnings_judged": not ga_open,
+            "ga_disposition_needed": bool(ga_failed) and ga_rerun_checks is not None and not rerun_clean}
 
 
 def workload_items(w):
