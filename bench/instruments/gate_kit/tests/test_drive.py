@@ -2,6 +2,7 @@
 audit.py --events, and a host-backed smoke (a real ``hermes acp`` and TUI gateway against the localhost fake provider)."""
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -42,6 +43,18 @@ def test_plan_meets_every_floor_with_margin_and_is_deterministic():
     assert got["host_sources"] == 2
     assert drive.plan(2055, tg) == ops and drive.plan(2056, tg) != ops
     assert drive.targets(turns=100, children=30)["turns"] == 240 and drive.targets(children=30)["delegated_children"] == 30
+    # Pin the complete pre-ageing seed-2055 plan, including operation order and prompt indices.
+    assert hashlib.sha256(json.dumps(ops, sort_keys=True).encode()).hexdigest() == (
+        "b75268e934ff3fb25f72e9d7a950904a2a4b80390c25b8cf4a796e91a516a6a2")
+
+
+@pytest.mark.parametrize("compactions,expected", [(0, 24), (20, 24), (30, 30), (45, 45)])
+def test_compaction_target_only_raises_the_floor(compactions, expected):
+    tg = drive.targets(compactions=compactions)
+    assert tg["compactions"] == expected
+    assert sum(o["op"] == "compress" for o in drive.plan(2055, tg)) == expected
+    if expected == 24:
+        assert drive.plan(2055, tg) == drive.plan(2055, drive.targets())
 
 
 def test_plan_repeats_are_word_for_word_and_restarts_are_never_last():
@@ -66,9 +79,10 @@ def test_plan_repeats_are_word_for_word_and_restarts_are_never_last():
 
 def test_dry_run_prints_counts(capsys):
     assert drive.main(["--hermes-python", "x", "--hermes-src", "x", "--home", "h", "--workdir", "w",
-                       "--events", "e.jsonl", "--dry-run"]) == 0
+                       "--events", "e.jsonl", "--compactions", "30", "--age-turns", "6", "--dry-run"]) == 0
     out = json.loads(capsys.readouterr().out)
     assert out["planned"]["turns"] >= 240 and out["targets"]["undo_resend"] == 12
+    assert out["targets"]["compactions"] == out["planned"]["ops"]["compress"] == 30
 
 
 def test_live_home_is_refused(tmp_path):
@@ -139,7 +153,7 @@ class StubTui:
         if method == "session.undo":
             return {"removed": 2}
         if method == "session.compress":
-            return {"compressed": True}
+            return {"compressed": False, "status": "compressed"}
         assert method == "prompt.submit" and params["session_id"] in self.live
         return {"status": "streaming"}
 
@@ -237,6 +251,7 @@ def test_cli_paths_are_absolute_for_hosts_and_prompts(tmp_path, monkeypatch):
     (tmp_path / "venv" / "bin" / "python").symlink_to(tmp_path / "host-python")
 
     def run(d, _ops, _tg):
+        assert d.age_turns == 6
         assert all(p.is_absolute() for p in (d.src, d.home, d.workdir, d.ev.path))
         assert d.src == tmp_path / "src" and d.home == tmp_path / "home"
         assert d.ev.path == tmp_path / "events.jsonl"
@@ -256,7 +271,7 @@ def test_cli_paths_are_absolute_for_hosts_and_prompts(tmp_path, monkeypatch):
 
     monkeypatch.setattr(drive.Driver, "run", run)
     assert drive.main(["--hermes-python", "venv/bin/python", "--hermes-src", "src", "--home", "home",
-                       "--workdir", "run", "--events", "events.jsonl"]) == 0
+                       "--workdir", "run", "--events", "events.jsonl", "--age-turns", "6"]) == 0
 
 
 @pytest.mark.parametrize("where", ["acp.stderr", "tui.stderr", "agent.log"])
@@ -274,20 +289,29 @@ def test_inactive_scan_ignores_old_lines_but_reads_new_ones(tmp_path, where):
 
 
 @pytest.mark.parametrize("slot", ["A1", "T1"])
-def test_compress_request_precedes_triggering_turn(tmp_path, monkeypatch, slot):
+@pytest.mark.parametrize("age_turns", [4, 6])
+def test_compress_request_precedes_triggering_turn(tmp_path, monkeypatch, slot, age_turns):
     d, ev, _log = stub_driver(tmp_path)
-    send = d.send
+    assert d.age_turns == 4
+    d.age_turns = age_turns
+    ix = drive.CATS["long"][0]
+    attempts = compress_stub_log(d, slot, monkeypatch, ["LCM compaction #1: published"])
+    send, sent = d.send, []
 
-    def trigger(*args):
-        assert ev.path.exists(), "compress_request must be written before the triggering turn"
-        requests = [json.loads(x) for x in ev.path.read_text().splitlines() if json.loads(x)["kind"] == "compress_request"]
-        assert len(requests) == 1 and requests[0]["session"] == d.slots[slot]["session"]
-        return send(*args)
+    def trigger(s, prompt):
+        requests = [e for e in audit.read_events(ev.path) if e["kind"] == "compress_request"] if ev.path.exists() else []
+        assert len(requests) == int(len(sent) == age_turns + 1)
+        sent.append(prompt)
+        return send(s, prompt)
 
     monkeypatch.setattr(d, "send", trigger)
-    d.op({"op": "compress", "slot": slot, "prompt": drive.CATS["long"][0]})
+    d.op({"op": "compress", "slot": slot, "prompt": ix})
     events = [json.loads(x) for x in ev.path.read_text().splitlines()]
-    assert sum(e["kind"] == "compress_request" for e in events) == 1
+    assert len(attempts) == 1
+    assert sent == [ix] + [drive.CATS["plain"][(ix + j) % len(drive.CATS["plain"])] for j in range(age_turns + 1)]
+    sequence = [e["kind"] for e in events if e["kind"] != "source2_session"]
+    assert sequence == ["turn"] * (age_turns + 1) + ["compress_request", "turn", "compress_result"]
+    assert events[-3]["session"] == d.slots[slot]["session"]
     assert any(e["kind"] == "compress_result" and "manual=compressed" in e["detail"] for e in events)
 
 
@@ -321,7 +345,7 @@ def compress_stub_log(d, slot, monkeypatch, messages, host_answer=True, logger="
         def wrapped(method, params, timeout):
             if method == "session.compress":
                 write()
-                return {"compressed": host_answer}
+                return {"compressed": False, "status": "compressed" if host_answer else "noop"}
             return call(method, params, timeout)
 
         monkeypatch.setattr(d.tui, "call", wrapped)
@@ -344,7 +368,7 @@ def test_compress_result_uses_new_lcm_log_lines(tmp_path, monkeypatch, slot, mes
     d.op({"op": "compress", "slot": slot, "prompt": drive.CATS["long"][0]})
     events = [json.loads(x) for x in ev.path.read_text().splitlines()]
     results = [e for e in events if e["kind"] == "compress_result"]
-    assert len(attempts) == len(results) == (3 if label == "noop" else 1)
+    assert len(attempts) == len(results) == (1 if label == "compressed" else 3)
     for e in results:
         assert e["log"] == label
         assert e["host_answer"] == ("compressed" if host_answer else "not_compressed")
@@ -354,20 +378,23 @@ def test_compress_result_uses_new_lcm_log_lines(tmp_path, monkeypatch, slot, mes
 
 @pytest.mark.parametrize("slot", ["A1", "T1"])
 @pytest.mark.parametrize("noops", [0, 1, 2, 3])
-def test_compress_noop_retries_are_bounded_and_summary_counts_real(tmp_path, monkeypatch, slot, noops):
+@pytest.mark.parametrize("missing", ["noop", "none"])
+def test_compress_noop_retries_are_bounded_and_summary_counts_real(tmp_path, monkeypatch, slot, noops, missing):
     d, ev, _log = stub_driver(tmp_path)
-    messages = ["LCM compression no-op: below leaf chunk threshold"] * noops + ["LCM compaction #1: published"]
+    message = "LCM compression no-op: below leaf chunk threshold" if missing == "noop" else "unrelated line"
+    messages = [message] * noops + ["LCM compaction #1: published"]
     attempts = compress_stub_log(d, slot, monkeypatch, messages)
     summary = d.run([{"op": "compress", "slot": slot, "prompt": drive.CATS["long"][0]}], {"delegated_children": 0})
     n = min(noops + 1, 3)
     events = [json.loads(x) for x in ev.path.read_text().splitlines()]
     sequence = [e for e in events if e["kind"] in ("compress_request", "turn", "compress_result")]
-    assert [e["kind"] for e in sequence] == ["compress_request", "turn", "compress_result"] * n
+    assert [e["kind"] for e in sequence] == (["turn"] * 5 + ["compress_request", "turn", "compress_result"]) * n
     assert [e["retry"] for e in sequence if e["kind"] == "compress_request"] == list(range(n))
-    assert len(attempts) == n and summary["prompts_by_category"] == {"long": n}
+    assert len(attempts) == n and summary["prompts_by_category"] == {"long": n, "plain": n * 5}
     assert summary["executed"] == {"compress": 1}  # retries do not change the seeded plan's op counts
     assert summary["compactions"] == {"planned": 1, "requests": n, "real": int(noops < 3),
-                                      "noop": min(noops, 3), "log_none": 0}
+                                      "noop": min(noops, 3) if missing == "noop" else 0,
+                                      "log_none": min(noops, 3) if missing == "none" else 0}
 
 
 def test_shared_acp_restart_records_all_bound_sessions(tmp_path):
@@ -573,8 +600,12 @@ def test_failed_warm_restart_has_no_event(tmp_path, closed):
 @pytest.mark.parametrize("raises", [False, True])
 def test_failed_compress_request_is_not_attributed(tmp_path, monkeypatch, slot, raises):
     d, ev, _log = stub_driver(tmp_path)
+    send, sent = d.send, []
 
-    def fail(*_args):
+    def fail(*args):
+        sent.append(1)
+        if len(sent) <= d.age_turns + 1:  # the paste and ageing turns succeed; the triggering turn fails
+            return send(*args)
         if raises:
             raise drive.AD.ProcessGone("host exited")
         return "submit_busy"
@@ -823,7 +854,8 @@ def test_smoke_against_fake_provider_then_audit(tmp_path):
     assert exits == ["entry=acp returncode=0", "entry=tui returncode=0"], exits  # both ended their sessions by EOF
     kinds = Counter(e["kind"] for e in lines)
     assert {k: kinds[k] for k in audit.EVENT_KINDS if kinds[k]} == {"restart_cold": 1, "restart_warm": 1, "undo_resend": 1,
-                                                        "delegate_prompt": 1, "compress_request": 1}
+                                                        "delegate_prompt": 1, "compress_request": kinds["compress_request"]}
+    assert 1 <= kinds["compress_request"] <= 3  # host replies alone never stop retries
     assert kinds["cancel_resend"] == 1  # recorded, never counted as an undo
     assert summary["delegate"]["children_in_state_db"] >= 1 and summary["context_length"] == 64000
     for db in ("state.db", "lcm.db"):  # the audit reads immutable files: open each once after the run to checkpoint

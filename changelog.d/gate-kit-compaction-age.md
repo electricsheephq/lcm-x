@@ -1,0 +1,1 @@
+- Changed: Gate-kit compaction attempts age pasted notes with plain turns, retry missing real compactions, support raised compaction targets, and report TUI compression status.

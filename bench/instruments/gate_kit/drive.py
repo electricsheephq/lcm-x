@@ -2,7 +2,8 @@
 prepared Hermes home, writing the events log that ``audit.py --events`` reads.
 
     python -m bench.instruments.gate_kit.drive --hermes-python <python> --hermes-src <host src> --home <HERMES_HOME>
-        --workdir <dir> --events <events.jsonl> [--turns N] [--children N] [--seed 2055] [--max-hours 6] [--dry-run]
+        --workdir <dir> --events <events.jsonl> [--turns N] [--children N] [--compactions N] [--age-turns 4]
+        [--seed 2055] [--max-hours 6] [--dry-run]
 
 Two host entry points, both real processes over newline-delimited JSON-RPC on stdio:
 - ``hermes acp`` (acp_driver.AcpProcess): turns, repeated tool calls, ``/compress``, delegate prompts,
@@ -104,10 +105,11 @@ def margin(n: int) -> int:
     return (n * 6 + 4) // 5  # ceil(n * 1.2) in integers (200 * 1.2 is 240.00000000000003 in floats)
 
 
-def targets(turns: int | None = None, children: int | None = None) -> dict:
-    """Every section 5 floor x1.2, rounded up; ``turns``/``children`` may raise those two, never lower them."""
+def targets(turns: int | None = None, children: int | None = None, compactions: int | None = None) -> dict:
+    """Every section 5 floor x1.2, rounded up; optional targets may raise those floors, never lower them."""
     t = {k: margin(FLOORS[k]) for k in PLANNED_FLOORS}
     t["turns"], t["delegated_children"] = max(t["turns"], turns or 0), max(t["delegated_children"], children or 0)
+    t["compactions"] = max(t["compactions"], compactions or 0)
     return t
 
 
@@ -283,9 +285,10 @@ def host_env(base: dict, home: Path, workdir: Path, src: Path) -> dict:
 class Driver:
     def __init__(self, *, python: str, src: Path, home: Path, workdir: Path, events: Events, env: dict,
                  prompt_timeout: float = 600.0, max_hours: float = 6.0, cancel_after: float = 2.0, wrap=(),
-                 acp_factory=None, tui_factory=None):
+                 acp_factory=None, tui_factory=None, age_turns: int = 4):
         self.src, self.home, self.workdir, self.ev = Path(src), Path(home), Path(workdir), events
         self.timeout, self.cancel_after = prompt_timeout, cancel_after
+        self.age_turns = age_turns
         self.stop_at = time.monotonic() + max_hours * 3600
         # Children of an earlier run in a retained home are outside this run, as the audit's --since excludes them.
         self.run_start = time.time()
@@ -439,9 +442,15 @@ class Driver:
     def compress(self, o):
         slot = o["slot"]
         self.acp_sid(slot) if slot.startswith("A") else self.tui_rt(slot)
-        for retry in range(3):  # the planned attempt and at most two logged no-op retries
+        for retry in range(3):  # the planned attempt and at most two retries without a real compaction
             if time.monotonic() >= self.stop_at:
-                return True if retry else None  # a no-op attempt already ran and was counted
+                return True if retry else None  # an attempt already ran and was counted
+            # Age the paste outside LCM-X's eight-message fresh tail before the measured triggering turn.
+            if self.send(slot, o["prompt"]) not in ("end_turn", "complete"):
+                return False
+            for j in range(self.age_turns):
+                if self.send(slot, CATS["plain"][(o["prompt"] + j) % len(CATS["plain"])]) not in ("end_turn", "complete"):
+                    return False
             paths = (self.logs / ("acp.stderr" if slot.startswith("A") else "tui.stderr"),
                      self.home / "logs" / "agent.log")
             offsets = {}
@@ -454,7 +463,7 @@ class Driver:
             self.ev.write("compress_request", self.slots[slot]["session"], f"slot={slot}", retry=retry)
             self.compactions["requests"] += 1
             try:
-                stop = self.send(slot, o["prompt"])
+                stop = self.send(slot, CATS["plain"][(o["prompt"] + self.age_turns) % len(CATS["plain"])])
             except (AD.DriverError, OSError, KeyError, ValueError):
                 self.ev.write("compress_request_failed", self.slots[slot]["session"], f"slot={slot}")
                 raise
@@ -466,7 +475,7 @@ class Driver:
                 host = "compressed" if reply.startswith("Context compressed") else "not_compressed"
             else:
                 res = self.tui.call("session.compress", {"session_id": self.tui_rt(slot)}, self.timeout)
-                host = "compressed" if res.get("compressed") else "not_compressed"
+                host = "compressed" if res.get("status") == "compressed" else "not_compressed"
             logged, n = self.compress_log_result(offsets)
             result = host if logged == "none" else logged
             self.compactions["real"] += n
@@ -474,7 +483,7 @@ class Driver:
             self.compactions["log_none"] += int(logged == "none")
             self.ev.write("compress_result", self.slots[slot]["session"], f"slot={slot} manual={result} log={logged}",
                           log=logged, host_answer=host, compactions=n, retry=retry)
-            if result != "noop":
+            if n:
                 break
         return True
 
@@ -639,19 +648,23 @@ def main(argv=None) -> int:
     ap.add_argument("--append-events", action="store_true", help="explicitly retain and append to a non-empty events file")
     ap.add_argument("--turns", type=int, help="at least this many prompts (never below the floor x1.2)")
     ap.add_argument("--children", type=int, help="at least this many delegated children (never below the floor x1.2)")
+    ap.add_argument("--compactions", type=int, help="at least this many compaction ops (never below the floor x1.2)")
+    ap.add_argument("--age-turns", type=int, default=4, help="plain turns to age each paste before the triggering turn")
     ap.add_argument("--seed", type=int, default=2055)
     ap.add_argument("--max-hours", type=float, default=6.0)
     ap.add_argument("--prompt-timeout", type=float, default=600.0)
     ap.add_argument("--cancel-after", type=float, default=2.0, help="seconds into a prompt before session/cancel")
     ap.add_argument("--dry-run", action="store_true")
     a = ap.parse_args(argv)
+    if a.age_turns < 0:
+        ap.error("--age-turns must be non-negative")
     for name in ("home", "workdir", "events"):
         if under_real_hermes(getattr(a, name)):
             ap.error(f"--{name} must not be at or under the live ~/.hermes")
     for name in ("home", "workdir", "events", "hermes_src"):
         setattr(a, name, getattr(a, name).expanduser().resolve())
     a.hermes_python = str(Path(a.hermes_python).expanduser().absolute())  # retain the venv executable's symlink
-    tg = targets(a.turns, a.children)
+    tg = targets(a.turns, a.children, a.compactions)
     ops = plan(a.seed, tg)
     if a.dry_run:
         print(json.dumps({"targets": tg, "planned": planned_counts(ops)}, indent=1, sort_keys=True))
@@ -666,7 +679,8 @@ def main(argv=None) -> int:
     write_notes(a.workdir)
     env = host_env(dict(os.environ), a.home, a.workdir, a.hermes_src)
     d = Driver(python=a.hermes_python, src=a.hermes_src, home=a.home, workdir=a.workdir, events=events,
-               env=env, prompt_timeout=a.prompt_timeout, max_hours=a.max_hours, cancel_after=a.cancel_after)
+               env=env, prompt_timeout=a.prompt_timeout, max_hours=a.max_hours, cancel_after=a.cancel_after,
+               age_turns=a.age_turns)
     try:
         summary = d.run(ops, tg)
     except EventLogError as exc:
