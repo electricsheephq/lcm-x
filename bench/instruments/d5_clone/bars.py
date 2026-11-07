@@ -112,14 +112,15 @@ def bar1(rc_rows, host_rows, snapshot_rows, ga_rows, binds, bar2_by_bind, identi
         else:
             class3.setdefault(key(row), []).append(row)
     over = [k for k, rows in class3.items() if len(rows) > ga[k]]  # Per identity over the whole run, rc <= GA.
-    groups = [[row] for row in unassigned] + [class3[k] for k in over]
+    groups = [([row], 0) for row in unassigned] + [(class3[k], ga[k]) for k in over]
     # A leftover at a bind whose bar 2 is INCONCLUSIVE, or whose copies are unknown, makes the bar INCONCLUSIVE,
     # never FAIL (design r4 I-2).
     def open_bind(row):
         bind = bind_of(row)
         return bind is not None and (bar2_by_bind.get(bind["bind"]) == INCONCLUSIVE or bind["bind"] not in dups)
 
-    pending = [g for g in groups if all(open_bind(r) for r in g)]
+    # GA's allowance goes to the rows at settled binds first: only an excess it cannot absorb there is a FAIL.
+    pending = [g for g, allowance in groups if sum(not open_bind(r) for r in g) <= allowance]
     verdict = FAIL if lost or len(pending) < len(groups) else INCONCLUSIVE if pending else PASS
     verdict = INCONCLUSIVE if missing_receipts else verdict
     return {"verdict": verdict, "rows": len(rc_rows), "host_occurrences": len(host_rows), "matched": matched,
