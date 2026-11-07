@@ -109,6 +109,7 @@ def lineage(cell_dir: Path, root: str = "S0", db_dir: Path | None = None):
             sid = parents[sid]
         return "chat" if sid == root else sid
     group.host_error = host_error
+    group.sessions_error = host_error  # only the sessions read; B10 needs that one alone (#2382)
     return group
 
 

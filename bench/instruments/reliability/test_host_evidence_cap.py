@@ -134,3 +134,19 @@ def test_unreadable_messages_table_with_readable_sessions_is_never_pass(tmp_path
         assert out["verdict"] == "INCONCLUSIVE" and set(out["inconclusive_bars"]) == {"B1"}
     else:
         assert out["verdict"] == "FAIL" and "B1" in out["failed_bars"]
+
+
+@pytest.mark.parametrize("link", ["missing", "S0"], ids=["missing-parent-link", "linked"])
+def test_unreadable_messages_keeps_b10_session_checks(tmp_path, monkeypatch, link):
+    """Review of #2382: readable sessions with a failed messages read (here the host parity read) must keep B10's
+    session-backed failures (a missing parent link stays FAIL); an otherwise-passing B10 is capped at INCONCLUSIVE."""
+    child_fixture.make(tmp_path, link=None if link == "missing" else link)
+    monkeypatch.setattr(bars.host_parity, "load",
+                        lambda *_a, **_k: (None, "host state.db unreadable: OperationalError('no such table')"))
+    out = bars.score({"bars": ["B10"], "delegate_plan": [{"turns": [2]}]}, tmp_path / "cell")
+    assert out["numbers"]["diagnostic"]["host_evidence_error"]
+    if link == "missing":
+        assert out["verdict"] == "FAIL"
+        assert out["failed_bars"]["B10"]["children_without_parent_link"] == ["C1"]
+    else:
+        assert out["verdict"] == "INCONCLUSIVE" and set(out["inconclusive_bars"]) == {"B10"}
