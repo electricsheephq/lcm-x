@@ -1586,6 +1586,55 @@ class IdentityAnchorMixin:
         if groups:
             self._store.add_message_relations(groups)
 
+    def _identity_anchor_record_composite_of(self, stored_ids) -> None:
+        """Provenance for stored todo composites; never participates in replay decisions."""
+        from .reconcile import _PRESERVED_TODO_CONTEXT_PREFIX
+
+        groups = []
+        for store_id, row in self._store.get_batch(stored_ids).items():
+            content = row.get("content")
+            if (row.get("role") != "user" or not isinstance(content, str)
+                    or _PRESERVED_TODO_CONTEXT_PREFIX not in content or "\n\n" not in content):
+                continue
+            by_text = defaultdict(list)
+            for sid, text, session in self._store._conn.execute(
+                "SELECT store_id, content, session_id FROM messages "
+                "WHERE conversation_id = ? AND role = 'user' AND store_id < ?",
+                (row["conversation_id"], store_id),
+            ):
+                if text:
+                    by_text[text].append((sid, session))
+            # Whole stored rows can contain blank lines. Only the maximal span not covered by
+            # any whole-row match is a scaffold candidate; it cannot swallow a known prompt.
+            paragraphs, covered = content.split("\n\n"), set()
+            for text in by_text:
+                pieces = text.split("\n\n")
+                for start in range(len(paragraphs) - len(pieces) + 1):
+                    if paragraphs[start:start + len(pieces)] == pieces:
+                        covered.update(range(start, start + len(pieces)))
+            missing = [i for i in range(len(paragraphs)) if i not in covered]
+            scaffold = None
+            if missing:
+                if missing != list(range(missing[0], missing[-1] + 1)):
+                    continue
+                scaffold = "\n\n".join(paragraphs[missing[0]:missing[-1] + 1])
+                if not scaffold.startswith(_PRESERVED_TODO_CONTEXT_PREFIX):
+                    continue
+            found = _decompositions(content, set(by_text) | ({scaffold} if scaffold else set()), partial=False)
+            if found is None or len(found) != 1:
+                continue
+            parts, _rest = found[0]
+            if scaffold is None and not parts[0].startswith(_PRESERVED_TODO_CONTEXT_PREFIX):
+                continue
+            if any(len(by_text[part]) != 1 for part in parts if part != scaffold):
+                continue
+            if scaffold is None and any(by_text[part][0][1] != row["session_id"] for part in parts):
+                continue
+            groups.append([(store_id, "composite_of", None if part == scaffold else by_text[part][0][0],
+                            ordinal, row.get("observed_at")) for ordinal, part in enumerate(parts)])
+        if groups:
+            self._store.add_message_relations(groups)
+
     def _identity_anchor_remember(self, stored) -> None:
         """R5 current-turn window: (session, identity, store_id, observed_at) of user rows just stored."""
         recent = list(getattr(self, "_identity_anchor_recent", ()))
