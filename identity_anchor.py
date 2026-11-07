@@ -1587,51 +1587,33 @@ class IdentityAnchorMixin:
             self._store.add_message_relations(groups)
 
     def _identity_anchor_record_composite_of(self, stored_ids) -> None:
-        """Provenance for stored todo composites; never participates in replay decisions."""
-        from .reconcile import _PRESERVED_TODO_CONTEXT_PREFIX
+        """Provenance for stored todo composites; never participates in replay decisions.
+
+        A stored user row gets ``composite_of`` rows only when exactly one decomposition of its text fits
+        either rule, counted across both: (i) a LEADING unstored todo scaffold, then whole stored user rows
+        of its conversation; (ii) whole stored rows only, the first a stored todo row and every part in its
+        session. Parts join with exactly ``"\\n\\n"``. Ambiguity, an over-budget search or a part text held
+        by more than one row writes nothing."""
+        from .reconcile import _PRESERVED_TODO_CONTEXT_PREFIX as header
 
         groups = []
         for store_id, row in self._store.get_batch(stored_ids).items():
             content = row.get("content")
             if (row.get("role") != "user" or not isinstance(content, str)
-                    or _PRESERVED_TODO_CONTEXT_PREFIX not in content or "\n\n" not in content):
+                    or header not in content or "\n\n" not in content):
                 continue
             by_text = defaultdict(list)
             for sid, text, session in self._store._conn.execute(
-                "SELECT store_id, content, session_id FROM messages "
-                "WHERE conversation_id = ? AND role = 'user' AND store_id < ?",
-                (row["conversation_id"], store_id),
+                "SELECT store_id, content, session_id FROM messages WHERE conversation_id = ? AND role = 'user' "
+                "AND store_id < ? AND content != '' AND instr(?, content) > 0",
+                (row["conversation_id"], store_id, content),
             ):
-                if text:
-                    by_text[text].append((sid, session))
-            # Whole stored rows can contain blank lines. Only the maximal span not covered by
-            # any whole-row match is a scaffold candidate; it cannot swallow a known prompt.
-            paragraphs, covered = content.split("\n\n"), set()
-            for text in by_text:
-                pieces = text.split("\n\n")
-                for start in range(len(paragraphs) - len(pieces) + 1):
-                    if paragraphs[start:start + len(pieces)] == pieces:
-                        covered.update(range(start, start + len(pieces)))
-            missing = [i for i in range(len(paragraphs)) if i not in covered]
-            scaffold = None
-            if missing:
-                if missing != list(range(missing[0], missing[-1] + 1)):
-                    continue
-                scaffold = "\n\n".join(paragraphs[missing[0]:missing[-1] + 1])
-                if not scaffold.startswith(_PRESERVED_TODO_CONTEXT_PREFIX):
-                    continue
-            found = _decompositions(content, set(by_text) | ({scaffold} if scaffold else set()), partial=False)
-            if found is None or len(found) != 1:
+                by_text[text].append((sid, session))
+            fits = _composite_of_splits(content, by_text, row["session_id"], header)
+            if fits is None or len(fits) != 1 or any(len(by_text[part]) != 1 for part, held in fits[0] if held):
                 continue
-            parts, _rest = found[0]
-            if scaffold is None and not parts[0].startswith(_PRESERVED_TODO_CONTEXT_PREFIX):
-                continue
-            if any(len(by_text[part]) != 1 for part in parts if part != scaffold):
-                continue
-            if scaffold is None and any(by_text[part][0][1] != row["session_id"] for part in parts):
-                continue
-            groups.append([(store_id, "composite_of", None if part == scaffold else by_text[part][0][0],
-                            ordinal, row.get("observed_at")) for ordinal, part in enumerate(parts)])
+            groups.append([(store_id, "composite_of", by_text[part][0][0] if held else None,
+                            ordinal, row.get("observed_at")) for ordinal, (part, held) in enumerate(fits[0])])
         if groups:
             self._store.add_message_relations(groups)
 
@@ -1678,3 +1660,34 @@ def _raw_remainder(message, remainder) -> Optional[str]:
     raw = normalize_content_value(message.get("content")) or ""
     head = "\n\n".join(parts) + "\n\n"
     return raw[len(head):] if raw.startswith(head) and raw[len(head):] == rest else None
+
+
+def _composite_of_splits(content: str, by_text, session, header: str) -> list[list[tuple[str, bool]]] | None:
+    """The decompositions of ``content`` that composite_of rule (i) or (ii) allows, as ``[(part, stored)]``.
+    None when a search is over budget or capped, so more splits may exist; stops once two are found."""
+    texts = set(by_text)
+    whole = _decompositions(content, texts, partial=False)
+    if whole is None or len(whole) >= _MAX_DECOMPOSITIONS:
+        return None
+    found = [[(part, True) for part in parts] for parts, _rest in whole
+             if parts[0].lstrip().startswith(header)
+             and all(held == session for part in parts for _sid, held in by_text[part])]
+    paragraphs = content.split("\n\n")
+    if not content.lstrip().startswith(header):
+        return found
+    if len(paragraphs) > _DECOMPOSE_MAX_PARTS:
+        return None
+    # The scaffold is unstored text: it never holds a whole stored row (a stored todo row is rule (ii)).
+    ends = [start + len(pieces) for pieces in (text.split("\n\n") for text in texts)
+            for start in range(len(paragraphs) - len(pieces) + 1) if paragraphs[start:start + len(pieces)] == pieces]
+    for cut in range(1, len(paragraphs)):
+        if len(found) > 1 or any(end <= cut for end in ends):
+            break
+        scaffold, rest = "\n\n".join(paragraphs[:cut]), "\n\n".join(paragraphs[cut:])
+        if rest in texts:
+            found.append([(scaffold, False), (rest, True)])
+        tails = _decompositions(rest, texts, partial=False)
+        if tails is None or len(tails) >= _MAX_DECOMPOSITIONS:
+            return None
+        found += [[(scaffold, False)] + [(part, True) for part in parts] for parts, _rest in tails]
+    return found

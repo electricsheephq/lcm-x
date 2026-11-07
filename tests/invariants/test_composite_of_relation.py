@@ -105,19 +105,17 @@ def test_relation_failure_preserves_ingest(tmp_path, monkeypatch, caplog):
         engine.shutdown()
 
 
-@pytest.mark.parametrize("case", ["both-rules", "trailing-scaffold", "stored-todo-second", "gap", "scaffold-paragraph"])
+@pytest.mark.parametrize("case", ["both-rules", "trailing-scaffold", "stored-todo-second", "gap"])
 def test_no_relation_when_rules_overlap_or_scaffold_is_not_leading(tmp_path, case):
     """Uniqueness is across both rules, and the scaffold must lead (the host folds the todo list in first)."""
     engine = _engine(tmp_path)
     try:
-        note = "a stored note"
         stored = {"both-rules": [P1, TODO + "\n\n" + P1, P2], "trailing-scaffold": [P1],
-                  "stored-todo-second": [P1, TODO], "gap": [P1, P2], "scaffold-paragraph": [note, P1]}[case]
+                  "stored-todo-second": [P1, TODO], "gap": [P1, P2]}[case]
         content = {"both-rules": TODO + "\n\n" + P1 + "\n\n" + P2,  # (i) [scaffold, P1, P2] and (ii) [TODO+P1, P2]
                    "trailing-scaffold": P1 + "\n\n" + TODO,
                    "stored-todo-second": P1 + "\n\n" + TODO,
-                   "gap": TODO + "\n\n" + P1 + "\n\nunknown middle\n\n" + P2,
-                   "scaffold-paragraph": TODO + "\n\n" + note + "\n\n" + P1}[case]  # the scaffold may hold `note`
+                   "gap": TODO + "\n\n" + P1 + "\n\nunknown middle\n\n" + P2}[case]
         history = []
         for i, text in enumerate(stored):
             history += [_u(text, 500.0 + 2 * i), _a(f"reply {i}", 501.0 + 2 * i)]
@@ -127,5 +125,21 @@ def test_no_relation_when_rules_overlap_or_scaffold_is_not_leading(tmp_path, cas
         row = _rows(engine)[-1]
         assert row["content"] == content
         assert not [r for r in _relations(engine) if r[1] == "composite_of" and r[0] == row["store_id"]]
+    finally:
+        engine.shutdown()
+
+
+def test_scaffold_never_holds_a_whole_stored_row(tmp_path):
+    """A stored paragraph after the todo block is a part, so the only allowed split is [scaffold, note, P1]."""
+    engine = _engine(tmp_path)
+    try:
+        note = "a stored note"
+        history = [_u(note, 500.0), _a("reply", 501.0), _u(P1, 502.0), _a("reply two", 503.0)]
+        engine.ingest(history)
+        ids = {r["content"]: r["store_id"] for r in _rows(engine)}
+        engine.ingest([*history, _u(TODO + "\n\n" + note + "\n\n" + P1, None)])
+        row = _rows(engine)[-1]
+        assert [r for r in _relations(engine) if r[1] == "composite_of"] == [
+            (row["store_id"], "composite_of", target, i) for i, target in enumerate([None, ids[note], ids[P1]])]
     finally:
         engine.shutdown()
