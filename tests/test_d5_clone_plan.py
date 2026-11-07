@@ -5,6 +5,7 @@ import json
 import os
 import sqlite3
 import subprocess
+import sys
 
 import pytest
 
@@ -175,6 +176,14 @@ def test_tool_output(command, size):
     result = subprocess.run(["/bin/sh", "-c", command], check=True, capture_output=True)  # The terminal tool's shell.
     assert result.stdout == b"d" * size
     assert result.stderr == b""
+
+
+@pytest.mark.parametrize("command,size", [(LARGE_COMMAND, 204800), (SMALL_COMMAND, 64)])
+def test_the_new_commands_write_exactly_the_old_commands_bytes(command, size):
+    """The previous commands, run as they were (no shell), give the same stdout bytes as the new ones."""
+    old = f"import sys; sys.stdout.write('d' * {size})"
+    before = subprocess.run([sys.executable, "-c", old], check=True, capture_output=True).stdout
+    assert subprocess.run(["/bin/sh", "-c", command], check=True, capture_output=True).stdout == before
 
 
 @pytest.mark.skipif(not os.environ.get("D5_HOST_SRC"), reason="D5_HOST_SRC not set")
