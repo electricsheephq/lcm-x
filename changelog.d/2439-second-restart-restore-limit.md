@@ -1,0 +1,1 @@
+- Changed: the exactly-once design doc names a known limit, pinned by a strict xfail: after a delegated child's stored-tail anchor is rejected, a later restart can store its kept rows again. That is surplus, never a loss (#2439).
