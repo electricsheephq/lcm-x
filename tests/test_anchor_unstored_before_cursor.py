@@ -24,8 +24,8 @@ SESSION = "s-anchor-unstored"
 PAD = " alpha beta gamma delta" * 40
 
 
-def _engine(tmp_path) -> LCMEngine:
-    config = LCMConfig(database_path=str(tmp_path / "lcm.db"), large_output_externalization_enabled=False)
+def _engine(tmp_path, **overrides) -> LCMEngine:
+    config = LCMConfig(database_path=str(tmp_path / "lcm.db"), large_output_externalization_enabled=False, **overrides)
     engine = LCMEngine(config=config, hermes_home=str(tmp_path / "home"))
     engine.on_session_start(SESSION, platform="cli", context_length=1_000_000)
     return engine
@@ -152,5 +152,52 @@ def test_unaccounted_rows_in_front_of_the_anchor_log_a_reasoned_warning(tmp_path
         message = lines[0].getMessage()
         # The moved prompt and the tool-call row: neither is stored, bound or a compaction output.
         assert "2 row(s)" in message and "neither stored nor compaction outputs" in message, message
+    finally:
+        engine.shutdown()
+
+
+STEER = {"role": "user", "content": "steer: keep the answer short"}  # unstamped, as the host inserts it
+
+
+def _steered(engine, turns: int, reply, steer_at: int) -> tuple[list[dict], list[dict]]:
+    """``turns`` stamped user turns with unstamped replies, then a /steer inserted ``steer_at`` rows from the end,
+    then one more turn. Returns (the view before the steer, the view after it)."""
+    view = []
+    for index in range(turns):
+        view += [_u(f"T{index} user turn", 1000 + index), {"role": "assistant", "content": reply(index)}]
+        engine.ingest(view)
+    before = list(view)
+    view.insert(len(view) - steer_at, dict(STEER))
+    view += [_u("the next user turn", 5000), {"role": "assistant", "content": "the next reply" + PAD}]
+    engine.ingest(view)
+    return before, view
+
+
+def _count(engine, text) -> int:
+    return sum(1 for row in _stored(engine) if row.get("content") == text)
+
+
+def test_a_reply_repeated_past_the_audited_tail_is_not_stored_again(tmp_path):
+    """Review: copies of a repeated reply outside the audited tail must not make a stored copy look unaccounted.
+    With 40 equal replies the tail holds fewer copies than the prefix reserves; unsure counts as accounted."""
+    engine = _engine(tmp_path)
+    try:
+        same = "the same reply every time" + PAD
+        _before, view = _steered(engine, 40, lambda _i: same, 3)
+        # As on main: the 40 replies and the displaced reply after the steer once more (#633's known duplicate).
+        assert _count(engine, same) == 41
+        assert _count(engine, STEER["content"]) == 1
+    finally:
+        engine.shutdown()
+
+
+def test_a_redacted_reply_in_front_of_the_anchor_is_not_stored_again(tmp_path):
+    """Review: a lossy (redacted) identity has no comparable key; such a row counts as accounted, as on main."""
+    engine = _engine(tmp_path, sensitive_patterns_enabled=True)
+    try:
+        secret = "the reply quotes password=hunter2hunter2 from the file" + PAD
+        _before, _view = _steered(engine, 6, lambda i: secret if i == 4 else f"reply {i}" + PAD, 5)
+        # Main: 12 rows, the steer, the next turn's two rows, and the displaced reply after the steer (#633): 16.
+        assert len(_stored(engine)) == 16
     finally:
         engine.shutdown()
