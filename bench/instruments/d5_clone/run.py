@@ -576,7 +576,7 @@ def run(host, *, rc_id, prior=(), instrument_fix=None):
     snap = host.rows(base)
     unreadable = [a for a in arms if arms[a]["rows"] is None]
     for a in unreadable:
-        arms[a]["rows"] = {"store": [], "host": []}  # Placeholders only: bars 1 and 3 are INCONCLUSIVE below.
+        arms[a]["rows"] = {"store": [], "host": []}  # Placeholders only: unreadable rc rows make bars 1 and 3 INCONCLUSIVE below; unreadable GA rows alone keep a bar 1 FAIL.
     tops = {k: max((r[c] for r in snap[k]), default=0) for k, c in (("store", "store_id"), ("host", "id"))}
     new = {a: [r for r in arms[a]["rows"]["store"] if r["store_id"] > tops["store"]] for a in arms}
     binds, hosts = arms["rc"]["binds"], [r for r in arms["rc"]["rows"]["host"] if r["id"] > tops["host"]]
