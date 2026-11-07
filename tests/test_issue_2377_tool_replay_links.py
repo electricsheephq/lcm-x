@@ -206,6 +206,29 @@ def test_incoming_row_metadata_never_moves_its_owner(build):
     assert not linked & set(targets)
 
 
+def test_replay_seed_reads_never_scan_unrelated_history(build):
+    """Codex P2: seed reads search by the targets' ids; the store's other replay history is never scanned."""
+    engine = build()
+    engine.ingest([U, call(), X])
+    conn = engine._store._conn
+
+    def steps():
+        count = [0]
+        conn.set_progress_handler(lambda: count.__setitem__(0, count[0] + 1), 100)
+        try:
+            engine._prepare_tool_replay_links([call(), X], 64)
+        finally:
+            conn.set_progress_handler(None, 100)
+        return count[0]
+
+    before = steps()
+    conn.executemany("INSERT INTO message_relations(store_id, kind, related_store_id) "
+                     "VALUES (?, 'possible_replay_of', ?)", [(10**6 + i, 10**6 + i + 1) for i in range(0, 40_000, 2)])
+    conn.commit()
+    after = steps()
+    assert after <= before + 20, (before, after)
+
+
 def test_summary_coverage_is_combined_once_per_scan(build, monkeypatch):
     """Codex P2: the ownership union is built once, not copied for every tail tool row."""
     from hermes_lcm import reconcile
