@@ -51,14 +51,27 @@ STOP_REASON = re.compile(r"compaction stop: reason=(\w+)")
 PRODUCT_FRESH_TAIL = 24  # config.py LCMConfig.fresh_tail_count
 
 
-def default_age_turns(env: dict) -> int:
+def fresh_tail(env: dict, home: Path | None = None) -> tuple[int, str]:
+    """LCM-X's effective fresh tail for the hosts and where it came from. The hosts load ``<home>/.env`` over their
+    process environment at startup, so that file's LCM_FRESH_TAIL_COUNT wins. Only that one key is read; the file is
+    never printed."""
+    value, source = env.get("LCM_FRESH_TAIL_COUNT") or None, "env"
+    dotenv = home / ".env" if home is not None else None
+    if dotenv is not None and dotenv.is_file():
+        for line in dotenv.read_text(errors="replace").splitlines():
+            key, sep, raw = line.strip().removeprefix("export ").partition("=")
+            if sep and key.strip() == "LCM_FRESH_TAIL_COUNT":
+                value, source = raw.strip().strip("'\"") or None, ".env"
+    try:
+        return int(value), source
+    except (TypeError, ValueError):
+        return PRODUCT_FRESH_TAIL, "product default"
+
+
+def default_age_turns(env: dict, home: Path | None = None) -> int:
     """Ageing turns that put the paste outside LCM-X's fresh tail. After the paste come its reply, two rows per ageing
     turn and the triggering turn's prompt and reply, so ceil(tail / 2) turns leave at least the tail behind it."""
-    try:
-        tail = int(env.get("LCM_FRESH_TAIL_COUNT") or PRODUCT_FRESH_TAIL)
-    except ValueError:
-        tail = PRODUCT_FRESH_TAIL
-    return max(1, -(-tail // 2))
+    return max(1, -(-fresh_tail(env, home)[0] // 2))
 EXIT_LCM_INACTIVE = 3
 EXIT_EVENT_LOG = 4
 PLANNED_FLOORS = ("turns", "delegated_children", "compactions", "compactions_then_restart", "restarts_cold",
@@ -484,6 +497,10 @@ class Driver:
                 if stop not in ("end_turn", "complete"):
                     self.ev.write("compress_request_failed", self.slots[slot]["session"], f"slot={slot} phase=paste")
                     return False
+            if not self.compress_log_result(offsets)[1]:
+                # Nothing compacted during the paste or ageing turns: close the paste window, so it cannot claim
+                # another session's sessionless line (the audit drops a session's latest request on this event).
+                self.ev.write("compress_request_failed", self.slots[slot]["session"], f"slot={slot} phase=paste unused")
             self.ev.write("compress_request", self.slots[slot]["session"], f"slot={slot} phase=trigger", retry=retry)
             self.compactions["requests"] += 1
             try:
@@ -661,7 +678,7 @@ class Driver:
                                 "attempts": self.attempts["delegate"],
                                 "children_in_state_db": self.children()},
                    "context_length": self.context, "stopped": stopped, "sessions": len(self.slots),
-                   "age_turns": self.age_turns}
+                   "age_turns": self.age_turns, "fresh_tail": getattr(self, "fresh_tail", None)}
         self.ev.write("summary", None, "end of run", **summary)
         summary["exit"] = EXIT_LCM_INACTIVE if stopped == "lcm_inactive" else 0
         return summary
@@ -708,11 +725,13 @@ def main(argv=None) -> int:
     a.workdir.mkdir(parents=True, exist_ok=True)
     write_notes(a.workdir)
     env = host_env(dict(os.environ), a.home, a.workdir, a.hermes_src)
+    tail, tail_source = fresh_tail(env, a.home)
     if a.age_turns is None:
-        a.age_turns = default_age_turns(env)
+        a.age_turns = default_age_turns(env, a.home)
     d = Driver(python=a.hermes_python, src=a.hermes_src, home=a.home, workdir=a.workdir, events=events,
                env=env, prompt_timeout=a.prompt_timeout, max_hours=a.max_hours, cancel_after=a.cancel_after,
                age_turns=a.age_turns)
+    d.fresh_tail = {"count": tail, "source": tail_source}
     try:
         summary = d.run(ops, tg)
     except EventLogError as exc:

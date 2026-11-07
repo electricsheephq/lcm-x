@@ -217,8 +217,9 @@ python -m bench.instruments.gate_kit.drive --hermes-python <host venv python> --
   undo that removed rows and a completed second send. A rejected
   first TUI send skips undo. After a successful close, a failed resume leaves the slot unbound so its next operation
   resumes it again. `--max-hours` stops the plan and still writes the summary.
-- Each compress attempt sends the long paste, then `--age-turns` plain turns (chosen without rng; the default is ceil(`LCM_FRESH_TAIL_COUNT` / 2) read from the hosts'
-  environment, 12 for the product's 24-row tail when it is unset, and the summary records it as `age_turns`) so the paste
+- Each compress attempt sends the long paste, then `--age-turns` plain turns (chosen without rng; the default is ceil(`LCM_FRESH_TAIL_COUNT` / 2), read from
+  `<home>/.env` (the hosts load it over their environment; only that key is read) or else the hosts' environment, and 12 for
+  the product's 24-row tail when neither sets it; the summary records `age_turns` and `fresh_tail` with its source) so the paste
   leaves LCM-X's fresh tail, then one plain triggering turn and `/compress`. It records two
   `compress_request` events: `phase=paste` before the paste, and `phase=trigger` after the ageing turns, before the
   triggering turn. Both only open audit attribution windows; `requests` counts the `phase=trigger` one. So a
@@ -226,7 +227,9 @@ python -m bench.instruments.gate_kit.drive --hermes-python <host venv python> --
   it. The paste window lasts 120 s, so an ageing compaction more than 120 s after the paste and more than 2 s before
   the trigger request stays unattributed: it still counts toward `compactions`, but not toward
   `compactions_then_restart`. `compress_result` records the manual compression outcome separately. A failed paste,
-  ageing or triggering turn writes `compress_request_failed`, and the audit drops that session's latest request.
+  ageing or triggering turn writes `compress_request_failed`, and the audit drops that session's latest request. When
+  the paste and ageing turns logged no compaction, a `compress_request_failed` with `phase=paste unused` closes the
+  paste window before the trigger request, so an unused window never claims another session's sessionless line.
   Each attempt reads only log bytes added since its paste-phase offsets, from the entry point's stderr and
   `<home>/logs/agent.log`, accepting only LCM-X logger lines. That means a compaction during the paste or ageing turns
   counts for the attempt. `LCM compaction #` or `in-place compression boundary kept` labels it `compressed`;
