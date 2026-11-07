@@ -56,8 +56,8 @@ _POOL_WINDOW = 256  # store ids either side of a stamp donor searched for a comp
 _INSERT_DIFF_BUDGET = 1_000_000  # #633: old x new rows compared per insertion diff (quadratic worst case ~40 ms)
 _CARRIER_LEDGER_CAP = 256  # #1000: carrier emission keys remembered as seen / retired (process-local)
 _PRESENCE_WINDOW_ROWS = 10000  # total stored rows across the presence scope
-_PRESENCE_WINDOW_BYTES = 104_000_000  # stored content and tool-call text across the scope
-_PRESENCE_TEXT_BYTES = 16_000_000  # stored text the audit normalizes (rows of a candidate's text role)
+_PRESENCE_WINDOW_BYTES = 104_000_000  # characters (code points) of stored content and tool-call text across the scope
+_PRESENCE_TEXT_BYTES = 16_000_000  # characters of stored text the audit normalizes (rows of a candidate's text role)
 _PRESENCE_WINDOW_LOGGED: set[tuple[str, int, str]] = set()  # store file and session, once per process
 
 
@@ -669,7 +669,7 @@ class IdentityAnchorMixin:
                         notice = (str(self._db_path), self._db_path.stat().st_ino, session)
                         if notice not in _PRESENCE_WINDOW_LOGGED:
                             logger.info("LCM identity-anchor presence window incomplete: session=%s scope=%d "
-                                        "budget=%d bytes=%d text=%d", session, len(scope), budget + len(tail), byte_budget,
+                                        "budget=%d chars=%d text_chars=%d", session, len(scope), budget + len(tail), byte_budget,
                                         text_budget)
                             _PRESENCE_WINDOW_LOGGED.add(notice)
                         return []
