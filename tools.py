@@ -3366,7 +3366,7 @@ def _lcm_recall_answer_ready_content(
             continue
         content = str(stored.get("content") or "")
         span = hit.get("chunk_span") or {}
-        if not span and len(content) > _LCM_RECALL_ANSWER_READY_CONTENT_CHARS:
+        if not span and len(content) > char_cap:
             # Short rows keep their legacy evidence_span and output bytes.
             # Emoji has no lexical hydration terms; use LIKE's verified span.
             for candidate in [hit, *entry.get("_alternates", [])]:
@@ -3450,6 +3450,13 @@ def _lcm_recall_snippet_windows(
                 + ",".join("?" for _ in ids) + ")", ids,
             ).fetchall() if conn is not None else []
             rows_by_id = {row[0]: dict(zip(columns.split(", "), row[1:])) for row in rows}
+            # An extra shows only event_time, so a carried (borrowed) stamp is
+            # shown as no time rather than as the row's own.
+            timed = [int(sid) for sid, row in rows_by_id.items() if row.get("observed_at") is not None]
+            carried = (engine._store.get_carried_stamp_ids(timed, connection=conn)
+                       if extra_entries and timed else set())
+            for sid in carried:
+                rows_by_id[sid]["observed_at"] = None
             content = _lcm_recall_answer_ready_content(engine, messages, rows_by_id=rows_by_id, **kwargs)
     except Exception as exc:  # noqa: BLE001 - optional read must never fail recall
         logger.warning("lcm_recall %s read failed: %s",

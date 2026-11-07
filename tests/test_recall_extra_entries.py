@@ -380,7 +380,7 @@ def test_private_read_is_one_batch_and_uses_its_own_event_time(recall_engine, mo
     monkeypatch.setattr(sqlite3, "connect", connect)
     on = json.loads(d.invoke(limit=6, extra_entries=3, read_extra_entries=partial(
         tools._lcm_recall_snippet_windows, e, extra_entries=True)))
-    assert len([sql for sql in statements if sql.startswith("SELECT")]) == 1
+    assert len([sql for sql in statements if sql.startswith("SELECT") and "FROM messages" in sql]) == 1
     assert [h["event_time"] for h in on["hits"][6:]] == [
         tools._lcm_recall_event_time({"observed_at": 1700000000 + i})["event_time"] for i in range(7, 10)
     ]
@@ -451,3 +451,64 @@ def test_short_pool_stops_without_more_reads():
     d.read_windows.assert_not_called()
     del on["hits"][20:]
     assert on == off
+
+
+def test_reader_missing_identity_is_read_error_not_a_failure():
+    d = make_delivery((1300,) * 6)
+    off = json.loads(d.invoke(limit=2))
+    on = json.loads(d.invoke(limit=2, extra_entries=1, read_extra_entries=Mock(return_value=({}, None))))
+    assert on.pop("extra_entries_skipped") == "read_error"
+    assert on == off
+
+
+def test_like_span_used_for_rows_between_window_and_answer_ready_caps():
+    content = "a" * 800 + "🚀" + "b" * 200
+    hit = {"kind": "message_excerpt", "store_id": 1, "session_id": "s1", "snippet": "a" * 300,
+           "_like_excerpt": {"snippet": content[790:812], "content_offset": 790}}
+    rows = {1: {"content": content, "role": "user", "source": "chat"}}
+    entry = {"hit": hit, "ranks": {0: 1}}
+    window = tools._lcm_recall_answer_ready_content(
+        SimpleNamespace(), [entry], query="🚀", rows_by_id=rows, char_cap=300,
+    )[tools._hit_identity(hit)]["content"]
+    assert "🚀" in window and len(window) == 300
+    # The default (answer_ready / snippet-window) cap keeps short rows whole, as before.
+    whole = tools._lcm_recall_answer_ready_content(
+        SimpleNamespace(), [entry], query="🚀", rows_by_id=rows,
+    )[tools._hit_identity(hit)]
+    assert whole["content"] == content and whole["content_offset"] == 0
+
+
+def carried_setup(e, monkeypatch):
+    d = make_delivery((1300,) * 9)
+    for i in range(1, 10):
+        e._store.append(f"s{i}", {"role": "assistant", "content": d.rows[i]["content"], "timestamp": 1700000000 + i})
+    e._store.add_message_relations([[(8, "carried_stamp", None, 0, 1700000008)]])
+    reader = partial(tools._lcm_recall_snippet_windows, e, extra_entries=True)
+    return d, reader
+
+
+def test_carried_extra_stamp_is_null_and_own_stamp_kept(recall_engine, monkeypatch):
+    d, reader = carried_setup(recall_engine, monkeypatch)
+    off = json.loads(d.invoke(limit=6))
+    on = json.loads(d.invoke(limit=6, extra_entries=3, read_extra_entries=reader))
+    assert [h["store_id"] for h in on["hits"][6:]] == [7, 8, 9]
+    assert [h["event_time"] for h in on["hits"][6:]] == [
+        tools._lcm_recall_event_time({"observed_at": 1700000007})["event_time"], None,
+        tools._lcm_recall_event_time({"observed_at": 1700000009})["event_time"],
+    ]
+    on["hits"] = on["hits"][:6]
+    assert on == off
+
+
+def test_carried_lookup_error_is_read_error(recall_engine, monkeypatch):
+    d, reader = carried_setup(recall_engine, monkeypatch)
+    off = d.invoke(limit=6)
+    monkeypatch.setattr(recall_engine._store, "get_carried_stamp_ids",
+                        Mock(side_effect=sqlite3.OperationalError("boom")))
+    on = json.loads(d.invoke(limit=6, extra_entries=3, read_extra_entries=reader))
+    assert on.pop("extra_entries_skipped") == "read_error"
+    assert json.dumps(on) == off
+    lookup = Mock(side_effect=AssertionError("lookup at setting 0"))
+    monkeypatch.setattr(recall_engine._store, "get_carried_stamp_ids", lookup)
+    assert d.invoke(limit=6, extra_entries=0, read_extra_entries=reader) == off
+    lookup.assert_not_called()

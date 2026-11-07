@@ -581,20 +581,22 @@ def deliver_recall(
                     candidates, query=query, expanded_limit=len(candidates),
                     fts_arm_index=fts_arm_index, deadline=deadline, char_cap=300,
                 ) if read_extra_entries is not None else ({}, "read_error")
-            except Exception as exc:  # noqa: BLE001 - optional extras must never fail recall
-                logging.getLogger(__name__).warning("lcm_recall extra entries read failed: %s", type(exc).__name__)
-                content, skipped = {}, "read_error"
-            if skipped is not None:
-                response["extra_entries_skipped"] = skipped
-            else:
-                for entry in candidates:
+                extras = []
+                for entry in candidates if skipped is None else []:
                     hit = entry["hit"]
                     window = content[_hit_identity(hit)]
-                    hits_out.append({
+                    extras.append({
                         "kind": hit.get("kind"), "store_id": hit.get("store_id"),
                         "session_id": hit.get("session_id"), "event_time": window.get("event_time"),
                         "window": window["content"], "extra": True,
                     })
+            except Exception as exc:  # noqa: BLE001 - optional extras must never fail recall
+                logging.getLogger(__name__).warning("lcm_recall extra entries read failed: %s", type(exc).__name__)
+                skipped = "read_error"
+            if skipped is not None:
+                response["extra_entries_skipped"] = skipped
+            else:
+                hits_out.extend(extras)
                 while len(hits_out) > limit and len(json.dumps(response)) > response_char_cap:
                     hits_out.pop()
             return json.dumps(response)
