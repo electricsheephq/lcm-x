@@ -9,8 +9,8 @@
       "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "admission-full": {
-      "outcome_sha": "75ef8732b1cfa13523983c3c392341dc5fab3e49501544e7e7ec6f520621ebd5",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "5df325f64fc8ac914ad0efd9a7f4edd322b36a1e85509e8bc63e43de81b3d4cc",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then admission-full: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links)"
     },
     "admission-ignored": {
       "outcome_sha": "c1c04bff836ec09b1ce3c9c06c7999c20a0545ee1330807fde763f89d4574c83",
@@ -157,12 +157,12 @@
       "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "empty-all-ordinals": {
-      "outcome_sha": "4bbd3c4b338fc6f68aa2e6e81483a727509bb8a14a8622a028a54cc619ec02a1",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "97b91dab6057e08522e948833fbe46b1978f16b46e04d35837e8318006e3648e",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then empty-all-ordinals: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links)"
     },
     "empty-child-placeholder-prefix": {
-      "outcome_sha": "eda20414f824c0caf5fbb3a850b97b2eaecc895e0e1bd2dff5d4ad9f4bd68a63",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "bc37813e310daa7d74d82168bc283b29236c6b1db57ac566977f164fca32a1df",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then empty-child-placeholder-prefix: adds possible_replay_of 3->1 (#2305 P1h PR5 cursor-0 batch links)"
     },
     "ignored-changed": {
       "outcome_sha": "8520b7eaf3d8f64d1d7e4c06bf670b1bebf0750a3ea20c3ebffa58836376c142",
@@ -177,8 +177,8 @@
       "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "ignored-new": {
-      "outcome_sha": "90262e63a8117f670a7b1cc0b2d4be0abc2ac2b55f799157336cdfed357f8907",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "549a6c05efef0106abecbbf19fdb1d1666de66532ae230eaddd79b1c438fb037",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then ignored-new: adds possible_replay_of 6->5 (#2305 P1h PR5 cursor-0 batch links)"
     },
     "ignored-prefix": {
       "outcome_sha": "bb5dc23e6f79dea459fd1664769f3884d26d2a202e2a1015e055785c8e90d001",
@@ -197,32 +197,32 @@
       "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "marker-changed": {
-      "outcome_sha": "6e1ac81a4d4d6f9e6bd0468d141860c041057f6e2621e341b41c8275eebcc04a",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "c1ad64828e8bec600561014cb03a23680dc079642ce845981dbff54903bb82c3",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then marker-changed: adds possible_replay_of 6->4 (#2305 P1h PR5 cursor-0 batch links)"
     },
     "marker-delta": {
-      "outcome_sha": "d4a514a2bc0c242d710bd89c449f02696db5b95b4b7ecb2d723ca689b5c9195f",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "7a1e67ef45af81a2e80f3846ad714861460bf2c8afc58f1bbbecf6b73ea70af4",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then marker-delta: adds possible_replay_of 5->4 (#2305 P1h PR5 cursor-0 batch links)"
     },
     "marker-full": {
-      "outcome_sha": "d23aa535139b1769c9cd682016e64c99000b5e9ca587fd1bc42121851546c8e4",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "809cd723cbe9486dc9e16528e8b3f6a07d137d92747cf2082b8a85259ca82179",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then marker-full: adds possible_replay_of 5->4 (#2305 P1h PR5 cursor-0 batch links)"
     },
     "marker-new": {
-      "outcome_sha": "9a8669a798968ce4b8d0fb304fc40ff824d19466b7e699dc89ed7e27f60135a1",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "52492a8d84bc2e95e4c808c6dbf23a92a5a199efc3ff7198175b9642f9e1ce5b",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then marker-new: adds possible_replay_of 6->5 (#2305 P1h PR5 cursor-0 batch links)"
     },
     "marker-prefix": {
       "outcome_sha": "baa6b23ffc635d72cd8bca10d61ce90aa0c3b1f9cafad9bfc7d6822ac38ab47f",
       "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "marker-rewrite": {
-      "outcome_sha": "d65802c92733638f2911987538fba86b0474234cd41d91470bc084ce70a37183",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "8b5724302a5f3727c6460b6e3c93db7fc30adc6fbfa7283371360d58374d95e4",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then marker-rewrite: adds possible_replay_of 5->4 (#2305 P1h PR5 cursor-0 batch links)"
     },
     "marker-suffix": {
-      "outcome_sha": "9cac57b16546435fff63093ff05f83f42c9f995afaeeb67fdadd1c88d54ec25d",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "58b041ddcc3ad0ff3dbafa089b1b775d2ee658cf6b442ddcfc3f3f1a37951389",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then marker-suffix: adds possible_replay_of 5->4 (#2305 P1h PR5 cursor-0 batch links)"
     },
     "marker-warm": {
       "outcome_sha": "ad49857cbbdbb469465bc8dd8d327a029b1c4b1ff7b316d38c6b0965384509e6",
@@ -253,56 +253,56 @@
       "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "placeholder-0-1-all": {
-      "outcome_sha": "83cddfe73c63c74c93ba1b93f3fb9b0660887582a5cf1eb14c1d2f0d9ab92c45",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "afb62a6adc905e041af3c2fa530e99d454973b6fcaff39cc47b49b4276e9df98",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-0-1-all: adds possible_replay_of 3->1, 4->2 (#2305 P1h PR5 cursor-0 batch links)"
     },
     "placeholder-0-1-generated": {
-      "outcome_sha": "ea84885198f75f3c4af2bd2bb596a837b027758504b6f4980d7dfa355f4bd60a",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "81b0b8ebafab9a54b6470fb040713281ad70b1d8e5e437d795a544a3e02d293c",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-0-1-generated: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links)"
     },
     "placeholder-0-1-mixed": {
       "outcome_sha": "d13ff7499b7fb729e2150a15553d3f1e2f1d8f184ac4aa3916b7edb408d9aad6",
       "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "placeholder-0-1-single": {
-      "outcome_sha": "7d8395a93865650755dfa0d3236dd6a13faadc8ac216d2cd6469b2cbb919689e",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "84f43245dc1a39e7f53a7be9919fed7d73a0e92e3460fcbfbc235ac3ce34e859",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-0-1-single: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links)"
     },
     "placeholder-0-1-stored-counts": {
-      "outcome_sha": "83cddfe73c63c74c93ba1b93f3fb9b0660887582a5cf1eb14c1d2f0d9ab92c45",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "afb62a6adc905e041af3c2fa530e99d454973b6fcaff39cc47b49b4276e9df98",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-0-1-stored-counts: adds possible_replay_of 3->1, 4->2 (#2305 P1h PR5 cursor-0 batch links)"
     },
     "placeholder-0-1-summary": {
       "outcome_sha": "02d590655aca5d009f9793ed83e4817cdef3f6f8687d2ad9eea61a6e6e6e90f6",
       "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "placeholder-0-2-all": {
-      "outcome_sha": "83cddfe73c63c74c93ba1b93f3fb9b0660887582a5cf1eb14c1d2f0d9ab92c45",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "afb62a6adc905e041af3c2fa530e99d454973b6fcaff39cc47b49b4276e9df98",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-0-2-all: adds possible_replay_of 3->1, 4->2 (#2305 P1h PR5 cursor-0 batch links)"
     },
     "placeholder-0-2-generated": {
-      "outcome_sha": "ea84885198f75f3c4af2bd2bb596a837b027758504b6f4980d7dfa355f4bd60a",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "81b0b8ebafab9a54b6470fb040713281ad70b1d8e5e437d795a544a3e02d293c",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-0-2-generated: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links)"
     },
     "placeholder-0-2-mixed": {
       "outcome_sha": "772996163e9c688f0f71b4fad65f01ad9ff9e42120678569ed4d360b124acf84",
       "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "placeholder-0-2-single": {
-      "outcome_sha": "7d8395a93865650755dfa0d3236dd6a13faadc8ac216d2cd6469b2cbb919689e",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "84f43245dc1a39e7f53a7be9919fed7d73a0e92e3460fcbfbc235ac3ce34e859",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-0-2-single: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links)"
     },
     "placeholder-0-2-stored-counts": {
-      "outcome_sha": "83cddfe73c63c74c93ba1b93f3fb9b0660887582a5cf1eb14c1d2f0d9ab92c45",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "afb62a6adc905e041af3c2fa530e99d454973b6fcaff39cc47b49b4276e9df98",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-0-2-stored-counts: adds possible_replay_of 3->1, 4->2 (#2305 P1h PR5 cursor-0 batch links)"
     },
     "placeholder-0-2-summary": {
       "outcome_sha": "02d590655aca5d009f9793ed83e4817cdef3f6f8687d2ad9eea61a6e6e6e90f6",
       "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "placeholder-1-1-all": {
-      "outcome_sha": "83cddfe73c63c74c93ba1b93f3fb9b0660887582a5cf1eb14c1d2f0d9ab92c45",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "afb62a6adc905e041af3c2fa530e99d454973b6fcaff39cc47b49b4276e9df98",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-1-1-all: adds possible_replay_of 3->1, 4->2 (#2305 P1h PR5 cursor-0 batch links)"
     },
     "placeholder-1-1-generated": {
       "outcome_sha": "485416bec023ddbcadc21a0356755c54170d34c4a64cfbb7c580e67a84d0c9c1",
@@ -313,20 +313,20 @@
       "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "placeholder-1-1-single": {
-      "outcome_sha": "7d8395a93865650755dfa0d3236dd6a13faadc8ac216d2cd6469b2cbb919689e",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "84f43245dc1a39e7f53a7be9919fed7d73a0e92e3460fcbfbc235ac3ce34e859",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-1-1-single: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links)"
     },
     "placeholder-1-1-stored-counts": {
-      "outcome_sha": "83cddfe73c63c74c93ba1b93f3fb9b0660887582a5cf1eb14c1d2f0d9ab92c45",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "afb62a6adc905e041af3c2fa530e99d454973b6fcaff39cc47b49b4276e9df98",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-1-1-stored-counts: adds possible_replay_of 3->1, 4->2 (#2305 P1h PR5 cursor-0 batch links)"
     },
     "placeholder-1-1-summary": {
       "outcome_sha": "ba58f43d40a473da5b15cd163debf6fc025aa3de0b26d80bf161c180c469c70a",
       "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "placeholder-1-2-all": {
-      "outcome_sha": "83cddfe73c63c74c93ba1b93f3fb9b0660887582a5cf1eb14c1d2f0d9ab92c45",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "afb62a6adc905e041af3c2fa530e99d454973b6fcaff39cc47b49b4276e9df98",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-1-2-all: adds possible_replay_of 3->1, 4->2 (#2305 P1h PR5 cursor-0 batch links)"
     },
     "placeholder-1-2-generated": {
       "outcome_sha": "485416bec023ddbcadc21a0356755c54170d34c4a64cfbb7c580e67a84d0c9c1",
@@ -337,20 +337,20 @@
       "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "placeholder-1-2-single": {
-      "outcome_sha": "7d8395a93865650755dfa0d3236dd6a13faadc8ac216d2cd6469b2cbb919689e",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "84f43245dc1a39e7f53a7be9919fed7d73a0e92e3460fcbfbc235ac3ce34e859",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-1-2-single: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links)"
     },
     "placeholder-1-2-stored-counts": {
-      "outcome_sha": "83cddfe73c63c74c93ba1b93f3fb9b0660887582a5cf1eb14c1d2f0d9ab92c45",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "afb62a6adc905e041af3c2fa530e99d454973b6fcaff39cc47b49b4276e9df98",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-1-2-stored-counts: adds possible_replay_of 3->1, 4->2 (#2305 P1h PR5 cursor-0 batch links)"
     },
     "placeholder-1-2-summary": {
       "outcome_sha": "02d590655aca5d009f9793ed83e4817cdef3f6f8687d2ad9eea61a6e6e6e90f6",
       "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "placeholder-2-1-all": {
-      "outcome_sha": "83cddfe73c63c74c93ba1b93f3fb9b0660887582a5cf1eb14c1d2f0d9ab92c45",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "afb62a6adc905e041af3c2fa530e99d454973b6fcaff39cc47b49b4276e9df98",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-2-1-all: adds possible_replay_of 3->1, 4->2 (#2305 P1h PR5 cursor-0 batch links)"
     },
     "placeholder-2-1-generated": {
       "outcome_sha": "485416bec023ddbcadc21a0356755c54170d34c4a64cfbb7c580e67a84d0c9c1",
@@ -361,20 +361,20 @@
       "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "placeholder-2-1-single": {
-      "outcome_sha": "7d8395a93865650755dfa0d3236dd6a13faadc8ac216d2cd6469b2cbb919689e",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "84f43245dc1a39e7f53a7be9919fed7d73a0e92e3460fcbfbc235ac3ce34e859",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-2-1-single: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links)"
     },
     "placeholder-2-1-stored-counts": {
-      "outcome_sha": "83cddfe73c63c74c93ba1b93f3fb9b0660887582a5cf1eb14c1d2f0d9ab92c45",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "afb62a6adc905e041af3c2fa530e99d454973b6fcaff39cc47b49b4276e9df98",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-2-1-stored-counts: adds possible_replay_of 3->1, 4->2 (#2305 P1h PR5 cursor-0 batch links)"
     },
     "placeholder-2-1-summary": {
       "outcome_sha": "ba58f43d40a473da5b15cd163debf6fc025aa3de0b26d80bf161c180c469c70a",
       "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "placeholder-2-2-all": {
-      "outcome_sha": "83cddfe73c63c74c93ba1b93f3fb9b0660887582a5cf1eb14c1d2f0d9ab92c45",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "afb62a6adc905e041af3c2fa530e99d454973b6fcaff39cc47b49b4276e9df98",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-2-2-all: adds possible_replay_of 3->1, 4->2 (#2305 P1h PR5 cursor-0 batch links)"
     },
     "placeholder-2-2-generated": {
       "outcome_sha": "485416bec023ddbcadc21a0356755c54170d34c4a64cfbb7c580e67a84d0c9c1",
@@ -385,12 +385,12 @@
       "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "placeholder-2-2-single": {
-      "outcome_sha": "7d8395a93865650755dfa0d3236dd6a13faadc8ac216d2cd6469b2cbb919689e",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "84f43245dc1a39e7f53a7be9919fed7d73a0e92e3460fcbfbc235ac3ce34e859",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-2-2-single: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links)"
     },
     "placeholder-2-2-stored-counts": {
-      "outcome_sha": "83cddfe73c63c74c93ba1b93f3fb9b0660887582a5cf1eb14c1d2f0d9ab92c45",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "afb62a6adc905e041af3c2fa530e99d454973b6fcaff39cc47b49b4276e9df98",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-2-2-stored-counts: adds possible_replay_of 3->1, 4->2 (#2305 P1h PR5 cursor-0 batch links)"
     },
     "placeholder-2-2-summary": {
       "outcome_sha": "02d590655aca5d009f9793ed83e4817cdef3f6f8687d2ad9eea61a6e6e6e90f6",
@@ -421,8 +421,8 @@
       "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "proof-consumed-merge": {
-      "outcome_sha": "0b10a59029bc2ace2cf5de483595be4b794509526a221190f456f9078bd10b66",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "5afe86033a0c6c55f3b013d6ee012b8075f9d707cb5c4ea051519b890c5d26a5",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then proof-consumed-merge: adds possible_replay_of 6->5 (#2305 P1h PR5 cursor-0 batch links)"
     },
     "proof-consumed-missing-metadata": {
       "outcome_sha": "b0cfc7cd1928d2e1e2b66f0d890b3c8453e887f48d5be0a16d44eb77e36b5d95",
@@ -477,8 +477,8 @@
       "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "proof-native-merge": {
-      "outcome_sha": "6879eb5a85dc378221af8e407bf154874ed5033db4fb98e054bc2a971cecab84",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "4daef13124c29dda1c6530f2581a0e158dc63e95467946b9ade98e45a0e8a686",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then proof-native-merge: adds possible_replay_of 6->5 (#2305 P1h PR5 cursor-0 batch links)"
     },
     "proof-native-missing-metadata": {
       "outcome_sha": "b0cfc7cd1928d2e1e2b66f0d890b3c8453e887f48d5be0a16d44eb77e36b5d95",
@@ -537,8 +537,8 @@
       "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "proof-output-merge": {
-      "outcome_sha": "5f1d7693341a2b1bea560b7d2a2be0da19f4b45bbadb287f901f84cff72bd33f",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "47fbe0771af67253cc19d60ee13b3d5cdc8af6e9697ec55b8a0e36fd92273f07",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then proof-output-merge: adds possible_replay_of 6->5 (#2305 P1h PR5 cursor-0 batch links)"
     },
     "proof-output-missing-metadata": {
       "outcome_sha": "b0cfc7cd1928d2e1e2b66f0d890b3c8453e887f48d5be0a16d44eb77e36b5d95",
@@ -569,28 +569,28 @@
       "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "protect-large-assistant": {
-      "outcome_sha": "9e5ba68bbd1076690696e5e4b1e7aaf238de3c8e4cec323251b7c180de303bb9",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "b13645e0987309b318d49f96c14ecdc690b5dc9023f02f2334744f05bb61f2ba",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then protect-large-assistant: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links)"
     },
     "protect-large-user": {
-      "outcome_sha": "0df6891908dafbfaf2b78cdabb2f8501366c6a125648dff47489ac5009512344",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "d33936512eb0389d8dc314ad4dcec90bb1fc81b0123be34f0ff35f42ddf7f991",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then protect-large-user: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links)"
     },
     "protect-path-error": {
       "outcome_sha": "352525a3c28c381d6bc1cc05530ab8d0bdd396052420d596996f36e41acb9efc",
       "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "reconcile-tool-after-new": {
-      "outcome_sha": "78d932e838a0b342a5afa25be2d50d130c2d6fb1ea845c04641cf35a0c356e70",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "1f2dd325b32b419f64a031cbd624aa7e89ad86210222b1311f950de9799f2007",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then reconcile-tool-after-new: adds possible_replay_of 7->3 (#2305 P1h PR5 cursor-0 batch links); review fix: adds possible_replay_of 6->2 for the empty assistant tool-call copy (#2305 PR #2335)"
     },
     "repeated-equal-occurrences": {
       "outcome_sha": "b66e74141d6ec68a5551fa6c9caa3a042a3858135b20489351e432f9974ca58c",
       "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "repeated-tool-id": {
-      "outcome_sha": "8f4231770658dfbca52aff035930d346d7ccc72a4ae72db1a5345cd86124b7b4",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "67e3b96caf3f28bf1ab9cbc0a752815e89a421f54a298454bdacc79b7e14bff7",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then repeated-tool-id: adds possible_replay_of 6->3 (#2305 P1h PR5 cursor-0 batch links); review fix: adds possible_replay_of 5->2 for the empty assistant tool-call copy (#2305 PR #2335)"
     },
     "replay-build-mapped-ignore": {
       "outcome_sha": "9895704074931ec5cffb6078c20d094c16b2ab1e6336af63a2b0b86d1ed4e535",
@@ -601,8 +601,8 @@
       "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "row-filter-generated-append-error": {
-      "outcome_sha": "874230875112835f711049274f3fdd97bea4cffe6d42e8fedb7847d3007eb9ec",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "b2aa35478241aa7b60c216081cc545e1735791bc1e8d788b72480a6c4f7592b7",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then row-filter-generated-append-error: adds possible_replay_of 7->5, 8->6 (#2305 P1h PR5 cursor-0 batch links)"
     },
     "row-filter-ignore-ledger-lock": {
       "outcome_sha": "33474d00806c48a2f415c3270372ec5a3560904d095d4970e371932a946d2aa0",
@@ -633,24 +633,24 @@
       "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2344: compress no longer leaves its id()-keyed store-id map in engine state after the pass; state-after hash only, no row or outcome change"
     },
     "sqlite-append": {
-      "outcome_sha": "8ef36b8df91b5bf693c2ad826888b92fb8c3e8df810f28204eb28c37d79b5c21",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "320d20fb18a6a040ab1a1d25b70e0b06c0647b403bf39145d12277fa954d5938",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then sqlite-append: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links)"
     },
     "sqlite-duplicate-existing-tail": {
       "outcome_sha": "702139d7b61dfcdb50f1b9ea3277e11f1056d4d8e47126d5a32f8b1bc20e8cc2",
       "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "sqlite-duplicate-tail": {
-      "outcome_sha": "84741f353c6d65bdb06945005dd3d18201d873d66b818f50b0c6fcad902f679f",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "051df811a1ef0b0b74d1b1da080a4125e2add334c436db0526060ed78817045c",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then sqlite-duplicate-tail: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links)"
     },
     "sqlite-durable": {
       "outcome_sha": "0b115b03d0f2495bbdd6c3efac4a0ee3096fcad6e0f05d70bcb3c1da48016051",
       "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "sqlite-locked": {
-      "outcome_sha": "fabbadeebb3188c1a31eef57f683668d5ef514717a2a5cd878f24329ff2eabf5",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "514af1553229c77a2df0e30021cc8e3440cba3c21094f34cc946d0d5791d6c1a",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then sqlite-locked: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links)"
     },
     "sqlite-locked-existing-tail": {
       "outcome_sha": "a1f5b8966f775ff29d98f57f860c15ba9e467b00d19ae8eb7d4fd72a4378bd13",
@@ -665,16 +665,16 @@
       "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "sqlite-probe": {
-      "outcome_sha": "75ef8732b1cfa13523983c3c392341dc5fab3e49501544e7e7ec6f520621ebd5",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "5df325f64fc8ac914ad0efd9a7f4edd322b36a1e85509e8bc63e43de81b3d4cc",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then sqlite-probe: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links)"
     },
     "sqlite-relation": {
       "outcome_sha": "327761efc4b799251295e613f8dafff272078e8e941d5aee9127cd69d5465bf5",
       "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "sqlite-snapshot": {
-      "outcome_sha": "2923a8946aa09bc590416a89b6c94e521e8b11cef40f7308b074e4cedd506b4d",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "f6b21f76f1e8456533d15e459a4e5f2e7795f226e7941e08bb64158ee914e4fc",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then sqlite-snapshot: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links)"
     },
     "tool-segments-after-new": {
       "outcome_sha": "56232c0ea6412c873730f9a12e0d3e38b49f41e476db16e50d913a90b19062be",
@@ -701,32 +701,32 @@
       "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "tools-changed": {
-      "outcome_sha": "6ba60f2ff4096db9cd0aa6a883033aaa3adf7cd1973d71c492635d8adb477ecf",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "99446c15729e8becc7fa5ef340eae466fd3138b5ad273440e1aa4c869e317c39",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then tools-changed: adds possible_replay_of 7->3 (#2305 P1h PR5 cursor-0 batch links); review fix: adds possible_replay_of 6->2 for the empty assistant tool-call copy (#2305 PR #2335)"
     },
     "tools-delta": {
-      "outcome_sha": "5be34b81cc5d8662bbd6e6fd32dbe8066126d7b2c952d331262b09edd074269c",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "7807ec5288139c06d850c41645656f84aa2c9c176ad0d0ab9c5946bed59870b8",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then tools-delta: adds possible_replay_of 6->3 (#2305 P1h PR5 cursor-0 batch links); review fix: adds possible_replay_of 5->2 for the empty assistant tool-call copy (#2305 PR #2335)"
     },
     "tools-full": {
-      "outcome_sha": "07339ec6af4ec78849a2bb8932fbd95d98f37e062881cc99b4d5acf4471e4f55",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "af5a9f38215b7e5e729090422e32707ac4f0f51af2f9dff062ed6e37597e46f7",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then tools-full: adds possible_replay_of 6->3 (#2305 P1h PR5 cursor-0 batch links); review fix: adds possible_replay_of 5->2 for the empty assistant tool-call copy (#2305 PR #2335)"
     },
     "tools-new": {
-      "outcome_sha": "940a6614f351853a308b5dd10f0e69bf5573c8cd20c60a4ad54d833452853b51",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "ede3a3dc1f53f8b06b71d1d752abc40291eac6f3baebf2d0cd356436655d7592",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then tools-new: adds possible_replay_of 6->5 (#2305 P1h PR5 cursor-0 batch links)"
     },
     "tools-prefix": {
       "outcome_sha": "b29824f161b017f6944b1478c493e4f4e3e9f8e83a9b0a1a26efe7ebe828e789",
       "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "tools-rewrite": {
-      "outcome_sha": "e150f005ca77c7c40e7de336893b17ecb739e5daf622f685f4a8c0050b98e51b",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "afd0ee198d32300a57b7253d844b531c1f8409515eb7825e7ecf364472f7cac8",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then tools-rewrite: adds possible_replay_of 6->3 (#2305 P1h PR5 cursor-0 batch links); review fix: adds possible_replay_of 5->2 for the empty assistant tool-call copy (#2305 PR #2335)"
     },
     "tools-suffix": {
-      "outcome_sha": "c2e46fd26dc29e4dbc087799b963f705907c940f14a3726a805396c9ad34b980",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "9fe6ae3874862cc83057fa0f9aa336cd05e1f0c9c1508d81049c4d3b8fc3bda2",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then tools-suffix: adds possible_replay_of 5->3 (#2305 P1h PR5 cursor-0 batch links)"
     },
     "tools-warm": {
       "outcome_sha": "1adac9f41456db1d3542ce6b8de56b35d99cf6d89aa608b995352fa02b78d08f",
@@ -745,8 +745,8 @@
       "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "turns-new": {
-      "outcome_sha": "c689c7cb3e43b86ebb171361691f8937bc45e163587afbb3682d9c1e3380468c",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "3f8bf5cbf791ba6e30f04e06a5721e5104683d052c3bd7a0a56e87947cdcfb6d",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then turns-new: adds possible_replay_of 6->5 (#2305 P1h PR5 cursor-0 batch links)"
     },
     "turns-prefix": {
       "outcome_sha": "e8cb62995f4e1ee095dae582590668fa1e57d80241e20d416f4635d7236894c7",
@@ -789,16 +789,16 @@
       "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "whitespace-new": {
-      "outcome_sha": "844fe2df684a3b630a1598a0dd034fdd69a5b24361e46d2cc51cdfb8a53901d2",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "e219783ade1e4bab8172ccfd4b496a521e723068733667ec1b82b826e0f72ec3",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then whitespace-new: adds possible_replay_of 6->5 (#2305 P1h PR5 cursor-0 batch links)"
     },
     "whitespace-prefix": {
       "outcome_sha": "def901a3960233e999c74da550924e5b8f079ac5a4888288022c09357bdd867d",
       "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "whitespace-rewrite": {
-      "outcome_sha": "038a117d19e4c2fcec7cb5d0a8f7b6bc37beb7e03d17b4df027a828681ad5aa2",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "07cba92a35eb73d5d1d5abd4d02563567a698cc1f06c0a254131093005214990",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then whitespace-rewrite: adds possible_replay_of 6->5 (#2305 P1h PR5 cursor-0 batch links)"
     },
     "whitespace-suffix": {
       "outcome_sha": "159ac3c4062b1deb9e99356ecea55b7b8895542736b8ea53ff5b7724fcc0d295",

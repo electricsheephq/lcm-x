@@ -4,6 +4,7 @@ import hashlib
 import json
 import sqlite3
 from collections import Counter
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
@@ -167,6 +168,23 @@ def _split(expected, rows, relations, host=None):
     keys = []
     out = multiset.score(expected, [(sid, "S", role, text) for sid, role, text in rows], host=host, surplus_keys=keys)
     return out, multiset.split_surplus(keys, relations)
+
+
+@pytest.mark.parametrize("relations,want", [([], 0), ([(2, "possible_replay_of", 1)], 1),
+                                          ([(1, "possible_replay_of", 2)], 0), ([(2, "carried_stamp", 1)], 0)])
+def test_cursor0_stripped_content_requires_product_pair(relations, want):
+    _out, split = _split([("assistant", "<think>old</think>answer")],
+                         [(1, "assistant", "<think>old</think>answer"), (2, "assistant", "answer")], relations)
+    assert split["visible_surplus_rows"] == want
+    assert split["silent_surplus_rows"] == 1 - want
+
+
+@pytest.mark.parametrize("old,new", [("<think>x</think>", " "), ("<think>x</think>answer", " answer"),
+                                    ("<think>x</think>Answer", "answer"), ("<think>x</think>answer", "other")])
+def test_cursor0_stripped_pair_rechecks_content_without_more_normalization(old, new):
+    _out, split = _split([("assistant", old)], [(1, "assistant", old), (2, "assistant", new)],
+                         [(2, "possible_replay_of", 1)])
+    assert split["visible_surplus_rows"] == 0
 
 
 def test_p1h_a_host_licensed_copy_makes_the_key_fail_closed():
@@ -459,6 +477,68 @@ def test_p1h_b2s_proven_pass_with_clean_numbers_still_passes(monkeypatch):
     row = next(r for r in rows if r["cell"] == PERSISTENT)
     row.update(verdict="PASS", numbers={"B2": dict(FULL)})
     assert ci.gate(rows, set()) == []
+
+
+def test_p1h_stripped_tool_result_link_uses_the_stored_rows():
+    # #2335 review: a cursor-0 copy of a tool result linked through the stripped pass. Tool groups carry no row
+    # evidence, so with no user/assistant surplus the scorer must read the stored rows the caller passes.
+    rows = [(1, "S0", "tool", "<think>plan</think>answer", None, "call-1"),
+            (2, "S0", "tool", "answer", None, "call-1")]
+    # The two contents differ, so the copy is its own key: row 1 is expected, row 2 is the only surplus.
+    keys = [(("tool", "digest-of-answer"), 1, [2])]
+    relations = [(2, "possible_replay_of", 1)]
+    split = multiset.split_surplus(keys, relations, {r[0]: (r[1], r[2], r[3]) for r in rows})
+    assert (split["visible_surplus_rows"], split["silent_surplus_rows"]) == (1, 0)
+    # A relation between rows whose stripped content differs explains nothing.
+    other = {1: ("S0", "tool", "<think>plan</think>answer"), 2: ("S0", "tool", "different")}
+    split = multiset.split_surplus(keys, relations, other)
+    assert (split["visible_surplus_rows"], split["silent_surplus_rows"]) == (0, 1)
+
+
+def test_p1h_shared_evidence_map_is_merged_once():
+    # score() attaches one shared stored-row map to every surplus group; it must be read once, not once per group.
+    # A Mapping, not a dict subclass: dict.update copies a dict subclass without calling any method we could count.
+    class CountingMap(Mapping):
+        reads = 0
+
+        def __init__(self, rows):
+            self.rows = rows
+
+        def __getitem__(self, key):
+            return self.rows[key]
+
+        def __len__(self):
+            return len(self.rows)
+
+        def __iter__(self):
+            CountingMap.reads += 1
+            return iter(self.rows)
+
+    shared = CountingMap({1: ("S0", "user", "a"), 2: ("S0", "user", "a")})
+    groups = [(("user", f"k{i}"), 0, [1], [], shared) for i in range(50)]
+    multiset.split_surplus(groups, [])
+    assert CountingMap.reads == 1
+
+
+def test_p1h_replay_links_are_checked_against_stored_content(tmp_path, monkeypatch):
+    # #2335 review: the product links on stored bytes. When resolution expands only the older row's placeholder,
+    # the split must still receive the stored contents. This checks the map score() passes; the effect on the
+    # split is checked in the gate-kit audit's test_replay_links_are_checked_against_stored_content.
+    fixture.make(tmp_path, rows=[("assistant", "[stored]"), ("assistant", "<think>r</think>[stored]")], events=[])
+    resolve, seen = bars.externalized.resolve, {}
+
+    def expand_first(rows, home):
+        out, ext, ids = resolve(rows, home)
+        return [(r[0], r[1], r[2], "expanded", *r[4:]) if r[0] == 1 else r for r in out], ext, ids
+
+    def split(groups, relations, rows=None):
+        seen.update(rows)
+        return {}
+
+    monkeypatch.setattr(bars.externalized, "resolve", expand_first)
+    monkeypatch.setattr(bars.multiset, "split_surplus", split)
+    bars.score({"bars": ["B2"], "plugin": {}}, tmp_path / "cell")
+    assert seen == {1: ("S0", "assistant", "[stored]"), 2: ("S0", "assistant", "<think>r</think>[stored]")}
 
 
 def test_silent_example_names_unexplained_surplus_copy():

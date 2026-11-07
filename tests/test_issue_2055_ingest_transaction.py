@@ -12,7 +12,7 @@ from contextlib import contextmanager, nullcontext
 import pytest
 
 from hermes_lcm.sqlite_util import _SqliteSavepointError
-from tests.p1_gate import GateFailure, expect_from_view, install_former_commit_faults, record, store_outcome
+from tests.p1_gate import expect_from_view, install_former_commit_faults, record, store_outcome
 from tests.test_host_uid_shadow import _engine, _m, _state_db
 
 
@@ -57,15 +57,10 @@ class Crash(BaseException):
     """Escapes each writer's Exception handler, like a process exit before COMMIT."""
 
 
-M_CRASH_XFAIL = pytest.mark.xfail(
-    strict=True, raises=GateFailure,
-    reason="#2305: an in-process crash at the proof re-key leaves 9 silent surplus rows (P1 gate blocker)")
-
-
 @pytest.mark.parametrize("boundary,fault", [
     *((boundary, fault) for boundary in ("b", "c", "d", "e", "f", "INSERT", "h", "i", "j", "k", "l", "m")
       for fault in ("error", "crash") if (boundary, fault) != ("m", "crash")),
-    pytest.param("m", "crash", marks=M_CRASH_XFAIL, id="m-crash"),
+    pytest.param("m", "crash", id="m-crash"),  # #2305: the re-bound copies are linked (visible), never silent
 ])
 def test_fault_at_each_former_commit(ingest_case, monkeypatch, caplog, boundary, fault):
     caplog.set_level("DEBUG")
@@ -1232,12 +1227,8 @@ def _rekey_fault_case(fixture_engine, monkeypatch, caplog, fault):
         engine.ingest(view)
         engine.ingest(view)
         outcome = store_outcome(engine._store._conn, expected)
-        record(dict(family="former_commit", boundary="m", fault=fault, strict_xfail=fault == "crash"), outcome, engine)
-        assert outcome["loss"] == 0, outcome  # Loss is never an expected failure.
-        if fault == "crash":
-            assert outcome["silent"] == 9, outcome  # Only #2305's known rows (m-error is clean).
-            raise GateFailure(outcome)  # gate_result counts this strict-xfail cell FAIL.
-        assert outcome["silent"] == 0, outcome
+        record(dict(family="former_commit", boundary="m", fault=fault), outcome, engine)
+        assert outcome["loss"] == outcome["silent"] == 0, outcome
     finally:
         host.close()
 

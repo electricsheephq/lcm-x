@@ -915,3 +915,18 @@ def test_an_undone_pair_kept_twice_while_its_resend_is_lost_is_a_stamp_swap(tmp_
              {"reason": "stamp_swap", "session": "S1", "store_ids": [4, 6]}]
     assert out["gate"]["hand_checks"] == (swaps if lost else [])
     assert outcome(out) == ("HAND CHECK" if lost else "PASS")
+
+
+def test_replay_links_are_checked_against_stored_content():
+    # #2335 review: resolution can expand the older row only; the product linked the stored bytes.
+    rows = [(1, "S", "assistant", "expanded", None, None, 1.0),
+            (2, "S", "assistant", "<think>r</think>[stored]", None, None, 2.0)]
+    stored = {1: ("S", "assistant", "[stored]"), 2: ("S", "assistant", "<think>r</think>[stored]")}
+    relations = [(2, "possible_replay_of", 1)]
+    numbers, silent = audit.score_lineage("S", [("assistant", "expanded")], {}, rows, relations, stored)
+    assert (numbers["surplus_rows"], numbers["visible_surplus_rows"], numbers["silent_surplus_rows"]) == (1, 1, 0)
+    assert silent == []
+    # Checked against the resolved content instead, the same link explains nothing.
+    resolved = {r[0]: (r[1], r[2], r[3]) for r in rows}
+    numbers, _silent = audit.score_lineage("S", [("assistant", "expanded")], {}, rows, relations, resolved)
+    assert (numbers["visible_surplus_rows"], numbers["silent_surplus_rows"]) == (0, 1)

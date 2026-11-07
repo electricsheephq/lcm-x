@@ -589,8 +589,11 @@ def attribute_silent_surplus(silent, ingests, observed, user_rows, restarts, in_
     return {k: sorted(v) for k, v in out.items()}
 
 
-def score_lineage(g, items, tools, rows, relations):
-    """B2's instruments on one lineage; returns numbers and the silent rows [(store_id, ids of its key)]."""
+def score_lineage(g, items, tools, rows, relations, stored=None):
+    """B2's instruments on one lineage; returns numbers and the silent rows [(store_id, ids of its key)].
+
+    ``stored`` maps store_id -> (session, role, content) as stored: the product links replay copies on stored
+    bytes, so a link is checked against stored content, not resolved content (as in the B2 scorer)."""
     groups = []
     stored4 = [r[:4] for r in rows]
     ms = multiset.score(items, stored4, None, surplus_keys=groups)
@@ -599,7 +602,7 @@ def score_lineage(g, items, tools, rows, relations):
                             store_ids=ids, surplus_keys=groups)
     visible, silent, truncated = 0, [], 0
     for group in groups:  # split_surplus matches within one key, so one call per key loses nothing
-        split = multiset.split_surplus([group], relations)
+        split = multiset.split_surplus([group], relations, stored)
         visible += split["visible_surplus_rows"]
         found = [e["store_id"] for e in split["silent_surplus_examples"]]
         truncated += split["silent_surplus_rows"] - len(found)  # over 10 in one key: left unattributable
@@ -631,6 +634,7 @@ def audit(state_db: Path, lcm_db: Path, logs=(), since=None, events_path=None, l
     # Payloads sit beside the state.db the link points to, not beside a symlink to it.
     resolved, ext, _ids = externalized.resolve([r[:6] for r in stored], Path(state_db).resolve().parent)
     extra = {r[0]: r for r in stored}
+    stored_content = {r[0]: (r[1], r[2], r[3]) for r in stored}
 
     def audited(store_id):  # a scored session's row, or a row under no host session stored in the window
         session = extra[store_id][1]
@@ -652,7 +656,7 @@ def audit(state_db: Path, lcm_db: Path, logs=(), since=None, events_path=None, l
     parity, silent_rows = {}, []
     for g in sorted(roots | set(by_lineage) | set(lost)):
         items, tools = expected.get(g, ([], Counter()))
-        numbers, silent = score_lineage(g, items, tools, by_lineage[g], relations)
+        numbers, silent = score_lineage(g, items, tools, by_lineage[g], relations, stored_content)
         numbers["stored_rows"] += lost[g]
         numbers.update(externalized_unresolved=lost[g], host_carrier_rows_excluded=carriers[g],
                        source=sessions.get(g, {}).get("source"), host_session=g in sessions)

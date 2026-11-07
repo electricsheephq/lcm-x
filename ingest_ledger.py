@@ -18,6 +18,7 @@ import weakref
 from typing import NamedTuple
 
 from .message_content import normalize_content_value
+from .escalation import stripped_replay_content  # noqa: F401  (re-exported for engine and tests)
 from .reconcile import ReconcileMixin, _strip_volatile_host_scaffolding
 from .sqlite_session import TransactionOwner
 from .store import ledger_digest

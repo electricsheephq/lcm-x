@@ -8,10 +8,30 @@ import sys
 
 import pytest
 
-from tests.p1_gate import GateFailure, expect_from_view, gate_result, record, store_outcome
+from tests.p1_gate import expect_from_view, gate_result, record, store_outcome
 from tests.test_host_uid_shadow import _engine, _m, _state_db
 from tests.test_issue_2055_ingest_transaction import durable, _no_background_maintenance as _no_background_maintenance
 from tests.test_issue_2055_ingest_ledger_writes import engines as engines
+
+
+@pytest.mark.parametrize("relations,wanted", [
+    ([], (0, 0, 1)),
+    ([(3, "possible_replay_of", 1)], (0, 0, 1)),  # the original is in another conversation: no evidence
+    ([(3, "possible_replay_of", 2)], (0, 1, 0)),
+])
+def test_store_outcome_replay_link_stays_inside_its_conversation(relations, wanted):
+    # One session holds two conversations. A copy linked to an equal row of the other conversation stays silent.
+    with sqlite3.connect(":memory:") as conn:
+        conn.execute("CREATE TABLE messages(store_id,session_id,conversation_id,role,content,tool_call_id,tool_calls)")
+        conn.execute("CREATE TABLE message_relations(store_id,kind,related_store_id)")
+        expected = {**expect_from_view([_m("assistant", "D")], "conv"),
+                    **expect_from_view([_m("assistant", "D")], "foreign")}
+        conn.executemany("INSERT INTO messages VALUES (?,?,?,?,?,?,?)", [
+            (1, "S", "conv", "assistant", "D", None, None), (2, "S", "foreign", "assistant", "D", None, None),
+            (3, "S", "foreign", "assistant", "D", None, None)])
+        conn.executemany("INSERT INTO message_relations VALUES (?,?,?)", relations)
+        outcome = store_outcome(conn, expected)
+    assert (outcome["loss"], outcome["visible"], outcome["silent"]) == wanted, outcome
 
 
 @pytest.mark.parametrize("shape,relations,wanted", [
@@ -91,18 +111,10 @@ os._exit(0)
 '''
 
 
-M_XFAIL = pytest.mark.xfail(
-    strict=True, raises=GateFailure,
-    reason="#2305: the cold bind after a mid-history insert re-stores unstamped rows as silent surplus "
-           "(the no-crash control shows the same rows; P1 gate blocker)")
-# #2305's silent surplus per m shape; loss is never expected, and a different count is a new failure.
-M_SILENT = {"insert": 7, "field_chain_replace": 9}
-
-
 @pytest.mark.parametrize("boundary,shape", [
     *((point, None) for point in ("b", "c", "d", "e", "f", "INSERT", "h", "i", "j", "k", "l")),
-    pytest.param("m", "insert", marks=M_XFAIL, id="m-insert"),
-    pytest.param("m", "field_chain_replace", marks=M_XFAIL, id="m-field-chain-replace"),
+    pytest.param("m", "insert", id="m-insert"),  # #2305: the cold bind's copies are linked (visible), never silent
+    pytest.param("m", "field_chain_replace", id="m-field-chain-replace"),
 ])
 def test_former_commit_process_death(tmp_path, monkeypatch, boundary, shape):
     if boundary == "m":
@@ -204,14 +216,12 @@ os._exit(0)
         assert durable(fresh) == before
         fresh.ingest(view)
         fresh.ingest(view)
-        # Crash adds zero rows: this differential must pass before the expected failure.
+        # Crash adds zero rows, and the crash run's outcome equals the no-crash control's.
         assert host.rows() == control_rows
         outcome = store_outcome(fresh._store._conn, expected)
         assert outcome == control_outcome
-        record(dict(family="process_death", boundary="m", shape=shape, strict_xfail=True), outcome, fresh)
-        assert outcome["loss"] == 0, outcome  # Loss is never an expected failure.
-        assert outcome["silent"] == M_SILENT[shape], outcome  # Only #2305's known rows.
-        raise GateFailure(outcome)
+        record(dict(family="process_death", boundary="m", shape=shape), outcome, fresh)
+        assert outcome["loss"] == outcome["silent"] == 0, outcome
     finally:
         fresh.shutdown()
 

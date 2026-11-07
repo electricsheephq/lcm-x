@@ -5329,10 +5329,12 @@ class LCMEngine(
             suffix = messages[prefix_count:]
             if suffix:
                 try:
-                    self._append_off_current_session_end_suffix(
+                    ids = self._append_off_current_session_end_suffix(
                         session_id, suffix, source=off_current_source,
                         conversation_id=off_current_normal_conversation_id,
                     )
+                    self._ingest_telemetry(self._log_ingest_route, session_id, "S3", prefix_count,
+                                           "off-current session end", ids)
                 except Exception as exc:
                     if queue_off_current_busy_tail(exc):
                         return
@@ -5887,6 +5889,7 @@ class LCMEngine(
 
     def get_status(self) -> Dict[str, Any]:
         status = super().get_status()
+        status["ingest_ledger"] = dict(getattr(self, "_ingest_ledger_counters", {}))
         try:
             status["ingest_lock"] = self._ingest_lock_status()
         except Exception as exc:
@@ -7214,6 +7217,11 @@ class LCMEngine(
                         callback()
                     except Exception as exc:
                         self._record_ingest_failure("post-commit cache", exc)
+                route, cursor, reason = prepared.get("ingest_route", ("foreground", 0, "append"))
+                route = retried_tail["kind"] if retried_tail is not None else (
+                    "session_end" if self._session_end_flush_active else "warm_tail" if no_view else route)
+                self._ingest_telemetry(self._log_ingest_route, self._session_id, route, cursor, reason,
+                                       prepared.get("stored_ids", ()), (emission_attempt or {}).get("replay_pairs", (0, 0)))
                 self._ingest_telemetry(self._record_ingest_attempt, record, sample, attribution)
                 if prepared.get("sender_update"):
                     sender_capture.try_update(self)
@@ -7223,6 +7231,15 @@ class LCMEngine(
                     self._record_ingest_failure("post-commit replay cache", exc)
                     return active
             raise AssertionError("unreachable ingest retry state")
+
+    @staticmethod
+    def _log_ingest_route(session, route, cursor, reason, ids, pairs=(0, 0)):
+        if ids:
+            route = str(route).replace(" ", "_")  # one token per route, so audits can parse the line
+            level = logging.INFO if route in ("persisted_batch", "cold", "session_end", "warm_tail", "S3") else logging.DEBUG
+            logger.log(level, "LCM ingest route: session=%s route=%s cursor=%d reason=%s stored=%d-%d rows=%d "
+                       "replay_pairs=%d stripped=%d", session, route, cursor, reason,
+                       min(ids), max(ids), len(ids), *pairs)
 
     def _ingest_telemetry(self, action, *args):
         try:
@@ -7602,12 +7619,108 @@ class LCMEngine(
         @contextmanager
         def committed_delta():
             yield
+            attempt["replay_pairs"] = (delta["ledger.replay_pairs.cursor0"], delta["ledger.replay_pairs.cursor0_stripped"])
             for key, count in delta.items():
                 after_commit.append(lambda key=key, count=count: self._ledger_count(key, amount=count))
 
         try:
             # Register after the inner savepoint releases, including the crossed return.
             with committed_delta(), _sqlite_savepoint(conn, abort_on_cleanup_failure=True, owner_active=True, foreground_ingest=True):
+                if attempt.get("cursor0_batch") and attempt["stored"]:
+                    # #2305: annotate the batch, never consume or change a message.
+                    # Compare stored bytes (including tool fields), not the host view's digest.
+                    flag = getattr(store, "_pending_relation_schema", False)
+                    try:
+                        with _sqlite_savepoint(conn, abort_on_cleanup_failure=True, owner_active=True, foreground_ingest=True):
+                            first = min(attempt["stored"].values())
+                            # A copy and its target share the session and the conversation: a same-session rebind
+                            # to another conversation never spends the earlier conversation's rows.
+                            new_rows = list(conn.execute(
+                                "SELECT store_id,role,content,tool_call_id,tool_calls,tool_name,observed_at,conversation_id "
+                                "FROM messages WHERE session_id=? AND store_id IN "
+                                "(SELECT value FROM json_each(?)) ORDER BY store_id",
+                                (self._session_id, json.dumps(sorted(attempt["stored"].values())))))
+                            # Legacy rows may hold a padded or NULL id for the same conversation: compare normalized.
+                            new_rows = [(*row[:7], _normalize_conversation_id_value(row[7])) for row in new_rows]
+                            keys = {(conv, role, call_id, calls, name) for _, role, _, call_id, calls, name, _, conv in new_rows}
+                            # Only an earlier row whose content or stripped content equals a copy's can be a target,
+                            # so the scan keeps those rows alone, not every earlier row of the session.
+                            exact_wanted = {(conv, role, content, call_id, calls, name)
+                                            for _, role, content, call_id, calls, name, _, conv in new_rows}
+                            stripped_wanted = {(conv, role, ingest_ledger.stripped_replay_content(content), call_id, calls, name)
+                                               for _, role, content, call_id, calls, name, _, conv in new_rows}
+                            earlier, stripped_earlier = {}, {}
+                            # One linear scan over the session's earlier rows (index order), filtered by key in
+                            # Python: a per-key join re-scans the key set for every row and holds the lock far longer.
+                            for sid, role, content, call_id, calls, name, stamp, conv in conn.execute(
+                                "SELECT store_id,role,content,tool_call_id,tool_calls,tool_name,observed_at,conversation_id "
+                                "FROM messages WHERE session_id=? AND store_id<? ORDER BY store_id",
+                                (self._session_id, first)):
+                                conv = _normalize_conversation_id_value(conv)
+                                if (conv, role, call_id, calls, name) not in keys:
+                                    continue
+                                key = (conv, role, content, call_id, calls, name)
+                                if key in exact_wanted:
+                                    earlier.setdefault(key, []).append((sid, stamp))
+                                stripped = ingest_ledger.stripped_replay_content(content)
+                                key = (conv, role, stripped, call_id, calls, name)
+                                if stripped is not None and key in stripped_wanted:
+                                    stripped_earlier.setdefault(key, []).append((sid, stamp))
+                            used = {row[0] for row in conn.execute(
+                                "SELECT related_store_id FROM message_relations "
+                                "WHERE kind='possible_replay_of' AND related_store_id<?", (first,))} if conn.execute(
+                                    "SELECT 1 FROM sqlite_master WHERE name='message_relations'").fetchone() else set()
+                            pairs, linked, candidate_ids, stripped_count = [], set(), set(), 0
+                            # Each candidate list is split into lanes: all rows, rows without a stamp, and rows per
+                            # stamp. A lane's start skips its used leading targets once, not per row, so N copies of
+                            # one payload match in linear time under the write lock, stamp-vetoed rows included.
+                            lanes, starts = {}, {}
+
+                            def first_unused(candidates, lane_key):
+                                if id(candidates) not in lanes:
+                                    by_stamp = {}
+                                    for position, (_old, old_stamp) in enumerate(candidates):
+                                        by_stamp.setdefault(old_stamp, []).append(position)
+                                    lanes[id(candidates)] = {"all": range(len(candidates)), **{
+                                        ("stamp", key): positions for key, positions in by_stamp.items()}}
+                                lane = lanes[id(candidates)].get(lane_key, ())
+                                at = starts.get((id(candidates), lane_key), 0)
+                                while at < len(lane) and candidates[lane[at]][0] in used:
+                                    at += 1
+                                starts[(id(candidates), lane_key)] = at
+                                return lane[at] if at < len(lane) else None
+                            # Complete the exact pass before any stripped copy can spend a target.
+                            for strip, index in ((False, earlier), (True, stripped_earlier)):
+                                for sid, role, content, call_id, calls, name, stamp, conv in new_rows:
+                                    if sid in linked:
+                                        continue
+                                    stripped = ingest_ledger.stripped_replay_content(content)
+                                    candidates = index.get((conv, role, stripped if strip else content, call_id, calls, name), ())
+                                    if candidates:
+                                        candidate_ids.add(sid)
+                                    if stripped is None and (strip or not call_id and not calls):
+                                        continue
+                                    # The oldest unused target that the stamp veto allows: any row for an unstamped
+                                    # copy; otherwise an unstamped row or one with the same stamp.
+                                    found = [first_unused(candidates, "all")] if stamp is None else [
+                                        first_unused(candidates, ("stamp", None)), first_unused(candidates, ("stamp", stamp))]
+                                    found = [position for position in found if position is not None]
+                                    target = candidates[min(found)][0] if found else None
+                                    if target is not None:
+                                        pairs.append([(sid, "possible_replay_of", target, None, None)])
+                                        linked.add(sid)
+                                        used.add(target)
+                                        stripped_count += int(strip)
+                            written = store.add_message_relations(pairs)
+                        delta["ledger.replay_pairs.cursor0"] += written
+                        delta["ledger.replay_pairs.cursor0_unlinked"] += len(candidate_ids - linked)
+                        delta["ledger.replay_pairs.cursor0_stripped"] += stripped_count
+                    except BaseException as exc:
+                        store._pending_relation_schema = flag
+                        if (not isinstance(exc, Exception) or _is_ingest_busy_error(exc)
+                                or isinstance(exc, _SqliteSavepointError) or not conn.in_transaction):
+                            raise
+                        delta["ledger.write_failed"] += 1
                 key = "session_lineage:" + str(self._session_id)
                 persisted = conn.execute("SELECT value FROM ledger_meta WHERE key=?", (key,)).fetchone()
                 lineage = persisted[0] if persisted else attempt["lineage"]
@@ -8235,8 +8348,18 @@ class LCMEngine(
             self._session_id, cursor, n,
         )
 
+        if prepared is not None:
+            decision = self._last_ingest_reconciliation if reconciled_existing_session else {}
+            prepared["ingest_route"] = (decision.get("action", "foreground"), cursor, decision.get("reason", "append"))
+
         if getattr(self, "_ingest_ledger_attempt", None) is not None:
             try:
+                # Freeze this transaction's decision; warm appends can retain an older status.
+                self._ingest_ledger_attempt["cursor0_batch"] = (
+                    reconciled_existing_session and cursor == 0
+                    and self._last_ingest_reconciliation.get("action") == "persisted batch"
+                    and self._last_ingest_reconciliation.get("reason") == "persisted ambiguous delta"
+                    and self._last_ingest_reconciliation.get("cursor") == 0)
                 self._ingest_ledger_attempt["matched"] = {
                     idx: int(rows[0]["store_id"]) for idx, rows in (anchor_plan or {}).get("matched", {}).items() if len(rows) == 1}
             except Exception as exc:
@@ -8352,6 +8475,8 @@ class LCMEngine(
             view_only=(prepared or {}).get("view_only"),
         )
         attribution["rows_written"] = len(store_ids)
+        if prepared is not None:
+            prepared["stored_ids"] = tuple(store_ids)
         # Logical row payload bytes, not SQLite page/WAL amplification.
         attribution["bytes_written"] = sum(
             len((normalize_content_value(message.get("content")) or "").encode("utf-8"))
@@ -11794,8 +11919,9 @@ class LCMEngine(
                     ids.extend(self._append_off_current_session_end_suffix(session, view[stored:], source=tail["source"],
                         conversation_id=_normalize_conversation_id_value(tail["conversation_id"]), _log_outcome=False))
                 if self._cold_tail_conflict_placed(tail, conflict, deadline=deadline):
-                    return True
-                stored = None
+                    stored = len(view)
+                else:
+                    stored = None
             if stored is None:
                 if conflict is not None:
                     tail["kept_on_conflict"] = True
@@ -11811,6 +11937,7 @@ class LCMEngine(
                             context_window_tokens=tail.get("context_window_tokens")) if hermes_home is not None else {})))
         if hermes_home is not None and ids:
             self._ledger_count("ledger.tail.cold_detached_stored")
+        self._ingest_telemetry(self._log_ingest_route, session, "S3", stored or 0, "tail retry", ids)
         return True
 
     def _retry_pending_session_tails(self, *, deadline: float | None = None, exiting: bool = False,
@@ -11860,6 +11987,8 @@ class LCMEngine(
                             "ledger_match" if rule == "digest" else "fallback." + rule))])
                     for callback in after_commit:
                         callback()
+                    self._ingest_telemetry(self._log_ingest_route, tail["session_id"], "session_end" if exiting else "warm_tail",
+                                           covered, rule, ids)
                     self._pending_session_tails.remove(tail)
                     # Read the bound store without a lazy open (#2152): after a failed
                     # rebind, opening the new home here would raise out of shutdown's cleanup.
