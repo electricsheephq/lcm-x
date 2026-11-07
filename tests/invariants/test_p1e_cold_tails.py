@@ -1192,10 +1192,14 @@ def test_ingest_that_stores_nothing_after_the_end_is_not_progress(engines, monke
     before = committed_rows(engine._store.db_path, "S")
     engine.ingest(copy.deepcopy(view[:3]))
     assert committed_rows(engine._store.db_path, "S") == before
-    assert tail.get("went_on_noop") and not tail.get("went_on")
+    progress = (tail.get("went_on_noop"), tail.get("went_on"))
     engine._retry_pending_session_tails()
-    assert [r["content"] for r in committed_rows(engine._store.db_path, "S")] == ["A", "B", "C", "D"]
+    # #2205 row-level outcome first: the no-op ingest must not keep the tail from storing C and D once.
+    rows = committed_rows(engine._store.db_path, "S")
+    assert [(r["role"], r["content"], r["observed_at"]) for r in rows] == [
+        (m["role"], m["content"], m["timestamp"]) for m in history()]
     assert not engine._pending_session_tails
+    assert progress[0] and not progress[1]
 
 
 @pytest.mark.parametrize("shape", ["uidless", "uids"])
