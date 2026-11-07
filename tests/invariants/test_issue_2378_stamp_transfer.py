@@ -125,6 +125,40 @@ def test_retained_prompt_vetoes_a_genuine_repeat(build, cold, host_form):
     assert not any(a == repeat[0] and b == old[0] for a, b in links), evidence
 
 
+@pytest.mark.parametrize("cold", [False, True], ids=["warm", "cold"])
+def test_retained_redacted_prompt_vetoes_a_genuine_repeat(build, cold):
+    """With durable redaction on, the stored copy of a prompt holding a credential is redacted while the host still
+    shows it raw. The retained original must still veto, so a genuine repeat at a new stamp stays unlinked."""
+    secret_p = P + " with api_key=sk-test-0123456789abcdefABCDEF0123"
+    engine = build(sensitive_patterns_enabled=True)
+    before = history(False) + [{"role": "user", "content": T, "timestamp": T_REQ}]
+    engine.ingest(deepcopy(before))
+    view = engine.compress(deepcopy(before), force=True)
+    assert engine._last_compression_status == "compacted"
+    view += [{"role": "assistant", "content": "compress finished", "timestamp": T_REQ + 1},
+             {"role": "user", "content": secret_p, "timestamp": T_REQ}]
+    engine.ingest(deepcopy(view))
+    old = [row["store_id"] for row in all_rows(engine) if row["content"].startswith(P)]
+    assert len(old) == 1
+    assert not any("sk-test-" in row["content"] for row in all_rows(engine))  # stored redacted
+    engine.on_session_end("S", deepcopy(view))
+    if cold:
+        engine.shutdown()
+        engine = build(sensitive_patterns_enabled=True)
+    else:
+        engine.on_session_start("S", conversation_id="conversation", platform="cli")
+    next(row for row in view if row.get("content") == T)["timestamp"] = T_COMMIT - 1
+    view += [{"role": "user", "content": secret_p, "timestamp": T_COMMIT},
+             {"role": "user", "content": NEW, "timestamp": T_COMMIT + 10}]
+    engine.ingest(deepcopy(view))
+    rows, links = all_rows(engine), replay_links(engine)
+    repeat = [row["store_id"] for row in rows if row["content"].startswith(P) and row["observed_at"] == T_COMMIT]
+    evidence = {"old": old, "repeat": repeat, "relations": sorted(links)}
+    assert sum(row["content"] == NEW for row in rows) == 1, evidence
+    assert len(repeat) == 1, evidence
+    assert not any(a == repeat[0] for a, _b in links), evidence
+
+
 def _rotate_then_store_p_at_carried_stamp(build):
     """The compaction commits by rotating S into the child ``rotated``; the next prompt P then inherits T's
     carried stamp and is stored first in the child."""
