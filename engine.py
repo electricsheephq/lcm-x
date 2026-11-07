@@ -7164,8 +7164,10 @@ class LCMEngine(
                                           and source["content"].strip() == target["content"].strip()
                                           and not any(message.get("role") == "user"
                                                       and message.get("content") is not None
-                                                      and normalize_content_value(message["content"]).strip()
-                                                      == target["content"].strip()
+                                                      # stored content is redacted as protect_message_for_ingest does
+                                                      and normalize_content_value(redact_sensitive_value(
+                                                          message["content"], self._config, parse_json_strings=False
+                                                      )).strip() == target["content"].strip()
                                                       and self._host_occurrence_metadata(message)["timestamp"]
                                                       == target["observed_at"] for message in messages)]
                             if len(candidates) == 1:
