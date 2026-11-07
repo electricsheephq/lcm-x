@@ -180,7 +180,7 @@ host processes:
 
 | Entry point | Operations |
 |---|---|
-| `hermes acp` (`reliability/acp_driver.py`) | turns from a fixed prompt bank (plain questions, `read_file`/todo/`lcm_grep` tool prompts, word-for-word repeats of earlier tool prompts, long pasted text), `/compress` after a long-text turn, `delegate_task` prompts, cancel-and-resend (`session/cancel` while the prompt is in flight, then the same prompt; recorded as `cancel_resend`, half as many as the undo target, never counted as an undo), cold restarts (SIGKILL the process group, a new process, `session/load`) |
+| `hermes acp` (`reliability/acp_driver.py`) | turns from a fixed prompt bank (plain questions, `read_file`/todo/`lcm_grep` tool prompts, word-for-word repeats of earlier tool prompts, long pasted text), `/compress` after a long paste aged past the fresh tail by plain turns, `delegate_task` prompts, cancel-and-resend (`session/cancel` while the prompt is in flight, then the same prompt; recorded as `cancel_resend`, half as many as the undo target, never counted as an undo), cold restarts (SIGKILL the process group, a new process, `session/load`) |
 | TUI gateway (`python -m tui_gateway.entry`) | the second host source (`tui` sessions), warm restarts (`session.close`, which ends the session in the context engine, then `session.resume` in the same process), undo-and-resend (`session.undo`, then the same prompt), `session.compress` |
 
 ACP has no session end and no undo, which is why the TUI gateway carries those three. Every planned restart follows a
@@ -191,10 +191,10 @@ attempts (including failed attempts and those made by the plan). The summary sep
 
 ```
 python -m bench.instruments.gate_kit.drive --hermes-python <host venv python> --hermes-src <host tree> \
-  --home <HERMES_HOME> --workdir <dir> --events <events.jsonl> [--turns N] [--children N] [--seed 2055] \
-  [--max-hours 6] [--prompt-timeout 600] [--cancel-after 2] [--append-events] [--dry-run]
+  --home <HERMES_HOME> --workdir <dir> --events <events.jsonl> [--turns N] [--children N] [--compactions N] \
+  [--age-turns N] [--seed 2055] [--max-hours 6] [--prompt-timeout 600] [--cancel-after 2] [--append-events] [--dry-run]
 ```
-- `--dry-run` prints the targets and the planned counts and exits. `--turns`/`--children` can raise a target, never
+- `--dry-run` prints the targets and the planned counts and exits. `--turns`/`--children`/`--compactions` can raise a target, never
   lower it below the floor x1.2.
 - A `--home`, `--workdir` or `--events` at or under the live `~/.hermes` is refused.
 - All CLI paths become absolute against the invoking directory before use, including the host Python and source tree;
@@ -217,17 +217,30 @@ python -m bench.instruments.gate_kit.drive --hermes-python <host venv python> --
   undo that removed rows and a completed second send. A rejected
   first TUI send skips undo. After a successful close, a failed resume leaves the slot unbound so its next operation
   resumes it again. `--max-hours` stops the plan and still writes the summary.
-- `compress_request` is recorded before the triggering long-text turn; `compress_result` records the later manual
-  compression outcome separately, so the audit's attribution window starts before automatic compaction can occur.
-  A failed long-text turn writes `compress_request_failed`; the audit excludes that request from attribution.
-  Each attempt reads only log bytes added since its request, from the entry point's stderr and
-  `<home>/logs/agent.log`, accepting only LCM-X logger lines. `LCM compaction #` or `in-place compression boundary kept`
-  labels it `compressed`; `LCM compression no-op` or `compaction stop: reason=noop` labels it `noop`. A compaction
-  wins if both occur (automatic compaction during the long turn, followed by a manual no-op). Without either,
-  the host answer is retained with `log=none`. Results keep `detail="slot=.. manual=.. log=.."` and add `log`,
-  `host_answer`, `compactions` (observed log count, or one for a boundary-only success) and `retry` fields.
-  A confirmed `noop` sends the same planned long paste again and retries, at most twice, recording a fresh
-  request/result pair per attempt with `retry=0|1|2`. This leaves the seeded op order unchanged. The summary's
+- Each compress attempt sends the long paste, then `--age-turns` plain turns (chosen without rng; the default is ceil(`LCM_FRESH_TAIL_COUNT` / 2), read from
+  `<home>/.env` (the hosts load it over their environment; only that key is read) or else the hosts' environment, and 12 for
+  the product's 24-row tail when neither sets it; the summary records `age_turns` and `fresh_tail` with its source) so the paste
+  leaves LCM-X's fresh tail, then one plain triggering turn and `/compress`. It records two
+  `compress_request` events: `phase=paste` before the paste, and `phase=trigger` after the ageing turns, before the
+  triggering turn. Both only open audit attribution windows; `requests` counts the `phase=trigger` one. So a
+  sessionless compaction line from the paste, an ageing turn or the triggering turn has a request at most 2 s after
+  it. The paste window lasts 120 s, so an ageing compaction more than 120 s after the paste and more than 2 s before
+  the trigger request stays unattributed: it still counts toward `compactions`, but not toward
+  `compactions_then_restart`. `compress_result` records the manual compression outcome separately. A failed paste,
+  ageing or triggering turn writes `compress_request_failed`, and the audit drops that session's latest request. When
+  the paste and ageing turns logged no compaction, a `compress_request_failed` with `phase=paste unused` closes the
+  paste window before the trigger request, so an unused window never claims another session's sessionless line.
+  Each attempt reads only log bytes added since its paste-phase offsets, from the entry point's stderr and
+  `<home>/logs/agent.log`, accepting only LCM-X logger lines. That means a compaction during the paste or ageing turns
+  counts for the attempt. `LCM compaction #` or `in-place compression boundary kept` labels it `compressed`;
+  `LCM compression no-op` or `compaction stop: reason=noop` labels it `noop`. A compaction wins if both occur.
+  Without either, the host answer is retained with `log=none`. Every `compaction stop: reason=<r>` line is kept in
+  the result's `stop_reasons`, and the summary counts them per reason (`compactions.stop_reasons`), so LCM-X's own
+  stop mix (sanitized, time budget, error) stays visible across retries. Results keep
+  `detail="slot=.. manual=.. log=.."` and add `log`, `host_answer`, `compactions` (observed log count, or one for a
+  boundary-only success), `stop_reasons` and `retry` fields.
+  Any attempt without a real compaction (`noop` or `log=none`) repeats the whole attempt (paste, ageing turns,
+  trigger, `/compress`), at most twice. It records fresh request/result events per attempt with `retry=0|1|2`. This leaves the seeded op order unchanged. The summary's
   `compactions` separates `planned`, `requests`, `real` (log-confirmed), `noop` and `log_none`; unconfirmed host
   successes never increase `real`. The log windows are shared, so a compaction another session logs inside the
   same request window also counts for this request (a rotation can change the session id, so lines are not filtered by

@@ -2,6 +2,7 @@
 audit.py --events, and a host-backed smoke (a real ``hermes acp`` and TUI gateway against the localhost fake provider)."""
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -42,6 +43,18 @@ def test_plan_meets_every_floor_with_margin_and_is_deterministic():
     assert got["host_sources"] == 2
     assert drive.plan(2055, tg) == ops and drive.plan(2056, tg) != ops
     assert drive.targets(turns=100, children=30)["turns"] == 240 and drive.targets(children=30)["delegated_children"] == 30
+    # Pin the complete pre-ageing seed-2055 plan, including operation order and prompt indices.
+    assert hashlib.sha256(json.dumps(ops, sort_keys=True).encode()).hexdigest() == (
+        "b75268e934ff3fb25f72e9d7a950904a2a4b80390c25b8cf4a796e91a516a6a2")
+
+
+@pytest.mark.parametrize("compactions,expected", [(0, 24), (20, 24), (30, 30), (45, 45)])
+def test_compaction_target_only_raises_the_floor(compactions, expected):
+    tg = drive.targets(compactions=compactions)
+    assert tg["compactions"] == expected
+    assert sum(o["op"] == "compress" for o in drive.plan(2055, tg)) == expected
+    if expected == 24:
+        assert drive.plan(2055, tg) == drive.plan(2055, drive.targets())
 
 
 def test_plan_repeats_are_word_for_word_and_restarts_are_never_last():
@@ -66,9 +79,10 @@ def test_plan_repeats_are_word_for_word_and_restarts_are_never_last():
 
 def test_dry_run_prints_counts(capsys):
     assert drive.main(["--hermes-python", "x", "--hermes-src", "x", "--home", "h", "--workdir", "w",
-                       "--events", "e.jsonl", "--dry-run"]) == 0
+                       "--events", "e.jsonl", "--compactions", "30", "--age-turns", "6", "--dry-run"]) == 0
     out = json.loads(capsys.readouterr().out)
     assert out["planned"]["turns"] >= 240 and out["targets"]["undo_resend"] == 12
+    assert out["targets"]["compactions"] == out["planned"]["ops"]["compress"] == 30
 
 
 def test_live_home_is_refused(tmp_path):
@@ -139,7 +153,7 @@ class StubTui:
         if method == "session.undo":
             return {"removed": 2}
         if method == "session.compress":
-            return {"compressed": True}
+            return {"compressed": False, "status": "compressed"}
         assert method == "prompt.submit" and params["session_id"] in self.live
         return {"status": "streaming"}
 
@@ -237,6 +251,7 @@ def test_cli_paths_are_absolute_for_hosts_and_prompts(tmp_path, monkeypatch):
     (tmp_path / "venv" / "bin" / "python").symlink_to(tmp_path / "host-python")
 
     def run(d, _ops, _tg):
+        assert d.age_turns == 6
         assert all(p.is_absolute() for p in (d.src, d.home, d.workdir, d.ev.path))
         assert d.src == tmp_path / "src" and d.home == tmp_path / "home"
         assert d.ev.path == tmp_path / "events.jsonl"
@@ -256,7 +271,7 @@ def test_cli_paths_are_absolute_for_hosts_and_prompts(tmp_path, monkeypatch):
 
     monkeypatch.setattr(drive.Driver, "run", run)
     assert drive.main(["--hermes-python", "venv/bin/python", "--hermes-src", "src", "--home", "home",
-                       "--workdir", "run", "--events", "events.jsonl"]) == 0
+                       "--workdir", "run", "--events", "events.jsonl", "--age-turns", "6"]) == 0
 
 
 @pytest.mark.parametrize("where", ["acp.stderr", "tui.stderr", "agent.log"])
@@ -274,20 +289,32 @@ def test_inactive_scan_ignores_old_lines_but_reads_new_ones(tmp_path, where):
 
 
 @pytest.mark.parametrize("slot", ["A1", "T1"])
-def test_compress_request_precedes_triggering_turn(tmp_path, monkeypatch, slot):
+@pytest.mark.parametrize("age_turns", [4, 6])
+def test_compress_request_precedes_triggering_turn(tmp_path, monkeypatch, slot, age_turns):
     d, ev, _log = stub_driver(tmp_path)
-    send = d.send
+    assert d.age_turns == 4
+    d.age_turns = age_turns
+    ix = drive.CATS["long"][0]
+    attempts = compress_stub_log(d, slot, monkeypatch, ["LCM compaction #1: published"])
+    send, sent = d.send, []
 
-    def trigger(*args):
-        assert ev.path.exists(), "compress_request must be written before the triggering turn"
-        requests = [json.loads(x) for x in ev.path.read_text().splitlines() if json.loads(x)["kind"] == "compress_request"]
-        assert len(requests) == 1 and requests[0]["session"] == d.slots[slot]["session"]
-        return send(*args)
+    def trigger(s, prompt):
+        requests = [e for e in audit.read_events(ev.path) if e["kind"] == "compress_request"] if ev.path.exists() else []
+        assert len(requests) == 1 + int(len(sent) == age_turns + 1)  # phase=paste, then phase=trigger
+        sent.append(prompt)
+        return send(s, prompt)
 
     monkeypatch.setattr(d, "send", trigger)
-    d.op({"op": "compress", "slot": slot, "prompt": drive.CATS["long"][0]})
+    d.op({"op": "compress", "slot": slot, "prompt": ix})
     events = [json.loads(x) for x in ev.path.read_text().splitlines()]
-    assert sum(e["kind"] == "compress_request" for e in events) == 1
+    assert len(attempts) == 1
+    assert sent == [ix] + [drive.CATS["plain"][(ix + j) % len(drive.CATS["plain"])] for j in range(age_turns + 1)]
+    sequence = [e["kind"] for e in events if e["kind"] != "source2_session"]
+    assert sequence == (["compress_request"] + ["turn"] * (age_turns + 1)  # no ageing compaction: the paste window closes
+                        + ["compress_request_failed", "compress_request", "turn", "compress_result"])
+    assert [e["detail"] for e in events if e["kind"] == "compress_request"] == [f"slot={slot} phase=paste",
+                                                                                f"slot={slot} phase=trigger"]
+    assert events[-3]["session"] == d.slots[slot]["session"]
     assert any(e["kind"] == "compress_result" and "manual=compressed" in e["detail"] for e in events)
 
 
@@ -321,7 +348,7 @@ def compress_stub_log(d, slot, monkeypatch, messages, host_answer=True, logger="
         def wrapped(method, params, timeout):
             if method == "session.compress":
                 write()
-                return {"compressed": host_answer}
+                return {"compressed": False, "status": "compressed" if host_answer else "noop"}
             return call(method, params, timeout)
 
         monkeypatch.setattr(d.tui, "call", wrapped)
@@ -344,7 +371,7 @@ def test_compress_result_uses_new_lcm_log_lines(tmp_path, monkeypatch, slot, mes
     d.op({"op": "compress", "slot": slot, "prompt": drive.CATS["long"][0]})
     events = [json.loads(x) for x in ev.path.read_text().splitlines()]
     results = [e for e in events if e["kind"] == "compress_result"]
-    assert len(attempts) == len(results) == (3 if label == "noop" else 1)
+    assert len(attempts) == len(results) == (1 if label == "compressed" else 3)
     for e in results:
         assert e["log"] == label
         assert e["host_answer"] == ("compressed" if host_answer else "not_compressed")
@@ -354,20 +381,101 @@ def test_compress_result_uses_new_lcm_log_lines(tmp_path, monkeypatch, slot, mes
 
 @pytest.mark.parametrize("slot", ["A1", "T1"])
 @pytest.mark.parametrize("noops", [0, 1, 2, 3])
-def test_compress_noop_retries_are_bounded_and_summary_counts_real(tmp_path, monkeypatch, slot, noops):
+@pytest.mark.parametrize("missing", ["noop", "none"])
+def test_compress_noop_retries_are_bounded_and_summary_counts_real(tmp_path, monkeypatch, slot, noops, missing):
     d, ev, _log = stub_driver(tmp_path)
-    messages = ["LCM compression no-op: below leaf chunk threshold"] * noops + ["LCM compaction #1: published"]
+    message = "LCM compression no-op: below leaf chunk threshold" if missing == "noop" else "unrelated line"
+    messages = [message] * noops + ["LCM compaction #1: published"]
     attempts = compress_stub_log(d, slot, monkeypatch, messages)
     summary = d.run([{"op": "compress", "slot": slot, "prompt": drive.CATS["long"][0]}], {"delegated_children": 0})
     n = min(noops + 1, 3)
     events = [json.loads(x) for x in ev.path.read_text().splitlines()]
     sequence = [e for e in events if e["kind"] in ("compress_request", "turn", "compress_result")]
-    assert [e["kind"] for e in sequence] == ["compress_request", "turn", "compress_result"] * n
-    assert [e["retry"] for e in sequence if e["kind"] == "compress_request"] == list(range(n))
-    assert len(attempts) == n and summary["prompts_by_category"] == {"long": n}
+    assert [e["kind"] for e in sequence] == (
+        ["compress_request"] + ["turn"] * 5 + ["compress_request", "turn", "compress_result"]) * n
+    assert [e["retry"] for e in sequence if e["kind"] == "compress_request"] == [r for r in range(n) for _ in "pt"]
+    assert len(attempts) == n and summary["prompts_by_category"] == {"long": n, "plain": n * 5}
     assert summary["executed"] == {"compress": 1}  # retries do not change the seeded plan's op counts
     assert summary["compactions"] == {"planned": 1, "requests": n, "real": int(noops < 3),
-                                      "noop": min(noops, 3), "log_none": 0}
+                                      "noop": min(noops, 3) if missing == "noop" else 0,
+                                      "log_none": min(noops, 3) if missing == "none" else 0, "stop_reasons": {}}
+
+
+@pytest.mark.parametrize("slot", ["A1", "T1"])
+def test_compress_records_lcm_stop_reasons(tmp_path, monkeypatch, slot):
+    d, ev, _log = stub_driver(tmp_path)
+    messages = ["LCM compaction stop: reason=sanitized", "LCM compaction stop: reason=time_budget_exhausted",
+                "LCM compaction #1: published"]
+    compress_stub_log(d, slot, monkeypatch, messages, logger="hermes_lcm.compaction")
+    summary = d.run([{"op": "compress", "slot": slot, "prompt": drive.CATS["long"][0]}], {"delegated_children": 0})
+    results = [json.loads(x) for x in ev.path.read_text().splitlines() if '"compress_result"' in x]
+    assert [e["stop_reasons"] for e in results] == [["sanitized"], ["time_budget_exhausted"], []]
+    assert summary["compactions"]["stop_reasons"] == {"sanitized": 1, "time_budget_exhausted": 1}
+    assert summary["compactions"]["real"] == 1 and summary["compactions"]["log_none"] == 2
+
+
+def test_compaction_during_paste_ageing_counts_for_the_attempt(tmp_path, monkeypatch):
+    d, ev, _log = stub_driver(tmp_path)
+    attempts = compress_stub_log(d, "A1", monkeypatch, ["LCM compression no-op: below leaf chunk threshold"] * 3)
+    send, sent = d.send, []
+
+    def ageing(slot, prompt):
+        sent.append(prompt)
+        if len(sent) == 2:  # the first ageing turn compacts automatically
+            with (d.logs / "acp.stderr").open("a") as fh:
+                fh.write("2026-11-06 10:00:01 INFO hermes_lcm.compaction: LCM compaction #2: published\n")
+        return send(slot, prompt)
+
+    monkeypatch.setattr(d, "send", ageing)
+    summary = d.run([{"op": "compress", "slot": "A1", "prompt": drive.CATS["long"][0]}], {"delegated_children": 0})
+    assert len(attempts) == 1  # the ageing compaction is this attempt's: no retry
+    assert summary["compactions"]["real"] == 1 and summary["compactions"]["requests"] == 1
+    events = [json.loads(x) for x in ev.path.read_text().splitlines()]
+    paste = next(e for e in events if e["kind"] == "compress_request")
+    assert paste["detail"] == "slot=A1 phase=paste"
+    assert paste["t"] <= min(e["t"] for e in events if e["kind"] == "turn")  # its window opens before the paste
+
+
+@pytest.mark.parametrize("dotenv,env,expected", [
+    ("LCM_FRESH_TAIL_COUNT=8\n", {}, (8, ".env")),
+    ("export LCM_FRESH_TAIL_COUNT='10'\n", {"LCM_FRESH_TAIL_COUNT": "24"}, (10, ".env")),  # the hosts load .env over env
+    ("OTHER=1\n# LCM_FRESH_TAIL_COUNT=2\n", {"LCM_FRESH_TAIL_COUNT": "8"}, (8, "env")),
+    (None, {}, (24, "product default")),
+    ("LCM_FRESH_TAIL_COUNT=\n", {}, (24, "product default")),
+    ("LCM_FRESH_TAIL_COUNT=48 # retain recent rows\n", {}, (48, ".env")),  # dotenv inline comment
+    ('LCM_FRESH_TAIL_COUNT="16" # quoted\n', {}, (16, ".env")),
+])
+def test_fresh_tail_reads_the_home_env_file_first(tmp_path, dotenv, env, expected):
+    if dotenv is not None:
+        (tmp_path / ".env").write_text(dotenv)
+    assert drive.fresh_tail(env, tmp_path) == expected
+    assert drive.default_age_turns(env, tmp_path) == -(-expected[0] // 2)
+
+
+def test_unused_paste_window_never_claims_another_sessions_line(tmp_path, monkeypatch):
+    """A compress attempt whose paste and ageing turns compact nothing closes its paste window before the trigger,
+    so a later sessionless line from another slot is not tied to this session."""
+    d, ev, _log = stub_driver(tmp_path)
+    compress_stub_log(d, "A1", monkeypatch, ["LCM compaction #1: published"])
+    d.op({"op": "compress", "slot": "A1", "prompt": drive.CATS["long"][0]})
+    events = audit.read_events(ev.path)
+    paste = next(e for e in events if e["kind"] == "compress_request")
+    trigger = [e for e in events if e["kind"] == "compress_request"][-1]
+    lines = [(None, trigger["t"] + 1), (None, paste["t"] + 60)]  # this attempt's /compress line, then another slot's
+    assert audit.attribute_compactions(lines, events) == ([(trigger["session"], trigger["t"] + 1), lines[1]], 1)
+    # Positive control: without the closing event the open paste window claims the other slot's line.
+    reopened = [e for e in events if not (e["kind"] == "compress_request_failed" and "unused" in e["detail"])]
+    assert audit.attribute_compactions(lines, reopened)[1] == 0
+
+
+@pytest.mark.parametrize("env,expected", [({"LCM_FRESH_TAIL_COUNT": "8"}, 4), ({}, 12), ({"LCM_FRESH_TAIL_COUNT": "24"}, 12),
+                                          ({"LCM_FRESH_TAIL_COUNT": "9"}, 5), ({"LCM_FRESH_TAIL_COUNT": "bad"}, 12),
+                                          ({"LCM_FRESH_TAIL_COUNT": "1"}, 1)])
+def test_default_age_turns_clears_the_effective_fresh_tail(env, expected):
+    age = drive.default_age_turns(env)
+    assert age == expected
+    tail = int(env.get("LCM_FRESH_TAIL_COUNT", "24")) if env.get("LCM_FRESH_TAIL_COUNT", "24").isdigit() else 24
+    assert 1 + 2 * age + 2 >= tail  # rows after the paste: its reply, the ageing turns, the trigger turn
 
 
 def test_shared_acp_restart_records_all_bound_sessions(tmp_path):
@@ -573,8 +681,12 @@ def test_failed_warm_restart_has_no_event(tmp_path, closed):
 @pytest.mark.parametrize("raises", [False, True])
 def test_failed_compress_request_is_not_attributed(tmp_path, monkeypatch, slot, raises):
     d, ev, _log = stub_driver(tmp_path)
+    send, sent = d.send, []
 
-    def fail(*_args):
+    def fail(*args):
+        sent.append(1)
+        if len(sent) <= d.age_turns + 1:  # the paste and ageing turns succeed; the triggering turn fails
+            return send(*args)
         if raises:
             raise drive.AD.ProcessGone("host exited")
         return "submit_busy"
@@ -582,9 +694,14 @@ def test_failed_compress_request_is_not_attributed(tmp_path, monkeypatch, slot, 
     monkeypatch.setattr(d, "send", fail)
     d.guarded({"op": "compress", "slot": slot, "prompt": drive.CATS["long"][0]})
     events = [json.loads(x) for x in ev.path.read_text().splitlines()]
-    request = next(e for e in events if e["kind"] == "compress_request")
-    assert any(e["kind"] == "compress_request_failed" and e["session"] == request["session"] for e in events)
-    assert audit.attribute_compactions([(None, request["t"])], audit.read_events(ev.path)) == ([(None, request["t"])], 1)
+    kinds = [e["kind"] for e in events if e["kind"].startswith("compress_request")]
+    assert kinds == ["compress_request", "compress_request_failed", "compress_request", "compress_request_failed"]
+    request = [e for e in events if e["kind"] == "compress_request"][-1]
+    assert request["detail"].endswith("phase=trigger")
+    # The unused paste window closed before the trigger, and the failed trigger request is dropped: nothing remains
+    # to claim a line, from this session or another one.
+    lines = [(None, request["t"]), (None, request["t"] + 50)]
+    assert audit.attribute_compactions(lines, audit.read_events(ev.path)) == (lines, 2)
     ev.write("compress_request", request["session"], t=request["t"] + 300)
     assert audit.attribute_compactions([(None, request["t"] + 300)], audit.read_events(ev.path)) == (
         [(request["session"], request["t"] + 300)], 0)
@@ -822,8 +939,12 @@ def test_smoke_against_fake_provider_then_audit(tmp_path):
     exits = sorted(e["detail"] for e in lines if e["kind"] == "host_exit")
     assert exits == ["entry=acp returncode=0", "entry=tui returncode=0"], exits  # both ended their sessions by EOF
     kinds = Counter(e["kind"] for e in lines)
-    assert {k: kinds[k] for k in audit.EVENT_KINDS if kinds[k]} == {"restart_cold": 1, "restart_warm": 1, "undo_resend": 1,
-                                                        "delegate_prompt": 1, "compress_request": 1}
+    assert {k: kinds[k] for k in audit.EVENT_KINDS if kinds[k]} == {
+        "restart_cold": 1, "restart_warm": 1, "undo_resend": 1, "delegate_prompt": 1,
+        "compress_request": kinds["compress_request"],
+        **({"compress_request_failed": kinds["compress_request_failed"]} if kinds["compress_request_failed"] else {})}
+    triggers = sum(e["kind"] == "compress_request" and e["detail"].endswith("phase=trigger") for e in lines)
+    assert 1 <= triggers <= 3 and kinds["compress_request"] == 2 * triggers  # a paste and a trigger request per attempt
     assert kinds["cancel_resend"] == 1  # recorded, never counted as an undo
     assert summary["delegate"]["children_in_state_db"] >= 1 and summary["context_length"] == 64000
     for db in ("state.db", "lcm.db"):  # the audit reads immutable files: open each once after the run to checkpoint
@@ -864,5 +985,6 @@ def test_compress_deadline_after_a_noop_attempt_still_counts_the_op(tmp_path, mo
     monkeypatch.setattr(d.ev, "write", write)
     d.op({"op": "compress", "slot": slot, "prompt": drive.CATS["long"][0]})
     events = [json.loads(x) for x in ev.path.read_text().splitlines()]
-    assert [e["kind"] for e in events if e["kind"].startswith("compress")] == ["compress_request", "compress_result"]
+    assert [e["kind"] for e in events if e["kind"].startswith("compress")] == [
+        "compress_request", "compress_request_failed", "compress_request", "compress_result"]  # paste (closed unused), trigger
     assert d.done["compress"] == 1
