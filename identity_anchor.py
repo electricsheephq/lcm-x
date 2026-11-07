@@ -594,7 +594,7 @@ class IdentityAnchorMixin:
         key (call ids, a result's call id, else role and stripped text), never fields a pre-ledger row can lack.
         A stored row's reasoning-cleanup form counts as its copy. Absence from a ``capped`` tail proves nothing,
         so there a row is unaccounted only by direct proof: a tool result whose call id no stored result holds, or
-        a call row whose call ids no stored call row and no stored result hold.
+        a call row with a result at or after the cursor whose call ids no stored call row and no stored result hold.
         Unsure is accounted (the positional replay, as before): a row with no comparable key (a lossy identity),
         any other row a ``capped`` tail lacks, and a tool result whose call is neither in the view before it nor
         stored."""
@@ -628,7 +628,9 @@ class IdentityAnchorMixin:
                 return True  # the tail holds every stored row: absence is proof
             if wanted[0] == "tool":
                 return not stored(wanted[1])
-            return wanted[0] == "call" and not any(stored(i) or stored(i, call_row=True) for i in wanted[1])
+            return wanted[0] == "call" and any(  # a result at or after the cursor, and no stored call row or result
+                identity_messages[k].get("tool_call_id") in wanted[1] for k in range(cursor, len(messages))) and not any(
+                stored(i) or stored(i, call_row=True) for i in wanted[1])
 
         chain = self._identity_anchor_chain()
         index: dict = defaultdict(list)
