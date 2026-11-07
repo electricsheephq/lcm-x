@@ -221,16 +221,22 @@ def test_partial_write_retry_is_idempotent(tmp_path, monkeypatch, stage):
             )
         real = getattr(owner, attribute)
 
-        at_fault = []
+        at_fault, retry_added, at_fault_created = [], [], set()
+
+        def created(engine):
+            return {row[0] for row in engine._store._conn.execute("SELECT created_at FROM message_relations")}
 
         def after_write(*args, **kwargs):
             result = real(*args, **kwargs)
+            if fired and stage == "commit-relation":
+                retry_added.append(result)  # rows this later call really inserted (a surviving copy would block them)
             if not fired and (stage == "version-rewind" or args[0]):
                 if stage == "backfill":
                     assert e._store.get_session_messages("S")[2]["observed_at"] == 12.0
                 elif stage == "commit-relation":
                     assert _relations(e)
                     at_fault.extend(_relations(e))  # the first attempt's relations, inside its open transaction
+                    at_fault_created.update(created(e))
                 fired.append(True)
                 raise sqlite3.OperationalError("synthetic fault after " + stage)
             return result
@@ -243,7 +249,12 @@ def test_partial_write_retry_is_idempotent(tmp_path, monkeypatch, stage):
         relations_after_fault = _relations(e)
         if stage == "commit-relation":
             # Direct rollback check: the first attempt's relations were discarded, not kept beside the retry's.
+            # add_message_relations skips a group identical to a recorded one, so equal counts alone would also pass
+            # if the first attempt's rows survived. Pin that the retry inserted them afresh, and that none of the
+            # first attempt's group keys (created_at) is still stored.
             assert at_fault and len(relations_after_fault) == len(at_fault)
+            assert sum(retry_added) == len(at_fault), retry_added
+            assert not created(e) & at_fault_created
         # #1815: the fault fires once, on the first attempt; that attempt rolls back (R2: this writer's partial
         # evidence is discarded) and the same ingest classifies again and succeeds, so no ingest failure is counted.
         e.ingest(deepcopy(host))
