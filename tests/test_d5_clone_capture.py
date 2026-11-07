@@ -120,3 +120,27 @@ def test_free_space(monkeypatch):
     monkeypatch.setattr(cap.shutil, "disk_usage", lambda path: usage)
     assert cap.free_space_ok(".", 60)
     assert not cap.free_space_ok(".", 61)
+
+
+def test_missing_or_symlinked_payload_dir_is_refused(inputs, tmp_path):
+    with pytest.raises(cap.CaptureError):  # A mistyped path must never read as "no payload".
+        cap.capture("T0", tmp_path / "typo", store_db=inputs[0], host_db=inputs[1], payload_dir=tmp_path / "nope")
+    real = tmp_path / "real-payload"
+    real.mkdir()
+    (real / "a.json").write_text("{}")
+    (tmp_path / "linked").symlink_to(real, target_is_directory=True)
+    with pytest.raises(cap.CaptureError):
+        cap.capture("T0", tmp_path / "out1", store_db=inputs[0], host_db=inputs[1], payload_dir=tmp_path / "linked")
+    outside = tmp_path / "outside.json"
+    outside.write_text("{}")
+    (real / "inner-link.json").symlink_to(outside)
+    with pytest.raises(cap.CaptureError):
+        cap.capture("T0", tmp_path / "out2", store_db=inputs[0], host_db=inputs[1], payload_dir=real)
+
+
+def test_dotted_extra_name_cannot_overwrite_the_manifest(inputs, tmp_path):
+    extra = tmp_path / "extra.txt"
+    extra.write_text("x")
+    with pytest.raises(cap.CaptureError):
+        cap.capture("T0", tmp_path / "out", store_db=inputs[0], host_db=inputs[1], payload_dir=None,
+                    extras={"./capture-hashes.json": extra})

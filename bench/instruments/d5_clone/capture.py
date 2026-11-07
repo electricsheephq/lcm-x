@@ -72,13 +72,18 @@ def capture(kind, out_dir, *, store_db, host_db, payload_dir, extras=None):
     backup(store_db, out / "store.db")
     backup(host_db, out / "host-0.db")
     payload = out / "lcm-large-outputs"
-    if payload_dir is None or not Path(payload_dir).exists():
-        payload.mkdir()
+    if payload_dir is None:
+        payload.mkdir()  # Only an explicit None means "no payload"; a wrong path must never read as empty.
+    elif Path(payload_dir).is_symlink() or not Path(payload_dir).is_dir():
+        raise CaptureError("payload dir must be an existing real directory")
     else:
         clone_tree(payload_dir, payload)
+        if any(path.is_symlink() for path in payload.rglob("*")):
+            raise CaptureError("payload dir holds a symlink")  # A link would point the capture at live data.
     for name, source in (extras or {}).items():
         dest = _relative(out, name)
-        if dest.exists() or name == "capture-hashes.json" or dest.is_relative_to(payload):
+        normalized = dest.relative_to(out).as_posix()
+        if dest.exists() or normalized == "capture-hashes.json" or dest.is_relative_to(payload):
             raise CaptureError("extra collides with capture layout")
         dest.parent.mkdir(parents=True, exist_ok=True)
         if dest.suffix == ".db":

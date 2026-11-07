@@ -123,3 +123,46 @@ def test_empty_pin_fails(tmp_path):
     scratch.mkdir()
     pin.write_text(json.dumps({"schema": "d5-clone-snapshot-pin/1", "files": []}))
     assert snapshot.verify(pin, root, scratch)["verdict"] == "FAIL"
+
+
+def _pin_of(root, pin):
+    entries = [{"name": p.relative_to(root).as_posix(), "size": p.stat().st_size, "sha256": sha(p)}
+               for p in sorted(root.rglob("*")) if p.is_file() and not p.is_symlink()]
+    pin.write_text(json.dumps({"schema": "d5-clone-snapshot-pin/1", "files": entries}))
+
+
+@pytest.mark.parametrize("kind", ["file", "db", "payload-dir"])
+def test_symlinks_fail_and_are_never_followed(fixture, tmp_path, kind):
+    pin, root, scratch = fixture
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "x.db").write_bytes((root / "store.db").read_bytes())
+    if kind == "file":
+        (root / "linked.bin").symlink_to(outside / "x.db")
+    elif kind == "db":
+        (root / "other.db").symlink_to(outside / "x.db")
+    else:
+        (root / "lcm-large-outputs" / "nested").symlink_to(outside, target_is_directory=True)
+    _pin_of(root, pin)
+    result = snapshot.verify(pin, root, scratch)
+    assert result["verdict"] == "FAIL"
+    assert result["symlinks"]["names"] or result["symlinks"]["payload"]
+
+
+def test_duplicate_entries_and_dot_prefixed_payload_names(fixture):
+    pin, root, scratch = fixture
+    data = json.loads(pin.read_text())
+    data["files"].append(dict(data["files"][0]))
+    data["files"].append({"name": "./lcm-large-outputs/leakname.txt", "size": 1, "sha256": "0" * 64})
+    pin.write_text(json.dumps(data))
+    result = snapshot.verify(pin, root, scratch)
+    assert result["verdict"] == "FAIL"
+    assert result["duplicate_entries"]["names"] or result["duplicate_entries"]["payload"]
+    assert "leakname" not in json.dumps(result)
+
+
+def test_scratch_inside_snapshot_is_refused(fixture):
+    pin, root, _ = fixture
+    (root / "scratch").mkdir()
+    with pytest.raises(ValueError):
+        snapshot.verify(pin, root, root / "scratch")
