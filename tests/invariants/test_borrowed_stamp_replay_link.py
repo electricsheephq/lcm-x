@@ -56,7 +56,7 @@ def check(engine, before_ids, *, copies, expected):
                for a, b in links), evidence
 
 
-def borrowed_first(build, cold, *, borrowed=T_LONG, keep_old=False, earlier=None):
+def borrowed_first(build, cold, *, borrowed=T_LONG, keep_old=False, earlier=None, holder_shown=True):
     """383 order: P stored at the turn end on T's stamp, then at its own stamp after a restart."""
     engine = build()
     head = history(False) + ([{"role": "user", "content": P, "timestamp": earlier},
@@ -71,8 +71,10 @@ def borrowed_first(build, cold, *, borrowed=T_LONG, keep_old=False, earlier=None
     stored = [row["store_id"] for row in all_rows(engine)]
     engine = restart(engine, build, cold, view)
     # The reload no longer holds the host's in-memory compress note, and shows P at its own stamp.
-    view = [row for row in view[:-2] if row.get("content") != "compress finished"] + (view[-1:] if keep_old else [])
-    view += [{"role": "user", "content": P, "timestamp": P_OWN},{"role": "assistant", "content": "rollback: restore, verify", "timestamp": P_OWN + 5},
+    view = [row for row in view[:-2] if row.get("content") != "compress finished"
+            and (holder_shown or row.get("content") != T)] + (view[-1:] if keep_old else [])
+    view += [{"role": "user", "content": P, "timestamp": P_OWN},
+             {"role": "assistant", "content": "rollback: restore, verify", "timestamp": P_OWN + 5},
              {"role": "user", "content": NEW, "timestamp": P_OWN + 10}]
     engine.ingest(deepcopy(view))
     assert len(ids(engine, NEW)) == 1
@@ -108,9 +110,11 @@ def test_579_own_stamp_first_then_borrowed_copy_links(build, cold):
     check(engine, stored, copies=copies, expected={(copies[1], copies[0])})
 
 
+@pytest.mark.parametrize("holder_shown", [True, False], ids=["holder-shown", "holder-gone"])
 @pytest.mark.parametrize("cold", [False, True], ids=["warm", "cold"])
-def test_383_borrowed_copy_first_then_own_stamp_after_restart_links(build, cold):
-    engine, stored = borrowed_first(build, cold)
+def test_383_borrowed_copy_first_then_own_stamp_after_restart_links(build, cold, holder_shown):
+    """The stamp gate reads the store, so the link does not need the reload view to still show T."""
+    engine, stored = borrowed_first(build, cold, holder_shown=holder_shown)
     copies = ids(engine, P)
     assert len(copies) == 2, copies
     check(engine, stored, copies=copies, expected={(copies[1], copies[0])})
@@ -290,3 +294,105 @@ def test_two_links_into_one_target_both_count_visible():
     split = split_surplus([(("user", P), 2, [1, 2, 3], [], evidence)],
                           [(2, "possible_replay_of", 1), (3, "possible_replay_of", 1)])
     assert (split["visible_surplus_rows"], split["silent_surplus_rows"]) == (2, 0), split
+
+
+@pytest.mark.parametrize("n", [500, 2000])
+def test_linker_reads_grow_linearly_on_a_bulk_ingest(build, monkeypatch, n):
+    """A cold first ingest of n distinct user turns: the linker issues a constant number of reads per row."""
+    import hermes_lcm.engine as engine_module
+
+    engine, statements = build(), []
+    link = engine_module.LCMEngine._link_borrowed_stamp_occurrences
+
+    def counted(self, *args):
+        self._store._conn.set_trace_callback(statements.append)
+        try:
+            return link(self, *args)
+        finally:
+            self._store._conn.set_trace_callback(None)
+    monkeypatch.setattr(engine_module.LCMEngine, "_link_borrowed_stamp_occurrences", counted)
+    turns = []
+    for i in range(n):
+        turns += [{"role": "user", "content": f"distinct turn {i}", "timestamp": 1000.0 + 2 * i},
+                  {"role": "assistant", "content": f"reply {i}", "timestamp": 1001.0 + 2 * i}]
+    engine.ingest(turns)
+    assert len(ids(engine, f"distinct turn {n - 1}")) == 1
+    assert len(statements) <= 3 * n, len(statements)
+
+
+def test_known_limit_a_genuine_repeat_sharing_a_stamp_with_other_text_is_linked(build):
+    """Characterization: a host that stamps two different user texts identically for a reason other than the
+    borrow shows the borrowed-stamp signature, so a genuine repeat P is attributed to its earlier copy. The link
+    only attributes: every row stays stored."""
+    engine = build()
+    first = history(False) + [{"role": "user", "content": P, "timestamp": 1200.0},
+                              {"role": "assistant", "content": "done", "timestamp": 1201.0}]
+    engine.ingest(deepcopy(first))
+    stored = [row["store_id"] for row in all_rows(engine)]
+    view = compacted(engine, first)
+    view = [row for row in view if row.get("content") != P]  # P compacted out of the host view
+    view += [{"role": "user", "content": T, "timestamp": 5000.0},
+             {"role": "user", "content": P, "timestamp": 5000.0},
+             {"role": "assistant", "content": "again", "timestamp": 5001.0}]
+    engine.ingest(deepcopy(view))
+    copies = ids(engine, P)
+    assert len(copies) == 2, copies
+    check(engine, stored, copies=copies, expected={(copies[1], copies[0])})
+
+
+def test_one_way_a_consumed_target_takes_no_borrowed_link(build):
+    """By design the borrowed linker treats any incoming link on E as taken, so N stays unlinked when another
+    copy already holds E; the reverse never happens because a borrowed link does not consume E."""
+    engine = build()
+    before = history(False) + [{"role": "user", "content": T, "timestamp": T_LONG}]
+    engine.ingest(deepcopy(before))
+    view = compacted(engine, before)
+    view += [{"role": "assistant", "content": "compress finished", "timestamp": T_LONG + 1},
+             {"role": "user", "content": P, "timestamp": P_OWN}]
+    engine.ingest(deepcopy(view))
+    own = ids(engine, P)[0]
+    other = next(row["store_id"] for row in all_rows(engine) if row["role"] == "user" and row["observed_at"] == 1130.0)
+    engine._store.add_message_relations([[(other, "possible_replay_of", own, None, None)]])  # a consuming link
+    host = [row for row in view if row.get("content") != T]
+    next(row for row in host if row.get("content") == P)["timestamp"] = T_LONG
+    host.append({"role": "assistant", "content": "rollback: restore, verify", "timestamp": P_OWN + 5})
+    engine.ingest(deepcopy(host))
+    copies = ids(engine, P)
+    assert len(copies) == 2, copies
+    assert not any(a == copies[1] for a, _b in replay_links(engine)), sorted(replay_links(engine))
+
+
+def test_durable_recovery_never_gives_a_borrowed_source_a_second_link(tmp_path, monkeypatch):
+    """The durable-recovery link runs after the borrowed linker; a source that already holds a link is skipped.
+    The borrowed linker's write is forced here (the harness cannot borrow the recovered prompt's stamp)."""
+    import hermes_lcm.engine as engine_module
+    from tests.harness import ScriptedSummarizer, engine_context, pin_char_counter
+    from tests.invariants.test_issue_1505_recovery_stamp import lineage, message, users
+
+    pin_char_counter(monkeypatch)
+    ScriptedSummarizer("outage").install(monkeypatch)
+    lineage(tmp_path)
+    current = message("[T32] rebuild the index " * 500, 20.)
+    source = [message("[T31] earlier request", 10.), message("earlier reply", 11., "assistant"), current,
+              {"role": "tool", "content": "orphan result", "tool_call_id": "orphan", "timestamp": 21.}]
+    with engine_context(tmp_path, window=128000, session_id="parent", conversation_id="conv") as engine:
+        engine.ingest(source)
+        recovered = next(r["store_id"] for r in users(engine) if r["content"] == current["content"])
+        engine._config.fresh_tail_count, engine._config.max_assembly_tokens = 64, 120
+        view = list(engine.compress(source, current_tokens=100, force=True))
+        assert engine._last_compression_status == "overflow_recovery"
+        view[-1]["timestamp"] = 30.
+
+    def borrowed_first(self, messages, stored_at):
+        for idx, sid in stored_at.items():
+            if messages[idx].get("content") == current["content"]:
+                self._store.add_message_relations([[(sid, "possible_replay_of", recovered, None, 30.)]])
+    monkeypatch.setattr(engine_module.LCMEngine, "_link_borrowed_stamp_occurrences", borrowed_first)
+    with engine_context(tmp_path, window=128000, session_id="parent", conversation_id="conv") as engine:
+        view[-1]["content"] = current["content"]
+        view.append(message("reply", 31., "assistant"))
+        engine.ingest(deepcopy(view))
+        copies = [r["store_id"] for r in users(engine) if r["content"] == current["content"]]
+        links = list(engine._store._conn.execute(
+            "SELECT store_id, related_store_id, observed_at FROM message_relations WHERE kind='possible_replay_of'"))
+        assert len(copies) == 2 and links == [(copies[1], recovered, 30.)], (copies, links)
