@@ -679,7 +679,7 @@ def register(ctx):
                 root = aux_session.live_delegate_child_root(session_id) if session_id else ""
                 if not root or not aux_session.explicit_subagent_lineage(root):
                     return None  # not a live delegated child bound in this process: main's behaviour
-                child_engine = aux_session.live_delegate_child_engine(session_id)
+                child_engine, storage = aux_session.live_delegate_child_engine(session_id)
                 if child_engine is None:
                     return None  # the child's own engine is gone: its end store (main's behaviour) is all that runs
                 history = payload.get("conversation_history")
@@ -692,6 +692,9 @@ def register(ctx):
                 outcome: dict = {}
 
                 def store_child(active_engine):
+                    if aux_session.live_child_storage_identity(active_engine) != storage:
+                        outcome["moved"] = True  # the engine now serves another profile: never write there early
+                        return 0
                     return active_engine._store_delegate_child_turn(
                         session_id, history, platform=platform, lock_wait=wait, outcome=outcome,
                     )
@@ -700,9 +703,15 @@ def register(ctx):
                     """True only when the store ran: not skipped as busy, not failed, not refused by a closed engine."""
                     # Only the child's own engine: it serves the child's profile, as main's end store does. Never the
                     # plugin prototype, which may serve another profile. It never binds and never ingests.
+                    outcome.clear()
                     result = use_lcm_engine(child_engine, store_child, timeout=wait)
-                    return bool(result.used and isinstance(result.value, int)
-                                and not outcome.get("skipped") and "error" not in outcome)
+                    if outcome.get("moved"):
+                        aux_session.warn_live_child_moved(session_id)
+                        return False
+                    if result.status is ActiveEngineUseStatus.BUSY or outcome.get("skipped"):
+                        return aux_session.LIVE_STORE_RETRY  # busy: the worker retries this list a few times
+                    return bool(result.used and isinstance(result.value, int) and outcome.get("linked")
+                                and "error" not in outcome)
 
                 aux_session.run_live_child_store(session_id, store, rows=len(history))
             except Exception as exc:

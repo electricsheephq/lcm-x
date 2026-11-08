@@ -226,14 +226,17 @@ def test_a_busy_store_lock_skips_the_store_within_the_bound(host, monkeypatch):
     holder.start()
     try:
         assert held.wait(5)
-        began = time.monotonic()
-        child.run_until(ctx, 1)  # pre_llm_call + two model calls, each skipped
-        assert time.monotonic() - began < 2.0
+        for hook in (lambda: child.llm_start(ctx, view(0)), lambda: child.api_call(ctx, view(0), 1),
+                     lambda: child.api_call(ctx, view(1), 2)):  # each skipped while the lock is held
+            began = time.monotonic()
+            hook()
+            assert time.monotonic() - began < aux._LIVE_CHILD_STORE_JOIN_S + 0.5  # within the hook's bound
         assert child_rows(parent) == []
     finally:
         release.set()
         holder.join(10)
     child.api_call(ctx, view(1), 3)  # the next model call stores everything handed over so far
+    aux.drain_live_child_stores(10)  # the store may land just after the hook returns (a retry still in flight)
     assert _contents(child_rows(parent)) == _contents(view(1))
 
 
@@ -438,6 +441,7 @@ def test_a_queued_store_after_the_childs_end_store_adds_nothing(host, monkeypatc
     assert _contents(child_rows(parent)) == _contents(final)
 
 
+@pytest.mark.skipif(not hasattr(__import__("os"), "fork"), reason="needs os.fork (the dying process is a fork)")
 def test_a_store_cut_off_mid_write_leaves_no_partial_prefix_and_a_resume_appends_once(host, tmp_path):
     # The process dies inside the store's transaction, after its first row INSERT (as a kill, or interpreter exit
     # ending a daemon worker): nothing of that batch is stored, and the next store appends the list once.
@@ -547,9 +551,15 @@ def test_a_drain_that_times_out_says_so_with_the_hashed_child_and_the_unstored_r
     import hashlib
 
     _, aux, child, engines, db_path, release = _blocked_drain(host, monkeypatch)
+    took = []
     with caplog.at_level("WARNING"):
-        for closing in engines:  # three drains time out; the stuck child is reported once
+        for closing in engines:  # the first drain times out and reports the stuck child once
+            began = time.monotonic()
             closing.shutdown()
+            took.append(time.monotonic() - began)
+    # CodeRabbit (review of c43478d5): a child already reported is not waited for again, so N engines do not stall
+    # shutdown N times.
+    assert all(later < aux._LIVE_CHILD_SHUTDOWN_DRAIN_S for later in took[1:]), took
     lines = [r.getMessage() for r in caplog.records if r.levelname == "WARNING" and "shutdown drain" in r.getMessage()]
     digest = hashlib.sha256(b"child").hexdigest()[:12]
     # An upper bound: the first store (1 row) has landed but its worker has not returned, so nothing counts as stored
@@ -713,3 +723,41 @@ def test_the_model_call_hooks_never_store_through_the_plugin_prototype(host, spa
     child.run_until(ctx, 2)
     assert used == []
     assert (_contents(child_rows(parent)) == _contents(view(2))) is spawned
+
+
+@pytest.mark.parametrize("retries", [3, 0])
+def test_a_store_skipped_on_a_busy_lock_lands_once_the_lock_frees_without_another_hook(host, monkeypatch, retries):
+    """NeonDiff (review of c43478d5): a skipped store is retried by its worker, so an interruption right after the
+    contention clears loses nothing. ``retries=0`` (no retry) is the red control."""
+    _, _, ctx, parent, child, _ = _setup(host, "own_engine")
+    aux = ctx.module("aux_session")
+    monkeypatch.setattr(aux, "_LIVE_CHILD_STORE_WAIT_S", 0.2, raising=False)
+    monkeypatch.setattr(aux, "_LIVE_CHILD_STORE_RETRIES", retries, raising=False)
+    skipped_before = aux.delegate_child_store_counts().get("live_store_skipped", 0)
+    held, release = threading.Event(), threading.Event()
+
+    def hold():
+        with aux._DELEGATE_STORE_LOCK:
+            held.set()
+            release.wait(10)
+
+    def free_after_first_skip():
+        deadline = time.monotonic() + 10
+        while aux.delegate_child_store_counts().get("live_store_skipped", 0) <= skipped_before:
+            if time.monotonic() > deadline:
+                break
+            time.sleep(0.01)
+        release.set()
+
+    holder, freer = threading.Thread(target=hold), threading.Thread(target=free_after_first_skip)
+    holder.start()
+    assert held.wait(5)
+    freer.start()
+    child.api_call(ctx, view(1), 1)  # the only hook: its first store is skipped, then the lock frees
+    freer.join(10)
+    holder.join(10)
+    aux.drain_live_child_stores(10)  # the interruption: nothing else runs for the child
+    if retries:
+        assert _contents(child_rows(parent)) == _contents(view(1))
+    else:
+        assert child_rows(parent) == []  # without a retry the list was dropped

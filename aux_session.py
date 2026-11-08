@@ -77,6 +77,7 @@ def record_subagent_stop(payload: Dict[str, Any]) -> None:
         for session_id in [sid for sid, root in _LIVE_DELEGATE_CHILD_ROOTS.items() if root == child_session_id]:
             _LIVE_DELEGATE_CHILD_ROOTS.pop(session_id, None)
             _LIVE_DELEGATE_CHILD_ENGINES.pop(session_id, None)
+            _LIVE_CHILD_MOVED_WARNED.discard(session_id)
 
 
 def explicit_subagent_lineage(session_id: str) -> Dict[str, str]:
@@ -841,9 +842,11 @@ _LIVE_CHILD_STORE_WAIT_S = 1.0
 # thread) and carried across its compression handoff; a root's subagent_stop ends its entries.
 _LIVE_CHILD_LOCK = threading.Lock()
 _LIVE_DELEGATE_CHILD_ROOTS: dict[str, str] = {}
-# The engine the child bound, by session id (weak): the early store writes only through it, so a child whose engine
-# serves another profile never writes into the plugin prototype's profile.
-_LIVE_DELEGATE_CHILD_ENGINES: dict[str, Any] = {}
+# The engine the child bound and the storage it served then, by session id (weak reference, identity): the early
+# store writes only through that engine and only while it still serves that storage, so a child's rows never land in
+# another profile's database (the plugin prototype's, or a later rebind of the child's engine).
+_LIVE_DELEGATE_CHILD_ENGINES: dict[str, tuple] = {}
+_LIVE_CHILD_MOVED_WARNED: set[str] = set()
 _LIVE_CHILD_STORES_IN_FLIGHT: set[str] = set()
 _LIVE_CHILD_PENDING: dict[str, Any] = {}  # the newest store handed over while one was in flight, per child
 _LIVE_CHILD_HANDED_ROWS: dict[str, int] = {}  # rows in the newest list handed over, per child with a store in flight
@@ -851,6 +854,9 @@ _LIVE_CHILD_STORED_ROWS: dict[str, int] = {}  # rows in the newest list whose st
 _LIVE_CHILD_WARNED: set[str] = set()  # children whose stuck store a shutdown drain already reported
 _LIVE_CHILD_STORE_JOIN_S = 2.0  # the most a host hook waits for a live-child store; the store itself may finish later
 _LIVE_CHILD_SHUTDOWN_DRAIN_S = 5.0  # the most an engine shutdown waits for in-flight or queued live-child stores
+LIVE_STORE_RETRY = "retry"  # a live-child store that found the database busy: its worker tries the same list again
+_LIVE_CHILD_STORE_RETRIES = 3  # retries per list, unless a newer list is handed over first
+_LIVE_CHILD_RETRY_DELAY_S = 0.25  # times the retry number
 _DELEGATE_AUXILIARY_IDS: set[tuple[str, str]] = set()
 _DELEGATE_RESUME_BOUNDARIES: dict[tuple[str, str], list[bytes]] = {}
 _DELEGATE_COMPRESSION_PARENTS: dict[tuple[str, str], str] = {}
@@ -865,11 +871,30 @@ def live_delegate_child_root(session_id: str) -> str:
         return _LIVE_DELEGATE_CHILD_ROOTS.get(str(session_id or ""), "")
 
 
-def live_delegate_child_engine(session_id: str) -> Any:
-    """The engine a live delegated child bound in this process (still alive), or ``None``."""
+def live_child_storage_identity(engine: Any) -> tuple[str, str]:
+    """The profile home and database an engine serves now."""
+    return str(getattr(engine, "_hermes_home", "") or ""), str(getattr(engine, "_db_path", "") or "")
+
+
+def live_delegate_child_engine(session_id: str) -> tuple[Any, tuple]:
+    """The engine a live delegated child bound in this process (if still alive) and the storage it served then."""
     with _LIVE_CHILD_LOCK:
-        ref = _LIVE_DELEGATE_CHILD_ENGINES.get(str(session_id or ""))
-    return ref() if ref is not None else None
+        entry = _LIVE_DELEGATE_CHILD_ENGINES.get(str(session_id or ""))
+    if entry is None:
+        return None, ()
+    return entry[0](), entry[1]
+
+
+def warn_live_child_moved(session_id: str) -> None:
+    """One WARNING per child whose engine now serves another profile; its rows are left to the end store."""
+    with _LIVE_CHILD_LOCK:
+        if session_id in _LIVE_CHILD_MOVED_WARNED:
+            return
+        _LIVE_CHILD_MOVED_WARNED.add(session_id)
+    logger.warning(
+        "LCM live delegated-child store skipped: the child's engine now serves another profile than when the child "
+        "started; child=%s is left to its end store (#2482)", hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:12],
+    )
 
 
 def run_live_child_store(session_id: str, operation, rows: int = 0) -> None:
@@ -898,12 +923,21 @@ def run_live_child_store(session_id: str, operation, rows: int = 0) -> None:
         current = (operation, rows)
         try:
             while current is not None:
-                try:
-                    if current[0]() is True:  # only a store that really ran counts its rows as stored
+                for attempt in range(_LIVE_CHILD_STORE_RETRIES + 1):
+                    try:
+                        stored = current[0]()
+                    except Exception as exc:
+                        logger.debug("LCM live delegated-child store error: %s", exc)
+                        break
+                    if stored is True:  # only a store that really ran counts its rows as stored
                         with _LIVE_CHILD_LOCK:
                             _LIVE_CHILD_STORED_ROWS[session_id] = current[1]
-                except Exception as exc:
-                    logger.debug("LCM live delegated-child store error: %s", exc)
+                        break
+                    with _LIVE_CHILD_LOCK:
+                        superseded = session_id in _LIVE_CHILD_PENDING
+                    if stored != LIVE_STORE_RETRY or superseded or attempt == _LIVE_CHILD_STORE_RETRIES:
+                        break
+                    time.sleep(_LIVE_CHILD_RETRY_DELAY_S * (attempt + 1))  # busy: the same list again, shortly
                 with _LIVE_CHILD_LOCK:
                     current = _LIVE_CHILD_PENDING.pop(session_id, None)
                     if current is None:
@@ -929,8 +963,8 @@ def drain_live_child_stores(timeout: float) -> None:
     deadline = time.monotonic() + max(0.0, timeout)
     while True:
         with _LIVE_CHILD_LOCK:
-            if not _LIVE_CHILD_STORES_IN_FLIGHT:
-                return
+            if not _LIVE_CHILD_STORES_IN_FLIGHT - _LIVE_CHILD_WARNED:
+                return  # a child an earlier drain already reported stuck is not waited for again
         if time.monotonic() >= deadline:
             with _LIVE_CHILD_LOCK:
                 waiting = {sid: max(0, _LIVE_CHILD_HANDED_ROWS.get(sid, 0) - _LIVE_CHILD_STORED_ROWS.get(sid, 0))
@@ -995,7 +1029,7 @@ class DelegateChildMixin:
         elif agent is not None and _is_delegate_agent(agent):
             with _LIVE_CHILD_LOCK:
                 _LIVE_DELEGATE_CHILD_ROOTS.setdefault(session_id, session_id)
-                _LIVE_DELEGATE_CHILD_ENGINES[session_id] = weakref.ref(self)
+                _LIVE_DELEGATE_CHILD_ENGINES[session_id] = (weakref.ref(self), live_child_storage_identity(self))
 
     def _stored_delegate_child_link(self, session_id: str) -> Dict[str, str]:
         if not self._store._session_lineage_table_exists():
