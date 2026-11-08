@@ -150,8 +150,10 @@ the host reported `interrupted`. Any other assistant row is surplus.
   the segments joined by `\n\n`, byte for byte; only C is credited, never its parts). The relation format is
   provisional. Valid composites consume their non-NULL parts once, lowest C store id first; any shared claimed
   part prevents credit, and the replay needs its own `possible_replay_of`. NULL claims nothing. The gate audit's
-  `composite_store_ids` lists credited ids held by surplus groups, sorted per lineage and unioned in totals;
-  composite credit leaves M3 unchanged. `link_pending_rows` and `composite_rows` count the visible surplus each
+  `composite_store_ids` lists the composite-credited surplus copies; `composite_rows` counts the visible surplus
+  the form adds beyond the other links, so it can be lower when another link already explains a listed copy (a
+  key's expected copy is never listed; sorted per lineage, unioned in totals). Composite credit leaves M3
+  unchanged. `link_pending_rows` and `composite_rows` count the visible surplus each
   form adds to the relation
   witnesses alone (a row two forms credit counts in both); `link_pending_rows_total` counts every store row with a
   `link_pending` relation, surplus or not: non-zero is a defect signal of its own. The scorer has no log input, so

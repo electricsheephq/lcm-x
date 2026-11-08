@@ -648,3 +648,23 @@ def test_composite_consume_once(case, credited, visible):
     split = multiset.split_surplus(groups, relations, rows)
     assert (split["composite_rows"], split["visible_surplus_rows"], split["silent_surplus_rows"]) == (
         len(credited), visible, len(composites) - visible)
+
+
+@pytest.mark.parametrize("composite_id,reported,credited", [(3, [], 0), (4, [4], 1)],
+                         ids=["expected-copy-not-reported", "later-copy-reported"])
+def test_creditable_composite_ids_exclude_the_expected_copy(composite_id, reported, credited):
+    """Review of #2495 (probe A): the host shows C once and a second copy is stored. Only the key's later copy can be
+    credited, so a composite_of on the expected copy is witnessed but not reported as a credited row."""
+    rows = todo_rows({1: ("S", "user", "prompt one"), 3: ("S", "user", BLOCK + "\n\nprompt one"),
+                      4: ("S", "user", BLOCK + "\n\nprompt one")})
+    c = rows[3][2]
+    relations = [(composite_id, "composite_of", None, 0), (composite_id, "composite_of", 1, 1)]
+    groups = []
+    multiset.score([("user", "prompt one"), ("user", c)], [(s, *rows[s]) for s in sorted(rows)], surplus_keys=groups)
+    forms, creditable = multiset.attribution_forms(relations, rows), set()
+    split = multiset.split_surplus(groups, relations, rows, forms, creditable)
+    assert forms["composite_rows"] == {composite_id}
+    assert sorted(forms["composite_rows"] & {s for g in groups for s in g[2]}) == [composite_id]  # 22f25b19's list
+    assert sorted(forms["composite_rows"] & creditable) == reported
+    assert (split["composite_rows"], split["visible_surplus_rows"], split["silent_surplus_rows"]) == (
+        credited, credited, 1 - credited)

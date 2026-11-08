@@ -108,8 +108,10 @@ witnesses alone, so a row two forms credit counts in both. Scaffold provenance m
 Every stored `composite_of` part must be a user row of C's session with store id < C's. Valid composites
 consume their non-NULL parts once, lowest C store id first; sharing any claimed part requires a separate
 `possible_replay_of` link. The ordinal-0 NULL scaffold claims nothing. `composite_store_ids` lists the
-credited ids held by surplus groups, sorted per lineage and as a sorted union in totals. Composite credit
-does not change M3's numerator (`possible_replay_of` plus `generated_unproven`).
+composite-credited surplus copies; `composite_rows` counts the visible surplus the form adds beyond the other
+links, so it can be lower when another link already explains a listed copy. A key's expected copy is never
+listed (only its later copies can be credited); the list is sorted per lineage and a sorted union in totals.
+Composite credit does not change M3's numerator (`possible_replay_of` plus `generated_unproven`).
 
 | Output | Fields |
 |---|---|

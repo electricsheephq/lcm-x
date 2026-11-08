@@ -761,9 +761,9 @@ def score_lineage(g, items, tools, rows, relations, stored=None, forms=None):
     ids = {}
     tc = tool_calls.compare(tools, set(), tool_calls.stored_keys([r[:6] for r in rows], lambda _s: g, store_ids=ids),
                             store_ids=ids, surplus_keys=groups)
-    visible, silent, truncated, credited = 0, [], 0, Counter()
+    visible, silent, truncated, credited, creditable = 0, [], 0, Counter(), set()
     for group in groups:  # split_surplus matches within one key, so one call per key loses nothing
-        split = multiset.split_surplus([group], relations, stored, forms)
+        split = multiset.split_surplus([group], relations, stored, forms, creditable)
         visible += split["visible_surplus_rows"]
         credited.update({k: split[k] for k in forms or ()})
         found = [e["store_id"] for e in split["silent_surplus_examples"]]
@@ -773,8 +773,7 @@ def score_lineage(g, items, tools, rows, relations, stored=None, forms=None):
             "missing_rows": ms["deficit_rows"] + tc["tool_missing_rows"], "split_assistant_keys": ms["split_keys"],
             "surplus_rows": ms["surplus_rows"] + tc["tool_surplus_rows"], "visible_surplus_rows": visible,
             "silent_surplus_rows": len(silent) + truncated, "silent_unlisted_rows": truncated,
-            "composite_store_ids": sorted((forms or {}).get("composite_rows", set()) &
-                                          {sid for group in groups for sid in group[2]}),
+            "composite_store_ids": sorted((forms or {}).get("composite_rows", set()) & creditable),
             **{k: credited[k] for k in forms or ()}}, silent
 
 

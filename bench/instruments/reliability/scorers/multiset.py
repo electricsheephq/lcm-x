@@ -553,7 +553,7 @@ def attribution_forms(relations, rows, logged=None):
     return forms
 
 
-def split_surplus(groups, relations, rows=None, forms=None):
+def split_surplus(groups, relations, rows=None, forms=None, creditable=None):
     """Maximum matching of relation witnesses to rows, with each key capped at its unlicensed surplus.
 
     Flow: key quota -> unique self/pair witness -> stored row. Witness and row nodes belong to one key, so a row
@@ -574,6 +574,8 @@ def split_surplus(groups, relations, rows=None, forms=None):
     copies around reserved rows, so store order no longer identifies the kept copy.
     Each ``attribution_forms`` set (``forms``, computed from the relations when None) is a self witness too; a form's
     count is the visible surplus it adds to the relation witnesses alone, so two forms on one row both count it.
+    ``creditable``: a set, when given, receives each key's copies that the matching can credit (its ``later`` set
+    in the pass with every form), so a caller can report credited rows without counting a key's expected copy.
     """
     # Stored text only verifies an existing directed witness; it never creates one.
     # ``rows`` (store_id -> (session, role, content)) covers every stored row, tool results included; without it,
@@ -588,7 +590,7 @@ def split_surplus(groups, relations, rows=None, forms=None):
     held = {sid for group in groups for sid in group[2]}
     live = {name: ids & held for name, ids in forms.items()}
     # Passes: one with every touched form, one without, one per touched form (up to 5 in the audit, 4 in B2).
-    out = _matched(groups, relations, rows, set().union(*live.values()))
+    out = _matched(groups, relations, rows, set().union(*live.values()), creditable)
     base = _matched(groups, relations, rows, set())["visible_surplus_rows"] if any(live.values()) else 0
     for name, ids in live.items():
         out[name] = _matched(groups, relations, rows, ids)["visible_surplus_rows"] - base if ids else 0
@@ -596,7 +598,7 @@ def split_surplus(groups, relations, rows=None, forms=None):
     return out
 
 
-def _matched(groups, relations, rows, credited):
+def _matched(groups, relations, rows, credited, creditable=None):
     graph, source, sink = defaultdict(dict), ("source",), ("sink",)
 
     def edge(a, b, capacity=1):
@@ -633,6 +635,8 @@ def _matched(groups, relations, rows, credited):
                     break
                 cap, left = cap + 1, left - n
             witnesses = [("self", sid) for sid in sorted(later)]
+        if creditable is not None:
+            creditable.update(later)
         caps.append(cap)
         edge(source, quota, cap)
         for witness in witnesses:
