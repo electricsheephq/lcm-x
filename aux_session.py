@@ -76,6 +76,7 @@ def record_subagent_stop(payload: Dict[str, Any]) -> None:
     with _LIVE_CHILD_LOCK:
         for session_id in [sid for sid, root in _LIVE_DELEGATE_CHILD_ROOTS.items() if root == child_session_id]:
             _LIVE_DELEGATE_CHILD_ROOTS.pop(session_id, None)
+            _LIVE_DELEGATE_CHILD_ENGINES.pop(session_id, None)
 
 
 def explicit_subagent_lineage(session_id: str) -> Dict[str, str]:
@@ -840,6 +841,9 @@ _LIVE_CHILD_STORE_WAIT_S = 1.0
 # thread) and carried across its compression handoff; a root's subagent_stop ends its entries.
 _LIVE_CHILD_LOCK = threading.Lock()
 _LIVE_DELEGATE_CHILD_ROOTS: dict[str, str] = {}
+# The engine the child bound, by session id (weak): the early store writes only through it, so a child whose engine
+# serves another profile never writes into the plugin prototype's profile.
+_LIVE_DELEGATE_CHILD_ENGINES: dict[str, Any] = {}
 _LIVE_CHILD_STORES_IN_FLIGHT: set[str] = set()
 _LIVE_CHILD_PENDING: dict[str, Any] = {}  # the newest store handed over while one was in flight, per child
 _LIVE_CHILD_HANDED_ROWS: dict[str, int] = {}  # rows in the newest list handed over, per child with a store in flight
@@ -859,6 +863,13 @@ def live_delegate_child_root(session_id: str) -> str:
     """The root child id of a live delegated child bound in this process, or ``""``."""
     with _LIVE_CHILD_LOCK:
         return _LIVE_DELEGATE_CHILD_ROOTS.get(str(session_id or ""), "")
+
+
+def live_delegate_child_engine(session_id: str) -> Any:
+    """The engine a live delegated child bound in this process (still alive), or ``None``."""
+    with _LIVE_CHILD_LOCK:
+        ref = _LIVE_DELEGATE_CHILD_ENGINES.get(str(session_id or ""))
+    return ref() if ref is not None else None
 
 
 def run_live_child_store(session_id: str, operation, rows: int = 0) -> None:
@@ -984,6 +995,7 @@ class DelegateChildMixin:
         elif agent is not None and _is_delegate_agent(agent):
             with _LIVE_CHILD_LOCK:
                 _LIVE_DELEGATE_CHILD_ROOTS.setdefault(session_id, session_id)
+                _LIVE_DELEGATE_CHILD_ENGINES[session_id] = weakref.ref(self)
 
     def _stored_delegate_child_link(self, session_id: str) -> Dict[str, str]:
         if not self._store._session_lineage_table_exists():
@@ -1107,6 +1119,8 @@ class DelegateChildMixin:
                 root = _LIVE_DELEGATE_CHILD_ROOTS.get(old_session_id)
                 if root and new_session_id:
                     _LIVE_DELEGATE_CHILD_ROOTS[new_session_id] = root
+                    if old_session_id in _LIVE_DELEGATE_CHILD_ENGINES:
+                        _LIVE_DELEGATE_CHILD_ENGINES[new_session_id] = _LIVE_DELEGATE_CHILD_ENGINES[old_session_id]
             with _DELEGATE_STORE_LOCK:
                 old_key, new_key = self._delegate_child_key(old_session_id), self._delegate_child_key(new_session_id)
                 if old_key in _DELEGATE_AUXILIARY_IDS:

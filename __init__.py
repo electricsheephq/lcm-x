@@ -679,6 +679,9 @@ def register(ctx):
                 root = aux_session.live_delegate_child_root(session_id) if session_id else ""
                 if not root or not aux_session.explicit_subagent_lineage(root):
                     return None  # not a live delegated child bound in this process: main's behaviour
+                child_engine = aux_session.live_delegate_child_engine(session_id)
+                if child_engine is None:
+                    return None  # the child's own engine is gone: its end store (main's behaviour) is all that runs
                 history = payload.get("conversation_history")
                 if not isinstance(history, list) or not history:
                     return None
@@ -695,10 +698,9 @@ def register(ctx):
 
                 def store():
                     """True only when the store ran: not skipped as busy, not failed, not refused by a closed engine."""
-                    result = use_active_lcm_engine(store_child, session_id=session_id, timeout=wait)
-                    if result.status is ActiveEngineUseStatus.ENGINE_NOT_RESIDENT:
-                        # No engine bound to the child: store without binding one (never bind, never ingest).
-                        result = use_lcm_engine(engine, store_child, timeout=wait)
+                    # Only the child's own engine: it serves the child's profile, as main's end store does. Never the
+                    # plugin prototype, which may serve another profile. It never binds and never ingests.
+                    result = use_lcm_engine(child_engine, store_child, timeout=wait)
                     return bool(result.used and isinstance(result.value, int)
                                 and not outcome.get("skipped") and "error" not in outcome)
 
