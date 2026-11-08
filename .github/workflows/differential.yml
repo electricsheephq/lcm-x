@@ -43,6 +43,7 @@ jobs:
             extraction.py
             frontier_state.py
             fresh_tail.py
+            host_rewrite.py
             host_uid.py
             host_uid_emit.py
             identity_anchor.py

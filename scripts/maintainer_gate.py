@@ -49,7 +49,7 @@ TURN_PATH_FILES = {
     "__init__.py", "assembly_plan.py", "aux_session.py", "bypass.py", "codex_routing.py", "compaction.py",
     "compaction_policy.py", "compaction_request.py", "compress_run.py",
     "dag.py", "engine.py", "escalation.py", "externalize.py", "extraction.py", "fresh_tail.py",
-    "host_uid.py", "host_uid_emit.py", "identity_anchor.py", "ingest_protection.py",
+    "host_rewrite.py", "host_uid.py", "host_uid_emit.py", "identity_anchor.py", "ingest_protection.py",
     "leaf_prep.py", "lifecycle_state.py", "message_analysis.py", "message_content.py", "placeholder_ledger.py",
     "prefix_matching.py", "reconcile.py", "sanitize.py", "sender_capture.py", "store_complete.py",
     "summary_attempt.py", "summary_input_clip.py", "summary_outcome.py", "survival_codec.py",
