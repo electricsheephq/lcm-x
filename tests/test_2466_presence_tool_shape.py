@@ -115,3 +115,31 @@ def test_a_trip_costs_sql_only(tmp_path, where):
         assert best < BAR, f"{best * 1000:.0f} ms"
     finally:
         engine.shutdown()
+
+
+def test_one_stored_row_with_many_parallel_calls_is_checked_in_linear_time(tmp_path):
+    """#2466 terminal review nit: the admission check reads each entry from the entry itself, so one stored row with
+    many parallel calls is checked in linear time: four times the entries costs well under eight times as long (a
+    lookup from the row's root per entry was quadratic, about sixteen times), and 9,999 calls stay under the bar."""
+    def best_of(width):
+        engine = _engine(tmp_path / f"w{width}")
+        try:
+            engine._store.append_batch(SESSION, [{"role": "assistant", "content": "", "tool_calls": [
+                _entry(f"w{k}", '{"path": "a"}') for k in range(width)]}])
+            best = None
+            for _ in range(3):
+                start = time.perf_counter()
+                out = _presence(engine, [_call("brand_new", 1)])
+                took = time.perf_counter() - start
+                best = took if best is None or took < best else best
+            assert out == [0]
+            return best
+        finally:
+            engine.shutdown()
+
+    wide = identity_anchor._PRESENCE_WINDOW_CALL_IDS - 1
+    small, large = best_of(wide // 4), best_of(wide)
+    print(f"\nWIDE-ROW {wide // 4}:{small * 1000:.1f} ms {wide}:{large * 1000:.1f} ms x{large / small:.1f} "
+          f"load1={os.getloadavg()[0]:.1f}")
+    assert large < 8 * small, f"x{large / small:.1f}"
+    assert large < BAR, f"{large * 1000:.0f} ms"

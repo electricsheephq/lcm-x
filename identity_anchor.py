@@ -699,8 +699,8 @@ class IdentityAnchorMixin:
                     "WHEN NOT json_valid(tool_calls) THEN -1 "
                     "WHEN json_type(tool_calls) <> 'array' THEN -1 "
                     "WHEN EXISTS (SELECT 1 FROM json_each(tool_calls) AS e WHERE e.type <> 'object' "
-                    "OR json_type(tool_calls, '$[' || e.key || '].id') IS NOT 'text' "
-                    "OR json_type(tool_calls, '$[' || e.key || '].function.arguments') IS NOT 'text') THEN -1 "
+                    "OR json_type(e.value, '$.id') IS NOT 'text' "
+                    "OR json_type(e.value, '$.function.arguments') IS NOT 'text') THEN -1 "
                     "ELSE json_array_length(tool_calls) END "
                     "FROM messages WHERE session_id=? ORDER BY store_id DESC LIMIT ?",
                     (_PRESENCE_WINDOW_BYTES, source, budget + 1))
