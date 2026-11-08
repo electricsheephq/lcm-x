@@ -3,7 +3,6 @@
 Every test here also passes on main, where no reply is a candidate: each asserts main's answer. Synthetic strings only."""
 from __future__ import annotations
 
-import json
 from collections import Counter
 
 import pytest
