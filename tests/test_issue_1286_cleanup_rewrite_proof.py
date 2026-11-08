@@ -536,8 +536,9 @@ def test_a_later_cleanup_pass_keeps_the_warm_stored_reply_and_the_restart_batch_
                           "covered, the warm-stored reply and its siblings alike")
 def test_a_later_cleanup_pass_then_a_restart_stores_each_row_once(host):
     """The ideal end state: after the restart, the reply and its siblings are each stored once. The named residual
-    holds only while no certifying run hits its trigger (a restart after a cleanup-only pass, on a reply the warm path
-    stored); a certifying run whose audit shows that trigger gets it fixed before the next certifying run."""
+    holds only while no certifying run hits its trigger (a restart after the warm path stored a replaced reply, with or
+    without a cleanup-only pass first); a certifying run whose audit shows that trigger gets it fixed before the next
+    certifying run."""
     reply, warm = _resend_then_cleanup_pass_then_restart(host)
     if warm != (1, 1):
         pytest.fail(f"setup: the warm ingest must store the resent turn, got {warm}")
