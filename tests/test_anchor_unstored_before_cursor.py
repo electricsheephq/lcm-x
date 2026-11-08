@@ -598,7 +598,7 @@ def test_an_unrecorded_earlier_rotation_ends_the_scope(tmp_path, caplog, flagged
             engine._record_rotation_predecessor("C", "P")
         with caplog.at_level(logging.WARNING):
             found = _presence(engine, [_call("call_parent", 1), _result("call_parent", "held", 2)])
-        assert found == []
+        assert found == (None if flagged else [])  # flagged: a trip, the caller keeps main's plan
         assert any("presence unavailable" in r.getMessage() for r in caplog.records) is flagged
     finally:
         engine.shutdown()
@@ -620,7 +620,7 @@ def test_a_transient_predecessor_read_failure_cannot_hide_a_scope_session(tmp_pa
 
         monkeypatch.setattr(engine._store, "read_metadata_json", fail_once)
         with caplog.at_level(logging.WARNING):
-            assert _presence(engine, [_call("call_new", 3), _result("call_new", "new", 4)]) == []
+            assert _presence(engine, [_call("call_new", 3), _result("call_new", "new", 4)]) is None
         assert any("presence" in record.message and record.levelno == logging.WARNING for record in caplog.records)
     finally:
         engine.shutdown()
@@ -710,7 +710,7 @@ def test_presence_window_counts_deduplicated_whole_scope(tmp_path, monkeypatch, 
         caplog.clear()  # inspect only the presence check, excluding engine setup warnings
         with caplog.at_level(logging.DEBUG, logger=identity_anchor.__name__):
             found = _presence(engine, [_call("new", 10), _result("new", "result", 11)], capped=capped)
-        assert found == ([] if extra else [0, 1])  # over budget: main's positional behavior
+        assert found == (None if extra else [0, 1])  # over budget: main's positional behavior
         assert reads == [(SESSION, 5), ("A", 4)] + ([] if extra else [("P", 3)])  # sized in SQL before a load
         assert not any(record.levelno >= logging.WARNING for record in caplog.records)
         if extra:
@@ -725,7 +725,7 @@ def test_tool_only_presence_uses_the_same_bounded_tail(tmp_path, monkeypatch):
     try:
         monkeypatch.setattr(identity_anchor, "_PRESENCE_WINDOW_ROWS", 2, raising=False)
         engine._store.append_batch(SESSION, [_call("kept", 1), _result("kept", "held", 2), _a("third", 3)])
-        assert _presence(engine, [_call("new", 4), _result("new", "new result", 5)]) == []
+        assert _presence(engine, [_call("new", 4), _result("new", "new result", 5)]) is None
     finally:
         engine.shutdown()
 
@@ -851,13 +851,13 @@ def test_presence_window_info_is_once_per_session_without_warning(tmp_path, monk
         caplog.clear()
         with caplog.at_level(logging.INFO, logger=identity_anchor.__name__):
             for _ in range(2):
-                assert _presence(engine, [_call("new", 2)]) == []
+                assert _presence(engine, [_call("new", 2)]) is None
             engine.on_session_start("another-session", platform="cli", context_length=1_000_000)
             engine._store.append_batch("another-session", [_a("over budget too", 3)])
-            assert _presence(engine, [_call("new", 4)]) == []
+            assert _presence(engine, [_call("new", 4)]) is None
             engine.shutdown()
             engine = _engine(tmp_path)
-            assert _presence(engine, [_call("new", 5)]) == []
+            assert _presence(engine, [_call("new", 5)]) is None
         limits = [r for r in caplog.records if "presence window incomplete" in r.message]
         assert len(limits) == 2
         assert all(r.levelno == logging.INFO for r in limits)

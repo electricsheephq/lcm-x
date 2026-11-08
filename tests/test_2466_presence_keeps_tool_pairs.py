@@ -370,6 +370,7 @@ def test_a_string_and_an_object_with_the_same_text_are_different_arguments(tmp_p
     try:
         engine._store.append_batch(SESSION, [call(stored_args)])
         result = {"role": "tool", "tool_call_id": "call_t", "tool_name": "read_file", "content": "file text"}
-        assert _presence(engine, [call(shown_args), result]) == []
+        assert _presence(engine, [call(shown_args), result]) == (
+            [] if isinstance(stored_args, str) else None)  # reused, or a non-standard stored shape (a trip)
     finally:
         engine.shutdown()

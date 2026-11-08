@@ -52,7 +52,7 @@ ROWS, READ = identity_anchor._PRESENCE_WINDOW_ROWS, identity_anchor._PRESENCE_WI
 CALL_ROW_OVERHEAD = 100  # JSON around a call's arguments, generous
 
 
-@pytest.mark.parametrize("chars,expected", [(READ // ROWS - CALL_ROW_OVERHEAD, [0]), (10_000, [])],
+@pytest.mark.parametrize("chars,expected", [(READ // ROWS - CALL_ROW_OVERHEAD, [0]), (10_000, None)],
                          ids=["at-row-and-read-limits", "read-limit-overfilled"])
 def test_tool_call_json_at_the_read_limit(tmp_path, chars, expected):
     engine = _engine(tmp_path)
@@ -87,7 +87,7 @@ def test_a_nul_inside_stored_text_is_still_sized_in_full(tmp_path):
     engine = _engine(tmp_path)
     try:
         _append(engine, [_call_row(0, "{}"), {"role": "tool", "tool_call_id": "c0", "content": "x\0" + "y" * (READ + 1)}])
-        assert _presence(engine, [_call("brand_new", 1)]) == []  # past the read limit: main's result
+        assert _presence(engine, [_call("brand_new", 1)]) is None  # past the read limit: a trip, main's result
     finally:
         engine.shutdown()
 
@@ -107,7 +107,7 @@ def test_pairing_a_wide_parallel_call_row_is_linear(tmp_path, calls):
         engine.shutdown()
 
 
-DENSE = '{"items":[' + ",".join(["0"] * 900) + "]}"  # about 1.8 KB of valid JSON per call row: 10,000 rows sit inside
+DENSE = '{"items":[' + ",".join(["0"] * 900) + "]}"  # about 1.8 KB of valid JSON per call row
 
 
 @pytest.mark.parametrize("view_kind", ["fresh-only", "history-then-fresh", "history-reserialized-then-fresh"])
@@ -115,13 +115,17 @@ def test_dense_json_arguments_at_the_window_limit(tmp_path, view_kind):
     """#2466 review, delta 9: arguments are compared as stored first and parsed only for an id whose stored and
     shown forms differ, within a byte budget; past it the id keeps main's result. Dense valid JSON in every call
     row must not make the audit parse the whole window."""
+    import json
+
+    per_row = len(json.dumps(_call_row(ROWS, DENSE)["tool_calls"]).encode())
+    filled = min(ROWS, READ // per_row)  # as many dense call rows as fit the window's byte limit
     engine = _engine(tmp_path)
     try:
-        stored = [_call_row(i, DENSE) for i in range(ROWS)]
+        stored = [_call_row(i, DENSE) for i in range(filled)]
         _append(engine, stored)
         shown = DENSE.replace(",", ", ")
         history = {"fresh-only": [], "history-then-fresh": stored,
-                   "history-reserialized-then-fresh": [_call_row(i, shown) for i in range(ROWS)]}[view_kind]
+                   "history-reserialized-then-fresh": [_call_row(i, shown) for i in range(filled)]}[view_kind]
         took, out = _best(engine, [*history, _call("brand_new", 1)])
         assert out == [len(history)]
         assert took < BAR, f"{took * 1000:.0f} ms"
@@ -183,13 +187,13 @@ def test_call_rows_at_the_call_id_limit(tmp_path, shape, view_kind):
         _append(engine, stored, batch=100)
         history = stored if view_kind == "history-then-fresh" else []
         took, out = _best(engine, [*history, _call("brand_new", 1)])
-        assert out == ([len(history)] if shape in ("wide_hermes", "two_dense_ids") else [])
+        assert out == ([len(history)] if shape in ("wide_hermes", "two_dense_ids") else None)
         assert took < BAR, f"{took * 1000:.0f} ms"
     finally:
         engine.shutdown()
 
 
-@pytest.mark.parametrize("extra,expected", [(0, [0]), (1, [])], ids=["at-the-limit", "one-entry-past"])
+@pytest.mark.parametrize("extra,expected", [(0, [0]), (1, None)], ids=["at-the-limit", "one-entry-past"])
 def test_the_call_id_limit_is_counted_in_sql(tmp_path, extra, expected):
     """Three entries per call row, so the row and byte limits stay far away: at the call-id limit the audit answers;
     one entry past it, it gives main's result (nothing beyond its own finds)."""

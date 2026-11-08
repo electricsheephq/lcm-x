@@ -2,7 +2,7 @@
 NULL, or a JSON array of objects whose id and function.arguments are text; the sizing pass checks that in SQL before any
 row loads. Any other stored row gives main's result for the whole audit (the audit keeps only its own finds) and logs
 one INFO line. Each test stores one row of a non-standard shape beside a fresh call that the check would otherwise
-store, so main's result is []."""
+store, so main's result is a trip (the audit returns None and the caller keeps main's plan)."""
 from __future__ import annotations
 
 import json
@@ -67,9 +67,11 @@ def test_a_non_standard_stored_tool_shape_gives_mains_result(tmp_path, shape, ca
         engine._store.append_batch(SESSION, [{"role": "assistant", "content": "", "tool_calls": [_entry("ok2")]}])
         view = [_call("brand_new", 1)]
         with caplog.at_level(logging.INFO, logger="hermes_lcm.identity_anchor"):
-            assert _presence(engine, view) == []
-            assert _presence(engine, view) == []
-        assert sum("non-standard tool-call shape" in r.getMessage() for r in caplog.records) <= 1
+            assert _presence(engine, view) is None
+            assert _presence(engine, view) is None
+        # Every trip reaches the counted reason through the SQL CASE guard, never the exception path.
+        assert sum("non-standard tool-call shape" in r.getMessage() for r in caplog.records) == 1
+        assert not [r for r in caplog.records if "presence unavailable" in r.getMessage()]
     finally:
         engine.shutdown()
 
@@ -109,7 +111,7 @@ def test_a_trip_costs_sql_only(tmp_path, where):
             took = time.perf_counter() - start
             best = took if best is None or took < best else best
         print(f"\nTRIP {where} {best * 1000:.1f} ms load1={os.getloadavg()[0]:.1f}")
-        assert out == []
+        assert out is None
         assert best < BAR, f"{best * 1000:.0f} ms"
     finally:
         engine.shutdown()

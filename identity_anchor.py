@@ -57,7 +57,7 @@ _POOL_WINDOW = 256  # store ids either side of a stamp donor searched for a comp
 _INSERT_DIFF_BUDGET = 1_000_000  # #633: old x new rows compared per insertion diff (quadratic worst case ~40 ms)
 _CARRIER_LEDGER_CAP = 256  # #1000: carrier emission keys remembered as seen / retired (process-local)
 _PRESENCE_WINDOW_ROWS = 10000  # total stored rows across the presence scope
-_PRESENCE_WINDOW_BYTES = 20_000_000  # UTF-8 bytes of stored content and tool-call text across the scope
+_PRESENCE_WINDOW_BYTES = 15_000_000  # UTF-8 bytes of stored content and tool-call text across the scope
 _PRESENCE_WINDOW_CALL_IDS = 10_000  # stored tool-call entries across the scope (#2466 wait bar)
 _PRESENCE_PARSE_BYTES = 256_000  # call-row text parsed as JSON when an id's raw forms differ (#2466 wait bar)
 _PRESENCE_WINDOW_LOGGED: set[tuple[str, int, str]] = set()  # store file and session, once per process
@@ -589,9 +589,17 @@ class IdentityAnchorMixin:
             # made a positional replay here: the version rewind still stores its new version, as on main (#2466 review).
             rewritten = {idx for idx in self._identity_anchor_rewritten(messages, cursor)
                          if idx >= plan.get("accepted_prefix", 0) and idx not in plan["replayed"] and idx not in excluded}
-            missed = sorted({*missed, *self._identity_anchor_unaccounted(
+            found = self._identity_anchor_unaccounted(
                 messages, identity_messages, cursor, start, identity_at, held, capped, consumed, plan, matched,
-                set(excluded) | rewritten, missed)})
+                set(excluded) | rewritten, missed)
+            if found is None:  # the presence check tripped (logged there): main's plan exactly (#2466 review)
+                plan["cursor"] = min(missed)
+                plan["positional"] = {idx for idx in range(min(missed), cursor) if idx not in missed}
+                plan["replayed"].update(plan["positional"])
+                logger.info("LCM identity-anchor: host changed its list before the cursor; %d unstored rows from %d: "
+                            "session=%s", len(missed), min(missed), self._session_id)
+                return
+            missed = sorted({*missed, *found})
             plan["cursor"] = min(missed)
             plan["positional"] = {idx for idx in range(min(missed), cursor) if idx not in missed and idx not in rewritten}
             plan["replayed"].update(plan["positional"])
@@ -600,13 +608,14 @@ class IdentityAnchorMixin:
                            len(missed), min(missed), self._session_id)
 
     def _identity_anchor_unaccounted(self, messages, identity_messages, cursor, start, identity_at, held, capped,
-                                     consumed, plan, matched, excluded, missed) -> list[int]:
+                                     consumed, plan, matched, excluded, missed) -> Optional[list[int]]:
         """Call and result rows in ``[start, cursor)`` that are neither bound, matched, a compaction output (LCM's
         own scaffold) nor ignored, and whose id is stored nowhere in the scope: this session, its verified ancestors
         and its recorded predecessors, within the row and stored-byte budgets. One id is one invocation, so an id
         stored anywhere accounts for its rows, including an upgraded store's pre-ledger rows. Pairs stay whole and a
         reused id keeps main's result. Text rows are not checked (#2116, v0.30.x). ``capped``, ``held`` and
-        ``consumed`` are retained for callers but unused. Past the window the audit adds nothing beyond its own finds,
+        ``consumed`` are retained for callers but unused. Past the window, on a non-standard stored tool shape, or on a
+        failed read, it returns None (a trip): the caller then keeps main's plan exactly, adding nothing beyond its own finds,
         as on main. Unsure is accounted (the positional replay, as before): a call row whose ids cannot be read."""
         calls_memo: dict = {}  # view rows are read several times below
 
@@ -686,13 +695,15 @@ class IdentityAnchorMixin:
                 # loads, so SQL-visible limits bound the work on the admitted path.
                 sized = self._store._conn.execute(
                     "SELECT length(CAST(content AS BLOB)), length(CAST(tool_calls AS BLOB)), "
-                    "CASE WHEN tool_calls IS NULL THEN 0 WHEN NOT json_valid(tool_calls) THEN -1 "
+                    "CASE WHEN tool_calls IS NULL THEN 0 WHEN length(CAST(tool_calls AS BLOB)) > ? THEN -1 "
+                    "WHEN NOT json_valid(tool_calls) THEN -1 "
                     "WHEN json_type(tool_calls) <> 'array' THEN -1 "
                     "WHEN EXISTS (SELECT 1 FROM json_each(tool_calls) AS e WHERE e.type <> 'object' "
                     "OR json_type(tool_calls, '$[' || e.key || '].id') IS NOT 'text' "
                     "OR json_type(tool_calls, '$[' || e.key || '].function.arguments') IS NOT 'text') THEN -1 "
                     "ELSE json_array_length(tool_calls) END "
-                    "FROM messages WHERE session_id=? ORDER BY store_id DESC LIMIT ?", (source, budget + 1))
+                    "FROM messages WHERE session_id=? ORDER BY store_id DESC LIMIT ?",
+                    (_PRESENCE_WINDOW_BYTES, source, budget + 1))
                 count, shape_ok = 0, True
                 for content_len, calls_len, call_ids in sized:
                     count += 1
@@ -710,14 +721,14 @@ class IdentityAnchorMixin:
                         logger.info("LCM identity-anchor presence check skipped: non-standard tool-call shape: "
                                     "session=%s scope=%d", session, len(scope))
                         _PRESENCE_SHAPE_LOGGED.add(notice)
-                    return []
+                    return None  # a trip: the caller restores main's plan
                 if count > budget or byte_budget < 0 or id_budget < 0:
                     notice = (str(self._db_path), self._db_path.stat().st_ino, session)
                     if notice not in _PRESENCE_WINDOW_LOGGED:
                         logger.info("LCM identity-anchor presence window incomplete: session=%s scope=%d "
                                     "budget=%d bytes=%d call_ids=%d", session, len(scope), budget, byte_budget, id_budget)
                         _PRESENCE_WINDOW_LOGGED.add(notice)
-                    return []
+                    return None  # a trip: the caller restores main's plan
                 end, pages = None, []
                 while True:
                     limit = min(256, budget + 1)
@@ -803,7 +814,7 @@ class IdentityAnchorMixin:
                         reused.add(call_id)
         except Exception as exc:
             logger.warning("LCM identity-anchor presence unavailable (%s); keeping positional replays", type(exc).__name__)
-            return []
+            return None  # a trip: the caller restores main's plan
         results_of: dict = defaultdict(list)
         callers: dict = defaultdict(list)
         for k, msg in enumerate(identity_messages):
