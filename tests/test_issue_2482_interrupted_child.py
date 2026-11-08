@@ -7,6 +7,10 @@ interrupted shapes are the ones the v0.30.0 driven run (r7) lost; the guards pin
 normally stores the same rows exactly once, and that the parent's resume in a new process adds no copy.
 """
 
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+
 import pytest
 
 from tests.test_issue_1931_delegate_children import DELEGATE, PARENT_VIEW, Agent, child_rows, host  # noqa: F401
@@ -14,47 +18,50 @@ from tests.test_issue_1931_delegate_children import DELEGATE, PARENT_VIEW, Agent
 PROMPT = {"role": "user", "content": "Count the ledger rows and report the total."}
 
 
-def call(i):
+def call(i, tag=""):
     return {"role": "assistant", "content": "", "tool_calls": [
-        {"id": f"c{i}", "type": "function", "function": {"name": "terminal", "arguments": "{}"}}]}
+        {"id": f"{tag}c{i}", "type": "function", "function": {"name": "terminal", "arguments": "{}"}}]}
 
 
-def result(i):
-    return {"role": "tool", "tool_call_id": f"c{i}", "content": f"ledger chunk {i}: 17 rows"}
+def result(i, tag=""):
+    return {"role": "tool", "tool_call_id": f"{tag}c{i}", "content": f"{tag}ledger chunk {i}: 17 rows"}
 
 
-def view(tool_calls, final=False):
-    rows = [PROMPT]
+def view(tool_calls, final=False, tag=""):
+    rows = [dict(PROMPT, content=tag + PROMPT["content"])]
     for i in range(1, tool_calls + 1):
-        rows += [call(i), result(i)]
-    return rows + ([{"role": "assistant", "content": "The ledger has 34 rows."}] if final else [])
+        rows += [call(i, tag), result(i, tag)]
+    return rows + ([{"role": "assistant", "content": f"{tag}The ledger has 34 rows."}] if final else [])
 
 
 class HostChild(Agent):
     """A delegated child whose hooks fire inside its own frame, with the host's payload fields."""
 
+    tag = ""
+
     def fire(self, ctx, name, history, **extra):
-        for callback in ctx.hooks.get(name, []):
-            callback(session_id=self.session_id, platform="subagent", conversation_history=list(history), **extra)
+        return [callback(session_id=self.session_id, platform="subagent", conversation_history=list(history), **extra)
+                for callback in ctx.hooks.get(name, [])]
 
     def llm_start(self, ctx, history):
-        self.fire(ctx, "pre_llm_call", history, user_message=PROMPT["content"], is_first_turn=True,
-                  parent_session_id=self._parent_session_id, model="m")
+        return self.fire(ctx, "pre_llm_call", history, user_message=history[0]["content"], is_first_turn=True,
+                         parent_session_id=self._parent_session_id, model="m")
 
     def api_call(self, ctx, history, n):
-        self.fire(ctx, "pre_api_request", history, api_call_count=n, retry_count=0, model="m",
-                  request_messages=list(history), message_count=len(history), task_id="t", turn_id="turn-1")
+        return self.fire(ctx, "pre_api_request", history, api_call_count=n, retry_count=0, model="m",
+                         request_messages=list(history), message_count=len(history), task_id="t", turn_id="turn-1")
 
     def run_until(self, ctx, tool_calls):
         """Start the turn and issue model call k after k-1 tool rounds, up to ``tool_calls`` rounds done."""
-        self.llm_start(ctx, view(0))
+        self.llm_start(ctx, view(0, tag=self.tag))
         for k in range(tool_calls + 1):
-            self.api_call(ctx, view(k), k + 1)
+            self.api_call(ctx, view(k, tag=self.tag), k + 1)
 
 
 def _setup(host, route):
     load, clone = host
-    ctx, _ = load()
+    ctx, module = load()
+    ctx.module = module
     parent = clone(ctx)
     parent.on_session_start("parent", platform="cli", context_length=200_000)
     ctx.hooks["post_llm_call"][0](session_id="parent", platform="cli",
@@ -128,3 +135,100 @@ def test_other_sessions_ignore_the_model_call_hook(host):
         callback(session_id="parent", platform="cli", conversation_history=PARENT_VIEW + [
             {"role": "user", "content": "a new prompt not yet stored"}], api_call_count=1)
     assert _contents(parent._store.get_session_messages("parent")) == before
+
+
+@pytest.mark.parametrize("route", ROUTES)
+def test_a_retried_model_call_with_the_same_list_adds_nothing(host, route):
+    _, _, ctx, parent, child, _ = _setup(host, route)
+    child.run_until(ctx, 1)
+    child.api_call(ctx, view(1), 2)  # the host retries the same request
+    child.api_call(ctx, view(1), 2)
+    assert _contents(child_rows(parent)) == _contents(view(1))
+
+
+def test_parallel_children_of_one_parent_store_only_their_own_rows(host):
+    _, _, ctx, parent, _, _ = _setup(host, "parent_engine")
+    before = _contents(parent._store.get_session_messages("parent"))
+    children = []
+    for n, tag in enumerate(("a:", "b:", "c:")):
+        child = HostChild(f"child-{n}", **dict(DELEGATE, _subagent_id=f"sa-{n}", log_prefix=f"[subagent-{n}]"))
+        child.tag = tag
+        children.append(child)
+    start = threading.Barrier(len(children))
+
+    def run(child):
+        start.wait()
+        child.run_until(ctx, 2)
+
+    with ThreadPoolExecutor(len(children)) as pool:
+        list(pool.map(run, children))
+    for child in children:
+        assert _contents(child_rows(parent, child.session_id)) == _contents(view(2, tag=child.tag))
+    assert _contents(parent._store.get_session_messages("parent")) == before
+
+
+@pytest.mark.parametrize("route", ROUTES)
+def test_the_pre_llm_call_return_value_is_unchanged(host, route):
+    _, _, ctx, parent, child, _ = _setup(host, route)
+    # main 4e8c8c2d returns [None] here for the child and the parent; the child store adds no context.
+    assert child.llm_start(ctx, view(0)) == [None] * len(ctx.hooks["pre_llm_call"])
+    assert _contents(child_rows(parent)) == _contents(view(0))
+    parent_returns = [callback(session_id="parent", platform="cli", conversation_history=PARENT_VIEW,
+                               user_message="x", is_first_turn=False, model="m")
+                      for callback in ctx.hooks["pre_llm_call"]]
+    assert parent_returns == [None] * len(ctx.hooks["pre_llm_call"])
+    assert all(value is None for value in child.api_call(ctx, view(0), 1))
+
+
+def test_a_busy_store_lock_skips_the_store_within_the_bound(host, monkeypatch):
+    _, _, ctx, parent, child, _ = _setup(host, "parent_engine")
+    aux = ctx.module("aux_session")
+    monkeypatch.setattr(aux, "_LIVE_CHILD_STORE_WAIT_S", 0.2, raising=False)
+    held, release = threading.Event(), threading.Event()
+
+    def hold():
+        with aux._DELEGATE_STORE_LOCK:
+            held.set()
+            release.wait(10)
+
+    holder = threading.Thread(target=hold)
+    holder.start()
+    try:
+        assert held.wait(5)
+        began = time.monotonic()
+        child.run_until(ctx, 1)  # pre_llm_call + two model calls, each skipped
+        assert time.monotonic() - began < 2.0
+        assert child_rows(parent) == []
+    finally:
+        release.set()
+        holder.join(10)
+    child.api_call(ctx, view(1), 3)  # the next model call stores everything handed over so far
+    assert _contents(child_rows(parent)) == _contents(view(1))
+
+
+def test_a_failing_store_never_raises_into_the_hook(host, monkeypatch):
+    _, _, ctx, parent, child, _ = _setup(host, "parent_engine")
+    mixin = ctx.module("aux_session").DelegateChildMixin
+    real = mixin._append_delegate_child_rows
+
+    def boom(self, *args, **kwargs):
+        raise RuntimeError("store failed")
+
+    monkeypatch.setattr(mixin, "_append_delegate_child_rows", boom)
+    assert child.llm_start(ctx, view(0)) == [None] * len(ctx.hooks["pre_llm_call"])
+    assert all(value is None for value in child.api_call(ctx, view(0), 1))
+    assert child_rows(parent) == []
+    monkeypatch.setattr(mixin, "_append_delegate_child_rows", real)
+    child.api_call(ctx, view(1), 2)
+    assert _contents(child_rows(parent)) == _contents(view(1))
+
+
+@pytest.mark.xfail(strict=True, reason="#2482 named loss limit (v0.30.0): a child interrupted while its tools run "
+                   "keeps its rows up to its last model call; that round's tool-call row and finished results stay "
+                   "only in the host (follow-up: recovery from the host's state.db)")
+@pytest.mark.parametrize("route", ROUTES)
+def test_residual_a_child_interrupted_while_its_tools_run_keeps_that_round(host, route):
+    _, _, ctx, parent, child, _ = _setup(host, route)
+    child.run_until(ctx, 2)
+    # The host persists the third tool-call row and its result while the tools run; no model call follows.
+    assert _contents(child_rows(parent)) == _contents(view(3))
