@@ -58,6 +58,7 @@ _INSERT_DIFF_BUDGET = 1_000_000  # #633: old x new rows compared per insertion d
 _CARRIER_LEDGER_CAP = 256  # #1000: carrier emission keys remembered as seen / retired (process-local)
 _PRESENCE_WINDOW_ROWS = 10000  # total stored rows across the presence scope
 _PRESENCE_WINDOW_BYTES = 20_000_000  # UTF-8 bytes of stored content and tool-call text across the scope
+_PRESENCE_WINDOW_CALL_IDS = 10_000  # stored tool-call entries across the scope (#2466 wait bar)
 _PRESENCE_PARSE_BYTES = 256_000  # call-row text parsed as JSON when an id's raw forms differ (#2466 wait bar)
 _PRESENCE_WINDOW_LOGGED: set[tuple[str, int, str]] = set()  # store file and session, once per process
 _UNREADABLE_CALLS = (object(),)  # an unreadable tool_calls value: no host id can equal it (#2466 review)
@@ -671,28 +672,31 @@ class IdentityAnchorMixin:
                 # Any session of the scope whose own predecessor write failed ends the scope early (#2466 review).
                 raise ValueError("unrecorded rotation lineage")
             rows = {int(row["store_id"]): row for group in held.values() for row in group}
-            budget, byte_budget = _PRESENCE_WINDOW_ROWS, _PRESENCE_WINDOW_BYTES
+            budget, byte_budget, id_budget = _PRESENCE_WINDOW_ROWS, _PRESENCE_WINDOW_BYTES, _PRESENCE_WINDOW_CALL_IDS
             for source in scope:
                 # Size the window in SQL before loading any row (#2466 review, wait bar): stored UTF-8 bytes per row
                 # (SQLite's length() of text stops at the first NUL, and Python loads the whole value), newest first,
                 # stopping at the first budget it passes, so an over-budget scope costs at most its budget plus one
                 # row of reading and decodes nothing. Only call and result rows are compared, by their stored text,
-                # so the audit loads no payload file.
+                # so the audit loads no payload file. Stored tool-call entries are counted too: the audit's work grows
+                # with them, so a window of wide parallel call rows is bounded as well.
                 sized = self._store._conn.execute(
-                    "SELECT length(CAST(content AS BLOB)), length(CAST(tool_calls AS BLOB)) "
+                    "SELECT length(CAST(content AS BLOB)), length(CAST(tool_calls AS BLOB)), "
+                    "CASE WHEN json_valid(tool_calls) THEN json_array_length(tool_calls) ELSE 0 END "
                     "FROM messages WHERE session_id=? ORDER BY store_id DESC LIMIT ?", (source, budget + 1))
                 count = 0
-                for content_len, calls_len in sized:
+                for content_len, calls_len, call_ids in sized:
                     count += 1
                     byte_budget -= (content_len or 0) + (calls_len or 0)
-                    if count > budget or byte_budget < 0:
+                    id_budget -= call_ids or 0
+                    if count > budget or byte_budget < 0 or id_budget < 0:
                         break
                 sized.close()
-                if count > budget or byte_budget < 0:
+                if count > budget or byte_budget < 0 or id_budget < 0:
                     notice = (str(self._db_path), self._db_path.stat().st_ino, session)
                     if notice not in _PRESENCE_WINDOW_LOGGED:
                         logger.info("LCM identity-anchor presence window incomplete: session=%s scope=%d "
-                                    "budget=%d chars=%d", session, len(scope), budget, byte_budget)
+                                    "budget=%d bytes=%d call_ids=%d", session, len(scope), budget, byte_budget, id_budget)
                         _PRESENCE_WINDOW_LOGGED.add(notice)
                     return []
                 end, pages = None, []
@@ -737,7 +741,7 @@ class IdentityAnchorMixin:
                         if parse:
                             arguments = canonical(arguments)
                         elif not isinstance(arguments, str):
-                            arguments = repr(arguments)
+                            arguments = object()  # equal to nothing as stored: parsed within the budget
                         parts.append((str(c.get("id") or ""), str(function.get("name") or ""), arguments))
                 return tuple(sorted(parts))
 

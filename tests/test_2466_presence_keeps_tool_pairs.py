@@ -352,3 +352,24 @@ def test_an_ignored_result_past_the_cursor_never_authorizes_its_call(tmp_path, m
         assert found == []
     finally:
         engine.shutdown()
+
+
+@pytest.mark.parametrize("stored_args,shown_args", [("None", None), (None, "None"), ("True", True), (True, "True"),
+                                                    ("{'x': 1}", {"x": 1}), ({"x": 1}, "{'x': 1}")],
+                         ids=["str-None", "None-str", "str-True", "True-str", "str-dict", "dict-str"])
+def test_a_string_and_an_object_with_the_same_text_are_different_arguments(tmp_path, stored_args, shown_args):
+    """A string argument and a non-string one whose repr reads the same are different invocations: the id is reused,
+    so its rows keep main's result, as when arguments were always compared parsed (#2466 review, delta 10)."""
+    from tests.test_anchor_unstored_before_cursor import _engine, _presence, SESSION
+
+    def call(args):
+        return {"role": "assistant", "content": "", "tool_calls": [
+            {"id": "call_t", "type": "function", "function": {"name": "read_file", "arguments": args}}]}
+
+    engine = _engine(tmp_path)
+    try:
+        engine._store.append_batch(SESSION, [call(stored_args)])
+        result = {"role": "tool", "tool_call_id": "call_t", "tool_name": "read_file", "content": "file text"}
+        assert _presence(engine, [call(shown_args), result]) == []
+    finally:
+        engine.shutdown()

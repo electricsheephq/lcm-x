@@ -127,3 +127,83 @@ def test_dense_json_arguments_at_the_window_limit(tmp_path, view_kind):
         assert took < BAR, f"{took * 1000:.0f} ms"
     finally:
         engine.shutdown()
+
+
+IDS = identity_anchor._PRESENCE_WINDOW_CALL_IDS
+PER_ROW = READ // ROWS - 8  # stored bytes per row, just inside the byte limit at 10,000 rows
+
+
+def _packed(make, per_row):
+    """Call entries from ``make(k)`` until the row's stored tool-call JSON reaches ``per_row`` bytes."""
+    import json
+
+    calls, k = [], 0
+    while True:
+        calls.append(make(k))
+        if len(json.dumps(calls).encode()) > per_row:
+            calls.pop()
+            return calls
+        k += 1
+
+
+def _wide_rows(shape):
+    """Rows of one shape (the release manager's round-5 cost shapes, plus two dense ids per row) filling the scope to
+    just inside the call-id limit, and inside the row and byte limits."""
+    def entry(i, k, arguments):
+        return {"id": f"call_{i:05d}_{k:04d}", "type": "function", "function": {"name": "f", "arguments": arguments}}
+
+    makers = {
+        "wide_hermes": lambda i: (lambda k: entry(i, k, "{}")),
+        "wide_tiny": lambda i: (lambda k: {"id": f"{i:05d}{k:04d}"}),
+        "args_dict": lambda i: (lambda k: entry(i, k, {f"k{j}": j for j in range(40)})),
+        "two_dense_ids": lambda i: (lambda k: entry(i, k, DENSE[:PER_ROW // 2 - 120])),
+    }
+    rows, total = [], 0
+    while len(rows) < ROWS:
+        calls = _packed(makers[shape](len(rows)), PER_ROW)
+        if shape == "two_dense_ids":
+            calls = calls[:2]
+        if total + len(calls) > IDS:
+            break
+        rows.append({"role": "assistant", "content": "", "tool_calls": calls})
+        total += len(calls)
+    return rows
+
+
+@pytest.mark.parametrize("view_kind", ["fresh-only", "history-then-fresh"])
+@pytest.mark.parametrize("shape", ["wide_hermes", "wide_tiny", "args_dict", "two_dense_ids"])
+def test_call_rows_at_the_call_id_limit(tmp_path, shape, view_kind):
+    """#2466 review, delta 10: the audit's work grows with stored tool-call entries, so the window has a third limit,
+    on those entries, sized in SQL with the rows and bytes. Each shape fills the scope to just inside it."""
+    engine = _engine(tmp_path)
+    try:
+        stored = _wide_rows(shape)
+        _append(engine, stored, batch=100)
+        history = stored if view_kind == "history-then-fresh" else []
+        took, out = _best(engine, [*history, _call("brand_new", 1)])
+        assert out == [len(history)]
+        assert took < BAR, f"{took * 1000:.0f} ms"
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("extra,expected", [(0, [0]), (1, [])], ids=["at-the-limit", "one-entry-past"])
+def test_the_call_id_limit_is_counted_in_sql(tmp_path, extra, expected):
+    """Three entries per call row, so the row and byte limits stay far away: at the call-id limit the audit answers;
+    one entry past it, it gives main's result (nothing beyond its own finds)."""
+    full = (IDS - 1) // 3
+    assert full + 1 < ROWS
+    engine = _engine(tmp_path)
+    try:
+        rows = [{"role": "assistant", "content": "", "tool_calls": [
+            {"id": f"c{i}_{k}", "type": "function", "function": {"name": "f", "arguments": "{}"}} for k in range(3)]}
+            for i in range(full)]
+        rows.append({"role": "assistant", "content": "", "tool_calls": [
+            {"id": f"tail_{k}", "type": "function", "function": {"name": "f", "arguments": "{}"}}
+            for k in range(IDS - 3 * full + extra)]})
+        _append(engine, rows)
+        took, out = _best(engine, [_call("brand_new", 1)])
+        assert out == expected
+        assert took < BAR, f"{took * 1000:.0f} ms"
+    finally:
+        engine.shutdown()
