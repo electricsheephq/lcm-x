@@ -692,18 +692,21 @@ class IdentityAnchorMixin:
                 # with them, so a window of wide parallel call rows is bounded as well. Only the standard tool shape is
                 # admitted (#2466 review, scope cut): tool_calls NULL, or a JSON array of objects whose id and
                 # function.arguments are text. Any other row gives main's result for the whole audit, before any row
-                # loads, so SQL-visible limits bound the work on the admitted path.
+                # loads, so SQL-visible limits bound the work on the admitted path. A row with more entries than the
+                # whole call-id window returns its length before any entry is checked, so the loop below trips on it
+                # and admission checks at most about two windows of entries in all.
                 sized = self._store._conn.execute(
                     "SELECT length(CAST(content AS BLOB)), length(CAST(tool_calls AS BLOB)), "
                     "CASE WHEN tool_calls IS NULL THEN 0 WHEN length(CAST(tool_calls AS BLOB)) > ? THEN -1 "
                     "WHEN NOT json_valid(tool_calls) THEN -1 "
                     "WHEN json_type(tool_calls) <> 'array' THEN -1 "
+                    "WHEN json_array_length(tool_calls) > ? THEN json_array_length(tool_calls) "
                     "WHEN EXISTS (SELECT 1 FROM json_each(tool_calls) AS e WHERE e.type <> 'object' "
                     "OR json_type(e.value, '$.id') IS NOT 'text' "
                     "OR json_type(e.value, '$.function.arguments') IS NOT 'text') THEN -1 "
                     "ELSE json_array_length(tool_calls) END "
                     "FROM messages WHERE session_id=? ORDER BY store_id DESC LIMIT ?",
-                    (_PRESENCE_WINDOW_BYTES, source, budget + 1))
+                    (_PRESENCE_WINDOW_BYTES, _PRESENCE_WINDOW_CALL_IDS, source, budget + 1))
                 count, shape_ok = 0, True
                 for content_len, calls_len, call_ids in sized:
                     count += 1

@@ -143,3 +143,36 @@ def test_one_stored_row_with_many_parallel_calls_is_checked_in_linear_time(tmp_p
           f"load1={os.getloadavg()[0]:.1f}")
     assert large < 8 * small, f"x{large / small:.1f}"
     assert large < BAR, f"{large * 1000:.0f} ms"
+
+
+def test_one_stored_row_over_the_call_id_window_trips_before_any_entry_is_checked(tmp_path, caplog):
+    """#2466 terminal review (bot threads): a row with more entries than the whole call-id window returns its length
+    before the per-entry check, so 180,000 tiny calls inside the byte limit trip on the window for about the cost of
+    one length read: under four times one admitted row of 9,999 calls (checking each entry first cost over ten)."""
+    def best_of(name, width, expect):
+        engine = _engine(tmp_path / name)
+        try:
+            engine._store.append_batch(SESSION, [{"role": "assistant", "content": "", "tool_calls": [
+                _entry(f"t{k}", "") for k in range(width)]}])
+            best = None
+            for _ in range(3):
+                start = time.perf_counter()
+                out = _presence(engine, [_call("brand_new", 1)])
+                took = time.perf_counter() - start
+                best = took if best is None or took < best else best
+                assert out == expect
+            return best
+        finally:
+            engine.shutdown()
+
+    over = 180_000
+    with caplog.at_level(logging.INFO, logger="hermes_lcm.identity_anchor"):
+        admitted = best_of("admitted", identity_anchor._PRESENCE_WINDOW_CALL_IDS - 1, [0])
+        tripped = best_of("over", over, None)
+    windows = [r for r in caplog.records if "presence window incomplete" in r.getMessage()]
+    assert len(windows) == 1 and "call_ids=" in windows[0].getMessage()
+    assert not [r for r in caplog.records if "non-standard tool-call shape" in r.getMessage()]
+    print(f"\nOVER-CAP-ROW {over}:{tripped * 1000:.1f} ms vs 9999:{admitted * 1000:.1f} ms "
+          f"x{tripped / admitted:.1f} load1={os.getloadavg()[0]:.1f}")
+    assert tripped < 4 * admitted, f"x{tripped / admitted:.1f}"
+    assert tripped < BAR, f"{tripped * 1000:.0f} ms"
