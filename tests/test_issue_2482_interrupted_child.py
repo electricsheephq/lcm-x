@@ -275,3 +275,22 @@ def test_without_a_subagent_start_record_the_model_call_hooks_store_nothing(host
     child.turn(ctx, final, engine)
     child.end(engine, final)
     assert _contents(child_rows(parent)) == _contents(final)
+
+
+def test_when_another_context_engine_is_active_the_model_call_hooks_store_nothing(tmp_path, monkeypatch):
+    # Main stores nothing for a child while LCM-X is not the context engine (post_llm_call returns early).
+    from tests.test_issue_622_slow_load import _Ctx, _Manager, _OtherEngine, _install_host, _load_plugin
+
+    monkeypatch.setenv("LCM_EMBEDDINGS_ENABLED", "false")
+    _install_host(monkeypatch, tmp_path)
+    module = _load_plugin("hermes_lcm_2482_inactive")
+    ctx = _Ctx(_Manager(_OtherEngine()))
+    module.register(ctx)
+    prototype = ctx.offered
+    try:
+        child = HostChild("child", **DELEGATE)
+        child.spawn(ctx)
+        child.run_until(ctx, 2)
+        assert prototype._store.get_session_messages("child") == []
+    finally:
+        prototype.shutdown()
