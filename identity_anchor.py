@@ -814,7 +814,7 @@ class IdentityAnchorMixin:
                 text_trip(text_off, text_error if text_off == "error" else candidate_spent)
             rows = {int(row["store_id"]): row for group in held.values() for row in group}
             budget, byte_budget, id_budget = _PRESENCE_WINDOW_ROWS, _PRESENCE_WINDOW_BYTES, _PRESENCE_WINDOW_CALL_IDS
-            text_budget = _PRESENCE_TEXT_BYTES
+            text_budget = _PRESENCE_TEXT_BYTES - candidate_spent  # one counter: candidates, stored and shown
             for source in scope:
                 # Size the window in SQL before loading any row (#2466 review, wait bar): stored UTF-8 bytes per row
                 # (SQLite's length() of text stops at the first NUL, and Python loads the whole value), newest first,
@@ -827,12 +827,13 @@ class IdentityAnchorMixin:
                 # loads, so SQL-visible limits bound the work on the admitted path. A row with more entries than the
                 # whole call-id window returns its length before any entry is checked, so the loop below trips on it
                 # and admission checks at most about two windows of entries in all.
-                # With a reply candidate (#2116), the same pass sizes stored reply text (assistant rows without
-                # calls) against the text budget and finds any reply whose identity would load a payload file or is
-                # redacted: either gives main's result before any row loads, so the audit loads no payload file.
-                text_sql = ("CASE WHEN role='assistant' AND (tool_calls IS NULL OR tool_calls IN ('', '[]')) "
+                # With a reply candidate (#2116), the same pass sizes stored reply text (replies, and the text of call
+                # rows) against the one text counter the candidates started, and finds any assistant row whose identity
+                # would load a payload file or is redacted: either gives every reply main's result before any row loads.
+                text_sql = ("CASE WHEN role='assistant' AND (tool_calls IS NULL OR tool_calls IN ('', '[]') "
+                            "OR length(CAST(content AS BLOB)) > 0) "
                             f"THEN max(length(CAST(content AS BLOB)), {_PRESENCE_TEXT_MIN_CHARGE}) ELSE 0 END, "
-                            "CASE WHEN role='assistant' AND (tool_calls IS NULL OR tool_calls IN ('', '[]')) AND ("
+                            "CASE WHEN role='assistant' AND ("
                             + " OR ".join(f"instr(CAST(content AS BLOB), CAST('{m}' AS BLOB)) > 0"
                                           for m in _PRESENCE_MARKERS) + ") THEN 1 ELSE 0 END, "
                             if text_wanted else "")  # without one, the statement is the tool-only one
@@ -900,15 +901,22 @@ class IdentityAnchorMixin:
             shown_text: Counter = Counter()
 
             def reply_forms():
-                """Fill stored_text and shown_text; return the trip reason (a marked or redacted stored reply, the
-                budget passed, or a failed normalization), else None."""
-                spent = 0
+                """Fill stored_text and shown_text; return the trip reason (a marked or redacted reply, stored or shown,
+                the budget passed, or a failed normalization), else None. No identity or cleanup work runs on a reply
+                before its marker check and its charge, on the one counter the candidates started."""
+                spent = candidate_spent
                 try:
                     for store_id in sorted(rows):
                         row = rows[store_id]
-                        if row.get("role") != "assistant" or calls(row, stored=True) != ():
+                        if row.get("role") != "assistant":
                             continue
                         text = row.get("content") if isinstance(row.get("content"), str) else str(row.get("content") or "")
+                        if calls(row, stored=True) != ():
+                            if not text:
+                                continue
+                            # A stored call row's text accounts for the reply it becomes once a host strips its calls
+                            # (#2116 review r2); its identity is taken without the calls, so no call payload loads.
+                            row = {**row, "tool_calls": None}
                         if any(marker in text for marker in _PRESENCE_MARKERS):
                             return "marked", spent
                         spent += max(len(text.encode("utf-8", "surrogatepass")), _PRESENCE_TEXT_MIN_CHARGE)
@@ -922,6 +930,8 @@ class IdentityAnchorMixin:
                         if msg.get("role") != "assistant" or msg.get("tool_calls"):
                             continue
                         text = msg.get("content") if isinstance(msg.get("content"), str) else str(msg.get("content") or "")
+                        if any(marker in text for marker in _PRESENCE_MARKERS):
+                            return "marked", spent  # its identity would load a payload (#2116 review r2)
                         spent += max(len(text.encode("utf-8", "surrogatepass")), _PRESENCE_TEXT_MIN_CHARGE)
                         if spent > _PRESENCE_TEXT_BYTES:
                             return "budget", spent
