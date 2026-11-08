@@ -522,12 +522,13 @@ def test_rotation_acp_trimmed_restamp_is_linked(build, caplog, monkeypatch):
     assert (copy, original) in replay_links(engine)
 
 
-@pytest.mark.issue(2390)
+@pytest.mark.issue(2490)
 def test_rotation_metadata_failure_degrades_to_durable_recovery(build, caplog, monkeypatch):
     """Grok review thread on #2387: if the re-stamp helper raises, the #1523 durable recovery still runs.
 
     The recovery links only rows of the current session, so a carried row whose original is in the predecessor
-    session stays unlinked, as on main before #2387 (#2392 review thread)."""
+    session stays unlinked, as on main before #2387 (#2392 review thread). That unlinked copy is #2490, a named
+    surplus limit (v0.30.0)."""
     called = []
 
     def break_helper(engine, _view):
