@@ -90,7 +90,7 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
   - #2124: after a restart and a compaction, on a host that sends only new messages, a message whose text appears more than once in the session can be saved fewer times than it was sent. Hosts that send full history, as Hermes does, are not affected.
   - #2172: after a cold restart, a new tool call and its result that exactly repeat an earlier pair already compacted out of view can be taken as a replay and not saved. Only hosts that reuse tool-call ids are affected.
   - #7: when the host merges or replaces a message before LCM-X's saved position, a new message without a timestamp can be dropped. In the widest case, a view without timestamps that replaces every saved message at the same length saves none of them.
-  - #2116: a host message replaced below LCM-X's saved position is treated as a replay and is not saved while the session is running.
+  - #2116: a host message that reached LCM-X without its host timestamp and is then replaced below LCM-X's saved position is treated as a replay and is not saved while the session is running.
   - #1428: when only a message's id changes, behind a merged system block that did not change, the replacement can be lost once the session's saved proof has been used.
   - #1519: a new message with the same text as an earlier one, arriving on a timestamp LCM-X recorded for that earlier one, is not saved once the original view has gone.
   - #1563: an in-place edit of an earlier message, sent inside a shorter view of the conversation, is never saved. This was already the case in v0.27.0.
