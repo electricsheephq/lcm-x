@@ -144,7 +144,8 @@ from .message_analysis import (
 )
 from .fresh_tail import FreshTailBoundary, resolve_fresh_tail_boundary, tool_group_safe_end
 from .message_patterns import compile_message_patterns, matches_message_pattern
-from .aux_session import AuxiliarySessionMixin, DelegateChildMixin
+from . import aux_session as _aux_session
+from .aux_session import AuxiliarySessionMixin, DelegateChildMixin, drain_live_child_stores
 from .placeholder_ledger import PlaceholderLedgerMixin
 from .reconcile import _COMPACTION_COMMIT_PROOF_METADATA_PREFIX, ReconcileMixin, _PRESERVED_OBJECTIVE_CONTEXT_PREFIX
 from .reconcile import _HERMES_PRUNED_TOOL_PLACEHOLDER, _emission_identity, _strip_volatile_host_scaffolding
@@ -12599,6 +12600,8 @@ class LCMEngine(
             return self._compaction_closing
 
     def shutdown(self):
+        # #2482: a live delegated child's in-flight or queued store needs this engine open; it is bounded.
+        drain_live_child_stores(_aux_session._LIVE_CHILD_SHUTDOWN_DRAIN_S)
         with self._compaction_gate:
             self._compaction_closing = True
         sender_capture.retire(self)

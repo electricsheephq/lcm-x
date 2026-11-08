@@ -71,6 +71,11 @@ Cleanup apply is separately feature-gated. Never infer permission to enable it f
 
 - LOCAL catch-up: `/lcm status` exposes `embedding_incremental_last_pass`; doctor readiness includes the database's maintenance outcome. `model_preparing`, `model_unavailable`, `lease_held`, `circuit_open` and `row_backoff` describe deferred work; `no_progress`, `model_prepare_exhausted`, refusal/error or `queue_capacity_exhausted` need inspection. Summary coverage alone does not certify chunk coverage. Full-text recall remains available while semantic coverage is incomplete.
 - Unbound status after restart: send a normal message, then check again.
+- `LCM shutdown drain timed out ... child=<12 hex> has up to N handed-over row(s) not yet stored ... (#2483)`: a delegated
+  child's early store was still waiting on a busy database when the engine shut down. Those rows are lost only if
+  the process ends before the store lands; the hashed id names the child, never its session id.
+- `LCM live delegated-child store skipped: the child's engine now serves another profile ...`: the child's engine was
+  rebound after the child started, so LCM-X wrote nothing early. The child's rows still come from its end store.
 - Database exists but stays empty: verify plugin enablement, `context.engine`, profile, database path, and ignore/stateless patterns.
 - Weak exact recall: verify source rows exist, query construction/scope is correct, summary health is sound, and embedding coverage/provenance matches the requested mode.
 - Conflicting summary and raw evidence: prefer the newer exact raw evidence and inspect lineage.
