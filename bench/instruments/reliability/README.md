@@ -152,7 +152,8 @@ the host reported `interrupted`. Any other assistant row is surplus.
   part prevents credit, and the replay needs its own `possible_replay_of`. NULL claims nothing. The gate audit's
   `composite_store_ids` lists the composite-credited surplus copies; `composite_rows` counts the visible surplus
   the form adds beyond the other links, so it can be lower when another link already explains a listed copy (a
-  key's expected copy is never listed; sorted per lineage, unioned in totals). Composite credit leaves M3
+  key that keeps at most one copy never lists its expected copy; in a worst-case key the listed ids are the rows
+  the matching picked for its surplus slots; sorted per lineage, unioned in totals). Composite credit leaves M3
   unchanged. `link_pending_rows` and `composite_rows` count the visible surplus each
   form adds to the relation
   witnesses alone (a row two forms credit counts in both); `link_pending_rows_total` counts every store row with a

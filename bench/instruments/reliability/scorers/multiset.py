@@ -575,8 +575,10 @@ def split_surplus(groups, relations, rows=None, forms=None, creditable=None):
     Each ``attribution_forms`` set (``forms``, computed from the relations when None) is a self witness too; a form's
     count is the visible surplus it adds to the relation witnesses alone, so two forms on one row both count it.
     ``creditable``: a set, when given, receives the rows that the completed matching (the pass with every form)
-    credited through their own self witness, so a caller reports only rows that explain a surplus copy: never a
-    key's expected copy, nor a candidate in a key whose matching capacity is zero.
+    credited through their own self witness, so a caller reports only rows that explain a surplus copy, never a
+    candidate in a key whose matching capacity is zero. A key that keeps at most one copy never reports its
+    expected copy; in a worst-case key the reported rows are those the matching picked for its surplus slots
+    (the lowest store ids it reaches), as with the silent examples.
     """
     # Stored text only verifies an existing directed witness; it never creates one.
     # ``rows`` (store_id -> (session, role, content)) covers every stored row, tool results included; without it,
