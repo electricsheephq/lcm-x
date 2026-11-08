@@ -12,15 +12,15 @@ The project is **LCM-X — Lossless Context Memory eXtension**. From v0.24.0 (#4
 | Plugin manifest and install directory | `hermes-lcm-x` (legacy, v0.23.x and earlier: `hermes-lcm`) |
 | Runtime context engine | `lcm-x` (legacy alias `lcm` accepted with a deprecation warning) |
 | Bundled skill | `hermes-lcm` (unchanged) |
-| Latest stable | `v0.29.2` (ships `hermes-lcm-x` / `lcm-x`; verify its exact SHA before installation) <!-- RM: v0.29.2 GA SHA and date at the cut --> |
+| Latest stable | `v0.29.1@3a4a08ff501347a79669fab51444c471b09b551d` (ships `hermes-lcm-x` / `lcm-x`; GA date 2026-11-03) |
 
 The rename is a breaking change with a documented migration path; see the operator guide's migration section. Historical notes and upstream evidence retain the names and identities used when they were created.
 
 ## Released product and development source
 
-The latest stable release is [v0.29.2](https://github.com/electricsheephq/lcm-x/releases/tag/v0.29.2); verify its exact SHA before installation. <!-- RM: v0.29.2 GA SHA and date at the cut --> The previous stable release is `v0.29.1` at `3a4a08ff501347a79669fab51444c471b09b551d`.
+The latest stable release is [v0.29.1](https://github.com/electricsheephq/lcm-x/releases/tag/v0.29.1), released 2026-11-03 at `3a4a08ff501347a79669fab51444c471b09b551d`. The previous stable release is `v0.29.0` at `c13dea3783bdbd1aab52d83dff5d009bfade0bd2`.
 
-For the previous stable release, v0.29.1, the [published GA notes](https://github.com/electricsheephq/lcm-x/releases/tag/v0.29.1) describe a patch on v0.29.0 that fixes compaction and restart problems found in v0.29.0's release testing. There are no new settings and the schema version stays 5:
+The [published GA notes](https://github.com/electricsheephq/lcm-x/releases/tag/v0.29.1) describe a patch on v0.29.0 that fixes compaction and restart problems found in v0.29.0's release testing. There are no new settings and the schema version stays 5:
 
 - **Compaction:** Compaction now gets past a row the host still holds by summarising the blocked rows from the stored copy, so passes make progress again (#1162, #1880). The 10-minute pause after a pass that changes nothing holds the full 600 s again, and summaries read a leaf's rows in store order after a host reorder (#2007).
 - **Restarts and retries:** A restart after a cleanup pass no longer stores the conversation again; this problem never lost a message. Two retry shapes after a compaction now store exactly once (#1446), and a re-stamped tool turn after a cold restart is stored (#1967).
@@ -32,7 +32,7 @@ For the previous stable release, v0.29.1, the [published GA notes](https://githu
 
 The source snapshot used for this reconciliation is `main@0df3188d805b895d99ce5a175c2c84c9a2ac2075`. Stable and main are different proof planes: stable is the released product baseline, while main contains later development and documentation work. Do not describe a main checkout as the installed stable release merely because it contains stable commits.
 
-v0.29.1 was cut from the `release/v0.29.x` maintenance branch, not from main; v0.29.x patch releases are cut from that branch. Main carries the forward identity `0.30.0` (`hermes-lcm-x`), first tagged as `v0.30.0-rc1`; `v0.29.2` remains the latest stable release. The candidate is not qualified yet. The order after v0.29.1, including LCM-X for Claude Code as its own release unit and the cloud steps, is in the [roadmap](../ROADMAP.md#the-order-roadmap-v5). Releases with product code are rc-first under `bench/specs/RELEASE-READINESS-V1.md`; the release identity test keeps `plugin.yaml`, README, the operator guide, CHANGELOG and the bug-report template synchronized.
+v0.29.1 was cut from the `release/v0.29.x` maintenance branch, not from main; v0.29.x patch releases are cut from that branch. Main carries the forward identity `0.30.0` (`hermes-lcm-x`), first tagged as `v0.30.0-rc1`; `v0.29.1` remains the latest stable release until `v0.29.2` ships from that branch. The candidate is not qualified yet. The order after v0.29.1, including LCM-X for Claude Code as its own release unit and the cloud steps, is in the [roadmap](../ROADMAP.md#the-order-roadmap-v5). Releases with product code are rc-first under `bench/specs/RELEASE-READINESS-V1.md`; the release identity test keeps `plugin.yaml`, README, the operator guide, CHANGELOG and the bug-report template synchronized.
 
 ## Reference-agent acceptance state
 
