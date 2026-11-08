@@ -29,7 +29,10 @@ def test_a_half_new_pair_is_stored_whole(build, monkeypatch, new_half):
         return rows
 
     monkeypatch.setattr(shapes, "fixture", stamped_fixture)
-    engine, host = compact(build, mode="cold")
+    try:  # the imported setup helper asserts; its failure must not read as the expected xfail
+        engine, host = compact(build, mode="cold")
+    except AssertionError as error:
+        pytest.fail(f"setup: {error}")
     before = stored(engine)
     if engine._compress_commit_proof is not None or engine._durable_commit_proof_payload() is None:
         pytest.fail("setup: the cold engine must bind through the durable compaction proof")

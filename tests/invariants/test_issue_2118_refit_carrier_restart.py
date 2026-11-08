@@ -21,7 +21,10 @@ NEW = [{"role": "user", "content": "[NEW] next turn", "timestamp": 50_000.0},
 
 
 def _restart_after_committed_fit(tmp_path, host, monkeypatch, commit, stamp, warm):  # noqa: F811
-    engine, fitted, rest = _held_fit_after_inplace_boundary(tmp_path, host, monkeypatch)
+    try:  # the imported setup helper asserts; its failure must not read as the expected xfail
+        engine, fitted, rest = _held_fit_after_inplace_boundary(tmp_path, host, monkeypatch)
+    except AssertionError as error:
+        pytest.fail(f"setup: {error}")
     if stamp == "host-stamped":
         fitted[0]["timestamp"] = 40_000.0  # the host stamps the carrier object it adopted
     try:
