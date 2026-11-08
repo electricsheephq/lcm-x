@@ -499,12 +499,14 @@ def link_pending_ids(relations):
 
 def composite_witness(relations, rows):
     """#2212 ``composite_of`` witness (provisional format): the stored user rows C it credits. C holds one relation
-    per segment, ordinals 0..n-1 contiguous with n >= 2, each naming the contained stored row of C's session, or NULL
+    per segment, ordinals 0..n-1 contiguous with n >= 2, each naming an earlier stored user row of C's session, or NULL
     for the host scaffold, at most once and only at ordinal 0 (the product renders the todo block first). With one
     NULL that leftover span starts with the todo injection header; with
     none, ordinal 0 names a stored user row that starts with it. C's content is the segments joined by "\n\n" in
-    ordinal order, byte for byte. Only C is credited: the contained rows are scored as ordinary rows."""
-    header, segments, out = todo_header(), defaultdict(list), set()
+    ordinal order, byte for byte. Valid composites consume their non-NULL parts once, in ascending C store id:
+    a composite sharing any already-claimed part receives no credit; NULL claims nothing. Only C is credited:
+    the contained rows are scored as ordinary rows. A replayed composite needs its own possible_replay_of link."""
+    header, segments, valid = todo_header(), defaultdict(list), {}
     for sid, kind, other, *ordinal in relations:
         if kind == "composite_of":
             segments[sid].append((ordinal[0] if ordinal else None, other))
@@ -518,6 +520,8 @@ def composite_witness(relations, rows):
         nulls = [i for i, r in enumerate(related) if r is None]
         if nulls not in ([], [0]) or any(r not in rows or rows[r][0] != session for r in related if r is not None):
             continue
+        if any(r >= c or rows[r][1] != "user" for r in related if r is not None):
+            continue
         texts, content = [None if r is None else rows[r][2] or "" for r in related], content or ""
         if nulls:  # the scaffold is the one span the contained rows leave
             i = nulls[0]
@@ -530,7 +534,12 @@ def composite_witness(relations, rows):
         else:
             first_ok = rows[related[0]][1] == "user" and texts[0].startswith(header)
         if first_ok and "\n\n".join(texts) == content:
+            valid[c] = {r for r in related if r is not None}
+    out, claimed = set(), set()
+    for c, parts in sorted(valid.items()):
+        if not parts & claimed:
             out.add(c)
+            claimed.update(parts)
     return out
 
 
@@ -544,7 +553,7 @@ def attribution_forms(relations, rows, logged=None):
     return forms
 
 
-def split_surplus(groups, relations, rows=None, forms=None):
+def split_surplus(groups, relations, rows=None, forms=None, creditable=None):
     """Maximum matching of relation witnesses to rows, with each key capped at its unlicensed surplus.
 
     Flow: key quota -> unique self/pair witness -> stored row. Witness and row nodes belong to one key, so a row
@@ -565,6 +574,11 @@ def split_surplus(groups, relations, rows=None, forms=None):
     copies around reserved rows, so store order no longer identifies the kept copy.
     Each ``attribution_forms`` set (``forms``, computed from the relations when None) is a self witness too; a form's
     count is the visible surplus it adds to the relation witnesses alone, so two forms on one row both count it.
+    ``creditable``: a set, when given, receives the rows that the completed matching (the pass with every form)
+    credited through their own self witness, so a caller reports only rows that explain a surplus copy, never a
+    candidate in a key whose matching capacity is zero. A key that keeps at most one copy never reports its
+    expected copy; in a worst-case key the reported rows are those the matching picked for its surplus slots
+    (the lowest store ids it reaches), as with the silent examples.
     """
     # Stored text only verifies an existing directed witness; it never creates one.
     # ``rows`` (store_id -> (session, role, content)) covers every stored row, tool results included; without it,
@@ -579,7 +593,7 @@ def split_surplus(groups, relations, rows=None, forms=None):
     held = {sid for group in groups for sid in group[2]}
     live = {name: ids & held for name, ids in forms.items()}
     # Passes: one with every touched form, one without, one per touched form (up to 5 in the audit, 4 in B2).
-    out = _matched(groups, relations, rows, set().union(*live.values()))
+    out = _matched(groups, relations, rows, set().union(*live.values()), creditable)
     base = _matched(groups, relations, rows, set())["visible_surplus_rows"] if any(live.values()) else 0
     for name, ids in live.items():
         out[name] = _matched(groups, relations, rows, ids)["visible_surplus_rows"] - base if ids else 0
@@ -587,7 +601,7 @@ def split_surplus(groups, relations, rows=None, forms=None):
     return out
 
 
-def _matched(groups, relations, rows, credited):
+def _matched(groups, relations, rows, credited, creditable=None):
     graph, source, sink = defaultdict(dict), ("source",), ("sink",)
 
     def edge(a, b, capacity=1):
@@ -655,6 +669,11 @@ def _matched(groups, relations, rows, credited):
             graph[node][previous] += 1
             node = previous
         visible += 1
+    if creditable is not None:  # rows whose own self witness carries flow in the completed matching
+        for index, (_key, _surplus, ids, *_merged) in enumerate(groups):
+            for sid in set(ids):
+                if graph[("row", index, sid)].get(("out", index, ("self", sid)), 0) > 0:
+                    creditable.add(sid)
     examples = []
     for index, (key, surplus, ids, *_merged) in enumerate(groups):
         silent = surplus - (caps[index] - graph[source][("key", index)])  # surplus minus what the matching explained
