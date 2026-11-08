@@ -24,6 +24,7 @@ import d2_score  # noqa: E402
 
 LIMIT_SECONDS = 21600
 LIMIT = re.compile(r"HTTP(?: Error)?[ :]+429|usage[- _]limit|rate[- _]limit|too many requests", re.I)
+READER_FLAGS = {"glm-5.3": "glm", "gpt-6.1-sol": "sol-low"}
 
 
 def dump(path, value):
@@ -60,10 +61,15 @@ def prepare(config, option, aa, *, check_hash=True):
         raise ValueError("all route, reader and policy pins required")
     route = pins["summary"]
     lane = {("glm", "glm-5.3"): "glm", ("codex", "gpt-6.1-sol"): "codex-sol"}.get((route["provider"], route["model"]))
-    if not lane or route["effort"] != "low" or route["tier"] != "default" or pins["reader"] != "glm-5.3":
+    if not lane or route["effort"] != "low" or route["tier"] != "default" or pins["reader"] not in READER_FLAGS:
         raise ValueError("pins must match a supported producer route")
     if lane != "glm" and not config.get("comparability_ruling"):
         raise ValueError("changed D2 summary route requires a comparability_ruling")
+    if pins["reader"] != "glm-5.3":
+        ruling = config.get("reader_comparability_ruling")
+        if not isinstance(ruling, str) or not ruling.strip():
+            raise ValueError("changed D2 reader requires a reader_comparability_ruling")
+        pins["reader_comparability_ruling"] = ruling
     pins.update(summary_lane=lane, comparability_ruling=config.get("comparability_ruling"),
                 instrument_hash_ruling=config.get("instrument_hash_ruling"))
     if {b["arm"] for b in pins["builds"].values()} != {pins["policy"]["arm"]}:
@@ -119,7 +125,7 @@ def real_producer(pins):
         env = dict(os.environ, PRODUCT_WT=build["worktree"], PRODUCT_SHA=build["sha"],
                    KIT_DIR=str(Path(__file__).resolve().parents[1]), MATERIAL=pins["material"],
                    OUT=str(path), ARM=build["arm"], SEEDS=str(row["seed"]), PARALLEL="1", PY=sys.executable,
-                   SUMMARY_LANE=pins["summary_lane"])
+                   SUMMARY_LANE=pins["summary_lane"], READER=READER_FLAGS[pins["reader"]])
         env = {k: v for k, v in env.items() if k != "FAULT" and not k.startswith("S2_")}
         # A child session contains the producer's own replay process group too.
         with (path / "producer.log").open("x") as log:
@@ -140,7 +146,7 @@ def validate_artifacts(pins, row, attempt, path):
             return "invalid", "unfinished or wrong build/stop row", None
         if summ["material_sha256"] != pins["materials"][str(seed)]["manifest"]:
             return "invalid", "material pin mismatch", None
-        if summ["lane"] != pins["summary_lane"] or summ["reader"] != "glm" or summ["arm"]["env"].get("LCM_SUMMARY_REASONING_EFFORT") != pins["summary"]["effort"]:
+        if pins["reader"] not in READER_FLAGS or summ["lane"] != pins["summary_lane"] or summ["reader"] != READER_FLAGS.get(pins["reader"]) or summ["arm"]["env"].get("LCM_SUMMARY_REASONING_EFFORT") != pins["summary"]["effort"]:
             return "invalid", "summary/reader route pin mismatch", None
         calls = [c for e in summ.get("events", []) for c in e.get("summariser_calls", []) if not c.get("exception")]
         if not calls or any(c.get("lane_model") != pins["summary"]["model"] or
@@ -164,6 +170,8 @@ def validate_artifacts(pins, row, attempt, path):
                 return "invalid", "incomplete checkpoint", None
             if data["reader_readback"].get("model") != pins["reader"] or data["reader_readback"].get("pin_ok") is False:
                 return "invalid", "reader pin mismatch", None
+            if pins["reader"] == "gpt-6.1-sol" and data["reader_readback"].get("effort") != "low":
+                return "invalid", "reader effort pin mismatch", None
             facts = {f: bool(data["probes"][f].get("success")) for f in pins["materials"][str(seed)]["fact_ids"]}
             if len(facts) != fk["denominator"] or abs(sum(facts.values())/len(facts)-fk["value"]) > 1e-12:
                 return "invalid", "fact denominator/share mismatch", None
