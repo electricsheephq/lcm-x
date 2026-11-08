@@ -63,6 +63,7 @@ _PRESENCE_WINDOW_BYTES = 15_000_000  # UTF-8 bytes of stored content and tool-ca
 _PRESENCE_WINDOW_CALL_IDS = 10_000  # stored tool-call entries across the scope (#2466 wait bar)
 _PRESENCE_PARSE_BYTES = 256_000  # call-row text parsed as JSON when an id's raw forms differ (#2466 wait bar)
 _PRESENCE_TEXT_BYTES = 4_000_000  # stored and shown reply text the audit normalizes when a reply is a candidate (#2116)
+_PRESENCE_TEXT_MIN_CHARGE = 400  # each reply normalized costs at least this much budget: at most 10,000 identity calls
 _PRESENCE_WINDOW_LOGGED: set[tuple[str, int, str]] = set()  # store file and session, once per process
 _PRESENCE_SHAPE_LOGGED: set[tuple[str, int, str]] = set()  # non-standard tool shapes, once per store and session
 _PRESENCE_TEXT_LOGGED: set[tuple[str, int, str]] = set()  # externalized or redacted stored replies (#2116), likewise
@@ -791,7 +792,7 @@ class IdentityAnchorMixin:
                 # calls) against the text budget and finds any reply whose identity would load a payload file or is
                 # redacted: either gives main's result before any row loads, so the audit loads no payload file.
                 text_sql = ("CASE WHEN role='assistant' AND (tool_calls IS NULL OR tool_calls IN ('', '[]')) "
-                            "THEN length(CAST(content AS BLOB)) ELSE 0 END, "
+                            f"THEN max(length(CAST(content AS BLOB)), {_PRESENCE_TEXT_MIN_CHARGE}) ELSE 0 END, "
                             "CASE WHEN role='assistant' AND (tool_calls IS NULL OR tool_calls IN ('', '[]')) AND ("
                             + " OR ".join(f"instr(CAST(content AS BLOB), CAST('{m}' AS BLOB)) > 0"
                                           for m in _PRESENCE_MARKERS) + ") THEN 1 ELSE 0 END, "
@@ -871,7 +872,7 @@ class IdentityAnchorMixin:
                     if any(marker in text for marker in _PRESENCE_MARKERS):
                         text_trip("marked", spent)
                         return None  # a trip: the caller restores main's plan
-                    spent += len(text.encode("utf-8", "surrogatepass"))
+                    spent += max(len(text.encode("utf-8", "surrogatepass")), _PRESENCE_TEXT_MIN_CHARGE)
                     if spent > _PRESENCE_TEXT_BYTES:
                         text_trip("budget", spent)
                         return None  # a trip: the caller restores main's plan
@@ -884,7 +885,7 @@ class IdentityAnchorMixin:
                     if msg.get("role") != "assistant" or msg.get("tool_calls"):
                         continue
                     text = msg.get("content") if isinstance(msg.get("content"), str) else str(msg.get("content") or "")
-                    spent += len(text.encode("utf-8", "surrogatepass"))
+                    spent += max(len(text.encode("utf-8", "surrogatepass")), _PRESENCE_TEXT_MIN_CHARGE)
                     if spent > _PRESENCE_TEXT_BYTES:
                         text_trip("budget", spent)
                         return None  # a trip: the caller restores main's plan
