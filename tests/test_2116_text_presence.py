@@ -140,8 +140,8 @@ def test_marked_stored_reply_named_limit_the_new_reply_is_stored(tmp_path, marke
     "[LCM sensitive redaction: name=password_assignment; len=8]",
 ], ids=["externalized", "lossy-redaction"])
 def test_a_marked_stored_reply_trips_to_mains_plan_and_loads_nothing(tmp_path, monkeypatch, marker):
-    """A trip, not a guess: the audit returns None (main's plan) before computing any stored reply's identity, and
-    nothing is stored twice."""
+    """A trip, not a guess: every reply keeps main's result (here nothing is new) before any stored reply's identity is
+    computed, and nothing is stored twice. The tool audit runs as on main (tests/test_2116_r1_findings.py)."""
     engine = _engine(tmp_path)
     try:
         view = _warm(engine)
@@ -169,7 +169,7 @@ def test_a_marked_stored_reply_trips_to_mains_plan_and_loads_nothing(tmp_path, m
         _, after = _resend(engine, view, new)
         if not results:
             pytest.fail("setup: the presence check never ran")
-        assert all(out is None and not loaded for out, loaded in results), results
+        assert all(out == [] and not loaded for out, loaded in results), results
         assert max(after.values()) == 1
     finally:
         engine.shutdown()
