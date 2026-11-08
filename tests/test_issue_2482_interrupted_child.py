@@ -485,3 +485,62 @@ def test_a_store_cut_off_mid_write_leaves_no_partial_prefix_and_a_resume_appends
     child.start(clone(ctx))
     child.api_call(ctx, view(2), 1)
     assert _contents(child_rows(parent)) == _contents(view(2))
+
+
+def _blocked_drain(host, monkeypatch):
+    """A store stuck past the shutdown drain (as a database busy at exit), with a newer list queued behind it."""
+    _, _, ctx, parent, child, engine = _setup(host, "own_engine")
+    aux = ctx.module("aux_session")
+    monkeypatch.setattr(aux, "_LIVE_CHILD_STORE_JOIN_S", 0.1, raising=False)
+    monkeypatch.setattr(aux, "_LIVE_CHILD_SHUTDOWN_DRAIN_S", 0.2, raising=False)
+    mixin = aux.DelegateChildMixin
+    real, calls = mixin._append_delegate_child_rows, []
+
+    def stuck_first(self, *args, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            stored = real(self, *args, **kwargs)
+            time.sleep(1.0)  # the store's engine use outlasts the drain
+            return stored
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(mixin, "_append_delegate_child_rows", stuck_first)
+    db_path = parent._store.db_path
+    child.api_call(ctx, view(0), 1)
+    child.api_call(ctx, view(1), 2)  # queued behind the stuck store
+    return ctx, aux, child, (engine, parent, ctx.offered), db_path
+
+
+def _stored_after_close(aux, db_path, session_id="child"):
+    import sqlite3
+
+    aux.drain_live_child_stores(10)
+    with sqlite3.connect(db_path) as conn:
+        return conn.execute("SELECT role, content FROM messages WHERE session_id = ? ORDER BY store_id",
+                            (session_id,)).fetchall()
+
+
+@pytest.mark.xfail(strict=True, reason="#2482 named loss limit (v0.30.0, #2483): a delegated child's rows after its "
+                   "last completed store are lost if the process ends first while a store waits more than the "
+                   "shutdown drain on a busy database")
+def test_residual_a_store_stuck_past_the_shutdown_drain_loses_the_queued_list(host, monkeypatch):
+    _, aux, _, engines, db_path = _blocked_drain(host, monkeypatch)
+    for closing in engines:
+        closing.shutdown()
+    assert _stored_after_close(aux, db_path) == _contents(view(1))
+
+
+def test_a_drain_that_times_out_says_so_with_the_hashed_child_and_the_unstored_rows(host, monkeypatch, caplog):
+    import hashlib
+
+    _, aux, child, engines, db_path = _blocked_drain(host, monkeypatch)
+    with caplog.at_level("WARNING"):
+        engines[0].shutdown()
+    lines = [r.getMessage() for r in caplog.records if r.levelname == "WARNING" and "shutdown drain" in r.getMessage()]
+    digest = hashlib.sha256(b"child").hexdigest()[:12]
+    assert len(lines) == 1, lines
+    assert digest in lines[0] and "2 handed-over row(s)" in lines[0] and "#2483" in lines[0]
+    assert "child=child" not in lines[0]
+    for closing in engines[1:]:
+        closing.shutdown()
+    _stored_after_close(aux, db_path)
