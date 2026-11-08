@@ -37,7 +37,9 @@ def _all(e):
 def test_restart_incomplete_lineage(tmp_path, own_first, pad_rows):
     parent = [_u("P1 first", 100), _a("A1 reply", 101), _call("call_old", 102), _res("call_old", "old out", 103), _a("A2 after", 104)]
     pad = [r for i in range(pad_rows) for r in (_u(f"E{i} more", 105 + i), _a(f"E{i} reply", 105.5 + i))]
-    e = _engine(tmp_path, "P"); e.ingest(parent + pad); e.shutdown()
+    e = _engine(tmp_path, "P")
+    e.ingest(parent + pad)
+    e.shutdown()
     e = _engine(tmp_path, "C")  # restart; the C -> P predecessor record was never written
     try:
         carried = parent + pad
@@ -46,7 +48,8 @@ def test_restart_incomplete_lineage(tmp_path, own_first, pad_rows):
         slot = len(carried)
         a, b = (1000, 900) if own_first else (900, 1000)
         start = [*hist, _u("P60 new prompt", a)]
-        end = list(hist); end[slot] = _u("P60 new prompt", b)
+        end = list(hist)
+        end[slot] = _u("P60 new prompt", b)
         end += [_call("call_new", 1001), _res("call_new", "new out", 1002), _a("A60 after", 1003)]
         for v in (start, end, end):
             e.ingest(v)
