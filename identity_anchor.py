@@ -734,7 +734,8 @@ class IdentityAnchorMixin:
                 if ids:
                     if ids == ("?",):
                         return
-                    form = exact_form(msg, ("call", ids), stored=stored)
+                    # One digest per row: a row with many ids would otherwise rehash its whole form per id.
+                    form = hashlib.sha256(repr(exact_form(msg, ("call", ids), stored=stored)).encode()).digest()
                     for call_id in ids:
                         call_sig[call_id].add(form)
                         if stored:
