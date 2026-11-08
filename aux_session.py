@@ -20,6 +20,7 @@ import json
 import logging
 import sqlite3
 import threading
+import time
 import weakref
 from pathlib import Path
 from collections import Counter
@@ -842,6 +843,7 @@ _LIVE_DELEGATE_CHILD_ROOTS: dict[str, str] = {}
 _LIVE_CHILD_STORES_IN_FLIGHT: set[str] = set()
 _LIVE_CHILD_PENDING: dict[str, Any] = {}  # the newest store handed over while one was in flight, per child
 _LIVE_CHILD_STORE_JOIN_S = 2.0  # the most a host hook waits for a live-child store; the store itself may finish later
+_LIVE_CHILD_SHUTDOWN_DRAIN_S = 5.0  # the most an engine shutdown waits for in-flight or queued live-child stores
 _DELEGATE_AUXILIARY_IDS: set[tuple[str, str]] = set()
 _DELEGATE_RESUME_BOUNDARIES: dict[tuple[str, str], list[bytes]] = {}
 _DELEGATE_COMPRESSION_PARENTS: dict[tuple[str, str], str] = {}
@@ -872,15 +874,21 @@ def run_live_child_store(session_id: str, operation) -> None:
 
     def runner():
         current = operation
-        while current is not None:
-            try:
-                current()
-            except Exception as exc:
-                logger.debug("LCM live delegated-child store error: %s", exc)
-            with _LIVE_CHILD_LOCK:
-                current = _LIVE_CHILD_PENDING.pop(session_id, None)
-                if current is None:
+        try:
+            while current is not None:
+                try:
+                    current()
+                except Exception as exc:
+                    logger.debug("LCM live delegated-child store error: %s", exc)
+                with _LIVE_CHILD_LOCK:
+                    current = _LIVE_CHILD_PENDING.pop(session_id, None)
+                    if current is None:
+                        _LIVE_CHILD_STORES_IN_FLIGHT.discard(session_id)
+        finally:
+            if current is not None:  # something beyond Exception escaped: never leave the child marked in flight
+                with _LIVE_CHILD_LOCK:
                     _LIVE_CHILD_STORES_IN_FLIGHT.discard(session_id)
+                    _LIVE_CHILD_PENDING.pop(session_id, None)
 
     try:
         worker = threading.Thread(target=runner, name="lcm-live-child-store", daemon=True)
@@ -892,6 +900,19 @@ def run_live_child_store(session_id: str, operation) -> None:
         logger.debug("LCM live delegated-child store not started: %s", exc)
         return
     worker.join(_LIVE_CHILD_STORE_JOIN_S)
+
+
+def drain_live_child_stores(timeout: float) -> None:
+    """Wait at most ``timeout`` seconds for in-flight live-child stores, queued ones included (engine shutdown)."""
+    deadline = time.monotonic() + max(0.0, timeout)
+    while True:
+        with _LIVE_CHILD_LOCK:
+            if not _LIVE_CHILD_STORES_IN_FLIGHT:
+                return
+        if time.monotonic() >= deadline:
+            logger.debug("LCM live delegated-child stores still running at shutdown; left to finish")
+            return
+        time.sleep(0.01)
 
 
 def delegate_child_store_counts() -> Dict[str, int]:
