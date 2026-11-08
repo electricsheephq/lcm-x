@@ -1,3 +1,4 @@
+# ruff: noqa: F811  # Imported pytest fixture is intentionally injected by name.
 """#2482: a delegated child interrupted before it finishes keeps every row the host handed LCM-X.
 
 The host hands a child's whole list to plugins at ``pre_llm_call`` (once per turn, before the tool loop) and at

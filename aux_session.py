@@ -830,6 +830,7 @@ _COUNTS_LOCK = threading.Lock()
 _COUNTS: Counter = Counter()
 # Shared by clones and hook engines: compare and append form one process-local operation.
 _DELEGATE_STORE_LOCK = threading.RLock()
+_LIVE_CHILD_STORE_WAIT_S = 1.0
 _DELEGATE_AUXILIARY_IDS: set[tuple[str, str]] = set()
 _DELEGATE_RESUME_BOUNDARIES: dict[tuple[str, str], list[bytes]] = {}
 _DELEGATE_COMPRESSION_PARENTS: dict[tuple[str, str], str] = {}
@@ -1137,6 +1138,7 @@ class DelegateChildMixin:
         after_ingest: bool = False,
         require_agent: bool = False,
         outcome: Optional[dict] = None,
+        lock_wait: Optional[float] = None,
     ) -> Optional[int]:
         """Store a delegated child's new rows; return their count, or None on failure. Never raises."""
         try:
@@ -1147,7 +1149,7 @@ class DelegateChildMixin:
                 after_ingest or session_id == self._session_id
             ):
                 return 0  # this engine's own ingest owns the view
-            with _DELEGATE_STORE_LOCK:
+            def store_locked():
                 link = self._delegate_child_link(session_id, platform=platform, require_agent=require_agent)
                 if link is None:
                     return 0
@@ -1155,6 +1157,21 @@ class DelegateChildMixin:
                     outcome["linked"] = True
                 with self._attribution_span("delegate_child_store", len(messages)):
                     return self._append_delegate_child_rows(session_id, messages, link)
+
+            if lock_wait is None:
+                with _DELEGATE_STORE_LOCK:
+                    return store_locked()
+            if not _DELEGATE_STORE_LOCK.acquire(timeout=lock_wait):
+                _count("live_store_skipped")
+                logger.debug(
+                    "LCM delegated child %s: store lock busy, left to the next hook or the end store",
+                    session_id,
+                )
+                return 0
+            try:
+                return store_locked()
+            finally:
+                _DELEGATE_STORE_LOCK.release()
         except Exception as exc:
             if isinstance(outcome, dict):
                 outcome["error"] = exc

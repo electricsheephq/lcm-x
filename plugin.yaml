@@ -29,6 +29,7 @@ provides_tools:
   - lcm_memory
 provides_hooks:
   - pre_llm_call
+  - pre_api_request
   - post_llm_call
   - subagent_start
   - subagent_stop

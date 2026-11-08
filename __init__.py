@@ -667,6 +667,34 @@ def register(ctx):
                 exc,
             )
 
+        def _on_live_delegate_child_list(**payload):
+            # #2482: the host hands a live delegated child's whole list over at pre_llm_call and before every model
+            # call (pre_api_request); storing it there keeps an interrupted child's rows. Always returns None.
+            try:
+                from . import aux_session
+
+                session_id = str(payload.get("session_id") or "")
+                if not session_id or not aux_session.explicit_subagent_lineage(session_id):
+                    return None
+                history = payload.get("conversation_history")
+                if not isinstance(history, list) or not history:
+                    return None
+                wait = aux_session._LIVE_CHILD_STORE_WAIT_S
+
+                def store_child(active_engine):
+                    return active_engine._store_delegate_child_turn(
+                        session_id, history,
+                        platform=str(payload.get("platform") or ""), lock_wait=wait,
+                    )
+
+                result = use_active_lcm_engine(store_child, session_id=session_id, timeout=wait)
+                if result.status is ActiveEngineUseStatus.ENGINE_NOT_RESIDENT:
+                    # No engine bound to the child: store without binding one (never bind, never ingest).
+                    use_lcm_engine(engine, store_child, timeout=wait)
+            except Exception as exc:
+                logger.debug("LCM live delegated-child store error: %s", exc)
+            return None
+
         # Hermes invokes this hook after the context engine has received
         # on_session_start(). Resolve through LCM's own registry so merely
         # loading the plugin cannot inject guidance when another context
@@ -677,6 +705,7 @@ def register(ctx):
             def _on_pre_llm_call(**payload):
                 from .sender_capture import create_pending
 
+                _on_live_delegate_child_list(**payload)  # #2482; returns None, never raises
                 session_id = str(payload.get("session_id") or "")
                 conversation_id = str(
                     payload.get("conversation_id")
@@ -888,6 +917,10 @@ def register(ctx):
         if callable(register_hook):
             register_hook("post_llm_call", _on_post_llm_call)
             logger.debug("LCM registered post_llm_call hook for per-turn ingest")
+            try:
+                register_hook("pre_api_request", _on_live_delegate_child_list)
+            except Exception as exc:
+                logger.debug("LCM could not register the pre_api_request live delegated-child hook: %s", exc)
         else:
             logger.warning(
                 "LCM-X: this Hermes host has no plugin register_hook (below the supported floor); "
