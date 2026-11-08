@@ -1,1 +1,0 @@
-- Fix: Link a re-stamped carried turn, and a prompt that inherited its stamp, when the rotation child stored the first copy or the original lives in the predecessor session.

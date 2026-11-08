@@ -1,1 +1,0 @@
-- Changed: tests only. Two #2466 presence-shape tests now check their wall-time ratios only in the nightly latency cell, as their 150 ms bar already was, so a loaded CI runner no longer fails the required suite on timing (#2480).

@@ -1,1 +1,0 @@
-- Fix: Session lineage adoption no longer gives a row that already has a replay link a second one.

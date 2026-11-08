@@ -1,1 +1,0 @@
-- New: Add D5 clone-run source pins, a deterministic loopback provider, and a macOS egress sandbox with a positive control.

@@ -161,8 +161,9 @@ separate proof planes; do not describe an arbitrary `main` checkout as the
 installed stable product.
 
 v0.29.1 was cut from the `release/v0.29.x` maintenance branch, not from `main`; v0.29.x
-patch releases (v0.29.2 next, the first release train) are cut from that branch. The `main`
-line keeps the identity `hermes-lcm-x v0.29.1` in `plugin.yaml` until its own next release.
+patch releases are cut from that branch. The `main` line carries the forward identity
+`hermes-lcm-x v0.30.0` — nothing lost — which the `v0.30.0-rc1` tag carries first.
+That tag is cut from `main`, while `v0.29.2` comes from `release/v0.29.x`.
 An identity is never a restamp of any past commit's own recorded identity
 (#385 fixed the earlier drift).
 The manifest declares 16 tools; runtime discovery advertises 13 by default,
@@ -344,7 +345,7 @@ On the `main` line, output with all three opt-in flags enabled is:
 
 ```text
 Plugins (1):
-  ✓ hermes-lcm-x v0.29.1 (16 tools)
+  ✓ hermes-lcm-x v0.30.0 (16 tools)
 
 Provider Plugins:
   Context Engine: lcm-x
