@@ -258,6 +258,27 @@ def test_one_call_serialized_differently_is_still_one_invocation(tmp_path, store
         engine.shutdown()
 
 
+def test_past_the_parse_budget_a_call_serialized_differently_keeps_mains_result(tmp_path, monkeypatch):
+    """Arguments are parsed only within a byte budget (the wait bar). Past it, an id whose stored and shown arguments
+    differ as text reads as reused, so its rows keep main's result: nothing is added (#2466 review, delta 9)."""
+    from hermes_lcm import identity_anchor
+    from tests.test_anchor_unstored_before_cursor import _engine, _presence, SESSION
+
+    def call(args):
+        return {"role": "assistant", "content": "", "tool_calls": [
+            {"id": "call_s", "type": "function", "function": {"name": "read_file", "arguments": args}}]}
+
+    monkeypatch.setattr(identity_anchor, "_PRESENCE_PARSE_BYTES", 0)
+    engine = _engine(tmp_path)
+    try:
+        engine._store.append_batch(SESSION, [call('{"path": "a", "n": 1}')])
+        result = {"role": "tool", "tool_call_id": "call_s", "tool_name": "read_file", "content": "file text"}
+        assert _presence(engine, [call('{"n":1,"path":"a"}'), result]) == []
+        assert _presence(engine, [call('{"path": "a", "n": 1}'), result]) == [1]  # same text: no parse needed
+    finally:
+        engine.shutdown()
+
+
 @pytest.mark.parametrize("form", ["externalized", "host-pruned"])
 @pytest.mark.parametrize("own_first", [True, False], ids=["own-stamp-first", "carried-stamp-first"])
 def test_class_a_moved_pair_is_stored_once_when_a_stored_output_has_another_form(tmp_path, form, own_first):

@@ -105,3 +105,25 @@ def test_pairing_a_wide_parallel_call_row_is_linear(tmp_path, calls):
         assert took < BAR, f"{took * 1000:.0f} ms"
     finally:
         engine.shutdown()
+
+
+DENSE = '{"items":[' + ",".join(["0"] * 900) + "]}"  # about 1.8 KB of valid JSON per call row: 10,000 rows sit inside
+
+
+@pytest.mark.parametrize("view_kind", ["fresh-only", "history-then-fresh", "history-reserialized-then-fresh"])
+def test_dense_json_arguments_at_the_window_limit(tmp_path, view_kind):
+    """#2466 review, delta 9: arguments are compared as stored first and parsed only for an id whose stored and
+    shown forms differ, within a byte budget; past it the id keeps main's result. Dense valid JSON in every call
+    row must not make the audit parse the whole window."""
+    engine = _engine(tmp_path)
+    try:
+        stored = [_call_row(i, DENSE) for i in range(ROWS)]
+        _append(engine, stored)
+        shown = DENSE.replace(",", ", ")
+        history = {"fresh-only": [], "history-then-fresh": stored,
+                   "history-reserialized-then-fresh": [_call_row(i, shown) for i in range(ROWS)]}[view_kind]
+        took, out = _best(engine, [*history, _call("brand_new", 1)])
+        assert out == [len(history)]
+        assert took < BAR, f"{took * 1000:.0f} ms"
+    finally:
+        engine.shutdown()

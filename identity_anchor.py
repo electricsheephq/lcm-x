@@ -57,7 +57,8 @@ _POOL_WINDOW = 256  # store ids either side of a stamp donor searched for a comp
 _INSERT_DIFF_BUDGET = 1_000_000  # #633: old x new rows compared per insertion diff (quadratic worst case ~40 ms)
 _CARRIER_LEDGER_CAP = 256  # #1000: carrier emission keys remembered as seen / retired (process-local)
 _PRESENCE_WINDOW_ROWS = 10000  # total stored rows across the presence scope
-_PRESENCE_WINDOW_BYTES = 20_000_000  # characters (code points) of stored content and tool-call text across the scope
+_PRESENCE_WINDOW_BYTES = 20_000_000  # UTF-8 bytes of stored content and tool-call text across the scope
+_PRESENCE_PARSE_BYTES = 256_000  # call-row text parsed as JSON when an id's raw forms differ (#2466 wait bar)
 _PRESENCE_WINDOW_LOGGED: set[tuple[str, int, str]] = set()  # store file and session, once per process
 _UNREADABLE_CALLS = (object(),)  # an unreadable tool_calls value: no host id can equal it (#2466 review)
 
@@ -605,7 +606,16 @@ class IdentityAnchorMixin:
         reused id keeps main's result. Text rows are not checked (#2116, v0.30.x). ``capped``, ``held`` and
         ``consumed`` are retained for callers but unused. Past the window the audit adds nothing beyond its own finds,
         as on main. Unsure is accounted (the positional replay, as before): a call row whose ids cannot be read."""
+        calls_memo: dict = {}  # view rows are read several times below
+
         def calls(msg, stored=False):
+            if not stored:
+                if id(msg) not in calls_memo:
+                    calls_memo[id(msg)] = read_calls(msg, False)
+                return calls_memo[id(msg)]
+            return read_calls(msg, True)
+
+        def read_calls(msg, stored):
             value = msg.get("tool_calls") or ()
             if isinstance(value, str):
                 try:
@@ -639,8 +649,8 @@ class IdentityAnchorMixin:
             # v0.30.x under #2467).
             candidates = {idx: key(identity_messages[idx]) for idx in range(start, cursor)
                           if idx not in explained and tool_row(identity_messages[idx])
-                          and not (identity_at(idx) is None and
-                          self._identity_is_lcm_scaffold(identity_messages[idx]))
+                          and not (self._identity_is_lcm_scaffold(identity_messages[idx])
+                                   and identity_at(idx) is None)  # scaffold first: identity_at parses arguments
                           and not self._matches_ignore_message_patterns(messages[idx])}
             session = str(self._session_id)
             chain = self._identity_anchor_chain()
@@ -703,6 +713,8 @@ class IdentityAnchorMixin:
             # Result text is not compared: the store can hold one result in another form (an externalized or a
             # host-pruned output).
             call_sig: dict = defaultdict(set)
+            rows_by_id: dict = defaultdict(list)
+            form_token: dict = {}
             stored_calls, stored_results = set(), set()
 
             def canonical(arguments):
@@ -713,7 +725,7 @@ class IdentityAnchorMixin:
                         return arguments.strip()
                 return json.dumps(arguments, sort_keys=True, separators=(",", ":"), default=str)
 
-            def shape(msg):
+            def shape(msg, parse=False):
                 value = msg.get("tool_calls") or ()
                 if isinstance(value, str):
                     value = json.loads(value)
@@ -721,8 +733,12 @@ class IdentityAnchorMixin:
                 for c in value if isinstance(value, list) else ():
                     function = (c.get("function") or {}) if isinstance(c, dict) else {}
                     if isinstance(c, dict) and isinstance(function, dict):
-                        parts.append((str(c.get("id") or ""), str(function.get("name") or ""),
-                                      canonical(function.get("arguments"))))
+                        arguments = function.get("arguments")
+                        if parse:
+                            arguments = canonical(arguments)
+                        elif not isinstance(arguments, str):
+                            arguments = repr(arguments)
+                        parts.append((str(c.get("id") or ""), str(function.get("name") or ""), arguments))
                 return tuple(sorted(parts))
 
             def note(msg, stored):
@@ -730,10 +746,11 @@ class IdentityAnchorMixin:
                 if ids:
                     if ids is _UNREADABLE_CALLS:
                         return
-                    # One digest per row: a row with many ids would otherwise rehash its whole form per id.
-                    form = hashlib.sha256(repr(shape(msg)).encode()).digest()
+                    # One lookup per row: a row with many ids would otherwise rehash its whole form per id.
+                    form = form_token.setdefault(shape(msg), len(form_token))
                     for call_id in ids:
                         call_sig[call_id].add(form)
+                        rows_by_id[call_id].append(msg)
                         if stored:
                             stored_calls.add(call_id)
                 elif stored and msg.get("role") == "tool" and msg.get("tool_call_id"):
@@ -743,7 +760,24 @@ class IdentityAnchorMixin:
                 note(rows[store_id], True)
             for msg in identity_messages:
                 note(msg, False)
-            reused = {call_id for call_id, forms in call_sig.items() if len(forms) > 1}
+            # Raw forms first; arguments are parsed only for an id whose raw forms differ, within a byte budget (the
+            # wait bar). Past it the id stays reused, which is main's result.
+            reused, parse_budget, parsed, parsed_token = set(), _PRESENCE_PARSE_BYTES, {}, {}
+            for call_id, forms in call_sig.items():
+                if len(forms) > 1:
+                    group = rows_by_id[call_id]
+                    pending = [m for m in group if id(m) not in parsed]
+                    if pending:
+                        need = sum(len(repr(m.get("tool_calls"))) for m in pending) if parse_budget > 0 else 1
+                        if need > parse_budget:
+                            parse_budget = 0  # spent: every later differing id stays reused
+                            reused.add(call_id)
+                            continue
+                        parse_budget -= need
+                        for m in pending:
+                            parsed[id(m)] = parsed_token.setdefault(shape(m, parse=True), len(parsed_token))
+                    if len({parsed[id(m)] for m in group}) > 1:
+                        reused.add(call_id)
         except Exception as exc:
             logger.warning("LCM identity-anchor presence unavailable (%s); keeping positional replays", type(exc).__name__)
             return []

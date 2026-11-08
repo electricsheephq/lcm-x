@@ -180,3 +180,20 @@ def test_interrupted_turn_default_config_result_below_cursor(tmp_path, monkeypat
         assert after[_key(reply)] == 1
     finally:
         engine.shutdown()
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError,
+                   reason="#2467: ingest moves a base64 blob in a call's arguments to a payload file, so the stored "
+                          "and shown calls differ and the id keeps main's result")
+def test_dangling_call_with_a_base64_argument_then_its_result_below_the_cursor(tmp_path):
+    """Default ingest protection stores the call's base64 argument as a placeholder. The result that lands below the
+    cursor should still be stored once; today the id reads as reused and gives main's result (named limit)."""
+    import base64
+    import random
+
+    call = json.loads(json.dumps(_call("call_new", 201)))
+    blob = base64.b64encode(random.Random(1).randbytes(6000)).decode()
+    call["tool_calls"][0]["function"]["arguments"] = json.dumps({"image": "data:image/png;base64," + blob})
+    res, reply = _res("call_new", "new file text", 202), _a("A60 after the new call", 203)
+    _added, _before, after, _again, _view, _cursor = _run(tmp_path, [call], [call, res, reply], True)
+    assert sum(c for k, c in after.items() if k[2] == "call_new") == 1
