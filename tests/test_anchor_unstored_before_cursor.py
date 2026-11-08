@@ -368,7 +368,6 @@ def _long_resend(engine) -> dict[str, str]:
     return {name: row["content"] for name, row in rows.items()}
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason="#2116: replaced replies were split out of #2466 to v0.30.x (#2467); a text row keeps main's result")
 def test_2116_a_replaced_reply_past_the_audited_tail_is_stored_warm(tmp_path):
     engine = _engine(tmp_path)
     try:
