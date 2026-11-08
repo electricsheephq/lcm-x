@@ -27,6 +27,7 @@ MARKED = pytest.mark.xfail(strict=True, raises=AssertionError,
 def _fresh_presence_notices(monkeypatch):
     monkeypatch.setattr(identity_anchor, "_PRESENCE_SHAPE_LOGGED", set())
     monkeypatch.setattr(identity_anchor, "_PRESENCE_WINDOW_LOGGED", set())
+    monkeypatch.setattr(identity_anchor, "_PRESENCE_TEXT_LOGGED", set())
 
 
 def _reply(text):
