@@ -142,3 +142,46 @@ def test_externalized_payloads_are_charged_before_they_load(tmp_path, raw_bytes,
         assert took < BAR, f"{took * 1000:.0f} ms"
     finally:
         engine.shutdown()
+
+
+def test_a_nul_inside_stored_text_is_still_sized_in_full(tmp_path):
+    """SQLite's length() of text stops at the first NUL; Python loads the whole value (#2466 review, delta 7)."""
+    engine = _engine(tmp_path)
+    try:
+        _append(engine, [_call_row(0, "{}"), {"role": "tool", "tool_call_id": "c0", "content": "x\0" + "y" * (READ + 1)}])
+        assert _presence(engine, [_call("brand_new", 1)]) == []  # past the read limit: main's result
+    finally:
+        engine.shutdown()
+
+
+def test_each_repeated_placeholder_load_is_charged(tmp_path):
+    """Restoration loads a payload file once per placeholder occurrence, so each occurrence is charged."""
+    engine = _payload_engine(tmp_path)
+    try:
+        blob = base64.b64encode(random.Random(1).randbytes(3_072)).decode()
+        engine.ingest([{"role": "user", "content": f"look data:image/png;base64,{blob}", "timestamp": 1.0},
+                       {"role": "assistant", "content": "ok"}])
+        stored = next(row for row in engine._store.get_session_messages(SESSION) if row["role"] == "user")
+        placeholder = identity_anchor._INGEST_PLACEHOLDER_RE.search(stored["content"]).group(0)
+        repeats = SMALL_LOADS + 50
+        _append(engine, [{"role": "user", "content": " ".join([placeholder] * repeats), "timestamp": 2.0}])
+        took, out = _best(engine, [_u("a brand new prompt", 1e6)])
+        assert out == []  # one row, but more loads than the text limit allows: main's result
+        assert took < BAR, f"{took * 1000:.0f} ms"
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("calls", [2_000, 4_000])
+def test_pairing_a_wide_parallel_call_row_is_linear(tmp_path, calls):
+    """One new row with thousands of parallel calls and their results: pairing is one forward pass (#2466 review)."""
+    engine = _engine(tmp_path)
+    try:
+        row = {"role": "assistant", "content": "", "tool_calls": [
+            {"id": f"w{i}", "type": "function", "function": {"name": "f", "arguments": "{}"}} for i in range(calls)]}
+        view = [row, *({"role": "tool", "tool_call_id": f"w{i}", "content": f"r{i}"} for i in range(calls))]
+        took, out = _best(engine, view)
+        assert out == list(range(calls + 1))
+        assert took < BAR, f"{took * 1000:.0f} ms"
+    finally:
+        engine.shutdown()

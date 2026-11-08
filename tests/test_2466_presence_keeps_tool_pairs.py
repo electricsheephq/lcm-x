@@ -180,3 +180,17 @@ def test_a_new_pair_next_to_a_stored_pair_is_stored_once_in_any_order(tmp_path, 
         assert added[_full(new_call)] == 1 and added[_full(new_result)] == 1
     finally:
         engine.shutdown()
+
+
+def test_parallel_calls_in_separate_rows_keep_their_own_results(tmp_path):
+    """[call A, call B, result A, result B]: each result belongs to the call row carrying its id, so all four are
+    stored and no call is stored without its result (#2466 review, delta 7)."""
+    engine = _engine(tmp_path)
+    try:
+        call_a, call_b = _call("call_a", '{"path": "a"}'), _call("call_b", '{"path": "b"}')
+        view = [call_a, call_b, _res("call_a", "A text"), _res("call_b", "B text")]
+        assert engine._identity_anchor_unaccounted(
+            view, view, len(view), 0, lambda i: engine._message_replay_identity(view[i]), {}, True,
+            set(), {"replayed": set()}, {}, (), []) == [0, 1, 2, 3]
+    finally:
+        engine.shutdown()

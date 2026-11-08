@@ -30,6 +30,7 @@ import logging
 import sqlite3
 from collections import Counter, defaultdict, deque
 from difflib import SequenceMatcher
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 from .recognition_matching import (
@@ -44,9 +45,9 @@ from .recognition_matching import (
     _reroute_for_null as _reroute_for_null,
 )
 from .config import identity_anchor_enabled
-from .externalize import get_large_output_storage_dir
+from .externalize import _EXTERNALIZED_REF_RE, get_large_output_storage_dir
 from .fresh_tail import tool_group_safe_end
-from .ingest_content import extract_all_externalized_payload_refs
+from .ingest_content import _INGEST_PLACEHOLDER_RE
 from .message_content import normalize_content_value, text_content_for_pattern_matching
 from .store import _normalize_observed_at
 from .tokens import count_messages_tokens
@@ -63,6 +64,27 @@ _PRESENCE_WINDOW_BYTES = 20_000_000  # characters (code points) of stored conten
 _PRESENCE_TEXT_BYTES = 4_000_000  # characters of stored text the audit normalizes (rows of a candidate's text role)
 _PRESENCE_PAYLOAD_MIN_CHARS = 8_000  # each payload file a text row loads costs at least this much text budget
 _PRESENCE_WINDOW_LOGGED: set[tuple[str, int, str]] = set()  # store file and session, once per process
+
+
+def _payload_loads(content, tool_calls) -> list:
+    """Every payload file a stored text row's identity loads, one entry per load (#2466 review).
+
+    Ingest placeholders load once per occurrence, plus once per distinct ref when the content is structured JSON
+    (the field-path check); the first externalized ref loads once. A ref that only a restored payload reveals loads
+    at most one file per row, and the expanded-text budget ends the audit after it.
+    """
+    loads = []
+    for text in (content, tool_calls):
+        if not isinstance(text, str) or not text:
+            continue
+        ingest = [match.group(1).strip() for match in _INGEST_PLACEHOLDER_RE.finditer(text)]
+        loads += ingest
+        if ingest and text.lstrip()[:1] in "[{":
+            loads += list(dict.fromkeys(ingest))
+    first = _EXTERNALIZED_REF_RE.search(content) if isinstance(content, str) else None
+    if first:
+        loads.append(first.group(1).strip())
+    return loads
 _ROTATION_LINEAGE_UNRECORDED: set[tuple[str, str]] = set()  # store file and session whose predecessor write failed, per process
 
 
@@ -693,19 +715,25 @@ class IdentityAnchorMixin:
                 # its placeholders point at, so each is charged at its file size before any load; call and result
                 # rows compare their stored text and load none.
                 sized = self._store._conn.execute(
-                    "SELECT role, COALESCE(tool_call_id, '') != '', length(content), length(tool_calls), "
-                    "CASE WHEN instr(content, 'xternalized') THEN content END "
+                    # Stored UTF-8 bytes, which bound the characters loaded: SQLite's length() of text stops at
+                    # the first NUL, and Python loads the whole value (#2466 review).
+                    "SELECT role, COALESCE(tool_call_id, '') != '', length(CAST(content AS BLOB)), "
+                    "length(CAST(tool_calls AS BLOB)), "
+                    "CASE WHEN instr(CAST(content AS BLOB), CAST('xternalized' AS BLOB)) THEN content END, "
+                    "CASE WHEN instr(CAST(tool_calls AS BLOB), CAST('xternalized' AS BLOB)) THEN tool_calls END "
                     "FROM messages WHERE session_id=? ORDER BY store_id DESC LIMIT ?", (source, budget + 1))
                 count = 0
-                for role, tool_result, content_len, calls_len, marked in sized:
+                for role, tool_result, content_len, calls_len, marked, marked_calls in sized:
                     count += 1
                     byte_budget -= (content_len or 0) + (calls_len or 0)
                     if role in text_roles and not (role == "tool" and tool_result):
                         text_budget -= content_len or 0  # normalization cost bound (#2466 review)
-                        for ref in extract_all_externalized_payload_refs(marked) if marked else ():
+                        for ref in _payload_loads(marked, marked_calls):
                             if storage is None:
                                 storage = get_large_output_storage_dir(self._config, hermes_home=self._hermes_home,
                                                                        create=False)
+                            if not ref or Path(ref).name != ref:
+                                continue  # the loader refuses it: nothing loads
                             try:
                                 size = (storage / ref).stat().st_size
                             except OSError:
@@ -820,18 +848,33 @@ class IdentityAnchorMixin:
         new = {idx for idx, wanted in candidates.items() if wanted is not None and idx not in served}
         stored_now = set(missed) | new
 
-        def group_call(j):
-            k = j - 1
-            while k >= 0 and identity_messages[k].get("role") == "tool":
-                k -= 1
-            return k if k >= 0 and calls(identity_messages[k]) else None
+        # Pair rows once, in one forward pass over the view (#2466 review: linear, and parallel calls in separate
+        # rows keep their own results). Within a run of consecutive call and result rows, a result belongs to the
+        # latest earlier call row of the run that carries its id; a run with no call row leaves it unowned.
+        owner: dict = {}
+        owned: dict = defaultdict(list)
+        call_ids: dict = {}
+        latest: dict = {}
+        has_call = False
+        for k, msg in enumerate(identity_messages):
+            ids = calls(msg) or ()
+            if ids:
+                call_ids[k] = set(ids)
+                latest.update((call_id, k) for call_id in ids)
+                has_call = True
+            elif msg.get("role") == "tool":
+                call_id = str(msg.get("tool_call_id") or "")
+                owner[k] = latest.get(call_id, -1) if has_call else None  # -1: a call row of the run, none with the id
+                if owner[k] is not None and owner[k] >= 0:
+                    owned[owner[k]].append(k)
+            else:
+                latest, has_call = {}, False
+        ignored: dict = {}
 
-        def group_results(k):
-            j, out = k + 1, []
-            while j < len(identity_messages) and identity_messages[j].get("role") == "tool":
-                out.append(j)
-                j += 1
-            return out
+        def dropped(k):
+            if k not in ignored:
+                ignored[k] = self._matches_ignore_message_patterns(messages[k])
+            return ignored[k]
 
         changed = True
         while changed:
@@ -839,14 +882,11 @@ class IdentityAnchorMixin:
             for idx in sorted(new):
                 wanted = candidates[idx]
                 if wanted[0] == "call":
-                    ids = set(wanted[1])
-                    ok = all(j in stored_now or j >= cursor and j not in plan["replayed"] for j in group_results(idx)
-                             if str(identity_messages[j].get("tool_call_id") or "") in ids)
+                    ok = all(j in stored_now or j >= cursor and j not in plan["replayed"] for j in owned.get(idx, ()))
                 elif wanted[0] == "tool":
-                    k = group_call(idx)
+                    k = owner.get(idx)
                     ok = wanted[1] in stored_calls if k is None else (
-                        wanted[1] in (calls(identity_messages[k]) or ())
-                        and not self._matches_ignore_message_patterns(messages[k])
+                        k >= 0 and wanted[1] in call_ids[k] and not dropped(k)
                         and (k in stored_now or k in served_exact))
                 else:
                     continue
