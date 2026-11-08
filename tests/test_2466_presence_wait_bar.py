@@ -3,9 +3,9 @@ user-visible wait. Each shape fills the window to just inside its limits (the au
 overfills it (the audit must give main's result, sized in SQL before any row loads). Only call and result rows are
 compared, by their stored text, so the audit loads no payload file.
 
-The bar is 150 ms, measured at load of at most half the cores. Shared CI runners are slower and noisier, so the
-assertion multiplies the bar by LCM_PRESENCE_TIMING_SLACK (default 4); run with LCM_PRESENCE_TIMING_SLACK=1 to
-check the bar itself.
+The bar is 150 ms, measured at load of at most half the cores. Shared CI runners are slower and noisier: PR CI
+checks each shape's result, and the elapsed bound runs in the nightly latency cell (`latency_check`), multiplied by
+LCM_PRESENCE_TIMING_SLACK (default 4). Run with `-m latency` and LCM_PRESENCE_TIMING_SLACK=1 to check the bar itself.
 """
 from __future__ import annotations
 
@@ -54,18 +54,18 @@ CALL_ROW_OVERHEAD = 100  # JSON around a call's arguments, generous
 
 @pytest.mark.parametrize("chars,expected", [(READ // ROWS - CALL_ROW_OVERHEAD, [0]), (10_000, None)],
                          ids=["at-row-and-read-limits", "read-limit-overfilled"])
-def test_tool_call_json_at_the_read_limit(tmp_path, chars, expected):
+def test_tool_call_json_at_the_read_limit(tmp_path, chars, expected, latency_check):
     engine = _engine(tmp_path)
     try:
         _append(engine, [_call_row(i, "y" * chars) for i in range(ROWS)])
         took, out = _best(engine, [_call("brand_new", 1)])
         assert out == expected
-        assert took < BAR, f"{took * 1000:.0f} ms"
+        assert not latency_check or took < BAR, f"{took * 1000:.0f} ms"
     finally:
         engine.shutdown()
 
 
-def test_inline_tool_result_text_at_the_read_limit(tmp_path):
+def test_inline_tool_result_text_at_the_read_limit(tmp_path, latency_check):
     engine = _engine(tmp_path)
     try:
         pairs, half = [], ROWS // 2
@@ -75,7 +75,7 @@ def test_inline_tool_result_text_at_the_read_limit(tmp_path):
         _append(engine, pairs)
         took, out = _best(engine, [_call("brand_new", 1)])
         assert out == [0]
-        assert took < BAR, f"{took * 1000:.0f} ms"
+        assert not latency_check or took < BAR, f"{took * 1000:.0f} ms"
     finally:
         engine.shutdown()
 
@@ -93,7 +93,7 @@ def test_a_nul_inside_stored_text_is_still_sized_in_full(tmp_path):
 
 
 @pytest.mark.parametrize("calls", [2_000, 4_000])
-def test_pairing_a_wide_parallel_call_row_is_linear(tmp_path, calls):
+def test_pairing_a_wide_parallel_call_row_is_linear(tmp_path, calls, latency_check):
     """One new row with thousands of parallel calls and their results: pairing is one forward pass (#2466 review)."""
     engine = _engine(tmp_path)
     try:
@@ -102,7 +102,7 @@ def test_pairing_a_wide_parallel_call_row_is_linear(tmp_path, calls):
         view = [row, *({"role": "tool", "tool_call_id": f"w{i}", "content": f"r{i}"} for i in range(calls))]
         took, out = _best(engine, view)
         assert out == list(range(calls + 1))
-        assert took < BAR, f"{took * 1000:.0f} ms"
+        assert not latency_check or took < BAR, f"{took * 1000:.0f} ms"
     finally:
         engine.shutdown()
 
@@ -111,7 +111,7 @@ DENSE = '{"items":[' + ",".join(["0"] * 900) + "]}"  # about 1.8 KB of valid JSO
 
 
 @pytest.mark.parametrize("view_kind", ["fresh-only", "history-then-fresh", "history-reserialized-then-fresh"])
-def test_dense_json_arguments_at_the_window_limit(tmp_path, view_kind):
+def test_dense_json_arguments_at_the_window_limit(tmp_path, view_kind, latency_check):
     """#2466 review, delta 9: arguments are compared as stored first and parsed only for an id whose stored and
     shown forms differ, within a byte budget; past it the id keeps main's result. Dense valid JSON in every call
     row must not make the audit parse the whole window."""
@@ -128,7 +128,7 @@ def test_dense_json_arguments_at_the_window_limit(tmp_path, view_kind):
                    "history-reserialized-then-fresh": [_call_row(i, shown) for i in range(filled)]}[view_kind]
         took, out = _best(engine, [*history, _call("brand_new", 1)])
         assert out == [len(history)]
-        assert took < BAR, f"{took * 1000:.0f} ms"
+        assert not latency_check or took < BAR, f"{took * 1000:.0f} ms"
     finally:
         engine.shutdown()
 
@@ -176,7 +176,7 @@ def _wide_rows(shape):
 
 @pytest.mark.parametrize("view_kind", ["fresh-only", "history-then-fresh"])
 @pytest.mark.parametrize("shape", ["wide_hermes", "wide_tiny", "args_dict", "two_dense_ids"])
-def test_call_rows_at_the_call_id_limit(tmp_path, shape, view_kind):
+def test_call_rows_at_the_call_id_limit(tmp_path, shape, view_kind, latency_check):
     """#2466 review, delta 10: the audit's work grows with stored tool-call entries, so the window has a third limit,
     on those entries, sized in SQL with the rows and bytes. Each shape fills the scope to just inside it. Entries
     without text arguments (wide_tiny's bare ids, args_dict's object arguments) are not the standard tool shape, so
@@ -188,13 +188,13 @@ def test_call_rows_at_the_call_id_limit(tmp_path, shape, view_kind):
         history = stored if view_kind == "history-then-fresh" else []
         took, out = _best(engine, [*history, _call("brand_new", 1)])
         assert out == ([len(history)] if shape in ("wide_hermes", "two_dense_ids") else None)
-        assert took < BAR, f"{took * 1000:.0f} ms"
+        assert not latency_check or took < BAR, f"{took * 1000:.0f} ms"
     finally:
         engine.shutdown()
 
 
 @pytest.mark.parametrize("extra,expected", [(0, [0]), (1, None)], ids=["at-the-limit", "one-entry-past"])
-def test_the_call_id_limit_is_counted_in_sql(tmp_path, extra, expected):
+def test_the_call_id_limit_is_counted_in_sql(tmp_path, extra, expected, latency_check):
     """Three entries per call row, so the row and byte limits stay far away: at the call-id limit the audit answers;
     one entry past it, it gives main's result (nothing beyond its own finds)."""
     full = (IDS - 1) // 3
@@ -210,6 +210,6 @@ def test_the_call_id_limit_is_counted_in_sql(tmp_path, extra, expected):
         _append(engine, rows)
         took, out = _best(engine, [_call("brand_new", 1)])
         assert out == expected
-        assert took < BAR, f"{took * 1000:.0f} ms"
+        assert not latency_check or took < BAR, f"{took * 1000:.0f} ms"
     finally:
         engine.shutdown()

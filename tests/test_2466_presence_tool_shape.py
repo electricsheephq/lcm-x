@@ -18,6 +18,15 @@ from tests.test_anchor_unstored_before_cursor import SESSION, _call, _engine, _p
 BAR = 0.150 * float(os.environ.get("LCM_PRESENCE_TIMING_SLACK", "4"))
 
 
+@pytest.fixture(autouse=True)
+def _fresh_presence_notices(monkeypatch):
+    """The audit logs each trip reason once per (store path, inode, session) for the process. A deleted test directory
+    can hand its path and inode to the next test (tmp_path_retention_policy=failed, inode reuse on CI), so each test
+    starts with empty notice sets to see its own line (#2466 CI)."""
+    monkeypatch.setattr(identity_anchor, "_PRESENCE_SHAPE_LOGGED", set())
+    monkeypatch.setattr(identity_anchor, "_PRESENCE_WINDOW_LOGGED", set())
+
+
 def _entry(call_id, arguments="{}"):
     return {"id": call_id, "type": "function", "function": {"name": "f", "arguments": arguments}}
 
@@ -101,7 +110,7 @@ def test_standard_shapes_are_admitted(tmp_path):
 
 
 @pytest.mark.parametrize("where", ["newest", "oldest"])
-def test_a_trip_costs_sql_only(tmp_path, where):
+def test_a_trip_costs_sql_only(tmp_path, where, latency_check):
     """At the window limits with one non-standard row, the audit stops in the SQL sizing pass. The oldest row is the
     worst case: every admitted row is checked in SQL first."""
     rows_n, per_row = identity_anchor._PRESENCE_WINDOW_ROWS, identity_anchor._PRESENCE_WINDOW_BYTES // 10_000 - 120
@@ -121,12 +130,12 @@ def test_a_trip_costs_sql_only(tmp_path, where):
             best = took if best is None or took < best else best
         print(f"\nTRIP {where} {best * 1000:.1f} ms load1={os.getloadavg()[0]:.1f}")
         assert out is None
-        assert best < BAR, f"{best * 1000:.0f} ms"
+        assert not latency_check or best < BAR, f"{best * 1000:.0f} ms"
     finally:
         engine.shutdown()
 
 
-def test_one_stored_row_with_many_parallel_calls_is_checked_in_linear_time(tmp_path):
+def test_one_stored_row_with_many_parallel_calls_is_checked_in_linear_time(tmp_path, latency_check):
     """#2466 terminal review nit: the admission check reads each entry from the entry itself, so one stored row with
     many parallel calls is checked in linear time: four times the entries costs well under eight times as long (a
     lookup from the row's root per entry was quadratic, about sixteen times), and 9,999 calls stay under the bar."""
@@ -151,10 +160,10 @@ def test_one_stored_row_with_many_parallel_calls_is_checked_in_linear_time(tmp_p
     print(f"\nWIDE-ROW {wide // 4}:{small * 1000:.1f} ms {wide}:{large * 1000:.1f} ms x{large / small:.1f} "
           f"load1={os.getloadavg()[0]:.1f}")
     assert large < 8 * small, f"x{large / small:.1f}"
-    assert large < BAR, f"{large * 1000:.0f} ms"
+    assert not latency_check or large < BAR, f"{large * 1000:.0f} ms"
 
 
-def test_one_stored_row_over_the_call_id_window_trips_before_any_entry_is_checked(tmp_path, monkeypatch):
+def test_one_stored_row_over_the_call_id_window_trips_before_any_entry_is_checked(tmp_path, monkeypatch, latency_check):
     """#2466 terminal review (bot threads): a row with more entries than the whole call-id window returns its length
     before the per-entry check, so 180,000 tiny calls inside the byte limit trip on the window for about the cost of
     one length read: under four times one admitted row of 9,999 calls (checking each entry first cost over ten)."""
@@ -184,4 +193,4 @@ def test_one_stored_row_over_the_call_id_window_trips_before_any_entry_is_checke
     print(f"\nOVER-CAP-ROW {over}:{tripped * 1000:.1f} ms vs 9999:{admitted * 1000:.1f} ms "
           f"x{tripped / admitted:.1f} load1={os.getloadavg()[0]:.1f}")
     assert tripped < 4 * admitted, f"x{tripped / admitted:.1f}"
-    assert tripped < BAR, f"{tripped * 1000:.0f} ms"
+    assert not latency_check or tripped < BAR, f"{tripped * 1000:.0f} ms"

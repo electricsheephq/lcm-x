@@ -26,6 +26,15 @@ SESSION = "s-anchor-unstored"
 PAD = " alpha beta gamma delta" * 40
 
 
+@pytest.fixture(autouse=True)
+def _fresh_presence_notices(monkeypatch):
+    """The audit logs each trip reason once per (store path, inode, session) for the process. A deleted test directory
+    can hand its path and inode to the next test (tmp_path_retention_policy=failed, inode reuse on CI), so each test
+    starts with empty notice sets to see its own line (#2466 CI)."""
+    monkeypatch.setattr(identity_anchor, "_PRESENCE_SHAPE_LOGGED", set())
+    monkeypatch.setattr(identity_anchor, "_PRESENCE_WINDOW_LOGGED", set())
+
+
 def _engine(tmp_path, **overrides) -> LCMEngine:
     config = LCMConfig(database_path=str(tmp_path / "lcm.db"), large_output_externalization_enabled=False, **overrides)
     engine = LCMEngine(config=config, hermes_home=str(tmp_path / "home"))
