@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 from collections import Counter
 
+import pytest
+
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
 
@@ -152,5 +154,29 @@ def test_reused_id_pairs_are_never_split(tmp_path):
     try:
         engine._store.append_batch(SESSION, [call("A"), result("X")])
         assert _presence(engine, [call("A"), result("Y"), call("B"), result("X")]) == [1]
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("shape", ["before", "after", "before_stamped", "before_unique_id"])
+def test_a_new_pair_next_to_a_stored_pair_is_stored_once_in_any_order(tmp_path, shape):
+    """A new pair (reused id, or a fresh one) placed before or after a stored pair, stamped or not: each row is
+    stored once, and the stored pair is never stored a second time (#2466 review, round 2 p5 order variants)."""
+    engine = _engine(tmp_path)
+    try:
+        ts = (lambda t: t) if "stamped" in shape else (lambda t: None)
+        stored_call, stored_result = _call("call_0", '{"path": "b.txt"}', ts(101)), _res("call_0", "B file text", ts(102))
+        tail = [_a("A1 reply", 103), _u("P2 second", 110), _a("A2 reply", 111), _u("P3 third", 120), _a("A3", 121)]
+        engine.ingest([_u("P1 first", 100), stored_call, stored_result, *tail])
+        before = Counter(_report(engine))
+        new_id = "call_9" if "unique" in shape else "call_0"
+        new_call, new_result = _call(new_id, '{"path": "c.txt"}', ts(98)), _res(new_id, "C file text", ts(98.5))
+        pair = ([new_call, new_result, stored_call, stored_result] if shape.startswith("before")
+                else [stored_call, stored_result, new_call, new_result])
+        engine.ingest([_u("P1 replaced first", 99), *pair, *tail[:-2], _u("P4 new", 200)])
+        after = Counter(_report(engine))
+        added = after - before
+        assert not {key: count for key, count in after.items() if count > 1}
+        assert added[_full(new_call)] == 1 and added[_full(new_result)] == 1
     finally:
         engine.shutdown()
