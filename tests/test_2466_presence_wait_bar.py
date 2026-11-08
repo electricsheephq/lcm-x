@@ -174,14 +174,16 @@ def _wide_rows(shape):
 @pytest.mark.parametrize("shape", ["wide_hermes", "wide_tiny", "args_dict", "two_dense_ids"])
 def test_call_rows_at_the_call_id_limit(tmp_path, shape, view_kind):
     """#2466 review, delta 10: the audit's work grows with stored tool-call entries, so the window has a third limit,
-    on those entries, sized in SQL with the rows and bytes. Each shape fills the scope to just inside it."""
+    on those entries, sized in SQL with the rows and bytes. Each shape fills the scope to just inside it. Entries
+    without text arguments (wide_tiny's bare ids, args_dict's object arguments) are not the standard tool shape, so
+    those scopes give main's result from the SQL sizing pass (#2466 review, scope cut)."""
     engine = _engine(tmp_path)
     try:
         stored = _wide_rows(shape)
         _append(engine, stored, batch=100)
         history = stored if view_kind == "history-then-fresh" else []
         took, out = _best(engine, [*history, _call("brand_new", 1)])
-        assert out == [len(history)]
+        assert out == ([len(history)] if shape in ("wide_hermes", "two_dense_ids") else [])
         assert took < BAR, f"{took * 1000:.0f} ms"
     finally:
         engine.shutdown()

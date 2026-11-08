@@ -61,6 +61,7 @@ _PRESENCE_WINDOW_BYTES = 20_000_000  # UTF-8 bytes of stored content and tool-ca
 _PRESENCE_WINDOW_CALL_IDS = 10_000  # stored tool-call entries across the scope (#2466 wait bar)
 _PRESENCE_PARSE_BYTES = 256_000  # call-row text parsed as JSON when an id's raw forms differ (#2466 wait bar)
 _PRESENCE_WINDOW_LOGGED: set[tuple[str, int, str]] = set()  # store file and session, once per process
+_PRESENCE_SHAPE_LOGGED: set[tuple[str, int, str]] = set()  # non-standard tool shapes, once per store and session
 _UNREADABLE_CALLS = (object(),)  # an unreadable tool_calls value: no host id can equal it (#2466 review)
 
 _ROTATION_LINEAGE_UNRECORDED: set[tuple[str, str]] = set()  # store file and session whose predecessor write failed, per process
@@ -679,19 +680,37 @@ class IdentityAnchorMixin:
                 # stopping at the first budget it passes, so an over-budget scope costs at most its budget plus one
                 # row of reading and decodes nothing. Only call and result rows are compared, by their stored text,
                 # so the audit loads no payload file. Stored tool-call entries are counted too: the audit's work grows
-                # with them, so a window of wide parallel call rows is bounded as well.
+                # with them, so a window of wide parallel call rows is bounded as well. Only the standard tool shape is
+                # admitted (#2466 review, scope cut): tool_calls NULL, or a JSON array of objects whose id and
+                # function.arguments are text. Any other row gives main's result for the whole audit, before any row
+                # loads, so SQL-visible limits bound the work on the admitted path.
                 sized = self._store._conn.execute(
                     "SELECT length(CAST(content AS BLOB)), length(CAST(tool_calls AS BLOB)), "
-                    "CASE WHEN json_valid(tool_calls) THEN json_array_length(tool_calls) ELSE 0 END "
+                    "CASE WHEN tool_calls IS NULL THEN 0 WHEN NOT json_valid(tool_calls) THEN -1 "
+                    "WHEN json_type(tool_calls) <> 'array' THEN -1 "
+                    "WHEN EXISTS (SELECT 1 FROM json_each(tool_calls) AS e WHERE e.type <> 'object' "
+                    "OR json_type(tool_calls, '$[' || e.key || '].id') IS NOT 'text' "
+                    "OR json_type(tool_calls, '$[' || e.key || '].function.arguments') IS NOT 'text') THEN -1 "
+                    "ELSE json_array_length(tool_calls) END "
                     "FROM messages WHERE session_id=? ORDER BY store_id DESC LIMIT ?", (source, budget + 1))
-                count = 0
+                count, shape_ok = 0, True
                 for content_len, calls_len, call_ids in sized:
                     count += 1
+                    if call_ids < 0:
+                        shape_ok = False
+                        break
                     byte_budget -= (content_len or 0) + (calls_len or 0)
-                    id_budget -= call_ids or 0
+                    id_budget -= call_ids
                     if count > budget or byte_budget < 0 or id_budget < 0:
                         break
                 sized.close()
+                if not shape_ok:
+                    notice = (str(self._db_path), self._db_path.stat().st_ino, session)
+                    if notice not in _PRESENCE_SHAPE_LOGGED:
+                        logger.info("LCM identity-anchor presence check skipped: non-standard tool-call shape: "
+                                    "session=%s scope=%d", session, len(scope))
+                        _PRESENCE_SHAPE_LOGGED.add(notice)
+                    return []
                 if count > budget or byte_budget < 0 or id_budget < 0:
                     notice = (str(self._db_path), self._db_path.stat().st_ino, session)
                     if notice not in _PRESENCE_WINDOW_LOGGED:
