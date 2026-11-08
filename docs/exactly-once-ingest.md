@@ -301,6 +301,20 @@ Traces:
 - An incoming composite whose parts are stored: bind the parts as `composite_part`, and store only the remainder.
 - A stored composite whose parts arrive separately: bind them as `split_part`, with a composite relation (#1506).
 - A Hermes merge-append (R, then R+N1, then R+N1+N2): store only the new tail, so the copies never grow quadratically.
+- **Host-rewrite replay (I1, after R1 and the existing user rules):** Arm M recognises an assistant's
+  single-newline fold of at least two unconsumed same-session assistant rows, anchored to the first
+  part's host stamp, with only user rows between parts and the last part stamped strictly later than the row. Arm S recognises an unstamped whole todo
+  snapshot equal to a stored snapshot or a stored composite's leading scaffold span, only when
+  the view or this session's store contains a stamped user prompt. M consumes its parts; S consumes nothing. Every incoming byte is already reachable in that session's
+  stored parts (apart from M's fixed separator); no durable content is removed or overwritten.
+  Ambiguity or a full 64-row M scan stays new. S reads at most 10,000 newest todo rows.
+  Optional read failures keep the candidate new and preserve proven rewinds. Both arms track
+  replayed host objects for later in-place changes, without superseding their matched stored rows.
+  That memory holds 16 entries shared with stored-row notes; a replay entry evicted by 16 or more
+  later distinct notes no longer sees its object's in-place rewrite (#2476, P3, synthetic only).
+  Controls preserve new stamps, missing parts, tool barriers, double-newline separators, consumed
+  parts, ambiguous anchors, foreign sessions, changed items, suffix text and stamped TUI snapshots.
+  Proof: `tests/test_host_rewrite_replay.py`; this is synthetic proof, not a live-host gate result.
 - **An emission merged with a host row** (#1446, #1961, #534): a row that begins or ends with an emission's generated text, at that emission's output index, is split. The generated part binds to its descriptor as composite_part, and only the remainder is stored, in the row's own role. Summary text is never stored as user content.
 
 **Guards.** Each shape applies only when all five guards hold; otherwise the row is NEW plus `possible_replay_of`. A same-stamp prefix part follows the same rule.
