@@ -84,9 +84,6 @@ class PlaceholderLedgerMixin:
             return True
         return False
 
-    def _ignored_placeholder_metadata_key(self) -> str:
-        return f"ignored_active_replay_placeholder_hashes:{self._session_id}"
-
     def _ignored_placeholder_metadata_keys(self) -> list[str]:
         return self._session_scoped_hash_metadata_keys("ignored_active_replay_placeholder_hashes")
 
@@ -201,8 +198,10 @@ class PlaceholderLedgerMixin:
             return ordered_hashes
         try:
             payload = json.dumps(ordered_hashes)
-            self._store.write_metadata_json(keys, payload)
-        except Exception:
+            with self._ingest_evidence():
+                self._store.write_metadata_json(keys, payload)
+        except Exception as exc:
+            self._raise_ingest_busy(exc)
             logger.debug("LCM scoped hash metadata write failed", exc_info=True)
         return ordered_hashes
 
@@ -261,8 +260,10 @@ class PlaceholderLedgerMixin:
             serialized = json.dumps(payload, sort_keys=True)
             # skip_unchanged avoids the fsync commit (under synchronous=FULL) when
             # the stored value already matches; this runs on every ingest.
-            self._store.write_metadata_json(count_keys, serialized, skip_unchanged=True)
-        except Exception:
+            with self._ingest_evidence():
+                self._store.write_metadata_json(count_keys, serialized, skip_unchanged=True)
+        except Exception as exc:
+            self._raise_ingest_busy(exc)
             logger.debug("LCM ignored placeholder count metadata write failed", exc_info=True)
 
     def _load_generated_ignored_placeholder_hash_ordinals(
@@ -322,8 +323,10 @@ class PlaceholderLedgerMixin:
             serialized = json.dumps(payload, sort_keys=True)
             # Skip the write (and its fsync commit) when unchanged; see the counts
             # writer above for rationale.
-            self._store.write_metadata_json(ordinal_keys, serialized, skip_unchanged=True)
-        except Exception:
+            with self._ingest_evidence():
+                self._store.write_metadata_json(ordinal_keys, serialized, skip_unchanged=True)
+        except Exception as exc:
+            self._raise_ingest_busy(exc)
             logger.debug("LCM ignored placeholder ordinal metadata write failed", exc_info=True)
 
     def _active_replay_generated_placeholder_digest_budget(self) -> dict[str, int]:
@@ -394,20 +397,6 @@ class PlaceholderLedgerMixin:
                     counts[digest] = counts.get(digest, 0) + 1
             next_candidate_after = rows[-1]["store_id"]
         return counts
-
-    @staticmethod
-    def _subtract_placeholder_digest_counts(
-        budget: dict[str, int],
-        stored_counts: dict[str, int],
-    ) -> dict[str, int]:
-        adjusted: dict[str, int] = {}
-        for digest, count in budget.items():
-            parsed_count = max(0, int(count or 0))
-            stored_count = max(0, int(stored_counts.get(digest, 0) or 0))
-            remaining = max(0, parsed_count - stored_count)
-            if remaining > 0:
-                adjusted[digest] = remaining
-        return adjusted
 
     def _remember_generated_ignored_placeholder_hash(self, digest: str) -> None:
         ordered_hashes = self._remember_hash_for_metadata_keys(

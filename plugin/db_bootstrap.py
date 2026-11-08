@@ -16,6 +16,7 @@ import shutil
 import sqlite3
 import threading
 import time
+import uuid
 from contextlib import closing, contextmanager
 from typing import Iterable, Sequence
 
@@ -346,6 +347,17 @@ _KNOWN_FEATURE_TABLE_PREFIXES = (
     "summary_node_provenance",  # #441 per-node level/model sidecar, not a derived cache
 )
 
+# #2055 ingest ledger (additive named step ingest_ledger_v1; exact names)
+_KNOWN_FEATURE_TABLE_NAMES = frozenset({
+    "ledger_meta",
+    "occurrence_bindings",
+    "ledger_emissions",
+    "stamp_observations",
+    "ingest_views",
+    "lineage_marks",
+    "session_lineage",  # #1931 additive delegated-child links
+})
+
 # The known opt-in feature families whose derived tables an interim build may
 # have created in an EARLY variant (missing later-added columns/tables). Each is
 # validated by its own final-shape verifier (resolved at call time in
@@ -508,6 +520,8 @@ def classify_version_mismatch(conn: sqlite3.Connection) -> str:
         allowed.update(get_fts_shadow_table_names(fts))
     for table in tables:
         if table in allowed:
+            continue
+        if table in _KNOWN_FEATURE_TABLE_NAMES:
             continue
         if any(table.startswith(prefix) for prefix in _KNOWN_FEATURE_TABLE_PREFIXES):
             continue
@@ -2551,6 +2565,40 @@ def mark_migration_step_complete(conn: sqlite3.Connection, step_name: str) -> No
         """,
         (step_name,),
     )
+
+
+STORE_UUID_METADATA_KEY = "store_uuid"
+
+
+def ensure_store_uuid(conn: sqlite3.Connection) -> None:
+    """Stamp a stable per-store id once (#1192); readers outside Hermes qualify ids with it.
+
+    Hermes' migration chain never calls this, so a Hermes store stays byte-identical
+    and the reader derives its id from the file identity instead. A writer that
+    creates its own store may call it. The SELECT keeps a repeat call free of write
+    locks (#622); OR IGNORE makes a racing second writer a no-op. Not a
+    schema-version step: older builds simply ignore the extra metadata row.
+    """
+    if conn.execute(
+        "SELECT 1 FROM metadata WHERE key = ?", (STORE_UUID_METADATA_KEY,)
+    ).fetchone():
+        return
+    conn.execute(
+        "INSERT OR IGNORE INTO metadata(key, value) VALUES(?, ?)",
+        (STORE_UUID_METADATA_KEY, uuid.uuid4().hex),
+    )
+
+
+def read_store_uuid(conn: sqlite3.Connection) -> str:
+    """Return the stamped store_uuid, or '' when absent; never creates anything."""
+    if not conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='metadata'"
+    ).fetchone():
+        return ""
+    row = conn.execute(
+        "SELECT value FROM metadata WHERE key = ?", (STORE_UUID_METADATA_KEY,)
+    ).fetchone()
+    return str(row[0] or "") if row else ""
 
 
 def set_schema_version(conn: sqlite3.Connection, version: int = SCHEMA_VERSION) -> None:

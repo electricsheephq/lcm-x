@@ -91,6 +91,36 @@ def _get_encoder():
     return _encoder if _encoder_ready else None
 
 
+def start_encoder_load() -> None:
+    """Start the background load without waiting for it (#2179).
+
+    A server that must answer at once calls this before it serves: no later
+    caller is then the first, so none waits _ENCODER_FIRST_WAIT_S; each uses
+    the estimator until the load finishes.
+    """
+    global _encoder_thread
+    with _encoder_lock:
+        if _encoder_ready or _encoder_thread is not None:
+            return
+        _encoder_thread = threading.Thread(
+            target=_encoder_loader, name="lcm-tiktoken-load", daemon=True
+        )
+        _encoder_thread.start()
+
+
+def token_counter_status() -> Dict[str, str]:
+    """Report the active counter (#615) without starting or waiting on its load."""
+    with _encoder_lock:
+        ready, enc, started = _encoder_ready, _encoder, _encoder_thread is not None
+    if ready and enc is not None:
+        return {"counter": "tiktoken", "encoding": "cl100k_base", "state": "ready"}
+    if ready:
+        return {"counter": "char_estimate", "encoding": "", "state": "unavailable"}
+    if started:
+        return {"counter": "char_estimate", "encoding": "", "state": "loading"}
+    return {"counter": "not_loaded", "encoding": "", "state": "not_started"}
+
+
 def _fallback_token_estimate(text: str) -> int:
     # Latin text is ~4 chars/token, but CJK and other non-Latin scripts
     # tokenize far denser (~1-2 tokens/char). A flat len//4 undercounts them
