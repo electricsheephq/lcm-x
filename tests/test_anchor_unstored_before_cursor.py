@@ -709,7 +709,7 @@ def test_presence_window_counts_deduplicated_whole_scope(tmp_path, monkeypatch, 
         with caplog.at_level(logging.DEBUG, logger=identity_anchor.__name__):
             found = _presence(engine, [_call("new", 10), _result("new", "result", 11)], capped=capped)
         assert found == ([] if extra else [0, 1])  # over budget: main's positional behavior
-        assert reads == [(SESSION, 5), ("A", 4), ("P", 3)]
+        assert reads == [(SESSION, 5), ("A", 4)] + ([] if extra else [("P", 3)])  # sized in SQL before a load
         assert not any(record.levelno >= logging.WARNING for record in caplog.records)
         if extra:
             assert any("presence window" in record.message and "scope=3" in record.message

@@ -5662,7 +5662,7 @@ class LCMEngine(
             )
         except Exception as exc:  # lineage is best-effort; rotation still continues
             self._rotation_lineage_unrecorded = getattr(self, "_rotation_lineage_unrecorded", set()) | {session_id}
-            _ROTATION_LINEAGE_UNRECORDED.add((str(self._db_path), str(session_id)))  # survives clones in this process
+            _ROTATION_LINEAGE_UNRECORDED.add((os.path.realpath(str(self._db_path)), str(session_id)))  # survives clones in this process
             logger.warning(
                 "LCM rotation lineage write failed: session=%s predecessor=%s exception=%s",
                 session_id,

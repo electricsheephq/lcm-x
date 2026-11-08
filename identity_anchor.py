@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import logging
 import sqlite3
 from collections import Counter, defaultdict, deque
@@ -43,7 +44,9 @@ from .recognition_matching import (
     _reroute_for_null as _reroute_for_null,
 )
 from .config import identity_anchor_enabled
+from .externalize import get_large_output_storage_dir
 from .fresh_tail import tool_group_safe_end
+from .ingest_content import extract_all_externalized_payload_refs
 from .message_content import normalize_content_value, text_content_for_pattern_matching
 from .store import _normalize_observed_at
 from .tokens import count_messages_tokens
@@ -56,7 +59,7 @@ _POOL_WINDOW = 256  # store ids either side of a stamp donor searched for a comp
 _INSERT_DIFF_BUDGET = 1_000_000  # #633: old x new rows compared per insertion diff (quadratic worst case ~40 ms)
 _CARRIER_LEDGER_CAP = 256  # #1000: carrier emission keys remembered as seen / retired (process-local)
 _PRESENCE_WINDOW_ROWS = 10000  # total stored rows across the presence scope
-_PRESENCE_WINDOW_BYTES = 104_000_000  # characters (code points) of stored content and tool-call text across the scope
+_PRESENCE_WINDOW_BYTES = 32_000_000  # characters (code points) of stored content and tool-call text across the scope
 _PRESENCE_TEXT_BYTES = 8_000_000  # characters of stored text the audit normalizes (rows of a candidate's text role)
 _PRESENCE_WINDOW_LOGGED: set[tuple[str, int, str]] = set()  # store file and session, once per process
 _ROTATION_LINEAGE_UNRECORDED: set[tuple[str, str]] = set()  # store file and session whose predecessor write failed, per process
@@ -673,35 +676,60 @@ class IdentityAnchorMixin:
                 if next_source != (predecessors[hop] if hop < len(predecessors) else None):
                     raise ValueError("incomplete rotation predecessor scope")
             scope = list(dict.fromkeys([session, *chain, *predecessors]))
-            failed = {session_id for path, session_id in _ROTATION_LINEAGE_UNRECORDED if path == str(self._db_path)}
+            failed = {session_id for path, session_id in _ROTATION_LINEAGE_UNRECORDED
+                      if path == os.path.realpath(str(self._db_path))}
             if set(scope) & (getattr(self, "_rotation_lineage_unrecorded", set()) | failed):
                 # Any session of the scope whose own predecessor write failed ends the scope early (#2466 review).
                 raise ValueError("unrecorded rotation lineage")
             rows = {int(row["store_id"]): row for group in held.values() for row in group}
             text_roles = {wanted[0] for wanted in candidates.values() if wanted and wanted[0] not in {"call", "tool"}}
             budget, byte_budget, text_budget = _PRESENCE_WINDOW_ROWS, _PRESENCE_WINDOW_BYTES, _PRESENCE_TEXT_BYTES
+            storage = None
             for source in scope:
+                # Size the window in SQL before loading any row (#2466 review, wait bar): stored character counts per
+                # row, newest first, stopping at the first budget it passes, so an over-budget scope costs at most its
+                # budget plus one row of reading and decodes nothing. Payload files a placeholder points at are
+                # charged at their file size before any identity loads them.
+                sized = self._store._conn.execute(
+                    "SELECT role, COALESCE(tool_call_id, '') != '', length(content), length(tool_calls), "
+                    "CASE WHEN instr(content, 'xternalized') THEN content END, "
+                    "CASE WHEN instr(tool_calls, 'xternalized') THEN tool_calls END "
+                    "FROM messages WHERE session_id=? ORDER BY store_id DESC LIMIT ?", (source, budget + 1))
+                count = 0
+                for role, tool_result, content_len, calls_len, marked_content, marked_calls in sized:
+                    count += 1
+                    byte_budget -= (content_len or 0) + (calls_len or 0)
+                    text_row = role in text_roles and not (role == "tool" and tool_result)
+                    if text_row:
+                        text_budget -= content_len or 0  # normalization cost bound (#2466 review)
+                    for text in (marked_content, marked_calls):
+                        for ref in extract_all_externalized_payload_refs(text) if text else ():
+                            if storage is None:
+                                storage = get_large_output_storage_dir(self._config, hermes_home=self._hermes_home,
+                                                                       create=False)
+                            try:
+                                size = (storage / ref).stat().st_size
+                            except OSError:
+                                continue  # a missing payload loads nothing
+                            byte_budget -= size
+                            text_budget -= size if text_row else 0
+                    if count > budget or byte_budget < 0 or text_budget < 0:
+                        break
+                sized.close()
+                if count > budget or byte_budget < 0 or text_budget < 0:
+                    notice = (str(self._db_path), self._db_path.stat().st_ino, session)
+                    if notice not in _PRESENCE_WINDOW_LOGGED:
+                        logger.info("LCM identity-anchor presence window incomplete: session=%s scope=%d "
+                                    "budget=%d chars=%d text_chars=%d", session, len(scope), budget, byte_budget,
+                                    text_budget)
+                        _PRESENCE_WINDOW_LOGGED.add(notice)
+                    return []
                 end, pages = None, []
                 while True:
                     limit = min(256, budget + 1)
                     tail = (self._store.get_session_tail(source, limit=limit) if end is None else
                             self._store.get_session_rows_through(source, end, limit))
                     budget -= len(tail)
-                    for row in tail:
-                        tool_text = row.get("tool_calls") or ""
-                        if not isinstance(tool_text, str):
-                            tool_text = json.dumps(tool_text)
-                        byte_budget -= len(row.get("content") or "") + len(tool_text)
-                        if row.get("role") in text_roles and not (row.get("role") == "tool" and row.get("tool_call_id")):
-                            text_budget -= len(row.get("content") or "")  # normalization cost bound (#2466 review)
-                    if budget < 0 or byte_budget < 0 or text_budget < 0:
-                        notice = (str(self._db_path), self._db_path.stat().st_ino, session)
-                        if notice not in _PRESENCE_WINDOW_LOGGED:
-                            logger.info("LCM identity-anchor presence window incomplete: session=%s scope=%d "
-                                        "budget=%d chars=%d text_chars=%d", session, len(scope), budget + len(tail), byte_budget,
-                                        text_budget)
-                            _PRESENCE_WINDOW_LOGGED.add(notice)
-                        return []
                     pages.append(tail)
                     if len(tail) < limit:
                         break
@@ -721,9 +749,9 @@ class IdentityAnchorMixin:
                     own = exact_form(row, cleaned_form, stored=True)
                 elif row.get("role") in text_roles:
                     identity = self._message_replay_identity(row, stored_row=True)
-                    if _lossy(identity):
+                    expanded -= len(identity[1] or "") if isinstance(identity[1], str) else 0  # may load a payload
+                    if _lossy(identity) and expanded >= 0:
                         continue
-                    expanded -= len(identity[1])  # identity may load an externalized payload (#2466 review)
                     if expanded < 0:
                         notice = (str(self._db_path), self._db_path.stat().st_ino, session)
                         if notice not in _PRESENCE_WINDOW_LOGGED:
