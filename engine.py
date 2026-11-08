@@ -277,6 +277,8 @@ _EMBEDDING_SCHEMA_LOCK = threading.Lock()
 
 _EMBEDDING_RETIRE_TIMEOUT_S = 2.0
 _SESSION_END_BUSY_TIMEOUT_MS = 50
+# #2466's presence-window limit is not on main yet; bound this conflict scan independently.
+_COLD_TAIL_CONFLICT_SCAN_ROWS = 10_000
 _SESSION_DIAGNOSTIC_LOG_MAX = 4096
 _SHUTDOWN_COMPACTION_WAIT_MAX_S = 86400.0
 
@@ -12259,11 +12261,14 @@ class LCMEngine(
             self._ingest_messages(tail["view"], allow_session_end_replay_proof=False, no_view=True, retried_tail=tail)
             # The host can still rewrite this view, so the next ingest finds its own cursor.
             self._ingest_cursor_needs_reconcile = True
-            if conflict is not None and not self._cold_tail_conflict_placed(tail, conflict, deadline=deadline):
+            if conflict is not None and (conflict is False or not self._cold_tail_conflict_placed(tail, conflict, deadline=deadline)):
                 tail["kept_on_conflict"] = True
                 self._ledger_count("ledger.tail.cold_unmatched")
+                if conflict is False:
+                    self._ledger_count("ledger.tail.cold_scan_capped")
                 if not tail.get("unmatched_warned"):
-                    logger.warning("LCM session-end cold tail conflicting stamp unplaced; retry pending")
+                    logger.warning("LCM session-end cold tail conflict scan capped; retry pending" if conflict is False else
+                                   "LCM session-end cold tail conflicting stamp unplaced; retry pending")
                     tail["unmatched_warned"] = True
                 return False
             return True
@@ -12284,13 +12289,22 @@ class LCMEngine(
         return view if len(kept) == len(view) else kept
 
     def _cold_tail_one_conflict(self, tail):
-        """Return the sole unexplained user stamp conflict in an identity-matching prefix."""
+        """Return the sole unexplained user stamp conflict, None, or False if the scan caps."""
         view, session, home = tail["view"], tail["session_id"], tail["hermes_home"]
         stored = tail["store"].get_range(session, limit=len(view) + 1,
             conversation_id=_normalize_conversation_id_value(tail["conversation_id"]))
-        conflicts = []
+        # Extra pages are read only past stored rows the walk skipped; only they count toward the cap.
+        read, conflicts = 0, []
         stored_index = index = 0
-        while stored_index < len(stored) and index < len(view):
+        while stored and index < len(view):
+            if stored_index == len(stored):
+                if read >= _COLD_TAIL_CONFLICT_SCAN_ROWS:
+                    return False
+                stored = tail["store"].get_range(session, start_id=stored[-1]["store_id"] + 1,
+                    limit=min(1000, _COLD_TAIL_CONFLICT_SCAN_ROWS - read),
+                    conversation_id=_normalize_conversation_id_value(tail["conversation_id"]))
+                read, stored_index = read + len(stored), 0
+                continue
             row, message = stored[stored_index], view[index]
             if (self._session_end_prefix_compare_identity(row, session_id=session, hermes_home=home) !=
                     self._session_end_prefix_compare_identity(message, session_id=session, hermes_home=home)):
@@ -12302,7 +12316,8 @@ class LCMEngine(
                     continue
                 return None
             stamp, seen = _normalize_observed_at(message.get("timestamp")), _normalize_observed_at(row.get("observed_at"))
-            if None not in (stamp, seen) and stamp != seen:
+            if (None not in (stamp, seen) and stamp != seen and not
+                    (self._cold_tail_ingest_drops(message) and self._matches_ignore_message_patterns(row, stored_row=True))):
                 conflicts.append((index, row, message, stamp))
             stored_index += 1
             index += 1
@@ -12363,6 +12378,8 @@ class LCMEngine(
         with self._cold_tail_diagnostic_commit(tail["store"], session, ids):
             stored = self._cold_tail_stored(tail, stamps=stamps)
             conflict = self._cold_tail_one_conflict(tail) if stored is None or not stamps else None
+            if conflict is False:
+                stored = None
             if stored is not None and not stamps and conflict is not None:
                 if stored < len(view):
                     ids.extend(self._append_off_current_session_end_suffix(session, view[stored:], source=tail["source"],
@@ -12375,8 +12392,11 @@ class LCMEngine(
                 if conflict is not None:
                     tail["kept_on_conflict"] = True
                 self._ledger_count("ledger.tail.cold_unmatched")
+                if conflict is False:
+                    self._ledger_count("ledger.tail.cold_scan_capped")
                 if not tail.get("unmatched_warned"):
-                    logger.warning("LCM session-end cold tail prefix mismatch; retry pending")
+                    logger.warning("LCM session-end cold tail conflict scan capped; retry pending" if conflict is False else
+                                   "LCM session-end cold tail prefix mismatch; retry pending")
                     tail["unmatched_warned"] = True
                 return False
             if stored < len(view):

@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from hermes_lcm import maintenance_scheduler
+from hermes_lcm import engine as engine_module, maintenance_scheduler
 from hermes_lcm.engine import LCMEngine
 from hermes_lcm.externalize import get_large_output_storage_dir, load_externalized_payload, extract_externalized_ref
 from hermes_lcm.host_uid import HOST_UID_COUNTER_KEY
@@ -1469,6 +1469,73 @@ def test_different_ignored_rows_on_both_sides_keep_the_conflict_with_anchor_off(
     assert count(engine, "tail.cold_unmatched") >= 1
     assert committed_rows(tail["store"].db_path, "S") == before
     assert tail["view"] == queued
+
+
+@pytest.mark.parametrize("shape", ["stored_skips", "ignored_pair"])
+def test_paged_or_restamped_ignored_rows_keep_the_real_conflict(engines, monkeypatch, caplog, shape):
+    engine = engines()
+    a, q = _m("user", "A", 1.), _m("user", "Q", 6.)
+    if shape == "stored_skips":
+        stored = [a, _m("user", "ignore-1", 2.), _m("user", "ignore-2", 3.), q]
+        queued = [a, _m("user", "Q", 5.)]
+    else:
+        middle = history()[1:]
+        stored = [a, _m("user", "ignore", 2.5), *middle, q]
+        queued = [a, _m("user", "ignore", 2.6), *middle, _m("user", "Q", 5.)]
+    tail = queue_cold(engine, monkeypatch, queued, stored=stored)
+    ignoring(engine)  # These ignored rows were stored before patterns were configured.
+    before = committed_rows(tail["store"].db_path, "S")
+    assert [_row(row) for row in before] == [(m["role"], m["content"], m["timestamp"]) for m in stored]
+    engine._retry_pending_session_tails()
+    assert committed_rows(tail["store"].db_path, "S") == before
+    assert engine._pending_session_tails == [tail] and tail.get("kept_on_conflict")
+    assert count(engine, "tail.cold_unmatched") >= 1 and tail["view"] == queued
+    caplog.clear()
+    engine._warn_unflushed_session_tails("SQLite lock")
+    assert count(engine, "tail.unflushed") == 1
+    assert "stamp conflict" in caplog.text and "unflushed=1" in caplog.text
+    assert committed_rows(tail["store"].db_path, "S") == before
+
+
+@pytest.mark.parametrize("sibling", [False, True], ids=["same_session", "S3"])
+def test_cold_conflict_scan_cap_keeps_counts_and_warns(engines, monkeypatch, caplog, sibling):
+    engine = engines()
+    stored = [_m("user", "A", 1.), *[_m("user", f"ignore-{i}", 2. + i / 10) for i in range(6)],
+              _m("user", "Q", 6.)]
+    queued = [stored[0], _m("user", "Q", 5.)]
+    tail = queue_cold(engine, monkeypatch, queued, stored=stored)
+    ignoring(engine)
+    # The cap bounds the extra pages read past skipped stored rows; the first page is len(view) + 1, as on main.
+    monkeypatch.setattr(engine_module, "_COLD_TAIL_CONFLICT_SCAN_ROWS", 3)
+    before = committed_rows(tail["store"].db_path, "S")
+    assert [_row(row) for row in before] == [(m["role"], m["content"], m["timestamp"]) for m in stored]
+    pages, read = [], tail["store"].get_range
+
+    def observed(*args, **kwargs):
+        rows = read(*args, **kwargs)
+        pages.append((kwargs, len(rows)))
+        return rows
+
+    with monkeypatch.context() as patch:
+        patch.setattr(tail["store"], "get_range", observed)
+        assert engine._cold_tail_one_conflict(tail) is False
+    assert [size for _, size in pages] == [3, 3]
+    assert all(kwargs["conversation_id"] == "conv" for kwargs, _ in pages)
+    assert pages[1][0]["start_id"] == before[2]["store_id"] + 1
+    caplog.clear()
+    engine._retry_pending_session_tails(sibling=sibling)
+    assert engine._pending_session_tails == [tail] and tail.get("kept_on_conflict")
+    assert count(engine, "tail.cold_scan_capped") == count(engine, "tail.cold_unmatched") == 1
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert warnings == ["LCM session-end cold tail conflict scan capped; retry pending"]
+    assert committed_rows(tail["store"].db_path, "S") == before and tail["view"] == queued
+    engine._retry_pending_session_tails(sibling=sibling)
+    assert count(engine, "tail.cold_scan_capped") == count(engine, "tail.cold_unmatched") == 2
+    assert sum("conflict scan capped" in r.getMessage() for r in caplog.records) == 1
+    caplog.clear()
+    engine._warn_unflushed_session_tails("SQLite lock")
+    assert count(engine, "tail.unflushed") == 1 and "unflushed=1" in caplog.text
+    assert committed_rows(tail["store"].db_path, "S") == before
 
 
 @pytest.mark.parametrize("patterns", [False, True])
