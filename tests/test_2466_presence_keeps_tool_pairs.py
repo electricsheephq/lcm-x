@@ -294,3 +294,40 @@ def test_class_a_moved_pair_is_stored_once_when_a_stored_output_has_another_form
         assert twice <= {_key(turn_end[4])}, twice
     finally:
         engine.shutdown()
+
+
+def test_a_call_whose_id_is_a_question_mark_is_not_stored_again(tmp_path):
+    """A valid id "?" must not collide with the unreadable-call marker: a stored pre-ledger pair under it is found,
+    so its view copy is not stored again (#2466 review, delta 8)."""
+    from tests.test_anchor_unstored_before_cursor import _engine, _presence, SESSION
+
+    call = {"role": "assistant", "content": "", "tool_calls": [
+        {"id": "?", "type": "function", "function": {"name": "f", "arguments": "{}"}}]}
+    result = {"role": "tool", "tool_call_id": "?", "content": "done"}
+    engine = _engine(tmp_path)
+    try:
+        engine._store.append_batch(SESSION, [call, result])
+        assert _presence(engine, [call, result]) == []
+    finally:
+        engine.shutdown()
+
+
+def test_an_ignored_result_past_the_cursor_never_authorizes_its_call(tmp_path, monkeypatch):
+    """The tail ingest drops a result the ignore patterns match, so it cannot complete its call's pair (#2466 review,
+    delta 8): the call keeps main's result."""
+    from tests.test_anchor_unstored_before_cursor import _engine
+
+    engine = _engine(tmp_path)
+    try:
+        monkeypatch.setattr(engine, "_matches_ignore_message_patterns",
+                            lambda msg: str(msg.get("content") or "").startswith("IGNORE"))
+        call = {"role": "assistant", "content": "", "tool_calls": [
+            {"id": "c", "type": "function", "function": {"name": "f", "arguments": "{}"}}]}
+        view = [{"role": "user", "content": "new prompt"}, call, {"role": "tool", "tool_call_id": "c",
+                                                                  "content": "IGNORE result"}]
+        found = engine._identity_anchor_unaccounted(
+            view, view, 2, 0, lambda i: engine._message_replay_identity(view[i]), {}, True,
+            set(), {"replayed": set()}, {}, (), [0])
+        assert found == []
+    finally:
+        engine.shutdown()
