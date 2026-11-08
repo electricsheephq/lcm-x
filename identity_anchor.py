@@ -59,6 +59,7 @@ _CARRIER_LEDGER_CAP = 256  # #1000: carrier emission keys remembered as seen / r
 _PRESENCE_WINDOW_ROWS = 10000  # total stored rows across the presence scope
 _PRESENCE_WINDOW_BYTES = 20_000_000  # characters (code points) of stored content and tool-call text across the scope
 _PRESENCE_WINDOW_LOGGED: set[tuple[str, int, str]] = set()  # store file and session, once per process
+_UNREADABLE_CALLS = (object(),)  # an unreadable tool_calls value: no host id can equal it (#2466 review)
 
 _ROTATION_LINEAGE_UNRECORDED: set[tuple[str, str]] = set()  # store file and session whose predecessor write failed, per process
 
@@ -597,24 +598,20 @@ class IdentityAnchorMixin:
 
     def _identity_anchor_unaccounted(self, messages, identity_messages, cursor, start, identity_at, held, capped,
                                      consumed, plan, matched, excluded, missed) -> list[int]:
-        """Rows in ``[start, cursor)`` that are neither bound, matched to a stored row, a compaction output (LCM's
-        own scaffold) nor ignored, and that no stored copy in the audited tail accounts for, one copy each. The
-        copies the view's unchanged prefix ``[0, start)`` holds are reserved first. Counting stored copies, not
-        bindings, keeps an upgraded store's pre-ledger rows from being stored again. The count compares a loose
-        key (call ids, a result's call id, else role and stripped text), never fields a pre-ledger row can lack.
-        A stored row's reasoning-cleanup form counts as its copy. Completeness is decided by the
-        row and stored-text byte budgets across this session, verified ancestors and recorded predecessors;
-        ``capped`` is retained for callers but unused. Past the window the audit adds nothing beyond
-        its own finds, as on main.
-        Unsure is accounted (the positional replay, as before): a row with no comparable key (a lossy identity)
-        and a tool result whose call is neither in the view before it nor stored."""
+        """Call and result rows in ``[start, cursor)`` that are neither bound, matched, a compaction output (LCM's
+        own scaffold) nor ignored, and whose id is stored nowhere in the scope: this session, its verified ancestors
+        and its recorded predecessors, within the row and stored-byte budgets. One id is one invocation, so an id
+        stored anywhere accounts for its rows, including an upgraded store's pre-ledger rows. Pairs stay whole and a
+        reused id keeps main's result. Text rows are not checked (#2116, v0.30.x). ``capped``, ``held`` and
+        ``consumed`` are retained for callers but unused. Past the window the audit adds nothing beyond its own finds,
+        as on main. Unsure is accounted (the positional replay, as before): a call row whose ids cannot be read."""
         def calls(msg, stored=False):
             value = msg.get("tool_calls") or ()
             if isinstance(value, str):
                 try:
                     value = json.loads(value)
                 except ValueError:
-                    return ("?",)  # unreadable: equal to nothing, so never proof of a copy
+                    return _UNREADABLE_CALLS  # unreadable: equal to nothing, so never proof of a copy
             if not stored and isinstance(value, list) and any(
                     not isinstance(c.get("id"), str) for c in value if isinstance(c, dict)):
                 return None  # non-string host ids cannot prove absence against SQLite's JSON casts
@@ -626,7 +623,7 @@ class IdentityAnchorMixin:
 
         def key(msg, stored=False):
             ids = calls(msg, stored=stored)
-            if ids is None:
+            if ids is None or ids is _UNREADABLE_CALLS:
                 return None
             if ids:
                 return ("call", ids)
@@ -701,24 +698,37 @@ class IdentityAnchorMixin:
                 for page in reversed(pages):  # Preserve the previous chronological copy-consumption order.
                     rows.update((int(row["store_id"]), row) for row in page)
             # One id, one invocation (#2466 review, plain rule). Every call id and result id stored anywhere in the
-            # scope counts as stored. An id whose call rows differ between the view and the window in the tool names
-            # or the row's ids is reused: its rows keep main's result (#2172). Arguments and result text are not
-            # compared: the store can hold one invocation in another form (an externalized or host-pruned output,
-            # arguments serialized differently).
+            # scope counts as stored. An id whose call rows differ between the view and the window (the row's ids,
+            # tool names, or arguments compared as parsed JSON) is reused: its rows keep main's result (#2172).
+            # Result text is not compared: the store can hold one result in another form (an externalized or a
+            # host-pruned output).
             call_sig: dict = defaultdict(set)
             stored_calls, stored_results = set(), set()
+
+            def canonical(arguments):
+                if isinstance(arguments, str):
+                    try:
+                        arguments = json.loads(arguments)
+                    except ValueError:
+                        return arguments.strip()
+                return json.dumps(arguments, sort_keys=True, separators=(",", ":"), default=str)
 
             def shape(msg):
                 value = msg.get("tool_calls") or ()
                 if isinstance(value, str):
                     value = json.loads(value)
-                return tuple(sorted((str(c.get("id") or ""), str((c.get("function") or {}).get("name") or ""))
-                                    for c in value if isinstance(c, dict)))
+                parts = []
+                for c in value if isinstance(value, list) else ():
+                    function = (c.get("function") or {}) if isinstance(c, dict) else {}
+                    if isinstance(c, dict) and isinstance(function, dict):
+                        parts.append((str(c.get("id") or ""), str(function.get("name") or ""),
+                                      canonical(function.get("arguments"))))
+                return tuple(sorted(parts))
 
             def note(msg, stored):
                 ids = calls(msg, stored=stored)
                 if ids:
-                    if ids == ("?",):
+                    if ids is _UNREADABLE_CALLS:
                         return
                     # One digest per row: a row with many ids would otherwise rehash its whole form per id.
                     form = hashlib.sha256(repr(shape(msg)).encode()).digest()
@@ -757,7 +767,7 @@ class IdentityAnchorMixin:
                 end = k + 1
                 while end < len(identity_messages) and identity_messages[end].get("role") == "tool":
                     end += 1
-                if any(j >= cursor and (set(calls(identity_messages[j]) or ("?",)) <= stored_calls if j == k else
+                if any(j >= cursor and (set(calls(identity_messages[j]) or _UNREADABLE_CALLS) <= stored_calls if j == k else
                                         str(identity_messages[j].get("tool_call_id") or "") in stored_results)
                        for j in range(k, end)):
                     blocked.update(range(k, end))
@@ -793,6 +803,7 @@ class IdentityAnchorMixin:
                 if wanted[0] == "call":
                     ok = all(j in stored_now or j < cursor and call_id in stored_results
                              or j >= cursor and j not in plan["replayed"] and call_id not in stored_results
+                             and not dropped(j)
                              for call_id in wanted[1] for j in results_of.get(call_id, ()))
                 else:
                     ok = wanted[1] in stored_calls or any(k in stored_now and not dropped(k)
