@@ -408,3 +408,80 @@ def test_a_list_queued_behind_a_store_is_stored_before_the_engines_close(host, m
         rows = conn.execute("SELECT role, content FROM messages WHERE session_id = ? ORDER BY store_id",
                             ("child",)).fetchall()
     assert rows == _contents(view(1))
+
+
+def test_a_queued_store_after_the_childs_end_store_adds_nothing(host, monkeypatch):
+    _, _, ctx, parent, child, engine = _setup(host, "own_engine")
+    aux = ctx.module("aux_session")
+    monkeypatch.setattr(aux, "_LIVE_CHILD_STORE_JOIN_S", 0.2, raising=False)
+    mixin = aux.DelegateChildMixin
+    real, calls = mixin._append_delegate_child_rows, []
+
+    def slow_first(self, *args, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            time.sleep(1.0)
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(mixin, "_append_delegate_child_rows", slow_first)
+    child.api_call(ctx, view(1), 1)
+    child.api_call(ctx, view(2), 2)  # queued behind the in-flight store
+    final = view(2, final=True)
+    child.turn(ctx, final, engine)  # the end stores wait for the in-flight store, then run
+    child.end(engine, final)
+    aux.drain_live_child_stores(10)
+    assert len(calls) >= 3  # the in-flight, the queued and at least one end store all ran
+    assert _contents(child_rows(parent)) == _contents(final)
+
+
+def test_a_store_cut_off_mid_write_leaves_no_partial_prefix_and_a_resume_appends_once(host, tmp_path):
+    # The process dies inside the store's transaction, after its first row INSERT (as a kill, or interpreter exit
+    # ending a daemon worker): nothing of that batch is stored, and the next store appends the list once.
+    import os
+    import signal
+
+    load, clone = host
+    pid = os.fork()
+    if pid == 0:  # the dying process: its own plugin load, engines and connections
+        try:
+            ctx, _ = load()
+            parent = clone(ctx)
+            parent.on_session_start("parent", platform="cli", context_length=200_000)
+            child = HostChild("child", **DELEGATE)
+            child.spawn(ctx)
+            engine = clone(ctx)
+            child.start(engine)
+            inserts = []
+
+            def trace(sql):
+                if sql.lstrip().upper().startswith("INSERT INTO MESSAGES"):
+                    inserts.append(sql)
+                    if len(inserts) == 2:
+                        os._exit(17)
+
+            for candidate in (engine, parent, ctx.offered):
+                candidate._store.connection.set_trace_callback(trace)
+            child.api_call(ctx, view(2), 1)
+        finally:
+            os._exit(3)  # never reached when the store died mid-write
+    deadline = time.monotonic() + 30
+    status = None
+    while time.monotonic() < deadline:
+        done, status = os.waitpid(pid, os.WNOHANG)
+        if done:
+            break
+        time.sleep(0.05)
+    else:
+        os.kill(pid, signal.SIGKILL)
+        os.waitpid(pid, 0)
+        pytest.fail("the dying process did not exit")
+    assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 17
+    ctx, _ = load()  # the resumed process
+    parent = clone(ctx)
+    parent.on_session_start("parent", platform="cli", context_length=200_000)
+    assert child_rows(parent) == []  # no partial prefix
+    child = HostChild("child", **DELEGATE)
+    child.spawn(ctx)
+    child.start(clone(ctx))
+    child.api_call(ctx, view(2), 1)
+    assert _contents(child_rows(parent)) == _contents(view(2))
