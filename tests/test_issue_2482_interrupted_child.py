@@ -624,3 +624,92 @@ def test_a_child_on_another_profile_is_stored_only_in_its_own_profile(host, tmp_
     child.run_until(ctx, 1)
     assert child_rows(ctx.offered) == [] and child_rows(parent) == []  # nothing written into profile A
     assert _contents(child_rows(engine)) == _contents(view(1))  # the interrupted child kept its rows in profile B
+
+
+def _r7_wiring(host):
+    """Host 8cfaaa8e (agent/agent_init.py): every agent gets ``clone_for_agent()`` of the plugin's one engine, and the
+    child's clone gets ``on_session_start(session_id, hermes_home=<the active profile>)`` on the child's own frames."""
+    load, clone = host
+    ctx, _ = load()
+    parent = clone(ctx)
+    parent.on_session_start("parent", platform="cli", context_length=200_000,
+                            hermes_home=str(ctx.offered._hermes_home))
+    ctx.hooks["post_llm_call"][0](session_id="parent", platform="cli",
+                                  conversation_history=PARENT_VIEW, context_compressor=parent)
+    child = HostChild("child", **DELEGATE)
+    child.spawn(ctx)
+    engine = clone(ctx)
+    child.start_on_home(engine, str(ctx.offered._hermes_home))
+    return ctx, parent, child, engine
+
+
+@pytest.mark.parametrize("cut", ["cold_kill", "clean_exit"])
+def test_on_the_r7_engine_wiring_an_interrupted_child_is_stored_before_its_end(host, cut):
+    import sqlite3
+
+    ctx, parent, child, engine = _r7_wiring(host)
+    db_path = parent._store.db_path
+    child.run_until(ctx, 2)
+    if cut == "clean_exit":  # the host's clean exit: engines shut down, the child gets no session end
+        for closing in (engine, parent, ctx.offered):
+            closing.shutdown()
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute("SELECT role, content FROM messages WHERE session_id = ? ORDER BY store_id",
+                            ("child",)).fetchall()
+    assert rows == _contents(view(2))
+
+
+def test_a_child_engine_moved_to_another_profile_after_it_went_live_stores_nothing_early(host, tmp_path, caplog):
+    ctx, parent, child, engine = _r7_wiring(host)
+    home_b = tmp_path / "profile-b"
+    home_b.mkdir()
+    engine._rebind_storage_for_home(str(home_b))  # the child's engine now serves profile B
+    with caplog.at_level("WARNING"):
+        child.run_until(ctx, 2)
+    assert child_rows(parent) == [] and child_rows(engine) == []  # neither profile gets an early copy
+    warned = [r.getMessage() for r in caplog.records if "another profile" in r.getMessage()]
+    assert len(warned) == 1 and "child" not in warned[0].split("child=")[1][:12]  # one WARNING, hashed id
+
+
+def test_a_dead_child_engine_reference_stores_nothing_early_and_the_end_store_still_writes(host):
+    import gc
+
+    _, _, ctx, parent, child, engine = _setup(host, "own_engine")
+    aux = ctx.module("aux_session")
+
+    class Gone:
+        pass
+
+    gone = Gone()
+    with aux._LIVE_CHILD_LOCK:
+        recorded = aux._LIVE_DELEGATE_CHILD_ENGINES["child"]
+        aux._LIVE_DELEGATE_CHILD_ENGINES["child"] = (aux.weakref.ref(gone),) + tuple(recorded[1:]) \
+            if isinstance(recorded, tuple) else aux.weakref.ref(gone)
+    del gone
+    gc.collect()
+    child.run_until(ctx, 2)  # never raises (fire() asserts that)
+    assert child_rows(parent) == []
+    final = view(2, final=True)
+    child.turn(ctx, final, engine)
+    child.end(engine, final)
+    assert _contents(child_rows(parent)) == _contents(final)
+
+
+@pytest.mark.parametrize("spawned", [True, False])
+def test_the_model_call_hooks_never_store_through_the_plugin_prototype(host, spawned):
+    load, clone = host
+    ctx, _ = load()
+    parent = clone(ctx)
+    parent.on_session_start("parent", platform="cli", context_length=200_000)
+    ctx.hooks["post_llm_call"][0](session_id="parent", platform="cli",
+                                  conversation_history=PARENT_VIEW, context_compressor=parent)
+    child = HostChild("child", **DELEGATE)
+    if spawned:
+        child.spawn(ctx)  # without it: the legacy frame-walk fallback
+    engine = clone(ctx)
+    child.start(engine)
+    used = []
+    ctx.offered._store_delegate_child_turn = lambda *a, **k: used.append(a) or 0
+    child.run_until(ctx, 2)
+    assert used == []
+    assert (_contents(child_rows(parent)) == _contents(view(2))) is spawned
