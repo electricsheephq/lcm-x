@@ -574,8 +574,9 @@ def split_surplus(groups, relations, rows=None, forms=None, creditable=None):
     copies around reserved rows, so store order no longer identifies the kept copy.
     Each ``attribution_forms`` set (``forms``, computed from the relations when None) is a self witness too; a form's
     count is the visible surplus it adds to the relation witnesses alone, so two forms on one row both count it.
-    ``creditable``: a set, when given, receives each key's copies that the matching can credit (its ``later`` set
-    in the pass with every form), so a caller can report credited rows without counting a key's expected copy.
+    ``creditable``: a set, when given, receives the rows that the completed matching (the pass with every form)
+    credited through their own self witness, so a caller reports only rows that explain a surplus copy: never a
+    key's expected copy, nor a candidate in a key whose matching capacity is zero.
     """
     # Stored text only verifies an existing directed witness; it never creates one.
     # ``rows`` (store_id -> (session, role, content)) covers every stored row, tool results included; without it,
@@ -635,8 +636,6 @@ def _matched(groups, relations, rows, credited, creditable=None):
                     break
                 cap, left = cap + 1, left - n
             witnesses = [("self", sid) for sid in sorted(later)]
-        if creditable is not None:
-            creditable.update(later)
         caps.append(cap)
         edge(source, quota, cap)
         for witness in witnesses:
@@ -668,6 +667,11 @@ def _matched(groups, relations, rows, credited, creditable=None):
             graph[node][previous] += 1
             node = previous
         visible += 1
+    if creditable is not None:  # rows whose own self witness carries flow in the completed matching
+        for index, (_key, _surplus, ids, *_merged) in enumerate(groups):
+            for sid in set(ids):
+                if graph[("row", index, sid)].get(("out", index, ("self", sid)), 0) > 0:
+                    creditable.add(sid)
     examples = []
     for index, (key, surplus, ids, *_merged) in enumerate(groups):
         silent = surplus - (caps[index] - graph[source][("key", index)])  # surplus minus what the matching explained
