@@ -72,6 +72,9 @@ def record_subagent_stop(payload: Dict[str, Any]) -> None:
         return
     with _SUBAGENT_LINEAGE_LOCK:
         _SUBAGENT_LINEAGE_BY_SESSION_ID.pop(child_session_id, None)
+    with _LIVE_CHILD_LOCK:
+        for session_id in [sid for sid, root in _LIVE_DELEGATE_CHILD_ROOTS.items() if root == child_session_id]:
+            _LIVE_DELEGATE_CHILD_ROOTS.pop(session_id, None)
 
 
 def explicit_subagent_lineage(session_id: str) -> Dict[str, str]:
@@ -831,12 +834,57 @@ _COUNTS: Counter = Counter()
 # Shared by clones and hook engines: compare and append form one process-local operation.
 _DELEGATE_STORE_LOCK = threading.RLock()
 _LIVE_CHILD_STORE_WAIT_S = 1.0
+# #2482: live delegated children, by session id -> the root child id that subagent_start named. Filled when a child
+# binds its own engine on its own thread as a delegate (its frames are visible there, not on the host's hook worker
+# thread) and carried across its compression handoff; a root's subagent_stop ends its entries.
+_LIVE_CHILD_LOCK = threading.Lock()
+_LIVE_DELEGATE_CHILD_ROOTS: dict[str, str] = {}
+_LIVE_CHILD_STORES_IN_FLIGHT: set[str] = set()
+_LIVE_CHILD_STORE_JOIN_S = 2.0  # the most a host hook waits for a live-child store; the store itself may finish later
 _DELEGATE_AUXILIARY_IDS: set[tuple[str, str]] = set()
 _DELEGATE_RESUME_BOUNDARIES: dict[tuple[str, str], list[bytes]] = {}
 _DELEGATE_COMPRESSION_PARENTS: dict[tuple[str, str], str] = {}
 # #2071: digests of the rows the child's last bypassed compaction produced (absent from its input). They are the only
 # rows the stored-tail anchor may pass over without finding them stored.
 _DELEGATE_COMPACTION_OUTPUTS: dict[tuple[str, str], list[bytes]] = {}
+
+
+def live_delegate_child_root(session_id: str) -> str:
+    """The root child id of a live delegated child bound in this process, or ``""``."""
+    with _LIVE_CHILD_LOCK:
+        return _LIVE_DELEGATE_CHILD_ROOTS.get(str(session_id or ""), "")
+
+
+def run_live_child_store(session_id: str, operation) -> None:
+    """Run ``operation`` on a worker thread and wait at most ``_LIVE_CHILD_STORE_JOIN_S`` (#2482); never raises.
+
+    A host hook must stay far below its own timeout, and a store can wait on SQLite past the lock bounds. One store
+    per child is in flight at a time: a later list waits for the next hook or the end store, which append the rest.
+    """
+    with _LIVE_CHILD_LOCK:
+        if session_id in _LIVE_CHILD_STORES_IN_FLIGHT:
+            _count("live_store_in_flight")
+            return
+        _LIVE_CHILD_STORES_IN_FLIGHT.add(session_id)
+
+    def runner():
+        try:
+            operation()
+        except Exception as exc:
+            logger.debug("LCM live delegated-child store error: %s", exc)
+        finally:
+            with _LIVE_CHILD_LOCK:
+                _LIVE_CHILD_STORES_IN_FLIGHT.discard(session_id)
+
+    try:
+        worker = threading.Thread(target=runner, name="lcm-live-child-store", daemon=True)
+        worker.start()
+    except Exception as exc:
+        with _LIVE_CHILD_LOCK:
+            _LIVE_CHILD_STORES_IN_FLIGHT.discard(session_id)
+        logger.debug("LCM live delegated-child store not started: %s", exc)
+        return
+    worker.join(_LIVE_CHILD_STORE_JOIN_S)
 
 
 def delegate_child_store_counts() -> Dict[str, int]:
@@ -883,6 +931,9 @@ class DelegateChildMixin:
         if agent is not None and _is_auxiliary_agent(agent):
             with _DELEGATE_STORE_LOCK:
                 _DELEGATE_AUXILIARY_IDS.add(self._delegate_child_key(session_id))
+        elif agent is not None and _is_delegate_agent(agent):
+            with _LIVE_CHILD_LOCK:
+                _LIVE_DELEGATE_CHILD_ROOTS.setdefault(session_id, session_id)
 
     def _stored_delegate_child_link(self, session_id: str) -> Dict[str, str]:
         if not self._store._session_lineage_table_exists():
@@ -1002,6 +1053,10 @@ class DelegateChildMixin:
 
     def _handoff_delegate_child_compression(self, old_session_id: str, new_session_id: str) -> None:
         try:
+            with _LIVE_CHILD_LOCK:
+                root = _LIVE_DELEGATE_CHILD_ROOTS.get(old_session_id)
+                if root and new_session_id:
+                    _LIVE_DELEGATE_CHILD_ROOTS[new_session_id] = root
             with _DELEGATE_STORE_LOCK:
                 old_key, new_key = self._delegate_child_key(old_session_id), self._delegate_child_key(new_session_id)
                 if old_key in _DELEGATE_AUXILIARY_IDS:

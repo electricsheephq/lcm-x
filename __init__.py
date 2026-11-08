@@ -671,26 +671,33 @@ def register(ctx):
             # #2482: the host hands a live delegated child's whole list over at pre_llm_call and before every model
             # call (pre_api_request); storing it there keeps an interrupted child's rows. Always returns None.
             try:
+                if not active:
+                    return None  # another context engine serves this host: LCM-X stores nothing (as post_llm_call)
                 from . import aux_session
 
                 session_id = str(payload.get("session_id") or "")
-                if not session_id or not aux_session.explicit_subagent_lineage(session_id):
-                    return None
+                root = aux_session.live_delegate_child_root(session_id) if session_id else ""
+                if not root or not aux_session.explicit_subagent_lineage(root):
+                    return None  # not a live delegated child bound in this process: main's behaviour
                 history = payload.get("conversation_history")
                 if not isinstance(history, list) or not history:
                     return None
+                history = list(history)
+                platform = str(payload.get("platform") or "")
                 wait = aux_session._LIVE_CHILD_STORE_WAIT_S
 
                 def store_child(active_engine):
                     return active_engine._store_delegate_child_turn(
-                        session_id, history,
-                        platform=str(payload.get("platform") or ""), lock_wait=wait,
+                        session_id, history, platform=platform, lock_wait=wait,
                     )
 
-                result = use_active_lcm_engine(store_child, session_id=session_id, timeout=wait)
-                if result.status is ActiveEngineUseStatus.ENGINE_NOT_RESIDENT:
-                    # No engine bound to the child: store without binding one (never bind, never ingest).
-                    use_lcm_engine(engine, store_child, timeout=wait)
+                def store():
+                    result = use_active_lcm_engine(store_child, session_id=session_id, timeout=wait)
+                    if result.status is ActiveEngineUseStatus.ENGINE_NOT_RESIDENT:
+                        # No engine bound to the child: store without binding one (never bind, never ingest).
+                        use_lcm_engine(engine, store_child, timeout=wait)
+
+                aux_session.run_live_child_store(session_id, store)
             except Exception as exc:
                 logger.debug("LCM live delegated-child store error: %s", exc)
             return None
