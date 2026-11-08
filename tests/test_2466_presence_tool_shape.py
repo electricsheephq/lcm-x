@@ -6,7 +6,6 @@ store, so main's result is a trip (the audit returns None and the caller keeps m
 from __future__ import annotations
 
 import json
-import logging
 import os
 import time
 
@@ -21,6 +20,16 @@ BAR = 0.150 * float(os.environ.get("LCM_PRESENCE_TIMING_SLACK", "4"))
 
 def _entry(call_id, arguments="{}"):
     return {"id": call_id, "type": "function", "function": {"name": "f", "arguments": arguments}}
+
+
+def _anchor_lines(monkeypatch):
+    """The audit's INFO and WARNING lines, recorded at the logger's own methods: a process-wide logging setup left by
+    another test in the same worker cannot hide them, as it can with caplog (CI shards, #2466)."""
+    lines = []
+    for level in ("info", "warning"):
+        monkeypatch.setattr(identity_anchor.logger, level,
+                            lambda msg, *args, _level=level, **_: lines.append((_level, msg % args if args else msg)))
+    return lines
 
 
 def _raw_insert(engine, tool_calls_text):
@@ -59,19 +68,19 @@ SHAPES = {
 
 
 @pytest.mark.parametrize("shape", list(SHAPES))
-def test_a_non_standard_stored_tool_shape_gives_mains_result(tmp_path, shape, caplog):
+def test_a_non_standard_stored_tool_shape_gives_mains_result(tmp_path, shape, monkeypatch):
     engine = _engine(tmp_path)
     try:
         engine._store.append_batch(SESSION, [{"role": "assistant", "content": "", "tool_calls": [_entry("ok1")]}])
         SHAPES[shape](engine)
         engine._store.append_batch(SESSION, [{"role": "assistant", "content": "", "tool_calls": [_entry("ok2")]}])
         view = [_call("brand_new", 1)]
-        with caplog.at_level(logging.INFO, logger="hermes_lcm.identity_anchor"):
-            assert _presence(engine, view) is None
-            assert _presence(engine, view) is None
+        lines = _anchor_lines(monkeypatch)
+        assert _presence(engine, view) is None
+        assert _presence(engine, view) is None
         # Every trip reaches the counted reason through the SQL CASE guard, never the exception path.
-        assert sum("non-standard tool-call shape" in r.getMessage() for r in caplog.records) == 1
-        assert not [r for r in caplog.records if "presence unavailable" in r.getMessage()]
+        assert sum("non-standard tool-call shape" in text for _, text in lines) == 1, lines
+        assert not [text for _, text in lines if "presence unavailable" in text]
     finally:
         engine.shutdown()
 
@@ -145,7 +154,7 @@ def test_one_stored_row_with_many_parallel_calls_is_checked_in_linear_time(tmp_p
     assert large < BAR, f"{large * 1000:.0f} ms"
 
 
-def test_one_stored_row_over_the_call_id_window_trips_before_any_entry_is_checked(tmp_path, caplog):
+def test_one_stored_row_over_the_call_id_window_trips_before_any_entry_is_checked(tmp_path, monkeypatch):
     """#2466 terminal review (bot threads): a row with more entries than the whole call-id window returns its length
     before the per-entry check, so 180,000 tiny calls inside the byte limit trip on the window for about the cost of
     one length read: under four times one admitted row of 9,999 calls (checking each entry first cost over ten)."""
@@ -166,12 +175,12 @@ def test_one_stored_row_over_the_call_id_window_trips_before_any_entry_is_checke
             engine.shutdown()
 
     over = 180_000
-    with caplog.at_level(logging.INFO, logger="hermes_lcm.identity_anchor"):
-        admitted = best_of("admitted", identity_anchor._PRESENCE_WINDOW_CALL_IDS - 1, [0])
-        tripped = best_of("over", over, None)
-    windows = [r for r in caplog.records if "presence window incomplete" in r.getMessage()]
-    assert len(windows) == 1 and "call_ids=" in windows[0].getMessage()
-    assert not [r for r in caplog.records if "non-standard tool-call shape" in r.getMessage()]
+    lines = _anchor_lines(monkeypatch)
+    admitted = best_of("admitted", identity_anchor._PRESENCE_WINDOW_CALL_IDS - 1, [0])
+    tripped = best_of("over", over, None)
+    windows = [text for _, text in lines if "presence window incomplete" in text]
+    assert len(windows) == 1 and "call_ids=" in windows[0], lines
+    assert not [text for _, text in lines if "non-standard tool-call shape" in text]
     print(f"\nOVER-CAP-ROW {over}:{tripped * 1000:.1f} ms vs 9999:{admitted * 1000:.1f} ms "
           f"x{tripped / admitted:.1f} load1={os.getloadavg()[0]:.1f}")
     assert tripped < 4 * admitted, f"x{tripped / admitted:.1f}"
