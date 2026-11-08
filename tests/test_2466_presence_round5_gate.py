@@ -1,7 +1,8 @@
 """#2466 review, round 5 (the release manager's rule-pairs lens), named limit: the presence check runs only on a turn
 where the audit already missed a row. A tool row the host moved below the cursor while every text row there is
-accounted for keeps main's result (a positional replay). Main-equal, tracked under #2467; each test asserts the
-correct behaviour and is a strict xfail until that follow-up. Default config, unique ids."""
+accounted for keeps main's result (a positional replay). Main-equal, tracked under #2467: the new-call tests assert
+the correct behaviour and are strict xfails until that follow-up; the old pair and repeat-ingest checks run unmarked.
+Default config, unique ids."""
 from __future__ import annotations
 
 import json
@@ -67,7 +68,32 @@ def _pairs(engine, ids):
     return {i: (calls[i], results[i]) for i in ids}
 
 
-def _go(tmp_path, turn_start, turn_end):
+def _dropped_interim(stamped_tools=True):
+    history = _history()
+    turn_start = [*history, _u("P60 new prompt", 200), _a("interim status note", 200.5)]
+    turn_end = [*history, _u("P60 new prompt", 200), _call("call_new", 201), _res("call_new", "new", 202),
+                _a("A60 after", 203)]
+    return turn_start, turn_end
+
+
+def _moved_prompt(stamped_tools):
+    history = _history()
+    turn_start = [*history, _u("P60 new prompt", 200)]
+    turn_end = list(history)
+    turn_end[SLOT] = _u("P60 new prompt", 200)
+    turn_end += [_call("call_new", 201 if stamped_tools else None),
+                 _res("call_new", "new", 202 if stamped_tools else None), _a("A60 after", 203)]
+    return turn_start, turn_end
+
+
+SCENARIOS = {"dropped-interim": (_dropped_interim, True), "moved-prompt-stamped": (_moved_prompt, True),
+             "moved-prompt-unstamped": (_moved_prompt, False)}
+
+
+def _go(tmp_path, scenario):
+    """The store's pairs after the turn, and after the same view is ingested again."""
+    build, stamped_tools = SCENARIOS[scenario]
+    turn_start, turn_end = build(stamped_tools)
     engine = _engine(tmp_path)
     try:
         engine.ingest(_history())
@@ -75,28 +101,21 @@ def _go(tmp_path, turn_start, turn_end):
         engine.ingest(turn_end)
         first = _pairs(engine, ["call_new", "call_old"])
         engine.ingest(turn_end)
-        assert _pairs(engine, ["call_new", "call_old"]) == first, "repeat ingest changed the store"
-        assert first == {"call_new": (1, 1), "call_old": (1, 1)}, first
+        return first, _pairs(engine, ["call_new", "call_old"])
     finally:
         engine.shutdown()
 
 
-@LIMIT
-def test_a_call_that_takes_a_dropped_interim_rows_index_is_stored(tmp_path):
-    history = _history()
-    turn_start = [*history, _u("P60 new prompt", 200), _a("interim status note", 200.5)]
-    turn_end = [*history, _u("P60 new prompt", 200), _call("call_new", 201), _res("call_new", "new", 202),
-                _a("A60 after", 203)]
-    _go(tmp_path, turn_start, turn_end)
+@pytest.mark.parametrize("scenario", list(SCENARIOS))
+def test_the_gate_shapes_keep_the_old_pair_and_a_repeat_ingest_changes_nothing(tmp_path, scenario):
+    """Runs without a marker, so an idempotence or old-pair regression cannot hide behind the strict xfail below."""
+    first, again = _go(tmp_path, scenario)
+    assert again == first, "repeat ingest changed the store"
+    assert first["call_old"] == (1, 1), first
 
 
 @LIMIT
-@pytest.mark.parametrize("stamped_tools", [True, False])
-def test_a_moved_prompt_on_its_own_stamp_then_a_new_call_is_stored(tmp_path, stamped_tools):
-    history = _history()
-    turn_start = [*history, _u("P60 new prompt", 200)]
-    turn_end = list(history)
-    turn_end[SLOT] = _u("P60 new prompt", 200)
-    turn_end += [_call("call_new", 201 if stamped_tools else None),
-                 _res("call_new", "new", 202 if stamped_tools else None), _a("A60 after", 203)]
-    _go(tmp_path, turn_start, turn_end)
+@pytest.mark.parametrize("scenario", list(SCENARIOS))
+def test_the_new_call_is_stored_once_with_its_result(tmp_path, scenario):
+    first, _ = _go(tmp_path, scenario)
+    assert first["call_new"] == (1, 1), first
