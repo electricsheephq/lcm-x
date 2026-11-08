@@ -59,8 +59,9 @@ _POOL_WINDOW = 256  # store ids either side of a stamp donor searched for a comp
 _INSERT_DIFF_BUDGET = 1_000_000  # #633: old x new rows compared per insertion diff (quadratic worst case ~40 ms)
 _CARRIER_LEDGER_CAP = 256  # #1000: carrier emission keys remembered as seen / retired (process-local)
 _PRESENCE_WINDOW_ROWS = 10000  # total stored rows across the presence scope
-_PRESENCE_WINDOW_BYTES = 32_000_000  # characters (code points) of stored content and tool-call text across the scope
-_PRESENCE_TEXT_BYTES = 8_000_000  # characters of stored text the audit normalizes (rows of a candidate's text role)
+_PRESENCE_WINDOW_BYTES = 20_000_000  # characters (code points) of stored content and tool-call text across the scope
+_PRESENCE_TEXT_BYTES = 4_000_000  # characters of stored text the audit normalizes (rows of a candidate's text role)
+_PRESENCE_PAYLOAD_MIN_CHARS = 8_000  # each payload file a text row loads costs at least this much text budget
 _PRESENCE_WINDOW_LOGGED: set[tuple[str, int, str]] = set()  # store file and session, once per process
 _ROTATION_LINEAGE_UNRECORDED: set[tuple[str, str]] = set()  # store file and session whose predecessor write failed, per process
 
@@ -688,22 +689,20 @@ class IdentityAnchorMixin:
             for source in scope:
                 # Size the window in SQL before loading any row (#2466 review, wait bar): stored character counts per
                 # row, newest first, stopping at the first budget it passes, so an over-budget scope costs at most its
-                # budget plus one row of reading and decodes nothing. Payload files a placeholder points at are
-                # charged at their file size before any identity loads them.
+                # budget plus one row of reading and decodes nothing. A text row's identity loads the payload files
+                # its placeholders point at, so each is charged at its file size before any load; call and result
+                # rows compare their stored text and load none.
                 sized = self._store._conn.execute(
                     "SELECT role, COALESCE(tool_call_id, '') != '', length(content), length(tool_calls), "
-                    "CASE WHEN instr(content, 'xternalized') THEN content END, "
-                    "CASE WHEN instr(tool_calls, 'xternalized') THEN tool_calls END "
+                    "CASE WHEN instr(content, 'xternalized') THEN content END "
                     "FROM messages WHERE session_id=? ORDER BY store_id DESC LIMIT ?", (source, budget + 1))
                 count = 0
-                for role, tool_result, content_len, calls_len, marked_content, marked_calls in sized:
+                for role, tool_result, content_len, calls_len, marked in sized:
                     count += 1
                     byte_budget -= (content_len or 0) + (calls_len or 0)
-                    text_row = role in text_roles and not (role == "tool" and tool_result)
-                    if text_row:
+                    if role in text_roles and not (role == "tool" and tool_result):
                         text_budget -= content_len or 0  # normalization cost bound (#2466 review)
-                    for text in (marked_content, marked_calls):
-                        for ref in extract_all_externalized_payload_refs(text) if text else ():
+                        for ref in extract_all_externalized_payload_refs(marked) if marked else ():
                             if storage is None:
                                 storage = get_large_output_storage_dir(self._config, hermes_home=self._hermes_home,
                                                                        create=False)
@@ -711,8 +710,10 @@ class IdentityAnchorMixin:
                                 size = (storage / ref).stat().st_size
                             except OSError:
                                 continue  # a missing payload loads nothing
-                            byte_budget -= size
-                            text_budget -= size if text_row else 0
+                            # A load costs a file read and a JSON parse whatever its size, so each one is charged at
+                            # least the minimum: about 500 loads at most per audit (#2466 review, wait bar).
+                            size = max(size, _PRESENCE_PAYLOAD_MIN_CHARS)
+                            byte_budget, text_budget = byte_budget - size, text_budget - size
                     if count > budget or byte_budget < 0 or text_budget < 0:
                         break
                 sized.close()
