@@ -213,3 +213,46 @@ def test_parallel_calls_in_separate_rows_keep_their_own_results(tmp_path):
             set(), {"replayed": set()}, {}, (), []) == [0, 1, 2, 3]
     finally:
         engine.shutdown()
+
+
+@pytest.mark.parametrize("stored_text,shown_text", [
+    ("[Externalized tool output: read_file; ref=out.json]", "the full output " * 500),
+    ("the full output " * 500, "[Old tool output cleared to save context space]")],
+    ids=["externalized-in-store", "pruned-by-host"])
+def test_one_result_stored_in_another_form_is_still_one_invocation(tmp_path, stored_text, shown_text):
+    """The store can hold a result in another form than the host shows: an externalized placeholder, or the full
+    text the host has since pruned. It is the same invocation, so its call, missing from the store, is stored
+    (class A), and the result is not stored again (#2466 review)."""
+    from tests.test_anchor_unstored_before_cursor import _engine, _presence, SESSION
+
+    engine = _engine(tmp_path)
+    try:
+        call = {"role": "assistant", "content": "", "tool_calls": [
+            {"id": "call_big", "type": "function", "function": {"name": "read_file", "arguments": '{"path": "a"}'}}]}
+        engine._store.append_batch(SESSION, [{"role": "tool", "tool_call_id": "call_big", "tool_name": "read_file",
+                                              "content": stored_text}])
+        shown = {"role": "tool", "tool_call_id": "call_big", "tool_name": "read_file", "content": shown_text}
+        assert _presence(engine, [call, shown]) == [0]
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("stored_args,shown_args", [('{"path": "a", "n": 1}', '{"n":1,"path":"a"}'),
+                                                    ('{"path": "a"}', {"path": "a"})],
+                         ids=["key-order-and-spacing", "string-or-object"])
+def test_one_call_serialized_differently_is_still_one_invocation(tmp_path, stored_args, shown_args):
+    """A stored call whose arguments the host now serializes differently is the same invocation: its result, missing
+    from the store, is stored (class A) (#2466 review)."""
+    from tests.test_anchor_unstored_before_cursor import _engine, _presence, SESSION
+
+    def call(args):
+        return {"role": "assistant", "content": "", "tool_calls": [
+            {"id": "call_s", "type": "function", "function": {"name": "read_file", "arguments": args}}]}
+
+    engine = _engine(tmp_path)
+    try:
+        engine._store.append_batch(SESSION, [call(stored_args)])
+        result = {"role": "tool", "tool_call_id": "call_s", "tool_name": "read_file", "content": "file text"}
+        assert _presence(engine, [call(shown_args), result]) == [1]
+    finally:
+        engine.shutdown()

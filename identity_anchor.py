@@ -635,28 +635,6 @@ class IdentityAnchorMixin:
             identity = self._message_replay_identity(msg, stored_row=stored)
             return None if _lossy(identity) else (identity[0], identity[1].strip())
 
-        def exact_form(msg, loose, stored=False):
-            # The payload-exact form of a call or result, tried before its loose id key, so a reused id matches its
-            # own payload first (#2466 review); a pre-ledger row whose payload differs still matches loosely.
-            if loose is None or loose[0] not in {"call", "tool"}:
-                return loose
-            if loose[0] == "tool":
-                content = msg.get("content")
-                return ("toolx", loose[1], content.strip() if isinstance(content, str) else json.dumps(content, sort_keys=True, default=str))
-            value = msg.get("tool_calls") or ()
-            if isinstance(value, str):
-                try:
-                    value = json.loads(value)
-                except ValueError:
-                    return loose
-            parts = []
-            for c in value if isinstance(value, list) else ():
-                function = (c.get("function") or {}) if isinstance(c, dict) else {}
-                arguments = function.get("arguments") if isinstance(function, dict) else None
-                parts.append((str(c.get("id") or "") if isinstance(c, dict) else "", str(function.get("name") if isinstance(function, dict) else ""),
-                              arguments if isinstance(arguments, str) else json.dumps(arguments, sort_keys=True, default=str)))
-            return ("callx", loose[1], tuple(sorted(parts)))
-
         explained = set(excluded) | set(matched) | set(plan.get("matched", {})) | plan["replayed"] | set(missed)
         try:
             # Only call and result rows are presence-checked (class A). A replaced reply (#2116) keeps main's
@@ -723,11 +701,19 @@ class IdentityAnchorMixin:
                 for page in reversed(pages):  # Preserve the previous chronological copy-consumption order.
                     rows.update((int(row["store_id"]), row) for row in page)
             # One id, one invocation (#2466 review, plain rule). Every call id and result id stored anywhere in the
-            # scope counts as stored. An id whose call rows (payload and row shape) or results differ between the
-            # view and the window is reused: its rows keep main's result (#2172).
+            # scope counts as stored. An id whose call rows differ between the view and the window in the tool names
+            # or the row's ids is reused: its rows keep main's result (#2172). Arguments and result text are not
+            # compared: the store can hold one invocation in another form (an externalized or host-pruned output,
+            # arguments serialized differently).
             call_sig: dict = defaultdict(set)
-            result_sig: dict = defaultdict(set)
             stored_calls, stored_results = set(), set()
+
+            def shape(msg):
+                value = msg.get("tool_calls") or ()
+                if isinstance(value, str):
+                    value = json.loads(value)
+                return tuple(sorted((str(c.get("id") or ""), str((c.get("function") or {}).get("name") or ""))
+                                    for c in value if isinstance(c, dict)))
 
             def note(msg, stored):
                 ids = calls(msg, stored=stored)
@@ -735,22 +721,19 @@ class IdentityAnchorMixin:
                     if ids == ("?",):
                         return
                     # One digest per row: a row with many ids would otherwise rehash its whole form per id.
-                    form = hashlib.sha256(repr(exact_form(msg, ("call", ids), stored=stored)).encode()).digest()
+                    form = hashlib.sha256(repr(shape(msg)).encode()).digest()
                     for call_id in ids:
                         call_sig[call_id].add(form)
                         if stored:
                             stored_calls.add(call_id)
-                elif msg.get("role") == "tool" and msg.get("tool_call_id") and ids is not None:
-                    call_id = str(msg["tool_call_id"])
-                    result_sig[call_id].add(exact_form(msg, ("tool", call_id), stored=stored))
-                    if stored:
-                        stored_results.add(call_id)
+                elif stored and msg.get("role") == "tool" and msg.get("tool_call_id"):
+                    stored_results.add(str(msg["tool_call_id"]))
 
             for store_id in sorted(rows):
                 note(rows[store_id], True)
             for msg in identity_messages:
                 note(msg, False)
-            reused = {call_id for sig in (call_sig, result_sig) for call_id, forms in sig.items() if len(forms) > 1}
+            reused = {call_id for call_id, forms in call_sig.items() if len(forms) > 1}
         except Exception as exc:
             logger.warning("LCM identity-anchor presence unavailable (%s); keeping positional replays", type(exc).__name__)
             return []
