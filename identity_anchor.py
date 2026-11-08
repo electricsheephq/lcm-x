@@ -795,7 +795,7 @@ class IdentityAnchorMixin:
                             "CASE WHEN role='assistant' AND (tool_calls IS NULL OR tool_calls IN ('', '[]')) AND ("
                             + " OR ".join(f"instr(CAST(content AS BLOB), CAST('{m}' AS BLOB)) > 0"
                                           for m in _PRESENCE_MARKERS) + ") THEN 1 ELSE 0 END, "
-                            if text_wanted else "0, 0, ")
+                            if text_wanted else "")  # without one, the statement is the tool-only one
                 sized = self._store._conn.execute(
                     "SELECT " + text_sql + "length(CAST(content AS BLOB)), length(CAST(tool_calls AS BLOB)), "
                     "CASE WHEN tool_calls IS NULL THEN 0 WHEN length(CAST(tool_calls AS BLOB)) > ? THEN -1 "
@@ -809,7 +809,9 @@ class IdentityAnchorMixin:
                     "FROM messages WHERE session_id=? ORDER BY store_id DESC LIMIT ?",
                     (_PRESENCE_WINDOW_BYTES, _PRESENCE_WINDOW_CALL_IDS, source, budget + 1))
                 count, shape_ok, marked = 0, True, False
-                for reply_len, reply_marked, content_len, calls_len, call_ids in sized:
+                for sized_row in sized:
+                    reply_len, reply_marked = sized_row[:2] if text_wanted else (0, 0)
+                    content_len, calls_len, call_ids = sized_row[-3:]
                     count += 1
                     if call_ids < 0:
                         shape_ok = False
