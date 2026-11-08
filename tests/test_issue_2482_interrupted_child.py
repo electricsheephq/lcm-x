@@ -355,20 +355,28 @@ def test_a_slow_store_returns_to_the_host_within_the_bound_and_still_lands(host,
     aux = ctx.module("aux_session")
     monkeypatch.setattr(aux, "_LIVE_CHILD_STORE_JOIN_S", 0.3, raising=False)
     mixin = aux.DelegateChildMixin
-    real, calls = mixin._append_delegate_child_rows, []
+    real, calls, running, overlap = mixin._append_delegate_child_rows, [], [], []
 
     def slow(self, *args, **kwargs):
         calls.append(1)
-        time.sleep(2.0)  # e.g. SQLite busy: a wait the lock bounds do not cover
-        return real(self, *args, **kwargs)
+        running.append(1)
+        overlap.append(len(running))
+        try:
+            if len(calls) == 1:
+                time.sleep(2.0)  # e.g. SQLite busy: a wait the lock bounds do not cover
+            return real(self, *args, **kwargs)
+        finally:
+            running.pop()
 
     monkeypatch.setattr(mixin, "_append_delegate_child_rows", slow)
     began = time.monotonic()
-    child.api_call(ctx, view(1), 1)
-    child.api_call(ctx, view(1), 2)  # while the first store is in flight: no second store starts
+    child.api_call(ctx, view(0), 1)
+    child.api_call(ctx, view(1), 2)  # handed over while the first store is in flight: kept, stored after it
     assert time.monotonic() - began < 1.5
+    # Interrupted here: no further hook and no end store.
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline and len(child_rows(parent)) < 3:
         time.sleep(0.05)
+    time.sleep(0.2)
     assert _contents(child_rows(parent)) == _contents(view(1))
-    assert len(calls) == 1
+    assert len(calls) == 2 and max(overlap) == 1  # one store at a time per child
