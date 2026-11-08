@@ -1,1 +1,0 @@
-- Fix: a stored copy that an earlier linker in the same ingest already marked as a possible replay no longer gets a second `possible_replay_of` link from the cursor-0 replay scan.

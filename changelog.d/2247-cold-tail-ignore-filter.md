@@ -1,1 +1,0 @@
-- Fix: With ignore patterns configured, a busy session end followed by an undo and resend now keeps the earlier message pending and reports it at exit, as v0.29.x warned, instead of dropping it silently. Storing it is planned for v0.30.x. (#2247)

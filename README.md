@@ -141,11 +141,12 @@ copy-paste setups per agent type. Externalization and temporal rollups are on by
 ## Project status
 
 The latest stable release is
-[`v0.29.1`](https://github.com/electricsheephq/lcm-x/releases/tag/v0.29.1)
-at `3a4a08ff501347a79669fab51444c471b09b551d`, released 2026-11-03 (plugin `hermes-lcm-x`, engine `lcm-x`).
-Compaction gets past a row the host still holds, keeps its 10-minute pause, and
-summarises in store order, and a restart after a cleanup pass no longer stores the
-conversation again. See [project status](docs/project-status.md) for the release summary,
+[`v0.29.2`](https://github.com/electricsheephq/lcm-x/releases/tag/v0.29.2)
+(plugin `hermes-lcm-x`, engine `lcm-x`); verify its exact SHA before installation.
+<!-- RM: v0.29.2 GA SHA and date at the cut -->
+In the previous stable release, v0.29.1, compaction gets past a row the host still holds,
+keeps its 10-minute pause, and summarises in store order, and a restart after a cleanup
+pass no longer stores the conversation again. See [project status](docs/project-status.md) for the release summary,
 the disclosed qualification decisions and current work.
 It requires Hermes 0.21.3 or newer (#1080). It carries
 the v0.23.2 lossless
@@ -161,8 +162,9 @@ separate proof planes; do not describe an arbitrary `main` checkout as the
 installed stable product.
 
 v0.29.1 was cut from the `release/v0.29.x` maintenance branch, not from `main`; v0.29.x
-patch releases (v0.29.2 next, the first release train) are cut from that branch. The `main`
-line keeps the identity `hermes-lcm-x v0.29.1` in `plugin.yaml` until its own next release.
+patch releases are cut from that branch. The `main` line carries the forward identity
+`hermes-lcm-x v0.30.0` — nothing lost — which the `v0.30.0-rc1` tag carries first.
+That tag is cut from `main`, while `v0.29.2` comes from `release/v0.29.x`.
 An identity is never a restamp of any past commit's own recorded identity
 (#385 fixed the earlier drift).
 The manifest declares 16 tools; runtime discovery advertises 13 by default,
@@ -344,7 +346,7 @@ On the `main` line, output with all three opt-in flags enabled is:
 
 ```text
 Plugins (1):
-  ✓ hermes-lcm-x v0.29.1 (16 tools)
+  ✓ hermes-lcm-x v0.30.0 (16 tools)
 
 Provider Plugins:
   Context Engine: lcm-x
@@ -1346,7 +1348,7 @@ See [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for project conduct expectations
 and [SECURITY.md](SECURITY.md) for vulnerability reporting.
 See the [releases page](https://github.com/electricsheephq/lcm-x/releases),
 [tags page](https://github.com/electricsheephq/lcm-x/tags), and
-[CHANGELOG](CHANGELOG.md) for version history. `v0.29.1` is the latest stable
+[CHANGELOG](CHANGELOG.md) for version history. `v0.29.2` is the latest stable
 GitHub Release; verify its exact SHA before installation.
 
 ## License

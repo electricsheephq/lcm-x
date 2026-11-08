@@ -1,1 +1,0 @@
-- Fix: Any failed read of the host state.db, not only the sessions read, now marks host evidence unreadable, so host-dependent reliability bars cannot pass on host rows the scorer never read.
