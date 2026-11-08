@@ -8,8 +8,24 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## v0.30.0 (nothing lost)
 
-<!-- RM: curated bullets at the cut -->
-
+- Fix: a delegated child (sub-agent) that is interrupted before it finishes no longer loses its whole transcript
+  (#2482). Before, its rows were stored only when its turn ended, at its session end or before its own compaction,
+  so a host restart, kill or exit while it ran left it with no rows in LCM-X. Its rows are now stored each time the
+  host hands over its list: once at the start of each turn and before every model call. Rows a child stores this way
+  are not stored again when it finishes. Known issue (v0.30.0): a child's rows after its last completed store are lost
+  if the process ends first: while its tools run (that round's tool-call row and finished results stay only in the
+  host), or while a store waits more than 5 s on a busy database at shutdown, which logs a warning (#2483).
+- Changed: Bench instruments enforce earlier user parts and consume-once `composite_of` credit, report credited surplus store ids, and document the rule; instrument and docs only, with no user-facing product change.
+- Changed: v0.30.0's named limits now also cover these shapes, each pinned where it reproduces engine-direct (a
+  strict-xfail test, or a passing test of today's behaviour where §5 says so). Loss: #2259, a fresh byte-identical tool step and the user row after it, skipped after
+  a cold start. #2191, half of a re-stamped tool pair stored without its partner. #2253, a busy session-end tail
+  missing after a gateway stop until resume. #2042, Desktop-source sessions with no rows, cause unknown. Surplus:
+  #2118, a re-formed summary carrier stored after a restart. #2488, a todo snapshot merged with the next prompt
+  after a resume. #2134, a hidden-only or recovery pass, then a host commit, then a restart, not reproduced. #2197's duplicate shape.
+  #2490, a carried turn after a failed predecessor lookup. #2431 item 4, a retained prompt shown with a
+  leading space. #2436, a cursor-0 tool-pair replay on a store with blank conversation ids. #2491, a compression
+  child's reply after a host insert before its carried tail.
+  See `docs/exactly-once-ingest.md` §5.
 - Fix: Carry-range maintenance keeps a compaction's occurrence snapshot bound to its proof, so an equal-content retry with a changed timestamp or message id is still stored after a restart.
 - Fix: Make possible replay copies of a recovered user turn visible after a restart, while preserving new same-text requests.
 - Fix: when the identity-anchor pre-match or its stamp backfill fails on an ingest whose host view changed before the resume point (for example a row inserted before the last one), the ingest now rolls back and classifies again once, instead of falling back to the ordered prefix that stored a shifted row a second time (#1815, shapes 1 and 2). A fault that persists on the retry falls back as before, and no row is lost. A busy retry is still available after this one.
