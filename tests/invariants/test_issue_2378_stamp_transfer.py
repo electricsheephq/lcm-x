@@ -107,8 +107,8 @@ def test_unreadable_placeholder_never_links_and_keeps_primary_links(build, monke
     assert len(p_copies) == 2 and from_p == {(p_copies[1], p_copies[0], T_REQ)}, evidence
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason="625: TODO composite is scaffold before R2 "
-                   "(engine.py:6663; identity_anchor.py:312), so no composite witness is recorded")
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason="625 (#2488, named surplus limit, v0.30.0): the "
+                   "todo composite is treated as scaffold before R2, so no composite witness is recorded")
 def test_625_todo_prompt_composite_with_stamp_transfer_copy_is_replay(build):
     engine = build()
     todo = _PRESERVED_TODO_CONTEXT_PREFIX + "\n- [>] 1. check deployment (in_progress)"
