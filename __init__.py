@@ -697,7 +697,7 @@ def register(ctx):
                         # No engine bound to the child: store without binding one (never bind, never ingest).
                         use_lcm_engine(engine, store_child, timeout=wait)
 
-                aux_session.run_live_child_store(session_id, store)
+                aux_session.run_live_child_store(session_id, store, rows=len(history))
             except Exception as exc:
                 logger.debug("LCM live delegated-child store error: %s", exc)
             return None

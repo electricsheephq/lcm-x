@@ -842,6 +842,8 @@ _LIVE_CHILD_LOCK = threading.Lock()
 _LIVE_DELEGATE_CHILD_ROOTS: dict[str, str] = {}
 _LIVE_CHILD_STORES_IN_FLIGHT: set[str] = set()
 _LIVE_CHILD_PENDING: dict[str, Any] = {}  # the newest store handed over while one was in flight, per child
+_LIVE_CHILD_HANDED_ROWS: dict[str, int] = {}  # rows in the newest list handed over, per child with a store in flight
+_LIVE_CHILD_STORED_ROWS: dict[str, int] = {}  # rows in the newest list whose store completed, per such child
 _LIVE_CHILD_STORE_JOIN_S = 2.0  # the most a host hook waits for a live-child store; the store itself may finish later
 _LIVE_CHILD_SHUTDOWN_DRAIN_S = 5.0  # the most an engine shutdown waits for in-flight or queued live-child stores
 _DELEGATE_AUXILIARY_IDS: set[tuple[str, str]] = set()
@@ -858,7 +860,7 @@ def live_delegate_child_root(session_id: str) -> str:
         return _LIVE_DELEGATE_CHILD_ROOTS.get(str(session_id or ""), "")
 
 
-def run_live_child_store(session_id: str, operation) -> None:
+def run_live_child_store(session_id: str, operation, rows: int = 0) -> None:
     """Run ``operation`` on a worker thread and wait at most ``_LIVE_CHILD_STORE_JOIN_S`` (#2482); never raises.
 
     A host hook must stay far below its own timeout, and a store can wait on SQLite past the lock bounds. One store
@@ -866,37 +868,44 @@ def run_live_child_store(session_id: str, operation) -> None:
     (each list holds every earlier row, and the store appends only what is not stored yet).
     """
     with _LIVE_CHILD_LOCK:
+        _LIVE_CHILD_HANDED_ROWS[session_id] = rows
         if session_id in _LIVE_CHILD_STORES_IN_FLIGHT:
-            _LIVE_CHILD_PENDING[session_id] = operation
+            _LIVE_CHILD_PENDING[session_id] = (operation, rows)
             _count("live_store_queued")
             return
         _LIVE_CHILD_STORES_IN_FLIGHT.add(session_id)
 
+    def finish():  # under _LIVE_CHILD_LOCK
+        _LIVE_CHILD_STORES_IN_FLIGHT.discard(session_id)
+        _LIVE_CHILD_PENDING.pop(session_id, None)
+        _LIVE_CHILD_HANDED_ROWS.pop(session_id, None)
+        _LIVE_CHILD_STORED_ROWS.pop(session_id, None)
+
     def runner():
-        current = operation
+        current = (operation, rows)
         try:
             while current is not None:
                 try:
-                    current()
+                    current[0]()
+                    with _LIVE_CHILD_LOCK:
+                        _LIVE_CHILD_STORED_ROWS[session_id] = current[1]
                 except Exception as exc:
                     logger.debug("LCM live delegated-child store error: %s", exc)
                 with _LIVE_CHILD_LOCK:
                     current = _LIVE_CHILD_PENDING.pop(session_id, None)
                     if current is None:
-                        _LIVE_CHILD_STORES_IN_FLIGHT.discard(session_id)
+                        finish()
         finally:
             if current is not None:  # something beyond Exception escaped: never leave the child marked in flight
                 with _LIVE_CHILD_LOCK:
-                    _LIVE_CHILD_STORES_IN_FLIGHT.discard(session_id)
-                    _LIVE_CHILD_PENDING.pop(session_id, None)
+                    finish()
 
     try:
         worker = threading.Thread(target=runner, name="lcm-live-child-store", daemon=True)
         worker.start()
     except Exception as exc:
         with _LIVE_CHILD_LOCK:
-            _LIVE_CHILD_STORES_IN_FLIGHT.discard(session_id)
-            _LIVE_CHILD_PENDING.pop(session_id, None)
+            finish()
         logger.debug("LCM live delegated-child store not started: %s", exc)
         return
     worker.join(_LIVE_CHILD_STORE_JOIN_S)
@@ -910,7 +919,17 @@ def drain_live_child_stores(timeout: float) -> None:
             if not _LIVE_CHILD_STORES_IN_FLIGHT:
                 return
         if time.monotonic() >= deadline:
-            logger.debug("LCM live delegated-child stores still running at shutdown; left to finish")
+            with _LIVE_CHILD_LOCK:
+                waiting = {sid: max(0, _LIVE_CHILD_HANDED_ROWS.get(sid, 0) - _LIVE_CHILD_STORED_ROWS.get(sid, 0))
+                           for sid in _LIVE_CHILD_STORES_IN_FLIGHT}
+            for sid, unstored in sorted(waiting.items()):
+                # NOT SILENT (#2482): this child's newest rows are lost if the process ends before the store lands.
+                logger.warning(
+                    "LCM shutdown drain timed out after %.1fs: a live delegated-child store is still waiting "
+                    "(likely a busy database); child=%s has up to %d handed-over row(s) not yet stored, lost if "
+                    "the process ends first (#2483)",
+                    timeout, hashlib.sha256(sid.encode("utf-8")).hexdigest()[:12], unstored,
+                )
             return
         time.sleep(0.01)
 

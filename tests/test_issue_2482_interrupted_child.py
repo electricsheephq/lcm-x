@@ -538,8 +538,9 @@ def test_a_drain_that_times_out_says_so_with_the_hashed_child_and_the_unstored_r
         engines[0].shutdown()
     lines = [r.getMessage() for r in caplog.records if r.levelname == "WARNING" and "shutdown drain" in r.getMessage()]
     digest = hashlib.sha256(b"child").hexdigest()[:12]
+    # An upper bound: the stuck store has not returned, so none of the newest list's 3 rows counts as stored yet.
     assert len(lines) == 1, lines
-    assert digest in lines[0] and "2 handed-over row(s)" in lines[0] and "#2483" in lines[0]
+    assert digest in lines[0] and "up to 3 handed-over row(s)" in lines[0] and "#2483" in lines[0]
     assert "child=child" not in lines[0]
     for closing in engines[1:]:
         closing.shutdown()
