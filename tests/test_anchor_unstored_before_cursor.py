@@ -998,11 +998,12 @@ def test_presence_with_many_identical_copies_is_linear(tmp_path):
         for k in range(0, len(rows), 1000):
             engine._store.append_batch(SESSION, rows[k:k + 1000])
         began = time.perf_counter()
-        assert _presence(engine, rows) == []
+        # 9,990 stored and 9,990 shown replies pass the #2116 text budget: a trip, main's result (all are stored).
+        assert _presence(engine, rows) is None
         assert time.perf_counter() - began < 1.5
         # Half the view is the unchanged prefix: its reserved copies are queued once per key, not per candidate.
         began = time.perf_counter()
-        assert _presence(engine, rows, start=len(rows) // 2) == []
+        assert _presence(engine, rows, start=len(rows) // 2) is None
         assert time.perf_counter() - began < 1.5
     finally:
         engine.shutdown()
