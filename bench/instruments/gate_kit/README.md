@@ -105,6 +105,11 @@ A line with that start that does not parse that way (an unknown reason, a non-in
 `recorder.logged_link_unparsed`. Each form's count is the visible surplus it adds to the relation
 witnesses alone, so a row two forms credit counts in both. Scaffold provenance metadata
 (`real_user_scaffold_store_id:<id>`) is not accounting and never clears a row.
+Every stored `composite_of` part must be a user row of C's session with store id < C's. Valid composites
+consume their non-NULL parts once, lowest C store id first; sharing any claimed part requires a separate
+`possible_replay_of` link. The ordinal-0 NULL scaffold claims nothing. `composite_store_ids` lists the
+credited ids held by surplus groups, sorted per lineage and as a sorted union in totals. Composite credit
+does not change M3's numerator (`possible_replay_of` plus `generated_unproven`).
 
 | Output | Fields |
 |---|---|

@@ -1,0 +1,1 @@
+- Changed: Bench instruments enforce earlier user parts and consume-once `composite_of` credit, report credited surplus store ids, and document the rule; instrument and docs only, with no user-facing product change.

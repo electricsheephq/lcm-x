@@ -773,6 +773,8 @@ def score_lineage(g, items, tools, rows, relations, stored=None, forms=None):
             "missing_rows": ms["deficit_rows"] + tc["tool_missing_rows"], "split_assistant_keys": ms["split_keys"],
             "surplus_rows": ms["surplus_rows"] + tc["tool_surplus_rows"], "visible_surplus_rows": visible,
             "silent_surplus_rows": len(silent) + truncated, "silent_unlisted_rows": truncated,
+            "composite_store_ids": sorted((forms or {}).get("composite_rows", set()) &
+                                          {sid for group in groups for sid in group[2]}),
             **{k: credited[k] for k in forms or ()}}, silent
 
 
@@ -849,6 +851,7 @@ def audit(state_db: Path, lcm_db: Path, logs=(), since=None, events_path=None, l
             "visible_surplus_rows", "silent_surplus_rows", "silent_unlisted_rows", "externalized_unresolved",
             "host_todo_rows_expected", *forms)
     totals = {k: sum(p[k] for p in parity.values()) for k in keys}
+    totals["composite_store_ids"] = sorted({sid for p in parity.values() for sid in p["composite_store_ids"]})
     zero = sorted(g for g, p in parity.items() if p["host_session"] and p["expected_rows"] and not p["stored_rows"])
     per_session = Counter(r[1] for r in stored)
     window_ids = {r[0] for rows in by_lineage.values() for r in rows} | set(lost_ids) | retained | kept_todo | recovery

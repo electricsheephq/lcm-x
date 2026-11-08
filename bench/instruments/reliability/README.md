@@ -143,11 +143,16 @@ the host reported `interrupted`. Any other assistant row is surplus.
   `link_pending_ids` (a `link_pending` relation with `related_store_id` NULL; the ingest writes one only when
   computing a row's links raised, and then over-marks, new rows of that ingest included, so a surplus copy that
   carries one is visible) and `composite_witness` (a stored user row C with
-  `composite_of` relations, ordinals 0..n-1 contiguous with n >= 2, each naming a stored row of C's session or NULL
-  for the host scaffold, at most one NULL; with one NULL the leftover span starts with the todo injection header
+  `composite_of` relations, ordinals 0..n-1 contiguous with n >= 2, each naming an earlier stored user row of C's
+  session (store id < C's), or NULL only at ordinal 0 for the host scaffold; with one NULL the leftover span starts
+  with the todo injection header
   `_PRESERVED_TODO_CONTEXT_PREFIX`, with none ordinal 0 names a stored user row that starts with it; C's content is
   the segments joined by `\n\n`, byte for byte; only C is credited, never its parts). The relation format is
-  provisional. `link_pending_rows` and `composite_rows` count the visible surplus each form adds to the relation
+  provisional. Valid composites consume their non-NULL parts once, lowest C store id first; any shared claimed
+  part prevents credit, and the replay needs its own `possible_replay_of`. NULL claims nothing. The gate audit's
+  `composite_store_ids` lists credited ids held by surplus groups, sorted per lineage and unioned in totals;
+  composite credit leaves M3 unchanged. `link_pending_rows` and `composite_rows` count the visible surplus each
+  form adds to the relation
   witnesses alone (a row two forms credit counts in both); `link_pending_rows_total` counts every store row with a
   `link_pending` relation, surplus or not: non-zero is a defect signal of its own. The scorer has no log input, so
   logged intended links are credited by the gate audit only. Scaffold provenance metadata

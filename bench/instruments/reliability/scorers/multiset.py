@@ -499,12 +499,14 @@ def link_pending_ids(relations):
 
 def composite_witness(relations, rows):
     """#2212 ``composite_of`` witness (provisional format): the stored user rows C it credits. C holds one relation
-    per segment, ordinals 0..n-1 contiguous with n >= 2, each naming the contained stored row of C's session, or NULL
+    per segment, ordinals 0..n-1 contiguous with n >= 2, each naming an earlier stored user row of C's session, or NULL
     for the host scaffold, at most once and only at ordinal 0 (the product renders the todo block first). With one
     NULL that leftover span starts with the todo injection header; with
     none, ordinal 0 names a stored user row that starts with it. C's content is the segments joined by "\n\n" in
-    ordinal order, byte for byte. Only C is credited: the contained rows are scored as ordinary rows."""
-    header, segments, out = todo_header(), defaultdict(list), set()
+    ordinal order, byte for byte. Valid composites consume their non-NULL parts once, in ascending C store id:
+    a composite sharing any already-claimed part receives no credit; NULL claims nothing. Only C is credited:
+    the contained rows are scored as ordinary rows. A replayed composite needs its own possible_replay_of link."""
+    header, segments, valid = todo_header(), defaultdict(list), {}
     for sid, kind, other, *ordinal in relations:
         if kind == "composite_of":
             segments[sid].append((ordinal[0] if ordinal else None, other))
@@ -518,6 +520,8 @@ def composite_witness(relations, rows):
         nulls = [i for i, r in enumerate(related) if r is None]
         if nulls not in ([], [0]) or any(r not in rows or rows[r][0] != session for r in related if r is not None):
             continue
+        if any(r >= c or rows[r][1] != "user" for r in related if r is not None):
+            continue
         texts, content = [None if r is None else rows[r][2] or "" for r in related], content or ""
         if nulls:  # the scaffold is the one span the contained rows leave
             i = nulls[0]
@@ -530,7 +534,12 @@ def composite_witness(relations, rows):
         else:
             first_ok = rows[related[0]][1] == "user" and texts[0].startswith(header)
         if first_ok and "\n\n".join(texts) == content:
+            valid[c] = {r for r in related if r is not None}
+    out, claimed = set(), set()
+    for c, parts in sorted(valid.items()):
+        if not parts & claimed:
             out.add(c)
+            claimed.update(parts)
     return out
 
 

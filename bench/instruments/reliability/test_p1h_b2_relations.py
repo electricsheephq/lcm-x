@@ -610,3 +610,41 @@ def test_composite_of_witness_leaves_a_silent_part_silent():
     split = multiset.split_surplus(groups, [(9, "composite_of", None, 0), (9, "composite_of", 7, 1)], rows)
     assert (split["visible_surplus_rows"], split["silent_surplus_rows"], split["composite_rows"]) == (1, 1, 1)
     assert [e["store_id"] for e in split["silent_surplus_examples"]] == [7]
+
+
+@pytest.mark.parametrize("case,credited,visible", [
+    ("scaffold", {9}, 1), ("stored-todo", {9}, 1), ("repeated-part", {9}, 1),
+    ("replay-link", {9}, 2), ("distinct-parts", {9, 10}, 2), ("partial-overlap", {9}, 1),
+    ("later-part", set(), 0), ("non-user-part", set(), 0), ("stored-non-user-part", set(), 0),
+    ("rejected-claims-nothing", {9, 12}, 2),
+])
+def test_composite_consume_once(case, credited, visible):
+    rows = todo_rows({**PARTS, 7: ("S", "user", "prompt three"), 11: ("S", "user", "later")})
+    composites = {9: [None, 1]}
+    if case == "stored-todo":
+        composites = {9: [5, 1]}
+    elif case in ("repeated-part", "replay-link", "distinct-parts"):
+        composites = {10: [None, 2 if case == "distinct-parts" else 1], 9: [None, 1]}
+    elif case in ("partial-overlap", "rejected-claims-nothing"):
+        composites = {10: [None, 2, 7], 9: [None, 1, 2]}
+        if case == "rejected-claims-nothing":
+            composites = {12: [None, 7], **composites}
+    elif case == "later-part":
+        composites = {9: [None, 11]}
+    elif case in ("non-user-part", "stored-non-user-part"):
+        rows[1] = ("S", "assistant", rows[1][2])
+        if case == "stored-non-user-part":
+            composites = {9: [5, 1]}
+    relations = []
+    for sid, parts in composites.items():  # higher composite first: credit must follow store order
+        rows[sid] = ("S", "user", "\n\n".join(
+            todo_rows({0: ("S", "user", BLOCK)})[0][2] if p is None else rows[p][2] for p in parts))
+        relations += [(sid, "composite_of", p, i) for i, p in enumerate(parts)]
+    if case == "replay-link":
+        relations.append((10, "possible_replay_of", 9))
+    assert multiset.composite_witness(relations, rows) == credited
+    groups = []
+    multiset.score([], [(sid, *rows[sid]) for sid in composites], surplus_keys=groups)
+    split = multiset.split_surplus(groups, relations, rows)
+    assert (split["composite_rows"], split["visible_surplus_rows"], split["silent_surplus_rows"]) == (
+        len(credited), visible, len(composites) - visible)
