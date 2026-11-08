@@ -55,3 +55,21 @@ def test_a_half_new_pair_is_stored_whole(build, monkeypatch, new_half):
         pytest.fail(f"not the #2191 shape: {added}")
     # Main stores the new half alone: its partner's copy for this occurrence is missing beside it.
     assert [role for role, _id, _stamp in added] == ["assistant", "tool"], f"#2191 known shape: added={added}"
+
+
+def test_an_unchanged_pair_replay_adds_nothing(build, monkeypatch):
+    """Control: with neither half re-stamped, the cold replay of the same view stores no row."""
+    plain_fixture = shapes.fixture
+
+    def stamped_fixture(*, uids=False):
+        rows = plain_fixture(uids=uids)
+        rows[-2]["timestamp"], rows[-1]["timestamp"] = 11, 12
+        return rows
+
+    monkeypatch.setattr(shapes, "fixture", stamped_fixture)
+    engine, host = compact(build, mode="cold")
+    before = stored(engine)
+    assert engine._compress_commit_proof is None and engine._durable_commit_proof_payload() is not None
+    engine.ingest(deepcopy(host))
+    assert not engine._ingest_failure_count, engine._last_ingest_error
+    assert stored(engine) == before
