@@ -40,8 +40,28 @@ class HostChild(Agent):
     tag = ""
 
     def fire(self, ctx, name, history, **extra):
-        return [callback(session_id=self.session_id, platform="subagent", conversation_history=list(history), **extra)
-                for callback in ctx.hooks.get(name, [])]
+        """Run the callbacks on a separate worker thread, as the host runs its timeout-bounded hooks."""
+        payload = dict(session_id=self.session_id, platform="subagent", conversation_history=list(history), **extra)
+        out, errors = [], []
+
+        def run():
+            try:
+                out.extend(callback(**payload) for callback in ctx.hooks.get(name, []))
+            except BaseException as exc:  # surfaced below: a hook must never raise
+                errors.append(exc)
+
+        worker = threading.Thread(target=run, name=f"hermes-hook-{name}", daemon=True)
+        worker.start()
+        worker.join(30)
+        assert not worker.is_alive() and not errors, errors
+        return out
+
+    def spawn(self, ctx):
+        """The parent fires ``subagent_start`` on its own thread before the child runs (tools/delegate_tool.py)."""
+        for callback in ctx.hooks.get("subagent_start", []):
+            callback(parent_session_id=self._parent_session_id, parent_turn_id="pt-1", parent_subagent_id="",
+                     child_session_id=self.session_id, child_subagent_id=self._subagent_id, child_role="leaf",
+                     child_goal="count the ledger")
 
     def llm_start(self, ctx, history):
         return self.fire(ctx, "pre_llm_call", history, user_message=history[0]["content"], is_first_turn=True,
@@ -67,6 +87,7 @@ def _setup(host, route):
     ctx.hooks["post_llm_call"][0](session_id="parent", platform="cli",
                                   conversation_history=PARENT_VIEW, context_compressor=parent)
     child = HostChild("child", **DELEGATE)
+    child.spawn(ctx)
     engine = parent
     if route == "own_engine":
         engine = clone(ctx)
@@ -153,6 +174,7 @@ def test_parallel_children_of_one_parent_store_only_their_own_rows(host):
     for n, tag in enumerate(("a:", "b:", "c:")):
         child = HostChild(f"child-{n}", **dict(DELEGATE, _subagent_id=f"sa-{n}", log_prefix=f"[subagent-{n}]"))
         child.tag = tag
+        child.spawn(ctx)
         children.append(child)
     start = threading.Barrier(len(children))
 
@@ -232,3 +254,23 @@ def test_residual_a_child_interrupted_while_its_tools_run_keeps_that_round(host,
     child.run_until(ctx, 2)
     # The host persists the third tool-call row and its result while the tools run; no model call follows.
     assert _contents(child_rows(parent)) == _contents(view(3))
+
+
+@pytest.mark.parametrize("route", ROUTES)
+def test_without_a_subagent_start_record_the_model_call_hooks_store_nothing(host, route):
+    # A host without the subagent_start hook (the legacy frame-walk fallback): behaviour stays at main's.
+    load, clone = host
+    ctx, _ = load()
+    parent = clone(ctx)
+    parent.on_session_start("parent", platform="cli", context_length=200_000)
+    child = HostChild("child", **DELEGATE)  # no spawn(): no subagent_start record
+    engine = parent
+    if route == "own_engine":
+        engine = clone(ctx)
+        child.start(engine)
+    child.run_until(ctx, 2)
+    assert child_rows(parent) == []
+    final = view(2, final=True)
+    child.turn(ctx, final, engine)
+    child.end(engine, final)
+    assert _contents(child_rows(parent)) == _contents(final)
