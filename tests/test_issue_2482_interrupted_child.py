@@ -101,11 +101,14 @@ def _contents(rows):
 
 
 ROUTES = ["own_engine", "parent_engine"]
+# The host binds each child's own engine (on_session_start on the child's thread) before its first hook; the early
+# store runs only for a child bound that way as a delegate. "parent_engine" (never bound) keeps main's behaviour.
+BOUND = ["own_engine"]
 # r7's three interrupted shapes: tool rounds completed before the interruption.
 SHAPES = {"kill_third_model_call_in_flight": 2, "exit_after_one_call_and_result": 1, "exit_with_only_the_prompt": 0}
 
 
-@pytest.mark.parametrize("route", ROUTES)
+@pytest.mark.parametrize("route", BOUND)
 @pytest.mark.parametrize("shape", list(SHAPES))
 def test_an_interrupted_child_keeps_every_row_handed_over(host, route, shape):
     _, _, ctx, parent, child, _ = _setup(host, route)
@@ -134,7 +137,7 @@ def test_a_child_that_finishes_normally_is_unchanged(host, route):
     assert _contents(child_rows(parent)) == _contents(final)
 
 
-@pytest.mark.parametrize("route", ROUTES)
+@pytest.mark.parametrize("route", BOUND)
 def test_the_parent_resume_after_a_kill_adds_no_copy(host, route):
     load, clone, ctx, parent, child, _ = _setup(host, route)
     child.run_until(ctx, 2)
@@ -159,7 +162,7 @@ def test_other_sessions_ignore_the_model_call_hook(host):
     assert _contents(parent._store.get_session_messages("parent")) == before
 
 
-@pytest.mark.parametrize("route", ROUTES)
+@pytest.mark.parametrize("route", BOUND)
 def test_a_retried_model_call_with_the_same_list_adds_nothing(host, route):
     _, _, ctx, parent, child, _ = _setup(host, route)
     child.run_until(ctx, 1)
@@ -169,13 +172,14 @@ def test_a_retried_model_call_with_the_same_list_adds_nothing(host, route):
 
 
 def test_parallel_children_of_one_parent_store_only_their_own_rows(host):
-    _, _, ctx, parent, _, _ = _setup(host, "parent_engine")
+    _, clone, ctx, parent, _, _ = _setup(host, "parent_engine")
     before = _contents(parent._store.get_session_messages("parent"))
     children = []
     for n, tag in enumerate(("a:", "b:", "c:")):
         child = HostChild(f"child-{n}", **dict(DELEGATE, _subagent_id=f"sa-{n}", log_prefix=f"[subagent-{n}]"))
         child.tag = tag
         child.spawn(ctx)
+        child.start(clone(ctx))
         children.append(child)
     start = threading.Barrier(len(children))
 
@@ -195,7 +199,7 @@ def test_the_pre_llm_call_return_value_is_unchanged(host, route):
     _, _, ctx, parent, child, _ = _setup(host, route)
     # main 4e8c8c2d returns [None] here for the child and the parent; the child store adds no context.
     assert child.llm_start(ctx, view(0)) == [None] * len(ctx.hooks["pre_llm_call"])
-    assert _contents(child_rows(parent)) == _contents(view(0))
+    assert _contents(child_rows(parent)) == (_contents(view(0)) if route == "own_engine" else [])
     parent_returns = [callback(session_id="parent", platform="cli", conversation_history=PARENT_VIEW,
                                user_message="x", is_first_turn=False, model="m")
                       for callback in ctx.hooks["pre_llm_call"]]
@@ -204,7 +208,7 @@ def test_the_pre_llm_call_return_value_is_unchanged(host, route):
 
 
 def test_a_busy_store_lock_skips_the_store_within_the_bound(host, monkeypatch):
-    _, _, ctx, parent, child, _ = _setup(host, "parent_engine")
+    _, _, ctx, parent, child, _ = _setup(host, "own_engine")
     aux = ctx.module("aux_session")
     monkeypatch.setattr(aux, "_LIVE_CHILD_STORE_WAIT_S", 0.2, raising=False)
     held, release = threading.Event(), threading.Event()
@@ -230,7 +234,7 @@ def test_a_busy_store_lock_skips_the_store_within_the_bound(host, monkeypatch):
 
 
 def test_a_failing_store_never_raises_into_the_hook(host, monkeypatch):
-    _, _, ctx, parent, child, _ = _setup(host, "parent_engine")
+    _, _, ctx, parent, child, _ = _setup(host, "own_engine")
     mixin = ctx.module("aux_session").DelegateChildMixin
     real = mixin._append_delegate_child_rows
 
@@ -249,7 +253,7 @@ def test_a_failing_store_never_raises_into_the_hook(host, monkeypatch):
 @pytest.mark.xfail(strict=True, reason="#2482 named loss limit (v0.30.0): a child interrupted while its tools run "
                    "keeps its rows up to its last model call; that round's tool-call row and finished results stay "
                    "only in the host (follow-up: recovery from the host's state.db)")
-@pytest.mark.parametrize("route", ROUTES)
+@pytest.mark.parametrize("route", BOUND)
 def test_residual_a_child_interrupted_while_its_tools_run_keeps_that_round(host, route):
     _, _, ctx, parent, child, _ = _setup(host, route)
     child.run_until(ctx, 2)
@@ -294,3 +298,77 @@ def test_when_another_context_engine_is_active_the_model_call_hooks_store_nothin
         assert prototype._store.get_session_messages("child") == []
     finally:
         prototype.shutdown()
+
+
+
+@pytest.mark.parametrize("shape", list(SHAPES))
+def test_a_child_that_never_bound_an_engine_keeps_mains_behaviour(host, shape):
+    # Auxiliary detection needs the child's own frames, which only its bind on its own thread sees; the hook worker
+    # thread cannot tell a delegate from an AUXILIARY child, so an unbound child is left to the end store, as on main.
+    _, _, ctx, parent, child, engine = _setup(host, "parent_engine")
+    child.run_until(ctx, SHAPES[shape])
+    assert child_rows(parent) == []
+    final = view(2, final=True)
+    child.turn(ctx, final, engine)
+    child.end(engine, final)
+    assert _contents(child_rows(parent)) == _contents(final)
+
+
+def test_an_auxiliary_child_with_a_subagent_start_record_stores_nothing(host):
+    load, clone = host
+    ctx, _ = load()
+    parent = clone(ctx)
+    parent.on_session_start("parent", platform="cli", context_length=200_000)
+    child = HostChild("child", **dict(DELEGATE, enabled_toolsets=["memory", "skills"]))
+    child.spawn(ctx)
+    engine = clone(ctx)
+    child.start(engine)
+    child.run_until(ctx, 2)
+    final = view(2, final=True)
+    child.turn(ctx, final, engine)
+    child.end(engine, final)
+    assert child_rows(parent) == []
+
+
+def test_a_child_rotated_by_its_own_compaction_keeps_the_rows_handed_over_after_it(host, monkeypatch):
+    _, _, ctx, parent, child, engine = _setup(host, "own_engine")
+    big = [{"role": "user", "content": "start " + "payload " * 400}] + [
+        {"role": "assistant" if i % 2 else "user", "content": f"turn {i} " + "payload " * 400} for i in range(1, 12)]
+    child.llm_start(ctx, big[:1])
+    child.api_call(ctx, big, 1)
+    monkeypatch.setattr(engine, "_get_host_fallback_compressor", lambda: None)
+    monkeypatch.setattr(engine, "_bypass_compaction_target_tokens", lambda **kwargs: 64)
+    compacted = child.compress(engine, big)
+    child.rotate(engine, "child-continued")
+    after = [*compacted, {"role": "assistant", "content": "after rotation 0"}]
+    child.api_call(ctx, after, 2)
+    after = [*after, {"role": "assistant", "content": "after rotation 1"}]
+    child.api_call(ctx, after, 3)
+    # Interrupted here.
+    assert _contents(child_rows(parent)) == _contents(big)
+    assert _contents(child_rows(parent, "child-continued")) == [("assistant", "after rotation 0"),
+                                                                 ("assistant", "after rotation 1")]
+
+
+def test_a_slow_store_returns_to_the_host_within_the_bound_and_still_lands(host, monkeypatch):
+    _, _, ctx, parent, child, _ = _setup(host, "own_engine")
+    aux = ctx.module("aux_session")
+    monkeypatch.setattr(aux, "_LIVE_CHILD_STORE_JOIN_S", 0.3, raising=False)
+    mixin = aux.DelegateChildMixin
+    real, calls = mixin._append_delegate_child_rows, []
+
+    def slow(self, *args, **kwargs):
+        calls.append(1)
+        time.sleep(2.0)  # e.g. SQLite busy: a wait the lock bounds do not cover
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(mixin, "_append_delegate_child_rows", slow)
+    began = time.monotonic()
+    child.api_call(ctx, view(1), 1)
+    child.api_call(ctx, view(1), 2)  # while the first store is in flight: no second store starts
+    assert time.monotonic() - began < 1.5
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and len(child_rows(parent)) < 3:
+        time.sleep(0.05)
+    assert _contents(child_rows(parent)) == _contents(view(1))
+    assert len(calls) == 1
