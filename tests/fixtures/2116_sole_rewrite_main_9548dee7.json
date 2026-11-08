@@ -650,5 +650,331 @@
    "",
    1
   ]
+ ],
+ "pruned-False": [
+  [
+   "assistant",
+   "next alpha beta gamma delta alpha beta gamma del",
+   "",
+   "",
+   1
+  ],
+  [
+   "user",
+   "the next user turn alpha beta gamma delta alpha ",
+   "",
+   "",
+   1
+  ],
+  [
+   "user",
+   "the resent user turn alpha beta gamma delta alph",
+   "",
+   "",
+   1
+  ]
+ ],
+ "pruned-True": [
+  [
+   "assistant",
+   "checking the file alpha beta gamma delta alpha b",
+   "",
+   "",
+   1
+  ],
+  [
+   "assistant",
+   "next alpha beta gamma delta alpha beta gamma del",
+   "",
+   "",
+   1
+  ],
+  [
+   "assistant",
+   "reply to T0 alpha beta gamma delta alpha beta ga",
+   "",
+   "",
+   1
+  ],
+  [
+   "assistant",
+   "reply to T1 alpha beta gamma delta alpha beta ga",
+   "",
+   "",
+   1
+  ],
+  [
+   "assistant",
+   "reply to T10 alpha beta gamma delta alpha beta g",
+   "",
+   "",
+   1
+  ],
+  [
+   "assistant",
+   "reply to T11 alpha beta gamma delta alpha beta g",
+   "",
+   "",
+   1
+  ],
+  [
+   "assistant",
+   "reply to T12 alpha beta gamma delta alpha beta g",
+   "",
+   "",
+   1
+  ],
+  [
+   "assistant",
+   "reply to T13 alpha beta gamma delta alpha beta g",
+   "",
+   "",
+   1
+  ],
+  [
+   "assistant",
+   "reply to T14 alpha beta gamma delta alpha beta g",
+   "",
+   "",
+   1
+  ],
+  [
+   "assistant",
+   "reply to T15 alpha beta gamma delta alpha beta g",
+   "",
+   "",
+   1
+  ],
+  [
+   "assistant",
+   "reply to T16 alpha beta gamma delta alpha beta g",
+   "",
+   "",
+   1
+  ],
+  [
+   "assistant",
+   "reply to T17 alpha beta gamma delta alpha beta g",
+   "",
+   "",
+   1
+  ],
+  [
+   "assistant",
+   "reply to T18 alpha beta gamma delta alpha beta g",
+   "",
+   "",
+   1
+  ],
+  [
+   "assistant",
+   "reply to T19 alpha beta gamma delta alpha beta g",
+   "",
+   "",
+   1
+  ],
+  [
+   "assistant",
+   "reply to T2 alpha beta gamma delta alpha beta ga",
+   "",
+   "",
+   1
+  ],
+  [
+   "assistant",
+   "reply to T20 alpha beta gamma delta alpha beta g",
+   "",
+   "",
+   1
+  ],
+  [
+   "assistant",
+   "reply to T21 alpha beta gamma delta alpha beta g",
+   "",
+   "",
+   1
+  ],
+  [
+   "assistant",
+   "reply to T22 alpha beta gamma delta alpha beta g",
+   "",
+   "",
+   1
+  ],
+  [
+   "assistant",
+   "reply to T23 alpha beta gamma delta alpha beta g",
+   "",
+   "",
+   1
+  ],
+  [
+   "assistant",
+   "reply to T24 alpha beta gamma delta alpha beta g",
+   "",
+   "",
+   1
+  ],
+  [
+   "assistant",
+   "reply to T25 alpha beta gamma delta alpha beta g",
+   "",
+   "",
+   1
+  ],
+  [
+   "assistant",
+   "reply to T26 alpha beta gamma delta alpha beta g",
+   "",
+   "",
+   1
+  ],
+  [
+   "assistant",
+   "reply to T27 alpha beta gamma delta alpha beta g",
+   "",
+   "",
+   1
+  ],
+  [
+   "assistant",
+   "reply to T28 alpha beta gamma delta alpha beta g",
+   "",
+   "",
+   1
+  ],
+  [
+   "assistant",
+   "reply to T29 alpha beta gamma delta alpha beta g",
+   "",
+   "",
+   1
+  ],
+  [
+   "assistant",
+   "reply to T3 alpha beta gamma delta alpha beta ga",
+   "",
+   "",
+   1
+  ],
+  [
+   "assistant",
+   "reply to T30 alpha beta gamma delta alpha beta g",
+   "",
+   "",
+   1
+  ],
+  [
+   "assistant",
+   "reply to T31 alpha beta gamma delta alpha beta g",
+   "",
+   "",
+   1
+  ],
+  [
+   "assistant",
+   "reply to T32 alpha beta gamma delta alpha beta g",
+   "",
+   "",
+   1
+  ],
+  [
+   "assistant",
+   "reply to T33 alpha beta gamma delta alpha beta g",
+   "",
+   "",
+   1
+  ],
+  [
+   "assistant",
+   "reply to T34 alpha beta gamma delta alpha beta g",
+   "",
+   "",
+   1
+  ],
+  [
+   "assistant",
+   "reply to T35 alpha beta gamma delta alpha beta g",
+   "",
+   "",
+   1
+  ],
+  [
+   "assistant",
+   "reply to T36 alpha beta gamma delta alpha beta g",
+   "",
+   "",
+   1
+  ],
+  [
+   "assistant",
+   "reply to T37 alpha beta gamma delta alpha beta g",
+   "",
+   "",
+   1
+  ],
+  [
+   "assistant",
+   "reply to T38 alpha beta gamma delta alpha beta g",
+   "",
+   "",
+   1
+  ],
+  [
+   "assistant",
+   "reply to T4 alpha beta gamma delta alpha beta ga",
+   "",
+   "",
+   1
+  ],
+  [
+   "assistant",
+   "reply to T5 alpha beta gamma delta alpha beta ga",
+   "",
+   "",
+   1
+  ],
+  [
+   "assistant",
+   "reply to T6 alpha beta gamma delta alpha beta ga",
+   "",
+   "",
+   1
+  ],
+  [
+   "assistant",
+   "reply to T7 alpha beta gamma delta alpha beta ga",
+   "",
+   "",
+   1
+  ],
+  [
+   "assistant",
+   "reply to T8 alpha beta gamma delta alpha beta ga",
+   "",
+   "",
+   1
+  ],
+  [
+   "assistant",
+   "reply to T9 alpha beta gamma delta alpha beta ga",
+   "",
+   "",
+   1
+  ],
+  [
+   "user",
+   "the next user turn alpha beta gamma delta alpha ",
+   "",
+   "",
+   1
+  ],
+  [
+   "user",
+   "the resent user turn alpha beta gamma delta alph",
+   "",
+   "",
+   1
+  ]
  ]
 }

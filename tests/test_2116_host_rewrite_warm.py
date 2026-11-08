@@ -202,6 +202,14 @@ def test_a_host_rewrite_keeps_mains_counts_and_the_replaced_reply_is_stored_once
 # next certifying run.
 
 def _sole_rewrite(kind):
+    if kind == "pruned":  # the turn's call row loses its calls and its result is dropped (#2116 review r2, N1)
+        def special():
+            return [_callrow("c39", "checking the file"), _res("c39")]
+
+        def mutate(view):
+            view[-2].pop("tool_calls")
+            del view[-1]
+        return special, mutate
     if kind == "whitespace":
         def special():
             return [_reply("reply  to T39 spaced")]
@@ -250,7 +258,7 @@ def _main_added(kind, restart):
 @pytest.mark.skipif(not os.environ.get("LCM_SOLE_REWRITE_RECORD"), reason="records main's fixture only on request")
 def test_record_mains_sole_rewrite_fixture(tmp_path):
     out = {f"{kind}-{restart}": _sole_rewrite_resend(tmp_path / f"{kind}{restart}", kind, restart)
-           for kind in ("whitespace", "merged") for restart in (False, True)}
+           for kind in ("whitespace", "merged", "pruned") for restart in (False, True)}
     with open(os.environ["LCM_SOLE_REWRITE_RECORD"], "w") as f:
         json.dump(out, f, indent=1)
 
@@ -266,6 +274,32 @@ def test_sole_rewrite_named_residual_warm_equals_main(tmp_path, kind):
     assert _sole_rewrite_resend(tmp_path, kind, False) == _main_added(kind, False)
 
 
-@pytest.mark.parametrize("kind", ["whitespace", "merged"])
+def test_a_sole_reply_left_by_a_pruned_call_row_keeps_mains_count_warm(tmp_path):
+    """The stored call row's text accounts for the row it becomes once the host strips its calls (#2116 review r2)."""
+    assert _sole_rewrite_resend(tmp_path, "pruned", False) == _main_added("pruned", False)
+
+
+@pytest.mark.parametrize("kind", ["whitespace", "merged", "pruned"])
 def test_sole_rewrite_after_a_restart_equals_main(tmp_path, kind):
     assert _sole_rewrite_resend(tmp_path, kind, True) == _main_added(kind, True)
+
+
+def test_a_warm_stored_replaced_reply_is_copied_by_a_plain_restart_like_its_sibling(tmp_path):
+    """Residual (1), #1674's class: after the warm path stores the replaced reply, a plain restart (no cleanup-only
+    pass) copies it exactly as main's restart batch copies the warm-stored reply after it. No row is lost."""
+    engine = _engine(tmp_path)
+    try:
+        view = _warm(engine, lambda: [_reply("reply to T39")], at=39, turns=40)
+        before = Counter(_key(r) for r in _stored(engine))
+        _resend(view)
+        _ingest_twice(engine, view)
+        engine.shutdown()
+        engine = _engine(tmp_path)
+        engine.ingest(view)
+        view += [_u("after the restart", 4000), _reply("after the restart reply")]
+        after = _ingest_twice(engine, view)
+        assert not before - after, "a stored row was lost"
+        reply, sibling = _count_text(engine, "a brand new reply" + PAD), _count_text(engine, "next" + PAD)
+        assert (reply, sibling) == ((1, 2) if ON_MAIN else (2, 2))  # main stored the reply only at the restart
+    finally:
+        engine.shutdown()

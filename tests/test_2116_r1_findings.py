@@ -190,8 +190,124 @@ def test_r1_2_an_over_budget_reply_costs_no_identity_or_cleanup_work(tmp_path, m
         monkeypatch.setattr(type(engine), "_message_replay_identity",
                             lambda self, *a, **k: calls.append("identity") or real_identity(self, *a, **k))
         monkeypatch.setattr(type(engine), "_active_cleanup_replay_identity",
-                            lambda self, *a, **k: calls.append("cleanup") or real_cleanup(self, *a, **k))
+                            lambda self, *a, **k: calls.append("cleanup") or real_cleanup(*a, **k))  # a classmethod
         assert _presence(engine, [big], identities) == []
         assert calls == []
+    finally:
+        engine.shutdown()
+
+
+# r2 (Astra): a marked reply shown anywhere in the view is never normalized by the reply pass, and every reply then
+# keeps main's result; the tool audit runs as on main.
+
+@pytest.mark.parametrize("marker", ["[Externalized payload: 4000001 chars; ref=lcm_000000000000_x.json]",
+                                    "[LCM sensitive redaction: name=password_assignment; len=8]"])
+def test_r2_a_marked_reply_shown_past_the_cursor_is_never_normalized(tmp_path, monkeypatch, marker):
+    engine = _engine(tmp_path)
+    try:
+        engine._store.append_batch(SESSION, [_u("older user", 1), {"role": "assistant", "content": "older" + PAD}])
+        marked = {"role": "assistant", "content": "a later reply " + marker}
+        rows = [dict(NEW), _call("call_x", 3), _result("call_x", "the result", 4), _u("the next user", 5), marked]
+        view = [dict(MISSED_USER), *rows]
+        identities = [engine._message_replay_identity(m) for m in view[:-1]] + [("assistant", "x", "", "", "")]
+        seen = []
+        real = type(engine)._active_cleanup_replay_identity
+        monkeypatch.setattr(type(engine), "_active_cleanup_replay_identity",
+                            lambda self, identity, *a, **k: seen.append(identity[1]) or real(identity, *a, **k))
+        out = engine._identity_anchor_unaccounted(
+            view, view, 4, 0, lambda i: identities[i], {}, True, set(), {"replayed": set()}, {}, (), [0])
+        assert "x" not in seen  # the marked reply's identity never reaches the reply pass
+        assert sorted(out) == [2, 3]  # every reply keeps main's result; the moved pair is stored, as on main
+    finally:
+        engine.shutdown()
+
+
+def test_r2_one_text_counter_bounds_candidates_stored_and_shown_replies(tmp_path, monkeypatch):
+    """Candidates, stored replies and shown replies share the 4 MB counter: each alone fits, together they trip."""
+    monkeypatch.setattr(identity_anchor, "_PRESENCE_TEXT_BYTES", 6000, raising=False)
+    engine = _engine(tmp_path)
+    try:
+        engine._store.append_batch(SESSION, [_u("older user", 1), {"role": "assistant", "content": "o" * 2500}])
+        new = {"role": "assistant", "content": "n" * 2500}
+        assert _presence(engine, [new]) == []  # 2,500 (candidate) + 2,500 (stored) + 2,500 (shown) > 6,000
+    finally:
+        engine.shutdown()
+
+
+def test_r2_a_stored_call_rows_text_accounts_for_the_reply_it_becomes(tmp_path):
+    engine = _engine(tmp_path)
+    try:
+        engine._store.append_batch(SESSION, [_u("older user", 1), {
+            "role": "assistant", "content": "checking the file" + PAD, "tool_calls": [
+                {"id": "c1", "type": "function", "function": {"name": "read_file", "arguments": "{}"}}]},
+            _result("c1", "the result", 2)])
+        assert _presence(engine, [{"role": "assistant", "content": "checking the file" + PAD}]) == []
+    finally:
+        engine.shutdown()
+
+
+MARKERS = {"none (a positive control)": "plain text",
+           "externalized": "[Externalized payload: 4000001 chars; ref=lcm_000000000000_x.json]",
+           "ingest-placeholder": "[Externalized LCM ingest payload: 4000001 chars; ref=lcm_000000000000_y.json]",
+           "redaction": "[LCM sensitive redaction: name=password_assignment; len=8]"}
+
+
+def _count_payload_loads(monkeypatch):
+    """Every binding of the payload loaders in the package returns a large in-memory payload and is counted."""
+    import sys
+
+    loads = []
+
+    def load(*args, **kwargs):
+        loads.append(args[:1])
+        return {"content": "z" * 4_000_001}
+
+    def restore(content, *args, **kwargs):
+        if "Externalized LCM ingest payload" in str(content):  # a call on text without one loads nothing
+            loads.append(("placeholder",))
+        return content
+
+    for name, module in list(sys.modules.items()):
+        if name.startswith("hermes_lcm") and module is not None:
+            if hasattr(module, "load_externalized_payload"):
+                monkeypatch.setattr(module, "load_externalized_payload", load)
+            if hasattr(module, "restore_ingest_payload_placeholders"):
+                monkeypatch.setattr(module, "restore_ingest_payload_placeholders", restore)
+    return loads
+
+
+@pytest.mark.parametrize("marker", list(MARKERS))
+@pytest.mark.parametrize("where", ["stored", "shown-below-the-cursor", "shown-at-the-cursor", "shown-past-the-cursor"])
+def test_r2_marked_text_anywhere_costs_no_payload_load_and_no_cleanup(tmp_path, monkeypatch, marker, where):
+    """A normal candidate (the resent turn's sole reply) beside marked text: the reply check loads no payload and
+    cleans no marked text, every reply keeps main's result, and the moved pair is stored as on main."""
+    engine = _engine(tmp_path)
+    try:
+        marked = {"role": "assistant", "content": "a marked reply " + MARKERS[marker]}
+        turn = [dict(MISSED_USER), dict(NEW), _call("call_x", 3), _result("call_x", "the result", 4)]
+        if where == "stored":
+            engine._store.append_batch(SESSION, [_u("older user", 1), dict(marked)])
+            view, cursor, missed = turn, 4, [0]
+        elif where == "shown-below-the-cursor":
+            view, cursor, missed = [_u("an earlier user", 1), dict(marked), *turn], 6, [2]
+        elif where == "shown-at-the-cursor":
+            view, cursor, missed = [*turn, _u("the next user", 5), dict(marked)], 5, [0]
+        else:
+            view, cursor, missed = [*turn, _u("the next user", 5), dict(marked), _u("a later user", 6)], 4, [0]
+        loads = _count_payload_loads(monkeypatch)
+        cleaned = []
+        real = type(engine)._active_cleanup_replay_identity
+        monkeypatch.setattr(type(engine), "_active_cleanup_replay_identity",
+                            lambda self, identity, *a, **k: cleaned.append(identity[1]) or real(identity, *a, **k))
+        out = engine._identity_anchor_unaccounted(
+            view, view, cursor, 0, lambda i: engine._message_replay_identity(view[i]), {}, True, set(),
+            {"replayed": set()}, {}, (), missed)
+        control, on_main = marker.startswith("none"), not hasattr(identity_anchor, "_PRESENCE_TEXT_BYTES")
+        assert loads == []
+        assert control or not any(MARKERS[marker] in text or "z" * 64 in text for text in cleaned)
+        first = missed[0]
+        stored_reply = [first + 1] if control and not on_main else []  # the control stores the new reply
+        assert sorted(out) == [*stored_reply, first + 2, first + 3]  # else main's result; the moved pair stored
+        assert on_main or cleaned  # the spy saw the candidate's cleanup, so it is live
     finally:
         engine.shutdown()
