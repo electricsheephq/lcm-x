@@ -554,6 +554,9 @@ def test_rotation_metadata_failure_degrades_to_durable_recovery(build, caplog, m
     assert recovered
     assert sum(row["content"] == T for row in rows) == 2
     assert engine._ingest_failure_count == 0
+    # Any link that does form joins a T copy only to a T copy (the strict xfail below wants that one link).
+    t_ids = {row["store_id"] for row in rows if row["content"] == T}
+    assert all((source in t_ids) == (target in t_ids) for source, target in replay_links(engine))
 
 
 @pytest.mark.issue(2490)
