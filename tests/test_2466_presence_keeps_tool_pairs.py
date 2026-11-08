@@ -256,3 +256,41 @@ def test_one_call_serialized_differently_is_still_one_invocation(tmp_path, store
         assert _presence(engine, [call(shown_args), result]) == [1]
     finally:
         engine.shutdown()
+
+
+@pytest.mark.parametrize("form", ["externalized", "host-pruned"])
+@pytest.mark.parametrize("own_first", [True, False], ids=["own-stamp-first", "carried-stamp-first"])
+def test_class_a_moved_pair_is_stored_once_when_a_stored_output_has_another_form(tmp_path, form, own_first):
+    """Class A V1 at default settings with an earlier tool output stored in another form than the host shows: LCM
+    externalized it (a large output), or the host has since pruned it to a stub. The moved turn's call and result are
+    each stored once, and nothing else is stored (#2466 review)."""
+    from tests.test_anchor_unstored_before_cursor import SESSION, _key, _moved_turn, _stored
+
+    big = "old file line\n" * 1_500  # past the default 12,000-character externalization threshold
+    config = LCMConfig(database_path=str(tmp_path / "lcm.db"), large_output_externalization_enabled=True)
+    engine = LCMEngine(config=config, hermes_home=str(tmp_path / "home"))
+    engine.on_session_start(SESSION, platform="cli", context_length=1_000_000)
+    try:
+        history, turn_start, turn_end = _moved_turn(own_first)
+        old = next(i for i, row in enumerate(history) if row.get("tool_call_id") == "call_old")
+        for view in (history, turn_start, turn_end):
+            view[old] = {**view[old], "content": big}
+        if form == "host-pruned":
+            turn_end[old] = {**turn_end[old], "content": "[Old tool output cleared to save context space]"}
+        engine.ingest(history)
+        if form == "externalized":
+            stored_old = next(r for r in _stored(engine) if r.get("tool_call_id") == "call_old")
+            assert len(stored_old["content"]) < len(big)  # setup: the stored output is a placeholder
+        engine.ingest(turn_start)
+        before = Counter(_key(row) for row in _stored(engine))
+        engine.ingest(turn_end)
+        added = Counter(_key(row) for row in _stored(engine)) - before
+        new_call = next(r for r in turn_end if (r.get("tool_calls") or [{}])[0].get("id") == "call_new")
+        new_result = next(r for r in turn_end if r.get("tool_call_id") == "call_new")
+        assert added[_key(new_call)] == 1 and added[_key(new_result)] == 1
+        assert not any(key[2] == "call_old" or key[3] == "call_old" for key in added)
+        # Nothing stored twice except the moved prompt at its other stamp (#2421, unchanged here).
+        twice = {key for key, count in Counter(_key(row) for row in _stored(engine)).items() if count > 1}
+        assert twice <= {_key(turn_end[4])}, twice
+    finally:
+        engine.shutdown()
