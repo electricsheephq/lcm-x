@@ -488,32 +488,41 @@ def test_a_store_cut_off_mid_write_leaves_no_partial_prefix_and_a_resume_appends
 
 
 def _blocked_drain(host, monkeypatch):
-    """A store stuck past the shutdown drain (as a database busy at exit), with a newer list queued behind it."""
+    """A store stuck past the shutdown drain (as a database busy at exit), with a newer list queued behind it.
+
+    The first store lands, then its worker waits outside any engine use until ``release`` is set, so the shutdowns
+    run while the newer list is still queued (deterministic: the drain times out, the engines close, then it runs).
+    """
     _, _, ctx, parent, child, engine = _setup(host, "own_engine")
     aux = ctx.module("aux_session")
     monkeypatch.setattr(aux, "_LIVE_CHILD_STORE_JOIN_S", 0.1, raising=False)
     monkeypatch.setattr(aux, "_LIVE_CHILD_SHUTDOWN_DRAIN_S", 0.2, raising=False)
-    mixin = aux.DelegateChildMixin
-    real, calls = mixin._append_delegate_child_rows, []
+    release, first = threading.Event(), [True]
+    real_run = aux.run_live_child_store
 
-    def stuck_first(self, *args, **kwargs):
-        calls.append(1)
-        if len(calls) == 1:
-            stored = real(self, *args, **kwargs)
-            time.sleep(1.0)  # the store's engine use outlasts the drain
-            return stored
-        return real(self, *args, **kwargs)
+    def run(session_id, operation, rows=0):
+        if first[0]:
+            first[0] = False
 
-    monkeypatch.setattr(mixin, "_append_delegate_child_rows", stuck_first)
+            def held():
+                outcome = operation()
+                release.wait(10)
+                return outcome
+
+            return real_run(session_id, held, rows)
+        return real_run(session_id, operation, rows)
+
+    monkeypatch.setattr(aux, "run_live_child_store", run)
     db_path = parent._store.db_path
     child.api_call(ctx, view(0), 1)
-    child.api_call(ctx, view(1), 2)  # queued behind the stuck store
-    return ctx, aux, child, (engine, parent, ctx.offered), db_path
+    child.api_call(ctx, view(1), 2)  # queued behind the held store
+    return ctx, aux, child, (engine, parent, ctx.offered), db_path, release
 
 
-def _stored_after_close(aux, db_path, session_id="child"):
+def _stored_after_close(aux, db_path, release, session_id="child"):
     import sqlite3
 
+    release.set()
     aux.drain_live_child_stores(10)
     with sqlite3.connect(db_path) as conn:
         return conn.execute("SELECT role, content FROM messages WHERE session_id = ? ORDER BY store_id",
@@ -524,24 +533,67 @@ def _stored_after_close(aux, db_path, session_id="child"):
                    "last completed store are lost if the process ends first while a store waits more than the "
                    "shutdown drain on a busy database")
 def test_residual_a_store_stuck_past_the_shutdown_drain_loses_the_queued_list(host, monkeypatch):
-    _, aux, _, engines, db_path = _blocked_drain(host, monkeypatch)
+    _, aux, _, engines, db_path, release = _blocked_drain(host, monkeypatch)
     for closing in engines:
         closing.shutdown()
-    assert _stored_after_close(aux, db_path) == _contents(view(1))
+    assert _stored_after_close(aux, db_path, release) == _contents(view(1))
 
 
 def test_a_drain_that_times_out_says_so_with_the_hashed_child_and_the_unstored_rows(host, monkeypatch, caplog):
     import hashlib
 
-    _, aux, child, engines, db_path = _blocked_drain(host, monkeypatch)
+    _, aux, child, engines, db_path, release = _blocked_drain(host, monkeypatch)
     with caplog.at_level("WARNING"):
-        engines[0].shutdown()
+        for closing in engines:  # three drains time out; the stuck child is reported once
+            closing.shutdown()
     lines = [r.getMessage() for r in caplog.records if r.levelname == "WARNING" and "shutdown drain" in r.getMessage()]
     digest = hashlib.sha256(b"child").hexdigest()[:12]
-    # An upper bound: the stuck store has not returned, so none of the newest list's 3 rows counts as stored yet.
+    # The first list (1 row) is stored; the newest (3 rows) is queued: up to 2 handed-over rows are not stored.
     assert len(lines) == 1, lines
-    assert digest in lines[0] and "up to 3 handed-over row(s)" in lines[0] and "#2483" in lines[0]
+    assert digest in lines[0] and "up to 2 handed-over row(s)" in lines[0] and "#2483" in lines[0]
     assert "child=child" not in lines[0]
-    for closing in engines[1:]:
-        closing.shutdown()
-    _stored_after_close(aux, db_path)
+    _stored_after_close(aux, db_path, release)
+
+
+def test_a_failed_store_counts_no_rows_as_stored_in_the_drain_warning(host, monkeypatch, caplog):
+    _, _, ctx, parent, child, engine = _setup(host, "own_engine")
+    aux = ctx.module("aux_session")
+    monkeypatch.setattr(aux, "_LIVE_CHILD_STORE_JOIN_S", 0.1, raising=False)
+    monkeypatch.setattr(aux, "_LIVE_CHILD_SHUTDOWN_DRAIN_S", 0.2, raising=False)
+    mixin = aux.DelegateChildMixin
+    release = threading.Event()
+
+    def boom(self, *args, **kwargs):
+        raise RuntimeError("store failed")
+
+    monkeypatch.setattr(mixin, "_append_delegate_child_rows", boom)
+    real_run, calls, queued = aux.run_live_child_store, [], threading.Event()
+
+    def run(session_id, operation, rows=0):
+        calls.append(1)
+        if len(calls) == 1:  # the first store fails (caught inside the store: no rows stored) while a retry queues
+
+            def first():
+                outcome = operation()
+                queued.wait(10)
+                return outcome
+
+            return real_run(session_id, first, rows)
+
+        def held():  # the same list, queued behind it, is then stuck on the database
+            release.wait(10)
+            return operation()
+
+        return real_run(session_id, held, rows)
+
+    monkeypatch.setattr(aux, "run_live_child_store", run)
+    child.api_call(ctx, view(1), 1)
+    child.api_call(ctx, view(1), 2)  # queued in the same in-flight chain
+    queued.set()
+    time.sleep(0.1)  # the failed store returns; the queued one starts and blocks
+    with caplog.at_level("WARNING"):
+        engine.shutdown()
+    lines = [r.getMessage() for r in caplog.records if r.levelname == "WARNING" and "shutdown drain" in r.getMessage()]
+    release.set()
+    aux.drain_live_child_stores(10)
+    assert len(lines) == 1 and "up to 3 handed-over row(s)" in lines[0], lines
