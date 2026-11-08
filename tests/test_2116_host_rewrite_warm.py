@@ -188,4 +188,84 @@ def test_a_host_rewrite_keeps_mains_counts_and_the_replaced_reply_is_stored_once
         with open(os.path.join(dump, "-".join(map(str, key)) + ".json"), "w") as f:
             json.dump(sorted([list(k), v] for k, v in added.items()), f)
     assert counts[:-1] == MAIN[key]
-    assert counts[-1] == (MAIN_REPLY_ON_MAIN[key] if ON_MAIN else 1)  # the PR stores the replaced reply once
+    # The PR stores the replaced reply once, except in a missed turn holding more than one reply (the rewritten one
+    # and the new one), where it keeps main's result (#2116 review r1, G1: a named limit, as on main).
+    in_turn_limit = placement == "missed-turn" and not restart
+    assert counts[-1] == (MAIN_REPLY_ON_MAIN[key] if ON_MAIN or in_turn_limit else 1)
+
+
+# The seventh shape (#2116 review r1, G1): the resend ingest rewrites the replaced turn's only reply in place, or
+# merges its two stored replies into one row, and adds no new reply. That row is the turn's sole reply and its text is
+# stored nowhere exactly, so the PR stores it warm; main stores it at its next restart (#1674's restart batch). A
+# named residual under #1674 and #2467, which holds only while no certifying run hits this trigger (a host rewrite of
+# the replaced turn's own reply in the resend ingest); if a certifying run's audit shows it, it is fixed before the
+# next certifying run.
+
+def _sole_rewrite(kind):
+    if kind == "whitespace":
+        def special():
+            return [_reply("reply  to T39 spaced")]
+
+        def mutate(view):
+            view[-1]["content"] = "reply to T39 spaced" + PAD
+        return special, mutate
+    def special():
+        return [_reply("interim reply"), _reply("final reply")]
+
+    def mutate(view):
+        view[-2]["content"] = (view[-2]["content"].strip() + "\n" + view[-1]["content"].strip())
+        del view[-1]
+    return special, mutate
+
+
+def _sole_rewrite_resend(tmp_path, kind, restart):
+    special, mutate = _sole_rewrite(kind)
+    engine = _engine(tmp_path)
+    try:
+        view = _warm(engine, special, at=39)
+        before = Counter(_key(r) for r in _stored(engine))
+        mutate(view)
+        last_user = max(k for k, m in enumerate(view) if m.get("role") == "user")
+        view[last_user] = _u("the resent user turn", 3000)
+        view += [_u("the next user turn", 3001), _reply("next")]
+        if restart:
+            engine.shutdown()
+            engine = _engine(tmp_path)
+        after = _ingest_twice(engine, view)
+        assert not before - after, "a stored row was lost"
+        return sorted((k[0], k[1].strip()[:48], k[2], k[3], n) for k, n in (after - before).items())
+    finally:
+        engine.shutdown()
+
+
+FIXTURE = os.path.join(os.path.dirname(__file__), "fixtures", "2116_sole_rewrite_main_9548dee7.json")
+
+
+def _main_added(kind, restart):
+    """Main 9548dee7's added rows for the shape, recorded by running this file there with LCM_SOLE_REWRITE_RECORD."""
+    with open(FIXTURE) as f:
+        return [tuple(row) for row in json.load(f)[f"{kind}-{restart}"]]
+
+
+@pytest.mark.skipif(not os.environ.get("LCM_SOLE_REWRITE_RECORD"), reason="records main's fixture only on request")
+def test_record_mains_sole_rewrite_fixture(tmp_path):
+    out = {f"{kind}-{restart}": _sole_rewrite_resend(tmp_path / f"{kind}{restart}", kind, restart)
+           for kind in ("whitespace", "merged") for restart in (False, True)}
+    with open(os.environ["LCM_SOLE_REWRITE_RECORD"], "w") as f:
+        json.dump(out, f, indent=1)
+
+
+@pytest.mark.xfail(not ON_MAIN, strict=True, raises=AssertionError,
+                   reason="#1674/#2467 named residual: the resend ingest's rewrite of the replaced turn's sole reply "
+                          "is stored warm; main stores it at its next restart")
+@pytest.mark.parametrize("kind", ["whitespace", "merged"])
+def test_sole_rewrite_named_residual_warm_equals_main(tmp_path, kind):
+    """The ideal end state: warm, the PR adds exactly main's rows. The residual holds only while no certifying run
+    hits its trigger (a host rewrite of the replaced turn's own reply in the resend ingest); if a certifying run's
+    audit shows it, it is fixed before the next certifying run."""
+    assert _sole_rewrite_resend(tmp_path, kind, False) == _main_added(kind, False)
+
+
+@pytest.mark.parametrize("kind", ["whitespace", "merged"])
+def test_sole_rewrite_after_a_restart_equals_main(tmp_path, kind):
+    assert _sole_rewrite_resend(tmp_path, kind, True) == _main_added(kind, True)

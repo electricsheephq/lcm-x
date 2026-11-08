@@ -21,10 +21,17 @@ def _fresh(monkeypatch):
         monkeypatch.setattr(identity_anchor, name, set(), raising=False)
 
 
-def _presence(engine, view, identities=None):
-    identities = identities or [engine._message_replay_identity(m) for m in view]
-    return engine._identity_anchor_unaccounted(
-        view, view, len(view), 0, lambda i: identities[i], {}, True, set(), {"replayed": set()}, {}, (), [])
+MISSED_USER = {"role": "user", "content": "the resent user turn" + PAD, "timestamp": 3000.0}
+
+
+def _presence(engine, rows, identities=None):
+    """The audit over a view of a missed user (an edit-resend) and ``rows``, its turn: a reply there is a candidate
+    when it is the turn's sole reply. Returns the unaccounted indexes into ``rows``."""
+    view = [dict(MISSED_USER), *rows]
+    identities = identities or [engine._message_replay_identity(m) for m in view]  # given: the whole view's, cached
+    out = engine._identity_anchor_unaccounted(
+        view, view, len(view), 0, lambda i: identities[i], {}, True, set(), {"replayed": set()}, {}, (), [0])
+    return None if out is None else [i - 1 for i in out if i]
 
 
 # (0) A reply whose identity as a stored row differs from its incoming identity cannot be proved absent from stored
@@ -80,7 +87,7 @@ def test_r1_0_a_marked_reply_is_never_normalized_as_a_stored_row(tmp_path, monke
     engine = _engine(tmp_path)
     try:
         row = {"role": "assistant", "content": "a reply " + marker + PAD}
-        identities = [engine._message_replay_identity(row)]
+        identities = [engine._message_replay_identity(dict(MISSED_USER)), engine._message_replay_identity(row)]
         seen = []
         real = type(engine)._message_replay_identity
         monkeypatch.setattr(type(engine), "_message_replay_identity", lambda self, m, *a, **k: (
@@ -176,7 +183,7 @@ def test_r1_2_an_over_budget_reply_costs_no_identity_or_cleanup_work(tmp_path, m
     engine = _engine(tmp_path)
     try:
         big = {"role": "assistant", "content": "y" * 4_000_001}
-        identities = [engine._message_replay_identity(big)]
+        identities = [engine._message_replay_identity(dict(MISSED_USER)), engine._message_replay_identity(big)]
         calls = []
         real_identity = type(engine)._message_replay_identity
         real_cleanup = type(engine)._active_cleanup_replay_identity

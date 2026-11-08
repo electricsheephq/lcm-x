@@ -10,10 +10,26 @@ import pytest
 
 from hermes_lcm import identity_anchor
 
-from tests.test_2466_presence_wait_bar import _append, _best
+from tests.test_2466_presence_wait_bar import _append
 from tests.test_anchor_unstored_before_cursor import _engine
 
 BAR = 0.150 * float(os.environ.get("LCM_PRESENCE_TIMING_SLACK", "4"))
+
+
+def _best(engine, view, missed, reps=3):
+    """The audit's best wait over ``reps`` runs, with ``missed`` the edit-resend's user rows."""
+    import time
+
+    best, out = None, None
+    for _ in range(reps):
+        began = time.perf_counter()
+        out = engine._identity_anchor_unaccounted(
+            view, view, len(view), 0, lambda i: engine._message_replay_identity(view[i]), {}, True, set(),
+            {"replayed": set()}, {}, (), list(missed))
+        took = time.perf_counter() - began
+        best = took if best is None or took < best else best
+    print(f"\nWAIT {best * 1000:.1f} ms load1={os.getloadavg()[0]:.1f} result={out}")
+    return best, out
 TEXT = identity_anchor._PRESENCE_TEXT_BYTES
 
 
@@ -42,8 +58,10 @@ def test_reply_text_at_the_text_budget(tmp_path, shape, view_kind, latency_check
         stored = [_reply(i, size) for i in range(rows)]
         _append(engine, stored)
         history = stored if view_kind == "history-then-fresh" else []
-        took, out = _best(engine, [*history, {"role": "assistant", "content": "a brand new reply"}])
-        assert out == ([len(history)] if expected else [])  # past: every reply keeps main's result
+        resent = {"role": "user", "content": "the resent user turn", "timestamp": 3000.0}
+        took, out = _best(engine, [*history, resent, {"role": "assistant", "content": "a brand new reply"}],
+                          [len(history)])
+        assert out == ([len(history) + 1] if expected else [])  # past: every reply keeps main's result
         assert not latency_check or took < BAR, f"{took * 1000:.0f} ms"
     finally:
         engine.shutdown()

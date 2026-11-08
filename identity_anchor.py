@@ -725,7 +725,8 @@ class IdentityAnchorMixin:
                                "session=%s", spent, session)
                 return
             notice = (str(self._db_path), self._db_path.stat().st_ino, session)
-            logged = _PRESENCE_TEXT_LOGGED if reason == "marked" else _PRESENCE_WINDOW_LOGGED
+            logged = _PRESENCE_TEXT_LOGGED  # one notice per reason (#2116 review r1: no longer the window's set)
+            notice = (*notice, reason)
             if notice not in logged:
                 if reason == "marked":
                     logger.info("LCM identity-anchor presence check skipped: externalized or redacted stored reply: "
@@ -755,9 +756,23 @@ class IdentityAnchorMixin:
             # absent from stored identities, so it keeps main's result too (#2116 review).
             # A text trip (text_off) gives every reply main's result; the tool audit runs unchanged.
             text_off, text_error, candidate_spent = None, None, 0
+            # Only the sole text reply of a missed user's turn (from that user to the next user row) is a candidate:
+            # the replaced reply of an edit-resend. Every other reply, a reply in a turn with more than one, and so a
+            # host rewrite inside that turn, keeps main's result (#2116 review r1, Governor ruling G1).
+            sole_replies = set()
+            for m in missed:
+                if 0 <= m < len(identity_messages) and identity_messages[m].get("role") == "user":
+                    k, replies = m + 1, []
+                    while k < len(identity_messages) and identity_messages[k].get("role") != "user":
+                        if identity_messages[k].get("role") == "assistant" and not identity_messages[k].get("tool_calls"):
+                            replies.append(k)
+                        k += 1
+                    if len(replies) == 1:
+                        sole_replies.add(replies[0])
             for idx in range(start, cursor):
                 msg = identity_messages[idx]
-                if (idx in explained or idx in candidates or msg.get("role") != "assistant" or msg.get("tool_calls")
+                if (idx not in sole_replies or idx in explained or idx in candidates or msg.get("role") != "assistant"
+                        or msg.get("tool_calls")
                         or self._matches_ignore_message_patterns(messages[idx])):
                     continue
                 text = msg.get("content") if isinstance(msg.get("content"), str) else str(msg.get("content") or "")
