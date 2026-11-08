@@ -380,3 +380,31 @@ def test_a_slow_store_returns_to_the_host_within_the_bound_and_still_lands(host,
     time.sleep(0.2)
     assert _contents(child_rows(parent)) == _contents(view(1))
     assert len(calls) == 2 and max(overlap) == 1  # one store at a time per child
+
+
+def test_a_list_queued_behind_a_store_is_stored_before_the_engines_close(host, monkeypatch):
+    import sqlite3
+
+    _, _, ctx, parent, child, engine = _setup(host, "own_engine")
+    aux = ctx.module("aux_session")
+    monkeypatch.setattr(aux, "_LIVE_CHILD_STORE_JOIN_S", 0.2, raising=False)
+    mixin = aux.DelegateChildMixin
+    real, calls = mixin._append_delegate_child_rows, []
+
+    def slow_first(self, *args, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            time.sleep(1.0)
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(mixin, "_append_delegate_child_rows", slow_first)
+    db_path = parent._store.db_path
+    child.api_call(ctx, view(0), 1)
+    child.api_call(ctx, view(1), 2)  # queued behind the in-flight store
+    # Clean exit right away: the child's, the parent's and the prototype engines shut down.
+    for closing in (engine, parent, ctx.offered):
+        closing.shutdown()
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute("SELECT role, content FROM messages WHERE session_id = ? ORDER BY store_id",
+                            ("child",)).fetchall()
+    assert rows == _contents(view(1))
