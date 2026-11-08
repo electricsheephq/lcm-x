@@ -118,15 +118,17 @@ def test_625_todo_prompt_composite_with_stamp_transfer_copy_is_replay(build):
              {"role": "user", "content": P, "timestamp": T_REQ + 2}]
     engine.ingest(deepcopy(head + parts))
     before = all_rows(engine)
-    assert sum(row["content"] == P for row in before) == 2
-    assert sum(row["content"] == todo for row in before) == 1
+    if sum(row["content"] == P for row in before) != 2 or sum(row["content"] == todo for row in before) != 1:
+        pytest.fail("setup: the todo row and both P rows must be stored once each")
     engine.on_session_end("S", deepcopy(head + parts))
     engine.on_session_start("S", conversation_id="conversation", platform="cli")
     composite = {"role": "user", "content": todo + "\n\n" + P, "timestamp": T_REQ}
     engine.ingest(deepcopy(head + [composite,
                                   {"role": "user", "content": NEW, "timestamp": T_COMMIT}]))
     rows = all_rows(engine)
-    assert sum(row["content"] == NEW for row in rows) == 1
+    if sum(row["content"] == NEW for row in rows) != 1:
+        pytest.fail("not the 625 shape: the new turn must be stored once")
+    # Only the composite-surplus assertions below may raise the expected AssertionError.
     assert not any(row["content"] == composite["content"] for row in rows)
     relations = list(engine._store._conn.execute(
         "SELECT store_id,kind,related_store_id FROM message_relations WHERE kind='composite'"))
