@@ -1,5 +1,5 @@
 #!/bin/bash
-# Track S per-message-wait cell: one repeat per seed, GLM reader, Codex summariser.
+# Track S per-message-wait cell: one repeat per seed, GLM or Sol reader and summariser.
 # Only an observed 429 / usage-limit marker brakes the cell (exit 3).
 # FACTS_FLOOR is the cp-304 floor the release declares (RELEASE-READINESS-V1 D7: the previous GA's D7 mean - 0.10).
 set -euC
@@ -11,6 +11,8 @@ case "$ATTEMPT" in ''|*[!0-9]*|0*) echo "STOP: attempt must be positive without 
 R=r$K
 SUMMARY_LANE=${SUMMARY_LANE:-codex-sol}
 case "$SUMMARY_LANE" in glm|codex-sol) ;; *) echo "STOP: unsupported summary lane" >&2; exit 2;; esac
+READER=${READER:-glm}
+case "$READER" in glm|sol-low) ;; *) echo "STOP: unsupported reader" >&2; exit 2;; esac
 [ "$ATTEMPT" = 1 ] || R=$R-a$ATTEMPT
 SUFFIX=
 set --
@@ -23,14 +25,17 @@ if [ "${S2_FAULT_SLEEP_S+x}" = x ]; then
 fi
 FAULT=${FAULT:-}
 case "$FAULT" in ''|T|P) ;; *) echo "STOP: FAULT must be empty, T or P" >&2; exit 2;; esac
-for var in PRODUCT_WT PRODUCT_SHA KIT_DIR MATERIAL OUT PY GLM_API_KEY FACTS_FLOOR; do
+for var in PRODUCT_WT PRODUCT_SHA KIT_DIR MATERIAL OUT PY FACTS_FLOOR; do
   if [ -z "${!var:-}" ]; then echo "STOP: required environment variable $var is unset" >&2; exit 2; fi
 done
+if [ "$SUMMARY_LANE" = glm ] || [ "$READER" = glm ]; then
+  [ -n "${GLM_API_KEY:-}" ] || { echo "STOP: required environment variable GLM_API_KEY is unset" >&2; exit 2; }
+  export GLM_API_KEY
+fi
 if [ -n "$SUFFIX" ]; then
   OUT=$OUT/replay-$R
   [ ! -e "$OUT" ] || { echo "STOP: existing path $OUT" >&2; exit 2; }
 fi
-export GLM_API_KEY
 ARM=${ARM:-LCMX-fleet-rc3}
 SEEDS=${SEEDS:-1 2 3}
 PARALLEL=${PARALLEL:-2}
@@ -101,7 +106,7 @@ one() {
   echo "start $(date +%s) $(date -u +%FT%TZ)" > "$H/logs/$name.log.wall"
   TRACK_S_OUT=$OUT TMPDIR=$OUT/tmp TRACK_S_MATERIAL=$MATERIAL S2_PRODUCT_WORKTREE=$PRODUCT_WT S2_PRODUCT_SHA=$PRODUCT_SHA \
     perl -e 'setpgrp or die; exec @ARGV or die' nice -n 19 "$PY" -B "$KIT_DIR/s2/run_s_lcmx.py" \
-    --arm "$ARM" --seed "$seed" --run "d$seed-$R" --lane "$SUMMARY_LANE" --reader glm \
+    --arm "$ARM" --seed "$seed" --run "d$seed-$R" --lane "$SUMMARY_LANE" --reader "$READER" \
     --turn-end-notify --checkpoints 176,304 "$@" > "$H/logs/$name.log" 2>&1 < /dev/null & pid=$!
   trap 'kill -TERM -- "-$pid" 2>/dev/null || true' EXIT
   while kill -0 "$pid" 2>/dev/null; do
