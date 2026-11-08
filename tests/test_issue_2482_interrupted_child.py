@@ -548,9 +548,10 @@ def test_a_drain_that_times_out_says_so_with_the_hashed_child_and_the_unstored_r
             closing.shutdown()
     lines = [r.getMessage() for r in caplog.records if r.levelname == "WARNING" and "shutdown drain" in r.getMessage()]
     digest = hashlib.sha256(b"child").hexdigest()[:12]
-    # The first list (1 row) is stored; the newest (3 rows) is queued: up to 2 handed-over rows are not stored.
+    # An upper bound: the first store (1 row) has landed but its worker has not returned, so nothing counts as stored
+    # yet; the newest list (3 rows) is queued.
     assert len(lines) == 1, lines
-    assert digest in lines[0] and "up to 2 handed-over row(s)" in lines[0] and "#2483" in lines[0]
+    assert digest in lines[0] and "up to 3 handed-over row(s)" in lines[0] and "#2483" in lines[0]
     assert "child=child" not in lines[0]
     _stored_after_close(aux, db_path, release)
 

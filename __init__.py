@@ -686,16 +686,21 @@ def register(ctx):
                 platform = str(payload.get("platform") or "")
                 wait = aux_session._LIVE_CHILD_STORE_WAIT_S
 
+                outcome: dict = {}
+
                 def store_child(active_engine):
                     return active_engine._store_delegate_child_turn(
-                        session_id, history, platform=platform, lock_wait=wait,
+                        session_id, history, platform=platform, lock_wait=wait, outcome=outcome,
                     )
 
                 def store():
+                    """True only when the store ran: not skipped as busy, not failed, not refused by a closed engine."""
                     result = use_active_lcm_engine(store_child, session_id=session_id, timeout=wait)
                     if result.status is ActiveEngineUseStatus.ENGINE_NOT_RESIDENT:
                         # No engine bound to the child: store without binding one (never bind, never ingest).
-                        use_lcm_engine(engine, store_child, timeout=wait)
+                        result = use_lcm_engine(engine, store_child, timeout=wait)
+                    return bool(result.used and isinstance(result.value, int)
+                                and not outcome.get("skipped") and "error" not in outcome)
 
                 aux_session.run_live_child_store(session_id, store, rows=len(history))
             except Exception as exc:
