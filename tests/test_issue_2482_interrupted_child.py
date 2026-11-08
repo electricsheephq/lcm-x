@@ -72,6 +72,10 @@ class HostChild(Agent):
         return self.fire(ctx, "pre_api_request", history, api_call_count=n, retry_count=0, model="m",
                          request_messages=list(history), message_count=len(history), task_id="t", turn_id="turn-1")
 
+    def start_on_home(self, engine, hermes_home):
+        """The host starts the child's own engine on the child's profile (inside the child's frame)."""
+        engine.on_session_start(self.session_id, platform="subagent", context_length=200_000, hermes_home=hermes_home)
+
     def run_until(self, ctx, tool_calls):
         """Start the turn and issue model call k after k-1 tool rounds, up to ``tool_calls`` rounds done."""
         self.llm_start(ctx, view(0, tag=self.tag))
@@ -598,3 +602,25 @@ def test_a_failed_store_counts_no_rows_as_stored_in_the_drain_warning(host, monk
     release.set()
     aux.drain_live_child_stores(10)
     assert len(lines) == 1 and "up to 3 handed-over row(s)" in lines[0], lines
+
+
+def test_a_child_on_another_profile_is_stored_only_in_its_own_profile(host, tmp_path):
+    """NeonDiff (review of c43478d5): a child's engine rebound to profile B must never write its rows into the
+    prototype's profile A; the early store uses the child's own engine, as main's end store does."""
+    load, clone = host
+    ctx, _ = load()
+    parent = clone(ctx)
+    parent.on_session_start("parent", platform="cli", context_length=200_000)
+    ctx.hooks["post_llm_call"][0](session_id="parent", platform="cli",
+                                  conversation_history=PARENT_VIEW, context_compressor=parent)
+    child = HostChild("child", **DELEGATE)
+    child.spawn(ctx)
+    engine = clone(ctx)
+    home_b = tmp_path / "profile-b"
+    home_b.mkdir()
+    engine._rebind_storage_for_home(str(home_b))  # a reused clone already serving profile B
+    child.start_on_home(engine, str(home_b))
+    assert engine._store.db_path != ctx.offered._store.db_path  # the child really serves another profile
+    child.run_until(ctx, 1)
+    assert child_rows(ctx.offered) == [] and child_rows(parent) == []  # nothing written into profile A
+    assert _contents(child_rows(engine)) == _contents(view(1))  # the interrupted child kept its rows in profile B
