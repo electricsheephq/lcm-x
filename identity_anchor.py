@@ -62,12 +62,8 @@ _PRESENCE_WINDOW_ROWS = 10000  # total stored rows across the presence scope
 _PRESENCE_WINDOW_BYTES = 15_000_000  # UTF-8 bytes of stored content and tool-call text across the scope
 _PRESENCE_WINDOW_CALL_IDS = 10_000  # stored tool-call entries across the scope (#2466 wait bar)
 _PRESENCE_PARSE_BYTES = 256_000  # call-row text parsed as JSON when an id's raw forms differ (#2466 wait bar)
-_PRESENCE_TEXT_BYTES = 4_000_000  # stored and shown reply text the audit normalizes when a reply is a candidate (#2116)
-_PRESENCE_TEXT_MIN_CHARGE = 400  # each reply normalized costs at least this much budget: at most 10,000 identity calls
 _PRESENCE_WINDOW_LOGGED: set[tuple[str, int, str]] = set()  # store file and session, once per process
 _PRESENCE_SHAPE_LOGGED: set[tuple[str, int, str]] = set()  # non-standard tool shapes, once per store and session
-_PRESENCE_TEXT_LOGGED: set[tuple[str, int, str]] = set()  # externalized or redacted stored replies (#2116), likewise
-_PRESENCE_MARKERS = ("xternalized", "LCM sensitive redaction")  # a stored reply whose identity loads or loses text
 _UNREADABLE_CALLS = (object(),)  # an unreadable tool_calls value: no host id can equal it (#2466 review)
 
 _ROTATION_LINEAGE_UNRECORDED: set[tuple[str, str]] = set()  # store file and session whose predecessor write failed, per process
@@ -712,30 +708,6 @@ class IdentityAnchorMixin:
             identity = self._message_replay_identity(msg, stored_row=stored)
             return None if _lossy(identity) else (identity[0], identity[1].strip())
 
-        def text_forms(identity):
-            forms = {(identity[0], identity[1].strip())}
-            cleaned = self._active_cleanup_replay_identity(identity)
-            if cleaned is not None:
-                forms.add((cleaned[0], cleaned[1].strip()))
-            return frozenset(forms)
-
-        def text_trip(reason, spent):
-            if reason == "error":
-                logger.warning("LCM identity-anchor reply presence unavailable (%s); keeping positional replays: "
-                               "session=%s", spent, session)
-                return
-            notice = (str(self._db_path), self._db_path.stat().st_ino, session)
-            logged = _PRESENCE_TEXT_LOGGED  # one notice per reason (#2116 review r1: no longer the window's set)
-            notice = (*notice, reason)
-            if notice not in logged:
-                if reason == "marked":
-                    logger.info("LCM identity-anchor presence check skipped: externalized or redacted stored reply: "
-                                "session=%s scope=%d", session, len(scope))
-                else:
-                    logger.info("LCM identity-anchor presence window incomplete: session=%s scope=%d text_bytes=%d",
-                                session, len(scope), spent)
-                logged.add(notice)
-
         explained = set(excluded) | set(matched) | set(plan.get("matched", {})) | plan["replayed"] | set(missed)
         try:
             # Only call and result rows are presence-checked (class A). A replaced reply (#2116) keeps main's
@@ -746,52 +718,6 @@ class IdentityAnchorMixin:
                           and not (self._identity_is_lcm_scaffold(identity_messages[idx])
                                    and identity_at(idx) is None)  # scaffold first: identity_at parses arguments
                           and not self._matches_ignore_message_patterns(messages[idx])}
-            # #2116 (plain rule for text): a replaced reply, an assistant text row the audit has not explained, is a
-            # candidate by its replay identity in exact and #1286 cleanup form. It is stored only when no form is stored
-            # anywhere in the scope and the view shows it once; a redacted (lossy) identity stays unsure (accounted).
-            # Each reply's bytes (at least the minimum charge) are charged to the text budget before any identity or
-            # cleanup work on it; past the budget, and for a reply carrying a payload or redaction marker, the reply
-            # keeps main's result. A reply whose identity as a stored row differs from its incoming identity (an
-            # out-of-band block, a survival-fit projection, or any other one-sided normalization) cannot be proved
-            # absent from stored identities, so it keeps main's result too (#2116 review).
-            # A text trip (text_off) gives every reply main's result; the tool audit runs unchanged.
-            text_off, text_error, candidate_spent = None, None, 0
-            # Only the sole text reply of a missed user's turn (from that user to the next user row) is a candidate:
-            # the replaced reply of an edit-resend. Every other reply, a reply in a turn with more than one, and so a
-            # host rewrite inside that turn, keeps main's result (#2116 review r1, Governor ruling G1).
-            sole_replies = set()
-            for m in missed:
-                if 0 <= m < len(identity_messages) and identity_messages[m].get("role") == "user":
-                    k, replies = m + 1, []
-                    while k < len(identity_messages) and identity_messages[k].get("role") != "user":
-                        if identity_messages[k].get("role") == "assistant" and not identity_messages[k].get("tool_calls"):
-                            replies.append(k)
-                        k += 1
-                    if len(replies) == 1:
-                        sole_replies.add(replies[0])
-            for idx in range(start, cursor):
-                msg = identity_messages[idx]
-                if (idx not in sole_replies or idx in explained or idx in candidates or msg.get("role") != "assistant"
-                        or msg.get("tool_calls")
-                        or self._matches_ignore_message_patterns(messages[idx])):
-                    continue
-                text = msg.get("content") if isinstance(msg.get("content"), str) else str(msg.get("content") or "")
-                candidate_spent += max(len(text.encode("utf-8", "surrogatepass")), _PRESENCE_TEXT_MIN_CHARGE)
-                if candidate_spent > _PRESENCE_TEXT_BYTES:
-                    text_off = text_off or "budget"
-                if text_off or any(marker in text for marker in _PRESENCE_MARKERS):
-                    continue
-                try:
-                    identity = identity_at(idx)
-                    if (identity is None or identity[0] != "assistant" or _lossy(identity)
-                            or self._message_replay_identity(msg) != identity  # carries LCM's carrier (R8), as the audit
-                            or self._message_replay_identity(msg, stored_row=True) != identity):
-                        continue
-                    candidates[idx] = ("text", text_forms(identity))
-                except Exception as exc:  # the reply check alone is lost: replies keep main's result
-                    text_off, text_error = "error", type(exc).__name__
-            text_wanted = not text_off and any(wanted[0] == "text" for wanted in candidates.values()
-                                               if wanted is not None)
             session = str(self._session_id)
             chain = self._identity_anchor_chain()
             cached = getattr(self, "_identity_anchor_chain_cache", None)
@@ -810,11 +736,8 @@ class IdentityAnchorMixin:
             if set(scope) & (getattr(self, "_rotation_lineage_unrecorded", set()) | failed):
                 # Any session of the scope whose own predecessor write failed ends the scope early (#2466 review).
                 raise ValueError("unrecorded rotation lineage")
-            if text_off:
-                text_trip(text_off, text_error if text_off == "error" else candidate_spent)
             rows = {int(row["store_id"]): row for group in held.values() for row in group}
             budget, byte_budget, id_budget = _PRESENCE_WINDOW_ROWS, _PRESENCE_WINDOW_BYTES, _PRESENCE_WINDOW_CALL_IDS
-            text_budget = _PRESENCE_TEXT_BYTES - candidate_spent  # one counter: candidates, stored and shown
             for source in scope:
                 # Size the window in SQL before loading any row (#2466 review, wait bar): stored UTF-8 bytes per row
                 # (SQLite's length() of text stops at the first NUL, and Python loads the whole value), newest first,
@@ -827,18 +750,8 @@ class IdentityAnchorMixin:
                 # loads, so SQL-visible limits bound the work on the admitted path. A row with more entries than the
                 # whole call-id window returns its length before any entry is checked, so the loop below trips on it
                 # and admission checks at most about two windows of entries in all.
-                # With a reply candidate (#2116), the same pass sizes stored reply text (replies, and the text of call
-                # rows) against the one text counter the candidates started, and finds any assistant row whose identity
-                # would load a payload file or is redacted: either gives every reply main's result before any row loads.
-                text_sql = ("CASE WHEN role='assistant' AND (tool_calls IS NULL OR tool_calls IN ('', '[]') "
-                            "OR length(CAST(content AS BLOB)) > 0) "
-                            f"THEN max(length(CAST(content AS BLOB)), {_PRESENCE_TEXT_MIN_CHARGE}) ELSE 0 END, "
-                            "CASE WHEN role='assistant' AND ("
-                            + " OR ".join(f"instr(CAST(content AS BLOB), CAST('{m}' AS BLOB)) > 0"
-                                          for m in _PRESENCE_MARKERS) + ") THEN 1 ELSE 0 END, "
-                            if text_wanted else "")  # without one, the statement is the tool-only one
                 sized = self._store._conn.execute(
-                    "SELECT " + text_sql + "length(CAST(content AS BLOB)), length(CAST(tool_calls AS BLOB)), "
+                    "SELECT length(CAST(content AS BLOB)), length(CAST(tool_calls AS BLOB)), "
                     "CASE WHEN tool_calls IS NULL THEN 0 WHEN length(CAST(tool_calls AS BLOB)) > ? THEN -1 "
                     "WHEN NOT json_valid(tool_calls) THEN -1 "
                     "WHEN json_type(tool_calls) <> 'array' THEN -1 "
@@ -849,17 +762,12 @@ class IdentityAnchorMixin:
                     "ELSE json_array_length(tool_calls) END "
                     "FROM messages WHERE session_id=? ORDER BY store_id DESC LIMIT ?",
                     (_PRESENCE_WINDOW_BYTES, _PRESENCE_WINDOW_CALL_IDS, source, budget + 1))
-                count, shape_ok, marked = 0, True, False
-                for sized_row in sized:
-                    reply_len, reply_marked = sized_row[:2] if text_wanted else (0, 0)
-                    content_len, calls_len, call_ids = sized_row[-3:]
+                count, shape_ok = 0, True
+                for content_len, calls_len, call_ids in sized:
                     count += 1
                     if call_ids < 0:
                         shape_ok = False
                         break
-                    if not marked and text_budget >= 0:  # text is sized beside the tool window, never instead of it
-                        marked = bool(reply_marked)
-                        text_budget -= 0 if marked else (reply_len or 0)
                     byte_budget -= (content_len or 0) + (calls_len or 0)
                     id_budget -= call_ids
                     if count > budget or byte_budget < 0 or id_budget < 0:
@@ -872,9 +780,6 @@ class IdentityAnchorMixin:
                                     "session=%s scope=%d", session, len(scope))
                         _PRESENCE_SHAPE_LOGGED.add(notice)
                     return None  # a trip: the caller restores main's plan
-                if text_wanted and not text_off and (marked or text_budget < 0):
-                    text_off = "marked" if marked else "budget"
-                    text_trip(text_off, _PRESENCE_TEXT_BYTES - text_budget)
                 if count > budget or byte_budget < 0 or id_budget < 0:
                     notice = (str(self._db_path), self._db_path.stat().st_ino, session)
                     if notice not in _PRESENCE_WINDOW_LOGGED:
@@ -894,58 +799,6 @@ class IdentityAnchorMixin:
                     end = int(tail[0]["store_id"]) - 1
                 for page in reversed(pages):  # Preserve the previous chronological copy-consumption order.
                     rows.update((int(row["store_id"]), row) for row in page)
-            # #2116: every stored reply form in the scope, and how often the view shows each form. The text is charged
-            # to the same budget as it is normalized (held rows and the view's own replies included); a marked or
-            # redacted reply, or the budget passed, gives main's result.
-            stored_text: set = set()
-            shown_text: Counter = Counter()
-
-            def reply_forms():
-                """Fill stored_text and shown_text; return the trip reason (a marked or redacted reply, stored or shown,
-                the budget passed, or a failed normalization), else None. No identity or cleanup work runs on a reply
-                before its marker check and its charge, on the one counter the candidates started."""
-                spent = candidate_spent
-                try:
-                    for store_id in sorted(rows):
-                        row = rows[store_id]
-                        if row.get("role") != "assistant":
-                            continue
-                        text = row.get("content") if isinstance(row.get("content"), str) else str(row.get("content") or "")
-                        if calls(row, stored=True) != ():
-                            if not text:
-                                continue
-                            # A stored call row's text accounts for the reply it becomes once a host strips its calls
-                            # (#2116 review r2); its identity is taken without the calls, so no call payload loads.
-                            row = {**row, "tool_calls": None}
-                        if any(marker in text for marker in _PRESENCE_MARKERS):
-                            return "marked", spent
-                        spent += max(len(text.encode("utf-8", "surrogatepass")), _PRESENCE_TEXT_MIN_CHARGE)
-                        if spent > _PRESENCE_TEXT_BYTES:
-                            return "budget", spent
-                        identity = self._message_replay_identity(row, stored_row=True)
-                        if _lossy(identity):
-                            return "marked", spent
-                        stored_text.update(text_forms(identity))
-                    for k, msg in enumerate(identity_messages):
-                        if msg.get("role") != "assistant" or msg.get("tool_calls"):
-                            continue
-                        text = msg.get("content") if isinstance(msg.get("content"), str) else str(msg.get("content") or "")
-                        if any(marker in text for marker in _PRESENCE_MARKERS):
-                            return "marked", spent  # its identity would load a payload (#2116 review r2)
-                        spent += max(len(text.encode("utf-8", "surrogatepass")), _PRESENCE_TEXT_MIN_CHARGE)
-                        if spent > _PRESENCE_TEXT_BYTES:
-                            return "budget", spent
-                        identity = identity_at(k)
-                        if identity is not None and identity[0] == "assistant":
-                            shown_text.update(text_forms(identity))
-                except Exception as exc:  # the reply check alone is lost: replies keep main's result
-                    return "error", type(exc).__name__
-                return None, spent
-
-            if text_wanted and not text_off:
-                text_off, spent = reply_forms()
-                if text_off:
-                    text_trip(text_off, spent)
             # One id, one invocation (#2466 review, plain rule). Every call id and result id stored anywhere in the
             # scope counts as stored. An id whose call rows differ between the view and the window (the row's ids,
             # tool names, or arguments compared as parsed JSON) is reused: its rows keep main's result (#2172).
@@ -1051,10 +904,6 @@ class IdentityAnchorMixin:
         for idx, wanted in candidates.items():
             if wanted is None:
                 continue  # unsure: accounted, as on main
-            if wanted[0] == "text":
-                if not text_off and idx not in blocked and not wanted[1] & stored_text and all(shown_text[f] == 1 for f in wanted[1]):
-                    new.add(idx)  # stored nowhere in the scope and shown once: a new reply (#2116)
-                continue
             ids = set(wanted[1]) if wanted[0] == "call" else {wanted[1]}
             if idx in blocked or ids & reused or ids & (stored_calls if wanted[0] == "call" else stored_results):
                 continue  # reused (main's result), or stored: accounted (a partly stored call row keeps main's result)
@@ -1077,8 +926,6 @@ class IdentityAnchorMixin:
             changed = False
             for idx in sorted(new):
                 wanted = candidates[idx]
-                if wanted[0] == "text":
-                    continue  # a reply has no pair to keep whole
                 if wanted[0] == "call":
                     ok = all(j in stored_now or j < cursor and call_id in stored_results
                              or j >= cursor and j not in plan["replayed"] and call_id not in stored_results

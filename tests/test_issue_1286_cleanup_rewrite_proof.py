@@ -404,6 +404,8 @@ def _resend_the_last_turn(host, variant, reply):
     return user
 
 
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason="#2116: the warm anchor keeps the replaced unstamped reply below the cursor as a "
+                                                              "positional replay, so the warm path never stores it")
 @_RESENT_REPLIES
 @pytest.mark.parametrize("variant", ["stub", "reasoning"])
 def test_a_reply_the_warm_path_never_stored_is_not_proven_away(host, variant, reply):
@@ -498,9 +500,10 @@ def test_control_without_a_cleanup_pass(host, variant):
     assert host.duplicated() == {}
 
 
-def _resend_then_cleanup_pass_then_restart(host):
-    """The edit-resend, then a later cleanup-only pass (another reasoning block stripped) whose proof stays
-    process-local, as before #1286, then a restart. Returns the reply text and the host after the restart's turn."""
+def test_a_later_cleanup_pass_does_not_prove_away_a_reply_the_warm_path_never_stored(host):
+    """I1: the edit-resend above leaves the new reply unstored; a later cleanup-only pass (another reasoning block
+    stripped) hands the host a list that holds it. That pass's proof stays process-local, as before #1286: made
+    durable at the boundary it would advance the restart's cold cursor past the reply, which is never stored."""
     _turns(host, "reasoning")
     _commit_cleanup(host, "reasoning")
     host.turn(reply=f"{THINK}reply to T{host.n_turns}{PAD}")
@@ -509,40 +512,13 @@ def _resend_then_cleanup_pass_then_restart(host):
     host.live[-2:] = [{"role": "user", "content": user, "timestamp": host.stamp()},
                       {"role": "assistant", "content": reply}]
     host.turn()
-    warm = (host.count(user), host.count(reply))
+    assert (host.count(user), host.count(reply)) == (1, 0)
     _commit_cleanup(host, "reasoning")
     host.restart()
     host.turn()
-    return reply, warm
-
-
-def test_a_later_cleanup_pass_keeps_the_warm_stored_reply_and_the_restart_batch_copies_it_like_its_siblings(host):
-    """I1, the #2116 trade (release manager's ruling (a)): the warm ingest now stores the resent turn's new reply, so
-    it is never lost (main loses it until a restart). The later cleanup-only pass's proof stays process-local, so the
-    restart stores the unstamped rows again as #259's batch: the reply is one of those copies, like each of its
-    siblings, which main copies too. Per row against main: main stores it 0 then 1, this stores it 1 then 2. The
-    copy is main's restart batch (#1674), not the presence check; a plain restart keeps it at 1
-    (test_a_reply_the_warm_path_never_stored_is_not_proven_away)."""
-    reply, warm = _resend_then_cleanup_pass_then_restart(host)
-    assert warm == (1, 1)
-    duplicated = host.duplicated()
-    assert host.count(reply) == 2 and set(duplicated.values()) == {2} and len(duplicated) == 8, duplicated
+    assert host.count(reply) == 1
     _restart_stores_only_the_next_turn(host)
-    assert host.count(reply) == 2
-
-
-@pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="#1674/#2467: the restart batch re-stores unstamped rows a process-local cleanup proof "
-                          "covered, the warm-stored reply and its siblings alike")
-def test_a_later_cleanup_pass_then_a_restart_stores_each_row_once(host):
-    """The ideal end state: after the restart, the reply and its siblings are each stored once. The named residual
-    holds only while no certifying run hits its trigger (a restart after the warm path stored a replaced reply, with or
-    without a cleanup-only pass first); a certifying run whose audit shows that trigger gets it fixed before the next
-    certifying run."""
-    reply, warm = _resend_then_cleanup_pass_then_restart(host)
-    if warm != (1, 1):
-        pytest.fail(f"setup: the warm ingest must store the resent turn, got {warm}")
-    assert (host.count(reply), host.duplicated()) == (1, {})
+    assert host.count(reply) == 1
 
 
 def test_a_reasoning_cleaned_reply_in_front_of_the_anchor_is_not_stored_again(host):
