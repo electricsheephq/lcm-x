@@ -138,9 +138,8 @@ def test_p2_reused_id_split_into_a_two_call_row_leaves_a_call_without_its_result
 
 
 def test_reused_id_pairs_are_never_split(tmp_path):
-    # Astra (delta 6): stored (A, X); view (A, Y), (B, X) under one id. A new call is stored only with its own
-    # results, and a new result only with its own call: Y (its call A is stored by payload) is stored; B is not,
-    # since its result X is already stored (main's result for B).
+    # Astra (delta 6): stored (A, X); view (A, Y), (B, X) under one id. The id is reused (its calls and results
+    # differ), so all its rows keep main's result: nothing is stored, so no pair is split (#2172).
     from tests.test_anchor_unstored_before_cursor import _engine, _presence, SESSION
 
     def call(path):
@@ -153,7 +152,7 @@ def test_reused_id_pairs_are_never_split(tmp_path):
     engine = _engine(tmp_path)
     try:
         engine._store.append_batch(SESSION, [call("A"), result("X")])
-        assert _presence(engine, [call("A"), result("Y"), call("B"), result("X")]) == [1]
+        assert _presence(engine, [call("A"), result("Y"), call("B"), result("X")]) == []
     finally:
         engine.shutdown()
 
@@ -177,6 +176,26 @@ def test_a_new_pair_next_to_a_stored_pair_is_stored_once_in_any_order(tmp_path, 
         after = Counter(_report(engine))
         added = after - before
         assert not {key: count for key, count in after.items() if count > 1}
+        # A fresh id is stored once; a reused id keeps main's result, which stores neither row (#2172).
+        expected = 1 if "unique" in shape else 0
+        assert added[_full(new_call)] == added[_full(new_result)] == expected
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError,
+                   reason="#2172: a reused id keeps main's result, so its new pair is not stored (#2466 review)")
+def test_a_new_pair_reusing_a_stored_id_is_stored_once(tmp_path):
+    engine = _engine(tmp_path)
+    try:
+        stored_call, stored_result = _call("call_0", '{"path": "b.txt"}'), _res("call_0", "B file text")
+        tail = [_a("A1 reply", 103), _u("P2 second", 110), _a("A2 reply", 111), _u("P3 third", 120), _a("A3", 121)]
+        engine.ingest([_u("P1 first", 100), stored_call, stored_result, *tail])
+        before = Counter(_report(engine))
+        new_call, new_result = _call("call_0", '{"path": "c.txt"}'), _res("call_0", "C file text")
+        engine.ingest([_u("P1 replaced first", 99), new_call, new_result, stored_call, stored_result, *tail[:-2],
+                       _u("P4 new", 200)])
+        added = Counter(_report(engine)) - before
         assert added[_full(new_call)] == 1 and added[_full(new_result)] == 1
     finally:
         engine.shutdown()

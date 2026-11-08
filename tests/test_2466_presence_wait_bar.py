@@ -1,6 +1,7 @@
 """#2466 review, delta 7: the presence audit runs under the write lock, so its worst case at every window limit is a
-user-visible wait. Each shape fills one budget to just inside its limit (the audit must still answer), and one shape
-also overfills it (the audit must give main's result, sized in SQL before any row loads).
+user-visible wait. Each shape fills the window to just inside its limits (the audit must still answer), and one shape
+overfills it (the audit must give main's result, sized in SQL before any row loads). Only call and result rows are
+compared, by their stored text, so the audit loads no payload file.
 
 The bar is 150 ms, measured at load of at most half the cores. Shared CI runners are slower and noisier, so the
 assertion multiplies the bar by LCM_PRESENCE_TIMING_SLACK (default 4); run with LCM_PRESENCE_TIMING_SLACK=1 to
@@ -8,18 +9,14 @@ check the bar itself.
 """
 from __future__ import annotations
 
-import base64
 import os
-import random
 import time
 
 import pytest
 
 from hermes_lcm import identity_anchor
-from hermes_lcm.config import LCMConfig
-from hermes_lcm.engine import LCMEngine
 
-from tests.test_anchor_unstored_before_cursor import SESSION, _a, _call, _engine, _u
+from tests.test_anchor_unstored_before_cursor import SESSION, _call, _engine
 
 BAR = 0.150 * float(os.environ.get("LCM_PRESENCE_TIMING_SLACK", "4"))
 
@@ -51,8 +48,7 @@ def _call_row(i, args):
         {"id": f"c{i}", "type": "function", "function": {"name": "f", "arguments": args}}]}
 
 
-ROWS, READ, TEXT = (identity_anchor._PRESENCE_WINDOW_ROWS, identity_anchor._PRESENCE_WINDOW_BYTES,
-                    identity_anchor._PRESENCE_TEXT_BYTES)
+ROWS, READ = identity_anchor._PRESENCE_WINDOW_ROWS, identity_anchor._PRESENCE_WINDOW_BYTES
 CALL_ROW_OVERHEAD = 100  # JSON around a call's arguments, generous
 
 
@@ -84,64 +80,6 @@ def test_inline_tool_result_text_at_the_read_limit(tmp_path):
         engine.shutdown()
 
 
-def test_text_rows_at_the_text_limit(tmp_path):
-    engine = _engine(tmp_path)
-    try:
-        _append(engine, [{"role": "assistant", "content": f"reply {i} " + "x" * (TEXT // ROWS - 20), "timestamp": float(i)}
-                         for i in range(ROWS)])
-        took, out = _best(engine, [_a("a brand new reply", ROWS + 1)])
-        assert out == [0]
-        assert took < BAR, f"{took * 1000:.0f} ms"
-    finally:
-        engine.shutdown()
-
-
-def test_text_and_tool_call_json_at_both_limits_at_once(tmp_path):
-    engine = _engine(tmp_path)
-    try:
-        rows, half = [], ROWS // 2
-        for i in range(half):
-            rows += [{"role": "assistant", "content": f"reply {i} " + "x" * (TEXT // half - 20), "timestamp": float(i)},
-                     _call_row(i, "y" * ((READ - TEXT) // half - CALL_ROW_OVERHEAD))]
-        _append(engine, rows)
-        took, out = _best(engine, [_a("a brand new reply", ROWS + 1)])
-        assert out == [0]
-        assert took < BAR, f"{took * 1000:.0f} ms"
-    finally:
-        engine.shutdown()
-
-
-def _payload_engine(path):
-    engine = LCMEngine(config=LCMConfig(database_path=str(path / "lcm.db"), large_output_externalization_enabled=True),
-                       hermes_home=str(path / "home"))
-    engine.on_session_start(SESSION, platform="cli", context_length=10_000_000)
-    return engine
-
-
-SMALL_LOADS = TEXT // identity_anchor._PRESENCE_PAYLOAD_MIN_CHARS  # most payload loads one audit may make
-LARGE_LOADS = TEXT // (530 * 1024)  # 512K-character payload files that fit the text limit
-
-
-@pytest.mark.parametrize("raw_bytes,rows,expected", [
-    (3_072, SMALL_LOADS - 50, [0]), (3_072, SMALL_LOADS + 50, []), (384 * 1024, LARGE_LOADS, [0]),
-    (384 * 1024, 100, [])], ids=["4K-inside", "4K-overfilled", "512K-inside", "512K-overfilled"])
-def test_externalized_payloads_are_charged_before_they_load(tmp_path, raw_bytes, rows, expected):
-    engine = _payload_engine(tmp_path)
-    try:
-        rnd = random.Random(raw_bytes + rows)
-        view = []
-        for i in range(rows):
-            blob = base64.b64encode(rnd.randbytes(raw_bytes)).decode()
-            view += [{"role": "user", "content": f"look {i} data:image/png;base64,{blob}", "timestamp": float(i)},
-                     {"role": "assistant", "content": f"ok {i}"}]
-        engine.ingest(view)
-        stored = [row for row in engine._store.get_session_messages(SESSION) if row["role"] == "user"]
-        assert len(stored) == rows and max(len(row["content"]) for row in stored) < 2_000  # setup: externalized
-        took, out = _best(engine, [_u("a brand new prompt", 1e6)])
-        assert out == expected
-        assert took < BAR, f"{took * 1000:.0f} ms"
-    finally:
-        engine.shutdown()
 
 
 def test_a_nul_inside_stored_text_is_still_sized_in_full(tmp_path):
@@ -150,24 +88,6 @@ def test_a_nul_inside_stored_text_is_still_sized_in_full(tmp_path):
     try:
         _append(engine, [_call_row(0, "{}"), {"role": "tool", "tool_call_id": "c0", "content": "x\0" + "y" * (READ + 1)}])
         assert _presence(engine, [_call("brand_new", 1)]) == []  # past the read limit: main's result
-    finally:
-        engine.shutdown()
-
-
-def test_each_repeated_placeholder_load_is_charged(tmp_path):
-    """Restoration loads a payload file once per placeholder occurrence, so each occurrence is charged."""
-    engine = _payload_engine(tmp_path)
-    try:
-        blob = base64.b64encode(random.Random(1).randbytes(3_072)).decode()
-        engine.ingest([{"role": "user", "content": f"look data:image/png;base64,{blob}", "timestamp": 1.0},
-                       {"role": "assistant", "content": "ok"}])
-        stored = next(row for row in engine._store.get_session_messages(SESSION) if row["role"] == "user")
-        placeholder = identity_anchor._INGEST_PLACEHOLDER_RE.search(stored["content"]).group(0)
-        repeats = SMALL_LOADS + 50
-        _append(engine, [{"role": "user", "content": " ".join([placeholder] * repeats), "timestamp": 2.0}])
-        took, out = _best(engine, [_u("a brand new prompt", 1e6)])
-        assert out == []  # one row, but more loads than the text limit allows: main's result
-        assert took < BAR, f"{took * 1000:.0f} ms"
     finally:
         engine.shutdown()
 

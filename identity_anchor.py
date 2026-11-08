@@ -28,9 +28,8 @@ import json
 import os
 import logging
 import sqlite3
-from collections import Counter, defaultdict, deque
+from collections import Counter, defaultdict
 from difflib import SequenceMatcher
-from pathlib import Path
 from typing import Any, Dict, Optional
 
 from .recognition_matching import (
@@ -45,9 +44,7 @@ from .recognition_matching import (
     _reroute_for_null as _reroute_for_null,
 )
 from .config import identity_anchor_enabled
-from .externalize import _EXTERNALIZED_REF_RE, get_large_output_storage_dir
 from .fresh_tail import tool_group_safe_end
-from .ingest_content import _INGEST_PLACEHOLDER_RE
 from .message_content import normalize_content_value, text_content_for_pattern_matching
 from .store import _normalize_observed_at
 from .tokens import count_messages_tokens
@@ -61,30 +58,8 @@ _INSERT_DIFF_BUDGET = 1_000_000  # #633: old x new rows compared per insertion d
 _CARRIER_LEDGER_CAP = 256  # #1000: carrier emission keys remembered as seen / retired (process-local)
 _PRESENCE_WINDOW_ROWS = 10000  # total stored rows across the presence scope
 _PRESENCE_WINDOW_BYTES = 20_000_000  # characters (code points) of stored content and tool-call text across the scope
-_PRESENCE_TEXT_BYTES = 4_000_000  # characters of stored text the audit normalizes (rows of a candidate's text role)
-_PRESENCE_PAYLOAD_MIN_CHARS = 8_000  # each payload file a text row loads costs at least this much text budget
 _PRESENCE_WINDOW_LOGGED: set[tuple[str, int, str]] = set()  # store file and session, once per process
 
-
-def _payload_loads(content, tool_calls) -> list:
-    """Every payload file a stored text row's identity loads, one entry per load (#2466 review).
-
-    Ingest placeholders load once per occurrence, plus once per distinct ref when the content is structured JSON
-    (the field-path check); the first externalized ref loads once. A ref that only a restored payload reveals loads
-    at most one file per row, and the expanded-text budget ends the audit after it.
-    """
-    loads = []
-    for text in (content, tool_calls):
-        if not isinstance(text, str) or not text:
-            continue
-        ingest = [match.group(1).strip() for match in _INGEST_PLACEHOLDER_RE.finditer(text)]
-        loads += ingest
-        if ingest and text.lstrip()[:1] in "[{":
-            loads += list(dict.fromkeys(ingest))
-    first = _EXTERNALIZED_REF_RE.search(content) if isinstance(content, str) else None
-    if first:
-        loads.append(first.group(1).strip())
-    return loads
 _ROTATION_LINEAGE_UNRECORDED: set[tuple[str, str]] = set()  # store file and session whose predecessor write failed, per process
 
 
@@ -646,6 +621,9 @@ class IdentityAnchorMixin:
             return tuple(sorted(str(c.get("id") or "") for c in value if isinstance(c, dict))) if isinstance(
                 value, list) else ()
 
+        def tool_row(msg):
+            return calls(msg) != () or msg.get("role") == "tool" and bool(msg.get("tool_call_id"))
+
         def key(msg, stored=False):
             ids = calls(msg, stored=stored)
             if ids is None:
@@ -681,8 +659,11 @@ class IdentityAnchorMixin:
 
         explained = set(excluded) | set(matched) | set(plan.get("matched", {})) | plan["replayed"] | set(missed)
         try:
+            # Only call and result rows are presence-checked (class A). A replaced reply (#2116) keeps main's
+            # result: its text identity can load payload files the window cannot bound (#2466 review, split to
+            # v0.30.x under #2467).
             candidates = {idx: key(identity_messages[idx]) for idx in range(start, cursor)
-                          if idx not in explained and identity_messages[idx].get("role") != "system"
+                          if idx not in explained and tool_row(identity_messages[idx])
                           and not (identity_at(idx) is None and
                           self._identity_is_lcm_scaffold(identity_messages[idx]))
                           and not self._matches_ignore_message_patterns(messages[idx])}
@@ -705,52 +686,28 @@ class IdentityAnchorMixin:
                 # Any session of the scope whose own predecessor write failed ends the scope early (#2466 review).
                 raise ValueError("unrecorded rotation lineage")
             rows = {int(row["store_id"]): row for group in held.values() for row in group}
-            text_roles = {wanted[0] for wanted in candidates.values() if wanted and wanted[0] not in {"call", "tool"}}
-            budget, byte_budget, text_budget = _PRESENCE_WINDOW_ROWS, _PRESENCE_WINDOW_BYTES, _PRESENCE_TEXT_BYTES
-            storage = None
+            budget, byte_budget = _PRESENCE_WINDOW_ROWS, _PRESENCE_WINDOW_BYTES
             for source in scope:
-                # Size the window in SQL before loading any row (#2466 review, wait bar): stored character counts per
-                # row, newest first, stopping at the first budget it passes, so an over-budget scope costs at most its
-                # budget plus one row of reading and decodes nothing. A text row's identity loads the payload files
-                # its placeholders point at, so each is charged at its file size before any load; call and result
-                # rows compare their stored text and load none.
+                # Size the window in SQL before loading any row (#2466 review, wait bar): stored UTF-8 bytes per row
+                # (SQLite's length() of text stops at the first NUL, and Python loads the whole value), newest first,
+                # stopping at the first budget it passes, so an over-budget scope costs at most its budget plus one
+                # row of reading and decodes nothing. Only call and result rows are compared, by their stored text,
+                # so the audit loads no payload file.
                 sized = self._store._conn.execute(
-                    # Stored UTF-8 bytes, which bound the characters loaded: SQLite's length() of text stops at
-                    # the first NUL, and Python loads the whole value (#2466 review).
-                    "SELECT role, COALESCE(tool_call_id, '') != '', length(CAST(content AS BLOB)), "
-                    "length(CAST(tool_calls AS BLOB)), "
-                    "CASE WHEN instr(CAST(content AS BLOB), CAST('xternalized' AS BLOB)) THEN content END, "
-                    "CASE WHEN instr(CAST(tool_calls AS BLOB), CAST('xternalized' AS BLOB)) THEN tool_calls END "
+                    "SELECT length(CAST(content AS BLOB)), length(CAST(tool_calls AS BLOB)) "
                     "FROM messages WHERE session_id=? ORDER BY store_id DESC LIMIT ?", (source, budget + 1))
                 count = 0
-                for role, tool_result, content_len, calls_len, marked, marked_calls in sized:
+                for content_len, calls_len in sized:
                     count += 1
                     byte_budget -= (content_len or 0) + (calls_len or 0)
-                    if role in text_roles and not (role == "tool" and tool_result):
-                        text_budget -= content_len or 0  # normalization cost bound (#2466 review)
-                        for ref in _payload_loads(marked, marked_calls):
-                            if storage is None:
-                                storage = get_large_output_storage_dir(self._config, hermes_home=self._hermes_home,
-                                                                       create=False)
-                            if not ref or Path(ref).name != ref:
-                                continue  # the loader refuses it: nothing loads
-                            try:
-                                size = (storage / ref).stat().st_size
-                            except OSError:
-                                continue  # a missing payload loads nothing
-                            # A load costs a file read and a JSON parse whatever its size, so each one is charged at
-                            # least the minimum: about 500 loads at most per audit (#2466 review, wait bar).
-                            size = max(size, _PRESENCE_PAYLOAD_MIN_CHARS)
-                            byte_budget, text_budget = byte_budget - size, text_budget - size
-                    if count > budget or byte_budget < 0 or text_budget < 0:
+                    if count > budget or byte_budget < 0:
                         break
                 sized.close()
-                if count > budget or byte_budget < 0 or text_budget < 0:
+                if count > budget or byte_budget < 0:
                     notice = (str(self._db_path), self._db_path.stat().st_ino, session)
                     if notice not in _PRESENCE_WINDOW_LOGGED:
                         logger.info("LCM identity-anchor presence window incomplete: session=%s scope=%d "
-                                    "budget=%d chars=%d text_chars=%d", session, len(scope), budget, byte_budget,
-                                    text_budget)
+                                    "budget=%d chars=%d", session, len(scope), budget, byte_budget)
                         _PRESENCE_WINDOW_LOGGED.add(notice)
                     return []
                 end, pages = None, []
@@ -765,110 +722,78 @@ class IdentityAnchorMixin:
                     end = int(tail[0]["store_id"]) - 1
                 for page in reversed(pages):  # Preserve the previous chronological copy-consumption order.
                     rows.update((int(row["store_id"]), row) for row in page)
-            # Per form, stored copies in store order: exact forms and cleanup aliases apart, so a replay takes an
-            # exact copy before an alias (#2466 review).
-            exact: dict = defaultdict(list)
-            alias: dict = defaultdict(list)
-            expanded = _PRESENCE_TEXT_BYTES
-            row_forms: dict = defaultdict(list)
+            # One id, one invocation (#2466 review, plain rule). Every call id and result id stored anywhere in the
+            # scope counts as stored. An id whose call rows (payload and row shape) or results differ between the
+            # view and the window is reused: its rows keep main's result (#2172).
+            call_sig: dict = defaultdict(set)
+            result_sig: dict = defaultdict(set)
+            stored_calls, stored_results = set(), set()
+
+            def note(msg, stored):
+                ids = calls(msg, stored=stored)
+                if ids:
+                    if ids == ("?",):
+                        return
+                    form = exact_form(msg, ("call", ids), stored=stored)
+                    for call_id in ids:
+                        call_sig[call_id].add(form)
+                        if stored:
+                            stored_calls.add(call_id)
+                elif msg.get("role") == "tool" and msg.get("tool_call_id") and ids is not None:
+                    call_id = str(msg["tool_call_id"])
+                    result_sig[call_id].add(exact_form(msg, ("tool", call_id), stored=stored))
+                    if stored:
+                        stored_results.add(call_id)
+
             for store_id in sorted(rows):
-                row = rows[store_id]
-                if calls(row, stored=True) or row.get("role") == "tool" and row.get("tool_call_id"):
-                    cleaned_form = key(row, stored=True)
-                    own = exact_form(row, cleaned_form, stored=True)
-                elif row.get("role") in text_roles:
-                    identity = self._message_replay_identity(row, stored_row=True)
-                    expanded -= len(identity[1] or "") if isinstance(identity[1], str) else 0  # may load a payload
-                    if _lossy(identity) and expanded >= 0:
-                        continue
-                    if expanded < 0:
-                        notice = (str(self._db_path), self._db_path.stat().st_ino, session)
-                        if notice not in _PRESENCE_WINDOW_LOGGED:
-                            logger.info("LCM identity-anchor presence window incomplete: session=%s scope=%d "
-                                        "expanded text over budget", session, len(scope))
-                            _PRESENCE_WINDOW_LOGGED.add(notice)
-                        return []
-                    own = (identity[0], identity[1].strip())
-                    cleaned = self._active_cleanup_replay_identity(identity)
-                    cleaned_form = (cleaned[0], cleaned[1].strip()) if cleaned else None  # proven cleanup form (#1286)
-                else:
-                    continue
-                exact[own].append(store_id)
-                row_forms[store_id].append(own)
-                if cleaned_form is not None and cleaned_form != own:
-                    alias[cleaned_form].append(store_id)
-                    row_forms[store_id].append(cleaned_form)
-            alias_rows = {store_id for stack in alias.values() for store_id in stack}
-            if set(alias) & {row_forms[store_id][0] for store_id in alias_rows}:
-                # Exact-before-alias allocation is optimal only when a cleanup form is never itself the form of a
-                # row that has an alias (cleanup is idempotent); otherwise keep main's result (#2466 review).
-                raise ValueError("cleanup forms are not idempotent")
-            stored_calls = {ident for form in alias if form and form[0] == "call" for ident in form[1]}
-            wanted_forms = {wanted for wanted in candidates.values() if wanted is not None}
-            demand = []  # (candidate index or None for a prefix copy, exact form, loose form): the prefix first
-            for idx in range(min(start, len(messages))):
-                if idx not in excluded and idx not in matched:
-                    loose = key(identity_messages[idx])
-                    if loose in wanted_forms:
-                        demand.append((None, exact_form(identity_messages[idx], loose), loose))
-            demand += [(idx, exact_form(identity_messages[idx], wanted), wanted)
-                       for idx, wanted in candidates.items() if wanted is not None]
+                note(rows[store_id], True)
+            for msg in identity_messages:
+                note(msg, False)
+            reused = {call_id for sig in (call_sig, result_sig) for call_id, forms in sig.items() if len(forms) > 1}
         except Exception as exc:
             logger.warning("LCM identity-anchor presence unavailable (%s); keeping positional replays", type(exc).__name__)
             return []
-        # Allocate stored copies: the prefix's reserved copies first, then candidates in view order. Pass 1 serves each
-        # demand from its exact form (text, or a call's or result's payload); pass 2 serves what is left from aliases
-        # (a reasoning-cleanup form, or a call's or result's id). An exact form with an alias is never an alias
-        # target (checked above), so this is a maximum allocation, in linear time (#2466 review). A candidate left
-        # without a copy is unaccounted.
-        used, served, done, served_exact = set(consumed), set(), set(), set()
-        for stacks, pick in ((exact, 1), (alias, 2)):
-            queues: dict = {}
-            for pos, item in enumerate(demand):
-                if pos not in done:
-                    queues.setdefault(item[pick], deque()).append(pos)
-            for form, queue in queues.items():
-                stack = stacks.get(form)
-                while queue and stack:
-                    store_id = stack.pop()  # newest first
-                    if store_id in used:
-                        continue
-                    used.add(store_id)
-                    pos = queue.popleft()
-                    done.add(pos)
-                    if demand[pos][0] is not None:
-                        consumed.add(store_id)
-                        served.add(demand[pos][0])
-                        if pick == 1:
-                            served_exact.add(demand[pos][0])
-
-        # Tool grouping (#2466 review): a new call is stored only with every result of its view group, and a new result
-        # only with its own view call, stored now (the audit's finds or an unaccounted row, not dropped by the ignore
-        # patterns) or matched by its exact payload. Anything else keeps main's result, never a split pair.
-        new = {idx for idx, wanted in candidates.items() if wanted is not None and idx not in served}
-        stored_now = set(missed) | new
-
-        # Pair rows once, in one forward pass over the view (#2466 review: linear, and parallel calls in separate
-        # rows keep their own results). Within a run of consecutive call and result rows, a result belongs to the
-        # latest earlier call row of the run that carries its id; a run with no call row leaves it unowned.
-        owner: dict = {}
-        owned: dict = defaultdict(list)
-        call_ids: dict = {}
-        latest: dict = {}
-        has_call = False
+        results_of: dict = defaultdict(list)
+        callers: dict = defaultdict(list)
         for k, msg in enumerate(identity_messages):
             ids = calls(msg) or ()
             if ids:
-                call_ids[k] = set(ids)
-                latest.update((call_id, k) for call_id in ids)
-                has_call = True
-            elif msg.get("role") == "tool":
-                call_id = str(msg.get("tool_call_id") or "")
-                owner[k] = latest.get(call_id, -1) if has_call else None  # -1: a call row of the run, none with the id
-                if owner[k] is not None and owner[k] >= 0:
-                    owned[owner[k]].append(k)
+                for call_id in ids:
+                    callers[call_id].append(k)
+            elif msg.get("role") == "tool" and msg.get("tool_call_id"):
+                results_of[str(msg["tool_call_id"])].append(k)
+        # A view that shows one id on more than one call row, or more than one result, is a reused id too.
+        reused |= {call_id for rows_of in (callers, results_of) for call_id, at in rows_of.items() if len(at) > 1}
+        # A tool segment (a call row and the results right after it) is replayed whole or not at all
+        # (_identity_anchor_tool_segments): storing one of its rows makes its stored rows at or past the cursor
+        # stored again. So no row of a segment that holds such a stored row is stored here (#2466 review).
+        blocked, k = set(), 0
+        while k < len(identity_messages):
+            if identity_messages[k].get("role") == "assistant" and identity_messages[k].get("tool_calls"):
+                end = k + 1
+                while end < len(identity_messages) and identity_messages[end].get("role") == "tool":
+                    end += 1
+                if any(j >= cursor and (set(calls(identity_messages[j]) or ("?",)) <= stored_calls if j == k else
+                                        str(identity_messages[j].get("tool_call_id") or "") in stored_results)
+                       for j in range(k, end)):
+                    blocked.update(range(k, end))
+                k = end
             else:
-                latest, has_call = {}, False
+                k += 1
+        new = set()
+        for idx, wanted in candidates.items():
+            if wanted is None:
+                continue  # unsure: accounted, as on main
+            ids = set(wanted[1]) if wanted[0] == "call" else {wanted[1]}
+            if idx in blocked or ids & reused or ids & (stored_calls if wanted[0] == "call" else stored_results):
+                continue  # reused (main's result), or stored: accounted (a partly stored call row keeps main's result)
+            new.add(idx)
+
+        # Groups stay whole (#2466 review). A new call is stored only if each result of its ids in the view is stored
+        # now, or sits at or past the cursor and is not replayed (the view's own later rows). A new result is stored
+        # only if its call is stored, or a call row carrying its id is stored now and not dropped by the ignore
+        # patterns. Anything else keeps main's result, never a split pair.
+        stored_now = set(missed) | new
         ignored: dict = {}
 
         def dropped(k):
@@ -882,14 +807,12 @@ class IdentityAnchorMixin:
             for idx in sorted(new):
                 wanted = candidates[idx]
                 if wanted[0] == "call":
-                    ok = all(j in stored_now or j >= cursor and j not in plan["replayed"] for j in owned.get(idx, ()))
-                elif wanted[0] == "tool":
-                    k = owner.get(idx)
-                    ok = wanted[1] in stored_calls if k is None else (
-                        k >= 0 and wanted[1] in call_ids[k] and not dropped(k)
-                        and (k in stored_now or k in served_exact))
+                    ok = all(j in stored_now or j < cursor and call_id in stored_results
+                             or j >= cursor and j not in plan["replayed"] and call_id not in stored_results
+                             for call_id in wanted[1] for j in results_of.get(call_id, ()))
                 else:
-                    continue
+                    ok = wanted[1] in stored_calls or any(k in stored_now and not dropped(k)
+                                                          for k in callers.get(wanted[1], ()))
                 if not ok:
                     new.discard(idx)
                     stored_now.discard(idx)

@@ -359,6 +359,7 @@ def _long_resend(engine) -> dict[str, str]:
     return {name: row["content"] for name, row in rows.items()}
 
 
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason="#2116: replaced replies were split out of #2466 to v0.30.x (#2467); a text row keeps main's result")
 def test_2116_a_replaced_reply_past_the_audited_tail_is_stored_warm(tmp_path):
     engine = _engine(tmp_path)
     try:
@@ -489,6 +490,7 @@ def test_rotation_predecessor_scope_equals_main(tmp_path, monkeypatch, statedb, 
         engine.shutdown()
 
 
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason="#2172: an id whose call or result content differs in the view or window keeps main's result (#2466 review)")
 def test_a_capped_session_reusing_a_stored_call_id_stores_the_new_call_once(tmp_path):
     """#2172 host shape: the view holds the earlier call and a new call under the same id, the store holds one.
 
@@ -825,23 +827,6 @@ def test_presence_byte_budget_ingest_boundary(tmp_path, monkeypatch, caplog, ove
     assert not any("presence window" in r.message and r.levelno >= logging.WARNING for r in caplog.records)
 
 
-@pytest.mark.parametrize("over", [0, 1], ids=["exact-text", "one-char-over"])
-def test_presence_text_budget_counts_only_the_candidate_role(tmp_path, monkeypatch, caplog, over):
-    # The normalization bound counts only stored rows of a candidate's text role: user text here is not normalized.
-    engine = _engine(tmp_path)
-    try:
-        engine._store.append_batch(SESSION, [{"role": "user", "content": "u" * 500}, _a("stored reply one", 2),
-                                             _a("stored reply two", 3)])
-        size = sum(len(r["content"]) for r in engine._store.get_session_messages(SESSION) if r["role"] == "assistant")
-        monkeypatch.setattr(identity_anchor, "_PRESENCE_TEXT_BYTES", size - over, raising=False)
-        with caplog.at_level(logging.INFO, logger=identity_anchor.__name__):
-            assert _presence(engine, [_a("a brand new reply", 4)]) == ([] if over else [0])
-        limits = [r for r in caplog.records if "presence window incomplete" in r.message]
-        assert len(limits) == over
-    finally:
-        engine.shutdown()
-
-
 def test_tool_only_presence_computes_no_stored_text_identity(tmp_path, monkeypatch):
     engine = _engine(tmp_path)
     try:
@@ -908,25 +893,6 @@ def test_presence_reads_pages_newest_first_and_finds_an_old_copy(tmp_path, monke
         engine.shutdown()
 
 
-def test_text_presence_only_normalizes_matching_role_text_rows(tmp_path, monkeypatch):
-    engine = _engine(tmp_path)
-    try:
-        engine._store.append_batch(SESSION, [_u("other role", 1), _a("kept reply", 2),
-                                             _call("kept", 3), _result("kept", "held", 4)])
-        replay, seen = engine._message_replay_identity, []
-
-        def identity(msg, *, stored_row=False):
-            if stored_row:
-                seen.append((msg["role"], bool(msg.get("tool_calls"))))
-            return replay(msg, stored_row=stored_row)
-
-        monkeypatch.setattr(engine, "_message_replay_identity", identity)
-        assert _presence(engine, [{"role": "assistant", "content": "new reply"}]) == [0]
-        assert seen == [("assistant", False)]
-    finally:
-        engine.shutdown()
-
-
 
 @pytest.mark.parametrize("seeded", [False, True], ids=["exact-then-alias", "held-seeded-tail"])
 def test_presence_takes_an_exact_copy_before_a_cleanup_alias(tmp_path, monkeypatch, seeded):
@@ -974,26 +940,7 @@ def test_presence_gives_an_alias_only_to_demand_an_exact_copy_cannot_meet(tmp_pa
         engine.shutdown()
 
 
-def test_presence_keeps_main_result_when_cleanup_forms_chain(tmp_path, monkeypatch, caplog):
-    # A cleanup form that is itself the form of a row with an alias breaks the exact-first allocation's optimality:
-    # the audit then keeps main's result (only its own finds) with a WARNING.
-    engine = _engine(tmp_path)
-    try:
-        engine._store.append_batch(SESSION, [{"role": "assistant", "content": "x one"},
-                                             {"role": "assistant", "content": "x two"}])
-        chain = {"x one": "x two", "x two": "x three"}
-
-        def cleanup(identity):
-            return (identity[0], chain[identity[1]], *identity[2:]) if identity[1] in chain else None
-
-        monkeypatch.setattr(engine, "_active_cleanup_replay_identity", cleanup)
-        with caplog.at_level(logging.WARNING, logger=identity_anchor.__name__):
-            assert _presence(engine, [{"role": "assistant", "content": "a brand new reply"}]) == []
-        assert any("presence unavailable" in r.message for r in caplog.records)
-    finally:
-        engine.shutdown()
-
-
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason="#2172: an id whose call or result content differs in the view or window keeps main's result (#2466 review)")
 @pytest.mark.parametrize("kind", ["call", "result"])
 def test_presence_matches_a_reused_id_by_its_own_payload_first(tmp_path, kind):
     # #2466 review: a new row reuses a stored row's id with another payload, shown BEFORE the stored one. The stored
@@ -1012,29 +959,6 @@ def test_presence_matches_a_reused_id_by_its_own_payload_first(tmp_path, kind):
             engine._store.append_batch(SESSION, [call('{"path": "a.txt"}'), stored])
         assert _presence(engine, [new, stored]) == [0]
         assert _presence(engine, [stored, new]) == [1]
-    finally:
-        engine.shutdown()
-
-
-def test_presence_text_budget_charges_expanded_identity_text(tmp_path, monkeypatch, caplog):
-    # #2466 review: a stored placeholder's identity may load its externalized payload; the expanded text is charged to
-    # the normalization budget, so an over-budget expansion keeps main's result.
-    engine = _engine(tmp_path)
-    try:
-        engine._store.append_batch(SESSION, [{"role": "assistant", "content": "small placeholder"}])
-        replay = engine._message_replay_identity
-
-        def expanded(msg, *, stored_row=False, **kwargs):
-            identity = replay(msg, stored_row=stored_row, **kwargs)
-            return (identity[0], "x" * 1000, *identity[2:]) if stored_row else identity
-
-        monkeypatch.setattr(engine, "_message_replay_identity", expanded)
-        monkeypatch.setattr(identity_anchor, "_PRESENCE_TEXT_BYTES", 999, raising=False)
-        with caplog.at_level(logging.INFO, logger=identity_anchor.__name__):
-            assert _presence(engine, [{"role": "assistant", "content": "a brand new reply"}]) == []
-        assert any("presence window incomplete" in r.message for r in caplog.records)
-        monkeypatch.setattr(identity_anchor, "_PRESENCE_TEXT_BYTES", 1000, raising=False)
-        assert _presence(engine, [{"role": "assistant", "content": "a brand new reply"}]) == [0]
     finally:
         engine.shutdown()
 
