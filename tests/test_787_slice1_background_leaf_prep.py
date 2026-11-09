@@ -12,6 +12,7 @@ import os
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -878,6 +879,32 @@ def test_shutdown_and_rebind_clear_the_cache_and_discard_a_late_job(
     assert status["cached_leaves"] == 0 and status["queued_jobs"] == 0
     if ending == "rebind":
         engine.shutdown()
+
+
+def test_plugin_unload_drains_leaf_preparation(engine, provider, _isolated):
+    unload = engine._enable_plugin_unload()
+    view = _crossing_view(engine)
+    started, release = threading.Event(), threading.Event()
+
+    def hold_worker():
+        started.set()
+        assert release.wait(10)
+
+    provider.hook = hold_worker
+    engine.ingest(view)
+    engine.last_prompt_tokens = tokens.count_messages_tokens(view)
+    engine._prepare_leaves_after_turn(view)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        try:
+            assert started.wait(5)
+            finished = executor.submit(unload)
+            assert engine._unload_group.closing.wait(5)
+            assert not finished.done()
+        finally:
+            release.set()
+        finished.result(timeout=5)
+    assert _isolated.wait_idle(0)
+    assert _isolated.status()["cached_leaves"] == 0
 
 
 # 9. levels -------------------------------------------------------------------------------------------------------

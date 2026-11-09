@@ -108,10 +108,11 @@ class _Job:
     foreground_guard: Any
     context: contextvars.Context = field(repr=False)
     dependent_records: tuple = ()  # the session's marked ignored-dependent replies, read at enqueue
+    owner: Any = None  # the plugin registration, when Hermes supports unload
 
     @property
     def key(self) -> tuple:
-        return (self.db_path, self.conversation_id)
+        return (self.db_path, self.conversation_id, self.owner)
 
 
 def route_fingerprint(config) -> str:
@@ -307,9 +308,10 @@ class _LeafPrep:
         self._condition = threading.Condition()
         self._jobs: "OrderedDict[tuple, _Job]" = OrderedDict()
         self._cache: "OrderedDict[tuple, List[PreparedLeaf]]" = OrderedDict()
-        self._generations: Dict[str, int] = {}
+        self._generations: Dict[tuple, int] = {}
         self._worker: Optional[threading.Thread] = None
         self._running = False
+        self._running_owner = None
         self._call_slot = threading.BoundedSemaphore(1)
         # one worker spend guard per profile (Hermes home, store), kept across other profiles' jobs
         self._spend_guards: "OrderedDict[tuple, tuple]" = OrderedDict()
@@ -317,13 +319,19 @@ class _LeafPrep:
 
     # -- turn thread ---------------------------------------------------------------------------------------
 
-    def generation(self, db_path: str) -> int:
+    def generation(self, db_path: str, owner=None) -> int:
         with self._condition:
-            return self._generations.get(db_path, 0)
+            return self._generations.get((db_path, owner), 0)
+
+    def _matches_generation(self, job: _Job) -> bool:
+        return (
+            (job.owner is None or not job.owner.closing.is_set())
+            and job.generation == self._generations.get((job.db_path, job.owner), 0)
+        )
 
     def enqueue(self, job: _Job) -> bool:
         with self._condition:
-            if job.generation != self._generations.get(job.db_path, 0):
+            if not self._matches_generation(job):
                 return False
             if self._jobs.pop(job.key, None) is not None:
                 self.counters["jobs_superseded"] += 1
@@ -337,22 +345,37 @@ class _LeafPrep:
             self._condition.notify_all()
             return True
 
-    def discard(self, db_path: str) -> None:
+    def discard(self, db_path: str, owner=None) -> None:
         """Shutdown or storage rebind: drop the queued jobs and prepared leaves; a running job is discarded."""
         db_path = str(db_path)
         with self._condition:
-            self._generations[db_path] = self._generations.get(db_path, 0) + 1
-            for key in [key for key in self._jobs if key[0] == db_path]:
+            if owner is not None and owner.closing.is_set():
+                return  # plugin unload retires this owner's jobs across all its databases
+            generation_key = (db_path, owner)
+            self._generations[generation_key] = self._generations.get(generation_key, 0) + 1
+            for key in [key for key in self._jobs if key[0] == db_path and key[2] is owner]:
                 del self._jobs[key]
-            for key in [key for key in self._cache if key[0] == db_path]:
+            for key in [key for key in self._cache if key[0] == db_path and key[2] is owner]:
                 self.counters["wasted"] += len(self._cache.pop(key))
             self._condition.notify_all()
 
+    def retire_owner(self, owner, *, timeout: float) -> bool:
+        """Cancel this registration's queued work and wait for its running job to close SQLite."""
+        with self._condition:
+            for key in [key for key in self._jobs if key[2] is owner]:
+                del self._jobs[key]
+            for key in [key for key in self._cache if key[2] is owner]:
+                self.counters["wasted"] += len(self._cache.pop(key))
+            for key in [key for key in self._generations if key[1] is owner]:
+                del self._generations[key]
+            self._condition.notify_all()
+            return self._condition.wait_for(lambda: self._running_owner is not owner, timeout)
+
     def ready_chain(
-        self, db_path: str, conversation_id: str, frontier: int
+        self, db_path: str, conversation_id: str, frontier: int, owner=None
     ) -> List[PreparedLeaf]:
         """The cached chain starting at ``frontier``; leaves no longer reachable from it are dropped."""
-        key = (str(db_path), conversation_id)
+        key = (str(db_path), conversation_id, owner)
         with self._condition:
             leaves = self._cache.get(key)
             if not leaves:
@@ -368,13 +391,13 @@ class _LeafPrep:
                 self._remove_locked(key, stale, "frontier_moved")
             return chain
 
-    def reject(self, db_path: str, conversation_id: str, leaves, reason: str) -> None:
+    def reject(self, db_path: str, conversation_id: str, leaves, reason: str, owner=None) -> None:
         with self._condition:
-            self._remove_locked((str(db_path), conversation_id), list(leaves), reason)
+            self._remove_locked((str(db_path), conversation_id, owner), list(leaves), reason)
 
-    def promoted(self, db_path: str, conversation_id: str, leaf: PreparedLeaf) -> None:
+    def promoted(self, db_path: str, conversation_id: str, leaf: PreparedLeaf, owner=None) -> None:
         with self._condition:
-            self._remove_locked((str(db_path), conversation_id), [leaf], None)
+            self._remove_locked((str(db_path), conversation_id, owner), [leaf], None)
             self.counters["promoted"] += 1
 
     def status(self) -> Dict[str, Any]:
@@ -432,11 +455,13 @@ class _LeafPrep:
         while True:
             with self._condition:
                 self._running = False
+                self._running_owner = None
                 self._condition.notify_all()
                 while not self._jobs:
                     self._condition.wait()
-                _key, job = self._jobs.popitem(last=False)
+                job = self._jobs.popitem(last=False)[1]
                 self._running = True
+                self._running_owner = job.owner
             try:
                 job.context.run(
                     self._prepare, job
@@ -448,11 +473,14 @@ class _LeafPrep:
                     job.conversation_id,
                     exc_info=True,
                 )
+            finally:
+                del job
 
     def _current(self, job: _Job, conn: sqlite3.Connection) -> bool:
         """The job's binding and frontier still hold, and no shutdown/rebind intervened."""
-        if self.generation(job.db_path) != job.generation:
-            return False
+        with self._condition:
+            if not self._matches_generation(job):
+                return False
         row = conn.execute(
             "SELECT current_session_id, current_frontier_store_id FROM lcm_lifecycle_state WHERE conversation_id = ?",
             (job.conversation_id,),
@@ -506,8 +534,9 @@ class _LeafPrep:
         return kept[1]
 
     def _prepare(self, job: _Job) -> None:
-        if self.generation(job.db_path) != job.generation:
-            return
+        with self._condition:
+            if not self._matches_generation(job):
+                return
         if (
             hermes_auxiliary_compression_max_concurrency(job.hermes_home) == 1
         ):  # D-7: the host's single aux slot
@@ -572,7 +601,7 @@ class _LeafPrep:
         )  # D-10: down to L, plus one chunk of lookahead
 
         position, freed = 0, 0
-        chain = self.ready_chain(job.db_path, job.conversation_id, job.frontier)
+        chain = self.ready_chain(job.db_path, job.conversation_id, job.frontier, job.owner)
         for index, leaf in enumerate(chain):
             covered = [
                 int(row["store_id"])
@@ -746,7 +775,7 @@ class _LeafPrep:
 
     def _cache_leaf(self, job: _Job, leaf: PreparedLeaf) -> bool:
         with self._condition:
-            if self._generations.get(job.db_path, 0) != job.generation:
+            if not self._matches_generation(job):
                 return False
             leaves = self._cache.setdefault(job.key, [])
             leaves.append(leaf)
@@ -788,6 +817,7 @@ def enqueue_after_turn(engine, history) -> bool:
     ):
         return False
     db_path = str(engine._store.db_path)
+    owner = getattr(engine, "_unload_group", None)
     config = copy.copy(engine._config)
     recent = engine._redact_active_replay_messages(list(history or [])[-64:])
     job = _Job(
@@ -796,7 +826,7 @@ def enqueue_after_turn(engine, history) -> bool:
         session_id=engine._session_id,
         conversation_id=engine._conversation_id,
         frontier=int(getattr(state, "current_frontier_store_id", 0) or 0),
-        generation=_LEAF_PREP.generation(db_path),
+        generation=_LEAF_PREP.generation(db_path, owner),
         config=config,
         fingerprint=route_fingerprint(config),
         tokens=tokens,
@@ -811,24 +841,29 @@ def enqueue_after_turn(engine, history) -> bool:
         dependent_records=tuple(
             engine._load_generated_ignored_dependent_reply_records()
         ),
+        owner=owner,
     )
     return _LEAF_PREP.enqueue(job)
 
 
-def discard(db_path) -> None:
-    _LEAF_PREP.discard(str(db_path))
+def discard(db_path, owner=None) -> None:
+    _LEAF_PREP.discard(str(db_path), owner)
 
 
-def ready_chain(db_path, conversation_id: str, frontier: int) -> List[PreparedLeaf]:
-    return _LEAF_PREP.ready_chain(str(db_path), conversation_id, frontier)
+def retire_owner(owner, *, timeout: float) -> bool:
+    return _LEAF_PREP.retire_owner(owner, timeout=timeout)
 
 
-def reject(db_path, conversation_id: str, leaves, reason: str) -> None:
-    _LEAF_PREP.reject(str(db_path), conversation_id, leaves, reason)
+def ready_chain(db_path, conversation_id: str, frontier: int, owner=None) -> List[PreparedLeaf]:
+    return _LEAF_PREP.ready_chain(str(db_path), conversation_id, frontier, owner)
 
 
-def promoted(db_path, conversation_id: str, leaf: PreparedLeaf) -> None:
-    _LEAF_PREP.promoted(str(db_path), conversation_id, leaf)
+def reject(db_path, conversation_id: str, leaves, reason: str, owner=None) -> None:
+    _LEAF_PREP.reject(str(db_path), conversation_id, leaves, reason, owner)
+
+
+def promoted(db_path, conversation_id: str, leaf: PreparedLeaf, owner=None) -> None:
+    _LEAF_PREP.promoted(str(db_path), conversation_id, leaf, owner)
 
 
 def status() -> Dict[str, Any]:

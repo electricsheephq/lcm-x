@@ -7,7 +7,9 @@ import os
 import sqlite3
 import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
@@ -15,6 +17,8 @@ import pytest
 
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
+from hermes_lcm.retrieval_core import _acquire_vector_store
+from hermes_lcm.vector_store import VectorStore
 
 
 @pytest.fixture
@@ -50,7 +54,7 @@ def preflight(tmp_path, monkeypatch):
     monkeypatch.setattr(sqlite3, "connect", connect_spy)
     monkeypatch.setattr(LCMEngine, "_bind_storage", bind_spy)
 
-    def register(*, inactive=False, abandoned=False):
+    def register(*, inactive=False, abandoned=False, supports_unload=False):
         ctx = SimpleNamespace(
             _manager=SimpleNamespace(_context_engine=object() if inactive else None),
             _load_abandoned=abandoned,
@@ -69,6 +73,9 @@ def preflight(tmp_path, monkeypatch):
         ctx.register_hook = lambda name, handler: ctx.hooks.update({name: handler})
         ctx.register_tool = lambda **kwargs: ctx.tools.update({kwargs["name"]: kwargs["handler"]})
         ctx.register_command = lambda name, handler, **kwargs: ctx.commands.update({name: handler})
+        if supports_unload:
+            ctx.unload_callbacks = []
+            ctx.on_unload = ctx.unload_callbacks.append
         hermes_lcm.register(ctx)
         return engines[-1], ctx
 
@@ -104,6 +111,219 @@ def test_shutdown_before_use_opens_nothing(preflight):
     engine.shutdown()
     engine.shutdown()
     assert (preflight.home.exists(), preflight.connects) == (False, [])
+
+
+def test_plugin_unload_closes_all_owned_engines(preflight):
+    prototype, ctx = preflight.register(supports_unload=True)
+    other, other_ctx = preflight.register(supports_unload=True)
+    owned = [prototype, prototype.clone_for_agent(), prototype.clone_for_agent()]
+    connections = []
+    try:
+        # Only the last engine bound to an id is reachable by the session registry.
+        for engine in owned:
+            engine.on_session_start("shared", platform="cli")
+            connections.append(engine._store.connection)
+        owned[-1].ingest([{"role": "user", "content": "keep this message"}])
+        other.on_session_start("other", platform="cli")
+        pooled_connections = []
+        for engine in (owned[-1], other):
+            store, lease, _ = _acquire_vector_store(engine, vector_store_cls=VectorStore, scan_rows=None)
+            with lease:
+                pooled_connections.append(store.connection)
+        assert pooled_connections[0] is not pooled_connections[1]
+        connections.append(pooled_connections[0])
+        assert len(ctx.unload_callbacks) == 1
+        ctx.unload_callbacks[0]()
+
+        for connection in connections:
+            with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+                connection.execute("SELECT 1")
+        assert other._store.connection.execute("SELECT 1").fetchone()[0] == 1
+        assert pooled_connections[1].execute("SELECT 1").fetchone()[0] == 1
+        assert other._store.get_session_messages("shared")[0]["content"] == "keep this message"
+        with pytest.raises(RuntimeError, match="unload"):
+            prototype.clone_for_agent()
+        with pytest.raises(RuntimeError, match="closed|unload"):
+            owned[1].on_session_start("late", hermes_home=str(preflight.home / "late"))
+        assert not (preflight.home / "late" / "lcm.db").exists()
+    finally:
+        for callback in other_ctx.unload_callbacks:
+            callback()
+        for engine in owned:
+            engine.shutdown()
+
+
+def test_unload_includes_clone_already_being_created(preflight, monkeypatch):
+    prototype, ctx = preflight.register(supports_unload=True)
+    constructing, release, unloading = threading.Event(), threading.Event(), threading.Event()
+    create = prototype._clone_for_agent
+
+    def paused_clone():
+        constructing.set()
+        assert release.wait(5)
+        return create()
+
+    def unload():
+        unloading.set()
+        ctx.unload_callbacks[0]()
+
+    monkeypatch.setattr(prototype, "_clone_for_agent", paused_clone)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        clone_future = executor.submit(prototype.clone_for_agent)
+        try:
+            assert constructing.wait(5)
+            unload_future = executor.submit(unload)
+            assert unloading.wait(5)
+        finally:
+            release.set()
+        clone = clone_future.result(timeout=5)
+        unload_future.result(timeout=5)
+    with pytest.raises(RuntimeError, match="closed"):
+        clone.on_session_start("late", platform="cli")
+    assert preflight.connects == []
+
+
+def test_unload_drains_timed_out_sqlite_worker(preflight):
+    from hermes_lcm.tools import _run_within_deadline
+
+    prototype, ctx = preflight.register(supports_unload=True)
+    prototype.on_session_start("worker", platform="cli")
+    opened, release, closed = threading.Event(), threading.Event(), threading.Event()
+
+    def query():
+        conn = sqlite3.connect(preflight.home / "lcm.db")
+        try:
+            opened.set()
+            assert release.wait(5)
+            conn.execute("SELECT 1").fetchone()
+        finally:
+            conn.close()
+            closed.set()
+
+    with pytest.raises(TimeoutError):
+        _run_within_deadline(query, remaining_s=0.05, name="test-unload-read", engine=prototype)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        try:
+            assert opened.wait(5)
+            finish = executor.submit(ctx.unload_callbacks[0])
+            # Wait for the closed gate without using sleep to guess that unload started.
+            assert prototype._unload_group.closing.wait(5)
+            assert not finish.done()
+        finally:
+            release.set()
+        finish.result(timeout=5)
+    assert closed.is_set()
+
+
+def test_timed_out_unload_closes_storage_after_native_tool_finishes(preflight, monkeypatch):
+    engine, ctx = preflight.register(supports_unload=True)
+    engine.on_session_start("tool", platform="cli")
+    connection = engine._store.connection
+    entered, release, closed = threading.Event(), threading.Event(), threading.Event()
+    original = engine._handle_tool_call
+    shutdown_storage = engine._shutdown_unlocked
+
+    def held_tool(*args, **kwargs):
+        entered.set()
+        assert release.wait(5)
+        return original(*args, **kwargs)
+
+    def close_storage(**kwargs):
+        shutdown_storage(**kwargs)
+        closed.set()
+
+    monkeypatch.setenv("LCM_SHUTDOWN_COMPACTION_WAIT_S", "0.05")
+    monkeypatch.setattr(engine, "_handle_tool_call", held_tool)
+    monkeypatch.setattr(engine, "_shutdown_unlocked", close_storage)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        tool = executor.submit(engine.handle_tool_call, "lcm_status", {})
+        try:
+            assert entered.wait(5)
+            ctx.unload_callbacks[0]()
+            assert not closed.is_set()
+            assert connection.execute("SELECT 1").fetchone()[0] == 1
+        finally:
+            release.set()
+        assert "error" not in json.loads(tool.result(timeout=5))
+    assert closed.wait(5)
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        connection.execute("SELECT 1")
+
+
+def test_unload_retries_a_busy_tail_in_the_previous_profile(preflight, monkeypatch):
+    from hermes_lcm import maintenance_scheduler
+
+    engine, ctx = preflight.register(supports_unload=True)
+    engine.on_session_start("ended", conversation_id="ended-conversation", platform="cli")
+    history = [
+        {"role": "user", "content": "first", "timestamp": 1760000001.0},
+        {"role": "assistant", "content": "tail", "timestamp": 1760000002.0},
+    ]
+    engine.ingest(history[:1])
+    old_store = engine._store
+    connection = old_store.connection
+    retry_exhausted = threading.Event()
+    with closing(sqlite3.connect(old_store.db_path, isolation_level=None)) as writer:
+        writer.execute("BEGIN IMMEDIATE")
+        try:
+            engine.on_session_end("ended", history)
+            engine.on_session_start("new", platform="cli", hermes_home=str(preflight.home / "new"))
+            assert engine._store is not old_store
+            assert len(engine._pending_session_tails) == 1
+            monkeypatch.setenv("LCM_SHUTDOWN_COMPACTION_WAIT_S", "0.05")
+            monkeypatch.setattr(maintenance_scheduler, "_SESSION_END_SHUTDOWN_TIMEOUT_MS", 100)
+            retry = engine._retry_pending_session_tails
+
+            def observe_retry(**kwargs):
+                result = retry(**kwargs)
+                if threading.current_thread().name == "lcm-deferred-unload":
+                    retry_exhausted.set()
+                return result
+
+            monkeypatch.setattr(engine, "_retry_pending_session_tails", observe_retry)
+            ctx.unload_callbacks[0]()
+            assert retry_exhausted.wait(5), "deferred retry did not run while the old store was busy"
+            assert not engine._stable_use_closed
+        finally:
+            writer.rollback()
+    deadline = time.monotonic() + 5
+    while not engine._stable_use_closed and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert engine._stable_use_closed
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        connection.execute("SELECT 1")
+    with closing(sqlite3.connect(old_store.db_path)) as reader:
+        assert reader.execute("SELECT content FROM messages ORDER BY store_id").fetchall() == [("first",), ("tail",)]
+
+
+def test_deferred_unload_progresses_past_a_terminal_tail(preflight, monkeypatch):
+    import hermes_lcm.engine as engine_module
+
+    engine, _ = preflight.register()
+    engine.on_session_start("old", platform="cli")
+    store = engine._store
+    terminal = {"kind": "cold", "store": store, "view": [], "session_id": "terminal"}
+    ready = {"kind": "cold", "store": store, "view": [], "session_id": "ready"}
+    engine._pending_session_tails[:] = [terminal, ready]
+    now = [0.0]
+    visited = []
+
+    def retry(tail, **kwargs):
+        visited.append(tail["session_id"])
+        if tail is terminal:
+            now[0] += 6.0
+            return False
+        return True
+
+    with monkeypatch.context() as patch:
+        patch.setattr(engine_module, "time", SimpleNamespace(monotonic=lambda: now[0]))
+        patch.setattr(engine, "_retry_cold_tail", retry)
+        terminal_tails = set()
+        assert engine._retry_pending_session_tails(deadline=5.0, terminal_tails=terminal_tails)
+        assert not engine._retry_pending_session_tails(deadline=11.0, terminal_tails=terminal_tails)
+    assert visited == ["terminal", "ready"]
+    assert engine._pending_session_tails == [terminal]
+    engine._pending_session_tails.clear()
 
 
 def test_concurrent_first_use_binds_once(preflight):

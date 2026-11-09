@@ -201,14 +201,20 @@ def _make_command_handler(handle_lcm_command, engine, resolve_active_lcm_engine)
         active_engine, resolved, context_present = _command_engine_for_current_session(
             engine, resolve_active_lcm_engine, with_resolution=True,
         )
-        return handle_lcm_command(
-            raw_args, active_engine,
-            session_engine_resolved=resolved, session_context_present=context_present,
-            session_profile=_session_context_value("HERMES_SESSION_PROFILE"),
-            engine_profile=_command_engine_profile(active_engine),
-            context_session_id=_session_context_value("HERMES_SESSION_ID"),
-            context_conversation_id=_session_context_value("HERMES_SESSION_KEY"),
-        )
+        def run(selected):
+            return handle_lcm_command(
+                raw_args, selected,
+                session_engine_resolved=resolved, session_context_present=context_present,
+                session_profile=_session_context_value("HERMES_SESSION_PROFILE"),
+                engine_profile=_command_engine_profile(selected),
+                context_session_id=_session_context_value("HERMES_SESSION_ID"),
+                context_conversation_id=_session_context_value("HERMES_SESSION_KEY"),
+            )
+
+        if getattr(active_engine, "_unload_group", None) is None:
+            return run(active_engine)
+        result = active_engine._run_stably(run, timeout=None)
+        return result.value if result.used else "LCM plugin is unloading."
 
     return _handler
 def _hook_question_date(payload: dict) -> object:
@@ -600,6 +606,9 @@ def register(ctx):
 
     # Register as the context engine (replaces ContextCompressor)
     ctx.register_context_engine(engine)
+    on_unload = getattr(ctx, "on_unload", None)
+    if callable(on_unload):
+        on_unload(engine._enable_plugin_unload())
     active = _engine_took_slot(ctx, engine, hermes_home)
 
     # Ship the same recall contract through both Hermes plugin skill
@@ -688,6 +697,7 @@ def register(ctx):
                 history = list(history)
                 platform = str(payload.get("platform") or "")
                 wait = aux_session._LIVE_CHILD_STORE_WAIT_S
+                owner = getattr(child_engine, "_unload_group", None)
 
                 outcome: dict = {}
 
@@ -704,7 +714,7 @@ def register(ctx):
                     # Only the child's own engine: it serves the child's profile, as main's end store does. Never the
                     # plugin prototype, which may serve another profile. It never binds and never ingests.
                     outcome.clear()
-                    result = use_lcm_engine(child_engine, store_child, timeout=wait)
+                    result = use_lcm_engine(child_engine, store_child, timeout=wait, allow_unloading=owner is not None)
                     if outcome.get("moved"):
                         aux_session.warn_live_child_moved(session_id)
                         return False
@@ -713,7 +723,9 @@ def register(ctx):
                     return bool(result.used and isinstance(result.value, int) and outcome.get("linked")
                                 and "error" not in outcome)
 
-                aux_session.run_live_child_store(session_id, store, rows=len(history))
+                aux_session.run_live_child_store(
+                    session_id, store, rows=len(history), **({"owner": owner} if owner is not None else {}),
+                )
             except Exception as exc:
                 logger.debug("LCM live delegated-child store error: %s", exc)
             return None

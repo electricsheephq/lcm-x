@@ -840,7 +840,7 @@ _LIVE_CHILD_STORE_WAIT_S = 1.0
 # #2482: live delegated children, by session id -> the root child id that subagent_start named. Filled when a child
 # binds its own engine on its own thread as a delegate (its frames are visible there, not on the host's hook worker
 # thread) and carried across its compression handoff; a root's subagent_stop ends its entries.
-_LIVE_CHILD_LOCK = threading.Lock()
+_LIVE_CHILD_LOCK = threading.Condition()
 _LIVE_DELEGATE_CHILD_ROOTS: dict[str, str] = {}
 # The engine the child bound and the storage it served then, by session id (weak reference, identity): the early
 # store writes only through that engine and only while it still serves that storage, so a child's rows never land in
@@ -848,6 +848,7 @@ _LIVE_DELEGATE_CHILD_ROOTS: dict[str, str] = {}
 _LIVE_DELEGATE_CHILD_ENGINES: dict[str, tuple] = {}
 _LIVE_CHILD_MOVED_WARNED: set[str] = set()
 _LIVE_CHILD_STORES_IN_FLIGHT: set[str] = set()
+_LIVE_CHILD_STORE_OWNERS: dict[str, Any] = {}
 _LIVE_CHILD_PENDING: dict[str, Any] = {}  # the newest store handed over while one was in flight, per child
 _LIVE_CHILD_HANDED_ROWS: dict[str, int] = {}  # rows in the newest list handed over, per child with a store in flight
 _LIVE_CHILD_STORED_ROWS: dict[str, int] = {}  # rows in the newest list whose store succeeded, per such child
@@ -897,7 +898,7 @@ def warn_live_child_moved(session_id: str) -> None:
     )
 
 
-def run_live_child_store(session_id: str, operation, rows: int = 0) -> None:
+def run_live_child_store(session_id: str, operation, rows: int = 0, *, owner=None) -> None:
     """Run ``operation`` on a worker thread and wait at most ``_LIVE_CHILD_STORE_JOIN_S`` (#2482); never raises.
 
     A host hook must stay far below its own timeout, and a store can wait on SQLite past the lock bounds. One store
@@ -905,22 +906,28 @@ def run_live_child_store(session_id: str, operation, rows: int = 0) -> None:
     (each list holds every earlier row, and the store appends only what is not stored yet).
     """
     with _LIVE_CHILD_LOCK:
+        if owner is not None and owner.closing.is_set():
+            return
         _LIVE_CHILD_HANDED_ROWS[session_id] = rows
         if session_id in _LIVE_CHILD_STORES_IN_FLIGHT:
-            _LIVE_CHILD_PENDING[session_id] = (operation, rows)
+            _LIVE_CHILD_PENDING[session_id] = (operation, rows, owner)
+            _LIVE_CHILD_LOCK.notify_all()
             _count("live_store_queued")
             return
         _LIVE_CHILD_STORES_IN_FLIGHT.add(session_id)
+        _LIVE_CHILD_STORE_OWNERS[session_id] = owner
 
     def finish():  # under _LIVE_CHILD_LOCK
         _LIVE_CHILD_STORES_IN_FLIGHT.discard(session_id)
+        _LIVE_CHILD_STORE_OWNERS.pop(session_id, None)
         _LIVE_CHILD_PENDING.pop(session_id, None)
         _LIVE_CHILD_HANDED_ROWS.pop(session_id, None)
         _LIVE_CHILD_STORED_ROWS.pop(session_id, None)
         _LIVE_CHILD_WARNED.discard(session_id)
+        _LIVE_CHILD_LOCK.notify_all()
 
     def runner():
-        current = (operation, rows)
+        current = (operation, rows, owner)
         try:
             while current is not None:
                 for attempt in range(_LIVE_CHILD_STORE_RETRIES + 1):
@@ -942,6 +949,9 @@ def run_live_child_store(session_id: str, operation, rows: int = 0) -> None:
                     current = _LIVE_CHILD_PENDING.pop(session_id, None)
                     if current is None:
                         finish()
+                    else:
+                        _LIVE_CHILD_STORE_OWNERS[session_id] = current[2]
+                        _LIVE_CHILD_LOCK.notify_all()
         finally:
             if current is not None:  # something beyond Exception escaped: never leave the child marked in flight
                 with _LIVE_CHILD_LOCK:
@@ -958,28 +968,36 @@ def run_live_child_store(session_id: str, operation, rows: int = 0) -> None:
     worker.join(_LIVE_CHILD_STORE_JOIN_S)
 
 
-def drain_live_child_stores(timeout: float) -> None:
-    """Wait at most ``timeout`` seconds for in-flight live-child stores, queued ones included (engine shutdown)."""
-    deadline = time.monotonic() + max(0.0, timeout)
-    while True:
-        with _LIVE_CHILD_LOCK:
-            if not _LIVE_CHILD_STORES_IN_FLIGHT - _LIVE_CHILD_WARNED:
-                return  # a child an earlier drain already reported stuck is not waited for again
-        if time.monotonic() >= deadline:
-            with _LIVE_CHILD_LOCK:
+def drain_live_child_stores(timeout: float | None, *, owner=None) -> bool:
+    """Wait for in-flight and queued child stores. Return false if the wait expires."""
+    deadline = None if timeout is None else time.monotonic() + max(0.0, timeout)
+    with _LIVE_CHILD_LOCK:
+        while True:
+            active = _LIVE_CHILD_STORES_IN_FLIGHT - _LIVE_CHILD_WARNED
+            if owner is not None:
+                active = {
+                    sid for sid in _LIVE_CHILD_STORES_IN_FLIGHT
+                    if _LIVE_CHILD_STORE_OWNERS.get(sid) is owner
+                    or _LIVE_CHILD_PENDING.get(sid, (None, None, None))[2] is owner
+                }
+            if not active:
+                return True  # an ordinary shutdown does not wait twice for a reported child
+            remaining = None if deadline is None else deadline - time.monotonic()
+            if remaining is not None and remaining <= 0:
                 waiting = {sid: max(0, _LIVE_CHILD_HANDED_ROWS.get(sid, 0) - _LIVE_CHILD_STORED_ROWS.get(sid, 0))
-                           for sid in _LIVE_CHILD_STORES_IN_FLIGHT if sid not in _LIVE_CHILD_WARNED}
-                _LIVE_CHILD_WARNED.update(waiting)
-            for sid, unstored in sorted(waiting.items()):
-                # NOT SILENT (#2482): this child's newest rows are lost if the process ends before the store lands.
-                logger.warning(
-                    "LCM shutdown drain timed out after %.1fs: a live delegated-child store is still waiting "
-                    "(likely a busy database); child=%s has up to %d handed-over row(s) not yet stored, lost if "
-                    "the process ends first (#2483)",
-                    timeout, hashlib.sha256(sid.encode("utf-8")).hexdigest()[:12], unstored,
-                )
-            return
-        time.sleep(0.01)
+                           for sid in active}
+                if owner is None:
+                    _LIVE_CHILD_WARNED.update(waiting)
+                break
+            _LIVE_CHILD_LOCK.wait(remaining)
+    for sid, unstored in sorted(waiting.items()):
+        logger.warning(
+            "LCM shutdown drain timed out after %.1fs: a live delegated-child store is still waiting "
+            "(likely a busy database); child=%s has up to %d handed-over row(s) not yet stored, lost if "
+            "the process ends first (#2483)",
+            timeout, hashlib.sha256(sid.encode("utf-8")).hexdigest()[:12], unstored,
+        )
+    return False
 
 
 def delegate_child_store_counts() -> Dict[str, int]:

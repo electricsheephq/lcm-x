@@ -3462,6 +3462,32 @@ def join_background_stem_backfills(timeout: float | None = None) -> None:
         thread.join(timeout)
 
 
+def drain_background_database_workers(db_paths: set[str], *, deadline: float) -> bool:
+    """Drain index work for the databases this plugin registration opened."""
+    if not db_paths:
+        return True
+    if not _integrity_scan_lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
+        return False
+    try:
+        scans = [(path, thread) for (path, _), thread in _integrity_scan_threads.items()]
+    finally:
+        _integrity_scan_lock.release()
+    if not _stem_lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
+        return False
+    try:
+        scans.extend(_stem_threads.items())
+    finally:
+        _stem_lock.release()
+    workers = {
+        thread for path, thread in scans
+        if os.path.normcase(os.path.realpath(path)) in db_paths
+    }
+    for worker in workers:
+        if worker is not threading.current_thread():
+            worker.join(max(0.0, deadline - time.monotonic()))
+    return not any(worker.is_alive() for worker in workers)
+
+
 def stem_index_status(conn: sqlite3.Connection | None) -> str:
     try:
         state = _stem_metadata(conn, "fts_stem_state")

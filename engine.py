@@ -48,6 +48,7 @@ from .engine_registry import (
     _remove_registry_entries_for_engine,
     ActiveEngineUseResult,
     ActiveEngineUseStatus,
+    EngineUnloadGroup,
     live_bound_session_ids,
     resolve_active_lcm_engine,  # noqa: F401  (re-exported: hosts import it from .engine)
     use_lcm_engine,
@@ -778,6 +779,7 @@ class LCMEngine(
                 "summarized tool rows are no longer rewritten"
             )
         self._hermes_home = hermes_home
+        self._unload_group: EngineUnloadGroup | None = None
         self._stable_use_lock = threading.Lock()
         self._compaction_gate = threading.Condition()
         self._compaction_inflight = 0
@@ -1212,6 +1214,20 @@ class LCMEngine(
         model and context-window metadata is copied so the clone is immediately
         budget-aware even before a compatible Hermes host calls update_model().
         """
+        group = self._unload_group
+        if group is None:
+            return self._clone_for_agent()
+        # Clone construction is lazy: serialize it with the unload snapshot
+        # without acquiring any SQLite connections under the group lock.
+        with group.lock:
+            if group.closing.is_set():
+                raise RuntimeError("Cannot clone LCM engine during plugin unload")
+            clone = self._clone_for_agent()
+            clone._unload_group = group
+            group.engines.add(clone)
+            return clone
+
+    def _clone_for_agent(self) -> "LCMEngine":
         clone = type(self)(
             config=copy.deepcopy(self._config),
             hermes_home=self._hermes_home,
@@ -1288,7 +1304,15 @@ class LCMEngine(
     def _ensure_storage(self) -> None:
         """Open once on real use; recursive binder reads share this lock."""
         with self._storage_lock:
-            if self._storage_ready or self._storage_binding:
+            if self._storage_binding:
+                return
+            if self._plugin_is_unloading() and (
+                self._stable_use_closed or (
+                    not self._storage_ready and self._stable_use_owner_thread != threading.get_ident()
+                )
+            ):
+                raise RuntimeError("LCM storage is closed for plugin unload")
+            if self._storage_ready:
                 return
             if self._stable_use_closed:
                 raise RuntimeError("LCM engine is closed")
@@ -1314,6 +1338,10 @@ class LCMEngine(
 
     def _bind_storage(self, db_path: str | Path, hermes_home: str = "") -> None:
         """Bind store/DAG/lifecycle helpers to one SQLite database."""
+        group = self._unload_group
+        if group is not None and str(db_path) != ":memory:":
+            with group.lock:
+                group.databases.add(os.path.normcase(os.path.realpath(db_path)))
         self._assertions = None
         self._entities = None
         self._query_views = None
@@ -1491,6 +1519,8 @@ class LCMEngine(
         """
         if not hermes_home:
             return False
+        if self._plugin_is_unloading():
+            raise RuntimeError("Cannot rebind LCM storage during plugin unload")
         db_path = self._resolve_db_path(hermes_home)
         if not self._storage_ready:
             if self._db_path == db_path and self._hermes_home == hermes_home:
@@ -2442,7 +2472,7 @@ class LCMEngine(
         """#787: shutdown and storage rebind drop this store's queued preparations and prepared leaves."""
         store = self.__dict__.get("_store")
         if store is not None:
-            leaf_prep.discard(store.db_path)
+            leaf_prep.discard(store.db_path, self._unload_group)
 
     def _prepare_leaves_after_turn(self, history) -> None:
         """#787 (default off): after a completed turn's ingest, enqueue one background leaf preparation (O(1))."""
@@ -2970,11 +3000,12 @@ class LCMEngine(
                 finally:
                     private_dag.close()
 
-            maintenance_scheduler._ROLLUP_MAINTENANCE_SCHEDULER.schedule(
-                key,
-                profile_bound(maintain),
-                owner=self._rollup_maintenance_owner,
-            )
+            scheduler = maintenance_scheduler._ROLLUP_MAINTENANCE_SCHEDULER
+            work = profile_bound(maintain)
+            if self._unload_group is None:
+                scheduler.schedule(key, work, owner=self._rollup_maintenance_owner)
+            else:
+                self._unload_group.schedule_rollup(scheduler, key, work, owner=self._rollup_maintenance_owner)
         except Exception:
             # Maintenance is opportunistic; a scheduler/setup failure must never
             # turn a successful foreground session bind into a host failure.
@@ -2990,7 +3021,8 @@ class LCMEngine(
         one pass queued per database, and the pass runs the backfill core under
         its lease on a private connection.
         """
-        if self._embedding_maintenance_retired or not getattr(self._config, "embeddings_enabled", False):
+        if (self._embedding_maintenance_retired or self._plugin_is_unloading()
+                or not getattr(self._config, "embeddings_enabled", False)):
             return
         try:
             raw_database_path = str(self._dag.db_path)
@@ -3065,17 +3097,22 @@ class LCMEngine(
                 self._embedding_maintenance_owner = object()
             self._embedding_maintenance_retired = False
 
-    def _retire_embedding_maintenance(self, wait: bool) -> None:
+    def _retire_embedding_maintenance(self, wait: bool, *, deadline: float | None = None) -> None:
         with self._embedding_maintenance_lock:
             self._embedding_maintenance_retired = True
             # Snapshot under the lock: a concurrent rearm mints a new owner, which must stay live.
             owner = self._embedding_maintenance_owner
         retire_local_model_prepare(owner)
+        timeout = _EMBEDDING_RETIRE_TIMEOUT_S if wait else 0.0
+        if wait and deadline is not None:
+            timeout = max(0.0, deadline - time.monotonic())
         try:
-            maintenance_scheduler._EMBEDDING_MAINTENANCE_SCHEDULER.retire_owner(
+            drained = maintenance_scheduler._EMBEDDING_MAINTENANCE_SCHEDULER.retire_owner(
                 owner,
-                timeout=_EMBEDDING_RETIRE_TIMEOUT_S if wait else 0,
+                timeout=timeout,
             )
+            if deadline is not None and not drained:
+                logger.warning("LCM unload: incremental embedding work still running")
         except Exception:
             logger.warning("LCM could not retire background incremental embedding", exc_info=True)
 
@@ -4672,7 +4709,7 @@ class LCMEngine(
 
     def on_session_start(self, session_id: str, **kwargs) -> None:
         with self._exclusive_lifecycle("rebind"):
-            if self._stable_use_closed:
+            if self._stable_use_closed or self._plugin_is_unloading():
                 raise RuntimeError("LCM engine is closed")
             self._on_session_start_unlocked(session_id, **kwargs)
             binding = self._emission_binding()
@@ -5810,6 +5847,14 @@ class LCMEngine(
         return _disabled_tool_names()
 
     def handle_tool_call(self, name: str, args: Dict[str, Any], **kwargs) -> str:
+        # Hermes' native context-engine tool dispatch does not take the plugin
+        # lifecycle lease. Hooks that already hold it can call through directly.
+        if self._unload_group is None or self._stable_use_owner_thread == threading.get_ident():
+            return self._handle_tool_call(name, args, **kwargs)
+        result = self._run_stably(lambda engine: engine._handle_tool_call(name, args, **kwargs), timeout=None)
+        return result.value if result.used else json.dumps({"error": "LCM plugin is unloading"})
+
+    def _handle_tool_call(self, name: str, args: Dict[str, Any], **kwargs) -> str:
         if name in self._disabled_tool_names():
             return json.dumps({"error": f"LCM tool {name} is disabled via LCM_DISABLED_TOOLS"})
         # Ingest live messages if passed (enables current-turn search)
@@ -9724,7 +9769,10 @@ class LCMEngine(
             daemon=True,
         )
         try:
-            worker.start()
+            if self._unload_group is None:
+                worker.start()
+            elif not self._unload_group.start_worker(worker):
+                raise RuntimeError("LCM is unloading")
         except Exception as exc:
             last_error = f"{type(exc).__name__}: {exc}"[:300]
             with self._assertion_extraction_metrics_lock:
@@ -12413,13 +12461,15 @@ class LCMEngine(
         return True
 
     def _retry_pending_session_tails(self, *, deadline: float | None = None, exiting: bool = False,
-                                     sibling: bool = False) -> None:
-        """Drain under the lifecycle lock, sharing one busy-wait budget."""
+                                     sibling: bool = False, terminal_tails: set[int] | None = None) -> bool:
+        """Drain under the lifecycle lock and report whether busy work needs another attempt."""
         if not self._pending_session_tails:
-            return
+            return False
         if deadline is None:
             deadline = time.monotonic() + _SESSION_END_BUSY_TIMEOUT_MS / 1000
-        for tail in list(self._pending_session_tails):
+        tails = [tail for tail in self._pending_session_tails if terminal_tails is None or id(tail) not in terminal_tails]
+        retry_busy = False
+        for index, tail in enumerate(tails):
             store = tail["store"]
             committed = False
             try:
@@ -12430,7 +12480,10 @@ class LCMEngine(
                         if self._retry_cold_tail(tail, sibling=sibling, deadline=deadline):
                             committed = True
                             self._pending_session_tails.remove(tail)
+                        elif terminal_tails is not None:
+                            terminal_tails.add(id(tail))
                         if time.monotonic() >= deadline:
+                            retry_busy = index + 1 < len(tails)
                             break
                         continue
                     covered, last_id, left, rule, _stop, candidates = self._match_pending_tail(tail)
@@ -12474,19 +12527,24 @@ class LCMEngine(
                 if isinstance(exc, KeyboardInterrupt) or _is_ingest_busy_error(exc):
                     self._ledger_count("ledger.tail.retry.deferred")
                     logger.debug("LCM pending session-end retry deferred", exc_info=True)
+                    retry_busy = True
                     break
                 self._ledger_count("ledger.tail.retry_failed")
                 logger.warning("LCM pending session-end retry failed (%s); retry pending", type(exc).__name__)
+                if not committed and terminal_tails is not None:
+                    terminal_tails.add(id(tail))
             finally:
                 if (store is not self.__dict__.get("_store")
                         and not any(t["store"] is store for t in self._pending_session_tails)):
                     store.close()
             if time.monotonic() >= deadline:
+                retry_busy = index + 1 < len(tails)
                 break
         if exiting:
             self._warn_unflushed_session_tails("SQLite lock", deadline=deadline)
         elif not self._pending_session_tails:
             maintenance_scheduler._PENDING_TAIL_ENGINES.discard(self)
+        return retry_busy
 
     def _cold_tail_absent_count(self, tail, *, deadline=None):
         """Count absent occurrences once, matching known stamps before untimed rows."""
@@ -12553,7 +12611,6 @@ class LCMEngine(
                 finally:
                     self._stable_use_owner_thread = None
             return
-        # Only the exit hook bounds its wait; shutdown still waits for active use.
         if not self._stable_use_lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
             yield False
             return
@@ -12570,6 +12627,7 @@ class LCMEngine(
         *,
         validate: Callable[[Any], bool] | None = None,
         timeout: float | None = 5.0,
+        allow_unloading: bool = False,
     ) -> ActiveEngineUseResult:
         """Run one bounded operation while rebind and shutdown are excluded."""
         if self._stable_use_owner_thread == threading.get_ident():
@@ -12583,7 +12641,7 @@ class LCMEngine(
             return ActiveEngineUseResult(ActiveEngineUseStatus.BUSY)
         self._stable_use_owner_thread = threading.get_ident()
         try:
-            if self._stable_use_closed:
+            if self._stable_use_closed or (self._plugin_is_unloading() and not allow_unloading):
                 return ActiveEngineUseResult(ActiveEngineUseStatus.CLOSED_ENGINE)
             if validate is not None and not validate(self):
                 return ActiveEngineUseResult(ActiveEngineUseStatus.BINDING_CHANGED)
@@ -12597,18 +12655,31 @@ class LCMEngine(
 
     def _compaction_is_closing(self) -> bool:
         with self._compaction_gate:
-            return self._compaction_closing
+            return self._compaction_closing or self._plugin_is_unloading()
 
-    def shutdown(self):
+    def _plugin_is_unloading(self) -> bool:
+        return self._unload_group is not None and self._unload_group.closing.is_set()
+
+    def _enable_plugin_unload(self) -> Callable[[], None]:
+        self._unload_group = EngineUnloadGroup(self)
+        return self._unload_group.shutdown
+
+    def shutdown(self, *, deadline: float | None = None, terminal_tails: set[int] | None = None):
         # #2482: a live delegated child's in-flight or queued store needs this engine open; it is bounded.
-        drain_live_child_stores(_aux_session._LIVE_CHILD_SHUTDOWN_DRAIN_S)
+        if not self._plugin_is_unloading():
+            drain_live_child_stores(_aux_session._LIVE_CHILD_SHUTDOWN_DRAIN_S)
         with self._compaction_gate:
             self._compaction_closing = True
         sender_capture.retire(self)
-        with self._exclusive_lifecycle("shutdown"):
+        with self._exclusive_lifecycle("shutdown", deadline=deadline) as acquired:
+            if not acquired:
+                logger.warning("LCM unload: engine still in use; connections left open")
+                return
             if self._stable_use_closed:
                 return
             wait_s = _shutdown_compaction_wait_s()
+            if deadline is not None:
+                wait_s = min(wait_s, max(0.0, deadline - time.monotonic()))
             with self._compaction_gate:
                 if not self._compaction_gate.wait_for(
                     lambda: self._compaction_inflight == 0, timeout=wait_s,
@@ -12619,18 +12690,47 @@ class LCMEngine(
                     return
             # Wait for running compaction before taking the storage lock: every lazy
             # helper read takes it, so holding it here could block that pass (#2101, #2152).
-            with self._storage_lock:
-                self._shutdown_unlocked(deadline=time.monotonic() + maintenance_scheduler._SESSION_END_SHUTDOWN_TIMEOUT_MS / 1000)
+            if deadline is None:
+                self._storage_lock.acquire()
+            elif not self._storage_lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
+                logger.warning("LCM unload: storage still binding; connections left open")
+                return
+            try:
+                tail_deadline = time.monotonic() + maintenance_scheduler._SESSION_END_SHUTDOWN_TIMEOUT_MS / 1000
+                if deadline is not None:
+                    tail_deadline = min(tail_deadline, deadline)
+                if self._shutdown_unlocked(
+                    deadline=tail_deadline, unload_deadline=deadline, terminal_tails=terminal_tails,
+                ) is False:
+                    return
                 self._stable_use_closed = True
+            finally:
+                self._storage_lock.release()
 
-    def _shutdown_unlocked(self, *, deadline: float):
-        self._retry_pending_session_tails(
-            deadline=deadline, exiting=True,
+    def _shutdown_unlocked(self, *, deadline: float, unload_deadline: float | None = None,
+                           terminal_tails: set[int] | None = None):
+        retry_busy = self._retry_pending_session_tails(
+            deadline=deadline, exiting=unload_deadline is None and terminal_tails is None,
+            terminal_tails=terminal_tails,
         )
+        detached_stores = set()
+        if self._pending_session_tails:
+            if unload_deadline is not None:
+                # A tail can still own an old profile's store. Finish its retry
+                # before closing the engine rather than orphaning that store.
+                logger.warning("LCM unload: session-end rows still pending; deferring storage cleanup")
+                return False
+            if terminal_tails is not None:
+                if retry_busy:
+                    return False
+                self._warn_unflushed_session_tails("unresolved session-end tail", deadline=deadline)
+                detached_stores = {tail["store"] for tail in self._pending_session_tails
+                                   if tail["store"] is not self.__dict__.get("_store")}
         self._discard_prepared_leaves()
-        self._retire_embedding_maintenance(wait=True)
+        self._retire_embedding_maintenance(wait=True, deadline=unload_deadline)
         cleanup = [
             self._unregister_active_engine_binding,
+            *(store.close for store in detached_stores),
             *(
                 helper.close
                 for attr in ("_adaptive_retrieval", "_store", "_dag", "_lifecycle",

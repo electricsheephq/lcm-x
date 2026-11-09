@@ -1641,6 +1641,7 @@ def _run_within_deadline(
     remaining_s: float,
     name: str,
     worker_slots: threading.BoundedSemaphore | None = None,
+    engine: "LCMEngine | None" = None,
 ):
     """Run ``fn`` in a bounded daemon worker, raising if the deadline lapses.
 
@@ -1666,7 +1667,11 @@ def _run_within_deadline(
 
     worker = threading.Thread(target=profile_bound(invoke), name=name, daemon=True)
     try:
-        worker.start()
+        group = getattr(engine, "_unload_group", None)
+        if group is None:
+            worker.start()
+        elif not group.start_worker(worker):
+            raise _WorkerCapacityError("LCM is unloading")
     except BaseException:
         slots.release()
         raise
@@ -1785,6 +1790,7 @@ def _lcm_grep_full_text_with_deadline(
             remaining_s=remaining,
             name="lcm-full-text",
             worker_slots=_lcm_full_text_worker_slots,
+            engine=engine,
         )
     except (_WorkerCapacityError, TimeoutError):
         return _lcm_grep_deadline_error(
@@ -2234,6 +2240,7 @@ def _lcm_grep_semantic(
             _run_knn,
             remaining_s=deadline - time.monotonic(),
             name="lcm-knn",
+            engine=engine,
         )
         coverage = knn_results.coverage
         ranked_rows = list(knn_results)
@@ -2259,6 +2266,7 @@ def _lcm_grep_semantic(
             ),
             remaining_s=deadline - time.monotonic(),
             name="lcm-result-hydration",
+            engine=engine,
         )
     except _WorkerCapacityError as exc:
         return degraded(f"semantic capacity exhausted: {exc}")
@@ -3814,6 +3822,7 @@ def _lcm_recall_summary_arm(
         ),
         remaining_s=deadline - time.monotonic(),
         name="lcm-recall-summary-knn",
+        engine=engine,
     )
     coverage = knn_results.coverage
     ranked_rows = list(knn_results)
@@ -3828,6 +3837,7 @@ def _lcm_recall_summary_arm(
         ),
         remaining_s=deadline - time.monotonic(),
         name="lcm-recall-summary-hydrate",
+        engine=engine,
     )
     current = engine.current_session_id
     if reference_strict:
@@ -3888,6 +3898,7 @@ def _lcm_recall_chunk_arm(
         ),
         remaining_s=deadline - time.monotonic(),
         name="lcm-recall-chunk-knn",
+        engine=engine,
     )
     coverage = knn_results.coverage
     ranked_rows = list(knn_results)
@@ -3903,6 +3914,7 @@ def _lcm_recall_chunk_arm(
         ),
         remaining_s=deadline - time.monotonic(),
         name="lcm-recall-chunk-hydrate",
+        engine=engine,
     )
     current = engine.current_session_id
     hits: list[dict[str, Any]] = []

@@ -83,10 +83,12 @@ class HostChild(Agent):
             self.api_call(ctx, view(k, tag=self.tag), k + 1)
 
 
-def _setup(host, route):
+def _setup(host, route, *, supports_unload=False):
     load, clone = host
     ctx, module = load()
     ctx.module = module
+    if supports_unload:
+        ctx.unload = ctx.offered._enable_plugin_unload()
     parent = clone(ctx)
     parent.on_session_start("parent", platform="cli", context_length=200_000)
     ctx.hooks["post_llm_call"][0](session_id="parent", platform="cli",
@@ -495,20 +497,20 @@ def test_a_store_cut_off_mid_write_leaves_no_partial_prefix_and_a_resume_appends
     assert _contents(child_rows(parent)) == _contents(view(2))
 
 
-def _blocked_drain(host, monkeypatch):
+def _blocked_drain(host, monkeypatch, *, supports_unload=False):
     """A store stuck past the shutdown drain (as a database busy at exit), with a newer list queued behind it.
 
     The first store lands, then its worker waits outside any engine use until ``release`` is set, so the shutdowns
     run while the newer list is still queued (deterministic: the drain times out, the engines close, then it runs).
     """
-    _, _, ctx, parent, child, engine = _setup(host, "own_engine")
+    _, _, ctx, parent, child, engine = _setup(host, "own_engine", supports_unload=supports_unload)
     aux = ctx.module("aux_session")
     monkeypatch.setattr(aux, "_LIVE_CHILD_STORE_JOIN_S", 0.1, raising=False)
     monkeypatch.setattr(aux, "_LIVE_CHILD_SHUTDOWN_DRAIN_S", 0.2, raising=False)
     release, first = threading.Event(), [True]
     real_run = aux.run_live_child_store
 
-    def run(session_id, operation, rows=0):
+    def run(session_id, operation, rows=0, **kwargs):
         if first[0]:
             first[0] = False
 
@@ -517,8 +519,8 @@ def _blocked_drain(host, monkeypatch):
                 release.wait(10)
                 return outcome
 
-            return real_run(session_id, held, rows)
-        return real_run(session_id, operation, rows)
+            return real_run(session_id, held, rows, **kwargs)
+        return real_run(session_id, operation, rows, **kwargs)
 
     monkeypatch.setattr(aux, "run_live_child_store", run)
     db_path = parent._store.db_path
@@ -535,6 +537,30 @@ def _stored_after_close(aux, db_path, release, session_id="child"):
     with sqlite3.connect(db_path) as conn:
         return conn.execute("SELECT role, content FROM messages WHERE session_id = ? ORDER BY store_id",
                             (session_id,)).fetchall()
+
+
+@pytest.mark.parametrize("budget_expires", [False, True])
+def test_plugin_unload_preserves_already_queued_child_rows(host, monkeypatch, budget_expires):
+    ctx, aux, _, engines, db_path, release = _blocked_drain(host, monkeypatch, supports_unload=True)
+    if budget_expires:
+        monkeypatch.setenv("LCM_SHUTDOWN_COMPACTION_WAIT_S", "0.05")
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        unloaded = executor.submit(ctx.unload)
+        try:
+            assert ctx.offered._unload_group.closing.wait(5)
+            if budget_expires:
+                unloaded.result(timeout=5)
+                assert not any(engine._stable_use_closed for engine in engines)
+            else:
+                assert not unloaded.done()
+        finally:
+            release.set()
+        unloaded.result(timeout=5)
+    deadline = time.monotonic() + 5
+    while not all(engine._stable_use_closed for engine in engines) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert all(engine._stable_use_closed for engine in engines)
+    assert _stored_after_close(aux, db_path, release) == _contents(view(1))
 
 
 @pytest.mark.xfail(strict=True, reason="#2482 named loss limit (v0.30.0, #2483): a delegated child's rows after its "

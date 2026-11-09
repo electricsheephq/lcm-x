@@ -11,7 +11,9 @@ methods on ``LCMEngine`` mutate the same shared objects by reference.
 
 from __future__ import annotations
 
+import logging
 import threading
+import time
 import weakref
 from dataclasses import dataclass
 from enum import Enum
@@ -23,6 +25,112 @@ _ACTIVE_ENGINE_REGISTRY_LOCK = threading.RLock()
 _ACTIVE_ENGINE_COLD_START_LOCK = threading.RLock()
 _ACTIVE_ENGINES_BY_SESSION_ID = weakref.WeakValueDictionary()
 _ACTIVE_ENGINES_BY_CONVERSATION_ID = weakref.WeakValueDictionary()
+logger = logging.getLogger(__name__)
+
+
+class EngineUnloadGroup:
+    """One plugin registration owns its prototype, clones and SQLite work."""
+
+    def __init__(self, prototype: Any) -> None:
+        self.lock = threading.Lock()
+        self.closing = threading.Event()
+        self.engines = weakref.WeakSet((prototype,))
+        self.databases: set[str] = set()
+        self._workers: set[threading.Thread] = set()
+        self._rollup_owners: set[object] = set()
+        self._deferred = weakref.WeakSet()
+
+    def start_worker(self, worker: threading.Thread) -> bool:
+        with self.lock:
+            if self.closing.is_set():
+                return False
+            self._workers = {active for active in self._workers if active.is_alive()}
+            worker.start()
+            self._workers.add(worker)
+            return True
+
+    def schedule_rollup(self, scheduler, key, work, *, owner) -> None:
+        with self.lock:
+            if self.closing.is_set():
+                return
+            self._rollup_owners = {
+                pending for pending in self._rollup_owners
+                if not scheduler.drain_owner(pending, timeout=0)
+            }
+            if scheduler.schedule(key, work, owner=owner):
+                self._rollup_owners.add(owner)
+
+    def _defer_shutdown(self, engine, *, wait_for_children: bool = False) -> None:
+        from .aux_session import drain_live_child_stores
+        from .config import profile_bound
+
+        def finish():
+            try:
+                if wait_for_children:
+                    drain_live_child_stores(None, owner=self)
+                with engine._compaction_gate:
+                    engine._compaction_gate.wait_for(lambda: engine._compaction_inflight == 0)
+                # A terminal tail cannot consume every retry budget while a
+                # later tail waits. Keep it for the final warning and close.
+                terminal_tails: set[int] = set()
+                while not engine._stable_use_closed:
+                    engine.shutdown(terminal_tails=terminal_tails)
+                    if not engine._stable_use_closed:
+                        time.sleep(0.1)
+            except Exception:
+                logger.exception("LCM deferred engine cleanup failed after plugin unload")
+
+        with self.lock:
+            if engine in self._deferred:
+                return
+            self._deferred.add(engine)
+        threading.Thread(target=profile_bound(finish), name="lcm-deferred-unload", daemon=True).start()
+
+    def shutdown(self) -> None:
+        from . import leaf_prep
+        from .aux_session import drain_live_child_stores
+        from .db_bootstrap import drain_background_database_workers
+        from .engine import _shutdown_compaction_wait_s
+        from .maintenance_scheduler import _ROLLUP_MAINTENANCE_SCHEDULER
+        from .retrieval_core import _retire_owned_vector_stores
+
+        with self.lock:
+            self.closing.set()
+            engines = list(self.engines)
+            workers = list(self._workers)
+            rollup_owners = list(self._rollup_owners)
+        deadline = time.monotonic() + _shutdown_compaction_wait_s()
+        children_drained = drain_live_child_stores(max(0.0, deadline - time.monotonic()), owner=self)
+
+        # Abandoned deadline workers may still hold private database handles.
+        drained = True
+        for worker in workers:
+            if worker is not threading.current_thread():
+                worker.join(max(0.0, deadline - time.monotonic()))
+            drained = not worker.is_alive() and drained
+
+        for engine in engines:
+            try:
+                if not children_drained:
+                    self._defer_shutdown(engine, wait_for_children=True)
+                    continue
+                engine.shutdown(deadline=deadline)
+                if not engine._stable_use_closed:
+                    self._defer_shutdown(engine)
+            except Exception:
+                logger.exception("LCM engine cleanup failed during plugin unload")
+
+        for owner in rollup_owners:
+            drained = _ROLLUP_MAINTENANCE_SCHEDULER.drain_owner(
+                owner, timeout=max(0.0, deadline - time.monotonic()),
+            ) and drained
+        drained = leaf_prep.retire_owner(self, timeout=max(0.0, deadline - time.monotonic())) and drained
+        with self.lock:
+            databases = self.databases.copy()
+        drained = drain_background_database_workers(databases, deadline=deadline) and drained
+        drained = _retire_owned_vector_stores(self, deadline=deadline) and drained
+        if not drained:
+            logger.warning("LCM plugin unload timed out waiting for SQLite work to finish")
 
 
 class ActiveEngineUseStatus(str, Enum):
@@ -261,6 +369,7 @@ def use_lcm_engine(
     operation,
     *,
     timeout: float | None = 5.0,
+    allow_unloading: bool = False,
 ) -> ActiveEngineUseResult:
     """Use a host-supplied or cold prototype engine with stable lifetime."""
     if not _is_usable_lcm_engine(engine):
@@ -268,6 +377,8 @@ def use_lcm_engine(
     run_stably = getattr(engine, "_run_stably", None)
     if not callable(run_stably):
         return ActiveEngineUseResult(ActiveEngineUseStatus.UNSUPPORTED_ENGINE)
+    if allow_unloading:
+        return run_stably(operation, timeout=timeout, allow_unloading=True)
     return run_stably(operation, timeout=timeout)
 
 
