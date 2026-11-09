@@ -1,0 +1,1 @@
+- Fix: The opt-in recorder could hang at interpreter exit when a checkpoint came due during the exit drain.
