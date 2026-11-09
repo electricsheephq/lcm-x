@@ -181,7 +181,9 @@ def arm_t(plugin, home, direct, empty=False):
 def claude(command, prompt, args, home, cwd, env=None):
     start, result, init, calls = time.monotonic(), {}, None, {}
     try:
-        proc = subprocess.run([command, "-p", prompt, *args, "--effort", "low", "--output-format", "stream-json", "--verbose"], env={**environment(home), **(env or {})}, cwd=cwd, capture_output=True, timeout=900)
+        # The launcher isolates HOME and CLAUDE_CONFIG_DIR itself (from KIT_HOME); it needs the caller's own
+        # environment to find its backend credentials, so HOME is not replaced here.
+        proc = subprocess.run([command, "-p", prompt, *args, "--effort", "low", "--output-format", "stream-json", "--verbose"], env={**os.environ, "KIT_HOME": str(home), **(env or {})}, cwd=cwd, capture_output=True, timeout=900)
     except subprocess.TimeoutExpired:
         return {"rc": -1, "wall_s": time.monotonic() - start, "is_error": True, "error": "timeout", "answer": ""}
     for line in proc.stdout.splitlines():
