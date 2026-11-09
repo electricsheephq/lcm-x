@@ -107,11 +107,11 @@ except ValueError:
 turns = [json.loads(line) for line in open("../turns.jsonl")] if __import__("os").path.exists("../turns.jsonl") else []
 rows = None  # no store at all is a failed install, recorded below with the audit's error
 if pathlib.Path(db).is_file():
-    con = sqlite3.connect(pathlib.Path(db).as_uri() + "?mode=ro", uri=True)  # as_uri escapes # and ? in the path
     try:
+        con = sqlite3.connect(pathlib.Path(db).as_uri() + "?mode=ro", uri=True)  # as_uri escapes # and ? in the path
         rows = con.execute("select count(*) from messages").fetchone()[0]
     except sqlite3.Error:
-        rows = None  # a store with no messages table; the audit's error says why
+        rows = None  # an unreadable store or one with no messages table; the audit's error says why
 print("RECORD", json.dumps({"case": case, "manual_steps": steps, "rows": rows, "audit_ok": a.get("ok"), "audit_error": a.get("error"),
       "verified": a.get("verified"), "lineages": len(a.get("lineages") or []),
       "failures": {k: v for k, v in (a.get("failures") or {}).items() if v}, "spool": a.get("spool"),
