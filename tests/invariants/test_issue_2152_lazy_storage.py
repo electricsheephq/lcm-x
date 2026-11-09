@@ -229,7 +229,8 @@ def test_unload_drains_timed_out_sqlite_worker(preflight, monkeypatch):
             assert prototype._lifecycle.get_by_conversation(conversation) == ended
             assert prototype._lifecycle.get_by_session("late-reset") is None
             active.on_session_end("active", [first, {"role": "assistant", "content": "late tail"}])
-            assert active.should_compress_preflight([first, {"role": "user", "content": "late turn"}]) is False
+            assert active.should_compress_preflight([first, {"role": "assistant", "content": "late turn"}]) is False
+            assert active._store.get_session_count("active") == 1
             assert active.carry_over_new_session_context("active", "late") == 0
             assert active._lifecycle.get_by_session("active").current_session_id == "active"
             assert active._store.get_session_count("active") == 1
@@ -242,22 +243,31 @@ def test_unload_drains_timed_out_sqlite_worker(preflight, monkeypatch):
 def test_unload_waits_for_admitted_compaction_preflight(preflight, monkeypatch):
     engine, ctx = preflight.register(supports_unload=True)
     engine.on_session_start("preflight", platform="cli")
-    entered, release = threading.Event(), threading.Event()
+    entered, release, shutdown_checked = threading.Event(), threading.Event(), threading.Event()
+    waiting_for_preflight = threading.Event()
     original = engine._should_compress_preflight_impl
+    wait_for = engine._compaction_gate.wait_for
 
     def held_preflight(messages):
         entered.set()
         assert release.wait(5)
         return original(messages)
 
+    def check_drain(predicate, timeout=None):
+        if not predicate():
+            waiting_for_preflight.set()
+        shutdown_checked.set()
+        return wait_for(predicate, timeout)
+
     monkeypatch.setattr(engine, "_should_compress_preflight_impl", held_preflight)
+    monkeypatch.setattr(engine._compaction_gate, "wait_for", check_drain)
     with ThreadPoolExecutor(max_workers=2) as executor:
         running = executor.submit(engine.should_compress_preflight, [{"role": "user", "content": "admitted"}])
         try:
             assert entered.wait(5)
             unload = executor.submit(ctx.unload_callbacks[0])
-            assert engine._unload_group.closing.wait(5)
-            assert not unload.done()
+            assert shutdown_checked.wait(5)
+            assert waiting_for_preflight.is_set()
             assert engine._store.connection.execute("SELECT 1").fetchone()[0] == 1
         finally:
             release.set()
