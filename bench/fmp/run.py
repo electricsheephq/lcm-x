@@ -216,7 +216,7 @@ def codex_home_lock(home):
         except BlockingIOError:
             raise RuntimeError("codex home busy") from None
         # SIGTERM unwinds normally: the running Codex call finishes (or, on the main thread, is killed) before the lock is
-        # released; queued questions are cancelled and no further model call starts (models.STOPPING).
+        # released; pool.map cancels queued questions and no further model call starts (models.STOPPING).
         models.STOPPING.clear()
         previous = signal.signal(signal.SIGTERM, _terminate) if threading.current_thread() is threading.main_thread() else None
         try:
@@ -335,13 +335,8 @@ def run_jobs(jobs, workers):
     if len(jobs) == 1:
         started = time.monotonic()
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            try:
-                for row in pool.map(*prepared[0][:2]):
-                    jobs[0].send(row)
-            except (SystemExit, KeyboardInterrupt):
-                # A stop drops the queued questions; only the in-flight one finishes, and its row is not kept.
-                pool.shutdown(wait=True, cancel_futures=True)
-                raise
+            for row in pool.map(*prepared[0][:2]):
+                jobs[0].send(row)
         prepared[0][2]["active_s"] += time.monotonic() - started
     else:
         start = random.Random(1189).randrange(len(jobs))

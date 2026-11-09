@@ -269,11 +269,11 @@ def test_rejected_output_inside_home_gets_no_failure_record(tmp_path, monkeypatc
     assert sorted(p.name for p in home.iterdir()) == []
 
 
-def test_sigterm_drain_cancels_queued_and_starts_no_model_call(tmp_path, monkeypatch, cli):
+def test_sigterm_drain_starts_no_further_model_call(tmp_path, monkeypatch, cli):
     import os
     import signal
     import threading
-    calls, shutdowns = [], []
+    calls, started = [], []
     monkeypatch.setattr(models, "STOPPING", threading.Event(), raising=False)  # never leak a set event
     questions = [SimpleNamespace(qid=f"q{i}", store_id="store", qtype="fact", question="Synthetic?", gold="yes",
                                  dataset="lme-s", session_map={}, question_date="2025-01-01") for i in range(3)]
@@ -286,20 +286,24 @@ def test_sigterm_drain_cancels_queued_and_starts_no_model_call(tmp_path, monkeyp
         handled.set()
         terminate(signum, frame)
 
-    monkeypatch.setattr(run, "_terminate", observed)
-
-    class Pool(run.ThreadPoolExecutor):
-        def shutdown(self, wait=True, *, cancel_futures=False):
-            shutdowns.append(cancel_futures)
-            return super().shutdown(wait=wait, cancel_futures=cancel_futures)
+    def judge(row, q, client, specs, agreement_model=None):
+        started.append(q.qid)
+        for spec in specs:  # like judges.judge: a failed judge call does not stop the next judge
+            try:
+                client.call(spec, [{"role": "user", "content": q.question}], [])
+            except RuntimeError:
+                pass
+        return {**row, "status": "ok"}
 
     def runner(cmd, **kwargs):
         calls.append(cmd)
-        if threading.current_thread() is not threading.main_thread() and len(calls) == 1:
+        if len(calls) == 1:
             os.kill(os.getpid(), signal.SIGTERM)
             assert handled.wait(5)  # the main thread is unwinding before this call returns
-        return subprocess.CompletedProcess(cmd, 0, json.dumps({"type": "item.completed", "item": {
-            "type": "agent_message", "text": "CORRECT"}}), "")
+        return subprocess.CompletedProcess(cmd, 0, "\n".join(map(json.dumps, [
+            {"type": "item.completed", "item": {"type": "agent_message", "text": "yes"}},
+            {"type": "turn.completed", "usage": {"output_tokens": 1}},
+        ])), "")
 
     original = models.Backends
 
@@ -308,13 +312,14 @@ def test_sigterm_drain_cancels_queued_and_starts_no_model_call(tmp_path, monkeyp
         client.codex.runner = runner
         return client
 
+    monkeypatch.setattr(run, "_terminate", observed)
+    monkeypatch.setattr(run.judges, "judge_row", judge)
     monkeypatch.setattr(run, "Backends", backends)
-    monkeypatch.setattr(run, "ThreadPoolExecutor", Pool)
     args = cli.args("judge", "--codex-home", str(tmp_path / "lease"),
                     "--judge", models.CODEX_DEFAULT_JUDGE, models.CODEX_DEFAULT_READER)
     with pytest.raises(SystemExit):
         run.execute(args)
+    assert started == ["q0"]  # queued questions never start
     assert len(calls) == 1  # the second judge of the in-flight question never starts
-    assert True in shutdowns  # queued questions are cancelled, not drained
     with (tmp_path / "lease" / "holder.lock").open("r+") as contender:
         fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
