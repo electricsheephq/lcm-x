@@ -1527,6 +1527,10 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
             discovered_refs = []
             try:
                 paths = (storage_dir / ref for ref in externalized_refs) if externalized_refs is not None else storage_dir.iterdir()
+                if reader_mode and externalized_refs is None:
+                    # The reader keeps the newest names, not the first ones the file system lists: names only (no
+                    # stat or open), sorted newest first, then capped below.
+                    paths = (storage_dir / name for name in sorted(os.listdir(storage_dir), reverse=True))
                 for entries_seen, path in enumerate(paths, start=1):
                     if entries_seen > _LCM_GREP_EXTERNALIZED_DISCOVERY_CAP:
                         scan_counts["discovery_truncated"] = True
@@ -1656,6 +1660,8 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
                 scan_counts["rejected_session_mismatch" if status == "out_of_scope" else "rejected_invalid_or_unreadable"] += 1
                 if externalized_refs is not None:
                     return json.dumps({"error": f"Externalized ref is not readable{' or not owned by the requested scope' if reader_mode else ''}: {ref}"})
+                if reader_mode and status != "out_of_scope":
+                    partial_reasons.append("unreadable")  # a payload this reader could not parse was not searched
                 continue
             scan_counts["scanned_files"] += 1
             if not payload_in_scope(payload.get("session_id")):

@@ -543,3 +543,25 @@ def test_a_confirmed_out_of_scope_ref_still_errors_at_the_budget_boundary(archiv
     monkeypatch.setattr(tools, "READER_PAYLOAD_BYTE_CAP", mine_bytes + theirs_bytes)  # ends exactly after its header
     raw, error = archive.reader.call("lcm_grep", dict(query=TOKEN, externalized_refs=[mine, theirs], **args))
     assert "not owned by the requested scope" in json.loads(raw).get("error", "")
+
+
+def test_discovery_cap_keeps_the_newest_names_whatever_the_listing_order(archive, monkeypatch):
+    # Bot review of #2528: the cap must keep the newest payloads, not the first ones the file system lists.
+    refs = [archive.save(name=f"20261110_12000{i}_p.json")[0] for i in range(5)]
+    monkeypatch.setattr(tools, "_LCM_GREP_EXTERNALIZED_DISCOVERY_CAP", 2)
+    real_listdir = tools.os.listdir
+    monkeypatch.setattr(tools.os, "listdir", lambda path: sorted(real_listdir(path)))  # oldest first
+    result = archive.grep()
+    assert sorted(hit["ref"] for hit in payload_hits(result)) == sorted(refs[-2:])
+    assert "discovery_cap" in result["partial"]["reasons"]
+
+
+def test_a_payload_the_reader_cannot_parse_is_disclosed(archive):
+    # Bot review of #2528: a valid-looking payload the reader cannot reconstruct is never a silent skip.
+    good, _ = archive.save(name="20261110_120001_good.json")
+    bad, _ = archive.save(name="20261110_120002_bad.json")
+    path = archive.storage / bad
+    path.write_bytes(path.read_bytes()[:-200])  # the closing quote and tail metadata are gone
+    result = archive.grep()
+    assert [hit["ref"] for hit in payload_hits(result)] == [good]
+    assert "unreadable" in result["partial"]["reasons"]
