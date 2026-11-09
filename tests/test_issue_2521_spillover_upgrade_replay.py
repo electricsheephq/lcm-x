@@ -92,6 +92,13 @@ def _v0292_store(tmp_path):
     dump = FIXTURE.read_text(encoding="utf-8").replace("@HERMES_HOME@", str(home))
     with closing(sqlite3.connect(home / "lcm.db")) as connection:
         connection.executescript(dump)
+    # The dump declares the FTS tables through writable_schema, so they load on the next connection. Re-index them
+    # over the substituted path, as v0.29.2 indexed the marker it stored.
+    with closing(sqlite3.connect(home / "lcm.db")) as connection:
+        for table in ("messages_fts", "messages_fts_stem"):
+            connection.execute(f"INSERT INTO {table}({table}) VALUES('rebuild')")
+            connection.execute(f"INSERT INTO {table}({table}) VALUES('integrity-check')")
+        connection.commit()
     rows = _read_store(tmp_path)
     marker = rows[2]["content"]
     assert [row["role"] for row in rows] == ["user", "assistant", "tool", "assistant"]
