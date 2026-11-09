@@ -1,73 +1,80 @@
 # Recall over MCP: the #2225 gate kit
 
-The bars live in **BARS-2225-mcp-recall-v1.md**, approved before any run
-and held by the orchestrator. That approved protocol is authoritative; this kit
-does not change its bars. Use the GLM gate launcher, never Anthropic billing.
-Only invented fixture facts and synthetic answers are written by this kit.
+Measures whether a Claude Code agent finds what was said in earlier Claude Code sessions through the
+read-only `lcm-x` MCP reader, and whether anything the capture store holds goes missing on the way
+through the endpoint. Gate item for Claude Code GA (#2225).
 
-The eight session labels include a resumed session and a fork. D checks all
-forty facts and both tokens of each superseded pair: forty-eight tokens,
-aggregated into forty-four positive/latest question rows. The empty T control
-queries forty facts and the four current values, exactly forty-four calls.
+## Protocol
 
-* Capture must audit ok and verified after each session, or the run stops.
-* D reads the expected session and allowed roles directly with read-only SQL.
-  A subagent fact can belong to the parent's recorded subagent children.
-* T keeps one MCP stdio connection, searches tokens, and expands paged content
-  and externalized payloads. Its content hash must match D's full content hash.
-* A starts a fresh reader session and working directory per question, with
-  hooks disabled, built-in tools off, and only the connected lcm-x MCP server.
-  Connection failures remain explicit errors, never ordinary recall misses.
+- **Corpus:** 8 real Claude Code sessions (S1-S8, including a resumed session, a fork, a compacted
+  session and a session with subagents) in a fixture project, captured by the plugin into one store.
+  40 invented facts, each a unique value, planted across eight classes: user text 8, assistant-stated
+  derived values 6, tool inputs read back 6, inline tool results 8, large tool outputs that Claude Code
+  saves to `tool-results/` 4, before a compaction 4, inside a subagent 2, in a resumed or forked
+  session 2. Plus 4 superseded values (stated, then changed in a later session). All facts are
+  invented, so the per-question outputs can be published. `corpus.json` holds the sessions and facts.
+- **Questions** (`questions.json`, fixed before any run): 40 positives that name the topic but never
+  the value, 4 latest-value questions, 6 negatives about topics never discussed.
+- **Arm D, direct:** read-only SQL over the store. Is each value in a row of the expected session and
+  role (inline or in its externalized payload)? It also checks that each value reached the session's
+  own Claude Code files (`plant_failed`), and records per session the compactions, subagent
+  transcripts and saved outputs that really happened.
+- **Arm T, endpoint:** the reader started as the plugin's `.mcp.json` starts it. `lcm_grep`
+  (full text) must find each value in the expected session, and paged `lcm_expand` must return content
+  byte-equal (sha256) to the stored row or payload.
+- **Arm A, agent:** headless Claude Code with hooks off, built-in tools off and only the `lcm-x`
+  server, one fresh session per question. The reader prompt is fixed in `kit.py` (`PROMPT`).
+  Deterministic judge (`judge`): a positive is correct only if the answer holds the gold value and no
+  other value-shaped string; a negative only if the answer is exactly `NOT FOUND`.
 
-Run from the repository root. Set KIT to this folder, CMD to the orchestrator's
-GLM launcher, PLUGIN to the unpacked plugin, and CAPTURE, EMPTY, READER and OUT
-to fresh absolute scratch/evidence directories. The launcher must isolate HOME
-and CLAUDE_CONFIG_DIR using KIT_HOME; it must pass KIT_LCMX_CC_HOME to its reader.
-The orchestrator checks the owner's settings hash before and after batches;
-the kit never reads that file or any authentication file.
+## Bars (set before any data)
+
+| Bar | Pass |
+|---|---|
+| Empty-store control (first) | T returns nothing for all 44 values, and A scores 0/40 positives, on an empty store. Otherwise the run is void. |
+| Capture | The capture audit is ok and verified on all 8 sessions. |
+| D | 44/44 (40 facts + 4 current values). A miss is a capture finding: stop. |
+| T | 44/44, byte-equal expand. A miss is endpoint loss and blocks release. |
+| A | At least 36/40 positives. |
+| False recall | At most 1/6 negatives name a value or invent one. |
+| T-pass / A-fail | Each such question is classified in the receipt. |
+| Latest values | Recorded and classified (current/stale/both/miss), not gated. |
+| Latency | Not gated. p50/p90/max per tool. A T p90 above 1 s, or any T call above 5 s, needs a written classification before GA. |
+
+If the first A run scores 34-38 positives, a second A run on the same store decides, and the lower
+score governs. Old superseded values are checked by D and T but reported apart, not gated. An
+infrastructure error in A (timeout, error exit, empty answer, a limit) gives `INCOMPLETE`, not a
+result. Verdict precedence: VOID, STOP, FAIL (T), INCOMPLETE, FAIL (other bars), SECOND RUN
+REQUIRED, FAIL (A), CLASSIFICATION REQUIRED, PASS.
+
+## Running it
+
+Run from the repository root. `CMD` is a launcher for the Claude Code CLI that isolates `HOME` and
+`CLAUDE_CONFIG_DIR` under `KIT_HOME`, and passes `KIT_LCMX_CC_HOME` through as the reader's
+`LCMX_CC_HOME`. `PLUGIN` is the unpacked Claude Code unit asset. The other variables are fresh
+absolute directories.
 
 ```bash
-python "$KIT/kit.py" --help
-# Empty-store controls FIRST; no corpus build or measured arm yet.
 python "$KIT/kit.py" make-empty-store --home "$EMPTY/.lcm-x/claude-code"
-python "$KIT/kit.py" arm-t --plugin "$PLUGIN" --home "$EMPTY" \
-  --d "$KIT/corpus.json" --empty --out "$OUT/t-empty"
-python "$KIT/kit.py" arm-a --claude "$CMD" --plugin "$PLUGIN" \
-  --store-home "$EMPTY/.lcm-x/claude-code" --reader-home "$READER/control" \
-  --only positive --out "$OUT/a-empty"
-# Proceed only if all empty T checks pass and empty A scores no positives.
-python "$KIT/kit.py" build-corpus --claude "$CMD" --plugin "$PLUGIN" \
-  --home "$CAPTURE" --out "$OUT/corpus"
-python "$KIT/kit.py" arm-d --home "$CAPTURE" \
-  --manifest "$OUT/corpus/corpus-manifest.json" --out "$OUT/d"
-python "$KIT/kit.py" arm-t --plugin "$PLUGIN" --home "$CAPTURE" \
-  --d "$OUT/d/arm-d.json" --out "$OUT/t"
-python "$KIT/kit.py" arm-a --claude "$CMD" --plugin "$PLUGIN" \
-  --store-home "$CAPTURE/.lcm-x/claude-code" --reader-home "$READER/main" \
-  --parallel 3 --out "$OUT/a"
-python "$KIT/kit.py" score --corpus-manifest "$OUT/corpus/corpus-manifest.json" \
-  --d "$OUT/d/arm-d.json" --t "$OUT/t/arm-t.json" \
-  --t-empty "$OUT/t-empty/arm-t.json" --a "$OUT/a/arm-a.json" \
+python "$KIT/kit.py" arm-t --empty --plugin "$PLUGIN" --home "$EMPTY" --d "$KIT/corpus.json" --out "$OUT/t-empty"
+python "$KIT/kit.py" arm-a --claude "$CMD" --plugin "$PLUGIN" --store-home "$EMPTY/.lcm-x/claude-code" \
+  --reader-home "$READER/control" --only positive --parallel 3 --out "$OUT/a-empty"
+python "$KIT/kit.py" build-corpus --claude "$CMD" --plugin "$PLUGIN" --home "$CAPTURE" --out "$OUT/corpus"
+python "$KIT/kit.py" arm-d --home "$CAPTURE" --manifest "$OUT/corpus/corpus-manifest.json" --out "$OUT/d"
+python "$KIT/kit.py" arm-t --plugin "$PLUGIN" --home "$CAPTURE" --d "$OUT/d/arm-d.json" --out "$OUT/t"
+python "$KIT/kit.py" arm-a --claude "$CMD" --plugin "$PLUGIN" --store-home "$CAPTURE/.lcm-x/claude-code" \
+  --reader-home "$READER/main" --parallel 3 --out "$OUT/a"
+python "$KIT/kit.py" score --corpus-manifest "$OUT/corpus/corpus-manifest.json" --d "$OUT/d/arm-d.json" \
+  --t "$OUT/t/arm-t.json" --t-empty "$OUT/t-empty/arm-t.json" --a "$OUT/a/arm-a.json" \
   --a-empty "$OUT/a-empty/arm-a.json" --out "$OUT/score"
 ```
 
-D misses are capture findings: stop and report. T misses block release.
-A needs at least thirty-six positives and at most one fabricated negative.
-When the first A run scores thirty-four through thirty-eight positives, run A
-again on the same store using a fresh reader home and supply `--a2`; the lower
-positive score and worse false-recall count govern. Latest values are classified
-current/stale/both/miss, and are not gated. Fill each empty `classification`
-field for T-pass/A-fail rows. Latency is ungated, but p90 above one second or
-any T call above five seconds requires a written classification before GA.
-
-The scorer snapshots its JSON inputs beside RESULT.md and RESULT-MANIFEST.json.
-Preserve them for re-scoring; publication and GA decisions belong to the
-orchestrator. Missing controls void the result. Limit errors stop new calls;
-already-running parallel calls may finish. No real sessions are run by tests.
+The scorer copies its inputs beside `RESULT.md` and `RESULT-MANIFEST.json` so a result can be
+re-scored. The tests (`tests/test_cc_mcp_recall_kit.py`) run no model and no Claude Code.
 
 ## What it does not prove
 
-Synthetic facts in a fixture project, not the owner's real history; one model
-(the GLM plan) as the reader; one store of 8 sessions, so nothing about recall
-at a large store size; no Grok Build sessions (that is #2226); latency on a
-shared Mac. Not a "customer ready" claim.
+Invented facts in a fixture project, not anyone's real history. One model as the agent. One store of
+8 sessions, so nothing about recall at a large store size. No Grok Build sessions (#2226). Latency on
+a shared machine. It is not a customer-ready claim. A value that appears only in a tool call's input
+(not echoed in any result) is not covered: the tool-input facts here are read back by the agent.
