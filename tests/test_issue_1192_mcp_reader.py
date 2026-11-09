@@ -435,6 +435,9 @@ def test_t2_outputs_equal_a_normal_engine_byte_for_byte(fx, monkeypatch):
             # The store-id expansion of the s2 externalized row: the normal engine under the
             # reader's any-session policy, ordinary storage, no current session.
             any_session = name == "lcm_expand" and args.get("store_id") == fx.s2_tool_id
+            # #2225: a reader lcm_grep without content_scope also searches saved tool outputs of any
+            # session, by design; the normal engine runs the same call under the reader's policy.
+            any_session = any_session or (name == "lcm_grep" and "content_scope" not in args)
             if any_session:
                 engine._reader_any_session = True
             try:
