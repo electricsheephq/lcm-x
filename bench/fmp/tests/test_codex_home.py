@@ -274,7 +274,7 @@ def test_sigterm_drain_cancels_queued_and_starts_no_model_call(tmp_path, monkeyp
     import signal
     import threading
     calls, shutdowns = [], []
-    monkeypatch.setattr(models, "STOPPING", threading.Event())  # never leak a set event into later tests
+    monkeypatch.setattr(models, "STOPPING", threading.Event(), raising=False)  # never leak a set event
     questions = [SimpleNamespace(qid=f"q{i}", store_id="store", qtype="fact", question="Synthetic?", gold="yes",
                                  dataset="lme-s", session_map={}, question_date="2025-01-01") for i in range(3)]
     monkeypatch.setattr(run.datasets, "load", lambda *a: (questions, "dataset", "ids", {}))
