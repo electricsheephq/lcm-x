@@ -6,7 +6,8 @@ import subprocess
 import sys
 import threading
 import time
-from contextlib import contextmanager
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing, contextmanager
 from pathlib import Path
 
 import pytest
@@ -298,6 +299,44 @@ def test_session_end_drops_sole_owners_queued_pass(make_engine, scheduler, monke
             assert not ran.is_set()
     finally:
         scheduler.release_exclusive(exclusive_key)
+
+
+def test_plugin_unload_waits_for_embedding_pass_retired_before_rebind(make_engine, scheduler, monkeypatch):
+    engine = make_engine()
+    unload = engine._enable_plugin_unload()
+    opened, release, closed, waiting = (threading.Event() for _ in range(4))
+    retired_owner = engine._embedding_maintenance_owner
+    retire_owner = scheduler.retire_owner
+
+    def run(db_path, _config, **kwargs):
+        with closing(sqlite3.connect(db_path)) as reader:
+            reader.execute("SELECT 1")
+            opened.set()
+            assert release.wait(5)
+        closed.set()
+
+    def observe_retire(owner, timeout):
+        if owner is retired_owner and timeout > 0:
+            waiting.set()
+        return retire_owner(owner, timeout)
+
+    monkeypatch.setattr(engine_mod, "run_incremental_embedding_pass", run)
+    monkeypatch.setattr(scheduler, "retire_owner", observe_retire)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        try:
+            _bind(engine)
+            assert opened.wait(5)
+            engine.on_session_end("session", [])
+            engine._config.embeddings_enabled = False
+            _bind(engine, "next")
+            assert engine._embedding_maintenance_owner is not retired_owner
+            finish = executor.submit(unload)
+            assert waiting.wait(5), "unload lost the previous session's active embedding owner"
+            assert not finish.done()
+        finally:
+            release.set()
+        finish.result(timeout=5)
+    assert closed.is_set()
 
 
 def test_session_end_preserves_other_owners_queued_pass(make_engine, scheduler, monkeypatch):

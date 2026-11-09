@@ -38,6 +38,7 @@ class EngineUnloadGroup:
         self.databases: set[str] = set()
         self._workers: set[threading.Thread] = set()
         self._rollup_owners: set[object] = set()
+        self._retired_embedding_owners: set[object] = set()
         self._deferred = weakref.WeakSet()
 
     def start_worker(self, worker: threading.Thread) -> bool:
@@ -59,6 +60,15 @@ class EngineUnloadGroup:
             }
             if scheduler.schedule(key, work, owner=owner):
                 self._rollup_owners.add(owner)
+
+    def remember_embedding_retirement(self, scheduler, owner, *, drained: bool) -> None:
+        with self.lock:
+            prior_owners = tuple(self._retired_embedding_owners)
+        finished = {prior for prior in prior_owners if scheduler.retire_owner(prior, timeout=0)}
+        with self.lock:
+            self._retired_embedding_owners.difference_update(finished)
+            if not drained:
+                self._retired_embedding_owners.add(owner)
 
     def _defer_shutdown(self, engine, *, wait_for_children: bool = False) -> None:
         from .aux_session import drain_live_child_stores
@@ -91,7 +101,7 @@ class EngineUnloadGroup:
         from .aux_session import drain_live_child_stores
         from .db_bootstrap import drain_background_database_workers
         from .engine import _shutdown_compaction_wait_s
-        from .maintenance_scheduler import _ROLLUP_MAINTENANCE_SCHEDULER
+        from .maintenance_scheduler import _EMBEDDING_MAINTENANCE_SCHEDULER, _ROLLUP_MAINTENANCE_SCHEDULER
         from .retrieval_core import _retire_owned_vector_stores
 
         with self.lock:
@@ -122,6 +132,12 @@ class EngineUnloadGroup:
 
         for owner in rollup_owners:
             drained = _ROLLUP_MAINTENANCE_SCHEDULER.drain_owner(
+                owner, timeout=max(0.0, deadline - time.monotonic()),
+            ) and drained
+        with self.lock:
+            retired_embedding_owners = tuple(self._retired_embedding_owners)
+        for owner in retired_embedding_owners:
+            drained = _EMBEDDING_MAINTENANCE_SCHEDULER.retire_owner(
                 owner, timeout=max(0.0, deadline - time.monotonic()),
             ) and drained
         drained = leaf_prep.retire_owner(self, timeout=max(0.0, deadline - time.monotonic())) and drained

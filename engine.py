@@ -3111,10 +3111,10 @@ class LCMEngine(
         if wait and deadline is not None:
             timeout = max(0.0, deadline - time.monotonic())
         try:
-            drained = maintenance_scheduler._EMBEDDING_MAINTENANCE_SCHEDULER.retire_owner(
-                owner,
-                timeout=timeout,
-            )
+            scheduler = maintenance_scheduler._EMBEDDING_MAINTENANCE_SCHEDULER
+            drained = scheduler.retire_owner(owner, timeout=timeout)
+            if not wait and self._unload_group is not None:
+                self._unload_group.remember_embedding_retirement(scheduler, owner, drained=drained)
             if deadline is not None and not drained:
                 logger.warning("LCM unload: incremental embedding work still running")
         except Exception:
