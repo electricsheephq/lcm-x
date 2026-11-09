@@ -337,10 +337,17 @@ provenance through rollback and re-upgrade. The current stable release is
 at `261d41ea928eec3dc5b8db13c70f044392adf124` (2026-11-09); see [project status](project-status.md).
 The rollback target for v0.29.2 is `v0.29.1`; it adds no schema change. Take a
 SQLite-safe backup first, and compare ordered raw messages and summary provenance
-through upgrade, rollback and re-upgrade. Rolling back further, v0.29.0 does not read the compaction
-escape record that v0.29.1 and later keep in the existing session metadata.
+through upgrade, rollback and re-upgrade.
 
 For the previous release,
+[v0.29.1](https://github.com/electricsheephq/lcm-x/releases/tag/v0.29.1)
+at `3a4a08ff501347a79669fab51444c471b09b551d` (2026-11-03),
+the rollback target is `v0.29.0`; it adds no schema change. Take a SQLite-safe backup first, and
+compare ordered raw messages and summary provenance through upgrade, rollback and re-upgrade.
+v0.29.0 does not read the compaction escape record that v0.29.1 and later keep in the existing
+session metadata.
+
+For the release before that,
 [v0.29.0](https://github.com/electricsheephq/lcm-x/releases/tag/v0.29.0)
 at `c13dea3783bdbd1aab52d83dff5d009bfade0bd2` (2026-10-28),
 the rollback target is `v0.28.1`. Take a SQLite-safe backup first, and
