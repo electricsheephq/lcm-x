@@ -6,10 +6,12 @@ import copy
 import json
 import logging
 import math
+import os
 import re
 import sqlite3
 import threading
 import time
+from contextlib import closing, nullcontext
 from types import SimpleNamespace
 from datetime import datetime, timezone
 from functools import partial
@@ -102,6 +104,7 @@ from .search_query import (
 from .store import _normalize_observed_at, build_message_fts_spec
 from .vector_store import VectorStore, _interrupt_read_on_deadline
 from .config import effective_embedding_model, LCMConfig, embedding_provider_id, normalize_embedding_provider, profile_bound
+from .config import _recall_extra_entries, _recall_snippet_window_hits
 
 if TYPE_CHECKING:
     from .engine import LCMEngine
@@ -175,16 +178,88 @@ def _session_expand_hint(node_id: int, session_id: str) -> str:
     return f"lcm_expand(node_id={node_id}, session_id={session_id!r})"
 
 
+def _reader_any_session(engine: "LCMEngine") -> bool:
+    """True only on the read-only ``lcm-x mcp`` reader's engine (#1192).
+
+    The reader has no current session and serves one store the local user owns, so
+    its externalized-payload lookups may reach any session of that store. Hermes'
+    engine never sets the attribute; the identity check keeps a mock engine (whose
+    auto-attributes are truthy) on today's session-scoped behaviour.
+    """
+    return getattr(engine, "_reader_any_session", False) is True
+
+
+def _engine_vector_store_cls(engine: "LCMEngine") -> Any:
+    """The KNN backend class: this module's ``VectorStore`` unless the engine binds one (#1192).
+
+    Resolved at call time through the module namespace, so tests that monkeypatch
+    ``tools.VectorStore`` still govern the backend. Only the read-only reader binds
+    ``_vector_store_cls`` (its constructor never writes the store).
+    """
+    bound = getattr(engine, "_vector_store_cls", None)
+    return bound if isinstance(bound, type) else VectorStore
+
+
+def _externalized_expand_hint(ref: str, session_id: str) -> str:
+    return f"lcm_expand(externalized_ref={ref!r}, session_id={session_id!r})"
+
+
+def _session_and_lineage(engine: "LCMEngine", session_id: str) -> set[str]:
+    lineage = getattr(engine, "_rotation_predecessor_session_ids", None)
+    return {session_id, *(lineage(session_id) if callable(lineage) else [])}
+
+
+def _is_inside_named_profile(path: Path, home: Path) -> bool:
+    profiles = home / "profiles"
+    try:
+        profiles.stat()
+    except FileNotFoundError:
+        return False
+    profile_dirs = (profiles, *profiles.iterdir())
+    for parent in (path, *path.parents):
+        if parent.is_relative_to(home):
+            if any(os.path.samefile(parent, profile) for profile in profile_dirs):
+                return True
+    return False
+
+
 def _get_externalized_payload(
     engine: "LCMEngine",
     ref: str,
     *,
     allowed_session_ids: set[str] | None = None,
+    require_profile_containment: bool = False,
 ) -> dict[str, Any] | None:
+    # The reader reads any session's payload only when the caller gives no session filter (an explicit
+    # session_id, or node expansion's sessions, filters as in Hermes). That read crosses sessions, so
+    # it first runs the containment checks Hermes runs for an explicit session.
+    any_session = _reader_any_session(engine) and not require_profile_containment and not allowed_session_ids
+    if require_profile_containment or any_session:
+        if not engine._hermes_home or not ref or Path(ref).name != ref:
+            return None
+        try:
+            home = Path(engine._hermes_home).expanduser().resolve()
+            storage_dir = get_large_output_storage_dir(
+                engine._config, hermes_home=engine._hermes_home, create=False
+            ).resolve()
+            payload_path = (storage_dir / ref).resolve()
+            storage_dir.relative_to(home)
+            payload_path.relative_to(storage_dir)
+            if (
+                _is_inside_named_profile(storage_dir, home)
+                or _is_inside_named_profile(payload_path, home)
+            ):
+                return None
+        except (OSError, RuntimeError, ValueError):
+            return None
     payload = load_externalized_payload(ref, config=engine._config, hermes_home=engine._hermes_home)
     if payload is None:
         return None
     payload_session_id = payload.get("session_id") or ""
+    if require_profile_containment and not payload_session_id:
+        return None
+    if any_session:
+        return payload
     allowed = allowed_session_ids
     if not allowed:
         # #680: a ref written before a compression-boundary rotation stays readable.
@@ -448,6 +523,8 @@ _LCM_RECALL_VALID_INCLUDE = frozenset({"all", "summaries", "verbatim"})
 # budget; hybrid recall reserves the remainder for provider resolution, vector
 # arms, hydration, fusion, and optional reranking.
 _LCM_RECALL_FTS_MAX_BUDGET_FRACTION = 0.25
+# Disclosure for a capped FTS expiry. Removed again when the arm is re-run (#265).
+_LCM_RECALL_FTS_CAPPED_REASON = "full-text arm capped to preserve semantic recall budget"
 # The vector-corpus preflight guards the budget split above, so its own scan
 # must never be able to spend the request budget it exists to protect: a
 # no-match probe over a large fully-orphaned corpus has to exhaust candidates
@@ -1057,6 +1134,27 @@ def lcm_recent(args: Dict[str, Any], **kwargs) -> str:
     return _recent.lcm_recent(args, **kwargs)
 
 
+_SUBAGENT_SOURCE = "subagent"  # #1931: the source a delegated subagent's stored rows carry
+
+
+def _annotate_subagent_lineage(engine: "LCMEngine", hits: list[dict[str, Any]]) -> None:
+    """#1931: a hit from a delegated subagent session (its rows carry source 'subagent') names its parent."""
+    hits = [hit for hit in hits if hit.get("source") == _SUBAGENT_SOURCE]
+    parents_of = getattr(getattr(engine, "_store", None), "session_lineage_parents", None)
+    if not hits or not callable(parents_of):
+        return
+    try:
+        parents = parents_of({str(hit.get("session_id") or "") for hit in hits})
+    except Exception as exc:  # lineage is an annotation; a failed read never drops hits
+        logger.debug("LCM subagent lineage read failed: %s", exc)
+        return
+    for hit in hits:
+        parent = parents.get(str(hit.get("session_id") or ""))
+        if parent:
+            hit["parent_session_id"] = parent
+            hit["lineage"] = f"subagent of {parent}"
+
+
 def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
     """Search raw messages + summaries with optional cross-session scoping.
 
@@ -1194,41 +1292,48 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
     results: list[Dict[str, Any]] = []
     message_search_error: str | None = None
 
-    if (
-        content_scope in {"history", "both"}
-        and search_session_id not in excluded_session_ids
-    ):
+    if content_scope in {"history", "both"}:
         try:
-            msg_hits = engine._store.search(
-                query,
-                session_id=search_session_id,
-                limit=source_limit,
-                sort=sort,
-                source=source,
-                conversation_id=conversation_id,
-                role=role,
-                time_from=time_from,
-                time_to=time_to,
-                exclude_session_ids=excluded_session_ids,
-                allow_operators=bool(args.get("_allow_operators", False)),
-                **({"stemmed": True} if args.get("_stemmed") else {}),
-                **({"_include_like_excerpt": True} if args.get("mode") == "recall" else {}),
-                **({"agent_operators": True} if args.get("_agent_operators") else {}),
+            # #1931: 'current' also covers the current session's delegated subagents (session_lineage).
+            descendant_ids = (
+                getattr(engine._store, "session_lineage_descendants", lambda _sid: ())(current_session_id)
+                if session_scope == "current" and has_current_session else ()
             )
-            if args.get("mode") != "recall":
-                msg_hits = collapse_duplicate_hits(msg_hits)
-            for hit in msg_hits:
-                if hit.get("session_id") in excluded_session_ids:
-                    continue
-                results.append(
-                    _shape_message_hit(
-                        hit,
-                        current_session_id=current_session_id,
-                        has_current_session=has_current_session,
-                    )
+            scoped_session_ids = [
+                scoped_id for scoped_id in (search_session_id, *descendant_ids)
+                if scoped_id not in excluded_session_ids
+            ]
+            for scoped_session_id in scoped_session_ids:
+                msg_hits = engine._store.search(
+                    query,
+                    session_id=scoped_session_id,
+                    limit=source_limit,
+                    sort=sort,
+                    source=source,
+                    conversation_id=conversation_id,
+                    role=role,
+                    time_from=time_from,
+                    time_to=time_to,
+                    exclude_session_ids=excluded_session_ids,
+                    allow_operators=bool(args.get("_allow_operators", False)),
+                    **({"stemmed": True} if args.get("_stemmed") else {}),
+                    **({"_include_like_excerpt": True} if args.get("mode") == "recall" else {}),
+                    **({"agent_operators": True} if args.get("_agent_operators") else {}),
                 )
-                if args.get("mode") == "recall" and "_like_excerpt" in hit:
-                    results[-1]["_like_excerpt"] = hit["_like_excerpt"]
+                if args.get("mode") != "recall":
+                    msg_hits = collapse_duplicate_hits(msg_hits)
+                for hit in msg_hits:
+                    if hit.get("session_id") in excluded_session_ids:
+                        continue
+                    results.append(
+                        _shape_message_hit(
+                            hit,
+                            current_session_id=current_session_id,
+                            has_current_session=has_current_session,
+                        )
+                    )
+                    if args.get("mode") == "recall" and "_like_excerpt" in hit:
+                        results[-1]["_like_excerpt"] = hit["_like_excerpt"]
         except Exception as exc:
             # Grep degrades to whatever the other stages produce, but the
             # failure must reach the PAYLOAD, not just the log: lcm_recall's
@@ -1469,6 +1574,7 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
         result.pop("_sort_rank", None)
         result.pop("_sort_directness", None)
         result.pop("_hybrid_summary_override", None)
+    _annotate_subagent_lineage(engine, results)
 
     response: Dict[str, Any] = {
         "query": query,
@@ -2108,7 +2214,8 @@ def _lcm_grep_semantic(
 
     def _run_knn() -> Any:
         # VectorStore is resolved through this module's namespace so tests that
-        # monkeypatch ``tools.VectorStore`` continue to govern the KNN backend.
+        # monkeypatch ``tools.VectorStore`` continue to govern the KNN backend;
+        # the read-only reader binds its own class on the engine (#1192).
         return run_knn(
             engine,
             query_vector=query_vector,
@@ -2119,7 +2226,7 @@ def _lcm_grep_semantic(
             until=time_to,
             conversation_ids=knn_conversation_ids,
             source=source,
-            vector_store_cls=VectorStore,
+            vector_store_cls=_engine_vector_store_cls(engine),
         )
 
     try:
@@ -3099,6 +3206,105 @@ def _lcm_recall_event_time_rows(
     }, None
 
 
+# Numeric observed_at values _normalize_observed_at accepts as they stand: > 0
+# and before year 10000. SQL aggregates only these; every other stored form
+# (ISO text, out-of-range numbers) comes back for Python normalization.
+_OBSERVED_AT_SQL_SAFE = (
+    "typeof(m.observed_at) IN ('integer', 'real') "
+    "AND m.observed_at > 0 AND m.observed_at < 253402300800"
+)
+
+
+def _lcm_recall_summary_event_time_rows(
+    engine: "LCMEngine", node_ids: list[int], *, deadline: float
+) -> tuple[dict[int, dict[str, str]], str | None]:
+    """Read each summary node's event-time span, inside the deadline.
+
+    Returns ``({node_id: {"event_time_start", "event_time_end"}}, reason)``:
+    the MIN/MAX host ``observed_at`` over ALL the node's source messages,
+    walked through condensed nodes with no cap, in one statement for the whole
+    batch. A span over any stamped source carrying a ``carried_stamp`` relation
+    (the message path's ``time_uncertain: "carried"`` test) also gets
+    ``time_uncertain: "carried"``. Write times (``messages.timestamp``, ``earliest_at``/``latest_at``,
+    ``created_at``) are never used; a node with no stamped source is absent.
+    ``reason`` follows ``_lcm_recall_event_time_rows``: ``"deadline"`` or
+    ``"read_error"``, and then the mapping is empty (atomic), on the same
+    private read-only connection bounded by the remaining budget.
+    """
+    if time.monotonic() >= deadline:
+        return {}, "deadline"
+    expired = [False]
+
+    def interrupt_if_expired() -> int:
+        if time.monotonic() >= deadline:
+            expired[0] = True
+            return 1
+        return 0
+
+    conn: sqlite3.Connection | None = None
+    try:
+        db_path = Path(engine._store.db_path).resolve()
+        conn = sqlite3.connect(
+            f"{db_path.as_uri()}?mode=ro",
+            uri=True,
+            timeout=max(0.001, deadline - time.monotonic()),
+        )
+        conn.execute("PRAGMA query_only=ON")
+        conn.set_progress_handler(interrupt_if_expired, 1000)
+        # Stores predating the optional relation table have no carried markers
+        # (the same fallback as MessageStore.get_carried_stamp_ids).
+        relation = "message_relations" if conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_relations'"
+        ).fetchone() else "(SELECT NULL AS store_id, NULL AS kind)"
+        rows = conn.execute(
+            f"""WITH RECURSIVE walk(root, source_type, source_id) AS (
+                    SELECT n.node_id, n.source_type, CAST(j.value AS INTEGER)
+                    FROM summary_nodes n, json_each(n.source_ids) j
+                    WHERE n.node_id IN ({",".join("?" for _ in node_ids)})
+                    UNION
+                    SELECT walk.root, child.source_type, CAST(j.value AS INTEGER)
+                    FROM walk JOIN summary_nodes child
+                      ON walk.source_type = 'nodes' AND child.node_id = walk.source_id
+                    JOIN json_each(child.source_ids) j
+                )
+                SELECT walk.root,
+                       MIN(CASE WHEN {_OBSERVED_AT_SQL_SAFE} THEN m.observed_at END),
+                       MAX(CASE WHEN {_OBSERVED_AT_SQL_SAFE} THEN m.observed_at END),
+                       group_concat(CASE WHEN typeof(m.observed_at) IN ('text', 'integer', 'real')
+                                         AND NOT ({_OBSERVED_AT_SQL_SAFE})
+                                    THEN json_quote(m.observed_at) END, ','),
+                       MAX(m.store_id IN (SELECT store_id FROM {relation} WHERE kind = 'carried_stamp'))
+                FROM walk JOIN messages m
+                  ON walk.source_type = 'messages' AND m.store_id = walk.source_id
+                WHERE m.observed_at IS NOT NULL
+                GROUP BY walk.root""",
+            [int(node_id) for node_id in node_ids],
+        ).fetchall()
+    except (sqlite3.Error, OSError) as exc:
+        logger.debug("lcm_recall summary event_time read failed: %s", exc)
+        if expired[0] or time.monotonic() >= deadline:
+            return {}, "deadline"
+        return {}, "read_error"
+    finally:
+        if conn is not None:
+            conn.close()
+    if time.monotonic() >= deadline:
+        return {}, "deadline"
+    spans: dict[int, dict[str, str]] = {}
+    for root, low, high, other, carried in rows:
+        values = [low, high, *(json.loads(f"[{other}]") if other else [])]
+        normalized = [v for v in map(_normalize_observed_at, values) if v is not None]
+        if normalized:
+            spans[int(root)] = {
+                key: datetime.fromtimestamp(value, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                for key, value in (("event_time_start", min(normalized)),
+                                   ("event_time_end", max(normalized)))
+            }
+            if carried:
+                spans[int(root)]["time_uncertain"] = "carried"
+    return spans, None
+
+
 def _lcm_recall_answer_ready_content(
     engine: "LCMEngine",
     entries: list[dict[str, Any]],
@@ -3107,6 +3313,7 @@ def _lcm_recall_answer_ready_content(
     expanded_limit: int = _LCM_RECALL_ANSWER_READY_EXPANDED_HIT_LIMIT,
     rows_by_id: dict[int, dict[str, Any]] | None = None,
     fts_arm_index: int | None = None,
+    char_cap: int = _LCM_RECALL_ANSWER_READY_CONTENT_CHARS,
 ) -> dict[tuple, dict[str, Any]]:
     """Hydrate selected exact refs with bounded reads and no retrieval search.
 
@@ -3143,7 +3350,7 @@ def _lcm_recall_answer_ready_content(
                 content,
                 match_start=0,
                 match_end=min(len(content), _LCM_RECALL_SNIPPET_CHARS),
-                char_cap=_LCM_RECALL_ANSWER_READY_CONTENT_CHARS,
+                char_cap=char_cap,
             )
             hydrated[identity] = {
                 **window,
@@ -3159,7 +3366,7 @@ def _lcm_recall_answer_ready_content(
             continue
         content = str(stored.get("content") or "")
         span = hit.get("chunk_span") or {}
-        if not span and len(content) > _LCM_RECALL_ANSWER_READY_CONTENT_CHARS:
+        if not span and len(content) > char_cap:
             # Short rows keep their legacy evidence_span and output bytes.
             # Emoji has no lexical hydration terms; use LIKE's verified span.
             for candidate in [hit, *entry.get("_alternates", [])]:
@@ -3206,7 +3413,7 @@ def _lcm_recall_answer_ready_content(
             content,
             match_start=match_start,
             match_end=match_end,
-            char_cap=_LCM_RECALL_ANSWER_READY_CONTENT_CHARS,
+            char_cap=char_cap,
         )
         hydrated[identity] = {
             **window,
@@ -3216,6 +3423,54 @@ def _lcm_recall_answer_ready_content(
             **_lcm_recall_event_time(stored),
         }
     return hydrated
+
+
+def _lcm_recall_snippet_windows(
+    engine: "LCMEngine", entries: list[dict[str, Any]], *, deadline: float,
+    extra_entries: bool = False, **kwargs,
+) -> tuple[dict[tuple, dict[str, Any]], str | None]:
+    """Optional content read on a private connection, bounded by recall's budget."""
+    if time.monotonic() >= deadline:
+        return {}, "deadline"
+    try:
+        messages = [entry for entry in entries if entry["hit"].get("kind") == "message_excerpt"
+                    and entry["hit"].get("store_id") is not None] if extra_entries else entries
+        db_path = Path(engine._store.db_path).resolve()
+        with closing(sqlite3.connect(
+            f"{db_path.as_uri()}?mode=ro", uri=True,
+            timeout=max(0.001, deadline - time.monotonic()),
+        )) if messages else nullcontext() as conn:
+            if conn is not None:
+                conn.execute("PRAGMA query_only=ON")
+                conn.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
+            ids = [int(entry["hit"]["store_id"]) for entry in messages]
+            columns = "content, role, source" + (", observed_at, observed_at_source" if extra_entries else "")
+            rows = conn.execute(
+                "SELECT store_id, " + columns + " FROM messages WHERE store_id IN ("
+                + ",".join("?" for _ in ids) + ")", ids,
+            ).fetchall() if conn is not None else []
+            rows_by_id = {row[0]: dict(zip(columns.split(", "), row[1:])) for row in rows}
+            # An extra shows only event_time, so a carried (borrowed) stamp is
+            # shown as no time rather than as the row's own.
+            timed = [int(sid) for sid, row in rows_by_id.items() if row.get("observed_at") is not None]
+            carried = (engine._store.get_carried_stamp_ids(timed, connection=conn)
+                       if extra_entries and timed else set())
+            for sid in carried:
+                rows_by_id[sid]["observed_at"] = None
+            content = _lcm_recall_answer_ready_content(engine, messages, rows_by_id=rows_by_id, **kwargs)
+    except Exception as exc:  # noqa: BLE001 - optional read must never fail recall
+        logger.warning("lcm_recall %s read failed: %s",
+                       "extra entries" if extra_entries else "snippet window", type(exc).__name__)
+        return {}, "deadline" if time.monotonic() >= deadline else "read_error"
+    if extra_entries:
+        for entry in entries:
+            hit = entry["hit"]
+            if _hit_identity(hit) not in content:
+                snippet = hit.get("snippet") or ""
+                content[_hit_identity(hit)] = _lcm_recall_content_window(
+                    snippet, match_start=0, match_end=len(snippet), char_cap=300,
+                )
+    return ({}, "deadline") if time.monotonic() >= deadline else (content, None)
 
 
 def _lcm_recall_bounded_reason(
@@ -3553,7 +3808,7 @@ def _lcm_recall_summary_arm(
             until=None,
             conversation_ids=candidate_session_ids,
             source=None,
-            vector_store_cls=VectorStore,
+            vector_store_cls=_engine_vector_store_cls(engine),
             scan_rows=max(1, int(getattr(engine._config, "recall_scan_rows", 25_000))),
             **_lcm_recall_scan_bounds(engine),
         ),
@@ -3627,7 +3882,7 @@ def _lcm_recall_chunk_arm(
             until=None,
             conversation_ids=candidate_session_ids,
             source=None,
-            vector_store_cls=VectorStore,
+            vector_store_cls=_engine_vector_store_cls(engine),
             scan_rows=max(1, int(getattr(engine._config, "recall_scan_rows", 25_000))),
             **_lcm_recall_scan_bounds(engine),
         ),
@@ -4019,6 +4274,124 @@ def default_semantic_cpu_limited(config) -> bool:
             and effective_cpus() <= 2)
 
 
+_LCM_RECALL_ADJACENT_SQL = (
+    "SELECT store_id, session_id, conversation_id, role, source, tool_calls, content, "
+    "timestamp, observed_at FROM messages WHERE session_id = ? AND store_id > ? "
+    "ORDER BY store_id LIMIT 1"
+)
+
+
+def _lcm_recall_next_row(conn, session_id: str, store_id: int) -> dict[str, Any] | None:
+    """The next stored row of ``session_id`` after ``store_id`` (one indexed read)."""
+    found = conn.execute(_LCM_RECALL_ADJACENT_SQL, (session_id, int(store_id))).fetchone()
+    return dict(found) if found is not None else None
+
+
+def _lcm_recall_adjacent_reply(
+    engine, ordered, source_rows, *, limit, deadline, excluded, allowed, read_next=None,
+):
+    """Atomically place up to three same-conversation replies; never write rows.
+
+    A reply is the next stored row of the source's session when it comes from the
+    other conversational role (user/assistant) and is not older than the source.
+    Reads use a private read-only connection bounded by the recall deadline.
+    """
+    placed = list(ordered)
+    pairs = []
+    conn = None
+    try:
+        if time.monotonic() >= deadline:
+            raise TimeoutError
+        for rank, source in enumerate(ordered[:min(3, limit)]):
+            hit = source["hit"]
+            row = source_rows.get(hit.get("store_id"))
+            if (hit.get("kind") == "summary" or hit.get("node_id") is not None
+                    or row is None or row.get("role") not in ("user", "assistant")):
+                continue
+            if rank and not str(row.get("content") or "").strip().endswith("?"):
+                continue
+            session_id = row.get("session_id")
+            if (not session_id or session_id in excluded
+                    or (allowed is not None and session_id not in allowed)):
+                continue
+            if read_next is None:
+                uri = f"{Path(engine._store.db_path).resolve().as_uri()}?mode=ro"
+                conn = sqlite3.connect(uri, uri=True, timeout=max(0.001, deadline - time.monotonic()))
+                conn.row_factory = sqlite3.Row
+                conn.execute("PRAGMA query_only=ON")
+                conn.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
+                read_next = partial(_lcm_recall_next_row, conn)
+            neighbour = read_next(session_id, int(hit["store_id"]))
+            if time.monotonic() >= deadline:
+                raise TimeoutError
+            if neighbour is None:
+                continue
+            content = str(neighbour.get("content") or "")
+            sid = neighbour.get("session_id")
+            source_seen = _normalize_observed_at(row.get("observed_at"))
+            reply_seen = _normalize_observed_at(neighbour.get("observed_at"))
+            if (sid != session_id
+                    or (neighbour.get("conversation_id") or "") != (row.get("conversation_id") or "")
+                    or neighbour.get("role") not in ("user", "assistant")
+                    or neighbour.get("role") == row.get("role")
+                    or neighbour.get("tool_calls") or not content.strip()
+                    or neighbour.get("source") == _SUBAGENT_SOURCE
+                    or (source_seen is not None and reply_seen is not None
+                        and reply_seen < source_seen)):
+                continue
+            store_id = int(neighbour["store_id"])
+            # Locate the source before moving anything: an earlier reply may have
+            # moved it as a copy, so match its store_id among message entries.
+            source_index = next((i for i, item in enumerate(placed)
+                                 if item["hit"].get("kind") != "summary"
+                                 and item["hit"].get("store_id") == hit["store_id"]), None)
+            existing = next((i for i, entry in enumerate(placed)
+                             if entry["hit"].get("kind") != "summary"
+                             and (entry["hit"].get("store_id") == store_id
+                                  or store_id in entry["hit"].get("duplicate_store_ids", []))), None)
+            if source_index is None or existing == source_index:
+                continue
+            if existing is not None and existing < limit:
+                continue
+            if existing is not None:
+                # A pool entry keeps its own scores, ranks and arms; it is only moved.
+                entry = placed.pop(existing)
+                entry = {**entry, "hit": dict(entry["hit"])}
+                if existing < source_index:
+                    source_index -= 1
+            else:
+                reply = {
+                    "kind": "message_excerpt", "store_id": store_id,
+                    "session_id": sid, "role": neighbour.get("role"),
+                    "source": neighbour.get("source") or "",
+                    "timestamp": neighbour.get("timestamp") or 0,
+                    "content_offset": 0, "snippet": content[:_LCM_RECALL_SNIPPET_CHARS],
+                    "from_current_session": sid == engine.current_session_id,
+                }
+                reply["expand_hint"] = _lcm_recall_excerpt_expand_hint(reply)
+                # No arm ranks: the reply was not retrieved by any arm.
+                entry = {"hit": reply, "rrf_score": source["rrf_score"],
+                         "_final_score": source["_final_score"], "ranks": {}}
+            entry["hit"]["adjacent_to"] = hit["store_id"]
+            placed.insert(source_index + 1, entry)
+            pairs.append({"store_id": store_id, "after_store_id": hit["store_id"]})
+        if time.monotonic() >= deadline:
+            raise TimeoutError
+    except TimeoutError:
+        return ordered, [], "deadline"
+    except sqlite3.OperationalError as exc:
+        if time.monotonic() >= deadline:
+            return ordered, [], "deadline"
+        return ordered, [], f"read_failed:{type(exc).__name__}"
+    except Exception as exc:  # noqa: BLE001 - optional read must never fail recall
+        return ordered, [], f"read_failed:{type(exc).__name__}"
+    finally:
+        if conn is not None:
+            conn.close()
+    # Every placed pair; delivery publishes those whose reply the final hits carry.
+    return placed, pairs, None
+
+
 def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
     """Search the agent's entire memory (all conversations, all time) by meaning.
 
@@ -4146,12 +4519,14 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
     degraded_reasons: list[str] = (["cpu_limited"] if cpu_limited else []) + local_fallback_reasons
     embedding_query_metrics: list[dict[str, Any]] = []
     timed_out = False
+    fts_capped_expiry = False
+    fts_rerun = False
     provider: Any = None
 
     served_fts_index = "plain"
     # -- FTS arm (the default-on value: works with embeddings disabled) --
     def _run_fts_arm(fallback: bool = False) -> None:
-        nonlocal timed_out, served_fts_index
+        nonlocal timed_out, served_fts_index, fts_capped_expiry
         fts_deadline = deadline
         fts_sub_budget_applied = False
         configured_provider = provider_override or str(
@@ -4225,9 +4600,8 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
                 and time.monotonic() < deadline
             )
             if capped_expiry:
-                degraded_reasons.append(
-                    "full-text arm capped to preserve semantic recall budget"
-                )
+                fts_capped_expiry = True
+                degraded_reasons.append(_LCM_RECALL_FTS_CAPPED_REASON)
             else:
                 degraded_reasons.append("full-text arm unavailable")
                 timed_out = timed_out or bool(fts_error.get("timeout"))
@@ -4461,15 +4835,37 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
                         coverage["chunk"] = "none"
                         degraded_reasons.append(f"chunk arm failed: {exc}")
 
+    # -- FTS re-run (#265). The sub-budget cap is a bet that the semantic arms
+    # will spend the rest of the request. When the capped FTS arm expired and no
+    # semantic arm then produced a hit (provider unusable, or reference-strict
+    # summaries that yielded only non-evidence leads), FTS is again the only arm
+    # that can return evidence, so it runs ONCE more under the REQUEST deadline.
+    # Never runs when a semantic arm has hits, and never past the deadline. As a
+    # fallback run it gets no sub-budget, and a failure is classified like an
+    # uncapped FTS failure, including a worker-capacity timeout before the deadline.
+    if (
+        fts_capped_expiry
+        and not arm_hits.get("summary")
+        and not arm_hits.get("chunk")
+        and time.monotonic() < deadline
+    ):
+        fts_rerun = True
+        degraded_reasons.remove(_LCM_RECALL_FTS_CAPPED_REASON)
+        _run_fts_arm(fallback=True)
+
     ordered, arm_order, arm_weights = fuse_candidates(
         arm_hits, getattr(engine._config, "recall_arm_weights", None)
     )
-    ordered = collapse_duplicate_candidates(
-        ordered, duplicate_identity_rows(engine, ordered, deadline=deadline)
-    )
+    identity_rows = duplicate_identity_rows(engine, ordered, deadline=deadline)
+    ordered = collapse_duplicate_candidates(ordered, identity_rows)
     fts_arm_index = arm_order.index("fts") if "fts" in arm_order else None
     now = time.time()
     scope_session_ids = set(_recent._recent_conversation_scope_session_ids(engine))
+    try:  # #1931: the current session's delegated subagents share its scope boost (only child hits need it)
+        if any(entry.get("hit", {}).get("source") == _SUBAGENT_SOURCE for entry in ordered):
+            scope_session_ids.update(engine._store.session_lineage_descendants(str(engine.current_session_id or "")))
+    except Exception as exc:
+        logger.debug("LCM subagent scope read failed: %s", exc)
     ordered = apply_prior(ordered, scope_session_ids, now, scope_bias)
 
     # -- Optional rerank stage (default OFF): a pure rank-REORDER within the top
@@ -4483,6 +4879,15 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
     #    Proactive recall passes ``fts_anchor=False`` (an internal keyword, not
     #    a tool argument): it filters hits by a score floor after the call, so
     #    an FTS-only anchor below that floor would displace an eligible hit. --
+    # -- Optional adjacent replies (default OFF), before the FTS anchor so the
+    #    #950 anchor guarantee still holds over the final window. --
+    adjacent_pairs, adjacent_unavailable = [], None
+    if (kwargs.get("delivery_unit", getattr(engine._config, "recall_delivery_unit", "hits")) != "session"
+            and kwargs.get("adjacent_reply", getattr(engine._config, "recall_adjacent_reply", False))):
+        ordered, adjacent_pairs, adjacent_unavailable = _lcm_recall_adjacent_reply(
+            engine, ordered, identity_rows, limit=limit, deadline=deadline,
+            excluded=excluded_session_ids, allowed=candidate_session_ids,
+        )
     fts_anchor_info: dict[str, Any] | None = None
     if bool(kwargs.get("fts_anchor", True)) and bool(
         getattr(engine._config, "recall_fts_anchor", True)
@@ -4491,6 +4896,13 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
             ordered, arm_hits, arm_order, limit, arm_weights=arm_weights
         )
 
+    _annotate_subagent_lineage(engine, [entry["hit"] for entry in ordered if isinstance(entry.get("hit"), dict)])
+    # Only the model's own call follows config; internal callers pin it off.
+    read_summary_event_time = (
+        partial(_lcm_recall_summary_event_time_rows, engine)
+        if kwargs.get("summary_event_time", getattr(engine._config, "recall_summary_event_time", False))
+        else None
+    )
     session_delivery = None
     if kwargs.get("delivery_unit", getattr(engine._config, "recall_delivery_unit", "hits")) == "session":
         from .recall_session import deliver_session
@@ -4500,6 +4912,7 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
             event_time_fields=_lcm_recall_event_time,
             occurrence=include_occurrence_time,
             summary_leads=summary_leads,
+            **({"summary_event_time": read_summary_event_time} if read_summary_event_time else {}),
         )
     return recall_delivery.deliver_recall(
         ordered,
@@ -4526,6 +4939,7 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
         degraded_reasons=degraded_reasons,
         timed_out=timed_out,
         fts_anchor_info=fts_anchor_info,
+        fts_rerun=fts_rerun,
         summary_leads=summary_leads,
         limit_cap=_LCM_RECALL_LIMIT_CAP,
         snippet_chars=_LCM_RECALL_SNIPPET_CHARS,
@@ -4535,6 +4949,8 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
         content_chars=_LCM_RECALL_ANSWER_READY_CONTENT_CHARS,
         strict_selector_factory=partial(_LcmRecallStrictSelector, engine=engine),
         hydrate=partial(_lcm_recall_answer_ready_content, engine),
+        read_snippet_windows=partial(_lcm_recall_snippet_windows, engine),
+        read_extra_entries=partial(_lcm_recall_snippet_windows, engine, extra_entries=True),
         read_event_time=partial(_lcm_recall_event_time_rows, engine),
         event_time_fields=_lcm_recall_event_time,
         read_occurrence_source=lambda store_id: (
@@ -4543,6 +4959,16 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
         ),
         rerank_enabled=lambda: bool(getattr(engine._config, "rerank_enabled", False)),
         session_delivery=session_delivery,
+        adjacent_reply=adjacent_pairs,
+        adjacent_reply_unavailable=adjacent_unavailable,
+        extra_entries=_recall_extra_entries(
+            kwargs.get("extra_entries", getattr(engine._config, "recall_extra_entries", 0)),
+        ),
+        snippet_window_hits=_recall_snippet_window_hits(
+            kwargs.get("snippet_window_hits", getattr(engine._config, "recall_snippet_window_hits", 0)),
+        ),
+        delivery_order=kwargs.get("delivery_order", getattr(engine._config, "recall_delivery_order", "score")),
+        **({"read_summary_event_time": read_summary_event_time} if read_summary_event_time else {}),
     )
 
 
@@ -4555,11 +4981,12 @@ def lcm_expand(args: Dict[str, Any], **kwargs) -> str:
     """Expand a summary node, externalized payload, or raw message to its content.
 
     Mode selection (exactly one is required):
-    - ``externalized_ref``: open a stored externalized payload by ref filename (current session only)
+    - ``externalized_ref``: open a stored payload; current session by default, pass ``session_id`` for another
     - ``store_id``: fetch a single raw message by store_id; works across sessions
     - ``node_id``: expand a summary node to its source content (explicit ``session_id`` required cross-session)
 
-    Omitting ``session_id`` preserves current-session node lookup. Carried-over
+    ``session_id`` is valid with ``node_id`` or ``externalized_ref`` only.
+    Omitting it preserves current-session lookup. Carried-over
     current-session nodes may reference raw source rows from the previous session.
     """
     return _expand_tools.lcm_expand(args, **kwargs)
@@ -4795,7 +5222,7 @@ def _embedding_provider_health_check(engine: "LCMEngine") -> dict[str, Any]:
             consent_option = ""
             consent_note = ""
             if "chunk" in stale_tasks:
-                from .command import _is_local_embedding_provider
+                from .embedding_provider import _is_local_embedding_provider
 
                 corpus_option = " --corpus both" if "summary" in stale_tasks else " --corpus chunks"
                 if not _is_local_embedding_provider(provider_id):
@@ -5084,6 +5511,8 @@ lcm_inspect = _inspect_tools.lcm_inspect
 
 def lcm_status(args: Dict[str, Any], **kwargs) -> str:
     """Quick health overview of the LCM engine for the current session."""
+    from .tokens import token_counter_status
+
     engine = _require_engine(kwargs)
     if engine is None:
         return json.dumps({"error": "LCM engine not initialized"})
@@ -5105,6 +5534,7 @@ def lcm_status(args: Dict[str, Any], **kwargs) -> str:
         return json.dumps({
             "error": "No active session",
             "runtime_identity": engine.get_runtime_identity(),
+            "token_counter": token_counter_status(),
             "identity_migration": getattr(engine, "identity_migration", None),
             **inactive_payload,
         })
@@ -5264,6 +5694,7 @@ def lcm_status(args: Dict[str, Any], **kwargs) -> str:
         "preset_suggestion": preset_status_payload(engine),
         "ingest_reconciliation": ingest_reconciliation,
         "runtime_identity": runtime_identity,
+        "token_counter": token_counter_status(),
         "identity_migration": full_status.get("identity_migration"),
         "lifecycle": lifecycle,
         "lifecycle_fragmentation": lifecycle_fragmentation,
@@ -5274,6 +5705,8 @@ def lcm_status(args: Dict[str, Any], **kwargs) -> str:
 
 def lcm_doctor(args: Dict[str, Any], **kwargs) -> str:
     """Run diagnostics on the LCM database and configuration."""
+    from .tokens import token_counter_status
+
     engine = _require_engine(kwargs)
     if engine is None:
         return json.dumps({"error": "LCM engine not initialized"})
@@ -5392,12 +5825,16 @@ def lcm_doctor(args: Dict[str, Any], **kwargs) -> str:
 
     # 1b. FTS5 integrity, separated from generic SQLite integrity so malformed
     # inverted indexes point at the exact table and repair path.
-    for check_name, conn, spec in (
-        ("messages_fts_integrity", engine._store.connection, build_message_fts_spec()),
-        ("nodes_fts_integrity", engine._dag.connection, build_nodes_fts_spec()),
+    # #2345: each check's SAVEPOINT/ROLLBACK TO runs under the lock its connection's
+    # writers take, so it cannot interleave with an ingest or a summary-tree write.
+    for check_name, conn, lock, spec in (
+        ("messages_fts_integrity", engine._store.connection, engine._store._write_lock, build_message_fts_spec()),
+        ("nodes_fts_integrity", engine._dag.connection, getattr(engine._dag, "_db_lock", nullcontext()),
+         build_nodes_fts_spec()),
     ):
         try:
-            fts_integrity = check_external_content_fts_integrity(conn, spec)
+            with lock:
+                fts_integrity = check_external_content_fts_integrity(conn, spec)
             status = fts_integrity["status"]
             checks.append({
                 "check": check_name,
@@ -5617,6 +6054,8 @@ def lcm_doctor(args: Dict[str, Any], **kwargs) -> str:
             "status": "fail",
             "detail": str(e),
         })
+
+    checks.append({"check": "token_counter", "status": "pass", "detail": token_counter_status()})
 
     # 5. Source-lineage hygiene
     try:

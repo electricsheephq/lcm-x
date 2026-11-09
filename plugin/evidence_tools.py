@@ -98,6 +98,11 @@ def lcm_query_state(args: Dict[str, Any], **kwargs: Any) -> str:
     if "scope_key" in args:
         scope_key = str(args.get("scope_key") or "").strip()
 
+    for key, value in (("subject_key", subject_key), ("predicate_key", predicate_key),
+                       ("scope_key", scope_key)):
+        if value is not None and len(value) > 1_000:
+            return json.dumps({"error": f"{key} must be at most 1000 characters"})
+
     raw_kinds = args.get("kinds")
     kinds: list[str] | None = None
     if raw_kinds is not None and raw_kinds != []:  # [] means "not provided" (#1194)
@@ -484,7 +489,7 @@ def lcm_evidence_pack(args: Dict[str, Any], **kwargs: Any) -> str:
     return build_evidence_pack(
         args,
         engine=engine,
-        retrieve=lambda recall_args: _tools.lcm_recall(recall_args, engine=engine, delivery_unit="hits"),
+        retrieve=lambda recall_args: _tools.lcm_recall(recall_args, engine=engine, delivery_unit="hits", delivery_order="score", adjacent_reply=False, summary_event_time=False, extra_entries=0),
     )
 
 
@@ -506,7 +511,7 @@ def lcm_compile_evidence(args: Dict[str, Any], **kwargs: Any) -> str:
                 engine=engine,
                 baseline_refs=args.get("baseline_refs") or (),
                 question_as_of=args.get("question_date"),
-                retrieve=lambda recall_args: _tools.lcm_recall(recall_args, engine=engine, delivery_unit="hits"),
+                retrieve=lambda recall_args: _tools.lcm_recall(recall_args, engine=engine, delivery_unit="hits", delivery_order="score", adjacent_reply=False, summary_event_time=False, extra_entries=0),
                 enabled=True,
                 budgets=args.get("budgets"),
             )
@@ -519,17 +524,23 @@ def lcm_compile_evidence(args: Dict[str, Any], **kwargs: Any) -> str:
         return json.dumps(result, ensure_ascii=False)
 
     proposal = args.get("proposal")
-    result = compile_evidence(
-        args.get("question"),
-        engine=engine,
-        baseline_refs=args.get("baseline_refs") or (),
-        question_date=args.get("question_date"),
-        selector=lambda _request: proposal,
-        retrieve=lambda recall_args: _tools.lcm_recall(recall_args, engine=engine, delivery_unit="hits"),
-        enabled=True,
-        persist_view=args.get("persist_view") is True,
-        budgets=args.get("budgets"),
-    )
+    try:
+        result = compile_evidence(
+            args.get("question"),
+            engine=engine,
+            baseline_refs=args.get("baseline_refs") or (),
+            question_date=args.get("question_date"),
+            selector=lambda _request: proposal,
+            retrieve=lambda recall_args: _tools.lcm_recall(recall_args, engine=engine, delivery_unit="hits", delivery_order="score", adjacent_reply=False, summary_event_time=False, extra_entries=0),
+            enabled=True,
+            persist_view=args.get("persist_view") is True,
+            budgets=args.get("budgets"),
+        )
+    except sqlite3.Error:
+        result = {"status": "fallback", "state": "unknown",
+                  "reason": "store_unavailable", "reason_code": "store_unavailable",
+                  "next_path": "evidence_only", "context": None,
+                  "computation": None, "evidence": []}
     return json.dumps(result, ensure_ascii=False)
 
 
@@ -567,7 +578,7 @@ def lcm_retrieve(args: Dict[str, Any], **kwargs: Any) -> str:
     action = str(args.get("action") or "").strip().casefold()
     def dispatch(name: str, payload: dict[str, Any]) -> str:
         return engine.handle_tool_call(name, payload,
-            **({"delivery_unit": "hits"} if name == "lcm_recall" else {}))
+            **({"delivery_unit": "hits", "delivery_order": "score", "adjacent_reply": False, "summary_event_time": False} if name == "lcm_recall" else {}))
     try:
         if action == "start":
             result = controller.start(

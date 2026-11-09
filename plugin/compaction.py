@@ -740,8 +740,12 @@ class CompactionMixin:
             return messages
         self._maybe_reclassify_late_auxiliary_before_compaction_write()
         with self._bypass_compression_binding() as bypassed:
+            sid = self._bypass_lcm_session_id() if bypassed else self._session_id
+            if self._emission_handle is not None and self._emission_handle.session_id == sid:
+                self._emission_handle = None
             if bypassed:
-                return self._compress_bypassed(messages, current_tokens, focus_topic, force)
+                # #1931: a delegated child's rows are stored before the host's compaction rewrites its view.
+                return self._compress_delegate_child_bypassed(messages, current_tokens, focus_topic, force)
         self._last_compress_leaves = None
         self._last_hidden_backlog = None
         self._compress_escaped = []
@@ -753,6 +757,11 @@ class CompactionMixin:
         if thread_context is not None:
             thread_context.foreground_budget = budget
         returned = None
+        exit_capture = None
+        # #2344: the pass maps id() of its own working copies to store ids; those copies die with the pass, so the
+        # map must too, or a later ingest can match a reused address and store a carried ignored placeholder.
+        store_id_scope = self._compress_run.preserve_store_ids()
+        store_id_scope.__enter__()
         try:
             budget.pre_leaf = PhaseSqlTrace()  # #1127: timed until the first leaf call, or the stop before one
             budget.pre_leaf.install([(self._store, "_conn"), (self._store, "_write_lock"), (self._dag, "_conn"),
@@ -830,9 +839,9 @@ class CompactionMixin:
                 self._stop_pass_for_shutdown()
                 returned = messages
                 return messages
-            self._record_compress_commit_proof(messages, result)
+            exit_capture = self._record_compress_commit_proof(messages, result)
             if self._compress_commit_proof is None:  # #1000: no proof recorded the fit's carrier
-                self._bind_survival_fit_emission(messages, result)
+                exit_capture = self._bind_survival_fit_emission(messages, result) or exit_capture
             self._host_uid_record_engine(result)
             self._host_uid_log_compaction_summary()
             logger.debug("LCM compaction emission descriptor count=%d",
@@ -871,7 +880,7 @@ class CompactionMixin:
                     logger.debug("LCM survival fit after a compress exception failed", exc_info=True)
                     fitted = messages
                 if fitted is not messages:
-                    self._bind_survival_fit_emission(messages, fitted)  # #1000: no proof on this path
+                    exit_capture = self._bind_survival_fit_emission(messages, fitted)  # #1000: no proof on this path
                     self._host_uid_record_engine(fitted)
                     logger.warning("LCM compress failed (%s); returning the survival-fitted list",
                                    type(exc).__name__, exc_info=True)
@@ -879,16 +888,25 @@ class CompactionMixin:
                     return fitted
             raise
         finally:
-            self._end_pre_leaf_phase(budget, "stopped")
-            self._last_compress_leaves = (self._hold_conversation_key(), budget.leaves)
-            self._compress_forced_overflow = False
-            self._foreground_budget = None
-            if thread_context is not None:
-                thread_context.foreground_budget = None
-            self._finish_foreground_budget(budget, returned, current_tokens if (current_tokens or 0) > 0 else messages)
+            try:
+                self._end_pre_leaf_phase(budget, "stopped")
+                self._last_compress_leaves = (self._hold_conversation_key(), budget.leaves)
+                self._compress_forced_overflow = False
+                self._foreground_budget = None
+                if thread_context is not None:
+                    thread_context.foreground_budget = None
+                try:
+                    if returned is not None and returned is not messages:
+                        self._compress_exit_write(returned, exit_capture)
+                finally:
+                    self._finish_foreground_budget(budget, returned, current_tokens if (current_tokens or 0) > 0 else messages)
+            finally:
+                store_id_scope.__exit__(None, None, None)  # #2344: last, even if the cleanup above raises
 
     def _compress_bypassed(self, messages, current_tokens, focus_topic, force):
         """Bypassed calls own a local budget; only child diagnostics are thread-local."""
+        if self._compaction_is_closing():
+            return messages
         context = self._thread_context
         state = self._bypass_compress_state()
         budget = context.foreground_budget = self._new_foreground_budget()
@@ -912,6 +930,11 @@ class CompactionMixin:
                 result = self._compress_lcm_bypassed_session(
                     messages, current_tokens=current_tokens, focus_topic=focus_topic, force=force,
                 )
+                if self._compaction_is_closing():
+                    state["_last_compression_status"] = "noop"
+                    state["_last_compression_noop_reason"] = "engine shutting down"
+                    returned = messages
+                    return messages
                 if (isinstance(result, list) and result is not messages and len(result) == len(messages)
                         and all(self._public_compression_row(left) == self._public_compression_row(right)
                                 for left, right in zip(result, messages))):
@@ -920,7 +943,18 @@ class CompactionMixin:
             logger.debug("LCM compaction emission descriptor count=%d", 0)
             returned = result
             return result
-        except BaseException:
+        except BaseException as exc:
+            if isinstance(exc, Exception) and self._compaction_is_closing():
+                try:  # #582: the gate keeps the connection open, so no partial write outlives the pass
+                    self._store.rollback_pending_write()
+                except Exception:
+                    logger.debug("LCM rollback after a closing bypassed compress exception failed", exc_info=True)
+                state["_last_compression_status"] = "noop"
+                state["_last_compression_noop_reason"] = "engine shutting down"
+                logger.warning("LCM bypassed compress failed while shutting down (%s); returning the host messages",
+                               type(exc).__name__, exc_info=True)
+                returned = messages
+                return messages
             state["_last_compression_status"] = "error"
             state["_last_compression_noop_reason"] = ""
             raise
@@ -1037,7 +1071,7 @@ class CompactionMixin:
         return {key: value for key, value in message.items()
                 if key != "timestamp" and not str(key).startswith("_")}
 
-    def _record_compress_commit_proof(self, messages, result) -> None:
+    def _record_compress_commit_proof(self, messages, result):
         """Remember the exact host input of this compress() call (process-local).
 
         Hermes commits a compaction by calling ``on_session_end(sid, <this input>)``
@@ -1055,7 +1089,7 @@ class CompactionMixin:
                 else "reconcile_pending" if self._ingest_cursor_needs_reconcile
                 else "cursor_mismatch" if self._ingest_cursor != len(result) else "ready")
             if self._compress_commit_reason != "ready":
-                return
+                return result, [], self._compress_commit_reason
             emission_binding = self._emission_binding()
             emissions = _finalize_emission_descriptors(
                 result, getattr(self, "_pending_emission_candidates", ()), emission_binding
@@ -1065,6 +1099,7 @@ class CompactionMixin:
                 taken = {item["output_occurrence"]["index"] for item in emissions}
                 emissions.extend(item for item in _finalize_emission_descriptors(result, [fit], emission_binding)
                                  if item["output_occurrence"]["index"] not in taken)
+            fresh = list(emissions)
             self._carry_prior_emissions(messages, result, emissions, emission_binding)
             # The output's rows map through THIS proof's emissions (A3), never a DAG-shaped strip (F1).
             occurrences, _v4 = self._replay_occurrences(result, {"version": 4, **emission_binding, "emissions": emissions})
@@ -1095,7 +1130,7 @@ class CompactionMixin:
                 self._compress_commit_reason = "identity_noop"
                 # No-progress compress: Hermes has nothing to commit, and an
                 # end call with this list must stay a real session end.
-                return
+                return result, [], self._compress_commit_reason
             _projection, output_identities = self._occurrence_replay_identities(
                 result, {**proof, **emission_binding}
             )
@@ -1161,7 +1196,7 @@ class CompactionMixin:
             self._compress_commit_proof = proof
             self._prepare_compress_commit_proof(proof, result)
             if any(d.get("kind") == "recovery" for d in getattr(self, "_pending_emission_candidates", ())):
-                self._identity_anchor_record_recovery(result, emissions)
+                self._identity_anchor_record_recovery(result, emissions, messages)
             if proof["published"] or proof["native"] or proof["recovery"] or proof["filtered"]:
                 self._persist_compress_commit_proof(proof)
             elif proof["stub_first"] or proof.get("cleanup_rewrite"):
@@ -1169,10 +1204,12 @@ class CompactionMixin:
                 # its commit signal (the compression boundary), with the store tail of this compress().
                 proof["stub_first_last_store_id"] = self._commit_proof_last_store_id()
                 proof["stub_first_compress_call"] = self._compress_calls
+            return result, fresh, None
         except Exception:
             self._compress_commit_proof = None
             self._compress_commit_reason = "construction_error"
             logger.warning("LCM occurrence-proof construction failed; proof unavailable", exc_info=True)
+            return result, [], self._compress_commit_reason
 
     def _carry_prior_emissions(self, messages, result, emissions, emission_binding) -> None:
         """Extend ``emissions`` with the prior proof's descriptors still emitted once in ``result``; sorted."""
@@ -1213,7 +1250,7 @@ class CompactionMixin:
                 del emissions[fresh_count:]
         emissions.sort(key=lambda item: item["output_occurrence"]["index"])
 
-    def _bind_survival_fit_emission(self, messages, result) -> None:
+    def _bind_survival_fit_emission(self, messages, result):
         """#1000: a fitted list no commit proof records (the exception path, or a cursor that does not index
         it) still binds the fit's re-formed carrier in memory, with the prior descriptors it still emits.
         Process-local, as the proof's own descriptors; nothing is persisted."""
@@ -1226,12 +1263,14 @@ class CompactionMixin:
             emissions = _finalize_emission_descriptors(result, [candidate], emission_binding)
             if not emissions:
                 return
+            fresh = list(emissions)
             self._carry_prior_emissions(messages, result, emissions, emission_binding)
             self._last_emission_descriptors = {
                 "version": _COMPACTION_COMMIT_PROOF_VERSION,
                 **emission_binding,
                 "emissions": emissions,
             }
+            return result, fresh, None
         except Exception:  # the carrier stays unbound: a replay of it is stored again, never lost
             logger.debug("LCM survival-fit carrier binding failed", exc_info=True)
 
@@ -1306,63 +1345,61 @@ class CompactionMixin:
         end goes to the store tail). When the old proof no longer proves the host list (its after-walk fails), a
         restart would bind cold at cursor 0 and store the session again. A list it still proves (a #535 merge
         behind the last output row, a carrier off its index) keeps it. The rows are stored first (I1): a failure
-        here keeps the old proof, which can duplicate but loses nothing. Built as compress() would build it for this
-        list returned unchanged; nothing process-local changes.
+        here keeps the old proof, which can duplicate but loses nothing; it is raised, so the caller's savepoint
+        rolls back a half-written proof and snapshot. Built as compress() would build it for this list returned
+        unchanged; nothing process-local changes.
         """
-        try:
-            previous = self._durable_commit_proof_payload()
-            if previous is None:
-                return
-            if self._cursor_from_durable_commit_proof(messages) == len(messages):
-                return
-            emission_binding = self._emission_binding()
-            emissions: list = []
-            self._carry_prior_emissions(messages, messages, emissions, emission_binding)
-            occurrences, _v4 = self._replay_occurrences(messages, {"version": 4, **emission_binding, "emissions": emissions})
-            store_ids = self._get_store_id_map_for_messages(messages, occurrences)
-            carried_rows = self._store.get_batch(sorted({store_ids[id(m)] for m in messages if id(m) in store_ids}))
-            output = [self._proof_replay_identity(m, strip_carrier=False) for m in messages]
-            for item in emissions:
-                item["output_multiplicity"] = output.count(output[item["output_occurrence"]["index"]])
-            proof = {
-                "version": _COMPACTION_COMMIT_PROOF_VERSION,
-                **emission_binding,
-                "session_id": self._session_id,
-                "conversation_id": self._conversation_id,
-                "input": output,
-                "output": output,
-                "end_consumed": False,
-                "carry_ranges": self._coalesce_compression_carry_ranges(
-                    (str(row["session_id"]), store_id - 1, store_id)
-                    for store_id, row in sorted(carried_rows.items())
-                    if row.get("session_id")
-                ),
-                "emissions": emissions,
-                "native": False,
-            }
-            _projection, output_identities = self._occurrence_replay_identities(messages, {**proof, **emission_binding})
-            proof["output_effective"] = [
-                _proof_user_identity(identity) for identity in output_identities if identity is not None
-            ]
-            if any(_has_lossy_redacted_identity(identity) for identity in proof["output_effective"]):
-                return  # the reader proves nothing through such a row: the old proof stays
-            unstored = self._rekey_unstored_rows(messages, occurrences, output_identities, store_ids)
-            if unstored:
-                logger.info("LCM durable commit proof not re-keyed: %d host rows have no stored occurrence; the "
-                            "previous proof stays: session=%s", unstored, self._session_id)
-                return
-            self._keep_recovered_and_inherited_carry(proof, messages, store_ids, carried_rows, previous)
-            proof["output_sha256_v3"] = [_commit_proof_identity_digest(self._proof_replay_identity(m)) for m in messages]
-            proof["effective_sha256_v3"] = [
-                digest for m, digest in zip(messages, proof["output_sha256_v3"])
-                if not self._is_replayed_context_scaffold_message(m)
-            ]
-            self._prepare_compress_commit_proof(proof, messages)
-            self._write_compress_commit_proof_payload(proof, self._compress_commit_proof_payload(proof))
-            logger.info("LCM durable commit proof re-keyed after an out-of-order store: session=%s rows=%d",
-                        self._session_id, len(messages))
-        except Exception:
-            logger.warning("LCM durable commit proof re-key failed; the previous proof stays", exc_info=True)
+        previous = self._durable_commit_proof_payload()
+        if previous is None:
+            return
+        if self._cursor_from_durable_commit_proof(messages) == len(messages):
+            return
+        emission_binding = self._emission_binding()
+        emissions: list = []
+        self._carry_prior_emissions(messages, messages, emissions, emission_binding)
+        occurrences, _v4 = self._replay_occurrences(messages, {"version": 4, **emission_binding, "emissions": emissions})
+        store_ids = self._get_store_id_map_for_messages(messages, occurrences)
+        carried_rows = self._store.get_batch(sorted({store_ids[id(m)] for m in messages if id(m) in store_ids}))
+        output = [self._proof_replay_identity(m, strip_carrier=False) for m in messages]
+        for item in emissions:
+            item["output_multiplicity"] = output.count(output[item["output_occurrence"]["index"]])
+        proof = {
+            "version": _COMPACTION_COMMIT_PROOF_VERSION,
+            **emission_binding,
+            "session_id": self._session_id,
+            "conversation_id": self._conversation_id,
+            "input": output,
+            "output": output,
+            "end_consumed": False,
+            "carry_ranges": self._coalesce_compression_carry_ranges(
+                (str(row["session_id"]), store_id - 1, store_id)
+                for store_id, row in sorted(carried_rows.items())
+                if row.get("session_id")
+            ),
+            "emissions": emissions,
+            "native": False,
+        }
+        _projection, output_identities = self._occurrence_replay_identities(messages, {**proof, **emission_binding})
+        proof["output_effective"] = [
+            _proof_user_identity(identity) for identity in output_identities if identity is not None
+        ]
+        if any(_has_lossy_redacted_identity(identity) for identity in proof["output_effective"]):
+            return  # the reader proves nothing through such a row: the old proof stays
+        unstored = self._rekey_unstored_rows(messages, occurrences, output_identities, store_ids)
+        if unstored:
+            logger.info("LCM durable commit proof not re-keyed: %d host rows have no stored occurrence; the "
+                        "previous proof stays: session=%s", unstored, self._session_id)
+            return
+        self._keep_recovered_and_inherited_carry(proof, messages, store_ids, carried_rows, previous)
+        proof["output_sha256_v3"] = [_commit_proof_identity_digest(self._proof_replay_identity(m)) for m in messages]
+        proof["effective_sha256_v3"] = [
+            digest for m, digest in zip(messages, proof["output_sha256_v3"])
+            if not self._is_replayed_context_scaffold_message(m)
+        ]
+        self._prepare_compress_commit_proof(proof, messages)
+        self._write_compress_commit_proof_payload(proof, self._compress_commit_proof_payload(proof))
+        logger.info("LCM durable commit proof re-keyed after an out-of-order store: session=%s rows=%d",
+                    self._session_id, len(messages))
 
     def _keep_recovered_and_inherited_carry(self, proof, messages, store_ids, carried_rows, previous) -> None:
         """#1286: extend ``proof["carry_ranges"]`` (built from the in-order map's ``carried_rows``) with the rows the
@@ -2808,9 +2845,7 @@ class CompactionMixin:
             else:
                 state.condensation_passes = self._maybe_condense(
                     focus_topic=focus_topic,
-                    leaf_compacted_this_turn=True,
                     force_overflow=state.force_overflow,
-                    critical_budget_pressure=state.critical_budget_pressure,
                 )
         except Exception as exc:
             if not _is_sqlite_locked_error(exc):
@@ -3189,34 +3224,6 @@ class CompactionMixin:
             state.prep_freed += count_messages_tokens(leaf.source_lookup_chunk) - count_tokens(leaf.summary_text)
         state.level3_leaves += leaf.level == 3
         state.estimated_active_tokens = max(0, state.estimated_active_tokens - leaf.source_tokens + leaf.summary_tokens)
-        if (
-            getattr(self._config, "large_output_transcript_gc_enabled", False)
-            and leaf.source_store_ids
-        ):
-            committed_context = self._assemble_committed_compaction_context(
-                state.working_messages,
-                state.anchor_source_messages,
-                state.recovery_assembly_cap,
-            )
-            try:
-                self._maybe_gc_compacted_tool_results(
-                    leaf.compacted_chunk,
-                    leaf.source_store_ids,
-                )
-            except Exception as exc:
-                if not _is_sqlite_locked_error(exc):
-                    raise
-                return "return", self._fail_open_after_publication_failure(
-                    committed_context,
-                    exc,
-                    compress_started=state._compress_started,
-                    threshold_full_sweep_active=state.threshold_full_sweep_active,
-                    recovery_assembly_cap=state.recovery_assembly_cap,
-                    leaf_passes=state.leaf_passes,
-                    condensation_passes=state.pre_leaf_condensation_passes,
-                    context_is_assembled=True,
-                )
-
         if leaf.prepared is not None:
             if state.estimated_active_tokens <= state.prep_low_water:  # design §4.4, D-10: the leaf path stops at L
                 state.sweep_stop_reason = "prepared_leaves_promoted"

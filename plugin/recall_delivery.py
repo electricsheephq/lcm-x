@@ -10,12 +10,17 @@ from __future__ import annotations
 from collections.abc import Callable
 from datetime import datetime, timezone
 import json
+import logging
 from typing import Any
 
 from .reasoning import resolve_occurrence_time
 from .retrieval_core import _hit_identity
+from .store import _normalize_observed_at
 
-_EVENT_TIME_KEYS = ("event_time", "event_time_source", "time_uncertain")
+# Optional time fields the response cap strips before it drops a hit. The
+# summary span keys appear only with ``read_summary_event_time`` (opt-in).
+_EVENT_TIME_KEYS = ("event_time", "event_time_source", "time_uncertain",
+                    "event_time_start", "event_time_end")
 
 
 def deliver_recall(
@@ -44,6 +49,7 @@ def deliver_recall(
     degraded_reasons: list[str],
     timed_out: bool,
     fts_anchor_info: dict[str, Any] | None,
+    fts_rerun: bool = False,
     summary_leads: list[dict[str, Any]],
     limit_cap: int,
     snippet_chars: int,
@@ -58,6 +64,14 @@ def deliver_recall(
     read_occurrence_source: Callable[[int], tuple[dict, dict | None]],
     rerank_enabled: Callable[[], bool],
     session_delivery: Callable[..., str] | None = None,
+    delivery_order: str = "score",
+    read_summary_event_time: Callable[..., tuple[dict[int, dict[str, str]], str | None]] | None = None,
+    adjacent_reply: list[dict[str, int]] | None = None,
+    adjacent_reply_unavailable: str | None = None,
+    snippet_window_hits: int = 0,
+    read_snippet_windows: Callable[..., tuple[dict, str | None]] | None = None,
+    extra_entries: int = 0,
+    read_extra_entries: Callable[..., tuple[dict, str | None]] | None = None,
 ) -> str:
     """Deliver ranked entries without changing retrieval or host-read policy."""
     if session_delivery is not None:
@@ -66,6 +80,8 @@ def deliver_recall(
         options = dict(locals())
         options.pop("ordered")
         options.pop("session_delivery")
+        options["delivery_order"] = "score"
+        options["read_summary_event_time"] = None
         response = json.loads(_deliver_hits([], **options))
         response["provenance"].pop("answer_ready", None)
         return session_delivery(ordered, response)
@@ -159,6 +175,23 @@ def deliver_recall(
         selected_entries = ordered
         diversity_dropped = 0
         answer_ready_content = {}
+    snippet_window_content = {}
+    snippet_window_skipped = None
+    if detail == "snippets" and snippet_window_hits > 0:
+        window_entries = [
+            entry for entry in selected_entries[:limit]
+            if entry["hit"].get("kind") == "message_excerpt"
+            and entry["hit"].get("store_id") is not None
+            and entry["hit"].get("adjacent_to") is None
+        ][:snippet_window_hits]
+        if window_entries:
+            if read_snippet_windows is None:
+                snippet_window_skipped = "read_error"
+            else:
+                snippet_window_content, snippet_window_skipped = read_snippet_windows(
+                    window_entries, query=query, expanded_limit=len(window_entries),
+                    fts_arm_index=fts_arm_index, deadline=deadline,
+                )
     # Event time for message hits that answer_ready hydration did not already
     # cover (the snippets default, and answer_ready hits past the expansion
     # limit): one batched read by store_id of only the deliverable entries,
@@ -186,6 +219,21 @@ def deliver_recall(
         if event_time_unavailable_reason is not None:
             event_time_rows.clear()
             event_time_unread_ids = set(event_time_ids)
+    # Opt-in summary span: one batched read of the deliverable summary nodes.
+    # A failed read omits the span from every summary hit (atomic).
+    summary_event_time: dict[int, dict[str, str]] = {}
+    summary_event_time_unavailable: str | None = None
+    summary_node_ids = list(dict.fromkeys(
+        int(entry["hit"]["node_id"])
+        for entry in selected_entries[:limit]
+        if entry["hit"].get("kind") == "summary" and entry["hit"].get("node_id") is not None
+    )) if read_summary_event_time is not None else []
+    if summary_node_ids:
+        summary_event_time, summary_event_time_unavailable = read_summary_event_time(
+            summary_node_ids, deadline=deadline
+        )
+        if summary_event_time_unavailable is not None:
+            summary_event_time = {}
     event_time_unavailable = False
     hits_out: list[dict[str, Any]] = []
     # Characters each delivered hit's optional event-time fields add on top of
@@ -194,7 +242,7 @@ def deliver_recall(
     response_chars = 0
     response_cap_truncated = False
     unreferenced_omitted = 0
-    for entry in selected_entries:
+    for consumed, entry in enumerate(selected_entries, 1):
         hit = entry["hit"]
         arms = sorted({arm_order[index] for index in entry["ranks"].keys()})
         item: dict[str, Any] = {
@@ -207,10 +255,24 @@ def deliver_recall(
             "from_current_session": bool(hit.get("from_current_session")),
             "arms": arms,
         }
+        if hit.get("adjacent_to") is not None:
+            item.update(adjacent_to=hit["adjacent_to"], arms=[*arms, "adjacent"])
+        window = snippet_window_content.get(_hit_identity(hit))
+        if window is not None:
+            item["snippet"] = window["content"]
+            item["snippet_window"] = {
+                key: window[key] for key in (
+                    "content_offset", "content_returned_chars", "content_chars", "content_truncated",
+                )
+            }
+        if hit.get("lineage"):  # #1931: a delegated subagent's hit names its parent session
+            item.update(parent_session_id=hit.get("parent_session_id"), lineage=hit["lineage"])
         if hit.get("kind") == "summary":
             item["node_id"] = hit.get("node_id")
             if hit.get("store_id") is not None:
                 item["store_id"] = hit.get("store_id")
+            if hit.get("node_id") is not None:
+                item.update(summary_event_time.get(int(hit["node_id"]), {}))
         else:
             item["store_id"] = hit.get("store_id")
             if hit.get("duplicate_store_ids"):
@@ -227,7 +289,10 @@ def deliver_recall(
             hydrated = answer_ready_content.get(_hit_identity(hit))
             if hydrated is not None:
                 item.update({k: v for k, v in hydrated.items() if k not in _EVENT_TIME_KEYS})
-                item.update(event_time_fields(event_time_rows.get(int(hit.get("store_id") or 0))))
+                # Off: a summary sharing a message's store_id keeps taking that
+                # message's event time (pinned). On: a summary never does.
+                if read_summary_event_time is None or hit.get("kind") != "summary":
+                    item.update(event_time_fields(event_time_rows.get(int(hit.get("store_id") or 0))))
             if delta_requested:
                 exact_ref = _exact_ref(hit, hydrated)
                 if exact_ref is not None:
@@ -289,14 +354,14 @@ def deliver_recall(
         # The cap sizes a hit without its optional event-time fields, so they
         # never evict a hit that fits without them (#995).
         item_chars = len(
-            json.dumps(_without_event_time(item), ensure_ascii=False)
+            json.dumps(_without_event_time(item), ensure_ascii=window is not None)
         )
         if hits_out and response_chars + item_chars > response_char_cap:
             response_cap_truncated = True
             break
         response_chars += item_chars
         event_time_chars.append(
-            len(json.dumps(item, ensure_ascii=False)) - item_chars
+            len(json.dumps(item, ensure_ascii=window is not None)) - item_chars
         )
         if reference_strict:
             strict_selector.deliver(entry)
@@ -351,8 +416,17 @@ def deliver_recall(
         },
         "degraded": degraded,
     }
+    if adjacent_reply and detail != "answer_ready":
+        # Snippets hits are final here; answer_ready publishes after fitting.
+        receipts = _delivered_adjacent_receipts(hits_out, adjacent_reply)
+        if receipts:
+            response["provenance"]["adjacent_reply"] = receipts
+    if adjacent_reply_unavailable is not None:
+        response["provenance"]["adjacent_reply_unavailable"] = adjacent_reply_unavailable
     if rerank_enabled() and rerank_scores:
         response["provenance"]["rerank_scores"] = rerank_scores
+    if fts_rerun:
+        response["provenance"]["fts_rerun"] = True
     if fts_anchor_info is not None and len(arm_order) > 1:
         # The anchor only places the hit in the ranked window; answer_ready
         # selection (citation and per-session rules) and the response cap still
@@ -373,6 +447,35 @@ def deliver_recall(
         response["event_time_unavailable_reason"] = event_time_unavailable_reason
     if requested_limit > limit_cap:
         response["limit_clamped_from"] = requested_limit
+    if summary_event_time_unavailable is not None:
+        response["provenance"]["summary_event_time_unavailable"] = summary_event_time_unavailable
+    if snippet_window_skipped is not None:
+        response["snippet_window_skipped"] = snippet_window_skipped
+    elif detail == "snippets" and snippet_window_hits > 0:
+        if response_cap_truncated:
+            response["response_cap_truncated"] = True
+        # Include the envelope and optional time-order marker in the encoded
+        # budget. Keep the flag-off and skipped-read fitting paths unchanged.
+        def encoded_size() -> int:
+            if adjacent_reply:
+                response["provenance"].pop("adjacent_reply", None)
+                receipts = _delivered_adjacent_receipts(hits_out, adjacent_reply)
+                if receipts:
+                    response["provenance"]["adjacent_reply"] = receipts
+            if fts_anchor_info is not None and len(arm_order) > 1:
+                fts_anchor_info["delivered"] = (
+                    _fts_anchor_delivered(hits_out, arm_hits) if fts_anchor_info["fired"] else None
+                )
+            if delivery_order == "time":
+                return len(json.dumps({**response, "provenance": {
+                    **response["provenance"], "delivery_order": "time",
+                }}))
+            return len(json.dumps(response))
+
+        while encoded_size() > response_char_cap and hits_out:
+            hits_out.pop()
+            response["total_results"] = len(hits_out)
+            response["response_cap_truncated"] = True
     if detail == "answer_ready":
         expansion = {
             "expanded_hit_count": sum("content" in hit for hit in hits_out),
@@ -426,12 +529,78 @@ def deliver_recall(
                 "observation_is_not_occurrence": True,
             }
 
-        return _fit_answer_ready_response(
+        encoded = _fit_answer_ready_response(
             fts_anchor_info=fts_anchor_info, response=response,
             response_char_cap=response_char_cap, expansion=expansion,
             delta_requested=delta_requested, arm_hits=arm_hits,
+            adjacent_reply=adjacent_reply,
         )
-    return json.dumps(response)
+        if delivery_order != "time":
+            return encoded
+    elif delivery_order != "time" and extra_entries <= 0:
+        return json.dumps(response)
+
+    # Both size-cap passes and event-time stripping run in score order first.
+    # Sort only survivors, using the existing read even if their date was
+    # stripped for space. Python's stable sort preserves score order on ties.
+    def event_time_key(hit: dict[str, Any]) -> tuple[bool, float]:
+        row = event_time_rows.get(int(hit.get("store_id") or 0), {})
+        observed_at = (
+            _normalize_observed_at(row.get("observed_at"))
+            if hit.get("kind") != "summary" else None
+        )
+        return observed_at is None, observed_at if observed_at is not None else 0.0
+
+    if delivery_order == "time":
+        hits_out.sort(key=event_time_key)
+    ensure_ascii = detail != "answer_ready"
+    # Reordering keeps the encoded length; the marker is extra, so it is added
+    # only when it still fits the response cap (never by dropping a hit).
+    unmarked = json.dumps(response, ensure_ascii=ensure_ascii)
+    if delivery_order == "time":
+        response["provenance"]["delivery_order"] = "time"
+    marked = json.dumps(response, ensure_ascii=ensure_ascii)
+    # answer_ready caps the whole envelope; snippets budgets hits only.
+    if detail == "answer_ready" and len(marked) > response_char_cap:
+        return unmarked
+    if (detail == "snippets" and extra_entries > 0 and len(hits_out) == limit
+            and not response_cap_truncated and not response.get("response_cap_truncated")):
+        seen = {hit["store_id"] for hit in hits_out if hit.get("store_id") is not None}
+        seen.update(sid for hit in hits_out for sid in hit.get("duplicate_store_ids", []))
+        candidates = []
+        for entry in selected_entries[consumed:consumed + min(extra_entries, limit // 2)]:
+            sid = entry["hit"].get("store_id")
+            if sid is not None and sid in seen:
+                continue
+            if sid is not None:
+                seen.add(sid)
+            candidates.append(entry)
+        if candidates:
+            try:
+                content, skipped = read_extra_entries(
+                    candidates, query=query, expanded_limit=len(candidates),
+                    fts_arm_index=fts_arm_index, deadline=deadline, char_cap=300,
+                ) if read_extra_entries is not None else ({}, "read_error")
+                extras = []
+                for entry in candidates if skipped is None else []:
+                    hit = entry["hit"]
+                    window = content[_hit_identity(hit)]
+                    extras.append({
+                        "kind": hit.get("kind"), "store_id": hit.get("store_id"),
+                        "session_id": hit.get("session_id"), "event_time": window.get("event_time"),
+                        "window": window["content"], "extra": True,
+                    })
+            except Exception as exc:  # noqa: BLE001 - optional extras must never fail recall
+                logging.getLogger(__name__).warning("lcm_recall extra entries read failed: %s", type(exc).__name__)
+                skipped = "read_error"
+            if skipped is not None:
+                response["extra_entries_skipped"] = skipped
+            else:
+                hits_out.extend(extras)
+                while len(hits_out) > limit and len(json.dumps(response)) > response_char_cap:
+                    hits_out.pop()
+            return json.dumps(response)
+    return marked
 
 
 def _fit_answer_ready_response(
@@ -442,6 +611,7 @@ def _fit_answer_ready_response(
     expansion: dict[str, Any],
     delta_requested: bool,
     arm_hits: dict[str, list[dict[str, Any]]],
+    adjacent_reply: list[dict[str, int]] | None = None,
 ) -> str:
     anchor_fired = bool(fts_anchor_info and fts_anchor_info.get("fired"))
     if anchor_fired:
@@ -510,7 +680,31 @@ def _fit_answer_ready_response(
             response["hits"], arm_hits
         )
         encoded = json.dumps(response, ensure_ascii=False)
+    receipts = _delivered_adjacent_receipts(response["hits"], adjacent_reply or [])
+    if receipts:
+        # Receipts name only replies the final hits carry, and are published
+        # only when they fit: a receipt never evicts a hit.
+        marked = {
+            **response,
+            "provenance": {**response["provenance"], "adjacent_reply": receipts},
+        }
+        marked_encoded = json.dumps(marked, ensure_ascii=False)
+        if len(marked_encoded) <= response_char_cap:
+            response["provenance"]["adjacent_reply"] = receipts
+            encoded = marked_encoded
     return encoded
+
+
+def _delivered_adjacent_receipts(
+    hits: list[dict[str, Any]], pairs: list[dict[str, int]]
+) -> list[dict[str, int]]:
+    """Keep receipts whose reply ``hits`` deliver, also as a collapsed duplicate."""
+    delivered: set[Any] = set()
+    for hit in hits:
+        if hit.get("kind") != "summary":
+            delivered.add(hit.get("store_id"))
+            delivered.update(hit.get("duplicate_store_ids", []))
+    return [pair for pair in pairs if pair["store_id"] in delivered]
 
 
 def _strip_hit_event_time(
