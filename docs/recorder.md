@@ -98,7 +98,7 @@ Directories are created 0700 and files 0600. A profile backup that copies `$HERM
   a replay of it must match the backup, without needing an exit. A checkpoint refused by the cap or disk floor
   or once the exit drain begins is skipped, counted as `recorder.checkpoint_skipped`, and warned with its cause; recording continues.
 - **Ended without exit:** a recording ends with `exit_begin` only if Python's atexit runs in the process that runs
-  the agent. The Hermes gateway and `hermes -z` one-shot runs end with `os._exit`, which skips it, and in Hermes
+  the agent. The Hermes gateway ends with `os._exit`, which skips it, and in Hermes
   v0.23.0 the CLI, ACP, the TUI and local Desktop run their turns in the gateway, so their recordings end as "ended
   without exit". That is a normal end; the sealed checkpoints are the comparison points. Before v0.23.0 the
   interactive CLI and ACP run the agent themselves and end normally, so atexit runs; the TUI's gateway
