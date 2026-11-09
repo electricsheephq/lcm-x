@@ -45,7 +45,7 @@ def _check(content: str) -> tuple[str, str, tuple[str, ...]]:
 def test_repeated_closer_is_accepted_with_the_plain_body(reply):
     body, check, tolerated = _check(reply)
     assert (body, check, tolerated) == (BODY, "", ("repeated_closer",))
-    assert escalation._unwrap_summary_contract(reply, NONCE, MAX_TOKENS) == BODY
+    assert escalation._check_summary_contract(reply, NONCE, MAX_TOKENS)[0] == BODY
 
 
 def test_repeated_closer_combines_with_a_decorated_hint():
