@@ -32,8 +32,10 @@ explicit opt-in metered path and needs `--max-spend` and `--spend-ledger`. Defau
 `--codex-home /absolute/existing/DIR` runs Codex readers and judges on a leased
 home without creating an authentication symlink. It requires `--workers 1` and
 holds an exclusive, non-blocking `holder.lock` in that home for the command;
-a busy home is refused before any model call. Stop a leased run with one SIGTERM and wait: the call in flight
-finishes before the lock is released. A second signal or SIGKILL can leave a Codex child running on the home. Unset, the existing isolated home
+a busy home is refused before any model call, as is a home holding `AGENTS.md`, `AGENTS.override.md` or
+non-system skills (Codex would load them into every reader prompt). Stop a leased run with one SIGTERM and wait: the
+call in flight finishes (worker threads) or is killed (main-thread calls) before the lock is released. A second
+signal or SIGKILL can leave a Codex child running on the home. Unset, the existing isolated home
 and plan-login symlink behavior is unchanged.
 
 Reader and judge transport failures get at most three attempts, waiting 5 s then

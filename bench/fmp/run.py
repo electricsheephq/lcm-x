@@ -233,6 +233,12 @@ def execute(args):
             raise ValueError("--codex-home must name an existing absolute directory")
         if args.workers != 1:
             raise ValueError("--codex-home requires --workers 1")
+        # Codex reads instructions and skills from CODEX_HOME that --ignore-user-config does not skip.
+        extra = [name for name in ("AGENTS.md", "AGENTS.override.md") if (home / name).exists()]
+        extra += [f"skills/{p.name}" for p in sorted((home / "skills").glob("*")) if p.name != ".system"] \
+            if (home / "skills").is_dir() else []
+        if extra:
+            raise ValueError("--codex-home holds instructions or skills a reader would load: " + ", ".join(extra))
         for path in (args.output, args.store_root):
             resolved = Path(path).resolve()
             if resolved == home.resolve() or home.resolve() in resolved.parents:

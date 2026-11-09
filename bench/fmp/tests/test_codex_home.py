@@ -236,3 +236,24 @@ def test_score_and_build_stores_ignore_codex_home_options(tmp_path, monkeypatch,
         run.execute(args)
         assert calls == [command]
     assert not (tmp_path / "holder.lock").exists()
+
+
+@pytest.mark.parametrize("entry", ["AGENTS.md", "AGENTS.override.md", "skills/custom"])
+def test_home_with_instructions_or_skills_refused(tmp_path, cli, entry):
+    home = tmp_path / "lease"
+    (home / "skills" / ".system").mkdir(parents=True)
+    target = home / entry
+    if entry.startswith("skills/"):
+        target.mkdir()
+    else:
+        target.write_text("synthetic")
+    with pytest.raises(ValueError, match="^--codex-home holds instructions or skills a reader would load: "):
+        run.execute(cli.args("answer", "--codex-home", str(home)))
+    cli.built.assert_not_called()
+
+
+def test_home_with_only_system_skills_allowed(tmp_path, cli):
+    home = tmp_path / "lease"
+    (home / "skills" / ".system").mkdir(parents=True)
+    run.execute(cli.args("canary", "--codex-home", str(home)))
+    assert cli.built.called
