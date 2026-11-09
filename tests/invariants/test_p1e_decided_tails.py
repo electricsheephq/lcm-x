@@ -392,3 +392,32 @@ def test_stamped_row_another_view_placed_below_the_head_is_not_stored_twice(engi
     engine._retry_pending_session_tails()
     assert contents(engine).count("E") == 1
     assert count(engine, "tail.retry.ledger_match") == 1
+
+
+def test_p1_gate_failed_tail_bindings_then_start_and_ingest(engines, monkeypatch):
+    from tests.p1_gate import expect_from_view, record, store_outcome
+
+    engine = engines()
+    view = history()
+    queue(engine, view)
+    insert = ledger.insert_bindings
+    fired = []
+
+    def fail(*args, **kwargs):
+        insert(*args, **kwargs)
+        fired.append(True)
+        raise sqlite3.OperationalError("injected tail-binding savepoint failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(ledger, "insert_bindings", fail)
+        engine._retry_pending_session_tails()
+    assert fired == [True] and count(engine, "write_failed") == 1
+    assert len(sql_rows(engine, "occurrence_bindings")) == 2
+    assert contents(engine) == ["A", "B", "C", "D"]
+    engine.on_session_start("S", platform="cli", conversation_id="conv")
+    view += [_m("user", "next turn", 8.), _m("assistant", "next reply", 9.)]
+    engine.ingest(copy.deepcopy(view))
+    assert contents(engine) == [row["content"] for row in view]
+    outcome = store_outcome(engine._store._conn, expect_from_view(view, "conv"))
+    record(dict(family="savepoint", boundary="tail_binding"), outcome, engine)
+    assert outcome["loss"] == outcome["silent"] == 0, outcome

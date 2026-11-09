@@ -13,6 +13,7 @@ from tests.invariants.test_p1e_decided_tails import contents, history, queue, re
 from tests.invariants.test_p1e_cold_tails import queue_cold
 from tests.test_issue_2055_ingest_ledger_writes import count, engines as engines
 from tests.test_host_uid_shadow import _m
+from tests.p1_gate import expect_from_view, record, store_outcome
 
 
 class Crash(BaseException):
@@ -86,6 +87,7 @@ def test_decided_crash_cell(engines, monkeypatch, between, route, stamped, point
     own = [r["content"] for r in engine._store.get_session_messages("S") if r["conversation_id"] == "conv"]
     assert own == expected  # Every extra row fails.
     assert not engine._pending_session_tails
+    _gate_tail(engine, view, between, route, stamped, point, cold=False)
 
 
 SUBPROCESS = r'''
@@ -142,6 +144,7 @@ def test_decided_subprocess_crash_resume(engines, tmp_path, point, stamped):
         assert before == (["A", "B", "C"] if point == "before_commit" else ["A", "B", "C", "D"])
         fresh.ingest(history(stamped))
         assert contents(fresh) == ["A", "B", "C", "D"]
+        _gate_tail(fresh, history(stamped), "none", "subprocess", stamped, point, cold=False)
     finally:
         fresh.shutdown()
 
@@ -218,6 +221,7 @@ def test_cold_crash_cell(engines, monkeypatch, between, route, stamped, point):
     own = [r["content"] for r in engine._store.get_session_messages("S") if r["conversation_id"] == "conv"]
     assert own == ["A", "B", "C", "D"] + (["new"] if between == "full+new" else [])
     assert not engine._pending_session_tails
+    _gate_tail(engine, view, between, route, stamped, point, cold=True)
 
 
 @pytest.mark.parametrize("point", ["before_commit", "after_commit"])
@@ -238,5 +242,18 @@ def test_cold_subprocess_crash_resume(engines, tmp_path, point, stamped):
         assert contents(fresh) == (["A", "B", "C"] if point == "before_commit" else ["A", "B", "C", "D"])
         fresh.ingest(history(stamped))
         assert contents(fresh) == ["A", "B", "C", "D"]
+        _gate_tail(fresh, history(stamped), "none", "subprocess", stamped, point, cold=True)
     finally:
         fresh.shutdown()
+
+
+def _gate_tail(engine, view, between, route, stamped, point, *, cold):
+    expected = expect_from_view(view, "conv")
+    if between == "full+new":
+        expected["conv"] += expect_from_view([_m("user", "new")], "conv")["conv"]
+    if between in {"foreign", "other-session"}:
+        expected.update(expect_from_view(view[2:], "foreign"))
+    outcome = store_outcome(engine._store._conn, expected)
+    record(dict(family="cold_tail" if cold else "decided_tail", between=between, route=route,
+                stamped=stamped, point=point), outcome, engine)
+    assert outcome["loss"] == outcome["silent"] == 0, outcome

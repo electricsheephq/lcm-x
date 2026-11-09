@@ -157,6 +157,8 @@
       "LCM_LEAF_TARGET_RATIO has no effect while the minimum equals the maximum; set LCM_LEAF_TARGET_MAX_TOKENS"
     ],
     "config_sources": {
+      "recall_snippet_window_hits": "default",
+      "recall_extra_entries": "default",
       "absolute_threshold_tokens": "env:LCM_ABSOLUTE_THRESHOLD_TOKENS",
       "codex_gpt55_autoraise_enabled": "default",
       "context_threshold": "env:LCM_CONTEXT_THRESHOLD",
@@ -173,7 +175,9 @@
       "summary_spend_backoff_seconds": "env:LCM_SUMMARY_SPEND_BACKOFF_SECONDS",
       "summary_spend_max_calls": "env:LCM_SUMMARY_SPEND_MAX_CALLS",
       "summary_spend_window_seconds": "env:LCM_SUMMARY_SPEND_WINDOW_SECONDS",
-      "summary_timeout_ms": "env:LCM_SUMMARY_TIMEOUT_MS"
+      "summary_timeout_ms": "env:LCM_SUMMARY_TIMEOUT_MS",
+      "large_output_active_replay_stub_threshold_tokens": "env:LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUB_THRESHOLD_TOKENS",
+      "large_output_active_replay_stub_aged_threshold_tokens": "env:LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUB_AGED_THRESHOLD_TOKENS"
     },
     "context_threshold": 0.63,
     "critical_budget_pressure_ratio": 0.0,
@@ -265,12 +269,17 @@
       "summary": 0.9
     },
     "recall_delivery_unit": "hits",
+    "recall_delivery_order": "score",
+    "recall_adjacent_reply": false,
+    "recall_snippet_window_hits": 0,
+    "recall_extra_entries": 0,
     "recall_fts_anchor": true,
     "recall_query_timeout_s": 8.0,
     "recall_reference_strict": true,
     "recall_scan_budget_s": 0.0,
     "recall_scan_max_rows": 0,
     "recall_scan_rows": 25000,
+    "recall_summary_event_time": false,
     "rerank_enabled": false,
     "rerank_margin": 0.0,
     "rerank_model": "rerank-2.5-lite",

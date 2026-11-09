@@ -2,6 +2,7 @@
 import hashlib
 import json
 import sqlite3
+import time
 
 import pytest
 
@@ -157,6 +158,13 @@ def test_rotated_session_user_breaks_split_in_owning_conversation():
     assert out["phase_c_split_matches"] == []
 
 
+@pytest.mark.parametrize("user_id,match", [(1, True), (2, True), (2.5, False), (3, True), (4, True)])
+def test_split_user_boundary_is_strictly_between_fragment_ids(user_id, match):
+    rows = split_rows(("a", "b")) + [(user_id, "other-session", "user", "", 1)]
+    out = multiset.phase_c_score([("user", "prompt"), ("assistant", "ab")], rows)
+    assert [s["split_match"] for s in out["phase_c_split_matches"]] == ([[2, 3]] if match else [])
+
+
 def test_claimed_fragment_cannot_be_borrowed():
     expected = [("user", "prompt"), ("assistant", "one\n\ntwo\n\nthree"), ("assistant", "two")]
     assert multiset.phase_c_score(expected, split_rows())["verdict"] == "FAIL"
@@ -186,11 +194,75 @@ def test_ambiguous_two_fragment_report_keeps_score_splits():
     assert out["phase_c_split_matches"] == []
 
 
-@pytest.mark.parametrize("n,verdict", [(2, "PASS"), (8, "PASS"), (9, "FAIL")])
-def test_split_fragment_limit(n, verdict):
+@pytest.mark.parametrize("n,verdict", [(2, "PASS"), (8, "PASS"), (9, "PASS"), (20, "PASS"), (64, "PASS")])
+def test_split_fragment_has_no_cap(n, verdict):
     parts = tuple(f"part{i}" for i in range(n))
     assert multiset.phase_c_score([("user", "prompt"), ("assistant", "\n\n".join(parts))], split_rows(parts))[
         "verdict"] == verdict
+
+
+@pytest.mark.parametrize("change,verdict", [
+    ("tools", "PASS"), ("deleted", "FAIL"), ("duplicated", "FAIL"), ("user", "FAIL"),
+    ("duplicated_after", "FAIL"), ("other_user", "FAIL"),
+])
+def test_twenty_fragment_answer_integrity(change, verdict):
+    parts = tuple(f"part{i}" for i in range(20))
+    rows = split_rows(parts)
+    if change == "tools":
+        rows += [(i + 2.5, "S", "tool", "result", 1) for i in (2, 7, 12)]
+    elif change == "deleted":
+        rows = [r for r in rows if r[0] != 11]
+    elif change == "duplicated":
+        rows += [(11.5, "S", "assistant", parts[9], 1)]
+    elif change == "duplicated_after":
+        rows += [(21.5, "S", "assistant", parts[9], 1)]
+    else:
+        rows += [(11.5, "other" if change == "other_user" else "S", "user", "", 1)]
+    out = multiset.phase_c_score([("user", "prompt"), ("assistant", "\n\n".join(parts))], rows)
+    assert out["verdict"] == verdict
+    if change == "deleted":
+        assert out["deficit_rows"] == 1
+    if change == "duplicated_after":
+        assert (out["accepted_split_keys"], out["surplus_rows"]) == (1, 1)
+    if change == "other_user":
+        assert out["accepted_split_keys"] == 0
+
+
+def test_long_unmatched_run_cost():
+    rows = split_rows(("x" * 100,) * 1000)
+    start = time.monotonic()
+    out = multiset.phase_c_score([("user", "prompt"), ("assistant", "y" * 200)], rows)
+    elapsed = time.monotonic() - start
+    assert out["verdict"] == "FAIL"
+    assert elapsed < 5, f"phase_c_score took {elapsed:.3f}s"
+
+
+@pytest.mark.parametrize("missing,verdict", [(False, "PASS"), (True, "FAIL")])
+def test_long_target_split_cost(missing, verdict):
+    parts = ("x" * 100,) * 1000
+    expected = [("user", "prompt"), ("assistant", "".join(parts))]
+    if missing:
+        expected.append(("assistant", "y" * 100000))
+    rows = split_rows(parts)
+    start = time.monotonic()
+    out = multiset.phase_c_score(expected, rows)
+    elapsed = time.monotonic() - start
+    assert out["verdict"] == verdict
+    assert out["phase_c_split_matches"][0]["split_match"] == list(range(2, 1002))
+    assert out["deficit_rows"] == int(missing)
+    assert elapsed < 10, f"phase_c_score took {elapsed:.3f}s"
+
+
+def test_two_twelve_fragment_answers_use_distinct_rows():
+    expected, rows = [], []
+    for turn in range(2):
+        parts = tuple(f"turn{turn}-part{i}" for i in range(12))
+        expected += [("user", f"prompt{turn}"), ("assistant", "\n\n".join(parts))]
+        for role, text in [("user", f"prompt{turn}")] + [("assistant", p) for p in parts]:
+            rows.append((len(rows) + 1, "S", role, text, 1))
+    out = multiset.phase_c_score(expected, rows)
+    assert out["verdict"] == "PASS"
+    assert [s["split_match"] for s in out["phase_c_split_matches"]] == [list(range(2, 14)), list(range(15, 27))]
 
 
 def test_repeated_missing_answer_cannot_use_split():
@@ -211,6 +283,7 @@ def test_split_cannot_cross_sessions_or_reverse_fragments():
     ("onetwothree", ("one", "two", "three")),
     ("one \t two\r\nthree", ("one", "two", "three")),
     ("é two", ("e\u0301", "two")),
+    ("é ö", ("e", "\u0301 o", "\u0308")),
     (" one two ", ("one", "two")),
 ])
 def test_inherited_v2_normalized_joins_are_phase_c_only(answer, parts):

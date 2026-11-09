@@ -360,7 +360,7 @@ class Harness:
                 failure = exc
             record = records[-1]
             log = Path(record["mcp_log"])
-            events = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+            events = [json.loads(line) for line in log.read_text().split("\n") if line.strip()] if log.exists() else []
             initialized = next((e for e in events if e.get("event") == "initialize"), {})
             offered = next((e for e in reversed(events) if e.get("event") == "tools/list"), {})
             status = initialized.get("startup_status", "no_initialize")
@@ -383,14 +383,19 @@ class Harness:
 class Codex(Harness):
     kind = "codex"
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, codex_home=None, include_total_tokens=False, **kwargs):
         super().__init__(*args, **kwargs)
+        self.include_total_tokens = include_total_tokens
         # Isolated CODEX_HOME (no user config, AGENTS.md, rules or MCP servers) and HOME (no host skills).
         # Auth is a symlink to the plan login: no token is copied or written.
         self.home, self.fake_home = self.scratch / "codex-home", self.scratch / "home"
-        self.home.mkdir()
         self.fake_home.mkdir()
-        (self.home / "auth.json").symlink_to(Path.home() / ".codex" / "auth.json")
+        if codex_home is None:
+            self.home.mkdir()
+            (self.home / "auth.json").symlink_to(Path.home() / ".codex" / "auth.json")
+        else:
+            # A leased home is passed through untouched; rollouts remain available for readback.
+            self.home = Path(codex_home)
 
     def command(self, model, effort, call, mcp):
         cmd = [self.binary, "exec", "--json", "--ignore-user-config", "--ignore-rules", "--skip-git-repo-check",
@@ -491,6 +496,8 @@ class Codex(Harness):
             transcripts=[str(call / "events.jsonl"), str(rollout) if rollout else None], exit_code=proc.returncode)
         record.update({k: usage.get(v) for k, v in zip(("input_tokens", "cached_input_tokens", "output_tokens", "reasoning_tokens"),
                                                      ("input_tokens", "cached_input_tokens", "output_tokens", "reasoning_output_tokens"))})
+        if self.include_total_tokens and "total_tokens" in usage:
+            record["total_tokens"] = usage["total_tokens"]
         record.update(identity_source=info["identity_source"], wrapper_overhead_tokens=None,
                       input_tokens_label="total incl. retrieved evidence")
         if limited(failure) or ((proc.returncode != 0 or done is None or not texts) and limited(proc.stderr)):

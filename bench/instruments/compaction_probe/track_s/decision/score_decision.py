@@ -126,7 +126,8 @@ def main():
             score_manifest.write_atomic(manifest_path, manifest)
             for population in ("scores", "loss"):
                 for directory in (args.out / population).glob("cp-*"):
-                    (directory / name).unlink(missing_ok=True)
+                    if directory.is_dir() and not directory.is_symlink():
+                        (directory / name).unlink(missing_ok=True)
             if not receipt_ok:
                 continue  # missing/failed runs are never measured as completed; their stale scores are removed above
             run_calls, run_probes = [], {}

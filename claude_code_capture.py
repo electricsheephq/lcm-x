@@ -136,7 +136,8 @@ def project_entry(entry: Mapping[str, Any], *, folder: Path | None = None) -> Pr
             if part.get("type") != "tool_result":
                 continue
             content = _result_content(part.get("content"))
-            if folder is not None and isinstance(content, str) and PERSISTED_TAG in content:
+            # Only a result that is itself a preview: a tag quoted mid-text is ordinary output.
+            if folder is not None and isinstance(content, str) and content.lstrip().startswith(PERSISTED_TAG):
                 content, file_name, problem = _recover_saved_output(content, saved, folder)
                 files += [file_name] if file_name else []
                 problems += [problem] if problem else []

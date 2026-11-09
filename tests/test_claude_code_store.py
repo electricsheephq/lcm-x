@@ -416,6 +416,137 @@ def test_capture_cli_drains_the_spool(tmp_path, home, hermes):
                           env=env, capture_output=True, timeout=60).returncode == 2
 
 
+def _registered(event):
+    hooks = json.loads((PLUGIN / "hooks" / "hooks.json").read_text(encoding="utf-8"))["hooks"]
+    [hook] = [hook for group in hooks[event] for hook in group["hooks"]]
+    return hook
+
+
+def _argv(event):
+    """What Claude Code spawns for the event's hook in exec form: the command found on PATH, and
+    the arguments with ``${CLAUDE_PLUGIN_ROOT}`` substituted, with no shell."""
+    hook = _registered(event)
+    return [hook["command"], *[arg.replace("${CLAUDE_PLUGIN_ROOT}", str(PLUGIN)) for arg in hook["args"]]]
+
+
+@pytest.mark.parametrize("killed", ["before_its_record", "after_its_record"])
+@pytest.mark.parametrize("case", ["session_goes_on", "print_mode_exit"])
+def test_a_killed_async_post_tool_batch_hook_loses_no_row(tmp_path, home, hermes, case, killed):
+    """#2141 runs PostToolBatch async: Claude Code kills an async hook still running when a -p
+    session exits, and one can also die in a session that goes on. Wherever the hook dies, before
+    or after it writes its record, the synchronous Stop and SessionEnd hooks that follow lead the
+    worker to every row, and the store matches a run in which no hook died.
+
+    Each hook runs its registered command. A worker holds the lock while the synchronous hooks
+    run, so they leave their records to it, and the worker run after them is that holder's rescan.
+    The async hook never takes the lock, so its death cannot leave them waiting on it. The worker
+    script it starts is a stub, and a FIFO in place of the hook log stops it just before it exits,
+    unless the kill, which waits only for its record, comes first."""
+    import signal
+    import subprocess
+    assert _registered("PostToolBatch").get("async") is True
+    path = _transcript(tmp_path, CONVERSATION[:3])  # the tool batch; the turn's end comes later
+    python = tmp_path / "bin" / "python3"
+    python.parent.mkdir()
+    python.symlink_to(sys.executable)
+    package = tmp_path / "package"
+    (package / "scripts").mkdir(parents=True)
+    for name in ("plugin.yaml", "store.py", "scripts/lcm_x_capture.py"):
+        (package / name).write_text("", encoding="utf-8")
+    env = {"HOME": str(tmp_path), "PATH": str(python.parent), "LCMX_CC_HOME": str(home),
+           "CLAUDE_CONFIG_DIR": str(tmp_path), "CLAUDE_PLUGIN_ROOT": str(PLUGIN), "LCMX_PACKAGE_ROOT": str(package)}
+    home.mkdir()
+    log = home / "logs" / "hook.log"
+
+    def payload(event):
+        return json.dumps({"hook_event_name": event, "session_id": "s1", "transcript_path": str(path)})
+
+    def stored(at):
+        store = _open(at, hermes)
+        try:
+            return [row[1:] for row in _rows(store)]
+        finally:
+            store.close()
+
+    def end_of_turn(*events):
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write("".join(json.dumps(entry) + "\n" for entry in CONVERSATION[3:]))
+        with open(home / "capture.lock", "a") as held:  # the running worker
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            for event in events:
+                done = subprocess.run(_argv(event), input=payload(event),
+                                      env=env, capture_output=True, text=True, timeout=60)
+                assert (done.returncode, done.stdout, done.stderr) == (0, "", "")
+        outcomes = [json.loads(line)["outcome"] for line in log.read_text(encoding="utf-8").splitlines()]
+        assert outcomes[-len(events):] == ["worker_running"] * len(events)  # left to the holder
+        assert cc.run_worker(home, hermes_home=hermes, settle_s=0)["complete"]
+        return stored(home)
+
+    tool_batch = subprocess.Popen(_argv("PostToolBatch"), env=env,
+                                  stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                  start_new_session=True)  # waits for its payload until it gets one
+
+    def write_its_record():
+        log.parent.mkdir(exist_ok=True)
+        log.unlink(missing_ok=True)
+        os.mkfifo(log)
+        tool_batch.stdin.write(payload("PostToolBatch").encode())
+        tool_batch.stdin.close()
+        deadline = time.monotonic() + 30
+        while not any(json.loads(record.read_text(encoding="utf-8"))["event"] == "PostToolBatch"
+                      for record in (home / "spool").glob("*.json")):
+            assert time.monotonic() < deadline, "the hook never wrote its record"
+            time.sleep(0.01)
+
+    def kill():
+        assert tool_batch.poll() is None, "the hook ended before it was killed"
+        os.killpg(tool_batch.pid, signal.SIGKILL)
+        tool_batch.wait(timeout=60)
+        tool_batch.stdin.close()
+        if log.is_fifo():
+            log.unlink()
+
+    if case == "session_goes_on":  # the hook dies, then the turn ends
+        if killed == "after_its_record":
+            write_its_record()
+        kill()
+        captured = end_of_turn("Stop")
+    else:  # the turn ends, and the exit kills the hook, which may write its record last
+        captured = end_of_turn("Stop", "SessionEnd")
+        if killed == "after_its_record":
+            write_its_record()
+        kill()
+    (home / "spool").mkdir(exist_ok=True)
+    (home / "spool" / ".cut.1.tmp").write_text('{"event": "PostTool', encoding="utf-8")  # a write cut short
+    waiting = cc.pending(home)
+    assert cc.run_worker(home, hermes_home=hermes, settle_s=0)["complete"]  # any session's next run
+    assert not cc.pending(home)
+    assert waiting is (case == "print_mode_exit" and killed == "after_its_record")  # only a late record waits
+
+    control = tmp_path / "control"
+    _record(_hook(), control, path)
+    assert cc.run_worker(control, hermes_home=hermes, settle_s=0)["complete"]
+    assert captured == stored(home) == stored(control) and len(captured) == 4
+
+
+def test_a_worker_started_while_another_holds_the_lock_exits_before_loading_the_store(home):
+    """The async PostToolBatch hook starts a worker on every tool batch, so a worker that finds
+    another holding the lock exits before any store code loads, with the exit codes it had: 0
+    detached, 4 bounded (the holder takes the record)."""
+    import subprocess
+    script = Path(__file__).resolve().parents[1] / "scripts" / "lcm_x_capture.py"
+    home.mkdir()
+    with open(home / "capture.lock", "a") as held:
+        fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        for extra, code in (([], 0), (["--deadline", "10"], 4)):
+            done = subprocess.run([sys.executable, "-X", "importtime", str(script), "worker", "--home", str(home),
+                                   *extra], capture_output=True, text=True, timeout=60)
+            imported = {line.rsplit("|", 1)[-1].strip() for line in done.stderr.splitlines()
+                        if line.startswith("import time:")}
+            assert done.returncode == code and "argparse" in imported  # the import log is complete
+            assert not any(name.startswith("hermes_lcm") for name in imported)
+
+
 def _embedding_slice(state, outcome="complete", *, vectors=0, again=False, delay=0.0):
     state.update(vectors_written=vectors, delay=delay, **{"continue": again})
     return dict(state, outcome=outcome)
@@ -1139,6 +1270,42 @@ def test_a_lineage_whose_first_batch_fails_is_retried_by_the_sweep(tmp_path, hom
         store.close()
 
 
+def test_a_final_reply_after_a_late_async_record_replaced_the_end_record_is_captured_by_the_next_run(
+        tmp_path, home, hermes, monkeypatch):
+    """REGRESSION (#2262): an async PostToolBatch record that lands after the session's end record
+    replaces it in the spool (one record per session), so the worker skips the settle. A final reply
+    written after that drain waits for the next run, whose sweep captures it from the cursor: every
+    transcript line in order, once. The transcript stays the source, so nothing is lost."""
+    path = _transcript(tmp_path, CONVERSATION[:-1])
+    hook = _hook()
+    _record(hook, home, path, event="Stop")
+    _record(hook, home, path, event="PostToolBatch")  # the late async hook
+    [spooled] = list((home / "spool").glob("*.json"))
+    assert json.loads(spooled.read_text(encoding="utf-8"))["event"] == "PostToolBatch"
+    settled = []
+    monkeypatch.setattr(cc, "_settle", lambda *args: settled.append(args))
+    assert cc.run_worker(home, hermes_home=hermes, settle_s=0)["complete"]
+    assert settled == []  # no end record was left to settle
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(CONVERSATION[-1]) + "\n")
+    final = "The word is ochre."
+    store = _open(home, hermes)
+    try:  # negative control: without the next run the final reply is absent
+        assert final not in [row[2] for row in _rows(store)]
+    finally:
+        store.close()
+    assert cc.run_worker(home, hermes_home=hermes, settle_s=0)["complete"]  # no fresh hook
+    store = _open(home, hermes)
+    try:
+        assert [row[1:3] for row in _rows(store)] == [("user", "find the secret word"),
+                                                      ("assistant", "Reading notes."),
+                                                      ("tool", "the secret word is ochre"),
+                                                      ("assistant", final)]
+    finally:
+        store.close()
+    assert not cc.pending(home)
+
+
 # -- round 2 re-review regressions -----------------------------------------------------
 
 def test_a_reader_cannot_attach_while_the_store_is_switched_after_close(home, hermes, monkeypatch):
@@ -1375,18 +1542,26 @@ def test_a_bounded_drain_never_waits_for_the_lock_and_the_next_worker_captures_e
 
 def test_a_bounded_drain_cut_by_its_deadline_keeps_whole_batches_and_its_record(tmp_path, home, hermes, monkeypatch):
     """A PreCompact drain that hits its bound keeps each batch it committed whole, leaves its
-    spool record, and the next worker captures the rest exactly once."""
+    spool record, and the next worker captures the rest exactly once.
+
+    The worker's clock is the real one plus an offset that jumps past the bound once the first
+    batch commits, so the bound passes exactly then however long the worker's startup takes
+    (#2198: a 0.2 s wall-clock bound could pass before the first batch on a slow runner)."""
     entries = [_entry("user", f"u{index}", f"line {index}") for index in range(9)]
     _record(_hook(), home, _transcript(tmp_path, entries))
     real_read, real_ingest = cc.read_lines, cc.ingest_lines
     monkeypatch.setattr(cc, "read_lines", lambda path, offset, **_kw: real_read(path, offset, max_lines=2))
+    offset = [0.0]
+    clock = SimpleNamespace(**{name: getattr(time, name) for name in dir(time) if not name.startswith("_")})
+    clock.monotonic = lambda: time.monotonic() + offset[0]
+    monkeypatch.setattr(cc, "time", clock)
 
-    def slow(store, lineage, cursor, lines):
+    def bounded(store, lineage, cursor, lines):
         result = real_ingest(store, lineage, cursor, lines)
-        time.sleep(0.3)  # the bound passes after this batch commits
+        offset[0] = 3600.0  # the bound passes after this batch commits
         return result
-    monkeypatch.setattr(cc, "ingest_lines", slow)
-    report = cc.run_worker(home, deadline_s=0.2, hermes_home=hermes, settle_s=0)
+    monkeypatch.setattr(cc, "ingest_lines", bounded)
+    report = cc.run_worker(home, deadline_s=60, hermes_home=hermes, settle_s=0)
     assert not report["complete"] and report["deadline"] and "lock" not in report and cc.pending(home)
     store = _open(home, hermes)
     try:
@@ -1394,6 +1569,7 @@ def test_a_bounded_drain_cut_by_its_deadline_keeps_whole_batches_and_its_record(
     finally:
         store.close()
     monkeypatch.setattr(cc, "ingest_lines", real_ingest)
+    monkeypatch.setattr(cc, "time", time)
     assert cc.run_worker(home, hermes_home=hermes, settle_s=0)["complete"]
     store = _open(home, hermes)
     try:

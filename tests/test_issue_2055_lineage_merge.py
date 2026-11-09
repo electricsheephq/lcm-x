@@ -199,6 +199,22 @@ def test_merge_pairs_require_stamp(engines):
     assert len(sql_rows(engine, "message_relations")) == 2
 
 
+def test_merge_pairs_never_give_a_linked_source_a_second_link(engines):
+    """A provisional row another writer already linked (here B2 -> B1, as the session-end todo writer does)
+    keeps that one link when its lineage is adopted; adoption still pairs the unlinked source (B1 -> A1)."""
+    engine = engines()
+    row = _m("user", "ok", 1.)
+    targets, _ = seed(engine, L, [row, row])
+    sources, _ = seed(engine, P, [row, row])
+    with engine._store.ingest_atomic():
+        engine._store.add_message_relations([[(sources[1], "possible_replay_of", sources[0], None, None)]])
+    adopt(engine)
+    pairs = [(r["store_id"], r["related_store_id"]) for r in sql_rows(engine, "message_relations")
+             if r["kind"] == "possible_replay_of"]
+    assert Counter(source for source, _ in pairs) == {sources[0]: 1, sources[1]: 1}, pairs
+    assert sorted(pairs) == sorted([(sources[0], targets[0]), (sources[1], sources[0])])
+
+
 @pytest.mark.parametrize("target_session,expected", [("S", 1), ("other", 0)])
 def test_merge_late_counted(engines, target_session, expected):
     engine = engines()
@@ -472,3 +488,33 @@ def test_merge_ordinal_overflow_keeps_both_histories(engines):
     assert adopt(engine) == P
     assert ledger_state(engine) == before and count(engine, "lineage_merge_failed") == 1
     assert not getattr(engine, "_ledger_adopted", ())
+
+
+def test_p1_gate_failed_adoption_then_later_ingests(engines, monkeypatch):
+    from tests.p1_gate import expect_from_view, record, store_outcome
+
+    engine = engines(sessions=[])
+    view = history()
+    engine.ingest(deepcopy(view[:2]))
+    resolution(engine, monkeypatch, L)
+    merge = ledger.merge_provisional
+    fired = []
+
+    def fail(*args, **kwargs):
+        merge(*args, **kwargs)
+        fired.append(True)
+        raise sqlite3.OperationalError("injected adoption savepoint failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(ledger, "merge_provisional", fail)
+        engine.ingest(deepcopy(view[:3]))
+    assert fired and count(engine, "lineage_merge_failed") >= 1
+    assert meta(engine, "adopted_from:" + P) is None
+    assert {row["lineage"] for row in sql_rows(engine, "occurrence_bindings")} == {P}
+    engine.ingest(deepcopy(view))
+    view += [_m("user", "new turn", 8.), _m("assistant", "new reply", 9.)]
+    engine.ingest(deepcopy(view))
+    assert contents(engine) == [row["content"] for row in view]
+    outcome = store_outcome(engine._store._conn, expect_from_view(view, "conv"))
+    record(dict(family="savepoint", boundary="adoption"), outcome, engine)
+    assert outcome["loss"] == outcome["silent"] == 0, outcome

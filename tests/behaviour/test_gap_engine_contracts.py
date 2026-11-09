@@ -192,7 +192,6 @@ def test_generated_payload_ref_is_recognized_without_file(tmp_path: Path) -> Non
     assert not externalize.is_generated_payload_ref_name("")
 
 
-@pytest.mark.xfail(strict=True, reason="known gap: evidence-pack fallback exceeds response cap; issue #1459")
 def test_evidence_pack_falls_back_without_partial_computation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     pack = importlib.import_module("hermes_lcm.evidence_pack")
     with harness.engine_context(tmp_path, window=32000) as engine:

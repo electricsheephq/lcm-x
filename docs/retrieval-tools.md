@@ -51,7 +51,76 @@ tool, even when its flag is enabled. The manifest retains all 16 declarations.
 | `lcm_status` | Show runtime health, context pressure, config, source lineage, and lifecycle stats. |
 | `lcm_inspect` | Read-only operator inventory for current-session lineage, message/frontier metadata, fresh tail, externalized refs/readability, compaction skip/no-op reasons, and matched ignore/stateless patterns. It returns metadata only; use `lcm_load_session`/`lcm_expand` when you need content. |
 | `lcm_doctor` | Run database, FTS, lifecycle, config, and context-pressure diagnostics. |
-| `lcm_memory` | Default-off read-only `lookup`/`list` over this profile. Lookup accepts a name and up to 8 aliases; returns mention counts, event/write-labelled first/last times (carried times marked `time_uncertain: carried`) and sessions over all matching rows, plus capped cited snippets and compatible assertion facts. Optional question ranks up to 5 mentions across all entity matches, independently of the card limit. List groups assertion subjects by namespace; without assertions there is no registry until E2. No writes or model calls. |
+| `lcm_memory` | Default-off read-only `lookup`/`list` over this profile. Lookup accepts a name and up to 8 aliases, each at most 256 characters; returns mention counts, event/write-labelled first/last times (carried times marked `time_uncertain: carried`) and sessions over all matching rows, plus capped cited snippets and compatible assertion facts. Optional question ranks up to 5 mentions across all entity matches, independently of the card limit. List groups assertion subjects by namespace; without assertions there is no registry until E2. No writes or model calls. |
+
+Set `recall_delivery_order="time"` (or `LCM_RECALL_DELIVERY_ORDER=time`) to deliver
+model-called `lcm_recall` hits oldest to newest by `observed_at`, after score-based
+selection and response caps. Untimed hits and summaries follow timed hits in
+score order; ties keep score order. The default `score` preserves existing output.
+Only time mode adds `provenance.delivery_order: "time"`; session delivery and
+internal recall consumers keep their existing order.
+
+Set `recall_summary_event_time: true` (or `LCM_RECALL_SUMMARY_EVENT_TIME=true`,
+which wins over the YAML key) to give model-called `lcm_recall` summary hits, and
+session-delivery summary leads, the span of their events:
+
+```yaml
+lcm:
+  recall_summary_event_time: true
+```
+
+`event_time_start` and `event_time_end` are the earliest and latest host
+`observed_at` over the summary's stored source messages, through condensed nodes,
+formatted like a message's `event_time`; sources without a host time, or no longer
+stored (for example after a session purge), do not count. When any stamped source carries a
+carried stamp, the summary also has `time_uncertain: "carried"`. A summary whose sources carry no host
+time has neither field. A summary hit's existing `timestamp` is unchanged: an LCM storage time
+(the node's `latest_at`, else its `created_at`), not an event time. Session leads carry no `timestamp`.
+The read runs inside the recall deadline; a late or failed read omits the fields
+from every summary and sets `provenance.summary_event_time_unavailable` to
+`deadline` or `read_error`. The fields count toward the response cap like
+`event_time`: a response over the cap drops them before any hit and sets
+`event_time_unavailable: true` (reason `response_cap`, or an earlier `deadline` or
+`read_error` reason, which is kept; the marker is left out only when it would itself
+evict a hit), so a missing span there says nothing about the summary. In session
+delivery, spans are added to summary leads after the leads are admitted. A lead
+whose span pushes the payload over the session budget is dropped whole, like any
+lead that does not fit, and this sets no marker. Over budget, summary leads are
+dropped before any evidence group, so a span never displaces evidence. Internal
+recall consumers keep their existing output.
+
+Set `recall_adjacent_reply=true` (or `LCM_RECALL_ADJACENT_REPLY=true`; default
+`false`) to insert the next stored reply after the rank-1 raw message hit and
+after question hits among ranks 1–3 of the delivered window. The reply stays in
+the same session and conversation, respects session exclusions, comes from the
+other conversational role (user ↔ assistant), and is skipped when it carries an
+event time older than its source (a re-stored or imported row). The step runs
+before the FTS anchor (#950), so the anchored hit stays inside the window. Tool rows, tool-call rows, empty
+replies and subagent replies are skipped without looking further. Already
+selected neighbours stay put; neighbours deeper in the pool move up without
+duplication and keep their own score and arms. Newly read replies inherit their
+source score. Both carry `adjacent_to` and arm `adjacent`, and shift the tail beyond the hit limit without deleting it.
+`provenance.adjacent_reply` lists the inserted/moved `{store_id, after_store_id}`
+pairs whose reply is among the final delivered hits (also as a collapsed
+duplicate), after answer_ready selection, refill and the response cap. Its source
+can be absent from the hits when the caller has already seen it. In answer_ready
+the list is left out when it does not fit the cap; the hit still carries
+`adjacent_to`. At most three single-row reads share the recall deadline; a failed read
+or deadline discards the whole step and adds `provenance.adjacent_reply_unavailable`.
+Citation, session-density and character caps still apply; time delivery order
+still sorts the selected hits. Session delivery and internal callers skip the
+step. This is configuration, not a model-visible tool argument.
+
+`recall_snippet_window_hits` (env `LCM_RECALL_SNIPPET_WINDOW_HITS`, YAML `lcm.recall_snippet_window_hits`) is off by default (`0`). Set N (clamped to 25) to give the first N selected message-excerpt hits in `detail="snippets"`, from chunk (vector) or keyword search, windows of up to 2,400 characters centred on the matched chunk, else the keyword match, else the query match; shorter messages come back whole. Each window carries `snippet_window` offsets, lengths and truncation metadata. Summary hits, adjacent replies and hits without hydrated content keep their existing snippets. Ranking and selection are unchanged. Larger snippets can mean fewer hits fit under `response_char_cap`; the response then sets `response_cap_truncated: true`. A skipped window read keeps the original snippets and reports `snippet_window_skipped` (`deadline` or `read_error`). Proactive recall ignores this setting. `answer_ready` and `delivery_unit="session"` are unchanged. Invalid values (including bools and negatives) warn and use `0`; environment overrides YAML.
+
+- `recall_extra_entries` (env `LCM_RECALL_EXTRA_ENTRIES`, YAML `lcm.recall_extra_entries`; environment overrides YAML) is off by default (`0`). The value is a cap (clamped to 25); a call appends at most min(cap, floor(L/2)) extras from ranks L+1.. in snippets-only hits delivery, where L is the call's delivered limit (`limit` clamped to 25): at cap 25, L=20 → 10 extras and L=25 → 12. Extras are not counted in `total_results`; the candidate pool and rerank window are still sized from L. Each extra has exactly `kind`, `store_id`, `session_id`, `event_time`, `window` (up to 300 characters centred like snippet windows), and `extra=true`; `event_time` is the row's own host time, or null for summaries, missing rows and rows whose time was carried from a neighbour; summaries and missing rows use their own snippet. Duplicates of full hits (including `duplicate_store_ids`) or earlier extras are skipped without refill. Full hits and existing envelope fields stay unchanged; extras are dropped from the end to fit the response cap. A skipped read reports `extra_entries_skipped` (`deadline` or `read_error`). Response-cap truncation of full hits or exhausted ranking gives no extras or reason flag. Internal recall, `answer_ready` and session delivery ignore it. Invalid values warn and use `0`.
+
+Example opt-in in `config.yaml`:
+
+```yaml
+lcm:
+  recall_snippet_window_hits: 5
+```
 
 ### Retrieval contract
 

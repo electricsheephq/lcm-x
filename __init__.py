@@ -255,6 +255,8 @@ def _answer_ready_baseline(active_engine, question: str, payload: dict):
             "include_occurrence_time": True,
         },
         delivery_unit="hits",
+        delivery_order="score", adjacent_reply=False,
+        summary_event_time=False,
     )
     recalled = json.loads(raw) if isinstance(raw, str) else raw
     hits = recalled.get("hits") if isinstance(recalled, dict) else None
@@ -335,7 +337,8 @@ def _pre_llm_context(active_engine, payload: dict) -> dict | None:
                 baseline_refs=baseline_refs,
                 question_as_of=question_date,
                 retrieve=lambda recall_args: active_engine.handle_tool_call(
-                    "lcm_recall", recall_args, delivery_unit="hits"
+                    "lcm_recall", recall_args, delivery_unit="hits", delivery_order="score", adjacent_reply=False,
+                    summary_event_time=False,
                 ),
                 enabled=True,
                 render_baseline_context=baseline_was_internal,
@@ -585,6 +588,9 @@ def register(ctx):
         hermes_home = lcm_env_get("HERMES_HOME", os.path.expanduser("~/.hermes"))
 
     engine = LCMEngine(config=config, hermes_home=hermes_home)
+    if _env_flag_enabled("LCM_RECORDER_ENABLED", default=False):  # #2243: off imports and installs nothing
+        from . import recorder
+        recorder.install(ctx, engine)
 
     # Hermes selects the engine whose ``name`` equals ``context.engine``; keep a
     # legacy ``context.engine: lcm`` config working, loudly (#471).
@@ -661,6 +667,57 @@ def register(ctx):
                 exc,
             )
 
+        def _on_live_delegate_child_list(**payload):
+            # #2482: the host hands a live delegated child's whole list over at pre_llm_call and before every model
+            # call (pre_api_request); storing it there keeps an interrupted child's rows. Always returns None.
+            try:
+                if not active:
+                    return None  # another context engine serves this host: LCM-X stores nothing (as post_llm_call)
+                from . import aux_session
+
+                session_id = str(payload.get("session_id") or "")
+                root = aux_session.live_delegate_child_root(session_id) if session_id else ""
+                if not root or not aux_session.explicit_subagent_lineage(root):
+                    return None  # not a live delegated child bound in this process: main's behaviour
+                child_engine, storage = aux_session.live_delegate_child_engine(session_id)
+                if child_engine is None:
+                    return None  # the child's own engine is gone: its end store (main's behaviour) is all that runs
+                history = payload.get("conversation_history")
+                if not isinstance(history, list) or not history:
+                    return None
+                history = list(history)
+                platform = str(payload.get("platform") or "")
+                wait = aux_session._LIVE_CHILD_STORE_WAIT_S
+
+                outcome: dict = {}
+
+                def store_child(active_engine):
+                    if aux_session.live_child_storage_identity(active_engine) != storage:
+                        outcome["moved"] = True  # the engine now serves another profile: never write there early
+                        return 0
+                    return active_engine._store_delegate_child_turn(
+                        session_id, history, platform=platform, lock_wait=wait, outcome=outcome,
+                    )
+
+                def store():
+                    """True only when the store ran: not skipped as busy, not failed, not refused by a closed engine."""
+                    # Only the child's own engine: it serves the child's profile, as main's end store does. Never the
+                    # plugin prototype, which may serve another profile. It never binds and never ingests.
+                    outcome.clear()
+                    result = use_lcm_engine(child_engine, store_child, timeout=wait)
+                    if outcome.get("moved"):
+                        aux_session.warn_live_child_moved(session_id)
+                        return False
+                    if result.status is ActiveEngineUseStatus.BUSY or outcome.get("skipped"):
+                        return aux_session.LIVE_STORE_RETRY  # busy: the worker retries this list a few times
+                    return bool(result.used and isinstance(result.value, int) and outcome.get("linked")
+                                and "error" not in outcome)
+
+                aux_session.run_live_child_store(session_id, store, rows=len(history))
+            except Exception as exc:
+                logger.debug("LCM live delegated-child store error: %s", exc)
+            return None
+
         # Hermes invokes this hook after the context engine has received
         # on_session_start(). Resolve through LCM's own registry so merely
         # loading the plugin cannot inject guidance when another context
@@ -671,6 +728,7 @@ def register(ctx):
             def _on_pre_llm_call(**payload):
                 from .sender_capture import create_pending
 
+                _on_live_delegate_child_list(**payload)  # #2482; returns None, never raises
                 session_id = str(payload.get("session_id") or "")
                 conversation_id = str(
                     payload.get("conversation_id")
@@ -869,6 +927,8 @@ def register(ctx):
                                 return
 
                 if not result.used:
+                    if result.status is ActiveEngineUseStatus.RESIDENT_ENGINE_CONFLICT:
+                        engine._log_session_ingest_outcome(session_id, reason="resident_engine_conflict")
                     logger.warning(
                         "LCM post_llm_call skipped ingest: stable engine use ended with %s",
                         result.status.value,
@@ -880,6 +940,10 @@ def register(ctx):
         if callable(register_hook):
             register_hook("post_llm_call", _on_post_llm_call)
             logger.debug("LCM registered post_llm_call hook for per-turn ingest")
+            try:
+                register_hook("pre_api_request", _on_live_delegate_child_list)
+            except Exception as exc:
+                logger.debug("LCM could not register the pre_api_request live delegated-child hook: %s", exc)
         else:
             logger.warning(
                 "LCM-X: this Hermes host has no plugin register_hook (below the supported floor); "

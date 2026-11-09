@@ -857,11 +857,15 @@ def _scan_fts_repair(engine) -> dict[str, Any]:
         "messages_fts": build_message_fts_spec(),
         "nodes_fts": build_nodes_fts_spec(),
     }
-    conn = engine._store.connection
+    store = engine._store
+    conn = store.connection
     for label, spec in specs.items():
         try:
             structural_needs_repair = external_content_fts_needs_repair(conn, spec)
-            integrity_check = check_external_content_fts_integrity(conn, spec)
+            # #2345: the integrity check's SAVEPOINT/ROLLBACK TO must not interleave
+            # with a foreground ingest's rows on this shared connection.
+            with store._write_lock:
+                integrity_check = check_external_content_fts_integrity(conn, spec)
             integrity_status = str(integrity_check.get("status") or "fail")
             needs_repair = structural_needs_repair or integrity_status == "fail"
             content_count = int(conn.execute(
@@ -934,15 +938,19 @@ def _doctor_repair_apply_text(engine) -> str:
     # via a race (F3).
     join_background_integrity_scans()
 
-    conn = engine._store.connection
+    store = engine._store
+    conn = store.connection
     try:
-        messages_result = repair_external_content_fts(conn, build_message_fts_spec())
-        nodes_result = repair_external_content_fts(conn, build_nodes_fts_spec())
-        with conn:
-            conn.execute("BEGIN IMMEDIATE")
-            _create_stem_fts(conn, build_message_stem_fts_spec())
-            conn.executemany("INSERT OR REPLACE INTO metadata(key, value) VALUES(?, ?)",
-                             [("fts_stem_state", "backfilling"), ("fts_stem_reset", "1")])
+        # #2345: the store write lock keeps a concurrent foreground ingest on this
+        # shared connection out of these transactions. The FTS helpers own their
+        # own BEGIN/COMMIT; the stem setup joins the store's transaction owner.
+        with store._write_lock:
+            messages_result = repair_external_content_fts(conn, build_message_fts_spec())
+            nodes_result = repair_external_content_fts(conn, build_nodes_fts_spec())
+            with store.atomic(immediate=True):
+                _create_stem_fts(conn, build_message_stem_fts_spec())
+                conn.executemany("INSERT OR REPLACE INTO metadata(key, value) VALUES(?, ?)",
+                                 [("fts_stem_state", "backfilling"), ("fts_stem_reset", "1")])
         dispatch_background_stem_backfill(conn, build_message_stem_fts_spec())
     except sqlite3.Error as exc:
         return "\n".join([
@@ -1393,7 +1401,8 @@ def _delete_clean_candidates_atomically(engine, session_ids: set[str]) -> dict[s
     apply is destructive, so do the coordinated deletes on one connection to
     avoid half-cleaned state if a later table delete fails.
     """
-    conn = engine._store.connection
+    store = engine._store
+    conn = store.connection
     # Protect the actively-bound session id, not current_session_id. While a
     # cron tick has rebound the engine, _session_id is the row the engine is
     # actively writing to via lifecycle hooks; deleting it during cleanup
@@ -1409,8 +1418,10 @@ def _delete_clean_candidates_atomically(engine, session_ids: set[str]) -> dict[s
             "lifecycle_skipped": 0,
         }
 
-    try:
-        conn.execute("BEGIN IMMEDIATE")
+    # #2345: own the transaction under the store write lock, so a concurrent
+    # foreground ingest on this shared connection commits first instead of
+    # being rolled back by a failed BEGIN here.
+    with store._write_lock, store.atomic(immediate=True):
         SummaryDAG.stage_delete_session_scope(conn, session_ids)
         scope_table = SummaryDAG.DELETE_SESSION_SCOPE_TABLE
         # Capture the store_ids about to be deleted so their raw-history chunks
@@ -1523,10 +1534,6 @@ def _delete_clean_candidates_atomically(engine, session_ids: set[str]) -> dict[s
             )
             lifecycle_deleted += cur.rowcount if cur.rowcount is not None else 0
         lifecycle_skipped = scoped_count - lifecycle_deleted
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
 
     return {
         "messages_deleted": msg_cur.rowcount if msg_cur.rowcount is not None else 0,

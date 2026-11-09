@@ -56,16 +56,22 @@ def tool_cell(**dispatch):
         {"name": n, "args": a} for n, a in PLAN]}]}
 
 
-def make(tmp_path, *, rows, events, nodes=(), phase=None, sids=None, parents=None, host=None, **cell_kw):
+def make(tmp_path, *, rows, events, nodes=(), phase=None, sids=None, parents=None, host=None,
+         host_occurrences=None, observed=None, **cell_kw):
     d = tmp_path / "cell"
     (d / "db").mkdir(parents=True)
-    if parents is not None or host is not None:  # host: state.db (session, role, content, active) rows
+    if parents is not None or host is not None or host_occurrences is not None:
         con = sqlite3.connect(d / "db" / "state.db")
         con.execute("create table sessions (id text primary key, parent_session_id text)")
         con.executemany("insert into sessions values (?,?)", (parents or {"S0": None}).items())
         if host is not None:
             con.execute("create table messages (id integer primary key, session_id text, role text, content text, active integer)")
             con.executemany("insert into messages (session_id, role, content, active) values (?,?,?,?)", host)
+        elif host_occurrences is not None:
+            con.execute("create table messages (id integer primary key, session_id text, role text, content text,"
+                        " tool_calls text, tool_call_id text, timestamp real, active integer default 1)")
+            con.executemany("insert into messages (session_id, role, content, tool_calls, tool_call_id, timestamp)"
+                            " values (?,?,?,?,?,?)", host_occurrences)
         con.commit()
         con.close()
     con = sqlite3.connect(d / "db" / "lcm.db")
@@ -78,6 +84,9 @@ def make(tmp_path, *, rows, events, nodes=(), phase=None, sids=None, parents=Non
         con.execute("insert into messages values (?,?,?,?,?,?,?)", (i, sid, role, content, *(rest + [None, None])[:2], i * 10.0))
     for i, ids in enumerate(nodes, 1):
         con.execute("insert into summary_nodes values (?,?,?,?,?,?)", (i, "S0", 0, json.dumps(ids), "messages", 1.0))
+    if observed is not None:
+        con.execute("alter table messages add column observed_at real")
+        con.executemany("update messages set observed_at=? where store_id=?", [(ts, i) for i, ts in enumerate(observed, 1)])
     con.commit()
     con.close()
     comp = [{"phase": "A", "turn": i + 1, "event": "compaction", "compression_status": "compacted", "depth0_nodes": i + 1}
@@ -364,7 +373,8 @@ FLOOR_SHA, REF_SHA = "345cd2b057a452236de401d3534b8502a7465e8d", "f97608f178d1ff
     (True, True, ("n0", "n1"), "FAIL", 2, True, False),  # the notice is never an acceptable stored body
     (True, False, ("r0", "r1"), "FAIL", 0, True, False),  # no dispatch sha (an older transcript): nothing is licensed
     (False, True, ("r0", "r1"), "FAIL", 0, True, False),  # the probe did not see the host's own notice: nothing is licensed
-    (True, True, ("r0", "r1"), "FAIL", 0, False, False),  # a failed dispatch is never licensed
+    # #1098: a semantically failed result is still licensed and stored as dispatched; the cell fails on the result
+    (True, True, ("r0", "r1"), "FAIL", 2, False, False),
     (True, True, ("r0", "r1"), "FAIL", 2, True, True),  # a licensed call whose stored row is lost still fails
 ])
 def test_b2_scores_the_dispatched_result_behind_a_host_wire_notice(tmp_path, flagged, dispatch_sha, stored, verdict, licensed,
@@ -385,6 +395,8 @@ def test_b2_scores_the_dispatched_result_behind_a_host_wire_notice(tmp_path, fla
     assert lic["rows"] == licensed and [r["id"] for r in lic["records"]] == ["call_T01_0_0", "call_T01_0_1"][:licensed]
     if licensed:
         assert lic["records"][0] == {"id": "call_T01_0_0", "notice_sha256": sha("n0"), "result_sha256": sha("r0")}
+    if not dispatch_ok:  # #1098: no storage findings on top of the failed result
+        assert "B2" not in out["failed_bars"], out["failed_bars"]
 
 
 @pytest.mark.parametrize("host_sha", [REF_SHA, None])

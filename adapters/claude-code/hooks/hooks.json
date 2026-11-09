@@ -1,12 +1,17 @@
 {
-  "description": "LCM-X capture: each hook records which transcript changed and starts the capture worker. Hooks never block or print.",
+  "description": "LCM-X capture: each hook records which transcript changed and starts the capture worker. Hooks never block or print; PostToolBatch runs in the background.",
   "hooks": {
     "SessionStart": [
       {
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/bin/lcmx_hook.py\"",
+            "command": "python3",
+            "args": [
+              "-I",
+              "-S",
+              "${CLAUDE_PLUGIN_ROOT}/bin/lcmx_hook.py"
+            ],
             "timeout": 5
           }
         ]
@@ -17,7 +22,12 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/bin/lcmx_hook.py\"",
+            "command": "python3",
+            "args": [
+              "-I",
+              "-S",
+              "${CLAUDE_PLUGIN_ROOT}/bin/lcmx_hook.py"
+            ],
             "timeout": 5
           }
         ]
@@ -28,8 +38,14 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/bin/lcmx_hook.py\"",
-            "timeout": 5
+            "command": "python3",
+            "args": [
+              "-I",
+              "-S",
+              "${CLAUDE_PLUGIN_ROOT}/bin/lcmx_hook.py"
+            ],
+            "timeout": 5,
+            "async": true
           }
         ]
       }
@@ -39,7 +55,12 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/bin/lcmx_hook.py\"",
+            "command": "python3",
+            "args": [
+              "-I",
+              "-S",
+              "${CLAUDE_PLUGIN_ROOT}/bin/lcmx_hook.py"
+            ],
             "timeout": 5
           }
         ]
@@ -50,7 +71,12 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/bin/lcmx_hook.py\"",
+            "command": "python3",
+            "args": [
+              "-I",
+              "-S",
+              "${CLAUDE_PLUGIN_ROOT}/bin/lcmx_hook.py"
+            ],
             "timeout": 5
           }
         ]
@@ -61,7 +87,12 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/bin/lcmx_hook.py\"",
+            "command": "python3",
+            "args": [
+              "-I",
+              "-S",
+              "${CLAUDE_PLUGIN_ROOT}/bin/lcmx_hook.py"
+            ],
             "timeout": 5
           }
         ]
@@ -72,7 +103,12 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/bin/lcmx_hook.py\"",
+            "command": "python3",
+            "args": [
+              "-I",
+              "-S",
+              "${CLAUDE_PLUGIN_ROOT}/bin/lcmx_hook.py"
+            ],
             "timeout": 15
           }
         ]
@@ -83,7 +119,12 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/bin/lcmx_hook.py\"",
+            "command": "python3",
+            "args": [
+              "-I",
+              "-S",
+              "${CLAUDE_PLUGIN_ROOT}/bin/lcmx_hook.py"
+            ],
             "timeout": 5
           }
         ]
@@ -94,7 +135,12 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/bin/lcmx_hook.py\"",
+            "command": "python3",
+            "args": [
+              "-I",
+              "-S",
+              "${CLAUDE_PLUGIN_ROOT}/bin/lcmx_hook.py"
+            ],
             "timeout": 5
           }
         ]

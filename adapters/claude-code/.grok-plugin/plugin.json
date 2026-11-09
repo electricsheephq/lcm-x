@@ -1,0 +1,18 @@
+{
+  "name": "lcm-x",
+  "version": "0.1.0",
+  "description": "LCM-X memory for Claude Code: captures every message and tool result of your sessions into a local lossless store, and lets the agent search and read it. Native compaction is unchanged.",
+  "author": {
+    "name": "Electric Sheep"
+  },
+  "homepage": "https://github.com/electricsheephq/lcm-x",
+  "repository": "https://github.com/electricsheephq/lcm-x",
+  "license": "MIT",
+  "keywords": [
+    "memory",
+    "recall",
+    "lossless",
+    "mcp"
+  ],
+  "hooks": "./.grok-plugin/hooks.json"
+}

@@ -25,6 +25,25 @@ If optional slash commands are enabled, `/lcm status` and `/lcm doctor` expose t
 
 When `/lcm` runs with session context, it compares the task-local session profile with the serving engine's captured home through the host profile helper. Different known profiles refuse every command, reads included: run it from a process launched for that profile. Equal known profiles keep normal output, including cold starts with no resident engine. If either profile is unknown, read commands (`status`, `help`, `doctor clean`, `doctor clean lifecycle`, `doctor source`, `doctor retention`, `rotate`, `rollups`, `preset show`, `preset suggest`) run, and when no session engine resolved they append `store: …` naming the opened store; inspect it before relying on the result. Write commands, including plain `doctor`, fail closed unless a resolved session engine is bound to the invoking session. Without session context (a local CLI), commands run against the process engine and append the store line.
 
+## SQLite connections and file descriptors
+
+In `engine.py`, `_ensure_storage` opens storage lazily;
+`_bind_storage` creates the message, DAG and lifecycle stores (three core
+connections per bound engine). `clone_for_agent` creates a separate runtime engine,
+so count clones that actually opened storage, not unused prototypes. The core
+stores open their handles through `sqlite_session.py`
+`open_connection`. Optional assertion/entity stores each add one; query views and
+adaptive retrieval share a query-view connection. Vector stores and temporary
+rollup, tool, integrity and embedding work can add more. Pending tails can retain
+engines or detached stores; a compaction still running at shutdown can delay close.
+
+Use `lsof -nP -p "$PID"` for each process, matching the configured database path
+from `lcm_status`. Count numeric FD rows with that exact NAME separately from WAL,
+SHM, `mem` and deleted-file rows. Do not infer a fixed connection-to-FD ratio or
+declare a leak from a flat count. Compare repeated samples with agent/maintenance
+activity; investigate sustained growth or deleted descriptors. See the operator
+guide's "SQLite connection and descriptor counts" section.
+
 ## Survival-fit history
 
 `lcm_doctor` returns durable survival-fit history in the top-level `survival_fit` field,
@@ -52,6 +71,11 @@ Cleanup apply is separately feature-gated. Never infer permission to enable it f
 
 - LOCAL catch-up: `/lcm status` exposes `embedding_incremental_last_pass`; doctor readiness includes the database's maintenance outcome. `model_preparing`, `model_unavailable`, `lease_held`, `circuit_open` and `row_backoff` describe deferred work; `no_progress`, `model_prepare_exhausted`, refusal/error or `queue_capacity_exhausted` need inspection. Summary coverage alone does not certify chunk coverage. Full-text recall remains available while semantic coverage is incomplete.
 - Unbound status after restart: send a normal message, then check again.
+- `LCM shutdown drain timed out ... child=<12 hex> has up to N handed-over row(s) not yet stored ... (#2483)`: a delegated
+  child's early store was still waiting on a busy database when the engine shut down. Those rows are lost only if
+  the process ends before the store lands; the hashed id names the child, never its session id.
+- `LCM live delegated-child store skipped: the child's engine now serves another profile ...`: the child's engine was
+  rebound after the child started, so LCM-X wrote nothing early. The child's rows still come from its end store.
 - Database exists but stays empty: verify plugin enablement, `context.engine`, profile, database path, and ignore/stateless patterns.
 - Weak exact recall: verify source rows exist, query construction/scope is correct, summary health is sound, and embedding coverage/provenance matches the requested mode.
 - Conflicting summary and raw evidence: prefer the newer exact raw evidence and inspect lineage.

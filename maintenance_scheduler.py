@@ -422,7 +422,7 @@ def _flush_pending_tails_at_exit() -> None:
             if acquired:
                 engine._retry_pending_session_tails(deadline=deadline, exiting=True)
             else:
-                engine._warn_unflushed_session_tails("lifecycle lock")
+                engine._warn_unflushed_session_tails("lifecycle lock", deadline=deadline)
 
 
 atexit.register(_flush_pending_tails_at_exit)

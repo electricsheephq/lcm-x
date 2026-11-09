@@ -5,6 +5,7 @@ from pathlib import Path
 import importlib.util
 import sqlite3
 import sys
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -17,6 +18,7 @@ from hermes_lcm.dag import SummaryNode
 from hermes_lcm.db_bootstrap import check_external_content_fts_integrity
 from hermes_lcm.diagnostics import doctor_guidance_for_check
 from hermes_lcm.engine import LCMEngine
+from hermes_lcm.sqlite_session import TransactionOwner
 from hermes_lcm.store import build_message_fts_spec
 
 
@@ -490,7 +492,7 @@ def test_lcm_status_reports_runtime_identity(engine):
     repo_root = Path(__file__).resolve().parent.parent
 
     assert "plugin_name: hermes-lcm-x" in result
-    assert "plugin_version: 0.29.1" in result
+    assert "plugin_version: 0.30.0" in result
     assert f"plugin_path: {repo_root}" in result
     assert "module_path:" in result
     assert "database_path_source: config.database_path" in result
@@ -530,7 +532,7 @@ def test_lcm_doctor_reports_health_checks(engine):
     assert "messages_fts: ok" in result
     assert "nodes_fts: ok" in result
     assert "plugin_name: hermes-lcm-x" in result
-    assert "plugin_version: 0.29.1" in result
+    assert "plugin_version: 0.30.0" in result
     assert f"plugin_path: {repo_root}" in result
     assert "plugin_git_commit:" in result
     assert "triage_guidance:\n- none" in result
@@ -1390,6 +1392,7 @@ def test_lcm_doctor_repair_dry_run_works_with_read_only_database(tmp_path):
 
     class FakeStore:
         _conn = ro_conn
+        _write_lock = threading.RLock()
 
         @property
         def connection(self):
@@ -1779,8 +1782,11 @@ def test_clean_apply_stages_250001_sessions_and_bounds_node_purge_batches(tmp_pa
         assert connection is conn
         batches.append(list(batch))
 
+    lock = threading.RLock()  # #2345: clean apply owns its transaction under the store write lock
+    owner = TransactionOwner(lock)
     engine = SimpleNamespace(
-        _store=SimpleNamespace(connection=conn),
+        _store=SimpleNamespace(connection=conn, _write_lock=lock,
+                               atomic=lambda immediate=False: owner.atomic(conn, immediate=immediate)),
         _session_id="",
         _purge_embeddings_for_nodes=purge,
     )

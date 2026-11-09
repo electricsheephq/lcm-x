@@ -49,7 +49,9 @@ def _locked_flush(engine, caplog):
     finally:
         locker.execute("ROLLBACK")
         locker.close()
-    assert "retry pending at the next session start or shutdown" in caplog.text
+    assert ("retry pending at the next session start or end in this process, "
+            "at engine shutdown, or at a normal interpreter exit (not os._exit)") in caplog.text
+    assert "session=S unflushed=" in caplog.text
     assert "may be absent" not in caplog.text
     assert _contents(engine) == [message["content"] for message in messages[:2]]
     return messages
@@ -108,6 +110,30 @@ def test_no_pending_tail_does_not_warn(engines, caplog):
         engine.on_session_end("S", messages)
     assert "session-end" not in caplog.text
     assert "unflushed=0" not in caplog.text
+
+
+def test_rebound_session_locked_flush_reports_unknown(engines, caplog):
+    original = engines()
+    original.on_session_start("S", platform="cli")
+    messages = [{"role": "user", "content": f"stored turn {i}"} for i in range(6)]
+    original.ingest(messages)
+    original.shutdown()
+    rebound = engines()
+    rebound.on_session_start("S", platform="cli")
+    assert rebound._ingest_cursor == 0 and rebound._ingest_cursor_needs_reconcile
+    messages.append({"role": "user", "content": "new pending turn"})
+    locker = sqlite3.connect(str(rebound._store.db_path), isolation_level=None)
+    locker.execute("BEGIN IMMEDIATE")
+    try:
+        with caplog.at_level(logging.WARNING):
+            rebound.on_session_end("S", messages)
+    finally:
+        locker.rollback()
+        locker.close()
+    assert "SQLite lock" in caplog.text
+    assert "unflushed=unknown" in caplog.text
+    assert f"unflushed={len(messages)}" not in caplog.text
+    assert _contents(rebound) == [row["content"] for row in messages[:-1]]
 
 
 def test_interrupted_flush_uses_pre_attempt_count(engines, monkeypatch, caplog):

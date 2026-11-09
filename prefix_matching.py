@@ -44,15 +44,15 @@ class PrefixMatchingMixin:
         prefix_count = self._session_end_store_prefix_count(session_id, messages)
         return prefix_count is not None and prefix_count > 0
 
-    def _session_end_prefix_compare_value(self, value: Any, *, session_id: str) -> Any:
+    def _session_end_prefix_compare_value(self, value: Any, *, session_id: str, hermes_home=None) -> Any:
         if isinstance(value, dict):
             return {
-                key: self._session_end_prefix_compare_value(child, session_id=session_id)
+                key: self._session_end_prefix_compare_value(child, session_id=session_id, hermes_home=hermes_home)
                 for key, child in value.items()
             }
         if isinstance(value, list):
             return [
-                self._session_end_prefix_compare_value(child, session_id=session_id)
+                self._session_end_prefix_compare_value(child, session_id=session_id, hermes_home=hermes_home)
                 for child in value
             ]
         if not isinstance(value, str):
@@ -61,7 +61,7 @@ class PrefixMatchingMixin:
         text = restore_ingest_payload_placeholders(
             value,
             config=self._config,
-            hermes_home=self._hermes_home,
+            hermes_home=self._hermes_home if hermes_home is None else hermes_home,
             session_id=session_id,
         )
         stripped = text.strip()
@@ -74,7 +74,7 @@ class PrefixMatchingMixin:
             payload = load_externalized_payload(
                 ingest_refs[0],
                 config=self._config,
-                hermes_home=self._hermes_home,
+                hermes_home=self._hermes_home if hermes_home is None else hermes_home,
             )
             if payload is not None:
                 payload_session_id = str(payload.get("session_id") or "")
@@ -88,7 +88,7 @@ class PrefixMatchingMixin:
             payload = load_externalized_payload(
                 ref or "",
                 config=self._config,
-                hermes_home=self._hermes_home,
+                hermes_home=self._hermes_home if hermes_home is None else hermes_home,
             )
             if payload is not None:
                 payload_session_id = str(payload.get("session_id") or "")
@@ -102,11 +102,11 @@ class PrefixMatchingMixin:
         self,
         message: Dict[str, Any],
         *,
-        session_id: str,
+        session_id: str, hermes_home=None,
     ) -> str:
         content = self._session_end_prefix_compare_value(
             (message or {}).get("content"),
-            session_id=session_id,
+            session_id=session_id, hermes_home=hermes_home,
         )
         content = redact_sensitive_value(
             content,
@@ -119,11 +119,11 @@ class PrefixMatchingMixin:
         self,
         message: Dict[str, Any],
         *,
-        session_id: str,
+        session_id: str, hermes_home=None,
     ) -> str:
         tool_calls = self._session_end_prefix_compare_value(
             (message or {}).get("tool_calls"),
-            session_id=session_id,
+            session_id=session_id, hermes_home=hermes_home,
         )
         tool_calls = redact_sensitive_value(
             tool_calls,
@@ -144,14 +144,14 @@ class PrefixMatchingMixin:
         self,
         message: Dict[str, Any],
         *,
-        session_id: str,
+        session_id: str, hermes_home=None,
     ) -> tuple[str, str, str, str, str]:
         return (
             str((message or {}).get("role") or ""),
-            self._session_end_prefix_compare_content(message, session_id=session_id),
+            self._session_end_prefix_compare_content(message, session_id=session_id, hermes_home=hermes_home),
             str((message or {}).get("tool_call_id") or ""),
             str((message or {}).get("tool_name") or ""),
-            self._session_end_prefix_compare_tool_calls(message, session_id=session_id),
+            self._session_end_prefix_compare_tool_calls(message, session_id=session_id, hermes_home=hermes_home),
         )
 
     def _session_end_store_prefix_count(
@@ -318,6 +318,7 @@ class PrefixMatchingMixin:
         *,
         source: str,
         conversation_id: str,
+        store=None, hermes_home=None, context_window_tokens=None,
     ) -> list[int]:
         if not session_id or not suffix:
             return []
@@ -335,22 +336,28 @@ class PrefixMatchingMixin:
             kept.append(msg)
         if not kept:
             return []
+        store = self._store if store is None else store
         protected_messages = protect_messages_for_ingest(
             kept,
             session_id=session_id,
             config=self._config,
-            hermes_home=self._hermes_home,
-            context_window_tokens=self._store.get_context_window_tokens(session_id),
+            hermes_home=self._hermes_home if hermes_home is None else hermes_home,
+            context_window_tokens=(store.get_context_window_tokens(session_id)
+                                   if context_window_tokens is None else context_window_tokens),
         )
-        host_uids = self._host_uid_capture(kept, kept, 0, 0, None, (), session_id=session_id)  # v0.26.0 shadow
-        store_ids = self._store._append_protected_batch(
+        host_uids = self._host_uid_capture(kept, kept, 0, 0, None, (), session_id=session_id,
+            **(dict(store=store) if hermes_home is not None else {}))  # v0.26.0 shadow
+        if host_uids is not None and hermes_home is not None:
+            host_uids["conversation_id"] = conversation_id
+        store_ids = store._append_protected_batch(
             session_id,
             protected_messages,
             [count_message_tokens(msg) for msg in protected_messages],
             source=source,
             conversation_id=conversation_id,
-            metadata_factory=self._real_user_scaffold_metadata_rows,
+            metadata_factory=lambda msg, store_id: self._real_user_scaffold_metadata_rows(msg, store_id, bound=hermes_home is None),
             metadata_messages=kept,
         )
-        self._host_uid_shadow(host_uids, dict(enumerate(store_ids)))  # stored-new under that session's lineage
+        self._host_uid_shadow(host_uids, dict(enumerate(store_ids)),
+                              **(dict(store=store, hermes_home=hermes_home) if hermes_home is not None else {}))  # stored-new under that session's lineage
         return store_ids

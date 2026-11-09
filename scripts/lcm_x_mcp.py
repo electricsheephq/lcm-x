@@ -3,7 +3,7 @@
 
 Register it with Claude Code (run with the Hermes venv python):
 
-    claude mcp add lcm-x -- <hermes-venv-python> <plugin_dir>/scripts/lcm_x_mcp.py \\
+    claude mcp add lcm-x -- <hermes-venv-python> <lcm-x-checkout>/scripts/lcm_x_mcp.py \\
         --store <path/to/lcm.db> --hermes-home <HERMES_HOME>
 
 It never writes the store. See docs/operator-guide.md.

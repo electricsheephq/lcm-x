@@ -36,6 +36,7 @@ STRING = (D, *VALUES[1:])
 # Frozen ENV_FIELD_SPECS rows: field, environment key, parser, default.
 CONFIG_ROWS = (
     ('recall_delivery_unit', 'LCM_RECALL_DELIVERY_UNIT', 'str', 'hits'),
+    ('recall_delivery_order', 'LCM_RECALL_DELIVERY_ORDER', 'str', 'score'),
     # config._parse_bool_env -> LCMConfig.from_env (construction time).
     ('fresh_tail_pressure_yield_enabled', 'LCM_FRESH_TAIL_PRESSURE_YIELD_ENABLED', 'bool', True),
     ('dynamic_leaf_chunk_enabled', 'LCM_DYNAMIC_LEAF_CHUNK_ENABLED', 'bool', False),
@@ -59,7 +60,11 @@ CONFIG_ROWS = (
     ('embeddings_enabled', 'LCM_EMBEDDINGS_ENABLED', 'bool', True),
     ('rerank_enabled', 'LCM_RERANK_ENABLED', 'bool', False),
     ('recall_reference_strict', 'LCM_RECALL_REFERENCE_STRICT', 'bool', True),
+    ('recall_adjacent_reply', 'LCM_RECALL_ADJACENT_REPLY', 'bool', False),
+    ('recall_snippet_window_hits', 'LCM_RECALL_SNIPPET_WINDOW_HITS', 'int', 0),
+    ('recall_extra_entries', 'LCM_RECALL_EXTRA_ENTRIES', 'int', 0),
     ('recall_fts_anchor', 'LCM_RECALL_FTS_ANCHOR', 'bool', True),
+    ('recall_summary_event_time', 'LCM_RECALL_SUMMARY_EVENT_TIME', 'bool', False),
     ('proactive_recall_enabled', 'LCM_PROACTIVE_RECALL_ENABLED', 'bool', False),
     ('preanswer_evidence_enabled', 'LCM_PREANSWER_EVIDENCE_ENABLED', 'bool', False),
     ('selective_compiler_enabled', 'LCM_SELECTIVE_COMPILER_ENABLED', 'bool', False),
@@ -174,15 +179,21 @@ EXTRA_CONFIG_ROWS = (
 
 # from_env has validation after the primitive reader for these fields.
 SPECIAL = {
+    "recall_snippet_window_hits": (D, D, D, D, 1, 0, D, D, D, D, D, D, D, D, D, 25),
+    "recall_extra_entries": (D, D, D, D, 1, 0, D, D, D, D, D, D, D, D, D, 25),
     "embeddings_enabled": FLAG,  # R3: unset local ON; invalid/blank stays OFF.
     "embedding_provider": (D, D, *VALUES[2:]),  # R4: blank provider follows unset local default.
     "recall_delivery_unit": ("hits",) * 16,
+    "recall_delivery_order": ("score",) * 16,
     "fresh_tail_max_tokens": (D, D, D, D, 1, 0, D, D, D, D, D, D, D, 0, D, HUGE),
     "leaf_target_ratio": (D, D, D, D, 1.0, D, D, D, D, D, D, D, D, D, 0.5, D),
     "leaf_target_min_tokens": (D, D, D, D, 1, D, D, D, D, D, D, D, D, D, D, D),
     "leaf_target_max_tokens": (D, D, D, D, D, D, D, D, D, D, D, D, D, D, D, HUGE),
     "summary_prompt_version": (1,) * 16,
     "stub_first_exit_target_ratio": (D, D, D, D, 1.0, 0.0, D, D, D, D, D, D, D, D, 0.5, D),
+    # #1982: below the 500-token floor falls back to the default; the aged threshold also accepts 0.
+    "large_output_active_replay_stub_threshold_tokens": (D,) * 15 + (HUGE,),
+    "large_output_active_replay_stub_aged_threshold_tokens": (D, D, D, D, D, 0) + (D,) * 9 + (HUGE,),
 }
 
 
@@ -402,7 +413,9 @@ def test_key_inventory_is_complete():
     covered.update(row[0] for row in DYNAMIC_ROWS)
     covered.update({"LCM_ENABLE_SLASH_COMMAND", "LCM_DISABLED_TOOLS",
                     "LCM_ABSOLUTE_THRESHOLD_TOKENS", "LCM_HERMES_BASE_DIR", "LCM_EMBEDDING_API_KEY",
-                    "LCM_SENDER_CAPTURE"})
+                    "LCM_SENDER_CAPTURE",
+                    # Default-off recorder (#2243), read by register() and recorder.py; tests/test_recorder.py.
+                    "LCM_RECORDER_ENABLED", "LCM_RECORDER_DIR", "LCM_RECORDER_MAX_BYTES"})
     assert derive_environment_keys() == covered
 
 

@@ -417,7 +417,7 @@ def test_running_compress_reader_uses_pass_store_ids(tmp_path, monkeypatch):
     """The provider boundary observes the current pass map, not a preflight map."""
     pin_char_counter(monkeypatch)
     with engine_context(tmp_path, window=200_000, fresh_tail_count=2, leaf_chunk_tokens=400,
-                        ignore_message_patterns=["never-match-fixture"],
+                        ignore_message_patterns=["never-match-fixture"], temporal_rollups_enabled=False,
                         large_output_externalization_enabled=False) as engine:
         objects, reads, observed = {}, [], []
         build = engine._get_store_id_map_for_messages
@@ -444,11 +444,14 @@ def test_running_compress_reader_uses_pass_store_ids(tmp_path, monkeypatch):
         monkeypatch.setattr(engine, "_get_store_id_map_for_messages", remember)
         monkeypatch.setattr(engine._store, "get", read)
         summaries = ScriptedSummarizer(mode="scripted", fn=summarize).install(monkeypatch)
+        before = engine._current_compress_store_ids_by_message_id
         try:
             result = engine.compress(_history(), force=True)
             assert summaries.calls and observed and len(result) < len(_history())
-            # The pass-level assignment is deliberately persistent, unlike temporary scopes.
-            assert engine._current_compress_store_ids_by_message_id is observed[-1]
+            # #2344: the pass map keys id() of the pass's own working copies, so it ends with the pass; a map left
+            # behind could match a later message at a reused address. The pre-pass map is restored by identity.
+            assert observed[-1] is not before
+            assert engine._current_compress_store_ids_by_message_id is before
         finally:
             # Rollups share this provider callback; finish its store reads before shutdown closes it.
             assert engine.drain_rollup_maintenance(timeout=5)

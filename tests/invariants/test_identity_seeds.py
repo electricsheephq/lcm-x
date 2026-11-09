@@ -273,7 +273,33 @@ class StaleProofCarrierStored(AssertionError):
     """Only an extra carrier after cold resume with a stale durable proof."""
 
 
-@pytest.mark.xfail(strict=True, reason="#1286: changed sanitized output leaves the durable commit proof stale",
+def stored_relations(machine):
+    """Every relation row, as (row position, kind, related row position); positions follow store_id order."""
+    connection = machine.engine._store.connection
+    ids = [sid for sid, in connection.execute(
+        "SELECT store_id FROM messages WHERE conversation_id = ? ORDER BY store_id", ("identity-conversation",))]
+    at = {sid: index for index, sid in enumerate(ids)}
+    return [(at.get(sid, f"store {sid}"), kind, None if related is None else at.get(related, f"store {related}"))
+            for sid, kind, related in connection.execute(
+                "SELECT store_id, kind, related_store_id FROM message_relations ORDER BY relation_id")]
+
+
+def expect_known_shape(machine, issue, rows, relations, shape):
+    """Compare every stored identity and relation even when the occurrence oracle passes."""
+    actual = machine.rows()
+    observed = [("row", identity(row)) for row in actual] + [("relation", row) for row in stored_relations(machine)]
+    fixed = [("row", identity(row)) for row in machine.occurrences]
+    known = [("row", identity(row)) for row in rows] + [("relation", row) for row in relations]
+    try:
+        assert_occurrences(machine.occurrences, actual, engine=machine.engine)
+        error = "relations differ"
+    except AssertionError as mismatch:
+        error = str(mismatch)
+    _expect_stored_shape(observed, fixed, known, f"#{issue} known shape: {error}", shape)
+
+
+@pytest.mark.xfail(strict=True, reason="#1286: changed sanitized output leaves the durable commit proof stale; visible surplus "
+                   "(generated_unproven); fix planned v0.30.x",
                    raises=StaleProofCarrierStored)
 @pytest.mark.parametrize(("counts", "compress_after"), [
     ((1, 1, 0), (0, 0, 2)),
@@ -289,20 +315,19 @@ def test_cold_stale_proof_1286_does_not_store_carrier(counts, compress_after):
             for _ in range(compressions):
                 machine.compress()
                 machine.exactly_once()
-        assert machine.engine._last_compression_status == "sanitized"
-        assert KNOWN_OPEN[1286](machine.stale_proof, "cold_resume")
+        if machine.engine._last_compression_status != "sanitized":
+            pytest.fail(f"setup: the last compress was {machine.engine._last_compression_status!r}, not sanitized")
+        if not KNOWN_OPEN[1286](machine.stale_proof, "cold_resume"):
+            pytest.fail("setup: the durable commit proof is not stale")
         carrier = deepcopy(machine.host[0])
         # Exercise the excluded transition without going through its rule guard.
         machine.engine.shutdown()
         machine.engine = machine.start_engine()
         machine.host = deepcopy(machine.host)
         machine.engine.ingest(machine.host)
-        try:
-            machine.exactly_once()
-        except AssertionError as error:
-            if list(map(identity, machine.rows())) == list(map(identity, [*machine.occurrences, carrier])):
-                raise StaleProofCarrierStored(str(error)) from error
-            raise
+        # Main re-stores the emitted carrier after all sent occurrences, marked generated_unproven.
+        expect_known_shape(machine, 1286, [*machine.occurrences, carrier],
+                           [(len(machine.occurrences), "generated_unproven", None)], StaleProofCarrierStored)
     finally:
         machine.teardown()
 
@@ -1164,16 +1189,14 @@ class RestartScaffoldStored(AssertionError):
 
 
 def check_restart_scaffold(machine):
-    expected, actual = list(map(identity, machine.occurrences)), list(map(identity, machine.rows()))
-    try:
-        machine.exactly_once()
-    except AssertionError as error:
-        if actual == expected[:-2] + [identity(machine.host[0])] + expected[-2:]:
-            raise RestartScaffoldStored(str(error)) from error
-        raise
+    # Main re-stores the emitted carrier before the next sent turn, marked generated_unproven.
+    expected = machine.occurrences
+    expect_known_shape(machine, 1286, [*expected[:-2], machine.host[0], *expected[-2:]],
+                       [(len(expected) - 2, "generated_unproven", None)], RestartScaffoldStored)
 
 
-@pytest.mark.xfail(strict=True, reason="#1286: cold published child lacks its parent emission proof",
+@pytest.mark.xfail(strict=True, reason="#1286: cold published child lacks its parent emission proof; visible surplus "
+                   "(generated_unproven); fix planned v0.30.x",
                    raises=RestartScaffoldStored)
 def test_restart_published_child_without_start_proof():
     """Non-default compression.in_place=False; check the next completed turn."""
@@ -1215,7 +1238,8 @@ def test_restart_published_child_after_start_control(monkeypatch):
 
 
 @pytest.mark.parametrize("point", ["in-place", "rotation-ended"])
-@pytest.mark.xfail(strict=True, reason="#1286: unadopted compaction supersedes the durable input emission",
+@pytest.mark.xfail(strict=True, reason="#1286: unadopted compaction supersedes the durable input emission; visible surplus "
+                   "(generated_unproven); fix planned v0.30.x",
                    raises=RestartScaffoldStored)
 def test_restart_before_recompression_adoption(point):
     """Default in-place window, plus rotation-ended with in_place=False."""
@@ -1266,13 +1290,9 @@ def test_restart_pending_prompt_849():
     try:
         machine.new_turn("alpha", False, 0, False, "lookup")
         machine.restart("user-persisted", "X pending")
-        expected, actual = list(map(identity, machine.occurrences)), list(map(identity, machine.rows()))
-        try:
-            machine.exactly_once()
-        except AssertionError as error:
-            if actual == expected[:-3] + [identity(machine.host[-2]), expected[-1]]:
-                raise RestartMergedStored(str(error)) from error
-            raise
+        # Main substitutes the host's held-plus-new composite for both sent prompts, with no relation.
+        expected = machine.occurrences
+        expect_known_shape(machine, 849, [*expected[:-3], machine.host[-2], expected[-1]], [], RestartMergedStored)
     finally:
         machine.teardown()
 
@@ -1302,3 +1322,32 @@ def test_failing_example_leaves_no_monitoring_events():
     probe = subprocess.run([sys.executable, "-c", _LEAK_PROBE, *(phase.name for phase in PROFILE.phases)],
                            capture_output=True, text=True, timeout=120, check=True)
     assert probe.stdout.strip() == str([0] * 6), probe.stdout + probe.stderr
+
+
+def _expect_stored_shape(observed, fixed, known, message, error_type=AssertionError):
+    """Accept only the complete fixed list or the complete named-limit list, in store order."""
+    if observed == fixed:
+        return
+    if observed == known:
+        raise error_type(message)
+    differences = []
+    for label, expected in (("fixed", fixed), ("known", known)):
+        index = next((i for i, (actual, wanted) in enumerate(zip(observed, expected)) if actual != wanted),
+                     min(len(observed), len(expected)))
+        differences.append(f"{label}: first difference={index}, lengths={len(observed)}/{len(expected)}")
+    pytest.fail("unexpected stored shape; " + "; ".join(differences))
+
+
+@pytest.mark.parametrize("case", ["known", "fixed", "doubled", "swapped"])
+def test_stored_shape_comparison(case):
+    fixed = [("user", "first"), ("assistant", "second")]
+    known = [fixed[0]]
+    observed = {"known": known, "fixed": fixed, "doubled": [fixed[0], *fixed], "swapped": fixed[::-1]}[case]
+    if case == "known":
+        with pytest.raises(StaleProofCarrierStored, match="synthetic known shape"):
+            _expect_stored_shape(observed, fixed, known, "synthetic known shape", StaleProofCarrierStored)
+    elif case == "fixed":
+        _expect_stored_shape(observed, fixed, known, "synthetic known shape", StaleProofCarrierStored)
+    else:
+        with pytest.raises(pytest.fail.Exception, match="first difference=.*lengths="):
+            _expect_stored_shape(observed, fixed, known, "synthetic known shape", StaleProofCarrierStored)

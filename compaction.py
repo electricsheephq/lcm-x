@@ -758,6 +758,10 @@ class CompactionMixin:
             thread_context.foreground_budget = budget
         returned = None
         exit_capture = None
+        # #2344: the pass maps id() of its own working copies to store ids; those copies die with the pass, so the
+        # map must too, or a later ingest can match a reused address and store a carried ignored placeholder.
+        store_id_scope = self._compress_run.preserve_store_ids()
+        store_id_scope.__enter__()
         try:
             budget.pre_leaf = PhaseSqlTrace()  # #1127: timed until the first leaf call, or the stop before one
             budget.pre_leaf.install([(self._store, "_conn"), (self._store, "_write_lock"), (self._dag, "_conn"),
@@ -884,17 +888,20 @@ class CompactionMixin:
                     return fitted
             raise
         finally:
-            self._end_pre_leaf_phase(budget, "stopped")
-            self._last_compress_leaves = (self._hold_conversation_key(), budget.leaves)
-            self._compress_forced_overflow = False
-            self._foreground_budget = None
-            if thread_context is not None:
-                thread_context.foreground_budget = None
             try:
-                if returned is not None and returned is not messages:
-                    self._compress_exit_write(returned, exit_capture)
+                self._end_pre_leaf_phase(budget, "stopped")
+                self._last_compress_leaves = (self._hold_conversation_key(), budget.leaves)
+                self._compress_forced_overflow = False
+                self._foreground_budget = None
+                if thread_context is not None:
+                    thread_context.foreground_budget = None
+                try:
+                    if returned is not None and returned is not messages:
+                        self._compress_exit_write(returned, exit_capture)
+                finally:
+                    self._finish_foreground_budget(budget, returned, current_tokens if (current_tokens or 0) > 0 else messages)
             finally:
-                self._finish_foreground_budget(budget, returned, current_tokens if (current_tokens or 0) > 0 else messages)
+                store_id_scope.__exit__(None, None, None)  # #2344: last, even if the cleanup above raises
 
     def _compress_bypassed(self, messages, current_tokens, focus_topic, force):
         """Bypassed calls own a local budget; only child diagnostics are thread-local."""
@@ -1189,7 +1196,7 @@ class CompactionMixin:
             self._compress_commit_proof = proof
             self._prepare_compress_commit_proof(proof, result)
             if any(d.get("kind") == "recovery" for d in getattr(self, "_pending_emission_candidates", ())):
-                self._identity_anchor_record_recovery(result, emissions)
+                self._identity_anchor_record_recovery(result, emissions, messages)
             if proof["published"] or proof["native"] or proof["recovery"] or proof["filtered"]:
                 self._persist_compress_commit_proof(proof)
             elif proof["stub_first"] or proof.get("cleanup_rewrite"):
@@ -2838,9 +2845,7 @@ class CompactionMixin:
             else:
                 state.condensation_passes = self._maybe_condense(
                     focus_topic=focus_topic,
-                    leaf_compacted_this_turn=True,
                     force_overflow=state.force_overflow,
-                    critical_budget_pressure=state.critical_budget_pressure,
                 )
         except Exception as exc:
             if not _is_sqlite_locked_error(exc):
@@ -3219,34 +3224,6 @@ class CompactionMixin:
             state.prep_freed += count_messages_tokens(leaf.source_lookup_chunk) - count_tokens(leaf.summary_text)
         state.level3_leaves += leaf.level == 3
         state.estimated_active_tokens = max(0, state.estimated_active_tokens - leaf.source_tokens + leaf.summary_tokens)
-        if (
-            getattr(self._config, "large_output_transcript_gc_enabled", False)
-            and leaf.source_store_ids
-        ):
-            committed_context = self._assemble_committed_compaction_context(
-                state.working_messages,
-                state.anchor_source_messages,
-                state.recovery_assembly_cap,
-            )
-            try:
-                self._maybe_gc_compacted_tool_results(
-                    leaf.compacted_chunk,
-                    leaf.source_store_ids,
-                )
-            except Exception as exc:
-                if not _is_sqlite_locked_error(exc):
-                    raise
-                return "return", self._fail_open_after_publication_failure(
-                    committed_context,
-                    exc,
-                    compress_started=state._compress_started,
-                    threshold_full_sweep_active=state.threshold_full_sweep_active,
-                    recovery_assembly_cap=state.recovery_assembly_cap,
-                    leaf_passes=state.leaf_passes,
-                    condensation_passes=state.pre_leaf_condensation_passes,
-                    context_is_assembled=True,
-                )
-
         if leaf.prepared is not None:
             if state.estimated_active_tokens <= state.prep_low_water:  # design §4.4, D-10: the leaf path stops at L
                 state.sweep_stop_reason = "prepared_leaves_promoted"

@@ -3,7 +3,8 @@
 
 The unit bundles the whole core, so its gate re-runs whenever a core file the worker or the
 reader imports changes (docs/claude-code-adapter.md, "Release mechanics"). The set is computed,
-not kept by hand: the import closure of the unit's entry points, plus the plugin folder.
+not kept by hand: the import closure of the unit's entry points, plus the plugin folder and the
+non-Python files core reads at run time (RUNTIME_INPUTS).
 
     python scripts/claude_code_unit_delta.py            # since the last claude-code-v* tag
     python scripts/claude_code_unit_delta.py --since REF --check   # exit 1 when anything changed
@@ -22,6 +23,9 @@ ROOT = Path(__file__).resolve().parents[1]
 PACKAGE = "hermes_lcm"  # the name the entry points import the package under
 ENTRY_POINTS = ("scripts/lcm_x_capture.py", "scripts/lcm_x_mcp.py")  # the worker; the reader (with #1216)
 PLUGIN_DIR = "adapters/claude-code/"
+# Read at run time by modules in the closure: plugin.yaml gives the bundle's core_version and the
+# version the reader reports (runtime_identity.py, mcp_reader.py).
+RUNTIME_INPUTS = frozenset({"plugin.yaml"})
 TAG_PATTERN = "claude-code-v*"
 
 
@@ -75,8 +79,9 @@ def closure(root: Path = ROOT, entry_points: Iterable[str] = ENTRY_POINTS) -> se
 
 
 def relevant(changed: Iterable[str], dependencies: set[str]) -> list[str]:
-    """The changed paths the unit depends on: its import closure and its plugin folder."""
-    return sorted({path for path in changed if path in dependencies or path.startswith(PLUGIN_DIR)})
+    """The changed paths the unit depends on: its import closure, its runtime inputs and its plugin folder."""
+    return sorted({path for path in changed
+                   if path in dependencies or path in RUNTIME_INPUTS or path.startswith(PLUGIN_DIR)})
 
 
 def last_release(root: Path = ROOT) -> Optional[str]:

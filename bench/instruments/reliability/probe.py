@@ -342,6 +342,19 @@ def user_text(cell, prefix, t):
     return text + ("\n" if ut.get("trailing_ws") else "")
 
 
+# #1931 delegated-child cells: the delegate_task goal is the child's own tagged user row, so a provider request from the
+# child is recognised by its last user row and B1/B2 score the child's rows in its own lineage.
+CHILD_TAG = r"\[(D\d{2,3})\] user turn"
+
+
+def child_goal(t: int) -> str:
+    return f"[D{t:02d}] user turn {t}: a delegated task, answer in one word."
+
+
+def child_reply(t: int) -> str:
+    return f"reply to D{t:02d}: child done."
+
+
 def install_p8(cell_dir, phase, faults, fired, fire, cur, checkpoint=None):
     """Read-only, fail-open audit of the host's own resolution and commit seams (R1)."""
     state = {"supported": False, "notes": [], "duplicates": []}

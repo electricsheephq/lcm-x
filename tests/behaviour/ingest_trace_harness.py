@@ -53,6 +53,13 @@ ROOT = Path(__file__).resolve().parents[2]
 GOLDEN = ROOT / "tests" / "fixtures" / "ingest_trace.json"
 TRACE_GUIDANCE = "Regenerate deliberately: python -m tests.behaviour.ingest_trace_harness --repo . --regenerate"
 LEDGER_SQL = re.compile(r"\b(?:ledger_meta|occurrence_bindings|ledger_emissions|stamp_observations|ingest_views|lineage_marks)\b")
+# #2042: reachable only through diagnostic helpers; observe their INFO records,
+# not locks, thread locals or dedupe metadata as durable ingest outcomes.
+DIAGNOSTIC_ATTRIBUTES = frozenset({
+    "_auxiliary_lineage_session_ids", "_auxiliary_session_ids", "_auxiliary_session_lock",
+    "_diagnostic_engine_token", "_lcm_current_start_allows_bypass_lineage",
+    "_session_diagnostic_logs", "_thread_context",
+})
 # FROZEN inventory, never generated from _ingest_messages at observation time.
 OBSERVED_ATTRIBUTES = frozenset({
     "_no_progress_replay", "_no_progress_public_rows", "_no_progress_metadata_warned", "_no_progress_hold_persisted",
@@ -79,13 +86,16 @@ OBSERVED_ATTRIBUTES = frozenset({
     "_generated_ignored_active_replay_placeholder_messages", "_host_uid_counters", "_host_uid_error_logged",
     "_host_uid_read_error", "_identity_anchor_chain_cache", "_identity_anchor_recent", "_identity_anchor_text_memo",
     "_identity_anchor_recoveries", "_identity_anchor_recovery", "_identity_anchor_user_generation",
+    "_identity_anchor_durable_recovery_pending", "_rotation_lineage_unrecorded",
     "_identity_anchor_versions", "_pressure_yield_tail_token_limit", "_survival_projected_fields",
     "_host_uid_lineage_cache", "_engine_uids_pending", "_engine_uids_recorded",
     "_pending_ingest_frontier", "_last_ingest_attribution", "_end_attribution", "_ingest_read_only",
+    "_ingest_attempt_index",
     "_ingest_ledger_attempt", "_ingest_ledger_observations", "_ingest_ledger_counters", "_ingest_ledger_warned",
-    "_ledger_rollback_failures_published", "_ledger_adopted", "_frozen_ledger_prepared", "_frozen_tail_reached",
+    "_ingest_lock_guard", "_ingest_lock_records", "_ingest_lock_totals", "_ingest_lock_warned",
+    "_ledger_rollback_failures_published", "_ledger_adopted", "_ledger_rebind_too_large", "_frozen_ledger_prepared", "_frozen_tail_reached",
     "_compress_calls", "_emission_handle",
-})
+}) | DIAGNOSTIC_ATTRIBUTES
 Trace = list[str]
 Message = dict[str, Any]
 
@@ -266,6 +276,7 @@ class IngestCanonical(Canonical):
         self.path_hashes: dict[str, str] = {}
         self.replay_digests: dict[str, str] = {}
         self.ledger_blobs: dict[str, str] = {}
+        self.engine_tokens: dict[int, str] = {}
         # Labels outlive individual snapshots. Keep their objects alive too, so
         # a later placeholder cannot inherit a freed object's address/label.
         self.retained_messages = {id(row): row for row in messages}
@@ -344,16 +355,23 @@ def snapshot(engine: Any, canonical: IngestCanonical) -> dict[str, Any]:
         elif dataclasses.is_dataclass(value) and not isinstance(value, type):
             for field in dataclasses.fields(value):
                 register(getattr(value, field.name))
-    for name in sorted(OBSERVED_ATTRIBUTES - {"_store", "_dag", "_lifecycle", "_host_rewrite_store"}):
+    for name in sorted(OBSERVED_ATTRIBUTES - DIAGNOSTIC_ATTRIBUTES - {"_store", "_dag", "_lifecycle", "_host_rewrite_store"}):
         register(observed_attribute(engine, name))
-    for name in sorted(OBSERVED_ATTRIBUTES - {"_last_ingest_attribution", "_ingest_ledger_attempt",
+    for name in sorted(OBSERVED_ATTRIBUTES - DIAGNOSTIC_ATTRIBUTES - {"_last_ingest_attribution", "_ingest_ledger_attempt",
                                             "_frozen_ledger_prepared",  # Transient attempt, cleared before return.
                                             "_frozen_tail_reached",  # Queue-decision flag; pending tails retain the outcome.
                                             "_compress_calls", "_emission_handle",
                                             "_ledger_rollback_failures_published",
                                             "_ledger_adopted",  # Commit-only optimization; observed in the attribute stream.
-                                            "_ingest_ledger_observations", "_ingest_ledger_counters", "_ingest_ledger_warned"}):
+                                            "_identity_anchor_durable_recovery_pending",  # Read admission only; writes recheck scope.
+                                            "_ledger_rebind_too_large",  # In-process cap memo; observed, not a durable outcome.
+                                            "_ingest_attempt_index",  # #1815: this ingest's attempt number; reset every ingest.
+                                            "_ingest_ledger_observations", "_ingest_ledger_counters", "_ingest_ledger_warned",
+                                            # P1h lock-hold telemetry; no ingest decision reads it.
+                                            "_ingest_lock_guard", "_ingest_lock_records", "_ingest_lock_totals", "_ingest_lock_warned"}):
         value = observed_attribute(engine, name)
+        if name == "_rotation_lineage_unrecorded" and value == {"absent": True}:
+            continue  # New fail-closed guard: observe it when set; preserve existing absent-state outcomes.
         if name == "_db_path":
             continue  # Observed by the binding assertion above.
         if name in {"_store", "_host_rewrite_store"}:
@@ -401,6 +419,11 @@ class Logs(logging.Handler):
 
     def emit(self, record: logging.LogRecord) -> None:
         args = record.args
+        if str(record.msg) == "LCM session decision: session=%s platform=%s parent=%s decision=%s reason=%s engine=%s":
+            # Like retained-message/nonce labels, preserve identity and sharing
+            # without freezing the process-global engine counter in a golden.
+            args = (*args[:-1], self.canonical.engine_tokens.setdefault(
+                args[-1], f"<engine-{len(self.canonical.engine_tokens)}>"))
         if str(record.msg).startswith("LCM attribution phase=ingest lock_hold_ms="):
             args = (0, args[1], 0, args[3])
         self.events.append("log " + encoded([record.name, record.levelname,

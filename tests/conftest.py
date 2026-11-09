@@ -104,6 +104,17 @@ def _isolate_product_environment(monkeypatch, request, tmp_path_factory):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path_factory.getbasetemp() / "hermes-home" / test_id))
 
 
+@pytest.fixture(autouse=True)
+def _host_aux_client_resolves_through_sys_modules(monkeypatch):
+    """Tests fake the host with monkeypatch.setitem(sys.modules, "agent.auxiliary_client", ...). The product reads it
+    with ``from agent import auxiliary_client``, which prefers an ``auxiliary_client`` attribute that an earlier test's
+    real import left on the ``agent`` package, so that fake was ignored depending on test order (test_issue_605's
+    test_c_a_full_window_deadline_... under worksteal). Dropping the attribute makes the lookup fall back to sys.modules."""
+    package = sys.modules.get("agent")
+    if package is not None:
+        monkeypatch.delattr(package, "auxiliary_client", raising=False)
+
+
 _MAINTENANCE_SCHEDULERS = ("_ROLLUP_MAINTENANCE_SCHEDULER", "_EMBEDDING_MAINTENANCE_SCHEDULER")
 
 

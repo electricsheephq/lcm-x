@@ -208,6 +208,7 @@ jobs:
         run: |
           pip install ruamel.yaml==0.18.16 PyYAML==6.0.3
           python -m pytest tests/test_config_yaml_loaders.py tests/test_per_model_threshold.py -q -p no:cacheprovider
+          python -m pytest tests/test_recorder.py -q -p no:cacheprovider -k "yaml_configuration or config_file_changes or legacy_identity or load_config_reads_restored_yaml"
 
       - name: Run static validation
         run: |
@@ -307,6 +308,7 @@ jobs:
           - bench/instruments/compaction_probe
           - bench/instruments/compaction_probe/track_s/decision/tests
           - bench/instruments/compaction_probe/track_s/scorer/tests
+          - bench/instruments/gate_kit/tests
           - bench/instruments/reliability
           - bench/instruments/scale389/tests
           - bench/scoreboard
@@ -376,7 +378,7 @@ jobs:
           python scripts/ci/check_tests_ran.py
           --junit reports/test-{3.11,3.12,3.13,3.14}/shard-{1,2,3,4}/main.xml
           reports/test-{3.11,3.12,3.13,3.14}/privacy.xml
-          reports/bench-{aml,fmp-tests,instruments-local_catchup-tests,instruments-compaction_probe,instruments-compaction_probe-track_s-decision-tests,instruments-compaction_probe-track_s-scorer-tests,instruments-reliability,instruments-scale389-tests,scoreboard,tools-tests}.xml
+          reports/bench-{aml,fmp-tests,instruments-local_catchup-tests,instruments-compaction_probe,instruments-compaction_probe-track_s-decision-tests,instruments-compaction_probe-track_s-scorer-tests,instruments-gate_kit-tests,instruments-reliability,instruments-scale389-tests,scoreboard,tools-tests}.xml
 
   session-end-attribution-cost:
     runs-on: ubuntu-latest

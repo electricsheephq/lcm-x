@@ -20,10 +20,13 @@ import json
 import logging
 import sqlite3
 import threading
+import time
 import weakref
 from pathlib import Path
 from collections import Counter
 from typing import Any, Dict, List, Optional
+
+from .sqlite_util import _is_ingest_busy_error
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +73,11 @@ def record_subagent_stop(payload: Dict[str, Any]) -> None:
         return
     with _SUBAGENT_LINEAGE_LOCK:
         _SUBAGENT_LINEAGE_BY_SESSION_ID.pop(child_session_id, None)
+    with _LIVE_CHILD_LOCK:
+        for session_id in [sid for sid, root in _LIVE_DELEGATE_CHILD_ROOTS.items() if root == child_session_id]:
+            _LIVE_DELEGATE_CHILD_ROOTS.pop(session_id, None)
+            _LIVE_DELEGATE_CHILD_ENGINES.pop(session_id, None)
+            _LIVE_CHILD_MOVED_WARNED.discard(session_id)
 
 
 def explicit_subagent_lineage(session_id: str) -> Dict[str, str]:
@@ -83,6 +91,23 @@ def explicit_subagent_lineage(session_id: str) -> Dict[str, str]:
 
 
 class AuxiliarySessionMixin:
+    def _log_auxiliary_session_decision(self, session_id, *, platform="", parent="", reason="inherited_bypass"):
+        try:
+            agent = self._delegate_child_agent(session_id)
+            auxiliary = agent is not None and _is_auxiliary_agent(agent)
+            record = explicit_subagent_lineage(session_id)
+            decision = "delegate_child" if not auxiliary and agent is not None and _is_delegate_agent(agent) else "auxiliary"
+            reason = ("background_review" if "background_review" in (
+                getattr(agent, "_memory_write_origin", ""), getattr(agent, "_memory_write_context", "")
+            ) else "toolsets_memory_only") if auxiliary else "subagent_start" if record else (
+                "frame_marker" if agent is not None else reason
+            )
+            parent = parent or record.get("parent_session_id", "") or str(getattr(agent, "_parent_session_id", "") or "")
+            self._log_session_decision(session_id, decision, reason, platform=platform, parent=parent)
+            return reason
+        except Exception:
+            return "unknown"  # Diagnostics cannot change bind or ingest outcomes.
+
     def _thread_context_auxiliary_stack(self) -> list[str]:
         stack = getattr(self._thread_context, "auxiliary_session_stack", None)
         if stack is None:
@@ -811,9 +836,150 @@ _COUNTS_LOCK = threading.Lock()
 _COUNTS: Counter = Counter()
 # Shared by clones and hook engines: compare and append form one process-local operation.
 _DELEGATE_STORE_LOCK = threading.RLock()
+_LIVE_CHILD_STORE_WAIT_S = 1.0
+# #2482: live delegated children, by session id -> the root child id that subagent_start named. Filled when a child
+# binds its own engine on its own thread as a delegate (its frames are visible there, not on the host's hook worker
+# thread) and carried across its compression handoff; a root's subagent_stop ends its entries.
+_LIVE_CHILD_LOCK = threading.Lock()
+_LIVE_DELEGATE_CHILD_ROOTS: dict[str, str] = {}
+# The engine the child bound and the storage it served then, by session id (weak reference, identity): the early
+# store writes only through that engine and only while it still serves that storage, so a child's rows never land in
+# another profile's database (the plugin prototype's, or a later rebind of the child's engine).
+_LIVE_DELEGATE_CHILD_ENGINES: dict[str, tuple] = {}
+_LIVE_CHILD_MOVED_WARNED: set[str] = set()
+_LIVE_CHILD_STORES_IN_FLIGHT: set[str] = set()
+_LIVE_CHILD_PENDING: dict[str, Any] = {}  # the newest store handed over while one was in flight, per child
+_LIVE_CHILD_HANDED_ROWS: dict[str, int] = {}  # rows in the newest list handed over, per child with a store in flight
+_LIVE_CHILD_STORED_ROWS: dict[str, int] = {}  # rows in the newest list whose store succeeded, per such child
+_LIVE_CHILD_WARNED: set[str] = set()  # children whose stuck store a shutdown drain already reported
+_LIVE_CHILD_STORE_JOIN_S = 2.0  # the most a host hook waits for a live-child store; the store itself may finish later
+_LIVE_CHILD_SHUTDOWN_DRAIN_S = 5.0  # the most an engine shutdown waits for in-flight or queued live-child stores
+LIVE_STORE_RETRY = "retry"  # a live-child store that found the database busy: its worker tries the same list again
+_LIVE_CHILD_STORE_RETRIES = 3  # retries per list, unless a newer list is handed over first
+_LIVE_CHILD_RETRY_DELAY_S = 0.25  # times the retry number
 _DELEGATE_AUXILIARY_IDS: set[tuple[str, str]] = set()
 _DELEGATE_RESUME_BOUNDARIES: dict[tuple[str, str], list[bytes]] = {}
 _DELEGATE_COMPRESSION_PARENTS: dict[tuple[str, str], str] = {}
+# #2071: digests of the rows the child's last bypassed compaction produced (absent from its input). They are the only
+# rows the stored-tail anchor may pass over without finding them stored.
+_DELEGATE_COMPACTION_OUTPUTS: dict[tuple[str, str], list[bytes]] = {}
+
+
+def live_delegate_child_root(session_id: str) -> str:
+    """The root child id of a live delegated child bound in this process, or ``""``."""
+    with _LIVE_CHILD_LOCK:
+        return _LIVE_DELEGATE_CHILD_ROOTS.get(str(session_id or ""), "")
+
+
+def live_child_storage_identity(engine: Any) -> tuple[str, str]:
+    """The profile home and database an engine serves now."""
+    return str(getattr(engine, "_hermes_home", "") or ""), str(getattr(engine, "_db_path", "") or "")
+
+
+def live_delegate_child_engine(session_id: str) -> tuple[Any, tuple]:
+    """The engine a live delegated child bound in this process (if still alive) and the storage it served then."""
+    with _LIVE_CHILD_LOCK:
+        entry = _LIVE_DELEGATE_CHILD_ENGINES.get(str(session_id or ""))
+    if entry is None:
+        return None, ()
+    return entry[0](), entry[1]
+
+
+def warn_live_child_moved(session_id: str) -> None:
+    """One WARNING per child whose engine now serves another profile; its rows are left to the end store."""
+    with _LIVE_CHILD_LOCK:
+        if session_id in _LIVE_CHILD_MOVED_WARNED:
+            return
+        _LIVE_CHILD_MOVED_WARNED.add(session_id)
+    logger.warning(
+        "LCM live delegated-child store skipped: the child's engine now serves another profile than when the child "
+        "started; child=%s is left to its end store (#2482)", hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:12],
+    )
+
+
+def run_live_child_store(session_id: str, operation, rows: int = 0) -> None:
+    """Run ``operation`` on a worker thread and wait at most ``_LIVE_CHILD_STORE_JOIN_S`` (#2482); never raises.
+
+    A host hook must stay far below its own timeout, and a store can wait on SQLite past the lock bounds. One store
+    per child runs at a time: a list handed over meanwhile replaces any older pending one and runs right after it
+    (each list holds every earlier row, and the store appends only what is not stored yet).
+    """
+    with _LIVE_CHILD_LOCK:
+        _LIVE_CHILD_HANDED_ROWS[session_id] = rows
+        if session_id in _LIVE_CHILD_STORES_IN_FLIGHT:
+            _LIVE_CHILD_PENDING[session_id] = (operation, rows)
+            _count("live_store_queued")
+            return
+        _LIVE_CHILD_STORES_IN_FLIGHT.add(session_id)
+
+    def finish():  # under _LIVE_CHILD_LOCK
+        _LIVE_CHILD_STORES_IN_FLIGHT.discard(session_id)
+        _LIVE_CHILD_PENDING.pop(session_id, None)
+        _LIVE_CHILD_HANDED_ROWS.pop(session_id, None)
+        _LIVE_CHILD_STORED_ROWS.pop(session_id, None)
+        _LIVE_CHILD_WARNED.discard(session_id)
+
+    def runner():
+        current = (operation, rows)
+        try:
+            while current is not None:
+                for attempt in range(_LIVE_CHILD_STORE_RETRIES + 1):
+                    try:
+                        stored = current[0]()
+                    except Exception as exc:
+                        logger.debug("LCM live delegated-child store error: %s", exc)
+                        break
+                    if stored is True:  # only a store that really ran counts its rows as stored
+                        with _LIVE_CHILD_LOCK:
+                            _LIVE_CHILD_STORED_ROWS[session_id] = current[1]
+                        break
+                    with _LIVE_CHILD_LOCK:
+                        superseded = session_id in _LIVE_CHILD_PENDING
+                    if stored != LIVE_STORE_RETRY or superseded or attempt == _LIVE_CHILD_STORE_RETRIES:
+                        break
+                    time.sleep(_LIVE_CHILD_RETRY_DELAY_S * (attempt + 1))  # busy: the same list again, shortly
+                with _LIVE_CHILD_LOCK:
+                    current = _LIVE_CHILD_PENDING.pop(session_id, None)
+                    if current is None:
+                        finish()
+        finally:
+            if current is not None:  # something beyond Exception escaped: never leave the child marked in flight
+                with _LIVE_CHILD_LOCK:
+                    finish()
+
+    try:
+        worker = threading.Thread(target=runner, name="lcm-live-child-store", daemon=True)
+        worker.start()
+    except Exception as exc:
+        with _LIVE_CHILD_LOCK:
+            finish()
+        logger.debug("LCM live delegated-child store not started: %s", exc)
+        return
+    worker.join(_LIVE_CHILD_STORE_JOIN_S)
+
+
+def drain_live_child_stores(timeout: float) -> None:
+    """Wait at most ``timeout`` seconds for in-flight live-child stores, queued ones included (engine shutdown)."""
+    deadline = time.monotonic() + max(0.0, timeout)
+    while True:
+        with _LIVE_CHILD_LOCK:
+            if not _LIVE_CHILD_STORES_IN_FLIGHT - _LIVE_CHILD_WARNED:
+                return  # a child an earlier drain already reported stuck is not waited for again
+        if time.monotonic() >= deadline:
+            with _LIVE_CHILD_LOCK:
+                waiting = {sid: max(0, _LIVE_CHILD_HANDED_ROWS.get(sid, 0) - _LIVE_CHILD_STORED_ROWS.get(sid, 0))
+                           for sid in _LIVE_CHILD_STORES_IN_FLIGHT if sid not in _LIVE_CHILD_WARNED}
+                _LIVE_CHILD_WARNED.update(waiting)
+            for sid, unstored in sorted(waiting.items()):
+                # NOT SILENT (#2482): this child's newest rows are lost if the process ends before the store lands.
+                logger.warning(
+                    "LCM shutdown drain timed out after %.1fs: a live delegated-child store is still waiting "
+                    "(likely a busy database); child=%s has up to %d handed-over row(s) not yet stored, lost if "
+                    "the process ends first (#2483)",
+                    timeout, hashlib.sha256(sid.encode("utf-8")).hexdigest()[:12], unstored,
+                )
+            return
+        time.sleep(0.01)
 
 
 def delegate_child_store_counts() -> Dict[str, int]:
@@ -860,6 +1026,10 @@ class DelegateChildMixin:
         if agent is not None and _is_auxiliary_agent(agent):
             with _DELEGATE_STORE_LOCK:
                 _DELEGATE_AUXILIARY_IDS.add(self._delegate_child_key(session_id))
+        elif agent is not None and _is_delegate_agent(agent):
+            with _LIVE_CHILD_LOCK:
+                _LIVE_DELEGATE_CHILD_ROOTS.setdefault(session_id, session_id)
+                _LIVE_DELEGATE_CHILD_ENGINES[session_id] = (weakref.ref(self), live_child_storage_identity(self))
 
     def _stored_delegate_child_link(self, session_id: str) -> Dict[str, str]:
         if not self._store._session_lineage_table_exists():
@@ -908,22 +1078,45 @@ class DelegateChildMixin:
         _DELEGATE_RESUME_BOUNDARIES[self._delegate_child_key(session_id)] = [
             self._delegate_child_boundary_digest(identity) for identity in boundary]
 
+    def _remember_delegate_child_outputs(self, session_id: str, messages, result) -> None:
+        def identities(rows):
+            return [self._session_end_prefix_compare_identity(msg, session_id=session_id) for msg in rows
+                    if isinstance(msg, dict) and not self._matches_ignore_message_patterns(msg)]
+        produced = Counter(identities(result)) - Counter(identities(messages))
+        _DELEGATE_COMPACTION_OUTPUTS[self._delegate_child_key(session_id)] = [
+            self._delegate_child_boundary_digest(identity) for identity in produced.elements()]
+
     def _compress_delegate_child_bypassed(self, messages, current_tokens, focus_topic, force):
         session_id = self._bypass_lcm_session_id()
-        stored_tail = None
+        stored_tail, covered = None, False
         with _DELEGATE_STORE_LOCK:
             # Closing may have begun while this pass waited for the child-store lock.
             if self._compaction_is_closing():
                 return messages
-            pre_store = self._store_delegate_child_turn(session_id, messages, platform=_DELEGATE_SOURCE, require_agent=True)
+            store_outcome: Dict[str, Any] = {}
+            pre_store = self._store_delegate_child_turn(
+                session_id, messages, platform=_DELEGATE_SOURCE, require_agent=True, outcome=store_outcome)
+            if pre_store is None and _is_ingest_busy_error(store_outcome.get("error") or Exception()):
+                # #2306: compacting now would drop rows that were never stored. A lock clears, so keep the view;
+                # the next compression or turn retries the store. Other failures compact as before (a store
+                # that keeps failing saves nothing by stalling the child) and stay visible below.
+                self._note_delegate_child_fallback(session_id, "compaction skipped: input not stored")
+                state = self._bypass_compress_state()
+                state["_last_compression_status"] = "noop"
+                state["_last_compression_noop_reason"] = "compaction skipped: input not stored"
+                return messages
             try:
                 if self._delegate_child_link(session_id, platform=_DELEGATE_SOURCE, require_agent=True):
                     tail = self._store.get_session_tail(session_id, limit=1)
                     view = [msg for msg in messages
                             if isinstance(msg, dict) and not self._matches_ignore_message_patterns(msg)]
-                    if pre_store is not None and tail and view and self._session_end_prefix_compare_identity(
+                    # The input is covered only when this pass stored it and its last row is the stored tail. After a
+                    # failed store, a matching tail can be a copy of the last stored row behind an unstored one (#2071),
+                    # so the summary is kept: a surplus head, never a lost one.
+                    covered = bool(pre_store is not None and tail and view and self._session_end_prefix_compare_identity(
                         tail[-1], session_id=session_id,
-                    ) == self._session_end_prefix_compare_identity(view[-1], session_id=session_id):
+                    ) == self._session_end_prefix_compare_identity(view[-1], session_id=session_id))
+                    if covered:
                         stored_tail = tail
                     else:
                         self._note_delegate_child_fallback(
@@ -935,7 +1128,16 @@ class DelegateChildMixin:
             return messages
         try:
             with _DELEGATE_STORE_LOCK:
+                # An earlier compaction's outputs never exempt a row once this one has replaced the view.
+                _DELEGATE_COMPACTION_OUTPUTS.pop(self._delegate_child_key(session_id), None)
                 if self._delegate_child_link(session_id, platform=_DELEGATE_SOURCE, require_agent=True):
+                    try:  # recorded apart from the boundary: it must survive a failed or dropped boundary
+                        # Only over a covered input: a summary of a row that was never stored is that row's only
+                        # trace, so it must be stored like any other row.
+                        if covered:
+                            self._remember_delegate_child_outputs(session_id, messages, result)
+                    except Exception as exc:
+                        self._note_delegate_child_fallback(session_id, f"compaction outputs not recorded: {exc}")
                     if stored_tail and self._store.get_session_tail(session_id, limit=1) == stored_tail:
                         self._remember_delegate_child_boundary(session_id, result)
                     else:
@@ -947,6 +1149,12 @@ class DelegateChildMixin:
 
     def _handoff_delegate_child_compression(self, old_session_id: str, new_session_id: str) -> None:
         try:
+            with _LIVE_CHILD_LOCK:
+                root = _LIVE_DELEGATE_CHILD_ROOTS.get(old_session_id)
+                if root and new_session_id:
+                    _LIVE_DELEGATE_CHILD_ROOTS[new_session_id] = root
+                    if old_session_id in _LIVE_DELEGATE_CHILD_ENGINES:
+                        _LIVE_DELEGATE_CHILD_ENGINES[new_session_id] = _LIVE_DELEGATE_CHILD_ENGINES[old_session_id]
             with _DELEGATE_STORE_LOCK:
                 old_key, new_key = self._delegate_child_key(old_session_id), self._delegate_child_key(new_session_id)
                 if old_key in _DELEGATE_AUXILIARY_IDS:
@@ -968,6 +1176,8 @@ class DelegateChildMixin:
                 _DELEGATE_COMPRESSION_PARENTS[new_key] = old_session_id
                 if old_key in _DELEGATE_RESUME_BOUNDARIES:
                     _DELEGATE_RESUME_BOUNDARIES[new_key] = _DELEGATE_RESUME_BOUNDARIES[old_key]
+                if old_key in _DELEGATE_COMPACTION_OUTPUTS:
+                    _DELEGATE_COMPACTION_OUTPUTS[new_key] = _DELEGATE_COMPACTION_OUTPUTS[old_key]
                 self._store.record_session_lineage(new_session_id, old_session_id, source="compression")
                 try:
                     stored_link = self._stored_delegate_child_link(new_session_id)
@@ -1017,14 +1227,18 @@ class DelegateChildMixin:
         """The parent link of a DELEGATE child, or None for an AUXILIARY or unproven session."""
         agent = self._delegate_child_agent(session_id)
         if agent is not None and _is_auxiliary_agent(agent):
+            self._log_auxiliary_session_decision(session_id, platform=platform)
             _DELEGATE_AUXILIARY_IDS.add(self._delegate_child_key(session_id))
+            self._log_session_ingest_outcome(session_id, reason="auxiliary")
             return None  # AUXILIARY wins over every delegate signal
         if self._delegate_child_key(session_id) in _DELEGATE_AUXILIARY_IDS:
+            self._log_session_ingest_outcome(session_id, reason="auxiliary_lineage")
             return None
         platform = platform or self._lcm_session_last_platform.get(session_id, "") or _DELEGATE_SOURCE
         if (agent is None and require_agent) or self._session_id_matches_lcm_bypass_filters(
             session_id, platform=platform,
         ):
+            self._log_session_ingest_outcome(session_id, reason="no_agent" if agent is None and require_agent else "bypass_pattern")
             return None
         record = explicit_subagent_lineage(session_id)
         stored_link = self._stored_delegate_child_link(session_id)
@@ -1041,18 +1255,25 @@ class DelegateChildMixin:
         source, parent = (stored_link["source"], stored_link["parent_session_id"]) if stored_link else next(
             ((name, value) for name, value in [("compression", compression_parent), *candidates] if value), ("", ""))
         if not delegate:
+            # Not a skip: the caller still decides this session's route (#2042).
             return None
         if not parent or parent == session_id:
             self._note_delegate_child_fallback(session_id, "rows not stored: no parent identity resolves")
+            self._log_session_ingest_outcome(session_id, reason="no_parent")
             return None
         if parent == self._session_id:
             parent_platform = self._session_platform
             if self._session_ignored or (self._session_stateless and not self._is_known_delegate_child(parent)):
+                self._log_session_ingest_outcome(session_id, reason="ignored_parent")
                 return None
         else:
             parent_platform = self._lcm_session_last_platform.get(parent, "") or self._host_session_parent(parent)[1]
         if self._session_id_matches_lcm_bypass_filters(parent, platform=parent_platform):
+            self._log_session_ingest_outcome(session_id, reason="parent_bypass_pattern")
             return None
+        self._log_session_decision(session_id, "delegate_child",
+                                   "state_db_subagent" if source == "state_db" else "frame_marker" if source == "parent_frame" else source,
+                                   platform=platform, parent=parent)
         return {
             "parent_session_id": parent, "source": source,
             "child_subagent_id": record.get("child_subagent_id") or str(getattr(agent, "_subagent_id", "") or ""),
@@ -1070,6 +1291,7 @@ class DelegateChildMixin:
         after_ingest: bool = False,
         require_agent: bool = False,
         outcome: Optional[dict] = None,
+        lock_wait: Optional[float] = None,
     ) -> Optional[int]:
         """Store a delegated child's new rows; return their count, or None on failure. Never raises."""
         try:
@@ -1080,7 +1302,7 @@ class DelegateChildMixin:
                 after_ingest or session_id == self._session_id
             ):
                 return 0  # this engine's own ingest owns the view
-            with _DELEGATE_STORE_LOCK:
+            def store_locked():
                 link = self._delegate_child_link(session_id, platform=platform, require_agent=require_agent)
                 if link is None:
                     return 0
@@ -1088,7 +1310,26 @@ class DelegateChildMixin:
                     outcome["linked"] = True
                 with self._attribution_span("delegate_child_store", len(messages)):
                     return self._append_delegate_child_rows(session_id, messages, link)
+
+            if lock_wait is None:
+                with _DELEGATE_STORE_LOCK:
+                    return store_locked()
+            if not _DELEGATE_STORE_LOCK.acquire(timeout=lock_wait):
+                if isinstance(outcome, dict):
+                    outcome["skipped"] = True
+                _count("live_store_skipped")
+                logger.debug(
+                    "LCM delegated child %s: store lock busy, left to the next hook or the end store",
+                    session_id,
+                )
+                return 0
+            try:
+                return store_locked()
+            finally:
+                _DELEGATE_STORE_LOCK.release()
         except Exception as exc:
+            if isinstance(outcome, dict):
+                outcome["error"] = exc
             self._note_delegate_child_fallback(session_id, f"rows not stored: {type(exc).__name__}: {exc}")
             return None
 
@@ -1117,7 +1358,7 @@ class DelegateChildMixin:
         identities = [self._session_end_prefix_compare_identity(msg, session_id=session_id) for msg in view]
         start = self._delegate_child_unique_end(
             [self._delegate_child_boundary_digest(identity) for identity in identities], boundary) if boundary else None
-        anchored = start is not None
+        anchored, rejected = start is not None, []
         if start is not None:
             logger.debug("LCM delegated child %s: resuming after compression boundary", session_id)
         else:
@@ -1132,9 +1373,30 @@ class DelegateChildMixin:
                     sid, limit=_ANCHOR_ROWS - len(stored_tail))] + stored_tail
                 if len(stored_tail) == _ANCHOR_ROWS:
                     break
-            start = self._delegate_child_anchor_end(session_id, view, stored_tail)
-            anchored = start is not None
-            if start is None:
+            outputs = Counter(_DELEGATE_COMPACTION_OUTPUTS.get(key) or ())
+            lineage: list[Counter] = []  # the lineage's stored identities, read once per append (under the store lock)
+
+            def unaccounted(front: list, end: int) -> list[int]:
+                # #2071: each row in front of the match must be stored in the lineage (apart from the anchor rows,
+                # the lineage's last stored rows) or be one of the last compaction's outputs, one occurrence each.
+                if not front:
+                    return []
+                if not lineage:
+                    lineage.append(Counter(self._session_end_prefix_compare_identity(row, session_id=sid)
+                                           for sid in sessions for row in self._store.get_session_messages(sid, limit=-1)))
+                stored_ids = lineage[0].copy()
+                stored_ids.subtract(identities[len(front):end])
+                return self._delegate_child_unaccounted(front, stored_ids, outputs)
+
+            start = self._delegate_child_anchor_end(session_id, view, stored_tail, unaccounted, rejected)
+            anchored = start is not None or bool(rejected)
+            if rejected:
+                end, missing = rejected[0]
+                self._note_delegate_child_fallback(
+                    session_id, f"{len(missing)} row(s) in front of the stored-tail anchor are neither stored nor "
+                    "compaction outputs; storing them with the rows after the anchor")
+                suffix = [view[index] for index in missing] + view[end:]
+            elif start is None:
                 self._note_delegate_child_fallback(
                     session_id, "stored rows no longer match the child's view; resuming with counted identities")
                 remaining = Counter(self._session_end_prefix_compare_identity(row, session_id=sid)
@@ -1143,6 +1405,8 @@ class DelegateChildMixin:
                 for msg, identity in zip(view, identities):
                     if remaining[identity] > 0:
                         remaining[identity] -= 1
+                    elif outputs[self._delegate_child_boundary_digest(identity)] > 0:  # a compacted head
+                        outputs[self._delegate_child_boundary_digest(identity)] -= 1
                     else:
                         suffix.append(msg)
             else:
@@ -1154,23 +1418,44 @@ class DelegateChildMixin:
             return 0
         stored = self._append_off_current_session_end_suffix(
             session_id, suffix, source=_DELEGATE_SOURCE, conversation_id=session_id)
-        if boundary and anchored:
+        if (boundary and anchored) or rejected:  # a rejection stores rows out of view order: always mark the end
             self._remember_delegate_child_boundary(session_id, view)
         _count("rows_stored", len(stored))
         logger.debug("LCM stored %d delegated-child rows: session=%s parent=%s",
                      len(stored), session_id, link["parent_session_id"])
         return len(stored)
 
+    def _delegate_child_unaccounted(self, front: list, stored: Counter, outputs: Counter) -> list[int]:
+        """Indexes of ``front`` rows that are neither stored nor a compaction output (one occurrence each)."""
+        stored, outputs, missing = stored.copy(), outputs.copy(), []
+        for index, identity in enumerate(front):
+            digest = self._delegate_child_boundary_digest(identity)
+            if stored[identity] > 0:
+                stored[identity] -= 1
+            elif outputs[digest] > 0:
+                outputs[digest] -= 1
+            else:
+                missing.append(index)
+        return missing
+
     def _delegate_child_anchor_end(self, session_id: str, view: List[Dict[str, Any]],
-                                  stored_rows: list[tuple[str, Dict[str, Any]]]) -> Optional[int]:
+                                  stored_rows: list[tuple[str, Dict[str, Any]]],
+                                  unaccounted=None, rejected: Optional[list] = None) -> Optional[int]:
         """After the host rewrote the child's head (native compaction), resume after the stored tail when
-        it occurs exactly once in the view."""
+        it occurs exactly once in the view, and only when every row in front of it is accounted for (#2071):
+        ``unaccounted(front, end)`` lists the front rows that are neither stored nor compaction outputs; when it lists
+        any, ``(end, those indexes)`` goes to ``rejected`` and None is returned."""
         anchor = [self._session_end_prefix_compare_identity(row, session_id=sid)
                   for sid, row in stored_rows]
         identities = [self._session_end_prefix_compare_identity(msg, session_id=session_id) for msg in view]
         for width in range(len(anchor), 0, -1):
             end = self._delegate_child_unique_end(identities, anchor[-width:])
             if end is not None:
+                missing = unaccounted(identities[:end - width], end) if unaccounted is not None else []
+                if missing:  # a narrower match would sit behind the same rows
+                    if rejected is not None:
+                        rejected.append((end, missing))
+                    return None
                 return end
         return None
 

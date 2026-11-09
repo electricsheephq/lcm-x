@@ -21,6 +21,7 @@ from tests.harness import engine_context, pin_char_counter
 
 @pytest.mark.parametrize("case", SCENARIOS, ids=lambda case: case.name)
 def test_ingest_golden(case: Any, tmp_path: Path) -> None:
+    # #2293 step 1, M2: remove repeated folded-tail reads within an ingest attempt; protected events stay identical.
     # P1b-1 regeneration moves BEGIN before classification, collapses evidence
     # commits into one, and moves cache observations after COMMIT. Fail-open
     # faults roll back their savepoint; escaping faults roll back the ingest.
@@ -72,8 +73,9 @@ def test_fixture_scenario_inventory_and_size() -> None:
     # Owned evidence savepoints enlarge the complete observer stream (round up to 100,000 bytes).
     # P1b-2b's shadow-ledger SQL adds about 140,000 bytes (4,138,779 in all; largest trace 46,288).
     # P1f's adopted attempt adds the transaction-start salt/lineage prelude (no outcome delta).
-    assert GOLDEN.stat().st_size <= 4_300_000
-    assert all(len(json.dumps(trace).encode()) <= 48_000 for trace in data.values())
+    # P1g adds the indexed lag probe, conditional store mark and nested exact rebind stream.
+    assert GOLDEN.stat().st_size <= 4_500_000
+    assert all(len(json.dumps(trace).encode()) <= 52_000 for trace in data.values())
 
 
 def test_snapshot_rejects_mismatched_binding_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

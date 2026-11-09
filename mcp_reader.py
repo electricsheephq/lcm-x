@@ -26,6 +26,7 @@ import re
 import sqlite3
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -65,8 +66,8 @@ READER_TOOLS = {
 READER_NOTE = (
     " Served read-only by lcm-x mcp, which has no active session: lcm_grep defaults to "
     "session_scope='all', a node_id without session_id resolves in the node's own session, "
-    "externalized payloads resolve from any session of this store, and ids may carry a "
-    "'<store_uuid>:' prefix."
+    "externalized payloads resolve from any session of this store when its payload folder is "
+    "inside the profile, and ids may carry a '<store_uuid>:' prefix."
 )
 PROFILE_ENV_EXTRA_KEYS = ("FASTEMBED_CACHE_PATH",)
 TOKENIZER_WAIT_S = 30.0
@@ -157,7 +158,8 @@ def disabled_tool_names(environ: MutableMapping[str, str] | None = None) -> set[
 
 def tool_definitions(disabled: set[str]) -> list[dict[str, Any]]:
     return [{"name": name, "description": schema.get("description", "") + READER_NOTE,
-             "inputSchema": schema.get("parameters") or {"type": "object", "properties": {}}}
+             "inputSchema": schema.get("parameters") or {"type": "object", "properties": {}},
+             "annotations": {"readOnlyHint": True}}  # every reader tool only reads the store
             for name, schema in READER_TOOLS.items() if name not in disabled]
 
 
@@ -250,15 +252,15 @@ class StoreReader:
 
     # -- startup --
     def prepare(self, *, tokenizer_wait_s: float = TOKENIZER_WAIT_S) -> None:
-        self._prewarm_tokenizer(tokenizer_wait_s)
-        self._prewarm_provider()
-
-    def _prewarm_tokenizer(self, wait_s: float) -> None:
         started = time.monotonic()
         tokens._get_encoder()  # starts the background load; waits its own short bound
+        self._prewarm_provider()  # before the long tokenizer wait: vectors come on first (#2179)
+        self._prewarm_tokenizer(max(0.0, tokenizer_wait_s - (time.monotonic() - started)))
+
+    def _prewarm_tokenizer(self, wait_s: float) -> None:
         thread = tokens._encoder_thread
         if thread is not None:
-            thread.join(timeout=max(0.0, wait_s - (time.monotonic() - started)))
+            thread.join(timeout=wait_s)
         self.tokenizer = self._tokenizer_state()
 
     @staticmethod
@@ -297,13 +299,15 @@ class StoreReader:
                     for task in ("summary", "chunk")}
         if embedding_provider.default_chunk_model(provider_id, model_id) != model_id:
             expected["chunk"] = None  # a separate chunk model is a cloud (Voyage) path: never matched
-        self._expected_identity = expected
-        self._provider = provider
         from .embedding_maintenance import note_local_model_present
 
         # A warmed local model is present for this process, so the first recall uses it at once
-        # instead of starting a second warmup and serving full text meanwhile.
+        # instead of starting a second warmup and serving full text meanwhile. Calls may run while
+        # this warms (#2179), so the provider is published last: a call that sees it also sees the
+        # expected identity and the model marked present.
+        self._expected_identity = expected
         note_local_model_present(cfg)
+        self._provider = provider
 
     def _embedding_gate(self, conn: sqlite3.Connection) -> tuple[bool, list[str]]:
         """Vectors only when the store's active identity equals the reader's on every field."""
@@ -496,6 +500,28 @@ def handle(reader: StoreReader, request: Any) -> dict[str, Any] | None:
     return {"jsonrpc": "2.0", "id": ident, "result": result}
 
 
+def start_warmup(reader: StoreReader) -> threading.Thread:
+    """Warm the reader in the background, so the server answers at once (#2179).
+
+    The tokenizer load starts first and nothing waits on it: counts are estimates until it ends.
+    Until the query model is warm, the embedding gate reports ``provider_unavailable`` and calls
+    serve full text; the first call after it uses vectors."""
+    tokens.start_encoder_load()
+
+    def warm() -> None:
+        try:
+            reader.prepare()
+        except Exception:  # noqa: BLE001 - a failed warmup leaves the reader degraded, not stopped
+            logger.exception("lcm-x mcp: warmup failed")
+            return
+        logger.info("lcm-x mcp warm: tokenizer=%s embeddings=%s", reader.tokenizer,
+                    reader._provider_problem or ("on" if reader._provider else "off"))
+
+    thread = threading.Thread(target=warm, name="lcm-x-mcp-warmup", daemon=True)
+    thread.start()
+    return thread
+
+
 def serve(reader: StoreReader, stdin: TextIO, stdout: TextIO) -> None:
     for line in stdin:
         if not line.strip():
@@ -558,11 +584,10 @@ def main(argv: list[str] | None = None) -> int:
         profile_keys = apply_profile_environment(hermes_home)
         config = LCMConfig.from_env()
         reader = StoreReader(options.store, hermes_home, config=config)
-        reader.prepare()
+        start_warmup(reader)
         logger.info(
-            "lcm-x mcp ready: profile LCM keys=%d tools=%d tokenizer=%s embeddings=%s",
+            "lcm-x mcp serving: profile LCM keys=%d tools=%d; warming up in the background",
             len(profile_keys), len(READER_TOOLS) - len(reader.disabled & set(READER_TOOLS)),
-            reader.tokenizer, reader._provider_problem or ("on" if reader._provider else "off"),
         )
         serve(reader, stdin, protocol)
     except Exception:  # noqa: BLE001 - logged for the operator; the client sees the exit

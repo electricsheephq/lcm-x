@@ -10,12 +10,14 @@ import json
 import logging
 import re
 import sqlite3
+from types import SimpleNamespace
 
 import pytest
 
 from hermes_lcm import engine as engine_module, ingest_ledger as ledger
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
+from tests.p1_gate import expect_from_view, record, store_outcome
 from tests.test_compression_boundary import (
     _CYCLES, _IN_PLACE_SEAMS, _assert_clean_commit_sequence, _compacted_engine,
     _config, _host_merge_consecutive_users, _run_host_commit_sequence, _turn,
@@ -196,6 +198,45 @@ def _snapshot(path):
         return [(session, role, content) for _sid, session, role, content, _calls in _rows(conn)]
 
 
+@contextmanager
+def _gate_observer(patch):
+    """These drivers use distinct scripted rows; retain their host-view multiplicity
+    across compression/rotation, never deriving expected content from the store.
+    """
+    ingest, shutdown = LCMEngine._ingest_messages, LCMEngine.shutdown
+    expected, engines = {}, []
+
+    def observe(self, rows, **kwargs):
+        lineage = self._conversation_id or self._session_id
+        scripted = [r for r in rows if not _looks_generated(r["role"], r.get("content"), r.get("tool_calls"))
+                    and not (r["role"] == "tool" and isinstance(r.get("content"), str)
+                             and r["content"].startswith("[Externalized tool output:"))]
+        current = Counter(expect_from_view(scripted, lineage)[lineage])
+        expected[lineage] = expected.get(lineage, Counter()) | current
+        return ingest(self, rows, **kwargs)
+
+    def stop(self):
+        # get_status needs an open lifecycle connection. Freeze the actual
+        # final engine's telemetry before the driver closes it.
+        status = self.get_status()["ingest_lock"]
+        engines[:] = [SimpleNamespace(_ingest_lock_guard=self._ingest_lock_guard,
+                      _ingest_lock_records=list(self._ingest_lock_records),
+                      get_status=lambda: {"ingest_lock": status})]
+        return shutdown(self)
+
+    patch.setattr(LCMEngine, "shutdown", stop)
+    patch.setattr(LCMEngine, "_ingest_messages", observe)
+    yield expected, engines
+
+
+def _record_emission_gate(conn, observed, cell):
+    expected, engines = observed
+    wanted = {lineage: list(rows.elements()) for lineage, rows in expected.items()}
+    outcome = store_outcome(conn, wanted)
+    record(cell, outcome, engines[-1])
+    assert outcome["loss"] == outcome["silent"] == 0, outcome
+
+
 # A: published-proof cells; B: the same matrix with a scoped reservation failure.
 @pytest.mark.parametrize("fault", ["insert", "view", "busy"])
 @pytest.mark.parametrize("in_place", [True, False], ids=["inplace", "rotation"])
@@ -207,7 +248,7 @@ def test_failure_then_restart_gate(tmp_path, monkeypatch, fault, in_place, merge
     for label, failure in (("control", None), ("fault", fault)):
         root = tmp_path / label
         root.mkdir()
-        with monkeypatch.context() as patch, _process_restarts(patch) as totals, _exit_fault(patch, failure):
+        with monkeypatch.context() as patch, _process_restarts(patch) as totals, _exit_fault(patch, failure), _gate_observer(patch) as observed:
             result = _run_host_commit_sequence(
                 root, patch, in_place=in_place, merge=merge, tail=tail,
                 restart_before_first_ingest=1 if restart == "before" else -1,
@@ -216,6 +257,8 @@ def test_failure_then_restart_gate(tmp_path, monkeypatch, fault, in_place, merge
             assert len(result["statuses"]) == _CYCLES
         with sqlite3.connect(root / "lcm.db") as conn:
             _assert_visible(conn, scripted)
+            _record_emission_gate(conn, observed, dict(family="emission_restart", path="published",
+                                  fault=failure, in_place=in_place, merge=merge, tail=tail, restart=restart))
             if failure in {"insert", "view"}:
                 recovered = conn.execute("SELECT count(*) FROM ledger_emissions").fetchone()[0]
                 assert recovered == (0 if failure == "insert" else totals["ledger.emission_recovered_provenance_only"])
@@ -297,9 +340,11 @@ def test_no_proof_exit_restart_gate(tmp_path, monkeypatch, survival_host, caplog
     for label, failure in (("control", None), ("fault", fault)):
         root = tmp_path / label
         root.mkdir()
-        with monkeypatch.context() as patch, _process_restarts(patch) as totals, _exit_fault(patch, failure):
+        with monkeypatch.context() as patch, _process_restarts(patch) as totals, _exit_fault(patch, failure), _gate_observer(patch) as observed:
             _extended_exit(root, patch, path, survival_host, caplog, restart)
         with sqlite3.connect(root / "lcm.db") as conn:
+            _record_emission_gate(conn, observed, dict(family="emission_restart", path=path,
+                                  fault=failure, restart=restart))
             if failure in {"insert", "view"}:
                 recovered = conn.execute("SELECT count(*) FROM ledger_emissions").fetchone()[0]
                 assert recovered == (0 if failure == "insert" else totals["ledger.emission_recovered_provenance_only"])
@@ -636,7 +681,7 @@ def test_accepted_ledger_gaps_do_not_publish_marker_counters(engines, monkeypatc
     assert count(engine, "write_failed") == int(failure == "write")
 
 
-# E: frozen caad1f5f8 writer, with the named P1f adoption/pending-key delta.
+# E: frozen caad1f5f8 writer, with P1f adoption/pending-key and P1g probe/mark deltas.
 # Keeping this local makes the SQL assertion runnable without git or a base checkout.
 def _main_ledger_write(self, attempt, after_commit, attribution):
     store, conn = self._store, self._store._conn
@@ -661,6 +706,13 @@ def _main_ledger_write(self, attempt, after_commit, attribution):
             lineage = persisted[0] if persisted else attempt["lineage"]
             if persisted and attempt["resolved"] is not None and lineage != attempt["resolved"]:
                 delta["ledger.lineage_drift"] += 1
+            mark, session_top, lag = conn.execute(
+                "SELECT mark,max(store_id),count(m.store_id) FILTER (WHERE NOT EXISTS "
+                "(SELECT 1 FROM occurrence_bindings b WHERE b.store_id=m.store_id)) FROM "
+                "(SELECT (SELECT max_store_id FROM lineage_marks WHERE lineage=?) AS mark) "
+                "LEFT JOIN messages m ON m.session_id=? AND m.store_id>coalesce(mark,0) "
+                "AND m.store_id NOT IN (SELECT value FROM json_each(?))",
+                (lineage, self._session_id, json.dumps(sorted(attempt["stored"].values())))).fetchone()
             ids = set(attempt["matched"].values()) | {sid for sid, _kind, _stamp in attempt["observations"]}
             by_store = {}
             for sid, occ, ordinal in conn.execute(
@@ -725,6 +777,11 @@ def _main_ledger_write(self, attempt, after_commit, attribution):
                 ledger.write_view(conn, attempt["salt"], lineage, "ingest", None, entries,
                                          view_seq=seq, precomputed_chain=attempt["chain"])
                 delta.update({"ledger.bindings_written": len(rows), "ledger.views_written": 1})
+            # P1g plain-path delta only: no rebind in this frozen writer.
+            target = max(mark or 0, session_top or 0, *attempt["stored"].values())
+            if not lag and not attempt.get("no_view") and target != (mark or 0):
+                ledger.update_store_mark(conn, lineage, target)
+                delta["ledger.store_mark_advanced"] += 1
             if ledger.has_pending(store.db_identity):
                 digests = set().union(*(ledger.pending_emission_digests((store.db_identity, attempt["salt"]),
                     key, attempt.get("retried_emissions", ())) for key in {lineage, ledger.lineage_key(None, self._session_id)}))
