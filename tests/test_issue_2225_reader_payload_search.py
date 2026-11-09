@@ -1,6 +1,7 @@
 """#2225: bounded saved-output search through the read-only MCP endpoint."""
 
 import json
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -84,15 +85,13 @@ def test_default_reader_finds_ingested_payload_and_expands_byte_equal(archive):
 
 
 @pytest.mark.parametrize("scope", [None, "externalized", "both"])
-def test_session_scope_includes_descendants_and_history(archive, scope):
-    ref, _ = archive.save("child")
+def test_session_scope_excludes_descendants_from_history_and_payloads(archive, scope):
+    archive.save("child")
     archive.store.record_session_lineage("child", "parent", source="subagent")
     archive.store.append("child", {"role": "user", "content": TOKEN})
     args = {} if scope is None else {"content_scope": scope}
     result = archive.grep(session_scope="session", session_id="parent", **args)
-    assert [h["ref"] for h in payload_hits(result)] == [ref]
-    if scope != "externalized":
-        assert any(h["type"] == "message" and h["session_id"] == "child" for h in result["results"])
+    assert result["results"] == []
     assert not archive.grep(session_scope="session", session_id="other", **args)["results"]
 
 
@@ -120,6 +119,7 @@ def test_default_history_full_skips_payloads_under_limit_fills_remaining(archive
         patch.setattr(tools, "get_large_output_storage_dir", forbidden)
         full = archive.grep(limit=1)
     assert full["results"][0]["type"] == "message" and "partial" not in full
+    assert full["externalized_skipped"] == "history_filled_limit"
     archive.save("second")
     result = archive.grep(limit=2)
     assert len(result["results"]) == 2
@@ -128,34 +128,24 @@ def test_default_history_full_skips_payloads_under_limit_fills_remaining(archive
 
 
 def test_file_cap_newest_first_and_scope_total(archive, monkeypatch):
-    archive.save("saved", name="z-old.json", created_at=1)
-    newest, _ = archive.save("saved", name="a-new.json", created_at=3)
-    archive.save("other", name="middle.json", created_at=2)
+    archive.save("saved", name="20261109_120000_old.json", created_at=1)
+    newest, _ = archive.save("saved", name="20261110_120000_new.json", created_at=3)
+    archive.save("other", name="20261108_120000_other.json", created_at=2)
     monkeypatch.setattr(tools, "READER_PAYLOAD_FILE_CAP", 1, raising=False)
     result = archive.grep(session_scope="session", session_id="saved")
     assert [h["ref"] for h in payload_hits(result)] == [newest]
     assert result["externalized_scan"]["file_limit"] == 1
-    assert result["partial"] == {"payloads_searched": 1, "payloads_total": 2,
+    assert result["partial"] == {"payloads_searched": 1, "payloads_total": 3,
                                   "reasons": ["file_cap"], "prefix_bytes": 512000}
 
 
 def test_byte_cap_never_overreads_and_reports_partial(archive, monkeypatch):
     archive.save(created_at=1)
-    newest, _ = archive.save("second", created_at=2)
+    archive.save("second", created_at=2)
     monkeypatch.setattr(tools, "READER_PAYLOAD_BYTE_CAP", 14000, raising=False)
-    real_read = tools.read_externalized_payload_search_prefix
-    reads = []
-
-    def record(*args, **kwargs):
-        result = real_read(*args, **kwargs)
-        reads.append(result.get("content_scanned_bytes", 0))
-        return result
-
-    monkeypatch.setattr(tools, "read_externalized_payload_search_prefix", record)
     result = archive.grep()
-    assert [h["ref"] for h in payload_hits(result)] == [newest]
-    assert sum(reads) <= 14000
-    assert result["partial"] == {"payloads_searched": 2, "payloads_total": 2,
+    assert not payload_hits(result)  # Header and tail consume the small budget first.
+    assert result["partial"] == {"payloads_searched": 1, "payloads_total": 2,
                                   "reasons": ["byte_cap"], "prefix_bytes": 512000}
 
 
@@ -187,7 +177,9 @@ def test_response_cap_is_disclosed(archive, monkeypatch):
 def test_second_store_is_never_read(archive, tmp_path, monkeypatch):
     other = Archive(tmp_path / "other")
     try:
-        other.save()
+        other.config.large_output_externalization_path = str(archive.storage)
+        other.storage = archive.storage
+        foreign_ref, _ = other.save("foreign")
         real_open = tools.os.open
 
         def guarded(path, *args, **kwargs):
@@ -197,6 +189,7 @@ def test_second_store_is_never_read(archive, tmp_path, monkeypatch):
         monkeypatch.setattr(tools.os, "open", guarded)
         result = archive.grep()
         assert not result["results"] and "partial" not in result
+        assert foreign_ref not in [hit["ref"] for hit in payload_hits(result)]
         archive.save()
         assert len(payload_hits(archive.grep())) == 1
     finally:
@@ -216,8 +209,8 @@ def test_unsafe_explicit_ref_is_rejected(archive, ref):
 
 
 def test_explicit_refs_use_scope_and_reader_caps(archive, monkeypatch):
-    old, _ = archive.save(name="z-old.json", created_at=1)
-    new, _ = archive.save("second", name="a-new.json", created_at=2)
+    old, _ = archive.save(name="20261109_120000_old.json", created_at=1)
+    new, _ = archive.save("second", name="20261110_120000_new.json", created_at=2)
     monkeypatch.setattr(tools, "READER_PAYLOAD_FILE_CAP", 1, raising=False)
     result = archive.grep(content_scope="externalized", externalized_refs=[old, new])
     assert [h["ref"] for h in payload_hits(result)] == [new]
@@ -256,14 +249,14 @@ def test_multiword_retry_preserves_partial_and_scans_payloads_once(archive, monk
     archive.save()
     archive.save("second")
     monkeypatch.setattr(tools, "READER_PAYLOAD_FILE_CAP", 1, raising=False)
-    real_read = tools.read_externalized_payload_search_prefix
+    real_read = tools._reader_payload_search
     reads = []
 
     def record(*args, **kwargs):
         reads.append(args[0])
         return real_read(*args, **kwargs)
 
-    monkeypatch.setattr(tools, "read_externalized_payload_search_prefix", record)
+    monkeypatch.setattr(tools, "_reader_payload_search", record)
     result = archive.call(query="missing2225 phrase2225")
     assert result["retried"] == "any_term" and not result["results"]
     assert result["partial"] == {"payloads_searched": 1, "payloads_total": 2,
@@ -278,12 +271,12 @@ def test_exact_prefix_boundary_is_complete(archive):
     assert "partial" not in result
 
 
-def test_small_byte_budget_that_fits_all_content_is_complete(archive, monkeypatch):
+def test_small_byte_budget_must_also_fit_metadata(archive, monkeypatch):
     _, content = archive.save(content="padding " * 1700 + TOKEN)
     monkeypatch.setattr(tools, "READER_PAYLOAD_BYTE_CAP", len(content.encode()), raising=False)
     result = archive.grep()
-    assert len(payload_hits(result)) == 1
-    assert "partial" not in result
+    assert not payload_hits(result)
+    assert result["partial"]["reasons"] == ["byte_cap"]
 
 
 @pytest.mark.parametrize("field,value", [("session_id", ""), ("session_id", "outside"), ("kind", None)])
@@ -309,7 +302,7 @@ def test_metadata_open_rejects_payload_replaced_by_symlink(archive, monkeypatch)
     replaced = []
 
     def replace_on_open(target, *args, **kwargs):
-        if str(target) == str(path) and not replaced:
+        if str(target) in {str(path), path.name} and not replaced:
             path.unlink()
             path.symlink_to(outside)
             replaced.append(True)
@@ -339,3 +332,86 @@ def test_prefix_cut_does_not_trust_claimed_content_size(archive):
     result = archive.grep()
     assert result["results"] == []
     assert result["partial"]["reasons"] == ["prefix"]
+
+
+@pytest.mark.parametrize("name,mode", [("lcm_grep", "hybrid"), ("lcm_grep", "semantic"),
+                                      ("lcm_recall", None)])
+def test_internal_searches_never_open_payloads_and_keep_history_parity(archive, monkeypatch, name, mode):
+    archive.save()
+    archive.store.append("saved", {"role": "user", "content": TOKEN})
+    args = {"query": TOKEN, "session_scope": "all"}
+    if mode:
+        args["mode"] = mode
+    now = time.time()
+    monkeypatch.setattr(time, "time", lambda: now)
+    with archive.reader._open_call() as (engine, _):
+        engine._reader_any_session = False
+        expected = getattr(tools, name)(args, engine=engine)
+        engine._reader_any_session = True
+        def forbidden(*args, **kwargs):
+            pytest.fail("internal search attempted payload discovery")
+        monkeypatch.setattr(tools, "get_large_output_storage_dir", forbidden)
+        started = time.monotonic()
+        actual = getattr(tools, name)(args, engine=engine)
+        assert time.monotonic() - started < 1
+        assert actual == expected
+
+
+def test_reader_history_scope_keeps_parent_only_parity(archive):
+    archive.save("child")
+    archive.store.record_session_lineage("child", "parent", source="subagent")
+    archive.store.append("child", {"role": "user", "content": TOKEN})
+    archive.store.append("parent", {"role": "user", "content": TOKEN})
+    args = {"query": TOKEN, "session_scope": "session", "session_id": "parent",
+            "content_scope": "history"}
+    with archive.reader._open_call() as (engine, _):
+        engine._reader_any_session = False
+        expected = tools.lcm_grep(args, engine=engine)
+        engine._reader_any_session = True
+        assert tools.lcm_grep(args, engine=engine) == expected
+
+
+@pytest.mark.parametrize("location", ["outside", "profile"])
+def test_storage_containment_skips_before_open(archive, tmp_path, monkeypatch, location):
+    archive.save()
+    target = tmp_path / "outside" if location == "outside" else archive.home / "profiles" / "named"
+    target.mkdir(parents=True)
+    link = archive.home / "linked"
+    link.symlink_to(target, target_is_directory=True)
+    archive.config.large_output_externalization_path = str(link)
+    def forbidden(*args, **kwargs):
+        pytest.fail("containment failure must skip discovery")
+    monkeypatch.setattr(type(archive.storage), "iterdir", forbidden)
+    result = archive.grep()
+    assert result["results"] == []
+    assert result["partial"]["reasons"] == ["containment"]
+
+
+def test_discovery_is_lazy_and_counts_all_reads(archive, monkeypatch):
+    for i in range(8):
+        archive.save(name=f"20261110_12000{i}_payload.json")
+    monkeypatch.setattr(tools, "READER_PAYLOAD_FILE_CAP", 1)
+    monkeypatch.setattr(tools, "READER_PAYLOAD_BYTE_CAP", 14000)
+    reads, opened = [], []
+    original = tools.os.fdopen
+    class CountingFile:
+        def __init__(self, handle):
+            self.handle = handle
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            self.handle.close()
+        def __getattr__(self, name):
+            return getattr(self.handle, name)
+        def read(self, size=-1):
+            data = self.handle.read(size)
+            reads.append(len(data))
+            return data
+    def counted(*args, **kwargs):
+        opened.append(args[0])
+        return CountingFile(original(*args, **kwargs))
+    monkeypatch.setattr(tools.os, "fdopen", counted)
+    result = archive.grep()
+    assert len(opened) <= 1
+    assert sum(reads) <= 14000
+    assert "byte_cap" in result["partial"]["reasons"]

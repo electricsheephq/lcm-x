@@ -225,6 +225,19 @@ def _is_inside_named_profile(path: Path, home: Path) -> bool:
     return False
 
 
+def _payload_storage_contained(engine, storage_dir: Path, ref: str = "") -> bool:
+    try:
+        home = Path(engine._hermes_home).expanduser().resolve()
+        storage_dir = storage_dir.resolve()
+        payload_path = (storage_dir / ref).resolve()
+        return bool(engine._hermes_home) and storage_dir.is_relative_to(home) and (
+            payload_path.is_relative_to(storage_dir)
+            and not _is_inside_named_profile(storage_dir, home)
+            and not _is_inside_named_profile(payload_path, home))
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
 def _get_externalized_payload(
     engine: "LCMEngine",
     ref: str,
@@ -240,17 +253,9 @@ def _get_externalized_payload(
         if not engine._hermes_home or not ref or Path(ref).name != ref:
             return None
         try:
-            home = Path(engine._hermes_home).expanduser().resolve()
             storage_dir = get_large_output_storage_dir(
-                engine._config, hermes_home=engine._hermes_home, create=False
-            ).resolve()
-            payload_path = (storage_dir / ref).resolve()
-            storage_dir.relative_to(home)
-            payload_path.relative_to(storage_dir)
-            if (
-                _is_inside_named_profile(storage_dir, home)
-                or _is_inside_named_profile(payload_path, home)
-            ):
+                engine._config, hermes_home=engine._hermes_home, create=False)
+            if not _payload_storage_contained(engine, storage_dir, ref):
                 return None
         except (OSError, RuntimeError, ValueError):
             return None
@@ -498,7 +503,7 @@ _LCM_MEMORY_LOOKUP_LIMITS = (20, 50)
 _LCM_MEMORY_LIST_LIMITS = (50, 200)
 _LCM_GREP_HARD_LIMIT_CAP = 200
 READER_PAYLOAD_FILE_CAP = 128
-READER_PAYLOAD_BYTE_CAP = 32 * 1024 * 1024
+READER_PAYLOAD_BYTE_CAP = 8 * 1024 * 1024
 _LCM_GREP_EXTERNALIZED_FILE_CAP = 256
 _LCM_GREP_EXTERNALIZED_DISCOVERY_CAP = 4096
 _LCM_GREP_EXTERNALIZED_METADATA_READ_BYTES = 64 * 1024
@@ -1159,52 +1164,71 @@ def _annotate_subagent_lineage(engine: "LCMEngine", hits: list[dict[str, Any]]) 
             hit["lineage"] = f"subagent of {parent}"
 
 
-def _reader_payload_metadata(path: Path) -> dict[str, Any]:
-    """Validate reader discovery metadata without scanning the content prefix."""
-    if "\\" in path.name:
-        return {}
+def _reader_payload_search(path: Path, budget: int, in_scope) -> dict[str, Any]:
+    """Validate and search one no-follow file; every unbuffered read spends the budget."""
+    result = {"status": "unreadable", "bytes_read": 0}
     fd = -1
     try:
         expected = path.lstat()
-        if not stat.S_ISREG(expected.st_mode):
-            return {}
-        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
-                     | getattr(os, "O_BINARY", 0))
+        if "\\" in path.name or not stat.S_ISREG(expected.st_mode):
+            return result
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+        finally:
+            os.close(directory)
         opened = os.fstat(fd)
         if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (expected.st_dev, expected.st_ino):
-            return {}
-        with os.fdopen(fd, "rb") as handle:
+            return result
+        with os.fdopen(fd, "rb", buffering=0) as handle:
             fd = -1
+            def read(size):
+                data = handle.read(min(size, budget - result["bytes_read"]))
+                result["bytes_read"] += len(data)
+                return data
             prefix, fields, seen, _ = _read_externalized_payload_metadata_prefix_from_handle(
-                handle, max_read_bytes=_LCM_GREP_EXTERNALIZED_METADATA_READ_BYTES)
-            if not seen or not fields.get("session_id"):
-                return {}
-            tail_offset = max(len(prefix.encode("utf-8")), opened.st_size - _LCM_GREP_EXTERNALIZED_DOCUMENT_TAIL_BYTES)
-            handle.seek(tail_offset)
-            tail = handle.read(_LCM_GREP_EXTERNALIZED_DOCUMENT_TAIL_BYTES)
-        # Validate the closing structure as in _validate_externalized_payload_json_tail,
-        # using the same no-follow descriptor as the header (never re-open by path).
-        for index, byte in enumerate(tail):
-            if byte != ord('"'):
-                continue
-            preceding = tail[:index]
-            if (len(preceding) - len(preceding.rstrip(b"\\"))) % 2:
-                continue
-            try:
-                document = json.loads((prefix.encode("utf-8") + b'"' + tail[index + 1:]).decode("utf-8"))
-            except (UnicodeDecodeError, json.JSONDecodeError):
-                continue
-            if isinstance(document, dict) and document.get("session_id") == fields["session_id"]:
+                SimpleNamespace(read=read), max_read_bytes=_LCM_GREP_EXTERNALIZED_METADATA_READ_BYTES)
+            if not seen or not in_scope(fields.get("session_id")):
+                return result
+            prefix = prefix.encode("utf-8")
+            offset = max(len(prefix), opened.st_size - _LCM_GREP_EXTERNALIZED_DOCUMENT_TAIL_BYTES)
+            handle.seek(offset)
+            tail = read(_LCM_GREP_EXTERNALIZED_DOCUMENT_TAIL_BYTES)
+            for index, byte in enumerate(tail):
+                if byte != 34:
+                    continue
+                cursor = index - 1
+                while cursor >= 0 and tail[cursor] == 92:
+                    cursor -= 1
+                if (index - cursor - 1) % 2:
+                    continue
+                try:
+                    document = json.loads(prefix + b'"' + tail[index + 1:])
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    continue
+                if not isinstance(document, dict) or document.get("session_id") != fields["session_id"]:
+                    continue
                 created = float(document.get("created_at") or 0)
-                return {"readable": True, "payload_session_id": fields["session_id"],
-                        "encoded_content_bytes": tail_offset + index - len(prefix.encode("utf-8")),
-                        "created_at": created if math.isfinite(created) else 0}
+                encoded_size = offset + index - len(prefix)
+                handle.seek(len(prefix))
+                raw = read(min(encoded_size, _LCM_GREP_EXTERNALIZED_CONTENT_BYTES))
+                for trim in range(min(7, len(raw) + 1)):
+                    try:
+                        content = json.loads(b'"' + raw[:len(raw) - trim] + b'"')
+                        return {**result, "status": "ok", **fields, "content": content,
+                                "created_at": created if math.isfinite(created) else 0,
+                                "original_content_bytes": document.get("content_bytes"),
+                                "original_content_chars": document.get("content_chars"),
+                                "content_scanned_bytes": len(raw), "scan_truncated": len(raw) < encoded_size}
+                    except (UnicodeDecodeError, json.JSONDecodeError):
+                        continue
+                return result
     except (OSError, ValueError, TypeError, OverflowError):
-        return {}
+        pass
     finally:
         if fd >= 0:
             os.close(fd)
-    return {}
+    return result
 
 
 def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
@@ -1331,18 +1355,20 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
         )
 
     reader_mode = _reader_any_session(engine)
-    reader_default_payloads = reader_mode and "content_scope" not in args and session_scope != "current"
+    reader_default_payloads = reader_mode and args.get("_reader_default_payloads") is True and session_scope != "current"
     if reader_default_payloads:
         content_scope = "both"
     reader_session_ids = {search_session_id}
-    if reader_mode and session_scope == "session":
-        reader_session_ids.update(engine._store.session_lineage_descendants(search_session_id))
+    reader_sessions = {}
 
     def payload_in_scope(session_id):
         if not reader_mode:
             return session_id == engine.current_session_id
-        return bool(session_id) and session_id not in excluded_session_ids and (
-            session_scope == "all" or session_id in reader_session_ids)
+        if not session_id or session_id in excluded_session_ids or (session_scope != "all" and session_id not in reader_session_ids):
+            return False
+        if session_id not in reader_sessions:
+            reader_sessions[session_id] = engine._store.has_session_messages(session_id)
+        return reader_sessions[session_id]
 
     searches_externalized = content_scope in {"externalized", "both"}
     if searches_externalized and session_scope != "current" and not reader_mode:
@@ -1365,8 +1391,6 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
                 getattr(engine._store, "session_lineage_descendants", lambda _sid: ())(current_session_id)
                 if session_scope == "current" and has_current_session else ()
             )
-            if reader_mode and session_scope == "session":
-                descendant_ids = sorted(reader_session_ids - {search_session_id})
             scoped_session_ids = [
                 scoped_id for scoped_id in (search_session_id, *descendant_ids)
                 if scoped_id not in excluded_session_ids
@@ -1446,6 +1470,16 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
     partial_reasons: list[str] = []
     payload_bytes = 0
     payloads_searched = 0
+    if searches_externalized and reader_mode:
+        try:
+            reader_storage = get_large_output_storage_dir(
+                engine._config, hermes_home=engine._hermes_home, create=False).resolve()
+            contained = _payload_storage_contained(engine, reader_storage)
+        except (OSError, ValueError):
+            contained = False
+        if not contained:
+            searches_externalized = False
+            partial_reasons.append("containment")
     externalized_scan: dict[str, Any] | None = None
     externalized_results_omitted = False
     if searches_externalized and externalized_filter_active:
@@ -1457,7 +1491,7 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
         externalized_results_omitted = True
     elif searches_externalized and current_session_id not in excluded_session_ids:
         try:
-            storage_dir = get_large_output_storage_dir(
+            storage_dir = reader_storage if reader_mode else get_large_output_storage_dir(
                 engine._config,
                 hermes_home=engine._hermes_home,
                 create=False,
@@ -1476,7 +1510,6 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
             "rejected_invalid_or_unreadable": 0,
             "rejected_session_mismatch": 0,
         }
-        reader_metadata = {}
         if externalized_refs is None or reader_mode:
             discovered_refs = []
             try:
@@ -1503,12 +1536,7 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
                         return json.dumps({"error": f"Externalized ref is a symlink: {ref}"})
                     continue
                 if reader_mode:
-                    metadata = _reader_payload_metadata(path)
-                    if not metadata.get("readable") or not payload_in_scope(metadata.get("payload_session_id")):
-                        if externalized_refs is not None:
-                            return json.dumps({"error": f"Externalized ref is not readable or not owned by the requested scope: {ref}"})
-                        continue
-                    reader_metadata[ref] = metadata
+                    candidate_refs.append(ref)
                     continue
                 metadata = _inspect_externalized_payload_metadata(
                     engine,
@@ -1548,7 +1576,12 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
         else:
             candidate_refs = externalized_refs
         if reader_mode:
-            candidate_refs = sorted(reader_metadata, key=lambda ref: reader_metadata[ref]["created_at"], reverse=True)
+            def newest(ref):
+                try:
+                    return (1, ref, ref) if re.match(r"^\d{8}_\d{6}_", ref) else (0, (storage_dir / ref).lstat().st_mtime, ref)
+                except OSError:
+                    return (0, 0, ref)
+            candidate_refs.sort(key=newest, reverse=True)
             if scan_counts["discovery_truncated"]:
                 partial_reasons.append("discovery_cap")
         scan_counts["candidate_files"] = len(candidate_refs)
@@ -1563,7 +1596,6 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
                 if payload_bytes >= READER_PAYLOAD_BYTE_CAP:
                     partial_reasons.append("byte_cap")
                     break
-                content_bytes = min(content_bytes, READER_PAYLOAD_BYTE_CAP - payload_bytes)
                 payloads_searched += 1
             if externalized_refs is not None and not reader_mode:
                 path = storage_dir / ref
@@ -1584,22 +1616,21 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
                     scan_counts["rejected_invalid_or_unreadable"] += 1
                     return json.dumps({"error": f"Externalized ref is not readable: {ref}"})
             try:
-                payload = read_externalized_payload_search_prefix(
-                    ref,
-                    config=engine._config,
-                    hermes_home=engine._hermes_home,
-                    max_content_bytes=content_bytes,
-                )
+                if reader_mode:
+                    payload = _reader_payload_search(storage_dir / ref, READER_PAYLOAD_BYTE_CAP - payload_bytes, payload_in_scope)
+                    payload_bytes += payload["bytes_read"]
+                    if payload_bytes >= READER_PAYLOAD_BYTE_CAP and (payload.get("scan_truncated") or payload["status"] != "ok"):
+                        partial_reasons.append("byte_cap")
+                    elif payload.get("scan_truncated"):
+                        partial_reasons.append("prefix")
+                else:
+                    payload = read_externalized_payload_search_prefix(
+                        ref, config=engine._config, hermes_home=engine._hermes_home,
+                        max_content_bytes=content_bytes)
             except (OSError, ValueError) as exc:
                 return json.dumps({
                     "error": f"Externalized payload storage is unavailable: {exc}",
                 })
-            if reader_mode:
-                payload_bytes += payload.get("content_scanned_bytes", 0)
-                if payload.get("scan_truncated") and reader_metadata[ref]["encoded_content_bytes"] > content_bytes:
-                    reason = "byte_cap" if content_bytes < _LCM_GREP_EXTERNALIZED_CONTENT_BYTES else "prefix"
-                    if reason not in partial_reasons:
-                        partial_reasons.append(reason)
             status = payload.get("status")
             if status == "symlink":
                 scan_counts["rejected_symlink"] += 1
@@ -1609,7 +1640,7 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
             if status != "ok":
                 scan_counts["rejected_invalid_or_unreadable"] += 1
                 if externalized_refs is not None:
-                    return json.dumps({"error": f"Externalized ref is not readable: {ref}"})
+                    return json.dumps({"error": f"Externalized ref is not readable{' or not owned by the requested scope' if reader_mode else ''}: {ref}"})
                 continue
             scan_counts["scanned_files"] += 1
             if not payload_in_scope(payload.get("session_id")):
@@ -1723,9 +1754,11 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
         response["externalized_refs"] = externalized_refs
     if externalized_scan is not None:
         response["externalized_scan"] = externalized_scan
+    if reader_default_payloads and len(results) >= limit and externalized_scan is None:
+        response["externalized_skipped"] = "history_filled_limit"
     if partial_reasons:
         response["partial"] = {"payloads_searched": payloads_searched,
-                               "payloads_total": ">4096" if scan_counts["discovery_truncated"] else len(candidate_refs),
+                               "payloads_total": (">4096" if scan_counts["discovery_truncated"] else len(candidate_refs)) if externalized_scan else 0,
                                "reasons": list(dict.fromkeys(partial_reasons)),
                                "prefix_bytes": _LCM_GREP_EXTERNALIZED_CONTENT_BYTES}
     if message_search_error is not None:
@@ -2593,6 +2626,7 @@ def lcm_grep(args: Dict[str, Any], **kwargs) -> str:
     parsed_args.pop("_grep_any_term", None)
     parsed_args.pop("_stemmed", None)
     parsed_args["_agent_operators"] = True
+    parsed_args["_reader_default_payloads"] = _reader_any_session(engine) and mode == "full_text" and "content_scope" not in args
     if mode == "full_text":
         payload = json.loads(_lcm_grep_full_text(parsed_args, **kwargs))
         query = _coerce_query_arg(args.get("query"))
@@ -2615,6 +2649,7 @@ def lcm_grep(args: Dict[str, Any], **kwargs) -> str:
                           "_agent_operators": True, "_allow_operators": True, "_grep_any_term": True}
             if _reader_any_session(engine):
                 retry_args["content_scope"] = "history"  # one payload budget per call; OR is history syntax
+                retry_args["_reader_default_payloads"] = False
             retried_payload = json.loads(_lcm_grep_full_text(retry_args, **kwargs))
             if _reader_any_session(engine):
                 for key in ("partial", "externalized_scan", "externalized_results_omitted", "content_scope"):
