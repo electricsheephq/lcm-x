@@ -7,8 +7,10 @@ import json
 import math
 import os
 import random
+import signal
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -211,7 +213,17 @@ def codex_home_lock(home):
             fcntl.flock(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise RuntimeError("codex home busy") from None
-        yield
+        # SIGTERM unwinds normally, so a running Codex child finishes or is killed before the lock is released.
+        previous = signal.signal(signal.SIGTERM, _terminate) if threading.current_thread() is threading.main_thread() else None
+        try:
+            yield
+        finally:
+            if previous is not None:
+                signal.signal(signal.SIGTERM, previous)
+
+
+def _terminate(signum, frame):
+    raise SystemExit(128 + signum)
 
 
 def execute(args):
@@ -221,6 +233,10 @@ def execute(args):
             raise ValueError("--codex-home must name an existing absolute directory")
         if args.workers != 1:
             raise ValueError("--codex-home requires --workers 1")
+        for path in (args.output, args.store_root):
+            resolved = Path(path).resolve()
+            if resolved == home.resolve() or home.resolve() in resolved.parents:
+                raise ValueError("--output and --store-root must be outside --codex-home")
     leased = home is not None and args.command in ("canary", "answer", "judge")
     lease = codex_home_lock(home) if leased else contextlib.nullcontext()
     with lease:
@@ -373,7 +389,8 @@ def run(args, client, questions, dataset_sha, ids_sha, excluded, store):
             if manifest.get(key) != value:
                 raise ValueError("judging run identity mismatch")
     home_manifest = manifest.get("harness", manifest)
-    home_manifest["codex_home_mode"] = "leased" if getattr(args, "codex_home", None) is not None else "symlink"
+    mode_key = "codex_home_mode" if args.command == "answer" else "judge_codex_home_mode"
+    home_manifest[mode_key] = "leased" if getattr(args, "codex_home", None) is not None else "symlink"
     manifest.setdefault("endpoint_hosts", {}).update({s: GLM_HOST for s in specs(args) if parse_spec(s)[0] == "glm"})
     timing = {"active_s": 0.0}
     if args.command == "answer":

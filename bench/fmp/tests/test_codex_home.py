@@ -27,6 +27,7 @@ def cli(tmp_path, monkeypatch):
     monkeypatch.setattr(run, "versions", lambda: {})
     monkeypatch.setattr(run.delivery, "schemas", lambda _: [])
     monkeypatch.setattr(run.subprocess, "run", Mock(side_effect=AssertionError("no real child")))
+    (tmp_path / "lease").mkdir(exist_ok=True)
     clients, environments = [], []
 
     def runner(cmd, **kwargs):
@@ -73,7 +74,7 @@ def test_t1_leased_home_reaches_codex_without_symlinks(tmp_path, monkeypatch, cl
     symlink = Mock(side_effect=AssertionError("no symlinks"))
     monkeypatch.setattr(Path, "symlink_to", symlink)
     home = tmp_path / "lease"
-    home.mkdir()
+    home.mkdir(exist_ok=True)
     args = cli.args(command, "--codex-home", str(home))
     if command == "judge":
         run.execute(cli.args("answer", "--codex-home", str(home)))
@@ -111,10 +112,10 @@ def test_t2_unsafe_options_rejected_before_backends(tmp_path, cli, invalid):
 
 @pytest.mark.parametrize("command", ["canary", "answer", "judge"])
 def test_t3_busy_home_rejected_before_backends(tmp_path, cli, command):
-    with (tmp_path / "holder.lock").open("w") as holder:
+    with (tmp_path / "lease" / "holder.lock").open("w") as holder:
         fcntl.flock(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
         with pytest.raises(RuntimeError, match="^codex home busy$"):
-            run.execute(cli.args(command, "--codex-home", str(tmp_path)))
+            run.execute(cli.args(command, "--codex-home", str(tmp_path / "lease")))
     cli.built.assert_not_called()
     assert not cli.environments
 
@@ -133,7 +134,7 @@ def test_t4_unset_preserves_symlink_home_and_records_mode(monkeypatch, cli):
 
 
 def test_lock_held_through_construction_calls_and_close(tmp_path, monkeypatch, cli):
-    lock = tmp_path / "holder.lock"
+    lock = tmp_path / "lease" / "holder.lock"
 
     def check_lock():
         with lock.open("r+") as contender:
@@ -161,7 +162,7 @@ def test_lock_held_through_construction_calls_and_close(tmp_path, monkeypatch, c
     cli.built.side_effect = checked_build
     monkeypatch.setattr(models.Codex, "call", checked_call)
     monkeypatch.setattr(models.Codex, "close", checked_close)
-    run.execute(cli.args("canary", "--codex-home", str(tmp_path)))
+    run.execute(cli.args("canary", "--codex-home", str(tmp_path / "lease")))
     assert observed == ["build", "call", "close"]
     with lock.open("r+") as contender:
         fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -176,8 +177,8 @@ def test_lock_released_on_failure(tmp_path, monkeypatch, cli, failure):
     else:
         monkeypatch.setattr(run, "canary", error)
     with pytest.raises(RuntimeError, match="synthetic failure"):
-        run.execute(cli.args("canary", "--codex-home", str(tmp_path)))
-    with (tmp_path / "holder.lock").open("r+") as contender:
+        run.execute(cli.args("canary", "--codex-home", str(tmp_path / "lease")))
+    with (tmp_path / "lease" / "holder.lock").open("r+") as contender:
         fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
     assert all(not client.codex.scratch.exists() for client in cli.clients)
 
@@ -185,14 +186,46 @@ def test_lock_released_on_failure(tmp_path, monkeypatch, cli, failure):
 def test_judge_updates_home_mode_and_routes_all_codex_specs(tmp_path, monkeypatch, cli):
     monkeypatch.setattr(Path, "symlink_to", Mock())
     run.execute(cli.args())
-    args = cli.args("judge", "--codex-home", str(tmp_path),
+    args = cli.args("judge", "--codex-home", str(tmp_path / "lease"),
                     "--judge", models.CODEX_DEFAULT_JUDGE, models.CODEX_DEFAULT_READER,
                     "--agreement-judge", models.CODEX_DEFAULT_JUDGE, "--agreement-fraction", "1")
     run.execute(args)
     assert len(cli.environments) == 4
-    assert all(env["CODEX_HOME"] == str(tmp_path) for env in cli.environments[1:])
+    assert all(env["CODEX_HOME"] == str(tmp_path / "lease") for env in cli.environments[1:])
     manifest = json.loads((args.output / "run-manifest.json").read_text())
-    assert manifest["harness"]["codex_home_mode"] == "leased"
+    assert manifest["harness"]["codex_home_mode"] == "symlink"  # the answer run's mode is kept
+    assert manifest["harness"]["judge_codex_home_mode"] == "leased"
+
+
+def test_output_or_store_root_inside_home_rejected(tmp_path, cli):
+    home = tmp_path / "lease"
+    home.mkdir(exist_ok=True)
+    for flag in ("--output", "--store-root"):
+        args = cli.args("answer", "--codex-home", str(home))
+        setattr(args, flag[2:].replace("-", "_"), home / "inside")
+        with pytest.raises(ValueError, match="^--output and --store-root must be outside --codex-home$"):
+            run.execute(args)
+    cli.built.assert_not_called()
+    assert not (home / "holder.lock").exists()
+
+
+def test_sigterm_unwinds_inside_lease_and_handler_restored(tmp_path, monkeypatch, cli):
+    import os
+    import signal
+    before = signal.getsignal(signal.SIGTERM)
+
+    def terminate(*a, **k):
+        assert signal.getsignal(signal.SIGTERM) is run._terminate
+        os.kill(os.getpid(), signal.SIGTERM)
+        raise AssertionError("SIGTERM did not unwind")
+
+    monkeypatch.setattr(run, "canary", terminate)
+    with pytest.raises(SystemExit) as exc:
+        run.execute(cli.args("canary", "--codex-home", str(tmp_path / "lease")))
+    assert exc.value.code == 128 + signal.SIGTERM
+    assert signal.getsignal(signal.SIGTERM) == before
+    with (tmp_path / "lease" / "holder.lock").open("r+") as contender:
+        fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
 
 def test_score_and_build_stores_ignore_codex_home_options(tmp_path, monkeypatch, cli):
