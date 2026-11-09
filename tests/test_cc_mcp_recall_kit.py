@@ -161,3 +161,33 @@ def test_tiny_store(tmp_path):
     subprocess.run(command, check=True)
     # One planted fact and no corpus files: the run did not exercise what it claims, so it is void, not a result.
     assert k.read(tmp_path / 'result/RESULT-MANIFEST.json')['verdict'] == 'VOID'
+
+def test_arm_t_payload_hit(monkeypatch, tmp_path):
+    # #2225: a fact held only in a saved tool output is found as a payload hit and must expand, by its ref, to the
+    # payload D read; a payload with other bytes, or a hit from another session, does not count.
+    fact = next(f for f in k.tokens() if f['class'] == 'tool_result_saved')
+    payload = 'x' * 20000 + fact['token']
+    d = {'tokens': [{'id': fact['id'], 'token': fact['token'], 'sessions': ['s4'], 'matches': [{'store_id': '9', 'session_id': 's4', 'role': 'tool', 'sha256': hashlib.sha256(payload.encode()).hexdigest(), 'externalized_ref': 'p1.json'}]}]}
+
+    def run(served, session='s4'):
+        class Fake:
+            calls = []
+            def __init__(self, *a):
+                pass
+            def rpc(self, *a):
+                return {}
+            def close(self):
+                pass
+            def call(self, name, args):
+                if name == 'lcm_grep':
+                    return {'results': [{'type': 'externalized', 'ref': 'p1.json', 'session_id': session, 'snippet': fact['token']}], 'partial': {'reasons': ['prefix']}}
+                assert args == {'externalized_ref': 'p1.json', 'session_id': session, 'content_offset': 0, 'max_tokens': 50000}
+                return {'content': served, 'has_more': False}
+        monkeypatch.setattr(k, 'MCP', Fake)
+        monkeypatch.setattr(k, 'server', lambda *a: None)
+        return k.arm_t(tmp_path, tmp_path, d)['tokens'][0]
+
+    row = run(payload)
+    assert row['pass'] and row['via'] == ['payload'] and row['partial'] == {'reasons': ['prefix']}
+    assert not run(payload + ' ')['pass']
+    assert not run(payload, session='s5')['pass']

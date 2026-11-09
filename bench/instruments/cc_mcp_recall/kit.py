@@ -203,7 +203,10 @@ def arm_t(plugin, home, direct, empty=False):
                 continue
             row = {"id": d["id"], "pass": False}
             try:
-                hits = mcp.call("lcm_grep", {"query": d["token"], "mode": "full_text", "limit": 50})["results"]
+                response = mcp.call("lcm_grep", {"query": d["token"], "mode": "full_text", "limit": 50})
+                hits = response["results"]
+                if "partial" in response:
+                    row["partial"] = response["partial"]
             except (RuntimeError, TimeoutError, ValueError, KeyError) as exc:
                 hits, row["error"] = None, type(exc).__name__
             row["hits"] = None if hits is None else len(hits)
@@ -211,13 +214,23 @@ def arm_t(plugin, home, direct, empty=False):
             for hit in [] if empty or hits is None else hits:
                 if hit.get("session_id") not in d["sessions"] or d["token"] not in hit.get("snippet", "").replace(">>>", "").replace("<<<", ""):
                     continue
+                # A saved tool output is found as a payload hit (#2225): expand it by its ref and compare it with
+                # the payload D read; a message hit is expanded by its row.
+                payload_hit = hit.get("type") == "externalized"
                 try:
-                    text = expand(mcp, {"store_id": hit["store_id"], "session_id": hit["session_id"]})
+                    if payload_hit:
+                        text = expand(mcp, {"externalized_ref": hit["ref"], "session_id": hit["session_id"]})
+                    else:
+                        text = expand(mcp, {"store_id": hit["store_id"], "session_id": hit["session_id"]})
                 except (RuntimeError, TimeoutError, ValueError, KeyError) as exc:
                     row["error"] = type(exc).__name__
                     continue
-                ident = str(hit["store_id"]).split(":")[-1]
-                row["pass"] |= d["token"] in text and any(str(m["store_id"]) == ident and m["session_id"] == hit["session_id"] and hashlib.sha256(text.encode()).hexdigest() == m["sha256"] for m in d["matches"])
+                digest = hashlib.sha256(text.encode()).hexdigest()
+                key, value = ("externalized_ref", hit["ref"]) if payload_hit else ("store_id", str(hit["store_id"]).split(":")[-1])
+                matched = d["token"] in text and any(str(m.get(key)) == value and m["session_id"] == hit["session_id"] and digest == m["sha256"] for m in d["matches"])
+                if matched:
+                    row.setdefault("via", []).append("payload" if payload_hit else "message")
+                row["pass"] |= matched
             rows.append(row)
     finally:
         mcp.close()
