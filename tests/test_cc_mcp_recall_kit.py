@@ -186,6 +186,7 @@ def test_arm_t_payload_hit(monkeypatch, tmp_path):
                 return {'content': served, 'has_more': False}
         monkeypatch.setattr(k, 'MCP', Fake)
         monkeypatch.setattr(k, 'server', lambda *a: None)
+        monkeypatch.setattr(k, 'store_identity', lambda home: 's')
         return k.arm_t(tmp_path, tmp_path, d)['tokens'][0]
 
     row = run(payload)
@@ -230,3 +231,40 @@ def test_compaction_must_follow_the_value(tmp_path, monkeypatch):
     assert fact['id'] not in k.evidence(tmp_path, manifest)[fact['session']]['compacted_facts']
     transcript.write_text(fact['token'] + '\n{"subtype": "compact_boundary"}\n')
     assert fact['id'] in k.evidence(tmp_path, manifest)[fact['session']]['compacted_facts']
+
+
+def test_bot_round_3(monkeypatch, tmp_path):
+    numeric = next(q for q in k.Q if q['kind'] == 'positive' and q['gold'].isdigit())
+    gold = numeric['gold']
+    # A decimal point is a different value; a short number beside the value is a hedge.
+    assert not k.judge(gold[:3] + '.' + gold[3:], numeric)['correct']
+    assert not k.judge(gold + ' or 8080', numeric)['correct']
+    assert not k.judge(gold + ' or 443', numeric)['correct']
+    assert k.judge(gold[:2] + ',' + gold[2:], numeric)['correct']
+    # Every measured arm is bound to the capturing asset and to the store D read.
+    for arm, key in ((4, 'bundle'), (6, 'bundle'), (4, 'store'), (2, 'store')):
+        inputs = synthetic()
+        inputs[0]['bundle'] = {'core_commit': 'a'}
+        for i in (2, 4, 6):
+            inputs[i]['bundle'] = {'core_commit': 'a'}
+        inputs[1]['store'] = inputs[2]['store'] = inputs[4]['store'] = 's'
+        assert k.score(*inputs)['verdict'] == 'PASS'
+        inputs[arm][key] = {'core_commit': 'b'} if key == 'bundle' else 'other'
+        assert k.score(*inputs)['verdict'] == 'VOID'
+    # A reader that dies mid-arm (BrokenPipeError) leaves a T receipt with the rows taken so far.
+    class Dead:
+        calls = [{'tool': 'lcm_grep', 'ms': 1}]
+        def __init__(self, *a):
+            pass
+        def rpc(self, *a):
+            return {}
+        def close(self):
+            pass
+        def call(self, name, args):
+            raise BrokenPipeError
+    monkeypatch.setattr(k, 'MCP', Dead)
+    monkeypatch.setattr(k, 'server', lambda *a: None)
+    monkeypatch.setattr(k, 'store_identity', lambda home: 's')
+    d = {'tokens': [{'id': 'F01', 'token': 'X', 'sessions': ['s1'], 'matches': []}]}
+    t = k.arm_t(tmp_path, tmp_path, d)
+    assert t['tokens'] == [{'id': 'F01', 'pass': False, 'error': 'BrokenPipeError', 'hits': None}]

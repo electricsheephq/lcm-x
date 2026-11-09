@@ -43,10 +43,11 @@ def log_text(spec):
 
 def normalize(text):
     text = re.sub("[\u2010-\u2015\u2212]", "-", text.upper())
-    text = re.sub(r"(?<=\d)[,.](?=\d)", "", text)  # 48,213 -> 48213
+    text = re.sub(r"(?<=\d),(?=\d{3}(?!\d))", "", text)  # a thousands comma: 48,213 -> 48213 (482.13 stays a different value)
     return " ".join(re.sub(r"[^A-Z0-9-]", " ", text).split())
 
-TOKEN_SHAPE = re.compile(r"(?<![A-Z0-9-])(?:[A-Z]+-\d+|\d{5,})(?![A-Z0-9-])")  # any code length, so an invented alternative is a hedge
+# The prompt asks for the exact value only, so any other code or number of 3+ digits is a hedge.
+TOKEN_SHAPE = re.compile(r"(?<![A-Z0-9-])(?:[A-Z]+-\d+|\d{3,})(?![A-Z0-9-])")  # any code length, so an invented alternative is a hedge
 
 def judge(answer, question, error=False):
     text = normalize(answer)
@@ -71,6 +72,15 @@ def package():
         sys.modules["hermes_lcm"] = pkg
     from hermes_lcm import claude_code_store
     return claude_code_store
+
+def bundle(plugin):
+    return read(plugin / "bundle.json") if (plugin / "bundle.json").is_file() else None
+
+def store_identity(store_home):
+    """Which store an arm measured: a digest of its sessions and their row counts (the corpus store is static)."""
+    with sqlite3.connect((store_home / "lcm.db").as_uri() + "?mode=ro", uri=True) as db:
+        rows = db.execute("SELECT session_id, COUNT(*) FROM messages GROUP BY session_id ORDER BY session_id").fetchall()
+    return hashlib.sha256(json.dumps(rows).encode()).hexdigest()
 
 def empty_store(home):
     cc = package()
@@ -97,7 +107,7 @@ def arm_d(home, manifest):
             records.append({"id": f["id"], "token": f["token"], "sessions": sessions, "matches": matches, "pass": bool(matches),
                             "planted": planted(home, sid, f["token"]),
                             **({"in_saved_output": saved_holds(home, sid, f["token"])} if f["class"] == "tool_result_saved" else {})})
-    return {"tokens": records, "plant_failed": [r["id"] for r in records if not r["planted"]], "evidence": evidence(home, manifest), "store_bytes": sum(p.stat().st_size for p in store_home.rglob("*") if p.is_file()), "host_load": os.getloadavg()}
+    return {"tokens": records, "plant_failed": [r["id"] for r in records if not r["planted"]], "evidence": evidence(home, manifest), "store": store_identity(store_home), "store_bytes": sum(p.stat().st_size for p in store_home.rglob("*") if p.is_file()), "host_load": os.getloadavg()}
 
 def session_files(home, sid):
     """A session's raw Claude Code files: its transcript, its subagents' transcripts and its saved outputs."""
@@ -214,7 +224,7 @@ def arm_t(plugin, home, direct, empty=False):
                 hits = response["results"]
                 if "partial" in response:
                     row["partial"] = response["partial"]
-            except (RuntimeError, TimeoutError, ValueError, KeyError) as exc:
+            except (RuntimeError, TimeoutError, ValueError, KeyError, OSError) as exc:
                 hits, row["error"] = None, type(exc).__name__
             row["hits"] = None if hits is None else len(hits)
             row["pass"] = hits is not None and not hits if empty else False
@@ -229,7 +239,7 @@ def arm_t(plugin, home, direct, empty=False):
                         text = expand(mcp, {"externalized_ref": hit["ref"], "session_id": hit["session_id"]})
                     else:
                         text = expand(mcp, {"store_id": hit["store_id"], "session_id": hit["session_id"]})
-                except (RuntimeError, TimeoutError, ValueError, KeyError) as exc:
+                except (RuntimeError, TimeoutError, ValueError, KeyError, OSError) as exc:
                     row["error"] = type(exc).__name__
                     continue
                 digest = hashlib.sha256(text.encode()).hexdigest()
@@ -241,7 +251,7 @@ def arm_t(plugin, home, direct, empty=False):
             rows.append(row)
     finally:
         mcp.close()
-    return {"tokens": rows, "calls": mcp.calls, "empty": empty, "bundle": read(plugin / "bundle.json") if (plugin / "bundle.json").is_file() else None}
+    return {"tokens": rows, "calls": mcp.calls, "empty": empty, "bundle": bundle(plugin), "store": store_identity(home / ".lcm-x/claude-code")}
 
 def claude(command, prompt, args, home, cwd, env=None):
     start, result, init, calls = time.monotonic(), {}, None, {}
@@ -285,7 +295,7 @@ def quiesce(home):
 
 def build(args):
     project, manifest = args.home / "proj/recall-fixture", {"sessions": {}, "stop": False}
-    manifest["bundle"] = read(args.plugin / "bundle.json") if (args.plugin / "bundle.json").is_file() else None
+    manifest["bundle"] = bundle(args.plugin)
     manifest["claude_version"] = subprocess.run([args.claude, "--version"], capture_output=True, text=True, env={**os.environ, "KIT_HOME": str(args.home)}).stdout.strip()
     project.mkdir(parents=True, exist_ok=False)
     for name, spec in C["files"].items():
@@ -348,7 +358,7 @@ def arm_a(args):
         return {"id": q["id"], **call}
     with ThreadPoolExecutor(max_workers=args.parallel) as pool:
         rows = [r for r in pool.map(one, [q for q in Q if not args.only or q["kind"] == args.only]) if r]
-    return {"answers": rows, **({"stop_reason": "limit"} if stopped.is_set() else {})}
+    return {"answers": rows, "bundle": bundle(args.plugin), "store": store_identity(args.store_home), **({"stop_reason": "limit"} if stopped.is_set() else {})}
 
 def first_positives(run):
     answers = {r["id"]: r for r in run["answers"]}
@@ -402,8 +412,11 @@ def score(manifest, d, t, te, a, a2=None, ae=None, classifications=None):
     cover = coverage(d)
     if t.get("empty") is not False or te.get("empty") is not True:  # a control receipt can never stand in for the measured arm
         cover = {**cover, "ok": False, "missing": cover["missing"] + ["t_receipt_mode"]}
-    if manifest.get("bundle") is not None and t.get("bundle") != manifest.get("bundle"):  # T must measure the asset that captured
+    # Every measured arm (T, A, the second A, the empty control) uses the asset that captured, and T and A the store D read.
+    if manifest.get("bundle") is not None and any(arm is not None and arm.get("bundle") != manifest["bundle"] for arm in (t, a, a2, ae)):
         cover = {**cover, "ok": False, "missing": cover["missing"] + ["asset_mismatch"]}
+    if "store" in d and any(arm is not None and arm.get("store") != d["store"] for arm in (t, a, a2)):
+        cover = {**cover, "ok": False, "missing": cover["missing"] + ["store_mismatch"]}
     bars = {"empty_control": empty_ok, "coverage": cover["ok"], "capture": not manifest.get("stop") and set(manifest["sessions"]) == {s["label"] for s in C["sessions"]} and all(s.get("audit", {}).get("rc") == 0 and s["audit"].get("ok") and s["audit"].get("verified") for s in manifest["sessions"].values()), "D": all(dm.get(f["id"], False) for f in tokens() if gated(f)), "T": all(tm.get(f["id"], False) for f in tokens() if gated(f)), "A": min(positives) >= 36, "false_recall": max(fabricated) <= 1, "answers_complete": all(valid(run, Q) for run in runs)}
     second = window and a2 is None
     complete = bars.pop("answers_complete")
