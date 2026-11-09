@@ -141,11 +141,11 @@ copy-paste setups per agent type. Externalization and temporal rollups are on by
 ## Project status
 
 The latest stable release is
-[`v0.29.1`](https://github.com/electricsheephq/lcm-x/releases/tag/v0.29.1)
-at `3a4a08ff501347a79669fab51444c471b09b551d`, released 2026-11-03 (plugin `hermes-lcm-x`, engine `lcm-x`).
-Compaction gets past a row the host still holds, keeps its 10-minute pause, and
-summarises in store order, and a restart after a cleanup pass no longer stores the
-conversation again. See [project status](docs/project-status.md) for the release summary,
+[`v0.29.2`](https://github.com/electricsheephq/lcm-x/releases/tag/v0.29.2)
+at `261d41ea928eec3dc5b8db13c70f044392adf124`, released 2026-11-09 (plugin `hermes-lcm-x`, engine `lcm-x`).
+Compaction retries past a contiguity stop at the scan limit and keeps its exit
+headroom, shutdown waits for a running compaction, and a profile's storage opens
+only when that profile is used. See [project status](docs/project-status.md) for the release summary,
 the disclosed qualification decisions and current work.
 It requires Hermes 0.21.3 or newer (#1080). It carries
 the v0.23.2 lossless
@@ -1347,7 +1347,7 @@ See [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for project conduct expectations
 and [SECURITY.md](SECURITY.md) for vulnerability reporting.
 See the [releases page](https://github.com/electricsheephq/lcm-x/releases),
 [tags page](https://github.com/electricsheephq/lcm-x/tags), and
-[CHANGELOG](CHANGELOG.md) for version history. `v0.29.1` is the latest stable
+[CHANGELOG](CHANGELOG.md) for version history. `v0.29.2` is the latest stable
 GitHub Release; verify its exact SHA before installation.
 
 ## License
