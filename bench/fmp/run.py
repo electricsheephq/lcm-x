@@ -213,7 +213,7 @@ def codex_home_lock(home):
             fcntl.flock(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise RuntimeError("codex home busy") from None
-        # SIGTERM unwinds normally, so a running Codex child finishes or is killed before the lock is released.
+        # SIGTERM unwinds normally: the running Codex call finishes (or, on the main thread, is killed) before the lock is released.
         previous = signal.signal(signal.SIGTERM, _terminate) if threading.current_thread() is threading.main_thread() else None
         try:
             yield
