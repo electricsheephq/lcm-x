@@ -6,7 +6,8 @@
 # calls' environment and is never printed. BASE_URL, when set, points Claude Code at an
 # Anthropic-compatible endpoint (left unset, Claude Code uses its default).
 # The unit gate's Linux install record (bench/specs/RELEASE-READINESS-V1.md, "Claude Code unit
-# releases") when no fresh container is available (#2348).
+# releases") when no container runtime is available (#2348). Exit 0 means the record was taken, not that
+# it passed: acceptance reads each RECORD line (audit_ok, verified, failures, turn_errors).
 #
 #   CANDIDATE=<full sha on main> KEY_FILE=<mode-600 key file> WORKDIR=<new or empty dir> [BASE_URL=<url>] \
 #     bash scripts/claude_code_install_record_linux.sh 2>&1 | tee linux-install-record.out
@@ -21,6 +22,14 @@ set -euo pipefail
 [ "$(stat -c %a "$KEY_FILE")" = 600 ] || { echo "KEY_FILE must be mode 600"; exit 2; }
 if [ -e "$WORKDIR" ] && [ -n "$(ls -A "$WORKDIR")" ]; then echo "WORKDIR must be new or empty"; exit 2; fi
 mkdir -p "$WORKDIR"; WORKDIR=$(cd "$WORKDIR" && pwd); KEY_FILE=$(cd "$(dirname "$KEY_FILE")" && pwd)/$(basename "$KEY_FILE")
+# Claude Code also loads CLAUDE.md files from every ancestor of the project folder, so WORKDIR must sit
+# where no ancestor carries one (a scratch HOME does not prevent this).
+d="$WORKDIR"; while :; do
+  for f in CLAUDE.md CLAUDE.local.md .claude/CLAUDE.md; do
+    [ ! -e "$d/$f" ] || { echo "WORKDIR has an ancestor instruction file: $d/$f; pick a scratch location outside any project"; exit 2; }
+  done
+  [ "$d" = / ] && break; d=$(dirname "$d")
+done
 SYSPATH=/usr/local/bin:/usr/bin:/bin
 PASS=(LANG=C.UTF-8 TERM=dumb CANDIDATE="$CANDIDATE" KEY_FILE="$KEY_FILE" BASE_URL="${BASE_URL:-}"
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 DISABLE_AUTOUPDATER=1 DISABLE_TELEMETRY=1)
@@ -28,7 +37,8 @@ for v in http_proxy https_proxy no_proxy HTTP_PROXY HTTPS_PROXY NO_PROXY; do [ -
 echo "== host: $(. /etc/os-release && echo "$PRETTY_NAME"), $(/usr/bin/python3 -V), native (clean environment, not a fresh container), endpoint $(if [ -n "${BASE_URL:-}" ]; then echo custom; else echo default; fi), candidate $CANDIDATE, start $(date -u +%FT%TZ)"
 
 # The release asset stand-in: built once from the candidate with the host's python3 (the tag
-# workflow builds the same bytes); each case then installs it from its own Downloads folder.
+# workflow builds the same tree; only the ref recorded in bundle.json, and so the archive hash,
+# differs); each case then installs it from its own Downloads folder.
 env -i "${PASS[@]}" HOME="$WORKDIR/build-home" PATH="$SYSPATH" bash -s <<'BUILD'
 set -euo pipefail
 mkdir -p "$HOME" && cd "$HOME/.."
@@ -47,7 +57,7 @@ mkdir -p "$WORKDIR/caseB/py310" "$WORKDIR/caseB/sysbin"
 ln -s "$PY310" "$WORKDIR/caseB/py310/python3"; ln -s "$WORKDIR/tools/bin/uv" "$WORKDIR/caseB/py310/uv"
 for d in /usr/local/bin /usr/bin /bin; do for f in "$d"/*; do b=$(basename "$f")
   case "$b" in python*|pydoc*|idle*|2to3*) continue;; esac
-  [ -e "$WORKDIR/caseB/sysbin/$b" ] || ln -s "$f" "$WORKDIR/caseB/sysbin/$b"; done; done
+  [ -e "$WORKDIR/caseB/sysbin/$b" ] || [ -L "$WORKDIR/caseB/sysbin/$b" ] || ln -s "$f" "$WORKDIR/caseB/sysbin/$b"; done; done
 
 one_case() {  # $1 case name, $2 PATH after the case HOME's ~/.local/bin
   local home="$WORKDIR/case$1/home"; mkdir -p "$home"
