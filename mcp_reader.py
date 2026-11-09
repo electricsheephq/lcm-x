@@ -68,6 +68,7 @@ READER_NOTE = (
     "session_scope='all', a node_id without session_id resolves in the node's own session, "
     "externalized payloads resolve from any session of this store when its payload folder is "
     "inside the profile, and ids may carry a '<store_uuid>:' prefix."
+    " Large tool outputs are searched too, and partial says when a search was cut."
 )
 PROFILE_ENV_EXTRA_KEYS = ("FASTEMBED_CACHE_PATH",)
 TOKENIZER_WAIT_S = 30.0
