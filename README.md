@@ -15,7 +15,7 @@ hermes plugins install hermes-lcm-x --enable
 hermes config set context.engine lcm-x
 ```
 
-On Hermes 0.23.0 this installs the catalog's current entry (0.29.1 until the catalog update merges; 0.29.2 is the latest release).
+This installs the version the Hermes catalog currently pins, which can trail the [latest release](https://github.com/electricsheephq/lcm-x/releases/latest) by a few days (see [catalog payload](docs/operations/catalog-payload.md)).
 The default local setup needs no API key; optional cloud embeddings and Voyage reranking use configured provider keys (see [embeddings setup](docs/embeddings-setup.md)).
 The first line installs and enables the plugin; the second selects it as the context engine (both checked on a clean Hermes 0.23.0 home). Restart Hermes afterwards.
 
@@ -47,7 +47,7 @@ Restart Hermes after changing plugin or context-engine config.
 
 > Bounded context, unbounded memory. Nothing is ever lost.
 
-Two opt-ins discard content by design: durable sensitive-pattern redaction (`LCM_SENSITIVE_PATTERNS_ENABLED`) and message ignore patterns (`LCM_IGNORE_MESSAGE_PATTERNS`); the operator's `/lcm doctor clean apply` deletes on purpose (off by default, takes a backup first).
+Two opt-ins discard content by design: durable sensitive-pattern redaction (`LCM_SENSITIVE_PATTERNS_ENABLED`) and message ignore patterns (`LCM_IGNORE_MESSAGE_PATTERNS`); the operator's `/lcm doctor clean apply` deletes on purpose (off by default, takes a backup first). Sessions matched by `LCM_IGNORE_SESSION_PATTERNS` or `LCM_STATELESS_SESSION_PATTERNS` (both empty by default) are not stored at all.
 
 <!-- results-highlights:start -->
 <a id="benchmark-highlights"></a>
@@ -135,7 +135,7 @@ LCM-X instead:
 Nothing is lost in normal operation. Raw messages stay recoverable in bounded
 pages, summaries retain source lineage, and oversized externalized payloads keep
 stable refs for later expansion.
-Two opt-ins discard content by design: durable sensitive-pattern redaction (`LCM_SENSITIVE_PATTERNS_ENABLED`) and message ignore patterns (`LCM_IGNORE_MESSAGE_PATTERNS`); the operator's `/lcm doctor clean apply` deletes on purpose (off by default, takes a backup first).
+Two opt-ins discard content by design: durable sensitive-pattern redaction (`LCM_SENSITIVE_PATTERNS_ENABLED`) and message ignore patterns (`LCM_IGNORE_MESSAGE_PATTERNS`); the operator's `/lcm doctor clean apply` deletes on purpose (off by default, takes a backup first). Sessions matched by `LCM_IGNORE_SESSION_PATTERNS` or `LCM_STATELESS_SESSION_PATTERNS` (both empty by default) are not stored at all.
 
 <p align="center">
   <img src="docs/standard_compression.png" alt="Standard compression" width="700">
@@ -773,7 +773,7 @@ Advanced compaction, assembly, and extraction knobs are defined in `config.py`.
 
 LCM is lossless by default: durable messages, FTS rows, summaries, and payloads
 remain untouched by redaction unless `LCM_SENSITIVE_PATTERNS_ENABLED=true` is explicitly set.
-Two opt-ins discard content by design: durable sensitive-pattern redaction (`LCM_SENSITIVE_PATTERNS_ENABLED`) and message ignore patterns (`LCM_IGNORE_MESSAGE_PATTERNS`); the operator's `/lcm doctor clean apply` deletes on purpose (off by default, takes a backup first).
+Two opt-ins discard content by design: durable sensitive-pattern redaction (`LCM_SENSITIVE_PATTERNS_ENABLED`) and message ignore patterns (`LCM_IGNORE_MESSAGE_PATTERNS`); the operator's `/lcm doctor clean apply` deletes on purpose (off by default, takes a backup first). Sessions matched by `LCM_IGNORE_SESSION_PATTERNS` or `LCM_STATELESS_SESSION_PATTERNS` (both empty by default) are not stored at all.
 Cloud embedding privacy is separate and transforms provider-bound copies only;
 it defaults on for known cloud providers and can be explicitly opted out with
 `LCM_EMBEDDING_PRIVACY_ENABLED=false`, which uses the `privacy:off` vector

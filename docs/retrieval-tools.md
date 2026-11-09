@@ -23,7 +23,8 @@ canonical policy is `skills/hermes-lcm/references/recall-policy.md`. It is
 distributed as product-owned skill guidance, not injected into user
 `api_content`.
 
-Retrieval still defaults to current-session scope. Discovery of earlier sessions
+Most retrieval tools still default to the current session; `lcm_recall` searches every
+conversation in the local store (per-tool defaults: the README's Retrieval contract). Discovery of earlier sessions
 remains `session_search`/`lcm_recall`/`lcm_grep`; once an LCM session id and node
 id are known, they can be retrieved directly through the explicit cross-session
 arguments documented below.
@@ -124,7 +125,8 @@ lcm:
 
 ### Retrieval contract
 
-LCM retrieval tools default to current-session scope. `lcm_grep` accepts
+Default scopes differ per tool (see the table in the README's Retrieval contract): most tools
+default to the current session, and `lcm_recall` searches every conversation. `lcm_grep` accepts
 `session_scope='all'` or `session_scope='session'` as an explicit opt-in for
 bounded archive search over rows already present in `lcm.db` (raw-message hits
 only). Once a session id is known, `lcm_load_session` can enumerate that session's
@@ -639,7 +641,7 @@ The script is intentionally conservative:
 - changing `--agent`, `--namespace`, or `--session-identity` under the same `--import-id` is treated as the same import and will skip already-tracked source messages; use a new `--import-id` for a different mapping
 - no OpenClaw config or separate secret tables are imported, but raw transcripts and tool payloads are imported and may contain sensitive user data
 
-This is a local archive migration path. It does not make LCM a general memory provider, and it does not change the default current-session retrieval contract for agent tools.
+This is a local archive migration path. It does not make LCM a general memory provider, and it does not change the per-tool default retrieval scopes for agent tools.
 
 ## Related references
 
