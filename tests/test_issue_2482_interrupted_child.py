@@ -563,6 +563,49 @@ def test_plugin_unload_preserves_already_queued_child_rows(host, monkeypatch, bu
     assert _stored_after_close(aux, db_path, release) == _contents(view(1))
 
 
+def test_plugin_unload_retries_admitted_child_after_sqlite_busy(host, monkeypatch):
+    import sqlite3
+    from contextlib import closing
+
+    _, _, ctx, parent, child, engine = _setup(host, "own_engine", supports_unload=True)
+    aux = ctx.module("aux_session")
+    monkeypatch.setenv("LCM_SHUTDOWN_COMPACTION_WAIT_S", "0.05")
+    monkeypatch.setattr(aux, "_LIVE_CHILD_STORE_RETRIES", 0)
+    monkeypatch.setattr(aux, "_LIVE_CHILD_RETRY_DELAY_S", 0.02)
+    engine._store.connection.execute("PRAGMA busy_timeout=20")
+    entered, allow_write, retried = threading.Event(), threading.Event(), threading.Event()
+    append = engine._append_delegate_child_rows
+
+    def observe_append(*args, **kwargs):
+        if entered.is_set():
+            retried.set()
+        else:
+            entered.set()
+            assert allow_write.wait(5)
+        return append(*args, **kwargs)
+
+    monkeypatch.setattr(engine, "_append_delegate_child_rows", observe_append)
+    db_path = parent._store.db_path
+    with closing(sqlite3.connect(db_path, isolation_level=None)) as writer, ThreadPoolExecutor(max_workers=2) as executor:
+        writer.execute("BEGIN IMMEDIATE")
+        call = executor.submit(child.api_call, ctx, view(1), 1)
+        try:
+            assert entered.wait(5)
+            unload = executor.submit(ctx.unload)
+            assert ctx.offered._unload_group.closing.wait(5)
+            allow_write.set()
+            unload.result(timeout=5)
+            assert retried.wait(5), "the admitted child store was dropped after SQLite BUSY"
+        finally:
+            allow_write.set()
+            writer.rollback()
+        call.result(timeout=5)
+    assert aux.drain_live_child_stores(5, owner=ctx.offered._unload_group)
+    with closing(sqlite3.connect(db_path)) as reader:
+        rows = reader.execute("SELECT role, content FROM messages WHERE session_id = ? ORDER BY store_id", ("child",)).fetchall()
+    assert rows == _contents(view(1))
+
+
 @pytest.mark.xfail(strict=True, reason="#2482 named loss limit (v0.30.0, #2483): a delegated child's rows after its "
                    "last completed store are lost if the process ends first while a store waits more than the "
                    "shutdown drain on a busy database")

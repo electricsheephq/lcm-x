@@ -930,7 +930,8 @@ def run_live_child_store(session_id: str, operation, rows: int = 0, *, owner=Non
         current = (operation, rows, owner)
         try:
             while current is not None:
-                for attempt in range(_LIVE_CHILD_STORE_RETRIES + 1):
+                attempt = 0
+                while True:
                     try:
                         stored = current[0]()
                     except Exception as exc:
@@ -942,9 +943,15 @@ def run_live_child_store(session_id: str, operation, rows: int = 0, *, owner=Non
                         break
                     with _LIVE_CHILD_LOCK:
                         superseded = session_id in _LIVE_CHILD_PENDING
-                    if stored != LIVE_STORE_RETRY or superseded or attempt == _LIVE_CHILD_STORE_RETRIES:
+                    closing = current[2] is not None and current[2].closing.is_set()
+                    if stored != LIVE_STORE_RETRY or superseded or (attempt >= _LIVE_CHILD_STORE_RETRIES and not closing):
                         break
-                    time.sleep(_LIVE_CHILD_RETRY_DELAY_S * (attempt + 1))  # busy: the same list again, shortly
+                    # Once unload takes ownership, there is no later child end
+                    # callback to recover admitted rows. Keep retrying a busy
+                    # store with capped backoff while teardown waits separately.
+                    attempt += 1
+                    delay_step = min(attempt, max(1, _LIVE_CHILD_STORE_RETRIES))
+                    time.sleep(_LIVE_CHILD_RETRY_DELAY_S * delay_step)
                 with _LIVE_CHILD_LOCK:
                     current = _LIVE_CHILD_PENDING.pop(session_id, None)
                     if current is None:
@@ -1348,6 +1355,9 @@ class DelegateChildMixin:
         except Exception as exc:
             if isinstance(outcome, dict):
                 outcome["error"] = exc
+                if lock_wait is not None and self._plugin_is_unloading() and _is_ingest_busy_error(exc):
+                    outcome["skipped"] = True
+                    return None
             self._note_delegate_child_fallback(session_id, f"rows not stored: {type(exc).__name__}: {exc}")
             return None
 

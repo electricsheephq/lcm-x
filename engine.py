@@ -5100,7 +5100,7 @@ class LCMEngine(
         sender_capture.retire(self)
         admission_started = time.perf_counter()
         with self._exclusive_lifecycle("end"):
-            if self._stable_use_closed:
+            if self._stable_use_closed or self._plugin_is_unloading():
                 return
             with self._session_end_diagnostic(messages, started, time.perf_counter(), admission_started):
                 self._frozen_tail_reached = False

@@ -54,7 +54,7 @@ def preflight(tmp_path, monkeypatch):
     monkeypatch.setattr(sqlite3, "connect", connect_spy)
     monkeypatch.setattr(LCMEngine, "_bind_storage", bind_spy)
 
-    def register(*, inactive=False, abandoned=False, supports_unload=False):
+    def register(*, inactive=False, abandoned=False, supports_unload=False, on_publish=None):
         ctx = SimpleNamespace(
             _manager=SimpleNamespace(_context_engine=object() if inactive else None),
             _load_abandoned=abandoned,
@@ -66,6 +66,8 @@ def preflight(tmp_path, monkeypatch):
             engines.append(engine)
             if not inactive and not abandoned:
                 ctx._manager._context_engine = engine
+                if on_publish is not None:
+                    on_publish(engine)
 
         ctx.register_context_engine = take_slot
         ctx.register_skill = lambda *args, **kwargs: None
@@ -114,9 +116,10 @@ def test_shutdown_before_use_opens_nothing(preflight):
 
 
 def test_plugin_unload_closes_all_owned_engines(preflight):
-    prototype, ctx = preflight.register(supports_unload=True)
+    eager_clones = []
+    prototype, ctx = preflight.register(supports_unload=True, on_publish=lambda engine: eager_clones.append(engine.clone_for_agent()))
     other, other_ctx = preflight.register(supports_unload=True)
-    owned = [prototype, prototype.clone_for_agent(), prototype.clone_for_agent()]
+    owned = [prototype, *eager_clones, prototype.clone_for_agent()]
     connections = []
     try:
         # Only the last engine bound to an id is reachable by the session registry.
@@ -191,6 +194,10 @@ def test_unload_drains_timed_out_sqlite_worker(preflight):
     conversation = prototype._conversation_id
     ended = prototype._lifecycle.get_by_conversation(conversation)
     assert ended.last_finalized_session_id == "worker"
+    active = prototype.clone_for_agent()
+    active.on_session_start("active", platform="cli")
+    first = {"role": "user", "content": "stored turn"}
+    active.ingest([first])
     opened, release, closed = threading.Event(), threading.Event(), threading.Event()
 
     def query():
@@ -217,6 +224,9 @@ def test_unload_drains_timed_out_sqlite_worker(preflight):
             assert prototype._session_id == "worker"
             assert prototype._lifecycle.get_by_conversation(conversation) == ended
             assert prototype._lifecycle.get_by_session("late-reset") is None
+            active.on_session_end("active", [first, {"role": "assistant", "content": "late tail"}])
+            assert active._lifecycle.get_by_session("active").current_session_id == "active"
+            assert active._store.get_session_count("active") == 1
         finally:
             release.set()
         finish.result(timeout=5)

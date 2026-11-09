@@ -605,10 +605,11 @@ def register(ctx):
     _identity.warn_identity_migration_once(identity_notice)
 
     # Register as the context engine (replaces ContextCompressor)
-    ctx.register_context_engine(engine)
     on_unload = getattr(ctx, "on_unload", None)
-    if callable(on_unload):
-        on_unload(engine._enable_plugin_unload())
+    shutdown = engine._enable_plugin_unload() if callable(on_unload) else None
+    ctx.register_context_engine(engine)
+    if shutdown is not None:
+        on_unload(shutdown)
     active = _engine_took_slot(ctx, engine, hermes_home)
 
     # Ship the same recall contract through both Hermes plugin skill
