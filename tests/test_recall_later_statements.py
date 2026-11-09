@@ -494,12 +494,14 @@ def test_anchor_displaced_source_keeps_pooled_child(statements, monkeypatch):
     ranked(monkeypatch, [*[entry(e, f) for f in fillers], entry(e, source), entry(e, child)])
 
     def anchor(ordered, *a, **kw):
+        # #950 places the best FTS hit in the last window slot, here the child.
         moved = next(x for x in ordered if x["hit"]["store_id"] == child)
         rest = [x for x in ordered if x is not moved]
         return [*rest[:3], moved, *rest[3:]], None
 
     monkeypatch.setattr(tools, "place_fts_anchor", anchor)
-    result = json.loads(invoke(e, later_statements=1))
+    result = json.loads(invoke(e, later_statements=4))
+    assert result["provenance"]["later_statements"]["found"] == 1
     ids = [h["store_id"] for h in result["hits"]]
     assert ids == [*fillers, child]
     assert "later_statement" not in result["hits"][-1]["arms"]
