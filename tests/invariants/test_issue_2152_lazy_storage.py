@@ -185,7 +185,7 @@ def test_unload_refuses_clone_that_finishes_construction_after_unload(preflight,
     assert preflight.connects == []
 
 
-def test_unload_drains_timed_out_sqlite_worker(preflight):
+def test_unload_drains_timed_out_sqlite_worker(preflight, monkeypatch):
     from hermes_lcm.tools import _run_within_deadline
 
     prototype, ctx = preflight.register(supports_unload=True)
@@ -198,6 +198,10 @@ def test_unload_drains_timed_out_sqlite_worker(preflight):
     active.on_session_start("active", platform="cli")
     first = {"role": "user", "content": "stored turn"}
     active.ingest([first])
+    monkeypatch.setattr(
+        active._dag, "reassign_session_nodes",
+        lambda *_: pytest.fail("late carry-over reached SQLite"),
+    )
     opened, release, closed = threading.Event(), threading.Event(), threading.Event()
 
     def query():
@@ -225,12 +229,41 @@ def test_unload_drains_timed_out_sqlite_worker(preflight):
             assert prototype._lifecycle.get_by_conversation(conversation) == ended
             assert prototype._lifecycle.get_by_session("late-reset") is None
             active.on_session_end("active", [first, {"role": "assistant", "content": "late tail"}])
+            assert active.should_compress_preflight([first, {"role": "user", "content": "late turn"}]) is False
+            assert active.carry_over_new_session_context("active", "late") == 0
             assert active._lifecycle.get_by_session("active").current_session_id == "active"
             assert active._store.get_session_count("active") == 1
         finally:
             release.set()
         finish.result(timeout=5)
     assert closed.is_set()
+
+
+def test_unload_waits_for_admitted_compaction_preflight(preflight, monkeypatch):
+    engine, ctx = preflight.register(supports_unload=True)
+    engine.on_session_start("preflight", platform="cli")
+    entered, release = threading.Event(), threading.Event()
+    original = engine._should_compress_preflight_impl
+
+    def held_preflight(messages):
+        entered.set()
+        assert release.wait(5)
+        return original(messages)
+
+    monkeypatch.setattr(engine, "_should_compress_preflight_impl", held_preflight)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        running = executor.submit(engine.should_compress_preflight, [{"role": "user", "content": "admitted"}])
+        try:
+            assert entered.wait(5)
+            unload = executor.submit(ctx.unload_callbacks[0])
+            assert engine._unload_group.closing.wait(5)
+            assert not unload.done()
+            assert engine._store.connection.execute("SELECT 1").fetchone()[0] == 1
+        finally:
+            release.set()
+        running.result(timeout=5)
+        unload.result(timeout=5)
+    assert engine._stable_use_closed
 
 
 def test_timed_out_unload_closes_storage_after_native_tool_finishes(preflight, monkeypatch):

@@ -5747,6 +5747,17 @@ class LCMEngine(
         by spanning the same current + last-finalized sessions its leaf fallback
         uses (see ``_recent_ready_rollups``), so no window content is dropped.
         """
+        if self._plugin_is_unloading():
+            return 0
+        if self._unload_group is not None and self._stable_use_owner_thread != threading.get_ident():
+            result = self._run_stably(
+                lambda engine: engine._carry_over_new_session_context(old_session_id, new_session_id),
+                timeout=None,
+            )
+            return result.value if result.used else 0
+        return self._carry_over_new_session_context(old_session_id, new_session_id)
+
+    def _carry_over_new_session_context(self, old_session_id: str, new_session_id: str) -> int:
         if not old_session_id or not new_session_id or old_session_id == new_session_id:
             return 0
         if self._session_ignored and new_session_id == self._session_id:
