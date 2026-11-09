@@ -96,7 +96,7 @@ Directories are created 0700 and files 0600. A profile backup that copies `$HERM
 - **Checkpoints:** at +24, +72 and +144 hours, between roots, the recorder backs up `lcm.db` and writes a
   `checkpoint_sealed` event with the seq it covers. Reading with a checkpoint returns the prefix through that seq, and
   a replay of it must match the backup, without needing an exit. A checkpoint refused by the cap or disk floor
-  is skipped, counted as `recorder.checkpoint_skipped`, and warned with its cause; recording continues.
+  or once the exit drain begins is skipped, counted as `recorder.checkpoint_skipped`, and warned with its cause; recording continues.
 - **Ended without exit:** Hermes ends its gateway and CLI with `os._exit`, so atexit never runs and a recording
   normally ends as "ended without exit". That is a normal end; the sealed checkpoints are the comparison points. When
   atexit does run, the recorder writes `exit_begin` and records the exit flushes synchronously after a successful
