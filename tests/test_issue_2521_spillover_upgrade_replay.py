@@ -27,6 +27,8 @@ from tests.test_issue_10_persisted_output_spillover import _messages, _write_out
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "v0292_spillover_store.sql"
+# The same turn written by v0.29.2 with a host timestamp on the user row only.
+FIXTURE_USER_STAMPS = Path(__file__).parent / "fixtures" / "v0292_spillover_store_user_stamps.sql"
 SESSION, CONVERSATION, CALL = "u1-session", "u1-conv", "call_spill"
 T0 = 1762700000.0
 # The spill file v0.29.2's marker points at: 5,427 characters, 7,227 bytes.
@@ -83,13 +85,13 @@ def _call_rows(rows):
 
 # --- the v0.29.2 store -------------------------------------------------------------------------------------------
 
-def _v0292_store(tmp_path):
+def _v0292_store(tmp_path, fixture=FIXTURE):
     """Load the dump written by the real v0.29.2 engine; write the spill file its marker points at."""
     home = _home(tmp_path)
     spill = home / "cache" / "spillover" / f"{CALL}.txt"
     spill.parent.mkdir(parents=True)
     spill.write_bytes(SPILL_TEXT.encode("utf-8"))
-    dump = FIXTURE.read_text(encoding="utf-8").replace("@HERMES_HOME@", str(home))
+    dump = fixture.read_text(encoding="utf-8").replace("@HERMES_HOME@", str(home))
     with closing(sqlite3.connect(home / "lcm.db")) as connection:
         connection.executescript(dump)
     # The dump declares the FTS tables through writable_schema, so they load on the next connection. Re-index them
@@ -107,10 +109,12 @@ def _v0292_store(tmp_path):
     return rows, marker, spill
 
 
-def _host_history(marker, extra=()):
-    """The host transcript the v0.29.2 store was written from (all stamped), plus any later rows."""
+def _host_history(marker, extra=(), stamps="all"):
+    """The host transcript the v0.29.2 store was written from, plus any later rows."""
     def row(i, role, content, **fields):
-        return {"role": role, "content": content, "timestamp": T0 + i, **fields}
+        if stamps == "all" or role == "user":
+            fields["timestamp"] = T0 + i
+        return {"role": role, "content": content, **fields}
     first = [
         row(1, "user", "Please dump the big report."),
         row(2, "assistant", "", tool_calls=[{"id": CALL, "type": "function",
@@ -151,6 +155,20 @@ def test_v0292_store_upgrade_replay_adds_only_new_turn(tmp_path, caplog, spill_f
     counts = f"stored rows={len(rows)}, tool rows={dict(_tool_rows(rows))}, reconciliation={reconciliation}"
     assert [row["content"] for row in rows[len(original):]] == [content for _, content in NEW_TURN], counts
     assert len(rows) == 6, counts
+    assert _tool_rows(rows) == {CALL: 1}, counts
+    assert _call_rows(rows) == {CALL: 1}, counts
+
+
+def test_v0292_users_only_stamped_store_upgrade_replay_stores_each_message_once(tmp_path, caplog):
+    original, marker, _ = _v0292_store(tmp_path, FIXTURE_USER_STAMPS)
+    history = _host_history(marker, NEW_TURN, stamps="user")
+
+    rows, _ = _replay(tmp_path, history, original, caplog)
+
+    # One stored row per host message, in order. v0.29.2's own replay of this history stores 9 rows: its 3 extra
+    # rows repeat messages already stored, so none of them is a new message.
+    counts = f"stored rows={len(rows)}, tool rows={dict(_tool_rows(rows))}"
+    assert [(row["role"], row["content"]) for row in rows] == [(m["role"], m["content"]) for m in history], counts
     assert _tool_rows(rows) == {CALL: 1}, counts
     assert _call_rows(rows) == {CALL: 1}, counts
 
