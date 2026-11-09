@@ -99,8 +99,9 @@ Directories are created 0700 and files 0600. A profile backup that copies `$HERM
   or once the exit drain begins is skipped, counted as `recorder.checkpoint_skipped`, and warned with its cause; recording continues.
 - **Ended without exit:** the Hermes gateway and one-shot runs end with `os._exit`, so atexit never runs there and a
   recording normally ends as "ended without exit". That is a normal end; the sealed checkpoints are the comparison
-  points. The desktop gateway when its input closes, ACP, and the CLI of older Hermes versions that run the agent in
-  the CLI process do run atexit.
+  points. A process that runs the agent itself and ends normally does run atexit: the TUI's gateway (`tui_gateway`)
+  when its input closes, and the interactive CLI and ACP before Hermes v0.23.0 (checked on v0.21.7 and v0.22.2). In
+  v0.23.0 the interactive CLI and ACP use the gateway's agent, so their recordings end as the gateway's do.
   When atexit does run, the recorder writes `exit_begin` and records the exit flushes synchronously after a successful
   drain. Session end and shutdown skip the ordinary 2 s event drain while a snapshot or checkpoint backup is
   pending or running. A drain timeout stops admission with `exit_timeout` in status. Recording stops in a forked child (`fork`)
