@@ -31,6 +31,9 @@ def write(path, data):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2) + "\n")
 
+def gated(f):
+    return not f["id"].endswith("-old")  # BARS v1: 40 facts + 4 latest values; old values are reported apart
+
 def tokens():
     return C["facts"] + [{**p[age], "id": p["id"] + "-" + age, "session": p[age + "_session"], "class": "latest"} for p in C["superseded"] for age in ("old", "new")]
 
@@ -39,21 +42,26 @@ def log_text(spec):
     return "".join((spec["insert"]["text"] if i == spec["insert"]["line"] else "".join(rng.choices("abcdefghijklmnopqrstuvwxyz ", k=160))) + "\n" for i in range(1, spec["lines"] + 1))
 
 def normalize(text):
-    return re.sub(r"[^A-Z0-9 -]", "", " ".join(text.upper().split()))
+    text = re.sub("[\u2010-\u2015\u2212]", "-", text.upper())
+    text = re.sub(r"(?<=\d)[,.](?=\d)", "", text)  # 48,213 -> 48213
+    return " ".join(re.sub(r"[^A-Z0-9-]", " ", text).split())
+
+TOKEN_SHAPE = re.compile(r"(?<![A-Z0-9-])(?:[A-Z]+-\d{4}|\d{5,})(?![A-Z0-9-])")
 
 def judge(answer, question, error=False):
     text = normalize(answer)
     found = {f["token"] for f in tokens() if f["token"] in text}
     bad = error or not text
     if question["kind"] == "negative":
-        correct = not bad and "NOT FOUND" in text and not found
+        correct = not bad and text == "NOT FOUND"
         return {"correct": correct, "fabricated": not bad and not correct, "verdict": "error" if bad else "correct" if correct else "fabricated"}
     if question["kind"] == "latest":
         pair = next(p for p in C["superseded"] if p["id"] == question["pair"])
         old, new = pair["old"]["token"] in found, pair["new"]["token"] in found
         verdict = "miss" if bad else "both" if old and new else "current" if new else "stale" if old else "miss"
         return {"correct": verdict == "current", "verdict": verdict}
-    correct = not bad and found == {question["gold"]} and bool(re.search(r"(?<![A-Z0-9-])" + re.escape(question["gold"]) + r"(?![A-Z0-9-])", text))
+    shaped = set(TOKEN_SHAPE.findall(text))  # any other value-shaped string, planted or invented, is a hedge
+    correct = not bad and found == {question["gold"]} and shaped == {question["gold"]} and "NOT FOUND" not in text
     return {"correct": correct, "verdict": "correct" if correct else "miss"}
 
 def package():
@@ -83,8 +91,32 @@ def arm_d(home, manifest):
                 for ident, role, content in db.execute("SELECT store_id, role, content FROM messages WHERE session_id=?", (session,)):
                     payloads = [(None, content or "")] + [(ref, (cc.load_externalized_payload(ref, config=None, hermes_home=str(store_home)) or {}).get("content", "")) for ref in cc.extract_externalized_refs(content or "")]
                     matches.extend({"store_id": ident, "session_id": session, "role": role, "sha256": hashlib.sha256(text.encode()).hexdigest(), "externalized_ref": ref} for ref, text in payloads if role in f["roles"] and f["token"] in text)
-            records.append({"id": f["id"], "token": f["token"], "sessions": sessions, "matches": matches, "pass": bool(matches)})
-    return {"tokens": records, "store_bytes": sum(p.stat().st_size for p in store_home.rglob("*") if p.is_file()), "host_load": os.getloadavg()}
+            records.append({"id": f["id"], "token": f["token"], "sessions": sessions, "matches": matches, "pass": bool(matches),
+                            "planted": planted(home, sid, f["token"])})
+    return {"tokens": records, "plant_failed": [r["id"] for r in records if not r["planted"]], "evidence": evidence(home, manifest), "store_bytes": sum(p.stat().st_size for p in store_home.rglob("*") if p.is_file()), "host_load": os.getloadavg()}
+
+def session_files(home, sid):
+    """A session's raw Claude Code files: its transcript, its subagents' transcripts and its saved outputs."""
+    files = list((home / ".claude/projects").glob(f"*/{sid}.jsonl"))
+    for folder in (home / ".claude/projects").glob(f"*/{sid}"):
+        files += [p for p in folder.rglob("*") if p.is_file()]
+    return files
+
+def planted(home, sid, token):
+    """Whether the planted value reached the session's own files at all (a model slip is not a capture finding)."""
+    return any(token in p.read_text(errors="replace") for p in session_files(home, sid))
+
+def evidence(home, manifest):
+    """Per session: compaction boundaries, subagent transcripts and saved outputs actually present."""
+    out = {}
+    for label, record in manifest["sessions"].items():
+        files, boundaries = session_files(home, record["session_id"]), 0
+        for path in files:
+            if path.suffix == ".jsonl" and path.parent.name != "subagents":
+                boundaries += sum('"compact_boundary"' in line for line in path.read_text(errors="replace").splitlines())
+        out[label] = {"compact_boundaries": boundaries, "subagent_transcripts": sum(p.parent.name == "subagents" and p.suffix == ".jsonl" for p in files),
+                      "saved_outputs": sum(p.parent.name == "tool-results" for p in files)}
+    return out
 
 def server(plugin, home):
     spec = read(plugin / ".mcp.json")["mcpServers"]["lcm-x"]
@@ -163,16 +195,21 @@ def arm_t(plugin, home, direct, empty=False):
                 continue
             row = {"id": d["id"], "pass": False}
             try:
-                hits = mcp.call("lcm_grep", {"query": d["token"], "mode": "full_text"})["results"]
-                row["pass"] = not hits if empty else False
-                for hit in [] if empty else hits:
-                    if hit.get("session_id") not in d["sessions"] or d["token"] not in hit.get("snippet", "").replace(">>>", "").replace("<<<", ""):
-                        continue
-                    text = expand(mcp, {"store_id": hit["store_id"], "session_id": hit["session_id"]})
-                    ident = str(hit["store_id"]).split(":")[-1]
-                    row["pass"] |= d["token"] in text and any(str(m["store_id"]) == ident and m["session_id"] == hit["session_id"] and hashlib.sha256(text.encode()).hexdigest() == m["sha256"] for m in d["matches"])
+                hits = mcp.call("lcm_grep", {"query": d["token"], "mode": "full_text", "limit": 50})["results"]
             except (RuntimeError, TimeoutError, ValueError, KeyError) as exc:
-                row["error"] = type(exc).__name__
+                hits, row["error"] = None, type(exc).__name__
+            row["hits"] = None if hits is None else len(hits)
+            row["pass"] = hits is not None and not hits if empty else False
+            for hit in [] if empty or hits is None else hits:
+                if hit.get("session_id") not in d["sessions"] or d["token"] not in hit.get("snippet", "").replace(">>>", "").replace("<<<", ""):
+                    continue
+                try:
+                    text = expand(mcp, {"store_id": hit["store_id"], "session_id": hit["session_id"]})
+                except (RuntimeError, TimeoutError, ValueError, KeyError) as exc:
+                    row["error"] = type(exc).__name__
+                    continue
+                ident = str(hit["store_id"]).split(":")[-1]
+                row["pass"] |= d["token"] in text and any(str(m["store_id"]) == ident and m["session_id"] == hit["session_id"] and hashlib.sha256(text.encode()).hexdigest() == m["sha256"] for m in d["matches"])
             rows.append(row)
     finally:
         mcp.close()
@@ -233,6 +270,10 @@ def build(args):
         for i, prompt in enumerate(session["turns"]):
             flags = ["--session-id" if mode == "new" and i == 0 else "--resume", sid] + (["--fork-session"] if mode == "fork" and i == 0 else [])
             call = claude(args.claude, prompt, ["--plugin-dir", str(args.plugin), "--dangerously-skip-permissions", *flags], args.home, project, session.get("env"))
+            if mode != "fork" or i > 0:
+                if call.get("session_id") and call["session_id"] != sid:
+                    manifest.update(stop=True, stop_reason="session_id_changed")
+                    break
             sid = call.get("session_id") or sid
             record["session_id"] = sid
             record["calls"].append({k: v for k, v in call.items() if k not in ("answer", "reader_not_connected")})
@@ -254,6 +295,8 @@ def build(args):
                         shapes[shape] = shapes.get(shape, 0) + 1
             record["backend"] = {"msg_id_shapes": shapes}
             manifest["stop"] = not (quiet and audit.returncode == 0 and report.get("ok") and report.get("verified"))
+            if manifest["stop"]:
+                manifest["stop_reason"] = "audit_not_verified" if quiet else "capture_not_quiet"
         write(args.out / "corpus-manifest.json", manifest)
         if manifest["stop"]:
             break
@@ -297,10 +340,19 @@ def score(manifest, d, t, te, a, a2=None, ae=None):
         values = sorted(c["ms"] for c in t["calls"] if c["tool"] == name)
         latency[name] = {"p50_ms": values[math.ceil(len(values) * .5) - 1], "p90_ms": values[math.ceil(len(values) * .9) - 1], "max_ms": max(values)}
     tripwire = any(v["p90_ms"] > 1000 or v["max_ms"] > 5000 for v in latency.values())
-    bars = {"empty_control": empty_ok, "capture": not manifest.get("stop") and set(manifest["sessions"]) == {s["label"] for s in C["sessions"]} and all(s.get("audit", {}).get("rc") == 0 and s["audit"].get("ok") and s["audit"].get("verified") for s in manifest["sessions"].values()), "D": all(dm.get(f["id"], False) for f in tokens()), "T": all(tm.get(f["id"], False) for f in tokens()), "A": min(positives) >= 36, "false_recall": max(fabricated) <= 1, "answers_complete": all(valid(run, Q) for run in runs)}
-    second = 34 <= positives[0] <= 38 and a2 is None
-    verdict = "VOID" if not empty_ok else "STOP" if not bars["capture"] or not bars["D"] else "FAIL" if not bars["T"] else "SECOND RUN REQUIRED" if second else "FAIL" if not all(bars.values()) else "CLASSIFICATION REQUIRED" if tripwire or any("classification" in r and r["kind"] == "positive" for r in rows) else "PASS"
-    return {"verdict": verdict, "bars": bars, "positives": positives, "fabricated": fabricated, "second_run_required": second, "rows": rows, "latency": latency, "tripwire": tripwire, "latency_classification": "" if tripwire else "not triggered", "store_bytes": d.get("store_bytes"), "host_load": d.get("host_load")}
+    window = 34 <= positives[0] <= 38
+    if a2 is not None and not window:  # BARS v1: a second run decides only inside the window
+        positives, fabricated = positives[:1], fabricated[:1]
+    bars = {"empty_control": empty_ok, "capture": not manifest.get("stop") and set(manifest["sessions"]) == {s["label"] for s in C["sessions"]} and all(s.get("audit", {}).get("rc") == 0 and s["audit"].get("ok") and s["audit"].get("verified") for s in manifest["sessions"].values()), "D": all(dm.get(f["id"], False) for f in tokens() if gated(f)), "T": all(tm.get(f["id"], False) for f in tokens() if gated(f)), "A": min(positives) >= 36, "false_recall": max(fabricated) <= 1, "answers_complete": all(valid(run, Q) for run in runs)}
+    second = window and a2 is None
+    complete = bars.pop("answers_complete")
+    other = all(v for k, v in bars.items() if k not in ("A",))
+    verdict = ("VOID" if not empty_ok else "STOP" if not bars["capture"] or not bars["D"] else "FAIL" if not bars["T"]
+               else "INCOMPLETE" if not complete else "FAIL" if not other
+               else "SECOND RUN REQUIRED" if second else "FAIL" if not bars["A"]
+               else "CLASSIFICATION REQUIRED" if tripwire or any("classification" in r and r["kind"] == "positive" for r in rows) else "PASS")
+    old = {f["id"]: {"D": dm.get(f["id"], False), "T": tm.get(f["id"], False)} for f in tokens() if not gated(f)}
+    return {"verdict": verdict, "bars": {**bars, "answers_complete": complete}, "old_values_ungated": old, "positives": positives, "fabricated": fabricated, "second_run_required": second, "rows": rows, "latency": latency, "tripwire": tripwire, "latency_classification": "" if tripwire else "not triggered", "store_bytes": d.get("store_bytes"), "host_load": d.get("host_load")}
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)

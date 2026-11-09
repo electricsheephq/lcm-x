@@ -45,6 +45,16 @@ def test_judge():
     assert not k.judge('', k.Q[0])["correct"]
     assert k.judge('', k.Q[-1]) == dict(correct=False, fabricated=False, verdict='error')
     assert k.judge(gold, k.Q[0], error=True)["verdict"] == 'miss'
+    # Review round 1: hedges and invented values never pass; punctuation around a value does.
+    assert not k.judge('NOT FOUND, but maybe ' + gold, k.Q[0])["correct"]
+    assert not k.judge(gold + ' or ' + gold[:-1] + '9', k.Q[0])["correct"]
+    assert not k.judge('NOT FOUND, maybe KESTREL-1234', k.Q[-1])["correct"]
+    assert k.judge('NOT FOUND, maybe KESTREL-1234', k.Q[-1])["fabricated"]
+    assert k.judge('Not found.', k.Q[-1])["correct"]
+    assert k.judge('value=' + gold, k.Q[0])["correct"]
+    assert k.judge(gold.replace('-', '\u2011'), k.Q[0])["correct"]
+    numeric = next(q for q in k.Q if q["kind"] == "positive" and q["gold"].isdigit())
+    assert k.judge('port: ' + numeric["gold"][:2] + ',' + numeric["gold"][2:], numeric)["correct"]
     pair = k.C['superseded'][0]
     assert [k.judge(a, k.Q[40])["verdict"] for a in (pair['new']['token'], pair['old']['token'], pair['new']['token'] + ' ' + pair['old']['token'], '')] == ['current', 'stale', 'both', 'miss']
 
