@@ -18,9 +18,9 @@ recall_engine = test_lcm_recall.recall_engine
 def statements(recall_engine, monkeypatch):
     e = recall_engine
     e._config.embeddings_enabled = False
+    monkeypatch.setattr(tools.time, "time", lambda: 1700000200)
     earlier = e._store.append("old", {"role": "user", "content": "orchidpassport My favorite hobby is pottery.", "timestamp": 1700000000})
     later = e._store.append("new", {"role": "user", "content": "My favorite hobby is now watercolor painting.", "timestamp": 1700000100})
-    monkeypatch.setattr(tools.time, "time", lambda: 1700000200)
     return e, earlier, later
 
 

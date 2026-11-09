@@ -321,6 +321,7 @@ without changing its behavior until removal.
 | `LCM_RECALL_ADJACENT_REPLY` | `bool` | `false` | — | — |
 | `LCM_RECALL_SNIPPET_WINDOW_HITS` | `int` | `0` | — | — |
 | `LCM_RECALL_EXTRA_ENTRIES` | `int` | `0` | — | — |
+| `LCM_RECALL_LATER_STATEMENTS` | `int` | `0` | — | — |
 | `LCM_RECALL_FTS_ANCHOR` | `bool` | `true` | — | — |
 | `LCM_PROACTIVE_RECALL_ENABLED` | `bool` | `false` | — | — |
 | `LCM_PROACTIVE_RECALL_MIN_SCORE` | `float` | `0.01` | — | — |
