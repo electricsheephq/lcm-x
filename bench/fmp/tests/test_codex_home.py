@@ -193,3 +193,13 @@ def test_judge_updates_home_mode_and_routes_all_codex_specs(tmp_path, monkeypatc
     assert all(env["CODEX_HOME"] == str(tmp_path) for env in cli.environments[1:])
     manifest = json.loads((args.output / "run-manifest.json").read_text())
     assert manifest["harness"]["codex_home_mode"] == "leased"
+
+
+def test_score_and_build_stores_ignore_codex_home_options(tmp_path, monkeypatch, cli):
+    for command in ("score", "build-stores"):
+        args = cli.args(command, "--codex-home", "relative", "--workers", "4")
+        calls = []
+        monkeypatch.setattr(run, "_execute", lambda a: calls.append(a.command))
+        run.execute(args)
+        assert calls == [command]
+    assert not (tmp_path / "holder.lock").exists()

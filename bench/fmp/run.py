@@ -216,12 +216,13 @@ def codex_home_lock(home):
 
 def execute(args):
     home = getattr(args, "codex_home", None)
-    if home is not None:
+    if home is not None and args.command in ("canary", "answer", "judge"):
         if not home.is_absolute() or not home.is_dir():
             raise ValueError("--codex-home must name an existing absolute directory")
         if args.workers != 1:
             raise ValueError("--codex-home requires --workers 1")
-    lease = codex_home_lock(home) if home is not None and args.command in ("canary", "answer", "judge") else contextlib.nullcontext()
+    leased = home is not None and args.command in ("canary", "answer", "judge")
+    lease = codex_home_lock(home) if leased else contextlib.nullcontext()
     with lease:
         _execute(args)
 
@@ -340,7 +341,8 @@ def run(args, client, questions, dataset_sha, ids_sha, excluded, store):
             "start_utc": utc(), "end_utc": None, "spend": 0, "status": "running"}
         if harness(args.reader):
             manifest.update(harness={"versions": versions(), "codex_disabled_features": list(CODEX_DISABLED),
-                "codex_sandbox": "read-only; isolated CODEX_HOME and HOME; --ignore-user-config --ignore-rules",
+                "codex_sandbox": ("read-only; leased CODEX_HOME, isolated HOME" if getattr(args, "codex_home", None) is not None
+                                  else "read-only; isolated CODEX_HOME and HOME") + "; --ignore-user-config --ignore-rules",
                 "claude": "isolated CLAUDE_CONFIG_DIR, --tools '' --strict-mcp-config, PreToolUse deny hook",
                 "agentic": "harness-native loop over mcp_reader, sufficiency stop = harness, cap "
                            f"{AGENTIC_TOOL_CAP} counted tool calls"},
