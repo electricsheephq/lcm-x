@@ -12,11 +12,12 @@ Lossless memory for Hermes Agent: every turn kept in a local store, not compacte
 
 ```bash
 hermes plugins install hermes-lcm-x --enable
+hermes config set context.engine lcm-x
 ```
 
 On Hermes 0.23.0 this installs the catalog's current entry (0.29.1 until the catalog update merges; 0.29.2 is the latest release).
 The default local setup needs no API key; optional cloud embeddings and Voyage reranking use configured provider keys (see [embeddings setup](docs/embeddings-setup.md)).
-Select the engine with the configuration below, then restart Hermes.
+The first line installs and enables the plugin; the second selects it as the context engine (both checked on a clean Hermes 0.23.0 home). Restart Hermes afterwards.
 
 ### Activate it
 
@@ -25,7 +26,7 @@ The plugin has two names:
 - plugin manifest name: `hermes-lcm-x`
 - runtime context engine name: `lcm-x`
 
-Both must be configured:
+Both must be configured. The two commands above write this; you can also edit the config by hand:
 
 ```yaml
 plugins:
@@ -40,7 +41,7 @@ Restart Hermes after changing plugin or context-engine config.
 
 ## Try it
 
-1. Install with the command above, select `context.engine: lcm-x`, and restart Hermes.
+1. Run the two commands above and restart Hermes.
 2. Send a message, then ask your agent to call `lcm_status`.
 3. You will see runtime health, context pressure, configuration, and storage counts for the active session.
 
