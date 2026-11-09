@@ -102,9 +102,11 @@ import json, pathlib, sqlite3, sys, time
 case, steps, t0, db = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), sys.argv[4]
 a = json.load(open("audit.json"))
 turns = [json.loads(line) for line in open("../turns.jsonl")] if __import__("os").path.exists("../turns.jsonl") else []
-con = sqlite3.connect(pathlib.Path(db).as_uri() + "?mode=ro", uri=True)  # as_uri escapes # and ? in the path
-rows = con.execute("select count(*) from messages").fetchone()[0]
-print("RECORD", json.dumps({"case": case, "manual_steps": steps, "rows": rows, "audit_ok": a.get("ok"),
+rows = None  # no store at all is a failed install, recorded below with the audit's error
+if pathlib.Path(db).is_file():
+    con = sqlite3.connect(pathlib.Path(db).as_uri() + "?mode=ro", uri=True)  # as_uri escapes # and ? in the path
+    rows = con.execute("select count(*) from messages").fetchone()[0]
+print("RECORD", json.dumps({"case": case, "manual_steps": steps, "rows": rows, "audit_ok": a.get("ok"), "audit_error": a.get("error"),
       "verified": a.get("verified"), "lineages": len(a.get("lineages") or []),
       "failures": {k: v for k, v in (a.get("failures") or {}).items() if v}, "spool": a.get("spool"),
       "turns": len(turns), "turn_errors": sum(1 for t in turns if t.get("is_error") is not False),
