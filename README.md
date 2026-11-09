@@ -1347,7 +1347,7 @@ See [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for project conduct expectations
 and [SECURITY.md](SECURITY.md) for vulnerability reporting.
 See the [releases page](https://github.com/electricsheephq/lcm-x/releases),
 [tags page](https://github.com/electricsheephq/lcm-x/tags), and
-[CHANGELOG](CHANGELOG.md) for version history. `v0.29.1` is the latest stable
+[CHANGELOG](CHANGELOG.md) for version history. `v0.29.2` is the latest stable
 GitHub Release; verify its exact SHA before installation.
 
 ## License
