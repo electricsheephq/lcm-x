@@ -26,7 +26,8 @@ through the endpoint. Gate item for Claude Code GA (#2225).
 - **Arm A, agent:** headless Claude Code with hooks off, built-in tools off and only the `lcm-x`
   server, one fresh session per question. The reader prompt is fixed in `kit.py` (`PROMPT`).
   Deterministic judge (`judge`): a positive is correct only if the answer holds the gold value and no
-  other value-shaped string; a negative only if the answer is exactly `NOT FOUND`. Arm T also counts a
+  other value-shaped string; a negative only if the answer is exactly `NOT FOUND`, and any other
+non-empty answer to a negative counts as a false recall. Arm T also counts a
   value found in a saved tool output (a payload hit), expanded by its ref and byte-equal to the payload.
 
 ## Bars (set before any data)
@@ -51,10 +52,15 @@ REQUIRED, FAIL (A), CLASSIFICATION REQUIRED, PASS.
 
 ## Running it
 
-Run from the repository root. `CMD` is a launcher for the Claude Code CLI that isolates `HOME` and
-`CLAUDE_CONFIG_DIR` under `KIT_HOME`, and passes `KIT_LCMX_CC_HOME` through as the reader's
-`LCMX_CC_HOME`. `PLUGIN` is the unpacked Claude Code unit asset. The other variables are fresh
-absolute directories.
+Run from the repository root. `KIT` is this folder (`bench/instruments/cc_mcp_recall`). `CMD` is a
+launcher for the Claude Code CLI that runs it with `HOME="$KIT_HOME"` and
+`CLAUDE_CONFIG_DIR="$KIT_HOME/.claude"` (the kit reads transcripts from `$KIT_HOME/.claude/projects`),
+and passes `KIT_LCMX_CC_HOME` through as the reader's `LCMX_CC_HOME`. `PLUGIN` is the unpacked Claude
+Code unit asset. `EMPTY`, `READER`, `CAPTURE` and `OUT` are fresh directories.
+
+Stop after the control if `t-empty` finds anything or `a-empty` names a value (the run is void), and
+after arm D if any value is missing (a capture finding); the scorer reports both, but the later arms
+would only spend model calls.
 
 ```bash
 python "$KIT/kit.py" make-empty-store --home "$EMPTY/.lcm-x/claude-code"
@@ -71,8 +77,10 @@ python "$KIT/kit.py" score --corpus-manifest "$OUT/corpus/corpus-manifest.json" 
   --a-empty "$OUT/a-empty/arm-a.json" --out "$OUT/score"
 ```
 
-The scorer copies its inputs beside `RESULT.md` and `RESULT-MANIFEST.json` so a result can be
-re-scored. The tests (`tests/test_cc_mcp_recall_kit.py`) run no model and no Claude Code.
+When the first A run scores 34-38, run arm A again on the same store and pass it as `--a2`. A
+T-pass/A-fail row, or a latency tripwire, needs a written classification: pass `--classifications`
+with a JSON object of question id to text (and `"latency"` to text). The scorer copies its inputs
+beside `RESULT.md` and `RESULT-MANIFEST.json` so a result can be re-scored. The tests (`tests/test_cc_mcp_recall_kit.py`) run no model and no Claude Code.
 
 ## What it does not prove
 

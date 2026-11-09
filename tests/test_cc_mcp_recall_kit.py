@@ -268,3 +268,14 @@ def test_bot_round_3(monkeypatch, tmp_path):
     d = {'tokens': [{'id': 'F01', 'token': 'X', 'sessions': ['s1'], 'matches': []}]}
     t = k.arm_t(tmp_path, tmp_path, d)
     assert t['tokens'] == [{'id': 'F01', 'pass': False, 'error': 'BrokenPipeError', 'hits': None}]
+
+
+def test_bot_round_4():
+    numeric = next(q for q in k.Q if q['kind'] == 'positive' and q['gold'].isdigit())
+    gold = numeric['gold']
+    # A decimal extension is a different value; the value inside a longer code does not count.
+    for wrong in (gold + '.5', gold + '.25', '1.' + gold, gold + '7'):
+        assert not k.judge(wrong, numeric)['correct'], wrong
+    assert k.judge('The port is ' + gold + '.', numeric)['correct']
+    code = k.Q[0]
+    assert not k.judge(code['gold'] + '.5', code)['correct']

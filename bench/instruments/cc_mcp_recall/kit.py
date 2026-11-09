@@ -21,15 +21,15 @@ from concurrent.futures import ThreadPoolExecutor
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[2]
-C = json.loads((HERE / "corpus.json").read_text())
-Q = json.loads((HERE / "questions.json").read_text())
+C = json.loads((HERE / "corpus.json").read_text(encoding="utf-8"))
+Q = json.loads((HERE / "questions.json").read_text(encoding="utf-8"))
 PROMPT = "You can search the memory of earlier Claude Code sessions in this project with the lcm-x tools. Use them to answer the question. Reply with the exact value only. If the memory holds nothing about it, reply exactly NOT FOUND.\n\nQuestion: "
 
 def read(path):
-    return json.loads(Path(path).read_text())
+    return json.loads(Path(path).read_text(encoding="utf-8"))
 def write(path, data):
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2) + "\n")
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
 def gated(f):
     return not f["id"].endswith("-old")  # BARS v1: 40 facts + 4 latest values; old values are reported apart
@@ -43,7 +43,8 @@ def log_text(spec):
 
 def normalize(text):
     text = re.sub("[\u2010-\u2015\u2212]", "-", text.upper())
-    text = re.sub(r"(?<=\d),(?=\d{3}(?!\d))", "", text)  # a thousands comma: 48,213 -> 48213 (482.13 stays a different value)
+    text = re.sub(r"(?<=\d),(?=\d{3}(?!\d))", "", text)  # a thousands comma: 48,213 -> 48213
+    text = re.sub(r"(?<=\d)\.(?=\d)", "-", text)  # a decimal point joins its digits: 48213.5 is not 48213
     return " ".join(re.sub(r"[^A-Z0-9-]", " ", text).split())
 
 # The prompt asks for the exact value only, so any other code or number of 3+ digits is a hedge.
@@ -51,7 +52,7 @@ TOKEN_SHAPE = re.compile(r"(?<![A-Z0-9-])(?:[A-Z]+-\d+|\d{3,})(?![A-Z0-9-])")  #
 
 def judge(answer, question, error=False):
     text = normalize(answer)
-    found = {f["token"] for f in tokens() if f["token"] in text}
+    found = {f["token"] for f in tokens() if re.search(r"(?<![A-Z0-9-])" + re.escape(f["token"]) + r"(?![A-Z0-9-])", text)}
     bad = error or not text
     if question["kind"] == "negative":
         correct = not bad and text == "NOT FOUND"
@@ -118,11 +119,11 @@ def session_files(home, sid):
 
 def saved_holds(home, sid, token):
     """Whether one of the session's own saved outputs (tool-results/) holds the value."""
-    return any(p.parent.name == "tool-results" and token in p.read_text(errors="replace") for p in session_files(home, sid))
+    return any(p.parent.name == "tool-results" and token in p.read_text(encoding="utf-8", errors="replace") for p in session_files(home, sid))
 
 def planted(home, sid, token):
     """Whether the planted value reached the session's own files at all (a model slip is not a capture finding)."""
-    return any(token in p.read_text(errors="replace") for p in session_files(home, sid))
+    return any(token in p.read_text(encoding="utf-8", errors="replace") for p in session_files(home, sid))
 
 def evidence(home, manifest):
     """Per session: compaction boundaries, subagent transcripts and saved outputs actually present."""
@@ -131,7 +132,7 @@ def evidence(home, manifest):
         files, boundaries, compacted = session_files(home, record["session_id"]), 0, []
         for path in files:
             if path.suffix == ".jsonl" and path.parent.name != "subagents":
-                lines = path.read_text(errors="replace").splitlines()
+                lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
                 marks = [i for i, line in enumerate(lines) if '"compact_boundary"' in line]
                 boundaries += len(marks)
                 # A pre-compaction value counts only when a compaction boundary follows the line that planted it.
@@ -301,7 +302,7 @@ def build(args):
     for name, spec in C["files"].items():
         path = project / name
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(spec["text"] if "text" in spec else log_text(spec))
+        path.write_text(spec["text"] if "text" in spec else log_text(spec), encoding="utf-8")
     for session in C["sessions"]:
         mode, _, parent = session["start"].partition(":")
         sid = str(uuid.uuid4()) if mode == "new" else manifest["sessions"][parent]["session_id"]
@@ -323,18 +324,24 @@ def build(args):
         if not manifest["stop"]:
             quiet = quiesce(args.home / ".lcm-x/claude-code")
             script = args.plugin / "lcm-x/scripts/lcm_x_capture.py"
-            audit = subprocess.run([sys.executable, str(script), "audit", "--home", str(args.home / ".lcm-x/claude-code"), "--session", sid], capture_output=True, timeout=900)
-            report = json.loads(audit.stdout)
-            record["audit"] = {"rc": audit.returncode, **{k: report.get(k) for k in ("ok", "verified", "failures", "unverified")}}
+            try:
+                audit = subprocess.run([sys.executable, str(script), "audit", "--home", str(args.home / ".lcm-x/claude-code"), "--session", sid], capture_output=True, timeout=900)
+                rc, report = audit.returncode, json.loads(audit.stdout)
+            except (subprocess.TimeoutExpired, ValueError) as exc:  # the session is still recorded, as a stop
+                rc, report = -1, {"error": type(exc).__name__}
+            record["audit"] = {"rc": rc, **{k: report.get(k) for k in ("ok", "verified", "failures", "unverified", "error")}}
             shapes = {}
             for path in (args.home / ".claude/projects").glob(f"*/{sid}.jsonl"):
-                for line in path.read_text().splitlines():
-                    e = json.loads(line)
+                for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+                    try:
+                        e = json.loads(line)
+                    except ValueError:
+                        continue  # a torn line says nothing about the backend
                     if e.get("type") == "assistant" and (e.get("message") or {}).get("id"):
                         shape = re.sub(r"\d", "9", e["message"]["id"][:12])
                         shapes[shape] = shapes.get(shape, 0) + 1
             record["backend"] = {"msg_id_shapes": shapes}
-            manifest["stop"] = not (quiet and audit.returncode == 0 and report.get("ok") and report.get("verified"))
+            manifest["stop"] = not (quiet and rc == 0 and report.get("ok") and report.get("verified"))
             if manifest["stop"]:
                 manifest["stop_reason"] = "audit_not_verified" if quiet else "capture_not_quiet"
         write(args.out / "corpus-manifest.json", manifest)
@@ -448,6 +455,9 @@ def main():
             sub.add_argument("--a-empty", type=Path)
             sub.add_argument("--classifications", type=Path, help="JSON: question id -> classification text, and 'latency' -> text")
     args = parser.parse_args()
+    for key, value in vars(args).items():  # every path is made absolute: subprocesses run in other folders
+        if isinstance(value, Path):
+            setattr(args, key, value.resolve())
     if args.cmd == "score":
         inputs = args.out / "inputs"
         for key in ("corpus_manifest", "d", "t", "t_empty", "a", "a2", "a_empty", "classifications"):
@@ -458,7 +468,7 @@ def main():
         write(inputs / "questions.json", Q)
         result = score(*[read(inputs / (k + ".json")) for k in ("corpus_manifest", "d", "t", "t_empty", "a")], read(inputs / "a2.json") if args.a2 else None, read(inputs / "a_empty.json") if args.a_empty else None, read(inputs / "classifications.json") if args.classifications else None)
         result.update(code={"sha": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()}, keep=["RESULT.md", "RESULT-MANIFEST.json", "inputs/"], headline={"metric": "positive_recall", "value": min(result["positives"]), "n": 40, "baseline": None}, published={"T1": None, "T2": None})
-        (args.out / "RESULT.md").write_text(f'# Recall over MCP: {result["verdict"]}\n\nBars: {json.dumps(result["bars"])}\n\nPositive counts: {result["positives"]}; fabricated: {result["fabricated"]}.\n\nLatency per tool: {json.dumps(result["latency"])}; tripwire: {result["tripwire"]}.\n\n| id | kind | class | D | T | A verdict | A tool calls | wall s | classification |\n|---|---|---|---|---|---|---|---|---|\n' + '\n'.join('| ' + ' | '.join(str(r[k]) for k in ("id", "kind", "class", "D", "T")) + ' | ' + ', '.join(v["verdict"] for v in r["A"]) + f' | {r["tool_calls"]} | {r["wall_s"]} | {r.get("classification", "")} |' for r in result["rows"]) + '\n\nNot proven: synthetic facts, one model, one small store; no real owner history, large-store recall, Grok sessions or customer readiness. Shared-Mac latency only. Latest-value rows are not gated. Bars are fixed by approved BARS v1 before any run. T1/T2: unpublished.\n')
+        (args.out / "RESULT.md").write_text(f'# Recall over MCP: {result["verdict"]}\n\nBars: {json.dumps(result["bars"])}\n\nPositive counts: {result["positives"]}; fabricated: {result["fabricated"]}.\n\nLatency per tool: {json.dumps(result["latency"])}; tripwire: {result["tripwire"]}.\n\n| id | kind | class | D | T | A verdict | A tool calls | wall s | classification |\n|---|---|---|---|---|---|---|---|---|\n' + '\n'.join('| ' + ' | '.join(str(r[k]) for k in ("id", "kind", "class", "D", "T")) + ' | ' + ', '.join(v["verdict"] for v in r["A"]) + f' | {r["tool_calls"]} | {r["wall_s"]} | {r.get("classification", "")} |' for r in result["rows"]) + '\n\nNot proven: synthetic facts, one model, one small store; no real owner history, large-store recall, Grok sessions or customer readiness. Shared-Mac latency only. Latest-value rows are not gated. Bars are fixed by approved BARS v1 before any run. T1/T2: unpublished.\n', encoding="utf-8")
     else:
         result = build(args) if args.cmd == "build-corpus" else arm_d(args.home, read(args.manifest)) if args.cmd == "arm-d" else arm_t(args.plugin, args.home, read(args.d), args.empty) if args.cmd == "arm-t" else arm_a(args) if args.cmd == "arm-a" else empty_store(args.home)
     write((args.out if hasattr(args, "out") else args.home) / ("RESULT-MANIFEST.json" if args.cmd == "score" else "corpus-manifest.json" if args.cmd == "build-corpus" else args.cmd + ".json"), result)
