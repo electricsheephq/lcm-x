@@ -64,7 +64,8 @@ GLM readers support `single`, `full_context` (a conservative 128k admission cap)
 - Codex: isolated `CODEX_HOME` (auth is a symlink to the plan login, never copied) and `HOME`,
   `--ignore-user-config --ignore-rules -s read-only`, every built-in tool feature disabled, a fresh
   empty `--cd` per call under `<output>/harness/`, prompt from a file, stdin from that file. Code mode
-  is enabled explicitly (`--enable code_mode`; codex-cli 0.167 no longer turns it on by default). It is the only
+  is enabled explicitly (`--enable code_mode`; verified: codex-cli 0.162.1 reached MCP tools without the flag, 0.167.0 needs it).
+  The canary fails with an explicit message when its MCP run reaches no `mcp__lcmx` tool. It is the only
   route to MCP tools, and its JS runtime has no file
   system or imports. Any model call other than the code-mode wrapper, any executed item other than an
   lcmx MCP call (or an MCP resource listing), fails the question as `tool_violation`. Model, tokens and

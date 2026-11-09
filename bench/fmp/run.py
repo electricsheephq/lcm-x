@@ -202,6 +202,8 @@ def canary(args, client, dataset_sha, q):
         # Positive control: in MCP mode the reader must reach the lcmx tools, or the run proves nothing.
         results[-1]["passed"] &= mode != "mcp" or results[-1]["mcp_calls"] > 0
     write_json(args.output / "canary.json", {"at": utc(), "results": results, "versions": versions(), **switches(args)})
+    if any(r["mode"] == "mcp" and not r["mcp_calls"] for r in results):
+        raise RuntimeError("canary_failed: the reader reached no mcp__lcmx tool (Codex code mode off or MCP tools deferred?)")
     if not all(r["passed"] for r in results):
         raise RuntimeError("canary_failed")
 
