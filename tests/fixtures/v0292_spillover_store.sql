@@ -27,7 +27,17 @@ CREATE TABLE messages (
             );
 INSERT INTO messages VALUES(1,'u1-session','cli','u1-conv','user','Please dump the big report.',NULL,NULL,NULL,1794266036.453254,11,0,1794266036.453254,1762700001.0,'host_message_timestamp',NULL,NULL);
 INSERT INTO messages VALUES(2,'u1-session','cli','u1-conv','assistant','',NULL,'[{"id": "call_spill", "type": "function", "function": {"name": "dump", "arguments": "{}"}}]',NULL,1794266036.4533529,10,0,1794266036.4533529,1762700002.0,'host_message_timestamp',NULL,NULL);
-INSERT INTO messages VALUES(3,'u1-session','cli','u1-conv','tool',unistr('<persisted-output>\u000aThis tool result was too large (5,427 characters, 5.3 KB).\u000aFull output saved to: @HERMES_HOME@/cache/spillover/call_spill.txt\u000aUse the read_file tool with offset and limit to access specific sections of this output.\u000aRecovery: page through the saved file with read_file (offset/limit) or process it with execute_code — do NOT re-request the same data from the remote API; the full result is already on disk.\u000a\u000aPreview (first 30 chars):\u000aSPILLOVER_RECOVERY_NEEDLE:\u000aé文a\u000a...\u000a</persisted-output>'),'call_spill',NULL,NULL,1794266036.453408,144,0,1794266036.453408,1762700003.0,'host_message_timestamp',NULL,NULL);
+INSERT INTO messages VALUES(3,'u1-session','cli','u1-conv','tool','<persisted-output>
+This tool result was too large (5,427 characters, 5.3 KB).
+Full output saved to: @HERMES_HOME@/cache/spillover/call_spill.txt
+Use the read_file tool with offset and limit to access specific sections of this output.
+Recovery: page through the saved file with read_file (offset/limit) or process it with execute_code — do NOT re-request the same data from the remote API; the full result is already on disk.
+
+Preview (first 30 chars):
+SPILLOVER_RECOVERY_NEEDLE:
+é文a
+...
+</persisted-output>','call_spill',NULL,NULL,1794266036.453408,144,0,1794266036.453408,1762700003.0,'host_message_timestamp',NULL,NULL);
 INSERT INTO messages VALUES(4,'u1-session','cli','u1-conv','assistant','The report is saved; the needle is at the top.',NULL,NULL,NULL,1794266036.4534369,16,0,1794266036.4534369,1762700004.0,'host_message_timestamp',NULL,NULL);
 CREATE TABLE metadata (
                 key TEXT PRIMARY KEY,
