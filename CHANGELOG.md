@@ -8,6 +8,7 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## v0.30.0 (nothing lost)
 
+- Fix: the opt-in recorder could hang at interpreter exit when a checkpoint came due during the exit drain (#2512).
 - Fix: a delegated child (sub-agent) that is interrupted before it finishes no longer loses its whole transcript
   (#2482). Before, its rows were stored only when its turn ended, at its session end or before its own compaction,
   so a host restart, kill or exit while it ran left it with no rows in LCM-X. Its rows are now stored each time the

@@ -97,9 +97,11 @@ Directories are created 0700 and files 0600. A profile backup that copies `$HERM
   `checkpoint_sealed` event with the seq it covers. Reading with a checkpoint returns the prefix through that seq, and
   a replay of it must match the backup, without needing an exit. A checkpoint refused by the cap or disk floor
   or once the exit drain begins is skipped, counted as `recorder.checkpoint_skipped`, and warned with its cause; recording continues.
-- **Ended without exit:** Hermes ends its gateway and CLI with `os._exit`, so atexit never runs and a recording
-  normally ends as "ended without exit". That is a normal end; the sealed checkpoints are the comparison points. When
-  atexit does run, the recorder writes `exit_begin` and records the exit flushes synchronously after a successful
+- **Ended without exit:** the Hermes gateway and one-shot runs end with `os._exit`, so atexit never runs there and a
+  recording normally ends as "ended without exit". That is a normal end; the sealed checkpoints are the comparison
+  points. The desktop gateway when its input closes, ACP, and the CLI of older Hermes versions that run the agent in
+  the CLI process do run atexit.
+  When atexit does run, the recorder writes `exit_begin` and records the exit flushes synchronously after a successful
   drain. Session end and shutdown skip the ordinary 2 s event drain while a snapshot or checkpoint backup is
   pending or running. A drain timeout stops admission with `exit_timeout` in status. Recording stops in a forked child (`fork`)
   before it can wait on inherited locks; the parent recording continues.
