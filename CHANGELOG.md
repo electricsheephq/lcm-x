@@ -134,6 +134,17 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 - Fix: successful delegated-child resumes and store-only turns log at DEBUG without false fallback counts or skipped-ingest warnings; storage is unchanged (#2074).
 - Deprecated: `LCM_DEFERRED_MAINTENANCE_ENABLED` still works (off by default). Enabling it now adds one deprecation warning in `/lcm status`, `lcm_status` and the `lcm_doctor` configuration check; it is removed in v0.31.0 (#1246). `LCM_DEFERRED_MAINTENANCE_MAX_PASSES` only applies while it is on.
 
+## v0.29.2 (compaction, shutdown and restart fixes)
+
+- **A contiguity stop at the scan limit no longer repeats on every pass:** compaction retries once on the part of the chunk before the blocking row, ending on a tool-group boundary; the rows after it stay in the host's context for the existing escape, and a retry that would take a claim from a row it cut is refused. The stop is logged once per conversation (#1998, PR #2032).
+- **An over-window exit fit keeps its headroom:** it first cuts whole oldest turns down to the exit budget, so the next request no longer lands over the host's threshold; when no whole-turn cut is deep enough, it behaves as before (#2039, PR #2050).
+- **Shutdown waits for a running compaction** for up to `LCM_SHUTDOWN_COMPACTION_WAIT_S` (default 10 s, new) and never closes the databases under it; a pass that sees the shutdown stops before its next write and returns the host's messages, and a pass that starts after it writes nothing (#2101, PR #2104).
+- **A repeated tool call is stored on a host that reuses tool-call IDs** when the host still shows the earlier pair; the case where that pair was compacted out stays open for v0.30.x. On such hosts, after a restart whose stored copy of the earlier pair is older than the recent stored window, a tool step can be stored twice or in place of a new one (#2197, planned for v0.30.x) (#2172, PR #2185).
+- **A profile's storage opens on first real use,** so another profile's gateway that only loads the plugin no longer opens or holds this profile's store (#2152, PR #2178).
+- **The bundled skill opens with `skill_view`:** the plugin registers its `SKILL.md` file instead of the folder (#571, #2131, PR #729).
+- **CI** runs on pushes and pull requests to `release/v*.x` maintenance branches (#2171, PR #2190).
+- **Store:** the schema version stays 5; one new setting, `LCM_SHUTDOWN_COMPACTION_WAIT_S`. Rollback target: v0.29.1.
+
 ## v0.29.1 (compaction fixes)
 
 - **Compaction gets past an unresolved retained row.** When the stored history before a row the host still holds could not be cut, compaction now summarises the blocked rows from the stored copy and moves on; the host's copy stays in context (duplicated, never lost). It also works in the protected recent turns and behind a backlog larger than one leaf. The escape records hashes for up to 256 rows per session in the existing session metadata, and each escape pass logs one WARNING (row IDs, role and kind only) plus an `escaped=` field on the compaction stop line (#1162, #1880, PR #2003).
