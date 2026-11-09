@@ -1,8 +1,11 @@
 """#2521: v0.29.2 bare spillover markers remain one-to-one replay identities (I1, I6)."""
 
 import logging
+import sqlite3
 import tempfile
 from collections import Counter
+from contextlib import closing
+from copy import deepcopy
 
 import pytest
 
@@ -24,86 +27,101 @@ def isolated_tempdir(tmp_path, monkeypatch):
 
 
 def _engine(tmp_path):
-    engine = LCMEngine(
+    return LCMEngine(
         config=LCMConfig(
             database_path=str(tmp_path / "lcm.db"),
             large_output_externalization_path=str(tmp_path / "hermes" / "externalized"),
         ),
         hermes_home=str(tmp_path / "hermes"),
     )
-    engine._session_id = SESSION
-    engine._conversation_id = CONVERSATION
-    return engine
+
+
+def _run_phase(tmp_path, history):
+    engine = _engine(tmp_path)
+    try:
+        engine.on_session_start(
+            SESSION, platform="cli", context_length=128000, conversation_id=CONVERSATION,
+        )
+        engine.ingest(deepcopy(history))
+        return dict(engine._last_ingest_reconciliation)
+    finally:
+        engine.shutdown()
+
+
+def _read_store(tmp_path):
+    uri = (tmp_path / "lcm.db").as_uri() + "?mode=ro"
+    with closing(sqlite3.connect(uri, uri=True)) as connection:
+        connection.row_factory = sqlite3.Row
+        return [dict(row) for row in connection.execute("SELECT * FROM messages ORDER BY store_id")]
 
 
 def _legacy_store(tmp_path, monkeypatch, history):
-    engine = _engine(tmp_path)
-    try:
-        # v0.29.2 recovers only hermes-results, never cache/spillover.
-        with monkeypatch.context() as patch:
-            patch.setattr(ingest_persisted, "_safe_hermes_spillover_file", lambda *_: None)
-            engine._ingest_messages(history)
-        rows = engine._store.get_session_messages(SESSION)
-        assert len(rows) == len(history)
-        for message, row in zip(history, rows):
-            assert row["content"] == message["content"]
-            if message["role"] == "tool":
-                assert row["tool_call_id"] == message["tool_call_id"]
-                assert "[LCM persisted-output" not in row["content"]
-        assert not list((tmp_path / "hermes" / "externalized").glob("*.json"))
-        return rows
-    finally:
-        engine.shutdown()
+    # v0.29.2 recovers only hermes-results, never cache/spillover.
+    with monkeypatch.context() as patch:
+        patch.setattr(ingest_persisted, "_safe_hermes_spillover_file", lambda *_: None)
+        _run_phase(tmp_path, history)
+    rows = _read_store(tmp_path)
+    assert len(rows) == len(history)
+    for message, row in zip(history, rows):
+        assert row["content"] == message["content"]
+        if message["role"] == "tool":
+            assert row["tool_call_id"] == message["tool_call_id"]
+            assert "[LCM persisted-output" not in row["content"]
+    assert not list((tmp_path / "hermes" / "externalized").glob("*.json"))
+    return rows
 
 
 def _replay(tmp_path, history, original, caplog):
-    engine = _engine(tmp_path)
-    try:
-        engine._ingest_cursor_needs_reconcile = True
-        with caplog.at_level(logging.INFO):
-            engine._ingest_messages(history)
-        rows = engine._store.get_session_messages(SESSION)
-        assert rows[:len(original)] == original  # No old row changed or disappeared.
-        assert "skipped stale no-overlap snapshot" not in caplog.text
-        assert engine._last_ingest_reconciliation.get("reason") != "skipped stale no-overlap snapshot"
-        # Raw host content survives, including the original bare marker.
-        contents = {row["content"] for row in rows}
-        assert all(message["content"] in contents for message in history)
-        return rows, dict(engine._last_ingest_reconciliation)
-    finally:
-        engine.shutdown()
+    with caplog.at_level(logging.INFO):
+        reconciliation = _run_phase(tmp_path, history)
+    rows = _read_store(tmp_path)
+    assert rows[:len(original)] == original  # No old row changed or disappeared.
+    assert "skipped stale no-overlap snapshot" not in caplog.text
+    assert reconciliation.get("reason") != "skipped stale no-overlap snapshot"
+    # Raw host content survives, including the original bare marker.
+    contents = {row["content"] for row in rows}
+    assert all(message["content"] in contents for message in history)
+    return rows, reconciliation
 
 
 @pytest.mark.parametrize("shape", ["stamped", "unstamped-reply", "file-gone"])
-def test_upgrade_replay_adds_only_new_user(tmp_path, monkeypatch, caplog, shape):
+def test_upgrade_replay_adds_only_new_turn(tmp_path, monkeypatch, caplog, shape):
     path = tmp_path / "hermes" / "cache" / "spillover" / "call_spill.txt"
     marker = _write_output(path)
     reply = {"role": "assistant", "content": "Finished reading the spillover."}
     if shape != "unstamped-reply":
         reply["timestamp"] = 104.0
+    pair = _messages(marker)
+    if shape == "stamped":
+        # Match probe.py's fully stamped public-host history, including the empty call content.
+        pair[0]["content"] = ""
+        pair[0]["tool_calls"][0]["type"] = "function"
+        pair[0]["timestamp"] = 102.0
+        pair[1]["timestamp"] = 103.0
     history = [
         {"role": "user", "content": "Read the synthetic output.", "timestamp": 100.0},
-        *_messages(marker),
+        *pair,
         reply,
     ]
     original = _legacy_store(tmp_path, monkeypatch, history)
     if shape == "file-gone":
-        path.unlink()
-    new_user = {"role": "user", "content": "The next request.", "timestamp": 105.0}
+        moved = tmp_path / "moved-out-of-home" / path.name
+        moved.parent.mkdir()
+        path.rename(moved)
+    new_turn = [
+        {"role": "user", "content": "The next request.", "timestamp": 105.0},
+        {"role": "assistant", "content": "The next reply.", "timestamp": 106.0},
+    ]
 
-    rows, reconciliation = _replay(tmp_path, [*history, new_user], original, caplog)
+    rows, reconciliation = _replay(tmp_path, [*history, *new_turn], original, caplog)
 
-    if shape == "file-gone":
-        # Pin main's existing no-live-file path, including its conservative duplicate pair.
-        expected = [history[1]["content"], marker, new_user["content"]]
-        tool_count = 2
-        assert reconciliation.get("reason") == "persisted ambiguous delta"
-    else:
-        expected = [new_user["content"]]
-        tool_count = 1
+    tool_count = sum(row["role"] == "tool" and row["tool_call_id"] == "call_spill" for row in rows)
+    assert [row["content"] for row in rows[len(original):]] == [row["content"] for row in new_turn], (
+        f"stored rows={len(rows)}, tool rows={tool_count}, reconciliation={reconciliation}"
+    )
+    assert tool_count == 1
+    if shape != "file-gone":
         assert reconciliation.get("reason") != "persisted ambiguous delta"
-    assert [row["content"] for row in rows[len(original):]] == expected
-    assert sum(row["role"] == "tool" and row["tool_call_id"] == "call_spill" for row in rows) == tool_count
 
 
 def test_identical_markers_keep_distinct_call_ids(tmp_path, monkeypatch, caplog):
