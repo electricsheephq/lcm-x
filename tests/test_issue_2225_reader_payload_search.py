@@ -521,3 +521,25 @@ def test_reader_schema_advertises_its_own_content_scope(archive):
     # Hermes' own schema object is unchanged.
     assert schemas.LCM_GREP["parameters"]["properties"]["content_scope"]["default"] == "history"
     assert "session_scope='current' only" in schemas.LCM_GREP["parameters"]["properties"]["content_scope"]["description"]
+
+
+def test_a_confirmed_out_of_scope_ref_still_errors_at_the_budget_boundary(archive, monkeypatch):
+    # Codex review of the bot-round delta: only a check the budget cut short becomes byte_cap. A ref whose header
+    # was read in full and named another session stays an error, even when the budget ends right there.
+    mine, _ = archive.save(session="mine", name="20261110_120002_mine.json")
+    theirs, _ = archive.save(session="theirs", name="20261110_120001_theirs.json")
+    spent = []
+    original = tools._reader_payload_search
+    def measured(*args, **kwargs):
+        result = original(*args, **kwargs)
+        spent.append((result["status"], result["bytes_read"]))
+        return result
+    monkeypatch.setattr(tools, "_reader_payload_search", measured)
+    args = dict(content_scope="externalized", session_scope="session", session_id="mine")
+    for ref in (mine, theirs):  # measured alone; the second is refused, as it should be
+        archive.reader.call("lcm_grep", dict(query=TOKEN, externalized_refs=[ref], **args))
+    (_, mine_bytes), (status, theirs_bytes) = spent[0], spent[1]
+    assert status == "out_of_scope"
+    monkeypatch.setattr(tools, "READER_PAYLOAD_BYTE_CAP", mine_bytes + theirs_bytes)  # ends exactly after its header
+    raw, error = archive.reader.call("lcm_grep", dict(query=TOKEN, externalized_refs=[mine, theirs], **args))
+    assert "not owned by the requested scope" in json.loads(raw).get("error", "")

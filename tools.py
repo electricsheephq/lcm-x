@@ -1187,7 +1187,12 @@ def _reader_payload_search(path: Path, budget: int, in_scope) -> dict[str, Any]:
         with os.fdopen(fd, "rb", buffering=0) as handle:
             fd = -1
             def read(size):
-                data = handle.read(min(size, budget - result["bytes_read"]))
+                allowed = budget - result["bytes_read"]
+                data = handle.read(min(size, allowed))
+                if allowed < size and len(data) == allowed:
+                    # The budget, not the file's end, stopped this read: the file's checks did not finish, so a
+                    # rejection here is not a confirmed failure.
+                    result["budget_cut"] = True
                 result["bytes_read"] += len(data)
                 return data
             prefix, fields, seen, _ = _read_externalized_payload_metadata_prefix_from_handle(
@@ -1646,8 +1651,8 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
                     return json.dumps({"error": f"Externalized ref is a symlink: {ref}"})
                 continue
             if status != "ok":
-                if reader_mode and payload_bytes >= READER_PAYLOAD_BYTE_CAP:
-                    break  # the budget ran out inside this file: byte_cap is recorded and earlier matches stand
+                if reader_mode and payload.get("budget_cut") and status != "out_of_scope":
+                    break  # the budget ran out before this file's checks finished: byte_cap is recorded, earlier matches stand
                 scan_counts["rejected_session_mismatch" if status == "out_of_scope" else "rejected_invalid_or_unreadable"] += 1
                 if externalized_refs is not None:
                     return json.dumps({"error": f"Externalized ref is not readable{' or not owned by the requested scope' if reader_mode else ''}: {ref}"})
@@ -2663,7 +2668,7 @@ def lcm_grep(args: Dict[str, Any], **kwargs) -> str:
                 retry_args["_reader_default_payloads"] = False
             retried_payload = json.loads(_lcm_grep_full_text(retry_args, **kwargs))
             if _reader_any_session(engine):
-                for key in ("partial", "externalized_scan", "externalized_results_omitted", "content_scope"):
+                for key in ("partial", "externalized_scan", "externalized_results_omitted", "content_scope", "externalized_refs"):
                     if key in payload:
                         retried_payload[key] = payload[key]
             payload = retried_payload
