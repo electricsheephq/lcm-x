@@ -18,14 +18,16 @@ through the endpoint. Gate item for Claude Code GA (#2225).
 - **Arm D, direct:** read-only SQL over the store. Is each value in a row of the expected session and
   role (inline or in its externalized payload)? It also checks that each value reached the session's
   own Claude Code files (`plant_failed`), and records per session the compactions, subagent
-  transcripts and saved outputs that really happened.
+  transcripts and saved outputs that really happened. A pre-compaction value counts as covered only
+  when a compaction boundary follows the line that planted it.
 - **Arm T, endpoint:** the reader started as the plugin's `.mcp.json` starts it. `lcm_grep`
   (full text) must find each value in the expected session, and paged `lcm_expand` must return content
   byte-equal (sha256) to the stored row or payload.
 - **Arm A, agent:** headless Claude Code with hooks off, built-in tools off and only the `lcm-x`
   server, one fresh session per question. The reader prompt is fixed in `kit.py` (`PROMPT`).
   Deterministic judge (`judge`): a positive is correct only if the answer holds the gold value and no
-  other value-shaped string; a negative only if the answer is exactly `NOT FOUND`.
+  other value-shaped string; a negative only if the answer is exactly `NOT FOUND`. Arm T also counts a
+  value found in a saved tool output (a payload hit), expanded by its ref and byte-equal to the payload.
 
 ## Bars (set before any data)
 

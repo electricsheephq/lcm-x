@@ -60,7 +60,8 @@ def test_judge():
 
 def synthetic():
     manifest = {'sessions': {s['label']: {'session_id': 's1', 'audit': dict(rc=0, ok=True, verified=True)} for s in k.C['sessions']}}
-    evidence = {s['label']: {'compact_boundaries': 1, 'subagent_transcripts': 2, 'saved_outputs': 4} for s in k.C['sessions']}
+    compacted = [f['id'] for f in k.C['facts'] if f['class'] == 'pre_compact']
+    evidence = {s['label']: {'compact_boundaries': 1, 'compacted_facts': compacted, 'subagent_transcripts': 2, 'saved_outputs': 4} for s in k.C['sessions']}
     d = {'tokens': [{'id': f['id'], 'pass': True} for f in k.tokens()], 'evidence': evidence, 'plant_failed': []}
     t = {**copy.deepcopy(d), 'calls': [{'tool': 'lcm_grep', 'ms': 1}], 'empty': False}
     te = {'tokens': [r for r in copy.deepcopy(d['tokens']) if not r['id'].endswith('-old')], 'empty': True}
@@ -191,3 +192,41 @@ def test_arm_t_payload_hit(monkeypatch, tmp_path):
     assert row['pass'] and row['via'] == ['payload'] and row['partial'] == {'reasons': ['prefix']}
     assert not run(payload + ' ')['pass']
     assert not run(payload, session='s5')['pass']
+
+
+def test_shadow_review_round():
+    # Codex shadow review of #2517. An invented alternative of any code length is a hedge.
+    gold = k.Q[0]['gold']
+    assert not k.judge(gold + ' or KESTREL-12345', k.Q[0])['correct']
+    assert not k.judge(gold + ' or KESTREL-12', k.Q[0])['correct']
+    # A compaction that came before the planted value does not cover it.
+    inputs = synthetic()
+    fact = next(f for f in k.C['facts'] if f['class'] == 'pre_compact')
+    inputs[1]['evidence'][fact['session']]['compacted_facts'].remove(fact['id'])
+    assert k.score(*inputs)['verdict'] == 'VOID'
+    # A null or non-string classification never clears a gate.
+    inputs = synthetic()
+    inputs[4]['answers'][0]['answer'] = 'NOT FOUND'
+    for note in (None, 0, '  '):
+        assert k.score(*inputs, classifications={'Q01': note})['verdict'] == 'CLASSIFICATION REQUIRED'
+    inputs = synthetic()
+    inputs[2]['calls'] = [{'tool': 'lcm_grep', 'ms': 6000}]
+    assert k.score(*inputs, classifications={'latency': None})['verdict'] == 'CLASSIFICATION REQUIRED'
+    # Exactly one answer per question: a duplicate, even a correct one, leaves the run incomplete.
+    inputs = synthetic()
+    inputs[4]['answers'].append(dict(inputs[4]['answers'][-1]))
+    assert k.score(*inputs)['verdict'] == 'INCOMPLETE'
+    inputs = synthetic()
+    inputs[6]['answers'].append(dict(inputs[6]['answers'][0]))
+    assert k.score(*inputs)['verdict'] == 'VOID'
+
+
+def test_compaction_must_follow_the_value(tmp_path, monkeypatch):
+    fact = next(f for f in k.C['facts'] if f['class'] == 'pre_compact')
+    transcript = tmp_path / 'main.jsonl'
+    monkeypatch.setattr(k, 'session_files', lambda home, sid: [transcript])
+    manifest = {'sessions': {fact['session']: {'session_id': 'x'}}}
+    transcript.write_text('{"subtype": "compact_boundary"}\n' + fact['token'] + '\n')
+    assert fact['id'] not in k.evidence(tmp_path, manifest)[fact['session']]['compacted_facts']
+    transcript.write_text(fact['token'] + '\n{"subtype": "compact_boundary"}\n')
+    assert fact['id'] in k.evidence(tmp_path, manifest)[fact['session']]['compacted_facts']

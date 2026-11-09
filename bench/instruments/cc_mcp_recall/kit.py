@@ -46,7 +46,7 @@ def normalize(text):
     text = re.sub(r"(?<=\d)[,.](?=\d)", "", text)  # 48,213 -> 48213
     return " ".join(re.sub(r"[^A-Z0-9-]", " ", text).split())
 
-TOKEN_SHAPE = re.compile(r"(?<![A-Z0-9-])(?:[A-Z]+-\d{4}|\d{5,})(?![A-Z0-9-])")
+TOKEN_SHAPE = re.compile(r"(?<![A-Z0-9-])(?:[A-Z]+-\d+|\d{5,})(?![A-Z0-9-])")  # any code length, so an invented alternative is a hedge
 
 def judge(answer, question, error=False):
     text = normalize(answer)
@@ -118,11 +118,18 @@ def evidence(home, manifest):
     """Per session: compaction boundaries, subagent transcripts and saved outputs actually present."""
     out = {}
     for label, record in manifest["sessions"].items():
-        files, boundaries = session_files(home, record["session_id"]), 0
+        files, boundaries, compacted = session_files(home, record["session_id"]), 0, []
         for path in files:
             if path.suffix == ".jsonl" and path.parent.name != "subagents":
-                boundaries += sum('"compact_boundary"' in line for line in path.read_text(errors="replace").splitlines())
-        out[label] = {"compact_boundaries": boundaries, "subagent_transcripts": sum(p.parent.name == "subagents" and p.suffix == ".jsonl" for p in files),
+                lines = path.read_text(errors="replace").splitlines()
+                marks = [i for i, line in enumerate(lines) if '"compact_boundary"' in line]
+                boundaries += len(marks)
+                # A pre-compaction value counts only when a compaction boundary follows the line that planted it.
+                for f in C["facts"]:
+                    first = next((i for i, line in enumerate(lines) if f["token"] in line), None)
+                    if f["class"] == "pre_compact" and f["session"] == label and first is not None and any(m > first for m in marks):
+                        compacted.append(f["id"])
+        out[label] = {"compact_boundaries": boundaries, "compacted_facts": compacted, "subagent_transcripts": sum(p.parent.name == "subagents" and p.suffix == ".jsonl" for p in files),
                       "saved_outputs": sum(p.parent.name == "tool-results" for p in files)}
     return out
 
@@ -360,7 +367,12 @@ def coverage(d):
             need[key] = need.get(key, 0) + 1 if f["class"] == "tool_result_saved" else 1
     missing = [f"{label}:{shape}" for (label, shape), n in need.items() if (evidence.get(label) or {}).get(shape, 0) < n]
     missing += [r["id"] + ":not_in_saved_output" for r in d.get("tokens", []) if r.get("in_saved_output") is False]
+    missing += [f["id"] + ":no_later_compaction" for f in C["facts"] if f["class"] == "pre_compact" and f["id"] not in (evidence.get(f["session"]) or {}).get("compacted_facts", [])]
     return {"ok": bool(evidence) and not missing and not d.get("plant_failed"), "missing": missing, "plant_failed": d.get("plant_failed", [])}
+
+def note_text(value):
+    """A classification counts only as a non-empty string (JSON null or a number never clears a gate)."""
+    return value.strip() if isinstance(value, str) else ""
 
 def score(manifest, d, t, te, a, a2=None, ae=None, classifications=None):
     dm, tm = ({r["id"]: r["pass"] for r in arm["tokens"]} for arm in (d, t))
@@ -375,11 +387,12 @@ def score(manifest, d, t, te, a, a2=None, ae=None, classifications=None):
         verdicts = [judge(r.get("answer", ""), q, r.get("is_error", False) or r.get("reader_not_connected", False) or r.get("rc", 0) != 0) for r in answers]
         rows.append({"id": q["id"], "kind": q["kind"], "class": next((f["class"] for f in C["facts"] if f["id"] == q.get("fact")), q["kind"]), "D": bool(ids) and all(dm.get(i, False) for i in ids), "T": bool(ids) and all(tm.get(i, False) for i in ids), "A": verdicts, "tool_calls": [r.get("tool_calls", {}) for r in answers], "wall_s": [r.get("wall_s") for r in answers]})
         if rows[-1]["T"] and not all(v["correct"] for v in verdicts):
-            rows[-1]["classification"] = str(classifications.get(q["id"], ""))
+            rows[-1]["classification"] = note_text(classifications.get(q["id"]))
     positives = [sum(r["A"][i]["correct"] for r in rows if r["kind"] == "positive") for i in range(len(runs))]
     fabricated = [sum(r["A"][i].get("fabricated", False) for r in rows if r["kind"] == "negative") for i in range(len(runs))]
     def valid(run, qs):
-        return not run.get("stop_reason") and {r["id"] for r in run["answers"]} == {q["id"] for q in qs} and all(not r.get("is_error") and not r.get("reader_not_connected", True) and r.get("rc") == 0 and bool(r.get("answer", "").strip()) for r in run["answers"])
+        ids = [r["id"] for r in run["answers"]]  # exactly one answer per question: a duplicate is incomplete
+        return not run.get("stop_reason") and len(ids) == len(set(ids)) and set(ids) == {q["id"] for q in qs} and all(not r.get("is_error") and not r.get("reader_not_connected", True) and r.get("rc") == 0 and bool(r.get("answer", "").strip()) for r in run["answers"])
     empty_ok = len(te["tokens"]) == 44 and {r["id"] for r in te["tokens"]} == {f["id"] for f in tokens() if not f["id"].endswith("-old")} and all(r["pass"] for r in te["tokens"]) and ae is not None and valid(ae, Q[:40]) and not any(judge(r["answer"], next(q for q in Q if q["id"] == r["id"]))["correct"] for r in ae["answers"])
     latency = {}
     for name in {c["tool"] for c in t["calls"]}:
@@ -395,7 +408,7 @@ def score(manifest, d, t, te, a, a2=None, ae=None, classifications=None):
     second = window and a2 is None
     complete = bars.pop("answers_complete")
     other = all(v for k, v in bars.items() if k not in ("A",))
-    latency_note = str(classifications.get("latency", ""))
+    latency_note = note_text(classifications.get("latency"))
     unclassified = [r["id"] for r in rows if r["kind"] == "positive" and "classification" in r and not r["classification"].strip()]
     verdict = ("VOID" if not empty_ok or not cover["ok"] else "STOP" if not bars["capture"] or not bars["D"] else "FAIL" if not bars["T"]
                else "INCOMPLETE" if not complete else "FAIL" if not other
