@@ -676,6 +676,39 @@ def cold_cursor_candidate(conn, *, session_id, attempt, ignored):
     return winner, counts
 
 
+def cold_turn_pairs(conn, *, session_id, attempt, messages, matched, consumed):
+    """A stamped user owns its following ledger rows until the next stored user."""
+    groups, group = {}, None
+    lineage = persisted_lineage(conn, session_id, attempt["lineage"])
+    for row in _rows(conn.execute(
+            "SELECT b.identity_digest,b.disposition,b.ordinal, m.* FROM occurrence_bindings b JOIN messages m ON m.store_id=b.store_id "
+            "WHERE b.lineage=? AND m.session_id=? "
+            "ORDER BY b.ordinal,b.occ_id", (lineage, session_id))):
+        if row["ordinal"] is None:
+            return {}  # Unplaced rows cannot establish turn boundaries.
+        if row["role"] == "user":
+            group = groups.setdefault(row["store_id"], defaultdict(deque))
+        elif group is not None and row["disposition"] in ("stored", "migrated"):
+            group[row["identity_digest"]].append(row)
+    available, pairs = None, {}
+    for idx, message in enumerate(messages):
+        if message.get("role") == "user":
+            rows = matched.get(idx, ())
+            available = (groups.get(rows[0]["store_id"]) if len(rows) == 1
+                         and attempt["stamps"][idx] is not None else None)
+        elif (available is not None and message.get("role") == "assistant"
+              and not message.get("tool_calls") and attempt["stamps"][idx] is None
+              and idx not in matched):
+            bucket = available.get(attempt["entries"][idx].identity_digest, deque())
+            while bucket and bucket[0]["store_id"] in consumed:
+                bucket.popleft()
+            if bucket:
+                row = bucket.popleft()
+                consumed.add(row["store_id"])
+                pairs[idx] = row
+    return pairs
+
+
 def emission_candidate(conn, lineage):
     """Return (newest usable live emission view, reason), without registry reads.
 

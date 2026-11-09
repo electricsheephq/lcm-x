@@ -281,12 +281,14 @@ def test_a_sole_reply_left_by_a_pruned_call_row_keeps_mains_count_warm(tmp_path)
 
 @pytest.mark.parametrize("kind", ["whitespace", "merged", "pruned"])
 def test_sole_rewrite_after_a_restart_equals_main(tmp_path, kind):
-    assert _sole_rewrite_resend(tmp_path, kind, True) == _main_added(kind, True)
+    # #2479: the earlier turns' replies are consumed, while the rewritten reply is new.
+    expected = [row for row in _main_added(kind, True)
+                if not row[1].startswith("reply to T") or row[1].startswith("reply to T39")]
+    assert _sole_rewrite_resend(tmp_path, kind, True) == expected
 
 
 def test_a_warm_stored_replaced_reply_is_copied_by_a_plain_restart_like_its_sibling(tmp_path):
-    """Residual (1), #1674's class: after the warm path stores the replaced reply, a plain restart (no cleanup-only
-    pass) copies it exactly as main's restart batch copies the warm-stored reply after it. No row is lost."""
+    """#2479: a plain restart consumes each warm-stored reply within its own turn. No row is lost."""
     engine = _engine(tmp_path)
     try:
         view = _warm(engine, lambda: [_reply("reply to T39")], at=39, turns=40)
@@ -300,6 +302,6 @@ def test_a_warm_stored_replaced_reply_is_copied_by_a_plain_restart_like_its_sibl
         after = _ingest_twice(engine, view)
         assert not before - after, "a stored row was lost"
         reply, sibling = _count_text(engine, "a brand new reply" + PAD), _count_text(engine, "next" + PAD)
-        assert (reply, sibling) == ((1, 2) if ON_MAIN else (2, 2))  # main stored the reply only at the restart
+        assert (reply, sibling) == (1, 1)
     finally:
         engine.shutdown()

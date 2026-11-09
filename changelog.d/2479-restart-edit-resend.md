@@ -1,0 +1,1 @@
+- Fix: Consume stored unstamped replies within their stamped user turn after a cold restart, preventing edit-resend history copies; retain replay links when the durable ledger advances an ambiguous cursor.
