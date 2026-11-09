@@ -153,7 +153,7 @@ def test_plugin_unload_closes_all_owned_engines(preflight):
             engine.shutdown()
 
 
-def test_unload_includes_clone_already_being_created(preflight, monkeypatch):
+def test_unload_refuses_clone_that_finishes_construction_after_unload(preflight, monkeypatch):
     prototype, ctx = preflight.register(supports_unload=True)
     constructing, release, unloading = threading.Event(), threading.Event(), threading.Event()
     create = prototype._clone_for_agent
@@ -174,12 +174,11 @@ def test_unload_includes_clone_already_being_created(preflight, monkeypatch):
             assert constructing.wait(5)
             unload_future = executor.submit(unload)
             assert unloading.wait(5)
+            unload_future.result(timeout=1)
         finally:
             release.set()
-        clone = clone_future.result(timeout=5)
-        unload_future.result(timeout=5)
-    with pytest.raises(RuntimeError, match="closed"):
-        clone.on_session_start("late", platform="cli")
+        with pytest.raises(RuntimeError, match="plugin unload"):
+            clone_future.result(timeout=5)
     assert preflight.connects == []
 
 
@@ -188,6 +187,10 @@ def test_unload_drains_timed_out_sqlite_worker(preflight):
 
     prototype, ctx = preflight.register(supports_unload=True)
     prototype.on_session_start("worker", platform="cli")
+    prototype.on_session_end("worker", [])
+    conversation = prototype._conversation_id
+    ended = prototype._lifecycle.get_by_conversation(conversation)
+    assert ended.last_finalized_session_id == "worker"
     opened, release, closed = threading.Event(), threading.Event(), threading.Event()
 
     def query():
@@ -209,6 +212,11 @@ def test_unload_drains_timed_out_sqlite_worker(preflight):
             # Wait for the closed gate without using sleep to guess that unload started.
             assert prototype._unload_group.closing.wait(5)
             assert not finish.done()
+            prototype.on_session_reset()
+            prototype.bind_session_state(session_id="late-reset")
+            assert prototype._session_id == "worker"
+            assert prototype._lifecycle.get_by_conversation(conversation) == ended
+            assert prototype._lifecycle.get_by_session("late-reset") is None
         finally:
             release.set()
         finish.result(timeout=5)

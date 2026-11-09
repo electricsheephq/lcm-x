@@ -1217,12 +1217,14 @@ class LCMEngine(
         group = self._unload_group
         if group is None:
             return self._clone_for_agent()
-        # Clone construction is lazy: serialize it with the unload snapshot
-        # without acquiring any SQLite connections under the group lock.
+        if group.closing.is_set():
+            raise RuntimeError("Cannot clone LCM engine during plugin unload")
+        # Construction opens no database. Only publish the clone under the
+        # group lock so a stalled constructor cannot delay the unload gate.
+        clone = self._clone_for_agent()
         with group.lock:
             if group.closing.is_set():
                 raise RuntimeError("Cannot clone LCM engine during plugin unload")
-            clone = self._clone_for_agent()
             clone._unload_group = group
             group.engines.add(clone)
             return clone
@@ -1340,8 +1342,10 @@ class LCMEngine(
         """Bind store/DAG/lifecycle helpers to one SQLite database."""
         group = self._unload_group
         if group is not None and str(db_path) != ":memory:":
+            absolute_path = os.path.normcase(os.path.abspath(db_path))
+            canonical_path = os.path.normcase(os.path.realpath(db_path))
             with group.lock:
-                group.databases.add(os.path.normcase(os.path.realpath(db_path)))
+                group.databases.update((absolute_path, canonical_path))
         self._assertions = None
         self._entities = None
         self._query_views = None
@@ -4643,6 +4647,7 @@ class LCMEngine(
         with self._exclusive_lifecycle("rebind"):
             if (
                 self._stable_use_closed
+                or self._plugin_is_unloading()
                 or not self._session_id
                 or session_id == self._session_id
                 or (
@@ -5569,7 +5574,7 @@ class LCMEngine(
     def on_session_reset(self) -> None:
         sender_capture.retire(self)
         with self._exclusive_lifecycle("reset"):
-            if self._stable_use_closed:
+            if self._stable_use_closed or self._plugin_is_unloading():
                 return
             self._on_session_reset_unlocked()
 

@@ -3480,7 +3480,7 @@ def drain_background_database_workers(db_paths: set[str], *, deadline: float) ->
         _stem_lock.release()
     workers = {
         thread for path, thread in scans
-        if os.path.normcase(os.path.realpath(path)) in db_paths
+        if os.path.normcase(os.path.normpath(path)) in db_paths
     }
     for worker in workers:
         if worker is not threading.current_thread():
