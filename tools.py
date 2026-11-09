@@ -1172,11 +1172,15 @@ def _reader_payload_search(path: Path, budget: int, in_scope) -> dict[str, Any]:
         expected = path.lstat()
         if "\\" in path.name or not stat.S_ISREG(expected.st_mode):
             return result
-        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-        try:
-            fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
-        finally:
-            os.close(directory)
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+        if os.open in os.supports_dir_fd:
+            directory = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))
+            try:
+                fd = os.open(path.name, flags, dir_fd=directory)
+            finally:
+                os.close(directory)
+        else:
+            fd = os.open(path, flags)
         opened = os.fstat(fd)
         if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (expected.st_dev, expected.st_ino):
             return result
@@ -1188,8 +1192,10 @@ def _reader_payload_search(path: Path, budget: int, in_scope) -> dict[str, Any]:
                 return data
             prefix, fields, seen, _ = _read_externalized_payload_metadata_prefix_from_handle(
                 SimpleNamespace(read=read), max_read_bytes=_LCM_GREP_EXTERNALIZED_METADATA_READ_BYTES)
-            if not seen or not in_scope(fields.get("session_id")):
+            if not seen:
                 return result
+            if not in_scope(fields.get("session_id")):
+                return {**result, "status": "out_of_scope"}
             prefix = prefix.encode("utf-8")
             offset = max(len(prefix), opened.st_size - _LCM_GREP_EXTERNALIZED_DOCUMENT_TAIL_BYTES)
             handle.seek(offset)
@@ -1474,7 +1480,9 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
         try:
             reader_storage = get_large_output_storage_dir(
                 engine._config, hermes_home=engine._hermes_home, create=False).resolve()
-            contained = _payload_storage_contained(engine, reader_storage)
+            if not reader_storage.exists():
+                searches_externalized = False
+            contained = not searches_externalized or _payload_storage_contained(engine, reader_storage)
         except (OSError, ValueError):
             contained = False
         if not contained:
@@ -1596,7 +1604,6 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
                 if payload_bytes >= READER_PAYLOAD_BYTE_CAP:
                     partial_reasons.append("byte_cap")
                     break
-                payloads_searched += 1
             if externalized_refs is not None and not reader_mode:
                 path = storage_dir / ref
                 if path.is_symlink():
@@ -1619,6 +1626,7 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
                 if reader_mode:
                     payload = _reader_payload_search(storage_dir / ref, READER_PAYLOAD_BYTE_CAP - payload_bytes, payload_in_scope)
                     payload_bytes += payload["bytes_read"]
+                    payloads_searched += payload["status"] != "out_of_scope"
                     if payload_bytes >= READER_PAYLOAD_BYTE_CAP and (payload.get("scan_truncated") or payload["status"] != "ok"):
                         partial_reasons.append("byte_cap")
                     elif payload.get("scan_truncated"):
@@ -1638,7 +1646,7 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
                     return json.dumps({"error": f"Externalized ref is a symlink: {ref}"})
                 continue
             if status != "ok":
-                scan_counts["rejected_invalid_or_unreadable"] += 1
+                scan_counts["rejected_session_mismatch" if status == "out_of_scope" else "rejected_invalid_or_unreadable"] += 1
                 if externalized_refs is not None:
                     return json.dumps({"error": f"Externalized ref is not readable{' or not owned by the requested scope' if reader_mode else ''}: {ref}"})
                 continue

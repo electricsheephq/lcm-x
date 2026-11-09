@@ -419,3 +419,66 @@ def test_discovery_is_lazy_and_counts_all_reads(archive, monkeypatch):
     assert len(opened) <= 1
     assert sum(reads) <= 14000
     assert "byte_cap" in result["partial"]["reasons"]
+
+
+@pytest.mark.parametrize("with_target", [True, False])
+def test_out_of_scope_payloads_do_not_spend_file_cap(archive, with_target, monkeypatch):
+    target, _ = archive.save("target", name="20261101_120000_target.json")
+    document = json.loads((archive.storage / target).read_text())
+    # One other session has rows here; the other belongs to a foreign store.
+    archive.store.append("other", {"role": "user", "content": "other session"})
+    for i in range(200):
+        document["session_id"] = "other" if i % 2 else "foreign"
+        (archive.storage / f"20261110_120000_reject{i:03}.json").write_text(json.dumps(document, indent=2))
+    if not with_target:
+        document["session_id"] = "foreign"
+        (archive.storage / target).write_text(json.dumps(document, indent=2))
+    searched = []
+    original = tools._reader_payload_search
+    def record(*args):
+        result = original(*args)
+        searched.append(result)
+        return result
+    monkeypatch.setattr(tools, "_reader_payload_search", record)
+    result = archive.grep(session_scope="session", session_id="target")
+    assert [hit["ref"] for hit in payload_hits(result)] == ([target] if with_target else [])
+    assert "partial" not in result
+    assert result["externalized_scan"]["candidate_files"] == 201
+    assert result["externalized_scan"]["scanned_files"] == int(with_target)
+    assert result["externalized_scan"]["rejected_session_mismatch"] == 201 - int(with_target)
+    assert result["externalized_scan"]["rejected_invalid_or_unreadable"] == 0
+    assert sum(item["status"] != "out_of_scope" for item in searched) == int(with_target)
+    # Rejected headers still consume bytes, and the discovered total stays intact.
+    monkeypatch.setattr(tools, "READER_PAYLOAD_BYTE_CAP", 8192)
+    result = archive.grep(session_scope="session", session_id="target")
+    assert result["partial"] == {"payloads_searched": 0, "payloads_total": 201,
+                                  "reasons": ["byte_cap"], "prefix_bytes": 512000}
+
+
+def test_missing_payload_directory_skips_containment_quietly(archive, monkeypatch):
+    (archive.home / "profiles").mkdir()
+    missing = archive.storage / "not-created"
+    monkeypatch.setattr(tools, "get_large_output_storage_dir", lambda *args, **kwargs: missing)
+    result = archive.grep()
+    assert result["results"] == []
+    assert "partial" not in result
+    assert not missing.exists()
+
+
+@pytest.mark.parametrize("unsupported", ["flags", "dir_fd"])
+def test_reader_payload_open_portable_fallback(archive, monkeypatch, unsupported):
+    ref, _ = archive.save()
+    original = tools.os.open
+    if unsupported == "flags":
+        monkeypatch.delattr(tools.os, "O_DIRECTORY")
+        monkeypatch.delattr(tools.os, "O_NOFOLLOW")
+    else:
+        monkeypatch.setattr(tools.os, "supports_dir_fd", set())
+    def portable_open(path, flags, *args, **kwargs):
+        if unsupported == "dir_fd":
+            assert kwargs.get("dir_fd") is None
+        return original(path, flags, *args, **kwargs)
+    monkeypatch.setattr(tools.os, "open", portable_open)
+    result = archive.grep()
+    assert [hit["ref"] for hit in payload_hits(result)] == [ref]
+    assert "partial" not in result
