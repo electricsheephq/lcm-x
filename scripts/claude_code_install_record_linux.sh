@@ -60,11 +60,16 @@ mkdir -p Downloads && cp "$ASSET"/*.tar.gz "$ASSET"/*.sha256 Downloads/
 ( cd Downloads && sha256sum -c ./*.sha256 >/dev/null && tar -xzf ./*.tar.gz )
 PLUGIN=$(ls -d "$HOME"/Downloads/lcm-x-claude-code-*/)
 mkdir -p proj && cd proj && printf 'alpha\nbeta\n' > a.txt
-if [ -n "$BASE_URL" ]; then export ANTHROPIC_BASE_URL="$BASE_URL"; fi
-# An assignment prefix, not `env`: the key never appears in any process's argument list.
-run() { ANTHROPIC_AUTH_TOKEN="$(cat "$KEY_FILE")" \
-        claude -p "$1" --plugin-dir "$PLUGIN" --dangerously-skip-permissions --output-format json "${@:2}" < /dev/null \
-        | python3 -c 'import json,sys; d=json.load(sys.stdin); print("turn", {k: d.get(k) for k in ("session_id","is_error","num_turns")})'; }
+# A custom endpoint takes the key as a bearer token; Anthropic's default endpoint takes an API key.
+if [ -n "$BASE_URL" ]; then export ANTHROPIC_BASE_URL="$BASE_URL"; KEYVAR=ANTHROPIC_AUTH_TOKEN; else KEYVAR=ANTHROPIC_API_KEY; fi
+# The key goes in through the environment of `claude` only (exported in a subshell), never an argument list.
+run() { ( export "$KEYVAR=$(cat "$KEY_FILE")"; claude -p "$1" --plugin-dir "$PLUGIN" --dangerously-skip-permissions \
+          --output-format json "${@:2}" < /dev/null ) \
+        | python3 -c 'import json,os,sys
+try: d = json.load(sys.stdin)
+except ValueError: d = {"is_error": True, "num_turns": None}
+t = {k: d.get(k) for k in ("session_id", "is_error", "num_turns")}
+print("turn", t); open(os.path.expanduser("~/turns.jsonl"), "a").write(json.dumps(t) + "\n")'; }
 outcomes() { python3 -c "import json,collections; print(dict(collections.Counter(json.loads(l)['event']+':'+str(json.loads(l)['outcome']) for l in open('$HOME/.lcm-x/claude-code/logs/hook.log'))))" 2>/dev/null || echo "{}"; }
 echo "== case $CASE: claude $(claude --version 2>/dev/null | head -1), python3 on PATH $(python3 -V 2>&1)"
 SID=$(python3 -c 'import uuid; print(uuid.uuid4())')
@@ -85,11 +90,13 @@ fi
 import json, sqlite3, sys, time
 case, steps, t0, db = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), sys.argv[4]
 a = json.load(open("audit.json"))
+turns = [json.loads(line) for line in open("../turns.jsonl")] if __import__("os").path.exists("../turns.jsonl") else []
 con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
 rows = con.execute("select count(*) from messages").fetchone()[0]
 print("RECORD", json.dumps({"case": case, "manual_steps": steps, "rows": rows, "audit_ok": a.get("ok"),
       "verified": a.get("verified"), "lineages": len(a.get("lineages") or []),
       "failures": {k: v for k, v in (a.get("failures") or {}).items() if v}, "spool": a.get("spool"),
+      "turns": len(turns), "turn_errors": sum(1 for t in turns if t.get("is_error") is not False),
       "wall_s": int(time.time()) - t0}, sort_keys=True))
 PYEND
 echo "after: hook outcomes $(outcomes)"
