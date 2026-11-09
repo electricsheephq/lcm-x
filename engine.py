@@ -10696,7 +10696,7 @@ class LCMEngine(
                 # FTS-only anchor under the floor would displace an eligible hit.
                 fts_anchor=False,
                 delivery_unit="hits",
-                delivery_order="score", adjacent_reply=False,
+                delivery_order="score", adjacent_reply=False, later_statements=0,
                 snippet_window_hits=0, extra_entries=0,
                 summary_event_time=False,
             )

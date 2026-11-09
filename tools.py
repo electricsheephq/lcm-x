@@ -104,7 +104,7 @@ from .search_query import (
 from .store import _normalize_observed_at, build_message_fts_spec
 from .vector_store import VectorStore, _interrupt_read_on_deadline
 from .config import effective_embedding_model, LCMConfig, embedding_provider_id, normalize_embedding_provider, profile_bound
-from .config import _recall_extra_entries, _recall_snippet_window_hits
+from .config import _recall_extra_entries, _recall_later_statements, _recall_snippet_window_hits
 
 if TYPE_CHECKING:
     from .engine import LCMEngine
@@ -4392,6 +4392,63 @@ def _lcm_recall_adjacent_reply(
     return placed, pairs, None
 
 
+def _lcm_recall_later_statements(engine, ordered, identity_rows, *, n, deadline, excluded, allowed):
+    """Place one later lexical match per source, atomically and read-only."""
+    started, now = time.monotonic(), time.time()
+    info = dict(requested=n, searched=0, found=0, delivered=0, ms=0)
+    placed = [{**entry, "hit": dict(entry["hit"])} for entry in ordered]
+    seen = {sid for entry in ordered for sid in
+            [entry["hit"].get("store_id"), *entry["hit"].get("duplicate_store_ids", [])]}
+    sources = [entry for entry in placed if entry["hit"].get("store_id") is not None
+               and entry["hit"].get("kind") != "summary" and entry["hit"].get("node_id") is None][:n]
+    reason = None
+    try:
+        if time.monotonic() >= deadline:
+            raise TimeoutError
+        for source in sources:
+            hit = source["hit"]
+            row = identity_rows.get(hit["store_id"], {})
+            source_time = _normalize_observed_at(row.get("observed_at")) or _normalize_observed_at(hit.get("timestamp"))
+            if source_time is None:
+                continue
+            info["searched"] += 1
+            candidates, error = _lcm_recall_fts_arm(
+                engine, hit.get("_fts_snippet") or hit.get("snippet") or "",
+                candidate_limit=10, deadline=deadline, excluded_session_ids=excluded,
+            )
+            if error:
+                raise TimeoutError if time.monotonic() >= deadline or error.get("timeout") else OSError
+            candidates = [c for c in candidates if c["store_id"] not in seen
+                          and c.get("session_id") not in excluded
+                          and (allowed is None or c.get("session_id") in allowed)]
+            rows, reason = _lcm_recall_event_time_rows(
+                engine, [c["store_id"] for c in candidates], deadline=deadline,
+            ) if candidates else ({}, None)
+            if reason:
+                raise TimeoutError if reason == "deadline" else OSError
+            for candidate in candidates:
+                stamp = _normalize_observed_at(rows.get(candidate["store_id"], {}).get("observed_at")) or _normalize_observed_at(candidate.get("timestamp"))
+                if stamp is None or not source_time < stamp <= now:
+                    continue
+                store_id = candidate["store_id"]
+                candidate = {**candidate, "later_statement_of": hit["store_id"]}
+                hit["has_later_statements"] = [store_id]
+                placed.insert(placed.index(source) + 1, {
+                    "hit": candidate, "rrf_score": source["rrf_score"],
+                    "_final_score": source["_final_score"], "ranks": {},
+                })
+                seen.add(store_id)
+                info["found"] += 1
+                break
+        if time.monotonic() >= deadline:
+            raise TimeoutError
+    except Exception as exc:  # noqa: BLE001 - optional expansion never fails recall
+        reason = "deadline" if isinstance(exc, TimeoutError) or time.monotonic() >= deadline else "read_error"
+        placed = ordered
+    info["ms"] = round((time.monotonic() - started) * 1000, 3)
+    return placed, info, reason
+
+
 def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
     """Search the agent's entire memory (all conversations, all time) by meaning.
 
@@ -4888,6 +4945,13 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
             engine, ordered, identity_rows, limit=limit, deadline=deadline,
             excluded=excluded_session_ids, allowed=candidate_session_ids,
         )
+    later_info, later_unavailable = None, None
+    later_n = _recall_later_statements(kwargs.get("later_statements", getattr(engine._config, "recall_later_statements", 0)))
+    if later_n and kwargs.get("delivery_unit", getattr(engine._config, "recall_delivery_unit", "hits")) != "session":
+        ordered, later_info, later_unavailable = _lcm_recall_later_statements(
+            engine, ordered, identity_rows, n=min(later_n, limit), deadline=deadline,
+            excluded=excluded_session_ids, allowed=candidate_session_ids,
+        )
     fts_anchor_info: dict[str, Any] | None = None
     if bool(kwargs.get("fts_anchor", True)) and bool(
         getattr(engine._config, "recall_fts_anchor", True)
@@ -4961,6 +5025,7 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
         session_delivery=session_delivery,
         adjacent_reply=adjacent_pairs,
         adjacent_reply_unavailable=adjacent_unavailable,
+        later_statements=later_info, later_statements_unavailable=later_unavailable,
         extra_entries=_recall_extra_entries(
             kwargs.get("extra_entries", getattr(engine._config, "recall_extra_entries", 0)),
         ),

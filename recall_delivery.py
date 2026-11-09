@@ -68,6 +68,8 @@ def deliver_recall(
     read_summary_event_time: Callable[..., tuple[dict[int, dict[str, str]], str | None]] | None = None,
     adjacent_reply: list[dict[str, int]] | None = None,
     adjacent_reply_unavailable: str | None = None,
+    later_statements: dict[str, Any] | None = None,
+    later_statements_unavailable: str | None = None,
     snippet_window_hits: int = 0,
     read_snippet_windows: Callable[..., tuple[dict, str | None]] | None = None,
     extra_entries: int = 0,
@@ -257,6 +259,9 @@ def deliver_recall(
         }
         if hit.get("adjacent_to") is not None:
             item.update(adjacent_to=hit["adjacent_to"], arms=[*arms, "adjacent"])
+        for key in ("later_statement_of", "has_later_statements"):
+            if key in hit:
+                item[key] = hit[key]
         window = snippet_window_content.get(_hit_identity(hit))
         if window is not None:
             item["snippet"] = window["content"]
@@ -416,6 +421,11 @@ def deliver_recall(
         },
         "degraded": degraded,
     }
+    if later_statements is not None:
+        response["provenance"]["later_statements"] = later_statements
+        _refresh_later_statements(response)
+    if later_statements_unavailable is not None:
+        response["provenance"]["later_statements_unavailable"] = later_statements_unavailable
     if adjacent_reply and detail != "answer_ready":
         # Snippets hits are final here; answer_ready publishes after fitting.
         receipts = _delivered_adjacent_receipts(hits_out, adjacent_reply)
@@ -457,6 +467,7 @@ def deliver_recall(
         # Include the envelope and optional time-order marker in the encoded
         # budget. Keep the flag-off and skipped-read fitting paths unchanged.
         def encoded_size() -> int:
+            _refresh_later_statements(response)
             if adjacent_reply:
                 response["provenance"].pop("adjacent_reply", None)
                 receipts = _delivered_adjacent_receipts(hits_out, adjacent_reply)
@@ -553,6 +564,7 @@ def deliver_recall(
 
     if delivery_order == "time":
         hits_out.sort(key=event_time_key)
+        _refresh_later_statements(response)
     ensure_ascii = detail != "answer_ready"
     # Reordering keeps the encoded length; the marker is extra, so it is added
     # only when it still fits the response cap (never by dropping a hit).
@@ -618,6 +630,7 @@ def _fit_answer_ready_response(
         # Size the cap check with the widest value (``false``) so the final
         # recompute below can never grow the encoded response past the cap.
         fts_anchor_info["delivered"] = False
+    _refresh_later_statements(response)
     encoded = json.dumps(response, ensure_ascii=False)
     event_time_marker_deferred: str | None = None
     if len(encoded) > response_char_cap:
@@ -638,6 +651,7 @@ def _fit_answer_ready_response(
             expansion["summary_leads"].pop()
         response["total_results"] = len(response["hits"])
         expansion["response_truncated"] = True
+        _refresh_later_statements(response)
         expansion["expanded_hit_count"] = sum(
             "content" in hit for hit in response["hits"]
         )
@@ -693,6 +707,26 @@ def _fit_answer_ready_response(
             response["provenance"]["adjacent_reply"] = receipts
             encoded = marked_encoded
     return encoded
+
+
+def _refresh_later_statements(response):
+    info = response["provenance"].get("later_statements")
+    if info is None:
+        return
+    hits = response["hits"]
+    by_id = {h.get("store_id"): h for h in hits if h.get("kind") != "summary"}
+    for hit in hits:
+        links = [sid for sid in hit.get("has_later_statements", []) if sid in by_id]
+        if "has_later_statements" in hit:
+            if links:
+                hit["has_later_statements"] = links
+            else:
+                hit.pop("has_later_statements")
+    children = [h for h in hits if h.get("later_statement_of") in by_id]
+    for child in children:
+        hits.remove(child)
+        hits.insert(hits.index(by_id[child["later_statement_of"]]) + 1, child)
+    info["delivered"] = len(children)
 
 
 def _delivered_adjacent_receipts(
