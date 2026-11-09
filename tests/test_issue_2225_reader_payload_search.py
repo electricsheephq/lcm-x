@@ -378,10 +378,14 @@ def test_storage_containment_skips_before_open(archive, tmp_path, monkeypatch, l
     target.mkdir(parents=True)
     link = archive.home / "linked"
     link.symlink_to(target, target_is_directory=True)
-    archive.config.large_output_externalization_path = str(link)
-    def forbidden(*args, **kwargs):
-        pytest.fail("containment failure must skip discovery")
-    monkeypatch.setattr(type(archive.storage), "iterdir", forbidden)
+    archive.reader.config.large_output_externalization_path = str(link)  # the reader keeps its own copy of the config
+    original = type(archive.storage).iterdir
+    def guarded(self, *args, **kwargs):
+        # The containment check may list the profiles folder; only listing the payload dir is discovery.
+        if self.resolve() == target.resolve():
+            pytest.fail("containment failure must skip discovery")
+        return original(self, *args, **kwargs)
+    monkeypatch.setattr(type(archive.storage), "iterdir", guarded)
     result = archive.grep()
     assert result["results"] == []
     assert result["partial"]["reasons"] == ["containment"]
