@@ -1,4 +1,4 @@
-"""#2116 (v0.31, under #2467): an UNSTAMPED reply the host replaced below the cursor, in a session longer than the
+"""#2116 (v0.30.x, under #2467): an UNSTAMPED reply the host replaced below the cursor, in a session longer than the
 64-row audited tail, is not stored while the session runs; a restart stores it, with copies of the rest of the unstamped
 history (#2479, #1674's class). Main's behaviour pinned: the ideal as strict xfails, and the guards and the stamped
 case (stored warm) as passing tests. Synthetic strings only."""
@@ -13,7 +13,7 @@ from hermes_lcm import identity_anchor
 from tests.test_anchor_unstored_before_cursor import PAD, _count, _engine, _key, _stored, _u
 
 UNSTAMPED = pytest.mark.xfail(strict=True, raises=AssertionError,
-                              reason="#2116 (v0.31): an unstamped replaced reply past the audited tail is not stored "
+                              reason="#2116 (v0.30.x): an unstamped replaced reply past the audited tail is not stored "
                                      "while the session runs (main); revisit with #2479")
 
 
