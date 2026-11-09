@@ -7,7 +7,7 @@
 # Anthropic-compatible endpoint (left unset, Claude Code uses its default).
 # The unit gate's Linux install record (bench/specs/RELEASE-READINESS-V1.md, "Claude Code unit
 # releases") when no container runtime is available (#2348). Exit 0 means the record was taken, not that
-# it passed: acceptance reads each RECORD line (audit_ok, verified, failures, turn_errors).
+# it passed: acceptance reads each RECORD line (audit_ok, audit_error, verified, failures, turn_errors).
 #
 #   CANDIDATE=<full sha on main> KEY_FILE=<mode-600 key file> WORKDIR=<new or empty dir> [BASE_URL=<url>] \
 #     bash scripts/claude_code_install_record_linux.sh 2>&1 | tee linux-install-record.out
@@ -100,12 +100,18 @@ fi
 "$PY" -I - "$CASE" "$STEPS" "$T0" "$HOME/.lcm-x/claude-code/lcm.db" <<'PYEND'
 import json, pathlib, sqlite3, sys, time
 case, steps, t0, db = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), sys.argv[4]
-a = json.load(open("audit.json"))
+try:
+    a = json.load(open("audit.json"))
+except ValueError:
+    a = {"ok": False, "error": "audit_unreadable"}  # the audit crashed before printing; still record the case
 turns = [json.loads(line) for line in open("../turns.jsonl")] if __import__("os").path.exists("../turns.jsonl") else []
 rows = None  # no store at all is a failed install, recorded below with the audit's error
 if pathlib.Path(db).is_file():
     con = sqlite3.connect(pathlib.Path(db).as_uri() + "?mode=ro", uri=True)  # as_uri escapes # and ? in the path
-    rows = con.execute("select count(*) from messages").fetchone()[0]
+    try:
+        rows = con.execute("select count(*) from messages").fetchone()[0]
+    except sqlite3.Error:
+        rows = None  # a store with no messages table; the audit's error says why
 print("RECORD", json.dumps({"case": case, "manual_steps": steps, "rows": rows, "audit_ok": a.get("ok"), "audit_error": a.get("error"),
       "verified": a.get("verified"), "lineages": len(a.get("lineages") or []),
       "failures": {k: v for k, v in (a.get("failures") or {}).items() if v}, "spool": a.get("spool"),
