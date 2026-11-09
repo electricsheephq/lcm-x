@@ -20,25 +20,6 @@ Errors log only their class and do not escape host finalization; no leaves are
 prepared here. A host failed-turn boundary appended after the callback is stored
 once by the next completed turn or a session-end flush supplied that final history.
 
-## Interrupted delegated children
-
-A delegated child (sub-agent) is stored at its turn end, its session end, and
-before its own compaction. Since #2482 a live child is also stored early, at
-`pre_llm_call` and before every model call (`pre_api_request`), so a child cut
-off by a kill, a restart or a clean host exit keeps every row it handed over.
-This runs only for a child that bound its own engine in this process as a
-delegate and whose root holds a `subagent_start` record. The rows are written
-through that engine, and only while it still serves the profile it served when
-the child started. Otherwise the child keeps the end-of-turn path. The store
-runs on a worker thread that the hook waits for at most about 2 s. A store that
-finds the database busy is retried a few times. Engine shutdown waits up to 5 s
-for a live-child store before it closes.
-
-Named loss limit (#2483): a child's rows after its last completed store are
-lost if the process ends first, either while its tools run or while a store
-waits on a busy database at shutdown for more than 5 s. Do not promise more
-than that for an interrupted child.
-
 ## CLI reset-time bind host contract
 
 The minimum Hermes capability for CLI `/new` rebinding is a reset-time call to

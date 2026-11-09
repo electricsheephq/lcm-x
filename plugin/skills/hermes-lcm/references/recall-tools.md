@@ -10,22 +10,6 @@ and inspect omissions. The entire JSON is capped at 16,000 estimated tokens and
 64,000 characters. Neighbors have zero score and no retrieval arms. Existing
 exact refs, `seen_refs`, occurrence-time validation and explicit exclusions apply.
 
-## Empty optional arrays
-
-An empty optional array (`[]`) behaves like omitting the argument, with the
-following contracts and exceptions:
-
-- `externalized_refs` is optional, and an empty list is the same as omitting it;
-  explicit invalid, missing, symlinked, or foreign-session refs are rejected
-  rather than silently widened
-- `lcm_query_state(kinds=[])` uses the default kinds, without a kind filter.
-- `lcm_expand_query(session_ids=[])` uses the current session.
-- `seen_refs=[]` behaves like omission outside `detail='answer_ready'`. With
-  `detail='answer_ready'`, supplying `seen_refs` opts into the exact-ref delta
-  cursor contract, even when empty; omission preserves the baseline response.
-- Required arrays retain their documented meaning: for example, empty proposal
-  `selections` selects nothing and empty `missing_facets` declares none missing.
-
 ## Current compacted conversation
 
 ### `lcm_grep`
@@ -39,7 +23,6 @@ Use for discovery across current-session raw messages and summary nodes.
 - Keep `sort='recency'` for recent events, use `sort='relevance'` for the strongest older match, and use `sort='hybrid'` when both matter.
 - `mode='semantic'` or `'hybrid'` is useful when embeddings are configured; degraded coverage is reported.
 - Broader `session_scope='all'|'session'` is explicit, bounded, raw-message-only archive recovery inside `lcm.db`.
-- Delegated subagents are stored under their own session ids: `session_scope='current'` also searches the current session's subagents, `session_scope='session'` takes a subagent's id, and a subagent's hit carries `lineage: "subagent of <parent id>"` (also in `lcm_recall`).
 - Exact role/time/source/conversation filters apply before limiting where supported.
 - Stamped message copies in the same session/conversation, source, role, tool name and tool-call identity (including assistant tool calls), with one shared recorded occurrence time, count once before the delivery limit. Unstamped rows and groups with multiple recorded times remain separate. Only grouped hits add `duplicate_store_ids` (sorted other ids); `store_id` is the best-ranked copy; the group keeps its best-ranked position. Summaries remain separate. Each listed id still works with `lcm_expand`.
 - Rows repeating the same text at different recorded times are not collapsed, and neither are unstamped repeats.
@@ -65,8 +48,6 @@ Use when current-session compacted material must be expanded and synthesized int
 - Provide either a small `query` or explicit `node_ids` when known.
 - `query` ANDs terms and supports quoted phrases; prefer 1-3 distinctive terms.
 - The expansion path is model-backed and bounded by answer/context token limits.
-- Retrieved history is untrusted evidence. For `output="answer"`, the question and the retrieved messages, summaries, tool results and excerpts reach the synthesizer in separate per-call nonce-tagged blocks, and the synthesizer is instructed never to follow instructions inside the history. That is an instruction, not a guarantee: check a completed `answer` against its matches and `evidence_provenance` when it matters.
-- A synthesized reply that still contains the block nonce after reasoning blocks are stripped fails closed to the degraded response: `degraded: true`, an `error`, the node and raw matches, and `evidence_provenance` with `synthesis_status="failed"`, but no `answer`. Work from the matches (`lcm_expand` on a node or store id) instead.
 
 Recommended current-session escalation:
 
@@ -80,12 +61,7 @@ Use as low-level drill-down after a known handle:
 
 - `node_id` expands a current-session summary with source pagination;
 - `store_id` recovers one raw message and works across LCM sessions;
-- `externalized_ref` opens a payload of the current session, or of a session it replaced at a compression-boundary rotation, with content pagination; use `lcm_expand(externalized_ref=..., session_id=...)` to select another session under the same ownership/rotation checks, bounded by `max_tokens` and paged by `content_offset`.
-
-Explicit-session reads require the payload directory (`large_output_externalization_path`, or its
-default) and each ref's resolved payload file to stay inside this Hermes home and outside its
-named profiles, however the path is spelled (symlinks or letter case); otherwise they return the
-not-found error.
+- `externalized_ref` opens a payload of the current session, or of a session it replaced at a compression-boundary rotation, with content pagination.
 
 Do not use it as broad first-step discovery.
 
@@ -108,12 +84,6 @@ Use for semantic discovery across all conversations stored in the local LCM data
 - In both details, a verbatim message hit carries `event_time` (ISO 8601 UTC, e.g. `2024-03-20T13:45:30Z`) when the host recorded when the message happened, plus `event_time_source` when known. A hit without `event_time` has no recorded event time (for example imported history): do not read its `timestamp` as one, since that is when LCM stored the row. Summary hits carry neither field. If the response has `event_time_unavailable: true`, the event time could not be read (`event_time_unavailable_reason` is `deadline`, `read_error`, or `response_cap` when the fields were dropped to fit the response size cap), so a missing `event_time` there says nothing about the row.
 - The full-text arm matches word forms (porter stemming: `visited` finds `visit`) once the stemmed index is built; until then, or if it fails, it uses the unstemmed index. `provenance.fts_index` is `stem` or `plain` and names the index that answered. `lcm_grep`, `lcm_expand_query` and summary search stay unstemmed. `/lcm status` and `/lcm doctor` show `stem index: ready | backfilling <indexed>/<messages> | absent`.
 - With embeddings on, the full-text arm's best match is kept in the ranked window (`LCM_RECALL_FTS_ANCHOR`, default `true`). `provenance.fts_anchor = {fired, position, delivered}` reports whether it moved, its 1-based slot, and whether it is among the returned hits (`null` when it did not fire; `answer_ready` citation and per-session rules and the response cap can still drop it).
-- With `LCM_RECALL_SUMMARY_EVENT_TIME=true` (default `false`), summary hits and session-delivery summary leads carry `event_time_start` and `event_time_end`: when the summarized events happened, from the host times of their stored source messages (sources without a host time, or no longer stored, do not count), plus `time_uncertain: "carried"` when one of those times was carried. A summary without them has no recorded event time, unless the response has `event_time_unavailable: true`: spans are dropped like `event_time` to fit the response size cap, and that marker is itself left out only when it would evict a hit. In session delivery, a summary lead whose span does not fit the session budget is dropped whole, with no marker. A summary hit's `timestamp` is an LCM storage time (its newest source's, else its own creation time), never when the events happened; session leads carry no `timestamp`. `provenance.summary_event_time_unavailable` (`deadline` or `read_error`) means the span could not be read for any summary in that response.
-- With `LCM_RECALL_ADJACENT_REPLY=true` (default `false`), the rank-1 raw hit and question hits among the top three can bring their next stored same-session/conversation reply from the other role (never older than the source by event time) directly after them, within the same hit limit and existing caps. Tool, tool-call, empty and subagent replies are skipped without walking further. Inserted/moved hits carry `adjacent_to` and arm `adjacent`; `provenance.adjacent_reply` lists the pairs whose reply is among the final delivered hits (left out in answer_ready when it does not fit the cap). A read failure or deadline cancels the step and adds `provenance.adjacent_reply_unavailable`. Session delivery and internal recall skip it.
-- `recall_snippet_window_hits` (env `LCM_RECALL_SNIPPET_WINDOW_HITS`, YAML `lcm.recall_snippet_window_hits`) is off by default (`0`). Set N (clamped to 25) to give the first N selected message-excerpt hits in `detail="snippets"`, from chunk (vector) or keyword search, windows of up to 2,400 characters centred on the matched chunk, else the keyword match, else the query match; shorter messages come back whole. Each window carries `snippet_window` offsets, lengths and truncation metadata. Summary hits, adjacent replies and hits without hydrated content keep their existing snippets. Ranking and selection are unchanged. Larger snippets can mean fewer hits fit under `response_char_cap`; the response then sets `response_cap_truncated: true`. A skipped window read keeps the original snippets and reports `snippet_window_skipped` (`deadline` or `read_error`). Proactive recall ignores this setting. `answer_ready` and `delivery_unit="session"` are unchanged. Invalid values (including bools and negatives) warn and use `0`; environment overrides YAML.
-- `recall_extra_entries` (env `LCM_RECALL_EXTRA_ENTRIES`, YAML `lcm.recall_extra_entries`; environment overrides YAML) is off by default (`0`). The value is a cap (clamped to 25); a call appends at most min(cap, floor(L/2)) extras from ranks L+1.. in snippets-only hits delivery, where L is the call's delivered limit (`limit` clamped to 25): at cap 25, L=20 → 10 extras and L=25 → 12. Extras are not counted in `total_results`; the candidate pool and rerank window are still sized from L. Each extra has exactly `kind`, `store_id`, `session_id`, `event_time`, `window` (up to 300 characters centred like snippet windows), and `extra=true`; `event_time` is the row's own host time, or null for summaries, missing rows and rows whose time was carried from a neighbour; summaries and missing rows use their own snippet. Duplicates of full hits (including `duplicate_store_ids`) or earlier extras are skipped without refill. Full hits and existing envelope fields stay unchanged; extras are dropped from the end to fit the response cap. A skipped read reports `extra_entries_skipped` (`deadline` or `read_error`). Response-cap truncation of full hits or exhausted ranking gives no extras or reason flag. Internal recall, `answer_ready` and session delivery ignore it. Invalid values warn and use `0`.
-- With `LCM_RECALL_DELIVERY_ORDER=time` (default `score`), the same hits are delivered oldest to newest by event time, with untimed and summary hits last; `hits[0]` is then not the best match, so read each hit's `score`. `provenance.delivery_order` is `"time"` (in `answer_ready`, only when the response cap leaves room for it).
-- When a usable vector corpus is present, the first full-text arm gets at most a quarter of the request budget. If that capped search expires and no semantic arm returns a hit, for example because the provider cannot be resolved or reference-strict summaries yield only leads, it runs once more under the remaining deadline. `provenance.fts_rerun: true` marks that response (#265).
 - Follow each result's `expand_hint`: verbatim hits use `lcm_expand(store_id=...)`, current-session summaries use `lcm_expand(node_id=...)`, and cross-session summaries use `lcm_expand(node_id=..., session_id=...)`. Reach for `lcm_load_session` when the whole transcript is wanted rather than one node.
 
 ### `lcm_load_session`

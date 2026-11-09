@@ -25,14 +25,11 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import logging
 import sqlite3
 from collections import Counter, defaultdict
 from difflib import SequenceMatcher
 from typing import Any, Dict, Optional
-
-from .host_rewrite import host_rewrite_match
 
 from .recognition_matching import (
     _MAX_DECOMPOSITIONS as _MAX_DECOMPOSITIONS,
@@ -45,7 +42,7 @@ from .recognition_matching import (
     _reserve_shown as _reserve_shown,
     _reroute_for_null as _reroute_for_null,
 )
-from .config import identity_anchor_enabled
+from .config import _parse_bool_env
 from .fresh_tail import tool_group_safe_end
 from .message_content import normalize_content_value, text_content_for_pattern_matching
 from .store import _normalize_observed_at
@@ -58,23 +55,15 @@ _RECENT_CAP = 16  # rows this process stored lately: the R5 current-turn window
 _POOL_WINDOW = 256  # store ids either side of a stamp donor searched for a composite's constituents
 _INSERT_DIFF_BUDGET = 1_000_000  # #633: old x new rows compared per insertion diff (quadratic worst case ~40 ms)
 _CARRIER_LEDGER_CAP = 256  # #1000: carrier emission keys remembered as seen / retired (process-local)
-_PRESENCE_WINDOW_ROWS = 10000  # total stored rows across the presence scope
-_PRESENCE_WINDOW_BYTES = 15_000_000  # UTF-8 bytes of stored content and tool-call text across the scope
-_PRESENCE_WINDOW_CALL_IDS = 10_000  # stored tool-call entries across the scope (#2466 wait bar)
-_PRESENCE_PARSE_BYTES = 256_000  # call-row text parsed as JSON when an id's raw forms differ (#2466 wait bar)
-_PRESENCE_WINDOW_LOGGED: set[tuple[str, int, str]] = set()  # store file and session, once per process
-_PRESENCE_SHAPE_LOGGED: set[tuple[str, int, str]] = set()  # non-standard tool shapes, once per store and session
-_UNREADABLE_CALLS = (object(),)  # an unreadable tool_calls value: no host id can equal it (#2466 review)
 
-_ROTATION_LINEAGE_UNRECORDED: set[tuple[str, str]] = set()  # store file and session whose predecessor write failed, per process
+
+def identity_anchor_enabled() -> bool:
+    return _parse_bool_env("LCM_IDENTITY_ANCHOR", True, unknown=True, true_values=())
 
 
 def _ws_equivalent(stored, identity) -> bool:
     return (identity[0] == "user" and bool(identity[1].strip()) and stored != identity
             and stored[1].strip() == identity[1].strip() and tuple(stored[2:]) == tuple(identity[2:]))
-
-
-_HOST_REWRITE_PRESENCE_ROWS = 10_000
 
 
 class IdentityAnchorMixin:
@@ -270,7 +259,7 @@ class IdentityAnchorMixin:
             logger.debug("LCM identity-anchor host UID shadow would reject alias edges: count=%d", count)
 
     def _identity_anchor_prematch(self, messages, identity_messages, cursor: int, audit_from: Optional[int] = None,
-                                  *, accepted_prefix: int = 0, ledger_pairs=None, ledger_today=None) -> Dict[str, Any]:
+                                  *, accepted_prefix: int = 0) -> Dict[str, Any]:
         """Rows at or after ``cursor`` recognised as replays of stored occurrences, plus the R3
         remainders to store, the relations to record and the R5 backfills. ``audit_from``: the host
         changed its list before the cursor from there (a positional cursor no longer proves those rows
@@ -287,8 +276,6 @@ class IdentityAnchorMixin:
         if rewritten:  # R6: a rewritten host object is examined like a new row (a merge survivor, ...)
             start = min(start, min(rewritten))
         start = max(start, accepted_prefix)
-        ledger_pairs = ledger_pairs or {}
-        fetch_start = min(start, ledger_today) if ledger_today is not None else start
         if not identity_anchor_enabled() or not self._session_id or start >= n:
             return plan
         stamps = {}
@@ -296,14 +283,8 @@ class IdentityAnchorMixin:
             observed_at = _normalize_observed_at(messages[idx].get("timestamp"))
             if observed_at is not None:
                 stamps[idx] = observed_at
-        wanted = {stamps[idx] for idx in range(fetch_start, n) if idx in stamps}
-        from .reconcile import _PRESERVED_TODO_CONTEXT_PREFIX as header, _todo_annotation_span
-
-        snapshots = {i for i in range(start, n) if i not in stamps and messages[i].get("role") == "user"
-                     and not messages[i].get("tool_calls") and isinstance(messages[i].get("content"), str)
-                     and messages[i]["content"].startswith(header)
-                     and _todo_annotation_span(messages[i]["content"], 0) == len(messages[i]["content"])}
-        if not wanted and start >= cursor and not snapshots:
+        wanted = {stamps[idx] for idx in range(start, n) if idx in stamps}
+        if not wanted and start >= cursor:
             return plan
         # #633: nothing stamped from ``start`` on still leaves a changed prefix to audit (an unstamped row).
         chain = self._identity_anchor_chain()
@@ -312,9 +293,6 @@ class IdentityAnchorMixin:
         ) if wanted else []
         self._load_host_rewrite_overrides(rows)
         plan["stamped_users"] = {int(row["store_id"]) for row in rows if row.get("role") == "user"}
-        canonical_stamps = getattr(rows, "canonical_stamps", None)
-        consumed = {int(row["store_id"]) for row in ledger_pairs.values()}
-        rows = [row for row in rows if int(row["store_id"]) not in consumed]
         by_stamp: dict[float, list] = defaultdict(list)
         for row in rows:
             by_stamp[float(row["observed_at"])].append((row, self._stored_row_forms(row)))
@@ -351,7 +329,8 @@ class IdentityAnchorMixin:
             return Counter((stamps.get(i), identity_at(i)) for i in range(n)  # unstamped: (None, form)
                            if i != idx and (matched_too or i not in matched) and identity_at(i) is not None)
 
-        matched: dict[int, list] = {idx: [row] for idx, row in ledger_pairs.items()}
+        consumed: set[int] = set()
+        matched: dict[int, list] = {}
         emitted = None  # #1000: the view's carriers LCM emitted, still where it emitted them; read once
         carriers = [d for d in (proof.get("emissions") or ()) if isinstance(d, dict) and d.get("kind") == "carrier"
                     ] if proof else []
@@ -367,7 +346,7 @@ class IdentityAnchorMixin:
         # R1: per key, the host view's occurrences consume the stored ones in order; the rest are new.
         forms_of = {id(r): forms for pairs in by_stamp.values() for r, forms in pairs}
         occurrences = [(idx, (stamps[idx], identity_at(idx))) for idx in sorted(stamps)
-                       if idx not in ledger_pairs and stamps[idx] in wanted and identity_at(idx) is not None]
+                       if stamps[idx] in wanted and identity_at(idx) is not None]
         def keys_of(r):
             return {(float(r["observed_at"]), form) for form in forms_of[id(r)]}
         ws_index = None
@@ -393,15 +372,13 @@ class IdentityAnchorMixin:
             return keys
 
         self._observe_alias_uid_conflicts(
-            rows, canonical_stamps, diag_keys_of, occurrences, identity_messages)
+            rows, getattr(rows, "canonical_stamps", None), diag_keys_of, occurrences, identity_messages)
         for store_id, idx in _match_occurrences(rows, keys_of, occurrences).items():
             consumed.add(store_id)
             matched[idx] = [next(r for r, _forms in by_stamp[stamps[idx]] if int(r["store_id"]) == store_id)]
             if idx >= start:
                 plan["replayed"].add(idx)
         for idx in range(start, n if wanted else start):  # nothing stamped: only the #633 audit below
-            if idx in ledger_pairs:
-                continue
             identity = identity_at(idx) if idx in stamps and idx not in plan["replayed"] else None
             if identity is not None and identity[0] == "user":
                 group = emitted_carrier(idx)  # #1000: Hermes 0.21.5 stamps the adopted carrier with its own clock;
@@ -428,7 +405,7 @@ class IdentityAnchorMixin:
                         break
                     self._identity_anchor_take(k, [row], consumed, matched, plan)
         for idx in range(cursor, n):  # a cold restart can have no positional prefix to audit
-            if idx in ledger_pairs or idx in plan["replayed"] or idx not in stamps or messages[idx].get("role") != "user":
+            if idx in plan["replayed"] or idx not in stamps or messages[idx].get("role") != "user":
                 continue
             copies = [row for row, forms in by_stamp.get(stamps.get(idx - 1), ())
                       if int(row["store_id"]) not in consumed and identity_at(idx) in forms]
@@ -451,56 +428,12 @@ class IdentityAnchorMixin:
                     self._identity_anchor_take(idx, recovery, consumed, matched, plan)
         if start < cursor:
             self._identity_anchor_audit(messages, identity_messages, cursor, start, stamps, identity_at, consumed, plan,
-                                        matched, excluded=ledger_pairs)
-        for idx in range(start, n):
-            if idx in plan["replayed"] or idx in ledger_pairs or idx in plan["remainders"]:
-                continue
-            message, candidates = messages[idx], []
-            text, stamp = message.get("content"), stamps.get(idx)
-            try:
-                if (message.get("role") == "assistant" and not message.get("tool_calls") and stamp is not None
-                        and isinstance(text, str) and "\n" in text
-                        and any(r.get("session_id") == self._session_id and r.get("observed_at") == stamp
-                                for r, _f in by_stamp.get(stamp, ()))):
-                    # The session/time index predates host stamps (observed_at); keep the bounded read
-                    # schema-free. The predecessor subquery also sees unstamped/out-of-scan barriers.
-                    candidates = [dict(zip(("store_id", "role", "content", "tool_calls", "observed_at", "previous"), r))
-                                  for r in self._store._conn.execute(
-                        "SELECT m.store_id, m.role, m.content, m.tool_calls, m.observed_at, "
-                        "(SELECT MAX(p.store_id) FROM messages p WHERE p.session_id=m.session_id "
-                        "AND p.store_id<m.store_id AND p.role!='user') FROM messages m INDEXED BY idx_msg_session_ts "
-                        "WHERE m.session_id=? AND m.observed_at>=? ORDER BY m.observed_at, m.store_id LIMIT 64",
-                        (self._session_id, stamp))]
-                    for c in candidates:
-                        c["consumed"] = c["store_id"] in consumed
-                elif idx in snapshots:
-                    if not any(messages[i].get("role") == "user" for i in stamps) and not self._store._conn.execute(
-                            "SELECT 1 FROM messages WHERE session_id=? AND role='user' "
-                            "AND observed_at IS NOT NULL LIMIT 1", (self._session_id,)).fetchone():
-                        continue
-                    candidates = [dict(zip(("store_id", "role", "content"), r)) for r in self._store._conn.execute(
-                        "SELECT store_id, role, content FROM messages INDEXED BY idx_msg_session "
-                        "WHERE session_id=? AND role='user' AND substr(content, 1, ?)=? "
-                        "ORDER BY store_id DESC LIMIT ?",
-                        (self._session_id, len(header), header, _HOST_REWRITE_PRESENCE_ROWS))]
-            except Exception:
-                logger.warning("LCM host-rewrite candidate read failed; keeping row new")
-                continue
-            if not candidates:
-                continue
-            match = host_rewrite_match({**message, "stamp": stamp}, candidates, header=header,
-                                      todo_span=len(text) if idx in snapshots else None, prompts_stamped=True)
-            if match is not None:
-                plan["replayed"].add(idx)
-                consumed.update(match.consumed)
-                self._note_identity_anchor_version(None, message)
-                logger.info("LCM host-rewrite replay: arm=%s parts=%s consumed=%s session=%s",
-                            match.arm, match.k, list(match.consumed), self._session_id)
+                                        matched)
         self._identity_anchor_tool_segments(messages, plan["cursor"], plan["replayed"], matched, plan.get("positional", ()))
         for idx in list(plan["remainders"]):
             if idx in plan["replayed"]:
                 del plan["remainders"][idx]
-        plan["explained"] = (plan["replayed"] - plan.get("positional", set())) | ledger_pairs.keys()
+        plan["explained"] = plan["replayed"] - plan.get("positional", set())
         plan["replayed"] = {idx for idx in plan["replayed"] if idx >= plan["cursor"]}
         plan["carry"] = [row for idx in plan["replayed"] | set(plan["remainders"]) for row in matched.get(idx, ())]
         plan["carry"] += [row for row, _message in plan.get("ws", ())]  # R1-ws matches the audit proved too
@@ -510,32 +443,24 @@ class IdentityAnchorMixin:
             for idx in range(plan["cursor"], min(plan["replayed"])):
                 if self._identity_is_lcm_scaffold(identity_messages[idx], verified=True):
                     plan["replayed"].add(idx)
-        # Seeded run pairs support local carried-stamp proof only: the ledger
-        # writer and uid shadow must still see an ordinary unbound prefix.
-        plan["matched"] = {idx: rows for idx, rows in {**plan.get("matched", {}), **matched}.items()
-                           if idx not in ledger_pairs}
+        plan["matched"] = {**plan.get("matched", {}), **matched}  # read only by the v0.26.0 host-uid shadow
         return plan
 
     def _identity_anchor_audit(self, messages, identity_messages, cursor, start, stamps, identity_at, consumed, plan,
-                               matched, *, excluded=()) -> None:
+                               matched) -> None:
         """Rows in ``[start, cursor)`` of a list the host changed before the cursor: a stamped host row,
         or an unstamped user row the host inserted there (#633: a /steer row), that
         no stored occurrence explains (key, witness, alias, or a stored copy of its content -- up to
         edge whitespace, with the same stamp or a canonical host-uid binding for a NULL stamp --
-        in the tail of this session or a verified ancestor, each copy used once) and no ignore pattern drops was never stored. When there
-        is such a row, every other row of the range must be accounted for too (#2071's rule, here for the parent
-        list): ``_identity_anchor_unaccounted`` adds the rows provably never stored, and keeps its unsure cases as
-        replays. The cursor moves back to the first row to store; every other row from there stays a replay."""
+        in the tail of this session or a verified ancestor, each copy used once) and no ignore pattern drops was never stored. The cursor moves back
+        to the first such row; every other row of that range stays a replay (today's positional proof)."""
         from .reconcile import _proof_user_identity
 
         span = max(64, 2 * (cursor - start))
         held: dict = defaultdict(list)
         chain = self._identity_anchor_chain()
-        capped = False  # a session holds more rows than the audited tail: its older copies are not in ``held``
         for session in [str(self._session_id), *chain]:
-            tail = self._store.get_session_tail(session, limit=span)
-            capped = capped or len(tail) >= span
-            for row in tail:
+            for row in self._store.get_session_tail(session, limit=span):
                 if int(row["store_id"]) not in consumed:
                     held[_proof_user_identity(self._message_replay_identity(row, stored_row=True))].append(row)
         bindings = None
@@ -565,8 +490,6 @@ class IdentityAnchorMixin:
         missed, deferred, audited = [], [], set()
         inserted = None
         for idx in range(start, cursor):
-            if idx in excluded:
-                continue
             identity = identity_at(idx)
             if idx not in stamps:  # #633: an unstamped user row the host inserted (a /steer), not a rewrite
                 if identity is None or identity[0] != "user":
@@ -638,309 +561,13 @@ class IdentityAnchorMixin:
                     continue
                 missed.append(idx)
         if missed:
-            # Class A (#2071 rule): the cursor resumes only behind rows that are accounted for. A position no longer
-            # proves a row stored once the host changed the list, and the audit above never examines tool rows.
-            # A host object this process stored and now sees rewritten in place (R6) is never credited as present nor
-            # made a positional replay here: the version rewind still stores its new version, as on main (#2466 review).
-            rewritten = {idx for idx in self._identity_anchor_rewritten(messages, cursor)
-                         if idx >= plan.get("accepted_prefix", 0) and idx not in plan["replayed"] and idx not in excluded}
-            found = self._identity_anchor_unaccounted(
-                messages, identity_messages, cursor, start, identity_at, held, capped, consumed, plan, matched,
-                set(excluded) | rewritten, missed)
-            if found is None:  # the presence check tripped (logged there): main's plan exactly (#2466 review)
-                plan["cursor"] = min(missed)
-                plan["positional"] = {idx for idx in range(min(missed), cursor) if idx not in missed}
-                plan["replayed"].update(plan["positional"])
-                logger.info("LCM identity-anchor: host changed its list before the cursor; %d unstored rows from %d: "
-                            "session=%s", len(missed), min(missed), self._session_id)
-                return
-            missed = sorted({*missed, *found})
             plan["cursor"] = min(missed)
-            plan["positional"] = {idx for idx in range(min(missed), cursor) if idx not in missed and idx not in rewritten}
+            plan["positional"] = {idx for idx in range(min(missed), cursor) if idx not in missed}
             plan["replayed"].update(plan["positional"])
-            logger.warning("LCM identity-anchor: host changed its list before the cursor; %d row(s) from %d are neither "
-                           "stored nor compaction outputs; storing them: session=%s",
-                           len(missed), min(missed), self._session_id)
+            logger.info("LCM identity-anchor: host changed its list before the cursor; %d unstored rows from %d: session=%s",
+                        len(missed), min(missed), self._session_id)
 
-    def _identity_anchor_unaccounted(self, messages, identity_messages, cursor, start, identity_at, held, capped,
-                                     consumed, plan, matched, excluded, missed) -> Optional[list[int]]:
-        """Call and result rows in ``[start, cursor)`` that are neither bound, matched, a compaction output (LCM's
-        own scaffold) nor ignored, and whose id is stored nowhere in the scope: this session, its verified ancestors
-        and its recorded predecessors, within the row and stored-byte budgets. One id is one invocation, so an id
-        stored anywhere accounts for its rows, including an upgraded store's pre-ledger rows. Pairs stay whole and a
-        reused id keeps main's result. Text rows are not checked (#2116, v0.30.x). ``capped``, ``held`` and
-        ``consumed`` are retained for callers but unused. Past the window, on a non-standard stored tool shape, or on a
-        failed read, it returns None (a trip): the caller then keeps main's plan exactly, adding nothing beyond its own finds,
-        as on main. Unsure is accounted (the positional replay, as before): a call row whose ids cannot be read."""
-        calls_memo: dict = {}  # view rows are read several times below
-
-        def calls(msg, stored=False):
-            if not stored:
-                if id(msg) not in calls_memo:
-                    calls_memo[id(msg)] = read_calls(msg, False)
-                return calls_memo[id(msg)]
-            return read_calls(msg, True)
-
-        def read_calls(msg, stored):
-            value = msg.get("tool_calls") or ()
-            if isinstance(value, str):
-                try:
-                    value = json.loads(value)
-                except ValueError:
-                    return _UNREADABLE_CALLS  # unreadable: equal to nothing, so never proof of a copy
-            if not stored and isinstance(value, list) and any(
-                    not isinstance(c.get("id"), str) for c in value if isinstance(c, dict)):
-                return None  # non-string host ids cannot prove absence against SQLite's JSON casts
-            return tuple(sorted(str(c.get("id") or "") for c in value if isinstance(c, dict))) if isinstance(
-                value, list) else ()
-
-        def tool_row(msg):
-            return calls(msg) != () or msg.get("role") == "tool" and bool(msg.get("tool_call_id"))
-
-        def key(msg, stored=False):
-            ids = calls(msg, stored=stored)
-            if ids is None or ids is _UNREADABLE_CALLS:
-                return None
-            if ids:
-                return ("call", ids)
-            if msg.get("role") == "tool" and msg.get("tool_call_id"):
-                return ("tool", str(msg["tool_call_id"])) if stored or isinstance(msg["tool_call_id"], str) else None
-            identity = self._message_replay_identity(msg, stored_row=stored)
-            return None if _lossy(identity) else (identity[0], identity[1].strip())
-
-        explained = set(excluded) | set(matched) | set(plan.get("matched", {})) | plan["replayed"] | set(missed)
-        try:
-            # Only call and result rows are presence-checked (class A). A replaced reply (#2116) keeps main's
-            # result: its text identity can load payload files the window cannot bound (#2466 review, split to
-            # v0.30.x under #2467).
-            candidates = {idx: key(identity_messages[idx]) for idx in range(start, cursor)
-                          if idx not in explained and tool_row(identity_messages[idx])
-                          and not (self._identity_is_lcm_scaffold(identity_messages[idx])
-                                   and identity_at(idx) is None)  # scaffold first: identity_at parses arguments
-                          and not self._matches_ignore_message_patterns(messages[idx])}
-            session = str(self._session_id)
-            chain = self._identity_anchor_chain()
-            cached = getattr(self, "_identity_anchor_chain_cache", None)
-            if self._state_db_path().exists() and (cached is None or cached[0] != session):
-                raise ValueError("incomplete ancestry read")
-            predecessors = self._rotation_predecessor_session_ids(session)
-            # The helper swallows read errors. Verify its reads before trusting the scope as complete.
-            for hop, source in enumerate([session, *predecessors]):
-                value = self._store.read_metadata_json(self._rotation_predecessor_metadata_key(source))
-                next_source = value if isinstance(value, str) and value and value not in [session, *predecessors[:hop]] else None
-                if next_source != (predecessors[hop] if hop < len(predecessors) else None):
-                    raise ValueError("incomplete rotation predecessor scope")
-            scope = list(dict.fromkeys([session, *chain, *predecessors]))
-            failed = {session_id for path, session_id in _ROTATION_LINEAGE_UNRECORDED
-                      if path == os.path.realpath(str(self._db_path))}
-            if set(scope) & (getattr(self, "_rotation_lineage_unrecorded", set()) | failed):
-                # Any session of the scope whose own predecessor write failed ends the scope early (#2466 review).
-                raise ValueError("unrecorded rotation lineage")
-            rows = {int(row["store_id"]): row for group in held.values() for row in group}
-            budget, byte_budget, id_budget = _PRESENCE_WINDOW_ROWS, _PRESENCE_WINDOW_BYTES, _PRESENCE_WINDOW_CALL_IDS
-            for source in scope:
-                # Size the window in SQL before loading any row (#2466 review, wait bar): stored UTF-8 bytes per row
-                # (SQLite's length() of text stops at the first NUL, and Python loads the whole value), newest first,
-                # stopping at the first budget it passes, so an over-budget scope costs at most its budget plus one
-                # row of reading and decodes nothing. Only call and result rows are compared, by their stored text,
-                # so the audit loads no payload file. Stored tool-call entries are counted too: the audit's work grows
-                # with them, so a window of wide parallel call rows is bounded as well. Only the standard tool shape is
-                # admitted (#2466 review, scope cut): tool_calls NULL, or a JSON array of objects whose id and
-                # function.arguments are text. Any other row gives main's result for the whole audit, before any row
-                # loads, so SQL-visible limits bound the work on the admitted path. A row with more entries than the
-                # whole call-id window returns its length before any entry is checked, so the loop below trips on it
-                # and admission checks at most about two windows of entries in all.
-                sized = self._store._conn.execute(
-                    "SELECT length(CAST(content AS BLOB)), length(CAST(tool_calls AS BLOB)), "
-                    "CASE WHEN tool_calls IS NULL THEN 0 WHEN length(CAST(tool_calls AS BLOB)) > ? THEN -1 "
-                    "WHEN NOT json_valid(tool_calls) THEN -1 "
-                    "WHEN json_type(tool_calls) <> 'array' THEN -1 "
-                    "WHEN json_array_length(tool_calls) > ? THEN json_array_length(tool_calls) "
-                    "WHEN EXISTS (SELECT 1 FROM json_each(tool_calls) AS e WHERE e.type <> 'object' "
-                    "OR json_type(e.value, '$.id') IS NOT 'text' "
-                    "OR json_type(e.value, '$.function.arguments') IS NOT 'text') THEN -1 "
-                    "ELSE json_array_length(tool_calls) END "
-                    "FROM messages WHERE session_id=? ORDER BY store_id DESC LIMIT ?",
-                    (_PRESENCE_WINDOW_BYTES, _PRESENCE_WINDOW_CALL_IDS, source, budget + 1))
-                count, shape_ok = 0, True
-                for content_len, calls_len, call_ids in sized:
-                    count += 1
-                    if call_ids < 0:
-                        shape_ok = False
-                        break
-                    byte_budget -= (content_len or 0) + (calls_len or 0)
-                    id_budget -= call_ids
-                    if count > budget or byte_budget < 0 or id_budget < 0:
-                        break
-                sized.close()
-                if not shape_ok:
-                    notice = (str(self._db_path), self._db_path.stat().st_ino, session)
-                    if notice not in _PRESENCE_SHAPE_LOGGED:
-                        logger.info("LCM identity-anchor presence check skipped: non-standard tool-call shape: "
-                                    "session=%s scope=%d", session, len(scope))
-                        _PRESENCE_SHAPE_LOGGED.add(notice)
-                    return None  # a trip: the caller restores main's plan
-                if count > budget or byte_budget < 0 or id_budget < 0:
-                    notice = (str(self._db_path), self._db_path.stat().st_ino, session)
-                    if notice not in _PRESENCE_WINDOW_LOGGED:
-                        logger.info("LCM identity-anchor presence window incomplete: session=%s scope=%d "
-                                    "budget=%d bytes=%d call_ids=%d", session, len(scope), budget, byte_budget, id_budget)
-                        _PRESENCE_WINDOW_LOGGED.add(notice)
-                    return None  # a trip: the caller restores main's plan
-                end, pages = None, []
-                while True:
-                    limit = min(256, budget + 1)
-                    tail = (self._store.get_session_tail(source, limit=limit) if end is None else
-                            self._store.get_session_rows_through(source, end, limit))
-                    budget -= len(tail)
-                    pages.append(tail)
-                    if len(tail) < limit:
-                        break
-                    end = int(tail[0]["store_id"]) - 1
-                for page in reversed(pages):  # Preserve the previous chronological copy-consumption order.
-                    rows.update((int(row["store_id"]), row) for row in page)
-            # One id, one invocation (#2466 review, plain rule). Every call id and result id stored anywhere in the
-            # scope counts as stored. An id whose call rows differ between the view and the window (the row's ids,
-            # tool names, or arguments compared as parsed JSON) is reused: its rows keep main's result (#2172).
-            # Result text is not compared: the store can hold one result in another form (an externalized or a
-            # host-pruned output).
-            call_sig: dict = defaultdict(set)
-            rows_by_id: dict = defaultdict(list)
-            form_token: dict = {}
-            stored_calls, stored_results = set(), set()
-
-            def canonical(arguments):
-                if isinstance(arguments, str):
-                    try:
-                        arguments = json.loads(arguments)
-                    except ValueError:
-                        return arguments.strip()
-                return json.dumps(arguments, sort_keys=True, separators=(",", ":"), default=str)
-
-            def shape(msg, parse=False):
-                value = msg.get("tool_calls") or ()
-                if isinstance(value, str):
-                    value = json.loads(value)
-                parts = []
-                for c in value if isinstance(value, list) else ():
-                    function = (c.get("function") or {}) if isinstance(c, dict) else {}
-                    if isinstance(c, dict) and isinstance(function, dict):
-                        arguments = function.get("arguments")
-                        if parse:
-                            arguments = canonical(arguments)
-                        elif not isinstance(arguments, str):
-                            arguments = object()  # equal to nothing as stored: parsed within the budget
-                        parts.append((str(c.get("id") or ""), str(function.get("name") or ""), arguments))
-                return tuple(sorted(parts))
-
-            def note(msg, stored):
-                ids = calls(msg, stored=stored)
-                if ids:
-                    if ids is _UNREADABLE_CALLS:
-                        return
-                    # One lookup per row: a row with many ids would otherwise rehash its whole form per id.
-                    form = form_token.setdefault(shape(msg), len(form_token))
-                    for call_id in ids:
-                        call_sig[call_id].add(form)
-                        rows_by_id[call_id].append(msg)
-                        if stored:
-                            stored_calls.add(call_id)
-                elif stored and msg.get("role") == "tool" and msg.get("tool_call_id"):
-                    stored_results.add(str(msg["tool_call_id"]))
-
-            for store_id in sorted(rows):
-                note(rows[store_id], True)
-            for msg in identity_messages:
-                note(msg, False)
-            # Raw forms first; arguments are parsed only for an id whose raw forms differ, within a byte budget (the
-            # wait bar). Past it the id stays reused, which is main's result.
-            reused, parse_budget, parsed, parsed_token = set(), _PRESENCE_PARSE_BYTES, {}, {}
-            for call_id, forms in call_sig.items():
-                if len(forms) > 1:
-                    group = rows_by_id[call_id]
-                    pending = [m for m in group if id(m) not in parsed]
-                    if pending:
-                        need = sum(len(repr(m.get("tool_calls"))) for m in pending) if parse_budget > 0 else 1
-                        if need > parse_budget:
-                            parse_budget = 0  # spent: every later differing id stays reused
-                            reused.add(call_id)
-                            continue
-                        parse_budget -= need
-                        for m in pending:
-                            parsed[id(m)] = parsed_token.setdefault(shape(m, parse=True), len(parsed_token))
-                    if len({parsed[id(m)] for m in group}) > 1:
-                        reused.add(call_id)
-        except Exception as exc:
-            logger.warning("LCM identity-anchor presence unavailable (%s); keeping positional replays", type(exc).__name__)
-            return None  # a trip: the caller restores main's plan
-        results_of: dict = defaultdict(list)
-        callers: dict = defaultdict(list)
-        for k, msg in enumerate(identity_messages):
-            ids = calls(msg) or ()
-            if ids:
-                for call_id in ids:
-                    callers[call_id].append(k)
-            elif msg.get("role") == "tool" and msg.get("tool_call_id"):
-                results_of[str(msg["tool_call_id"])].append(k)
-        # A view that shows one id on more than one call row, or more than one result, is a reused id too.
-        reused |= {call_id for rows_of in (callers, results_of) for call_id, at in rows_of.items() if len(at) > 1}
-        # A tool segment (a call row and the results right after it) is replayed whole or not at all
-        # (_identity_anchor_tool_segments): storing one of its rows makes its stored rows at or past the cursor
-        # stored again. So no row of a segment that holds such a stored row is stored here (#2466 review).
-        blocked, k = set(), 0
-        while k < len(identity_messages):
-            if identity_messages[k].get("role") == "assistant" and identity_messages[k].get("tool_calls"):
-                end = k + 1
-                while end < len(identity_messages) and identity_messages[end].get("role") == "tool":
-                    end += 1
-                if any(j >= cursor and (set(calls(identity_messages[j]) or _UNREADABLE_CALLS) <= stored_calls if j == k else
-                                        str(identity_messages[j].get("tool_call_id") or "") in stored_results)
-                       for j in range(k, end)):
-                    blocked.update(range(k, end))
-                k = end
-            else:
-                k += 1
-        new = set()
-        for idx, wanted in candidates.items():
-            if wanted is None:
-                continue  # unsure: accounted, as on main
-            ids = set(wanted[1]) if wanted[0] == "call" else {wanted[1]}
-            if idx in blocked or ids & reused or ids & (stored_calls if wanted[0] == "call" else stored_results):
-                continue  # reused (main's result), or stored: accounted (a partly stored call row keeps main's result)
-            new.add(idx)
-
-        # Groups stay whole (#2466 review). A new call is stored only if each result of its ids in the view is stored
-        # now, or sits at or past the cursor and is not replayed (the view's own later rows). A new result is stored
-        # only if its call is stored, or a call row carrying its id is stored now and not dropped by the ignore
-        # patterns. Anything else keeps main's result, never a split pair.
-        stored_now = set(missed) | new
-        ignored: dict = {}
-
-        def dropped(k):
-            if k not in ignored:
-                ignored[k] = self._matches_ignore_message_patterns(messages[k])
-            return ignored[k]
-
-        changed = True
-        while changed:
-            changed = False
-            for idx in sorted(new):
-                wanted = candidates[idx]
-                if wanted[0] == "call":
-                    ok = all(j in stored_now or j < cursor and call_id in stored_results
-                             or j >= cursor and j not in plan["replayed"] and call_id not in stored_results
-                             and not dropped(j)
-                             for call_id in wanted[1] for j in results_of.get(call_id, ()))
-                else:
-                    ok = wanted[1] in stored_calls or any(k in stored_now and not dropped(k)
-                                                          for k in callers.get(wanted[1], ()))
-                if not ok:
-                    new.discard(idx)
-                    stored_now.discard(idx)
-                    changed = True
-        return sorted(new)
-
-    def _identity_anchor_record_recovery(self, result, emissions, messages=()) -> None:
+    def _identity_anchor_record_recovery(self, result, emissions) -> None:
         """#1505: keep the actual published recovery object, never a displaced-occurrence mapping."""
         entries = [d for d in emissions if d.get("kind") == "recovery"]
         if len(entries) != 1:
@@ -952,9 +579,6 @@ class IdentityAnchorMixin:
                    "store": self._store, "home": str(self._hermes_home), "conversation": str(self._conversation_id),
                    "generation": getattr(self, "_identity_anchor_user_generation", 0), "stamp": None, "used": False,
                    "max_store_id": self._store.max_store_id()}  # the recovered turn was stored before its recovery
-        # Bind the note to the latest input user occurrence, never to a later equal-text row.
-        source = next((m for m in reversed(messages) if m.get("role") == "user"), None)
-        receipt["source_stamp"] = _normalize_observed_at(source.get("timestamp")) if source is not None else None
         receipts = list(getattr(self, "_identity_anchor_recoveries", ()))
         for previous in receipts:
             if (previous["row"] is row or previous["store"] is self._store
@@ -962,85 +586,6 @@ class IdentityAnchorMixin:
                 previous["blocked"] = receipt["blocked"] = True
         self._identity_anchor_recoveries = (receipts + [receipt])[-4:]
         self._identity_anchor_recovery = receipt
-
-    def _identity_anchor_link_durable_recovery(self, attempt, lineage) -> bool | None:
-        """#1523: durable doubt is a visible link, never authority to skip a cold user row."""
-        from . import ingest_ledger
-        from .store import _normalize_conversation_id_value
-
-        conn, salt = self._store._conn, attempt["salt"]
-        view, _reason = ingest_ledger.emission_candidate(conn, lineage)
-        if view is None:
-            return
-        emitted = ingest_ledger.decode_entries(view["entries"])
-        entries = attempt["entries"]
-        recoveries = list(conn.execute(
-            "SELECT emission_id,output_index,descriptor_digest,observed_stamp,recovered_store_id "
-            "FROM ledger_emissions WHERE lineage=? AND view_seq=? AND kind='recovery' "
-            "AND recovered_store_id IS NOT NULL AND state IN ('proposed','adopted')",
-            (lineage, view["view_seq"])))
-        if len(recoveries) != 1:
-            return
-        emission, idx, digest, observed, target = recoveries[0]
-        if (idx != len(emitted) - 1 or idx >= len(entries)
-                or any(a.identity_digest != b.identity_digest or a.stamp_digest != b.stamp_digest
-                       or a.uidset_digest != b.uidset_digest for a, b in zip(emitted[:idx], entries[:idx]))
-                or entries[idx].uidset_digest != emitted[idx].uidset_digest):
-            return
-        stamp = attempt["stamps"][idx]
-        generated = entries[idx].identity_digest == digest
-        stored_id = attempt["stored"].get(idx)
-        if stamp is None or observed not in (None, stamp):
-            return
-        if stored_id is None:
-            # The cold cursor can recognize the descriptor without storing the note.
-            # Admit its later warm rewrite to reads only; durable writes still need both rows.
-            return True if generated else None
-        if target >= stored_id:
-            return
-        rows = self._store.get_batch([target, stored_id])
-        prior, current = rows.get(target), rows.get(stored_id)
-        conversation = _normalize_conversation_id_value(self._conversation_id)
-        if (not prior or not current or prior.get("role") != "user" or current.get("role") != "user"
-                or any(r.get("session_id") != self._session_id for r in (prior, current))
-                # A legacy recovered row may carry no conversation id (NULL or blank); the new row never may.
-                or _normalize_conversation_id_value(prior.get("conversation_id")) not in (conversation, "")
-                or _normalize_conversation_id_value(current.get("conversation_id")) != conversation
-                or prior.get("observed_at") is None or prior["observed_at"] == current.get("observed_at")
-                or not generated and self._message_replay_identity(prior, stored_row=True)
-                != self._message_replay_identity(current, stored_row=True)):
-            return
-        # Only assistant/tool followers or the observed generated note may intervene.
-        # Page through every row between them: a long tool run must not hide the link (review: no follower cap).
-        start = target + 1
-        while start < stored_id:
-            followers = self._store.get_range(str(self._session_id), start_id=start, end_id=stored_id - 1,
-                                              limit=256, conversation_id=conversation, include_blank_conversation=True)
-            if any(r.get("role") not in {"assistant", "tool"} and not (
-                    observed is not None and ingest_ledger.stamp_text(r.get("observed_at")) == observed
-                    and ingest_ledger.identity_digest(salt, r) == digest) for r in followers):
-                return
-            if len(followers) < 256:
-                break
-            start = followers[-1]["store_id"] + 1
-        if self._store.get_message_relations([target], "alt_stamp"):
-            return  # the live receipt already consumed this occurrence
-        if conn.execute("SELECT 1 FROM sqlite_master WHERE name='message_relations'").fetchone() and conn.execute(
-                "SELECT 1 FROM message_relations WHERE kind='possible_replay_of' AND related_store_id=? "
-                "AND observed_at IS NULL", (target,)).fetchone():  # a borrowed-stamp link never consumes its target
-            return
-        if generated:
-            if observed is None:
-                conn.execute("UPDATE ledger_emissions SET observed_stamp=? WHERE emission_id=? AND observed_stamp IS NULL",
-                             (stamp, emission))
-            return True  # Keep admitting the later warm rewrite; row guards still own every write.
-        else:
-            # A source keeps its one link (the borrowed-stamp linker runs first); the alt_stamp read above
-            # ensured the relation table.
-            if not conn.execute("SELECT 1 FROM message_relations WHERE kind='possible_replay_of' AND store_id=? LIMIT 1",
-                                (stored_id,)).fetchone():
-                self._store.add_message_relations([[(stored_id, "possible_replay_of", target, None, None)]])
-            return False
 
     @staticmethod
     def _identity_anchor_occurrence_keys(row) -> dict:
@@ -1179,9 +724,6 @@ class IdentityAnchorMixin:
             groups.append([(store_id, "carried_stamp", store_id - 1, None, stamp)])
         if groups:
             self._store.add_message_relations(groups)
-            if getattr(self, "_ingest_ledger_observations", None) is not None:
-                self._ingest_ledger_observations.extend((sid, kind, stamp) for group in groups
-                                                       for sid, kind, _related, _ordinal, stamp in group)
 
     def _identity_anchor_inserted(self, messages, start: int, cursor: int) -> set:
         """#633: indexes in ``[start, cursor)`` the host inserted into the last list LCM ingested (Hermes
@@ -1220,10 +762,8 @@ class IdentityAnchorMixin:
             return
         store_id = int(row["store_id"])
         try:
-            with self._ingest_evidence():
-                self._record_ws_host_rewrite(row, head)  # existing payload, protection and skip_unchanged writer
+            self._record_ws_host_rewrite(row, head)  # existing payload, protection and skip_unchanged writer
         except Exception as exc:
-            self._raise_ingest_busy(exc)
             logger.warning("LCM merge-head capture for store_id %s failed (%s)", store_id, type(exc).__name__)
             return
         self._identity_anchor_text_memo.pop(store_id, None)
@@ -1893,9 +1433,6 @@ class IdentityAnchorMixin:
                       for idx, store_id in remainder_ids.items()]
         if groups:
             self._store.add_message_relations(groups)
-            if getattr(self, "_ingest_ledger_observations", None) is not None:
-                self._ingest_ledger_observations.extend((sid, kind, stamp) for group in groups
-                                                       for sid, kind, _related, _ordinal, stamp in group if kind == "alt_stamp")
         for row, message in plan.get("ws", ()) if remainder_ids is None else ():
             self._record_ws_host_rewrite(row, message)
         self._store.backfill_observed_at_many(plan["backfill"] if remainder_ids is None else ())
@@ -1910,18 +1447,18 @@ class IdentityAnchorMixin:
         self._capture_host_rewrite(store_id, identity, stored, message)
 
     def _note_identity_anchor_version(self, store_id, message) -> None:
-        """R6: track a changed stored object, or a replay (store_id=None) before its next change."""
+        """R6: this process stored ``store_id`` from ``message`` and now observes the SAME host object
+        with other content: positive evidence of an in-place rewrite. Held until the new version's store."""
         if identity_anchor_enabled():
             versions = [entry for entry in getattr(self, "_identity_anchor_versions", ()) if entry[0] is not message]
-            entry = (message, int(store_id)) if store_id is not None else (message, None, message.get("content"))
-            self._identity_anchor_versions = (versions + [entry])[-_RECENT_CAP:]
+            self._identity_anchor_versions = (versions + [(message, int(store_id))])[-_RECENT_CAP:]
 
     def _identity_anchor_rewritten(self, messages, cursor: int) -> list:
-        """Indexes before ``cursor`` holding a changed stored or replayed host object (R6)."""
+        """Indexes before ``cursor`` holding a host object this process stored and has since seen
+        rewritten (R6 before/after evidence, stamped or not)."""
         versions = getattr(self, "_identity_anchor_versions", ()) if identity_anchor_enabled() else ()
         return [idx for idx in range(min(cursor, len(messages)))
-                if any(entry[0] is messages[idx] and (entry[1] is not None or entry[2] != messages[idx].get("content"))
-                       for entry in versions)]
+                if any(message is messages[idx] for message, _store_id in versions)]
 
     def _identity_anchor_version_rewind(self, messages, plan) -> None:
         """R6: a rewritten host object whose new bytes the pre-match did not explain as stored
@@ -1939,7 +1476,7 @@ class IdentityAnchorMixin:
         plan["replayed"].update(idx for idx in range(min(rewritten), cursor) if idx not in rewritten)
         plan["replayed"].difference_update(rewritten)
 
-    def _identity_anchor_record_versions(self, stored, *, after_commit=None) -> None:
+    def _identity_anchor_record_versions(self, stored) -> None:
         """R6: a rewritten host object that this ingest stored as a row of its own is a new version of
         the row it was stored as before: ``supersedes`` relation, both versions' bytes kept. A version
         this ingest recognised as stored occurrences (a composite, a replay) records nothing here."""
@@ -1949,58 +1486,8 @@ class IdentityAnchorMixin:
             old = next((entry for entry in versions if entry[0] is message), None)
             if old is not None:
                 versions.remove(old)
-                if old[1] is not None:  # a replay never represented the matched stored row
-                    groups.append([(int(store_id), "supersedes", old[1], None, _normalize_observed_at(message.get("timestamp")))])
-        if after_commit is None:
-            self._identity_anchor_versions = versions
-        else:
-            after_commit.append(lambda: setattr(self, "_identity_anchor_versions", versions))
-        if groups:
-            self._store.add_message_relations(groups)
-
-    def _identity_anchor_record_composite_of(self, stored_ids) -> None:
-        """Provenance for stored todo composites; never participates in replay decisions.
-
-        A stored user row gets ``composite_of`` rows only when exactly one decomposition of its text fits
-        either rule, counted across both, with every part an earlier stored user row of its own session:
-        (i) the LEADING rendered todo block (the #516 span: header, item lines, optional reload notice),
-        unstored, then whole stored rows; (ii) whole stored rows only, the first a stored todo row. Parts join with exactly ``"\\n\\n"``. Ambiguity or an over-budget search
-        writes nothing. A part text held by more than one row resolves by the host's consecutive-turn merge: several
-        held parts link only to a unique run of consecutive session rows in text order, one held part only to the row
-        immediately before C (``_composite_of_holders``); anything else writes nothing."""
-        from .reconcile import _PRESERVED_TODO_CONTEXT_PREFIX as header, _todo_annotation_span
-
-        groups = []
-        for store_id, row in self._store.get_batch(stored_ids).items():
-            content = row.get("content")
-            if (row.get("role") != "user" or not isinstance(content, str)
-                    or header not in content or "\n\n" not in content):
-                continue
-            by_text = defaultdict(list)
-            for sid, text in self._store._conn.execute(
-                "SELECT store_id, content FROM messages WHERE conversation_id = ? AND session_id = ? "
-                "AND role = 'user' AND store_id < ? AND content != '' AND instr(?, content) > 0",
-                (row["conversation_id"], row["session_id"], store_id, content),
-            ):
-                by_text[text].append(sid)
-            fits = _composite_of_splits(content, by_text, header, _todo_annotation_span)
-            if fits is None or len(fits) != 1:
-                continue
-            choices = [by_text[part] for part, held in fits[0] if held]
-            if all(len(holders) == 1 for holders in choices):
-                chosen = [holders[0] for holders in choices]
-                if len(set(chosen)) != len(chosen):
-                    continue  # one stored occurrence never stands for two parts
-            else:  # identical texts held by several rows: the host merged CONSECUTIVE turns (ruling)
-                order = [sid for (sid,) in self._store._conn.execute(
-                    "SELECT store_id FROM messages WHERE session_id = ? AND store_id < ? ORDER BY store_id",
-                    (row["session_id"], store_id))]
-                chosen = _composite_of_holders(choices, order)
-                if chosen is None:
-                    continue
-            held_ids = iter(chosen)
-            groups.append([(store_id, "composite_of", next(held_ids) if held else None,
-                            ordinal, row.get("observed_at")) for ordinal, (part, held) in enumerate(fits[0])])
+                groups.append([(int(store_id), "supersedes", old[1], None, _normalize_observed_at(message.get("timestamp")))])
+        self._identity_anchor_versions = versions
         if groups:
             self._store.add_message_relations(groups)
 
@@ -2047,56 +1534,3 @@ def _raw_remainder(message, remainder) -> Optional[str]:
     raw = normalize_content_value(message.get("content")) or ""
     head = "\n\n".join(parts) + "\n\n"
     return raw[len(head):] if raw.startswith(head) and raw[len(head):] == rest else None
-
-
-def _composite_of_splits(content: str, by_text, header: str, todo_span) -> list[list[tuple[str, bool]]] | None:
-    """The decompositions of ``content`` that composite_of rule (i) or (ii) allows, as ``[(part, stored)]``.
-    None when a search is over budget or capped, so more splits may exist. A part whose text several rows
-    hold still yields its split here; the caller resolves its holder (``_composite_of_holders``) or writes nothing."""
-    texts = set(by_text)
-    whole = _decompositions(content, texts, partial=False)
-    if whole is None or len(whole) >= _MAX_DECOMPOSITIONS:
-        return None
-    found = [[(part, True) for part in parts] for parts, _rest in whole if parts[0].startswith(header)]
-    if not content.startswith(header):
-        return found
-    # Rule (i): the scaffold is exactly the rendered todo block the #516 identity cut strips; the header
-    # alone (no item line) is not a rendered block. It never holds a whole stored row (a stored todo row is
-    # rule (ii)), and the host's merge puts exactly one "\n\n" behind it.
-    end = todo_span(content, 0)
-    scaffold, rest = content[:end], content[end + 2:]
-    if (scaffold.split("\n", 1)[0] != header or "\n" not in scaffold or not content.startswith("\n\n", end) or not rest
-            or any(scaffold == text or scaffold.startswith(text + "\n\n") or scaffold.endswith("\n\n" + text)
-                   or "\n\n" + text + "\n\n" in scaffold for text in texts)):
-        return found
-    if rest in texts:
-        found.append([(scaffold, False), (rest, True)])
-    tails = _decompositions(rest, texts, partial=False)
-    if tails is None or len(tails) >= _MAX_DECOMPOSITIONS:
-        return None
-    return found + [[(scaffold, False)] + [(part, True) for part in parts] for parts, _rest in tails]
-
-
-def _composite_of_holders(choices: list[list[int]], order: list[int]) -> list[int] | None:
-    """One stored row per held part when some part's text is held by several rows of C's session
-    (``order``: the session's store ids before C, every role). Several parts: exactly one choice whose
-    rows are consecutive in store order with no row of any role between them, in text order. One part:
-    the row immediately before C, when it holds that text. Anything else: None (no relation)."""
-    if len(choices) == 1:
-        return [order[-1]] if order and order[-1] in choices[0] else None
-    position = {sid: index for index, sid in enumerate(order)}
-    rest = [set(holders) for holders in choices[1:]]  # O(1) membership: the walk stays linear in history
-    runs = []
-    for first in choices[0]:
-        run, at = [first], position[first]
-        for holders in rest:
-            nxt = order[at + 1] if at + 1 < len(order) else None
-            if nxt not in holders:
-                break
-            run.append(nxt)
-            at += 1
-        else:
-            runs.append(run)
-            if len(runs) > 1:
-                return None
-    return runs[0] if len(runs) == 1 else None

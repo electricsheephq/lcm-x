@@ -1,11 +1,10 @@
 """v0.26.0 slice A: host ``message_uid`` SHADOW bindings (design REVISION 3). After #436 decides an ingest,
 each uid-bearing host dict gets one R3-3 class and the row #436 chose goes to the droppable ``host_uid_bindings``
 table. #1124 reads canonical bindings for store-complete copy exclusions; #1403 also reads them
-as occurrence proof for NULL-stamp audit copies. Shadow writes fail open inside foreground savepoints;
-lock contention escapes to the ingest owner. Event counter keys are ``[replay.]class.outcome[.reason]``; ``skipped.no_uid`` stays in memory, so a no-uid
+as occurrence proof for NULL-stamp audit copies. Every shadow exception is caught, counted and fails
+open. Event counter keys are ``[replay.]class.outcome[.reason]``; ``skipped.no_uid`` stays in memory, so a no-uid
 host writes nothing. The shadow GATE is counted per binding in the table (``first_check`` / ``disagree_seen``),
-so a replayed prefix never inflates it. ``LCM_HOST_MESSAGE_UID=off`` stops capture and new bindings (see ``config.host_message_uid_mode`` for the reads it
-stops and the one it does not); ``on`` runs as ``shadow``.
+so a replayed prefix never inflates it. ``LCM_HOST_MESSAGE_UID=off`` does nothing; ``on`` runs as ``shadow``.
 From the first release, a persisted lineage key is ``<home_tag>:<root>`` (#836): one database shared by several
 Hermes homes never mixes two profiles' roots of the same session id."""
 from __future__ import annotations
@@ -75,27 +74,23 @@ def _fmt_counts(counts: dict) -> str:
 class HostUidShadowMixin:
     """Mixed into LCMEngine; reads ``self._store``, ``_state_db_path`` and the reconcile identity helpers."""
 
-    def _host_uid_lineage_key(self, session_id=None, *, require_complete=False, hermes_home=None, store=None) -> tuple:
+    def _host_uid_lineage_key(self, session_id=None) -> tuple:
         """R3-4: ``("<home_tag>:<root>", None)``, the root by Hermes' own walk (``_session_turn_lease_key_on_conn``:
         up while the parent ended by compression and the row is no fork child), else ``(None, "read_error" |
         "unresolved")`` (no state.db, missing row, cycle, over 256 hops). ``home_tag`` (#836) = 16 hex of the
         sha256 of the resolved state.db path. Cached per (state.db, session id): a key, or a missing state.db."""
         session_id = str(self._session_id if session_id is None else session_id or "")
-        cache = {} if require_complete else self.__dict__.setdefault("_host_uid_lineage_cache", {})
+        cache = self.__dict__.setdefault("_host_uid_lineage_cache", {})
         try:
-            path = Path(self._state_db_path(**(dict(hermes_home=hermes_home,
-                db_path=store.db_path if store is not None else None) if hermes_home is not None else {})))
+            path = Path(self._state_db_path())
             key = (str(path), session_id)  # keyed by the home too: a profile switch changes the state.db
             if key in cache:
                 return cache[key]
-            found = (self._host_uid_read_lineage(path, session_id, require_complete=True) if require_complete
-                     else self._host_uid_read_lineage(path, session_id))
+            found = self._host_uid_read_lineage(path, session_id)
             if found[0] is not None:  # a resolve error is a read error below, never an exception into ingest
                 tag = hashlib.sha256(str(path.resolve()).encode()).hexdigest()[:16]
                 found = (f"{tag}:{found[0]}", None)
         except Exception as exc:  # host DB drift: no root, no binding; counted as an error
-            if require_complete:
-                raise  # Ledger preparation owns its failure; do not change legacy error memory.
             self._host_uid_read_error = exc
             return None, "read_error"
         if found[0] is not None or found is _NO_STATE_DB:
@@ -104,7 +99,7 @@ class HostUidShadowMixin:
                 cache.pop(next(iter(cache)))
         return found
 
-    def _host_uid_read_lineage(self, path: Path, session_id: str, *, require_complete=False) -> tuple:
+    def _host_uid_read_lineage(self, path: Path, session_id: str) -> tuple:
         """One uncached read of the lineage root. Only FileNotFoundError means a missing state.db (unresolved,
         never an error); PermissionError and every other OSError propagate as a read error, never cached."""
         try:
@@ -125,8 +120,6 @@ class HostUidShadowMixin:
                 if current is None or parent_id in seen:  # missing row or a cycle: unresolved
                     break
                 parent = read(parent_id) if parent_id and not _is_fork_child(current) else None
-                if require_complete and parent_id and not _is_fork_child(current) and parent is None:
-                    break
                 if parent is None or parent.get("end_reason") != "compression":
                     root = str(current["id"])
                     break
@@ -219,7 +212,7 @@ class HostUidShadowMixin:
         return set()
 
     def _host_uid_capture(self, messages, identity_messages, start: int, cursor: int, plan, tool_segment,
-                          session_id=None, *, store=None):
+                          session_id=None):
         """Read the uids off the HOST dicts after #436 decided and before the INSERT drops unknown keys."""
         if host_message_uid_mode() == "off":
             return None
@@ -231,50 +224,38 @@ class HostUidShadowMixin:
                     "identity": identity_messages, "cursor": cursor, "plan": plan or {},
                     "tool_segment": set(tool_segment or ()), "session_id": session_id}
         except Exception as exc:
-            self._host_uid_count(Counter(errors=1), exc, **(dict(store=store) if store is not None else {}))
+            self._host_uid_count(Counter(errors=1), exc)
             return None
 
-    def _host_uid_shadow(self, capture, stored_at=None, remainders=(), *, store=None, hermes_home=None) -> None:
+    def _host_uid_shadow(self, capture, stored_at=None, remainders=()) -> None:
         """Classify and bind one ingest's decided dicts; ``stored_at`` = {index: new store id}."""
         if capture is None:
             return
-        target = {} if store is None else dict(store=store)
         delta, error = Counter({"skipped.no_uid": capture["no_uid"]}), None
         try:
-            with self._ingest_evidence(**target):
-                error = self._host_uid_classify(capture, stored_at or {}, set(remainders or ()), delta, store=store, hermes_home=hermes_home)
+            error = self._host_uid_classify(capture, stored_at or {}, set(remainders or ()), delta)
         except Exception as exc:
-            self._raise_ingest_busy(exc, **target)
-            if not (getattr(self, "_ingest_read_only", None) is not None
-                    and str(exc) == "session-end evidence deferred"):
-                delta["errors"] += 1
-                error = exc
+            delta["errors"] += 1
+            error = exc
         try:
-            self._host_uid_count(delta, error, **target)
-        except Exception as exc:  # Shadow counting remains best-effort.
-            self._raise_ingest_busy(exc, **target)
+            self._host_uid_count(delta, error)
+        except Exception:  # pragma: no cover - counting never blocks ingest
             logger.debug("LCM host-uid count failed")
 
-    def _host_uid_classify(self, capture, stored_at: dict, remainders: set, delta: Counter, *, store=None, hermes_home=None):
+    def _host_uid_classify(self, capture, stored_at: dict, remainders: set, delta: Counter):
         """An unmatched composite with an externalized constituent is unverified, without gate checks."""
         valid = {idx: uid for idx, uid in capture["entries"].items() if _valid_uid(uid)}
         delta["skipped.invalid_uid"] += len(capture["entries"]) - len(valid)
         if not valid:
             return None
-        try:
-            lineage, problem = self._host_uid_lineage_key(capture["session_id"],
-                **(dict(hermes_home=hermes_home, store=store) if hermes_home is not None else {}))
-        except Exception as exc:
-            delta["errors"] += 1
-            return exc  # Host ancestry unavailable: preserve the standalone no-binding decision.
+        lineage, problem = self._host_uid_lineage_key(capture["session_id"])
         if lineage is None:
             delta[f"skipped.no_lineage_root.{problem}"] += len(valid)
             if problem == "read_error":
                 delta["errors"] += 1
                 return getattr(self, "_host_uid_read_error", None)
             return None
-        target = {} if store is None else dict(store=store)
-        store, messages, identity = self._store if store is None else store, capture["messages"], capture["identity"]
+        store, messages, identity = self._store, capture["messages"], capture["identity"]
         plan, cursor = capture["plan"], capture["cursor"]
         replayed, matched = plan.get("replayed") or set(), plan.get("matched") or {}
 
@@ -290,7 +271,7 @@ class HostUidShadowMixin:
             for sid, _kind in items:
                 by_store[sid].add(uid)
         fetched: dict = {}
-        self._host_uid_fetch(by_store, fetched, **target)  # one batched read for the whole decided range
+        self._host_uid_fetch(by_store, fetched)  # one batched read for the whole decided range
         targets = {idx: int(matched[idx][0]["store_id"]) for idx in valid
                    if idx not in stored_at and len(matched.get(idx) or ()) == 1}
         held = store.host_uid_uids_of_stores(lineage, set(targets.values()))
@@ -319,10 +300,8 @@ class HostUidShadowMixin:
             canonical = next((sid for sid, kind in bindings.get(uid, ()) if kind == "canonical"), bound[0] if bound else None)
             unmapped = not rows and stored is None and (idx < cursor or idx in capture["tool_segment"] or idx in replayed)
             if bound:  # BOUND: compared against the payload-matching version (R1-1); the gate marks that binding
-                detached = dict(store=store, hermes_home=hermes_home, session_id=capture["session_id"],
-                                conversation_id=capture["conversation_id"]) if hermes_home is not None else {}
-                hit = self._host_uid_bytes_match(bound, identity[idx], fetched, **detached) if not rows else None
-                lossy = not rows and stored is None and _lossy_identity(self._message_replay_identity(identity[idx], **detached))
+                hit = self._host_uid_bytes_match(bound, identity[idx], fetched) if not rows else None
+                lossy = not rows and stored is None and _lossy_identity(self._message_replay_identity(identity[idx]))
                 if stored is not None:  # VERSION_NEW is an event only; a stored duplicate is a replay check
                     delta["bound.disagree.stored_despite_match" if hit is not None else "bound.version_new"] += 1
                     if hit is not None:
@@ -336,8 +315,7 @@ class HostUidShadowMixin:
                 elif unmapped and lossy:  # a digest-free redaction collapsed the identity: equality proves nothing
                     delta["replay.composite.unverified.lossy" if absorbed(messages[idx]) else "replay.bound.unverified.lossy"] += 1
                 elif unmapped and hit is None and (merge := self._host_uid_lcm_merge(
-                        messages[idx], [uid, *absorbed(messages[idx])], bindings, fetched, identity[idx],
-                        **(dict(hermes_home=hermes_home) if hermes_home is not None else {}))):
+                        messages[idx], [uid, *absorbed(messages[idx])], bindings, fetched, identity[idx])):
                     delta["replay.composite.agree.lcm_merge"] += 1  # LCM's own site-1 merge (R3-2)
                     checks.extend((part, sid, True) for part, sid in merge)
                 elif unmapped and hit is None and absorbed(messages[idx]) and any(  # a constituent bound to stubs only
@@ -389,24 +367,22 @@ class HostUidShadowMixin:
             return "generated.agree.remainder"
         return "generated.disagree.remainder"
 
-    def _host_uid_fetch(self, store_ids, fetched: dict, *, store=None) -> None:
+    def _host_uid_fetch(self, store_ids, fetched: dict) -> None:
         """Rows cached across one ingest: one batched, chunked read of the ids not fetched yet."""
         missing = sorted({int(sid) for sid in store_ids if int(sid) not in fetched})
         fetched.update({sid: None for sid in missing})
         for start in range(0, len(missing), 500):
-            fetched.update((self._store if store is None else store).get_batch(missing[start:start + 500]))
+            fetched.update(self._store.get_batch(missing[start:start + 500]))
 
-    def _host_uid_bytes_match(self, store_ids, identity_message, fetched: dict, *, store=None, hermes_home=None,
-                              session_id=None, conversation_id=None) -> Optional[int]:
+    def _host_uid_bytes_match(self, store_ids, identity_message, fetched: dict) -> Optional[int]:
         """The first bound row holding this dict's payload (its stored or host-rewrite form), else None."""
         if any(int(sid) not in fetched for sid in store_ids):
-            self._host_uid_fetch(store_ids, fetched, **(dict(store=store) if store is not None else {}))
-        target = {} if store is None else dict(store=store, hermes_home=hermes_home, session_id=session_id, conversation_id=conversation_id)
-        identity = self._message_replay_identity(identity_message, strip_carrier=False, **target)
+            self._host_uid_fetch(store_ids, fetched)
+        identity = self._message_replay_identity(identity_message, strip_carrier=False)
         return next((int(sid) for sid in store_ids if fetched.get(int(sid)) is not None
-                     and identity in self._stored_row_forms(fetched[int(sid)], **target)), None)
+                     and identity in self._stored_row_forms(fetched[int(sid)])), None)
 
-    def _host_uid_lcm_merge(self, message, uids, bindings, fetched, identity_message=None, *, hermes_home=None) -> Optional[list]:
+    def _host_uid_lcm_merge(self, message, uids, bindings, fetched, identity_message=None) -> Optional[list]:
         """Site 1: one bound row per uid, in order, whose stripped non-empty contents newline-join to this
         assistant's content and whose ordered tool calls match -> [(uid, store_id), ...], else None.
         Compared as the single-row path compares: the dict's #436 identity form against stored rows with
@@ -423,9 +399,8 @@ class HostUidShadowMixin:
             if key == "content":
                 value = row.get("content")
                 return self._restore_ingest_payload_placeholders_in_content_identity(
-                    value, session_id=session, **(dict(hermes_home=hermes_home) if hermes_home is not None else {})) if isinstance(value, str) else None
-            return self._restore_ingest_payload_placeholders_in_value(row.get(key) or [], session_id=session,
-                **(dict(hermes_home=hermes_home) if hermes_home is not None else {}))
+                    value, session_id=session) if isinstance(value, str) else None
+            return self._restore_ingest_payload_placeholders_in_value(row.get(key) or [], session_id=session)
 
         def walk(pos: int, joined: str, picked: list) -> Optional[list]:
             if pos == len(uids):
@@ -477,7 +452,7 @@ class HostUidShadowMixin:
             records.append((target, uid, "alias_candidate", reason))
         self._store.add_host_uid_bindings(lineage, records)
 
-    def _host_uid_count(self, delta: Counter, error: Optional[BaseException] = None, *, store=None) -> None:
+    def _host_uid_count(self, delta: Counter, error: Optional[BaseException] = None) -> None:
         delta = +delta
         if error is not None:  # one WARNING per engine, then DEBUG
             logged, self._host_uid_error_logged = getattr(self, "_host_uid_error_logged", False), True
@@ -487,8 +462,6 @@ class HostUidShadowMixin:
             return
         counts = self._host_uid_counters = getattr(self, "_host_uid_counters", None) or Counter()
         counts.update(delta)
-        if getattr(self, "_ingest_read_only", None) is not None:
-            return
         durable = {key: value for key, value in delta.items() if key != "skipped.no_uid"}
         if not durable:
             return
@@ -502,22 +475,11 @@ class HostUidShadowMixin:
                     record[key] = value
             return record
 
-        target = {} if store is None else dict(store=store)
-        store = self._store if store is None else store
-        owned = store._transaction_owner.owns_connection(store._conn)
-        try:
-            if owned:
-                # Same read-modify-write, serialized by the enclosing owner.
-                # update_metadata_json must never issue a nested BEGIN here.
-                with self._ingest_evidence(**target):
-                    value = merged(store.read_metadata_json(HOST_UID_COUNTER_KEY))
-                    store.write_metadata_json([HOST_UID_COUNTER_KEY], json.dumps(value, sort_keys=True))
-            elif getattr(store._conn, "in_transaction", False):
+        try:  # never inside someone else's transaction: skipped and counted
+            if getattr(self._store._conn, "in_transaction", False):
                 raise sqlite3.OperationalError("host-uid tally skipped: the connection is in a transaction")
-            else:
-                store.update_metadata_json(HOST_UID_COUNTER_KEY, merged)
+            self._store.update_metadata_json(HOST_UID_COUNTER_KEY, merged)
         except Exception as exc:
-            self._raise_ingest_busy(exc, **target)
             counts["errors"] += 1
             logger.debug("LCM host-uid counter write failed (%s)", type(exc).__name__)
 

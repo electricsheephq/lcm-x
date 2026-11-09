@@ -16,7 +16,6 @@ Use read-only product tools before changing configuration or running an apply pa
 2. Send one normal message if the session has not been bound since restart.
 3. `lcm_status`: inspect runtime identity, database path, context pressure, summary/store counts, filters, and lifecycle state.
    `dag.nodes_by_escalation_level` counts the session's summary nodes by the level that produced them (`1`, `2`, `3`, plus `unrecorded` for nodes written before the record existed); a growing `3` count means summaries are being truncated rather than written by the model.
-   `token_counter` names the active token counter: `counter` is `tiktoken`, `char_estimate`, or `not_loaded` before anything has been counted in the process, with its `encoding` and loader `state` (`ready`, `unavailable`, `loading`, `not_started`). `lcm_doctor` repeats it as an informational `token_counter` check that always passes.
 4. `lcm_inspect`: inspect current-session lineage, frontiers, fresh tail, externalized-ref readability, and skip/no-op reasons without retrieving content.
 5. `lcm_doctor`: run database, FTS, lifecycle, configuration, and context-pressure diagnostics. `embedding_provider_health` warns when the configured provider cannot run in this process; see [docs/embeddings-setup.md, "Install consent, updates and recovery"](https://github.com/electricsheephq/lcm-x/blob/main/docs/embeddings-setup.md#install-consent-updates-and-recovery) for the embedding-dependency recovery note. With an available cloud provider it also warns when the store has no active vector identity for it or the identity carries an older privacy revision (`embedding_identity_stale` in the detail). It checks the summary identity, and the chunk identity once the store holds chunk vectors; `stale_tasks` names which is stale. When a requested semantic arm is stale, recall skips that arm, marks the answer degraded with an `embedding_identity_stale:` reason and answers from the arms that remain (full text when no semantic arm is left). Run `/lcm embed warmup`, then `/lcm embed backfill --apply` for summary-only staleness; add `--corpus chunks` for chunk-only staleness or `--corpus both` when both are stale. Chunk apply commands on cloud providers also require `--confirm-raw-text` on every invocation: this acknowledges sending raw message text to the named cloud provider, even with provider-input privacy enabled. Inspect the emitted `remedy` and consent warning before applying it. Repeat the backfill apply only while `remaining` is above 0 and each run lowers it. Stop on `status: partial`, `status: error`, or `status: failed`, or if `remaining` stops falling, and inspect the warnings, errors, and detail output. A stale arm the query did not request changes nothing. An unavailable provider is reported first, because warmup cannot succeed until it is fixed. With fastembed configured, the detail also carries `embedding_readiness: model: <state>; coverage: <embedded>/<eligible> summaries`. The model state is `present` (the active profile is the configured local model), `preparing` (background preparation is running: the check warns, and recall answers from full text until it finishes), `unavailable(<reason>)`, or `not prepared (run /lcm embed warmup)` (no active profile for the configured model, including one left by a different model).
 6. `lcm_doctor` with `action: repair_level3`: read-only scan for level 3 truncation fragments and their condensed ancestors in the foreground session. Each page returns at most 50 `flagged` nodes and 50 `ancestors`, with `total_flagged`, `total_ancestors` and `next_cursor` when more remain; pass that integer as `cursor` for the next page. It writes nothing and refuses `apply`. The operator's slash command `/lcm doctor repair level3` keeps the store-wide view; `/lcm doctor repair level3 apply` backs up first, then re-summarises each group in place and schedules enabled rollup maintenance. Suggest it to the user, never run it yourself.
@@ -24,25 +23,6 @@ Use read-only product tools before changing configuration or running an apply pa
 If optional slash commands are enabled, `/lcm status` and `/lcm doctor` expose the corresponding operator views.
 
 When `/lcm` runs with session context, it compares the task-local session profile with the serving engine's captured home through the host profile helper. Different known profiles refuse every command, reads included: run it from a process launched for that profile. Equal known profiles keep normal output, including cold starts with no resident engine. If either profile is unknown, read commands (`status`, `help`, `doctor clean`, `doctor clean lifecycle`, `doctor source`, `doctor retention`, `rotate`, `rollups`, `preset show`, `preset suggest`) run, and when no session engine resolved they append `store: …` naming the opened store; inspect it before relying on the result. Write commands, including plain `doctor`, fail closed unless a resolved session engine is bound to the invoking session. Without session context (a local CLI), commands run against the process engine and append the store line.
-
-## SQLite connections and file descriptors
-
-In `engine.py`, `_ensure_storage` opens storage lazily;
-`_bind_storage` creates the message, DAG and lifecycle stores (three core
-connections per bound engine). `clone_for_agent` creates a separate runtime engine,
-so count clones that actually opened storage, not unused prototypes. The core
-stores open their handles through `sqlite_session.py`
-`open_connection`. Optional assertion/entity stores each add one; query views and
-adaptive retrieval share a query-view connection. Vector stores and temporary
-rollup, tool, integrity and embedding work can add more. Pending tails can retain
-engines or detached stores; a compaction still running at shutdown can delay close.
-
-Use `lsof -nP -p "$PID"` for each process, matching the configured database path
-from `lcm_status`. Count numeric FD rows with that exact NAME separately from WAL,
-SHM, `mem` and deleted-file rows. Do not infer a fixed connection-to-FD ratio or
-declare a leak from a flat count. Compare repeated samples with agent/maintenance
-activity; investigate sustained growth or deleted descriptors. See the operator
-guide's "SQLite connection and descriptor counts" section.
 
 ## Survival-fit history
 
@@ -71,11 +51,6 @@ Cleanup apply is separately feature-gated. Never infer permission to enable it f
 
 - LOCAL catch-up: `/lcm status` exposes `embedding_incremental_last_pass`; doctor readiness includes the database's maintenance outcome. `model_preparing`, `model_unavailable`, `lease_held`, `circuit_open` and `row_backoff` describe deferred work; `no_progress`, `model_prepare_exhausted`, refusal/error or `queue_capacity_exhausted` need inspection. Summary coverage alone does not certify chunk coverage. Full-text recall remains available while semantic coverage is incomplete.
 - Unbound status after restart: send a normal message, then check again.
-- `LCM shutdown drain timed out ... child=<12 hex> has up to N handed-over row(s) not yet stored ... (#2483)`: a delegated
-  child's early store was still waiting on a busy database when the engine shut down. Those rows are lost only if
-  the process ends before the store lands; the hashed id names the child, never its session id.
-- `LCM live delegated-child store skipped: the child's engine now serves another profile ...`: the child's engine was
-  rebound after the child started, so LCM-X wrote nothing early. The child's rows still come from its end store.
 - Database exists but stays empty: verify plugin enablement, `context.engine`, profile, database path, and ignore/stateless patterns.
 - Weak exact recall: verify source rows exist, query construction/scope is correct, summary health is sound, and embedding coverage/provenance matches the requested mode.
 - Conflicting summary and raw evidence: prefer the newer exact raw evidence and inspect lineage.

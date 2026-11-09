@@ -104,9 +104,8 @@ def _session_has_window_content(
                 """,
                 (session_id, window.end.timestamp(), window.start.timestamp()),
             ).fetchone()
-    except Exception:
-        logger.warning("LCM recent coverage read failed; using leaf summaries", exc_info=True)
-        return True
+    except Exception:  # pragma: no cover - defensive read-only degradation
+        return False
     return row is not None
 
 

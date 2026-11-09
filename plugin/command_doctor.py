@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -52,7 +51,6 @@ class DoctorFacts:
     survival_fit: dict[str, Any]
     fit_count: int | None
     projection_floor: bool
-    survival_counter_write_lost: bool
     stub_first_exit: dict[str, Any] | None
     inactive_process: str | None
     inactive_action: str
@@ -63,7 +61,6 @@ class DoctorFacts:
     sqlite_version: str
     stem_index: str
     host_uid_lines: tuple[str, ...]
-    token_counter: dict[str, str]
     # Exception text remains in the corresponding result; flags preserve branch identity.
     probe_errors: dict[str, bool]
 
@@ -106,10 +103,7 @@ def collect_doctor(engine: Any) -> DoctorFacts:
 
     try:
         store_fts_count = int(store_conn.execute("SELECT COUNT(*) FROM messages_fts").fetchone()[0])
-        # #2345: the check's SAVEPOINT/ROLLBACK TO must not interleave with a foreground ingest.
-        with engine._store._write_lock:
-            store_fts_integrity = command.check_external_content_fts_integrity(
-                store_conn, command.build_message_fts_spec())
+        store_fts_integrity = command.check_external_content_fts_integrity(store_conn, command.build_message_fts_spec())
         store_fts = _fts_text_status(store_fts_integrity)
     except Exception as exc:  # pragma: no cover - defensive
         store_fts_count = f"error: {exc}"
@@ -119,10 +113,7 @@ def collect_doctor(engine: Any) -> DoctorFacts:
 
     try:
         node_fts_count = int(dag_conn.execute("SELECT COUNT(*) FROM nodes_fts").fetchone()[0])
-        # #2345: summary-tree writers hold the DAG lock on this shared connection.
-        with getattr(engine._dag, "_db_lock", nullcontext()):
-            node_fts_integrity = command.check_external_content_fts_integrity(
-                dag_conn, command.build_nodes_fts_spec())
+        node_fts_integrity = command.check_external_content_fts_integrity(dag_conn, command.build_nodes_fts_spec())
         node_fts = _fts_text_status(node_fts_integrity)
     except Exception as exc:  # pragma: no cover - defensive
         node_fts_count = f"error: {exc}"
@@ -318,14 +309,7 @@ def collect_doctor(engine: Any) -> DoctorFacts:
         probe_errors["survival_fit"] = True
         survival_fit = None
     survival_fit = survival_fit if isinstance(survival_fit, dict) else {}
-    lost = getattr(engine, "_survival_counter_write_lost", {}).get(command.survival_counter_store_key(engine._store))
-    if lost is not None:
-        survival_fit = {**survival_fit, "ever_shortened": True}
-        if lost:
-            survival_fit.pop("projected_count", None)
     fit_count = command.survival_fit_count(survival_fit)
-    if fit_count == 0 and lost is not None:
-        fit_count = None
     projection_floor = command.survival_fit_projection_floor_applies(survival_fit) if fit_count != 0 else False
     if fit_count != 0:
         triage_checks.append({"check": "survival_fit", "status": "warn", "detail": survival_fit})
@@ -353,8 +337,6 @@ def collect_doctor(engine: Any) -> DoctorFacts:
     sqlite_version = command.sqlite3.sqlite_version
     stem_index = command.stem_index_status(store_conn)
     host_uid_lines = tuple(command.host_uid_doctor_lines(engine))
-    from .tokens import token_counter_status
-    token_counter = token_counter_status()
     return DoctorFacts(
         runtime_identity=runtime_identity,
         db_path=db_path,
@@ -393,7 +375,6 @@ def collect_doctor(engine: Any) -> DoctorFacts:
         survival_fit=survival_fit,
         fit_count=fit_count,
         projection_floor=projection_floor,
-        survival_counter_write_lost=lost is not None,
         stub_first_exit=stub_first_exit,
         inactive_process=inactive_process,
         inactive_action=inactive_action,
@@ -404,14 +385,12 @@ def collect_doctor(engine: Any) -> DoctorFacts:
         sqlite_version=sqlite_version,
         stem_index=stem_index,
         host_uid_lines=host_uid_lines,
-        token_counter=token_counter,
         probe_errors=probe_errors,
     )
 
 
 def survival_fit_observation(
     survival_fit: dict[str, Any], fit_count: int | None, projection_floor: bool,
-    *, counter_write_lost: bool = False,
 ) -> str | None:
     """Describe one collected survival-fit record without reading live state."""
     if fit_count == 0:
@@ -427,8 +406,7 @@ def survival_fit_observation(
               "default lcm.db, with its -wal and -shm companions) aside and keep it, then restore the database "
               "backup taken before the first v0.24.5 install with the plugin; a rollback of the plugin alone to "
               f"{'v0.27.0' if projection_floor else 'v0.24.5'} or later is fine")
-    unknown = "a counter write failed" if counter_write_lost else "the stored count is unreadable"
-    applied = (f"applied an unknown number of times ({unknown})" if fit_count is None
+    applied = ("applied an unknown number of times (the stored count is unreadable)" if fit_count is None
                else f"applied {fit_count} time(s)")
     if survival_fit.get("last_shortened") is False:
         applied = applied.replace("applied", "attempted", 1) + "; could not shorten the list on the last attempt"
@@ -639,10 +617,7 @@ def render_doctor(facts: DoctorFacts) -> str:
             "run `/lcm doctor repair`, then `/lcm backup` and `/lcm doctor repair apply` to rebuild nodes_fts"
         )
 
-    fit_observation = survival_fit_observation(
-        facts.survival_fit, facts.fit_count, facts.projection_floor,
-        counter_write_lost=facts.survival_counter_write_lost,
-    )
+    fit_observation = survival_fit_observation(facts.survival_fit, facts.fit_count, facts.projection_floor)
     if fit_observation is not None:
         observations.append(fit_observation)
     if facts.stub_first_exit:  # #671: a partial stop; the rows no leaf summarised stay stored as backlog
@@ -716,9 +691,6 @@ def render_doctor(facts: DoctorFacts) -> str:
         f"missing_externalized_payload_refs: {facts.externalized_integrity['missing_externalized_payload_refs']}",
         f"unreferenced_externalized_payload_files: {facts.externalized_integrity['unreferenced_externalized_payload_files']}",
         f"survival_fit_count: {'unknown' if facts.fit_count is None else facts.fit_count}",
-        f"token_counter: {facts.token_counter['counter']}",
-        f"token_counter_encoding: {facts.token_counter['encoding'] or '(none)'}",
-        f"token_counter_state: {facts.token_counter['state']}",
         *facts.host_uid_lines,
     ]
     if facts.inactive_process:

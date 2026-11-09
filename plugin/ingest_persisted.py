@@ -36,7 +36,6 @@ _UNRECOVERABLE_TRUNCATION_RE = re.compile(
     re.IGNORECASE,
 )
 _HERMES_RESULTS_DIRNAME = "hermes-results"
-_HERMES_SPILLOVER_PARTS = ("cache", "spillover")  # Hermes tools/tool_result_storage.py SPILLOVER_SUBDIR
 _MAX_RECOVERED_PERSISTED_OUTPUT_BYTES = 64 * 1024 * 1024
 
 
@@ -154,27 +153,6 @@ def _safe_temp_hermes_results_file(path: Path) -> Path | None:
         return None
 
 
-def _safe_hermes_spillover_file(path: Path, hermes_home) -> Path | None:
-    if not hermes_home:
-        return None
-    if not path.is_absolute() or path.name in {"", ".", ".."}:
-        return None
-    parent = path.parent
-    if parent.name != _HERMES_SPILLOVER_PARTS[1] or parent.parent.name != _HERMES_SPILLOVER_PARTS[0]:
-        return None
-    try:
-        home = Path(os.fspath(hermes_home)).expanduser()
-        if not home.is_absolute():
-            return None
-        expected_parent = home.joinpath(*_HERMES_SPILLOVER_PARTS).resolve()
-        parent_is_valid_dir = parent.exists() and parent.is_dir() and not parent.is_symlink()
-        if not parent_is_valid_dir or parent.resolve() != expected_parent:
-            return None
-        return expected_parent / path.name
-    except (OSError, TypeError, ValueError):
-        return None
-
-
 def _is_hermes_persisted_output_marker(text: str | None) -> bool:
     if not isinstance(text, str):
         return False
@@ -231,16 +209,13 @@ def _read_regular_file_no_symlink(path: Path) -> tuple[str, dict[str, int]] | No
                 pass
 
 
-def recover_hermes_persisted_output_with_file_stat(
-    text: str | None, *, hermes_home=None
-) -> tuple[str, dict[str, int]] | None:
+def recover_hermes_persisted_output_with_file_stat(text: str | None) -> tuple[str, dict[str, int]] | None:
     """Recover Hermes host `<persisted-output>` content when the backing file is safe.
 
     Recovery is intentionally conservative: the marker must include Hermes'
     character count, the file path must be an absolute basename under a
-    `hermes-results` temp directory or the active Hermes home's `cache/spillover`
-    directory, the target must be a regular non-symlink file, and the recovered
-    character count must match the marker. If any check
+    `hermes-results` temp directory, the target must be a regular non-symlink
+    file, and the recovered character count must match the marker. If any check
     fails, callers should keep the marker/preview instead of claiming lossless
     recovery from an unsafe or stale file.
     """
@@ -253,38 +228,23 @@ def recover_hermes_persisted_output_with_file_stat(
     if raw_path is None:
         return None
     path = Path(raw_path)
-    safe_path = _safe_temp_hermes_results_file(path) or _safe_hermes_spillover_file(path, hermes_home)
+    safe_path = _safe_temp_hermes_results_file(path)
     if safe_path is None:
         return None
     recovered_with_stat = _read_regular_file_no_symlink(safe_path)
     if recovered_with_stat is None:
         return None
     recovered, file_stat = recovered_with_stat
-    preview_prefix = _persisted_output_preview_prefix(text)
-    if not preview_prefix:
+    if len(recovered) != expected_chars:
         return None
-    # Exact content is authoritative when it already meets the marker's contract.
-    if len(recovered) == expected_chars and recovered.startswith(preview_prefix):
-        return recovered, file_stat
-    # Hermes counts the in-memory text before a Windows text-mode write expands
-    # every LF to CRLF. Try the LF form only when the file has no bare LF (every
-    # "\n" belongs to a "\r\n"); a mixed-ending file was not produced by that
-    # translation, so it keeps the marker instead. A file ending in a lone CR is
-    # also refused: it cannot be told apart from a translated file that lost its
-    # final LF byte, so recovering it could silently change the last character.
-    if (
-        "\r\n" in recovered
-        and recovered.count("\n") == recovered.count("\r\n")
-        and not recovered.endswith("\r")
-    ):
-        canonical = recovered.replace("\r\n", "\n")
-        if len(canonical) == expected_chars and canonical.startswith(preview_prefix):
-            return canonical, file_stat
-    return None
+    preview_prefix = _persisted_output_preview_prefix(text)
+    if not preview_prefix or not recovered.startswith(preview_prefix):
+        return None
+    return recovered, file_stat
 
 
-def recover_hermes_persisted_output(text: str | None, *, hermes_home=None) -> str | None:
-    recovered_with_stat = recover_hermes_persisted_output_with_file_stat(text, hermes_home=hermes_home)
+def recover_hermes_persisted_output(text: str | None) -> str | None:
+    recovered_with_stat = recover_hermes_persisted_output_with_file_stat(text)
     if recovered_with_stat is None:
         return None
     recovered, _file_stat = recovered_with_stat

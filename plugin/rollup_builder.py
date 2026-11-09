@@ -748,6 +748,22 @@ def mark_stale_for_published_summary(
             store.close()
 
 
+def mark_stale_for_deleted_nodes(dag: SummaryDAG, node_ids: Sequence[int]) -> int:
+    """Compatibility wrapper: mutation triggers own deletion invalidation."""
+    store: RollupStore | None = None
+    try:
+        store = RollupStore(dag.db_path)
+        before = store.has_pending_invalidations()
+        drained = store.drain_invalidations(event_limit=256, day_budget=256)
+        return drained if before else 0
+    except Exception:
+        logger.debug("LCM temporal rollup deletion staleness update failed", exc_info=True)
+        return 0
+    finally:
+        if store is not None:
+            store.close()
+
+
 def _rollup_route_available(config: LCMConfig, circuit_breaker: object | None) -> bool:
     """#669: the #628 route stop for rollups: the live route, then the rollup's own keys."""
     return all(

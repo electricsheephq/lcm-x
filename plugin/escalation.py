@@ -22,7 +22,7 @@ from typing import Callable, Optional
 
 from . import tokens as _token_module
 from .model_routing import apply_lcm_model_route, apply_lcm_reasoning_effort
-from .summary_attempt import SummaryAttempt, SummaryContentFilterError, SummaryTiming
+from .summary_attempt import SummaryAttempt, SummaryTiming
 # Re-exported for existing callers.
 from .summary_attempt import is_summary_content_filter_error, is_summary_context_length_error, is_summary_route_config_error  # noqa: F401
 from .summary_outcome import SummaryOutcomeFacts, SummaryOutcomeKind, classify_summary_outcome
@@ -442,40 +442,12 @@ class SummarySpendGuard:
             self._backoff_until = 0.0
 
 
-_THINK_OPEN_RE = re.compile(_THINK_BLOCK_RE.pattern.split(".*?")[0], re.IGNORECASE)
-
-
 def _strip_reasoning_blocks(text: str) -> str:
     """Remove <think>/<thinking>/<reasoning>/<thought>/<REASONING_SCRATCHPAD>
-    blocks from ``text``. Idempotent and safe on text without any tags.
-
-    Equal to ``_THINK_BLOCK_RE.sub("", text)`` in linear time (#2305 runs it under the ingest write lock).
-    The regex alone rescans to the end for every unclosed opening tag, which is quadratic. A tag spelling
-    that once found no closing tag finds none later either, so later openings with that spelling are skipped.
-    """
+    blocks from ``text``. Idempotent and safe on text without any tags."""
     if not text or "<" not in text:
         return text
-    out, last, at, unclosed = [], 0, 0, set()
-    while (opening := _THINK_OPEN_RE.search(text, at)) is not None:
-        # The backreference compares lowercased characters, so the lowercased tag names its closing tags.
-        tag = opening.group("tag").lower()
-        block = None if tag in unclosed else _THINK_BLOCK_RE.match(text, opening.start())
-        if block is None:
-            unclosed.add(tag)
-            at = opening.start() + 1
-            continue
-        out.append(text[last:opening.start()])
-        last = at = block.end()
-    if not out:
-        return text
-    out.append(text[last:])
-    return "".join(out)
-
-
-def stripped_replay_content(content):
-    """The replay transform for cursor-0 links (#2305): reasoning blocks removed; empty is never evidence."""
-    stripped = _strip_reasoning_blocks(content)
-    return stripped if stripped and stripped.strip() else None
+    return _THINK_BLOCK_RE.sub("", text)
 
 
 def _sanitize_reasoning_summary(text: str) -> str:
@@ -727,10 +699,8 @@ def _call_llm_for_summary(prompt: str, max_tokens: int,
             call_kwargs["timeout"] = timeout
         if _accepts_route_info(call_llm):  # #682: the host names the provider/model it used
             call_kwargs["route_info"] = route_info
-        with _host_stream_deadline_scope(getattr(_summary_call, "stream_deadline", None)):
+        with _host_stream_deadline_scope():
             response = call_llm(**call_kwargs)
-        if getattr(response.choices[0], "finish_reason", None) == "content_filter":
-            raise SummaryContentFilterError("content_filter")
         content = response.choices[0].message.content
         if not isinstance(content, str):
             content = str(content) if content else ""
@@ -1010,8 +980,9 @@ def _host_stream_deadline_seam() -> bool:
         getattr(host, "_current_aux_stream_deadline", None))
 
 
-def _host_stream_deadline_scope(deadline: float | None):
+def _host_stream_deadline_scope():
     """#605 D4: run the call inside min(host deadline, budget deadline) where the host exports the seam."""
+    deadline = getattr(_summary_call, "stream_deadline", None)
     if deadline is None:
         return contextlib.nullcontext()
     try:

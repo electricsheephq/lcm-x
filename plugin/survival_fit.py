@@ -63,11 +63,6 @@ _NOTICE_RE = re.compile(r"(?:\n\n)?\[LCM survival fit: \d+ earlier messages \(st
 _RECOVERY_THRESHOLD_SHARE = 0.95  # #608: a recovery attempt's request fits under this share of the threshold
 
 
-def survival_counter_store_key(store: Any) -> str:
-    """#719: one lost-write marker per database file: the identity the store fixed when it opened the file."""
-    return str(getattr(store, "db_identity", None) or store.db_path)
-
-
 def _carries_survival_notice(raw: Any, text: str) -> bool:
     """A system row the fit put its notice in: appended to string content, or as the last text part of
     list content (whose normalized form is JSON, where the separator is escaped)."""
@@ -491,7 +486,7 @@ class SurvivalFitMixin:
     _survival_projected_fields = staticmethod(projected_fields)
     _survival_bounded_call = staticmethod(bounded_call)
 
-    def _survival_projection_source(self, message: Dict[str, Any], role: str, content: str, *, store=None) -> Optional[Dict[str, Any]]:
+    def _survival_projection_source(self, message: Dict[str, Any], role: str, content: str) -> Optional[Dict[str, Any]]:
         """The stored row ``message`` is a projection of, else None. Self-verifying: each mark names a store
         id and the projection parameters; the row is loaded and its projection recomputed from its stored
         bytes, and the message must agree with it on every key the projection defines or the store keeps:
@@ -505,8 +500,7 @@ class SurvivalFitMixin:
         under that row's own stamp."""
         calls = message.get("tool_calls")
         matches = projection_mark_candidates(content, calls)
-        target = {} if store is None else dict(store=store)
-        store = getattr(self, "_store", None) if store is None else store
+        store = getattr(self, "_store", None)
         if store is None:
             return None
         for match in matches:
@@ -519,7 +513,7 @@ class SurvivalFitMixin:
                 row = None
             if not row or str(row.get("role") or "") != role:
                 continue
-            if not self._survival_stamp_matches(message, row, **target):
+            if not self._survival_stamp_matches(message, row):
                 continue
             fields = self._survival_projected_fields(row, int(tokens), int(head), int(tail))
             legacy_fields = self._survival_projected_fields(row, int(tokens), int(head), int(tail), legacy=True)
@@ -559,7 +553,7 @@ class SurvivalFitMixin:
             out.append((k, stored_row))
         return out
 
-    def _survival_stamp_matches(self, message: Dict[str, Any], row: Dict[str, Any], *, store=None) -> bool:
+    def _survival_stamp_matches(self, message: Dict[str, Any], row: Dict[str, Any]) -> bool:
         """No host stamp; or the source row's own: its observed_at or a recorded alias stamp (normalized as
         the identity anchor normalizes them); or any stamp when the source was stored unstamped (R6-1: a
         host that re-inserts the copy with a fresh stamp, Hermes 0.21.2; the byte rule still decides)."""
@@ -568,7 +562,7 @@ class SurvivalFitMixin:
         if stamp is None or observed is None or observed == stamp:
             return True
         try:
-            aliases = (self._store if store is None else store).get_message_relations([int(row["store_id"])], "alt_stamp")
+            aliases = self._store.get_message_relations([int(row["store_id"])], "alt_stamp")
         except Exception:
             return False
         return any(_normalize_observed_at(rel.get("observed_at")) == stamp for rel in aliases)
@@ -597,11 +591,6 @@ class SurvivalFitMixin:
         self._last_survival_fit = {"reason": reason, "dropped_rows": count, "notice": notice, "at": time.time(),
                                    **({"cause": cause} if cause else {}),
                                    "uncovered_rows": uncovered, "reached_budget": after <= budget}
-        # Per store: absent means no lost shortened write; False: lost drop-only fit; True: lost projection.
-        lost_by_store = getattr(self, "_survival_counter_write_lost", {})
-        self._survival_counter_write_lost = lost_by_store
-        store_key = survival_counter_store_key(self._store)
-        lost = lost_by_store.get(store_key)
 
         def counted(record):  # runs inside the store's write transaction: concurrent engines add, never overwrite
             record = record if isinstance(record, dict) else {}
@@ -615,11 +604,11 @@ class SurvivalFitMixin:
                     "last_reached_budget": after <= budget,
                     "last_uncovered_rows": uncovered,
                     "last_shortened": shortened,
-                    "ever_shortened": shortened or lost is not None or (record.get("ever_shortened", True) if record else False),
+                    "ever_shortened": shortened or (record.get("ever_shortened", True) if record else False),
                     "unreached_budget_count": int(record.get("unreached_budget_count") or 0) + (after > budget),
                     # fits that projected a row (#601); a record from before the key stays unknown (no key)
                     **({"projected_count": int(record.get("projected_count") or 0) + bool(projected)}
-                       if lost is not True and ("projected_count" in record or not record.get("count")) else {}),
+                       if "projected_count" in record or not record.get("count") else {}),
                     **({"uncovered_fit_count": int(record.get("uncovered_fit_count") or 0)
                        + bool(shortened and uncovered is not None and uncovered > 0)}
                        if "uncovered_fit_count" in record or not record.get("count") else {}),
@@ -630,15 +619,10 @@ class SurvivalFitMixin:
                     **({"count_lost": True} if record.get("count_lost") else {})}  # #618 item 14: kept
 
         try:
-            if self._store.update_metadata_json(SURVIVAL_FIT_COUNTER_KEY, counted) is None:
-                raise RuntimeError("survival-fit counter was not written")
+            self._store.update_metadata_json(SURVIVAL_FIT_COUNTER_KEY, counted)
         except Exception:
-            if shortened:
-                lost_by_store[store_key] = bool(projected) or lost is True
             logger.warning("LCM survival-fit counter write failed (projected=%s); /lcm doctor under-counts survival fits "
                            "for this store", projected, exc_info=True)
-        else:
-            lost_by_store.pop(store_key, None)
         key = str(self._conversation_id or self._session_id or "")
         if shortened and warn_user and key not in self._survival_fit_warned:
             self._survival_fit_warned.add(key)

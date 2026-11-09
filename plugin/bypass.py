@@ -171,23 +171,6 @@ class BypassMixin:
             return "stateless session"
         return "active session"
 
-    def _log_bypassed_ingest(self):
-        try:
-            session_id = self._bypass_lcm_session_id()
-            if self._thread_context_stateless():
-                reason = self._log_auxiliary_session_decision(session_id)
-            else:
-                decision = "ignored" if self._session_ignored else "stateless" if self._session_stateless else "bypass"
-                reason = "ignore_pattern" if self._session_ignored else (
-                    "bypass_lineage" if self._lcm_current_start_allows_bypass_lineage else "stateless_pattern"
-                ) if self._session_stateless else "no_session"
-                self._log_session_decision(session_id, decision, reason, platform=self._session_platform)
-            if reason not in ("subagent_start", "frame_marker"):
-                # A delegated child is stored by its own path, which logs its own outcome.
-                self._log_session_ingest_outcome(session_id, reason=reason)
-        except Exception:
-            pass  # Diagnostics cannot change bypass outcomes.
-
     def _bypass_lcm_session_id(self) -> str:
         binding = getattr(self._thread_context, "bypass_compression_binding", None)
         return binding[1] if binding is not None else self._thread_context_session_id() or self._session_id or "(unknown)"

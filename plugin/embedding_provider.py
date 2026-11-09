@@ -347,29 +347,6 @@ def _is_loopback_url(url: str) -> bool:
         return False
 
 
-# Providers that embed on this machine and never transmit text off-box. The raw-
-# text consent gate on the chunk corpus is waived for these (F1).
-_LOCAL_EMBEDDING_PROVIDERS = frozenset({"fastembed", "ollama"})
-
-
-def _is_local_embedding_provider(provider_name: str) -> bool:
-    return str(provider_name or "").strip().lower() in _LOCAL_EMBEDDING_PROVIDERS
-
-
-def _automatic_chunks_allowed(config: Any) -> bool:
-    provider = str(getattr(config, "embedding_provider", "") or "").strip().lower()
-    provider = embedding_provider_id(provider)
-    if not _is_local_embedding_provider(provider):
-        return False
-    if provider != "ollama":
-        return True  # FastEmbed runs in this process
-    # Read the base URL exactly as resolve_provider/OllamaProvider do.
-    base_url = str(
-        getattr(config, "ollama_base_url", "http://localhost:11434")
-    ).strip().rstrip("/") or "http://localhost:11434"
-    return _is_loopback_url(base_url)
-
-
 def _default_http_transport(
     *,
     url: str,
