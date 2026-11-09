@@ -631,7 +631,7 @@ committed row, and store growth (the growth gate above).
   container runtime is available, this may be a clean environment (a scratch `HOME` and Claude Code
   config directory) on a real host, named as such in the record, with the Linux distribution and
   version. `scripts/claude_code_install_record_linux.sh` takes the native Linux record from a scratch folder
-  with no `CLAUDE.md` in any parent folder (two cases: a
+  with no instruction file (`CLAUDE.md` or `AGENTS.md`) in any parent folder (two cases: a
   Python 3.11+ on `PATH`, and only Python 3.10 on `PATH` plus the one documented `uv venv` step). A
   native record does not prove a fresh image's package state.
 - **Recorded:** whether capture writes rows or records `runtime_missing`, and how many manual steps
