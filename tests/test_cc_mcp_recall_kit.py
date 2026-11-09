@@ -62,8 +62,8 @@ def synthetic():
     manifest = {'sessions': {s['label']: {'session_id': 's1', 'audit': dict(rc=0, ok=True, verified=True)} for s in k.C['sessions']}}
     evidence = {s['label']: {'compact_boundaries': 1, 'subagent_transcripts': 2, 'saved_outputs': 4} for s in k.C['sessions']}
     d = {'tokens': [{'id': f['id'], 'pass': True} for f in k.tokens()], 'evidence': evidence, 'plant_failed': []}
-    t = {**copy.deepcopy(d), 'calls': [{'tool': 'lcm_grep', 'ms': 1}]}
-    te = {'tokens': [r for r in copy.deepcopy(d['tokens']) if not r['id'].endswith('-old')]}
+    t = {**copy.deepcopy(d), 'calls': [{'tool': 'lcm_grep', 'ms': 1}], 'empty': False}
+    te = {'tokens': [r for r in copy.deepcopy(d['tokens']) if not r['id'].endswith('-old')], 'empty': True}
     a = {'answers': [{'id': q['id'], 'answer': q['gold'] or 'NOT FOUND', 'rc': 0, 'is_error': False, 'reader_not_connected': False, 'wall_s': .1, 'tool_calls': {'mcp__lcm-x__lcm_grep': 1}} for q in k.Q]}
     ae = {'answers': [{**r, 'answer': 'NOT FOUND'} for r in a['answers'][:40]]}
     return [manifest, d, t, te, a, None, ae]
@@ -100,6 +100,18 @@ def test_score():
         assert k.score(*inputs)['verdict'] == 'VOID'
     inputs = synthetic()
     inputs[1]['plant_failed'] = ['F01']
+    assert k.score(*inputs)['verdict'] == 'VOID'
+    # Bot review round 2: an empty-control receipt cannot stand in for the measured T arm; a saved-output fact that
+    # sits in no saved output does not count as covered; T must measure the asset that captured.
+    inputs = synthetic()
+    inputs[2] = copy.deepcopy(inputs[3])
+    inputs[2]['calls'] = [{'tool': 'lcm_grep', 'ms': 1}]
+    assert k.score(*inputs)['verdict'] == 'VOID'
+    inputs = synthetic()
+    inputs[1]['tokens'][28]['in_saved_output'] = False
+    assert k.score(*inputs)['verdict'] == 'VOID'
+    inputs = synthetic()
+    inputs[0]['bundle'], inputs[2]['bundle'] = {'core_commit': 'a'}, {'core_commit': 'b'}
     assert k.score(*inputs)['verdict'] == 'VOID'
     # A second run outside the 34-38 window changes nothing, even when it errors or misses.
     for broken in ({'is_error': True, 'rc': 1}, {'answer': 'NOT FOUND'}):

@@ -95,7 +95,8 @@ def arm_d(home, manifest):
                     payloads = [(None, content or "")] + [(ref, (cc.load_externalized_payload(ref, config=None, hermes_home=str(store_home)) or {}).get("content", "")) for ref in cc.extract_externalized_refs(content or "")]
                     matches.extend({"store_id": ident, "session_id": session, "role": role, "sha256": hashlib.sha256(text.encode()).hexdigest(), "externalized_ref": ref} for ref, text in payloads if role in f["roles"] and f["token"] in text)
             records.append({"id": f["id"], "token": f["token"], "sessions": sessions, "matches": matches, "pass": bool(matches),
-                            "planted": planted(home, sid, f["token"])})
+                            "planted": planted(home, sid, f["token"]),
+                            **({"in_saved_output": saved_holds(home, sid, f["token"])} if f["class"] == "tool_result_saved" else {})})
     return {"tokens": records, "plant_failed": [r["id"] for r in records if not r["planted"]], "evidence": evidence(home, manifest), "store_bytes": sum(p.stat().st_size for p in store_home.rglob("*") if p.is_file()), "host_load": os.getloadavg()}
 
 def session_files(home, sid):
@@ -104,6 +105,10 @@ def session_files(home, sid):
     for folder in (home / ".claude/projects").glob(f"*/{sid}"):
         files += [p for p in folder.rglob("*") if p.is_file()]
     return files
+
+def saved_holds(home, sid, token):
+    """Whether one of the session's own saved outputs (tool-results/) holds the value."""
+    return any(p.parent.name == "tool-results" and token in p.read_text(errors="replace") for p in session_files(home, sid))
 
 def planted(home, sid, token):
     """Whether the planted value reached the session's own files at all (a model slip is not a capture finding)."""
@@ -216,7 +221,7 @@ def arm_t(plugin, home, direct, empty=False):
             rows.append(row)
     finally:
         mcp.close()
-    return {"tokens": rows, "calls": mcp.calls, "empty": empty}
+    return {"tokens": rows, "calls": mcp.calls, "empty": empty, "bundle": read(plugin / "bundle.json") if (plugin / "bundle.json").is_file() else None}
 
 def claude(command, prompt, args, home, cwd, env=None):
     start, result, init, calls = time.monotonic(), {}, None, {}
@@ -260,6 +265,8 @@ def quiesce(home):
 
 def build(args):
     project, manifest = args.home / "proj/recall-fixture", {"sessions": {}, "stop": False}
+    manifest["bundle"] = read(args.plugin / "bundle.json") if (args.plugin / "bundle.json").is_file() else None
+    manifest["claude_version"] = subprocess.run([args.claude, "--version"], capture_output=True, text=True, env={**os.environ, "KIT_HOME": str(args.home)}).stdout.strip()
     project.mkdir(parents=True, exist_ok=False)
     for name, spec in C["files"].items():
         path = project / name
@@ -339,6 +346,7 @@ def coverage(d):
             key = (f["session"], SHAPES[f["class"]])
             need[key] = need.get(key, 0) + 1 if f["class"] == "tool_result_saved" else 1
     missing = [f"{label}:{shape}" for (label, shape), n in need.items() if (evidence.get(label) or {}).get(shape, 0) < n]
+    missing += [r["id"] + ":not_in_saved_output" for r in d.get("tokens", []) if r.get("in_saved_output") is False]
     return {"ok": bool(evidence) and not missing and not d.get("plant_failed"), "missing": missing, "plant_failed": d.get("plant_failed", [])}
 
 def score(manifest, d, t, te, a, a2=None, ae=None, classifications=None):
@@ -366,6 +374,10 @@ def score(manifest, d, t, te, a, a2=None, ae=None, classifications=None):
         latency[name] = {"p50_ms": values[math.ceil(len(values) * .5) - 1], "p90_ms": values[math.ceil(len(values) * .9) - 1], "max_ms": max(values)}
     tripwire = any(v["p90_ms"] > 1000 or v["max_ms"] > 5000 for v in latency.values())
     cover = coverage(d)
+    if t.get("empty") is not False or te.get("empty") is not True:  # a control receipt can never stand in for the measured arm
+        cover = {**cover, "ok": False, "missing": cover["missing"] + ["t_receipt_mode"]}
+    if manifest.get("bundle") is not None and t.get("bundle") != manifest.get("bundle"):  # T must measure the asset that captured
+        cover = {**cover, "ok": False, "missing": cover["missing"] + ["asset_mismatch"]}
     bars = {"empty_control": empty_ok, "coverage": cover["ok"], "capture": not manifest.get("stop") and set(manifest["sessions"]) == {s["label"] for s in C["sessions"]} and all(s.get("audit", {}).get("rc") == 0 and s["audit"].get("ok") and s["audit"].get("verified") for s in manifest["sessions"].values()), "D": all(dm.get(f["id"], False) for f in tokens() if gated(f)), "T": all(tm.get(f["id"], False) for f in tokens() if gated(f)), "A": min(positives) >= 36, "false_recall": max(fabricated) <= 1, "answers_complete": all(valid(run, Q) for run in runs)}
     second = window and a2 is None
     complete = bars.pop("answers_complete")
@@ -411,6 +423,8 @@ def main():
     else:
         result = build(args) if args.cmd == "build-corpus" else arm_d(args.home, read(args.manifest)) if args.cmd == "arm-d" else arm_t(args.plugin, args.home, read(args.d), args.empty) if args.cmd == "arm-t" else arm_a(args) if args.cmd == "arm-a" else empty_store(args.home)
     write((args.out if hasattr(args, "out") else args.home) / ("RESULT-MANIFEST.json" if args.cmd == "score" else "corpus-manifest.json" if args.cmd == "build-corpus" else args.cmd + ".json"), result)
+    if args.cmd == "build-corpus" and result.get("stop"):
+        sys.exit(3)  # the manifest is kept; callers must not run the arms on a stopped corpus
 
 if __name__ == "__main__":
     main()
