@@ -29,6 +29,12 @@ explicit opt-in metered path and needs `--max-spend` and `--spend-ledger`. Defau
 `claude:claude-opus-5-5` on a seeded 10% sample of question ids (`--agreement-judge none` disables),
 4 workers. `run.sh` loads the OpenRouter key only for an OpenRouter spec.
 
+`--codex-home /absolute/existing/DIR` runs Codex readers and judges on a leased
+home without creating an authentication symlink. It requires `--workers 1` and
+holds an exclusive, non-blocking `holder.lock` in that home for the command;
+a busy home is refused before any model call. Unset, the existing isolated home
+and plan-login symlink behavior is unchanged.
+
 Reader and judge transport failures get at most three attempts, waiting 5 s then
 20 s. Retries reuse the frozen messages; single delivery retrieves once, retaining
 the same trace, labels and evidence digest even if every call fails. Rows with a

@@ -2,6 +2,7 @@
 import argparse
 import contextlib
 import copy
+import fcntl
 import json
 import math
 import os
@@ -22,7 +23,7 @@ from . import datasets, delivery, judges, models
 from .common import commit, digest_file, load_lcm, quiet, sha, utc, write_json
 from .models import (AGENTIC_TOOL_CAP, CLAUDE_AGREEMENT_JUDGE, CODEX_DEFAULT_JUDGE, CODEX_DEFAULT_READER,
                      CODEX_DISABLED, GLM_HOST, JUDGE_MAX_TOKENS, READER_MAX_TOKENS, READERS, REASONING, Backends, BudgetStopped,
-                     OpenRouter, Quota, Spend, ToolViolation, glm_key, harness, parse_spec)
+                     Codex, OpenRouter, Quota, Spend, ToolViolation, glm_key, harness, parse_spec)
 from .score import delivery_identity, percentile, score
 from .stores import Stores
 
@@ -56,6 +57,7 @@ def parser():
     p.add_argument("--agreement-fraction", type=float, default=0.1)
     p.add_argument("--agreement-seed", type=int, default=1189)
     p.add_argument("--workers", type=int, default=4, help="concurrent questions per backend")
+    p.add_argument("--codex-home", type=Path, help="existing absolute leased Codex home (requires --workers 1)")
     p.add_argument("--quota-stop", type=float, default=95.0, help="Codex weekly used percent that stops new questions")
     p.add_argument("--quota-ledger", type=Path, help="shared quota state (default: <output>/quota.json)")
     p.add_argument("--max-spend", type=float)
@@ -202,7 +204,29 @@ def canary(args, client, dataset_sha, q):
         raise RuntimeError("canary_failed")
 
 
+@contextlib.contextmanager
+def codex_home_lock(home):
+    with os.fdopen(os.open(home / "holder.lock", os.O_CREAT | os.O_RDWR, 0o600), "r+") as holder:
+        try:
+            fcntl.flock(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise RuntimeError("codex home busy") from None
+        yield
+
+
 def execute(args):
+    home = getattr(args, "codex_home", None)
+    if home is not None:
+        if not home.is_absolute() or not home.is_dir():
+            raise ValueError("--codex-home must name an existing absolute directory")
+        if args.workers != 1:
+            raise ValueError("--codex-home requires --workers 1")
+    lease = codex_home_lock(home) if home is not None and args.command in ("canary", "answer", "judge") else contextlib.nullcontext()
+    with lease:
+        _execute(args)
+
+
+def _execute(args):
     if not 1 <= args.workers <= 64:
         raise ValueError("invalid worker count")
     if args.command in ("answer", "canary"):
@@ -248,7 +272,10 @@ def execute(args):
             raise ValueError("OpenRouter is opt-in: pass --max-spend and --spend-ledger")
         openrouter = OpenRouter(Spend(args.spend_ledger, args.max_spend))
     quota = Quota(args.quota_ledger or args.output / "quota.json", args.quota_stop)
-    client = Backends(args.output, quota, specs(args), openrouter)
+    backend_options = {}
+    if getattr(args, "codex_home", None) is not None and any(parse_spec(s)[0] == "codex" for s in specs(args)):
+        backend_options["codex"] = Codex(args.output, quota, codex_home=args.codex_home)
+    client = Backends(args.output, quota, specs(args), openrouter, **backend_options)
     try:
         if args.command == "canary":
             canary(args, client, dataset_sha, questions[0])
@@ -343,6 +370,8 @@ def run(args, client, questions, dataset_sha, ids_sha, excluded, store):
                            ("lcmx_commit", commit(args.lcmx_repo))):
             if manifest.get(key) != value:
                 raise ValueError("judging run identity mismatch")
+    home_manifest = manifest.get("harness", manifest)
+    home_manifest["codex_home_mode"] = "leased" if getattr(args, "codex_home", None) is not None else "symlink"
     manifest.setdefault("endpoint_hosts", {}).update({s: GLM_HOST for s in specs(args) if parse_spec(s)[0] == "glm"})
     timing = {"active_s": 0.0}
     if args.command == "answer":
