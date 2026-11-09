@@ -484,3 +484,40 @@ def test_reader_payload_open_portable_fallback(archive, monkeypatch, unsupported
         result = archive.grep()
     assert [hit["ref"] for hit in payload_hits(result)] == [ref]
     assert "partial" not in result
+
+
+def test_explicit_refs_keep_earlier_matches_when_the_budget_runs_out(archive, monkeypatch):
+    # Bot review of #2528: a budget cut inside an explicit ref is byte_cap, not an unreadable ref.
+    first, _ = archive.save(session="saved", name="20261110_120002_first.json")
+    second, _ = archive.save(session="saved", name="20261110_120001_second.json",
+                             content="padding " * 30000 + "\n" + TOKEN)
+    spent = []
+    original = tools._reader_payload_search
+    def measured(*args, **kwargs):
+        result = original(*args, **kwargs)
+        spent.append(result["bytes_read"])
+        return result
+    monkeypatch.setattr(tools, "_reader_payload_search", measured)
+    archive.grep(content_scope="externalized", externalized_refs=[first])
+    monkeypatch.setattr(tools, "READER_PAYLOAD_BYTE_CAP", spent[0] + 64)  # the first fits; the second is cut
+    result = archive.grep(content_scope="externalized", externalized_refs=[first, second])
+    assert "error" not in result
+    assert [hit["ref"] for hit in payload_hits(result)] == [first]
+    assert result["partial"]["reasons"] == ["byte_cap"]
+
+
+def test_any_term_retry_with_explicit_refs_is_not_an_error(archive):
+    ref, _ = archive.save()
+    result = archive.call(query="absentword otherabsent", content_scope="both", externalized_refs=[ref])
+    assert "error" not in result and result["retried"] == "any_term"
+
+
+def test_reader_schema_advertises_its_own_content_scope(archive):
+    from hermes_lcm import schemas
+    grep = next(tool for tool in mcp_reader.tool_definitions(set()) if tool["name"] == "lcm_grep")
+    scope = grep["inputSchema"]["properties"]["content_scope"]
+    assert "default" not in scope and "session_scope 'all' or 'session'" in scope["description"]
+    assert "active session" not in grep["inputSchema"]["properties"]["externalized_refs"]["description"]
+    # Hermes' own schema object is unchanged.
+    assert schemas.LCM_GREP["parameters"]["properties"]["content_scope"]["default"] == "history"
+    assert "session_scope='current' only" in schemas.LCM_GREP["parameters"]["properties"]["content_scope"]["description"]

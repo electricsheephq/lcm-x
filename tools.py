@@ -1646,6 +1646,8 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
                     return json.dumps({"error": f"Externalized ref is a symlink: {ref}"})
                 continue
             if status != "ok":
+                if reader_mode and payload_bytes >= READER_PAYLOAD_BYTE_CAP:
+                    break  # the budget ran out inside this file: byte_cap is recorded and earlier matches stand
                 scan_counts["rejected_session_mismatch" if status == "out_of_scope" else "rejected_invalid_or_unreadable"] += 1
                 if externalized_refs is not None:
                     return json.dumps({"error": f"Externalized ref is not readable{' or not owned by the requested scope' if reader_mode else ''}: {ref}"})
@@ -2657,6 +2659,7 @@ def lcm_grep(args: Dict[str, Any], **kwargs) -> str:
                           "_agent_operators": True, "_allow_operators": True, "_grep_any_term": True}
             if _reader_any_session(engine):
                 retry_args["content_scope"] = "history"  # one payload budget per call; OR is history syntax
+                retry_args.pop("externalized_refs", None)  # payload-only: refused with content_scope=history
                 retry_args["_reader_default_payloads"] = False
             retried_payload = json.loads(_lcm_grep_full_text(retry_args, **kwargs))
             if _reader_any_session(engine):

@@ -56,9 +56,25 @@ logger = logging.getLogger(__name__)
 SERVER_NAME = "lcm-x"
 # Newest first; an unknown client version is answered with the newest we speak.
 PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
+def _reader_grep_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """lcm_grep as the reader serves it (#2225): no history default, payload search in any session scope."""
+    schema = copy.deepcopy(schema)
+    properties = schema["parameters"]["properties"]
+    properties["content_scope"].pop("default", None)
+    properties["content_scope"]["description"] = (
+        "Content stores to search. Omitted (the reader's default): raw messages and summaries first, then, when "
+        "they return fewer than limit, saved tool outputs (externalized payloads) of this store. 'history': raw "
+        "messages and summaries only. 'externalized': saved tool outputs only. 'both': both. Saved-output search "
+        "works with session_scope 'all' or 'session'.")
+    properties["externalized_refs"]["description"] = (
+        "Optional saved-output ref filenames to search. Valid only with content_scope='externalized' or 'both'. "
+        "Each ref must be a payload of this store in the requested session scope.")
+    return schema
+
+
 READER_TOOLS = {
     "lcm_recall": schemas.LCM_RECALL,
-    "lcm_grep": schemas.LCM_GREP,
+    "lcm_grep": _reader_grep_schema(schemas.LCM_GREP),
     "lcm_expand": schemas.LCM_EXPAND,
     "lcm_load_session": schemas.LCM_LOAD_SESSION,
     "lcm_describe": schemas.LCM_DESCRIBE,
