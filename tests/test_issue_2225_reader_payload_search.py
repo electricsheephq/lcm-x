@@ -469,16 +469,18 @@ def test_missing_payload_directory_skips_containment_quietly(archive, monkeypatc
 def test_reader_payload_open_portable_fallback(archive, monkeypatch, unsupported):
     ref, _ = archive.save()
     original = tools.os.open
-    if unsupported == "flags":
-        monkeypatch.delattr(tools.os, "O_DIRECTORY")
-        monkeypatch.delattr(tools.os, "O_NOFOLLOW")
-    else:
-        monkeypatch.setattr(tools.os, "supports_dir_fd", set())
     def portable_open(path, flags, *args, **kwargs):
         if unsupported == "dir_fd":
             assert kwargs.get("dir_fd") is None
         return original(path, flags, *args, **kwargs)
-    monkeypatch.setattr(tools.os, "open", portable_open)
-    result = archive.grep()
+    # tools.os is the process-wide os module: undo the patches before any teardown (rmtree uses them).
+    with monkeypatch.context() as patch:
+        if unsupported == "flags":
+            patch.delattr(tools.os, "O_DIRECTORY")
+            patch.delattr(tools.os, "O_NOFOLLOW")
+        else:
+            patch.setattr(tools.os, "supports_dir_fd", set())
+        patch.setattr(tools.os, "open", portable_open)
+        result = archive.grep()
     assert [hit["ref"] for hit in payload_hits(result)] == [ref]
     assert "partial" not in result
