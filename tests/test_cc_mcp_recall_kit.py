@@ -60,7 +60,8 @@ def test_judge():
 
 def synthetic():
     manifest = {'sessions': {s['label']: {'session_id': 's1', 'audit': dict(rc=0, ok=True, verified=True)} for s in k.C['sessions']}}
-    d = {'tokens': [{'id': f['id'], 'pass': True} for f in k.tokens()]}
+    evidence = {s['label']: {'compact_boundaries': 1, 'subagent_transcripts': 2, 'saved_outputs': 4} for s in k.C['sessions']}
+    d = {'tokens': [{'id': f['id'], 'pass': True} for f in k.tokens()], 'evidence': evidence, 'plant_failed': []}
     t = {**copy.deepcopy(d), 'calls': [{'tool': 'lcm_grep', 'ms': 1}]}
     te = {'tokens': [r for r in copy.deepcopy(d['tokens']) if not r['id'].endswith('-old')]}
     a = {'answers': [{'id': q['id'], 'answer': q['gold'] or 'NOT FOUND', 'rc': 0, 'is_error': False, 'reader_not_connected': False, 'wall_s': .1, 'tool_calls': {'mcp__lcm-x__lcm_grep': 1}} for q in k.Q]}
@@ -90,6 +91,31 @@ def test_score():
     inputs = synthetic()
     inputs[6]['answers'][0]['reader_not_connected'] = True
     assert k.score(*inputs)['verdict'] == 'VOID'
+    # Bot review round 1 (#2517).
+    # A corpus whose advertised shapes did not run (no compaction, no saved output) or whose value never reached its
+    # session cannot pass.
+    for label, shape in [(k.C['facts'][32]['session'], 'compact_boundaries'), (k.C['facts'][28]['session'], 'saved_outputs')]:
+        inputs = synthetic()
+        inputs[1]['evidence'][label][shape] = 0
+        assert k.score(*inputs)['verdict'] == 'VOID'
+    inputs = synthetic()
+    inputs[1]['plant_failed'] = ['F01']
+    assert k.score(*inputs)['verdict'] == 'VOID'
+    # A second run outside the 34-38 window changes nothing, even when it errors or misses.
+    for broken in ({'is_error': True, 'rc': 1}, {'answer': 'NOT FOUND'}):
+        inputs = synthetic()
+        inputs[5] = synthetic()[4]
+        inputs[5]['answers'][0].update(broken)
+        assert k.score(*inputs)['verdict'] == 'PASS'
+    # A T-pass/A-fail row needs a classification; a supplied one clears it, and so does a latency note.
+    inputs = synthetic()
+    inputs[4]['answers'][0]['answer'] = 'NOT FOUND'
+    assert k.score(*inputs)['verdict'] == 'CLASSIFICATION REQUIRED'
+    assert k.score(*inputs, classifications={'Q01': 'query wording'})['verdict'] == 'PASS'
+    inputs = synthetic()
+    inputs[2]['calls'] = [{'tool': 'lcm_grep', 'ms': 6000}]
+    assert k.score(*inputs)['verdict'] == 'CLASSIFICATION REQUIRED'
+    assert k.score(*inputs, classifications={'latency': 'shared-machine stall'})['verdict'] == 'PASS'
 
 def test_tiny_store(tmp_path):
     cc, home, sid = k.package(), tmp_path / 'home', 's1'
@@ -121,4 +147,5 @@ def test_tiny_store(tmp_path):
     command = [sys.executable, str(k.HERE / 'kit.py'), 'score', '--out', str(tmp_path / 'result')]
     command += [arg for name in ('corpus-manifest', 'd', 't', 't-empty', 'a', 'a-empty') for arg in ('--' + name, str(tmp_path / (name + '.json')))]
     subprocess.run(command, check=True)
-    assert k.read(tmp_path / 'result/RESULT-MANIFEST.json')['verdict'] == 'STOP'
+    # One planted fact and no corpus files: the run did not exercise what it claims, so it is void, not a result.
+    assert k.read(tmp_path / 'result/RESULT-MANIFEST.json')['verdict'] == 'VOID'

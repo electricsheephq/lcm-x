@@ -85,7 +85,10 @@ def arm_d(home, manifest):
     with sqlite3.connect((store_home / "lcm.db").as_uri() + "?mode=ro", uri=True) as db:
         for f in tokens():
             sid = manifest["sessions"][f["session"]]["session_id"]
-            sessions = [sid] + ([r[0] for r in db.execute("SELECT child_session_id FROM session_lineage WHERE parent_session_id=? AND child_role='subagent'", (sid,))] if f["class"] == "subagent" and db.execute("SELECT 1 FROM sqlite_master WHERE name='session_lineage'").fetchone() else [])
+            # A subagent fact counts only in the recorded child sessions: the parent's delegated result must not
+            # stand in for a subagent transcript that was never captured.
+            children = [r[0] for r in db.execute("SELECT child_session_id FROM session_lineage WHERE parent_session_id=? AND child_role='subagent'", (sid,))] if f["class"] == "subagent" and db.execute("SELECT 1 FROM sqlite_master WHERE name='session_lineage'").fetchone() else []
+            sessions = children if f["class"] == "subagent" else [sid]
             matches = []
             for session in sessions:
                 for ident, role, content in db.execute("SELECT store_id, role, content FROM messages WHERE session_id=?", (session,)):
@@ -320,8 +323,30 @@ def arm_a(args):
         rows = [r for r in pool.map(one, [q for q in Q if not args.only or q["kind"] == args.only]) if r]
     return {"answers": rows, **({"stop_reason": "limit"} if stopped.is_set() else {})}
 
-def score(manifest, d, t, te, a, a2=None, ae=None):
+def first_positives(run):
+    answers = {r["id"]: r for r in run["answers"]}
+    return sum(judge(answers.get(q["id"], {}).get("answer", ""), q, bool(answers.get(q["id"], {}).get("is_error", True)))["correct"]
+               for q in Q if q["kind"] == "positive")
+
+SHAPES = {"pre_compact": "compact_boundaries", "subagent": "subagent_transcripts", "tool_result_saved": "saved_outputs"}
+
+def coverage(d):
+    """The corpus exercised every path it claims: each value reached its session, and each class's shape ran
+    (a compaction, a subagent transcript, one saved output per saved-output fact) in that fact's session."""
+    evidence, need = d.get("evidence") or {}, {}
+    for f in C["facts"]:
+        if f["class"] in SHAPES:
+            key = (f["session"], SHAPES[f["class"]])
+            need[key] = need.get(key, 0) + 1 if f["class"] == "tool_result_saved" else 1
+    missing = [f"{label}:{shape}" for (label, shape), n in need.items() if (evidence.get(label) or {}).get(shape, 0) < n]
+    return {"ok": bool(evidence) and not missing and not d.get("plant_failed"), "missing": missing, "plant_failed": d.get("plant_failed", [])}
+
+def score(manifest, d, t, te, a, a2=None, ae=None, classifications=None):
     dm, tm = ({r["id"]: r["pass"] for r in arm["tokens"]} for arm in (d, t))
+    classifications = classifications or {}
+    window = 34 <= first_positives(a) <= 38
+    if a2 is not None and not window:  # BARS v1: a second run decides only inside the window; otherwise ignore it fully
+        a2 = None
     runs, rows = [a] + ([a2] if a2 else []), []
     for q in Q:
         ids = [q["fact"]] if q["kind"] == "positive" else [q["pair"] + "-old", q["pair"] + "-new"] if q["kind"] == "latest" else []
@@ -329,7 +354,7 @@ def score(manifest, d, t, te, a, a2=None, ae=None):
         verdicts = [judge(r.get("answer", ""), q, r.get("is_error", False) or r.get("reader_not_connected", False) or r.get("rc", 0) != 0) for r in answers]
         rows.append({"id": q["id"], "kind": q["kind"], "class": next((f["class"] for f in C["facts"] if f["id"] == q.get("fact")), q["kind"]), "D": bool(ids) and all(dm.get(i, False) for i in ids), "T": bool(ids) and all(tm.get(i, False) for i in ids), "A": verdicts, "tool_calls": [r.get("tool_calls", {}) for r in answers], "wall_s": [r.get("wall_s") for r in answers]})
         if rows[-1]["T"] and not all(v["correct"] for v in verdicts):
-            rows[-1]["classification"] = ""
+            rows[-1]["classification"] = str(classifications.get(q["id"], ""))
     positives = [sum(r["A"][i]["correct"] for r in rows if r["kind"] == "positive") for i in range(len(runs))]
     fabricated = [sum(r["A"][i].get("fabricated", False) for r in rows if r["kind"] == "negative") for i in range(len(runs))]
     def valid(run, qs):
@@ -340,19 +365,19 @@ def score(manifest, d, t, te, a, a2=None, ae=None):
         values = sorted(c["ms"] for c in t["calls"] if c["tool"] == name)
         latency[name] = {"p50_ms": values[math.ceil(len(values) * .5) - 1], "p90_ms": values[math.ceil(len(values) * .9) - 1], "max_ms": max(values)}
     tripwire = any(v["p90_ms"] > 1000 or v["max_ms"] > 5000 for v in latency.values())
-    window = 34 <= positives[0] <= 38
-    if a2 is not None and not window:  # BARS v1: a second run decides only inside the window
-        positives, fabricated = positives[:1], fabricated[:1]
-    bars = {"empty_control": empty_ok, "capture": not manifest.get("stop") and set(manifest["sessions"]) == {s["label"] for s in C["sessions"]} and all(s.get("audit", {}).get("rc") == 0 and s["audit"].get("ok") and s["audit"].get("verified") for s in manifest["sessions"].values()), "D": all(dm.get(f["id"], False) for f in tokens() if gated(f)), "T": all(tm.get(f["id"], False) for f in tokens() if gated(f)), "A": min(positives) >= 36, "false_recall": max(fabricated) <= 1, "answers_complete": all(valid(run, Q) for run in runs)}
+    cover = coverage(d)
+    bars = {"empty_control": empty_ok, "coverage": cover["ok"], "capture": not manifest.get("stop") and set(manifest["sessions"]) == {s["label"] for s in C["sessions"]} and all(s.get("audit", {}).get("rc") == 0 and s["audit"].get("ok") and s["audit"].get("verified") for s in manifest["sessions"].values()), "D": all(dm.get(f["id"], False) for f in tokens() if gated(f)), "T": all(tm.get(f["id"], False) for f in tokens() if gated(f)), "A": min(positives) >= 36, "false_recall": max(fabricated) <= 1, "answers_complete": all(valid(run, Q) for run in runs)}
     second = window and a2 is None
     complete = bars.pop("answers_complete")
     other = all(v for k, v in bars.items() if k not in ("A",))
-    verdict = ("VOID" if not empty_ok else "STOP" if not bars["capture"] or not bars["D"] else "FAIL" if not bars["T"]
+    latency_note = str(classifications.get("latency", ""))
+    unclassified = [r["id"] for r in rows if r["kind"] == "positive" and "classification" in r and not r["classification"].strip()]
+    verdict = ("VOID" if not empty_ok or not cover["ok"] else "STOP" if not bars["capture"] or not bars["D"] else "FAIL" if not bars["T"]
                else "INCOMPLETE" if not complete else "FAIL" if not other
                else "SECOND RUN REQUIRED" if second else "FAIL" if not bars["A"]
-               else "CLASSIFICATION REQUIRED" if tripwire or any("classification" in r and r["kind"] == "positive" for r in rows) else "PASS")
+               else "CLASSIFICATION REQUIRED" if (tripwire and not latency_note.strip()) or unclassified else "PASS")
     old = {f["id"]: {"D": dm.get(f["id"], False), "T": tm.get(f["id"], False)} for f in tokens() if not gated(f)}
-    return {"verdict": verdict, "bars": {**bars, "answers_complete": complete}, "old_values_ungated": old, "positives": positives, "fabricated": fabricated, "second_run_required": second, "rows": rows, "latency": latency, "tripwire": tripwire, "latency_classification": "" if tripwire else "not triggered", "store_bytes": d.get("store_bytes"), "host_load": d.get("host_load")}
+    return {"verdict": verdict, "bars": {**bars, "answers_complete": complete}, "old_values_ungated": old, "positives": positives, "fabricated": fabricated, "second_run_required": second, "rows": rows, "latency": latency, "tripwire": tripwire, "latency_classification": latency_note if tripwire else "not triggered", "coverage": cover, "unclassified": unclassified, "store_bytes": d.get("store_bytes"), "host_load": d.get("host_load")}
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -370,16 +395,17 @@ def main():
         if name == "score":
             sub.add_argument("--a2", type=Path)
             sub.add_argument("--a-empty", type=Path)
+            sub.add_argument("--classifications", type=Path, help="JSON: question id -> classification text, and 'latency' -> text")
     args = parser.parse_args()
     if args.cmd == "score":
         inputs = args.out / "inputs"
-        for key in ("corpus_manifest", "d", "t", "t_empty", "a", "a2", "a_empty"):
+        for key in ("corpus_manifest", "d", "t", "t_empty", "a", "a2", "a_empty", "classifications"):
             source = getattr(args, key)
             if source:
                 write(inputs / (key + ".json"), read(source))
         write(inputs / "corpus.json", C)
         write(inputs / "questions.json", Q)
-        result = score(*[read(inputs / (k + ".json")) for k in ("corpus_manifest", "d", "t", "t_empty", "a")], read(inputs / "a2.json") if args.a2 else None, read(inputs / "a_empty.json") if args.a_empty else None)
+        result = score(*[read(inputs / (k + ".json")) for k in ("corpus_manifest", "d", "t", "t_empty", "a")], read(inputs / "a2.json") if args.a2 else None, read(inputs / "a_empty.json") if args.a_empty else None, read(inputs / "classifications.json") if args.classifications else None)
         result.update(code={"sha": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()}, keep=["RESULT.md", "RESULT-MANIFEST.json", "inputs/"], headline={"metric": "positive_recall", "value": min(result["positives"]), "n": 40, "baseline": None}, published={"T1": None, "T2": None})
         (args.out / "RESULT.md").write_text(f'# Recall over MCP: {result["verdict"]}\n\nBars: {json.dumps(result["bars"])}\n\nPositive counts: {result["positives"]}; fabricated: {result["fabricated"]}.\n\nLatency per tool: {json.dumps(result["latency"])}; tripwire: {result["tripwire"]}.\n\n| id | kind | class | D | T | A verdict | A tool calls | wall s | classification |\n|---|---|---|---|---|---|---|---|---|\n' + '\n'.join('| ' + ' | '.join(str(r[k]) for k in ("id", "kind", "class", "D", "T")) + ' | ' + ', '.join(v["verdict"] for v in r["A"]) + f' | {r["tool_calls"]} | {r["wall_s"]} | {r.get("classification", "")} |' for r in result["rows"]) + '\n\nNot proven: synthetic facts, one model, one small store; no real owner history, large-store recall, Grok sessions or customer readiness. Shared-Mac latency only. Latest-value rows are not gated. Bars are fixed by approved BARS v1 before any run. T1/T2: unpublished.\n')
     else:
