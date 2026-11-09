@@ -2144,7 +2144,10 @@ class TestEngineABC:
         # cross-session opt-in is now documented as bounded archive recovery
         assert "session_scope='all'" in readme
         assert "session_scope='session'" in readme
-        assert "current-session recall" in readme
+        # Scopes are documented per tool: lcm_recall searches every conversation, so the
+        # README no longer calls the whole tool surface current-session recall.
+        assert "Default scopes in Hermes" in readme
+        assert "soft ranking boost, not a scope restriction" in readme
         assert "session_search" in readme
         # The reframed positioning steers callers away from a memory-system
         # reading and toward bounded archive recovery over rows already in lcm.db.
