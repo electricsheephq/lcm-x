@@ -403,6 +403,8 @@ class Codex(Harness):
                "-c", "web_search=disabled"]
         for feature in CODEX_DISABLED:
             cmd += ["--disable", feature]
+        # codex-cli 0.167 no longer enables code mode by default; without it MCP tools are deferred and unreachable.
+        cmd += ["--enable", "code_mode"]
         if mcp:
             prefix = f"mcp_servers.{SERVER}."
             cmd += ["-c", prefix + "command=" + json.dumps(mcp["command"]),

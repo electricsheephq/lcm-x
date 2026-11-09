@@ -646,6 +646,7 @@ def test_codex_backend_isolated_text_call_and_accounting(tmp_path, monkeypatch):
         assert cmd[cmd.index("-s") + 1] == "read-only" and "web_search=disabled" in cmd
         disabled = {cmd[i + 1] for i, a in enumerate(cmd) if a == "--disable"}
         assert {"shell_tool", "unified_exec", "apps", "plugins", "multi_agent"} <= disabled
+        assert [cmd[i + 1] for i, a in enumerate(cmd) if a == "--enable"] == ["code_mode"]  # MCP tools need code mode
         cwd = Path(cmd[cmd.index("--cd") + 1])
         assert cwd.parent.parent == tmp_path / "run" / "harness" and not list(cwd.iterdir())
         assert Path(env["CODEX_HOME"], "auth.json").is_symlink() and env["HOME"] != str(Path.home())
