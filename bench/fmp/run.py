@@ -215,7 +215,9 @@ def codex_home_lock(home):
             fcntl.flock(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise RuntimeError("codex home busy") from None
-        # SIGTERM unwinds normally: the running Codex call finishes (or, on the main thread, is killed) before the lock is released.
+        # SIGTERM unwinds normally: the running Codex call finishes (or, on the main thread, is killed) before the lock is
+        # released; queued questions are cancelled and no further model call starts (models.STOPPING).
+        models.STOPPING.clear()
         previous = signal.signal(signal.SIGTERM, _terminate) if threading.current_thread() is threading.main_thread() else None
         try:
             yield
@@ -225,7 +227,13 @@ def codex_home_lock(home):
 
 
 def _terminate(signum, frame):
+    models.STOPPING.set()
     raise SystemExit(128 + signum)
+
+
+def inside_home(path, home):
+    resolved, home = Path(path).resolve(), Path(home).resolve()
+    return resolved == home or home in resolved.parents
 
 
 def execute(args):
@@ -242,8 +250,7 @@ def execute(args):
         if extra:
             raise ValueError("--codex-home holds instructions or skills a reader would load: " + ", ".join(extra))
         for path in (args.output, args.store_root):
-            resolved = Path(path).resolve()
-            if resolved == home.resolve() or home.resolve() in resolved.parents:
+            if inside_home(path, home):
                 raise ValueError("--output and --store-root must be outside --codex-home")
     leased = home is not None and args.command in ("canary", "answer", "judge")
     lease = codex_home_lock(home) if leased else contextlib.nullcontext()
@@ -328,8 +335,13 @@ def run_jobs(jobs, workers):
     if len(jobs) == 1:
         started = time.monotonic()
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            for row in pool.map(*prepared[0][:2]):
-                jobs[0].send(row)
+            try:
+                for row in pool.map(*prepared[0][:2]):
+                    jobs[0].send(row)
+            except (SystemExit, KeyboardInterrupt):
+                # A stop drops the queued questions; only the in-flight one finishes, and its row is not kept.
+                pool.shutdown(wait=True, cancel_futures=True)
+                raise
         prepared[0][2]["active_s"] += time.monotonic() - started
     else:
         start = random.Random(1189).randrange(len(jobs))
@@ -575,6 +587,11 @@ def main():
             execute(args)
     except Exception as exc:
         import traceback
+        home = getattr(args, "codex_home", None)
+        if home is not None and inside_home(args.output, home):
+            # A rejected output inside the leased home is never written, not even with the failure record.
+            print("FMP failed: " + type(exc).__name__ + " (no corpus logged)", file=sys.stderr)
+            return 1
         write_json(args.output / "failure.json", {"error": type(exc).__name__, "at": utc(),
             "frames": [{"file": Path(f.filename).name, "line": f.lineno, "function": f.name}
                        for f in traceback.extract_tb(exc.__traceback__)]})

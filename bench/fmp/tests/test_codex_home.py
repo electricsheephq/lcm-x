@@ -257,3 +257,56 @@ def test_home_with_only_system_skills_allowed(tmp_path, cli):
     (home / "skills" / ".system").mkdir(parents=True)
     run.execute(cli.args("canary", "--codex-home", str(home)))
     assert cli.built.called
+
+
+def test_rejected_output_inside_home_gets_no_failure_record(tmp_path, monkeypatch, cli):
+    import sys
+    home = tmp_path / "lease"
+    monkeypatch.setattr(sys, "argv", ["run.py", "answer", "--split-label", "synthetic", "--data", str(tmp_path / "synthetic.json"),
+                                      "--store-root", str(tmp_path / "stores"), "--output", str(home / "inside"),
+                                      "--agreement-judge", "none", "--workers", "1", "--codex-home", str(home)])
+    assert run.main() == 1
+    assert sorted(p.name for p in home.iterdir()) == []
+
+
+def test_sigterm_drain_cancels_queued_and_starts_no_model_call(tmp_path, monkeypatch, cli):
+    import os
+    import signal
+    import threading
+    calls, shutdowns = [], []
+    monkeypatch.setattr(models, "STOPPING", threading.Event())  # never leak a set event into later tests
+    questions = [SimpleNamespace(qid=f"q{i}", store_id="store", qtype="fact", question="Synthetic?", gold="yes",
+                                 dataset="lme-s", session_map={}, question_date="2025-01-01") for i in range(3)]
+    monkeypatch.setattr(run.datasets, "load", lambda *a: (questions, "dataset", "ids", {}))
+    run.execute(cli.args())
+
+    class Pool(run.ThreadPoolExecutor):
+        def shutdown(self, wait=True, *, cancel_futures=False):
+            shutdowns.append(cancel_futures)
+            return super().shutdown(wait=wait, cancel_futures=cancel_futures)
+
+    def runner(cmd, **kwargs):
+        calls.append(cmd)
+        if threading.current_thread() is not threading.main_thread() and len(calls) == 1:
+            os.kill(os.getpid(), signal.SIGTERM)
+            assert models.STOPPING.wait(5)
+        return subprocess.CompletedProcess(cmd, 0, json.dumps({"type": "item.completed", "item": {
+            "type": "agent_message", "text": "CORRECT"}}), "")
+
+    original = models.Backends
+
+    def backends(*a, **kw):
+        client = original(*a, **kw)
+        client.codex.runner = runner
+        return client
+
+    monkeypatch.setattr(run, "Backends", backends)
+    monkeypatch.setattr(run, "ThreadPoolExecutor", Pool)
+    args = cli.args("judge", "--codex-home", str(tmp_path / "lease"),
+                    "--judge", models.CODEX_DEFAULT_JUDGE, models.CODEX_DEFAULT_READER)
+    with pytest.raises(SystemExit):
+        run.execute(args)
+    assert len(calls) == 1  # the second judge of the in-flight question never starts
+    assert True in shutdowns  # queued questions are cancelled, not drained
+    with (tmp_path / "lease" / "holder.lock").open("r+") as contender:
+        fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
