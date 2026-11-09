@@ -201,3 +201,216 @@ def test_session_delivery_skips_option(statements, monkeypatch):
     monkeypatch.setattr(tools, "_lcm_recall_later_statements", reader)
     assert invoke(e, delivery_unit="session", later_statements=2) == invoke(e, delivery_unit="session", later_statements=0)
     reader.assert_not_called()
+
+
+def entry(e, store_id, **fields):
+    row = e._store.get(store_id)
+    hit = {"kind": "message_excerpt", "store_id": store_id, "session_id": row["session_id"],
+           "timestamp": row["timestamp"], "snippet": row["content"], "role": row["role"], **fields}
+    return {"hit": hit, "rrf_score": .02, "_final_score": .02, "ranks": {0: 1}}
+
+
+def ranked(monkeypatch, entries):
+    """Freeze ranking; all delivery and exact-row reads stay real."""
+    monkeypatch.setattr(tools, "fuse_candidates", lambda *a, **kw: (entries, ["fts"], [1.0]))
+    monkeypatch.setattr(tools, "apply_prior", lambda entries, *a: entries)
+
+
+def assert_links(payload):
+    hits = {h["store_id"]: h for h in payload["hits"]}
+    children = [h for h in hits.values() if "later_statement_of" in h]
+    for h in children:
+        assert h["later_statement_of"] in hits
+        assert h["store_id"] in hits[h["later_statement_of"]]["has_later_statements"]
+    for h in hits.values():
+        for sid in h.get("has_later_statements", []):
+            assert hits[sid]["later_statement_of"] == h["store_id"]
+    assert payload["provenance"]["later_statements"]["delivered"] == len(children)
+    assert payload["total_results"] == len(payload["hits"])
+
+
+@pytest.mark.parametrize("filter_kind", ["delta", "citation", "per_session"])
+def test_orphan_child_removed_after_source_filtered(statements, monkeypatch, filter_kind):
+    e, source, child = statements
+    entries = [entry(e, source), entry(e, child, later_statement_of=source)]
+    entries[0]["hit"]["has_later_statements"] = [child]
+    args = {"query": "orchidpassport", "detail": "answer_ready", "limit": 4}
+    if filter_kind == "delta":
+        args["seen_refs"] = [f"lcm:{source}:0-{len(e._store.get(source)['content'])}"]
+    elif filter_kind == "citation":
+        entries[0]["hit"]["snippet"] = "not present in the stored row"
+        hydrate = tools._lcm_recall_answer_ready_content
+        monkeypatch.setattr(tools, "_lcm_recall_answer_ready_content", lambda engine, entries, **kw:
+                            hydrate(engine, [v for v in entries if v["hit"]["store_id"] != source], **kw))
+    else:
+        other = e._store.append("old", {"role": "user", "content": "first old-session row"})
+        entries.insert(0, entry(e, other))
+        monkeypatch.setattr(tools, "_LCM_RECALL_ANSWER_READY_PER_SESSION_LIMIT", 1)
+    ranked(monkeypatch, entries)
+    # Isolate final delivery filtering from source eligibility (F4).
+    monkeypatch.setattr(tools, "_lcm_recall_later_statements", lambda *a, **kw: (
+        entries, dict(requested=1, searched=1, found=1, delivered=0, ms=0), None))
+    payload = json.loads(tools.lcm_recall(args, engine=e, later_statements=1))
+    assert source not in [h["store_id"] for h in payload["hits"]]
+    assert child not in [h["store_id"] for h in payload["hits"]]
+    assert_links(payload)
+
+
+@pytest.mark.parametrize("detail", ["snippets", "answer_ready"])
+def test_later_hydrates_own_deep_fts_match(statements, monkeypatch, detail):
+    e, source, _ = statements
+    text = "unrelated filler " * 500 + "My favorite hobby is now silver jewelry making."
+    child = e._store.append("deep", {"role": "user", "content": text, "timestamp": 1700000150})
+    original = tools._lcm_recall_fts_arm
+
+    def search(engine, query, **kw):
+        hits, error = original(engine, query, **kw)
+        return ([h for h in hits if h["store_id"] in (source, child)], error)
+
+    monkeypatch.setattr(tools, "_lcm_recall_fts_arm", search)
+    payload = json.loads(invoke(e, detail, later_statements=1, snippet_window_hits=2))
+    hit = next(h for h in payload["hits"] if h["store_id"] == child)
+    assert "later_statement" in hit["arms"]
+    assert "silver jewelry making" in hit.get("content", hit["snippet"])
+    if detail == "answer_ready":
+        assert hit["content_offset"] > 6000
+        assert text[hit["content_offset"]:hit["content_offset"] + hit["content_returned_chars"]] == hit["content"]
+        assert hit["evidence_span"]["char_start"] > 6000
+    assert_links(payload)
+
+
+def test_retrieve_nested_recall_pins_off(statements):
+    from hermes_lcm import evidence_tools
+    e, _, _ = statements
+    e._config.recall_later_statements = 2
+    calls = []
+
+    def dispatch(name, args, **kw):
+        calls.append(kw)
+        return tools.lcm_recall(args, engine=e, **kw)
+
+    def search(*, dispatch, **kw):
+        return json.loads(dispatch("lcm_recall", {"query": "orchidpassport"}))
+
+    e.handle_tool_call = dispatch
+    e._adaptive_retrieval = SimpleNamespace(search=search)
+    result = json.loads(evidence_tools.lcm_retrieve({"action": "search"}, engine=e))
+    assert calls[0].get("later_statements") == 0
+    assert "later_statements" not in result["provenance"]
+
+
+@pytest.mark.parametrize("shape", ["summary", "node", "adjacent", "delta", "beyond_window"])
+def test_only_eligible_window_sources_spend_searches(statements, monkeypatch, shape):
+    e, source, child = statements
+    ignored = e._store.append("ignored", {"role": "user", "content": "ignored source text", "timestamp": 1699999900})
+    skip = entry(e, ignored)
+    args = {"query": "orchidpassport", "limit": 4, "detail": "answer_ready"}
+    if shape == "summary":
+        skip["hit"].update(kind="summary", node_id=123)
+    elif shape == "node":
+        skip["hit"]["node_id"] = 123
+    elif shape == "adjacent":
+        skip["hit"]["adjacent_to"] = source
+    elif shape == "delta":
+        args["seen_refs"] = [f"lcm:{ignored}:0-{len(e._store.get(ignored)['content'])}"]
+    else:
+        args["limit"] = 1
+        skip["hit"].update(kind="summary", node_id=123)
+    entries = [skip, entry(e, source)]
+    ranked(monkeypatch, entries)
+    original = tools._lcm_recall_fts_arm
+    searches = []
+
+    def search(engine, query, **kw):
+        if query != "orchidpassport":
+            searches.append(query)
+        return original(engine, query, **kw)
+
+    monkeypatch.setattr(tools, "_lcm_recall_fts_arm", search)
+    result = json.loads(tools.lcm_recall(args, engine=e, later_statements=1))
+    assert searches == ([] if shape == "beyond_window" else [e._store.get(source)["content"]])
+    assert result["provenance"]["later_statements"]["searched"] == len(searches)
+    if shape != "beyond_window":
+        assert any(h["store_id"] == child and h.get("later_statement_of") == source for h in result["hits"])
+
+
+@pytest.mark.parametrize("source_observed,candidate_observed", [(1700000000, None), (None, 1700000100)])
+def test_no_mixed_observation_write_time_basis(statements, source_observed, candidate_observed):
+    e, source, child = statements
+    e._store.connection.executemany("UPDATE messages SET observed_at=?, timestamp=? WHERE store_id=?",
+                                  [(source_observed, 1699999900, source), (candidate_observed, 1700000100, child)])
+    e._store.connection.commit()
+    payload = json.loads(invoke(e, later_statements=1))
+    assert payload["provenance"]["later_statements"]["found"] == 0
+    assert [h["store_id"] for h in payload["hits"]] == [source]
+
+
+@pytest.mark.parametrize("failure", ["identity", "event_time"])
+def test_failed_time_identity_read_skips_expansion(statements, monkeypatch, failure):
+    e, source, _ = statements
+    if failure == "identity":
+        monkeypatch.setattr(tools, "duplicate_identity_rows", lambda *a, **kw: {})
+    else:
+        monkeypatch.setattr(tools, "_lcm_recall_event_time_rows", lambda *a, **kw: ({}, "read_error"))
+    payload = json.loads(invoke(e, later_statements=1))
+    assert payload["provenance"].get("later_statements_unavailable") == "read_error"
+    assert [h["store_id"] for h in payload["hits"]] == [source]
+    assert_links(payload)
+
+
+def test_write_time_fallback_when_both_observations_absent(statements):
+    e, source, child = statements
+    e._store.connection.executemany("UPDATE messages SET observed_at=NULL, timestamp=? WHERE store_id=?",
+                                  [(1700000000, source), (1700000100, child)])
+    e._store.connection.commit()
+    payload = json.loads(invoke(e, later_statements=1))
+    assert [h["store_id"] for h in payload["hits"]] == [source, child]
+    assert_links(payload)
+
+
+def test_candidate_beyond_window_is_moved_once(statements, monkeypatch):
+    e, source, child = statements
+    fillers = [e._store.append(f"filler-{i}", {"role": "user", "content": "unrelated"}) for i in range(3)]
+    ranked(monkeypatch, [entry(e, sid) for sid in [source, *fillers, child]])
+    result = json.loads(invoke(e, later_statements=1))
+    ids = [h["store_id"] for h in result["hits"]]
+    assert ids[:2] == [source, child]
+    assert ids.count(child) == 1
+    assert result["provenance"]["later_statements"]["delivered"] == 1
+    assert_links(result)
+
+
+def test_normalized_full_text_copy_is_skipped(statements, monkeypatch):
+    e, source, child = statements
+    copy = "ＯＲＣＨＩＤＰＡＳＳＰＯＲＴ  my FAVORITE\n hobby is pottery."
+    copy_id = e._store.append("copy", {"role": "user", "content": copy, "timestamp": 1700000050})
+    original = tools._lcm_recall_fts_arm
+
+    def search(engine, query, **kw):
+        hits, error = original(engine, query, **kw)
+        if query == "orchidpassport":
+            return [h for h in hits if h["store_id"] == source], error
+        by_id = {h["store_id"]: h for h in hits}
+        return [by_id[copy_id], by_id[child]], error
+
+    monkeypatch.setattr(tools, "_lcm_recall_fts_arm", search)
+    result = json.loads(invoke(e, later_statements=1))
+    assert [h["store_id"] for h in result["hits"]] == [source, child]
+    assert_links(result)
+
+
+@pytest.mark.parametrize("detail", ["snippets", "answer_ready"])
+def test_time_order_keeps_intervening_hit(statements, monkeypatch, detail):
+    e, source, child = statements
+    middle = e._store.append("middle", {"role": "user", "content": "orchidpassport intervening observation", "timestamp": 1700000050})
+    ranked(monkeypatch, [entry(e, source), entry(e, middle)])
+    original = tools._lcm_recall_fts_arm
+
+    def search(engine, query, **kw):
+        hits, error = original(engine, query, **kw)
+        return [h for h in hits if h["store_id"] != middle], error
+
+    monkeypatch.setattr(tools, "_lcm_recall_fts_arm", search)
+    result = json.loads(invoke(e, detail, later_statements=1, delivery_order="time"))
+    assert [h["store_id"] for h in result["hits"]] == [source, middle, child]
+    assert_links(result)

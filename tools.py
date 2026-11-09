@@ -11,6 +11,7 @@ import re
 import sqlite3
 import threading
 import time
+import unicodedata
 from contextlib import closing, nullcontext
 from types import SimpleNamespace
 from datetime import datetime, timezone
@@ -3379,7 +3380,8 @@ def _lcm_recall_answer_ready_content(
                 if like_span is not None:
                     span = {"char_start": like_span[0], "char_end": sum(like_span)}
                     break
-        if not span and fts_arm_index is not None and fts_arm_index in entry.get("ranks", {}):
+        if not span and (hit.get("later_statement_of") is not None or
+                         fts_arm_index is not None and fts_arm_index in entry.get("ranks", {})):
             # Fusion may retain a chunk preview; use the FTS representation of
             # this same row when it is available, before the literal fallback.
             for candidate in [hit, *entry.get("_alternates", [])]:
@@ -4392,23 +4394,38 @@ def _lcm_recall_adjacent_reply(
     return placed, pairs, None
 
 
-def _lcm_recall_later_statements(engine, ordered, identity_rows, *, n, deadline, excluded, allowed):
+def _lcm_recall_later_statements(engine, ordered, identity_rows, *, n, limit, query, seen_refs, fts_arm_index, deadline, excluded, allowed):
     """Place one later lexical match per source, atomically and read-only."""
     started, now = time.monotonic(), time.time()
     info = dict(requested=n, searched=0, found=0, delivered=0, ms=0)
     placed = [{**entry, "hit": dict(entry["hit"])} for entry in ordered]
-    seen = {sid for entry in ordered for sid in
+    seen = {sid for entry in ordered[:limit] for sid in
             [entry["hit"].get("store_id"), *entry["hit"].get("duplicate_store_ids", [])]}
-    sources = [entry for entry in placed if entry["hit"].get("store_id") is not None
-               and entry["hit"].get("kind") != "summary" and entry["hit"].get("node_id") is None][:n]
+    sources = [entry for entry in placed[:limit] if entry["hit"].get("store_id") is not None
+               and entry["hit"].get("kind") != "summary" and entry["hit"].get("node_id") is None
+               and entry["hit"].get("adjacent_to") is None]
+    def normalize(text):
+        return " ".join(unicodedata.normalize("NFKC", str(text or "")).casefold().split())
     reason = None
     try:
         if time.monotonic() >= deadline:
             raise TimeoutError
-        for source in sources:
+        if any(s["hit"]["store_id"] not in identity_rows for s in sources):
+            raise OSError
+        hydrated = _lcm_recall_answer_ready_content(
+            engine, sources, query=query, expanded_limit=len(sources),
+            rows_by_id=identity_rows, fts_arm_index=fts_arm_index,
+        ) if seen_refs else {}
+        if seen_refs:
+            sources = [s for s in sources if (ref := recall_delivery._exact_ref(
+                s["hit"], hydrated.get(_hit_identity(s["hit"])))) is not None and ref not in seen_refs]
+        for source in sources[:n]:
             hit = source["hit"]
             row = identity_rows.get(hit["store_id"], {})
-            source_time = _normalize_observed_at(row.get("observed_at")) or _normalize_observed_at(hit.get("timestamp"))
+            if not str(row.get("content") or "").strip():
+                continue
+            observed = _normalize_observed_at(row.get("observed_at"))
+            source_time = observed or _normalize_observed_at(hit.get("timestamp"))
             if source_time is None:
                 continue
             info["searched"] += 1
@@ -4426,17 +4443,28 @@ def _lcm_recall_later_statements(engine, ordered, identity_rows, *, n, deadline,
             ) if candidates else ({}, None)
             if reason:
                 raise TimeoutError if reason == "deadline" else OSError
+            texts = duplicate_identity_rows(engine, [{"hit": c} for c in candidates], deadline=deadline)
+            if any(c["store_id"] not in texts or c["store_id"] not in rows for c in candidates):
+                raise OSError
             for candidate in candidates:
-                stamp = _normalize_observed_at(rows.get(candidate["store_id"], {}).get("observed_at")) or _normalize_observed_at(candidate.get("timestamp"))
+                candidate_observed = _normalize_observed_at(rows[candidate["store_id"]].get("observed_at"))
+                if ((observed is None) != (candidate_observed is None)
+                        or normalize(texts[candidate["store_id"]]["content"]) == normalize(row.get("content"))):
+                    continue
+                stamp = candidate_observed if observed is not None else _normalize_observed_at(candidate.get("timestamp"))
                 if stamp is None or not source_time < stamp <= now:
                     continue
                 store_id = candidate["store_id"]
                 candidate = {**candidate, "later_statement_of": hit["store_id"]}
                 hit["has_later_statements"] = [store_id]
-                placed.insert(placed.index(source) + 1, {
-                    "hit": candidate, "rrf_score": source["rrf_score"],
-                    "_final_score": source["_final_score"], "ranks": {},
-                })
+                existing = next((e for e in placed if e["hit"].get("kind") != "summary" and (
+                    e["hit"].get("store_id") == store_id or store_id in e["hit"].get("duplicate_store_ids", []))), None)
+                if existing is not None:
+                    placed.remove(existing)
+                entry = existing if existing is not None else {
+                    "rrf_score": source["rrf_score"], "_final_score": source["_final_score"], "ranks": {},
+                }
+                placed.insert(placed.index(source) + 1, {**entry, "hit": candidate})
                 seen.add(store_id)
                 info["found"] += 1
                 break
@@ -4949,7 +4977,8 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
     later_n = _recall_later_statements(kwargs.get("later_statements", getattr(engine._config, "recall_later_statements", 0)))
     if later_n and kwargs.get("delivery_unit", getattr(engine._config, "recall_delivery_unit", "hits")) != "session":
         ordered, later_info, later_unavailable = _lcm_recall_later_statements(
-            engine, ordered, identity_rows, n=min(later_n, limit), deadline=deadline,
+            engine, ordered, identity_rows, n=min(later_n, limit), limit=limit, query=query,
+            seen_refs=seen_refs, fts_arm_index=fts_arm_index, deadline=deadline,
             excluded=excluded_session_ids, allowed=candidate_session_ids,
         )
     fts_anchor_info: dict[str, Any] | None = None

@@ -259,6 +259,8 @@ def deliver_recall(
         }
         if hit.get("adjacent_to") is not None:
             item.update(adjacent_to=hit["adjacent_to"], arms=[*arms, "adjacent"])
+        if hit.get("later_statement_of") is not None:
+            item["arms"] = [*arms, "later_statement"]
         for key in ("later_statement_of", "has_later_statements"):
             if key in hit:
                 item[key] = hit[key]
@@ -564,7 +566,6 @@ def deliver_recall(
 
     if delivery_order == "time":
         hits_out.sort(key=event_time_key)
-        _refresh_later_statements(response)
     ensure_ascii = detail != "answer_ready"
     # Reordering keeps the encoded length; the marker is extra, so it is added
     # only when it still fits the response cap (never by dropping a hit).
@@ -715,8 +716,12 @@ def _refresh_later_statements(response):
         return
     hits = response["hits"]
     by_id = {h.get("store_id"): h for h in hits if h.get("kind") != "summary"}
+    hits[:] = [h for h in hits if "later_statement_of" not in h or h["later_statement_of"] in by_id]
+    by_id = {h.get("store_id"): h for h in hits if h.get("kind") != "summary"}
+    response["total_results"] = len(hits)
     for hit in hits:
-        links = [sid for sid in hit.get("has_later_statements", []) if sid in by_id]
+        links = [sid for sid in hit.get("has_later_statements", []) if sid in by_id
+                 and by_id[sid].get("later_statement_of") == hit.get("store_id")]
         if "has_later_statements" in hit:
             if links:
                 hit["has_later_statements"] = links
