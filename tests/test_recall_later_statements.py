@@ -414,3 +414,94 @@ def test_time_order_keeps_intervening_hit(statements, monkeypatch, detail):
     result = json.loads(invoke(e, detail, later_statements=1, delivery_order="time"))
     assert [h["store_id"] for h in result["hits"]] == [source, middle, child]
     assert_links(result)
+
+
+def test_engine_dispatch_forwards_pin_off(statements):
+    from hermes_lcm import engine as engine_module, evidence_tools
+    e, _, _ = statements
+    e._config.recall_later_statements = 2
+    e._session_id = None
+    e._disabled_tool_names = lambda: set()
+    e.handle_tool_call = engine_module.LCMEngine.handle_tool_call.__get__(e)
+    args = {"query": "orchidpassport", "limit": 4}
+    assert json.loads(e.handle_tool_call("lcm_recall", args))["provenance"]["later_statements"]["delivered"] == 1
+    assert "later_statements" not in json.loads(e.handle_tool_call("lcm_recall", args, later_statements=0))["provenance"]
+    results = []
+
+    def search(*, dispatch, **kw):
+        results.append(json.loads(dispatch("lcm_recall", dict(args))))
+        return results[-1]
+
+    e._adaptive_retrieval = SimpleNamespace(search=search)
+    evidence_tools.lcm_retrieve({"action": "search"}, engine=e)
+    assert results and "later_statements" not in results[0]["provenance"]
+
+
+def observe(e, stamps):
+    e._store.connection.executemany("UPDATE messages SET observed_at=? WHERE store_id=?", [(t, sid) for sid, t in stamps.items()])
+    e._store.connection.commit()
+
+
+def followups(monkeypatch, e, answers):
+    """Pin each follow-up search (keyed by its source row) to the given rows."""
+    original = tools._lcm_recall_fts_arm
+    by_text = {e._store.get(src)["content"]: rows for src, rows in answers.items()}
+
+    def search(engine, query, **kw):
+        hits, error = original(engine, query, **kw)
+        if query not in by_text:
+            return hits, error
+        found, _ = original(engine, "watercolor", **{**kw, "candidate_limit": 50})
+        by_id = {h["store_id"]: h for h in found}
+        return [by_id[sid] for sid in by_text[query]], error
+
+    monkeypatch.setattr(tools, "_lcm_recall_fts_arm", search)
+
+
+def test_replay_copies_found_by_two_sources_take_one_slot(statements, monkeypatch):
+    e, source, child = statements
+    second = e._store.append("old2", {"role": "user", "content": "orchidpassport My favorite hobby was pottery.", "timestamp": 1700000010})
+    copy = e._store.append("new", {"role": "user", "content": "My favorite hobby is now watercolor painting.", "timestamp": 1700000100})
+    observe(e, {source: 1700000000, second: 1700000010, child: 1700000100, copy: 1700000100})
+    ranked(monkeypatch, [entry(e, source), entry(e, second)])
+    followups(monkeypatch, e, {source: [child], second: [copy]})
+    result = json.loads(invoke(e, later_statements=2))
+    ids = [h["store_id"] for h in result["hits"]]
+    assert len({child, copy} & set(ids)) == 1
+    assert result["provenance"]["later_statements"]["found"] == 1
+    assert_links(result)
+
+
+def test_moved_pooled_group_keeps_aliases(statements, monkeypatch):
+    e, source, child = statements
+    second = e._store.append("old2", {"role": "user", "content": "orchidpassport My favorite hobby was pottery.", "timestamp": 1700000010})
+    alias = e._store.append("new", {"role": "user", "content": "My favorite hobby is now watercolor painting.", "timestamp": 1700000100})
+    fillers = [e._store.append(f"filler-{i}", {"role": "user", "content": "unrelated"}) for i in range(2)]
+    observe(e, {source: 1700000000, second: 1700000010, child: 1700000100, alias: 1700000100})
+    ranked(monkeypatch, [entry(e, source), entry(e, second), *[entry(e, f) for f in fillers],
+                         entry(e, child, duplicate_store_ids=[alias])])
+    followups(monkeypatch, e, {source: [child], second: [alias]})
+    result = json.loads(invoke(e, later_statements=2))
+    ids = [h["store_id"] for h in result["hits"]]
+    assert child in ids and alias not in ids
+    assert next(h for h in result["hits"] if h["store_id"] == child).get("duplicate_store_ids") == [alias]
+    assert result["provenance"]["later_statements"]["found"] == 1
+    assert_links(result)
+
+def test_anchor_displaced_source_keeps_pooled_child(statements, monkeypatch):
+    e, source, child = statements
+    fillers = [e._store.append(f"filler-{i}", {"role": "user", "content": "orchidpassport unrelated"}) for i in range(3)]
+    ranked(monkeypatch, [*[entry(e, f) for f in fillers], entry(e, source), entry(e, child)])
+
+    def anchor(ordered, *a, **kw):
+        moved = next(x for x in ordered if x["hit"]["store_id"] == child)
+        rest = [x for x in ordered if x is not moved]
+        return [*rest[:3], moved, *rest[3:]], None
+
+    monkeypatch.setattr(tools, "place_fts_anchor", anchor)
+    result = json.loads(invoke(e, later_statements=1))
+    ids = [h["store_id"] for h in result["hits"]]
+    assert ids == [*fillers, child]
+    assert "later_statement" not in result["hits"][-1]["arms"]
+    assert "_later_pooled" not in json.dumps(result)
+    assert_links(result)

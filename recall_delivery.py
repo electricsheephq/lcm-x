@@ -261,7 +261,7 @@ def deliver_recall(
             item.update(adjacent_to=hit["adjacent_to"], arms=[*arms, "adjacent"])
         if hit.get("later_statement_of") is not None:
             item["arms"] = [*arms, "later_statement"]
-        for key in ("later_statement_of", "has_later_statements"):
+        for key in ("later_statement_of", "has_later_statements", "_later_pooled"):
             if key in hit:
                 item[key] = hit[key]
         window = snippet_window_content.get(_hit_identity(hit))
@@ -716,7 +716,18 @@ def _refresh_later_statements(response):
         return
     hits = response["hits"]
     by_id = {h.get("store_id"): h for h in hits if h.get("kind") != "summary"}
-    hits[:] = [h for h in hits if "later_statement_of" not in h or h["later_statement_of"] in by_id]
+    kept = []
+    for h in hits:
+        # The first refresh settles every orphan; fitting later pops from the
+        # end, where a child sits after its source, so no new orphan appears.
+        pooled = h.pop("_later_pooled", False)
+        if h.get("later_statement_of") is not None and h["later_statement_of"] not in by_id:
+            if not pooled:
+                continue
+            h.pop("later_statement_of")
+            h["arms"] = [arm for arm in h.get("arms", []) if arm != "later_statement"]
+        kept.append(h)
+    hits[:] = kept
     by_id = {h.get("store_id"): h for h in hits if h.get("kind") != "summary"}
     response["total_results"] = len(hits)
     for hit in hits:

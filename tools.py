@@ -4443,9 +4443,14 @@ def _lcm_recall_later_statements(engine, ordered, identity_rows, *, n, limit, qu
             ) if candidates else ({}, None)
             if reason:
                 raise TimeoutError if reason == "deadline" else OSError
-            texts = duplicate_identity_rows(engine, [{"hit": c} for c in candidates], deadline=deadline)
+            prior = [{"hit": {"store_id": sid}, "rrf_score": 0.0, "ranks": {}} for sid in seen if sid is not None]
+            fresh = [{"hit": c, "rrf_score": 0.0, "ranks": {}} for c in candidates]
+            texts = duplicate_identity_rows(engine, prior + fresh, deadline=deadline) if candidates else {}
             if any(c["store_id"] not in texts or c["store_id"] not in rows for c in candidates):
                 raise OSError
+            # Replay copies of a delivered or already chosen row join its group, never a second slot.
+            candidates = [g["hit"] for g in collapse_duplicate_candidates(prior + fresh, texts)
+                          if not {g["hit"]["store_id"], *g["hit"].get("duplicate_store_ids", [])} & seen]
             for candidate in candidates:
                 candidate_observed = _normalize_observed_at(rows[candidate["store_id"]].get("observed_at"))
                 if ((observed is None) != (candidate_observed is None)
@@ -4455,17 +4460,24 @@ def _lcm_recall_later_statements(engine, ordered, identity_rows, *, n, limit, qu
                 if stamp is None or not source_time < stamp <= now:
                     continue
                 store_id = candidate["store_id"]
+                group = {store_id, *candidate.get("duplicate_store_ids", [])}
+                existing = next((e for e in placed if e["hit"].get("kind") != "summary" and group & {
+                    e["hit"].get("store_id"), *e["hit"].get("duplicate_store_ids", [])}), None)
                 candidate = {**candidate, "later_statement_of": hit["store_id"]}
-                hit["has_later_statements"] = [store_id]
-                existing = next((e for e in placed if e["hit"].get("kind") != "summary" and (
-                    e["hit"].get("store_id") == store_id or store_id in e["hit"].get("duplicate_store_ids", []))), None)
                 if existing is not None:
+                    # A pooled row was retrieved on its own: it keeps its group, and
+                    # delivery keeps it as an ordinary hit if its source cannot ship.
                     placed.remove(existing)
+                    group |= {existing["hit"]["store_id"], *existing["hit"].get("duplicate_store_ids", [])}
+                    candidate["_later_pooled"] = True
+                if group - {store_id}:
+                    candidate["duplicate_store_ids"] = sorted(group - {store_id})
+                hit["has_later_statements"] = [store_id]
                 entry = existing if existing is not None else {
                     "rrf_score": source["rrf_score"], "_final_score": source["_final_score"], "ranks": {},
                 }
                 placed.insert(placed.index(source) + 1, {**entry, "hit": candidate})
-                seen.add(store_id)
+                seen |= group
                 info["found"] += 1
                 break
         if time.monotonic() >= deadline:
