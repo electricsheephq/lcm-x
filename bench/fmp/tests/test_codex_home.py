@@ -279,6 +279,14 @@ def test_sigterm_drain_cancels_queued_and_starts_no_model_call(tmp_path, monkeyp
                                  dataset="lme-s", session_map={}, question_date="2025-01-01") for i in range(3)]
     monkeypatch.setattr(run.datasets, "load", lambda *a: (questions, "dataset", "ids", {}))
     run.execute(cli.args())
+    handled = threading.Event()
+    terminate = run._terminate
+
+    def observed(signum, frame):
+        handled.set()
+        terminate(signum, frame)
+
+    monkeypatch.setattr(run, "_terminate", observed)
 
     class Pool(run.ThreadPoolExecutor):
         def shutdown(self, wait=True, *, cancel_futures=False):
@@ -289,7 +297,7 @@ def test_sigterm_drain_cancels_queued_and_starts_no_model_call(tmp_path, monkeyp
         calls.append(cmd)
         if threading.current_thread() is not threading.main_thread() and len(calls) == 1:
             os.kill(os.getpid(), signal.SIGTERM)
-            assert models.STOPPING.wait(5)
+            assert handled.wait(5)  # the main thread is unwinding before this call returns
         return subprocess.CompletedProcess(cmd, 0, json.dumps({"type": "item.completed", "item": {
             "type": "agent_message", "text": "CORRECT"}}), "")
 
