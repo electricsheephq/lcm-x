@@ -631,7 +631,8 @@ committed row, and store growth (the growth gate above).
   fresh container is available, this may be a clean environment (a scratch `HOME` and Claude Code
   config directory) on a real host, named as such in the record, with the Linux distribution and
   version. `scripts/claude_code_install_record_linux.sh` takes the native Linux record (two cases: a
-  Python 3.11+ on `PATH`, and only Python 3.10 on `PATH` plus the one documented `uv venv` step).
+  Python 3.11+ on `PATH`, and only Python 3.10 on `PATH` plus the one documented `uv venv` step). A
+  native record does not prove a fresh image's package state.
 - **Recorded:** whether capture writes rows or records `runtime_missing`, and how many manual steps
   it took.
 - **Without Claude Code:** the CLI smoke (`scripts/claude_code_unit_smoke.py`) runs the same path

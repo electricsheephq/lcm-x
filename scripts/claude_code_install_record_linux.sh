@@ -25,7 +25,7 @@ SYSPATH=/usr/local/bin:/usr/bin:/bin
 PASS=(LANG=C.UTF-8 TERM=dumb CANDIDATE="$CANDIDATE" KEY_FILE="$KEY_FILE" BASE_URL="${BASE_URL:-}"
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 DISABLE_AUTOUPDATER=1 DISABLE_TELEMETRY=1)
 for v in http_proxy https_proxy no_proxy HTTP_PROXY HTTPS_PROXY NO_PROXY; do [ -n "${!v:-}" ] && PASS+=("$v=${!v}"); done
-echo "== host: $(. /etc/os-release && echo "$PRETTY_NAME"), $(/usr/bin/python3 -V), candidate $CANDIDATE, start $(date -u +%FT%TZ)"
+echo "== host: $(. /etc/os-release && echo "$PRETTY_NAME"), $(/usr/bin/python3 -V), native (clean environment, not a fresh container), endpoint $(if [ -n "${BASE_URL:-}" ]; then echo custom; else echo default; fi), candidate $CANDIDATE, start $(date -u +%FT%TZ)"
 
 # The release asset stand-in: built once from the candidate with the host's python3 (the tag
 # workflow builds the same bytes); each case then installs it from its own Downloads folder.
@@ -60,7 +60,9 @@ mkdir -p Downloads && cp "$ASSET"/*.tar.gz "$ASSET"/*.sha256 Downloads/
 ( cd Downloads && sha256sum -c ./*.sha256 >/dev/null && tar -xzf ./*.tar.gz )
 PLUGIN=$(ls -d "$HOME"/Downloads/lcm-x-claude-code-*/)
 mkdir -p proj && cd proj && printf 'alpha\nbeta\n' > a.txt
-run() { env ${BASE_URL:+ANTHROPIC_BASE_URL="$BASE_URL"} ANTHROPIC_AUTH_TOKEN="$(cat "$KEY_FILE")" \
+if [ -n "$BASE_URL" ]; then export ANTHROPIC_BASE_URL="$BASE_URL"; fi
+# An assignment prefix, not `env`: the key never appears in any process's argument list.
+run() { ANTHROPIC_AUTH_TOKEN="$(cat "$KEY_FILE")" \
         claude -p "$1" --plugin-dir "$PLUGIN" --dangerously-skip-permissions --output-format json "${@:2}" < /dev/null \
         | python3 -c 'import json,sys; d=json.load(sys.stdin); print("turn", {k: d.get(k) for k in ("session_id","is_error","num_turns")})'; }
 outcomes() { python3 -c "import json,collections; print(dict(collections.Counter(json.loads(l)['event']+':'+str(json.loads(l)['outcome']) for l in open('$HOME/.lcm-x/claude-code/logs/hook.log'))))" 2>/dev/null || echo "{}"; }
@@ -73,7 +75,7 @@ PY=$(command -v python3.14 || command -v python3.13 || command -v python3.12 || 
 if [ -z "$PY" ] && python3 -c 'import sys; sys.exit(sys.version_info < (3, 11))'; then PY=$(command -v python3); fi
 if [ -z "$PY" ]; then
   echo "before step: hook outcomes $(outcomes)"
-  echo "one step: uv venv --python 3.11 ~/.lcm-x/claude-code/venv"
+  echo "one step: uv venv --python 3.11 ~/.lcm-x/claude-code/venv (uv was provided on PATH, not installed by the case)"
   uv venv -q --python 3.11 ~/.lcm-x/claude-code/venv; STEPS=1
   run "Use Bash to run 'echo after-setup' and report it." --resume "$SID"; sleep 5
   PY=~/.lcm-x/claude-code/venv/bin/python
