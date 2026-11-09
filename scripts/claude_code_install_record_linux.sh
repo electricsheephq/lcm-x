@@ -21,7 +21,8 @@ set -euo pipefail
 : "${CANDIDATE:?set CANDIDATE}"; : "${KEY_FILE:?file holding the model key, mode 600}"; : "${WORKDIR:?new or empty dir}"
 [ "$(stat -c %a "$KEY_FILE")" = 600 ] || { echo "KEY_FILE must be mode 600"; exit 2; }
 if [ -e "$WORKDIR" ] && [ -n "$(ls -A "$WORKDIR")" ]; then echo "WORKDIR must be new or empty"; exit 2; fi
-mkdir -p "$WORKDIR"; WORKDIR=$(cd "$WORKDIR" && pwd); KEY_FILE=$(cd "$(dirname "$KEY_FILE")" && pwd)/$(basename "$KEY_FILE")
+# WORKDIR is resolved to its physical path: the ancestor check below must see its real parents.
+mkdir -p "$WORKDIR"; WORKDIR=$(cd "$WORKDIR" && pwd -P); KEY_FILE=$(cd "$(dirname "$KEY_FILE")" && pwd)/$(basename "$KEY_FILE")
 # Claude Code also loads instruction files (CLAUDE.md, and AGENTS.md when no CLAUDE.md is present) from every
 # ancestor of the project folder, so WORKDIR must sit where no ancestor carries one (a scratch HOME does not
 # prevent this).
