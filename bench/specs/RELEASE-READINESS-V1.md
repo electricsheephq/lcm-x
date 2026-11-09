@@ -77,8 +77,11 @@ never wait for it.
 
   Every R run, R10 included, uses a scratch `HOME` and a scratch Claude Code config directory, never
   a user's own Claude Code setup. Install records (macOS in a clean environment: a scratch `HOME`
-  and Claude Code config directory, not a new OS account; Linux in a fresh container) go with the gate's receipt: whether capture wrote
-  rows and how many manual steps it took.
+  and Claude Code config directory, not a new OS account; Linux in a fresh container, or in a clean
+  environment on a real host, as on macOS, with the host's distribution and version named in the
+  record; `scripts/claude_code_install_record_linux.sh` takes the native record) go with the gate's
+  receipt: whether capture wrote rows and how many manual steps it took. A native Linux record does
+  not prove a fresh image's package state.
 - **No rc tag.** A unit release has no `-rcN` tag. The gate already binds the exact candidate tree
   (above), and the tag workflow publishes nothing: it re-checks the tag against the pushed commit,
   rebuilds the asset, runs the CLI smoke and creates a **draft** release; it never edits an existing
