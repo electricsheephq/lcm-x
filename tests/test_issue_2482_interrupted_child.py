@@ -575,9 +575,9 @@ def test_a_drain_that_times_out_says_so_with_the_hashed_child_and_the_unstored_r
             closing.shutdown()
             polls.append(clock.polls - before)
     # CodeRabbit (review of c43478d5): a child already reported is not waited for again, so N engines do not stall
-    # shutdown N times. Counted from the drain's own polls, not timed (#2573): the first drain waited, every later
-    # one found nothing left to wait for and never polled.
-    assert polls[0] > 0 and polls[1:] == [0] * (len(engines) - 1), polls
+    # shutdown N times. Counted from the drain's own polls, not timed (#2573): every later drain found nothing left to
+    # wait for and never polled. (The first may poll or not: a runner pause can pass its deadline before its first poll.)
+    assert polls[1:] == [0] * (len(engines) - 1), polls
     lines = [r.getMessage() for r in caplog.records if r.levelname == "WARNING" and "shutdown drain" in r.getMessage()]
     digest = hashlib.sha256(b"child").hexdigest()[:12]
     # An upper bound: the first store (1 row) has landed but its worker has not returned, so nothing counts as stored

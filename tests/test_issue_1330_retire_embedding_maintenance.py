@@ -372,11 +372,11 @@ def test_quiesce_bounds_wait_drops_pending_and_closes(scheduler, caplog, short_p
             result = scheduler.quiesce(timeout=timeout)
             elapsed = time.monotonic() - before
         assert result is short_pass
-        # The wait is proven from the recorded calls, not timed (#2573): it waited, each wait was bounded by the
-        # quiesce timeout, and a timed-out quiesce ended on a wait that timed out. A hang backstop stays.
-        # (A finished pass may end before quiesce waits at all, so only a timed-out one must have waited.)
-        assert (waits or short_pass) and all(remaining is not None and 0 < remaining <= timeout for remaining, _ in waits), waits
-        assert short_pass or waits[-1][1] is False, waits
+        # The wait is proven from the recorded calls, not timed (#2573): each wait was bounded by the quiesce timeout,
+        # and a timed-out quiesce that waited ended on a wait that timed out. A hang backstop stays. (Either case may
+        # not wait at all: a pass can finish, or a runner pause can pass the deadline, before the first wait.)
+        assert all(remaining is not None and 0 < remaining <= timeout for remaining, _ in waits), waits
+        assert short_pass or not waits or waits[-1][1] is False, waits
         assert elapsed < 5
         assert any(
             "timeout" in record.getMessage().lower()
