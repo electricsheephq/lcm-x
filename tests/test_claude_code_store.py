@@ -2219,6 +2219,31 @@ def test_a_subagent_under_a_pending_rows_earlier_path_is_not_verified(tmp_path, 
     assert not report["verified"] and "claude-code:s1/agent:x1" in report["unverified"]
 
 
+@pytest.mark.parametrize("saved", ["file", "empty"])
+def test_a_saved_output_under_a_pending_rows_earlier_path_is_not_verified(tmp_path, home, hermes, saved):
+    """#2548 review: a pending row on A is replaced by B (named [A, B]); a saved output appears under A's session folder.
+    The worker sweeps only B, so it is unverified. An empty saved-outputs folder holds nothing: the session, quit before
+    any prompt with neither transcript ever seen, expires (#2535 strict) and is not unverified."""
+    from hermes_lcm import claude_code_audit as ca
+
+    other = _append(tmp_path / "projects" / "-work" / "s2.jsonl", [dict(e, sessionId="s2") for e in CONVERSATION[:2]])
+    _record(_hook(), home, other, session="s2")
+    a = tmp_path / "projects" / "-work" / "s1.jsonl"
+    _record(_hook(), home, a, event="SessionStart", transcript_seen=False)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    _record(_hook(), home, tmp_path / "projects" / "-other" / "s1.jsonl", event="SessionEnd", transcript_seen=False)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    results = a.parent / "s1" / "tool-results"
+    results.mkdir(parents=True)
+    if saved == "file":
+        (results / "toolu_1.txt").write_text("saved output\n")
+    report = ca.audit(home)
+    if saved == "file":
+        assert not report["verified"] and "claude-code:s1" in report["unverified"]
+    else:
+        assert "claude-code:s1" not in report["unverified"]
+
+
 @pytest.mark.skipif(os.geteuid() == 0, reason="root reads any folder")
 def test_an_unreadable_subagents_folder_under_a_pending_path_is_not_verified(tmp_path, home, hermes):
     """#2548 review: glob returns nothing for a folder it cannot read, so a pending row's subagents folder that cannot be

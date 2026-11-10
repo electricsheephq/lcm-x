@@ -653,6 +653,15 @@ def _unverified(metadata: dict, records: list[dict], lineages: list[dict], sessi
                     pass
                 except OSError:
                     unknown.add(lineage.key)
+                try:  # saved outputs with no cursor are uncaptured; a folder that cannot be checked is not clean
+                    (session_dir(Path(name)) / "tool-results").lstat()
+                    folder = results_dir(session_dir(Path(name)))
+                    if folder is None or any(True for _ in folder.iterdir()):
+                        unknown.add(lineage.key)
+                except (FileNotFoundError, NotADirectoryError):
+                    pass
+                except OSError:
+                    unknown.add(lineage.key)
                 for child in _subagents(Lineage(lineage.session_id, None, Path(name))):
                     if (CURSOR_PREFIX + child.key not in metadata
                             and FORGOTTEN_PREFIX + child.rows_session not in metadata):
