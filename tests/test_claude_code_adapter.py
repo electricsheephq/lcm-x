@@ -1655,10 +1655,11 @@ def test_a_replaced_or_kept_pointer_keeps_every_event_seen(hook, env, tmp_path):
     for event in ("UserPromptSubmit", "Stop", "SessionEnd"):
         hook.spool(home, {**base, "event": event})
     assert hook.spool(home, {**base, "event": "PostToolUse"}) == "kept_end"
-    assert hook.spool(home, {**base, "event": "PreCompact", "prompt_id": "c1"}) == "spooled"
+    # #2571: an undrained SessionEnd is never replaced by another end-class hook, so the worker sees the lineage end
+    assert hook.spool(home, {**base, "event": "PreCompact", "prompt_id": "c1"}) == "kept_end"
     assert hook.spool(home, {**base, "event": "PostCompact", "prompt_id": "c2"}) == "kept_end"
     record = claim_records(home)[0][1]
-    assert record["event"] == "PreCompact" and record["transcript_seen"] is True
+    assert record["event"] == "SessionEnd" and record["transcript_seen"] is True
     assert record["seen"] == ["PostCompact", "PostToolUse", "PreCompact", "SessionEnd", "Stop", "UserPromptSubmit"]
     assert record["compact_prompts"] == ["c1", "c2"]
 
