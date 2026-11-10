@@ -1071,11 +1071,17 @@ def test_turn_path_budget(lab):
     stall = threading.Event()
     rec.writer.stall = stall  # the writer holds a backlog while the turn thread is measured
     numbers = {}
-    samples = [0.0]
-    _timed(rec, samples)
-    post(session_id="s", platform="cli", conversation_history=list(view))  # the session's first view
-    numbers["first_view_ms"] = samples[-1] * 1000
-    rec._enter, rec._exit = type(rec)._enter.__get__(rec), type(rec)._exit.__get__(rec)
+
+    def first_view(session_id):
+        samples = [0.0]
+        _timed(rec, samples)
+        post(session_id=session_id, platform="cli", conversation_history=list(view))  # the session's first view
+        rec._enter, rec._exit = type(rec)._enter.__get__(rec), type(rec)._exit.__get__(rec)
+        return samples[-1]
+    first = [first_view("s")]
+    while not strict and len(first) < 3 and first[-1] > 1.0:  # one sample: off strict, measure a fresh session again
+        first.append(first_view(f"s-first-view-{len(first)}"))
+    numbers["first_view_ms"] = first[0] * 1000
     state = {"view": view}
 
     def grow():
@@ -1130,15 +1136,21 @@ def test_turn_path_budget(lab):
     numbers["writer_turn_complete_s_per_turn"] = (time.monotonic() - started) / 5
     print("RECORDER BUDGET", json.dumps(numbers, sort_keys=True))
     assert rec.stopped is None, "budget samples must all be recorded"
-    # Medians keep their budgets (x4 off strict). A shared CI runner can preempt any one sample, or two in a row
-    # (510 ms and 2 x 322 ms seen, against 5-20 ms locally), so off strict every tail and single sample gets one
-    # 1 s ceiling: it still fails a slow path, never a pause. Strict runs keep every budget.
-    def tail(budget_ms):
-        return budget_ms if strict else 1000
-    assert numbers["steady_median_ms"] <= 5 * scale and numbers["steady_p99_ms"] <= tail(25)
-    assert numbers["equal_strings_median_ms"] <= 20 * scale and numbers["equal_strings_p99_ms"] <= tail(60)
+    # Medians keep their budgets (x4 off strict). Strict runs keep every budget.
+    assert numbers["steady_median_ms"] <= 5 * scale
+    assert numbers["equal_strings_median_ms"] <= 20 * scale
     assert numbers["edited_median_ms"] <= 5 * scale
-    assert numbers["first_view_ms"] <= tail(60) and numbers["turn_complete_clones_max_ms"] <= tail(60)
+    if strict:
+        assert numbers["steady_p99_ms"] <= 25 and numbers["equal_strings_p99_ms"] <= 60
+        assert numbers["first_view_ms"] <= 60 and numbers["turn_complete_clones_max_ms"] <= 60
+        return
+    # Off strict, a shared CI runner can preempt any one sample, or two in a row, for a second or more (510 ms,
+    # 2 x 322 ms and 1,253 ms seen, against 5-20 ms locally). So a series fails only when more than two of its samples
+    # are over a 1 s ceiling: a pause cannot fail it, and a slow path in every sample or every few samples still
+    # does (#2573). The first view is one sample, so it is measured on up to two fresh sessions while over the ceiling.
+    over = {name: sum(sample > 1.0 for sample in series) for name, series in
+            (("first_view", first), ("steady", steady), ("equal_strings", equal), ("turn_complete_clones", clones))}
+    assert all(count <= 2 for count in over.values()), over
 
 
 # FIX-PACKET-L3-1-r1 regressions: each test names its review finding.
