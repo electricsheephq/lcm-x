@@ -1070,7 +1070,7 @@ class DelegateChildMixin:
         return ends[0] if len(ends) == 1 else None
 
     def _remember_delegate_child_boundary(self, session_id: str, messages: List[Dict[str, Any]]) -> None:
-        identities = [self._session_end_prefix_compare_identity(msg, session_id=session_id) for msg in messages
+        identities = [self._session_end_prefix_compare_identity(msg, session_id=session_id, recover_markers=False) for msg in messages
                       if isinstance(msg, dict) and not self._matches_ignore_message_patterns(msg)]
         tail = identities[-_ANCHOR_ROWS:]
         # Repeated tails need the full output to identify the actual end uniquely.
@@ -1080,7 +1080,7 @@ class DelegateChildMixin:
 
     def _remember_delegate_child_outputs(self, session_id: str, messages, result) -> None:
         def identities(rows):
-            return [self._session_end_prefix_compare_identity(msg, session_id=session_id) for msg in rows
+            return [self._session_end_prefix_compare_identity(msg, session_id=session_id, recover_markers=False) for msg in rows
                     if isinstance(msg, dict) and not self._matches_ignore_message_patterns(msg)]
         produced = Counter(identities(result)) - Counter(identities(messages))
         _DELEGATE_COMPACTION_OUTPUTS[self._delegate_child_key(session_id)] = [
@@ -1113,9 +1113,8 @@ class DelegateChildMixin:
                     # The input is covered only when this pass stored it and its last row is the stored tail. After a
                     # failed store, a matching tail can be a copy of the last stored row behind an unstored one (#2071),
                     # so the summary is kept: a surplus head, never a lost one.
-                    covered = bool(pre_store is not None and tail and view and self._session_end_prefix_compare_identity(
-                        tail[-1], session_id=session_id,
-                    ) == self._session_end_prefix_compare_identity(view[-1], session_id=session_id))
+                    covered = bool(pre_store is not None and tail and view and self._session_end_rows_equal(
+                        tail[-1], view[-1], session_id=session_id))
                     if covered:
                         stored_tail = tail
                     else:
@@ -1355,7 +1354,7 @@ class DelegateChildMixin:
             self._note_delegate_child_fallback(session_id, f"parent link not recorded: {type(exc).__name__}: {exc}")
         key = self._delegate_child_key(session_id)
         boundary = _DELEGATE_RESUME_BOUNDARIES.get(key)
-        identities = [self._session_end_prefix_compare_identity(msg, session_id=session_id) for msg in view]
+        identities = [self._session_end_prefix_compare_identity(msg, session_id=session_id, recover_markers=False) for msg in view]
         start = self._delegate_child_unique_end(
             [self._delegate_child_boundary_digest(identity) for identity in identities], boundary) if boundary else None
         anchored, rejected = start is not None, []
@@ -1374,19 +1373,23 @@ class DelegateChildMixin:
                 if len(stored_tail) == _ANCHOR_ROWS:
                     break
             outputs = Counter(_DELEGATE_COMPACTION_OUTPUTS.get(key) or ())
-            lineage: list[Counter] = []  # the lineage's stored identities, read once per append (under the store lock)
+            lineage = []
+
+            def counted():
+                if not lineage:
+                    lineage.append(Counter(self._session_end_prefix_compare_identity(row, session_id=sid, recover_markers=False)
+                                           for sid in sessions for row in self._store.get_session_messages(sid, limit=-1)))
+                return lineage[0]
 
             def unaccounted(front: list, end: int) -> list[int]:
                 # #2071: each row in front of the match must be stored in the lineage (apart from the anchor rows,
                 # the lineage's last stored rows) or be one of the last compaction's outputs, one occurrence each.
                 if not front:
                     return []
-                if not lineage:
-                    lineage.append(Counter(self._session_end_prefix_compare_identity(row, session_id=sid)
-                                           for sid in sessions for row in self._store.get_session_messages(sid, limit=-1)))
-                stored_ids = lineage[0].copy()
-                stored_ids.subtract(identities[len(front):end])
-                return self._delegate_child_unaccounted(front, stored_ids, outputs)
+                stored_ids = counted().copy()
+                counted_view = [self._session_end_counted_identity(msg, stored_ids, session_id=session_id) for msg in view[:end]]
+                stored_ids.subtract(counted_view[len(front):end])
+                return self._delegate_child_unaccounted(counted_view[:len(front)], stored_ids, outputs)
 
             start = self._delegate_child_anchor_end(session_id, view, stored_tail, unaccounted, rejected)
             anchored = start is not None or bool(rejected)
@@ -1399,8 +1402,8 @@ class DelegateChildMixin:
             elif start is None:
                 self._note_delegate_child_fallback(
                     session_id, "stored rows no longer match the child's view; resuming with counted identities")
-                remaining = Counter(self._session_end_prefix_compare_identity(row, session_id=sid)
-                                    for sid in sessions for row in self._store.get_session_messages(sid, limit=-1))
+                remaining = counted().copy()
+                identities = [self._session_end_counted_identity(msg, remaining, session_id=session_id) for msg in view]
                 suffix = []
                 for msg, identity in zip(view, identities):
                     if remaining[identity] > 0:
@@ -1445,9 +1448,9 @@ class DelegateChildMixin:
         it occurs exactly once in the view, and only when every row in front of it is accounted for (#2071):
         ``unaccounted(front, end)`` lists the front rows that are neither stored nor compaction outputs; when it lists
         any, ``(end, those indexes)`` goes to ``rejected`` and None is returned."""
-        anchor = [self._session_end_prefix_compare_identity(row, session_id=sid)
+        anchor = [self._session_end_prefix_compare_identity(row, session_id=sid, recover_markers=False)
                   for sid, row in stored_rows]
-        identities = [self._session_end_prefix_compare_identity(msg, session_id=session_id) for msg in view]
+        identities = [self._session_end_counted_identity(msg, anchor, session_id=session_id) for msg in view]
         for width in range(len(anchor), 0, -1):
             end = self._delegate_child_unique_end(identities, anchor[-width:])
             if end is not None:
