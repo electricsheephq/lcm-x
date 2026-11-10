@@ -2,6 +2,7 @@
 import importlib.metadata
 import json
 import os
+import math
 import sqlite3
 import struct
 import uuid
@@ -30,6 +31,8 @@ def parse_recall_options(raw):
         return {}
     from hermes_lcm import config as module
     allowed = {f.name for f in fields(module.LCMConfig) if f.name.startswith("recall_")}
+    # --delivery-unit owns the delivery unit (session_mode would silently override an option).
+    allowed.discard("recall_delivery_unit")
     options = {}
     for item in raw:
         key, sep, value = item.partition("=")
@@ -37,6 +40,8 @@ def parse_recall_options(raw):
             raise RecallOptionError("--recall-option requires a known recall_ field and KEY=VALUE")
         if not value.strip():
             raise RecallOptionError("invalid --recall-option value for " + key)
+        if key in options:
+            raise RecallOptionError("repeated --recall-option " + key)
         options[key] = value
     # Use the selected product's parsers, including bounds, aliases and composite values.
     # Isolate both environment and YAML inputs; never mutate the process environment.
@@ -46,7 +51,11 @@ def parse_recall_options(raw):
         config = module.LCMConfig.from_env()
     if config.config_source_warnings:
         raise RecallOptionError("invalid --recall-option value")
-    return {key: getattr(config, key) for key in sorted(options)}
+    parsed = {key: getattr(config, key) for key in sorted(options)}
+    # NaN or infinity cannot round-trip a manifest identity check (nan != nan).
+    if any(isinstance(v, float) and not math.isfinite(v) for v in parsed.values()):
+        raise RecallOptionError("invalid --recall-option value")
+    return parsed
 
 
 def safe(value):

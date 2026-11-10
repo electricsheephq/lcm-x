@@ -90,6 +90,7 @@ def test_recall_option_parsing(cli, option, expected):
     "recall_later_statements=-1", "recall_adjacent_reply=maybe", "recall_scan_rows=bad",
     "recall_delivery_order=invalid", "recall_arm_weights=fts=bad", "recall_scan_rows=",
     "recall_later_statements", "recall_query_timeout_s=bad",
+    "recall_query_timeout_s=nan", "recall_scan_budget_s=inf", "recall_delivery_unit=session",
 ])
 def test_recall_option_refused_before_stores_or_backends(cli, option):
     args = cli.args("answer", "--recall-option", option)
@@ -102,8 +103,7 @@ def test_recall_option_refused_before_stores_or_backends(cli, option):
 
 @pytest.mark.parametrize("mode", ["single", "agentic"])
 def test_recall_option_answer_and_mcp(cli, tmp_path, mode):
-    args = cli.args("answer", "--delivery", mode, *OPTION,
-                    "--recall-option", "recall_delivery_unit=session")
+    args = cli.args("answer", "--delivery", mode, *OPTION, "--delivery-unit", "session")
     run.execute(args)
     config, offered, raw = cli.seen[0]
     assert config.recall_later_statements == 2
@@ -112,7 +112,7 @@ def test_recall_option_answer_and_mcp(cli, tmp_path, mode):
                                       if s["function"]["name"] == "lcm_recall")
     assert json.loads(raw)["later"] == 2
     spec = run.server_spec(args, "dataset", cli.question)
-    expected = {"recall_delivery_unit": "session", "recall_later_statements": 2}
+    expected = {"recall_later_statements": 2}
     assert spec["recall_options"] == expected
     manifest = json.loads((args.output / "run-manifest.json").read_text())
     assert manifest["recall_options"] == expected
@@ -222,3 +222,31 @@ def test_recall_option_default_bytes_match_main(cli, tmp_path, monkeypatch):
         shutil.rmtree(args.output)
         shutil.rmtree(report)
     assert snapshots[0] == snapshots[1]
+
+
+def test_recall_option_repeated_key_refused(cli):
+    args = cli.args("answer", "--recall-option", "recall_later_statements=2",
+                    "--recall-option", "recall_later_statements=3")
+    with pytest.raises(ValueError, match="repeated --recall-option"):
+        run.execute(args)
+    cli.backends.assert_not_called()
+
+
+def test_control_and_treatment_pair_on_one_commit(cli, tmp_path):
+    """Acceptance: real answer+judge runs, one without options and one with a lever, pair in score."""
+    outputs = {}
+    for name, extra in (("control", ()), ("treatment", OPTION)):
+        out = tmp_path / name
+        for command in ("answer", "judge"):
+            args = cli.args(command, *extra)
+            args.output = out
+            run.execute(args)
+        outputs[name] = out
+    control = json.loads((outputs["control"] / "run-manifest.json").read_text())
+    treatment = json.loads((outputs["treatment"] / "run-manifest.json").read_text())
+    assert "recall_options" not in control
+    assert treatment["recall_options"] == {"recall_later_statements": 2}
+    assert {k: v for k, v in treatment.items() if k != "recall_options"}.keys() == control.keys()
+    report = score.score([outputs["control"], outputs["treatment"]], tmp_path / "score")
+    assert len(report["arms"]) == 2 and len(report["paired"]) == 1
+    assert any("/opt:recall_later_statements=2" in name for name in report["arms"])
