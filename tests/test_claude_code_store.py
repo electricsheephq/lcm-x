@@ -1272,20 +1272,23 @@ def test_a_lineage_whose_first_batch_fails_is_retried_by_the_sweep(tmp_path, hom
 
 def test_a_final_reply_after_a_late_async_record_replaced_the_end_record_is_captured_by_the_next_run(
         tmp_path, home, hermes, monkeypatch):
-    """REGRESSION (#2262): an async PostToolBatch record that lands after the session's end record
-    replaces it in the spool (one record per session), so the worker skips the settle. A final reply
-    written after that drain waits for the next run, whose sweep captures it from the cursor: every
-    transcript line in order, once. The transcript stays the source, so nothing is lost."""
+    """REGRESSION (#2262): A1 (#2350) now keeps an unclaimed end pointer and settles once.
+    A lost pointer still defers a later final reply to the next run's registered-lineage sweep:
+    every transcript line in order, once."""
     path = _transcript(tmp_path, CONVERSATION[:-1])
     hook = _hook()
     _record(hook, home, path, event="Stop")
-    _record(hook, home, path, event="PostToolBatch")  # the late async hook
+    assert hook.spool(home, {"host": "claude-code", "session_id": "s1", "event": "PostToolBatch",
+                             "transcript_path": str(path)}) == "kept_end"
     [spooled] = list((home / "spool").glob("*.json"))
-    assert json.loads(spooled.read_text(encoding="utf-8"))["event"] == "PostToolBatch"
+    assert json.loads(spooled.read_text(encoding="utf-8"))["event"] == "Stop"
     settled = []
     monkeypatch.setattr(cc, "_settle", lambda *args: settled.append(args))
     assert cc.run_worker(home, hermes_home=hermes, settle_s=0)["complete"]
-    assert settled == []  # no end record was left to settle
+    assert len(settled) == 1
+    _record(hook, home, path, event="Stop")
+    [spooled] = list((home / "spool").glob("*.json"))
+    spooled.unlink()  # simulate a lost last pointer; no fresh hook below
     with open(path, "a", encoding="utf-8") as handle:
         handle.write(json.dumps(CONVERSATION[-1]) + "\n")
     final = "The word is ochre."

@@ -71,20 +71,16 @@ logged without content and capture catches up on a later run.
 | `PreCompact` | Drain synchronously, bounded to 10 s, only when the store lock is free; it never waits for the lock. If a worker holds it, the hook returns at once (`worker_running`) and the holder takes the spooled record. The hook logs `drained` only for a worker-confirmed complete drain, otherwise `drain_bound` (the worker's deadline ended it), `drain_incomplete` (work left for another reason), `drain_failed:<code>` or `drain_timeout`; any of these but a refused store then starts a detached worker for the rest (`+worker`), or leaves it to the worker that has taken the lock since (`+holder`). The drain captures only; it never embeds. The hook kills a drain still running 2 s after its bound. | Bounded, never on the lock |
 | `SessionEnd` | Spool; start a detached drain and return at once. | No |
 
-`PostToolBatch` is registered `async`, so Claude Code does not wait for it (#2141). The other hooks
-stay synchronous:
-- the worker settles a transcript only after an end event (`Stop`, `StopFailure`, `SubagentStop`,
-  `SessionEnd`, `PreCompact`);
-- a later hook copies how the session started from `SessionStart`'s record, so that record is
-  written first;
-- in `-p`, Claude Code kills an async hook still running when the session exits.
-
-An async hook killed while it writes leaves at most a temporary dotfile, which the worker never
-reads. One that finishes after a later hook replaces that hook's record. If that was an end event's
-record, the worker skips the settle, and the next run's sweep captures any line the settle would
-have waited for. The async hook never takes the store lock (step 1 below), so its death never
-leaves a synchronous hook waiting on it. A test kills the hook before and after it writes its
-record, in a session that goes on and at a `-p` exit, and finds every row stored.
+`PostToolBatch` is registered `async`. Other hooks return after forking a detached child,
+except SessionStart and PreCompact, which stay synchronous; without fork, hooks stay synchronous.
+The child validates paths, spools and starts the worker under a 30 s deadline, ignores SIGHUP
+and closes inherited pipes; a kill between create and rename can leave a zero-byte `.tmp`.
+A sibling spool lock preserves an unclaimed end pointer against late non-end hooks (`kept_end`)
+and rejects older same-kind records (`stale`); a claimed pointer is gone, so a late write only
+adds an idempotent drain. An extra settle costs at most 2 s, within PreCompact's 10 s worker
+deadline; an ordinary worker has no overall deadline. Based on the `registered(store)` sweep,
+the worst case of a lost pointer or a skipped settle is a delay until the next hook on the
+machine, not a loss (for already registered lineages).
 
 Each hook writes one line to `logs/hook.log` in the home: the event, the session id, the outcome and
 its in-process milliseconds (`ms`), without content or paths. For #2164 the line also carries `t0`,
@@ -416,6 +412,9 @@ hook entry handles:
   stderr) unless the Grok store home holds an `lcm.db` or a `reader-override.json`.
 
 ## Runtime and failure modes
+
+Detached hook logs include `detached: true` and parent `blocking_ms`; `ms` still measures
+through child completion. The parent parses stdin and forks before filesystem validation.
 
 - Claude Code starts the hook in exec form (`hooks/hooks.json`): `python3` found on `PATH`, with
   `${CLAUDE_PLUGIN_ROOT}` substituted in its arguments and no shell before it, which saves the
