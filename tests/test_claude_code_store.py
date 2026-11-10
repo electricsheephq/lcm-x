@@ -2304,7 +2304,8 @@ _TABLE += [("forgotten_parent", "named", kind, kind in {"subagent", "unreadable_
 # so a change in either direction shows here.
 _STRICTER = {("pending", "followed", "empty"), ("pending", "named", "empty"), ("pending", "followed", "subagent_empty"),
              ("pending", "named", "subagent_empty"), ("captured", "followed", "subagent_empty"),
-             ("captured", "named", "subagent_empty")}
+             ("captured", "named", "subagent_empty"), ("child_elsewhere", "folder", "subagent_empty"),
+             ("forgotten_parent", "named", "subagent_empty")}
 _TABLE = [pytest.param(*row, id="-".join(row[:3]), marks=pytest.mark.xfail(strict=True, reason="stricter than the rule"))
           if row[:3] in _STRICTER else pytest.param(*row, id="-".join(row[:3])) for row in _TABLE]
 
@@ -2373,3 +2374,20 @@ def test_every_kind_of_entry_under_a_tool_results_subfolder_counts(tmp_path, hom
         if shape == "unreadable":
             (pages / "inner").chmod(0o700)
     assert report["lineages"][0]["subfolder_files"] == count and not report["verified"]
+
+
+def test_an_unterminated_last_record_is_reported_and_does_not_change_the_verdict(tmp_path, home, hermes):
+    """#2557: capture reads complete lines only (Claude Code may be mid-write). An unterminated record after the cursor
+    is counted (partial_tail_bytes) and named in the verdict, and the lineage stays verified."""
+    from hermes_lcm import claude_code_audit as ca
+
+    a = _append(tmp_path / "projects" / "-work" / "s1.jsonl", CONVERSATION[:2])
+    _record(_hook(), home, a)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    tail = json.dumps(CONVERSATION[2]).encode()
+    with a.open("ab") as handle:
+        handle.write(tail)
+    report = ca.audit(home)
+    row = report["lineages"][0]
+    assert row["partial_tail_bytes"] == len(tail) and row["pending_lines"] == 0 and report["verified"]
+    assert report["verdict"].endswith(f"; 1 lineages end in an unterminated record ({len(tail)} bytes, not yet captured)")
