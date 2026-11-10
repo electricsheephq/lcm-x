@@ -276,11 +276,16 @@ def test_rejected_output_inside_home_gets_no_failure_record(tmp_path, monkeypatc
     assert sorted(p.name for p in home.iterdir()) == []
 
 
-def test_sigterm_drain_starts_no_further_model_call(tmp_path, monkeypatch, cli):
+@pytest.mark.parametrize("worker_wins_race", [False, True])
+def test_sigterm_drain_starts_no_further_model_call(tmp_path, monkeypatch, cli, worker_wins_race):
+    # The guarantee is that no model call starts after SIGTERM. A queued question may still begin when the worker
+    # finishes the in-flight one before the main thread's map iterator cancels the queue; it then finds the stop
+    # flag set. worker_wins_race forces that interleaving with an event, so both orders are covered.
     import os
     import signal
     import threading
     calls, started = [], []
+    later_started = threading.Event()
     questions = [SimpleNamespace(qid=f"q{i}", store_id="store", qtype="fact", question="Synthetic?", gold="yes",
                                  dataset="lme-s", session_map={}, question_date="2025-01-01") for i in range(3)]
     monkeypatch.setattr(run.datasets, "load", lambda *a: (questions, "dataset", "ids", {}))
@@ -293,9 +298,13 @@ def test_sigterm_drain_starts_no_further_model_call(tmp_path, monkeypatch, cli):
             terminate(signum, frame)
         finally:
             handled.set()  # only after the real handler has set the stop flag
+            if worker_wins_race:  # hold the main thread until the worker has begun the next queued question
+                assert later_started.wait(5)
 
     def judge(row, q, client, specs, agreement_model=None):
-        started.append(q.qid)
+        started.append((q.qid, models.STOPPING.is_set()))
+        if q.qid != "q0":
+            later_started.set()
         for spec in specs:  # like judges.judge: a failed judge call does not stop the next judge
             try:
                 client.call(spec, [{"role": "user", "content": q.question}], [])
@@ -327,8 +336,11 @@ def test_sigterm_drain_starts_no_further_model_call(tmp_path, monkeypatch, cli):
                     "--judge", models.CODEX_DEFAULT_JUDGE, models.CODEX_DEFAULT_READER)
     with pytest.raises(SystemExit):
         run.execute(args)
-    assert started == ["q0"]  # queued questions never start
-    assert len(calls) == 1  # the second judge of the in-flight question never starts
+    assert started[0] == ("q0", False)
+    assert all(stopping for _, stopping in started[1:])  # anything that began later saw the stop flag
+    if worker_wins_race:
+        assert len(started) >= 2  # the old assertion (only q0 starts) does not hold in this order
+    assert len(calls) == 1  # no model call after SIGTERM: not the in-flight question's second judge, not a queued one
     with (tmp_path / "lease" / "holder.lock").open("r+") as contender:
         fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
