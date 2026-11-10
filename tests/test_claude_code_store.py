@@ -2956,7 +2956,7 @@ def test_an_unreadable_set_aside_record_is_never_overwritten(tmp_path, home, her
 
 
 # #2562 ruling: Claude Code reused one agent id in one real session (a direct and a workflow transcript, different
-# content, a few shared lines). Keys stay the id for GA; this pins what capture and the audit do today.
+# content, a few shared lines). Since #2566 the second path has its own lineage; this pins that in four shapes.
 _REUSED_SHARED = [{"type": "attachment", "uuid": f"sh{n}", "sessionId": "s1", "isSidechain": True,
                    "attachment": {"type": "plan", "n": n}} for n in range(2)]
 _REUSED = {"first": _REUSED_SHARED + [dict(_entry("user", "fa1", "first task"), isSidechain=True),
@@ -2981,7 +2981,7 @@ def test_a_reused_agent_id_is_pinned(tmp_path, home, hermes, hooks):
     for name in order:
         _record(_hook(), home, a, event="SubagentStop", agent_id="x1", agent_transcript_path=str(paths[name]))
         cc.run_worker(home, hermes_home=hermes, settle_s=0)
-    if hooks == "both_then_second_grows":  # the sweep lists the direct path first and moves the lineage back to it
+    if hooks == "both_then_second_grows":  # before #2566 the sweep moved the shared lineage back and lost this line
         _append(paths["second"], [dict(_entry("assistant", "sb4", [{"type": "text", "text": "late"}]), isSidechain=True)])
     for _ in range(2):
         cc.run_worker(home, hermes_home=hermes, settle_s=0)
@@ -2990,25 +2990,141 @@ def test_a_reused_agent_id_is_pinned(tmp_path, home, hermes, hooks):
         held = collections.Counter(row[0] for row in store.connection.execute(
             "SELECT line_digest FROM capture_events WHERE source_kind = 'line'"))
         rows = collections.Counter(row[0] for row in store.connection.execute(
-            "SELECT content FROM messages WHERE session_id = ?", (cc.row_session_id("s1", "x1"),)))
+            "SELECT content FROM messages WHERE session_id LIKE 's1/agent:%'"))
     finally:
         store.close()
     seen = {}
     for name, path in paths.items():
         digests = [hashlib.sha256(line).hexdigest() for line in path.read_bytes().splitlines(keepends=True)]
         seen[name] = (len(digests), sum(1 for d in digests if not held[d]), sum(1 for d in digests if held[d] > 1))
-    report = ca.audit(home)
-    assert report["unverified"] == ["claude-code:s1/agent:x1"] and not report["verified"]
-    if hooks == "both_alternating":  # nothing lost: each switch re-reads a file as a new generation, so its raw lines
-        # are held more than once; its message rows are stored once, both agents' under the one child session
-        assert seen == {"first": (4, 0, 4), "second": (5, 0, 5)}
-        assert dict(rows) == {"first task": 1, "one": 1, "second task": 1, "two": 1, "three": 1}
-        assert "a second transcript path holds rows" in report["verdict"]
-    elif hooks == "both_then_second_grows":  # #2566: the line the second transcript wrote after both hooks is lost
-        assert seen["first"][1] == 0 and seen["second"][:2] == (6, 1) and "late" not in rows
-    else:  # the first path in sort order is taken; the second transcript's own lines are not captured separately
-        assert seen == {"first": (4, 0, 0), "second": (5, 3, 0)}
-        assert dict(rows) == {"first task": 1, "one": 1}
+    report = ca.audit(home)  # #2566: each transcript is its own lineage, so every shape captures both in full
+    assert report["verified"] and not report["unverified"]
+    assert [missing for _lines, missing, _held in seen.values()] == [0, 0]
+    assert dict(rows) == {"first task": 1, "one": 1, "second task": 1, "two": 1, "three": 1,
+                          **({"late": 1} if hooks == "both_then_second_grows" else {})}
+
+
+# #2566: one table for a reused agent id. Rows: which paths exist x hook order x which file grows afterwards x store
+# state (fresh, or already flipped by the old code). ONE rule decides every row: every line of every transcript is stored
+# exactly once under a lineage that maps to exactly one path, and the audit is verified exactly when that holds. An
+# already-flipped store keeps its rows (its old lineage spans two paths, so it stays unverified) and gains the missing
+# lines, with nothing stored twice.
+_REUSE_PATHS = {"direct": ("agent-x1.jsonl",), "workflow": ("workflows", "wf_run1", "agent-x1.jsonl"),
+                "workflow2": ("workflows", "wf_run2", "agent-x1.jsonl")}  # two workflow runs, one id (#2574 review)
+_REUSE_TABLE = [(exist, hooks, grow, state)
+                for exist in (("direct",), ("workflow",), ("direct", "workflow"))
+                for hooks in ((), ("direct",), ("workflow",), ("direct", "workflow"), ("workflow", "direct"))
+                for grow in ((), ("direct",), ("workflow",), ("direct", "workflow"))
+                for state in ("fresh", "flipped")
+                if set(hooks) <= set(exist) and set(grow) <= set(exist) and (state == "fresh" or len(exist) == 2)] + [
+    (("workflow", "workflow2"), hooks, grow, "fresh")
+    for hooks in ((), ("workflow",), ("workflow2",), ("workflow", "workflow2"), ("workflow2", "workflow"))
+    for grow in ((), ("workflow",), ("workflow2",), ("workflow", "workflow2"))]
+
+
+@pytest.mark.parametrize("exist,hooks,grow,state", _REUSE_TABLE,
+                         ids=["-".join(["+".join(e), "hooks:" + ("+".join(h) or "none"), "grow:" + ("+".join(g) or "none"), s])
+                              for e, h, g, s in _REUSE_TABLE])
+def test_the_reused_agent_id_rule_table(tmp_path, home, hermes, exist, hooks, grow, state):
+    from hermes_lcm import claude_code_audit as ca
+
+    a = _append(tmp_path / "projects" / "-work" / "s1.jsonl", CONVERSATION[:2])
+    agents = a.parent / "s1" / "subagents"
+    content = {"direct": _REUSED["first"], "workflow": _REUSED["second"], "workflow2": _REUSED["first"]}
+    _record(_hook(), home, a)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)  # the parent is captured before its agents write
+    paths = {name: _append(agents.joinpath(*_REUSE_PATHS[name]), content[name]) for name in exist}
+    if state == "flipped":  # what the old code left: one id-keyed lineage moved A -> B -> A
+        store = _open(home, hermes)
+        try:
+            for name in ("direct", "workflow", "direct"):
+                cc.drain(store, cc.Lineage("s1", "x1", paths[name]))
+        finally:
+            store.close()
+    for name in hooks:
+        _record(_hook(), home, a, event="SubagentStop", agent_id="x1", agent_transcript_path=str(paths[name]))
+        cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    for name in grow:
+        _append(paths[name], [dict(_entry("assistant", f"late-{name}", [{"type": "text", "text": f"late {name}"}]),
+                                   isSidechain=True)])
+    for _ in range(2):
+        cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    store = _open(home, hermes)
+    try:
+        conn = store.connection
+        held = collections.defaultdict(set)  # line digest -> lineage keys holding it
+        for digest, key in conn.execute("SELECT line_digest, lineage_key FROM capture_events WHERE source_kind = 'line'"):
+            held[digest].add(key)
+        rows = collections.Counter(row[0] for row in conn.execute(
+            "SELECT content FROM messages WHERE session_id LIKE 's1/agent:%'"))
+        cursors = {key[len(cc.CURSOR_PREFIX):]: json.loads(value) for key, value in conn.execute(
+            "SELECT key, value FROM metadata WHERE key LIKE ?", (cc.CURSOR_PREFIX + "claude-code:s1/agent:%",))}
+    finally:
+        store.close()
+    owner = {}  # path -> the one lineage whose cursor names only that path
+    for key, cursor in cursors.items():
+        named = set(cc.named_paths(cursor))
+        if len(named) == 1:
+            owner[named.pop()] = key
+    lost = twice = 0
+    one_to_one = all(str(path) in owner for path in paths.values()) and len(owner) == len(cursors)
+    for name, path in paths.items():
+        for line in path.read_bytes().splitlines(keepends=True):
+            keys = held[hashlib.sha256(line).hexdigest()]
+            lost += not keys
+            one_to_one = one_to_one and owner.get(str(path)) in keys
+    twice = sum(count - 1 for count in rows.values() if count > 1)
+    holds = not lost and not twice and one_to_one
+    assert (lost, twice) == (0, 0)
+    assert holds is (state == "fresh")
+    assert ca.audit(home)["verified"] is holds
+
+
+@pytest.mark.parametrize("shape", ["bare_path_gone", "moved_folder", "slash_never_an_id"])
+def test_the_reused_agent_id_edges(tmp_path, home, hermes, shape):
+    """#2566 review: a path's own key is kept once assigned (the bare path vanishing must not move it back); an agent
+    whose session folder was copied elsewhere (#2535) keeps one id-keyed lineage; a path key's leading "/" cannot be any
+    hook or file-name id."""
+    from hermes_lcm import claude_code_audit as ca
+
+    a = _append(tmp_path / "projects" / "-work" / "s1.jsonl", CONVERSATION[:2])
+    _record(_hook(), home, a)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    agents = a.parent / "s1" / "subagents"
+    if shape == "slash_never_an_id":
+        record = _hook().normalize({"hook_event_name": "SubagentStop", "session_id": "s1", "agent_id": "workflows/x1",
+                                    "transcript_path": str(a), "agent_transcript_path": str(agents / "x.jsonl")}, {})
+        lineage = cc.path_lineage(cc.Lineage("s1", "x1", agents / "workflows" / "wf_run1" / "agent-x1.jsonl"))
+        assert record["problem"] == "bad_agent_id" and lineage.agent_id == "/workflows/wf_run1/agent-x1.jsonl"
+        return
+    if shape == "bare_path_gone":
+        paths = [_append(agents / "agent-x1.jsonl", _REUSED["first"]),
+                 _append(agents / "workflows" / "wf_run1" / "agent-x1.jsonl", _REUSED["second"])]
+    else:  # the same agent's transcript, also present in a copy of the session folder under another project
+        paths = [_append(agents / "agent-x1.jsonl", _REUSED["first"]),
+                 _append(tmp_path / "projects" / "-other" / "s1" / "subagents" / "agent-x1.jsonl", _REUSED["first"])]
+    for path in paths:
+        _record(_hook(), home, a, event="SubagentStop", agent_id="x1", agent_transcript_path=str(path))
+        cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    if shape == "bare_path_gone":
+        paths[0].unlink()  # deleted (or set aside) after both were captured; then the workflow agent's hook again
+        _record(_hook(), home, a, event="SubagentStop", agent_id="x1", agent_transcript_path=str(paths[1]))
+    for _ in range(2):
+        cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    store = _open(home, hermes)
+    try:
+        rows = collections.Counter(row[0] for row in store.connection.execute(
+            "SELECT content FROM messages WHERE session_id LIKE 's1/agent:%'"))
+        keys = sorted(key[len(cc.CURSOR_PREFIX):] for (key,) in store.connection.execute(
+            "SELECT key FROM metadata WHERE key LIKE ?", (cc.CURSOR_PREFIX + "claude-code:s1/agent:%",)))
+    finally:
+        store.close()
+    assert max(rows.values()) == 1  # nothing stored twice
+    if shape == "bare_path_gone":
+        assert keys == ["claude-code:s1/agent:/workflows/wf_run1/agent-x1.jsonl", "claude-code:s1/agent:x1"]
+        assert set(rows) == {"first task", "one", "second task", "two", "three"}
+    else:  # one id-keyed lineage; the copy is reported, never captured again (#2535)
+        assert keys == ["claude-code:s1/agent:x1"] and not ca.audit(home)["verified"]
 
 
 def test_a_swept_workflow_agent_keeps_its_saved_tool_output(tmp_path, home, hermes):
@@ -3057,3 +3173,425 @@ def test_an_agent_file_with_no_id_is_never_swept_as_its_session(tmp_path, home, 
     finally:
         store.close()
     assert not ca.audit(home)["verified"]
+
+
+@pytest.mark.parametrize("then", ["hooks", "sweep", "key_before_delete_then_rewrite", "key_before_delete_then_copied"])
+def test_a_forgotten_reused_agent_id_never_comes_back_under_a_path_key(tmp_path, home, hermes, then):
+    """#2576 review: a store the old code flipped holds both transcripts under the bare id. Once the user deletes that
+    child session, no later hook or sweep may store its lines again under a path key: neither a new one, nor one the
+    path got before the delete (its rewritten file is re-read as a new generation)."""
+    a = _append(tmp_path / "projects" / "-work" / "s1.jsonl", CONVERSATION[:2])
+    _record(_hook(), home, a)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    agents = a.parent / "s1" / "subagents"
+    paths = [_append(agents / "agent-x1.jsonl", _REUSED["first"]),
+             _append(agents / "workflows" / "wf_run1" / "agent-x1.jsonl", _REUSED["second"])]
+    store = _open(home, hermes)
+    try:
+        for path in (paths[0], paths[1], paths[0]):  # what the old code left: one id-keyed lineage moved A -> B -> A
+            cc.drain(store, cc.Lineage("s1", "x1", path))
+        if then.startswith("key_before_delete"):  # B gets its own path key first: every line a duplicate, no rows
+            keyed = cc.resolve(store, cc.Lineage("s1", "x1", paths[1]))
+            assert keyed.agent_id.startswith("/") and cc.drain(store, keyed) == "drained"
+        assert store.delete_session_messages(cc.row_session_id("s1", "x1"))
+    finally:
+        store.close()
+    if then == "key_before_delete_then_rewrite":
+        paths[1].unlink()
+        _append(paths[1], _REUSED["second"])  # rewritten: a new generation, read again from the start
+        _record(_hook(), home, a, event="SubagentStop", agent_id="x1", agent_transcript_path=str(paths[1]))
+    elif then == "key_before_delete_then_copied":  # the session folder copied to another project (#2535's move)
+        b = _append(tmp_path / "projects" / "-other" / "s1.jsonl", CONVERSATION[:2])
+        copy = _append(b.parent / "s1" / "subagents" / "workflows" / "wf_run1" / "agent-x1.jsonl", _REUSED["second"])
+        _record(_hook(), home, b, event="SubagentStop", agent_id="x1", agent_transcript_path=str(copy))
+    elif then == "hooks":
+        for path in (paths[1], paths[0]):
+            _record(_hook(), home, a, event="SubagentStop", agent_id="x1", agent_transcript_path=str(path))
+            cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    else:
+        _record(_hook(), home, a)
+    for _ in range(2):
+        cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    store = _open(home, hermes)
+    try:
+        assert not store.connection.execute("SELECT COUNT(*) FROM messages WHERE session_id LIKE 's1/agent:%'").fetchone()[0]
+    finally:
+        store.close()
+
+
+def test_a_deleted_id_does_not_forget_a_separate_transcript_with_the_same_relative_name(tmp_path, home, hermes):
+    """#2576 review: the bare id holds a transcript at subagents/workflows/subagents/agent-x1.jsonl; a separate direct
+    transcript gets the path key /agent-x1.jsonl. Deleting the bare session must not forget the direct one."""
+    a = _append(tmp_path / "projects" / "-work" / "s1.jsonl", CONVERSATION[:2])
+    _record(_hook(), home, a)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    agents = a.parent / "s1" / "subagents"
+    nested = _append(agents / "workflows" / "subagents" / "agent-x1.jsonl", _REUSED["first"])
+    direct = _append(agents / "agent-x1.jsonl", _REUSED["second"])
+    for path in (nested, direct):
+        _record(_hook(), home, a, event="SubagentStop", agent_id="x1", agent_transcript_path=str(path))
+        cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    store = _open(home, hermes)
+    try:
+        assert store.delete_session_messages(cc.row_session_id("s1", "x1"))
+    finally:
+        store.close()
+    _append(direct, [dict(_entry("assistant", "late", [{"type": "text", "text": "late"}]), isSidechain=True)])
+    _record(_hook(), home, a, event="SubagentStop", agent_id="x1", agent_transcript_path=str(direct))
+    for _ in range(2):
+        cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    store = _open(home, hermes)
+    try:
+        rows = [row[0] for row in store.connection.execute(
+            "SELECT content FROM messages WHERE session_id = ?", (cc.row_session_id("s1", "/agent-x1.jsonl"),))]
+    finally:
+        store.close()
+    assert "late" in rows and len(rows) == len(set(rows))
+
+
+def test_a_second_path_named_before_it_exists_after_the_first_vanished_is_stored_once(tmp_path, home, hermes):
+    """#2576 bot review: A is captured; a hook names B before B's file exists (a pending row under B's path key); A's
+    file disappears before B appears. B's lines are stored once, in the bare session as on main, never also under the
+    path key; the audit reads unverified for the agent, never verified."""
+    from hermes_lcm import claude_code_audit as ca
+
+    a = _append(tmp_path / "projects" / "-work" / "s1.jsonl", CONVERSATION[:2])
+    _record(_hook(), home, a)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    agents = a.parent / "s1" / "subagents"
+    first = _append(agents / "workflows" / "wf_run1" / "agent-x1.jsonl", _REUSED["first"])
+    second = agents / "agent-x1.jsonl"
+    for path in (first, second):
+        _record(_hook(), home, a, event="SubagentStop", agent_id="x1", agent_transcript_path=str(path))
+        cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    first.unlink()
+    _append(second, _REUSED["second"])
+    _record(_hook(), home, a, event="SubagentStop", agent_id="x1", agent_transcript_path=str(second))
+    for _ in range(3):
+        assert cc.run_worker(home, hermes_home=hermes, settle_s=0)["failed"] == 0
+    store = _open(home, hermes)
+    try:
+        rows = store.connection.execute("SELECT session_id, content FROM messages WHERE session_id LIKE 's1/agent:%'").fetchall()
+    finally:
+        store.close()
+    texts = collections.Counter(text for _session, text in rows)
+    assert texts == collections.Counter(["first task", "one", "second task", "two", "three"])
+    assert {session for session, _text in rows} == {cc.row_session_id("s1", "x1")}
+    assert not ca.audit(home)["verified"]
+
+
+_TOOL_CALL = dict(_entry("assistant", "tc1", [{"type": "text", "text": "reading"},
+                                             {"type": "tool_use", "id": "toolu_9", "name": "Read", "input": {"path": "n"}}]),
+                  isSidechain=True)
+_TOOL_RESULT = dict(_entry("user", "tr1", [{"type": "tool_result", "tool_use_id": "toolu_9", "content": "result nine"}]),
+                    isSidechain=True)
+
+
+def _flipped_store(tmp_path, home, hermes, second_extra=()):
+    """What the old code left for a reused agent id: one id-keyed lineage moved A -> B -> A."""
+    a = _append(tmp_path / "projects" / "-work" / "s1.jsonl", CONVERSATION[:2])
+    _record(_hook(), home, a)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    agents = a.parent / "s1" / "subagents"
+    paths = [_append(agents / "agent-x1.jsonl", _REUSED["first"]),
+             _append(agents / "workflows" / "wf_run1" / "agent-x1.jsonl", _REUSED["second"] + list(second_extra))]
+    store = _open(home, hermes)
+    try:
+        for path in (paths[0], paths[1], paths[0]):
+            cc.drain(store, cc.Lineage("s1", "x1", path))
+    finally:
+        store.close()
+    return a, paths
+
+
+def _agent_rows(home, hermes):
+    store = _open(home, hermes)
+    try:
+        events = {row[0] for row in store.connection.execute(
+            "SELECT line_digest FROM capture_events WHERE source_kind = 'line' AND lineage_key LIKE 'claude-code:s1/agent:%'")}
+        rows = store.connection.execute("SELECT session_id, content FROM messages WHERE session_id LIKE 's1/agent:%'").fetchall()
+    finally:
+        store.close()
+    return events, rows
+
+
+def test_the_reused_agent_id_matrix_cell_flipped_store_tool_exchange(tmp_path, home, hermes):
+    """#2576 bot review (a split exchange): the old code's lineage holds B's tool call; B's tool result is written after
+    the upgrade. The four matrix invariants hold (every line captured, each text stored once, nothing deleted comes
+    back since nothing was deleted, the worker finishes), and the cell records the split: the call stays in the old
+    session, the result is stored in the path session, and the old lineage counts one unanswered call."""
+    from hermes_lcm import claude_code_audit as ca
+
+    a, paths = _flipped_store(tmp_path, home, hermes, [_TOOL_CALL])
+    _append(paths[1], [_TOOL_RESULT])
+    _record(_hook(), home, a, event="SubagentStop", agent_id="x1", agent_transcript_path=str(paths[1]))
+    for _ in range(2):
+        assert cc.run_worker(home, hermes_home=hermes, settle_s=0)["failed"] == 0
+    events, rows = _agent_rows(home, hermes)
+    lines = [line for path in paths for line in path.read_bytes().splitlines(keepends=True)]
+    assert not [line for line in lines if hashlib.sha256(line).hexdigest() not in events]
+    texts = collections.Counter(text for _session, text in rows)
+    assert max(texts.values()) == 1 and {"first task", "one", "second task", "two", "three", "reading", "result nine"} <= set(texts)
+    bare, keyed = cc.row_session_id("s1", "x1"), cc.row_session_id("s1", "/workflows/wf_run1/agent-x1.jsonl")
+    assert (bare, "reading") in rows and (keyed, "result nine") in rows  # the split
+    report = ca.audit(home)
+    assert not report["verified"]
+    assert {row["lineage"]: row["unanswered"] for row in report["lineages"]}["claude-code:s1/agent:x1"] == 1
+
+
+def test_an_intact_upgraded_store_audit_is_pinned(tmp_path, home, hermes):
+    """#2576 bot review: a store the old code flipped, upgraded, nothing deleted. Every text is stored once. The audit
+    reads not verified, and its failures count the path lineage's duplicate entries (rows the old lineage holds) as
+    lost, so ok is false: a false loss count on that store, never a false verified."""
+    from hermes_lcm import claude_code_audit as ca
+
+    a, paths = _flipped_store(tmp_path, home, hermes)
+    _append(paths[1], [dict(_entry("assistant", "sb4", [{"type": "text", "text": "four"}]), isSidechain=True)])
+    _record(_hook(), home, a, event="SubagentStop", agent_id="x1", agent_transcript_path=str(paths[1]))
+    for _ in range(2):
+        assert cc.run_worker(home, hermes_home=hermes, settle_s=0)["failed"] == 0
+    _events, rows = _agent_rows(home, hermes)
+    texts = collections.Counter(text for _session, text in rows)
+    assert texts == collections.Counter(["first task", "one", "second task", "two", "three", "four"])
+    report = ca.audit(home)
+    assert report["verdict"] == "not verified; 1 lineages: a second transcript path holds rows; not matched"
+    assert not report["ok"] and {name: n for name, n in report["failures"].items() if n} == {"lost": 3}
+    keyed = {row["lineage"]: row for row in report["lineages"]}["claude-code:s1/agent:/workflows/wf_run1/agent-x1.jsonl"]
+    assert keyed["pending_lines"] == 0 and keyed["surplus"] == 0 and keyed["failures"]["lost"] == 3  # all on the path lineage
+
+
+def test_an_inherited_forget_is_pinned_in_the_audit(tmp_path, home, hermes):
+    """#2576 bot review: a flipped store; B gets its path key; the user deletes the id-keyed session. Capture stores
+    nothing more, but the audit checks only each lineage's own forgotten marker: it still reads B's path lineage and
+    reports it unverified, never verified. The audit keeps its own check on purpose (release manager ruling): sharing
+    capture's inherited-forgotten predicate would hide an over-match."""
+    from hermes_lcm import claude_code_audit as ca
+
+    a, paths = _flipped_store(tmp_path, home, hermes)
+    store = _open(home, hermes)
+    try:
+        keyed = cc.resolve(store, cc.Lineage("s1", "x1", paths[1]))
+        assert cc.drain(store, keyed) == "drained" and store.delete_session_messages(cc.row_session_id("s1", "x1"))
+    finally:
+        store.close()
+    _append(paths[1], [dict(_entry("assistant", "sb4", [{"type": "text", "text": "four"}]), isSidechain=True)])
+    for _ in range(2):
+        cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    _events, rows = _agent_rows(home, hermes)
+    assert rows == []  # nothing re-enters messages
+    store = _open(home, hermes)
+    try:  # the purge took the id-keyed session's ledger; the path key's duplicate events stay (a known limit)
+        kept = store.connection.execute("SELECT disposition, raw IS NOT NULL FROM capture_events WHERE session_id = ?",
+                                        (keyed.rows_session,)).fetchall()
+        assert not store.connection.execute("SELECT COUNT(*) FROM capture_events WHERE session_id = ?",
+                                            (cc.row_session_id("s1", "x1"),)).fetchone()[0]
+    finally:
+        store.close()
+    assert sorted(kept) == [("duplicate", 1)] * 3 + [("raw", 1)] * 2  # each holds its raw line
+    report = ca.audit(home)
+    assert not report["verified"] and report["unverified"] == [keyed.key]
+    row = {row["lineage"]: row for row in report["lineages"]}[keyed.key]
+    assert not row["forgotten"] and row["lines"] == 5  # its ledger lines, read after the delete
+    store = _open(home, hermes)
+    try:  # deleting the path session too removes them, and capture never reads that path again
+        store.delete_session_messages(keyed.rows_session)
+        assert not store.connection.execute("SELECT COUNT(*) FROM capture_events WHERE session_id = ?",
+                                            (keyed.rows_session,)).fetchone()[0]
+    finally:
+        store.close()
+    _append(paths[1], [dict(_entry("assistant", "sb5", [{"type": "text", "text": "five"}]), isSidechain=True)])
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    assert _agent_rows(home, hermes) == (set(), [])
+
+
+def test_a_path_key_revision_supersedes_its_real_predecessor_across_batches(tmp_path, home, hermes):
+    """#2576 review: in a store the old code flipped, the old id-keyed lineage holds V0 of sb1. The path key then takes
+    V1 and V2 in separate drains: V1 supersedes V0 and V2 supersedes V1 (never V0 again), so one version stays active."""
+    a = _append(tmp_path / "projects" / "-work" / "s1.jsonl", CONVERSATION[:2])
+    agents = a.parent / "s1" / "subagents"
+    paths = [_append(agents / "agent-x1.jsonl", _REUSED["first"]),
+             _append(agents / "workflows" / "wf_run1" / "agent-x1.jsonl", _REUSED["second"])]
+    store = _open(home, hermes)
+    try:
+        for path in (paths[0], paths[1], paths[0]):  # what the old code left: one id-keyed lineage moved A -> B -> A
+            cc.drain(store, cc.Lineage("s1", "x1", path))
+        keyed = cc.resolve(store, cc.Lineage("s1", "x1", paths[1]))
+        assert keyed.agent_id.startswith("/")
+        ids = []
+        for text in ("second task, v1", "second task, v2"):
+            _append(paths[1], [dict(_entry("user", "sb1", text), isSidechain=True)])
+            cc.drain(store, keyed)
+            ids.append(store.connection.execute("SELECT store_id FROM messages WHERE content = ?", (text,)).fetchone()[0])
+        [v0] = store.connection.execute("SELECT store_id FROM messages WHERE content = 'second task'").fetchone()
+        assert _relations(store, "supersedes") == sorted([(ids[0], v0), (ids[1], ids[0])])
+    finally:
+        store.close()
+
+
+# #2576: one scenario matrix for a reused agent id, instead of point fixes. Rows: the store already holds the old
+# id-keyed lineage (flipped by the old code), or not, or not but a hook named the second path before it existed (so the
+# id-keyed cursor lists it as a pending path) x the first transcript on disk, deleted, or forgotten (its child
+# session deleted from the store) x the second transcript new, a copy sharing the first's uuids, or the nested
+# same-relative-name layout x one batch or two batches with a revision x the first transcript's folder readable or not.
+# Every cell asserts: no captured line is lost; exactly the expected versions are active (a revision supersedes its real
+# predecessor, in arrival order); a forgotten id stays gone; the worker finishes.
+_MATRIX = [(old, first, second, batches, readable) for old in ("fresh", "named_early", "flipped")
+           for first in ("on_disk", "deleted", "forgotten") for second in ("new", "copy", "nested")
+           for batches in (1, 2) for readable in (True, False)]
+_MATRIX_XFAIL = {  # cell id -> reason, for cells where main is wrong the same way and this PR does not change it
+    **{f"named_early-{first}-copy-b{b}-{r}": "#2566 residual: a pending second path in the id-keyed cursor makes its "
+       "path key consult the first lineage, so shared-uuid lines merge into the first's rows (main: one lineage)"
+       for first in ("on_disk", "deleted") for b in (1, 2) for r in ("readable", "locked")},
+    **{f"named_early-forgotten-{second}-b{b}-{r}": "a same-id transcript the deleted lineage saw only as a pending "
+       "path stops being captured after the delete (forgotten through that path), as on main where both are one lineage"
+       for second in ("new", "copy", "nested") for b in (1, 2)
+       for r in ("readable", "locked")}}
+
+
+def _cell_id(old, first, second, batches, readable):
+    return f"{old}-{first}-{second}-b{batches}-{'readable' if readable else 'locked'}"
+
+
+@pytest.mark.parametrize("old,first,second,batches,readable", [
+    pytest.param(*cell, id=_cell_id(*cell), marks=[pytest.mark.xfail(strict=True, reason=_MATRIX_XFAIL[_cell_id(*cell)])]
+                 if _cell_id(*cell) in _MATRIX_XFAIL else []) for cell in _MATRIX])
+def test_the_reused_agent_id_scenario_matrix(tmp_path, home, hermes, old, first, second, batches, readable):
+    a = _append(tmp_path / "projects" / "-work" / "s1.jsonl", CONVERSATION[:2])
+    _record(_hook(), home, a)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    store = _open(home, hermes)
+    try:  # the parent conversation's rows, which the exact count below includes
+        parent = collections.Counter(row[0] for row in store.connection.execute("SELECT content FROM messages"))
+    finally:
+        store.close()
+    agents = a.parent / "s1" / "subagents"
+    first_path = agents.joinpath(*(("workflows", "subagents") if second == "nested" else ("workflows", "wf_run1")),
+                                 "agent-x1.jsonl")
+    content = {"first": _REUSED["first"], "second": _REUSED["first"] if second == "copy" else _REUSED["second"]}
+    uid, base = ("fa1", "first task") if second == "copy" else ("sb1", "second task")
+    paths = {"first": _append(first_path, content["first"]), "second": agents / "agent-x1.jsonl"}
+    if old == "named_early":  # a hook names the second path before it exists; the first is drained first
+        for name in ("second", "first"):  # a pending row for the missing path, then the first drains and inherits it
+            _record(_hook(), home, a, event="SubagentStop", agent_id="x1", agent_transcript_path=str(paths[name]))
+            cc.run_worker(home, hermes_home=hermes, settle_s=0)
+        store = _open(home, hermes)
+        try:
+            assert str(paths["second"]) in cc.named_paths(store.read_metadata_json(cc.CURSOR_PREFIX + "claude-code:s1/agent:x1"))
+        finally:
+            store.close()
+    _append(paths["second"], content["second"])
+    lines = {name: path.read_bytes().splitlines(keepends=True) for name, path in paths.items()}
+    bare = cc.row_session_id("s1", "x1")
+    if old == "flipped":  # what the old code left: one id-keyed lineage moved A -> B -> A
+        store = _open(home, hermes)
+        try:
+            for name in ("first", "second", "first"):
+                cc.drain(store, cc.Lineage("s1", "x1", paths[name]))
+        finally:
+            store.close()
+    else:
+        for name in ("first", "second"):
+            _record(_hook(), home, a, event="SubagentStop", agent_id="x1", agent_transcript_path=str(paths[name]))
+            cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    gone: dict = {}
+    if first == "deleted":
+        paths["first"].unlink()
+    elif first == "forgotten":
+        store = _open(home, hermes)
+        try:
+            rows = store.connection.execute("SELECT session_id, content FROM messages").fetchall()
+            gone = {"deleted": {content for session, content in rows if session == bare},
+                    "kept": collections.Counter(content for session, content in rows if session != bare)}
+            assert store.delete_session_messages(bare)
+        finally:
+            store.close()
+    if not readable:
+        paths["first"].parent.chmod(0)
+    try:
+        texts = [f"{base}, v{n}" for n in range(1, batches + 1)]
+        for n, text in enumerate(texts):
+            grow = [dict(_entry("user", uid, text), isSidechain=True)]
+            if n == 0:
+                grow.append(dict(_entry("assistant", "late1", [{"type": "text", "text": "late one"}]), isSidechain=True))
+            _append(paths["second"], grow)
+            _record(_hook(), home, a, event="SubagentStop", agent_id="x1", agent_transcript_path=str(paths["second"]))
+            for _ in range(2):
+                cc.run_worker(home, hermes_home=hermes, settle_s=0)  # the worker finishes (an exception fails the cell)
+    finally:
+        paths["first"].parent.chmod(0o700) if paths["first"].parent.exists() else None
+    lines["second"] = paths["second"].read_bytes().splitlines(keepends=True)
+    second_forgotten = first == "forgotten" and old == "flipped"  # it was part of the deleted id-keyed session
+    store = _open(home, hermes)
+    try:
+        conn = store.connection
+        held = {row[0] for row in conn.execute(
+            "SELECT line_digest FROM capture_events WHERE source_kind = 'line' AND lineage_key LIKE 'claude-code:s1/agent:%'")}
+        for name in ("first", "second"):  # no captured line is lost
+            if first == "forgotten" and (name == "first" or second_forgotten) or (name == "first" and first == "deleted"):
+                continue
+            missing = [line for line in lines[name] if hashlib.sha256(line).hexdigest() not in held]
+            assert not missing, f"{name}: {len(missing)} lines not captured"
+        ids = {row[0] for row in conn.execute("SELECT b.store_id FROM host_uid_bindings b JOIN messages m "
+                                               "ON m.store_id = b.store_id WHERE b.uid = ?", (uid,))}
+        relations = conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'message_relations'").fetchone()
+        superseded = {row[0] for row in conn.execute(
+            "SELECT related_store_id FROM message_relations WHERE kind = 'supersedes'")} if relations else set()
+        active = sorted(row[0] for row in conn.execute(
+            f"SELECT content FROM messages WHERE store_id IN ({','.join(map(str, ids - superseded)) or 'NULL'})"))
+        expected = [] if second_forgotten else [texts[-1]]
+        if second == "copy" and old != "flipped" and first != "forgotten":
+            expected.append(base)  # the first transcript's own row of that uid stays its own
+            sessions = {row[0] for row in conn.execute("SELECT session_id FROM messages WHERE content = ?", (base,))}
+            assert len(sessions) == 2, "the second transcript's lines were merged into the first's rows"
+        assert active == sorted(expected)  # one active version per transcript, the newest in arrival order
+        rows = conn.execute("SELECT session_id, content FROM messages WHERE session_id LIKE 's1/agent:%'").fetchall()
+        assert max(collections.Counter(rows).values(), default=1) == 1  # no row stored twice in one session
+        texts_of = {name: [e["message"]["content"] if isinstance(e["message"]["content"], str)
+                           else e["message"]["content"][0]["text"] for e in content[name] if "message" in e]
+                    for name in content}
+        alive = [name for name in ("first", "second") if not (first == "forgotten" and (name == "first" or second_forgotten))]
+        want = collections.Counter(parent)  # the parent's rows, and every message of each live transcript, once each
+        for name in alive:
+            merged = name == "second" and old == "flipped" and second == "copy" and "first" in alive
+            want.update(([] if merged else texts_of[name]) + (["late one", *texts] if name == "second" else []))
+        everything = collections.Counter(row[0] for row in conn.execute("SELECT content FROM messages"))
+        assert everything == want  # in every session of the store; merged: the old code's one lineage, as on main
+        if first == "forgotten":  # a forgotten id stays gone, under any session
+            assert not conn.execute("SELECT COUNT(*) FROM messages WHERE session_id = ?", (bare,)).fetchone()[0]
+            now = collections.Counter(row[0] for row in conn.execute("SELECT content FROM messages"))
+            back = [text for text in gone["deleted"] if now[text] > gone["kept"][text]]
+            assert not back, f"deleted content came back: {back}"
+    finally:
+        store.close()
+
+
+def test_a_locked_folder_never_aborts_the_worker_and_its_id_falls_back(tmp_path, home, hermes):
+    """#2576 review: checking whether the first transcript is still there must never raise. When its folder cannot be
+    read, the worker finishes, the second path falls back to the bare id (the pre-#2566 behaviour), and the audit reads
+    unverified for that agent instead of verified."""
+    from hermes_lcm import claude_code_audit as ca
+
+    a = _append(tmp_path / "projects" / "-work" / "s1.jsonl", CONVERSATION[:2])
+    _record(_hook(), home, a)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    agents = a.parent / "s1" / "subagents"
+    first = _append(agents / "workflows" / "wf_run1" / "agent-x1.jsonl", _REUSED["first"])
+    _record(_hook(), home, a, event="SubagentStop", agent_id="x1", agent_transcript_path=str(first))
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    second = _append(agents / "agent-x1.jsonl", _REUSED["second"])
+    first.parent.chmod(0)
+    try:
+        _record(_hook(), home, a, event="SubagentStop", agent_id="x1", agent_transcript_path=str(second))
+        for _ in range(2):  # finishes: no PermissionError escapes, and nothing is swallowed as a failure
+            assert cc.run_worker(home, hermes_home=hermes, settle_s=0)["failed"] == 0
+        store = _open(home, hermes)
+        try:
+            assert cc.resolve(store, cc.Lineage("s1", "x1", second)).agent_id == "x1"
+            keys = [key for (key,) in store.connection.execute(
+                "SELECT key FROM metadata WHERE key LIKE ?", (cc.CURSOR_PREFIX + "claude-code:s1/agent:%",))]
+        finally:
+            store.close()
+        assert keys == [cc.CURSOR_PREFIX + "claude-code:s1/agent:x1"]
+        assert not ca.audit(home)["verified"]
+    finally:
+        first.parent.chmod(0o700)

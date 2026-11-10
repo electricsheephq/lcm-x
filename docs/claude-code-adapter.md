@@ -178,9 +178,19 @@ its modification time is the hook's write time.
   appear in no transcript. Its lines are workflow events (started, result, launched, failed), not
   model-visible messages, so they become no message rows. The `<session>/workflows/` folder holds
   run state and scripts, not transcripts, so it is not read. If Claude Code reuses an agent id
-  within one session, the two transcripts share one lineage: a transcript no hook names is not
-  read, and lines the second transcript writes after both hooks fired may not be captured. The
-  audit lists that agent's lineage unverified, so the session never reads verified (#2566).
+  within one session, each transcript gets its own lineage: a lineage is found by its path first,
+  the first path keeps the agent id, and a later path is keyed by its path below `subagents/`
+  while the first transcript is still on disk (#2566). A store written before that change, whose one lineage already moved between the two
+  paths, keeps its rows and gains the missing lines; its audit stays unverified for that agent.
+  Known limits of such a store, each pinned by a test, none losing a row or storing one twice:
+  a tool call the old lineage holds stays in its session when the result is written after the
+  upgrade, so the result's row is in the path session and the old lineage counts one unanswered
+  call; the audit's failures count the path lineage's duplicate entries as lost, so `ok` is false
+  although every row is stored once. If the user then deletes the id-keyed child session after the
+  second path got its key, capture stores nothing more, but that path session keeps its ledger
+  events (duplicates and shared raw lines, each holding its raw line) and the audit still reads
+  them and lists that lineage unverified. They never re-enter messages, which recall reads; deleting
+  the path session too removes them.
 - **One API response, several entries.** Claude Code writes each content block of a response as its
   own entry with its own uuid; the entries share `message.id`.
 - **Format** is internal and changes between versions, hence the per-type classes below and the

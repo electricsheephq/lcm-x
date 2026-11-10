@@ -371,9 +371,20 @@ def read_lines(path: Path, offset: int, *, max_lines: int = BATCH_LINES,
 
 # -- ingest --
 
+def _old_lineage(store: MessageStore, lineage: Lineage) -> Optional[Lineage]:
+    """For a path key, the id-keyed lineage whose cursor once named its path below subagents/, in this folder or a copy
+    of the session folder (a store the old code flipped, #2566)."""
+    old = Lineage(lineage.session_id, lineage.path.name[len("agent-"):-len(".jsonl")], lineage.path)
+    named = lineage.agent_id.startswith("/") and any(getattr(path_lineage(old._replace(path=Path(held))), "agent_id", None)
+                                                     == lineage.agent_id for held in named_paths(read_cursor(store, old)))
+    return old if named else None
+
+
 def forgotten(store: MessageStore, lineage: Lineage) -> bool:
-    """The session was deleted from the store (this module's purge marks it): never read its transcript or files again."""
-    return bool(store.read_metadata_json(FORGOTTEN_PREFIX + lineage.rows_session))
+    """The session was deleted from the store (this module's purge marks it): never read its transcript or files again.
+    A path key whose path the deleted id-keyed lineage once held is deleted with it (#2576)."""
+    old = _old_lineage(store, lineage) if lineage.agent_id else None
+    return any(store.read_metadata_json(FORGOTTEN_PREFIX + each.rows_session) for each in (lineage, old) if each)
 
 
 def record_facts(record: dict, lineage: Lineage) -> dict:
@@ -527,6 +538,10 @@ def ingest_lines(store: MessageStore, lineage: Lineage, cursor: dict, lines: lis
                             content_digest(entry) if entry else None))
     uids = {line.uid for line in parsed if line.uid and line.entry_class == PROJECTED}
     known = _versions(store, lineage.key, uids)
+    old = _old_lineage(store, lineage) if lineage.agent_id else None
+    if old is not None:  # #2566: rows the old id-keyed lineage holds stay its own
+        for uid, versions in _versions(store, old.key, uids).items():
+            known[uid] = versions + known.get(uid, [])  # the old lineage's versions are the older ones
     fork, started = _fork_start(store, lineage)
     origins = _origins(store, lineage.key, uids) if fork else {}
     copied_from = cursor.get("fork_parent")  # the session that wrote the latest copy so far
@@ -884,6 +899,33 @@ def lineages_of(record: dict) -> list[Lineage]:
     return found
 
 
+def _agents_root(lineage: Lineage) -> Optional[Path]:
+    return next((up for up in lineage.path.parents if up.name == "subagents" and up.parent.name == lineage.session_id), None)
+
+
+def path_lineage(lineage: Lineage) -> Optional[Lineage]:
+    """A child keyed by its path below the session's subagents/ ("/workflows/<run-id>/agent-<id>.jsonl": no agent id
+    holds a "/"), for a path whose agent id another live transcript of that tree already holds (#2566)."""
+    root = _agents_root(lineage)
+    if root is None or not lineage.agent_id or lineage.path.name != f"agent-{lineage.agent_id}.jsonl":
+        return None
+    return Lineage(lineage.session_id, "/" + lineage.path.relative_to(root).as_posix(), lineage.path)
+
+
+def resolve(store: MessageStore, lineage: Lineage) -> Lineage:
+    """Path first (#2566): a path's own key, once assigned, is kept. Otherwise a path keeps its agent id unless that id's
+    cursor holds a live path elsewhere in the same subagents/ folder (another folder is #2535's moved session)."""
+    by_path, cursor = path_lineage(lineage), store.read_metadata_json(CURSOR_PREFIX + lineage.key)
+    if by_path is not None and store.read_metadata_json(CURSOR_PREFIX + by_path.key):
+        return by_path
+    if store.read_metadata_json(FORGOTTEN_PREFIX + lineage.rows_session):  # deleted: no new key brings it back
+        return lineage
+    held = Path(cursor["path"]) if isinstance(cursor, dict) and isinstance(cursor.get("path"), str) else None
+    if by_path is None or held is None or held == lineage.path or _agents_root(Lineage(*lineage[:2], held)) != _agents_root(lineage):
+        return lineage
+    return by_path if os.path.exists(held) else lineage  # never raises: an unreadable folder reads as gone
+
+
 JOURNAL_PREFIX = "journal/"  # a run's journal.jsonl: its own child lineage; no file-name id or hook id holds "/" (#2562)
 
 
@@ -1072,8 +1114,9 @@ def _drain_once(home: Path, report: dict, deadline: Optional[float], config: Any
                 _set_aside(path)
                 continue
             try:
-                for lineage in lineages_of(record):
-                    outcome = drain(store, lineage, deadline=deadline, facts=record_facts(record, lineage))
+                for named in lineages_of(record):
+                    lineage = resolve(store, named)  # the facts stay the hook's own (#2566)
+                    outcome = drain(store, lineage, deadline=deadline, facts=record_facts(record, named))
                     if outcome == "deadline":
                         report["complete"] = False
                         return "deadline"  # the claimed record stays for the next run
@@ -1089,7 +1132,7 @@ def _drain_once(home: Path, report: dict, deadline: Optional[float], config: Any
             done.append(path)
         seen: set[str] = set()
         for lineage in registered(store):
-            for each in (lineage, *_subagents(lineage)):
+            for each in (resolve(store, item) for item in (lineage, *_subagents(lineage))):
                 if each.key in seen:
                     continue
                 seen.add(each.key)
