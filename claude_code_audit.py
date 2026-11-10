@@ -9,6 +9,7 @@ import hashlib
 import json
 import math
 import sqlite3
+import stat
 import time
 import zlib
 from collections import Counter, defaultdict
@@ -38,6 +39,7 @@ from .claude_code_store import (
     _subagents,
     _wal_without_sidecars,
     cursor_state,
+    named_paths,
     read_stamp,
 )
 from .config import LCMConfig
@@ -231,6 +233,43 @@ def _matches_generation(path: Path, rows: dict) -> bool:
     return count == len(rows)
 
 
+def _captured_prefix(path: Path, rows: dict) -> tuple[int, int]:
+    """How many of a file's leading complete lines a generation's rows hold, and how many complete lines it has."""
+    matched, total, matching = 0, 0, True
+    with path.open("rb") as handle:
+        for raw in handle:
+            if not raw.endswith(b"\n"):
+                break
+            row = rows.get(total)
+            matching = matching and row is not None and _digest(raw) == row["line_digest"]
+            matched += matching
+            total += 1
+    return matched, total
+
+
+def _named_others(lineage: Lineage, cursor: dict, generations: dict, compared: set, report: dict) -> None:
+    """#2535: another transcript path this lineage's records named. One that never appeared (a resume's SessionStart
+    names a path under the new directory) holds nothing. One that exists must be held by a generation: its lines
+    past that generation's rows, or all of them when no generation holds its start, are uncaptured."""
+    for name in named_paths(cursor):
+        other = Path(name)
+        try:
+            status = other.stat()
+        except OSError:
+            continue
+        if other == lineage.path or not stat.S_ISREG(status.st_mode) or (status.st_dev, status.st_ino) in compared:
+            continue
+        compared.add((status.st_dev, status.st_ino))
+        best, total, held = 0, 0, None
+        for generation, rows in generations.items():
+            matched, total = _captured_prefix(other, rows)
+            if matched > best:
+                best, held = matched, generation
+        if held is not None and held < cursor["generation"] and best == len(generations[held]) and report["generations_gone"]:
+            report["generations_gone"] -= 1  # the generation's file was found at its own path, not set aside
+        report["named_uncaptured_lines"] += total - best
+
+
 def _older_copy(siblings: list[Path], rows: dict) -> Path | None:
     for sibling in siblings:
         if _matches_generation(sibling, rows):
@@ -275,14 +314,24 @@ def _transcripts(lineage: Lineage, cursor: dict, events: list[dict], report: dic
             report["pending_lines"] = sum(line.endswith(b"\n") for line in handle)
         report["failures"]["surplus_lines"] += sum(i >= cursor["line_index"] for i in rows)
     siblings = _set_aside_siblings(lineage.path) if cursor["generation"] else []
+    compared = set()
+    for path in (lineage.path,):
+        try:
+            status = path.stat()
+            compared.add((status.st_dev, status.st_ino))
+        except OSError:
+            pass
     for generation in range(cursor["generation"]):
         rows = generations[generation]
         copy = _older_copy(siblings, rows)
         if copy is None:
             report["generations_gone"] += 1
             continue
+        status = copy.stat()
+        compared.add((status.st_dev, status.st_ino))
         length = _compare(copy, rows, report, expected, lag)
         report["failures"]["surplus_lines"] += sum(i >= length for i in rows)
+    _named_others(lineage, cursor, generations, compared, report)
     return expected
 
 
@@ -382,6 +431,7 @@ def _lineage_report(lineage: Lineage, cursor: dict, events: list[dict], messages
               "surplus": 0, "unverifiable": 0, "fork_copies": 0, "unanswered": 0,
               "forgotten": forgotten, "transcript_state": "forgotten" if forgotten else "ok",
               "other_projection": 0, "projected_without_uuid": 0,
+              "named_uncaptured_lines": 0,
               "files": dict.fromkeys(("held", "kept", "uncaptured"), 0), "failures": dict.fromkeys(FAILURES, 0)}
     report.update(classes={}, unknown_types={})
     if forgotten:
@@ -532,7 +582,7 @@ def _unverified(metadata: dict, records: list[dict], lineages: list[dict], sessi
                 failed: list[Lineage | None]) -> list[str]:
     unknown = {row["lineage"] for row in lineages if not row["forgotten"] and (
         row["transcript_state"] != "ok" or row["generations_gone"] or row["pending_lines"]
-        or row["files"]["uncaptured"])}
+        or row["files"]["uncaptured"] or row["named_uncaptured_lines"])}
     if session is not None and CURSOR_PREFIX + lineage_key(session) not in metadata:
         unknown.add(lineage_key(session))
     # A pending lineage (#2533) whose transcript now exists but has no cursor is uncaptured. One whose transcript never
@@ -548,7 +598,7 @@ def _unverified(metadata: dict, records: list[dict], lineages: list[dict], sessi
         lineage = Lineage(pending.get("session_id"), pending.get("agent_id"), Path(pending["path"]))
         if CURSOR_PREFIX + lineage.key in metadata or FORGOTTEN_PREFIX + lineage.rows_session in metadata:
             continue
-        if lineage.path.exists():
+        if any(Path(name).exists() for name in named_paths(pending)):  # every path its records named (#2535)
             unknown.add(lineage.key)
         if lineage.agent_id is None:
             for child in _subagents(lineage):

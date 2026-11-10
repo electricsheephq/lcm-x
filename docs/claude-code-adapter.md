@@ -424,8 +424,13 @@ and reports the age of the oldest one.
 Known issue in the shipped preview `claude-code-v0.1.0`: before this fix, such a session's final
 rows could be lost if its later hook records were also lost (#2533). Known issue for the preview and for any build before the
 follow-up to #2533 (#2535): the audit counts, but does not fail on, a session whose transcript file never appeared; its
-one-line verdict names how many lineages are awaiting capture and the age of the oldest. Also until #2535: a session whose
-hooks name two transcript paths can be reported verified while one path was never captured.
+one-line verdict names how many lineages are awaiting capture and the age of the oldest.
+
+A lineage's records can name more than one transcript path: a resume from another directory sends `SessionStart` with
+a path under the new directory that never appears. Capture follows one path. The pending row and the cursor list every
+named path, and the audit checks each one that exists: lines the store does not hold leave the lineage unverified
+(`named_uncaptured_lines`). A named path that never appeared holds nothing and is ignored. Capturing a second path that
+holds lines is tracked in #2535.
 
 - Claude Code starts the hook in exec form (`hooks/hooks.json`): `python3` found on `PATH`, with
   `${CLAUDE_PLUGIN_ROOT}` substituted in its arguments and no shell before it, which saves the

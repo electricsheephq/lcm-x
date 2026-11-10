@@ -399,7 +399,7 @@ def test_pending_lineage_retains_first_seen_and_drains_from_start(tmp_path, home
         with monkeypatch.context() as patch:
             patch.setattr(cc.time, "time", lambda: 100.0)
             assert cc.drain(store, lineage) == "missing"
-        expected = {"session_id": "s1", "agent_id": agent, "path": str(path), "first_seen": 100.0}
+        expected = {"session_id": "s1", "agent_id": agent, "path": str(path), "named": [str(path)], "first_seen": 100.0}
         assert store.read_metadata_json(key) == expected
         assert cc.read_cursor(store, lineage) is None
         calls, real_stat = [], os.stat
@@ -1866,3 +1866,97 @@ def test_a_resume_from_another_directory_is_captured_from_its_real_path(tmp_path
         store.close()
     report = ca.audit(home)
     assert report["verified"] and report["pending_lineages"] == 0 and report["failures"]["lost"] == 0
+
+
+def _append(path, entries):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write("".join(json.dumps(entry) + "\n" for entry in entries))
+    return path
+
+
+def test_a_second_named_path_with_uncaptured_lines_is_not_verified(tmp_path, home, hermes):
+    """#2535 (ii): the cursor is on A; a record names B while B is missing; B is then written with rows that nothing
+    drains. The audit must not report verified, and the resume's phantom path rule keeps (i) verified."""
+    from hermes_lcm import claude_code_audit as ca
+
+    a = _append(tmp_path / "projects" / "-work" / "s1.jsonl", CONVERSATION[:2])
+    _record(_hook(), home, a)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    b = tmp_path / "projects" / "-other" / "s1.jsonl"
+    _record(_hook(), home, b)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    assert ca.audit(home)["verified"]  # B never existed so far: the phantom case
+    _append(b, CONVERSATION[2:])
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    report = ca.audit(home)
+    assert not report["verified"] and "claude-code:s1" in report["unverified"]
+    assert report["lineages"][0]["named_uncaptured_lines"] == len(CONVERSATION[2:])
+
+
+def test_a_path_named_while_pending_and_later_filled_keeps_the_lineage_unverified(tmp_path, home, hermes):
+    """#2535: pending A appears with rows; in the same run a record names a missing B, A is kept and drained, and the
+    first cursor inherits B as a named path. When B later fills, the audit does not report verified."""
+    from hermes_lcm import claude_code_audit as ca
+
+    a = tmp_path / "projects" / "-work" / "s1.jsonl"
+    _record(_hook(), home, a, event="SessionStart")
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    _append(a, CONVERSATION[:2])
+    b = tmp_path / "projects" / "-other" / "s1.jsonl"
+    _record(_hook(), home, b)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    assert ca.audit(home)["verified"]  # A is captured; B has not appeared
+    _append(b, CONVERSATION[2:])
+    report = ca.audit(home)
+    assert not report["verified"] and "claude-code:s1" in report["unverified"]
+
+
+def test_cursor_alternation_stays_unverified(tmp_path, home, hermes):
+    """#2535 (iii): A drained, B named and drained as a new generation, then A grows: A's new lines are uncaptured."""
+    from hermes_lcm import claude_code_audit as ca
+
+    a = _append(tmp_path / "projects" / "-work" / "s1.jsonl", CONVERSATION[:2])
+    _record(_hook(), home, a)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    b = _append(tmp_path / "projects" / "-other" / "s1.jsonl", CONVERSATION[:2])
+    _record(_hook(), home, b)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    _append(a, CONVERSATION[2:])
+    report = ca.audit(home)
+    assert not report["verified"] and report["lineages"][0]["named_uncaptured_lines"] == len(CONVERSATION[2:])
+
+
+def test_a_known_path_adds_no_metadata_write(tmp_path, home, hermes):
+    """#2535 (iv): a drain of the path the cursor already names, with no new lines, leaves metadata unchanged."""
+    a = _append(tmp_path / "projects" / "-work" / "s1.jsonl", CONVERSATION)
+    lineage = cc.Lineage("s1", None, a)
+    store = _open(home, hermes)
+    try:
+        cc.drain(store, lineage)
+        before = store.connection.execute("SELECT key, value FROM metadata ORDER BY key").fetchall()
+        assert cc.drain(store, lineage) == "drained"
+        assert store.connection.execute("SELECT key, value FROM metadata ORDER BY key").fetchall() == before
+        assert cc.read_cursor(store, lineage)["named"] == [str(a)]
+    finally:
+        store.close()
+
+
+def test_a_cursor_written_before_named_paths_audits_as_before(tmp_path, home, hermes):
+    """#2535 (v): a cursor without `named` names only its own path; a complete capture stays verified."""
+    from hermes_lcm import claude_code_audit as ca
+
+    a = _append(tmp_path / "projects" / "-work" / "s1.jsonl", CONVERSATION)
+    _record(_hook(), home, a)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    _tamper_cursor = cc.CURSOR_PREFIX + "claude-code:s1"
+    store = _open(home, hermes)
+    try:
+        cursor = store.read_metadata_json(_tamper_cursor)
+        cursor.pop("named", None)
+        store.connection.execute("UPDATE metadata SET value = ? WHERE key = ?", (json.dumps(cursor), _tamper_cursor))
+        store.connection.commit()
+    finally:
+        cc.to_rollback_journal(store.connection)
+        store.close()
+    assert ca.audit(home)["verified"]
