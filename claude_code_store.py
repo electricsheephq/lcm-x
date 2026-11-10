@@ -840,15 +840,28 @@ def lineages_of(record: dict) -> list[Lineage]:
     return found
 
 
+SUBAGENT_DEPTH = 4  # folders below subagents/: workflow agents sit at workflows/<run-id>/ (#2562)
+
+
 def _subagents(lineage: Lineage) -> list[Lineage]:
+    """Every agent-*.jsonl below the session's subagents/ folder, to a bounded depth, never through a symlinked folder
+    (#2562): the sweep is the safety net for a missed hook, so it must not depend on a hook naming the path."""
     if lineage.agent_id:
         return []
-    folder = session_dir(lineage.path) / "subagents"
-    try:
-        names = sorted(path.name for path in folder.glob("agent-*.jsonl"))
-    except OSError:
-        return []
-    return [Lineage(lineage.session_id, name[len("agent-"):-len(".jsonl")], folder / name) for name in names]
+    found, stack = [], [(session_dir(lineage.path) / "subagents", 0)]
+    while stack:
+        folder, depth = stack.pop()
+        try:
+            with os.scandir(folder) as entries:
+                for entry in entries:
+                    if entry.is_dir(follow_symlinks=False):
+                        if depth < SUBAGENT_DEPTH:
+                            stack.append((Path(entry.path), depth + 1))
+                    elif entry.name.startswith("agent-") and entry.name.endswith(".jsonl"):
+                        found.append(Path(entry.path))
+        except OSError:
+            continue
+    return [Lineage(lineage.session_id, path.name[len("agent-"):-len(".jsonl")], path) for path in sorted(found)]
 
 
 def _settle(store: MessageStore, lineage: Lineage, deadline: Optional[float], settle_s: float) -> None:
