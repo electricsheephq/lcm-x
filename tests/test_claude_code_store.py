@@ -433,15 +433,15 @@ def _argv(event):
 @pytest.mark.parametrize("case", ["session_goes_on", "print_mode_exit"])
 def test_a_killed_async_post_tool_batch_hook_loses_no_row(tmp_path, home, hermes, case, killed):
     """#2141 runs PostToolBatch async: Claude Code kills an async hook still running when a -p
-    session exits, and one can also die in a session that goes on. Wherever the hook dies, before
-    or after it writes its record, the synchronous Stop and SessionEnd hooks that follow lead the
+    session exits; #2350 detaches its writer. Wherever that detached child dies, before
+    or after it writes its record, the detached Stop and SessionEnd hooks that follow lead the
     worker to every row, and the store matches a run in which no hook died.
 
-    Each hook runs its registered command. A worker holds the lock while the synchronous hooks
+    Each hook runs its entrypoint. A worker holds the lock while the detached end hooks
     run, so they leave their records to it, and the worker run after them is that holder's rescan.
     The async hook never takes the lock, so its death cannot leave them waiting on it. The worker
     script it starts is a stub, and a FIFO in place of the hook log stops it just before it exits,
-    unless the kill, which waits only for its record, comes first."""
+    unless killed first. A launcher records the child PID, stopping it before spooling for that case."""
     import signal
     import subprocess
     assert _registered("PostToolBatch").get("async") is True
@@ -473,16 +473,25 @@ def test_a_killed_async_post_tool_batch_hook_loses_no_row(tmp_path, home, hermes
             handle.write("".join(json.dumps(entry) + "\n" for entry in CONVERSATION[3:]))
         with open(home / "capture.lock", "a") as held:  # the running worker
             fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            for event in events:
+            for index, event in enumerate(events, 1):
                 done = subprocess.run(_argv(event), input=payload(event),
                                       env=env, capture_output=True, text=True, timeout=60)
                 assert (done.returncode, done.stdout, done.stderr) == (0, "", "")
+                deadline = time.monotonic() + 30
+                while not log.exists() or len(log.read_text(encoding="utf-8").splitlines()) < index:
+                    assert time.monotonic() < deadline, "the detached end hooks never logged"
+                    time.sleep(0.01)
         outcomes = [json.loads(line)["outcome"] for line in log.read_text(encoding="utf-8").splitlines()]
         assert outcomes[-len(events):] == ["worker_running"] * len(events)  # left to the holder
         assert cc.run_worker(home, hermes_home=hermes, settle_s=0)["complete"]
         return stored(home)
 
-    tool_batch = subprocess.Popen(_argv("PostToolBatch"), env=env,
+    child_pid = tmp_path / "child.pid"
+    launch = ("import os,runpy,signal; os.register_at_fork(after_in_child=lambda: "
+              f"(open({str(child_pid)!r},'w').write(str(os.getpid())), "
+              f"signal.raise_signal(signal.SIGSTOP) if {killed == 'before_its_record'} else None)); "
+              "runpy.run_path(__import__('sys').argv[-1],run_name='__main__')")
+    tool_batch = subprocess.Popen([sys.executable, "-I", "-S", "-c", launch, _argv("PostToolBatch")[-1]], env=env,
                                   stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                   start_new_session=True)  # waits for its payload until it gets one
 
@@ -499,9 +508,15 @@ def test_a_killed_async_post_tool_batch_hook_loses_no_row(tmp_path, home, hermes
             time.sleep(0.01)
 
     def kill():
-        assert tool_batch.poll() is None, "the hook ended before it was killed"
-        os.killpg(tool_batch.pid, signal.SIGKILL)
-        tool_batch.wait(timeout=60)
+        if killed == "before_its_record":
+            tool_batch.stdin.write(payload("PostToolBatch").encode())
+            tool_batch.stdin.close()
+        deadline = time.monotonic() + 30
+        while not child_pid.exists() or not child_pid.read_text():
+            assert time.monotonic() < deadline, "the hook never forked its writer"
+            time.sleep(0.01)
+        os.kill(int(child_pid.read_text()), signal.SIGKILL)
+        assert tool_batch.wait(timeout=60) == 0  # only its detached writer was killed
         tool_batch.stdin.close()
         if log.is_fifo():
             log.unlink()
@@ -1272,20 +1287,23 @@ def test_a_lineage_whose_first_batch_fails_is_retried_by_the_sweep(tmp_path, hom
 
 def test_a_final_reply_after_a_late_async_record_replaced_the_end_record_is_captured_by_the_next_run(
         tmp_path, home, hermes, monkeypatch):
-    """REGRESSION (#2262): an async PostToolBatch record that lands after the session's end record
-    replaces it in the spool (one record per session), so the worker skips the settle. A final reply
-    written after that drain waits for the next run, whose sweep captures it from the cursor: every
-    transcript line in order, once. The transcript stays the source, so nothing is lost."""
+    """REGRESSION (#2262): A1 (#2350) now keeps an unclaimed end pointer and settles once.
+    A lost pointer still defers a later final reply to the next run's registered-lineage sweep:
+    every transcript line in order, once."""
     path = _transcript(tmp_path, CONVERSATION[:-1])
     hook = _hook()
     _record(hook, home, path, event="Stop")
-    _record(hook, home, path, event="PostToolBatch")  # the late async hook
+    assert hook.spool(home, {"host": "claude-code", "session_id": "s1", "event": "PostToolBatch",
+                             "transcript_path": str(path)}) == "kept_end"
     [spooled] = list((home / "spool").glob("*.json"))
-    assert json.loads(spooled.read_text(encoding="utf-8"))["event"] == "PostToolBatch"
+    assert json.loads(spooled.read_text(encoding="utf-8"))["event"] == "Stop"
     settled = []
     monkeypatch.setattr(cc, "_settle", lambda *args: settled.append(args))
     assert cc.run_worker(home, hermes_home=hermes, settle_s=0)["complete"]
-    assert settled == []  # no end record was left to settle
+    assert len(settled) == 1
+    _record(hook, home, path, event="Stop")
+    [spooled] = list((home / "spool").glob("*.json"))
+    spooled.unlink()  # simulate a lost last pointer; no fresh hook below
     with open(path, "a", encoding="utf-8") as handle:
         handle.write(json.dumps(CONVERSATION[-1]) + "\n")
     final = "The word is ochre."
