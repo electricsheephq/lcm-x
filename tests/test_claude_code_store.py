@@ -3009,3 +3009,27 @@ def test_a_reused_agent_id_is_pinned(tmp_path, home, hermes, hooks):
     else:  # the first path in sort order is taken; the second transcript's own lines are not captured separately
         assert seen == {"first": (4, 0, 0), "second": (5, 3, 0)}
         assert dict(rows) == {"first task": 1, "one": 1}
+
+
+def test_a_swept_workflow_agent_keeps_its_saved_tool_output(tmp_path, home, hermes):
+    """#2574 review: a workflow agent's saved output sits in the session's tool-results/; its message row holds the full
+    output, not the preview, when the sweep (no hook) takes the nested transcript."""
+    a = _append(tmp_path / "projects" / "-work" / "s1.jsonl", CONVERSATION[:2])
+    saved = a.parent / "s1" / "tool-results" / "toolu_9.txt"
+    saved.parent.mkdir(parents=True)
+    saved.write_text("full output\n" * 5000, encoding="utf-8")
+    marker = (f"<persisted-output>\nOutput too large (60KB). Full output saved to: {saved}\n\n"
+              "Preview (first 2KB):\nfull output\n</persisted-output>")
+    _append(a.parent / "s1" / "subagents" / "workflows" / "wf_run1" / "agent-x1.jsonl",
+            [dict(_entry("user", "w1", [{"type": "tool_result", "tool_use_id": "toolu_9", "content": marker}]),
+                  isSidechain=True)])
+    assert cc.session_dir(saved.parent.parent / "subagents" / "workflows" / "wf_run1" / "agent-x1.jsonl") == a.parent / "s1"
+    _record(_hook(), home, a)
+    for _ in range(2):
+        cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    store = _open(home, hermes)
+    try:
+        [(_, _, content, _)] = _rows(store, cc.row_session_id("s1", "x1"))
+    finally:
+        store.close()
+    assert "chars=60000" in str(content) and "toolu_9" in str(content)
