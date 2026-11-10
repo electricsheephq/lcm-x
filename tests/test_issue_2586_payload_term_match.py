@@ -172,8 +172,8 @@ FUZZ_ALPHABET = list("isktmeaISKTM .-_") + SPECIAL
 
 
 def _reference(monkeypatch, *args):
-    with monkeypatch.context() as patch:
-        patch.setattr(tools, "_ASCII_CASE_FOLDS", __import__("re").compile(r"[\s\S]"))  # every content takes the regex
+    with monkeypatch.context() as patch:  # the plain regex search for every operand, whatever the fast path decides
+        patch.setattr(tools, "_operand_hit", lambda pattern, content, lower, first: pattern.search(content))
         return tools._payload_match(*args)
 
 
