@@ -277,8 +277,10 @@ def _run_case(case, host, tmp_path, monkeypatch, request, characterization=None)
         if child_route:
             # The host hook waits at most 2 s for a live-child store (#2482); the
             # store may land later under load, so wait for it before reading.
-            from hermes_lcm.aux_session import drain_live_child_stores
-            drain_live_child_stores(60.0)
+            aux = ctx.module('aux_session')  # the host's own copy of the plugin, as in the #2482 tests
+            warned = set(aux._LIVE_CHILD_WARNED)
+            aux.drain_live_child_stores(60.0)  # returns None; a timeout only adds to _LIVE_CHILD_WARNED
+            assert aux._LIVE_CHILD_WARNED <= warned, 'a live-child store did not land within 60 s'
         rows = reader._store.get_session_messages(session)
         counts.append(len(rows))
         multiset = _snapshot(rows, storage, home, temp, {})[3]
