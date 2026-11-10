@@ -92,7 +92,6 @@ def deliver_recall(
     # historical order and serialized response exactly. answer_ready applies
     # stable post-rank diversity before bounded exact-ref hydration.
     diversity_dropped = 0
-    selection_has_more = False
     if detail == "answer_ready":
         # Take only what the response can hold. Delta used to select the whole
         # 25-candidate cap up front and filter afterwards, which walked the
@@ -119,7 +118,6 @@ def deliver_recall(
                 limit=selection_limit,
                 per_session_limit=per_session_limit,
             )
-            selection_has_more = len(ordered) > len(selected_entries)
             strict_rows = None
         answer_ready_content = hydrate(
             selected_entries,
@@ -541,15 +539,27 @@ def deliver_recall(
                 "back here as non-evidence drill-down leads"
             )
         if guidance_v2:
-            more = selection_has_more
+            shipped = {_hit_identity(h) for h in hits_out}
+            pending = [e for e in selected_entries if _hit_identity(e["hit"]) not in shipped]
+            more = False
             if reference_strict:
-                more = bool(strict_selector.take(strict_selector.ledger.live_count + 1))
-                more = more or bool(strict_selector.diversity_dropped)
+                pending += strict_selector.take(strict_selector.ledger.live_count + 1)
                 # Post-budget rejection can become hydratable on a later call.
-                more = more or any(v is False for v in strict_selector._rejected.values())
+                deferred = [e for e in ordered if id(e) in strict_selector._blocked
+                            or strict_selector._rejected.get(id(e)) is False]
+                pending += deferred
+            else:
+                pending = [e for e in ordered if _hit_identity(e["hit"]) not in shipped] + pending
+            while delta_requested and pending:
+                answer_ready_content.update(hydrate(pending, query=query, expanded_limit=len(pending),
+                    rows_by_id=strict_selector.rows if reference_strict else None, fts_arm_index=fts_arm_index))
+                if _novel(pending):
+                    more = True
+                    break
+                pending = strict_selector.take(strict_selector.ledger.live_count + 1) if reference_strict else []
             expansion.update(sessions_delivered=_sessions(hits_out),
-                             sessions_in_pool=_sessions([e["hit"] for e in ordered]),
-                             more_available=bool(more or response_cap_truncated))
+                             sessions_in_pool=_sessions([e["hit"] for e in ordered] + hits_out),
+                             more_available=bool(more or pending or response_cap_truncated))
         response["detail"] = detail
         response["provenance"]["detail"] = detail
         response["provenance"]["answer_ready"] = expansion

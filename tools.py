@@ -1119,6 +1119,8 @@ def lcm_load_session(args: Dict[str, Any], **kwargs) -> str:
         has_more = bool(next_cursor is not None and engine._store.load_session_page(
             session_id, after_store_id=next_cursor, limit=1, roles=roles or None,
             time_from=time_from, time_to=time_to))
+        if not has_more:
+            next_cursor = None
     else:
         rows = engine._store.load_session_page(
             session_id, after_store_id=after_store_id, limit=limit + 1,

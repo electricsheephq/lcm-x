@@ -1287,8 +1287,9 @@ def recall_guidance_schemas(schemas, variant):
         if name == "lcm_recall":
             schema = {**schema, "description": schema["description"] + " " + (
                 "For questions that combine or compare facts from several conversations (totals, "
-                "lists, changes over time, 'how many', 'which ... first'), first check "
-                "`provenance.answer_ready.sessions_delivered` and `more_available`. "
+                "lists, changes over time, 'how many', 'which ... first'). "
+                + ("First check `provenance.answer_ready.sessions_delivered` and `more_available`. "
+                   if "Session delivery" not in schema["description"] else "") +
                 "If more may exist, call again with `exclude_session_ids` set to the sessions you have read. "
                 "Read around a hit with its `session_hint`. "
                 "Stop when every part of the question is supported by a cited span, or "

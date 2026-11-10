@@ -66,8 +66,10 @@ give the model guidance for questions spanning several conversations. The engine
 plugin registry and read-only MCP reader serve the same guidance. In hits delivery,
 `detail="answer_ready"` adds `sessions_delivered`, `sessions_in_pool` and
 `more_available` under `provenance.answer_ready`. The counts describe distinct
-sessions in the returned hits and ranked candidate pool; `more_available` also
-accounts for candidates left by hydration or response limits. These are bounded
+sessions in the returned hits and ranked candidate pool plus delivered later-statement
+children; `more_available` also accounts for displaced candidates and candidates left
+by hydration or response limits. In delta mode, seen exact refs do not count as more.
+Session-delivery guidance omits the hits-only provenance instruction. These are bounded
 retrieval signals, not proof that all matching sessions have been searched.
 
 With v2, `lcm_load_session` advertises `anchor_store_id`, `before` (default 6)
@@ -75,9 +77,9 @@ and `after` (default 12). The anchor must belong to the supplied `session_id`;
 otherwise the tool returns an error without rows. Each side clamps to 0..40,
 and rows come back in store order. Role and inclusive stored-write-time filters
 apply within that window, followed by `after_store_id` and the page limit.
-Continue with `after_store_id=next_cursor` without the anchor to read onward
+When `has_more` is true, continue with `after_store_id=next_cursor` without the anchor to read onward
 through the session. The handler accepts anchor arguments under either guidance
-version; existing internal window callers retain their 12-row clamp per side.
+version; `next_cursor` is null when `has_more` is false. Existing internal window callers retain their 12-row clamp per side.
 
 Set `recall_session_hints: true` (env `LCM_RECALL_SESSION_HINTS=true`; default
 `false`) to add `session_hint` to answer-ready hits and summary leads. It is a

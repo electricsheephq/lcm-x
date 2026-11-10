@@ -522,6 +522,7 @@ _SUPPORTED_LCM_CONFIG_YAML_KEYS = {
     "expansion_reasoning_effort",
     "embedding_query_prefix", "embedding_document_prefix",
     "recall_adjacent_reply",
+    "recall_guidance", "recall_session_hints",
     "recall_snippet_window_hits",
     "recall_extra_entries",
     "recall_later_statements",
@@ -1610,6 +1611,17 @@ class LCMConfig:
             else:
                 config_source_warnings.append("invalid config.yaml lcm.recall_adjacent_reply ignored; expected bool")
 
+        for name, expected in (("recall_guidance", "v1 or v2"), ("recall_session_hints", "bool")):
+            if isinstance(prefix_yaml, dict) and name in prefix_yaml:
+                value = prefix_yaml[name]
+                if name == "recall_guidance" and isinstance(value, str):
+                    value = value.strip().lower()
+                valid = isinstance(value, bool) if name == "recall_session_hints" else value in ("v1", "v2")
+                if valid:
+                    setattr(c, name, value)
+                _record(name, f"config_yaml:lcm.{name}" if valid else "default",
+                        None if valid else f"invalid config.yaml lcm.{name} ignored; expected {expected}")
+
         window_hits = prefix_yaml.get("recall_snippet_window_hits", 0) if isinstance(prefix_yaml, dict) else 0
         window_env = env.get("LCM_RECALL_SNIPPET_WINDOW_HITS", "")
         window_source = (
@@ -1821,6 +1833,8 @@ class LCMConfig:
                 if lcm_env_get(spec.env_key, "").strip() and len(config_source_warnings) == warning_count:
                     _warn_env_range(spec.name, value, config_source_warnings)
             setattr(c, spec.name, value)
+            if spec.name in ("recall_guidance", "recall_session_hints") and spec.env_key in env:
+                _record(spec.name, f"env:{spec.env_key}")
             if value is True and spec.name in ENV_FIELD_DEPRECATIONS:
                 _since, removal = ENV_FIELD_DEPRECATIONS[spec.name]
                 config_source_warnings.append(
@@ -1828,8 +1842,7 @@ class LCMConfig:
                     "Until then it behaves as before."
                 )
 
-        if c.recall_guidance not in ("v1", "v2"):
-            c.recall_guidance = "v1"
+        c.recall_guidance = "v2" if c.recall_guidance.strip().lower() == "v2" else "v1"
         c.recall_delivery_unit = c.recall_delivery_unit.strip().lower()
         if c.recall_delivery_unit not in ("hits", "session"):
             c.recall_delivery_unit = "hits"

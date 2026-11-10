@@ -242,6 +242,44 @@ def isolated_environment(monkeypatch):
     monkeypatch.setattr(config, "_sqlite_mmap_size_warned", False)
 
 
+@pytest.mark.parametrize("env", [False, True])
+def test_recall_guidance_and_hints_yaml(monkeypatch, tmp_path, env):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(config, "_load_hermes_config_yaml", lambda *a: {
+        "lcm": {"recall_guidance": "v2", "recall_session_hints": True}})
+    if env:
+        monkeypatch.setenv("LCM_RECALL_GUIDANCE", "v1")
+        monkeypatch.setenv("LCM_RECALL_SESSION_HINTS", "false")
+    cfg = config.LCMConfig.from_env()
+    assert cfg.recall_guidance == ("v1" if env else "v2")
+    assert cfg.recall_session_hints is (not env)
+    assert not {"recall_guidance", "recall_session_hints"} & set(cfg.ignored_config_yaml_lcm_keys)
+    for name in ("recall_guidance", "recall_session_hints"):
+        assert cfg.config_sources[name] == (f"env:LCM_{name.upper()}" if env else f"config_yaml:lcm.{name}")
+
+
+@pytest.mark.parametrize("guidance,hints", [(2, "true"), ("unknown", 1), (None, None)])
+def test_invalid_recall_guidance_and_hints_yaml(monkeypatch, guidance, hints):
+    monkeypatch.setattr(config, "_load_hermes_config_yaml", lambda *a: {
+        "lcm": {"recall_guidance": guidance, "recall_session_hints": hints}})
+    cfg = config.LCMConfig.from_env()
+    assert cfg.recall_guidance == "v1" and cfg.recall_session_hints is False
+    for name in ("recall_guidance", "recall_session_hints"):
+        assert any(f"invalid config.yaml lcm.{name}" in w for w in cfg.config_source_warnings)
+        assert cfg.config_sources[name] == "default"
+        assert name not in cfg.ignored_config_yaml_lcm_keys
+
+
+@pytest.mark.parametrize("raw", ["V2", " v2 "])
+@pytest.mark.parametrize("yaml", [False, True])
+def test_recall_guidance_normalizes_case_and_spaces(monkeypatch, raw, yaml):
+    if yaml:
+        monkeypatch.setattr(config, "_load_hermes_config_yaml", lambda *a: {"lcm": {"recall_guidance": raw}})
+    else:
+        monkeypatch.setenv("LCM_RECALL_GUIDANCE", raw)
+    assert config.LCMConfig.from_env().recall_guidance == "v2"
+
+
 @pytest.fixture(scope="module")
 def plugin():
     # conftest deliberately leaves hermes_lcm.__init__ unexecuted. Load a

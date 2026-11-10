@@ -97,6 +97,57 @@ def test_anchor_filters_match_session_page(orchard, monkeypatch, filters):
     assert e._store.connection.total_changes == changes
 
 
+def test_terminal_anchor_has_no_cursor(orchard):
+    result = json.loads(tools.lcm_load_session(
+        {'session_id': 'a', 'anchor_store_id': 1}, engine=orchard))
+    assert result['messages'] and result['has_more'] is False
+    assert result['next_cursor'] is None
+
+
+@pytest.mark.parametrize('strict', [False, True])
+@pytest.mark.parametrize('ranked_count', [1, 2])
+def test_v2_later_child_counts_and_displaced_continuation(orchard, monkeypatch, strict, ranked_count):
+    e = orchard
+    e._config.recall_guidance = 'v2'
+    e._config.recall_reference_strict = strict
+    monkeypatch.setattr(tools.time, 'time', lambda: 1700000200)
+    a = e._store.append('A', {'role': 'user', 'content': 'needle My hobby is pottery.', 'timestamp': 1700000000})
+    b = e._store.append('B', {'role': 'user', 'content': 'needle I prefer cycling.', 'timestamp': 1700000000})
+    c = e._store.append('C', {'role': 'user', 'content': 'My hobby is now painting.', 'timestamp': 1700000100})
+    original = tools._lcm_recall_fts_arm
+    def ranked(engine, query, **kw):
+        hits, error = original(engine, query, **kw)
+        if query == 'needle':
+            by_id = {h['store_id']: h for h in hits}
+            hits = [by_id[sid] for sid in [a, b][:ranked_count]]
+        return hits, error
+    monkeypatch.setattr(tools, '_lcm_recall_fts_arm', ranked)
+    changes = e._store.connection.total_changes
+    result = json.loads(tools.lcm_recall(
+        {'query': 'needle', 'detail': 'answer_ready', 'limit': 2}, engine=e, later_statements=1))
+    assert [h['store_id'] for h in result['hits']] == [a, c]
+    assert result['provenance']['later_statements']['displaced'] == ranked_count - 1
+    signal = result['provenance']['answer_ready']
+    assert signal['more_available'] is (ranked_count == 2)
+    assert signal['sessions_delivered'] == 2
+    assert signal['sessions_in_pool'] == ranked_count + 1
+    assert e._store.connection.total_changes == changes
+
+
+@pytest.mark.parametrize('strict', [False, True])
+def test_v2_delta_seen_tail_is_not_more_available(orchard, strict):
+    e = orchard
+    e._config.recall_guidance = 'v2'
+    e._config.recall_reference_strict = strict
+    args = {'query': 'orchard', 'detail': 'answer_ready', 'limit': 3, 'seen_refs': []}
+    initial = json.loads(tools.lcm_recall(args, engine=e))
+    # Keep only the first-ranked ref novel; the probe encounters a seen ref.
+    seen = [h['exact_ref'] for h in initial['hits'][1:]]
+    result = json.loads(tools.lcm_recall({**args, 'limit': 1, 'seen_refs': seen}, engine=e))
+    assert result['delta']['novel_ref_count'] == 1
+    assert result['provenance']['answer_ready']['more_available'] is False
+
+
 @pytest.mark.parametrize('strict', [True, False])
 @pytest.mark.parametrize('count,limit,more', [(0, 8, False), (2, 2, False), (3, 2, True), (20, 10, True)])
 def test_v2_continuation_and_hydration_budget(orchard, strict, count, limit, more):
