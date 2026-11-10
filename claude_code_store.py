@@ -424,7 +424,9 @@ def drain(store: MessageStore, lineage: Lineage, *, deadline: Optional[float] = 
         recorded = pending.get("path") if isinstance(pending, dict) else None
         replace = recorded != str(lineage.path) and not (isinstance(recorded, str) and recorded and Path(recorded).exists())
         named = named_paths(pending, lineage.path)
-        merged = _merge_facts(pending.get("facts") if isinstance(pending, dict) else None, facts)
+        # A pending row from an earlier build has no facts: its history is unknown, and unknown never expires (#2535).
+        unknown = {"transcript_seen": None} if facts is not None else None
+        merged = _merge_facts(pending.get("facts", unknown) if isinstance(pending, dict) else None, facts)
         if not cursor and (replace or not isinstance(pending, dict) or named != pending.get("named")
                            or merged != pending.get("facts")):
             # A newer record's path replaces the recorded one while that one is still absent (the sweep must look
