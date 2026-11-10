@@ -1,10 +1,11 @@
-"""#2197 duplicate shape, a named surplus limit (v0.30.0): the whole-prefix reservation counts a prefix copy outside
-the stored tail, so an already-stored tool group replayed after the cold-bind cursor is stored again with no link.
+"""#2197 duplicate shape: the whole-prefix reservation counts a prefix copy outside the stored tail, so an
+already-stored tool group replayed after the cold-bind cursor was stored again with no link. #2377's per-ingest tool
+links (#2414) make that copy visible, so the test is an ordinary one now.
 
 Engine-direct through ``LCMEngine.ingest``, as the issue's probe ran it: tool-call ids reused, the cold-bind cursor
 forced to 2, the prefix copy of the pair outside the 64-row stored tail, and the host's view (stale, anchored on the
-tail) replaying the stored post-cursor pair. The strict xfail turns green with the fix (v0.30.x) and must then become
-an ordinary test. The control keeps the prefix copy inside the tail: the replayed pair is skipped.
+tail) replaying the stored post-cursor pair. The control keeps the prefix copy inside the tail: the replayed pair is
+skipped.
 """
 from copy import deepcopy
 
@@ -43,9 +44,6 @@ def _replay_after_a_forced_cursor(build, monkeypatch, filler):  # noqa: F811
     return added, unlinked
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="#2197 named surplus limit (v0.30.0): with the prefix copy outside the stored tail, a "
-                          "replayed post-cursor tool group is stored again with no link")
 def test_a_replayed_group_after_an_out_of_tail_prefix_copy_is_not_a_silent_copy(build, monkeypatch):  # noqa: F811
     added, unlinked = _replay_after_a_forced_cursor(build, monkeypatch, filler=70)
     if [row["role"] for row in added] not in (["user"], ["assistant", "tool", "user"]):

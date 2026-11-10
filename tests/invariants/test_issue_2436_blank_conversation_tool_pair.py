@@ -1,9 +1,9 @@
-"""#2436, a named surplus limit (v0.30.0): on a legacy store whose rows carry a blank conversation id, a cold
-cursor-0 replay of a stored tool call and result is stored again with no ``possible_replay_of`` link.
+"""#2436: on a legacy store whose rows carry a blank conversation id, a cold cursor-0 replay of a stored tool call
+and result was stored again with no ``possible_replay_of`` link.
 
 The tool-link planner keys the blank stored id as '' and the incoming copy as the active conversation, so the copy
-never meets its original. Nothing is lost; the copy is silent. The strict xfail turns green with the fix (v0.30.x)
-and must then become an ordinary test. The control is the same replay over a named id (``test_18`` in
+never met its original. Nothing was lost, but the copy was silent. #2414's blank-id keying links it, so the test is
+an ordinary one now. The control is the same replay over a named id (``test_18`` in
 ``tests/test_issue_2305_cursor0_replay_links.py`` is the unmodified case).
 """
 from copy import deepcopy
@@ -37,9 +37,6 @@ def _replay_tool_pair_over(host, stored_id):  # noqa: F811
     return sources, originals
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="#2436 named surplus limit (v0.30.0): on a store with blank conversation ids, a cold "
-                          "cursor-0 replay of a tool pair is stored again with no link")
 @pytest.mark.parametrize("stored_id", ["NULL", "''"], ids=["null", "empty"])
 def test_a_cursor0_tool_pair_over_a_blank_conversation_id_is_linked(host, stored_id):  # noqa: F811
     sources, originals = _replay_tool_pair_over(host, stored_id)
