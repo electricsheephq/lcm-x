@@ -276,6 +276,16 @@ def _named_others(lineage: Lineage, cursor: dict, report: dict) -> None:
         report["named_other_paths"] += holds
 
 
+def _uncaptured_child(child: Lineage, metadata: dict) -> bool:
+    """A subagent transcript with no cursor, or a copy at a path its cursor never named that holds lines (#2535: no
+    matching). A forgotten one is never read again."""
+    if FORGOTTEN_PREFIX + child.rows_session in metadata:
+        return False
+    if CURSOR_PREFIX + child.key not in metadata:
+        return True
+    return str(child.path) not in named_paths(metadata[CURSOR_PREFIX + child.key]) and _holds_lines(child.path)
+
+
 def _unlistable_subagents(path: Path) -> bool:
     """The session folder's subagents folder exists but cannot be listed: glob would just return nothing."""
     folder = session_dir(path) / "subagents"
@@ -434,11 +444,20 @@ def _files(lineage: Lineage, events: list[dict], report: dict) -> None:
     if lineage.agent_id is not None:
         return
     folder = results_dir(session_dir(lineage.path))
-    if folder is None:
+    if folder is None:  # none, or one capture will not read (a symlink, or not a real folder): that holds rows
+        try:
+            (session_dir(lineage.path) / "tool-results").lstat()
+            report["files"]["uncaptured"] += 1
+        except (FileNotFoundError, NotADirectoryError):
+            pass
+        except OSError:
+            report["files"]["uncaptured"] += 1
         return
     versions = {(row["uid"], row["content_digest"]): row["disposition"]
                 for row in events if row["source_kind"] == "file"}
     for path in sorted(folder.iterdir()):
+        if path.is_symlink() or not (path.is_file() or path.is_dir()):  # capture never reads it
+            report["files"]["uncaptured"] += 1
         if path.is_symlink() or not path.is_file():
             continue
         disposition = versions.get(("tool-results/" + path.name, _file_digest(path)))
@@ -682,11 +701,7 @@ def _unverified(metadata: dict, records: list[dict], lineages: list[dict], sessi
                 except OSError:
                     unknown.add(lineage.key)
                 for child in _subagents(Lineage(lineage.session_id, None, Path(name))):
-                    if FORGOTTEN_PREFIX + child.rows_session in metadata:
-                        continue
-                    if CURSOR_PREFIX + child.key not in metadata or (  # or a copy at a path its cursor never named
-                            str(child.path) not in named_paths(metadata[CURSOR_PREFIX + child.key])
-                            and _holds_lines(child.path)):
+                    if _uncaptured_child(child, metadata):
                         unknown.add(child.key)
     # A record set aside before its transcript had a cursor names a lineage nothing else shows.
     for lineage in failed:
@@ -699,7 +714,7 @@ def _unverified(metadata: dict, records: list[dict], lineages: list[dict], sessi
         if record["lineage"].agent_id is None and _unlistable_subagents(record["lineage"].path):
             unknown.add(record["lineage"].key)
         for child in _subagents(record["lineage"]):
-            if CURSOR_PREFIX + child.key not in metadata and FORGOTTEN_PREFIX + child.rows_session not in metadata:
+            if _uncaptured_child(child, metadata):
                 unknown.add(child.key)
     return sorted(unknown)
 
