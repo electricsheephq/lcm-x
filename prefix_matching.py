@@ -220,7 +220,9 @@ class PrefixMatchingMixin:
         session_id: str, hermes_home=None,
     ) -> str:
         def compare_call(call):
-            if not isinstance(call, dict) or not isinstance(call.get("function"), dict):
+            # With redaction on, the argument compare keeps main's path: a named limit on #2172 (#2572 review).
+            if getattr(self._config, "sensitive_patterns_enabled", False) or not isinstance(call, dict) \
+                    or not isinstance(call.get("function"), dict):
                 return self._session_end_prefix_compare_value(
                     call, session_id=session_id, hermes_home=hermes_home)
             def restore(value):  # keys too: ingest can externalize a payload held in a key
@@ -243,9 +245,8 @@ class PrefixMatchingMixin:
                         arguments, parsed = json.loads(arguments), True
                     except ValueError:
                         pass
-                if parsed:  # redact before sorting: a redacted key sorts by its redacted text, as stored
-                    arguments = redact_sensitive_value(restore(arguments), self._config, parse_json_strings=True)
-                    arguments = json.dumps(arguments, sort_keys=True, separators=(",", ":"), default=str)
+                if parsed:
+                    arguments = json.dumps(restore(arguments), sort_keys=True, separators=(",", ":"), default=str)
                 else:  # text (invalid JSON or duplicate keys) compares stripped
                     arguments = arguments.strip()
                 function["arguments"] = arguments
