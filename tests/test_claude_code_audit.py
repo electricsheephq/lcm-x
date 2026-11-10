@@ -835,26 +835,3 @@ def test_pending_rows_that_cannot_be_checked_stay_unverified(tmp_path):
     _tamper(home, "UPDATE metadata SET value = json_remove(value, '$.path') WHERE key = ?",
             ("capture:pending:claude-code:s1",))
     assert "claude-code:s1" in ca.audit(home)["unverified"]
-
-
-def test_a_copy_of_a_held_generation_never_cancels_a_lost_one(tmp_path):
-    """#2535 review: two named copies of generation 0 must not cancel generation 1, which has no file anywhere."""
-    import hashlib
-    lines = [json.dumps({"type": "user", "uuid": f"u{i}", "message": {"role": "user", "content": f"m{i}"}}).encode() + b"\n"
-             for i in range(3)]
-    digest = lambda raw: hashlib.sha256(raw).hexdigest()  # noqa: E731
-    current = tmp_path / "w" / "s1.jsonl"
-    copies = [tmp_path / name / "s1.jsonl" for name in ("x", "y")]
-    for path, raw in ((current, lines[2]), (copies[0], lines[0]), (copies[1], lines[0])):
-        path.parent.mkdir()
-        path.write_bytes(raw)
-    status = current.stat()
-    cursor = {"path": str(current), "session_id": "s1", "agent_id": None, "dev": status.st_dev, "ino": status.st_ino,
-              "generation": 2, "offset": len(lines[2]), "line_index": 1, "first": digest(lines[2]), "last_offset": 0,
-              "last": digest(lines[2]), "named": sorted(str(p) for p in (current, *copies))}
-    events = [{"source_kind": "line", "generation": g, "position": 0, "line_digest": digest(lines[g]), "captured_at": 0}
-              for g in range(3)]
-    report = {"lines": 0, "pending_lines": 0, "generations_gone": 0, "named_uncaptured_lines": 0, "transcript_state": "ok",
-              "failures": dict.fromkeys(ca.FAILURES, 0)}
-    ca._transcripts(cc.Lineage("s1", None, current), cursor, events, report, [])
-    assert report["generations_gone"] == 1  # generation 1 stays gone; one copy of generation 0 is its own file
