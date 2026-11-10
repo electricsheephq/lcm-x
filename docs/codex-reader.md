@@ -5,8 +5,8 @@ Claude Code plugin uses. This is step 1 of the Codex harness (#2227): **install 
 Codex sessions are not captured into any store yet; capture needs its own design.
 
 What you get in Codex: five read-only tools, `lcm_recall`, `lcm_grep`, `lcm_expand`,
-`lcm_load_session` and `lcm_describe`, over one store. The reader opens the store read-only and
-never writes to it.
+`lcm_load_session` and `lcm_describe`, over one store. The reader opens `lcm.db` read-only and never writes it; each start adds one log file
+under `<store home>/logs/` (and creates that folder if it is missing).
 
 ## Which store
 
@@ -26,7 +26,11 @@ Code. Any LCM-X capture store home works the same way. Do not point it at a Herm
    ```
 
    The reader needs Python 3.11 or newer. It uses `LCMX_PYTHON` if set, else
-   `<store home>/venv/bin/python`, else a Python 3.11+ found on `PATH`.
+   `<store home>/venv/bin/python`, else a Python 3.11+ found on `PATH`. Codex passes a stdio server
+   only a short list of variables (such as `HOME` and `PATH`) plus the ones its config names, so a
+   `LCMX_PYTHON` exported in your shell does not reach the reader. To use a particular interpreter
+   (for example a venv with FastEmbed for vector recall), add `--env LCMX_PYTHON=<absolute path>` in
+   step 2. A venv in the Claude Code plugin's data folder is not visible to Codex.
 
 2. **Add it to Codex.** Use absolute paths. `$HOME` is expanded by your shell here, not by Codex:
 
@@ -56,11 +60,12 @@ To remove it: `codex mcp remove lcm-x`. That leaves the store and the unpacked u
 ## When it does not work
 
 - `codex mcp list` shows the server but Codex has no `lcm_*` tools: the launcher printed why on
-  stderr. Start it yourself with the same settings to see the message (with no input it exits
-  after starting):
+  stderr. Start it yourself with the same settings to see the message. `env -i` keeps only the
+  variables named, close to what Codex passes (add any `--env` you gave Codex); with no input it
+  exits after starting:
 
   ```bash
-  LCMX_CC_HOME="$HOME/.lcm-x/claude-code" \
+  env -i HOME="$HOME" PATH="$PATH" LCMX_CC_HOME="$HOME/.lcm-x/claude-code" \
     python3 "$HOME/.lcm-x/units/lcm-x-claude-code-<version>/bin/lcmx_mcp.py" < /dev/null
   ```
 
