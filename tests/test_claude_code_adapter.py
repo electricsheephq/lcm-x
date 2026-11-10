@@ -1634,6 +1634,15 @@ def test_records_carry_a_hashed_prompt_id_and_the_raw_agent_type(hook, env, tmp_
                              "agent_transcript_path": str(Path(path).parent / "s1" / "subagents" / "agent-a1.jsonl"),
                              "transcript_path": path}, env)
     assert absent["agent_transcript_seen"] is False
+    assert hook._on_disk(str(tmp_path / "no-such-dir" / "x.jsonl")) is False
+    assert hook._on_disk(path + "/below-a-file.jsonl") is False  # NotADirectoryError
+    blocked = tmp_path / "blocked"
+    blocked.mkdir()
+    blocked.chmod(0)
+    try:
+        assert os.geteuid() == 0 or hook._on_disk(str(blocked / "x.jsonl")) is None  # a failed stat is unknown
+    finally:
+        blocked.chmod(0o700)
 
 
 def test_a_replaced_or_kept_pointer_keeps_every_event_seen(hook, env, tmp_path):

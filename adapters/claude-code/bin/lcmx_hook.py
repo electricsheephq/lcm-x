@@ -102,6 +102,17 @@ def _hashed(value: Any) -> Optional[str]:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()[:16] if isinstance(value, str) and value else None
 
 
+def _on_disk(path: str) -> Optional[bool]:
+    """True or False when the file is known to exist or not; None when the stat itself failed (unknown, never absent)."""
+    try:
+        os.stat(path)
+        return True
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    except OSError:
+        return None
+
+
 COMPACT_EVENTS = frozenset({"PreCompact", "PostCompact"})
 FACTS_CAP = 64
 
@@ -196,7 +207,7 @@ def normalize(payload: Mapping[str, Any], environ: Mapping[str, str]) -> Dict[st
     # Whether this hook found each transcript on disk (#2535): the audit expires a lineage as never written only when no
     # hook of it ever did. One stat each; for a detached event it runs in the child.
     for key in ("transcript_path", "agent_transcript_path"):
-        record[key.replace("_path", "_seen")] = os.path.exists(record[key]) if record[key] else None
+        record[key.replace("_path", "_seen")] = _on_disk(record[key]) if record[key] else None
     if record["transcript_path"] is None:
         record["problem"] = "no_transcript_path"
     return record
