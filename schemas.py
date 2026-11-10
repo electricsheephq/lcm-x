@@ -1286,14 +1286,13 @@ def recall_guidance_schemas(schemas, variant):
         name = schema.get("name")
         if name == "lcm_recall":
             schema = {**schema, "description": schema["description"] + " " + (
-                "For questions that combine or compare facts from several conversations (totals, "
-                "lists, changes over time, 'how many', 'which ... first'). "
+                "For questions that combine or compare facts from several conversations, read across "
+                "sessions to support totals, lists, changes over time, 'how many' or 'which ... first'. "
                 + ("First check `provenance.answer_ready.sessions_delivered` and `more_available`. "
-                   if "Session delivery" not in schema["description"] else "") +
-                "If more may exist, call again with `exclude_session_ids` set to the sessions you have read. "
-                "Read around a hit with its `session_hint`. "
-                "Stop when every part of the question is supported by a cited span, or "
-                "when a call returns no new sessions; then say what you could not find.")}
+                   "If more sessions are available, call again with "
+                   if "Session delivery" not in schema["description"] else "To look for more sessions, call again with ") +
+                "`exclude_session_ids` set to the sessions you have read. Read around a hit with its `session_hint`. "
+                "Stop when cited spans support every part of the question or a call finds no new sessions; say what you could not find.")}
         elif name == "lcm_load_session":
             params = schema["parameters"]
             schema = {**schema, "description": schema["description"].replace(

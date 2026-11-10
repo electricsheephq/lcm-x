@@ -148,6 +148,81 @@ def test_v2_delta_seen_tail_is_not_more_available(orchard, strict):
     assert result['provenance']['answer_ready']['more_available'] is False
 
 
+def test_v2_strict_delta_session_cap_reports_continuation(orchard):
+    e = orchard
+    e._config.recall_guidance = 'v2'
+    e._config.recall_reference_strict = True
+    ids = [e._store.append('cap', {'role': 'user', 'content': f'needle row {i}'})
+           for i in range(7)]
+    changes = e._store.connection.total_changes
+    args = {'query': 'needle', 'detail': 'answer_ready', 'seen_refs': [], 'limit': 10}
+    first = json.loads(tools.lcm_recall(args, engine=e))
+    assert len(first['hits']) == 5
+    assert first['provenance']['answer_ready']['more_available'] is True
+    second = json.loads(tools.lcm_recall({**args, 'seen_refs': first['delta']['novel_refs']}, engine=e))
+    assert len(second['hits']) == 2
+    assert {h['store_id'] for h in first['hits'] + second['hits']} == set(ids)
+    assert second['provenance']['answer_ready']['more_available'] is False
+    assert e._store.connection.total_changes == changes
+
+
+def test_v2_strict_delta_post_budget_rejection_reports_continuation(orchard, monkeypatch):
+    e = orchard
+    e._config.recall_guidance = 'v2'
+    e._config.recall_reference_strict = True
+    ids = [e._store.append(f'deferred-{i}', {'role': 'user', 'content': f'needle row {i}'})
+           for i in range(26)]
+    original = tools._lcm_recall_fts_arm
+    def ranked(*a, **kw):
+        hits, error = original(*a, **kw)
+        hits.sort(key=lambda h: h['store_id'])
+        # The stored row is valid, but this carried excerpt cannot be verified
+        # once the selector has spent all 25 hydration slots.
+        hits[-1].update(snippet='absent excerpt', _fts_snippet='absent excerpt')
+        return hits, error
+    monkeypatch.setattr(tools, '_lcm_recall_fts_arm', ranked)
+    changes = e._store.connection.total_changes
+    args = {'query': 'needle', 'detail': 'answer_ready', 'seen_refs': [], 'limit': 25}
+    first = json.loads(tools.lcm_recall(args, engine=e))
+    assert [h['store_id'] for h in first['hits']] == ids[:25]
+    assert first['provenance']['answer_ready']['more_available'] is True
+    second = json.loads(tools.lcm_recall({**args, 'seen_refs': first['delta']['novel_refs']}, engine=e))
+    assert [h['store_id'] for h in second['hits']] == ids[25:]
+    assert second['provenance']['answer_ready']['more_available'] is False
+    assert e._store.connection.total_changes == changes
+
+
+def test_v2_delta_probe_stops_at_first_novel_and_skips_summaries(orchard, monkeypatch):
+    from copy import deepcopy
+    from hermes_lcm import recall_delivery
+    e = orchard
+    e._config.recall_guidance = 'v2'
+    e._config.recall_reference_strict = False
+    ids = [e._store.append(f'probe-{i}', {'role': 'user', 'content': f'needle row {i}'})
+           for i in range(8)]
+    calls = []
+    original = recall_delivery.deliver_recall
+    def deliver(ordered, **kw):
+        by_id = {entry['hit']['store_id']: entry for entry in ordered}
+        # Put a non-evidence summary before the first unseen message, then
+        # more messages after it. Probe reads must stop at that first message.
+        summary = {'hit': {'kind': 'summary', 'node_id': 999, 'session_id': 'summary'},
+                   'ranks': {0: 2}, '_final_score': 0.5}
+        ordered = [by_id[ids[0]], summary, *[by_id[sid] for sid in ids[1:]]]
+        hydrate = kw['hydrate']
+        def counted(entries, **options):
+            calls.append(deepcopy(entries))
+            return hydrate(entries, **options)
+        kw['hydrate'] = counted
+        return original(ordered, **kw)
+    monkeypatch.setattr(recall_delivery, 'deliver_recall', deliver)
+    args = {'query': 'needle', 'detail': 'answer_ready', 'limit': 1, 'seen_refs': []}
+    result = json.loads(tools.lcm_recall(args, engine=e))
+    assert result['provenance']['answer_ready']['more_available'] is True
+    assert [[entry['hit'].get('store_id') for entry in batch] for batch in calls] == [[ids[0]], [ids[1]]]
+    assert all(entry['hit']['kind'] != 'summary' for batch in calls for entry in batch)
+
+
 @pytest.mark.parametrize('strict', [True, False])
 @pytest.mark.parametrize('count,limit,more', [(0, 8, False), (2, 2, False), (3, 2, True), (20, 10, True)])
 def test_v2_continuation_and_hydration_budget(orchard, strict, count, limit, more):

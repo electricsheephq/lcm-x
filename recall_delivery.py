@@ -544,19 +544,21 @@ def deliver_recall(
             more = False
             if reference_strict:
                 pending += strict_selector.take(strict_selector.ledger.live_count + 1)
-                # Post-budget rejection can become hydratable on a later call.
-                deferred = [e for e in ordered if id(e) in strict_selector._blocked
+                # Deferred rows may hydrate next call; selection evicts their cache.
+                pending += [e for e in ordered if id(e) in strict_selector._blocked
                             or strict_selector._rejected.get(id(e)) is False]
-                pending += deferred
             else:
                 pending = [e for e in ordered if _hit_identity(e["hit"]) not in shipped] + pending
             while delta_requested and pending:
-                answer_ready_content.update(hydrate(pending, query=query, expanded_limit=len(pending),
-                    rows_by_id=strict_selector.rows if reference_strict else None, fts_arm_index=fts_arm_index))
-                if _novel(pending):
-                    more = True
-                    break
-                pending = strict_selector.take(strict_selector.ledger.live_count + 1) if reference_strict else []
+                entry = pending.pop(0)
+                if entry["hit"].get("kind") != "summary":
+                    answer_ready_content.update(hydrate([entry], query=query, expanded_limit=1,
+                        rows_by_id=None, fts_arm_index=fts_arm_index))
+                    if _novel([entry]):
+                        more = True
+                        break
+                if not pending:
+                    pending = strict_selector.take(strict_selector.ledger.live_count + 1) if reference_strict else []
             expansion.update(sessions_delivered=_sessions(hits_out),
                              sessions_in_pool=_sessions([e["hit"] for e in ordered] + hits_out),
                              more_available=bool(more or pending or response_cap_truncated))

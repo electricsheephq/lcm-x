@@ -280,6 +280,26 @@ def test_recall_guidance_normalizes_case_and_spaces(monkeypatch, raw, yaml):
     assert config.LCMConfig.from_env().recall_guidance == "v2"
 
 
+@pytest.mark.parametrize("name,yaml_value,default", [
+    ("recall_guidance", "v2", "v1"), ("recall_session_hints", True, False),
+])
+@pytest.mark.parametrize("raw", ["", " \t", "invalid"])
+@pytest.mark.parametrize("yaml", [False, True])
+def test_recall_guidance_and_hints_empty_invalid_env(monkeypatch, name, yaml_value, default, raw, yaml):
+    monkeypatch.setattr(config, "_load_hermes_config_yaml", lambda *a: {
+        "lcm": {name: yaml_value} if yaml else {}})
+    key = "LCM_" + name.upper()
+    monkeypatch.setenv(key, raw)
+    cfg = config.LCMConfig.from_env()
+    invalid = bool(raw.strip())
+    assert getattr(cfg, name) == (yaml_value if yaml and not invalid else default)
+    assert cfg.config_sources.get(name, "default") == (f"config_yaml:lcm.{name}" if yaml and not invalid else "default")
+    warnings = [w for w in cfg.config_source_warnings if key in w]
+    assert bool(warnings) is invalid
+    if invalid:
+        assert "invalid env " + key in warnings[0]
+
+
 @pytest.fixture(scope="module")
 def plugin():
     # conftest deliberately leaves hermes_lcm.__init__ unexecuted. Load a

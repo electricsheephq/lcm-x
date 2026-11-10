@@ -1078,6 +1078,7 @@ _PARSER_BY_TYPE = {
 # Fields whose env reading needs provenance tracking or a computed default;
 # ``from_env`` handles these explicitly, so the uniform loop skips them.
 _SOURCE_TRACKED_ENV_FIELDS = frozenset({
+    "recall_guidance", "recall_session_hints",
     "recall_snippet_window_hits",
     "recall_extra_entries",
     "recall_later_statements",
@@ -1612,15 +1613,20 @@ class LCMConfig:
                 config_source_warnings.append("invalid config.yaml lcm.recall_adjacent_reply ignored; expected bool")
 
         for name, expected in (("recall_guidance", "v1 or v2"), ("recall_session_hints", "bool")):
-            if isinstance(prefix_yaml, dict) and name in prefix_yaml:
-                value = prefix_yaml[name]
-                if name == "recall_guidance" and isinstance(value, str):
-                    value = value.strip().lower()
-                valid = isinstance(value, bool) if name == "recall_session_hints" else value in ("v1", "v2")
-                if valid:
-                    setattr(c, name, value)
-                _record(name, f"config_yaml:lcm.{name}" if valid else "default",
-                        None if valid else f"invalid config.yaml lcm.{name} ignored; expected {expected}")
+            key = "LCM_" + name.upper()
+            raw = env.get(key, "").strip()
+            value = raw or (prefix_yaml.get(name, getattr(c, name)) if isinstance(prefix_yaml, dict) else getattr(c, name))
+            source = f"env:{key}" if raw else (f"config_yaml:lcm.{name}"
+                if isinstance(prefix_yaml, dict) and name in prefix_yaml else "default")
+            if name == "recall_session_hints" and raw:
+                value = _PARSER_BY_TYPE[bool](key, None)
+            if name == "recall_guidance" and isinstance(value, str):
+                value = value.strip().lower()
+            valid = isinstance(value, bool) if name == "recall_session_hints" else value in ("v1", "v2")
+            setattr(c, name, value if valid else getattr(cls, name))
+            if raw or source != "default":
+                _record(name, source if valid else "default", None if valid else
+                        f"invalid {'env ' + key if raw else 'config.yaml lcm.' + name} ignored; expected {expected}")
 
         window_hits = prefix_yaml.get("recall_snippet_window_hits", 0) if isinstance(prefix_yaml, dict) else 0
         window_env = env.get("LCM_RECALL_SNIPPET_WINDOW_HITS", "")
@@ -1833,8 +1839,6 @@ class LCMConfig:
                 if lcm_env_get(spec.env_key, "").strip() and len(config_source_warnings) == warning_count:
                     _warn_env_range(spec.name, value, config_source_warnings)
             setattr(c, spec.name, value)
-            if spec.name in ("recall_guidance", "recall_session_hints") and spec.env_key in env:
-                _record(spec.name, f"env:{spec.env_key}")
             if value is True and spec.name in ENV_FIELD_DEPRECATIONS:
                 _since, removal = ENV_FIELD_DEPRECATIONS[spec.name]
                 config_source_warnings.append(
@@ -1842,7 +1846,6 @@ class LCMConfig:
                     "Until then it behaves as before."
                 )
 
-        c.recall_guidance = "v2" if c.recall_guidance.strip().lower() == "v2" else "v1"
         c.recall_delivery_unit = c.recall_delivery_unit.strip().lower()
         if c.recall_delivery_unit not in ("hits", "session"):
             c.recall_delivery_unit = "hits"
