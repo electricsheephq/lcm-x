@@ -473,10 +473,18 @@ def _files(lineage: Lineage, events: list[dict], report: dict) -> None:
 def _files_under(folder: Path) -> int:
     """Every entry under ``folder`` that is not a real folder (a symlink to a folder counts; it is not followed); a
     folder that cannot be listed counts one."""
-    errors = []
-    count = sum(len(files) + sum(os.path.islink(os.path.join(root, name)) for name in folders)
-                for root, folders, files in os.walk(folder, onerror=errors.append))
-    return count + len(errors)
+    count, stack = 0, [folder]
+    while stack:  # no recursion: os.walk recurses on Python 3.11, and a deep tree must be counted, never crash
+        try:
+            with os.scandir(stack.pop()) as entries:
+                for entry in entries:
+                    if entry.is_dir(follow_symlinks=False):
+                        stack.append(entry.path)
+                    else:
+                        count += 1
+        except OSError:
+            count += 1
+    return count
 
 
 def _subfolder_files_unverified(row: dict) -> bool:

@@ -2320,6 +2320,28 @@ def test_files_in_a_tool_results_subfolder_are_counted_and_named(tmp_path, home,
     assert report["verdict"].endswith("; 2 files in tool-results subfolders not stored (1 lineages)")
 
 
+def test_a_deep_tool_results_subfolder_is_counted_never_crashes(tmp_path):
+    """#2554 review: the walk does not recurse (os.walk does on Python 3.11), so a tree deeper than the recursion limit
+    is counted instead of aborting the audit."""
+    import inspect
+    import sys
+
+    from hermes_lcm import claude_code_audit as ca
+
+    leaf = tmp_path / "p1"
+    for _ in range(60):
+        leaf = leaf / "d"
+    leaf.mkdir(parents=True)
+    (leaf / "page-1.jpg").write_bytes(b"x")
+    limit = sys.getrecursionlimit()
+    sys.setrecursionlimit(len(inspect.stack()) + 30)
+    try:
+        count = ca._files_under(tmp_path / "p1")
+    finally:
+        sys.setrecursionlimit(limit)
+    assert count == 1
+
+
 @pytest.mark.skipif(os.geteuid() == 0, reason="root reads any folder")
 @pytest.mark.parametrize("shape,count", [("nested", 2), ("folder_symlink", 1), ("unreadable", 1)])
 def test_every_kind_of_entry_under_a_tool_results_subfolder_counts(tmp_path, home, hermes, shape, count):
