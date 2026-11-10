@@ -9,6 +9,7 @@ import hashlib
 import json
 import math
 import sqlite3
+import time
 import zlib
 from collections import Counter, defaultdict
 from contextlib import closing
@@ -30,6 +31,7 @@ from .claude_code_store import (
     FORGOTTEN_PREFIX,
     FORK_PREFIX,
     LOCAL_GC_PREFIX,
+    PENDING_PREFIX,
     SET_ASIDE_TAGS,
     Lineage,
     _digest,
@@ -533,6 +535,11 @@ def _unverified(metadata: dict, records: list[dict], lineages: list[dict], sessi
         or row["files"]["uncaptured"])}
     if session is not None and CURSOR_PREFIX + lineage_key(session) not in metadata:
         unknown.add(lineage_key(session))
+    for key, pending in metadata.items():
+        if key.startswith(PENDING_PREFIX) and (session is None or pending["session_id"] == session):
+            lineage = Lineage(pending["session_id"], pending.get("agent_id"), Path(pending["path"]))
+            if CURSOR_PREFIX + lineage.key not in metadata and FORGOTTEN_PREFIX + lineage.rows_session not in metadata:
+                unknown.add(lineage.key)
     # A record set aside before its transcript had a cursor names a lineage nothing else shows.
     for lineage in failed:
         if lineage is None:
@@ -572,7 +579,11 @@ def audit(home: Path, session: str | None = None) -> dict:
     unverified = _unverified(metadata, records, lineages, session, _failed_records(home))
     home_report = _home_report(home)
     checked = any(not row["forgotten"] for row in lineages)
+    pending = [value for key, value in metadata.items() if key.startswith(PENDING_PREFIX)
+               and (session is None or value["session_id"] == session)]
+    oldest_pending_age = max(0.0, time.time() - min(row["first_seen"] for row in pending)) if pending else None
     return {"ok": not any(failures.values()), "opened_immutable": immutable, "failures": failures,
+            "pending_lineages": len(pending), "oldest_pending_age_s": oldest_pending_age,
             "unverified": unverified, "verified": checked and not unverified and not home_report["spool"]["waiting"],
             "lineages": lineages, "sessions": _session_report(metadata, records, session),
             **home_report, "lag_s": _percentiles(lag), "growth": _growth(home, records)}

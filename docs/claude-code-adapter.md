@@ -417,6 +417,13 @@ hook entry handles:
 
 ## Runtime and failure modes
 
+A session whose transcript did not exist at its first drain is remembered as pending and swept
+every worker run until its transcript appears. Pending rows never expire; the audit counts them
+and reports the age of the oldest one.
+
+Known issue in the shipped preview `claude-code-v0.1.0`: before this fix, such a session's final
+rows could be lost if its later hook records were also lost (#2533).
+
 - Claude Code starts the hook in exec form (`hooks/hooks.json`): `python3` found on `PATH`, with
   `${CLAUDE_PLUGIN_ROOT}` substituted in its arguments and no shell before it, which saves the
   shell's start (about 4 ms per synchronous hook on the measurement machine, #2141). The exec form

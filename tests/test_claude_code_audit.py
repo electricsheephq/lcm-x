@@ -92,6 +92,29 @@ def test_clean_capture(captured, capsys):
     assert json.loads(capsys.readouterr().out) == report
 
 
+@pytest.mark.parametrize("exists", [False, True])
+def test_pending_lineage_is_counted_without_claiming_capture(tmp_path, monkeypatch, exists):
+    home = tmp_path / "home"
+    path = tmp_path / "projects" / "-work" / "s1.jsonl"
+    store = _open(home, tmp_path / "hermes")
+    try:
+        assert cc.drain(store, cc.Lineage("s1", None, path)) == "missing"
+    finally:
+        _close(store)
+    if exists:
+        _transcript(tmp_path, CONVERSATION)
+    monkeypatch.setattr(cc.time, "time", lambda: 200.0)
+    _tamper(home, "UPDATE metadata SET value = json_set(value, '$.first_seen', 100.0) WHERE key = ?",
+            ("capture:pending:claude-code:s1",))
+    report = ca.audit(home)
+    assert report["pending_lineages"] == 1 and report["oldest_pending_age_s"] == 100.0
+    assert report["lineages"] == [] and not report["verified"]
+    assert report["unverified"] == ["claude-code:s1"]
+    assert str(path) not in json.dumps(report)
+    assert ca.audit(home, "other")["pending_lineages"] == 0
+    assert ca.audit(home, "other")["oldest_pending_age_s"] is None
+
+
 @pytest.mark.parametrize("counter", ["lost_lines", "lost"])
 def test_missing_line_and_identity(captured, counter):
     home, _lineage = captured
