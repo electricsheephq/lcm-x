@@ -378,17 +378,33 @@ def test_bot_round_8_jsonl_escapes(tmp_path, monkeypatch):
     assert not k.saved_holds(tmp_path, sid, '48213')
 
 
-def test_bot_round_9(tmp_path):
-    # A reader error after connect marks the answer, so an offline store can never pass the empty-store control.
-    stream = [{'type': 'system', 'subtype': 'init', 'mcp_servers': [{'name': 'lcm-x', 'status': 'connected'}]},
-              {'type': 'assistant', 'message': {'content': [{'type': 'tool_use', 'id': 't1', 'name': 'mcp__lcm-x__lcm_grep'}]}},
-              {'type': 'user', 'message': {'content': [{'type': 'tool_result', 'tool_use_id': 't1', 'is_error': True}]}},
-              {'type': 'result', 'is_error': False, 'result': 'NOT FOUND', 'session_id': 'x'}]
-    fake = tmp_path / 'fake-claude'
+def _stream_run(tmp_path, calls):
+    # calls: (tool name, is_error, error text or None); the fake CLI replays a stream-json transcript.
+    stream = [{'type': 'system', 'subtype': 'init', 'mcp_servers': [{'name': 'lcm-x', 'status': 'connected'}]}]
+    for n, (name, failed, text) in enumerate(calls):
+        stream.append({'type': 'assistant', 'message': {'content': [{'type': 'tool_use', 'id': f't{n}', 'name': name}]}})
+        body = json.dumps({'error': text} if failed else {'matches': []})
+        stream.append({'type': 'user', 'message': {'content': [{'type': 'tool_result', 'tool_use_id': f't{n}', 'is_error': failed,
+                                                                'content': [{'type': 'text', 'text': body}]}]}})
+    stream.append({'type': 'result', 'is_error': False, 'result': 'NOT FOUND', 'session_id': 'x'})
+    fake = tmp_path / f'fake-claude-{len(list(tmp_path.glob("fake-claude-*")))}'
     fake.write_text('#!/bin/sh\ncat <<\'EOF\'\n' + ''.join(json.dumps(e) + '\n' for e in stream) + 'EOF\n')
     fake.chmod(0o755)
-    run = k.claude(str(fake), 'q', [], tmp_path, tmp_path)
-    assert run['answer'] == 'NOT FOUND' and run['reader_errors'] == 1 and run['is_error']
+    return k.claude(str(fake), 'q', [], tmp_path, tmp_path)
+
+
+def test_bot_round_9(tmp_path):
+    # An infrastructure failure of the reader marks the answer, so an offline store can never pass the empty-store control.
+    grep, describe = 'mcp__lcm-x__lcm_grep', 'mcp__lcm-x__lcm_describe'
+    offline = _stream_run(tmp_path, [(grep, True, 'store_offline: the writer is not running')])
+    assert offline['answer'] == 'NOT FOUND' and offline['reader_errors'] == 1 and offline['is_error']
+    assert _stream_run(tmp_path, [(grep, False, None), (describe, True, 'Error executing lcm_describe: boom')])['is_error']
+    # Every reader call failed: nothing was read, whatever the reason.
+    assert _stream_run(tmp_path, [(describe, True, 'Node n1 not found')])['is_error']
+    # A model's own slip followed by a good call, or another tool's error, is not an infrastructure error.
+    slip = _stream_run(tmp_path, [(describe, True, 'Node n1 not found'), (grep, False, None)])
+    assert slip['reader_errors'] == 0 and not slip['is_error']
+    assert not _stream_run(tmp_path, [('Read', True, 'denied'), (grep, False, None)])['is_error']
     inputs = synthetic()
     inputs[6]['answers'][0].update(is_error=True)  # on the empty-store control the control itself is unusable
     assert k.score(*inputs)['verdict'] == 'VOID'
