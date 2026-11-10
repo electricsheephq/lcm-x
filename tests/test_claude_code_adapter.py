@@ -106,6 +106,40 @@ def test_detached_fifo_does_not_block(hook, env, tmp_path, event):
     assert row["detached"] is True and row["blocking_ms"] < 1000 and row["outcome"]
 
 
+@pytest.mark.parametrize("event", ["Stop", "SessionEnd"])
+def test_a_killed_hook_process_group_still_lands_the_pointer(hook, env, tmp_path, event):
+    """A3 (#2350): Claude Code may kill the hook's process group (a -p exit). The detached child has its own
+    session, so a SIGKILL to the hook's group while the child is stalled on the pointer does not reach it."""
+    import signal
+    payload = {"hook_event_name": event, "session_id": "s1", "transcript_path": str(_transcript(tmp_path))}
+    hook.main(io.StringIO(json.dumps(payload)), env)  # a previous pointer to read
+    [pointer] = _spooled(env)
+    pointer.unlink()
+    os.mkfifo(pointer)  # stalls whichever process reads the previous pointer
+    proc = subprocess.Popen([sys.executable, "-I", "-S", str(PLUGIN / "bin/lcmx_hook.py")], env=env,
+                            stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                            start_new_session=True)
+    try:
+        proc.stdin.write(json.dumps(payload).encode())
+        proc.stdin.close()
+        try:
+            proc.wait(timeout=1)  # the parent returns at once; the old synchronous hook stays stalled here
+        except subprocess.TimeoutExpired:
+            pass
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)  # the hook's whole group, as a host would
+        except ProcessLookupError:
+            pass  # nothing is left in the group: the child runs in its own session
+        proc.wait(timeout=5)
+    finally:
+        with os.fdopen(os.open(pointer, os.O_RDWR | os.O_NONBLOCK), "w") as handle:
+            handle.write("{}")
+    row = _wait_hooks(env, 2)[-1]
+    assert row["detached"] is True and row["outcome"]
+    [landed] = _spooled(env)
+    assert landed.is_file() and json.loads(landed.read_text())["event"] == event
+
+
 def test_detached_records_keep_synchronous_start(env, tmp_path):
     payload = {"session_id": "s1", "transcript_path": str(_transcript(tmp_path)), "source": "fork"}
     for index, event in enumerate(("SessionStart", "UserPromptSubmit", "Stop"), 1):
