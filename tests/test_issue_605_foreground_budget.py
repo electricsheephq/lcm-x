@@ -23,6 +23,7 @@ import hermes_lcm.tools as lcm_tools
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.dag import SummaryNode
 from hermes_lcm.engine import LCMEngine
+from tests.timing_helpers import earlier_heap_frozen
 
 PAD = " alpha beta gamma delta" * 30
 SUMMARY = "Earlier turns.\nExpand for details about: turns"
@@ -51,7 +52,8 @@ class _Clock:
 def clock(monkeypatch):
     fake = _Clock()
     monkeypatch.setattr(time, "monotonic", fake)  # every module reads time.monotonic through the module
-    return fake
+    with earlier_heap_frozen():  # the clock includes real time: keep earlier tests' heap out of it (#2573)
+        yield fake
 
 
 class _Provider:

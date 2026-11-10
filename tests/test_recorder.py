@@ -1,5 +1,6 @@
 """#2243: the opt-in event recorder records host calls without changing what the engine stores, returns or logs."""
 
+import contextlib
 import copy
 import gc
 import hashlib
@@ -27,6 +28,7 @@ import pytest
 from tests import recorder_replay as replay_module
 from tests.recorder_replay import FakeCtx, HostModules, compare_stores, load_plugin, replay, scrub, store_rows, \
     stand_in_error, unload_plugin, write_state_db
+from tests.timing_helpers import earlier_heap_frozen
 
 REPO = Path(__file__).resolve().parents[1]
 SLOT = "_lcm_recorder_process"
@@ -1032,27 +1034,31 @@ def test_sealed_checkpoint_prefix_replays_without_exit(lab, tmp_path, monkeypatc
 
 # -- budget -----------------------------------------------------------------------------------------------
 
-def _timed(rec, samples):
+def _timed(rec, samples, gcs=None, collector=lambda: 0.0):
+    """Add each timed call to samples[-1], and the collector seconds inside the same calls to gcs[-1] (#2573)."""
     enter, exit_ = rec._enter, rec._exit
+    gcs = [0.0] if gcs is None else gcs
 
     def timed_enter(*args):
-        t = time.perf_counter()
+        t, g = time.perf_counter(), collector()
         try:
             return enter(*args)
         finally:
             samples[-1] += time.perf_counter() - t
+            gcs[-1] += collector() - g
 
     def timed_exit(*args):
-        t = time.perf_counter()
+        t, g = time.perf_counter(), collector()
         try:
             return exit_(*args)
         finally:
             samples[-1] += time.perf_counter() - t
+            gcs[-1] += collector() - g
     rec._enter, rec._exit = timed_enter, timed_exit
 
 
 @needs312
-def test_turn_path_budget(lab):
+def test_turn_path_budget(lab, request):
     """Turn-thread recorder cost of one post_llm_call root and one on_turn_complete root on 2,000 rows."""
     strict = os.environ.get("RECORDER_BUDGET_STRICT") == "1"
     scale = 1 if strict else 4
@@ -1071,10 +1077,16 @@ def test_turn_path_budget(lab):
     stall = threading.Event()
     rec.writer.stall = stall  # the writer holds a backlog while the turn thread is measured
     numbers = {}
+    gcs = {"first_view": [], "steady": [], "equal_strings": [], "edited": [], "turn_complete_clones": []}
+    # Every timed sample runs with the earlier tests' heap frozen, so a full collection walks only new objects.
+    frozen = contextlib.ExitStack()
+    request.addfinalizer(frozen.close)
+    collector = frozen.enter_context(earlier_heap_frozen())
 
     def first_view(session_id):
         samples = [0.0]
-        _timed(rec, samples)
+        gcs["first_view"].append(0.0)
+        _timed(rec, samples, gcs["first_view"], collector)
         # The session's first view. A re-measure gets fresh message objects: the recorder caches rows by identity.
         fresh = [{k: (v.encode().decode() if isinstance(v, str) else copy.deepcopy(v)) for k, v in m.items()}
                  for m in view] if session_id != "s" else list(view)
@@ -1094,7 +1106,8 @@ def test_turn_path_budget(lab):
     for _ in range(60):
         steady.append(0.0)
         rec_samples = [0.0]
-        _timed(rec, rec_samples)
+        gcs["steady"].append(0.0)
+        _timed(rec, rec_samples, gcs["steady"], collector)
         post(session_id="s", platform="cli", conversation_history=grow())
         steady[-1] = rec_samples[-1]
         rec._enter, rec._exit = type(rec)._enter.__get__(rec), type(rec)._exit.__get__(rec)
@@ -1105,7 +1118,8 @@ def test_turn_path_budget(lab):
         fresh = [{k: (v.encode().decode() if isinstance(v, str) else copy.deepcopy(v)) for k, v in m.items()}
                  for m in state["view"]]
         samples = [0.0]
-        _timed(rec, samples)
+        gcs["equal_strings"].append(0.0)
+        _timed(rec, samples, gcs["equal_strings"], collector)
         post(session_id="s", platform="cli", conversation_history=fresh)
         state["view"] = fresh
         equal.append(samples[-1])
@@ -1116,7 +1130,8 @@ def test_turn_path_budget(lab):
     for i in range(30):
         state["view"][1000 + i]["content"] = f"rewritten {i}"
         samples = [0.0]
-        _timed(rec, samples)
+        gcs["edited"].append(0.0)
+        _timed(rec, samples, gcs["edited"], collector)
         post(session_id="s", platform="cli", conversation_history=list(state["view"]))
         edited.append(samples[-1])
         rec._enter, rec._exit = type(rec)._enter.__get__(rec), type(rec)._exit.__get__(rec)
@@ -1124,11 +1139,20 @@ def test_turn_path_budget(lab):
     clones = []
     for _ in range(10):
         samples = [0.0]
-        _timed(rec, samples)
+        gcs["turn_complete_clones"].append(0.0)
+        _timed(rec, samples, gcs["turn_complete_clones"], collector)
         engine.on_turn_complete([_clone(m) for m in state["view"]])
         clones.append(samples[-1])
         rec._enter, rec._exit = type(rec)._enter.__get__(rec), type(rec)._exit.__get__(rec)
     numbers["turn_complete_clones_max_ms"] = max(clones) * 1000
+    frozen.close()
+    series = {"first_view": first, "steady": steady, "equal_strings": equal, "edited": edited,
+              "turn_complete_clones": clones}
+    numbers["gc_ms_max_in_sample"] = max(max(values) for values in gcs.values()) * 1000
+    name, index = max(((n, i) for n, values in series.items() for i in range(len(values))),
+                      key=lambda key: series[key[0]][key[1]])
+    numbers["slowest_sample"] = {"series": name, "index": index, "ms": series[name][index] * 1000,
+                                 "gc_ms": gcs[name][index] * 1000}
     stall.set()
     rec.writer.stall = None
     rec.writer.drain(120)
