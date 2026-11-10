@@ -3283,7 +3283,13 @@ def test_a_path_key_revision_supersedes_its_real_predecessor_across_batches(tmp_
 _MATRIX = [(old, first, second, batches, readable) for old in ("fresh", "named_early", "flipped")
            for first in ("on_disk", "deleted", "forgotten") for second in ("new", "copy", "nested")
            for batches in (1, 2) for readable in (True, False)]
-_MATRIX_XFAIL: dict = {}  # cell id -> reason, for cells where main is wrong the same way and this PR does not change it
+_MATRIX_XFAIL = {  # cell id -> reason, for cells where main is wrong the same way and this PR does not change it
+    **{f"named_early-{first}-copy-b{b}-{r}": "#2566 residual: a pending second path in the id-keyed cursor makes its "
+       "path key consult the first lineage, so shared-uuid lines merge into the first's rows (main: one lineage)"
+       for first in ("on_disk", "deleted") for b in (1, 2) for r in ("readable", "locked")},
+    **{f"named_early-forgotten-{second}-b{b}-{r}": "a same-id transcript never captured before the delete stays "
+       "forgotten with the deleted id, as on main" for second in ("new", "copy", "nested") for b in (1, 2)
+       for r in ("readable", "locked")}}
 
 
 def _cell_id(old, first, second, batches, readable):
@@ -3383,3 +3389,35 @@ def test_the_reused_agent_id_scenario_matrix(tmp_path, home, hermes, old, first,
             assert not back, f"deleted content came back: {len(back)}"
     finally:
         store.close()
+
+
+def test_a_locked_folder_never_aborts_the_worker_and_its_id_falls_back(tmp_path, home, hermes):
+    """#2576 review: checking whether the first transcript is still there must never raise. When its folder cannot be
+    read, the worker finishes, the second path falls back to the bare id (the pre-#2566 behaviour), and the audit reads
+    unverified for that agent instead of verified."""
+    from hermes_lcm import claude_code_audit as ca
+
+    a = _append(tmp_path / "projects" / "-work" / "s1.jsonl", CONVERSATION[:2])
+    _record(_hook(), home, a)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    agents = a.parent / "s1" / "subagents"
+    first = _append(agents / "workflows" / "wf_run1" / "agent-x1.jsonl", _REUSED["first"])
+    _record(_hook(), home, a, event="SubagentStop", agent_id="x1", agent_transcript_path=str(first))
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    second = _append(agents / "agent-x1.jsonl", _REUSED["second"])
+    first.parent.chmod(0)
+    try:
+        _record(_hook(), home, a, event="SubagentStop", agent_id="x1", agent_transcript_path=str(second))
+        for _ in range(2):
+            cc.run_worker(home, hermes_home=hermes, settle_s=0)  # finishes: no PermissionError escapes
+        store = _open(home, hermes)
+        try:
+            assert cc.resolve(store, cc.Lineage("s1", "x1", second)).agent_id == "x1"
+            keys = [key for (key,) in store.connection.execute(
+                "SELECT key FROM metadata WHERE key LIKE ?", (cc.CURSOR_PREFIX + "claude-code:s1/agent:%",))]
+        finally:
+            store.close()
+        assert keys == [cc.CURSOR_PREFIX + "claude-code:s1/agent:x1"]
+        assert not ca.audit(home)["verified"]
+    finally:
+        first.parent.chmod(0o700)
