@@ -74,3 +74,30 @@ def test_a_delegated_child_at_ext_off_stores_its_saved_result_once(host, monkeyp
     child.end(engine, final)
     rows = child_rows(parent)
     assert (len(rows), sum(r["content"] == "FINAL" for r in rows)) == (4, 1)
+
+
+@pytest.mark.parametrize("location", ["spillover", "hermes-results"])
+def test_an_ended_bypass_lineage_session_at_ext_off_keeps_its_stored_prefix_route(tmp_path, location):
+    """The bypass-lineage end check (engine `ended_lineage_bypasses`): a stored prefix holding the marker matches, so
+    the end is not skipped and the final reply is stored once."""
+    home = tmp_path / "hermes"
+    engine = LCMEngine(config=LCMConfig(database_path=str(home / "lcm.db"), large_output_externalization_enabled=False,
+                                        large_output_externalization_path=str(home / "externalized")),
+                       hermes_home=str(home))
+    try:
+        marker = _write_output(_path(home, location), FULL_OUTPUT)
+        history = [{"role": "user", "content": "A", "timestamp": 1.0},
+                   {"role": "assistant", "content": "", "timestamp": 2.0, "tool_calls": [
+                       {"id": CALL, "type": "function", "function": {"name": "terminal", "arguments": "{}"}}]},
+                   {"role": "tool", "tool_call_id": CALL, "content": marker, "timestamp": 3.0},
+                   {"role": "assistant", "content": "B", "timestamp": 4.0}]
+        engine.on_session_start("bypassed", platform="cli", context_length=200_000, conversation_id="conv-b")
+        engine.ingest(copy.deepcopy(history))
+        engine.on_session_start("parent", platform="cli", context_length=200_000, conversation_id="conv-p")
+        engine._mark_lcm_bypass_lineage_session("bypassed", platform="subagent")
+        engine.on_session_end("bypassed", copy.deepcopy(history) + [{"role": "assistant", "content": "FINAL",
+                                                                       "timestamp": 5.0}])
+        rows = engine._store.get_session_messages("bypassed")
+        assert (len(rows), sum(r["content"] == "FINAL" for r in rows)) == (len(history) + 1, 1)
+    finally:
+        engine.shutdown()
