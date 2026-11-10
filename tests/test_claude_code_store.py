@@ -1325,6 +1325,21 @@ def test_local_gc_is_remembered_for_the_session(tmp_path, home, hermes):
         store.close()
 
 
+def test_local_gc_survives_a_record_that_replaces_its_pointer_before_a_drain(tmp_path, home, hermes):
+    """#2503: a hook that saw local GC on, then a later hook of the same session with it off, both spooled before any
+    worker run: the replaced pointer must not drop the flag, or the audit would carry a lossless claim it should not."""
+    hook = _hook()
+    path = _transcript(tmp_path, CONVERSATION[:1])
+    _record(hook, home, path, event="UserPromptSubmit", local_gc=True)
+    _record(hook, home, path, event="Stop", local_gc=False)
+    assert cc.run_worker(home, hermes_home=hermes, settle_s=0)["complete"]
+    store = _open(home, hermes)
+    try:
+        assert store.read_metadata_json(cc.LOCAL_GC_PREFIX + "s1") is True
+    finally:
+        store.close()
+
+
 @pytest.mark.parametrize("named", ["~nosuchuser-lcmx/x.txt", "/tmp/a\x00b"], ids=["unknown-user", "nul"])
 def test_a_saved_output_path_that_cannot_resolve_keeps_the_preview(tmp_path, home, hermes, named):
     """REGRESSION: a marker naming an unknown ~user or holding a NUL keeps its preview, and the
