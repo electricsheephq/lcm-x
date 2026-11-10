@@ -56,6 +56,7 @@ COMPACT_PREFIX = "capture:compact:"  # hashed prompt ids of a session's compacti
 COMPACT_CAP = 256
 FORK_PREFIX = "capture:fork:"  # sessions whose SessionStart source was ``fork``, and when they started
 LOCAL_GC_PREFIX = "capture:local_gc:"  # sessions seen with Claude Code's local GC on (sticky)
+ENDED_PREFIX = "capture:ended:"  # lineages whose last observed hook was their end: SessionEnd, or SubagentStop (#2571)
 BATCH_LINES = 1000
 BATCH_BYTES = 8 * 1024 * 1024
 FILE_CHUNK_BYTES = 64 * 1024 * 1024  # a larger tool-results file is kept as several rows
@@ -1116,6 +1117,14 @@ def _drain_once(home: Path, report: dict, deadline: Optional[float], config: Any
             try:
                 for named in lineages_of(record):
                     lineage = resolve(store, named)  # the facts stay the hook's own (#2566)
+                    stamp = record.get("hook_started_ns") if isinstance(record.get("hook_started_ns"), int) else 0
+                    marked = store.read_metadata_json(ENDED_PREFIX + lineage.key)
+                    newest = marked.get("ns") if isinstance(marked, dict) and isinstance(marked.get("ns"), int) else -1
+                    # #2571: only own hooks move the marker; an end always marks (any clock), only a newer own hook clears
+                    ended = record.get("event") == ("SubagentStop" if named.agent_id else "SessionEnd")
+                    if (named.agent_id or not record.get("agent_id")) and (ended or stamp > newest):
+                        high = record.get("newest_ns") if isinstance(record.get("newest_ns"), int) else stamp
+                        _write_metadata(store, ENDED_PREFIX + lineage.key, {"ns": max(stamp, newest, high), "ended": ended})
                     outcome = drain(store, lineage, deadline=deadline, facts=record_facts(record, named))
                     if outcome == "deadline":
                         report["complete"] = False

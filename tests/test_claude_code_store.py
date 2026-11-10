@@ -3127,6 +3127,104 @@ def test_the_reused_agent_id_edges(tmp_path, home, hermes, shape):
         assert keys == ["claude-code:s1/agent:x1"] and not ca.audit(home)["verified"]
 
 
+# #2571: one table for an unterminated last record. The rule: a partial tail on a lineage whose last observed hook was
+# its end (SessionEnd for a session, SubagentStop for a subagent) makes that lineage unverified, since capture will never
+# take those bytes; with no observed end, or after the session resumed, the tail stays reported only.
+_TAIL_TABLE = [(kind, end, tail, resumed) for kind in ("session", "subagent") for end in (False, True)
+               for tail in (False, True) for resumed in (False, True)]
+
+
+@pytest.mark.parametrize("kind,end,tail,resumed", _TAIL_TABLE,
+                         ids=[f"{k}-{'end' if e else 'live'}-{'tail' if t else 'whole'}-{'resumed' if r else 'still'}"
+                              for k, e, t, r in _TAIL_TABLE])
+def test_the_ended_partial_tail_rule_table(tmp_path, home, hermes, kind, end, tail, resumed):
+    from hermes_lcm import claude_code_audit as ca
+
+    a = _append(tmp_path / "projects" / "-work" / "s1.jsonl", CONVERSATION[:2])
+    child = _append(a.parent / "s1" / "subagents" / "agent-x1.jsonl", _SIDE) if kind == "subagent" else None
+    path, extra = (child, {"agent_id": "x1", "agent_transcript_path": str(child)}) if child else (a, {})
+    live, last = ("SubagentStart", "SubagentStop") if child else ("UserPromptSubmit", "SessionEnd")
+    _record(_hook(), home, a)
+    _record(_hook(), home, a, event=live, **extra)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    partial = json.dumps(dict(_entry("assistant", "late", [{"type": "text", "text": "late"}]), isSidechain=bool(child)))
+    if tail:  # a crash mid-append leaves the last record without its newline
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(partial[:20])
+    if end:
+        _record(_hook(), home, a, event=last, **extra)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    if resumed:  # the session goes on: a later hook, and the record is finished
+        _record(_hook(), home, a, event=live, **extra)
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(partial[20:] + "\n" if tail else partial + "\n")
+        cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    report = ca.audit(home)
+    row = next(row for row in report["lineages"] if row["lineage"] == cc.lineage_key("s1", "x1" if child else None))
+    assert bool(row["partial_tail_bytes"]) is (tail and not resumed)
+    assert report["verified"] is not (end and tail and not resumed)
+
+
+@pytest.mark.parametrize("shape", ["child_stops_after_session_end", "older_end_after_resume", "resumed_still_partial",
+                                   "end_behind_a_clock_step", "older_hook_after_an_equal_end", "end_with_no_stamp",
+                                   "end_behind_a_waiting_stop", "equal_stop_behind_a_waiting_end",
+                                   "newer_stop_behind_a_waiting_end", "end_behind_a_waiting_stop_then_a_delayed_hook",
+                                   "newer_stop_behind_a_waiting_end_then_a_delayed_hook",
+                                   "a_delayed_stop_after_a_resume_stays_unverified"])
+def test_the_ended_marker_follows_the_lineages_own_newest_hook(tmp_path, home, hermes, shape):
+    """#2571 review: a child's SubagentStop never clears its session's end; an end marks the lineage ended whatever its
+    stamp (a clock stepped back, a tie, no stamp), so an older SessionEnd drained after a newer resume is unverified until
+    the next newer own hook; only a strictly newer own hook clears it, and a resumed session whose tail is still partial
+    stays reported only."""
+    from hermes_lcm import claude_code_audit as ca
+
+    a = _append(tmp_path / "projects" / "-work" / "s1.jsonl", CONVERSATION[:2])
+    child = _append(a.parent / "s1" / "subagents" / "agent-x1.jsonl", _SIDE)
+    _record(_hook(), home, a, hook_started_ns=1)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    with open(a, "a", encoding="utf-8") as handle:
+        handle.write('{"type": "assistant", "uu')  # a crash mid-append
+    if shape == "child_stops_after_session_end":
+        _record(_hook(), home, a, event="SessionEnd", hook_started_ns=5)
+        cc.run_worker(home, hermes_home=hermes, settle_s=0)
+        _record(_hook(), home, a, event="SubagentStop", agent_id="x1", agent_transcript_path=str(child), hook_started_ns=6)
+    elif shape == "older_end_after_resume":
+        _record(_hook(), home, a, event="UserPromptSubmit", hook_started_ns=9)
+        cc.run_worker(home, hermes_home=hermes, settle_s=0)
+        _record(_hook(), home, a, event="SessionEnd", hook_started_ns=5)  # delayed: drained after the newer resume
+        cc.run_worker(home, hermes_home=hermes, settle_s=0)
+        assert not ca.audit(home)["verified"]  # fails toward unverified ...
+        _record(_hook(), home, a, event="UserPromptSubmit", hook_started_ns=12)  # ... until the next newer own hook
+    elif shape.startswith("end_behind_a_waiting_stop"):  # the hook must not drop the end as stale against an undrained Stop
+        _record(_hook(), home, a, event="Stop", hook_started_ns=9)
+        _record(_hook(), home, a, event="SessionEnd", hook_started_ns=5)
+    elif "stop_behind_a_waiting_end" in shape:  # no other end-class hook replaces an undrained end
+        _record(_hook(), home, a, event="SessionEnd", hook_started_ns=9)
+        _record(_hook(), home, a, event="Stop", hook_started_ns=9 if shape.startswith("equal") else 12)
+    elif shape.startswith("a_delayed_stop_after_a_resume"):  # #2579 bot review: a known limit, pinned (fails safe)
+        _record(_hook(), home, a, event="SessionEnd", hook_started_ns=9)
+        cc.run_worker(home, hermes_home=hermes, settle_s=0)
+        _record(_hook(), home, a, event="UserPromptSubmit", hook_started_ns=12)  # the session resumed ...
+        _record(_hook(), home, a, event="Stop", hook_started_ns=5)  # ... and a delayed Stop replaces its pointer
+    elif shape == "resumed_still_partial":
+        _record(_hook(), home, a, event="SessionEnd", hook_started_ns=5)
+        cc.run_worker(home, hermes_home=hermes, settle_s=0)
+        _record(_hook(), home, a, event="UserPromptSubmit", hook_started_ns=9)
+    else:  # an own hook at 9, then the end at 5 (clock stepped back), at 9 then an older hook at 9, or with no stamp
+        _record(_hook(), home, a, event="UserPromptSubmit", hook_started_ns=9)
+        cc.run_worker(home, hermes_home=hermes, settle_s=0)
+        stamp = {"end_behind_a_clock_step": {"hook_started_ns": 5}, "end_with_no_stamp": {}}.get(shape, {"hook_started_ns": 9})
+        _record(_hook(), home, a, event="SessionEnd", **stamp)
+        if shape == "older_hook_after_an_equal_end":
+            cc.run_worker(home, hermes_home=hermes, settle_s=0)
+            _record(_hook(), home, a, event="UserPromptSubmit", hook_started_ns=9)
+    if shape.endswith("then_a_delayed_hook"):  # #2579: the coalesced pointer's newest stamp survives the drain
+        cc.run_worker(home, hermes_home=hermes, settle_s=0)
+        _record(_hook(), home, a, event="UserPromptSubmit", hook_started_ns=7 if shape.startswith("end") else 10)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    assert ca.audit(home)["verified"] is (shape in {"older_end_after_resume", "resumed_still_partial"})
+
+
 def test_a_swept_workflow_agent_keeps_its_saved_tool_output(tmp_path, home, hermes):
     """#2574 review: a workflow agent's saved output sits in the session's tool-results/; its message row holds the full
     output, not the preview, when the sweep (no hook) takes the nested transcript."""
@@ -3173,6 +3271,60 @@ def test_an_agent_file_with_no_id_is_never_swept_as_its_session(tmp_path, home, 
     finally:
         store.close()
     assert not ca.audit(home)["verified"]
+
+
+@pytest.mark.parametrize("order", ["end_then_precompact", "precompact_then_end"])
+def test_a_precompact_around_an_undrained_session_end_captures_every_line_once(tmp_path, home, hermes, order):
+    """#2571: a PreCompact spooled behind an undrained SessionEnd is now kept out (kept_end) instead of replacing it.
+    Between the SessionEnd and the session's next hook, a transcript still mid-write reads unverified (before this
+    change, in the kept_end order, it read verified); that is the safe direction. After the next hook, in both orders,
+    every transcript line is captured exactly once, message rows once each, and the verdict is unchanged: verified."""
+    from hermes_lcm import claude_code_audit as ca
+
+    def spool(event, stamp):
+        return hook.spool(home, {"host": "claude-code", "event": event, "session_id": "s1", "agent_id": None,
+                                 "transcript_path": str(a), "agent_transcript_path": None,
+                                 "hook_started_ns": stamp, "prompt_id": "c1"})
+
+    hook = _hook()
+    a = _append(tmp_path / "projects" / "-work" / "s1.jsonl", CONVERSATION[:2])
+    _record(hook, home, a, event="UserPromptSubmit", hook_started_ns=1)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    _append(a, CONVERSATION[2:4])
+    first, second = (("SessionEnd", 5), ("PreCompact", 6)) if order == "end_then_precompact" else (
+        ("PreCompact", 5), ("SessionEnd", 6))
+    outcomes = [spool(*first)]
+    _append(a, CONVERSATION[4:-1])  # written between the two hooks, before any drain
+    outcomes.append(spool(*second))
+    assert outcomes == (["spooled", "kept_end"] if order == "end_then_precompact" else ["spooled", "spooled"])
+    last = json.dumps(CONVERSATION[-1]) + "\n"
+    with open(a, "a", encoding="utf-8") as handle:  # the resumed session is still writing its last record
+        handle.write(last[:20])
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    between = ca.audit(home)
+    assert not between["verified"] and "claude-code:s1" in between["unverified"]  # the end is the lineage's newest drained hook and its tail is partial: never held
+    assert next(row for row in between["lineages"] if row["lineage"] == "claude-code:s1")["partial_tail_bytes"]
+    with open(a, "a", encoding="utf-8") as handle:
+        handle.write(last[20:])
+    _record(hook, home, a, event="UserPromptSubmit", hook_started_ns=7)  # the session's next hook
+    for _ in range(2):
+        cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    store = _open(home, hermes)
+    try:
+        held = collections.Counter(row[0] for row in store.connection.execute(
+            "SELECT line_digest FROM capture_events WHERE source_kind = 'line'"))
+        rows = collections.Counter(row[0] for row in store.connection.execute(
+            "SELECT content FROM messages WHERE session_id = 's1'"))
+    finally:
+        store.close()
+    digests = [hashlib.sha256(line).hexdigest() for line in a.read_bytes().splitlines(keepends=True)]
+    assert len(digests) == len(CONVERSATION) and all(held[d] >= 1 for d in digests)  # every line captured
+    assert all(held[d] == digests.count(d) for d in digests)  # ... and none twice (two api-request-blob lines repeat)
+    assert sum(held.values()) == len(digests)  # and nothing else held, such as the half-written record
+    assert rows and max(rows.values()) == 1  # message rows once each
+    report = ca.audit(home)
+    assert report["verified"] and not report["unverified"]
+    assert not next(row for row in report["lineages"] if row["lineage"] == "claude-code:s1")["partial_tail_bytes"]
 
 
 @pytest.mark.parametrize("then", ["hooks", "sweep", "key_before_delete_then_rewrite", "key_before_delete_then_copied"])

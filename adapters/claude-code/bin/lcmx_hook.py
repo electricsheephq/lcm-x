@@ -76,6 +76,7 @@ EVENTS = frozenset({
 })
 DETACHED_EVENTS = EVENTS - {"SessionStart", "PreCompact"}
 END_EVENTS = frozenset({"Stop", "StopFailure", "SubagentStop", "SessionEnd", "PreCompact"})
+LINEAGE_ENDS = frozenset({"SessionEnd", "SubagentStop"})  # the lineage itself ended (#2571)
 # Registered "async" in hooks.json: Claude Code does not wait for these and may kill one at any
 # point, so they never probe the store lock (start_worker).
 ASYNC_EVENTS = frozenset({"PostToolBatch"})
@@ -256,6 +257,9 @@ def _spool_locked(directory: Path, key: str, record: Mapping[str, Any]) -> str:
     except (OSError, ValueError):  # a pointer that cannot be read: its history is unknown, never "not seen" (#2535)
         previous, unknown = None, True
     facts = _merged_facts(record, previous)
+    stamps = [n for n in (record.get("hook_started_ns"), *((previous.get("newest_ns"), previous.get("hook_started_ns"))
+              if isinstance(previous, dict) else ())) if isinstance(n, int) and not isinstance(n, bool)]
+    facts["newest_ns"] = max(stamps) if stamps else None  # #2579: a coalesced pointer keeps the newest stamp it saw
     if unknown:
         facts.update({name: None for name in ("transcript_seen", "agent_transcript_seen") if facts[name] is not True})
         facts["local_gc"] = True  # the lost history may have seen local GC on: no lossless claim (#2503)
@@ -267,10 +271,12 @@ def _spool_locked(directory: Path, key: str, record: Mapping[str, Any]) -> str:
         # names content; local_gc is session environment. The guard preserves end-event ordering.
         if isinstance(previous, dict):
             kept = None
-            if previous.get("event") in END_EVENTS and record["event"] not in END_EVENTS:
+            if (previous.get("event") in END_EVENTS and record["event"] not in END_EVENTS
+                    or previous.get("event") in LINEAGE_ENDS - {record["event"]}):  # #2571: no other hook replaces it
                 kept = "kept_end"
             elif ((previous.get("event") in END_EVENTS) == (record["event"] in END_EVENTS)
-                    and previous.get("hook_started_ns", -1) > record.get("hook_started_ns", 0)):
+                    and previous.get("hook_started_ns", -1) > record.get("hook_started_ns", 0)
+                    and record["event"] not in LINEAGE_ENDS - {previous.get("event")}):  # #2571: an end is never stale
                 kept = "stale"
             if kept:  # the kept pointer still learns this record's facts
                 if facts != {name: previous.get(name) for name in facts}:

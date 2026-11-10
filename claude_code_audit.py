@@ -31,6 +31,7 @@ from .claude_code_capture import (
 from .claude_code_store import (
     COMPACT_PREFIX,
     CURSOR_PREFIX,
+    ENDED_PREFIX,
     FORGOTTEN_PREFIX,
     FORK_PREFIX,
     LOCAL_GC_PREFIX,
@@ -755,7 +756,9 @@ def _unverified(metadata: dict, records: list[dict], lineages: list[dict], sessi
                 failed: list[Lineage | None]) -> list[str]:
     unknown = {row["lineage"] for row in lineages if not row["forgotten"] and (
         row["transcript_state"] != "ok" or row["generations_gone"] or row["pending_lines"]
-        or row["files"]["uncaptured"] or row["named_other_paths"] or _subfolder_files_unverified(row))}
+        or row["files"]["uncaptured"] or row["named_other_paths"] or _subfolder_files_unverified(row)
+        or (row["partial_tail_bytes"] and isinstance(ended := metadata.get(ENDED_PREFIX + row["lineage"]), dict)
+            and ended.get("ended") is True))}  # #2571: a partial tail after the lineage's end is never taken
     if (session is not None and CURSOR_PREFIX + lineage_key(session) not in metadata
             and PENDING_PREFIX + lineage_key(session) not in metadata):  # a pending session is judged below
         unknown.add(lineage_key(session))

@@ -575,9 +575,14 @@ gate's instrument (see "The audit" in the test plan).
   - lines after the cursor (`pending_lines`) and `tool-results` files whose current bytes have no
     captured version (`files.uncaptured`): both leave the lineage unverified;
   - an unterminated last record after the cursor (`partial_tail_bytes`), which Claude Code may still be writing:
-    counted and named in the verdict ("N lineages end in an unterminated record"), never a reason for unverified.
-    For now this also covers a lineage whose `SessionEnd` or `SubagentStop` was observed, where a crash mid-append
-    leaves a record capture never takes; #2571 makes that case unverified;
+    counted and named in the verdict ("N lineages end in an unterminated record"). It leaves the lineage unverified
+    only when that lineage's last observed hook was its end (`SessionEnd`, or `SubagentStop` for a subagent): a crash
+    mid-append left a record capture will never take (#2571). An end marks it whatever its timestamp (the hook never
+    drops it as stale behind an undrained hook, nor lets another end-class hook replace it); only a newer hook of that lineage (the session resumed) clears it.
+    Known limits: a resumed session whose newer hook's pointer is replaced by a delayed older `Stop` before the
+    worker drains it stays unverified until a newer hook of that session drains (the safe side); a subagent still running when its session ends gets no
+    `SubagentStop` of its own if Claude Code sends none, and then its unterminated last record does not leave it
+    unverified;
   - files under a `tool-results` subfolder (`subfolder_files`; a symlink to a folder, or a folder that cannot be
     listed, counts one), which capture does not store as files: until #2554 they leave the lineage unverified, and the
     verdict names them ("N files in tool-results subfolders not stored (M lineages)");
