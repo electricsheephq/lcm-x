@@ -6,6 +6,7 @@ Design: docs/claude-code-adapter.md.
 from __future__ import annotations
 
 import ast
+import collections
 import fcntl
 import gc
 import hashlib
@@ -2725,6 +2726,78 @@ def test_the_closed_world_walk_edges(tmp_path, home, hermes, shape):
     assert bool(unverified) is (shape != "forgotten_journal")
 
 
+# #2562: one table for workflow agents and other nested subagent transcripts. The sweep is the safety net for a missed
+# hook, so it must not depend on a hook naming the path: it takes every agent-*.jsonl below subagents/, to a bounded
+# depth, without following a symlinked folder. Expected: (captured, verified).
+_NESTED = {"direct": ("agent-x1.jsonl",), "workflow": ("workflows", "wf_run1", "agent-x1.jsonl"),
+           "deep": ("a", "b", "c", "d", "agent-x1.jsonl"), "too_deep": ("a", "b", "c", "d", "e", "agent-x1.jsonl"),
+           "linked_folder": ("link", "agent-x1.jsonl"), "linked_file": ("agent-x1.jsonl",)}
+_NESTED_TABLE = [(kind, hook, hook or kind in ("direct", "workflow", "deep"), not kind.startswith("linked")
+                  and (hook or kind != "too_deep")) for kind in _NESTED for hook in (True, False)]
+
+
+@pytest.mark.parametrize("kind,hook,captured,verified", _NESTED_TABLE,
+                         ids=[f"{k}-{'hook' if h else 'missed'}" for k, h, _, _ in _NESTED_TABLE])
+def test_the_nested_subagent_rule_table(tmp_path, home, hermes, kind, hook, captured, verified):
+    from hermes_lcm import claude_code_audit as ca
+
+    a = _append(tmp_path / "projects" / "-work" / "s1.jsonl", CONVERSATION[:2])
+    agents = a.parent / "s1" / "subagents"
+    if kind in ("linked_folder", "linked_file"):  # the transcript lives elsewhere; a symlink in subagents/ reaches it
+        elsewhere = tmp_path / "elsewhere"
+        _append(elsewhere / "agent-x1.jsonl", _SIDE)
+        agents.mkdir(parents=True)
+        if kind == "linked_folder":
+            (agents / "link").symlink_to(elsewhere)
+            path = agents / "link" / "agent-x1.jsonl"
+        else:
+            path = agents / "agent-x1.jsonl"
+            path.symlink_to(elsewhere / "agent-x1.jsonl")
+    else:
+        path = _append(agents.joinpath(*_NESTED[kind]), _SIDE)
+    _record(_hook(), home, a)
+    if hook:  # the record Claude Code sends for a workflow agent (probe on 2026-11-10)
+        _record(_hook(), home, a, event="SubagentStop", agent_id="x1", agent_type="workflow-subagent",
+                agent_transcript_path=str(path))
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)  # a second run sweeps what the first registered
+    store = _open(home, hermes)
+    try:
+        assert bool(store.read_metadata_json(cc.CURSOR_PREFIX + "claude-code:s1/agent:x1")) is captured
+        assert len(_rows(store, cc.row_session_id("s1", "x1"))) == (len(_SIDE) if captured else 0)
+    finally:
+        store.close()
+    assert ca.audit(home)["verified"] is verified
+
+
+@pytest.mark.parametrize("place,captured", [(("workflows", "wf_run1"), True), ((), False), (("workflows",), False)],
+                         ids=["run_folder", "subagents", "workflows"])
+def test_a_workflow_journal_is_captured_only_in_its_run_folder(tmp_path, home, hermes, place, captured):
+    """#2562: 31 of 15,262 real journal results were held by no transcript, so a run's journal.jsonl is captured as its
+    own child lineage, every line kept raw. A journal anywhere else is not taken, and the closed-world audit flags it."""
+    from hermes_lcm import claude_code_audit as ca
+
+    a = _append(tmp_path / "projects" / "-work" / "s1.jsonl", CONVERSATION[:2])
+    run = a.parent / "s1" / "subagents" / "workflows" / "wf_run1"
+    _append(run / "agent-x1.jsonl", _SIDE)
+    events = [{"type": "started", "agentId": "x1"}, {"type": "result", "agentId": "x1", "result": {"ok": True}}]
+    journal = _append(a.parent.joinpath("s1", "subagents", *place, "journal.jsonl"), events)
+    _record(_hook(), home, a)
+    for _ in range(2):  # the second run sweeps what the first registered
+        cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    key = "claude-code:s1/agent:" + cc.JOURNAL_PREFIX + "wf_run1"
+    report = ca.audit(home)
+    assert report["verified"] is captured
+    if captured:
+        _append(journal, [{"type": "launched"}])  # a line written later is taken by the next sweep
+        cc.run_worker(home, hermes_home=hermes, settle_s=0)
+        report = ca.audit(home)
+        row = next(row for row in report["lineages"] if row["lineage"] == key)
+        assert row["unknown_types"] == {"started": 1, "result": 1, "launched": 1} and report["verified"]
+    else:
+        assert key not in {row["lineage"] for row in report["lineages"]}
+
+
 # #2535 strict: one table for when a pending record expires. The rule: a pending record expires only on facts this
 # home observed itself; history that is missing or cannot be read is unknown, and unknown never expires.
 _EXPIRY_EVENTS = {"end_only": ["SessionEnd"], "start_end": ["SessionStart", "SessionEnd"],
@@ -2880,3 +2953,107 @@ def test_an_unreadable_set_aside_record_is_never_overwritten(tmp_path, home, her
     (home / "spool" / "readable.json").write_text("{}")
     cc.run_worker(home, hermes_home=hermes, settle_s=0)
     assert len(list((home / "spool").glob("*.failed"))) == 2 and not (home / "spool" / "readable.json").exists()
+
+
+# #2562 ruling: Claude Code reused one agent id in one real session (a direct and a workflow transcript, different
+# content, a few shared lines). Keys stay the id for GA; this pins what capture and the audit do today.
+_REUSED_SHARED = [{"type": "attachment", "uuid": f"sh{n}", "sessionId": "s1", "isSidechain": True,
+                   "attachment": {"type": "plan", "n": n}} for n in range(2)]
+_REUSED = {"first": _REUSED_SHARED + [dict(_entry("user", "fa1", "first task"), isSidechain=True),
+                                      dict(_entry("assistant", "fa2", [{"type": "text", "text": "one"}]), isSidechain=True)],
+           "second": _REUSED_SHARED + [dict(_entry("user", "sb1", "second task"), isSidechain=True),
+                                       dict(_entry("assistant", "sb2", [{"type": "text", "text": "two"}]), isSidechain=True),
+                                       dict(_entry("assistant", "sb3", [{"type": "text", "text": "three"}]), isSidechain=True)]}
+
+
+@pytest.mark.parametrize("hooks", ["both_alternating", "first_then_sweep", "sweep_only", "both_then_second_grows"])
+def test_a_reused_agent_id_is_pinned(tmp_path, home, hermes, hooks):
+    """(file lines, lines missing from the ledger, lines held more than once) per transcript, rows, and the verdict."""
+    from hermes_lcm import claude_code_audit as ca
+
+    a = _append(tmp_path / "projects" / "-work" / "s1.jsonl", CONVERSATION[:2])
+    agents = a.parent / "s1" / "subagents"
+    paths = {"first": _append(agents / "agent-x1.jsonl", _REUSED["first"]),
+             "second": _append(agents / "workflows" / "wf_run1" / "agent-x1.jsonl", _REUSED["second"])}
+    _record(_hook(), home, a)
+    order = {"both_alternating": ["first", "second", "first", "second"], "first_then_sweep": ["first"],
+             "sweep_only": [], "both_then_second_grows": ["first", "second"]}[hooks]
+    for name in order:
+        _record(_hook(), home, a, event="SubagentStop", agent_id="x1", agent_transcript_path=str(paths[name]))
+        cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    if hooks == "both_then_second_grows":  # the sweep lists the direct path first and moves the lineage back to it
+        _append(paths["second"], [dict(_entry("assistant", "sb4", [{"type": "text", "text": "late"}]), isSidechain=True)])
+    for _ in range(2):
+        cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    store = _open(home, hermes)
+    try:
+        held = collections.Counter(row[0] for row in store.connection.execute(
+            "SELECT line_digest FROM capture_events WHERE source_kind = 'line'"))
+        rows = collections.Counter(row[0] for row in store.connection.execute(
+            "SELECT content FROM messages WHERE session_id = ?", (cc.row_session_id("s1", "x1"),)))
+    finally:
+        store.close()
+    seen = {}
+    for name, path in paths.items():
+        digests = [hashlib.sha256(line).hexdigest() for line in path.read_bytes().splitlines(keepends=True)]
+        seen[name] = (len(digests), sum(1 for d in digests if not held[d]), sum(1 for d in digests if held[d] > 1))
+    report = ca.audit(home)
+    assert report["unverified"] == ["claude-code:s1/agent:x1"] and not report["verified"]
+    if hooks == "both_alternating":  # nothing lost: each switch re-reads a file as a new generation, so its raw lines
+        # are held more than once; its message rows are stored once, both agents' under the one child session
+        assert seen == {"first": (4, 0, 4), "second": (5, 0, 5)}
+        assert dict(rows) == {"first task": 1, "one": 1, "second task": 1, "two": 1, "three": 1}
+        assert "a second transcript path holds rows" in report["verdict"]
+    elif hooks == "both_then_second_grows":  # #2566: the line the second transcript wrote after both hooks is lost
+        assert seen["first"][1] == 0 and seen["second"][:2] == (6, 1) and "late" not in rows
+    else:  # the first path in sort order is taken; the second transcript's own lines are not captured separately
+        assert seen == {"first": (4, 0, 0), "second": (5, 3, 0)}
+        assert dict(rows) == {"first task": 1, "one": 1}
+
+
+def test_a_swept_workflow_agent_keeps_its_saved_tool_output(tmp_path, home, hermes):
+    """#2574 review: a workflow agent's saved output sits in the session's tool-results/; its message row holds the full
+    output, not the preview, when the sweep (no hook) takes the nested transcript."""
+    a = _append(tmp_path / "projects" / "-work" / "s1.jsonl", CONVERSATION[:2])
+    saved = a.parent / "s1" / "tool-results" / "toolu_9.txt"
+    saved.parent.mkdir(parents=True)
+    saved.write_text("full output\n" * 5000, encoding="utf-8")
+    marker = (f"<persisted-output>\nOutput too large (60KB). Full output saved to: {saved}\n\n"
+              "Preview (first 2KB):\nfull output\n</persisted-output>")
+    _append(a.parent / "s1" / "subagents" / "workflows" / "wf_run1" / "agent-x1.jsonl",
+            [dict(_entry("user", "w1", [{"type": "tool_result", "tool_use_id": "toolu_9", "content": marker}]),
+                  isSidechain=True)])
+    assert cc.session_dir(saved.parent.parent / "subagents" / "workflows" / "wf_run1" / "agent-x1.jsonl") == a.parent / "s1"
+    _record(_hook(), home, a)
+    for _ in range(2):
+        cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    store = _open(home, hermes)
+    try:
+        [(_, _, content, _)] = _rows(store, cc.row_session_id("s1", "x1"))
+    finally:
+        store.close()
+    assert "chars=60000" in str(content) and "toolu_9" in str(content)
+    from hermes_lcm.externalize import extract_externalized_ref
+    [payload] = (home / "lcm-large-outputs").glob(extract_externalized_ref(str(content)))  # the saved bytes, not a preview
+    assert json.loads(payload.read_text(encoding="utf-8"))["content"] == "full output\n" * 5000
+
+
+@pytest.mark.parametrize("where", [(), ("workflows", "wf_run1")], ids=["direct", "nested"])
+def test_an_agent_file_with_no_id_is_never_swept_as_its_session(tmp_path, home, hermes, where):
+    """#2574 review: `agent-.jsonl` has an empty id, so its lineage key is the session's own. The sweep never takes it
+    (the session's key is already seen, and the name check now says so first); the closed-world audit reports the
+    session unverified, since the file ties to no cursor."""
+    from hermes_lcm import claude_code_audit as ca
+
+    a = _append(tmp_path / "projects" / "-work" / "s1.jsonl", CONVERSATION[:2])
+    _append(a.parent.joinpath("s1", "subagents", *where, "agent-.jsonl"), _SIDE)
+    _record(_hook(), home, a)
+    for _ in range(2):
+        cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    store = _open(home, hermes)
+    try:
+        assert store.read_metadata_json(cc.CURSOR_PREFIX + "claude-code:s1")["path"] == str(a)
+        assert len(_rows(store)) == len(CONVERSATION[:2])
+    finally:
+        store.close()
+    assert not ca.audit(home)["verified"]

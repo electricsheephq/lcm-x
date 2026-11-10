@@ -28,6 +28,7 @@ from .claude_code_capture import (
     PROJECTION_VERSION,
     SHARED_RAW,
     SOURCE,
+    SUBAGENT_DEPTH,
     UNKNOWN,
     classify_entry,
     content_digest,
@@ -883,15 +884,35 @@ def lineages_of(record: dict) -> list[Lineage]:
     return found
 
 
+JOURNAL_PREFIX = "journal/"  # a run's journal.jsonl: its own child lineage; no file-name id or hook id holds "/" (#2562)
+
+
 def _subagents(lineage: Lineage) -> list[Lineage]:
+    """Every agent-*.jsonl below the session's subagents/ folder, to a bounded depth, never through a symlink,
+    and each workflow run's ``workflows/<run-id>/journal.jsonl`` (#2562): the sweep is the safety net for a missed
+    hook, so it must not depend on a hook naming the path. No hook names a journal; only the sweep takes it."""
     if lineage.agent_id:
         return []
-    folder = session_dir(lineage.path) / "subagents"
-    try:
-        names = sorted(path.name for path in folder.glob("agent-*.jsonl"))
-    except OSError:
-        return []
-    return [Lineage(lineage.session_id, name[len("agent-"):-len(".jsonl")], folder / name) for name in names]
+    root = session_dir(lineage.path) / "subagents"
+    found, stack = [], [(root, 0)]
+    while stack:
+        folder, depth = stack.pop()
+        try:
+            with os.scandir(folder) as entries:
+                for entry in entries:
+                    if entry.is_symlink():
+                        continue  # never followed: one transcript reached twice would be two lineages
+                    if entry.is_dir(follow_symlinks=False):
+                        if depth < SUBAGENT_DEPTH:
+                            stack.append((Path(entry.path), depth + 1))
+                    elif entry.name.startswith("agent-") and entry.name.endswith(".jsonl") and len(entry.name) > 12:
+                        found.append((entry.name[len("agent-"):-len(".jsonl")], Path(entry.path)))
+                    elif entry.name == "journal.jsonl" and folder.parent == root / "workflows":
+                        # a workflow run's log: 31 of 15,262 real results were held by no transcript (#2562)
+                        found.append((JOURNAL_PREFIX + folder.name, Path(entry.path)))
+        except OSError:
+            continue
+    return [Lineage(lineage.session_id, agent, path) for agent, path in sorted(found, key=lambda item: item[1])]
 
 
 def _settle(store: MessageStore, lineage: Lineage, deadline: Optional[float], settle_s: float) -> None:
