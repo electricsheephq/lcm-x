@@ -182,6 +182,15 @@ its modification time is the hook's write time.
   the first path keeps the agent id, and a later path is keyed by its path below `subagents/`
   while the first transcript is still on disk (#2566). A store written before that change, whose one lineage already moved between the two
   paths, keeps its rows and gains the missing lines; its audit stays unverified for that agent.
+  Known limits of such a store, each pinned by a test, none losing a row or storing one twice:
+  a tool call the old lineage holds stays in its session when the result is written after the
+  upgrade, so the result's row is in the path session and the old lineage counts one unanswered
+  call; the audit's failures count the path lineage's duplicate entries as lost, so `ok` is false
+  although every row is stored once. If the user then deletes the id-keyed child session after the
+  second path got its key, capture stores nothing more, but that path session keeps its ledger
+  events (duplicates and shared raw lines, each holding its raw line) and the audit still reads
+  them and lists that lineage unverified. They never re-enter messages or recall; deleting the path
+  session too removes them.
 - **One API response, several entries.** Claude Code writes each content block of a response as its
   own entry with its own uuid; the entries share `message.id`.
 - **Format** is internal and changes between versions, hence the per-type classes below and the
