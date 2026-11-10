@@ -905,7 +905,7 @@ def _subagents(lineage: Lineage) -> list[Lineage]:
                     if entry.is_dir(follow_symlinks=False):
                         if depth < SUBAGENT_DEPTH:
                             stack.append((Path(entry.path), depth + 1))
-                    elif entry.name.startswith("agent-") and entry.name.endswith(".jsonl"):
+                    elif entry.name.startswith("agent-") and entry.name.endswith(".jsonl") and len(entry.name) > 12:
                         found.append((entry.name[len("agent-"):-len(".jsonl")], Path(entry.path)))
                     elif entry.name == "journal.jsonl" and folder.parent == root / "workflows":
                         # a workflow run's log: 31 of 15,262 real results were held by no transcript (#2562)

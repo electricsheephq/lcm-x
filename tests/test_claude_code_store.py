@@ -3033,3 +3033,23 @@ def test_a_swept_workflow_agent_keeps_its_saved_tool_output(tmp_path, home, herm
     finally:
         store.close()
     assert "chars=60000" in str(content) and "toolu_9" in str(content)
+
+
+@pytest.mark.parametrize("where", [(), ("workflows", "wf_run1")], ids=["direct", "nested"])
+def test_an_agent_file_with_no_id_is_never_swept_as_its_session(tmp_path, home, hermes, where):
+    """#2574 review: `agent-.jsonl` has an empty id, which would key it as the session itself and move the session's
+    cursor onto it. The sweep skips it; the closed-world audit reports the session unverified."""
+    from hermes_lcm import claude_code_audit as ca
+
+    a = _append(tmp_path / "projects" / "-work" / "s1.jsonl", CONVERSATION[:2])
+    _append(a.parent.joinpath("s1", "subagents", *where, "agent-.jsonl"), _SIDE)
+    _record(_hook(), home, a)
+    for _ in range(2):
+        cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    store = _open(home, hermes)
+    try:
+        assert store.read_metadata_json(cc.CURSOR_PREFIX + "claude-code:s1")["path"] == str(a)
+        assert len(_rows(store)) == len(CONVERSATION[:2])
+    finally:
+        store.close()
+    assert not ca.audit(home)["verified"]
