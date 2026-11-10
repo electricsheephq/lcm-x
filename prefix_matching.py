@@ -161,6 +161,13 @@ class PrefixMatchingMixin:
         bare = self._session_end_prefix_compare_identity(message, recover_markers=False, **kwargs)
         return bare if bare in stored else self._session_end_prefix_compare_identity(message, **kwargs)
 
+    def _bare_marker_identity(self, content, *, session_id, hermes_home=None):
+        """Bare marker text as stored, with placeholders restored and no file recovery."""
+        if not isinstance(content, str):
+            return None
+        text = self._session_end_prefix_compare_value(content, session_id=session_id, hermes_home=hermes_home)
+        return normalize_content_value(redact_sensitive_value(text, self._config, parse_json_strings=False))
+
     def _session_end_rows_equal(self, stored_row, host_message, *, session_id, hermes_home=None):
         # Two bare markers are the same row only when their text is byte-identical. A marker and a stored recovered result are the same row when the marker's path and character count equal the ones recorded at ingest and the marker's preview is exactly the start of the stored content. The marker's boilerplate wording is not part of that identity.
         # A stored row takes a marker identity only from its own marker: when its payload's recorded marker source is not unambiguously this row's (a shared payload, a plain row, a marker with another path), the row compares by content.
@@ -174,9 +181,13 @@ class PrefixMatchingMixin:
         if host_message.get("role") == "tool" and _is_hermes_persisted_output_marker(incoming):
             if _is_hermes_persisted_output_marker(original):
                 # Bare against bare: main's own compare (ingest's transforms undone on the stored side, none recovered).
-                return (self._session_end_prefix_compare_identity(stored_row, session_id=session_id,
-                        hermes_home=hermes_home, recover_markers=False) == self._session_end_prefix_compare_identity(
-                        host_message, session_id=session_id, hermes_home=hermes_home, recover_markers=False))
+                try:
+                    return (self._bare_marker_identity(original, session_id=session_id, hermes_home=hermes_home)
+                            == self._bare_marker_identity(incoming, session_id=session_id, hermes_home=hermes_home))
+                except Exception:  # nothing raised by this compare leaves it: main's compare
+                    return (self._session_end_prefix_compare_identity(stored_row, session_id=session_id,
+                            hermes_home=hermes_home, recover_markers=False) == self._session_end_prefix_compare_identity(
+                            host_message, session_id=session_id, hermes_home=hermes_home, recover_markers=False))
             payloads = {}
             text = self._session_end_prefix_compare_value(original, session_id=session_id,
                 hermes_home=hermes_home, marker_payloads=payloads)
