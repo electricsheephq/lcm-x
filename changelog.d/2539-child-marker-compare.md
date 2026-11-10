@@ -1,0 +1,1 @@
+- Fix: delegated-child and session-end saved-output comparison (#2539). A marker row equals a stored row exactly when the host's marker text would be byte-identical (path, character count, preview), whether or not the file still exists. A stored row without recorded marker metadata compares by recovered content.

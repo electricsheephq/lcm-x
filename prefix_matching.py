@@ -11,10 +11,12 @@ site and ``self._*`` reference unchanged.
 import hashlib
 import json
 import logging
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .externalize import (
     extract_externalized_ref,
+    get_large_output_storage_dir,
     is_externalized_placeholder,
     load_externalized_payload,
 )
@@ -25,6 +27,12 @@ from .ingest_protection import (
     restore_ingest_payload_placeholders,
 )
 from .message_content import normalize_content_value, text_content_for_pattern_matching
+from .ingest_persisted import (
+    _expected_persisted_output_chars,
+    _is_hermes_persisted_output_marker,
+    _persisted_output_preview_prefix_digest,
+    _persisted_output_saved_path,
+)
 from .sqlite_util import _is_ingest_busy_error
 from .tokens import count_message_tokens
 
@@ -33,6 +41,25 @@ from .tokens import count_message_tokens
 logger = logging.getLogger("hermes_lcm.engine")
 
 _LCM_MESSAGE_PREFIX_FINGERPRINT_LIMIT = 8
+
+def _recover_marker_for_compare(text, home):
+    """Keep storage-recovery version differences in this content-path adapter."""
+    from .ingest_persisted import recover_hermes_persisted_output_with_file_stat
+
+    return recover_hermes_persisted_output_with_file_stat(text, hermes_home=home)
+
+
+def _marker_payload_metadata(original, config, home):
+    # load_externalized_payload deliberately drops source metadata from its summary.
+    ref = extract_externalized_ref(original.strip()) or ""
+    if not ref or Path(ref).name != ref:
+        return None
+    try:
+        payload = json.loads((get_large_output_storage_dir(config, hermes_home=home, create=False) / ref).read_text(
+            encoding="utf-8"))
+        return payload if isinstance(payload, dict) else None
+    except (OSError, ValueError):
+        return None
 
 
 class PrefixMatchingMixin:
@@ -44,15 +71,17 @@ class PrefixMatchingMixin:
         prefix_count = self._session_end_store_prefix_count(session_id, messages)
         return prefix_count is not None and prefix_count > 0
 
-    def _session_end_prefix_compare_value(self, value: Any, *, session_id: str, hermes_home=None) -> Any:
+    def _session_end_prefix_compare_value(self, value: Any, *, session_id: str, hermes_home=None, marker_payloads=None) -> Any:
         if isinstance(value, dict):
             return {
-                key: self._session_end_prefix_compare_value(child, session_id=session_id, hermes_home=hermes_home)
+                key: self._session_end_prefix_compare_value(child, session_id=session_id, hermes_home=hermes_home,
+                                                       marker_payloads=marker_payloads)
                 for key, child in value.items()
             }
         if isinstance(value, list):
             return [
-                self._session_end_prefix_compare_value(child, session_id=session_id, hermes_home=hermes_home)
+                self._session_end_prefix_compare_value(child, session_id=session_id, hermes_home=hermes_home,
+                                                       marker_payloads=marker_payloads)
                 for child in value
             ]
         if not isinstance(value, str):
@@ -85,11 +114,16 @@ class PrefixMatchingMixin:
 
         if is_externalized_placeholder(stripped):
             ref = extract_externalized_ref(stripped)
-            payload = load_externalized_payload(
-                ref or "",
-                config=self._config,
-                hermes_home=self._hermes_home if hermes_home is None else hermes_home,
-            )
+            if marker_payloads is not None and stripped.startswith("[Externalized tool output:"):
+                # Tool-result payloads can carry persisted_output_*; retain the
+                # same JSON read for content and identity, including non-marker rows.
+                payload = _marker_payload_metadata(stripped, self._config,
+                    self._hermes_home if hermes_home is None else hermes_home)
+                marker_payloads[stripped] = payload
+            else:
+                payload = load_externalized_payload(
+                    ref or "", config=self._config,
+                    hermes_home=self._hermes_home if hermes_home is None else hermes_home)
             if payload is not None:
                 payload_session_id = str(payload.get("session_id") or "")
                 if not session_id or not payload_session_id or payload_session_id == session_id:
@@ -103,17 +137,58 @@ class PrefixMatchingMixin:
         message: Dict[str, Any],
         *,
         session_id: str, hermes_home=None,
-    ) -> str:
+    ) -> str | tuple:
+        home = self._hermes_home if hermes_home is None else hermes_home
+        marker_payloads = {} if (message or {}).get("role") == "tool" else None
         content = self._session_end_prefix_compare_value(
             (message or {}).get("content"),
-            session_id=session_id, hermes_home=hermes_home,
+            session_id=session_id, hermes_home=hermes_home, marker_payloads=marker_payloads,
         )
+        if (message or {}).get("role") == "tool":
+            text = normalize_content_value(content)
+            if not bool(getattr(self._config, "large_output_externalization_enabled", True)):
+                # Without durable marker metadata, retain the recovered-content compare.
+                if _is_hermes_persisted_output_marker(text):
+                    recovered = _recover_marker_for_compare(text, home)
+                    if recovered is not None:
+                        content = recovered[0]
+            else:
+                identity = self._session_end_marker_identity(
+                    message, text, session_id=session_id, payloads=marker_payloads)
+                if identity is not None:
+                    return identity
         content = redact_sensitive_value(
             content,
             self._config,
             parse_json_strings=False,
         )
         return normalize_content_value(content)
+
+    def _session_end_marker_identity(self, message, text, *, session_id, payloads):
+        # A marker row equals a stored row exactly when the host's marker text would be byte-identical (path, character count, preview), whether or not the file still exists. A stored row without recorded marker metadata compares by recovered content.
+        if _is_hermes_persisted_output_marker(text):
+            source = _persisted_output_saved_path(text)
+            expected = _expected_persisted_output_chars(text)
+            redacted = normalize_content_value(redact_sensitive_value(
+                text, self._config, parse_json_strings=False))
+            digest = _persisted_output_preview_prefix_digest(redacted)
+        else:
+            original = (message or {}).get("content")
+            if not isinstance(original, str) or not is_externalized_placeholder(original.strip()):
+                return None
+            payload = payloads.get(original.strip())
+            if (not isinstance(payload, dict) or not isinstance(payload.get("content"), str)
+                    or payload["content"] != text
+                    or (payload.get("session_id") and payload["session_id"] != session_id)):
+                return None
+            source = payload.get("persisted_output_source_path")
+            expected = payload.get("persisted_output_expected_chars")
+            digest = payload.get("persisted_output_redacted_preview_sha256")
+        if not (isinstance(source, str) and source and type(expected) is int and expected >= 0
+                and isinstance(digest, str) and len(digest) == 64):
+            return None
+        # A tuple cannot collide with literal user/tool text. All three fields must match.
+        return ("persisted-output-source", source, expected, digest)
 
     def _session_end_prefix_compare_tool_calls(
         self,
@@ -145,7 +220,7 @@ class PrefixMatchingMixin:
         message: Dict[str, Any],
         *,
         session_id: str, hermes_home=None,
-    ) -> tuple[str, str, str, str, str]:
+    ) -> tuple[str, str | tuple, str, str, str]:
         return (
             str((message or {}).get("role") or ""),
             self._session_end_prefix_compare_content(message, session_id=session_id, hermes_home=hermes_home),
