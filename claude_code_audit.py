@@ -478,7 +478,8 @@ def _home_report(home: Path) -> dict:
                 precompact["bound"] += outcome.startswith(("drain_bound", "drain_timeout"))
             value = row.get("blocking_ms")
             if type(value) in (int, float) and math.isfinite(value):
-                blocking["first" if isinstance(session, str) and session not in seen else row["event"]].append(value)
+                # Per event only: a session's first hook is the synchronous SessionStart, which never forks.
+                blocking[row["event"]].append(value)
             if isinstance(session, str) and session not in seen:
                 seen.add(session)
                 first.append(ms)
@@ -492,8 +493,7 @@ def _home_report(home: Path) -> dict:
     return {"spool": {"failed": sum(path.is_file() and path.suffix == ".failed" for path in spool),
                       "waiting": sum(path.is_file() and path.suffix in (".json", ".claimed") for path in spool)},
             "hooks_in_process_ms": latency, "precompact": precompact,
-            "hooks_blocking_ms": {event: {"n": len(values), **({"max": max(values)} if event == "first" else
-                                                            _percentiles(values))} for event, values in blocking.items()},
+            "hooks_blocking_ms": {event: {"n": len(values), **_percentiles(values)} for event, values in blocking.items()},
             "worker_log": dict(worker)}
 
 

@@ -31,12 +31,13 @@ def _close(store):
 def test_hook_blocking_latency(tmp_path, blocking):
     logs = tmp_path / "logs"
     logs.mkdir()
-    rows = [{"event": "Stop", "session": "s1", "ms": value,
-             **({"blocking_ms": value / 10} if blocking else {})} for value in (10, 20)]
+    # As in real logs, the session starts with the synchronous SessionStart, which has no blocking_ms.
+    rows = [{"event": "SessionStart", "session": "s1", "ms": 5}] + [
+        {"event": "Stop", "session": "s1", "ms": value, **({"blocking_ms": value / 10} if blocking else {})}
+        for value in (10, 20)]
     (logs / "hook.log").write_text("".join(json.dumps(row) + "\n" for row in rows))
     result = ca._home_report(tmp_path)["hooks_blocking_ms"]
-    assert result == ({"first": {"n": 1, "max": 1.0},
-                       "Stop": {"n": 1, "p50": 2.0, "p95": 2.0, "max": 2.0}} if blocking else {})
+    assert result == ({"Stop": {"n": 2, "p50": 1.0, "p95": 2.0, "max": 2.0}} if blocking else {})
 
 
 def _tamper(home, sql, args=()):
