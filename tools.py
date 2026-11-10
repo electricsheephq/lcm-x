@@ -1291,7 +1291,9 @@ def _reader_payload_search(path: Path, budget: int, in_scope) -> dict[str, Any]:
 _PAYLOAD_TERM_CAP = 16  # #2586: words across all operands; a longer query keeps the literal match only
 # A token character as the message index's unicode61 tokenizer sees it: letters and digits plus combining marks; the
 # underscore separates tokens.
-_PAYLOAD_TOKEN = "(?:[^\\W_]|[\u0300-\u036f\u1ab0-\u1aff\u1dc0-\u1dff\u20d0-\u20ff\ufe20-\ufe2f])"
+_COMBINING_MARKS = "".join(f"{chr(low)}-{chr(high)}" for low, high in (
+    (0x0300, 0x036F), (0x1AB0, 0x1AFF), (0x1DC0, 0x1DFF), (0x20D0, 0x20FF), (0xFE20, 0xFE2F)))
+_PAYLOAD_TOKEN = f"(?:[^\\W_]|[{_COMBINING_MARKS}])"
 
 
 def _payload_match(content: str, query: str, tokens: list[str], operands: list[str],
