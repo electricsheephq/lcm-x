@@ -3292,7 +3292,7 @@ def test_a_precompact_around_an_undrained_session_end_captures_every_line_once(t
         handle.write(last[:20])
     cc.run_worker(home, hermes_home=hermes, settle_s=0)
     between = ca.audit(home)
-    assert not between["verified"]  # the end is the lineage's newest drained hook and its tail is partial: never held
+    assert not between["verified"] and "claude-code:s1" in between["unverified"]  # the end is the lineage's newest drained hook and its tail is partial: never held
     assert next(row for row in between["lineages"] if row["lineage"] == "claude-code:s1")["partial_tail_bytes"]
     with open(a, "a", encoding="utf-8") as handle:
         handle.write(last[20:])
@@ -3310,6 +3310,7 @@ def test_a_precompact_around_an_undrained_session_end_captures_every_line_once(t
     digests = [hashlib.sha256(line).hexdigest() for line in a.read_bytes().splitlines(keepends=True)]
     assert len(digests) == len(CONVERSATION) and all(held[d] >= 1 for d in digests)  # every line captured
     assert all(held[d] == digests.count(d) for d in digests)  # ... and none twice (two api-request-blob lines repeat)
+    assert sum(held.values()) == len(digests)  # and nothing else held, such as the half-written record
     assert rows and max(rows.values()) == 1  # message rows once each
     report = ca.audit(home)
     assert report["verified"] and not report["unverified"]
