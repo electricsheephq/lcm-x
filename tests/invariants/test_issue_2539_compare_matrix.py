@@ -46,6 +46,13 @@ REPEATED_CASES = [(*case, 'occurrences-2') for case in CASES
                   if case[0] == 'reconcile-replay' or
                   (case[0].startswith(('child-', 'cold-')) and case[2] == 'data-uri')]
 CASES += REPEATED_CASES
+# Existing keys denote a full host window. Cover shifted partial histories with
+# both occurrence counts, and the off-current full-window repeat control.
+CASES += [(*case, 'occurrences-2') for case in CASES
+          if len(case) == 5 and case[0] == 'offcurrent-end' and case[2] == 'data-uri']
+CASES += [(*case[:5], f'occurrences-{n}', 'shifted') for case in CASES if len(case) == 5
+          and (case[0] == 'reconcile-replay' or (case[0] in ROUTES[3:6] and case[2] == 'data-uri'))
+          for n in (1, 2)]
 # S1/S2 replace the synthetic child-compress and child-output-counted routes.
 # Hermes 0.21.3 (345cd2b0), agent/context_compressor.py:651 (literal),
 # :440 (rewrite), cited by R4-5 Q2; the test hoststub has no compressor module.
@@ -56,6 +63,7 @@ _MARKER = re.compile(
     r'Preview \(first ([0-9]+) chars\):\n(.*)\n\.\.\.\n</persisted-output>', re.S)
 _EXCEPTION_CELLS = set()
 _LEGACY_EXCEPTION_CELLS = set()
+_GROWTH_EXCEPTION_CELLS = set()
 _HOST_RECOVERY_CELLS = set()
 
 _EXT = re.compile(r'\[Externalized (?:LCM ingest payload|tool output|payload):[^\]]*?;\s*ref=([^;\]\s]+)\]')
@@ -63,6 +71,10 @@ _EXT = re.compile(r'\[Externalized (?:LCM ingest payload|tool output|payload):[^
 
 class MainGap(AssertionError):
     """Only a fixture-proven main loss or replay growth can xfail."""
+
+
+class NamedLimit(AssertionError):
+    """R4-8: replay growth main lacks, admitted only by the data check in _repeated_marker_growth."""
 
 
 def _cell_id(case):
@@ -197,15 +209,20 @@ def _print_exception_cells(request, tmp_path_factory):
     # root for session-end aggregation by the evidence runner (also on xfail).
     (tmp_path_factory.getbasetemp() / 'matrix-exceptions.json').write_text(json.dumps({
         'marker': sorted(_EXCEPTION_CELLS), 'legacy': sorted(_LEGACY_EXCEPTION_CELLS),
-        'host_recovery': sorted(_HOST_RECOVERY_CELLS)}))
+        'growth': sorted(_GROWTH_EXCEPTION_CELLS), 'host_recovery': sorted(_HOST_RECOVERY_CELLS)}))
     reporter = request.config.pluginmanager.getplugin('terminalreporter')
     if reporter:
         reporter.write_line(f'#2539 corrected bar (ii): {len(_EXCEPTION_CELLS)} cells used the marker exception')
         reporter.write_line(f'#2539 corrected bar (iii): {len(_HOST_RECOVERY_CELLS)} cells where the candidate keeps rows main loses (#2543)')
+        for name, cells in (('bar (ii) stored-marker', _LEGACY_EXCEPTION_CELLS), ('bar (iv) R4-8 growth', _GROWTH_EXCEPTION_CELLS)):
+            reporter.write_line(f'#2558 {name} exception: {len(cells)} cells')
+            for cell in sorted(cells):
+                reporter.write_line(f'  {cell}')
 
 
 def _legacy_marker_losses(original, rows, handed, main, candidate, storage, home, temp):
-    """R4-7: unchanged v0.29.2 bare row in place of its own file's body only, when the host re-sent that marker."""
+    """R4-8 (restating R4-7): a stored bare marker kept byte-identical under its own call id, in place of
+    its own file's body only, when the host re-sent that exact marker and the candidate adds no row."""
     if candidate - main:
         return set()  # No candidate-only row in this step, even a host recovery.
     allowed = set()
@@ -231,6 +248,21 @@ def _legacy_marker_losses(original, rows, handed, main, candidate, storage, home
         if main[identity] and not candidate[identity]:
             allowed.add(identity)
     return allowed
+
+
+def _repeated_marker_growth(original, handed, storage, counts, main_counts, missing, third_growth):
+    """R4-8 named limit: the host reuses a call id and repeats the identical marker of a stored bare row.
+
+    Admitted only when no host row is missing, a third replay adds nothing and no step is above main."""
+    if missing or third_growth or len(counts) != len(main_counts) or any(c > m for c, m in zip(counts, main_counts)):
+        return False
+    for old in original:
+        marker = _restore(old['content'], storage) if old['role'] == 'tool' else ''
+        if _MARKER.fullmatch(marker) and sum(
+                m.get('role') == 'tool' and m.get('tool_call_id') == old['tool_call_id'] and m.get('content') == marker
+                for m in handed) >= 2:
+            return True
+    return False
 
 
 def _view(content):
@@ -312,7 +344,8 @@ def test_recovered_temp_different_path_characterization(preview, host, tmp_path,
 
 def _run_case(case, host, tmp_path, monkeypatch, request, characterization=None):
     route, stored_form, preview, location, host_form = case[:5]
-    repeated = len(case) == 6
+    repeated = 'occurrences-2' in case
+    shifted = 'shifted' in case
     legacy = stored_form.startswith('v0292')
     temp = tmp_path / 'host-temp'
     temp.mkdir()
@@ -352,9 +385,20 @@ def _run_case(case, host, tmp_path, monkeypatch, request, characterization=None)
         if not child_route:
             # More than the eight-row fingerprint window: exercise the store compare.
             first = [{'role': ('user', 'assistant')[i % 2], 'content': f'pad {i}'} for i in range(7)] + first
-    if route == 'reconcile-replay':
+    if shifted:
+        if not legacy:
+            first = first[-3:] + [{'role': 'assistant', 'content': 'FINAL'}]
+        # Reuse non-tool text to keep the interned oracle below its size cap;
+        # the exact reviewer regression separately uses 200 distinct rows.
+        padding = [m for m in first if m['role'] in ('user', 'assistant') and not m.get('tool_calls')]
+        first += [dict(padding[i % len(padding)], timestamp=1762700001.0 + len(first) + i)
+                  for i in range(200)] + copy.deepcopy(first[-4:])
+    if route == 'reconcile-replay' or shifted:
         for i, message in enumerate(first):
-            message.setdefault('timestamp', 1762700001.0 + i)
+            if shifted:
+                message['timestamp'] = 1762700001.0 + i
+            else:
+                message.setdefault('timestamp', 1762700001.0 + i)
     counts, absent, steps, host_steps, row_steps, handed_steps = [], [], [], [], [], []
     produced = set()
 
@@ -380,8 +424,13 @@ def _run_case(case, host, tmp_path, monkeypatch, request, characterization=None)
         else:
             engine.on_session_start(session, platform='cli', context_length=200_000,
                                     conversation_id=CONVERSATION if legacy else 'conv1')
-            if not legacy:
+            if not legacy or shifted:
+                if legacy:
+                    gone = path.with_suffix('.gone')
+                    path.rename(gone)
                 engine.ingest(copy.deepcopy(first))
+                if legacy:
+                    gone.rename(path)
             if route != 'reconcile-replay':
                 engine.on_session_start('foreground', platform='cli', context_length=200_000)
         record_step(first)
@@ -397,7 +446,7 @@ def _run_case(case, host, tmp_path, monkeypatch, request, characterization=None)
                           'path': marker.replace(str(path), str(path.with_name('other.txt')))}[host_form]
         if host_form == 'path':
             path.with_name('other.txt').write_text(body)
-        view = copy.deepcopy(first)
+        view = copy.deepcopy(first[120:124] + first[-4:] if shifted else first)
         tool = next(m for m in view if m['role'] == 'tool')
         tool['content'] = replay_content
         if route == 'child-counted':
@@ -530,7 +579,7 @@ def _run_case(case, host, tmp_path, monkeypatch, request, characterization=None)
         if route.startswith('child-compress-'):
             assert any('resuming with counted identities' in reason for reason in fallbacks)
         replay(view, 3)
-        if repeated:
+        if repeated or shifted:
             replay(view, 4)
         if child_route:
             child.end(engine, view)
@@ -551,7 +600,7 @@ def _run_case(case, host, tmp_path, monkeypatch, request, characterization=None)
                                  for r, c, t in missing)
         result = {'steps': steps, 'counts': counts, 'contents': contents, 'markers': markers,
                   'missing': missing_digests, 'replay_growth': counts[2] - counts[1], 'absent': absent}
-        if repeated:
+        if repeated or shifted:
             result['third_replay_growth'] = counts[3] - counts[2]
             print(f'OCCURRENCES {_cell_id(case)} counts={counts} third_growth={result["third_replay_growth"]}')
         if characterization is not None:
@@ -576,8 +625,7 @@ def _run_case(case, host, tmp_path, monkeypatch, request, characterization=None)
             candidate = Counter({(r, c, d): n for r, c, d, n in current})
             extras |= bool(candidate - main)
             unmatched.extend(_unmatched_extras(main, candidate, host_rows, produced))
-            permitted = (_legacy_marker_losses(row_steps[0], step_rows, handed, main, candidate, storage, home, temp)
-                         if legacy else set())
+            permitted = _legacy_marker_losses(row_steps[0], step_rows, handed, main, candidate, storage, home, temp)
             # Bar (ii) concerns what main ends with; retain the last step's
             # proof, including its no-candidate-only-row condition.
             legacy_losses = permitted
@@ -587,7 +635,7 @@ def _run_case(case, host, tmp_path, monkeypatch, request, characterization=None)
             _HOST_RECOVERY_CELLS.add(_cell_id(case))
         baseline_contents = fixture['content_sets'][baseline['contents']]
         lost, exceptions = _lost_contents(baseline_contents, contents, fixture['markers'], bodies)
-        if legacy_losses:
+        if set(lost) & legacy_losses:
             _LEGACY_EXCEPTION_CELLS.add(_cell_id(case))
         lost = [identity for identity in lost if identity not in legacy_losses]
         if exceptions:
@@ -603,14 +651,24 @@ def _run_case(case, host, tmp_path, monkeypatch, request, characterization=None)
                 gaps.append('compaction outputs consumed')
             if missing_ids - produced:
                 gaps.append('host rows absent (#2543 on off-current routes)' if not child_route else 'host rows absent')
+        limit = False
         if result['replay_growth']:
-            assert baseline['replay_growth'] >= result['replay_growth'] > 0, (
-                f'STOP bar iv {_cell_id(case)}: main={baseline["counts"]} candidate={counts}; new second-replay growth')
-            gaps.append('second replay adds rows')
-        if repeated and result['third_replay_growth']:
+            if baseline['replay_growth'] < result['replay_growth']:
+                limit = _repeated_marker_growth(row_steps[0], handed_steps[1], storage, counts, baseline['counts'],
+                                                missing, result.get('third_replay_growth', 1))
+                assert limit, (
+                    f'STOP bar iv {_cell_id(case)}: main={baseline["counts"]} candidate={counts}; new second-replay growth')
+                _GROWTH_EXCEPTION_CELLS.add(_cell_id(case))
+            else:
+                gaps.append('second replay adds rows')
+        if (repeated or shifted) and result['third_replay_growth']:
             assert baseline['third_replay_growth'] >= result['third_replay_growth'] > 0, (
                 f'STOP bar iv {_cell_id(case)}: main={baseline["counts"]} candidate={counts}; new third-replay growth')
             gaps.append('third replay adds rows')
+        if limit and not gaps:
+            request.node.add_marker(pytest.mark.xfail(strict=True, raises=NamedLimit,
+                reason='R4-8 named limit: a repeated marker of a stored bare row in a shifted host window'))
+            raise NamedLimit('second replay adds rows; no host row missing, third replay adds nothing, never above main')
         if gaps:
             request.node.add_marker(pytest.mark.xfail(strict=True, raises=MainGap,
                 reason='main 7e67daf16 fixture: ' + ', '.join(gaps)))
@@ -673,6 +731,24 @@ def test_legacy_exception_requires_dump_row_and_its_file(wrong, tmp_path):
                'content': 'abcde' if wrong == 'host-sent-body' else old['content']}]
     assert _legacy_marker_losses([old], [row], handed, main, candidate, tmp_path, tmp_path, tmp_path) == (
         {missing} if wrong is None else set())
+
+
+@pytest.mark.parametrize('wrong', [None, 'missing', 'third-replay', 'above-main', 'one-occurrence', 'other-text',
+                                   'stored-body'])
+def test_repeated_marker_growth_requires_each_condition(wrong, tmp_path):
+    path = tmp_path / 'saved.txt'
+    marker = _marker(path, 'abcde', preview='abc')
+    old = {'role': 'tool', 'tool_call_id': 'c1', 'content': 'abcde' if wrong == 'stored-body' else marker}
+    sent = {'role': 'tool', 'tool_call_id': 'c1', 'content': marker}
+    handed = [sent, dict(sent, content=marker + ' ') if wrong == 'other-text' else dict(sent)]
+    if wrong == 'one-occurrence':
+        handed = handed[:1]
+    counts, main_counts = [208, 212, 214, 214, 216], [208, 214, 214, 214, 216]
+    if wrong == 'above-main':
+        counts = [208, 212, 214, 214, 217]
+    assert _repeated_marker_growth([old], handed, tmp_path, counts, main_counts,
+                                   [('tool', 'c1', 'x')] if wrong == 'missing' else [],
+                                   1 if wrong == 'third-replay' else 0) == (wrong is None)
 
 
 def write_fixture(records, destination):
