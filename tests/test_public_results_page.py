@@ -208,13 +208,15 @@ def test_highlights_are_fresh(data):
     assert highlight_block() == renderer.render_highlights(data)
 
 
-def test_highlights_follow_tagline_before_contents():
+def test_highlights_follow_install_and_try_it_before_contents():
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     tagline = "> Bounded context, unbounded memory. Nothing is ever lost."
     block = highlight_block()
+    assert readme.index("## Install") < readme.index("## Try it") < readme.index(tagline)
     assert readme.index(tagline) < readme.index(block) < readme.index("LCM-X replaces")
     assert readme.index(block) < readme.index("## Table of contents")
-    assert readme.split(tagline, 1)[1].startswith("\n\n" + block + "\n\nLCM-X replaces")
+    assert "LCM_SENSITIVE_PATTERNS_ENABLED" in readme.split(tagline, 1)[1].split(block, 1)[0]
+    assert readme.split(block, 1)[1].startswith("\n\nLCM-X replaces")
 
 
 def test_highlights_order_by_placement_with_stable_ties(data):

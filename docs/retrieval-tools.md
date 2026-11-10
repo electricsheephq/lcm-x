@@ -23,7 +23,8 @@ canonical policy is `skills/hermes-lcm/references/recall-policy.md`. It is
 distributed as product-owned skill guidance, not injected into user
 `api_content`.
 
-Retrieval still defaults to current-session scope. Discovery of earlier sessions
+Most retrieval tools still default to the current session; `lcm_recall` searches every
+conversation in the local store (per-tool defaults: the README's Retrieval contract). Discovery of earlier sessions
 remains `session_search`/`lcm_recall`/`lcm_grep`; once an LCM session id and node
 id are known, they can be retrieved directly through the explicit cross-session
 arguments documented below.
@@ -113,6 +114,8 @@ step. This is configuration, not a model-visible tool argument.
 
 `recall_snippet_window_hits` (env `LCM_RECALL_SNIPPET_WINDOW_HITS`, YAML `lcm.recall_snippet_window_hits`) is off by default (`0`). Set N (clamped to 25) to give the first N selected message-excerpt hits in `detail="snippets"`, from chunk (vector) or keyword search, windows of up to 2,400 characters centred on the matched chunk, else the keyword match, else the query match; shorter messages come back whole. Each window carries `snippet_window` offsets, lengths and truncation metadata. Summary hits, adjacent replies and hits without hydrated content keep their existing snippets. Ranking and selection are unchanged. Larger snippets can mean fewer hits fit under `response_char_cap`; the response then sets `response_cap_truncated: true`. A skipped window read keeps the original snippets and reports `snippet_window_skipped` (`deadline` or `read_error`). Proactive recall ignores this setting. `answer_ready` and `delivery_unit="session"` are unchanged. Invalid values (including bools and negatives) warn and use `0`; environment overrides YAML.
 
+- `recall_later_statements` (env `LCM_RECALL_LATER_STATEMENTS`, YAML `lcm.recall_later_statements`; environment overrides YAML) defaults to `0`, preserving recall output and tool schemas. Integers clamp to 0..5; negative or invalid values warn and use 0. When enabled, the first N eligible message hits within the delivery window get one bounded FTS follow-up using its subject terms, with at most one later stored row placed directly after its source (chronological with time ordering). Scope and exclusions remain in force; candidates already in the delivery window, verbatim normalized copies, older/equal rows, and rows after the call's wall clock are skipped. Eligibility compares observed event times, or stored write times only when both observations are absent; failed time reads skip expansion. Adjacent-reply rows and already-seen delta refs are not sources; pool matches outside the window are moved into it. Children ship only with their source. This is a lexical match, not a claim of replacement. The child carries `later_statement_of` and the source `has_later_statements`, naming stored row IDs. Existing hydration, citation, density, hit and character caps apply. `provenance.later_statements` reports `requested`, `searched`, `found`, `delivered`, and `ms`; failure discards the expansion and adds `later_statements_unavailable` (`deadline` or `read_error`). Internal recall and session delivery skip it. Not a tool argument; no stored rows are changed.
+
 - `recall_extra_entries` (env `LCM_RECALL_EXTRA_ENTRIES`, YAML `lcm.recall_extra_entries`; environment overrides YAML) is off by default (`0`). The value is a cap (clamped to 25); a call appends at most min(cap, floor(L/2)) extras from ranks L+1.. in snippets-only hits delivery, where L is the call's delivered limit (`limit` clamped to 25): at cap 25, L=20 → 10 extras and L=25 → 12. Extras are not counted in `total_results`; the candidate pool and rerank window are still sized from L. Each extra has exactly `kind`, `store_id`, `session_id`, `event_time`, `window` (up to 300 characters centred like snippet windows), and `extra=true`; `event_time` is the row's own host time, or null for summaries, missing rows and rows whose time was carried from a neighbour; summaries and missing rows use their own snippet. Duplicates of full hits (including `duplicate_store_ids`) or earlier extras are skipped without refill. Full hits and existing envelope fields stay unchanged; extras are dropped from the end to fit the response cap. A skipped read reports `extra_entries_skipped` (`deadline` or `read_error`). Response-cap truncation of full hits or exhausted ranking gives no extras or reason flag. Internal recall, `answer_ready` and session delivery ignore it. Invalid values warn and use `0`.
 
 Example opt-in in `config.yaml`:
@@ -124,7 +127,8 @@ lcm:
 
 ### Retrieval contract
 
-LCM retrieval tools default to current-session scope. `lcm_grep` accepts
+Default scopes differ per tool (see the table in the README's Retrieval contract): most tools
+default to the current session, and `lcm_recall` searches every conversation. `lcm_grep` accepts
 `session_scope='all'` or `session_scope='session'` as an explicit opt-in for
 bounded archive search over rows already present in `lcm.db` (raw-message hits
 only). Once a session id is known, `lcm_load_session` can enumerate that session's
@@ -639,7 +643,7 @@ The script is intentionally conservative:
 - changing `--agent`, `--namespace`, or `--session-identity` under the same `--import-id` is treated as the same import and will skip already-tracked source messages; use a new `--import-id` for a different mapping
 - no OpenClaw config or separate secret tables are imported, but raw transcripts and tool payloads are imported and may contain sensitive user data
 
-This is a local archive migration path. It does not make LCM a general memory provider, and it does not change the default current-session retrieval contract for agent tools.
+This is a local archive migration path. It does not make LCM a general memory provider, and it does not change the per-tool default retrieval scopes for agent tools.
 
 ## Related references
 

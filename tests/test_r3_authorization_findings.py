@@ -23,7 +23,7 @@ from hermes_lcm.engine import LCMEngine
 
 
 # Slice 2 lands the policy/catalog/scope-storage layer and NO call sites, so the
-# pins below -- which assert that engine, tools and preanswer_evidence resolve a
+# pins below -- which assert that engine and tools resolve a
 # policy through the seam -- have nothing to bind to yet.  They are extracted
 # with the code they cover rather than left behind, and the call-site slice
 # removes this marker.
@@ -168,57 +168,6 @@ def test_recall_arm_never_keeps_the_hardcoded_all_session_corpus(
 
     assert captured.get("session_scope", "current") == expected_scope_value
     assert captured.get("session_scope") != "all"
-
-
-class _DenyStoreReads:
-    def authorize_operation(self, _context, _operation, expected_scope) -> Decision:
-        if expected_scope.get("kind") == "preanswer_baseline_ref":
-            return Decision.deny(DenialReason.SCOPE_FORBIDDEN)
-        return Decision.allow()
-
-    def audit_decision(self, *_args, **_kwargs) -> None:
-        return None
-
-
-def _baseline_refs(monkeypatch: pytest.MonkeyPatch, policy, refs):
-    # The gate lives in preanswer_evidence, not in __init__.py: tests/conftest.py
-    # registers the package WITHOUT executing __init__.py, so anything defined
-    # at that level is unreachable from a test.
-    from hermes_lcm import preanswer_evidence
-
-    monkeypatch.setattr(preanswer_evidence, "policy_for_engine", lambda _e: policy)
-    monkeypatch.setattr(preanswer_evidence, "policy_access_context", lambda _e: None)
-    return preanswer_evidence.authorize_supplied_baseline_refs(object(), refs)
-
-
-@_NEEDS_CALL_SITES
-def test_supplied_baseline_refs_are_authorized_in_both_shapes(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Callers pass bare strings OR mappings carrying exact_ref plus a quote."""
-    mapping_ref = {"exact_ref": "lcm:12:0-4", "quote": "text"}
-    string_ref = "lcm:99:0-4"
-
-    allowed = _baseline_refs(monkeypatch, _NarrowingPolicy({}), [mapping_ref, string_ref])
-    # The ORIGINAL items survive -- downstream reads the quote alongside the ref.
-    assert list(allowed) == [mapping_ref, string_ref]
-
-    denied = _baseline_refs(monkeypatch, _DenyStoreReads(), [mapping_ref, string_ref])
-    assert denied == ()
-
-
-@_NEEDS_CALL_SITES
-def test_supplied_refs_that_are_not_store_spans_pass_through_untouched(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Only exact store spans are a disclosure this gate governs.
-
-    Dropping everything else silently emptied the payload for callers whose
-    refs were never store references, which changed unrelated downstream
-    branching rather than closing a hole.
-    """
-    opaque = [{"quote": "no exact_ref here"}, "not-a-reference"]
-    assert list(_baseline_refs(monkeypatch, _DenyStoreReads(), opaque)) == opaque
 
 
 @_NEEDS_CALL_SITES

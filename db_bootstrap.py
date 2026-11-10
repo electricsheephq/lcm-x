@@ -901,8 +901,8 @@ def ensure_temporal_rollup_tables(conn: sqlite3.Connection) -> None:
             PRIMARY KEY(rollup_id, node_id)
         );
 
-        -- The (rollup_id, node_id) PK cannot serve purge's node_id lookup; add a
-        -- dedicated index so purging by deleted source node is not a full scan.
+        -- A node_id index for lookups by source node. Its reader (the purge by
+        -- deleted source node) has been removed; the schema keeps the index.
         CREATE INDEX IF NOT EXISTS idx_lcm_rollup_sources_node
             ON lcm_rollup_sources(node_id);
 
@@ -1065,8 +1065,8 @@ def ensure_temporal_rollup_tables(conn: sqlite3.Connection) -> None:
         "CREATE INDEX idx_lcm_rollup_invalidations_scope_coverage "
         "ON lcm_rollup_invalidations(scope, covered_start, covered_end, event_id)",
     )
-    # Cursor state is keyed per (period_kind, scope) so multiple scopes sharing a
-    # database do not clobber one another's build cursor. A pre-scope table (from
+    # Cursor state is keyed per (period_kind, scope). No production path writes it
+    # (its only writer, a test-only helper, has been removed). A pre-scope table (from
     # an earlier revision) only cached vestigial introspection data, so recreate
     # it rather than attempt an unsupported PRIMARY KEY migration.
     state_exists = conn.execute(

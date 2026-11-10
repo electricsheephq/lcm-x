@@ -316,6 +316,16 @@ line with a note (`projected_entry_without_uuid`, `projection_error:<type>`), an
   `lcm_load_session`, `lcm_describe`) search across sessions. The `StoreReader` and `handle()`
   signatures stay as they are. #1216 gets two behaviour changes in its own PR: host-neutral error
   texts, and the offline check re-reads the header once before refusing.
+- **Saved tool outputs in `lcm_grep` (#2225).** In this reader, a full-text `lcm_grep` with no
+  `content_scope` searches raw messages first, then this store's saved tool outputs (externalized
+  payloads), newest first; `content_scope` `externalized` and `both` work with every `session_scope`.
+  A payload hit carries `type: externalized`, its `ref` and its `session_id`, and
+  `lcm_expand(externalized_ref, session_id)` returns the whole output. A payload matches the query as
+  a literal phrase. The pass is bounded (4096 names discovered, 128 files and 8 MiB read per call,
+  512 KB per file); whenever a bound, an unreadable payload or the store-containment check cuts it,
+  the response carries `partial` with its `reasons`, and that means incomplete coverage: narrow the
+  query or pass `externalized_refs`. A named ref that cannot be read is an error. Hermes' own
+  `lcm_grep` is unchanged.
 - **Reader override.** A valid `reader-override.json` in the store home makes the server start
   another reader in place of the plain one. Something outside the plugin writes the file to opt in
   and removes it to opt out; the plugin never writes it. Each harness reads the file in its own home.
@@ -627,8 +637,13 @@ committed row, and store growth (the growth gate above).
 - the lag and the growth.
 
 **Install records**, one per supported platform (macOS and Linux):
-- **Setup:** only the documented install steps, on a fresh machine. On macOS this may be a clean
-  environment (a scratch `HOME` and Claude Code config directory), named as such in the record.
+- **Setup:** only the documented install steps, on a fresh machine. On macOS, and on Linux when no
+  container runtime is available, this may be a clean environment (a scratch `HOME` and Claude Code
+  config directory) on a real host, named as such in the record, with the Linux distribution and
+  version. `scripts/claude_code_install_record_linux.sh` takes the native Linux record from a scratch folder
+  with no instruction file (`CLAUDE.md` or `AGENTS.md`) in any parent folder (two cases: a
+  Python 3.11+ on `PATH`, and only Python 3.10 on `PATH` plus the one documented `uv venv` step). A
+  native record does not prove a fresh image's package state.
 - **Recorded:** whether capture writes rows or records `runtime_missing`, and how many manual steps
   it took.
 - **Without Claude Code:** the CLI smoke (`scripts/claude_code_unit_smoke.py`) runs the same path

@@ -77,8 +77,11 @@ never wait for it.
 
   Every R run, R10 included, uses a scratch `HOME` and a scratch Claude Code config directory, never
   a user's own Claude Code setup. Install records (macOS in a clean environment: a scratch `HOME`
-  and Claude Code config directory, not a new OS account; Linux in a fresh container) go with the gate's receipt: whether capture wrote
-  rows and how many manual steps it took.
+  and Claude Code config directory, not a new OS account; Linux in a fresh container, or, when no container runtime is
+  available, in a clean environment on a real host, as on macOS, with the host's distribution and version named in the
+  record; `scripts/claude_code_install_record_linux.sh` takes the native record) go with the gate's
+  receipt: whether capture wrote rows and how many manual steps it took. A native Linux record does
+  not prove a fresh image's package state.
 - **No rc tag.** A unit release has no `-rcN` tag. The gate already binds the exact candidate tree
   (above), and the tag workflow publishes nothing: it re-checks the tag against the pushed commit,
   rebuilds the asset, runs the CLI smoke and creates a **draft** release; it never edits an existing
@@ -664,7 +667,7 @@ A non-green raw row is never presented as an unqualified gate PASS. In particula
 no blanket “mean passed, spread waived” disposition. Past receipts and release decisions stand
 as recorded; these prospective rules grant no retroactive PASS.
 
-The rows not marked "v0.29.0 only", "v0.29.1 only", "v0.29.2 only" or "v0.30.0 only" are adopted as of 2026-10-22 and apply from the next release candidate. The v0.30.0-only D7 row was adopted on 2026-11-08, before the v0.30.0-rc1 tag and before any v0.30.0 D7 run; it applies to v0.30.0 alone and grants no PASS.
+The rows not marked "v0.29.0 only", "v0.29.1 only", "v0.29.2 only" or "v0.30.0 only" are adopted as of 2026-10-22 and apply from the next release candidate. The v0.30.0-only D7 row was adopted on 2026-11-08, before the v0.30.0-rc1 tag and before any v0.30.0 D7 run; it applies to v0.30.0 alone and grants no PASS. On 2026-11-09, before the v0.30.0-rc3 tag and before any rc3 D7 data, the release manager extended the "v0.30.0 only: D7 at rc2 in floor-pending mode" row to v0.30.0-rc3: each of its conditions applies to rc3 as written for rc2, and it still grants no PASS on bar 4. D7 did not run at rc2: rc2's smoke stage ended in a release-manager respin for a P2 fix (#2512) before any long row started.
 The evidence below binds candidate `54e8d21d891271d84623e89087f87dd0eb617271` versus
 comparison `709099b3a397a7893a7abae8802ebe7bf605f79e`; it is rationale, not proof that a
 future candidate meets the proposed conditions. #1617's D4 scheduling/resume and injected-crash

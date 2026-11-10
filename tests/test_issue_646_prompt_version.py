@@ -19,7 +19,7 @@ from hermes_lcm.escalation import (
     _build_l1_prompt,
     _build_l2_prompt,
     _summary_contract_messages,
-    _unwrap_summary_contract,
+    _check_summary_contract,
     summarize_with_escalation,
 )
 from hermes_lcm.rollup_builder import _summary_controls
@@ -153,7 +153,7 @@ def test_v2_envelope_round_trip():
         "Expand for details about: the deploy steps",
     ])
     reply = f'<lcm-summary nonce="{nonce}">\n{body}\n</lcm-summary>'
-    assert _unwrap_summary_contract(reply, nonce, 3 * 2000) == body
+    assert _check_summary_contract(reply, nonce, 3 * 2000)[0] == body
 
 
 # -- T4: ceilings ----------------------------------------------------------------------------------------
