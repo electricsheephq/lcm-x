@@ -535,10 +535,13 @@ def _unverified(metadata: dict, records: list[dict], lineages: list[dict], sessi
         or row["files"]["uncaptured"])}
     if session is not None and CURSOR_PREFIX + lineage_key(session) not in metadata:
         unknown.add(lineage_key(session))
+    # A pending lineage (#2533) whose transcript now exists but has no cursor is uncaptured. One whose transcript never
+    # appeared holds nothing to lose: it is counted in pending_lineages, not left unverified forever.
     for key, pending in metadata.items():
-        if key.startswith(PENDING_PREFIX) and (session is None or pending["session_id"] == session):
-            lineage = Lineage(pending["session_id"], pending.get("agent_id"), Path(pending["path"]))
-            if CURSOR_PREFIX + lineage.key not in metadata and FORGOTTEN_PREFIX + lineage.rows_session not in metadata:
+        if key.startswith(PENDING_PREFIX) and (session is None or pending.get("session_id") == session):
+            lineage = Lineage(pending.get("session_id"), pending.get("agent_id"), Path(pending.get("path") or ""))
+            if (CURSOR_PREFIX + lineage.key not in metadata and FORGOTTEN_PREFIX + lineage.rows_session not in metadata
+                    and pending.get("path") and lineage.path.exists()):
                 unknown.add(lineage.key)
     # A record set aside before its transcript had a cursor names a lineage nothing else shows.
     for lineage in failed:
@@ -580,8 +583,9 @@ def audit(home: Path, session: str | None = None) -> dict:
     home_report = _home_report(home)
     checked = any(not row["forgotten"] for row in lineages)
     pending = [value for key, value in metadata.items() if key.startswith(PENDING_PREFIX)
-               and (session is None or value["session_id"] == session)]
-    oldest_pending_age = max(0.0, time.time() - min(row["first_seen"] for row in pending)) if pending else None
+               and (session is None or value.get("session_id") == session)]
+    seen = [row["first_seen"] for row in pending if isinstance(row.get("first_seen"), (int, float))]
+    oldest_pending_age = max(0.0, time.time() - min(seen)) if seen else None
     return {"ok": not any(failures.values()), "opened_immutable": immutable, "failures": failures,
             "pending_lineages": len(pending), "oldest_pending_age_s": oldest_pending_age,
             "unverified": unverified, "verified": checked and not unverified and not home_report["spool"]["waiting"],

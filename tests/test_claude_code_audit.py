@@ -108,8 +108,9 @@ def test_pending_lineage_is_counted_without_claiming_capture(tmp_path, monkeypat
             ("capture:pending:claude-code:s1",))
     report = ca.audit(home)
     assert report["pending_lineages"] == 1 and report["oldest_pending_age_s"] == 100.0
-    assert report["lineages"] == [] and not report["verified"]
-    assert report["unverified"] == ["claude-code:s1"]
+    assert report["lineages"] == []
+    # Uncaptured once its transcript exists; a transcript that never appeared holds nothing to lose.
+    assert report["unverified"] == (["claude-code:s1"] if exists else [])
     assert str(path) not in json.dumps(report)
     assert ca.audit(home, "other")["pending_lineages"] == 0
     assert ca.audit(home, "other")["oldest_pending_age_s"] is None
