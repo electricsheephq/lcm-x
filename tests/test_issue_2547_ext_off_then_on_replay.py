@@ -86,9 +86,19 @@ MAIN_COUNTS = {
 }  # v0.29.2 261d41ea9 stores as many or more in every cell; the stampless ext-off replays duplicate there too.
 
 
-@pytest.mark.parametrize("shape", ["full", "partial"])
-@pytest.mark.parametrize("stamps", ["all", "none", "user"])
-@pytest.mark.parametrize("replay_ext", [False, True], ids=["replay-noext", "replay-ext"])
+# What a replay of rows already stored should leave: the same cells with a plain tool result store exactly these.
+PLAIN = {"full": (6, 1), "partial": (9, 2)}
+_KNOWN_2597 = {"noext-all-partial", "noext-none-full", "noext-none-partial", "noext-user-full", "noext-user-partial",
+               "ext-none-partial", "ext-user-partial"}
+_REASON_2597 = ("#2597 (P2, v0.30.2): a replay of a stored ext-off saved-output marker stores the replay again; "
+                "main and v0.29.2 alike")
+CELLS = [pytest.param(ext, stamps, shape, id=f"{'ext' if ext else 'noext'}-{stamps}-{shape}",
+                      marks=[pytest.mark.xfail(strict=True, raises=AssertionError, reason=_REASON_2597)]
+                      if f"{'ext' if ext else 'noext'}-{stamps}-{shape}" in _KNOWN_2597 else [])
+         for ext in (False, True) for stamps in ("all", "none", "user") for shape in ("full", "partial")]
+
+
+@pytest.mark.parametrize("replay_ext,stamps,shape", CELLS)
 def test_replays_of_an_ext_off_store_match_main(tmp_path, replay_ext, stamps, shape):
     path = tmp_path / "hermes" / "cache" / "spillover" / f"{CALL}.txt"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -107,4 +117,6 @@ def test_replays_of_an_ext_off_store_match_main(tmp_path, replay_ext, stamps, sh
     rows = _rows(tmp_path)
     got = (len(rows), sum(role == "tool" for role, _content in rows))
     key = f"{'ext' if replay_ext else 'noext'}-{stamps}-{shape}"
-    assert got == MAIN_COUNTS[key]
+    if got != MAIN_COUNTS[key]:  # outside the known limit: never other than main
+        pytest.fail(f"{key}: {got}, main {MAIN_COUNTS[key]}")
+    assert got == PLAIN[shape]  # the #2597 known-limit cells fail here until a fix
