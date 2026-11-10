@@ -55,12 +55,21 @@ To remove it: `codex mcp remove lcm-x`. That leaves the store and the unpacked u
 
 ## When it does not work
 
-- `codex mcp list` shows the server but Codex has no `lcm_*` tools: the reader printed why on
-  stderr. Run the command from step 2 by hand to see it. The usual causes are no Python 3.11+
-  (install one, or run `uv venv --python 3.11 <store home>/venv`), a relative `LCMX_CC_HOME`, and
-  a store home with no `lcm.db` yet.
+- `codex mcp list` shows the server but Codex has no `lcm_*` tools: the launcher printed why on
+  stderr. Start it yourself with the same settings to see the message (with no input it exits
+  after starting):
+
+  ```bash
+  LCMX_CC_HOME="$HOME/.lcm-x/claude-code" \
+    python3 "$HOME/.lcm-x/units/lcm-x-claude-code-<version>/bin/lcmx_mcp.py" < /dev/null
+  ```
+
+  Startup problems print as `lcm-x: ...` lines. The usual causes are no Python 3.11+ (install one,
+  or run `uv venv --python 3.11 <store home>/venv`) and a relative `LCMX_CC_HOME`. Once the reader
+  has started, its own messages go to `<store home>/logs/lcm-x-mcp-<pid>.log` instead of stderr.
 - Recall finds nothing: check that the store home is the one your Claude Code capture writes
-  (`lcm_describe` shows the store's counts).
+  (`lcm_describe` shows the store's counts). A store home with no `lcm.db` yet still offers the
+  tools, but has nothing to return.
 
 ## What this does not do yet
 
