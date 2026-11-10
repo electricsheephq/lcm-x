@@ -600,8 +600,15 @@ def audit(home: Path, session: str | None = None) -> dict:
                and FORGOTTEN_PREFIX + Lineage(value.get("session_id"), value.get("agent_id"), Path(".")).rows_session not in metadata]
     seen = [row["first_seen"] for row in pending if isinstance(row.get("first_seen"), (int, float))]
     oldest_pending_age = max(0.0, time.time() - min(seen)) if seen else None
-    return {"ok": not any(failures.values()), "opened_immutable": immutable, "failures": failures,
+    verified = checked and not unverified and not home_report["spool"]["waiting"]
+    # The one-line verdict says in words when sessions are pending (#2533): they are counted, not checked, so a
+    # verified verdict never reads as "everything accounted for".
+    verdict = "verified" if verified else "not verified"
+    if pending:
+        age = "unknown" if oldest_pending_age is None else f"{oldest_pending_age / 3600:.1f} h"
+        verdict += f"; {len(pending)} sessions pending: transcript never seen, oldest {age}"
+    return {"verdict": verdict, "ok": not any(failures.values()), "opened_immutable": immutable, "failures": failures,
             "pending_lineages": len(pending), "oldest_pending_age_s": oldest_pending_age,
-            "unverified": unverified, "verified": checked and not unverified and not home_report["spool"]["waiting"],
+            "unverified": unverified, "verified": verified,
             "lineages": lineages, "sessions": _session_report(metadata, records, session),
             **home_report, "lag_s": _percentiles(lag), "growth": _growth(home, records)}

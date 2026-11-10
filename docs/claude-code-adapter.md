@@ -422,7 +422,9 @@ every worker run until its transcript appears. Pending rows never expire; the au
 and reports the age of the oldest one.
 
 Known issue in the shipped preview `claude-code-v0.1.0`: before this fix, such a session's final
-rows could be lost if its later hook records were also lost (#2533).
+rows could be lost if its later hook records were also lost (#2533). Known issue for the preview and for any build before the
+follow-up to #2533: the audit counts, but does not fail on, a session whose transcript file never appeared; its
+one-line verdict names how many such sessions are pending and the age of the oldest.
 
 - Claude Code starts the hook in exec form (`hooks/hooks.json`): `python3` found on `PATH`, with
   `${CLAUDE_PLUGIN_ROOT}` substituted in its arguments and no shell before it, which saves the
