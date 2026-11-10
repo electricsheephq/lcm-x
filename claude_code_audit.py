@@ -256,7 +256,7 @@ def _named_others(lineage: Lineage, cursor: dict, generations: dict, compared: s
         other = Path(name)
         try:
             status = other.stat()
-        except FileNotFoundError:
+        except (FileNotFoundError, NotADirectoryError):  # never appeared, or cannot exist
             continue
         except OSError:  # a named path that cannot be checked is not a clean one
             report["named_uncaptured_lines"] += 1
@@ -274,14 +274,14 @@ def _named_others(lineage: Lineage, cursor: dict, generations: dict, compared: s
             gone.discard(held)
             report["generations_gone"] -= 1
             _compare(other, generations[held], report, expected, lag)
-        report["named_uncaptured_lines"] += total - best
+        report["named_uncaptured_lines"] += max(0, total - best)  # separate reads: a file rewritten meanwhile
 
 
 def _present(path: Path) -> bool:
     """Exists, or cannot be checked (fail closed): only a clean not-found is absent."""
     try:
         path.stat()
-    except FileNotFoundError:
+    except (FileNotFoundError, NotADirectoryError):
         return False
     except OSError:
         return True
