@@ -553,6 +553,10 @@ gate's instrument (see "The audit" in the test plan).
 - **Reported, never failures:**
   - lines after the cursor (`pending_lines`) and `tool-results` files whose current bytes have no
     captured version (`files.uncaptured`): both leave the lineage unverified;
+  - an unterminated last record after the cursor (`partial_tail_bytes`), which Claude Code may still be writing:
+    counted and named in the verdict ("N lineages end in an unterminated record"), never a reason for unverified.
+    For now this also covers a lineage whose `SessionEnd` or `SubagentStop` was observed, where a crash mid-append
+    leaves a record capture never takes; #2571 makes that case unverified;
   - files under a `tool-results` subfolder (`subfolder_files`; a symlink to a folder, or a folder that cannot be
     listed, counts one), which capture does not store as files: until #2554 they leave the lineage unverified, and the
     verdict names them ("N files in tool-results subfolders not stored (M lineages)");
@@ -586,6 +590,8 @@ gate's instrument (see "The audit" in the test plan).
     `tool-results` subfolder, and no other named transcript path holding rows (`named_other_paths`);
   - every selected session, and every subagent transcript on disk (a forgotten session's too),
     has a cursor;
+  - closed world: below a session folder it checks, nothing it cannot tie to a capture (a `*.jsonl` no cursor
+    names, a symlink, a folder that cannot be listed), whatever the folder names around it;
   - every lineage a set-aside (`.failed`) spool record names has a cursor, unless that lineage
     was forgotten. A record names its subagent even when that transcript is not on disk: one never
     written (the compaction summarizer's `SubagentStop` names one) looks the same as one removed

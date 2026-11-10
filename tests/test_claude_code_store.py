@@ -2350,6 +2350,26 @@ def _table_state(tmp_path, home, hermes, state):
     a = tmp_path / "projects" / "-work" / "s1.jsonl"
     b = tmp_path / "projects" / "-other" / "s1.jsonl"
     c = tmp_path / "projects" / "-third" / "s1.jsonl"
+    if state == "child_elsewhere":  # #2557: the parent names only A; x1's own hook puts it under B's folder. The parent
+        # is captured: a never-written pending parent with a child's hook is unknown and never expires (#2535 strict)
+        child = _append(b.parent / "s1" / "subagents" / "agent-x1.jsonl", _SIDE)
+        _append(a, CONVERSATION[:2])
+        _record(_hook(), home, a)
+        _record(_hook(), home, a, event="SubagentStop", agent_id="x1", agent_transcript_path=str(child))
+        cc.run_worker(home, hermes_home=hermes, settle_s=0)
+        return {"followed": child, "folder": b}
+    if state == "forgotten_parent":  # #2557: captured at A, a record names B, then the session is forgotten
+        _append(a, CONVERSATION[:2])
+        _record(_hook(), home, a)
+        cc.run_worker(home, hermes_home=hermes, settle_s=0)
+        _record(_hook(), home, b)
+        cc.run_worker(home, hermes_home=hermes, settle_s=0)
+        store = _open(home, hermes)
+        try:
+            store.delete_session_messages("s1")
+        finally:
+            store.close()
+        return {"named": b}
     if state == "captured":  # cursor on A; a later record names B, which never appeared
         _append(a, CONVERSATION[:2])
         _record(_hook(), home, a)
@@ -2415,12 +2435,19 @@ _TABLE = [(state, where, kind, where != "unnamed" and kind in _HOLDS)
           if not (state == "captured" and where == "followed" and kind == "empty")]  # A exists: no empty file to add
 _TABLE += [("child", "followed", "lines", True), ("child", "uncursored", "lines", True),
            ("child", "uncursored", "empty", False)]
+# #2557: a child in a folder its parent never named (that folder's artifacts count as the parent's do), and a
+# forgotten parent (its own content is excluded on purpose; its subagents are still captured and checked).
+_TABLE += [("child_elsewhere", "followed", "lines", True)]
+_TABLE += [("child_elsewhere", "folder", kind, kind in _HOLDS) for kind in _PARENT_KINDS
+           if kind != "unreadable_subagents"]  # x1 itself is in that folder: the audit raises (#2551), never verified
+_TABLE += [("forgotten_parent", "named", kind, kind in {"subagent", "unreadable_subagents"}) for kind in _PARENT_KINDS]
 # Where the code is stricter than the rule (it fails closed): an empty file, as a pending row's transcript or as a
 # subagent transcript with no cursor, holds no rows but is unverified. Reported to the release manager; strict xfail
 # so a change in either direction shows here.
 _STRICTER = {("pending", "followed", "empty"), ("pending", "named", "empty"), ("pending", "followed", "subagent_empty"),
              ("pending", "named", "subagent_empty"), ("captured", "followed", "subagent_empty"),
-             ("captured", "named", "subagent_empty")}
+             ("captured", "named", "subagent_empty"), ("child_elsewhere", "folder", "subagent_empty"),
+             ("forgotten_parent", "named", "subagent_empty")}
 _TABLE = [pytest.param(*row, id="-".join(row[:3]), marks=pytest.mark.xfail(strict=True, reason="stricter than the rule"))
           if row[:3] in _STRICTER else pytest.param(*row, id="-".join(row[:3])) for row in _TABLE]
 
@@ -2511,6 +2538,191 @@ def test_every_kind_of_entry_under_a_tool_results_subfolder_counts(tmp_path, hom
         if shape == "unreadable":
             (pages / "inner").chmod(0o700)
     assert report["lineages"][0]["subfolder_files"] == count and not report["verified"]
+
+
+def test_an_unterminated_last_record_is_reported_and_does_not_change_the_verdict(tmp_path, home, hermes):
+    """#2557: capture reads complete lines only (Claude Code may be mid-write). An unterminated record after the cursor
+    is counted (partial_tail_bytes) and named in the verdict, and the lineage stays verified."""
+    from hermes_lcm import claude_code_audit as ca
+
+    a = _append(tmp_path / "projects" / "-work" / "s1.jsonl", CONVERSATION[:2])
+    _record(_hook(), home, a)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    tail = json.dumps(CONVERSATION[2]).encode()
+    with a.open("ab") as handle:
+        handle.write(tail)
+    report = ca.audit(home)
+    row = report["lineages"][0]
+    assert row["partial_tail_bytes"] == len(tail) and row["pending_lines"] == 0 and report["verified"]
+    assert report["verdict"].endswith(f"; 1 lineages end in an unterminated record ({len(tail)} bytes, not yet captured)")
+
+
+@pytest.mark.parametrize("shape", ["forgotten_outputs", "forgotten_subagent", "top_level_child", "another_sessions_folder"])
+def test_a_child_outside_its_parents_folders_respects_forget_and_layout(tmp_path, home, hermes, shape):
+    """#2557 review: a forgotten parent's own content in the child's folder is excluded (its subagents still count),
+    and a child transcript not under subagents/, or under another session's folder, names no parent folder."""
+    from hermes_lcm import claude_code_audit as ca
+
+    a = tmp_path / "projects" / "-work" / "s1.jsonl"
+    b = tmp_path / "projects" / "-other" / "s1.jsonl"
+    child = {"top_level_child": tmp_path / "projects" / "-other" / "agent-x1.jsonl",
+             "another_sessions_folder": b.parent / "s9" / "subagents" / "agent-x1.jsonl"}.get(
+        shape, b.parent / "s1" / "subagents" / "agent-x1.jsonl")
+    _append(child, _SIDE)
+    _append(a, CONVERSATION[:2])
+    _record(_hook(), home, a)
+    _record(_hook(), home, a, event="SubagentStop", agent_id="x1", agent_transcript_path=str(child))
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    if shape == "another_sessions_folder":  # s9's own transcript: not s1's, so it says nothing about s1
+        _append(b.parent / "s9.jsonl", [dict(e, sessionId="s9") for e in CONVERSATION[:2]])
+    elif shape != "top_level_child":
+        store = _open(home, hermes)
+        try:
+            store.delete_session_messages("s1")
+        finally:
+            store.close()
+        _table_place(b, "saved" if shape == "forgotten_outputs" else "subagent")
+    unverified = ca.audit(home)["unverified"]
+    assert bool([key for key in unverified if key.startswith("claude-code:s1")]) is (shape == "forgotten_subagent")
+
+
+@pytest.mark.parametrize("forget", [False, True])
+def test_a_pending_parents_uncaptured_subagent_counts_even_when_forgotten(tmp_path, home, hermes, forget):
+    """#2557 review: a forgotten session's subagents are still captured, so a pending (never-captured) parent that was
+    forgotten still has its subagents checked under every path its records named; with another session captured, the
+    audit must not read verified while one waits for the next sweep."""
+    from hermes_lcm import claude_code_audit as ca
+
+    other = _append(tmp_path / "projects" / "-work" / "s2.jsonl", [dict(e, sessionId="s2") for e in CONVERSATION[:2]])
+    _record(_hook(), home, other, session="s2")
+    b = tmp_path / "projects" / "-other" / "s1.jsonl"
+    _record(_hook(), home, b, event="SessionStart")
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    if forget:
+        store = _open(home, hermes)
+        try:
+            store.delete_session_messages("s1")
+        finally:
+            store.close()
+    _append(b.parent / "s1" / "subagents" / "agent-y9.jsonl", _SIDE)
+    report = ca.audit(home)
+    assert not report["verified"] and "claude-code:s1/agent:y9" in report["unverified"]
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)  # the sweep captures it: then it is verified
+    assert "claude-code:s1/agent:y9" not in ca.audit(home)["unverified"]
+
+
+@pytest.mark.parametrize("shape", ["nested_child", "dotted_session", "two_subagents_segments", "inner_folder_named_s1"])
+def test_a_child_elsewhere_finds_its_parents_folder_from_any_layout(tmp_path, home, hermes, shape):
+    """#2557 cross-model review: the parent folder of a captured child in a folder its parent never named is the nearest
+    ``subagents`` folder's parent, and its transcript is ``<folder name>.jsonl`` even when the session id has a dot."""
+    from hermes_lcm import claude_code_audit as ca
+
+    session = "s1.v2" if shape == "dotted_session" else "s1"
+    a = tmp_path / "projects" / "-work" / (session + ".jsonl")
+    b = tmp_path / "projects" / "-other" / (session + ".jsonl")
+    folder = b.parent / session / "subagents"
+    child = {"nested_child": folder / "deep" / "agent-x1.jsonl",
+             "two_subagents_segments": folder / "deep" / "subagents" / "agent-x1.jsonl",
+             "inner_folder_named_s1": folder / session / "subagents" / "agent-x1.jsonl"}.get(shape, folder / "agent-x1.jsonl")
+    _append(child, [dict(e, sessionId=session) for e in _SIDE])
+    _append(a, [dict(e, sessionId=session) for e in CONVERSATION[:2]])
+    _record(_hook(), home, a, session=session)
+    _record(_hook(), home, a, session=session, event="SubagentStop", agent_id="x1", agent_transcript_path=str(child))
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    assert "claude-code:" + session not in ca.audit(home)["unverified"]
+    _append(b, [dict(e, sessionId=session) for e in CONVERSATION[:2]])  # rows at B the store never took
+    assert "claude-code:" + session in ca.audit(home)["unverified"]
+
+
+def test_a_child_elsewhere_in_an_inner_session_folder_checks_that_folder(tmp_path, home, hermes):
+    """#2557 cross-model review: the folder found above a child is checked itself, not the one session_dir() maps its
+    transcript back to (an inner ``s1`` folder directly under ``subagents`` maps to the outer one)."""
+    from hermes_lcm import claude_code_audit as ca
+
+    a = tmp_path / "projects" / "-work" / "s1.jsonl"
+    inner = tmp_path / "projects" / "-other" / "s1" / "subagents" / "s1"
+    child = inner / "subagents" / "agent-x1.jsonl"
+    _append(child, _SIDE)
+    _append(a, CONVERSATION[:2])
+    _record(_hook(), home, a)
+    _record(_hook(), home, a, event="SubagentStop", agent_id="x1", agent_transcript_path=str(child))
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    assert not [key for key in ca.audit(home)["unverified"] if key.startswith("claude-code:s1")]
+    _append(inner / "subagents" / "agent-y9.jsonl", _SIDE)  # a sibling nothing captured, in the inner folder
+    assert "claude-code:s1/agent:y9" in ca.audit(home)["unverified"]
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads any folder")
+def test_the_folder_check_is_closed_world_over_generated_layouts(tmp_path, home, hermes):
+    """#2557: the session folder check is closed-world. Whatever the folder names around it (nesting, repeated or dotted
+    segments, an inner id folder), one transcript-shaped file no cursor names, a symlink, or a folder that cannot be
+    listed, placed anywhere below a captured session's folder, makes the audit unverified. Empty folders alone do not
+    (the control). Seeded, so a failure names its case."""
+    import random
+    import shutil
+
+    from hermes_lcm import claude_code_audit as ca
+
+    a = _append(tmp_path / "projects" / "-work" / "s1.jsonl", CONVERSATION[:2])
+    _record(_hook(), home, a)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    root = a.parent / "s1"
+    words = ["subagents", "workflows", "s1", "s1.v2", "deep", "x.y", "agent-x9", "run-1", "subagents.jsonl.d"]
+    for seed in range(300):
+        rng = random.Random(seed)
+        folders = [root]
+        for _ in range(rng.randint(1, 8)):  # a random tree of folders, up to 6 deep
+            parent = rng.choice([f for f in folders if len(f.relative_to(root).parts) < 6])
+            folders.append(parent / rng.choice(words))
+        for folder in folders:
+            folder.mkdir(parents=True, exist_ok=True)
+        assert ca.audit(home)["verified"], f"control, seed {seed}"
+        spot = rng.choice(folders)
+        kind = rng.choice(["agent", "other", "file_link", "folder_link", "dangling", "unlistable"])
+        if kind in ("agent", "other"):
+            _append(spot / ("agent-y%d.jsonl" % seed if kind == "agent" else "journal.jsonl"), _SIDE)
+        elif kind == "unlistable":
+            (spot / "locked").mkdir(exist_ok=True)
+            (spot / "locked").chmod(0)
+        else:
+            target = {"file_link": a, "folder_link": tmp_path, "dangling": tmp_path / "gone"}[kind]
+            (spot / "link.jsonl").symlink_to(target)
+        try:
+            assert not ca.audit(home)["verified"], f"seed {seed}: {kind} at {spot.relative_to(root)}"
+        finally:
+            if kind == "unlistable":
+                (spot / "locked").chmod(0o700)
+            shutil.rmtree(root)
+
+
+@pytest.mark.parametrize("shape", ["forgotten_journal", "linked_direct_agent", "folder_named_like_an_agent"])
+def test_the_closed_world_walk_edges(tmp_path, home, hermes, shape):
+    """#2557 review: a forgotten session's own files are never read again, so they never keep it unverified; a symlink or
+    a folder in a judged agent file's place is still looked at, not skipped as judged."""
+    from hermes_lcm import claude_code_audit as ca
+
+    a = _append(tmp_path / "projects" / "-work" / "s1.jsonl", CONVERSATION[:2])
+    agents = a.parent / "s1" / "subagents"
+    captured = agents / "run-1" / "agent-x9.jsonl"  # x9's cursor names this nested copy
+    _append(captured, _SIDE)
+    _record(_hook(), home, a)
+    _record(_hook(), home, a, event="SubagentStop", agent_id="x9", agent_transcript_path=str(captured))
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    assert not [key for key in ca.audit(home)["unverified"] if key.startswith("claude-code:s1")]
+    direct = agents / "agent-x9.jsonl"
+    if shape == "forgotten_journal":
+        store = _open(home, hermes)
+        try:
+            store.delete_session_messages("s1")
+        finally:
+            store.close()
+        _append(a.parent / "s1" / "workflows-run" / "journal.jsonl", [{"type": "result"}])
+    elif shape == "linked_direct_agent":  # a dangling symlink where a direct agent file would be
+        direct.symlink_to(tmp_path / "gone.jsonl")
+    else:  # a folder with an agent file's name, holding a transcript-shaped file
+        _append(direct / "journal.jsonl", [{"type": "result"}])
+    unverified = [key for key in ca.audit(home)["unverified"] if key.startswith("claude-code:s1")]
+    assert bool(unverified) is (shape != "forgotten_journal")
 
 
 # #2535 strict: one table for when a pending record expires. The rule: a pending record expires only on facts this
