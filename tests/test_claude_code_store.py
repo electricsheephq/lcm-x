@@ -2532,3 +2532,24 @@ def test_a_pending_row_with_damaged_facts_stays_unknown(tmp_path, home, hermes, 
         _record(hook, home, path, event=event, transcript_seen=False)
         cc.run_worker(home, hermes_home=hermes, settle_s=0)
     assert not path.exists() and "claude-code:s1" in ca.audit(home)["unverified"]
+
+
+@pytest.mark.parametrize("damage", ["null", "list", "garbage", "empty"])
+def test_a_claimed_record_that_cannot_be_read_is_set_aside(tmp_path, home, hermes, damage):
+    """The worker claims a record it cannot read: it is set aside as ``.failed`` (reported), never drained as nothing
+    and removed, so the events it held cannot be lost and a prompted session cannot expire (#2535 strict)."""
+    from hermes_lcm import claude_code_audit as ca
+
+    hook = _hook()
+    path = tmp_path / "projects" / "-work" / "s1.jsonl"
+    _record(hook, home, path, event="SessionStart", transcript_seen=False)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    _record(hook, home, path, event="UserPromptSubmit", transcript_seen=True)
+    (pointer,) = sorted((home / "spool").glob("*.json"))
+    pointer.write_text({"null": "null", "list": "[]", "garbage": "garbage{", "empty": ""}[damage])
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    assert len(list((home / "spool").glob("*.failed"))) == 1
+    _record(hook, home, path, event="SessionEnd", transcript_seen=False)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    report = ca.audit(home)
+    assert not path.exists() and not report["verified"]
