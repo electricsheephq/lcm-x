@@ -1113,15 +1113,16 @@ def lcm_load_session(args: Dict[str, Any], **kwargs) -> str:
             window[key] = max(0, min(40, value))
         rows = engine._store.load_session_window(
             session_id, anchor_store_id=anchor, window_cap=40, **window)
-        boundary = rows[-1]["store_id"]
+        window_end = rows[-1]["store_id"]
         if roles or time_from is not None or time_to is not None:
             rows = [r for r in engine._store.load_session_page(
                 session_id, after_store_id=rows[0]["store_id"] - 1, limit=len(rows),
                 roles=roles or None, time_from=time_from, time_to=time_to)
-                if r["store_id"] <= boundary]
+                if r["store_id"] <= window_end]
         remaining = [r for r in rows if r["store_id"] > after_store_id]
         page_rows = remaining[:limit]
-        next_cursor = page_rows[-1]["store_id"] if len(remaining) > limit else boundary
+        # Never hand back a cursor behind the caller's own exclusive cursor.
+        next_cursor = page_rows[-1]["store_id"] if len(remaining) > limit else max(window_end, after_store_id)
         has_more = bool(next_cursor is not None and engine._store.load_session_page(
             session_id, after_store_id=next_cursor, limit=1, roles=roles or None,
             time_from=time_from, time_to=time_to))
@@ -4742,6 +4743,7 @@ def _lcm_recall_session_hint(engine: "LCMEngine", hit: dict[str, Any]) -> str | 
         session = row.get("session_id") if row else None
         return f"lcm_load_session(session_id={session!r}, anchor_store_id={store_id})" if session else None
     except Exception:  # Optional hints must not fail recall or suppress other hints.
+        logger.debug("LCM session hint skipped", exc_info=True)
         return None
 
 

@@ -127,6 +127,11 @@ def test_anchor_continuation_keeps_scanned_boundary(orchard, monkeypatch, mode):
     result = json.loads(tools.lcm_load_session(args, engine=e))
     expected = ids[:1] if mode in ('filtered_tail', 'limit') else []
     assert [r['store_id'] for r in result['messages']] == expected
+    if mode == 'after':
+        # A cursor past the window never moves backward: nothing follows the caller's own cursor.
+        assert result['has_more'] is False and result['next_cursor'] is None
+        assert e._store.connection.total_changes == changes
+        return
     boundary = ids[0] if mode == 'limit' else ids[2]
     assert result['has_more'] is True and result['next_cursor'] == boundary
     assert reads[-1] == dict(after_store_id=boundary, limit=1, roles=args.get('roles'),
