@@ -1,8 +1,43 @@
 """Ordering proofs for calls that must return before a blocker is released."""
 
+import gc
 import threading
 import time
 from contextlib import contextmanager
+
+_frozen = []
+
+
+@contextmanager
+def earlier_heap_frozen():
+    """Keep earlier tests' heap out of a timed section; yield a callable returning collector seconds since entry.
+
+    A full collection walks every object the xdist worker still holds, so one landing in a timed sample cost
+    about a second on CI (#2573). Freezing the heap on entry leaves later collections only the new objects.
+    Entry does not collect, so it stays constant time; frozen garbage waits for the unfreeze. Time is read
+    with perf_counter because some tests replace time.monotonic. Not nestable: an inner exit would unfreeze
+    the outer section's heap.
+    """
+    if _frozen:
+        raise RuntimeError("earlier_heap_frozen is already active")
+    spent, started = [0.0], [None]
+
+    def timer(phase, _info):
+        if phase == "start":
+            started[0] = time.perf_counter()
+        elif started[0] is not None:
+            spent[0] += time.perf_counter() - started[0]
+            started[0] = None
+
+    gc.freeze()
+    _frozen.append(True)
+    gc.callbacks.append(timer)
+    try:
+        yield lambda: spent[0]
+    finally:
+        gc.callbacks.remove(timer)
+        gc.unfreeze()
+        _frozen.clear()
 
 
 @contextmanager

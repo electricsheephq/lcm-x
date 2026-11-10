@@ -547,19 +547,37 @@ def test_residual_a_store_stuck_past_the_shutdown_drain_loses_the_queued_list(ho
     assert _stored_after_close(aux, db_path, release) == _contents(view(1))
 
 
+class _DrainPolls:
+    """aux_session's clock, counting the sleeps on the calling thread: the drain sleeps once per poll while it waits."""
+
+    def __init__(self, real):
+        self._real, self._thread, self.polls = real, threading.get_ident(), 0
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+    def sleep(self, seconds):
+        if threading.get_ident() == self._thread:
+            self.polls += 1
+        return self._real.sleep(seconds)
+
+
 def test_a_drain_that_times_out_says_so_with_the_hashed_child_and_the_unstored_rows(host, monkeypatch, caplog):
     import hashlib
 
     _, aux, child, engines, db_path, release = _blocked_drain(host, monkeypatch)
-    took = []
+    clock = _DrainPolls(time)
+    monkeypatch.setattr(aux, "time", clock)
+    polls = []
     with caplog.at_level("WARNING"):
         for closing in engines:  # the first drain times out and reports the stuck child once
-            began = time.monotonic()
+            before = clock.polls
             closing.shutdown()
-            took.append(time.monotonic() - began)
+            polls.append(clock.polls - before)
     # CodeRabbit (review of c43478d5): a child already reported is not waited for again, so N engines do not stall
-    # shutdown N times.
-    assert all(later < aux._LIVE_CHILD_SHUTDOWN_DRAIN_S for later in took[1:]), took
+    # shutdown N times. Counted from the drain's own polls, not timed (#2573): every later drain found nothing left to
+    # wait for and never polled. (The first may poll or not: a runner pause can pass its deadline before its first poll.)
+    assert polls[1:] == [0] * (len(engines) - 1), polls
     lines = [r.getMessage() for r in caplog.records if r.levelname == "WARNING" and "shutdown drain" in r.getMessage()]
     digest = hashlib.sha256(b"child").hexdigest()[:12]
     # An upper bound: the first store (1 row) has landed but its worker has not returned, so nothing counts as stored
