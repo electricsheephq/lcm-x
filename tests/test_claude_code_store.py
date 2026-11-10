@@ -2013,6 +2013,24 @@ def test_an_empty_named_file_never_stands_for_a_generation_with_no_rows(tmp_path
     assert not report["verified"] and report["unverified"] == ["claude-code:s1"]
 
 
+def test_a_saved_output_under_an_older_named_path_is_audited(tmp_path, home, hermes):
+    """#2548 review: A is captured, a saved output then appears under A's session folder, and a hook moves the cursor
+    to B. The worker sweeps only B's folder now, so A's output is uncaptured and the session must not verify."""
+    from hermes_lcm import claude_code_audit as ca
+
+    a = _append(tmp_path / "projects" / "-work" / "s1.jsonl", CONVERSATION[:2])
+    _record(_hook(), home, a)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    folder = tmp_path / "projects" / "-work" / "s1" / "tool-results"
+    folder.mkdir(parents=True)
+    (folder / "toolu_9.txt").write_text("saved output\n", encoding="utf-8")
+    b = _append(tmp_path / "projects" / "-other" / "s1.jsonl", CONVERSATION[:2])
+    _record(_hook(), home, b)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    report = ca.audit(home)
+    assert not report["verified"] and report["lineages"][0]["files"]["uncaptured"] == 1
+
+
 @pytest.mark.parametrize("failure", ["unreadable", "removed"])
 def test_a_named_path_that_cannot_be_read_leaves_the_lineage_unverified(tmp_path, home, hermes, monkeypatch, failure):
     """#2548 review: a named path that passes stat but cannot be read (denied, or removed between stat and open) must

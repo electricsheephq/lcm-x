@@ -425,22 +425,38 @@ def _tools(messages: list[dict], relations: list[dict], report: dict) -> None:
     report["unanswered"] = sum(not results[uid] for uid in calls)
 
 
-def _files(lineage: Lineage, events: list[dict], report: dict) -> None:
+def _files(lineage: Lineage, cursor: dict, events: list[dict], report: dict) -> None:
+    """Saved outputs of the session: under its current transcript, and (#2535) under every other named transcript
+    path, whose outputs the worker no longer sweeps once the cursor moved. One the ledger lacks is uncaptured."""
     if lineage.agent_id is not None:
-        return
-    folder = results_dir(session_dir(lineage.path))
-    if folder is None:
         return
     versions = {(row["uid"], row["content_digest"]): row["disposition"]
                 for row in events if row["source_kind"] == "file"}
-    for path in sorted(folder.iterdir()):
-        if path.is_symlink() or not path.is_file():
+    seen: set = set()
+    for name in [str(lineage.path), *named_paths(cursor)]:
+        folder = results_dir(session_dir(Path(name)))
+        if folder is None:
             continue
-        disposition = versions.get(("tool-results/" + path.name, _file_digest(path)))
-        if disposition in ("held", "kept"):
-            report["files"][disposition] += 1
-        else:
+        try:
+            key = folder.resolve()
+            if key in seen:
+                continue
+            seen.add(key)
+            paths = sorted(folder.iterdir())
+        except OSError:  # a folder that cannot be listed is not a clean one
             report["files"]["uncaptured"] += 1
+            continue
+        for path in paths:
+            if path.is_symlink() or not path.is_file():
+                continue
+            try:
+                disposition = versions.get(("tool-results/" + path.name, _file_digest(path)))
+            except OSError:
+                disposition = None
+            if disposition in ("held", "kept"):
+                report["files"][disposition] += 1
+            else:
+                report["files"]["uncaptured"] += 1
 
 
 def _file_digest(path: Path) -> str:
@@ -473,7 +489,7 @@ def _lineage_report(lineage: Lineage, cursor: dict, events: list[dict], messages
     report["failures"].update({key: value for key, value in checks.items() if key in FAILURES})
     _identities(events, messages, expected, report)
     _tools(messages, relations, report)
-    _files(lineage, events, report)
+    _files(lineage, cursor, events, report)
     return report
 
 
