@@ -172,7 +172,7 @@ _REPLAY_PINS = {  # (kind, redacted preview, stamps): (with #2584's keep, withou
     ("spillover", False, "all"): ((7, 1), (7, 1), (7, 1)),
     ("spillover", False, "none"): ((7, 1), (7, 1), (19, 3)),
     ("spillover", True, "all"): ((7, 1), (7, 1), (7, 1)),
-    ("spillover", True, "none"): ((12, 2), (12, 2), (19, 3)),
+    ("spillover", True, "none"): ((19, 3), (19, 3), (19, 3)),  # #2603 stores the redacted marker; as v0.29.2 (#2604)
     ("tempdir", False, "all"): ((7, 1), (7, 1), (9, 2)),
     ("tempdir", False, "none"): ((7, 1), (12, 2), (12, 2)),
     ("tempdir", True, "all"): ((7, 1), (7, 1), (9, 2)),

@@ -173,37 +173,62 @@ def test_a_restart_on_a_store_that_holds_the_marker_ends_off_current_with_the_fi
 
 
 # Three cold replays with redaction on (each ingest a new engine on the same store, two more rows each time; "partial"
-# re-sends from the call on with the identical marker). Stored rows after the ingest and each replay, pinned as measured
-# on this change (with and without #2584's keep they are equal), beside rc5's and v0.29.2's. No handed row is lost in
-# any cell. Stampless replays of a digest-redacted spillover marker store the replay again, as v0.29.2 does (rc5 stored
-# the externalized form there and did not).
+# re-sends from the call on with the identical marker; stamps on all rows, on user rows only, or none). Stored rows after
+# the ingest and each replay, pinned as measured on this change (equal with and without #2584's keep), beside rc5's and
+# v0.29.2's. No handed row is lost in any cell. Where this change stores the redacted marker (a spillover file whose
+# preview redaction changes) and the replay lacks stamps on assistant and tool rows, it stores the replay again as
+# v0.29.2 does; rc5 stored the externalized form there and did not (#2604). With stamps on every row it equals rc5.
 _T0 = 1762700000.0
 _RCALL = "call_spill"
 _REPLAY_PINS = {  # (kind, body, stamps, shape): (this change, rc5, v0.29.2)
-    ("K1", "cut", "all", "full"): ((4, 6, 8, 10), (4, 6, 8, 10), (4, 6, 8, 10)),
-    ("K1", "cut", "all", "partial"): ((4, 9, 11, 13), (4, 9, 11, 13), (4, 9, 11, 13)),
-    ("K1", "cut", "none", "full"): ((4, 6, 8, 10), (4, 6, 8, 10), (4, 10, 18, 28)),
-    ("K1", "cut", "none", "partial"): ((4, 9, 11, 13), (4, 9, 11, 13), (4, 12, 22, 34)),
-    ("K1", "digest", "all", "full"): ((4, 6, 8, 10), (4, 6, 8, 10), (4, 6, 8, 10)),
-    ("K1", "digest", "all", "partial"): ((4, 9, 11, 13), (4, 9, 11, 13), (4, 9, 11, 13)),
-    ("K1", "digest", "none", "full"): ((4, 10, 18, 28), (4, 6, 8, 10), (4, 10, 18, 28)),
-    ("K1", "digest", "none", "partial"): ((4, 12, 22, 34), (4, 9, 11, 13), (4, 12, 22, 34)),
-    ("K1", "lossy", "all", "full"): ((4, 6, 8, 10), (4, 6, 8, 10), (4, 8, 12, 16)),
-    ("K1", "lossy", "all", "partial"): ((4, 11, 13, 19), (4, 11, 13, 19), (4, 11, 17, 23)),
-    ("K1", "lossy", "none", "full"): ((4, 10, 18, 28), (4, 10, 18, 28), (4, 10, 18, 28)),
-    ("K1", "lossy", "none", "partial"): ((4, 12, 22, 34), (4, 12, 22, 34), (4, 12, 22, 34)),
-    ("K2", "cut", "all", "full"): ((4, 6, 8, 10), (4, 6, 8, 10), (4, 6, 8, 10)),
-    ("K2", "cut", "all", "partial"): ((4, 9, 11, 13), (4, 9, 11, 13), (4, 9, 11, 13)),
-    ("K2", "cut", "none", "full"): ((4, 6, 8, 10), (4, 6, 8, 10), (4, 6, 8, 10)),
-    ("K2", "cut", "none", "partial"): ((4, 9, 11, 13), (4, 9, 11, 13), (4, 9, 11, 13)),
-    ("K2", "digest", "all", "full"): ((4, 6, 8, 10), (4, 6, 8, 10), (4, 6, 8, 10)),
-    ("K2", "digest", "all", "partial"): ((4, 9, 11, 13), (4, 9, 11, 13), (4, 9, 11, 13)),
-    ("K2", "digest", "none", "full"): ((4, 6, 8, 10), (4, 6, 8, 10), (4, 6, 8, 10)),
-    ("K2", "digest", "none", "partial"): ((4, 9, 11, 13), (4, 9, 11, 13), (4, 9, 11, 13)),
-    ("K2", "lossy", "all", "full"): ((4, 6, 8, 10), (4, 6, 8, 10), (4, 8, 12, 16)),
-    ("K2", "lossy", "all", "partial"): ((4, 11, 13, 19), (4, 11, 13, 19), (4, 11, 17, 23)),
-    ("K2", "lossy", "none", "full"): ((4, 10, 18, 28), (4, 10, 18, 28), (4, 10, 18, 28)),
-    ("K2", "lossy", "none", "partial"): ((4, 12, 22, 34), (4, 12, 22, 34), (4, 12, 22, 34)),
+    ('K1', 'cut', 'all', 'full'): ((4, 6, 8, 10), (4, 6, 8, 10), (4, 6, 8, 10)),
+    ('K1', 'cut', 'all', 'partial'): ((4, 9, 11, 13), (4, 9, 11, 13), (4, 9, 11, 13)),
+    ('K1', 'cut', 'none', 'full'): ((4, 6, 8, 10), (4, 6, 8, 10), (4, 10, 18, 28)),
+    ('K1', 'cut', 'none', 'partial'): ((4, 9, 11, 13), (4, 9, 11, 13), (4, 12, 22, 34)),
+    ('K1', 'cut', 'user', 'full'): ((4, 6, 8, 10), (4, 6, 8, 10), (4, 9, 15, 22)),
+    ('K1', 'cut', 'user', 'partial'): ((4, 9, 11, 13), (4, 9, 11, 13), (4, 12, 21, 31)),
+    ('K1', 'digest', 'all', 'full'): ((4, 6, 8, 10), (4, 6, 8, 10), (4, 6, 8, 10)),
+    ('K1', 'digest', 'all', 'partial'): ((4, 9, 11, 13), (4, 9, 11, 13), (4, 9, 11, 13)),
+    ('K1', 'digest', 'none', 'full'): ((4, 10, 18, 28), (4, 6, 8, 10), (4, 10, 18, 28)),
+    ('K1', 'digest', 'none', 'partial'): ((4, 12, 22, 34), (4, 9, 11, 13), (4, 12, 22, 34)),
+    ('K1', 'digest', 'user', 'full'): ((4, 9, 15, 22), (4, 6, 8, 10), (4, 9, 15, 22)),
+    ('K1', 'digest', 'user', 'partial'): ((4, 12, 21, 31), (4, 9, 11, 13), (4, 12, 21, 31)),
+    ('K1', 'inside', 'all', 'full'): ((4, 6, 8, 10), (4, 6, 8, 10), (4, 6, 8, 10)),
+    ('K1', 'inside', 'all', 'partial'): ((4, 9, 11, 13), (4, 9, 11, 13), (4, 9, 11, 13)),
+    ('K1', 'inside', 'none', 'full'): ((4, 10, 18, 28), (4, 6, 8, 10), (4, 10, 18, 28)),
+    ('K1', 'inside', 'none', 'partial'): ((4, 12, 22, 34), (4, 9, 11, 13), (4, 12, 22, 34)),
+    ('K1', 'inside', 'user', 'full'): ((4, 9, 15, 22), (4, 6, 8, 10), (4, 9, 15, 22)),
+    ('K1', 'inside', 'user', 'partial'): ((4, 12, 21, 31), (4, 9, 11, 13), (4, 12, 21, 31)),
+    ('K1', 'lossy', 'all', 'full'): ((4, 6, 8, 10), (4, 6, 8, 10), (4, 8, 12, 16)),
+    ('K1', 'lossy', 'all', 'partial'): ((4, 11, 13, 19), (4, 11, 13, 19), (4, 11, 17, 23)),
+    ('K1', 'lossy', 'none', 'full'): ((4, 10, 18, 28), (4, 10, 18, 28), (4, 10, 18, 28)),
+    ('K1', 'lossy', 'none', 'partial'): ((4, 12, 22, 34), (4, 12, 22, 34), (4, 12, 22, 34)),
+    ('K1', 'lossy', 'user', 'full'): ((4, 9, 15, 22), (4, 9, 15, 22), (4, 9, 15, 22)),
+    ('K1', 'lossy', 'user', 'partial'): ((4, 12, 21, 31), (4, 12, 21, 31), (4, 12, 21, 31)),
+    ('K2', 'cut', 'all', 'full'): ((4, 6, 8, 10), (4, 6, 8, 10), (4, 6, 8, 10)),
+    ('K2', 'cut', 'all', 'partial'): ((4, 9, 11, 13), (4, 9, 11, 13), (4, 9, 11, 13)),
+    ('K2', 'cut', 'none', 'full'): ((4, 6, 8, 10), (4, 6, 8, 10), (4, 6, 8, 10)),
+    ('K2', 'cut', 'none', 'partial'): ((4, 9, 11, 13), (4, 9, 11, 13), (4, 9, 11, 13)),
+    ('K2', 'cut', 'user', 'full'): ((4, 6, 8, 10), (4, 6, 8, 10), (4, 6, 8, 10)),
+    ('K2', 'cut', 'user', 'partial'): ((4, 9, 11, 13), (4, 9, 11, 13), (4, 9, 11, 13)),
+    ('K2', 'digest', 'all', 'full'): ((4, 6, 8, 10), (4, 6, 8, 10), (4, 6, 8, 10)),
+    ('K2', 'digest', 'all', 'partial'): ((4, 9, 11, 13), (4, 9, 11, 13), (4, 9, 11, 13)),
+    ('K2', 'digest', 'none', 'full'): ((4, 6, 8, 10), (4, 6, 8, 10), (4, 6, 8, 10)),
+    ('K2', 'digest', 'none', 'partial'): ((4, 9, 11, 13), (4, 9, 11, 13), (4, 9, 11, 13)),
+    ('K2', 'digest', 'user', 'full'): ((4, 6, 8, 10), (4, 6, 8, 10), (4, 6, 8, 10)),
+    ('K2', 'digest', 'user', 'partial'): ((4, 9, 11, 13), (4, 9, 11, 13), (4, 9, 11, 13)),
+    ('K2', 'inside', 'all', 'full'): ((4, 6, 8, 10), (4, 6, 8, 10), (4, 6, 8, 10)),
+    ('K2', 'inside', 'all', 'partial'): ((4, 9, 11, 13), (4, 9, 11, 13), (4, 9, 11, 13)),
+    ('K2', 'inside', 'none', 'full'): ((4, 6, 8, 10), (4, 6, 8, 10), (4, 6, 8, 10)),
+    ('K2', 'inside', 'none', 'partial'): ((4, 9, 11, 13), (4, 9, 11, 13), (4, 9, 11, 13)),
+    ('K2', 'inside', 'user', 'full'): ((4, 6, 8, 10), (4, 6, 8, 10), (4, 6, 8, 10)),
+    ('K2', 'inside', 'user', 'partial'): ((4, 9, 11, 13), (4, 9, 11, 13), (4, 9, 11, 13)),
+    ('K2', 'lossy', 'all', 'full'): ((4, 6, 8, 10), (4, 6, 8, 10), (4, 8, 12, 16)),
+    ('K2', 'lossy', 'all', 'partial'): ((4, 11, 13, 19), (4, 11, 13, 19), (4, 11, 17, 23)),
+    ('K2', 'lossy', 'none', 'full'): ((4, 10, 18, 28), (4, 10, 18, 28), (4, 10, 18, 28)),
+    ('K2', 'lossy', 'none', 'partial'): ((4, 12, 22, 34), (4, 12, 22, 34), (4, 12, 22, 34)),
+    ('K2', 'lossy', 'user', 'full'): ((4, 9, 15, 22), (4, 9, 15, 22), (4, 9, 15, 22)),
+    ('K2', 'lossy', 'user', 'partial'): ((4, 12, 21, 31), (4, 12, 21, 31), (4, 12, 21, 31)),
 }
 
 
@@ -236,7 +261,7 @@ def test_three_cold_replays_with_redaction_on(tmp_path, kind, body, stamps, shap
         handed = copy.deepcopy(t[a:b])
         if n:
             for row in handed:
-                if stamps == "none":
+                if stamps == "none" or (stamps == "user" and row["role"] != "user"):
                     row.pop("timestamp", None)
         engine = LCMEngine(config=LCMConfig(database_path=str(home / "lcm.db"), sensitive_patterns_enabled=True,
                                             sensitive_patterns=["all"]), hermes_home=str(home))
