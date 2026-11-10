@@ -45,7 +45,14 @@ def _call(shape):
         {"id": "m1", "type": "function", "function": {"name": "write_file", "arguments": arguments}}]}
 
 
+def _require(condition, what):
+    # Setup checks raise pytest's Failed, never AssertionError, so the strict xfails cannot absorb them.
+    if not condition:
+        pytest.fail(f"setup: {what}")
+
+
 def _final_rows(tmp_path, monkeypatch, shape, route):
+    """Return (FINAL rows stored, the counted route's absent count or None)."""
     engine = _engine(tmp_path)
     try:
         first = [{"role": "user", "content": "A"}, {"role": "assistant", "content": "B"},
@@ -58,17 +65,16 @@ def _final_rows(tmp_path, monkeypatch, shape, route):
         engine.on_session_start("S1", platform="cli", context_length=200_000, conversation_id="conv1")
         engine.ingest(copy.deepcopy(first))
         engine.on_session_start("foreground", platform="cli", context_length=200_000)
-        assert len(engine._store.get_session_messages("S1")) == len(first)
+        _require(len(engine._store.get_session_messages("S1")) == len(first), "the first ingest stored every row")
         view = copy.deepcopy(first) + [{"role": "assistant", "content": "FINAL", "timestamp": 11.0}]
         with monkeypatch.context() as patch:
             patch.setattr(engine._store, "get_range", fail_end_read(engine))
             engine.on_session_end("S1", view)
-        assert engine._pending_session_tails  # the busy read deferred the end's rows
+        _require(engine._pending_session_tails, "the busy read deferred the end's rows")
         tail = engine._pending_session_tails[-1]
         engine._retry_pending_session_tails(deadline=time.monotonic() + 60)
-        if route == "cold-counted":
-            engine._cold_tail_absent_count(tail)
-        return sum(row.get("content") == "FINAL" for row in engine._store.get_session_messages("S1"))
+        absent = engine._cold_tail_absent_count(tail) if route == "cold-counted" else None
+        return sum(row.get("content") == "FINAL" for row in engine._store.get_session_messages("S1")), absent
     finally:
         engine.shutdown()
 
@@ -78,9 +84,14 @@ def _final_rows(tmp_path, monkeypatch, shape, route):
 @pytest.mark.xfail(strict=True, raises=AssertionError,
                    reason="#2543: a stored inline encoded block fails the busy end's retried compare")
 def test_a_busy_end_stores_the_final_reply_after_an_inline_block(tmp_path, monkeypatch, shape, route):
-    assert _final_rows(tmp_path, monkeypatch, shape, route) == 1
+    finals, absent = _final_rows(tmp_path, monkeypatch, shape, route)
+    # Today's counted result: the inline row and the reply read as absent (2). A fix changes it with the reply.
+    _require(route != "cold-counted" or absent == (0 if finals == 1 else 2), f"counted absent={absent}")
+    assert finals == 1
 
 
 @pytest.mark.parametrize("route", ["cold-pairwise", "cold-counted"])
 def test_a_busy_end_stores_the_final_reply_after_a_plain_call(tmp_path, monkeypatch, route):
-    assert _final_rows(tmp_path, monkeypatch, "plain", route) == 1
+    finals, absent = _final_rows(tmp_path, monkeypatch, "plain", route)
+    assert finals == 1
+    assert absent == (0 if route == "cold-counted" else None)

@@ -38,7 +38,8 @@ def test_an_identical_inline_payload_call_is_stored_once_across_handovers(host):
     child.api_call(ctx, copy.deepcopy(first), 1)
     aux.drain_live_child_stores(60.0)
     stored = reader._store.get_session_messages('child')
-    assert '[Externalized LCM ingest payload:' in json.dumps(stored)  # ingest really externalized the payload
+    if '[Externalized LCM ingest payload:' not in json.dumps(stored):  # setup, outside the strict xfail
+        pytest.fail('setup: ingest did not externalize the payload')
     view = copy.deepcopy(first) + [{'role': 'assistant', 'content': 'FINAL', 'timestamp': 11.0}]
     child.api_call(ctx, view, 2)
     aux.drain_live_child_stores(60.0)
