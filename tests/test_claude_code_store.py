@@ -2513,7 +2513,8 @@ def test_a_damaged_pointer_keeps_a_prompted_session_unknown(tmp_path, home, herm
     assert not path.exists() and "claude-code:s1" in ca.audit(home)["unverified"]
 
 
-@pytest.mark.parametrize("facts", [{}, None, []], ids=["empty", "null", "list"])
+@pytest.mark.parametrize("facts", [{}, None, [], {"transcript_seen": False}, {"events": "SessionStart"}],
+                         ids=["empty", "null", "list", "no_events", "events_not_a_list"])
 def test_a_pending_row_with_damaged_facts_stays_unknown(tmp_path, home, hermes, facts):
     """A pending row whose facts are present but not usable: unknown, never 'not seen' (#2535 strict)."""
     from hermes_lcm import claude_code_audit as ca

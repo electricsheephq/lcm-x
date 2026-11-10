@@ -425,9 +425,10 @@ def drain(store: MessageStore, lineage: Lineage, *, deadline: Optional[float] = 
         replace = recorded != str(lineage.path) and not (isinstance(recorded, str) and recorded and Path(recorded).exists())
         named = named_paths(pending, lineage.path)
         saved = pending.get("facts") if isinstance(pending, dict) else None
-        if isinstance(pending, dict) and facts is not None and not (isinstance(saved, dict) and saved):
+        if isinstance(pending, dict) and facts is not None and not (
+                isinstance(saved, dict) and isinstance(saved.get("events"), list) and "transcript_seen" in saved):
             # A pending row from an earlier build has no facts (and a damaged one has none usable): its history is
-            # unknown, and unknown never expires (#2535).
+            # unknown, and unknown never expires (#2535). Its events are kept as unknown too: a prompt may be missing.
             saved = {"transcript_seen": None}
         merged = _merge_facts(saved, facts)
         if not cursor and (replace or not isinstance(pending, dict) or named != pending.get("named")
