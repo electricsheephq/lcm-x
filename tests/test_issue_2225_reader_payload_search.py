@@ -672,3 +672,12 @@ def test_a_storage_path_that_cannot_be_resolved_degrades_to_containment(archive,
     monkeypatch.setattr(tools, "get_large_output_storage_dir", loop)
     result = archive.call(query="call-saved")
     assert "error" not in result and result["partial"]["reasons"] == ["containment"]
+
+
+def test_an_explicit_ref_with_no_payload_folder_is_an_error(archive):
+    # Codex connector on #2528: a named ref is never a clean miss; discovery alone still skips quietly.
+    archive.storage.rmdir()
+    raw, error = archive.reader.call("lcm_grep", dict(query=TOKEN, content_scope="externalized",
+                                                      externalized_refs=["20261110_000000_gone.json"]))
+    assert "not readable" in json.loads(raw).get("error", "")
+    assert "partial" not in archive.grep()

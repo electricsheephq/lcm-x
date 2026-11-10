@@ -1504,6 +1504,8 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
             reader_storage = get_large_output_storage_dir(
                 engine._config, hermes_home=engine._hermes_home, create=False).resolve()
             if not reader_storage.exists():
+                if externalized_refs is not None:  # a named ref with no payload folder is missing, not a clean miss
+                    return json.dumps({"error": f"Externalized ref is not readable or not owned by the requested scope: {externalized_refs[0]}"})
                 searches_externalized = False
             contained = not searches_externalized or _payload_storage_contained(engine, reader_storage)
         except (OSError, ValueError, RuntimeError):  # RuntimeError: a symlink loop before Python 3.13
