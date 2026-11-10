@@ -2467,3 +2467,24 @@ def test_a_pending_parents_uncaptured_subagent_counts_even_when_forgotten(tmp_pa
     assert not report["verified"] and "claude-code:s1/agent:y9" in report["unverified"]
     cc.run_worker(home, hermes_home=hermes, settle_s=0)  # the sweep captures it: then it is verified
     assert "claude-code:s1/agent:y9" not in ca.audit(home)["unverified"]
+
+
+@pytest.mark.parametrize("shape", ["nested_child", "dotted_session"])
+def test_a_child_elsewhere_finds_its_parents_folder_from_any_layout(tmp_path, home, hermes, shape):
+    """#2557 cross-model review: the parent folder of a captured child in a folder its parent never named is the nearest
+    ``subagents`` folder's parent, and its transcript is ``<folder name>.jsonl`` even when the session id has a dot."""
+    from hermes_lcm import claude_code_audit as ca
+
+    session = "s1.v2" if shape == "dotted_session" else "s1"
+    a = tmp_path / "projects" / "-work" / (session + ".jsonl")
+    b = tmp_path / "projects" / "-other" / (session + ".jsonl")
+    folder = b.parent / session / "subagents"
+    child = folder / "deep" / "agent-x1.jsonl" if shape == "nested_child" else folder / "agent-x1.jsonl"
+    _append(child, [dict(e, sessionId=session) for e in _SIDE])
+    _append(a, [dict(e, sessionId=session) for e in CONVERSATION[:2]])
+    _record(_hook(), home, a, session=session)
+    _record(_hook(), home, a, session=session, event="SubagentStop", agent_id="x1", agent_transcript_path=str(child))
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    assert "claude-code:" + session not in ca.audit(home)["unverified"]
+    _append(b, [dict(e, sessionId=session) for e in CONVERSATION[:2]])  # rows at B the store never took
+    assert "claude-code:" + session in ca.audit(home)["unverified"]
