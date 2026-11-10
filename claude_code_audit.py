@@ -247,7 +247,8 @@ def _captured_prefix(path: Path, rows: dict) -> tuple[int, int]:
     return matched, total
 
 
-def _named_others(lineage: Lineage, cursor: dict, generations: dict, compared: set, report: dict) -> None:
+def _named_others(lineage: Lineage, cursor: dict, generations: dict, compared: set, gone: set, report: dict,
+                  expected: set, lag: list[float]) -> None:
     """#2535: another transcript path this lineage's records named. One that never appeared (a resume's SessionStart
     names a path under the new directory) holds nothing. One that exists must be held by a generation: its lines
     past that generation's rows, or all of them when no generation holds its start, are uncaptured."""
@@ -255,19 +256,36 @@ def _named_others(lineage: Lineage, cursor: dict, generations: dict, compared: s
         other = Path(name)
         try:
             status = other.stat()
-        except OSError:
+        except FileNotFoundError:
+            continue
+        except OSError:  # a named path that cannot be checked is not a clean one
+            report["named_uncaptured_lines"] += 1
             continue
         if other == lineage.path or not stat.S_ISREG(status.st_mode) or (status.st_dev, status.st_ino) in compared:
             continue
         compared.add((status.st_dev, status.st_ino))
-        best, total, held = 0, 0, None
+        best, total, held = 0, _captured_prefix(other, {})[1], None
         for generation, rows in generations.items():
-            matched, total = _captured_prefix(other, rows)
+            matched = _captured_prefix(other, rows)[0]
             if matched > best:
                 best, held = matched, generation
-        if held is not None and held < cursor["generation"] and best == len(generations[held]) and report["generations_gone"]:
-            report["generations_gone"] -= 1  # the generation's file was found at its own path, not set aside
+        if held in gone and best == len(generations[held]) == total:
+            # A generation counted gone (no set-aside copy) is this file, whole at its own path: compare it as a copy.
+            gone.discard(held)
+            report["generations_gone"] -= 1
+            _compare(other, generations[held], report, expected, lag)
         report["named_uncaptured_lines"] += total - best
+
+
+def _present(path: Path) -> bool:
+    """Exists, or cannot be checked (fail closed): only a clean not-found is absent."""
+    try:
+        path.stat()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    return True
 
 
 def _older_copy(siblings: list[Path], rows: dict) -> Path | None:
@@ -321,17 +339,19 @@ def _transcripts(lineage: Lineage, cursor: dict, events: list[dict], report: dic
             compared.add((status.st_dev, status.st_ino))
         except OSError:
             pass
+    gone = set()
     for generation in range(cursor["generation"]):
         rows = generations[generation]
         copy = _older_copy(siblings, rows)
         if copy is None:
             report["generations_gone"] += 1
+            gone.add(generation)
             continue
         status = copy.stat()
         compared.add((status.st_dev, status.st_ino))
         length = _compare(copy, rows, report, expected, lag)
         report["failures"]["surplus_lines"] += sum(i >= length for i in rows)
-    _named_others(lineage, cursor, generations, compared, report)
+    _named_others(lineage, cursor, generations, compared, gone, report, expected, lag)
     return expected
 
 
@@ -598,7 +618,7 @@ def _unverified(metadata: dict, records: list[dict], lineages: list[dict], sessi
         lineage = Lineage(pending.get("session_id"), pending.get("agent_id"), Path(pending["path"]))
         if CURSOR_PREFIX + lineage.key in metadata or FORGOTTEN_PREFIX + lineage.rows_session in metadata:
             continue
-        if any(Path(name).exists() for name in named_paths(pending)):  # every path its records named (#2535)
+        if any(_present(Path(name)) for name in named_paths(pending)):  # every path its records named (#2535)
             unknown.add(lineage.key)
         if lineage.agent_id is None:
             for child in _subagents(lineage):

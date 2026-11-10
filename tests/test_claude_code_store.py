@@ -1960,3 +1960,18 @@ def test_a_cursor_written_before_named_paths_audits_as_before(tmp_path, home, he
         cc.to_rollback_journal(store.connection)
         store.close()
     assert ca.audit(home)["verified"]
+
+
+def test_cursor_alternation_without_growth_is_verified(tmp_path, home, hermes):
+    """#2535 review: A drained, then B (same lines) drained as a new generation, and A unchanged: the old generation is
+    found whole at its own named path, so nothing is gone and the lineage is verified."""
+    from hermes_lcm import claude_code_audit as ca
+
+    a = _append(tmp_path / "projects" / "-work" / "s1.jsonl", CONVERSATION[:2])
+    _record(_hook(), home, a)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    b = _append(tmp_path / "projects" / "-other" / "s1.jsonl", CONVERSATION[:2])
+    _record(_hook(), home, b)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    report = ca.audit(home)
+    assert report["verified"] and report["lineages"][0]["generations_gone"] == 0
