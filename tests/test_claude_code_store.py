@@ -2318,3 +2318,32 @@ def test_files_in_a_tool_results_subfolder_are_counted_and_named(tmp_path, home,
     assert report["lineages"][0]["subfolder_files"] == 2 and report["lineages"][0]["files"]["uncaptured"] == 0
     assert not report["verified"] and "claude-code:s1" in report["unverified"]
     assert report["verdict"].endswith("; 2 files in tool-results subfolders not stored (1 lineages)")
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads any folder")
+@pytest.mark.parametrize("shape,count", [("nested", 2), ("folder_symlink", 1), ("unreadable", 1)])
+def test_every_kind_of_entry_under_a_tool_results_subfolder_counts(tmp_path, home, hermes, shape, count):
+    """#2554 review: nested folders are walked; a symlink to a folder counts (not followed); a subfolder that cannot be
+    listed counts one."""
+    from hermes_lcm import claude_code_audit as ca
+
+    a = _append(tmp_path / "projects" / "-work" / "s1.jsonl", CONVERSATION[:2])
+    _record(_hook(), home, a)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    pages = a.parent / "s1" / "tool-results" / "p1"
+    (pages / "inner").mkdir(parents=True)
+    if shape == "nested":
+        (pages / "page-1.jpg").write_bytes(b"x")
+        (pages / "inner" / "page-2.jpg").write_bytes(b"x")
+    elif shape == "folder_symlink":
+        (pages / "inner").rmdir()
+        (tmp_path / "elsewhere").mkdir()
+        (pages / "link").symlink_to(tmp_path / "elsewhere", target_is_directory=True)
+    else:
+        (pages / "inner" / "page-1.jpg").write_bytes(b"x")
+        pages.chmod(0)
+    try:
+        report = ca.audit(home)
+    finally:
+        pages.chmod(0o700)
+    assert report["lineages"][0]["subfolder_files"] == count and not report["verified"]

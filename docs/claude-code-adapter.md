@@ -296,7 +296,7 @@ at worst an unreferenced payload file, never a lost row; a rerun is idempotent b
 | `user`, text or image parts | One `user` row. Meta entries, compact summaries and transcript-only entries become `system` rows. |
 | `user`, `tool_result` parts | One `tool` row per result, `tool_call_id` = `tool_use_id`. When Claude Code saved the output to a file inside the session's own `tool-results/` folder (`persistedOutputPath`, or the path in the marker), the row holds the file's full text (up to 64 MiB, as Hermes's persisted-output recovery does); the preview stays in the ledger's raw line. |
 | `assistant` | One row per entry: text parts as content, `tool_use` parts as `tool_calls`. An entry with only thinking gives no row. `message.id` stays in the ledger, so a reader can regroup one response. API-error entries become `system` rows. |
-| `tool-results` files | Ledger rows each. A saved output is held, with no bytes of its own, only when a row of the entry that references it, as stored, holds its exact text, inline or as one externalized payload. Every other file (images, PDFs, unreferenced or large files, and saved outputs that ingest protection redacts or externalizes in parts, such as a long base64 run, or that changed after their line was read) keeps its bytes in the ledger, in rows of at most 64 MiB, with no size limit; a file whose bytes change is kept again, a held one included. A `tool-results` folder that is a symlink, or in a symlinked session folder, is never read, for files or for saved outputs. |
+| `tool-results` files | Ledger rows each. A saved output is held, with no bytes of its own, only when a row of the entry that references it, as stored, holds its exact text, inline or as one externalized payload. Every other file (images, PDFs, unreferenced or large files, and saved outputs that ingest protection redacts or externalizes in parts, such as a long base64 run, or that changed after their line was read) keeps its bytes in the ledger, in rows of at most 64 MiB, with no size limit; a file whose bytes change is kept again, a held one included. A `tool-results` folder that is a symlink, or in a symlinked session folder, is never read, for files or for saved outputs. Only files directly in `tool-results/` are captured; its subfolders (for example page renders of a PDF) are not (#2554). |
 | `system`, `attachment`, bookkeeping (`queue-operation`, `last-prompt`, `mode`, `custom-title`, `file-history-*`, `tools-used`, desktop types such as `bridge-session` and `frame-link`) | None; raw line in the ledger. |
 | Request snapshots (`api-request`, `api-request-blob`, `api-request-shape`) | None; raw line kept once per line digest. They hold the exact model input, including system text and injected reminders that appear nowhere else in the transcript. |
 | Unknown types | None; raw line in the ledger, counted as `unknown_type`. |
@@ -526,6 +526,8 @@ gate's instrument (see "The audit" in the test plan).
 - **Reported, never failures:**
   - lines after the cursor (`pending_lines`) and `tool-results` files whose current bytes have no
     captured version (`files.uncaptured`): both leave the lineage unverified;
+  - files under a `tool-results` subfolder (`subfolder_files`), which capture does not store: until #2554 they leave
+    the lineage unverified, and the verdict names them ("N files in tool-results subfolders not stored (M lineages)");
   - forgotten lineages, which are not checked; rows of an older projection version
     (`other_projection`); projected entries without a `uuid` (`projected_without_uuid`);
   - a transcript that is gone, replaced or rewritten (`transcript_state`), and older generations
@@ -552,7 +554,8 @@ gate's instrument (see "The audit" in the test plan).
 - **A run passes the gate** when the audit exits 0 and `verified` is true:
   - at least one lineage was checked;
   - every selected lineage's transcript was read in full (`transcript_state` `ok`, no generation
-    gone), with nothing pending: no line after the cursor and no uncaptured file;
+    gone), with nothing pending: no line after the cursor, no uncaptured file and no file under a
+    `tool-results` subfolder;
   - every selected session, and every subagent transcript on disk (a forgotten session's too),
     has a cursor;
   - every lineage a set-aside (`.failed`) spool record names has a cursor, unless that lineage

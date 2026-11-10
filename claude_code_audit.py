@@ -471,9 +471,11 @@ def _files(lineage: Lineage, events: list[dict], report: dict) -> None:
 
 
 def _files_under(folder: Path) -> int:
-    """Every non-folder entry under ``folder``, symlinks not followed; a folder that cannot be listed counts one."""
+    """Every entry under ``folder`` that is not a real folder (a symlink to a folder counts; it is not followed); a
+    folder that cannot be listed counts one."""
     errors = []
-    count = sum(len(files) for _, _, files in os.walk(folder, onerror=errors.append))
+    count = sum(len(files) + sum(os.path.islink(os.path.join(root, name)) for name in folders)
+                for root, folders, files in os.walk(folder, onerror=errors.append))
     return count + len(errors)
 
 
