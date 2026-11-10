@@ -230,8 +230,10 @@ def bar5(rc_checks, ga_checks, ga_rerun_checks=None, ga_rerun_turns_complete=Tru
     and g the baseline GA arm's end, the session holds when r - s <= g - s and fails the bar when r - s > g - s. It is
     INCONCLUSIVE when there is no clean previous-GA arm, when a count is unknown, when the start counts differ, or when a
     count falls below s (a node can leave its session wholesale, at a compression rollover). A session with s = 0 keeps the warning rule above.
-    A previous-GA arm that did not complete every planned turn (*ga_turns_complete* false) is not a clean baseline for
-    the inherited counts, as for a re-run: those sessions are INCONCLUSIVE unless a clean re-run supplies the counts."""
+    A previous-GA arm that did not complete every planned turn (*ga_turns_complete* false) is not a clean baseline, as
+    for a re-run (ruling R5-4's addendum; release manager, 2026-11-10): unless a clean re-run supplies the baseline, the
+    inherited sessions are INCONCLUSIVE and the doctor warnings are not judged (INCONCLUSIVE), since fewer turns can
+    show fewer warnings. The rc arm's own failed checks still FAIL."""
     failed, ga_failed = failed_checks(rc_checks), failed_checks(ga_checks)
     rerun_failed = failed_checks(ga_rerun_checks) if ga_rerun_checks is not None else None
     rerun_missing = kinds_missing(ga_rerun_checks) if ga_rerun_checks is not None else None
@@ -246,19 +248,20 @@ def bar5(rc_checks, ga_checks, ga_rerun_checks=None, ga_rerun_turns_complete=Tru
     baseline_incomplete = not use_rerun and ga_turns_complete is not True  # Fewer GA turns: g is not comparable.
     flags = {name: _inherited_flags(n, use_rerun, ga_open or baseline_incomplete)
              for name, n in sorted(dict(inherited or {}).items())}
-    over = [] if ga_open or "doctor" in ga_missing else sorted(
+    warnings_open = ga_open or baseline_incomplete  # No clean baseline: the warning counts are not compared.
+    over = [] if warnings_open or "doctor" in ga_missing else sorted(
         name for name, n in rc_w.items() if n > ga_w[name] and name not in flags)
     flags_failed = sorted(name for name, f in flags.items() if f["verdict"] == FAIL)
     flags_open = sorted(name for name, f in flags.items() if f["verdict"] == INCONCLUSIVE)
     missing = kinds_missing(rc_checks)
     verdict = (FAIL if failed or over or flags_failed
-               else INCONCLUSIVE if missing or ga_open or missing_warned or flags_open else PASS)
+               else INCONCLUSIVE if missing or warnings_open or missing_warned or flags_open else PASS)
     return {"verdict": verdict, "failed": failed, "warnings_over_ga": over, "kinds_missing": missing,
             "ga_failed": ga_failed, "ga_kinds_missing": ga_missing, "ga_kinds_missing_rc_warned": missing_warned,
             "ga_rerun_needed": bool(ga_failed) and rerun_failed is None,
             "ga_rerun_failed": rerun_failed or [], "ga_rerun_kinds_missing": rerun_missing or [],
             "ga_rerun_turns_complete": None if ga_rerun_checks is None else ga_rerun_turns_complete is True,
-            "warnings_judged": not ga_open and not missing_warned,
+            "warnings_judged": not warnings_open and not missing_warned,
             "ga_turns_complete": ga_turns_complete is True, "inherited_flags": flags, "inherited_flags_over_ga": flags_failed, "inherited_flags_unjudged": flags_open,
             "ga_disposition_needed": bool(ga_failed) and ga_rerun_checks is not None and not rerun_clean}
 

@@ -322,3 +322,17 @@ def test_bar5_inherited_counts_are_never_judged_against_a_ga_arm_with_turns_miss
     failed = {"kind": "quick_check", "check": "store", "status": "fail"}
     rerun = counts(r=3, g=2, ga_rerun=3, ga_rerun_start=2)
     assert b.bar5(checks(), checks(failed), checks(), True, inherited=rerun, ga_turns_complete=False)["verdict"] == b.PASS
+
+
+def test_bar5_warnings_are_not_judged_against_a_ga_arm_with_turns_missing():
+    """P1 (release manager, 2026-11-10, as for the inherited counts): a previous-GA arm that did not complete its turns
+    can show fewer warnings, so the rc's warning counts are not compared with it: INCONCLUSIVE, never FAIL. The rc's own
+    failed checks still FAIL, and a clean re-run still serves as the baseline."""
+    warn = {"kind": "doctor", "check": "survival_fit", "status": "warn"}
+    assert b.bar5(checks(warn, warn), checks(warn))["verdict"] == b.FAIL  # Turns complete: judged, over the GA.
+    result = b.bar5(checks(warn, warn), checks(warn), ga_turns_complete=False)
+    assert (result["verdict"], result["warnings_over_ga"], result["warnings_judged"]) == (b.INCONCLUSIVE, [], False)
+    failed = {"kind": "quick_check", "check": "store", "status": "fail"}
+    assert b.bar5(checks(failed), checks(), ga_turns_complete=False)["verdict"] == b.FAIL
+    assert b.bar5(checks(warn), checks(failed), checks(warn), True, ga_turns_complete=False)["verdict"] == b.PASS
+
