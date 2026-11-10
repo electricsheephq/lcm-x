@@ -11,6 +11,7 @@ from functools import lru_cache
 import json
 import os
 import re
+import sqlite3
 import sys
 import tempfile
 import types
@@ -29,19 +30,20 @@ from tests.test_issue_2521_spillover_upgrade_replay import (
 FIXTURE = Path(__file__).with_name('fixtures') / 'compare_matrix_main_7e67daf16.json'
 ROUTES = ('child-live', 'child-counted', 'child-end',
           'offcurrent-end', 'cold-pairwise', 'cold-counted',
-          'child-compress-s1', 'child-compress-s2')
+          'child-compress-s1', 'child-compress-s2', 'reconcile-replay')
 FORMS = ('small', 'inline', 'recovered', 'bare')
 HOSTS = ('identical', 'present', 'missing', 'inline', 'different')
 CASES = [(r, s, p, loc, h) for r in ROUTES for s in FORMS
          for p in ('plain', 'data-uri') for loc in ('spillover', 'hermes-results') for h in HOSTS]
-# The existing genuine v0.29.2 dump is a plain-preview cache/spillover row.
-CASES += [(r, 'v0292', p, loc, h) for r in ROUTES[3:6]
+# Genuine v0.29.2 stores: spillover bare markers and temp-dir recovered results.
+CASES += [(r, 'v0292', p, loc, h) for r in (*ROUTES[3:6], 'reconcile-replay')
           for p in ('plain', 'data-uri') for loc in ('spillover', 'hermes-results') for h in HOSTS]
+CASES += [(r, 'v0292-crlf', 'plain', 'hermes-results', h)
+          for r in (*ROUTES[3:6], 'reconcile-replay') for h in HOSTS]
 # S1/S2 replace the synthetic child-compress and child-output-counted routes.
 # Hermes 0.21.3 (345cd2b0), agent/context_compressor.py:651 (literal),
 # :440 (rewrite), cited by R4-5 Q2; the test hoststub has no compressor module.
 _CLEARED_OUTPUT = '[Old tool output cleared to save context space]'
-UNCOVERED = 'not covered in #2546: needs a v0.29.2 dump of this form; added with Spec A'
 _MARKER = re.compile(
     r'<persisted-output>\n[^\n]*?\(([0-9,]+) characters,[^\n]*\n'
     r'Full output saved to: ([^\n]+)\n.*?'
@@ -210,6 +212,38 @@ def _missing(final_view, rows, storage, body):
     return missing
 
 
+def _v0292_matrix_store(tmp_path, temp, preview, location, crlf=False):
+    """Load real-engine dumps; payload files are storage evidence, never re-recovered."""
+    if (preview, location, crlf) == ('plain', 'spillover', False):
+        _, marker, path = _v0292_store(tmp_path)
+        return marker, path, SPILL_TEXT
+    name = ('temp_plain_crlf' if crlf else
+            'spillover_data_uri' if location == 'spillover' else
+            'temp_plain_lf' if preview == 'plain' else 'temp_data_uri')
+    fixtures = Path(__file__).parents[1] / 'fixtures'
+    home = tmp_path / 'hermes'
+    path = (home / 'cache/spillover' if location == 'spillover' else temp / 'hermes-results') / 'call_spill.txt'
+    body = ('data:application/octet-stream;base64,' + 'QUJD' * 80 + '\n' if preview == 'data-uri' else '') + SPILL_TEXT
+    path.parent.mkdir(parents=True, exist_ok=True)
+    home.mkdir(parents=True, exist_ok=True)
+    path.write_bytes((body.replace('\n', '\r\n') if crlf else body).encode())
+
+    def substitute(text):
+        return text.replace('@HERMES_HOME@', str(home)).replace('@HOST_TEMP@', str(temp))
+
+    with sqlite3.connect(home / 'lcm.db') as connection:
+        connection.executescript(substitute((fixtures / f'v0292_{name}_store.sql').read_text()))
+    with sqlite3.connect(home / 'lcm.db') as connection:
+        for table in ('messages_fts', 'messages_fts_stem'):
+            connection.execute(f"INSERT INTO {table}({table}) VALUES('rebuild')")
+            connection.execute(f"INSERT INTO {table}({table}) VALUES('integrity-check')")
+    storage = home / 'externalized'
+    storage.mkdir()
+    for payload in (fixtures / f'v0292_{name}_payloads').glob('*.json'):
+        (storage / payload.name).write_text(substitute(payload.read_text()))
+    return _marker(path, body, preview=body[:400] if preview == 'data-uri' else body[:30]), path, body
+
+
 @pytest.mark.parametrize('case', CASES, ids=_cell_id)
 def test_session_end_compare_matrix(case, host, tmp_path, monkeypatch, request):
     _run_case(case, host, tmp_path, monkeypatch, request)
@@ -230,8 +264,7 @@ def test_synthetic_orphan_characterization(case, expected, host, tmp_path, monke
 
 def _run_case(case, host, tmp_path, monkeypatch, request, characterization=None):
     route, stored_form, preview, location, host_form = case
-    if stored_form == 'v0292' and (preview, location) != ('plain', 'spillover'):
-        pytest.skip(UNCOVERED)
+    legacy = stored_form.startswith('v0292')
     temp = tmp_path / 'host-temp'
     temp.mkdir()
     monkeypatch.setattr(tempfile, 'tempdir', str(temp))
@@ -240,10 +273,11 @@ def _run_case(case, host, tmp_path, monkeypatch, request, characterization=None)
         _, _, ctx, parent, child, engine = _setup(host, 'own_engine')
         reader, session = parent, 'child'
     else:
-        if stored_form == 'v0292':
-            _, original, path = _v0292_store(tmp_path)
+        if legacy:
+            original, path, legacy_body = _v0292_matrix_store(
+                tmp_path, temp, preview, location, stored_form == 'v0292-crlf')
         engine = _engine(tmp_path)
-        reader, session = engine, SESSION if stored_form == 'v0292' else 'S1'
+        reader, session = engine, SESSION if legacy else 'S1'
     home = Path(engine._hermes_home)
     storage = Path(engine._config.large_output_externalization_path or home / 'lcm' / 'externalized')
     # Resolve the actual default directory without calling a compare or payload helper.
@@ -253,8 +287,8 @@ def _run_case(case, host, tmp_path, monkeypatch, request, characterization=None)
     body = ('small result' if stored_form == 'small' else
             ('data:application/octet-stream;base64,' + 'QUJD' * 80 + '\n' if preview == 'data-uri' else '')
             + 'MATRIX_BODY:\n' + 'line é文 abcdef 0123456789\n' * 700)
-    if stored_form == 'v0292':
-        body = SPILL_TEXT
+    if legacy:
+        body = legacy_body
         first = _host_history(original)
     else:
         path = (home / 'cache' / 'spillover' if location == 'spillover' else temp / 'hermes-results') / 'c1.txt'
@@ -269,6 +303,9 @@ def _run_case(case, host, tmp_path, monkeypatch, request, characterization=None)
         if not child_route:
             # More than the eight-row fingerprint window: exercise the store compare.
             first = [{'role': ('user', 'assistant')[i % 2], 'content': f'pad {i}'} for i in range(7)] + first
+    if route == 'reconcile-replay':
+        for i, message in enumerate(first):
+            message.setdefault('timestamp', 1762700001.0 + i)
     counts, absent, steps, host_steps = [], [], [], []
     produced = set()
 
@@ -284,10 +321,11 @@ def _run_case(case, host, tmp_path, monkeypatch, request, characterization=None)
             child.api_call(ctx, first, 1)
         else:
             engine.on_session_start(session, platform='cli', context_length=200_000,
-                                    conversation_id=CONVERSATION if stored_form == 'v0292' else 'conv1')
-            if stored_form != 'v0292':
+                                    conversation_id=CONVERSATION if legacy else 'conv1')
+            if not legacy:
                 engine.ingest(copy.deepcopy(first))
-            engine.on_session_start('foreground', platform='cli', context_length=200_000)
+            if route != 'reconcile-replay':
+                engine.on_session_start('foreground', platform='cli', context_length=200_000)
         record_step(first)
         if host_form in ('present', 'identical', 'different'):
             if host_form != 'identical':
@@ -377,7 +415,15 @@ def _run_case(case, host, tmp_path, monkeypatch, request, characterization=None)
             monkeypatch.setattr(engine, '_note_delegate_child_fallback', observe)
 
         def replay(handed, n):
-            if route in ('child-live', 'child-counted', 'child-compress') or route.startswith('child-compress-'):
+            nonlocal engine, reader
+            if route == 'reconcile-replay':
+                # The public cold-process route used by #2521's _replay.
+                engine.shutdown()
+                engine = reader = _engine(tmp_path)
+                engine.on_session_start(session, platform='cli', context_length=200_000,
+                                        conversation_id=CONVERSATION if legacy else 'conv1')
+                engine.ingest(copy.deepcopy(handed))
+            elif route in ('child-live', 'child-counted', 'child-compress') or route.startswith('child-compress-'):
                 child.api_call(ctx, handed, n)
             elif route == 'child-end':
                 child.end(engine, handed)
@@ -404,6 +450,9 @@ def _run_case(case, host, tmp_path, monkeypatch, request, characterization=None)
                 engine.on_session_end(session, handed)
             record_step(handed)
 
+        if route == 'reconcile-replay':
+            for i, message in enumerate(view):
+                message.setdefault('timestamp', 1762700001.0 + i)
         replay(view, 2)
         if route.startswith('child-compress-'):
             assert any('resuming with counted identities' in reason for reason in fallbacks)
@@ -413,6 +462,9 @@ def _run_case(case, host, tmp_path, monkeypatch, request, characterization=None)
             record_step(view)
         updated = [*view, {'role': 'user', 'content': 'new question'},
                    {'role': 'assistant', 'content': 'new answer'}]
+        if route == 'reconcile-replay':
+            for i, message in enumerate(updated):
+                message.setdefault('timestamp', 1762700001.0 + i)
         replay(updated, 4)
         rows = reader._store.get_session_messages(session)
         missing = _missing(updated, rows, storage, body)
@@ -506,27 +558,77 @@ def test_step_multiset_requires_distinct_host_rows():
 
 def write_fixture(records, destination):
     """Intern repeated digest lists; each cell resolves to sorted role/call/digest sets."""
-    cells, markers = {}, {}
+    fixture = json.loads(Path(destination).read_text())
+    cells, markers = {}, dict(fixture['markers'])
     for path in sorted(Path(records).glob('*.json')):
         for cell, result in json.loads(path.read_text()).items():
             assert cell not in cells
             for digest, marker in result.pop('markers').items():
                 assert digest not in markers or markers[digest] == marker
                 markers[digest] = marker
-            cells[cell] = result
+            if cell in fixture['cells']:
+                old = dict(fixture['cells'][cell])
+                old['contents'] = fixture['content_sets'][old['contents']]
+                old['missing'] = fixture['missing_sets'][old['missing']]
+                old['steps'] = [fixture['multisets'][i] for i in old['steps']]
+                assert old == result, f'STOP: existing main fixture changed: {cell}'
+            else:
+                cells[cell] = result
+    new_cells = list(cells.values())
+    cells = dict(fixture['cells'], **cells)
     pools = {}
     for field in ('contents', 'missing'):
-        serial = sorted({json.dumps(result[field], sort_keys=True) for result in cells.values()})
+        serial = sorted({json.dumps(result[field], sort_keys=True) for result in new_cells})
+        pool_name = 'content_sets' if field == 'contents' else 'missing_sets'
+        serial = [json.dumps(value, sort_keys=True) for value in fixture[pool_name]] + [
+            value for value in serial if json.loads(value) not in fixture[pool_name]]
         indexes = {value: i for i, value in enumerate(serial)}
         pools['content_sets' if field == 'contents' else 'missing_sets'] = [json.loads(value) for value in serial]
-        for result in cells.values():
+        for result in new_cells:
             result[field] = indexes[json.dumps(result[field], sort_keys=True)]
-    serial = sorted({json.dumps(step) for result in cells.values() for step in result['steps']})
+    serial = sorted({json.dumps(step) for result in new_cells for step in result['steps']})
+    serial = [json.dumps(value) for value in fixture['multisets']] + [
+        value for value in serial if json.loads(value) not in fixture['multisets']]
     indexes = {value: i for i, value in enumerate(serial)}
     pools['multisets'] = [json.loads(value) for value in serial]
-    for result in cells.values():
+    for result in new_cells:
         result['steps'] = [indexes[json.dumps(step)] for step in result['steps']]
     fixture = dict(pools, cells=cells, markers=markers, main_sha='7e67daf16478eff0d153b5973648c6d251f13d89')
     encoded = json.dumps(fixture, sort_keys=True, separators=(',', ':')) + '\n'
     assert len(encoded.encode('utf-8')) <= 1_000_000, 'STOP: fixture exceeds 1 MB'
     Path(destination).write_text(encoded)
+
+
+@pytest.mark.parametrize('preview,location,crlf', [
+    ('plain', 'spillover', False), ('data-uri', 'spillover', False),
+    ('plain', 'hermes-results', False), ('plain', 'hermes-results', True),
+    ('data-uri', 'hermes-results', False),
+], ids=['spillover-plain', 'spillover-data-uri', 'temp-lf', 'temp-crlf', 'temp-data-uri'])
+@pytest.mark.parametrize('incoming', ['same', 'preview', 'path', 'count'])
+def test_v0292_keep_and_session_end_agree(preview, location, crlf, incoming, tmp_path, monkeypatch):
+    temp = tmp_path / 'host-temp'
+    temp.mkdir()
+    monkeypatch.setattr(tempfile, 'tempdir', str(temp))
+    marker, path, body = _v0292_matrix_store(tmp_path, temp, preview, location, crlf)
+    engine = _engine(tmp_path)
+    try:
+        engine.on_session_start(SESSION, platform='cli', context_length=200_000, conversation_id=CONVERSATION)
+        stored = next(row for row in engine._store.get_session_messages(SESSION) if row['role'] == 'tool')
+        text = marker
+        if incoming == 'preview':
+            text = _marker(path, body, preview='DIFFERENT PREVIEW')
+        elif incoming == 'path':
+            other = path.with_name('other.txt')
+            other.write_bytes(body.encode())
+            text = marker.replace(str(path), str(other))
+        elif incoming == 'count':
+            text = _marker(path, body, count=len(body) + 1,
+                           preview=body[:400] if preview == 'data-uri' else body[:30])
+        host_message = dict(_host_history(text)[2])
+        keep_equal = (engine._message_replay_identity(stored, stored_row=True)
+                      == engine._message_replay_identity(host_message))
+        end_equal = engine._session_end_rows_equal(stored, host_message, session_id=SESSION)
+        assert keep_equal == end_equal == (incoming == 'same'), (
+            f'keep={keep_equal}, session-end={end_equal}, incoming={incoming}')
+    finally:
+        engine.shutdown()
