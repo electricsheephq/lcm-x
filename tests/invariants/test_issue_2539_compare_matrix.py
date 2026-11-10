@@ -843,4 +843,3 @@ def test_v0292_keep_and_session_end_agree(preview, location, crlf, incoming, tmp
             f'keep={keep_equal}, session-end={end_equal}, incoming={incoming}')
     finally:
         engine.shutdown()
-
