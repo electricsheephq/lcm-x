@@ -273,6 +273,7 @@ def test_a_turn_not_completed_is_never_swallowed(setup, fail, missing):
     work = receipt["arms"]["rc"]["workload"]
     assert (work["turns_planned"], len(work["turns_not_completed"])) == (36, missing)
     assert receipt["bars"]["bar6"]["items"]["ga"]["turns_completed"] is False
+    assert receipt["bars"]["bar5"]["ga_turns_complete"] is False  # The runner passes the GA arm's completion to bar 5.
 
 
 def test_p1_failure_with_an_instrument_fix_stops_cleanly(setup):
