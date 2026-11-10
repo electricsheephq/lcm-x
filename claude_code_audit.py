@@ -276,6 +276,19 @@ def _named_others(lineage: Lineage, cursor: dict, report: dict) -> None:
         report["named_other_paths"] += holds
 
 
+def _unlistable_subagents(path: Path) -> bool:
+    """The session folder's subagents folder exists but cannot be listed: glob would just return nothing."""
+    folder = session_dir(path) / "subagents"
+    try:
+        folder.lstat()
+        next(iter(folder.iterdir()), None)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    except OSError:
+        return True
+    return False
+
+
 def _holds_lines(path: Path) -> bool:
     """Not empty (a regular file with bytes, or anything else that exists), or cannot be checked (fail closed)."""
     try:
@@ -657,12 +670,7 @@ def _unverified(metadata: dict, records: list[dict], lineages: list[dict], sessi
             unknown.add(lineage.key)  # every path its records named (#2535)
         if lineage.agent_id is None:  # under every path its records named (#2535)
             for name in named_paths(pending):
-                try:  # a subagents folder that cannot be checked is not clean (glob would just return nothing)
-                    (session_dir(Path(name)) / "subagents").lstat()
-                    next(iter((session_dir(Path(name)) / "subagents").iterdir()), None)
-                except (FileNotFoundError, NotADirectoryError):
-                    pass
-                except OSError:
+                if _unlistable_subagents(Path(name)):
                     unknown.add(lineage.key)
                 try:  # saved outputs with no cursor are uncaptured; a folder that cannot be checked is not clean
                     (session_dir(Path(name)) / "tool-results").lstat()
@@ -688,6 +696,8 @@ def _unverified(metadata: dict, records: list[dict], lineages: list[dict], sessi
               and FORGOTTEN_PREFIX + lineage.rows_session not in metadata):
             unknown.add(lineage.key)
     for record in records:  # a forgotten session's subagents are still captured
+        if record["lineage"].agent_id is None and _unlistable_subagents(record["lineage"].path):
+            unknown.add(record["lineage"].key)
         for child in _subagents(record["lineage"]):
             if CURSOR_PREFIX + child.key not in metadata and FORGOTTEN_PREFIX + child.rows_session not in metadata:
                 unknown.add(child.key)

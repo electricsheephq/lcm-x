@@ -2295,3 +2295,94 @@ def test_an_unreadable_subagents_folder_under_a_pending_path_is_not_verified(tmp
     finally:
         folder.chmod(0o700)
     assert not report["verified"] and "claude-code:s1" in report["unverified"]
+
+
+# #2535 / #2548: one table for the audit's rule on paths a lineage's records named. The rule: anything holding rows the
+# store was not seen to take, or that cannot be read, makes the lineage unverified; nothing else does. "followed" is
+# the path capture follows (the cursor's, or the pending row's), "named" another path the lineage's records named, and
+# "unnamed" a path no record or cursor names (the audit cannot tie it to the lineage, so it is out of scope).
+_SIDE = [dict(e, isSidechain=True) for e in CONVERSATION[:2]]
+
+
+def _table_state(tmp_path, home, hermes, state):
+    """Builds a state whose audit has no s1 key unverified, and returns its locations."""
+    other = _append(tmp_path / "projects" / "-work" / "s2.jsonl", [dict(e, sessionId="s2") for e in CONVERSATION[:2]])
+    _record(_hook(), home, other, session="s2")
+    a = tmp_path / "projects" / "-work" / "s1.jsonl"
+    b = tmp_path / "projects" / "-other" / "s1.jsonl"
+    c = tmp_path / "projects" / "-third" / "s1.jsonl"
+    if state == "captured":  # cursor on A; a later record names B, which never appeared
+        _append(a, CONVERSATION[:2])
+        _record(_hook(), home, a)
+        cc.run_worker(home, hermes_home=hermes, settle_s=0)
+        _record(_hook(), home, b)
+        cc.run_worker(home, hermes_home=hermes, settle_s=0)
+        return {"followed": a, "named": b, "unnamed": c}
+    # pending: records name A, then B; the pending row follows B. Quit before a prompt with neither transcript ever
+    # seen, so it expires (#2535 strict) and only the artifact under test can make it unverified.
+    _record(_hook(), home, a, event="SessionStart", transcript_seen=False)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    if state == "child":  # agent x1 under B is swept and captured
+        _append(b.parent / "s1" / "subagents" / "agent-x1.jsonl", _SIDE)
+    _record(_hook(), home, b, event="SessionEnd", transcript_seen=False)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    if state == "child":
+        return {"followed": b.parent / "s1" / "subagents" / "agent-x1.jsonl",
+                "uncursored": a.parent / "s1" / "subagents" / "agent-x1.jsonl"}
+    return {"followed": b, "named": a, "unnamed": c}
+
+
+def _table_place(where, kind):
+    """Puts one artifact of ``kind`` at transcript path ``where`` (or under its session folder); returns a folder to
+    unlock after the audit, if any."""
+    folder = where.parent / where.stem
+    if kind == "lines":
+        _append(where, [dict(e, isSidechain=True) for e in CONVERSATION[2:4]] if "subagents" in where.parts
+                else CONVERSATION[2:4])
+    elif kind == "empty":
+        where.parent.mkdir(parents=True, exist_ok=True)
+        where.write_bytes(b"")
+    elif kind == "saved":
+        (folder / "tool-results").mkdir(parents=True, exist_ok=True)
+        (folder / "tool-results" / "toolu_9.txt").write_text("saved output\n")
+    elif kind in ("subagent", "subagent_empty", "unreadable_subagents"):
+        child = folder / "subagents" / "agent-y9.jsonl"
+        child.parent.mkdir(parents=True, exist_ok=True)
+        child.write_text("" if kind == "subagent_empty" else "".join(json.dumps(e) + "\n" for e in _SIDE))
+        if kind == "unreadable_subagents":
+            child.parent.chmod(0)
+            return child.parent
+    return None
+
+
+_PARENT_KINDS = ["lines", "empty", "saved", "subagent", "subagent_empty", "unreadable_subagents"]
+_HOLDS = {"lines", "saved", "subagent", "unreadable_subagents"}
+_TABLE = [(state, where, kind, where != "unnamed" and kind in _HOLDS)
+          for state in ("pending", "captured") for where in ("followed", "named", "unnamed") for kind in _PARENT_KINDS
+          if not (state == "captured" and where == "followed" and kind == "empty")]  # A exists: no empty file to add
+_TABLE += [("child", "followed", "lines", True), ("child", "uncursored", "lines", True),
+           ("child", "uncursored", "empty", False)]
+# Where the code is stricter than the rule (it fails closed): an empty file, as a pending row's transcript or as a
+# subagent transcript with no cursor, holds no rows but is unverified. Reported to the release manager; strict xfail
+# so a change in either direction shows here.
+_STRICTER = {("pending", "followed", "empty"), ("pending", "named", "empty"), ("pending", "followed", "subagent_empty"),
+             ("pending", "named", "subagent_empty"), ("captured", "followed", "subagent_empty"),
+             ("captured", "named", "subagent_empty")}
+_TABLE = [pytest.param(*row, id="-".join(row[:3]), marks=pytest.mark.xfail(strict=True, reason="stricter than the rule"))
+          if row[:3] in _STRICTER else pytest.param(*row, id="-".join(row[:3])) for row in _TABLE]
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads any folder")
+@pytest.mark.parametrize("state,where,kind,unverified", _TABLE)
+def test_the_named_path_rule_table(tmp_path, home, hermes, state, where, kind, unverified):
+    from hermes_lcm import claude_code_audit as ca
+
+    places = _table_state(tmp_path, home, hermes, state)
+    assert not [key for key in ca.audit(home)["unverified"] if key.startswith("claude-code:s1")]  # control
+    locked = _table_place(places[where], kind)
+    try:
+        report = ca.audit(home)
+    finally:
+        if locked is not None:
+            locked.chmod(0o700)
+    assert bool([key for key in report["unverified"] if key.startswith("claude-code:s1")]) is unverified
