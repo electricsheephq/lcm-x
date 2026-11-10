@@ -225,8 +225,11 @@ class PrefixMatchingMixin:
                     call, session_id=session_id, hermes_home=hermes_home)
             def restore(value):  # keys too: ingest can externalize a payload held in a key
                 if isinstance(value, dict):
-                    return {self._session_end_prefix_compare_value(key, session_id=session_id, hermes_home=hermes_home)
-                            if isinstance(key, str) else key: restore(child) for key, child in value.items()}
+                    keys = [self._session_end_prefix_compare_value(key, session_id=session_id, hermes_home=hermes_home)
+                            if isinstance(key, str) else key for key in value]
+                    if len(set(keys)) < len(keys):  # two keys restore to one: keep them as sent, never merge two
+                        keys = list(value)
+                    return {key: restore(child) for key, child in zip(keys, value.values())}
                 if isinstance(value, list):
                     return [restore(child) for child in value]
                 return self._session_end_prefix_compare_value(value, session_id=session_id, hermes_home=hermes_home)
@@ -239,9 +242,11 @@ class PrefixMatchingMixin:
                     try:
                         arguments, parsed = json.loads(arguments), True
                     except ValueError:
-                        arguments = arguments.strip()
+                        pass
                 if parsed:
                     arguments = json.dumps(restore(arguments), sort_keys=True, separators=(",", ":"), default=str)
+                else:  # text (invalid JSON or duplicate keys) compares stripped
+                    arguments = arguments.strip()
                 function["arguments"] = arguments
             return self._session_end_prefix_compare_value(
                 dict(call, function=function), session_id=session_id, hermes_home=hermes_home)
