@@ -581,7 +581,9 @@ gate's instrument (see "The audit" in the test plan).
     drops it as stale behind an undrained hook, nor lets another end-class hook replace it); only a newer hook of that lineage (the session resumed) clears it.
     A subagent's partial tail also counts after its session's end: Claude Code sends no `SubagentStop` to a session
     ended while a subagent is mid-task (by exit, `/clear` or a closed terminal; checked on real sessions), so the
-    session's end ends its subagents too, until the session resumes (#2566). Known limits: a Claude Code process
+    session's end ends its subagents too, until the session resumes (#2566). Known limits: once the session resumes
+    (`claude --resume`), a subagent cut off at its end, which never resumes, has its torn last record reported only
+    again while the session reads verified; a Claude Code process
     killed before any end hook (no `SessionEnd`, no `SubagentStop`) leaves a torn last record counted in the verdict
     while the session still reads verified; a resumed session whose newer hook's pointer is replaced by a delayed older
     `Stop` before the worker drains it stays unverified until a newer hook of that session drains (the safe side); and
