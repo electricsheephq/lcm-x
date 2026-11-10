@@ -332,7 +332,9 @@ and tag. `0.30.0` is the forward identity of the next minor release: the `v0.30.
 tag carries it first, the gauntlet runs at the last rc tag, and the GA tree must be
 that rc tree plus the GA release-notes file. The rollback target for this candidate
 is the latest stable release (`v0.29.2`); take a SQLite-safe backup and verify ordered messages and summary
-provenance through rollback and re-upgrade. The current stable release is
+provenance through rollback and re-upgrade. A rollback to v0.29.2 loses no rows; a tool result Hermes saved
+to a file is stored once more, with its tool call, at the first v0.29.2 replay, and the copy does not grow
+([#2552](https://github.com/electricsheephq/lcm-x/issues/2552)). The current stable release is
 [v0.29.2](https://github.com/electricsheephq/lcm-x/releases/tag/v0.29.2)
 at `261d41ea928eec3dc5b8db13c70f044392adf124` (2026-11-09); see [project status](project-status.md).
 The rollback target for v0.29.2 is `v0.29.1`; it adds no schema change. Take a
