@@ -752,7 +752,9 @@ def audit(home: Path, session: str | None = None) -> dict:
                and CURSOR_PREFIX + key[len(PENDING_PREFIX):] not in metadata
                and FORGOTTEN_PREFIX + Lineage(value["session_id"], value.get("agent_id"), Path(".")).rows_session not in metadata]
     # Expired lineages hold nothing to capture; they are reported apart and named in the verdict, never as pending.
-    classified = [(row, None if any(_present(Path(name)) for name in named_paths(row)) else _expired(row, metadata))
+    # One the audit found holding something (a saved output, a child) is not expired, whatever its hooks said.
+    classified = [(row, None if any(_present(Path(name)) for name in named_paths(row))
+                   or lineage_key(row["session_id"], row.get("agent_id")) in unverified else _expired(row, metadata))
                   for row in pending]
     expired = [kind for _row, kind in classified if kind]
     pending = [row for row, kind in classified if not kind]
