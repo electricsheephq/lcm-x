@@ -299,23 +299,25 @@ def _check_folder(folder: Path, session_id: str, key: str, metadata: dict, unkno
         if _uncaptured_child(child, metadata):
             unknown.add(child.key)
     stack, captured = [folder], None  # closed world (#2557): every transcript-shaped file below must be captured
+    judged, gone = set(names), FORGOTTEN_PREFIX + session_id in metadata  # a forgotten session's own files: never read
     while stack:
         try:
             with os.scandir(stack.pop()) as entries:
                 for entry in entries:
                     path = Path(entry.path)
-                    if path == folder / "tool-results" or (path.parent == folder / "subagents" and path.name in names):
-                        continue  # judged above
+                    if path == folder / "tool-results":
+                        continue  # judged by its own rule
                     if entry.is_symlink():
                         unknown.add(key)  # never followed, so never seen: not clean
                     elif entry.is_dir():
                         stack.append(entry.path)
-                    elif entry.name.endswith(".jsonl"):
-                        if entry.name.startswith("agent-"):
-                            child = Lineage(session_id, entry.name[len("agent-"):-len(".jsonl")], path)
-                            if _uncaptured_child(child, metadata):
-                                unknown.add(child.key)
-                            continue
+                    elif not entry.name.endswith(".jsonl") or (path.parent == folder / "subagents" and path.name in judged):
+                        continue  # not transcript-shaped, or judged above
+                    elif entry.name.startswith("agent-"):
+                        child = Lineage(session_id, entry.name[len("agent-"):-len(".jsonl")], path)
+                        if _uncaptured_child(child, metadata):
+                            unknown.add(child.key)
+                    elif not gone:
                         if captured is None:
                             captured = {name for meta, value in metadata.items() if meta.startswith(CURSOR_PREFIX)
                                         for name in named_paths(value)}
