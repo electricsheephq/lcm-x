@@ -44,7 +44,7 @@ from .externalize import (
     find_externalized_tool_result_content_for_call,
     load_externalized_payload,
 )
-from .ingest_persisted import _safe_hermes_spillover_file
+from .ingest_persisted import _safe_hermes_spillover_file, _safe_temp_hermes_results_file
 from .ingest_protection import (
     _add_inline_persisted_output_generation_metadata,
     _add_inline_persisted_output_identity_metadata,
@@ -1101,17 +1101,22 @@ class ReconcileMixin:
                     # matching still consumes each durable row at most once.
                     legacy_spillover = (
                         durable_content is None
-                        and _safe_hermes_spillover_file(
+                        and (_safe_temp_hermes_results_file(Path(persisted_output_source_path))
+                             or _safe_hermes_spillover_file(
                             Path(persisted_output_source_path),
                             self._hermes_home if hermes_home is None else hermes_home,
-                        ) is not None
-                        and any(row["content"] == msg.get("content") for row in
-                            (self._store if store is None else store).find_session_tool_rows(
-                                str(msg.get("session_id") or (self._session_id if session_id is None else session_id) or ""),
-                                str(msg.get("tool_call_id") or ""),
-                                conversation_id=str((self._conversation_id if conversation_id is None else conversation_id) or ""),
-                                tool_name=str(msg.get("tool_name") or msg.get("name") or ""),
-                            ))
+                        )) is not None
+                        and any(self._bare_marker_identity(row["content"],
+                                    session_id=str(row.get("session_id") or ""), hermes_home=hermes_home)
+                                == self._bare_marker_identity(msg.get("content"),
+                                    session_id=str(msg.get("session_id") or (self._session_id if session_id is None else session_id) or ""),
+                                    hermes_home=hermes_home)
+                                for row in (self._store if store is None else store).find_session_tool_rows(
+                                    str(msg.get("session_id") or (self._session_id if session_id is None else session_id) or ""),
+                                    str(msg.get("tool_call_id") or ""),
+                                    conversation_id=str((self._conversation_id if conversation_id is None else conversation_id) or ""),
+                                    tool_name=str(msg.get("tool_name") or msg.get("name") or ""),
+                                ))
                     )
                     if not legacy_spillover:
                         content = _add_inline_persisted_output_generation_metadata(
