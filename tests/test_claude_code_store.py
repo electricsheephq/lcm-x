@@ -2306,8 +2306,9 @@ def test_a_saved_output_under_a_pending_rows_earlier_path_is_not_verified(tmp_pa
     if saved == "file":
         (results / "toolu_1.txt").write_text("saved output\n")
     report = ca.audit(home)
-    if saved == "file":
+    if saved == "file":  # a saved output: never counted as expired, never written (#2560 review)
         assert not report["verified"] and "claude-code:s1" in report["unverified"]
+        assert report["expired_never_written"] == 0 and "never written" not in report["verdict"]
     else:
         assert "claude-code:s1" not in report["unverified"]
 
