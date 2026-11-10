@@ -2951,7 +2951,7 @@ _REUSED = {"first": _REUSED_SHARED + [dict(_entry("user", "fa1", "first task"), 
                                        dict(_entry("assistant", "sb3", [{"type": "text", "text": "three"}]), isSidechain=True)]}
 
 
-@pytest.mark.parametrize("hooks", ["both_alternating", "first_then_sweep", "sweep_only"])
+@pytest.mark.parametrize("hooks", ["both_alternating", "first_then_sweep", "sweep_only", "both_then_second_grows"])
 def test_a_reused_agent_id_is_pinned(tmp_path, home, hermes, hooks):
     """(file lines, lines missing from the ledger, lines held more than once) per transcript, rows, and the verdict."""
     from hermes_lcm import claude_code_audit as ca
@@ -2962,10 +2962,12 @@ def test_a_reused_agent_id_is_pinned(tmp_path, home, hermes, hooks):
              "second": _append(agents / "workflows" / "wf_run1" / "agent-x1.jsonl", _REUSED["second"])}
     _record(_hook(), home, a)
     order = {"both_alternating": ["first", "second", "first", "second"], "first_then_sweep": ["first"],
-             "sweep_only": []}[hooks]
+             "sweep_only": [], "both_then_second_grows": ["first", "second"]}[hooks]
     for name in order:
         _record(_hook(), home, a, event="SubagentStop", agent_id="x1", agent_transcript_path=str(paths[name]))
         cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    if hooks == "both_then_second_grows":  # the sweep lists the direct path first and moves the lineage back to it
+        _append(paths["second"], [dict(_entry("assistant", "sb4", [{"type": "text", "text": "late"}]), isSidechain=True)])
     for _ in range(2):
         cc.run_worker(home, hermes_home=hermes, settle_s=0)
     store = _open(home, hermes)
@@ -2987,6 +2989,8 @@ def test_a_reused_agent_id_is_pinned(tmp_path, home, hermes, hooks):
         assert seen == {"first": (4, 0, 4), "second": (5, 0, 5)}
         assert dict(rows) == {"first task": 1, "one": 1, "second task": 1, "two": 1, "three": 1}
         assert "a second transcript path holds rows" in report["verdict"]
+    elif hooks == "both_then_second_grows":  # #2566: the line the second transcript wrote after both hooks is lost
+        assert seen["first"][1] == 0 and seen["second"][:2] == (6, 1) and "late" not in rows
     else:  # the first path in sort order is taken; the second transcript's own lines are not captured separately
         assert seen == {"first": (4, 0, 0), "second": (5, 3, 0)}
         assert dict(rows) == {"first task": 1, "one": 1}
