@@ -46,11 +46,12 @@ import hashlib
 import json
 import os
 import re
+import signal
 import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # before stdin, so A7 allows it
 if __name__ != "__main__":
     import lcmx_runtime  # noqa: E402
 
@@ -359,15 +360,20 @@ def main(stdin: TextIO = sys.stdin, environ: Mapping[str, str] = os.environ, *, 
             else:
                 if pid:
                     return 0
-                child = True
-                import signal
+                child = True  # set first: the child must always end in os._exit, never return into the caller
+                # Leave the hook's group and release Claude Code's pipes before anything that can touch disk.
                 os.setsid()
+                null = os.open(os.devnull, os.O_RDWR)
+                for fd in (0, 1, 2):
+                    os.dup2(null, fd)
+                os.close(null)
                 signal.signal(signal.SIGHUP, signal.SIG_IGN)
-                with open(os.devnull, "r+b", buffering=0) as null:
-                    for fd in (0, 1, 2):
-                        os.dup2(null.fileno(), fd)
                 signal.alarm(DETACHED_DEADLINE_S)
-                time.sleep(min(500, max(0, float(environ.get("LCMX_TEST_HOOK_DELAY_MS", "0")))) / 1000)
+                try:  # test-only delay before spooling; a malformed value never costs the record
+                    delay_ms = float(environ.get("LCMX_TEST_HOOK_DELAY_MS", "0"))
+                except ValueError:
+                    delay_ms = 0
+                time.sleep(min(500, max(0, delay_ms)) / 1000)
         import lcmx_runtime
         record = normalize(payload, environ)
         record["hook_started_ns"] = hook_started_ns
