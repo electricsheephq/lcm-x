@@ -39,6 +39,17 @@ context:
 
 Restart Hermes after changing plugin or context-engine config.
 
+### Claude Code
+
+For Claude Code, use LCM-X for Claude Code, which we recommend for every Claude Code user on macOS
+and Linux. It captures your Claude Code sessions into their own local, lossless store and gives the
+agent the same five recall tools. Download the asset from the latest `claude-code-v*` release on the
+[releases page](https://github.com/electricsheephq/lcm-x/releases), unpack it, and start Claude Code
+with `claude --plugin-dir <unpacked folder>`; the steps are in the release notes and in
+[its README](adapters/claude-code/README.md). The read-only server under
+[Use LCM-X memory from Claude Code](#use-lcm-x-memory-from-claude-code-read-only) is a different
+thing: it reads a Hermes profile's store from Claude Code.
+
 ## Try it
 
 1. Run the two commands above and restart Hermes.
@@ -1155,6 +1166,9 @@ carried-over current-session node recovers the original raw message sources even
 when those sources still belong to a previous session.
 
 ## Use LCM-X memory from Claude Code (read-only)
+
+To keep a memory of your Claude Code sessions themselves, use LCM-X for Claude Code
+([Install](#claude-code)). This section reads a Hermes profile's store from Claude Code.
 
 `scripts/lcm_x_mcp.py` is a stdio MCP server over one Hermes profile's LCM-X
 store. It serves `lcm_recall`, `lcm_grep`, `lcm_expand`, `lcm_load_session` and
