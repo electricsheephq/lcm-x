@@ -426,3 +426,21 @@ def test_no_preflight_runs_for_a_tree_without_a_declared_commit(tmp_path, monkey
 @pytest.mark.parametrize("value, kept", [(12, 12), ("twelve chars", None), (True, None), (None, None), (1.5, None)])
 def test_p4_never_copies_a_payload_size_field_as_text(value, kept):
     assert pf._count(value) == kept
+
+
+def test_p4_writes_a_text_size_field_as_null_and_fails(tmp_path, monkeypatch):
+    """Through P4 itself: a payload whose size fields hold text gives a FAIL whose receipt never carries that text."""
+    monkeypatch.setitem(sys.modules, "yaml", types.SimpleNamespace(safe_load=json.loads))
+    tweak = lambda h, c, s: _payload(c, content_chars="PRIVATE-SIZE-TEXT", content_bytes="PRIVATE-SIZE-TEXT")
+    assert pf.produce(Tweaked(tmp_path, tweak), ["P4"]) == {"P4": "FAIL"}
+    text = (tmp_path / "P4.json").read_text()
+    assert "PRIVATE-SIZE-TEXT" not in text
+    assert {json.loads(text)["facts"][t][k] for t in ("rc", "ga") for k in ("content_chars", "content_bytes")} == {None}
+
+
+def test_the_producer_entry_point_refuses_a_run_dir_inside_the_package(tmp_path):
+    (tmp_path / "decl.json").write_text("{}")
+    inside = pf.run.PACKAGE / f"refused-{tmp_path.name}"
+    with pytest.raises(ValueError, match="outside the instrument package"):
+        pf.main(["--config", str(tmp_path / "decl.json"), "--run-dir", str(inside), "--instrument-dir", str(tmp_path)])
+    assert not inside.exists()

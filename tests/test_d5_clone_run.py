@@ -1026,3 +1026,12 @@ def test_only_a_declared_commit_identifies_a_tree(tmp_path, commit, bound):
     path.write_text(json.dumps(receipt))
     host.c["preflights"] = {"P4": str(path)}
     assert host.preflight("P4", plan)["verdict"] == ("PASS" if bound else "MISSING")
+
+
+def test_the_run_entry_point_refuses_a_run_dir_inside_the_package(tmp_path):
+    (tmp_path / "decl.json").write_text("{}")
+    inside = r.PACKAGE / f"refused-{tmp_path.name}"
+    with pytest.raises(ValueError, match="outside the instrument package"):
+        r.main(["--config", str(tmp_path / "decl.json"), "--run-dir", str(inside), "--instrument-dir", str(tmp_path),
+                "--rc-id", "rc-synthetic"])
+    assert not inside.exists()
