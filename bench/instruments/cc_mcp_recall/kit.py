@@ -61,7 +61,10 @@ def judge(answer, question, error=False):
     bad = error or not text
     if question["kind"] == "negative":
         correct = not bad and text == "NOT FOUND"
-        return {"correct": correct, "fabricated": not bad and not correct, "verdict": "error" if bad else "correct" if correct else "fabricated"}
+        # Any answer the run gave that is not NOT FOUND is a false recall, even one with no letters or digits ("?"):
+        # only a tool error or a blank answer is an error, and answers_complete already rejects those.
+        given = not error and bool(answer.strip())
+        return {"correct": correct, "fabricated": given and not correct, "verdict": "correct" if correct else "fabricated" if given else "error"}
     if question["kind"] == "latest":
         pair = next(p for p in C["superseded"] if p["id"] == question["pair"])
         old, new = pair["old"]["token"] in found, pair["new"]["token"] in found

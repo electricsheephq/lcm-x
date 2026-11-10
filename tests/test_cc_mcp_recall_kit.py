@@ -299,3 +299,18 @@ def test_bot_round_5():
     assert k.score(*inputs)['verdict'] == 'PASS'
     inputs[3]['bundle'] = {'core_commit': 'b'}
     assert k.score(*inputs)['verdict'] == 'VOID'
+
+
+def test_bot_round_6():
+    negative = next(q for q in k.Q if q['kind'] == 'negative')
+    # An answer with no letters or digits is a false recall, not an error the run can hide.
+    assert k.judge('?', negative)['fabricated'] and not k.judge('?', negative)['correct']
+    assert not k.judge('', negative)['fabricated'] and k.judge('', negative)['verdict'] == 'error'
+    # The final verdict: every negative answered '?' fails the false-recall bar.
+    inputs = synthetic()
+    negatives = {q['id'] for q in k.Q if q['kind'] == 'negative'}
+    for r in inputs[4]['answers']:
+        if r['id'] in negatives:
+            r['answer'] = '?'
+    result = k.score(*inputs)
+    assert not result['bars']['false_recall'] and result['verdict'] != 'PASS'
