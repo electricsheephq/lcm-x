@@ -450,8 +450,12 @@ These ship with the P2 flip:
 - test_restart_after_shrunk_resend keeps its pin as an upper bound. The ledger-era target is 0 re-stores.
 
 ## 5. Phases (v0.30.0 ceiling 11-18; ships when the gate passes)
+
+Named limits of the saved-output marker compare (#2539), stated here ahead of the phases:
 - **Named limit (#2539, counted fallbacks):** the saved-output marker rule holds on the positional and pairwise routes (live child store, off-current end, cold tail). The counted fallbacks compare by content: a missing or rewritten file, or a reused call id, gives one extra copy there, never a loss.
-- **Named limit (#2544):** if a host replaces a tool result in place with the same position, call id, path, character count and preview but different saved-file content, session-end comparison keeps the first-ingested content; the replacement is not stored (also present in v0.29.2).
+- **Named limit (#2544):** if a host replaces a tool result in place with the same position, call id, path, character count and preview but different saved-file content, session-end and delegated-child comparison keep the first-ingested content; the replacement is not stored. On the off-current route v0.29.2 behaves the same. On the delegated-child routes (new in v0.30.0) it is a loss against main before #2539, which stored the replacement among its per-handover duplicates.
+
+The phases:
 - **P0, refactor moves: NOT prerequisites (M13).** The cycle break (#2037) and the scheduler-family move land in the refactor window after v0.29.2 if they are ready. P1 and P2 do not wait for them; whichever lands second rebases.
 - **P1, ledger and atomic ingest (M15).**
   - Contents:
