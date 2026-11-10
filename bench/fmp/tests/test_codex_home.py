@@ -13,6 +13,13 @@ import pytest
 from bench.fmp import models, run
 
 
+@pytest.fixture(autouse=True)
+def fresh_stop_flag(monkeypatch):
+    # The real SIGTERM handler sets the module-global flag; never let it reach a later test.
+    import threading
+    monkeypatch.setattr(models, "STOPPING", threading.Event(), raising=False)
+
+
 @pytest.fixture
 def cli(tmp_path, monkeypatch):
     question = SimpleNamespace(qid="synthetic", store_id="store", qtype="fact",
@@ -274,7 +281,6 @@ def test_sigterm_drain_starts_no_further_model_call(tmp_path, monkeypatch, cli):
     import signal
     import threading
     calls, started = [], []
-    monkeypatch.setattr(models, "STOPPING", threading.Event(), raising=False)  # never leak a set event
     questions = [SimpleNamespace(qid=f"q{i}", store_id="store", qtype="fact", question="Synthetic?", gold="yes",
                                  dataset="lme-s", session_map={}, question_date="2025-01-01") for i in range(3)]
     monkeypatch.setattr(run.datasets, "load", lambda *a: (questions, "dataset", "ids", {}))
@@ -283,8 +289,10 @@ def test_sigterm_drain_starts_no_further_model_call(tmp_path, monkeypatch, cli):
     terminate = run._terminate
 
     def observed(signum, frame):
-        handled.set()
-        terminate(signum, frame)
+        try:
+            terminate(signum, frame)
+        finally:
+            handled.set()  # only after the real handler has set the stop flag
 
     def judge(row, q, client, specs, agreement_model=None):
         started.append(q.qid)
