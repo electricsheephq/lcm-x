@@ -11,7 +11,7 @@ import hermes_lcm.placeholder_ledger as placeholder_ledger
 from hermes_lcm import message_patterns
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
-from tests.test_lcm_engine import _FakeTimeoutRegexEngine
+from tests.engine_helpers import _FakeTimeoutRegexEngine
 
 PLACEHOLDER = "LCM active replay placeholder: message ignored"
 

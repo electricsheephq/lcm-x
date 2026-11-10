@@ -209,7 +209,7 @@ def test_foreign_conversation_replay_does_not_cover_pending_tail(engine, foreign
 
 def test_exit_lifecycle_lock_is_within_pending_retry_bound(engine, monkeypatch, caplog):
     """The exit hook never waits on a held lifecycle lock; shutdown() keeps its
-    existing contract of waiting for active use (test_lcm_engine.py)."""
+    existing contract of waiting for active use (test_lcm_engine_runtime.py)."""
     history = _history()
     _skip(engine, history)
     monkeypatch.setattr(maintenance_scheduler, "_SESSION_END_SHUTDOWN_TIMEOUT_MS", 25)
