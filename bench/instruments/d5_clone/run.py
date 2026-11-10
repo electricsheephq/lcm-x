@@ -34,6 +34,7 @@ from . import bars, capture, gateway, pins, plan as planner, provider as prov, s
 from ..release_gauntlet import kit_evidence
 
 SCHEMA = "d5-clone-receipt/1"
+_ISO_Z = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?Z")  # The declared settings time, UTC.
 NEED_FREE = 40 * 10**9
 PREFLIGHTS = ("P3", "P4", "P5", "P6", "P7")
 DOCTOR_STATUS = {"pass": "ok", "ok": "ok", "warn": "warn", "fail": "fail"}  # Any other status stays, and fails bar 5.
@@ -823,6 +824,10 @@ def run(host, *, rc_id, prior=(), instrument_fix=None):
     prior = [p for p in prior if p.get("rc") == rc_id and "verdict" in p]  # A stopped run is not an attempt.
     prior_verdicts = [p["verdict"]["raw"] for p in prior]
     receipt = {"schema": SCHEMA, "rc": rc_id, "attempt": len(prior_verdicts) + 1, "instrument_fix": instrument_fix}
+    as_of = getattr(host, "c", {}).get("settings_as_of")
+    receipt["settings"] = {  # A disclosed fact, never judged (release manager, 2026-11-10); only a UTC time is written.
+        "as_of": as_of if isinstance(as_of, str) and _ISO_Z.fullmatch(as_of) else None,
+        "note": "both arms run the declared reference-settings snapshot taken at as_of, assumed unchanged since"}
     refusal = bars.may_run(prior_verdicts, instrument_fix)
     receipt["preflights"] = steps = {"free_space": {"verdict": "PASS" if host.free_bytes() >= NEED_FREE else "FAIL"}}
     if refusal is None and steps["free_space"]["verdict"] == "PASS":

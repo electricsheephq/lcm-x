@@ -959,3 +959,18 @@ def test_an_unreadable_preflight_receipt_is_missing(tmp_path):
 def test_the_instrument_identity_is_the_package_content():
     one, two = r.instrument_identity(), r.instrument_identity()
     assert one == two and len(one["instrument_sha256"]) == 64
+
+
+@pytest.mark.parametrize("as_of, written", [("2026-11-07T01:02:03Z", "2026-11-07T01:02:03Z"),
+                                             ("2026-11-07T01:02Z", "2026-11-07T01:02Z"),
+                                             ("not a time", None), (12, None), (None, None)])
+def test_the_receipt_discloses_the_settings_time_and_nothing_else(tmp_path, as_of, written):
+    """The settings snapshot's time is recorded as a disclosed fact (release manager, 2026-11-10); a value that is not a
+    UTC time is never written."""
+    snap = tmp_path / "snapshot"
+    config = {"snapshot_dir": str(snap), "snapshot_pin": str(make_snapshot(snap)), "nonce": "synthetic"}
+    if as_of is not None:
+        config["settings_as_of"] = as_of
+    receipt = r.run(FakeHost(config, tmp_path / "run"), rc_id="rc-synthetic")
+    assert receipt["settings"]["as_of"] == written
+    assert "not a time" not in json.dumps(receipt, sort_keys=True, default=str)
