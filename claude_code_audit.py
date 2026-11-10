@@ -37,7 +37,6 @@ from .claude_code_store import (
     SET_ASIDE_TAGS,
     Lineage,
     _digest,
-    _subagents,
     _wal_without_sidecars,
     cursor_state,
     named_paths,
@@ -276,22 +275,27 @@ def _named_others(lineage: Lineage, cursor: dict, report: dict) -> None:
         report["named_other_paths"] += holds
 
 
-def _check_folder(path: Path, session_id: str, key: str, metadata: dict, unknown: set, outputs: bool) -> None:
-    """The session folder of ``path``: a subagents folder that cannot be listed, subagent transcripts nothing captured,
-    and (``outputs``: no cursor of the session follows ``path``) saved outputs, which nothing captured either."""
-    if _unlistable_subagents(path):
+def _check_folder(folder: Path, session_id: str, key: str, metadata: dict, unknown: set, outputs: bool) -> None:
+    """A session folder: a subagents folder that cannot be listed, subagent transcripts nothing captured, and
+    (``outputs``: no cursor of the session follows its transcript) saved outputs, which nothing captured either."""
+    if _unlistable_subagents(folder):
         unknown.add(key)
     if outputs:
         try:  # a folder that cannot be checked is not clean
-            (session_dir(path) / "tool-results").lstat()
-            folder = results_dir(session_dir(path))
-            if folder is None or any(True for _ in folder.iterdir()):
+            (folder / "tool-results").lstat()
+            results = results_dir(folder)
+            if results is None or any(True for _ in results.iterdir()):
                 unknown.add(key)
         except (FileNotFoundError, NotADirectoryError):
             pass
         except OSError:
             unknown.add(key)
-    for child in _subagents(Lineage(session_id, None, path)):
+    try:  # this folder's own subagents (session_dir() would map an inner <id>/ under subagents/ to the outer folder)
+        names = sorted(path.name for path in (folder / "subagents").glob("agent-*.jsonl"))
+    except OSError:
+        names = []
+    for name in names:
+        child = Lineage(session_id, name[len("agent-"):-len(".jsonl")], folder / "subagents" / name)
         if _uncaptured_child(child, metadata):
             unknown.add(child.key)
 
@@ -306,9 +310,9 @@ def _uncaptured_child(child: Lineage, metadata: dict) -> bool:
     return str(child.path) not in named_paths(metadata[CURSOR_PREFIX + child.key]) and _holds_lines(child.path)
 
 
-def _unlistable_subagents(path: Path) -> bool:
+def _unlistable_subagents(session: Path) -> bool:
     """The session folder's subagents folder exists but cannot be listed: glob would just return nothing."""
-    folder = session_dir(path) / "subagents"
+    folder = session / "subagents"
     try:
         folder.lstat()
         next(iter(folder.iterdir()), None)
@@ -706,13 +710,13 @@ def _unverified(metadata: dict, records: list[dict], lineages: list[dict], sessi
         if CURSOR_PREFIX + lineage.key in metadata or FORGOTTEN_PREFIX + lineage.rows_session in metadata:
             if lineage.agent_id is None and CURSOR_PREFIX + lineage.key not in metadata:  # #2557: forgotten, but its
                 for name in named_paths(pending):  # subagents are still captured: check them under every named path
-                    _check_folder(Path(name), lineage.session_id, lineage.key, metadata, unknown, outputs=False)
+                    _check_folder(session_dir(Path(name)), lineage.session_id, lineage.key, metadata, unknown, outputs=False)
             continue
         if any(_present(Path(name)) for name in named_paths(pending)):  # every path its records named (#2535)
             unknown.add(lineage.key)
         if lineage.agent_id is None:  # under every path its records named (#2535)
             for name in named_paths(pending):
-                _check_folder(Path(name), lineage.session_id, lineage.key, metadata, unknown, outputs=True)
+                _check_folder(session_dir(Path(name)), lineage.session_id, lineage.key, metadata, unknown, outputs=True)
     # A record set aside before its transcript had a cursor names a lineage nothing else shows.
     for lineage in failed:
         if lineage is None:
@@ -724,7 +728,7 @@ def _unverified(metadata: dict, records: list[dict], lineages: list[dict], sessi
         lineage = record["lineage"]
         if lineage.agent_id is None:
             for name in named_paths(metadata.get(CURSOR_PREFIX + lineage.key), lineage.path):
-                _check_folder(Path(name), lineage.session_id, lineage.key, metadata, unknown, outputs=False)
+                _check_folder(session_dir(Path(name)), lineage.session_id, lineage.key, metadata, unknown, outputs=False)
             continue
         parent = lineage_key(lineage.session_id)  # #2557: a child in a session folder its parent never named
         named = named_paths(metadata.get(CURSOR_PREFIX + parent)) or named_paths(metadata.get(PENDING_PREFIX + parent))
@@ -735,7 +739,7 @@ def _unverified(metadata: dict, records: list[dict], lineages: list[dict], sessi
             gone = FORGOTTEN_PREFIX + lineage.session_id in metadata  # a forgotten parent's own content is never read
             if not gone and _holds_lines(transcript):
                 unknown.add(parent)
-            _check_folder(transcript, lineage.session_id, parent, metadata, unknown, outputs=not gone)
+            _check_folder(folder, lineage.session_id, parent, metadata, unknown, outputs=not gone)
     return sorted(unknown)
 
 
