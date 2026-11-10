@@ -255,7 +255,7 @@ def _answer_ready_baseline(active_engine, question: str, payload: dict):
             "include_occurrence_time": True,
         },
         delivery_unit="hits",
-        delivery_order="score", adjacent_reply=False, later_statements=0,
+        delivery_order="score", adjacent_reply=False, later_statements=0, session_hints=False, recall_guidance="v1",
         summary_event_time=False,
     )
     recalled = json.loads(raw) if isinstance(raw, str) else raw
@@ -337,7 +337,7 @@ def _pre_llm_context(active_engine, payload: dict) -> dict | None:
                 baseline_refs=baseline_refs,
                 question_as_of=question_date,
                 retrieve=lambda recall_args: active_engine.handle_tool_call(
-                    "lcm_recall", recall_args, delivery_unit="hits", delivery_order="score", adjacent_reply=False, later_statements=0,
+                    "lcm_recall", recall_args, delivery_unit="hits", delivery_order="score", adjacent_reply=False, later_statements=0, session_hints=False, recall_guidance="v1",
                     summary_event_time=False,
                 ),
                 enabled=True,
@@ -767,6 +767,9 @@ def register(ctx):
     if getattr(engine._config, "recall_delivery_unit", "hits") == "session":
         from .recall_session import session_schema
         _TOOLS = [(name, session_schema(schema), emoji) for name, schema, emoji in _TOOLS]
+    from .schemas import recall_guidance_schemas
+    selected = recall_guidance_schemas([s for _, s, _ in _TOOLS], getattr(engine._config, "recall_guidance", "v1"))
+    _TOOLS = [(name, schema, emoji) for (name, _, emoji), schema in zip(_TOOLS, selected)]
     # Share the loaded-config filter with the native context-engine path:
     # explicitly disabled and flag-dormant tools cost no schema tokens.
     _disabled = engine._omitted_tool_names()

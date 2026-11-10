@@ -522,6 +522,7 @@ _SUPPORTED_LCM_CONFIG_YAML_KEYS = {
     "expansion_reasoning_effort",
     "embedding_query_prefix", "embedding_document_prefix",
     "recall_adjacent_reply",
+    "recall_guidance", "recall_session_hints",
     "recall_snippet_window_hits",
     "recall_extra_entries",
     "recall_later_statements",
@@ -1017,6 +1018,8 @@ ENV_FIELD_SPECS: tuple[_EnvFieldSpec, ...] = (
     _EnvFieldSpec("recall_snippet_window_hits", "LCM_RECALL_SNIPPET_WINDOW_HITS", int),
     _EnvFieldSpec("recall_extra_entries", "LCM_RECALL_EXTRA_ENTRIES", int),
     _EnvFieldSpec("recall_later_statements", "LCM_RECALL_LATER_STATEMENTS", int),
+    _EnvFieldSpec("recall_session_hints", "LCM_RECALL_SESSION_HINTS", bool),
+    _EnvFieldSpec("recall_guidance", "LCM_RECALL_GUIDANCE", str),
     _EnvFieldSpec("recall_fts_anchor", "LCM_RECALL_FTS_ANCHOR", bool),
     _EnvFieldSpec("proactive_recall_enabled", "LCM_PROACTIVE_RECALL_ENABLED", bool),
     _EnvFieldSpec("proactive_recall_min_score", "LCM_PROACTIVE_RECALL_MIN_SCORE", float),
@@ -1075,6 +1078,7 @@ _PARSER_BY_TYPE = {
 # Fields whose env reading needs provenance tracking or a computed default;
 # ``from_env`` handles these explicitly, so the uniform loop skips them.
 _SOURCE_TRACKED_ENV_FIELDS = frozenset({
+    "recall_guidance", "recall_session_hints",
     "recall_snippet_window_hits",
     "recall_extra_entries",
     "recall_later_statements",
@@ -1410,6 +1414,8 @@ class LCMConfig:
     # Evidence (#950): frozen LongMemEval-M LOCAL replay, R@10 0.898 -> 0.905 (470 q).
     # FTS-only (embeddings-off) output is unchanged; False restores the previous order.
     recall_fts_anchor: bool = True
+    recall_session_hints: bool = False
+    recall_guidance: str = "v1"
     # -- Proactive memory injection (SPEC F, default-OFF) ---
     # At active-context assembly, embed the newest user message and run the
     # lcm_recall pipeline to surface cross-session memories the model would
@@ -1605,6 +1611,22 @@ class LCMConfig:
                 c.recall_adjacent_reply = value
             else:
                 config_source_warnings.append("invalid config.yaml lcm.recall_adjacent_reply ignored; expected bool")
+
+        for name, expected in (("recall_guidance", "v1 or v2"), ("recall_session_hints", "bool")):
+            key = "LCM_" + name.upper()
+            raw = env.get(key, "").strip()
+            value = raw or (prefix_yaml.get(name, getattr(c, name)) if isinstance(prefix_yaml, dict) else getattr(c, name))
+            source = f"env:{key}" if raw else (f"config_yaml:lcm.{name}"
+                if isinstance(prefix_yaml, dict) and name in prefix_yaml else "default")
+            if name == "recall_session_hints" and raw:
+                value = _PARSER_BY_TYPE[bool](key, None)
+            if name == "recall_guidance" and isinstance(value, str):
+                value = value.strip().lower()
+            valid = isinstance(value, bool) if name == "recall_session_hints" else value in ("v1", "v2")
+            setattr(c, name, value if valid else getattr(cls, name))
+            if raw or source != "default":
+                _record(name, source if valid else "default", None if valid else
+                        f"invalid {'env ' + key if raw else 'config.yaml lcm.' + name} ignored; expected {expected}")
 
         window_hits = prefix_yaml.get("recall_snippet_window_hits", 0) if isinstance(prefix_yaml, dict) else 0
         window_env = env.get("LCM_RECALL_SNIPPET_WINDOW_HITS", "")

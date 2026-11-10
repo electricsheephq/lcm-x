@@ -5788,6 +5788,8 @@ class LCMEngine(
         if getattr(getattr(self, "_config", None), "recall_delivery_unit", "hits") == "session":
             from .recall_session import session_schema
             schemas = [session_schema(s) for s in schemas]
+        from .schemas import recall_guidance_schemas
+        schemas = recall_guidance_schemas(schemas, getattr(getattr(self, "_config", None), "recall_guidance", "v1"))
         if disabled:
             return [s for s in schemas if s.get("name") not in disabled]
         return schemas
@@ -5834,7 +5836,7 @@ class LCMEngine(
         handler = handlers.get(name)
         if handler:
             return handler(args, engine=self,
-                           **{k: v for k, v in kwargs.items() if k in {"delivery_unit", "delivery_order", "adjacent_reply", "summary_event_time", "snippet_window_hits", "extra_entries", "later_statements"}})
+                           **{k: v for k, v in kwargs.items() if k in {"delivery_unit", "delivery_order", "adjacent_reply", "summary_event_time", "snippet_window_hits", "extra_entries", "later_statements", "session_hints", "recall_guidance"}})
         return json.dumps({"error": f"Unknown LCM tool: {name}"})
 
     def _database_path_source(self) -> str:
@@ -10696,7 +10698,7 @@ class LCMEngine(
                 # FTS-only anchor under the floor would displace an eligible hit.
                 fts_anchor=False,
                 delivery_unit="hits",
-                delivery_order="score", adjacent_reply=False, later_statements=0,
+                delivery_order="score", adjacent_reply=False, later_statements=0, session_hints=False, recall_guidance="v1",
                 snippet_window_hits=0, extra_entries=0,
                 summary_event_time=False,
             )

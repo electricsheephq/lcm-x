@@ -61,6 +61,46 @@ score order; ties keep score order. The default `score` preserves existing outpu
 Only time mode adds `provenance.delivery_order: "time"`; session delivery and
 internal recall consumers keep their existing order.
 
+Set `recall_guidance: v2` (env `LCM_RECALL_GUIDANCE=v2`; default `v1`) to
+give the model guidance for questions spanning several conversations. The engine,
+plugin registry and read-only MCP reader serve the same guidance. In hits delivery,
+`detail="answer_ready"` adds `sessions_delivered` and `sessions_in_pool` under
+`provenance.answer_ready`. The counts describe distinct sessions in the returned hits
+and ranked candidate pool plus delivered later-statement children. With
+`detail="answer_ready"`, compare the counts; when fewer sessions were delivered than
+are in the pool, call again with `exclude_session_ids` set to the sessions already read.
+When a hit carries a `session_hint`, use it to read around that hit.
+Session-delivery guidance omits the hits-only provenance instruction. These are bounded
+retrieval signals, not proof that all matching sessions have been searched.
+
+With v2, `lcm_load_session` advertises `anchor_store_id`, `before` (default 6)
+and `after` (default 12). The anchor must belong to the supplied `session_id`;
+otherwise the tool returns an error without rows. Each side clamps to 0..40,
+and rows come back in store order. Role and inclusive stored-write-time filters
+apply within that window, followed by `after_store_id` and the page limit.
+When `has_more` is true, continue with `after_store_id=next_cursor` without the anchor to read onward
+through the session. The handler accepts anchor arguments under either guidance
+version; `next_cursor` is null when `has_more` is false. Existing internal window callers retain their 12-row clamp per side.
+
+Set `recall_session_hints: true` (env `LCM_RECALL_SESSION_HINTS=true`; default
+`false`) to add `session_hint` to answer-ready hits and summary leads. It is a
+call string such as `lcm_load_session(session_id='session-a', anchor_store_id=42)`.
+The session ID comes from the anchor's stored row, including for summary sources,
+so the hint still works after a compression rollover moves summary ownership.
+A missing source row or failed hint read omits only that hint. The two settings are independent; environment
+values override their `lcm.*` YAML keys. For example:
+
+```yaml
+lcm:
+  recall_guidance: v2
+  recall_session_hints: true
+```
+
+Both settings leave internal recall consumers unchanged, including proactive
+recall, pre-answer retrieval and evidence wrappers. Defaults preserve existing
+output and schemas. Agentic FMP runs must set these keys through `--recall-option`;
+FMP constructs its config explicitly and ignores environment overrides.
+
 Set `recall_summary_event_time: true` (or `LCM_RECALL_SUMMARY_EVENT_TIME=true`,
 which wins over the YAML key) to give model-called `lcm_recall` summary hits, and
 session-delivery summary leads, the span of their events:
