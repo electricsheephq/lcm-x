@@ -2249,6 +2249,29 @@ def test_a_captured_subagents_copy_under_a_pending_rows_other_path_is_not_verifi
         assert "claude-code:s1/agent:x1" not in report["unverified"]
 
 
+@pytest.mark.parametrize("copy", ["lines", "empty"])
+def test_a_subagents_copy_under_a_captured_parents_folder_is_not_verified(tmp_path, home, hermes, copy):
+    """#2548 review: x1 is captured under B while the parent was pending; the parent is then captured at A. A copy of
+    x1 under A's folder is at a path x1's cursor never named, so x1 itself is unverified when it holds lines. (The
+    parent is unverified too, through B's subagents folder: stricter than the rule, #2551.)"""
+    from hermes_lcm import claude_code_audit as ca
+
+    a = tmp_path / "projects" / "-work" / "s1.jsonl"
+    b = tmp_path / "projects" / "-other" / "s1.jsonl"
+    _record(_hook(), home, a, event="SessionStart")
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    _append(b.parent / "s1" / "subagents" / "agent-x1.jsonl", [dict(e, isSidechain=True) for e in CONVERSATION[:2]])
+    _record(_hook(), home, b)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    _append(a, CONVERSATION[:2])
+    _record(_hook(), home, a)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    assert "claude-code:s1/agent:x1" not in ca.audit(home)["unverified"]
+    stray = a.parent / "s1" / "subagents" / "agent-x1.jsonl"
+    _append(stray, [dict(e, isSidechain=True) for e in CONVERSATION[2:4]] if copy == "lines" else [])
+    assert ("claude-code:s1/agent:x1" in ca.audit(home)["unverified"]) is (copy == "lines")
+
+
 @pytest.mark.parametrize("saved", ["file", "empty"])
 def test_a_saved_output_under_a_pending_rows_earlier_path_is_not_verified(tmp_path, home, hermes, saved):
     """#2548 review: a pending row on A is replaced by B (named [A, B]); a saved output appears under A's session folder.
@@ -2345,6 +2368,16 @@ def _table_place(where, kind):
     elif kind == "saved":
         (folder / "tool-results").mkdir(parents=True, exist_ok=True)
         (folder / "tool-results" / "toolu_9.txt").write_text("saved output\n")
+    elif kind in ("saved_symlink", "results_symlink"):  # capture reads neither: a symlinked file, or a symlinked folder
+        outside = where.parent.parent / "elsewhere"
+        outside.mkdir(parents=True, exist_ok=True)
+        (outside / "toolu_9.txt").write_text("saved output\n")
+        folder.mkdir(parents=True, exist_ok=True)
+        if kind == "results_symlink":
+            (folder / "tool-results").symlink_to(outside, target_is_directory=True)
+        else:
+            (folder / "tool-results").mkdir(exist_ok=True)
+            (folder / "tool-results" / "toolu_9.txt").symlink_to(outside / "toolu_9.txt")
     elif kind in ("subagent", "subagent_empty", "unreadable_subagents"):
         child = folder / "subagents" / "agent-y9.jsonl"
         child.parent.mkdir(parents=True, exist_ok=True)
@@ -2355,8 +2388,9 @@ def _table_place(where, kind):
     return None
 
 
-_PARENT_KINDS = ["lines", "empty", "saved", "subagent", "subagent_empty", "unreadable_subagents"]
-_HOLDS = {"lines", "saved", "subagent", "unreadable_subagents"}
+_PARENT_KINDS = ["lines", "empty", "saved", "saved_symlink", "results_symlink", "subagent", "subagent_empty",
+                 "unreadable_subagents"]
+_HOLDS = {"lines", "saved", "saved_symlink", "results_symlink", "subagent", "unreadable_subagents"}
 _TABLE = [(state, where, kind, where != "unnamed" and kind in _HOLDS)
           for state in ("pending", "captured") for where in ("followed", "named", "unnamed") for kind in _PARENT_KINDS
           if not (state == "captured" and where == "followed" and kind == "empty")]  # A exists: no empty file to add
