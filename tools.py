@@ -1294,6 +1294,24 @@ _PAYLOAD_TERM_CAP = 16  # #2586: words across all operands; a longer query keeps
 _COMBINING_MARKS = "".join(f"{chr(low)}-{chr(high)}" for low, high in (
     (0x0300, 0x036F), (0x1AB0, 0x1AFF), (0x1DC0, 0x1DFF), (0x20D0, 0x20FF), (0xFE20, 0xFE2F)))
 _PAYLOAD_TOKEN = f"(?:[^\\W_]|[{_COMBINING_MARKS}])"
+# The non-ASCII characters a case-insensitive regex treats as equal to an ASCII letter (dotted and dotless i, long s,
+# Kelvin sign). Content without them lets an ASCII first word be found with str.find on lower(), exactly as the regex
+# would find it; other content takes the regex search.
+_ASCII_CASE_FOLDS = re.compile("[" + "".join(map(chr, (0x130, 0x131, 0x17F, 0x212A))) + "]")
+
+
+def _operand_hit(pattern: "re.Pattern[str]", content: str, lower: str | None, first: str) -> "re.Match[str] | None":
+    """#2586: the leftmost match of ``pattern`` (which starts with ``first``), as ``pattern.search`` returns it. With
+    ``lower`` (content.lower(), proven equivalent by the caller) and an ASCII ``first``, find candidate starts at C
+    speed and check the boundaries and the phrase only there."""
+    if lower is None or not first.isascii():
+        return pattern.search(content)
+    first, position = first.lower(), lower.find(first.lower())
+    while position != -1:
+        if (hit := pattern.match(content, position)) is not None:
+            return hit
+        position = lower.find(first, position + 1)
+    return None
 
 
 def _payload_match(content: str, query: str, tokens: list[str], operands: list[str],
@@ -1316,18 +1334,12 @@ def _payload_match(content: str, query: str, tokens: list[str], operands: list[s
         elif token in words:
             groups[-1].append(token)
     lower = content.lower()
-    lower = lower if len(lower) == len(content) else None  # a case fold that changes length: offsets would drift
+    lower = lower if len(lower) == len(content) and _ASCII_CASE_FOLDS.search(content) is None else None
     for operand, parts in words.items():
         prefix = not operand.startswith('"') and operand.endswith("*")
         pattern = re.compile(f"(?<!{_PAYLOAD_TOKEN})" + f"(?:(?!{_PAYLOAD_TOKEN})[\\s\\S])+".join(map(re.escape, parts))
                              + ("" if prefix else f"(?!{_PAYLOAD_TOKEN})"), re.IGNORECASE)
-        if lower is None:
-            hit = pattern.search(content)
-        else:  # find the first word at C speed, then check the boundaries and the phrase only there
-            first, hit, position = parts[0].lower(), None, lower.find(parts[0].lower())
-            while position != -1 and (hit := pattern.match(content, position)) is None:
-                position = lower.find(first, position + 1)
-        if hit is not None:
+        if (hit := _operand_hit(pattern, content, lower, parts[0])) is not None:
             hits[operand] = hit
     full = [group for group in groups if group and all(operand in hits for operand in group)]
     if not full and not (any_term and hits):

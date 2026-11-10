@@ -162,3 +162,51 @@ def test_the_active_session_mode_matches_by_terms(archive, query):
                              _store=archive.store, _dag=archive.dag, current_session_id="saved")
     result = json.loads(tools.lcm_grep({"query": query, "content_scope": "both"}, engine=engine))
     assert len(found(result)) == 1, result
+
+
+# Bar 2 (#2587): the str.find fast path returns exactly what the plain regex search returns. Special characters are
+# built with chr() so the source carries no escape chains.
+SPECIAL = [chr(c) for c in (0x131, 0x130, 0x17F, 0xB5, 0x3BC, 0x3C2, 0x3C3, 0x3A3, 0x212A, 0xDF, 0xFB05, 0xFB06,
+                            0x3D0, 0x3B2, 0x1E9B, 0x1E61, 0x345, 0x301)]
+FUZZ_ALPHABET = list("isktmeaISKTM .-_") + SPECIAL
+
+
+def _reference(monkeypatch, *args):
+    with monkeypatch.context() as patch:
+        patch.setattr(tools, "_ASCII_CASE_FOLDS", __import__("re").compile(r"[\s\S]"))  # every content takes the regex
+        return tools._payload_match(*args)
+
+
+def _differential_cases():
+    import random
+    rng = random.Random(2587)
+    words = ["id", "storm", "sigma", "kelvin", "st", "beta", "mum", "ss",
+             chr(0x131) + "d", chr(0x17F) + "torm", chr(0xB5) + "m", chr(0x3BC) + "m", chr(0x3BF) + chr(0x3C2),
+             chr(0x3A3) + "IGMA", chr(0x212A) + "elvin", chr(0xFB05), chr(0xFB06), chr(0x3D0) + "eta", "s" + chr(0x301)]
+    contents = [f"{a} x {b}" for a in words for b in ("storm", "id", chr(0x3C3))] + [
+        "".join(rng.choice(FUZZ_ALPHABET) for _ in range(rng.randint(1, 24))) for _ in range(300)]
+    queries = words + [f"{a} {b}" for a, b in zip(words, reversed(words))] + [f'"{a} {b}"' for a, b in zip(words, words[1:])]
+    return contents, queries
+
+
+def test_the_fast_path_equals_the_regex_search(monkeypatch):
+    from hermes_lcm.search_query import agent_grep_operands
+    contents, queries = _differential_cases()
+    compared = 0
+    for query in queries:
+        _, tokens, operands = agent_grep_operands(query)
+        for content in contents:
+            for any_term in (False, True):
+                assert tools._payload_match(content, query, tokens, operands, any_term) == _reference(
+                    monkeypatch, content, query, tokens, operands, any_term), (content, query, any_term)
+                compared += 1
+    assert compared > 10000
+
+
+def test_the_fast_path_is_taken_for_plain_ascii_content(monkeypatch):
+    calls = []
+    real = tools._operand_hit
+    monkeypatch.setattr(tools, "_operand_hit", lambda pattern, content, lower, first: calls.append(lower is not None) or real(pattern, content, lower, first))
+    tools._payload_match("padding storm relay", "relay storm", ["relay", "storm"], ["relay", "storm"])
+    tools._payload_match(chr(0x17F) + " storm relay", "relay storm", ["relay", "storm"], ["relay", "storm"])
+    assert calls == [True, True, False, False]
