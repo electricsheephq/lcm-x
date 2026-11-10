@@ -53,6 +53,31 @@ def test_an_explicit_or_query_shows_its_payload_hits_at_once(archive):
     assert "retried" not in result and len(found(result)) == 1, result
 
 
+def test_an_underscore_separates_tokens_as_in_the_message_index(archive):
+    saved(archive, f"storm_relay evacuation: {GOLD}")
+    assert len(found(archive.call(query='"storm relay"'))) == 1
+
+
+def test_a_combining_mark_joins_a_token_as_in_the_message_index(archive):
+    saved(archive, f"storm\u0301relay evacuation: {GOLD}")
+    assert found(archive.call(query='"storm relay"')) == []
+
+
+@pytest.mark.parametrize("text,hit", [("alpha only", False), ("gamma and delta", True), ("beta then alpha", True)])
+def test_or_groups_bind_looser_than_and(archive, text, hit):
+    saved(archive, f"{text} {GOLD}")
+    assert bool(found(archive.call(query="alpha beta OR gamma delta"))) is hit
+
+
+def test_a_capped_any_term_retry_reports_response_cap(archive, monkeypatch):
+    for n in range(3):
+        saved(archive, f"storm lantern {n} {GOLD}", session=f"s{n}")
+    monkeypatch.setattr(tools, "_LCM_GREP_RESPONSE_CHAR_CAP", 1500)
+    result = archive.call(query="storm zzabsentterm")
+    assert result["retried"] == "any_term" and 0 < len(payload_hits(result)) < 3, result
+    assert "response_cap" in result["partial"]["reasons"]
+
+
 def test_an_out_of_scope_payload_never_matches(archive):
     saved(archive, FACT, session="other")
     archive.store.append("saved", {"role": "user", "content": "unrelated"})

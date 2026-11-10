@@ -1289,28 +1289,39 @@ def _reader_payload_search(path: Path, budget: int, in_scope) -> dict[str, Any]:
 
 
 _PAYLOAD_TERM_CAP = 16  # #2586: words across all operands; a longer query keeps the literal match only
+# A token character as the message index's unicode61 tokenizer sees it: letters and digits plus combining marks; the
+# underscore separates tokens.
+_PAYLOAD_TOKEN = "(?:[^\\W_]|[\u0300-\u036f\u1ab0-\u1aff\u1dc0-\u1dff\u20d0-\u20ff\ufe20-\ufe2f])"
 
 
 def _payload_match(content: str, query: str, tokens: list[str], operands: list[str],
                    any_term: bool = False) -> tuple[int, int, int, int] | None:
     """#2586: (tier, start, end, terms) for a saved output, in one pass. Tier 0 is the query as typed; tier 1 is every
-    operand (a quoted one as a phrase) in any order; tier 2 is any operand, for an OR query or when ``any_term`` asks
-    for the retry's candidates. The span is the first matched operand. Case-insensitive; a term matches whole words, as
-    the message index does. At most 1 + 16 searches, each linear in the content times a phrase of at most 16 words."""
+    operand of one OR group (a quoted operand as a phrase) in any order, groups split as FTS5 does (AND binds tighter
+    than OR); tier 2 is any operand, only when ``any_term`` asks for the retry's candidates. The span is the first
+    matched operand. Case-insensitive, on message-index token boundaries. At most 1 + 16 searches, each linear in the
+    content times a phrase of at most 16 words."""
     if (match := re.search(re.escape(query), content, flags=re.IGNORECASE)) is not None:
         return 0, match.start(), match.end(), len(operands)
-    words = [re.findall(r"\w+", operand) for operand in operands]
-    if "NOT" in tokens or not operands or sum(map(len, words)) > _PAYLOAD_TERM_CAP or not all(words):
+    words = {operand: re.findall(_PAYLOAD_TOKEN + "+", operand) for operand in operands}
+    if "NOT" in tokens or not operands or sum(map(len, words.values())) > _PAYLOAD_TERM_CAP or not all(words.values()):
         return None
-    any_term, found = any_term or "OR" in tokens, []
-    for operand, parts in zip(operands, words):
+    groups, hits = [[]], {}
+    for token in tokens:
+        if token == "OR" and not any_term:  # the retry's OR query is flat: tier 1 needs every operand
+            groups.append([])
+        elif token in words:
+            groups[-1].append(token)
+    for operand, parts in words.items():
         prefix = not operand.startswith('"') and operand.endswith("*")
-        hit = re.search(r"(?<!\w)" + r"\W+".join(map(re.escape, parts)) + ("" if prefix else r"(?!\w)"), content, re.IGNORECASE)
-        if hit is None and not any_term:
-            return None
-        found += [hit] if hit else []
-    first = min(found, key=lambda hit: hit.start(), default=None)
-    return None if first is None else (1 if len(found) == len(operands) else 2, first.start(), first.end(), len(found))
+        pattern = f"(?<!{_PAYLOAD_TOKEN})" + f"(?:(?!{_PAYLOAD_TOKEN})[\\s\\S])+".join(map(re.escape, parts))
+        if (hit := re.search(pattern + ("" if prefix else f"(?!{_PAYLOAD_TOKEN})"), content, re.IGNORECASE)) is not None:
+            hits[operand] = hit
+    full = [group for group in groups if group and all(operand in hits for operand in group)]
+    if not full and not (any_term and hits):
+        return None
+    first = min((hits[o] for o in (sum(full, []) if full else hits)), key=lambda hit: hit.start())
+    return (1 if full else 2), first.start(), first.end(), len(hits)
 
 
 def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
@@ -1758,7 +1769,8 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
                     return json.dumps({"error": f"Externalized ref is not owned by the active session: {ref}"})
                 continue
             content = str(payload.get("content") or "")
-            match = _payload_match(content, query, match_tokens, match_operands, stash_any_term)
+            match = _payload_match(content, query, match_tokens, match_operands,
+                                   stash_any_term or args.get("_grep_any_term") is True)
             if match is None:
                 continue
             tier, start, end, terms = match
@@ -1811,6 +1823,7 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
             for key in ("_sort_ts", "_sort_rank", "_sort_directness", "_match_tier", "_terms"):
                 item.pop(key, None)
             if (response_chars := response_chars + len(json.dumps(item, ensure_ascii=False))) > _LCM_GREP_RESPONSE_CHAR_CAP:
+                stashed_any_term.append({"_response_cap": True})  # marker: the retry reports response_cap
                 break
             stashed_any_term.append(item)
         externalized_scan = {
@@ -2781,8 +2794,15 @@ def lcm_grep(args: Dict[str, Any], **kwargs) -> str:
                         retried_payload[key] = payload[key]
                 if stashed and isinstance(retried_payload.get("results"), list):
                     # #2586: payload any-term hits rank after every history hit in each sort, so they follow it
-                    retried_payload["total_results"] += len(stashed)
-                    retried_payload["results"] = (retried_payload["results"] + stashed)[:retried_payload["limit"]]
+                    hits = [item for item in stashed if "_response_cap" not in item]
+                    if len(hits) < len(stashed):
+                        scan = retried_payload.get("externalized_scan") or {}
+                        partial = retried_payload.setdefault("partial", {
+                            "payloads_searched": scan.get("scanned_files", 0), "payloads_total": scan.get("candidate_files", 0),
+                            "reasons": [], "prefix_bytes": _LCM_GREP_EXTERNALIZED_CONTENT_BYTES})
+                        partial["reasons"] = list(dict.fromkeys([*partial.get("reasons", []), "response_cap"]))
+                    retried_payload["total_results"] += len(hits)
+                    retried_payload["results"] = (retried_payload["results"] + hits)[:retried_payload["limit"]]
             payload = retried_payload
             payload["query"] = query
             payload["retried"] = "any_term"

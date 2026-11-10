@@ -32,7 +32,7 @@ LCM_GREP = {
                     "Indexed history full-text query: AND by default; uppercase OR/NOT, quoted phrases, and term* prefixes "
                     "(at least 2 alphanumeric characters) are honoured. In mode='full_text', zero hits with multiple terms retry once "
                     "as any-term matching (retried='any_term'), except top-level OR/NOT queries and CJK/emoji substring searches. "
-                    "content_scope='externalized' matches the literal query text; operators and retry do not apply."
+                    "content_scope='externalized' matches the query as typed or all its terms in any order (quoted phrases kept, uppercase OR honoured); a NOT query matches only as typed."
                 ),
             },
             "limit": {
