@@ -11,6 +11,7 @@ site and ``self._*`` reference unchanged.
 import hashlib
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -30,7 +31,6 @@ from .message_content import normalize_content_value, text_content_for_pattern_m
 from .ingest_persisted import (
     _expected_persisted_output_chars,
     _is_hermes_persisted_output_marker,
-    _persisted_output_preview_prefix_digest,
     _persisted_output_saved_path,
 )
 from .sqlite_util import _is_ingest_busy_error
@@ -136,7 +136,7 @@ class PrefixMatchingMixin:
         self,
         message: Dict[str, Any],
         *,
-        session_id: str, hermes_home=None,
+        session_id: str, hermes_home=None, recover_markers=True,
     ) -> str | tuple:
         home = self._hermes_home if hermes_home is None else hermes_home
         marker_payloads = {} if (message or {}).get("role") == "tool" else None
@@ -146,17 +146,10 @@ class PrefixMatchingMixin:
         )
         if (message or {}).get("role") == "tool":
             text = normalize_content_value(content)
-            if not bool(getattr(self._config, "large_output_externalization_enabled", True)):
-                # Without durable marker metadata, retain the recovered-content compare.
-                if _is_hermes_persisted_output_marker(text):
-                    recovered = _recover_marker_for_compare(text, home)
-                    if recovered is not None:
-                        content = recovered[0]
-            else:
-                identity = self._session_end_marker_identity(
-                    message, text, session_id=session_id, payloads=marker_payloads)
-                if identity is not None:
-                    return identity
+            if recover_markers and _is_hermes_persisted_output_marker(text):
+                recovered = _recover_marker_for_compare(text, home)
+                if recovered is not None:
+                    content = recovered[0]
         content = redact_sensitive_value(
             content,
             self._config,
@@ -164,31 +157,35 @@ class PrefixMatchingMixin:
         )
         return normalize_content_value(content)
 
-    def _session_end_marker_identity(self, message, text, *, session_id, payloads):
-        # A marker row equals a stored row exactly when the host's marker text would be byte-identical (path, character count, preview), whether or not the file still exists. A stored row without recorded marker metadata compares by recovered content.
-        if _is_hermes_persisted_output_marker(text):
-            source = _persisted_output_saved_path(text)
-            expected = _expected_persisted_output_chars(text)
-            redacted = normalize_content_value(redact_sensitive_value(
-                text, self._config, parse_json_strings=False))
-            digest = _persisted_output_preview_prefix_digest(redacted)
-        else:
-            original = (message or {}).get("content")
-            if not isinstance(original, str) or not is_externalized_placeholder(original.strip()):
-                return None
-            payload = payloads.get(original.strip())
-            if (not isinstance(payload, dict) or not isinstance(payload.get("content"), str)
-                    or payload["content"] != text
-                    or (payload.get("session_id") and payload["session_id"] != session_id)):
-                return None
-            source = payload.get("persisted_output_source_path")
-            expected = payload.get("persisted_output_expected_chars")
-            digest = payload.get("persisted_output_redacted_preview_sha256")
-        if not (isinstance(source, str) and source and type(expected) is int and expected >= 0
-                and isinstance(digest, str) and len(digest) == 64):
-            return None
-        # A tuple cannot collide with literal user/tool text. All three fields must match.
-        return ("persisted-output-source", source, expected, digest)
+    def _session_end_rows_equal(self, stored_row, host_message, *, session_id, hermes_home=None):
+        # Two bare markers are the same row only when their text is byte-identical. A marker and a stored recovered result are the same row when the marker's path and character count equal the ones recorded at ingest and the marker's preview is exactly the start of the stored content. The marker's boilerplate wording is not part of that identity.
+        # A stored row takes a marker identity only from its own marker: when its payload's recorded marker source is not unambiguously this row's (a shared payload, a plain row, a marker with another path), the row compares by content.
+        def fields(row):
+            return self._session_end_prefix_compare_identity(dict(row, content=None),
+                session_id=session_id, hermes_home=hermes_home)
+        if fields(stored_row) != fields(host_message):
+            return False
+        original, incoming = stored_row.get("content"), host_message.get("content")
+        if host_message.get("role") == "tool" and _is_hermes_persisted_output_marker(incoming):
+            if _is_hermes_persisted_output_marker(original):
+                return original == incoming
+            payloads = {}
+            text = self._session_end_prefix_compare_value(original, session_id=session_id,
+                hermes_home=hermes_home, marker_payloads=payloads)
+            payload = payloads.get(original.strip()) if isinstance(original, str) else None
+            if (isinstance(payload, dict) and isinstance(payload.get("content"), str) and payload["content"] == text
+                    and (not payload.get("session_id") or payload["session_id"] == session_id)):
+                source, expected = payload.get("persisted_output_source_path"), payload.get("persisted_output_expected_chars")
+                if source and source == _persisted_output_saved_path(incoming) and type(expected) is int:
+                    preview = re.search(r"^Preview \(first \d+ chars\):[^\S\r\n]*\r?\n(.*?)\r?\n</persisted-output>\s*$",
+                        incoming, re.MULTILINE | re.DOTALL)
+                    prefix = preview[1] if preview else None
+                    if prefix is not None and prefix.endswith("\n..."):
+                        prefix = prefix[:-4].removesuffix("\r")
+                    if prefix:
+                        return (expected >= 0 and expected == _expected_persisted_output_chars(incoming)
+                                and text.startswith(prefix))
+        return self._session_end_prefix_compare_identity(stored_row, session_id=session_id, hermes_home=hermes_home) == self._session_end_prefix_compare_identity(host_message, session_id=session_id, hermes_home=hermes_home)
 
     def _session_end_prefix_compare_tool_calls(
         self,
@@ -219,11 +216,11 @@ class PrefixMatchingMixin:
         self,
         message: Dict[str, Any],
         *,
-        session_id: str, hermes_home=None,
+        session_id: str, hermes_home=None, recover_markers=True,
     ) -> tuple[str, str | tuple, str, str, str]:
         return (
             str((message or {}).get("role") or ""),
-            self._session_end_prefix_compare_content(message, session_id=session_id, hermes_home=hermes_home),
+            self._session_end_prefix_compare_content(message, session_id=session_id, hermes_home=hermes_home, recover_markers=recover_markers),
             str((message or {}).get("tool_call_id") or ""),
             str((message or {}).get("tool_name") or ""),
             self._session_end_prefix_compare_tool_calls(message, session_id=session_id, hermes_home=hermes_home),
@@ -255,18 +252,11 @@ class PrefixMatchingMixin:
         for idx, stored_msg in enumerate(stored_messages):
             msg = messages[idx]
             try:
-                message_identity = self._session_end_prefix_compare_identity(
-                    msg,
-                    session_id=session_id,
-                )
-                stored_identity = self._session_end_prefix_compare_identity(
-                    stored_msg,
-                    session_id=session_id,
-                )
+                equal = self._session_end_rows_equal(stored_msg, msg, session_id=session_id)
             except Exception:
                 logger.debug("LCM session-end prefix compare normalization failed", exc_info=True)
                 return None
-            if message_identity != stored_identity:
+            if not equal:
                 return None
         return len(stored_messages)
 

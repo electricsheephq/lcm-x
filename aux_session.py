@@ -1070,7 +1070,7 @@ class DelegateChildMixin:
         return ends[0] if len(ends) == 1 else None
 
     def _remember_delegate_child_boundary(self, session_id: str, messages: List[Dict[str, Any]]) -> None:
-        identities = [self._session_end_prefix_compare_identity(msg, session_id=session_id) for msg in messages
+        identities = [self._session_end_prefix_compare_identity(msg, session_id=session_id, recover_markers=False) for msg in messages
                       if isinstance(msg, dict) and not self._matches_ignore_message_patterns(msg)]
         tail = identities[-_ANCHOR_ROWS:]
         # Repeated tails need the full output to identify the actual end uniquely.
@@ -1080,7 +1080,7 @@ class DelegateChildMixin:
 
     def _remember_delegate_child_outputs(self, session_id: str, messages, result) -> None:
         def identities(rows):
-            return [self._session_end_prefix_compare_identity(msg, session_id=session_id) for msg in rows
+            return [self._session_end_prefix_compare_identity(msg, session_id=session_id, recover_markers=False) for msg in rows
                     if isinstance(msg, dict) and not self._matches_ignore_message_patterns(msg)]
         produced = Counter(identities(result)) - Counter(identities(messages))
         _DELEGATE_COMPACTION_OUTPUTS[self._delegate_child_key(session_id)] = [
@@ -1113,9 +1113,8 @@ class DelegateChildMixin:
                     # The input is covered only when this pass stored it and its last row is the stored tail. After a
                     # failed store, a matching tail can be a copy of the last stored row behind an unstored one (#2071),
                     # so the summary is kept: a surplus head, never a lost one.
-                    covered = bool(pre_store is not None and tail and view and self._session_end_prefix_compare_identity(
-                        tail[-1], session_id=session_id,
-                    ) == self._session_end_prefix_compare_identity(view[-1], session_id=session_id))
+                    covered = bool(pre_store is not None and tail and view and self._session_end_rows_equal(
+                        tail[-1], view[-1], session_id=session_id))
                     if covered:
                         stored_tail = tail
                     else:
@@ -1355,7 +1354,7 @@ class DelegateChildMixin:
             self._note_delegate_child_fallback(session_id, f"parent link not recorded: {type(exc).__name__}: {exc}")
         key = self._delegate_child_key(session_id)
         boundary = _DELEGATE_RESUME_BOUNDARIES.get(key)
-        identities = [self._session_end_prefix_compare_identity(msg, session_id=session_id) for msg in view]
+        identities = [self._session_end_prefix_compare_identity(msg, session_id=session_id, recover_markers=False) for msg in view]
         start = self._delegate_child_unique_end(
             [self._delegate_child_boundary_digest(identity) for identity in identities], boundary) if boundary else None
         anchored, rejected = start is not None, []
@@ -1366,6 +1365,7 @@ class DelegateChildMixin:
             if start == 0 and len(self._delegate_child_store_sessions(session_id)) > 1:
                 start = None  # an empty continuation is not an empty logical child history
         if start is None:
+            identities = [self._session_end_prefix_compare_identity(msg, session_id=session_id) for msg in view]
             sessions = self._delegate_child_store_sessions(session_id)
             stored_tail = []
             for sid in sessions:

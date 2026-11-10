@@ -12309,8 +12309,7 @@ class LCMEngine(
                 read, stored_index = read + len(stored), 0
                 continue
             row, message = stored[stored_index], view[index]
-            if (self._session_end_prefix_compare_identity(row, session_id=session, hermes_home=home) !=
-                    self._session_end_prefix_compare_identity(message, session_id=session, hermes_home=home)):
+            if not self._session_end_rows_equal(row, message, session_id=session, hermes_home=home):
                 if self._cold_tail_ingest_drops(message):
                     index += 1
                     continue
@@ -12337,12 +12336,11 @@ class LCMEngine(
         _, message, stamp = conflict
         session, home, start = tail["session_id"], tail["hermes_home"], 0
         conversation = _normalize_conversation_id_value(tail["conversation_id"])
-        identity = self._session_end_prefix_compare_identity(message, session_id=session, hermes_home=home)
         while rows := tail["store"].get_range(session, start_id=start, limit=1000,
                 conversation_id=conversation):
             if any(_normalize_conversation_id_value(row.get("conversation_id")) == conversation and
                    _normalize_observed_at(row.get("observed_at")) == stamp and
-                   self._session_end_prefix_compare_identity(row, session_id=session, hermes_home=home) == identity
+                   self._session_end_rows_equal(row, message, session_id=session, hermes_home=home)
                    for row in rows):
                 return True
             if deadline is not None and time.monotonic() >= deadline:
@@ -12359,8 +12357,7 @@ class LCMEngine(
         conversation = _normalize_conversation_id_value(tail["conversation_id"])
         stored = tail["store"].get_range(session, limit=len(view) + 1, conversation_id=conversation)
         for row, message in zip(stored, view):
-            if (self._session_end_prefix_compare_identity(row, session_id=session, hermes_home=hermes_home) !=
-                    self._session_end_prefix_compare_identity(message, session_id=session, hermes_home=hermes_home)):
+            if not self._session_end_rows_equal(row, message, session_id=session, hermes_home=hermes_home):
                 return None
             stamp, seen = _normalize_observed_at(message.get("timestamp")), _normalize_observed_at(row.get("observed_at"))
             if stamps and None not in (stamp, seen) and stamp != seen:
