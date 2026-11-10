@@ -202,3 +202,184 @@ def test_only_paths_beneath_the_arm_s_home_are_masked(tmp_path):
     assert masked.count("<home-path>") == 1 and f"{home}-backup/lost.txt" in masked and f'"bare": "{home}"' in masked
     escaped = json.dumps({"output": f"{home}/a.txt\nRC-TEXT more"})  # The JSON escape ends the path, not the text.
     assert pf._home_paths(escaped, home) == json.dumps({"output": "<home-path>\nRC-TEXT more"})
+    assert pf._home_paths(f"{home}/o.txt;exit=1", home) != pf._home_paths(f"{home}/o.txt;exit=0", home)
+    assert pf._home_paths(f"{home}/a/b.txt", home) == pf._home_paths(f"{home}/a/c.txt", home)
+
+
+MODEL = "unlisted-model-9d2b"
+
+
+class Tweaked(FakeHost):
+    """FakeHost plus one targeted change: tweak(host, ctx, step) after each turn, ctx["over"] over the workload facts,
+    host.reply as the edition replay's result, and *seed* log lines already present before the arm."""
+
+    def __init__(self, root, tweak, fault=None, seed=()):
+        super().__init__(root, fault)
+        self.tweak, self.seed, self.reply, self.armed = tweak, list(seed), None, []
+
+    def arm(self, tree, home, plan):
+        self.armed.append((home.parent.name, self.c["context_length"]))
+        return {**super().arm(tree, home, plan), "log": list(self.seed)}
+
+    def turn(self, ctx, step):
+        done = super().turn(ctx, step)
+        self.tweak(self, ctx, step)
+        return done
+
+    def replay(self, ctx, step, t0, h8):
+        return self.reply or super().replay(ctx, step, t0, h8)
+
+    def facts(self, ctx):
+        return {**super().facts(ctx), **ctx.get("over", {})}
+
+
+def _sql(ctx, db, sql, *args):
+    with closing(sqlite3.connect(ctx["home"] / db)) as con, con:
+        con.execute(sql, args)
+
+
+def _payload(ctx, **changes):
+    """Rewrite the arm's one payload file with *changes*, renamed by its content's digest, and repoint the host row."""
+    old = next((ctx["home"] / "lcm-large-outputs").iterdir())
+    data = {**json.loads(old.read_text()), **changes}
+    new = old.with_name(old.name.replace(pf.DIGEST12.search(old.name)[1],
+                                         hashlib.sha256(data["content"].encode()).hexdigest()[:12]))
+    old.rename(new)
+    new.write_text(json.dumps(data))
+    _sql(ctx, "state.db", "UPDATE messages SET content = replace(content, ?, ?)", old.name, new.name)
+
+
+def _receipt(validity="PASS", conversation="conv", range_new=0):
+    return {"checks": {"validity": {"verdict": validity}}, "payload": {"conversation_id": conversation}}, False, range_new
+
+
+def _disable(ctx):
+    (ctx["home"] / "config.yaml").write_text(json.dumps({"plugins": {"enabled": ["hermes-lcm-x"]}}))
+
+
+def _rc(ctx):
+    return ctx["name"] == "rc"
+
+
+def _noop(host, ctx, step):
+    pass
+
+
+def _case(name, tweak, verdict, reasons, id, **kw):
+    return pytest.param(name, tweak, verdict, reasons, kw, id=id)
+
+
+HYGIENE_NOTE = "host session hygiene ran on L (2 lines); the checks are not judged"
+NO_LIVE = "the cold bind's LCM-X rows carry no conversation_id to compare"
+NO_REPLAYED = "neither the T0 session row nor the edition receipt gives a conversation_id to compare"
+P4_ROWS, P4_EMPTY = "not one tool row per store, one reference and one payload file", "the payload file holds no content and sizes"
+P4_DIGEST = "the reference's digest is not its own content's hash"
+CASES = [
+    _case("P3", _noop, "FAIL", [f"{m}: the same request gave different bytes" for m in ("d5-summary", "d5-aux")],
+          "P3-replies-vary", vary=True),
+    _case("P3", lambda h, c, s: _rc(c) and c["stats"]["calls_per_step"].clear(), "FAIL", ["rc: no step ran"], "P3-no-step"),
+    _case("P3", lambda h, c, s: _rc(c) and c["stats"]["calls_by_model"].clear(), "FAIL", ["rc: no d5-summary call"],
+          "P3-no-summary-call"),
+    _case("P3", lambda h, c, s: _rc(c) and _sql(c, "lcm.db", "INSERT INTO summary_nodes (summary) VALUES ('free text')"),
+          "FAIL", ["rc: a new summary node not from the fixed rule"], "P3-free-node"),
+    _case("P3", lambda h, c, s: _rc(c) and c["stats"].update(agent_calls_outside_step=1), "FAIL",
+          ["rc: agent calls outside a step"], "P3-outside-step"),
+    _case("P3", lambda h, c, s: _rc(c) and c["stats"].update(replay_misses={"x": 1}), "FAIL", ["rc: replay misses"],
+          "P3-replay-miss"),
+    _case("P3", lambda h, c, s: _rc(c) and c["stats"].update(unknown_models={MODEL: 1}), "FAIL", ["rc: unknown models"],
+          "P3-unknown-model"),
+    _case("P3", lambda h, c, s: _rc(c) and c["stats"]["calls_per_step"].update({s["id"]: 9}), "FAIL",
+          ["rc: step calls != planned entries"], "P3-off-script"),
+    _case("P4", lambda h, c, s: _rc(c) and (c["home"] / "lcm-large-outputs" / "extra.json").write_text("{}"), "FAIL",
+          [f"rc: {P4_ROWS}"], "P4-second-file"),
+    _case("P4", lambda h, c, s: _payload(c, content_chars=0), "FAIL", [f"rc: {P4_EMPTY}", f"ga: {P4_EMPTY}"],
+          "P4-zero-chars"),  # Both trees: one tree alone would also differ from the other.
+    _case("P4", _noop, "FAIL", [f"rc: {P4_DIGEST}", f"ga: {P4_DIGEST}"], "P4-wrong-digest", fault="wrong-digest"),
+    _case("P4", lambda h, c, s: _rc(c) and _payload(c, content_chars=2), "FAIL", ["content_chars differs between the trees"],
+          "P4-chars-differ"),
+    _case("P4", lambda h, c, s: _rc(c) and _payload(c, content_bytes=2), "FAIL", ["content_bytes differs between the trees"],
+          "P4-bytes-differ"),
+    _case("P4", lambda h, c, s: _rc(c) and _sql(c, "state.db", "UPDATE messages SET content ="
+                                                 " replace(content, 'output: ', 'output: other ')"),
+          "FAIL", ["stub_masked_sha256 differs between the trees"], "P4-stub-differs"),
+    _case("P4", lambda h, c, s: _rc(c) and _payload(c, content=MARKER.upper()), "FAIL",  # Same length, its own digest.
+          ["content_masked_sha256 differs between the trees"], "P4-content-differs"),
+    _case("P6", lambda h, c, s: setattr(h, "reply", _receipt(validity="FAIL")), "FAIL", ["bind validity is not PASS"],
+          "P6-validity"),
+    _case("P6", lambda h, c, s: setattr(h, "reply", _receipt(range_new=1)), "FAIL", ["range_new_rows is not 0"],
+          "P6-range-new"),
+    _case("P6", lambda h, c, s: c.update(log=[x for x in c["log"] if not x.startswith(s["id"] + " ")]), "FAIL",
+          ["no anchor line at the cold bind"], "P6-no-cold-anchor"),
+    _case("P6", lambda h, c, s: c.update(log=[x for x in c["log"] if not x.startswith(s["id"] + " ")]), "FAIL",
+          ["no anchor line at the cold bind"], "P6-anchor-before-arm", seed=[f"old {ANCHOR}"] * 2),
+    _case("P6", _noop, "FAIL", ["an anchor line after the warm turn"], "P6-warm-anchor", fault="P6"),
+    _case("P6", lambda h, c, s: s["kind"] == "warm" and _sql(c, "lcm.db", "INSERT INTO messages (session_id, role)"
+                                                              " VALUES ('sess-l', 'assistant')"),
+          "FAIL", ["the warm turn stored LCM-X rows beyond the host's"], "P6-warm-extra-lcm"),
+    _case("P6", lambda h, c, s: s["kind"] == "warm" and [_sql(c, db, "DELETE FROM messages WHERE rowid ="
+                                                              " (SELECT max(rowid) FROM messages)")
+                                                         for db in ("lcm.db", "state.db")],
+          "FAIL", ["the warm turn stored fewer than two rows"], "P6-warm-one-row"),
+    _case("P6", lambda h, c, s: _sql(c, "state.db", "UPDATE sessions SET end_reason = 'x'"), "FAIL",
+          ["a chosen session ended"], "P6-session-ended"),
+    _case("P6", lambda h, c, s: _disable(c), "FAIL", ["d5-local is not enabled"], "P6-d5-local-off"),
+    _case("P6", lambda h, c, s: s["kind"] == "warm" and _sql(c, "state.db", "INSERT INTO messages (session_id, role)"
+                                                              " VALUES ('sess-x', 'user')"),
+          "FAIL", ["new host rows outside L's session"], "P6-host-row-elsewhere"),
+    _case("P6", lambda h, c, s: setattr(h, "reply", _receipt(conversation="other")), "FAIL",
+          ["the live and replayed conversation_id differ"], "P6-conversation-differs"),
+    _case("P6", lambda h, c, s: _sql(c, "lcm.db", "UPDATE messages SET conversation_id = ''"), "INCONCLUSIVE",
+          [NO_LIVE], "P6-live-id-empty"),
+    _case("P6", lambda h, c, s: [_sql(c, "lcm.db", "UPDATE messages SET conversation_id = ''"),
+                                 setattr(h, "reply", _receipt(conversation=""))], "INCONCLUSIVE",
+          [NO_REPLAYED, NO_LIVE], "P6-both-ids-empty"),
+    _case("P6", lambda h, c, s: _disable(c), "FAIL", ["d5-local is not enabled", HYGIENE_NOTE], "P6-hygiene-d5-local-off",
+          fault="hygiene"),
+    _case("P7", lambda h, c, s: s["rewrite"] and _sql(c, "state.db", "UPDATE messages SET content = 'other'"
+                                                       " WHERE role = 'user' AND content = ?", s["user_text"].strip()),
+          "FAIL", ["the host did not store the stripped form"], "P7-stripped-missing"),
+    _case("P7", lambda h, c, s: s["rewrite"] and _sql(c, "state.db", "INSERT INTO messages (session_id, role, content)"
+                                                       " VALUES ('sess-l', 'user', ?)", s["user_text"]),
+          "FAIL", ["the host stored the unstripped form"], "P7-raw-stored"),
+    _case("P7", lambda h, c, s: c.update(over={"whitespace_rewrites": 0}), "FAIL", ["no whitespace rewrite"],
+          "P7-no-rewrite"),
+    _case("P7", lambda h, c, s: c.update(over={"payload_swaps": 0}), "FAIL", ["no payload swap"], "P7-no-swap"),
+    _case("P7", lambda h, c, s: c.update(over={"payload_files_created": 0}), "FAIL", ["no payload file"], "P7-no-file"),
+    _case("P7", lambda h, c, s: s["tools"] and _sql(c, "lcm.db", "UPDATE messages SET content = content || 'x'"
+                                                     " WHERE role = 'tool'"),
+          "FAIL", ["the host row differs from the LCM-X row by more than the stub"], "P7-not-the-stub"),
+]
+
+
+@pytest.mark.parametrize("name, tweak, verdict, reasons, kw", CASES)
+def test_each_check_fires_alone(tmp_path, monkeypatch, name, tweak, verdict, reasons, kw):
+    monkeypatch.setitem(sys.modules, "yaml", types.SimpleNamespace(safe_load=json.loads))
+    if kw.pop("vary", False):  # A provider whose second reply differs from the first.
+        complete = prov.Provider._complete
+        monkeypatch.setattr(prov.Provider, "_complete", lambda self, request: {
+            **complete(self, request), "created": len(self.stats["request_log"])})
+    assert pf.produce(Tweaked(tmp_path, tweak, **kw), [name]) == {name: verdict}
+    text = (tmp_path / f"{name}.json").read_text()
+    receipt = json.loads(text)
+    assert receipt["reasons"] == reasons and MODEL not in text
+    if name == "P3":  # Unknown models are kept as 12-hex sha256s, never by name.
+        unknown = [hashlib.sha256(MODEL.encode()).hexdigest()[:12]] if reasons == ["rc: unknown models"] else []
+        assert receipt["facts"]["rc"]["unknown_model_sha256_12"] == unknown
+
+
+@pytest.mark.parametrize("raises", [False, True])
+def test_p3_context_length_stays_in_p3(tmp_path, monkeypatch, raises):
+    """host.c is restored after P3, even when a turn raises midway, and P3's small context never reaches P4, P6 or P7."""
+    monkeypatch.setitem(sys.modules, "yaml", types.SimpleNamespace(safe_load=json.loads))
+
+    def boom(host, ctx, step):
+        if raises and "pf-P3" in str(ctx["home"]):
+            raise RuntimeError("turn failed")
+
+    host = Tweaked(tmp_path, boom)
+    saved = dict(host.c)
+    assert pf.produce(host, list(pf.PREFLIGHTS)) == {**dict.fromkeys(pf.PREFLIGHTS, "PASS"),
+                                                     "P3": "INCONCLUSIVE" if raises else "PASS"}
+    assert host.c == saved and {n[:5] for n, _ in host.armed} == {"pf-P3", "pf-P4", "pf-P6", "pf-P7"}
+    assert all((n.startswith("pf-P3")) == (length == 64000) for n, length in host.armed)
+    assert json.loads((tmp_path / "P3.json").read_text())["reasons"] == (["RuntimeError"] if raises else [])
