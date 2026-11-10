@@ -31,8 +31,11 @@ from .message_content import normalize_content_value, text_content_for_pattern_m
 from .ingest_persisted import (
     _expected_persisted_output_chars,
     _is_hermes_persisted_output_marker,
+    _persisted_output_preview_prefix,
+    _persisted_output_preview_prefix_digest,
     _persisted_output_saved_path,
 )
+from .ingest_policy import _SENSITIVE_PLACEHOLDER_PREFIX
 from .sqlite_util import _is_ingest_busy_error
 from .tokens import count_message_tokens
 
@@ -47,6 +50,43 @@ def _recover_marker_for_compare(text, home):
     from .ingest_persisted import recover_hermes_persisted_output_with_file_stat
 
     return recover_hermes_persisted_output_with_file_stat(text, hermes_home=home)
+
+
+_LCM_MARKER_GENERATION_LINE_RE = re.compile(
+    r"\[LCM persisted-output file generation: size=\d+; mtime_ns=\d+; ctime_ns=\d+\]\n\Z")
+_LCM_MARKER_IDENTITY_LINE_RE = re.compile(
+    r"\[LCM persisted-output marker identity: preview_sha256=(?P<sha256>[0-9a-f]{64})\]\n\Z")
+_LCM_MARKER_ANY_LINE_RE = re.compile(r"\n\[LCM persisted-output (?:file generation|marker identity):[^\n]*\]\r?\n\Z")
+_PERSISTED_OUTPUT_CLOSE = "</persisted-output>"
+
+
+def _without_lcm_marker_lines(text):
+    """#2547: a Hermes marker without the two lines LCM-X's ingest added to it when externalization is off.
+
+    Ingest inserts ``[LCM persisted-output marker identity: ...]\\n`` and then ``[LCM persisted-output file generation:
+    ...]\\n`` just before the marker's first ``</persisted-output>`` (ingest_persisted.py); exactly those are removed,
+    in that order, and nothing else.
+    Callers pass the text AFTER redaction, so two texts that are equal once redacted get the same decision. The
+    identity line goes only when its digest is the remaining marker's own preview digest, or when that preview holds a
+    redaction placeholder (the digest was taken before redaction and cannot be checked); otherwise the text is
+    returned unchanged and the compare behaves as on main.
+    """
+    if not isinstance(text, str) or not _is_hermes_persisted_output_marker(text):
+        return text
+    close = text.find(_PERSISTED_OUTPUT_CLOSE)
+    head, tail = text[:close], text[close:]
+    head = _LCM_MARKER_GENERATION_LINE_RE.sub("", head, count=1)
+    identity = _LCM_MARKER_IDENTITY_LINE_RE.search(head)
+    if not identity:
+        return head + tail
+    rest = head[:identity.start()]
+    if _LCM_MARKER_ANY_LINE_RE.search(rest):  # another LCM-X line before the identity line: not what ingest wrote
+        return text
+    bare = rest + tail
+    preview = _persisted_output_preview_prefix(bare) or ""
+    if identity["sha256"] != _persisted_output_preview_prefix_digest(bare) and _SENSITIVE_PLACEHOLDER_PREFIX not in preview:
+        return text
+    return bare
 
 
 def _marker_payload_metadata(original, config, home):
@@ -150,12 +190,14 @@ class PrefixMatchingMixin:
                 recovered = _recover_marker_for_compare(text, home)
                 if recovered is not None:
                     content = recovered[0]
-        content = redact_sensitive_value(
+        content = normalize_content_value(redact_sensitive_value(
             content,
             self._config,
             parse_json_strings=False,
-        )
-        return normalize_content_value(content)
+        ))
+        if (message or {}).get("role") == "tool":
+            content = _without_lcm_marker_lines(content)  # #2547: LCM-X's own marker lines are not host content
+        return content
 
     def _session_end_counted_identity(self, message, stored, **kwargs):
         bare = self._session_end_prefix_compare_identity(message, recover_markers=False, **kwargs)
