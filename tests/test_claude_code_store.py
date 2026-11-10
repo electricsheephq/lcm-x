@@ -2391,3 +2391,29 @@ def test_an_unterminated_last_record_is_reported_and_does_not_change_the_verdict
     row = report["lineages"][0]
     assert row["partial_tail_bytes"] == len(tail) and row["pending_lines"] == 0 and report["verified"]
     assert report["verdict"].endswith(f"; 1 lineages end in an unterminated record ({len(tail)} bytes, not yet captured)")
+
+
+@pytest.mark.parametrize("shape", ["forgotten_outputs", "forgotten_subagent", "top_level_child"])
+def test_a_child_outside_its_parents_folders_respects_forget_and_layout(tmp_path, home, hermes, shape):
+    """#2557 review: a forgotten parent's own content in the child's folder is excluded (its subagents still count),
+    and a child transcript not under subagents/ names no parent folder."""
+    from hermes_lcm import claude_code_audit as ca
+
+    a = tmp_path / "projects" / "-work" / "s1.jsonl"
+    b = tmp_path / "projects" / "-other" / "s1.jsonl"
+    child = (tmp_path / "projects" / "-other" / "agent-x1.jsonl" if shape == "top_level_child"
+             else b.parent / "s1" / "subagents" / "agent-x1.jsonl")
+    _append(child, _SIDE)
+    _append(a, CONVERSATION[:2])
+    _record(_hook(), home, a)
+    _record(_hook(), home, a, event="SubagentStop", agent_id="x1", agent_transcript_path=str(child))
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    if shape != "top_level_child":
+        store = _open(home, hermes)
+        try:
+            store.delete_session_messages("s1")
+        finally:
+            store.close()
+        _table_place(b, "saved" if shape == "forgotten_outputs" else "subagent")
+    unverified = ca.audit(home)["unverified"]
+    assert bool([key for key in unverified if key.startswith("claude-code:s1")]) is (shape == "forgotten_subagent")

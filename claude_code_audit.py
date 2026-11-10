@@ -717,11 +717,13 @@ def _unverified(metadata: dict, records: list[dict], lineages: list[dict], sessi
             continue
         parent = lineage_key(lineage.session_id)  # #2557: a child in a session folder its parent never named
         named = named_paths(metadata.get(CURSOR_PREFIX + parent)) or named_paths(metadata.get(PENDING_PREFIX + parent))
-        if session_dir(lineage.path) not in {session_dir(Path(name)) for name in named}:
+        if lineage.path.parent.name == "subagents" and session_dir(lineage.path) not in {
+                session_dir(Path(name)) for name in named}:
             transcript = session_dir(lineage.path).with_suffix(".jsonl")
-            if _holds_lines(transcript):
+            gone = FORGOTTEN_PREFIX + lineage.session_id in metadata  # a forgotten parent's own content is never read
+            if not gone and _holds_lines(transcript):
                 unknown.add(parent)
-            _check_folder(transcript, lineage.session_id, parent, metadata, unknown, outputs=True)
+            _check_folder(transcript, lineage.session_id, parent, metadata, unknown, outputs=not gone)
     return sorted(unknown)
 
 
