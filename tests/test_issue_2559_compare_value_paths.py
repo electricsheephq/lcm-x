@@ -132,3 +132,58 @@ def test_a_changed_value_under_a_placeholder_key_is_stored_for_a_live_child(host
             stored = row['tool_calls']
             calls.extend(json.loads(stored) if isinstance(stored, str) else stored)
     assert sum('changed' in call['function']['arguments'] for call in calls) == 1, len(calls)
+
+
+def _content(form, first, second, changed):
+    pair = {first: changed, second: 'B'}
+    if form == 'dict':
+        return pair
+    if form == 'list':
+        return [dict({'type': 'text', 'text': 'x'}, **pair)]
+    return [{'type': 'text', 'text': 'x', 'meta': pair}]
+
+
+@pytest.mark.parametrize('keys', ['placeholder-and-payload', 'two-placeholders'])
+@pytest.mark.parametrize('form', ['dict', 'list', 'nested'])
+def test_a_changed_value_under_colliding_content_keys_is_stored_for_a_live_child(host, form, keys):  # noqa: F811
+    # Codex connector (#2572 round 3): content keys that restore to one payload, then a re-send with only the first
+    # value changed. Recorded on main 7e67daf16 first: [2, 4, 4, 4] rows and the changed row stored once.
+    import base64
+    import copy
+    import re
+    from pathlib import Path
+
+    from hermes_lcm.externalize import externalize_ingest_payload
+    from tests.test_issue_2482_interrupted_child import _setup
+
+    _, _, ctx, reader, child, engine = _setup(host, 'own_engine')
+    body = 'data:image/png;base64,' + base64.b64encode(bytes(range(256)) * 20).decode()
+    alias = externalize_ingest_payload(body, role='user', session_id='child', field_path='content[0].<key>',
+                                       config=reader._config, hermes_home=reader._hermes_home)['placeholder']
+    second = body
+    if keys == 'two-placeholders':  # a second, distinct ref to the same payload
+        name = Path(re.search(r'ref=([^\]]+)\]', alias).group(1)).name
+        source = next(Path(reader._hermes_home).rglob(name))
+        source.with_name('twin-' + name).write_bytes(source.read_bytes())
+        second = alias.replace(name, 'twin-' + name)
+    first = [{'role': 'user', 'content': _content(form, alias, second, 'A')}, {'role': 'assistant', 'content': 'seen'}]
+    for i, row in enumerate(first):
+        row['timestamp'] = i + 1.0
+    aux = ctx.module('aux_session')
+    child.api_call(ctx, copy.deepcopy(first), 1)
+    aux.drain_live_child_stores(60)
+    counts = [len(reader._store.get_session_messages('child'))]
+    view = copy.deepcopy(first)
+    view[0]['content'] = _content(form, alias, second, 'CHANGED')
+    view.append({'role': 'assistant', 'content': 'final', 'timestamp': 3.0})
+    for n in (2, 3):
+        child.api_call(ctx, copy.deepcopy(view), n)
+        aux.drain_live_child_stores(60)
+        counts.append(len(reader._store.get_session_messages('child')))
+    child.end(engine, view)
+    aux.drain_live_child_stores(60)
+    rows = reader._store.get_session_messages('child')
+    counts.append(len(rows))
+    users = [r['content'] if isinstance(r['content'], str) else json.dumps(r['content'])
+             for r in rows if r['role'] == 'user']
+    assert counts == [2, 4, 4, 4] and sum('CHANGED' in text for text in users) == 1, (counts, len(users))
