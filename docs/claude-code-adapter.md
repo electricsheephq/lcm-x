@@ -646,7 +646,7 @@ The release rules (the gate, no rc tag, the draft release) are in
 `docs/process/claude-code-unit-release.md`.
 
 LCM-X for Claude Code is its own release unit, versioned by the plugin manifest
-(`adapters/claude-code/.claude-plugin/plugin.json`; `0.1.0` is the preview).
+(`adapters/claude-code/.claude-plugin/plugin.json`; `0.1.0` was the preview, `1.0.0` the first full release).
 - A release is an annotated tag `claude-code-v<version>` on a `main` commit. The Hermes release
   workflows trigger on `v*` tags, so they never fire on it.
 - `scripts/build_claude_code_unit.py <tag>` builds the release asset from the tag's tree alone

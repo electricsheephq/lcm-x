@@ -40,7 +40,9 @@ the gate's evidence.
    published, it stops. To rebuild a draft, delete the draft and re-run the workflow by hand with
    the tag.
 6. **Publish.** The release manager attaches the gate's result card to the draft, reads the
-   workflow run, and publishes the draft as a prerelease (below 1.0.0) with "Set as the latest
-   release" unticked: `gh release edit claude-code-v<version> --draft=false --prerelease --latest=false`.
+   workflow run, and publishes the draft with "Set as the latest release" unticked. Below 1.0.0 it
+   is a prerelease: `gh release edit claude-code-v<version> --draft=false --prerelease --latest=false`.
+   From 1.0.0 it is a full release, still not the latest:
+   `gh release edit claude-code-v<version> --draft=false --latest=false`.
 7. **After the release.** A follow-up PR may move the manifest to the next `-dev` version.
    `scripts/claude_code_unit_delta.py` then lists what the next release must re-gate.

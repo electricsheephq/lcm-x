@@ -5,9 +5,9 @@ Claude Code sessions into a local, lossless LCM-X store, and gives the agent rea
 search and read it (`lcm_recall`, `lcm_grep`, `lcm_expand`, `lcm_load_session`, `lcm_describe`).
 Claude Code's own compaction is unchanged, and the plugin adds nothing to the context by itself.
 
-**Status: preview (0.1.0), opt-in.** The hooks record which transcript changed and start the
-capture worker, which writes every message and tool result to the store; the read-only MCP reader
-serves recall. Release notes: [claude-code-v0.1.0](../../.github/release-notes/claude-code-v0.1.0.md). Design:
+**Status: 1.0.0, recommended for every Claude Code user on macOS and Linux; opt-in per launch.**
+The hooks record which transcript changed and start the capture worker, which writes every message
+and tool result to the store; the read-only MCP reader serves recall. Release notes: [claude-code-v1.0.0](../../.github/release-notes/claude-code-v1.0.0.md). Design:
 [docs/claude-code-adapter.md](../../docs/claude-code-adapter.md). To recall the same store from Codex, see
 [docs/codex-reader.md](../../docs/codex-reader.md).
 
