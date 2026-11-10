@@ -3249,6 +3249,37 @@ def test_a_deleted_id_does_not_forget_a_separate_transcript_with_the_same_relati
     assert "late" in rows and len(rows) == len(set(rows))
 
 
+def test_a_second_path_named_before_it_exists_after_the_first_vanished_is_stored_once(tmp_path, home, hermes):
+    """#2576 bot review: A is captured; a hook names B before B's file exists (a pending row under B's path key); A's
+    file disappears before B appears. B's lines are stored once, in the bare session as on main, never also under the
+    path key; the audit reads unverified for the agent, never verified."""
+    from hermes_lcm import claude_code_audit as ca
+
+    a = _append(tmp_path / "projects" / "-work" / "s1.jsonl", CONVERSATION[:2])
+    _record(_hook(), home, a)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    agents = a.parent / "s1" / "subagents"
+    first = _append(agents / "workflows" / "wf_run1" / "agent-x1.jsonl", _REUSED["first"])
+    second = agents / "agent-x1.jsonl"
+    for path in (first, second):
+        _record(_hook(), home, a, event="SubagentStop", agent_id="x1", agent_transcript_path=str(path))
+        cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    first.unlink()
+    _append(second, _REUSED["second"])
+    _record(_hook(), home, a, event="SubagentStop", agent_id="x1", agent_transcript_path=str(second))
+    for _ in range(3):
+        cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    store = _open(home, hermes)
+    try:
+        rows = store.connection.execute("SELECT session_id, content FROM messages WHERE session_id LIKE 's1/agent:%'").fetchall()
+    finally:
+        store.close()
+    texts = collections.Counter(text for _session, text in rows)
+    assert max(texts.values()) == 1 and {"second task", "three"} <= set(texts)
+    assert {session for session, _text in rows} == {cc.row_session_id("s1", "x1")}
+    assert not ca.audit(home)["verified"]
+
+
 def test_a_path_key_revision_supersedes_its_real_predecessor_across_batches(tmp_path, home, hermes):
     """#2576 review: in a store the old code flipped, the old id-keyed lineage holds V0 of sb1. The path key then takes
     V1 and V2 in separate drains: V1 supersedes V0 and V2 supersedes V1 (never V0 again), so one version stays active."""
