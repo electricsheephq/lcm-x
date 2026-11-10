@@ -1613,18 +1613,17 @@ def test_profile_rebind_clears_the_commit_proof(tmp_path, monkeypatch):
 
 
 def test_conversation_change_clears_the_commit_proof(tmp_path, monkeypatch):
-    """#484 item 11c: a reused engine rebinding the same session id to another
-    conversation must not consume the old conversation's commit proof; the end is a
-    real end and finalizes in the new conversation."""
+    """#484 refused a proof that crossed conversations; under the #2461 ownership rule S0's rows and its proof stay in K1, so this route no longer crosses conversations."""
     engine, pre, _compressed = _compacted_engine(tmp_path, monkeypatch)
     try:
         old_conversation = engine._conversation_id
         assert engine._compress_commit_proof is not None
         engine.on_session_start("S0", platform="acp", conversation_id="other-conversation", context_length=200_000)
-        assert engine._conversation_id == "other-conversation" != old_conversation
+        assert engine._conversation_id == old_conversation
         engine.on_session_end("S0", pre)
-        assert engine._compress_commit_proof is None or not engine._compress_commit_proof.get("end_consumed")
-        state = engine._lifecycle.get_by_conversation("other-conversation")
+        assert engine._compress_commit_proof["end_consumed"] is True
+        assert engine._lifecycle.get_by_conversation("other-conversation") is None
+        state = engine._lifecycle.get_by_conversation(old_conversation)
         assert state.current_session_id is None
         assert state.last_finalized_session_id == "S0"
     finally:
@@ -1632,8 +1631,7 @@ def test_conversation_change_clears_the_commit_proof(tmp_path, monkeypatch):
 
 
 def test_durable_commit_proof_is_bound_to_its_conversation(tmp_path, monkeypatch):
-    """#484 item 11c: the durable proof records its conversation and is not used
-    after a restart that binds the same session id to another conversation."""
+    """#484 refused a proof that crossed conversations; under the #2461 ownership rule S0's rows and its proof stay in K1, so this route no longer crosses conversations."""
     engine, pre, compressed = _compacted_engine(tmp_path, monkeypatch)
     host = list(compressed) + [_turn(13)[1]]
     try:
@@ -1643,9 +1641,40 @@ def test_durable_commit_proof_is_bound_to_its_conversation(tmp_path, monkeypatch
     resumed = LCMEngine(config=_config(tmp_path), hermes_home=str(tmp_path / "home"))
     try:
         resumed.on_session_start("S0", platform="acp", conversation_id="other-conversation", context_length=200_000)
-        assert resumed._cursor_from_durable_commit_proof(host) is None
+        assert resumed._cursor_from_durable_commit_proof(host) == len(compressed)
     finally:
         resumed.shutdown()
+
+
+def test_N3_proof_other_live_owner(tmp_path, monkeypatch):
+    """#484 still rejects K1's proof when another live session holds K1."""
+    engine, pre, compressed = _compacted_engine(tmp_path, monkeypatch)
+    other = LCMEngine(config=_config(tmp_path), hermes_home=str(tmp_path / "home"))
+    try:
+        other.on_session_start("S1", conversation_id=engine._conversation_id, platform="acp")
+        engine.on_session_start("S0", conversation_id="K2", platform="acp")
+        assert engine._conversation_id == "K2"
+        assert engine._cursor_from_durable_commit_proof(compressed) is None
+        engine.on_session_end("S0", pre)
+        assert not (engine._compress_commit_proof or {}).get("end_consumed")
+        assert engine._lifecycle.get_by_conversation("K2").last_finalized_session_id == "S0"
+    finally:
+        other.shutdown()
+        engine.shutdown()
+
+
+def test_N2_proof_split_store(tmp_path, monkeypatch):
+    """#484 still rejects K1's proof when S0's stored rows span K1 and K2."""
+    engine, pre, compressed = _compacted_engine(tmp_path, monkeypatch)
+    try:
+        engine._store.append_batch("S0", [pre[0]], conversation_id="K2")
+        engine.on_session_start("S0", conversation_id="K2", platform="acp")
+        assert engine._conversation_id == "K2"
+        assert engine._cursor_from_durable_commit_proof(compressed) is None
+        engine.on_session_end("S0", pre)
+        assert not (engine._compress_commit_proof or {}).get("end_consumed")
+    finally:
+        engine.shutdown()
 
 
 def _as_rc3_durable_proof(engine, compressed):

@@ -68,7 +68,10 @@ def _engine_matches_conversation_binding(engine: Any, conversation_id: str) -> b
     return bool(
         _is_usable_lcm_engine(engine)
         and conversation_id
-        and str(getattr(engine, "_conversation_id", "") or "") == conversation_id
+        and conversation_id in (
+            str(getattr(engine, "_conversation_id", "") or ""),
+            str(getattr(engine, "_routing_conversation_id", "") or ""),
+        )
     )
 
 
