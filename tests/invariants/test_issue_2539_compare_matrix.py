@@ -1034,10 +1034,10 @@ def test_inline_payload_compare_matrix(case, host, tmp_path, monkeypatch, reques
             return record(view)
 
         replay(2)
-        rows = replay(3)
+        replay(3)
         if child_route:
             child.end(engine, view)
-            rows = record(view)
+            record(view)
         current = Counter({(r, c, d): n for r, c, d, n in steps[-1]})
         missing = sorted(set(_inline_identity(m) for m in view) - set(current))
         contents = defaultdict(set)
@@ -1077,7 +1077,10 @@ def test_inline_payload_compare_matrix(case, host, tmp_path, monkeypatch, reques
         if missing:
             gaps.append('bar i: host rows absent')
         if result['replay_growth']:
-            gaps.append('bar iv: second replay adds rows')
+            # #2550: a cold replay stores a call with wrapped base64 arguments again on every restart
+            # (main and this head: 10, 13, 15, then 17 on a third replay).
+            tracker = ' (#2550)' if (route, shape, variant) == ('reconcile-replay', 'T7', 'X') else ''
+            gaps.append('bar iv: second replay adds rows' + tracker)
         if child_route and form != 'different' and copies[-1] != 1:
             assert main['copies'][-1] != 1, 'new one-copy regression'
             gaps.append('bar v: shaped row must have one copy')
