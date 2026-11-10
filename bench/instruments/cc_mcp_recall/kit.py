@@ -55,6 +55,14 @@ def leaked(answer):
     text = normalize(answer)
     return [f["token"] for f in tokens() if re.search(r"(?<![A-Z0-9-])" + re.escape(f["token"]) + r"(?![A-Z0-9-])", text)]
 
+def holds(text, token):
+    """The judge's whole-value match on raw text: 482130 does not hold 48213 (arm D and the plant check)."""
+    return re.search(r"(?<![A-Z0-9-])" + re.escape(token) + r"(?![A-Z0-9-])", normalize(text)) is not None
+
+def overrides():
+    """LCMX_* runtime overrides in this arm's environment: recorded, and any one voids the run (never scrubbed)."""
+    return sorted(key for key in os.environ if key.startswith("LCMX_"))
+
 def judge(answer, question, error=False):
     text = normalize(answer)
     found = {f["token"] for f in tokens() if re.search(r"(?<![A-Z0-9-])" + re.escape(f["token"]) + r"(?![A-Z0-9-])", text)}
@@ -114,11 +122,11 @@ def arm_d(home, manifest):
             for session in sessions:
                 for ident, role, content in db.execute("SELECT store_id, role, content FROM messages WHERE session_id=?", (session,)):
                     payloads = [(None, content or "")] + [(ref, (cc.load_externalized_payload(ref, config=None, hermes_home=str(store_home)) or {}).get("content", "")) for ref in cc.extract_externalized_refs(content or "")]
-                    matches.extend({"store_id": ident, "session_id": session, "role": role, "sha256": hashlib.sha256(text.encode()).hexdigest(), "externalized_ref": ref} for ref, text in payloads if role in f["roles"] and f["token"] in text)
+                    matches.extend({"store_id": ident, "session_id": session, "role": role, "sha256": hashlib.sha256(text.encode()).hexdigest(), "externalized_ref": ref} for ref, text in payloads if role in f["roles"] and holds(text, f["token"]))
             records.append({"id": f["id"], "token": f["token"], "sessions": sessions, "matches": matches, "pass": bool(matches),
                             "planted": planted(home, sid, f["token"]),
                             **({"in_saved_output": saved_holds(home, sid, f["token"])} if f["class"] == "tool_result_saved" else {})})
-    return {"tokens": records, "plant_failed": [r["id"] for r in records if not r["planted"]], "evidence": evidence(home, manifest), "store": store_identity(store_home), "store_bytes": sum(p.stat().st_size for p in store_home.rglob("*") if p.is_file()), "host_load": os.getloadavg()}
+    return {"tokens": records, "plant_failed": [r["id"] for r in records if not r["planted"]], "evidence": evidence(home, manifest), "store": store_identity(store_home), "overrides": overrides(), "store_bytes": sum(p.stat().st_size for p in store_home.rglob("*") if p.is_file()), "host_load": os.getloadavg()}
 
 def session_files(home, sid):
     """A session's raw Claude Code files: its transcript, its subagents' transcripts and its saved outputs."""
@@ -129,11 +137,11 @@ def session_files(home, sid):
 
 def saved_holds(home, sid, token):
     """Whether one of the session's own saved outputs (tool-results/) holds the value."""
-    return any(p.parent.name == "tool-results" and token in p.read_text(encoding="utf-8", errors="replace") for p in session_files(home, sid))
+    return any(p.parent.name == "tool-results" and holds(p.read_text(encoding="utf-8", errors="replace"), token) for p in session_files(home, sid))
 
 def planted(home, sid, token):
     """Whether the planted value reached the session's own files at all (a model slip is not a capture finding)."""
-    return any(token in p.read_text(encoding="utf-8", errors="replace") for p in session_files(home, sid))
+    return any(holds(p.read_text(encoding="utf-8", errors="replace"), token) for p in session_files(home, sid))
 
 def evidence(home, manifest):
     """Per session: compaction boundaries, subagent transcripts and saved outputs actually present."""
@@ -262,7 +270,7 @@ def arm_t(plugin, home, direct, empty=False):
             rows.append(row)
     finally:
         mcp.close()
-    return {"tokens": rows, "calls": mcp.calls, "empty": empty, "bundle": bundle(plugin), "store": store_identity(home / ".lcm-x/claude-code")}
+    return {"tokens": rows, "calls": mcp.calls, "empty": empty, "bundle": bundle(plugin), "store": store_identity(home / ".lcm-x/claude-code"), "overrides": overrides()}
 
 def claude(command, prompt, args, home, cwd, env=None):
     start, result, init, calls = time.monotonic(), {}, None, {}
@@ -307,6 +315,7 @@ def quiesce(home):
 def build(args):
     project, manifest = args.home / "proj/recall-fixture", {"sessions": {}, "stop": False}
     manifest["bundle"] = bundle(args.plugin)
+    manifest["overrides"] = overrides()
     manifest["claude_version"] = subprocess.run([args.claude, "--version"], capture_output=True, text=True, env={**os.environ, "KIT_HOME": str(args.home)}).stdout.strip()
     project.mkdir(parents=True, exist_ok=False)
     for name, spec in C["files"].items():
@@ -375,7 +384,7 @@ def arm_a(args):
         return {"id": q["id"], **call}
     with ThreadPoolExecutor(max_workers=args.parallel) as pool:
         rows = [r for r in pool.map(one, [q for q in Q if not args.only or q["kind"] == args.only]) if r]
-    return {"answers": rows, "bundle": bundle(args.plugin), "store": store_identity(args.store_home), **({"stop_reason": "limit"} if stopped.is_set() else {})}
+    return {"answers": rows, "bundle": bundle(args.plugin), "store": store_identity(args.store_home), "overrides": overrides(), **({"stop_reason": "limit"} if stopped.is_set() else {})}
 
 def first_positives(run):
     answers = {r["id"]: r for r in run["answers"]}
@@ -434,6 +443,9 @@ def score(manifest, d, t, te, a, a2=None, ae=None, classifications=None):
     if any(arm is not None and arm.get("bundle") != manifest.get("bundle") for arm in (t, te, a, a2, ae)):
         cover = {**cover, "ok": False, "missing": cover["missing"] + ["asset_mismatch"]}
     # T and A use the store D read; the controls use an empty store; a D receipt without its store voids the run.
+    # A runtime override in any arm's environment means the arms may not have run the asset they name.
+    if any(arm is not None and arm.get("overrides") for arm in (manifest, d, t, te, a, a2, ae)):
+        cover = {**cover, "ok": False, "missing": cover["missing"] + ["runtime_override"]}
     if d.get("store") is None or any(arm is not None and arm.get("store") != d["store"] for arm in (t, a, a2)) or any(arm is not None and arm.get("store") != EMPTY_STORE for arm in (te, ae)):
         cover = {**cover, "ok": False, "missing": cover["missing"] + ["store_mismatch"]}
     bars = {"empty_control": empty_ok, "coverage": cover["ok"], "capture": not manifest.get("stop") and set(manifest["sessions"]) == {s["label"] for s in C["sessions"]} and all(s.get("audit", {}).get("rc") == 0 and s["audit"].get("ok") and s["audit"].get("verified") for s in manifest["sessions"].values()), "D": all(dm.get(f["id"], False) for f in tokens() if gated(f)), "T": all(tm.get(f["id"], False) for f in tokens() if gated(f)), "A": min(positives) >= 36, "false_recall": max(fabricated) <= 1, "answers_complete": all(valid(run, Q) for run in runs)}

@@ -339,3 +339,22 @@ def _empty(tmp_path):
     store_home.mkdir(parents=True)
     k.empty_store(store_home)
     return store_home
+
+
+def test_bot_round_8(tmp_path, monkeypatch):
+    # A runtime override in any arm's environment voids the run, and the reason is named.
+    monkeypatch.setenv('LCMX_PACKAGE_ROOT', str(tmp_path))
+    assert k.overrides() == ['LCMX_PACKAGE_ROOT']
+    inputs = synthetic()
+    inputs[4]['overrides'] = k.overrides()
+    result = k.score(*inputs)
+    assert result['verdict'] == 'VOID' and 'runtime_override' in result['coverage']['missing']
+    # Whole-value matching: a slipped 482130 is not the planted 48213, so the plant check fails at once.
+    assert not k.holds('the count was 482130 today', '48213') and k.holds('the count was 48213.', '48213')
+    assert not k.holds('48213.5', '48213') and k.holds('ref VELNORA-7101 ok', 'VELNORA-7101')
+    sid = 'sess-1'
+    folder = tmp_path / 'home/.claude/projects/p'
+    folder.mkdir(parents=True)
+    (folder / f'{sid}.jsonl').write_text('{"text": "value 482130"}\n', encoding='utf-8')
+    monkeypatch.setattr(k, 'session_files', lambda home, s: sorted(folder.glob('*.jsonl')))
+    assert not k.planted(tmp_path / 'home', sid, '48213')
