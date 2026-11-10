@@ -14,7 +14,7 @@ from tests.test_issue_2055_ingest_ledger_writes import engines  # noqa: F401
 from tests.test_issue_10_persisted_output_spillover import FULL_OUTPUT, _marker, _write_output
 from tests.test_issue_1931_delegate_children import host as host
 from tests.test_issue_2482_interrupted_child import _setup as setup_child
-from tests.test_issue_2539_child_marker_compare import _path
+from tests.test_issue_2539_child_marker_compare import _path, _shared_view
 from tests.invariants.test_p1e_cold_tails import fail_end_read
 from hermes_lcm.session_patterns import compile_session_patterns
 
@@ -72,7 +72,7 @@ def _setup(make_engines, monkeypatch, tmp_path, kind):
     return engine, view, form, len(history)
 
 
-_NOEXT_REASON = ("class audit row transforms-T1-inline-marker-metadata (externalization disabled, not a default route): "
+_NOEXT_REASON = ("#2547: class audit row transforms-T1-inline-marker-metadata (externalization disabled, not a default route): "
                  "storage keeps the marker inline with LCM identity and generation lines, so neither side yields the "
                  "marker key; pre-existing on main 7e67daf1; out of this PR by release-manager ruling")
 _NOEXT = [pytest.param(kind, marks=pytest.mark.xfail(strict=True, raises=AssertionError, reason=_NOEXT_REASON))
@@ -124,8 +124,7 @@ def _reused_view(first, marker):
 def _assert_reused_once(engine, sid, view):
     rows = engine._store.get_session_messages(sid)
     assert len(rows) == len(view)
-    assert [engine._session_end_prefix_compare_identity(r, session_id=sid) for r in rows] == [
-        engine._session_end_prefix_compare_identity(m, session_id=sid) for m in view]
+    assert all(engine._session_end_rows_equal(r, m, session_id=sid) for r, m in zip(rows, view))
     assert rows[-1]["content"] == "FINAL"
     tools = [r for r in rows if r["role"] == "tool"]
     assert len(tools) == 2
@@ -224,11 +223,9 @@ def test_rule_b_changed_marker_text_compares_unequal(engines, monkeypatch, tmp_p
     kind = "spillover" if location == "spillover" else "tempdir"
     engine, view, _, _n = _setup(engines, monkeypatch, tmp_path, kind)
     stored = engine._store.get_session_messages("S1")[4]
-    same = engine._session_end_prefix_compare_identity(view[4], session_id="S1")
-    assert same == engine._session_end_prefix_compare_identity(stored, session_id="S1")
+    assert engine._session_end_rows_equal(stored, view[4], session_id="S1")
     _changed_marker_view(engine, view, location)
-    assert engine._session_end_prefix_compare_identity(view[4], session_id="S1") != (
-        engine._session_end_prefix_compare_identity(stored, session_id="S1"))
+    assert not engine._session_end_rows_equal(stored, view[4], session_id="S1")
 
 
 @pytest.mark.xfail(strict=True, raises=AssertionError, reason=_ROUTE_2543)
@@ -261,3 +258,35 @@ def test_offcurrent_changed_marker_text_keeps_new_result_and_final(engines, monk
     assert engine._session_end_prefix_compare_value(tools[1]["content"], session_id="S1") == changed
     assert _final_count(engine) == 1
     assert len(rows) == n + 2
+
+
+@pytest.mark.parametrize("shape", ["marker-then-plain", "spill-then-temp"])
+@pytest.mark.parametrize("busy", [False, True], ids=["offcurrent", "cold-tail"])
+def test_shared_payload_offcurrent_end_preserves_every_row_and_final(engines, monkeypatch, tmp_path, shape, busy):  # noqa: F811
+    root = tmp_path / "shared-temp"
+    root.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(root))
+    engine = engines(sessions=[("S1", None, None), ("foreground", None, None)])
+    handed = [{"role": ("user", "assistant")[n % 2], "content": f"pad {n}"} for n in range(6)]
+    handed += _shared_view(engine, shape)
+    engine.on_session_start("S1", platform="cli", context_length=200_000, conversation_id="old-conv")
+    engine.ingest(handed)
+    engine.on_session_start("foreground", platform="cli", context_length=200_000)
+    updated = [*handed, {"role": "user", "content": "new question"},
+               {"role": "assistant", "content": "FINAL"}]
+    if busy:
+        with monkeypatch.context() as patch:
+            patch.setattr(engine._store, "get_range", fail_end_read(engine))
+            engine.on_session_end("S1", updated)
+        assert len(engine._pending_session_tails) == 1
+        engine._retry_pending_session_tails()
+        engine._retry_pending_session_tails()
+        assert not engine._pending_session_tails
+    else:
+        engine.on_session_end("S1", updated)
+    rows = engine._store.get_session_messages("S1")
+    assert len(rows) == len(updated)
+    assert all(engine._session_end_rows_equal(r, m, session_id="S1") for r, m in zip(rows, updated))
+    assert [r["content"] for r in rows[-2:]] == ["new question", "FINAL"]
+    engine.on_session_end("S1", updated)
+    assert len(engine._store.get_session_messages("S1")) == len(updated)

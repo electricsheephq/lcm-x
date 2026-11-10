@@ -33,16 +33,14 @@ def _view(content):
             {"role": "tool", "tool_call_id": "c1", "content": content}]
 
 
-def _assert_once(parent, handed):
-    rows = child_rows(parent)
+def _assert_once(parent, handed, session_id="child"):
+    rows = child_rows(parent, session_id)
     assert len(rows) == len(handed)
     assert [(r["role"], r.get("tool_call_id")) for r in rows] == [
         (m["role"], m.get("tool_call_id")) for m in handed]
     assert Counter(r["tool_call_id"] for r in rows if r["role"] == "tool") == Counter(
         m["tool_call_id"] for m in handed if m["role"] == "tool")
-    # Also verify the stored identities, not just row totals.
-    assert [parent._session_end_prefix_compare_identity(r, session_id="child") for r in rows] == [
-        parent._session_end_prefix_compare_identity(m, session_id="child") for m in handed]
+    assert all(parent._session_end_rows_equal(r, m, session_id=session_id) for r, m in zip(rows, handed))
 
 
 @pytest.mark.parametrize("location", ["spillover", "hermes-results"])
@@ -200,53 +198,46 @@ def test_stored_tail_anchor_recovers_marker(host, location):
     assert len(child_rows(parent)) == len(rows) + 2
 
 
-@pytest.mark.parametrize("field", ["persisted_output_source_path", "persisted_output_expected_chars",
-                                 "persisted_output_redacted_preview_sha256"])
-def test_A1_partial_metadata_never_identifies_missing_marker(tmp_path, field):
-    from hermes_lcm.prefix_matching import _marker_payload_metadata
+@pytest.mark.parametrize("field", ["persisted_output_source_path", "persisted_output_expected_chars"])
+def test_A1_partial_metadata_never_identifies_missing_marker(host, tmp_path, monkeypatch, field):
+    _, _, ctx, parent, child, engine = _setup(host, "own_engine")
+    path = _path(engine._hermes_home, "spillover")
+    handed = _view(_write_output(path))
+    child.api_call(ctx, handed, 1)
+    path.rename(tmp_path / "pruned-output")
+    namespace = engine._session_end_prefix_compare_value.__func__.__globals__
+    loader = namespace["_marker_payload_metadata"]
 
-    engine = _engine(tmp_path)
-    try:
-        path = _path(engine._hermes_home, "spillover")
-        handed = _view(_write_output(path))
-        engine._append_off_current_session_end_suffix("child", handed, source="delegate_child", conversation_id="child")
-        stored = engine._store.get_session_messages("child")[-1]
-        payload = _marker_payload_metadata(stored["content"], engine._config, engine._hermes_home)
-        path.rename(tmp_path / "pruned-output")
-        # Alter the synthetic payload through the loader only, leaving durable rows untouched.
-        original_loader = engine._session_end_marker_identity.__globals__["_marker_payload_metadata"]
-        namespace = engine._session_end_marker_identity.__globals__
-        damaged = dict(payload)
-        damaged.pop(field)
-        try:
-            namespace["_marker_payload_metadata"] = lambda *a, **kw: damaged
-            assert engine._session_end_prefix_compare_identity(stored, session_id="child") != engine._session_end_prefix_compare_identity(
-                handed[-1], session_id="child")
-        finally:
-            namespace["_marker_payload_metadata"] = original_loader
-    finally:
-        engine.shutdown()
+    def damaged(*args):
+        payload = dict(loader(*args))
+        payload.pop(field, None)
+        return payload
+
+    monkeypatch.setitem(namespace, "_marker_payload_metadata", damaged)
+    for n in (2, 3):
+        child.api_call(ctx, handed, n)
+        assert len(child_rows(parent)) == 4
+    child.end(engine, handed)
+    assert len(child_rows(parent)) == 4
 
 
 @pytest.mark.parametrize("pruned", [False, True], ids=["present", "gone"])
-def test_A1_byte_identical_host_marker_text_equals_stored_rows(tmp_path, pruned):
-    engine = _engine(tmp_path)
-    try:
-        path = _path(engine._hermes_home, "spillover")
-        for full in (FULL_OUTPUT, FULL_OUTPUT[:-10] + "Z" * 10):
-            row = _view(_write_output(path, full))[-1]
-            engine._append_off_current_session_end_suffix("child", [row],
-                source="delegate_child", conversation_id="child")
-        rows = engine._store.get_session_messages("child")
-        assert len(rows) == 2 and rows[0]["content"] != rows[1]["content"]
-        if pruned:
-            path.rename(tmp_path / "pruned-output")
-        assert engine._session_end_prefix_compare_identity(rows[0], session_id="child") == engine._session_end_prefix_compare_identity(
-            rows[1], session_id="child")
-        assert engine._session_end_prefix_compare_identity(rows[0], session_id="child") == engine._session_end_prefix_compare_identity(
-            row, session_id="child")
-    finally:
-        engine.shutdown()
+def test_A1_byte_identical_host_marker_text_equals_stored_rows(host, tmp_path, pruned):
+    _, _, ctx, parent, child, engine = _setup(host, "own_engine")
+    path = _path(engine._hermes_home, "spillover")
+    marker = _write_output(path)
+    handed = _view(marker)
+    child.api_call(ctx, handed, 1)
+    assert _write_output(path, FULL_OUTPUT[:-10] + "Z" * 10) == marker
+    if pruned:
+        path.rename(tmp_path / "pruned-output")
+    for n in (2, 3):
+        child.api_call(ctx, handed, n)
+        assert len(child_rows(parent)) == 3
+    child.end(engine, handed)
+    rows = child_rows(parent)
+    assert len(rows) == 3
+    assert engine._session_end_prefix_compare_value(rows[-1]["content"], session_id="child") == FULL_OUTPUT
 
 
 def test_cost_ten_megabyte_marker_handover(host, capsys):
@@ -286,8 +277,7 @@ def test_offcurrent_same_history_changed_file_keeps_first_content(tmp_path, loca
         assert len(tools) == 1
         assert engine._session_end_prefix_compare_value(tools[0]["content"], session_id="old") == FULL_OUTPUT
         assert all(engine._session_end_prefix_compare_value(r["content"], session_id="old") != changed for r in tools)
-        assert engine._session_end_prefix_compare_identity(tools[-1], session_id="old") == engine._session_end_prefix_compare_identity(
-            handed[-1], session_id="old")
+        assert engine._session_end_rows_equal(tools[-1], handed[-1], session_id="old")
         assert rows[-1]["content"] == "after reused call"
         engine.on_session_end("old", final)
         assert sum(r["content"] == "after reused call" for r in engine._store.get_session_messages("old")) == 1
@@ -320,3 +310,250 @@ def test_child_end_and_next_compression_marker_boundary_covered(host, monkeypatc
     child.end(engine, updated)
     _assert_once(parent, updated)
     assert len(covered_calls) == 2
+
+
+_SHARED = "SHARED_NEEDLE:\n" + "payload line abcdef 0123456789\n" * 700
+
+
+def _shared_view(engine, shape):
+    first = _write_output(_path(engine._hermes_home, "spillover"), _SHARED)
+    second = (_SHARED if shape == "marker-then-plain" else
+              _write_output(_path(engine._hermes_home, "hermes-results"), _SHARED))
+    return [*_view(first), {"role": "assistant", "content": "again"}, call(1),
+            {"role": "tool", "tool_call_id": "c1", "content": second}]
+
+
+@pytest.mark.parametrize("shape", ["marker-then-plain", "spill-then-temp"])
+def test_shared_payload_handovers_store_every_host_row_once_and_append_new_turn(host, shape):
+    _, _, ctx, parent, child, engine = _setup(host, "own_engine")
+    handed = _shared_view(engine, shape)
+    counts = []
+    for n in range(3):
+        child.api_call(ctx, handed, n + 1)
+        counts.append(len(child_rows(parent)))
+        _assert_once(parent, handed)
+    child.end(engine, handed)
+    counts.append(len(child_rows(parent)))
+    _assert_once(parent, handed)
+    # Main: marker-then-plain 6,7,7,7; spill-then-temp 6,8,10,12.
+    # 13211798: both shapes 6,9,12,15. Corrected bar: the host's six rows once.
+    assert counts == [6, 6, 6, 6]
+    updated = [*handed, {"role": "user", "content": "new question"},
+               {"role": "assistant", "content": "new answer"}]
+    child.api_call(ctx, updated, 4)
+    _assert_once(parent, updated)
+    assert len(child_rows(parent)) == 8
+
+
+@pytest.mark.parametrize("location", ["spillover", "hermes-results"])
+@pytest.mark.parametrize("change", ["leading-whitespace", "missing-boilerplate"])
+def test_astra_distinct_bare_markers_store_four_rows(host, location, change):
+    _, _, ctx, parent, child, engine = _setup(host, "own_engine")
+    path = _path(engine._hermes_home, location)
+    if change == "leading-whitespace":
+        old = _write_output(path, "\n\n" + "A" * 6000)
+        new = _marker(path, " \n" + "A" * 6000)
+    else:
+        old = _marker(path)
+        new = old.replace("Use the read_file tool", "SECOND literal message: Use the read_file tool")
+    child.api_call(ctx, _view(old), 1)
+    assert child_rows(parent)[-1]["content"] == old  # Both shapes are BARE, not recovered.
+    if change == "leading-whitespace":
+        assert _write_output(path, " \n" + "A" * 6000) == new
+    for n in (2, 3):
+        child.api_call(ctx, _view(new), n)
+        rows = child_rows(parent)
+        assert len(rows) == 4
+        assert [r["content"] for r in rows if r["role"] == "tool"] == [old, new]
+    child.end(engine, _view(new))
+    assert len(child_rows(parent)) == 4
+
+
+@pytest.mark.parametrize("location", ["spillover", "hermes-results"])
+@pytest.mark.parametrize("change,extra", [
+    ("last-preview-character", 1), ("recovered-boilerplate", 0), ("bare-boilerplate", 1),
+    ("crlf", 0), ("redaction", 1), ("empty-preview", 1),
+    ("other-path-present", 0), ("other-path-missing", 1), ("nested-marker", 0),
+])
+def test_marker_identity_through_live_handover(host, tmp_path, location, change, extra):
+    _, _, ctx, parent, child, engine = _setup(host, "own_engine")
+    path = _path(engine._hermes_home, location)
+    full = FULL_OUTPUT
+    if change == "redaction":
+        engine._config.sensitive_patterns_enabled = True
+        engine._config.sensitive_patterns = ["api_key"]
+        full = "api_key=synthetic2539secret\n" + FULL_OUTPUT
+    elif change == "nested-marker":
+        full = _marker(_path(engine._hermes_home, location, "inner"))
+    old = _marker(path) if change == "bare-boilerplate" else _write_output(path, full)
+    if change == "crlf":
+        path.write_bytes(full.replace("\n", "\r\n").encode())
+    child.api_call(ctx, _view(old), 1)
+    stored = child_rows(parent)[-1]
+    restored = engine._session_end_prefix_compare_value(stored["content"], session_id="child")
+    if change not in ("bare-boilerplate", "nested-marker"):
+        assert restored != old  # Prove this exercises a recovered row.
+    new = old
+    if change == "last-preview-character":
+        preview = full[:30]
+        new = _marker(path, full, preview=preview[:-1] + "!")
+    elif change.endswith("boilerplate"):
+        new = old.replace("Use the read_file tool", "SECOND literal message: Use the read_file tool")
+    elif change == "empty-preview":
+        new = _marker(path, full, preview="")
+        path.rename(tmp_path / "pruned-empty-preview")  # Path/count alone must not identify it.
+    elif change.startswith("other-path"):
+        other = _path(engine._hermes_home, location, "other")
+        new = _write_output(other, full) if change.endswith("present") else _marker(other, full)
+    if change == "redaction":
+        assert not restored.startswith(full[:30])
+        # With the file present the counted fallback recovers and redacts both sides.
+        # Pruning leaves only the mismatched preview; that uncertainty stores one extra copy.
+        path.rename(tmp_path / "pruned-redaction")
+    if change == "nested-marker":
+        # Main's replay counts are 3,4,5,6; the new tree keeps 3,3,3,3 and the inner text.
+        assert full in restored
+    assert engine._session_end_rows_equal(stored, _view(new)[-1], session_id="child") is (extra == 0)
+    for n in (2, 3):
+        child.api_call(ctx, _view(new), n)
+        rows = child_rows(parent)
+        assert len(rows) == 3 + extra
+        assert rows[0]["content"] == "Dump the ledger."
+        assert rows[1]["tool_calls"]
+        assert rows[2]["content"] == stored["content"]  # First content is never replaced.
+        if extra:
+            if change == "redaction":
+                assert engine._session_end_prefix_compare_identity(rows[-1], session_id="child") == (
+                    engine._session_end_prefix_compare_identity(_view(new)[-1], session_id="child"))
+            else:
+                assert engine._session_end_rows_equal(rows[-1], _view(new)[-1], session_id="child")
+    child.end(engine, _view(new))
+    assert len(child_rows(parent)) == 3 + extra
+
+
+@pytest.mark.parametrize("location", ["spillover", "hermes-results"])
+@pytest.mark.parametrize("ordering", ["inline-then-marker", "marker-then-inline"])
+def test_host_inline_marker_orderings_store_every_row_once_and_append_new_turn(tmp_path, location, ordering):
+    engine = _engine(tmp_path)
+    try:
+        marker = _write_output(_path(engine._hermes_home, location))
+        first, second = (FULL_OUTPUT, marker) if ordering == "inline-then-marker" else (marker, FULL_OUTPUT)
+        # Context-engine tools ingest foreground messages; delegated sessions suppress that ingest.
+        # Include a plain row sharing the payload so it cannot borrow the marker identity.
+        tail = [{"role": "assistant", "content": "again"}, call(1),
+                {"role": "tool", "tool_call_id": "c1", "content": FULL_OUTPUT}]
+        engine.on_session_start("old", platform="cli", context_length=200_000, conversation_id="old-conv")
+        engine.handle_tool_call("lcm_grep", {"query": "SPILLOVER_RECOVERY_NEEDLE"}, messages=[*_view(first), *tail])
+        assert len(engine._store.get_session_messages("old")) == 6
+        engine.on_session_start("foreground", platform="cli", context_length=200_000)
+        handed = [*_view(second), *tail]
+        counts = []
+        for _ in range(4):
+            engine.on_session_end("old", handed)
+            _assert_once(engine, handed, "old")
+            counts.append(len(engine._store.get_session_messages("old")))
+        assert counts == [6, 6, 6, 6]
+        updated = [*handed, {"role": "user", "content": "new question"},
+                   {"role": "assistant", "content": "new answer"}]
+        engine.on_session_end("old", updated)
+        _assert_once(engine, updated, "old")
+        assert len(engine._store.get_session_messages("old")) == 8
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("location", ["spillover", "hermes-results"])
+@pytest.mark.parametrize("ordering", ["inline-then-marker", "marker-then-inline"])
+def test_child_inline_marker_orderings_store_six_rows_once_and_append_new_turn(host, location, ordering):
+    _, _, ctx, parent, child, engine = _setup(host, "own_engine")
+    marker = _write_output(_path(engine._hermes_home, location))
+    first, second = (FULL_OUTPUT, marker) if ordering == "inline-then-marker" else (marker, FULL_OUTPUT)
+    tail = [{"role": "assistant", "content": "again"}, call(1),
+            {"role": "tool", "tool_call_id": "c1", "content": FULL_OUTPUT}]
+    child.api_call(ctx, [*_view(first), *tail], 1)
+    handed = [*_view(second), *tail]
+    counts = []
+    for n in (2, 3, 4):
+        child.api_call(ctx, handed, n)
+        _assert_once(parent, handed)
+        counts.append(len(child_rows(parent)))
+    child.end(engine, handed)
+    _assert_once(parent, handed)
+    counts.append(len(child_rows(parent)))
+    assert counts == [6, 6, 6, 6]
+    updated = [*handed, {"role": "user", "content": "new question"},
+               {"role": "assistant", "content": "new answer"}]
+    child.api_call(ctx, updated, 5)
+    _assert_once(parent, updated)
+    assert len(child_rows(parent)) == 8
+
+
+@pytest.mark.parametrize("location", ["spillover", "hermes-results"])
+@pytest.mark.parametrize("limit", ["missing-file", "rewritten-file", "reused-call-id"])
+def test_counted_fallback_keeps_every_row_with_at_most_one_extra_copy(host, tmp_path, caplog, location, limit):
+    _, _, ctx, parent, child, engine = _setup(host, "own_engine")
+    path = _path(engine._hermes_home, location)
+    old = _write_output(path)
+    # A trailing row absent from the next view prevents a positional or stored-tail match.
+    first = [*_view(old), {"role": "assistant", "content": "stored tail outside the host view"}]
+    child.api_call(ctx, first, 1)
+    if limit == "missing-file":
+        path.rename(tmp_path / "pruned-counted")
+        tool = _view(old)[-1]
+    else:
+        changed = FULL_OUTPUT + "new output"
+        tool = _view(_write_output(path, changed))[-1]
+    updated = [tool, {"role": "user", "content": "new question"},
+               {"role": "assistant", "content": "new answer"}]
+    if limit == "reused-call-id":
+        # Two occurrences under one call id; the first is inline so a changed file cannot rewrite it.
+        updated.insert(0, _view(FULL_OUTPUT)[-1])
+    before = child_rows(parent)
+    caplog.clear()
+    child.api_call(ctx, updated, 2)
+    assert "resuming with counted identities" in caplog.text
+    rows = child_rows(parent)
+    assert rows[:len(before)] == before
+    assert len(rows) == len(before) + 3  # One distinct/uncertain result plus the two genuinely new rows.
+    assert engine._session_end_rows_equal(rows[-3], tool, session_id="child")
+    assert [r["content"] for r in rows[-2:]] == ["new question", "new answer"]
+    child.api_call(ctx, updated, 3)
+    child.end(engine, updated)
+    assert len(child_rows(parent)) == len(rows)
+
+
+@pytest.mark.parametrize("location", ["spillover", "hermes-results"])
+def test_recovered_leading_whitespace_then_own_marker_keeps_content_with_one_duplicate(host, location):
+    _, _, ctx, parent, child, engine = _setup(host, "own_engine")
+    full = " \n" + FULL_OUTPUT
+    marker = _write_output(_path(engine._hermes_home, location), full)
+    # The host first delivers the recovered body inline (no recorded source metadata).
+    # Storage's current preview parser rejects recovery of a leading-whitespace preview.
+    child.api_call(ctx, _view(full), 1)
+    first = child_rows(parent)[-1]
+    assert engine._session_end_prefix_compare_value(first["content"], session_id="child") == full
+    assert not engine._session_end_rows_equal(first, _view(marker)[-1], session_id="child")
+    for n in (2, 3, 4):
+        child.api_call(ctx, _view(marker), n)
+        rows = child_rows(parent)
+        assert len(rows) == 4
+        assert rows[2]["content"] == first["content"]
+        assert rows[-1]["content"] == marker
+    child.end(engine, _view(marker))
+    assert len(child_rows(parent)) == 4
+
+
+@pytest.mark.parametrize("shape", ["marker-then-plain", "spill-then-temp"])
+def test_shared_payload_compression_boundary_preserves_plain_rows_and_new_turn(host, monkeypatch, shape):
+    _, _, ctx, parent, child, engine = _setup(host, "own_engine")
+    handed = _shared_view(engine, shape)
+    child.api_call(ctx, handed, 1)
+    monkeypatch.setattr(engine, "_compress_bypassed", lambda messages, *args: messages)
+    child.compress(engine, handed)
+    _assert_once(parent, handed)
+    updated = [*handed, {"role": "user", "content": "new question"},
+               {"role": "assistant", "content": "new answer"}]
+    child.api_call(ctx, updated, 2)
+    child.compress(engine, updated)
+    child.end(engine, updated)
+    _assert_once(parent, updated)
