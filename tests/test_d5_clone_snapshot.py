@@ -9,6 +9,8 @@ import pytest
 from bench.instruments.d5_clone import snapshot
 from bench.instruments.d5_clone.capture import _readonly
 
+from tests.test_d5_clone_capture import _hot_journal_copy
+
 
 def sha(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -204,21 +206,9 @@ def test_an_unreadable_pinned_file_fails_without_raising(tmp_path):
 
 
 def test_a_snapshot_with_a_hot_rollback_journal_fails(tmp_path):
-    root, scratch, pin = tmp_path / "snapshot", tmp_path / "scratch", tmp_path / "pin.json"
+    root = _hot_journal_copy(tmp_path, "store.db").parent  # The hot state is asserted by the helper.
+    scratch, pin = tmp_path / "scratch", tmp_path / "pin.json"
     scratch.mkdir()
-    live = tmp_path / "live"
-    live.mkdir()
-    with sqlite3.connect(live / "store.db", isolation_level=None) as conn:
-        conn.execute("CREATE TABLE t (x TEXT)")
-        conn.executemany("INSERT INTO t VALUES (?)", [("a" * 900,)] * 400)
-        conn.execute("PRAGMA cache_size=1")
-        conn.execute("BEGIN")
-        conn.execute("UPDATE t SET x = ?", ("b" * 900,))
-        root.mkdir()
-        for suffix in ("", "-journal"):
-            (root / ("store.db" + suffix)).write_bytes((live / ("store.db" + suffix)).read_bytes())
-        conn.execute("ROLLBACK")
-    conn.close()
     _pin_of(root, pin)
     result = snapshot.verify(pin, root, scratch)
     assert result["verdict"] == "FAIL"

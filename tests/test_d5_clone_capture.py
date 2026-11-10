@@ -5,6 +5,8 @@ import hashlib
 import json
 from pathlib import Path
 import sqlite3
+import sys
+import subprocess
 import time
 import types
 from datetime import datetime
@@ -216,23 +218,49 @@ def test_reading_a_stopped_wal_input_writes_no_sidecar(tmp_path):
     assert sorted(p.name for p in tmp_path.iterdir()) == ["stopped.db"]
 
 
+_HOT_WRITER = r"""
+import sqlite3, sys
+from pathlib import Path
+live, copy, name = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]
+conn = sqlite3.connect(live / name, isolation_level=None)
+conn.execute("CREATE TABLE t (x TEXT)")
+conn.executemany("INSERT INTO t VALUES (?)", [("a" * 900,)] * 400)
+conn.execute("PRAGMA cache_size=1")
+conn.execute("BEGIN")
+conn.execute("UPDATE t SET x = ?", ("b" * 900,))  # The tiny cache spills uncommitted pages into the main file.
+for suffix in ("", "-journal"):
+    (copy / (name + suffix)).write_bytes((live / (name + suffix)).read_bytes())
+conn.execute("ROLLBACK")
+conn.close()
+"""
+
+
 def _hot_journal_copy(tmp_path, name="hot.db"):
-    """A rollback-journal store copied mid-write: its main file holds uncommitted pages, its -journal is hot."""
+    """A rollback-journal store copied mid-write: its main file holds uncommitted pages, its -journal is hot.
+
+    Built in a fresh interpreter. In a used test process another open connection's clean pages can be recycled instead
+    of spilling ours (seen on Python 3.14.9 with SQLite 3.54.1 under xdist), so the copy would hold no uncommitted
+    page and the refusal under test would never be exercised."""
     live, copy = tmp_path / "live", tmp_path / "copy"
     live.mkdir()
     copy.mkdir()
-    with closing(sqlite3.connect(live / name, isolation_level=None)) as conn:
-        conn.execute("CREATE TABLE t (x TEXT)")
-        conn.executemany("INSERT INTO t VALUES (?)", [("a" * 900,)] * 400)
-        conn.execute("PRAGMA cache_size=1")
-        conn.execute("BEGIN")
-        conn.execute("UPDATE t SET x = ?", ("b" * 900,))  # The tiny cache spills pages into the main file.
-        assert Path(str(live / name) + "-journal").exists()
-        for suffix in ("", "-journal"):
-            (copy / (name + suffix)).write_bytes((live / (name + suffix)).read_bytes())
-        conn.execute("ROLLBACK")
+    subprocess.run([sys.executable, "-I", "-c", _HOT_WRITER, str(live), str(copy), name], check=True, timeout=60)
+    assert (copy / (name + "-journal")).stat().st_size > 0
     assert "b" * 900 in (copy / name).read_bytes().decode("latin-1")  # Uncommitted content reached the copy.
     return copy / name
+
+
+def test_the_hot_journal_setup_holds_while_another_connection_is_open(tmp_path):
+    """The case that broke the in-process setup: an open connection with clean cached pages in this process."""
+    other = sqlite3.connect(tmp_path / "other.db", isolation_level=None)
+    try:
+        other.execute("PRAGMA cache_size=2000")
+        other.execute("CREATE TABLE o (x TEXT)")
+        other.executemany("INSERT INTO o VALUES (?)", [("c" * 900,)] * 8000)
+        other.execute("SELECT count(*) FROM o").fetchone()
+        assert _hot_journal_copy(tmp_path).is_file()
+    finally:
+        other.close()
 
 
 def test_a_hot_rollback_journal_fails_loudly_instead_of_being_read_past(tmp_path):
