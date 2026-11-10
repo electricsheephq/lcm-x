@@ -65,6 +65,8 @@ CONFIG_ROWS = (
     ('recall_extra_entries', 'LCM_RECALL_EXTRA_ENTRIES', 'int', 0),
     ('recall_later_statements', 'LCM_RECALL_LATER_STATEMENTS', 'int', 0),
     ('recall_fts_anchor', 'LCM_RECALL_FTS_ANCHOR', 'bool', True),
+    ('recall_session_hints', 'LCM_RECALL_SESSION_HINTS', 'bool', False),
+    ('recall_guidance', 'LCM_RECALL_GUIDANCE', 'str', 'v1'),
     ('recall_summary_event_time', 'LCM_RECALL_SUMMARY_EVENT_TIME', 'bool', False),
     ('proactive_recall_enabled', 'LCM_PROACTIVE_RECALL_ENABLED', 'bool', False),
     ('preanswer_evidence_enabled', 'LCM_PREANSWER_EVIDENCE_ENABLED', 'bool', False),
@@ -187,6 +189,7 @@ SPECIAL = {
     "embedding_provider": (D, D, *VALUES[2:]),  # R4: blank provider follows unset local default.
     "recall_delivery_unit": ("hits",) * 16,
     "recall_delivery_order": ("score",) * 16,
+    "recall_guidance": ("v1",) * 16,
     "fresh_tail_max_tokens": (D, D, D, D, 1, 0, D, D, D, D, D, D, D, 0, D, HUGE),
     "leaf_target_ratio": (D, D, D, D, 1.0, D, D, D, D, D, D, D, D, D, 0.5, D),
     "leaf_target_min_tokens": (D, D, D, D, 1, D, D, D, D, D, D, D, D, D, D, D),

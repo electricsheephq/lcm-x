@@ -1017,6 +1017,8 @@ ENV_FIELD_SPECS: tuple[_EnvFieldSpec, ...] = (
     _EnvFieldSpec("recall_snippet_window_hits", "LCM_RECALL_SNIPPET_WINDOW_HITS", int),
     _EnvFieldSpec("recall_extra_entries", "LCM_RECALL_EXTRA_ENTRIES", int),
     _EnvFieldSpec("recall_later_statements", "LCM_RECALL_LATER_STATEMENTS", int),
+    _EnvFieldSpec("recall_session_hints", "LCM_RECALL_SESSION_HINTS", bool),
+    _EnvFieldSpec("recall_guidance", "LCM_RECALL_GUIDANCE", str),
     _EnvFieldSpec("recall_fts_anchor", "LCM_RECALL_FTS_ANCHOR", bool),
     _EnvFieldSpec("proactive_recall_enabled", "LCM_PROACTIVE_RECALL_ENABLED", bool),
     _EnvFieldSpec("proactive_recall_min_score", "LCM_PROACTIVE_RECALL_MIN_SCORE", float),
@@ -1410,6 +1412,8 @@ class LCMConfig:
     # Evidence (#950): frozen LongMemEval-M LOCAL replay, R@10 0.898 -> 0.905 (470 q).
     # FTS-only (embeddings-off) output is unchanged; False restores the previous order.
     recall_fts_anchor: bool = True
+    recall_session_hints: bool = False
+    recall_guidance: str = "v1"
     # -- Proactive memory injection (SPEC F, default-OFF) ---
     # At active-context assembly, embed the newest user message and run the
     # lcm_recall pipeline to surface cross-session memories the model would
@@ -1824,6 +1828,8 @@ class LCMConfig:
                     "Until then it behaves as before."
                 )
 
+        if c.recall_guidance not in ("v1", "v2"):
+            c.recall_guidance = "v1"
         c.recall_delivery_unit = c.recall_delivery_unit.strip().lower()
         if c.recall_delivery_unit not in ("hits", "session"):
             c.recall_delivery_unit = "hits"

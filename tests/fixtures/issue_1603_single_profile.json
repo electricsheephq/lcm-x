@@ -276,6 +276,8 @@
     "recall_extra_entries": 0,
     "recall_later_statements": 0,
     "recall_fts_anchor": true,
+    "recall_session_hints": false,
+    "recall_guidance": "v1",
     "recall_query_timeout_s": 8.0,
     "recall_reference_strict": true,
     "recall_scan_budget_s": 0.0,

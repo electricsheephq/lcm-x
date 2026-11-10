@@ -1098,17 +1098,34 @@ def lcm_load_session(args: Dict[str, Any], **kwargs) -> str:
         time_from=time_from,
         time_to=time_to,
     )
-    rows = engine._store.load_session_page(
-        session_id,
-        after_store_id=after_store_id,
-        limit=limit + 1,
-        roles=roles or None,
-        time_from=time_from,
-        time_to=time_to,
-    )
-    page_rows = rows[:limit]
-    has_more = len(rows) > limit
-    next_cursor = page_rows[-1]["store_id"] if has_more and page_rows else None
+    if "anchor_store_id" in args:
+        anchor, error = _parse_strict_int(args["anchor_store_id"], "anchor_store_id")
+        if error:
+            return json.dumps({"error": error})
+        row = engine._store.get(anchor) if anchor is not None else None
+        if not row or row.get("session_id") != session_id:
+            return json.dumps({"error": "anchor_store_id must identify a message in session_id"})
+        window = {}
+        for key, default in (("before", 6), ("after", 12)):
+            value, error = _parse_strict_int(args.get(key, default), key)
+            if error or value is None:
+                return json.dumps({"error": error or f"{key} must be an integer"})
+            window[key] = max(0, min(40, value))
+        rows = engine._store.load_session_window(
+            session_id, anchor_store_id=anchor, window_cap=40, **window,
+            roles=roles or None, time_from=time_from, time_to=time_to)
+        page_rows = [r for r in rows if r["store_id"] > after_store_id][:limit]
+        next_cursor = page_rows[-1]["store_id"] if page_rows else None
+        has_more = bool(next_cursor is not None and engine._store.load_session_page(
+            session_id, after_store_id=next_cursor, limit=1, roles=roles or None,
+            time_from=time_from, time_to=time_to))
+    else:
+        rows = engine._store.load_session_page(
+            session_id, after_store_id=after_store_id, limit=limit + 1,
+            roles=roles or None, time_from=time_from, time_to=time_to)
+        page_rows = rows[:limit]
+        has_more = len(rows) > limit
+        next_cursor = page_rows[-1]["store_id"] if has_more and page_rows else None
 
     response: dict[str, Any] = {
         "session_id": session_id,
@@ -4707,6 +4724,16 @@ def _lcm_recall_later_statements(engine, ordered, identity_rows, *, n, limit, qu
     return placed, info, reason
 
 
+def _lcm_recall_session_hint(engine: "LCMEngine", hit: dict[str, Any]) -> str | None:
+    store_id = hit.get("store_id")
+    if hit.get("node_id") is not None and (hit.get("kind") == "summary" or store_id is None):
+        sources = engine._dag.source_message_ids(hit["node_id"], limit=1)
+        store_id = sources[0] if sources else None
+    row = engine._store.get(store_id) if store_id is not None else None
+    session = row.get("session_id") if row else None
+    return f"lcm_load_session(session_id={session!r}, anchor_store_id={store_id})" if session else None
+
+
 def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
     """Search the agent's entire memory (all conversations, all time) by meaning.
 
@@ -5265,6 +5292,9 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
         fts_anchor_info=fts_anchor_info,
         fts_rerun=fts_rerun,
         summary_leads=summary_leads,
+        session_hint=partial(_lcm_recall_session_hint, engine) if kwargs.get(
+            "session_hints", getattr(engine._config, "recall_session_hints", False)) else None,
+        guidance_v2=kwargs.get("recall_guidance", getattr(engine._config, "recall_guidance", "v1")) == "v2",
         limit_cap=_LCM_RECALL_LIMIT_CAP,
         snippet_chars=_LCM_RECALL_SNIPPET_CHARS,
         response_char_cap=_LCM_RECALL_RESPONSE_CHAR_CAP,

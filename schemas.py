@@ -1275,3 +1275,36 @@ LCM_MEMORY = {
         "required": ["action"],
     },
 }
+
+
+def recall_guidance_schemas(schemas, variant):
+    """Select read-path guidance without imports or changing the input schemas."""
+    if variant != "v2":
+        return schemas
+    selected = []
+    for schema in schemas:
+        name = schema.get("name")
+        if name == "lcm_recall":
+            schema = {**schema, "description": schema["description"] + " " + (
+                "For questions that combine or compare facts from several conversations (totals, "
+                "lists, changes over time, 'how many', 'which ... first'), first check "
+                "`provenance.answer_ready.sessions_delivered` and `more_available`. "
+                "If more may exist, call again with `exclude_session_ids` set to the sessions you have read. "
+                "Read around a hit with its `session_hint`. "
+                "Stop when every part of the question is supported by a cited span, or "
+                "when a call returns no new sessions; then say what you could not find.")}
+        elif name == "lcm_load_session":
+            params = schema["parameters"]
+            schema = {**schema, "description": schema["description"].replace(
+                "Use this after session_search or lcm_grep has identified a session_id "
+                "that already exists in lcm.db.",
+                "Use this after lcm_recall, session_search or lcm_grep has identified a session_id "
+                "that already exists in lcm.db; pass anchor_store_id to read the conversation around one hit."),
+                "parameters": {**params, "properties": {**params["properties"],
+                    "anchor_store_id": {"type": "integer", "description":
+                        "Optional exact message anchor belonging to session_id; returns its surrounding window."},
+                    **{key: {"type": "integer", "default": default, "description":
+                             f"Rows {key} the anchor, clamped to 0..40; used only with anchor_store_id."}
+                       for key, default in (("before", 6), ("after", 12))}}}}
+        selected.append(schema)
+    return selected
