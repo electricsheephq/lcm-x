@@ -233,3 +233,153 @@ def test_cold_replays_of_a_store_written_under_a_payload_fault(tmp_path, monkeyp
     expected = with_keep if hasattr(type(engine), "_bare_marker_identity") else without_keep
     got = (len(rows), sum(role == "tool" for role, _content in rows))
     assert got == expected, f"got {got}; pinned {expected}; v0.29.2 {v0292}"
+
+
+# Six cold replays after a fault at the first ingest (the payload folder blocked by a regular file; "lifted" unblocks it
+# before the first replay, "kept" keeps it), each by a new engine on the same store and each handing two more rows. The
+# "partial" shape re-sends from the call on and reuses the call id with the identical marker. Stamps are removed from
+# the replays per variant. Counts are pinned as measured, beside v0.29.2's on the same inputs. The one cell above
+# v0.29.2 is ('K1', 'F1lifted', 'all', 'partial'): two rows more from the third replay on, and no more after that (the
+# reused call id with an identical marker, stored once more, once). Stampless and partially stamped replays store the
+# replay again on every branch and in v0.29.2 alike; where this change differs from v0.29.2 there, it stores fewer.
+_SIX_REPLAY_PINS = {  # cell: (stored rows after the ingest and each replay: with #2584's keep, without it, v0.29.2)
+    ('K1', 'F1kept', 'all', 'full'): ((4, 6, 8, 10, 12, 14, 16), (4, 6, 8, 10, 12, 14, 16),
+        (4, 6, 8, 10, 12, 14, 16)),
+    ('K1', 'F1kept', 'all', 'partial'): ((4, 9, 11, 13, 15, 17, 19), (4, 9, 11, 13, 15, 17, 19),
+        (4, 9, 11, 13, 15, 17, 19)),
+    ('K1', 'F1kept', 'none', 'full'): ((4, 6, 8, 10, 12, 14, 16), (4, 6, 8, 10, 12, 14, 16),
+        (4, 10, 18, 28, 40, 54, 70)),
+    ('K1', 'F1kept', 'none', 'partial'): ((4, 12, 22, 34, 48, 64, 82), (4, 12, 22, 34, 48, 64, 82),
+        (4, 12, 22, 34, 48, 64, 82)),
+    ('K1', 'F1kept', 'user', 'full'): ((4, 6, 8, 10, 12, 14, 16), (4, 6, 8, 10, 12, 14, 16),
+        (4, 9, 15, 22, 30, 39, 49)),
+    ('K1', 'F1kept', 'user', 'partial'): ((4, 12, 21, 31, 42, 54, 67), (4, 12, 21, 31, 42, 54, 67),
+        (4, 12, 21, 31, 42, 54, 67)),
+    ('K1', 'F1lifted', 'all', 'full'): ((4, 6, 8, 10, 12, 14, 16), (4, 6, 8, 10, 12, 14, 16),
+        (4, 6, 8, 10, 12, 14, 16)),
+    ('K1', 'F1lifted', 'all', 'partial'): ((4, 9, 11, 15, 17, 19, 21), (4, 9, 11, 15, 17, 19, 21),
+        (4, 9, 11, 13, 15, 17, 19)),
+    ('K1', 'F1lifted', 'none', 'full'): ((4, 6, 8, 10, 12, 14, 16), (4, 6, 8, 10, 12, 14, 16),
+        (4, 10, 18, 28, 40, 54, 70)),
+    ('K1', 'F1lifted', 'none', 'partial'): ((4, 12, 14, 16, 18, 20, 22), (4, 12, 14, 16, 18, 20, 22),
+        (4, 12, 22, 34, 48, 64, 82)),
+    ('K1', 'F1lifted', 'user', 'full'): ((4, 6, 8, 10, 12, 14, 16), (4, 6, 8, 10, 12, 14, 16),
+        (4, 9, 15, 22, 30, 39, 49)),
+    ('K1', 'F1lifted', 'user', 'partial'): ((4, 12, 14, 16, 18, 20, 22), (4, 12, 14, 16, 18, 20, 22),
+        (4, 12, 21, 31, 42, 54, 67)),
+    ('K2', 'F1kept', 'all', 'full'): ((4, 6, 8, 10, 12, 14, 16), (4, 6, 8, 10, 12, 14, 16),
+        (4, 8, 12, 16, 20, 24, 28)),
+    ('K2', 'F1kept', 'all', 'partial'): ((4, 9, 11, 13, 15, 17, 19), (4, 11, 13, 19, 25, 31, 37),
+        (4, 11, 17, 23, 29, 35, 41)),
+    ('K2', 'F1kept', 'none', 'full'): ((4, 6, 8, 10, 12, 14, 16), (4, 10, 18, 28, 40, 54, 70),
+        (4, 10, 18, 28, 40, 54, 70)),
+    ('K2', 'F1kept', 'none', 'partial'): ((4, 12, 22, 34, 48, 64, 82), (4, 12, 22, 34, 48, 64, 82),
+        (4, 12, 22, 34, 48, 64, 82)),
+    ('K2', 'F1kept', 'user', 'full'): ((4, 6, 8, 10, 12, 14, 16), (4, 9, 15, 22, 30, 39, 49),
+        (4, 9, 15, 22, 30, 39, 49)),
+    ('K2', 'F1kept', 'user', 'partial'): ((4, 12, 21, 31, 42, 54, 67), (4, 12, 21, 31, 42, 54, 67),
+        (4, 12, 21, 31, 42, 54, 67)),
+    ('K2', 'F1lifted', 'all', 'full'): ((4, 6, 8, 10, 12, 14, 16), (4, 6, 8, 10, 12, 14, 16),
+        (4, 8, 10, 12, 14, 16, 18)),
+    ('K2', 'F1lifted', 'all', 'partial'): ((4, 9, 11, 15, 17, 19, 21), (4, 11, 13, 15, 17, 19, 21),
+        (4, 11, 13, 15, 17, 19, 21)),
+    ('K2', 'F1lifted', 'none', 'full'): ((4, 6, 8, 10, 12, 14, 16), (4, 10, 12, 14, 16, 18, 20),
+        (4, 10, 12, 14, 16, 18, 20)),
+    ('K2', 'F1lifted', 'none', 'partial'): ((4, 12, 14, 16, 18, 20, 22), (4, 12, 14, 16, 18, 20, 22),
+        (4, 12, 14, 16, 18, 20, 22)),
+    ('K2', 'F1lifted', 'user', 'full'): ((4, 6, 8, 10, 12, 14, 16), (4, 9, 15, 22, 30, 39, 49),
+        (4, 9, 15, 22, 30, 39, 49)),
+    ('K2', 'F1lifted', 'user', 'partial'): ((4, 12, 14, 16, 18, 20, 22), (4, 12, 14, 16, 18, 20, 22),
+        (4, 12, 14, 16, 18, 20, 22)),
+}
+_FULL = "SPILLOVER_RECOVERY_NEEDLE:\n" + ("é文abcdef\n" * 600)
+_T0 = 1762700000.0
+_RCALL = "call_spill"
+
+
+def _six_replay_transcript(tool, shape):
+    def row(i, role, content, **extra):
+        return dict(role=role, content=content, timestamp=_T0 + i, **extra)
+
+    call = row(2, "assistant", "", tool_calls=[{"id": _RCALL, "type": "function",
+                                                "function": {"name": "dump", "arguments": "{}"}}])
+    t = [row(1, "user", "dump it"), call, row(3, "tool", tool, tool_call_id=_RCALL), row(4, "assistant", "saved")]
+    if shape == "full":
+        t += [row(5 + i, ("user", "assistant")[i % 2], f"next {i}") for i in range(12)]
+        return t, [(0, 4)] + [(0, 4 + 2 * k) for k in range(1, 7)]
+    t += [row(5 + i, ("user", "assistant")[i % 2], f"next {i}") for i in range(2)]
+    t += [dict(call), row(10, "tool", tool, tool_call_id=_RCALL), row(11, "assistant", "saved again")]
+    t += [row(10 + i, ("user", "assistant")[i % 2], f"next {i}") for i in range(2, 12)]
+    return t, [(0, 4)] + [(1, 7 + 2 * k) for k in range(1, 7)]
+
+
+@pytest.mark.parametrize("kind,arm,stamps,shape", sorted(_SIX_REPLAY_PINS), ids=["-".join(c) for c in sorted(_SIX_REPLAY_PINS)])
+def test_six_cold_replays_after_a_payload_folder_fault(tmp_path, kind, arm, stamps, shape):
+    from hermes_lcm.config import LCMConfig
+    from hermes_lcm.engine import LCMEngine
+
+    home = tmp_path / "hermes"
+    home.mkdir()
+    blocker = home / "lcm-large-outputs"
+    blocker.write_bytes(b"not a folder\n")
+    path = (home / "cache" / "spillover" if kind == "K1" else Path(tempfile.gettempdir()) / "hermes-results") / f"{_RCALL}.txt"
+    t, slices = _six_replay_transcript(_write_output(path, _FULL), shape)
+    counts, has_keep = [], None
+    for n, (a, b) in enumerate(slices):
+        handed = copy.deepcopy(t[a:b])
+        if n:
+            for row in handed:
+                if stamps == "none" or (stamps == "user" and row["role"] != "user"):
+                    row.pop("timestamp", None)
+        if n == 1 and arm == "F1lifted":
+            blocker.rename(home / "lcm-large-outputs.lifted")
+        engine = LCMEngine(config=LCMConfig(database_path=str(home / "lcm.db")), hermes_home=str(home))
+        try:
+            engine.on_session_start("S1", platform="cli", context_length=128000, conversation_id="conv1")
+            engine.ingest(handed)
+            rows = engine._store.get_session_messages("S1")
+            if n == 0:
+                _assert_bare([r for r in rows if r["role"] == "tool"][0]["content"], t[2]["content"])
+            has_keep = hasattr(type(engine), "_bare_marker_identity")
+        finally:
+            engine.shutdown()
+        counts.append(len(rows))
+    with_keep, without_keep, v0292 = _SIX_REPLAY_PINS[(kind, arm, stamps, shape)]
+    expected = with_keep if has_keep else without_keep
+    assert tuple(counts) == expected, f"got {counts}; pinned {expected}; v0.29.2 {v0292}"
+
+
+@KINDS
+def test_a_restart_that_binds_the_old_session_first_then_ends_it_off_current(tmp_path, monkeypatch, kind):
+    """A store written under a payload fault (the bare marker, the form v0.29.2 stores), then a new engine: it binds the
+    old session first, starts another, and the old session's end arrives with its rows and a final reply."""
+    from hermes_lcm.config import LCMConfig
+    from hermes_lcm.engine import LCMEngine
+
+    home = tmp_path / "hermes"
+    marker = _write_output(_marker_path(kind, home))
+    history = _history(marker)
+
+    def engine():
+        return LCMEngine(config=LCMConfig(database_path=str(home / "lcm.db"),
+                                          large_output_externalization_path=str(home / "externalized")),
+                         hermes_home=str(home))
+
+    first = engine()
+    try:
+        with monkeypatch.context() as patch:
+            _payload_fault(patch, first, "write")
+            first.on_session_start("S1", platform="cli", context_length=200_000, conversation_id="conv1")
+            first.ingest(copy.deepcopy(history))
+        _assert_bare([r for r in first._store.get_session_messages("S1") if r["role"] == "tool"][0]["content"], marker)
+    finally:
+        first.shutdown()
+    second = engine()
+    try:
+        second.on_session_start("S1", platform="cli", context_length=200_000, conversation_id="conv1")
+        second.on_session_start("S2", platform="cli", context_length=200_000, conversation_id="conv2")
+        second.on_session_end("S1", copy.deepcopy(history) + [{"role": "assistant", "content": "FINAL", "timestamp": 11.0}])
+        rows = second._store.get_session_messages("S1")
+        assert (sum(r["content"] == "FINAL" for r in rows), len(rows)) == (1, len(history) + 1)
+    finally:
+        second.shutdown()
