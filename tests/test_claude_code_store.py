@@ -2273,7 +2273,7 @@ def test_an_unreadable_subagents_folder_under_a_pending_path_is_not_verified(tmp
     _record(_hook(), home, tmp_path / "projects" / "-other" / "s1.jsonl")
     cc.run_worker(home, hermes_home=hermes, settle_s=0)
     _append(a.parent / "s1" / "subagents" / "agent-x1.jsonl", [dict(e, isSidechain=True) for e in CONVERSATION[2:]])
-    folder = a.parent / "s1"
+    folder = a.parent / "s1" / "subagents"  # only this folder: the saved-outputs check must not be what flags it
     folder.chmod(0)
     try:
         report = ca.audit(home)
