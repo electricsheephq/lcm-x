@@ -131,3 +131,19 @@ def test_a_child_cannot_read_a_denied_path_but_may_hash_its_name(tmp_path):
                             capture_output=True, text=True, timeout=20, cwd=allowed)
     import hashlib
     assert result.stdout.split() == [hashlib.sha256(str(denied / "state.db").encode()).hexdigest()[:8], "denied", "read"]
+
+
+def test_the_egress_control_child_never_sees_the_live_home(monkeypatch):
+    """P5's child runs under the same profile as every host process, the live agent's home denied included."""
+    seen = []
+
+    def fake_run(argv, **kw):
+        seen.append(argv)
+        return subprocess.CompletedProcess(argv, 0, stdout='{"verdict": "PASS"}', stderr="")
+
+    monkeypatch.setattr(sandbox, "available", lambda: True)
+    monkeypatch.setattr(sandbox.subprocess, "run", fake_run)
+    assert sandbox.positive_control("http://127.0.0.1:9/v1/models") == {"verdict": "PASS"}
+    (argv,) = seen
+    assert argv[:2] == ["/usr/bin/sandbox-exec", "-p"]
+    assert f'(deny file-read* file-write* (subpath "{os.path.abspath(sandbox.hermes_home())}"))' in argv[2]
