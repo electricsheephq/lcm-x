@@ -605,8 +605,11 @@ def audit(home: Path, session: str | None = None) -> dict:
     # verified verdict never reads as "everything accounted for".
     verdict = "verified" if verified else "not verified"
     if pending:
+        # Lineages, not sessions (a subagent is its own lineage); an undated row can be older than the oldest dated one.
+        absent = sum(1 for row in pending if not (isinstance(row.get("path"), str) and row["path"] and Path(row["path"]).exists()))
         age = "unknown" if oldest_pending_age is None else f"{oldest_pending_age / 3600:.1f} h"
-        verdict += f"; {len(pending)} sessions pending: transcript never seen, oldest {age}"
+        verdict += (f"; {len(pending)} lineages awaiting capture ({absent} transcripts not yet seen), "
+                    f"oldest{' known' if seen and len(seen) < len(pending) else ''} {age}")
     return {"verdict": verdict, "ok": not any(failures.values()), "opened_immutable": immutable, "failures": failures,
             "pending_lineages": len(pending), "oldest_pending_age_s": oldest_pending_age,
             "unverified": unverified, "verified": verified,

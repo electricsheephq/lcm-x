@@ -359,9 +359,12 @@ def drain(store: MessageStore, lineage: Lineage, *, deadline: Optional[float] = 
     if state == "missing":
         key = PENDING_PREFIX + lineage.key
         pending = store.read_metadata_json(key) if not cursor else None
-        if not cursor and (not isinstance(pending, dict) or pending.get("path") != str(lineage.path)):
-            # A newer record's path replaces the recorded one (the sweep must look where the transcript will be);
-            # first_seen keeps the first sighting.
+        recorded = pending.get("path") if isinstance(pending, dict) else None
+        if not cursor and recorded != str(lineage.path) and not (isinstance(recorded, str) and recorded
+                                                                and Path(recorded).exists()):
+            # A newer record's path replaces the recorded one while that one is still absent (the sweep must look
+            # where the transcript will be); a recorded transcript that has appeared keeps its reference, so the
+            # sweep drains it. first_seen keeps the first sighting.
             first_seen = pending.get("first_seen") if isinstance(pending, dict) else None
             with store.atomic():
                 store.connection.execute(

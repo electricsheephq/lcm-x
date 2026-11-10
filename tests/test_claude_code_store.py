@@ -1816,3 +1816,30 @@ def test_a_pending_lineage_follows_a_newer_transcript_path(tmp_path, home, herme
         assert store.read_metadata_json("capture:pending:" + lineage.key) is None
     finally:
         store.close()
+
+
+def test_a_pending_path_that_now_exists_is_not_replaced(tmp_path, home, hermes):
+    """#2533 review: when the recorded transcript has appeared, a newer record naming another missing path keeps
+    the recorded one, so the sweep still drains the transcript that holds rows."""
+    early = _transcript(tmp_path, [])  # the recorded path, still missing
+    early.unlink()
+    lineage = cc.Lineage("s1", None, early)
+    store = _open(home, hermes)
+    try:
+        assert cc.drain(store, lineage) == "missing"
+    finally:
+        store.close()
+    _transcript(tmp_path, CONVERSATION)  # the recorded transcript appears with rows, before any sweep reaches it
+    later = tmp_path / "projects" / "-elsewhere" / "s1.jsonl"
+    store = _open(home, hermes)
+    try:
+        assert cc.drain(store, cc.Lineage("s1", None, later)) == "missing"
+        assert store.read_metadata_json("capture:pending:" + lineage.key)["path"] == str(early)
+    finally:
+        store.close()
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    store = _open(home, hermes)
+    try:
+        assert _rows(store), "the transcript at the recorded path must be captured"
+    finally:
+        store.close()
