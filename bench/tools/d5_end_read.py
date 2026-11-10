@@ -227,10 +227,11 @@ def end_read(args):
                              args.scratch)
         if reason:
             return {**out, "verdict": INCONCLUSIVE, "reason": f"{side}: {reason}"}
-    if not _HEX64.fullmatch(args.config_sha256 or "") or capture._sha256(args.config) != args.config_sha256:
+    raw = Path(args.config).read_bytes() if _HEX64.fullmatch(args.config_sha256 or "") else b""
+    if hashlib.sha256(raw).hexdigest() != args.config_sha256:  # The bytes hashed are the bytes parsed.
         return {**out, "verdict": INCONCLUSIVE, "reason": "the declaration does not hash to the sha256 sent"}
     out["config_sha256"] = args.config_sha256
-    config = {**json.loads(Path(args.config).read_text(encoding="utf-8")), "instrument_dir": args.instrument_dir}
+    config = {**json.loads(raw.decode("utf-8")), "instrument_dir": args.instrument_dir}
     lcm = (config.get("settings") or {}).get("lcm") if isinstance(config.get("settings"), dict) else None
     if not isinstance(lcm, dict) or not all(isinstance(lcm.get(k), list) for k in
                                             ("ignore_session_patterns", "stateless_session_patterns")):
@@ -251,7 +252,10 @@ def end_read(args):
     log = logging.getLogger(message_patterns.__name__)
     was_disabled, log.disabled = log.disabled, True  # Its warnings quote a pattern: a settings value.
     try:
-        declared = [x for x in lcm.get("ignore_message_patterns") or [] if isinstance(x, str)]
+        declared = lcm.get("ignore_message_patterns") or []
+        if not isinstance(declared, list) or not all(isinstance(x, str) for x in declared):
+            return {**out, "verdict": unproven,
+                    "reason": "the declaration's ignore_message_patterns is not a list of strings"}
         if declared and message_patterns._regex_engine is None:
             return {**out, "verdict": unproven, "reason": "declared message patterns need the regex package for "
                                                           "bounded matching; it is not installed"}

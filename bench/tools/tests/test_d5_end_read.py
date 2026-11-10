@@ -325,6 +325,17 @@ def test_a_declared_pattern_session_with_stored_rows_outside_the_window_is_incon
     assert er.verdict(PRESERVED, check2) == "INCONCLUSIVE"
 
 
+def test_the_declaration_is_parsed_from_the_bytes_it_was_hashed_from(monkeypatch, tmp_path):
+    """Review finding: hashing by path and reopening let a swapped file be parsed after the check."""
+    reads = []
+    real = er.Path.read_bytes
+    monkeypatch.setattr(er.Path, "read_bytes", lambda self: reads.append(self.name) or real(self))
+    monkeypatch.setattr(er.Path, "read_text", lambda self, *a, **k: (_ for _ in ()).throw(AssertionError("reopened")))
+    end = {"host": [*START["host"], host(2, "s1", "a")], "store": [*START["store"], stored(11, "s1", "a")]}
+    assert _fake_read(monkeypatch, tmp_path, end, [])["verdict"] == "PASS"
+    assert reads.count("decl.json") == 2  # One by this test's own _sha, one by the read: hashed and parsed once.
+
+
 def test_the_declaration_must_hash_to_the_sha256_sent(monkeypatch, tmp_path):
     monkeypatch.setattr(er, "_capture", lambda *a: ({"verdict": "PASS"}, None))
     (tmp_path / "decl.json").write_text(json.dumps({"settings": {"lcm": {}}}))
@@ -466,17 +477,22 @@ def test_message_pattern_warnings_are_silenced_and_the_logger_is_restored(monkey
 
 def test_a_malformed_message_pattern_list_keeps_a_failed_check_1(monkeypatch, tmp_path):
     end = {"host": [*START["host"], host(2, "s1", "a")], "store": [stored(11, "s1", "a")]}  # Start row 10 deleted.
-    result = _fake_read(monkeypatch, tmp_path, end, 5)
-    assert result["verdict"] == "FAIL" and result["reason"] == "check 2 could not be read (TypeError)"
+    for malformed in (5, "abc", ["ok", 7], {"a": 1}):
+        result = _fake_read(monkeypatch, tmp_path, end, malformed)
+        assert result["verdict"] == "FAIL", malformed
+        assert result["reason"] == "the declaration's ignore_message_patterns is not a list of strings"
+    kept = {"host": end["host"], "store": [*START["store"], stored(11, "s1", "a")]}
+    assert _fake_read(monkeypatch, tmp_path, kept, "abc")["verdict"] == "INCONCLUSIVE"  # Never split into characters.
 
 
 def test_a_catastrophic_message_pattern_is_bounded_and_quotes_nothing(monkeypatch, tmp_path, caplog):
-    """Review finding: stdlib re had no timeout; with the regex package each search is bounded, and a search that
-    times out may have matched at runtime, so the row is unmatched, never LOST."""
+    """Review finding: stdlib re had no timeout; with the regex package each search is bounded."""
     pytest.importorskip("regex")
     caplog.set_level("DEBUG")
     end = {"host": [*START["host"], host(2, "s9", "a" * 40 + "!"), host(3, "s1", "a")],
            "store": [*START["store"], stored(11, "s1", "a")]}
     check2 = _fake_read(monkeypatch, tmp_path, end, ["(a+)+$"])["check2_coverage"]
-    assert (check2["lost"], check2["unmatched_by_hint"]["matches a declared message pattern"]) == (0, 1)
+    # The read returns. A search that finishes in time is a plain non-match (LOST); one that times out may have matched
+    # (unmatched); the timeout path itself is pinned by the stand-in test above.
+    assert check2["lost"] + check2["unmatched_by_hint"]["matches a declared message pattern"] == 1
     assert "(a+)+$" not in caplog.text
