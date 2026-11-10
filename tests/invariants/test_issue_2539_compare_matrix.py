@@ -64,6 +64,21 @@ _MARKER = re.compile(
 _EXCEPTION_CELLS = set()
 _LEGACY_EXCEPTION_CELLS = set()
 _GROWTH_EXCEPTION_CELLS = set()
+# R4-8 and its amendment: the data checks decide; these names bound them, so a twelfth stored-marker
+# or an eighth growth admission fails its own cell, also under -n 8.
+_PINNED_LEGACY_CELLS = frozenset(
+    f'reconcile-replay/{form}/{host}{window}'
+    for form in ('v0292/data-uri/spillover', 'v0292-crlf/plain/hermes-results')
+    for host in ('identical', 'present') for window in ('', '/occurrences-1/shifted')) | frozenset(
+    f'reconcile-replay/bare/{form}/present/occurrences-1/shifted'
+    for form in ('data-uri/spillover', 'data-uri/hermes-results', 'plain/hermes-results'))
+_PINNED_GROWTH_CELLS = frozenset(
+    f'reconcile-replay/{form}/{host}/occurrences-2/shifted'
+    for form in ('v0292/data-uri/spillover', 'v0292-crlf/plain/hermes-results')
+    for host in ('identical', 'present')) | frozenset(
+    f'reconcile-replay/bare/{form}/present/occurrences-2/shifted'
+    for form in ('data-uri/spillover', 'data-uri/hermes-results', 'plain/hermes-results'))
+assert len(_PINNED_LEGACY_CELLS) == 11 and len(_PINNED_GROWTH_CELLS) == 7
 _HOST_RECOVERY_CELLS = set()
 
 _EXT = re.compile(r'\[Externalized (?:LCM ingest payload|tool output|payload):[^\]]*?;\s*ref=([^;\]\s]+)\]')
@@ -636,6 +651,7 @@ def _run_case(case, host, tmp_path, monkeypatch, request, characterization=None)
         baseline_contents = fixture['content_sets'][baseline['contents']]
         lost, exceptions = _lost_contents(baseline_contents, contents, fixture['markers'], bodies)
         if set(lost) & legacy_losses:
+            assert _cell_id(case) in _PINNED_LEGACY_CELLS, f'STOP bar ii {_cell_id(case)}: a new stored-marker admission'
             _LEGACY_EXCEPTION_CELLS.add(_cell_id(case))
         lost = [identity for identity in lost if identity not in legacy_losses]
         if exceptions:
@@ -658,6 +674,7 @@ def _run_case(case, host, tmp_path, monkeypatch, request, characterization=None)
                                                 missing, result.get('third_replay_growth', 1))
                 assert limit, (
                     f'STOP bar iv {_cell_id(case)}: main={baseline["counts"]} candidate={counts}; new second-replay growth')
+                assert _cell_id(case) in _PINNED_GROWTH_CELLS, f'STOP bar iv {_cell_id(case)}: a new named-limit admission'
                 _GROWTH_EXCEPTION_CELLS.add(_cell_id(case))
             else:
                 gaps.append('second replay adds rows')

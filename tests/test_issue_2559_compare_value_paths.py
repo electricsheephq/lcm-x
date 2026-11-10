@@ -40,3 +40,34 @@ def test_list_content_stored_as_text_is_restored_per_leaf(engine):
     restored = engine._session_end_prefix_compare_value(stored, session_id='S1')
     assert json.loads(restored) == [{'type': 'text', 'text': 'LEAF'}]
     assert engine._session_end_prefix_compare_value(stored, session_id='S2') == stored
+
+
+def _call(arguments):
+    return {'role': 'assistant', 'content': '', 'timestamp': 2.0,
+            'tool_calls': [{'id': 'k1', 'type': 'function', 'function': {'name': 'f', 'arguments': arguments}}]}
+
+
+def test_arguments_with_duplicate_keys_compare_as_text(engine):
+    # NeonDiff (#2572): parsing would collapse these to one object; ingest keeps duplicate-key JSON as text.
+    first, second = '{"image":"A","image":"plain"}', '{"image":"B","image":"plain"}'
+    assert not engine._session_end_rows_equal(_call(first), _call(second), session_id='S1')
+    assert engine._session_end_rows_equal(_call(first), _call(first), session_id='S1')
+
+
+def test_a_payload_held_in_an_argument_key_is_restored_before_the_keys_are_sorted(engine, tmp_path):
+    # NeonDiff (#2572): ingest can externalize a payload held in a key; restoring only values left the
+    # stored placeholder key sorting before "b" while the host's data URI sorts after it.
+    import base64
+
+    key = 'data:image/png;base64,' + base64.b64encode(bytes(range(256)) * 20).decode()
+    host = _call(json.dumps({key: 'v', 'b': 'x'}))
+    engine.on_session_start('S1', platform='cli', context_length=200_000, conversation_id='c')
+    engine.ingest([{'role': 'user', 'content': 'go', 'timestamp': 1.0}, json.loads(json.dumps(host)),
+                   {'role': 'tool', 'tool_call_id': 'k1', 'content': 'ok', 'timestamp': 3.0},
+                   {'role': 'assistant', 'content': 'done', 'timestamp': 4.0}])
+    stored = next(r for r in engine._store.get_session_messages('S1') if r['role'] == 'assistant' and r.get('tool_calls'))
+    raw = stored['tool_calls'] if isinstance(stored['tool_calls'], str) else json.dumps(stored['tool_calls'])
+    assert '[Externalized LCM ingest payload:' in raw and key not in raw  # the key itself was moved out
+    assert engine._session_end_rows_equal(stored, host, session_id='S1')
+    changed = _call(json.dumps({key[:-4] + 'AAAA': 'v', 'b': 'x'}))
+    assert not engine._session_end_rows_equal(stored, changed, session_id='S1')

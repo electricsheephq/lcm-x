@@ -168,3 +168,25 @@ def test_shifted_repeated_call_upgrade_replay(shape, tmp_path, monkeypatch):
     print(f'SHIFTED_CALL {shape} counts={counts}')
     assert snapshots[1] == snapshots[2], f'{shape}: third replay added rows: {counts}'
     assert counts == [208, 211, 213, 213], f'{shape}: named-limit counts changed: {counts}'
+
+
+def test_an_unreadable_tool_row_lookup_keeps_the_row_and_stores_every_host_row(legacy, tmp_path, monkeypatch):
+    """CodeRabbit (#2572): a failed lookup in the legacy keep proves nothing; the row keeps its own identity."""
+    from hermes_lcm.store import MessageStore
+
+    marker, path, body, original = legacy
+    calls = []
+
+    def unreadable(self, *args, **kwargs):
+        calls.append(1)
+        raise RuntimeError('lookup failed')
+
+    monkeypatch.setattr(MessageStore, 'find_session_tool_rows', unreadable)
+    history = _host_history(marker, [('assistant', 'FINAL')])
+    _run_phase(tmp_path, history)  # no exception escapes the ingest
+    assert calls, 'the legacy keep did not reach the lookup'
+    rows = _read_store(tmp_path)
+    assert rows[:4] == original
+    storage, home, temp = tmp_path / 'hermes' / 'externalized', tmp_path / 'hermes', tmp_path / 'host-temp'
+    _, missing = _match_host_rows(_snapshot(rows, storage, home, temp, {})[3], _host_rows(history, body, home, temp))
+    assert not missing, missing
