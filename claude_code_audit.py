@@ -648,7 +648,9 @@ def _expired(pending: dict, metadata: dict) -> str | None:
     """Why a pending lineage none of whose named transcripts exists was never written, or None (#2535). Only two shapes
     seen on real sessions qualify, and only when no hook of the lineage ever found its transcript on disk: the
     compaction summarizer (only a SubagentStop, of type "", whose prompt id is one of its session's compactions) and a
-    session whose hooks were only SessionStart and SessionEnd. Anything else may be a removed transcript."""
+    session whose hooks were only SessionStart and SessionEnd. Anything else may be a removed transcript. The rule: a
+    pending record expires only on facts this home observed itself; history that is missing or cannot be read is
+    unknown, and unknown never expires."""
     facts = pending.get("facts") if _usable(pending) else None
     if not isinstance(facts, dict) or facts.get("transcript_seen") is not False:  # older rows and hooks: unknown
         return None
@@ -659,7 +661,7 @@ def _expired(pending: dict, metadata: dict) -> str | None:
                 and isinstance(compactions, list) and facts["prompt"] in compactions):
             return "summarizer"
         return None
-    return "no_prompt" if "SessionEnd" in events and events <= NO_PROMPT_EVENTS else None
+    return "no_prompt" if events == NO_PROMPT_EVENTS else None  # both seen by this home, nothing else
 
 
 def _unverified(metadata: dict, records: list[dict], lineages: list[dict], session: str | None,

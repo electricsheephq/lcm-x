@@ -246,12 +246,17 @@ def spool(home: Path, record: Mapping[str, Any], *, wait_s: Optional[float] = No
 
 def _spool_locked(directory: Path, key: str, record: Mapping[str, Any]) -> str:
     record = dict(record)
+    unknown = False
     try:
         with open(directory / (key + ".json"), encoding="utf-8") as handle:
             previous = json.load(handle)
-    except (OSError, ValueError):
+    except FileNotFoundError:
         previous = None
+    except (OSError, ValueError):  # a pointer that cannot be read: its history is unknown, never "not seen" (#2535)
+        previous, unknown = None, True
     facts = _merged_facts(record, previous)
+    if unknown:
+        facts.update({name: None for name in ("transcript_seen", "agent_transcript_seen") if facts[name] is not True})
     if record.get("event") == "SessionStart" and record.get("source"):
         record["start_source"] = record["source"]
         record["started_at"] = record.get("observed_at")

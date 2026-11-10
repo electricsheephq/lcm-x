@@ -2435,3 +2435,68 @@ def test_the_named_path_rule_table(tmp_path, home, hermes, state, where, kind, u
         if locked is not None:
             locked.chmod(0o700)
     assert bool([key for key in report["unverified"] if key.startswith("claude-code:s1")]) is unverified
+
+
+# #2535 strict: one table for when a pending record expires. The rule: a pending record expires only on facts this
+# home observed itself; history that is missing or cannot be read is unknown, and unknown never expires.
+_EXPIRY_EVENTS = {"end_only": ["SessionEnd"], "start_end": ["SessionStart", "SessionEnd"],
+                  "with_prompt": ["SessionStart", "UserPromptSubmit", "SessionEnd"],
+                  "summarizer": ["SubagentStop"], "summarizer_plus": ["SubagentStop", "SubagentStart"]}
+
+
+def _expiry_case(tmp_path, home, hermes, history, events, seen):
+    """Spools ``events`` for a lineage whose transcript never appears and returns its key."""
+    hook = _hook()
+    agent = events.startswith("summarizer")
+    parent = _transcript(tmp_path, CONVERSATION) if agent else tmp_path / "projects" / "-work" / "s1.jsonl"
+    path = cc.session_dir(parent) / "subagents" / "agent-sum1.jsonl" if agent else parent
+    key = "claude-code:s1/agent:sum1" if agent else "claude-code:s1"
+    if agent:  # the compaction this summarizer belongs to, as Claude Code sends it
+        _record(hook, home, parent, event="PreCompact", prompt_id="c1", compact_prompts=["c1"], transcript_seen=True)
+        cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    if history == "earlier_build":  # the pending row main writes since #2533: no facts
+        store = _open(home, hermes)
+        try:
+            store.update_metadata_json(cc.PENDING_PREFIX + key, lambda _current: {
+                "session_id": "s1", "agent_id": "sum1" if agent else None, "path": str(path),
+                "named": [str(path)], "first_seen": 100.0})
+        finally:
+            store.close()
+    names = _EXPIRY_EVENTS[events]
+    for n, event in enumerate(names):
+        extra = (dict(agent_id="sum1", agent_transcript_path=str(path), agent_type="", prompt_id="c1",
+                      transcript_seen=True, agent_transcript_seen=seen) if agent else dict(transcript_seen=seen))
+        if history == "pointer_unreadable" and n == len(names) - 1:  # an earlier pointer the hook cannot read
+            if n == 0:  # a first pointer to make unreadable
+                _record(hook, home, parent, event=event, **extra)
+            pointers = sorted((home / "spool").glob("*.json"))
+            for pointer in pointers:
+                pointer.chmod(0)
+            try:
+                _record(hook, home, parent, event=event, **extra)
+            finally:
+                for pointer in pointers:
+                    if pointer.exists():
+                        pointer.chmod(0o600)
+            cc.run_worker(home, hermes_home=hermes, settle_s=0)
+            continue
+        _record(hook, home, parent, event=event, **extra)
+        if history != "pointer_unreadable":
+            cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    assert not path.exists()
+    return key
+
+
+_EXPIRY = [(history, events, seen, history == "known" and seen is False and events in ("start_end", "summarizer"))
+           for history in ("known", "earlier_build", "pointer_unreadable") for events in _EXPIRY_EVENTS
+           for seen in (True, False, None)]
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads any file")
+@pytest.mark.parametrize("history,events,seen,expires", _EXPIRY,
+                         ids=[f"{h}-{e}-{s}" for h, e, s, _ in _EXPIRY])
+def test_the_expiry_rule_table(tmp_path, home, hermes, history, events, seen, expires):
+    from hermes_lcm import claude_code_audit as ca
+
+    key = _expiry_case(tmp_path, home, hermes, history, events, seen)
+    assert (key not in ca.audit(home)["unverified"]) is expires
