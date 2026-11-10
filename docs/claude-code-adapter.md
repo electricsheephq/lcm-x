@@ -319,19 +319,26 @@ line with a note (`projected_entry_without_uuid`, `projection_error:<type>`), an
 - **Saved tool outputs in `lcm_grep` (#2225).** In this reader, a full-text `lcm_grep` with no
   `content_scope` searches raw messages first. When they return fewer than `limit` results, it then
   searches this store's saved tool outputs (externalized payloads), newest first. `content_scope`
-  `externalized` and `both` work with `session_scope` `all` and `session`; `session_scope` `current`
-  stays history-only, because the reader has no active session.
+  `externalized` and `both` work with `session_scope` `all` and `session`. With `session_scope`
+  `current` the default stays history-only, and an explicit `externalized` or `both` is an error,
+  because the reader has no active session.
   - A payload hit carries `type: externalized`, its `ref` and its `session_id`. A payload matches the
     query as a literal phrase.
   - `lcm_expand(externalized_ref, session_id)` returns the output in pages of `max_tokens`; follow
     `has_more` and `next_content_offset` for the rest.
   - The pass is bounded: 4096 names discovered, 128 files and 8 MiB read per call, 512 KB per file.
     Whenever a bound, an unreadable payload or the store-containment check cuts it, the response
-    carries `partial` with its `reasons`. That means incomplete coverage: narrow `session_scope` or
-    pass `externalized_refs`.
-  - A named ref with no payload folder is an error. A named ref cut short by the byte budget reports
-    `partial` with `byte_cap`, not an error. A named ref that the containment check skips is
-    reported as `partial` with `containment` (#2518).
+    carries `partial` with its `reasons`, which means incomplete coverage. The remedy depends on the
+    reason:
+    - `discovery_cap`, `file_cap` and `byte_cap`: narrow `session_scope` or pass `externalized_refs`.
+    - `prefix` (a file past 512 KB was searched only in its first part): page that ref with
+      `lcm_expand`.
+    - `containment` (the payload pass is off for this store, named refs included) and a folder-level
+      `unreadable`: nothing in the payload folder was searched, so the result is history only.
+  - A named ref that cannot be read is an error: no payload folder, a name missing from it, a symlink,
+    an unparseable payload, or one outside the requested scope. There are two exceptions, both
+    reported as `partial` rather than as an error: a named ref cut short by the byte budget
+    (`byte_cap`), and the containment check turning the payload pass off (`containment`, #2518).
   - Hermes' own `lcm_grep` is unchanged.
 - **Reader override.** A valid `reader-override.json` in the store home makes the server start
   another reader in place of the plain one. Something outside the plugin writes the file to opt in
