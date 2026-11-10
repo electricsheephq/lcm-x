@@ -185,7 +185,7 @@ class PrefixMatchingMixin:
                     and (not payload.get("session_id") or payload["session_id"] == session_id)):
                 source, expected = payload.get("persisted_output_source_path"), payload.get("persisted_output_expected_chars")
                 if source and source == _persisted_output_saved_path(incoming) and type(expected) is int:
-                    preview = re.search(r"^Preview \(first \d+ chars\):[^\S\r\n]*\r?\n(.*?)\r?\n</persisted-output>\s*$",
+                    preview = re.search(r"^Preview \(first \d+ chars\):[^\S\r\n]*\r?\n(.*?)\r?\n</persisted-output>\s*\Z",
                         incoming, re.MULTILINE | re.DOTALL)
                     prefix = preview[1] if preview else None
                     if prefix is not None and prefix.endswith("\n..."):

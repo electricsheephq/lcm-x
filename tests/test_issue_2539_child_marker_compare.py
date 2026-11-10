@@ -607,3 +607,18 @@ def test_anchor_handover_needs_no_full_store_read(host, monkeypatch):
     assert anchors == [1], "handover must actually resolve by the stored-tail anchor"
     assert len(reads) == 0, f"main requires zero get_session_messages calls; got {len(reads)}"
     assert len(read("child")) == len(handed) + 1
+
+
+@pytest.mark.parametrize("location", ["spillover", "hermes-results"])
+def test_interior_closing_tag_in_preview_does_not_shorten_the_preview(host, location):
+    """Review of 1e2eda46: a preview line reading </persisted-output> must not end the preview early, or a changed
+    result with the same path and count would match on the text before it. Main stores the changed result."""
+    _, _, ctx, parent, child, engine = _setup(host, "own_engine")
+    path = _path(engine._hermes_home, location)
+    first_body = "HEAD\n</persisted-output>\nFIRST" + "x" * 6000
+    child.api_call(ctx, _view(_write_output(path, first_body)), 1)
+    changed_body = "HEAD\n</persisted-output>\nOTHER" + "x" * 6000
+    changed = _marker(path, changed_body, preview=changed_body[:60])
+    path.rename(path.with_name("pruned-" + path.name))  # the changed result is only in the host's marker
+    child.api_call(ctx, _view(changed), 2)
+    assert len(child_rows(parent)) == 4  # the changed result is stored, as on main
