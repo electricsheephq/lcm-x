@@ -15,12 +15,12 @@ from tests.test_issue_1931_delegate_children import host  # noqa: F401
 from tests.test_issue_2482_interrupted_child import _setup
 
 
-def _call():
+def _call(inline=True):
     def b64(n):
         return base64.b64encode(bytes((i * 37 + 11) % 256 for i in range(n))).decode('ascii')
     long = b64(3420)
     wrapped = '\n'.join(long[i:i + 76] for i in range(0, len(long), 76))  # line-wrapped base64
-    arguments = json.dumps({'path': 'a.b64', 'content': 'hdr\n' + wrapped + '\nend'})
+    arguments = json.dumps({'path': 'a.b64', 'content': 'hdr\n' + (wrapped if inline else 'plain body') + '\nend'})
     return {'role': 'assistant', 'content': '', 'tool_calls': [
         {'id': 'm1', 'type': 'function', 'function': {'name': 'write_file', 'arguments': arguments}}]}
 
@@ -45,3 +45,22 @@ def test_an_identical_inline_payload_call_is_stored_once_across_handovers(host):
     aux.drain_live_child_stores(60.0)
     calls = [row for row in reader._store.get_session_messages('child') if row.get('tool_calls')]
     assert len(calls) == 1, f'{len(calls)} call rows'
+
+
+def test_an_identical_plain_call_is_stored_once_across_handovers(host):  # noqa: F811
+    """Control: the same handovers with a plain argument store the call once."""
+    _, _, ctx, reader, child, _engine = _setup(host, 'own_engine')
+    first = [{'role': 'user', 'content': 'Write the file.'}, _call(inline=False),
+             {'role': 'tool', 'tool_call_id': 'm1', 'content': 'wrote a.b64'},
+             {'role': 'assistant', 'content': 'Done: a.b64 written.'}]
+    for i, row in enumerate(first):
+        row['timestamp'] = float(i + 1)
+    aux = ctx.module('aux_session')
+    child.api_call(ctx, copy.deepcopy(first), 1)
+    aux.drain_live_child_stores(60.0)
+    view = copy.deepcopy(first) + [{'role': 'assistant', 'content': 'FINAL', 'timestamp': 11.0}]
+    child.api_call(ctx, view, 2)
+    aux.drain_live_child_stores(60.0)
+    rows = reader._store.get_session_messages('child')
+    assert len([row for row in rows if row.get('tool_calls')]) == 1
+    assert sum(row.get('content') == 'FINAL' for row in rows) == 1
