@@ -63,15 +63,15 @@ def test_a_payload_held_in_an_argument_key_is_restored_before_the_keys_are_sorte
     import base64
 
     key = 'data:image/png;base64,' + base64.b64encode(bytes(range(256)) * 20).decode()
-    host = _call(json.dumps({key: 'v', 'b': 'x'}))
+    sent = _call(json.dumps({key: 'v', 'b': 'x'}))
     engine.on_session_start('S1', platform='cli', context_length=200_000, conversation_id='c')
-    engine.ingest([{'role': 'user', 'content': 'go', 'timestamp': 1.0}, json.loads(json.dumps(host)),
+    engine.ingest([{'role': 'user', 'content': 'go', 'timestamp': 1.0}, json.loads(json.dumps(sent)),
                    {'role': 'tool', 'tool_call_id': 'k1', 'content': 'ok', 'timestamp': 3.0},
                    {'role': 'assistant', 'content': 'done', 'timestamp': 4.0}])
     stored = next(r for r in engine._store.get_session_messages('S1') if r['role'] == 'assistant' and r.get('tool_calls'))
     raw = stored['tool_calls'] if isinstance(stored['tool_calls'], str) else json.dumps(stored['tool_calls'])
     assert '[Externalized LCM ingest payload:' in raw and key not in raw  # the key itself was moved out
-    assert engine._session_end_rows_equal(stored, host, session_id='S1')
+    assert engine._session_end_rows_equal(stored, sent, session_id='S1')
     changed = _call(json.dumps({key[:-4] + 'AAAA': 'v', 'b': 'x'}))
     assert not engine._session_end_rows_equal(stored, changed, session_id='S1')
 
@@ -99,7 +99,7 @@ def test_two_argument_keys_that_restore_to_one_payload_are_never_merged(engine, 
     assert not engine._session_end_rows_equal(sent, _call(json.dumps({payload: 'two'})), session_id='S1')
 
 
-def test_a_changed_value_under_a_placeholder_key_is_stored_for_a_live_child(host, tmp_path):
+def test_a_changed_value_under_a_placeholder_key_is_stored_for_a_live_child(host, tmp_path):  # noqa: F811
     import base64
     import copy
 
