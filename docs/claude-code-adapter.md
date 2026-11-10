@@ -580,7 +580,7 @@ gate's instrument (see "The audit" in the test plan).
     mid-append left a record capture will never take (#2571). An end marks it whatever its timestamp (the hook never
     drops it as stale behind an undrained hook, nor lets another end-class hook replace it); only a newer hook of that lineage (the session resumed) clears it.
     Known limits: a resumed session whose newer hook's pointer is replaced by a delayed older `Stop` before the
-    worker drains it stays unverified (the safe side); a subagent still running when its session ends gets no
+    worker drains it stays unverified until a newer hook of that session drains (the safe side); a subagent still running when its session ends gets no
     `SubagentStop` of its own if Claude Code sends none, and then its unterminated last record does not leave it
     unverified;
   - files under a `tool-results` subfolder (`subfolder_files`; a symlink to a folder, or a folder that cannot be
