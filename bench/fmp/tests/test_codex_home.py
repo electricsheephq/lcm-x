@@ -490,9 +490,10 @@ def test_sigterm_probes_leave_no_live_child_and_start_no_call(tmp_path, monkeypa
         code = "import os; open(r'{pid}','w').write(str(os.getpid()))"  # exits at once; the signal lands after the reap
     else:
         code = "import os,time; open(r'{pid}','w').write(str(os.getpid())); time.sleep(30)"
-        kill = subprocess.Popen.kill
+        kill, fired = subprocess.Popen.kill, []
 
         def kill_with_second_signal(self):
+            fired.append(True)
             term()  # a second SIGTERM lands while subprocess.run is killing the child
             time.sleep(0.05)
             kill(self)
@@ -507,6 +508,8 @@ def test_sigterm_probes_leave_no_live_child_and_start_no_call(tmp_path, monkeypa
     assert len(calls) == 1  # no model call starts after the signal
     assert alive == [False]  # the child is gone before the lease is released
     assert time.monotonic() - started < 10  # the child was killed, not waited out
+    if case == "second_signal_while_unwinding":
+        assert fired == [True]  # the second signal really landed inside the kill
 
 
 def test_sigterm_between_questions_starts_no_call(tmp_path, monkeypatch, cli):
@@ -547,3 +550,18 @@ def test_sigterm_between_questions_starts_no_call(tmp_path, monkeypatch, cli):
     assert started == ["q0"] and len(calls) == 2  # q0's two judges ran; nothing after the signal
     with (tmp_path / "lease" / "holder.lock").open("r+") as contender:
         fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def test_stop_flag_refuses_any_new_model_subprocess(tmp_path):
+    # The guard for multi-worker (pool) runs and any later call path: once STOPPING is set, nothing launches.
+    runner = Mock(side_effect=AssertionError("launched after the stop flag"))
+    harness = models.Codex(tmp_path, models.Quota(tmp_path / "quota.json"), runner=runner)
+    try:
+        models.STOPPING.set()
+        call = harness.directory()
+        with pytest.raises(RuntimeError, match="^stopping$"):
+            harness.run(["codex"], call, "prompt", {})
+        runner.assert_not_called()
+        assert not (call / "prompt.txt").exists()
+    finally:
+        harness.close()
