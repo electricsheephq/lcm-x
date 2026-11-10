@@ -2508,3 +2508,46 @@ def test_a_child_elsewhere_in_an_inner_session_folder_checks_that_folder(tmp_pat
     assert not [key for key in ca.audit(home)["unverified"] if key.startswith("claude-code:s1")]
     _append(inner / "subagents" / "agent-y9.jsonl", _SIDE)  # a sibling nothing captured, in the inner folder
     assert "claude-code:s1/agent:y9" in ca.audit(home)["unverified"]
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads any folder")
+def test_the_folder_check_is_closed_world_over_generated_layouts(tmp_path, home, hermes):
+    """#2557: the session folder check is closed-world. Whatever the folder names around it (nesting, repeated or dotted
+    segments, an inner id folder), one transcript-shaped file no cursor names, a symlink, or a folder that cannot be
+    listed, placed anywhere below a captured session's folder, makes the audit unverified. Empty folders alone do not
+    (the control). Seeded, so a failure names its case."""
+    import random
+    import shutil
+
+    from hermes_lcm import claude_code_audit as ca
+
+    a = _append(tmp_path / "projects" / "-work" / "s1.jsonl", CONVERSATION[:2])
+    _record(_hook(), home, a)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    root = a.parent / "s1"
+    words = ["subagents", "workflows", "s1", "s1.v2", "deep", "x.y", "agent-x9", "run-1", "subagents.jsonl.d"]
+    for seed in range(300):
+        rng = random.Random(seed)
+        folders = [root]
+        for _ in range(rng.randint(1, 8)):  # a random tree of folders, up to 6 deep
+            parent = rng.choice([f for f in folders if len(f.relative_to(root).parts) < 6])
+            folders.append(parent / rng.choice(words))
+        for folder in folders:
+            folder.mkdir(parents=True, exist_ok=True)
+        assert ca.audit(home)["verified"], f"control, seed {seed}"
+        spot = rng.choice(folders)
+        kind = rng.choice(["agent", "other", "file_link", "folder_link", "dangling", "unlistable"])
+        if kind in ("agent", "other"):
+            _append(spot / ("agent-y%d.jsonl" % seed if kind == "agent" else "journal.jsonl"), _SIDE)
+        elif kind == "unlistable":
+            (spot / "locked").mkdir(exist_ok=True)
+            (spot / "locked").chmod(0)
+        else:
+            target = {"file_link": a, "folder_link": tmp_path, "dangling": tmp_path / "gone"}[kind]
+            (spot / "link.jsonl").symlink_to(target)
+        try:
+            assert not ca.audit(home)["verified"], f"seed {seed}: {kind} at {spot.relative_to(root)}"
+        finally:
+            if kind == "unlistable":
+                (spot / "locked").chmod(0o700)
+            shutil.rmtree(root)
