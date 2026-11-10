@@ -3209,3 +3209,51 @@ def test_the_ended_marker_follows_the_lineages_own_newest_hook(tmp_path, home, h
             _record(_hook(), home, a, event="UserPromptSubmit", hook_started_ns=9)
     cc.run_worker(home, hermes_home=hermes, settle_s=0)
     assert ca.audit(home)["verified"] is (shape in {"older_end_after_resume", "resumed_still_partial"})
+
+
+def test_a_swept_workflow_agent_keeps_its_saved_tool_output(tmp_path, home, hermes):
+    """#2574 review: a workflow agent's saved output sits in the session's tool-results/; its message row holds the full
+    output, not the preview, when the sweep (no hook) takes the nested transcript."""
+    a = _append(tmp_path / "projects" / "-work" / "s1.jsonl", CONVERSATION[:2])
+    saved = a.parent / "s1" / "tool-results" / "toolu_9.txt"
+    saved.parent.mkdir(parents=True)
+    saved.write_text("full output\n" * 5000, encoding="utf-8")
+    marker = (f"<persisted-output>\nOutput too large (60KB). Full output saved to: {saved}\n\n"
+              "Preview (first 2KB):\nfull output\n</persisted-output>")
+    _append(a.parent / "s1" / "subagents" / "workflows" / "wf_run1" / "agent-x1.jsonl",
+            [dict(_entry("user", "w1", [{"type": "tool_result", "tool_use_id": "toolu_9", "content": marker}]),
+                  isSidechain=True)])
+    assert cc.session_dir(saved.parent.parent / "subagents" / "workflows" / "wf_run1" / "agent-x1.jsonl") == a.parent / "s1"
+    _record(_hook(), home, a)
+    for _ in range(2):
+        cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    store = _open(home, hermes)
+    try:
+        [(_, _, content, _)] = _rows(store, cc.row_session_id("s1", "x1"))
+    finally:
+        store.close()
+    assert "chars=60000" in str(content) and "toolu_9" in str(content)
+    from hermes_lcm.externalize import extract_externalized_ref
+    [payload] = (home / "lcm-large-outputs").glob(extract_externalized_ref(str(content)))  # the saved bytes, not a preview
+    assert json.loads(payload.read_text(encoding="utf-8"))["content"] == "full output\n" * 5000
+
+
+@pytest.mark.parametrize("where", [(), ("workflows", "wf_run1")], ids=["direct", "nested"])
+def test_an_agent_file_with_no_id_is_never_swept_as_its_session(tmp_path, home, hermes, where):
+    """#2574 review: `agent-.jsonl` has an empty id, so its lineage key is the session's own. The sweep never takes it
+    (the session's key is already seen, and the name check now says so first); the closed-world audit reports the
+    session unverified, since the file ties to no cursor."""
+    from hermes_lcm import claude_code_audit as ca
+
+    a = _append(tmp_path / "projects" / "-work" / "s1.jsonl", CONVERSATION[:2])
+    _append(a.parent.joinpath("s1", "subagents", *where, "agent-.jsonl"), _SIDE)
+    _record(_hook(), home, a)
+    for _ in range(2):
+        cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    store = _open(home, hermes)
+    try:
+        assert store.read_metadata_json(cc.CURSOR_PREFIX + "claude-code:s1")["path"] == str(a)
+        assert len(_rows(store)) == len(CONVERSATION[:2])
+    finally:
+        store.close()
+    assert not ca.audit(home)["verified"]
