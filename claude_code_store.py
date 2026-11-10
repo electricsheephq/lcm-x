@@ -840,15 +840,18 @@ def lineages_of(record: dict) -> list[Lineage]:
     return found
 
 
+JOURNAL_PREFIX = "workflow-journal-"  # a run's journal.jsonl is its own child lineage, keyed by the run folder (#2562)
 SUBAGENT_DEPTH = 4  # folders below subagents/: workflow agents sit at workflows/<run-id>/ (#2562)
 
 
 def _subagents(lineage: Lineage) -> list[Lineage]:
-    """Every agent-*.jsonl below the session's subagents/ folder, to a bounded depth, never through a symlinked folder
-    (#2562): the sweep is the safety net for a missed hook, so it must not depend on a hook naming the path."""
+    """Every agent-*.jsonl below the session's subagents/ folder, to a bounded depth, never through a symlinked folder,
+    and each workflow run's ``workflows/<run-id>/journal.jsonl`` (#2562): the sweep is the safety net for a missed
+    hook, so it must not depend on a hook naming the path. No hook names a journal; only the sweep takes it."""
     if lineage.agent_id:
         return []
-    found, stack = [], [(session_dir(lineage.path) / "subagents", 0)]
+    root = session_dir(lineage.path) / "subagents"
+    found, stack = [], [(root, 0)]
     while stack:
         folder, depth = stack.pop()
         try:
@@ -858,10 +861,13 @@ def _subagents(lineage: Lineage) -> list[Lineage]:
                         if depth < SUBAGENT_DEPTH:
                             stack.append((Path(entry.path), depth + 1))
                     elif entry.name.startswith("agent-") and entry.name.endswith(".jsonl"):
-                        found.append(Path(entry.path))
+                        found.append((entry.name[len("agent-"):-len(".jsonl")], Path(entry.path)))
+                    elif entry.name == "journal.jsonl" and folder.parent == root / "workflows":
+                        # a workflow run's log: 31 of 15,262 real results were held by no transcript (#2562)
+                        found.append((JOURNAL_PREFIX + folder.name, Path(entry.path)))
         except OSError:
             continue
-    return [Lineage(lineage.session_id, path.name[len("agent-"):-len(".jsonl")], path) for path in sorted(found)]
+    return [Lineage(lineage.session_id, agent, path) for agent, path in sorted(found, key=lambda item: item[1])]
 
 
 def _settle(store: MessageStore, lineage: Lineage, deadline: Optional[float], settle_s: float) -> None:

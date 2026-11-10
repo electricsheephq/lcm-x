@@ -2621,3 +2621,31 @@ def test_the_nested_subagent_rule_table(tmp_path, home, hermes, kind, hook, capt
     finally:
         store.close()
     assert ca.audit(home)["verified"] is verified
+
+
+@pytest.mark.parametrize("place,captured", [(("workflows", "wf_run1"), True), ((), False), (("workflows",), False)],
+                         ids=["run_folder", "subagents", "workflows"])
+def test_a_workflow_journal_is_captured_only_in_its_run_folder(tmp_path, home, hermes, place, captured):
+    """#2562: 31 of 15,262 real journal results were held by no transcript, so a run's journal.jsonl is captured as its
+    own child lineage, every line kept raw. A journal anywhere else is not taken, and the closed-world audit flags it."""
+    from hermes_lcm import claude_code_audit as ca
+
+    a = _append(tmp_path / "projects" / "-work" / "s1.jsonl", CONVERSATION[:2])
+    run = a.parent / "s1" / "subagents" / "workflows" / "wf_run1"
+    _append(run / "agent-x1.jsonl", _SIDE)
+    events = [{"type": "started", "agentId": "x1"}, {"type": "result", "agentId": "x1", "result": {"ok": True}}]
+    journal = _append(a.parent.joinpath("s1", "subagents", *place, "journal.jsonl"), events)
+    _record(_hook(), home, a)
+    for _ in range(2):  # the second run sweeps what the first registered
+        cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    key = "claude-code:s1/agent:" + cc.JOURNAL_PREFIX + "wf_run1"
+    report = ca.audit(home)
+    assert report["verified"] is captured
+    if captured:
+        _append(journal, [{"type": "launched"}])  # a line written later is taken by the next sweep
+        cc.run_worker(home, hermes_home=hermes, settle_s=0)
+        report = ca.audit(home)
+        row = next(row for row in report["lineages"] if row["lineage"] == key)
+        assert row["unknown_types"] == {"started": 1, "result": 1, "launched": 1} and report["verified"]
+    else:
+        assert key not in {row["lineage"] for row in report["lineages"]}

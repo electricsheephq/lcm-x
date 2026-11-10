@@ -160,6 +160,11 @@ the worker.
   file on most entries.
 - **Subagents** write `<session>/subagents/agent-<id>.jsonl`; their entries carry the parent's
   `sessionId`, plus `agentId` and `isSidechain`. The main transcript holds no sidechain entries.
+  Workflow agents write `<session>/subagents/workflows/<run-id>/agent-<id>.jsonl`, and their
+  `SubagentStop` hook (`agent_type` `workflow-subagent`) names that path. The sweep takes every
+  `agent-*.jsonl` up to four folders below `subagents/`, never through a symlinked folder, each as
+  its own child lineage of the session. The `<session>/workflows/` folder holds run state and
+  scripts, not transcripts, so it is not read.
 - **One API response, several entries.** Claude Code writes each content block of a response as its
   own entry with its own uuid; the entries share `message.id`.
 - **Format** is internal and changes between versions, hence the per-type classes below and the
