@@ -1843,3 +1843,26 @@ def test_a_pending_path_that_now_exists_is_not_replaced(tmp_path, home, hermes):
         assert _rows(store), "the transcript at the recorded path must be captured"
     finally:
         store.close()
+
+
+def test_a_resume_from_another_directory_is_captured_from_its_real_path(tmp_path, home, hermes):
+    """#2535 reach evidence: a resume from another directory sends SessionStart with a transcript path under the new
+    directory's project folder that never exists; every later hook names the real transcript. The session is
+    captured in full from the real path, its pending row clears, and the audit verifies it."""
+    from hermes_lcm import claude_code_audit as ca
+
+    phantom = tmp_path / "projects" / "-elsewhere" / "s1.jsonl"
+    _record(_hook(), home, phantom, event="SessionStart")
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    real = _transcript(tmp_path, CONVERSATION)
+    _record(_hook(), home, real)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    store = _open(home, hermes)
+    try:
+        assert len(_rows(store)) == len([e for e in CONVERSATION if e.get("type") in ("user", "assistant")])
+        assert store.read_metadata_json("capture:pending:claude-code:s1") is None
+    finally:
+        cc.to_rollback_journal(store.connection)
+        store.close()
+    report = ca.audit(home)
+    assert report["verified"] and report["pending_lineages"] == 0 and report["failures"]["lost"] == 0
