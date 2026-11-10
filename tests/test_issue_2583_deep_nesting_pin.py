@@ -2,8 +2,11 @@
 
 Ingest protection walks the parsed arguments recursively, so arguments nested about 2,000 levels deep (at the default
 recursion limit of 1,000) raise inside ingest and no row of the turn is stored. This strict xfail pins that loss on
-the main-session ingest; a shallow control stores every row. A fix flips it.
+the main-session ingest; a shallow control stores every row. A fix flips it. On Python 3.11 the JSON parser itself
+stops at the recursion limit, the arguments stay unparsed text and the turn is stored, so the pin applies from 3.12.
 """
+
+import sys
 
 import pytest
 
@@ -34,7 +37,7 @@ def test_a_shallow_argument_turn_is_stored(tmp_path):
     assert _stored_rows(tmp_path, "[[0]]") == 4
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError,
+@pytest.mark.xfail(sys.version_info >= (3, 12), strict=True, raises=AssertionError,
                    reason="#2583: arguments nested about 2,000 levels deep make ingest store no row of the turn")
 def test_a_deeply_nested_argument_turn_is_stored(tmp_path):
     assert _stored_rows(tmp_path, "[" * 2000 + "0" + "]" * 2000) == 4
