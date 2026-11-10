@@ -2127,6 +2127,29 @@ def test_a_captured_subagents_copy_under_a_pending_rows_other_path_is_not_verifi
         assert "claude-code:s1/agent:x1" not in report["unverified"]
 
 
+@pytest.mark.parametrize("copy", ["lines", "empty"])
+def test_a_subagents_copy_under_a_captured_parents_folder_is_not_verified(tmp_path, home, hermes, copy):
+    """#2548 review: x1 is captured under B while the parent was pending; the parent is then captured at A. A copy of
+    x1 under A's folder is at a path x1's cursor never named, so x1 itself is unverified when it holds lines. (The
+    parent is unverified too, through B's subagents folder: stricter than the rule, #2551.)"""
+    from hermes_lcm import claude_code_audit as ca
+
+    a = tmp_path / "projects" / "-work" / "s1.jsonl"
+    b = tmp_path / "projects" / "-other" / "s1.jsonl"
+    _record(_hook(), home, a, event="SessionStart")
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    _append(b.parent / "s1" / "subagents" / "agent-x1.jsonl", [dict(e, isSidechain=True) for e in CONVERSATION[:2]])
+    _record(_hook(), home, b)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    _append(a, CONVERSATION[:2])
+    _record(_hook(), home, a)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    assert "claude-code:s1/agent:x1" not in ca.audit(home)["unverified"]
+    stray = a.parent / "s1" / "subagents" / "agent-x1.jsonl"
+    _append(stray, [dict(e, isSidechain=True) for e in CONVERSATION[2:4]] if copy == "lines" else [])
+    assert ("claude-code:s1/agent:x1" in ca.audit(home)["unverified"]) is (copy == "lines")
+
+
 @pytest.mark.parametrize("saved", ["file", "empty"])
 def test_a_saved_output_under_a_pending_rows_earlier_path_is_not_verified(tmp_path, home, hermes, saved):
     """#2548 review: a pending row on A is replaced by B (named [A, B]); a saved output appears under A's session folder.
