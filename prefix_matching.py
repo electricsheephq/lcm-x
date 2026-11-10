@@ -22,6 +22,7 @@ from .externalize import (
     load_externalized_payload,
 )
 from .ingest_protection import (
+    _json_has_duplicate_object_keys,
     extract_ingest_externalized_refs,
     protect_messages_for_ingest,
     redact_sensitive_value,
@@ -222,22 +223,25 @@ class PrefixMatchingMixin:
             if not isinstance(call, dict) or not isinstance(call.get("function"), dict):
                 return self._session_end_prefix_compare_value(
                     call, session_id=session_id, hermes_home=hermes_home)
+            def restore(value):  # keys too: ingest can externalize a payload held in a key
+                if isinstance(value, dict):
+                    return {self._session_end_prefix_compare_value(key, session_id=session_id, hermes_home=hermes_home)
+                            if isinstance(key, str) else key: restore(child) for key, child in value.items()}
+                if isinstance(value, list):
+                    return [restore(child) for child in value]
+                return self._session_end_prefix_compare_value(value, session_id=session_id, hermes_home=hermes_home)
+
             function = dict(call["function"])
             if "arguments" in function:
                 arguments = function["arguments"]
-                if isinstance(arguments, str):
+                parsed = not isinstance(arguments, str)
+                if not parsed and not _json_has_duplicate_object_keys(arguments):  # duplicate keys stay text
                     try:
-                        arguments = json.loads(arguments)
+                        arguments, parsed = json.loads(arguments), True
                     except ValueError:
                         arguments = arguments.strip()
-                    else:
-                        arguments = self._session_end_prefix_compare_value(
-                            arguments, session_id=session_id, hermes_home=hermes_home)
-                        arguments = json.dumps(arguments, sort_keys=True, separators=(",", ":"), default=str)
-                else:
-                    arguments = self._session_end_prefix_compare_value(
-                        arguments, session_id=session_id, hermes_home=hermes_home)
-                    arguments = json.dumps(arguments, sort_keys=True, separators=(",", ":"), default=str)
+                if parsed:
+                    arguments = json.dumps(restore(arguments), sort_keys=True, separators=(",", ":"), default=str)
                 function["arguments"] = arguments
             return self._session_end_prefix_compare_value(
                 dict(call, function=function), session_id=session_id, hermes_home=hermes_home)
