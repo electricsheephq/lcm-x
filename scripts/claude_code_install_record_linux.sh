@@ -1,0 +1,127 @@
+#!/bin/bash
+# Native Linux install record for LCM-X for Claude Code: no containers. Run as an unprivileged user
+# on an Ubuntu host (written for 24.04, python3 3.12). Every case gets a fresh scratch HOME and
+# CLAUDE_CONFIG_DIR under WORKDIR and runs under `env -i`, so the user's own setup is never read or
+# written. Output: counts, ids and timings only. The model key is read from KEY_FILE into the model
+# calls' environment and is never printed. BASE_URL, when set, points Claude Code at an
+# Anthropic-compatible endpoint (left unset, Claude Code uses its default).
+# The unit gate's Linux install record (bench/specs/RELEASE-READINESS-V1.md, "Claude Code unit
+# releases") when no container runtime is available (#2348). Exit 0 means the record was taken, not that
+# it passed: acceptance reads each RECORD line (audit_ok, audit_error, verified, failures, turn_errors).
+#
+#   CANDIDATE=<full sha on main> KEY_FILE=<mode-600 key file> WORKDIR=<new or empty dir> [BASE_URL=<url>] \
+#     bash scripts/claude_code_install_record_linux.sh 2>&1 | tee linux-install-record.out
+#
+# Case A: the host's python3 (3.11+) on PATH; expect zero manual steps.
+# Case B: PATH whose only Python is a uv-managed 3.10 (the host's python3* names are left out of a
+#   linked copy of the system bin dirs); expect runtime_missing, then the documented one step
+#   `uv venv --python 3.11 ~/.lcm-x/claude-code/venv`, a resume, and a verified audit.
+# Proxy variables (http_proxy, https_proxy, no_proxy, any case) pass through when set.
+set -euo pipefail
+: "${CANDIDATE:?set CANDIDATE}"; : "${KEY_FILE:?file holding the model key, mode 600}"; : "${WORKDIR:?new or empty dir}"
+[ "$(stat -c %a "$KEY_FILE")" = 600 ] || { echo "KEY_FILE must be mode 600"; exit 2; }
+if [ -e "$WORKDIR" ] && [ -n "$(ls -A "$WORKDIR")" ]; then echo "WORKDIR must be new or empty"; exit 2; fi
+# WORKDIR is resolved to its physical path: the ancestor check below must see its real parents.
+mkdir -p "$WORKDIR"; WORKDIR=$(cd "$WORKDIR" && pwd -P); KEY_FILE=$(cd "$(dirname "$KEY_FILE")" && pwd)/$(basename "$KEY_FILE")
+# Claude Code also loads instruction files (CLAUDE.md, and AGENTS.md when no CLAUDE.md is present) from every
+# ancestor of the project folder, so WORKDIR must sit where no ancestor carries one (a scratch HOME does not
+# prevent this).
+d="$WORKDIR"; while :; do
+  for f in CLAUDE.md CLAUDE.local.md .claude/CLAUDE.md AGENTS.md .claude/AGENTS.md; do
+    [ ! -e "$d/$f" ] || { echo "WORKDIR has an ancestor instruction file: $d/$f; pick a scratch location outside any project"; exit 2; }
+  done
+  [ "$d" = / ] && break; d=$(dirname "$d")
+done
+SYSPATH=/usr/local/bin:/usr/bin:/bin
+PASS=(LANG=C.UTF-8 TERM=dumb CANDIDATE="$CANDIDATE" KEY_FILE="$KEY_FILE" BASE_URL="${BASE_URL:-}"
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 DISABLE_AUTOUPDATER=1 DISABLE_TELEMETRY=1)
+for v in http_proxy https_proxy no_proxy HTTP_PROXY HTTPS_PROXY NO_PROXY; do [ -n "${!v:-}" ] && PASS+=("$v=${!v}"); done
+echo "== host: $(. /etc/os-release && echo "$PRETTY_NAME"), $(/usr/bin/python3 -V), native (clean environment, not a fresh container), managed config $([ -e /etc/claude-code ] && echo present || echo none), endpoint $(if [ -n "${BASE_URL:-}" ]; then echo custom; else echo default; fi), candidate $CANDIDATE, start $(date -u +%FT%TZ)"
+
+# The release asset stand-in: built once from the candidate with the host's python3 (the tag
+# workflow builds the same tree; only the ref recorded in bundle.json, and so the archive hash,
+# differs); each case then installs it from its own Downloads folder.
+env -i "${PASS[@]}" HOME="$WORKDIR/build-home" PATH="$SYSPATH" bash -s <<'BUILD'
+set -euo pipefail
+mkdir -p "$HOME" && cd "$HOME/.."
+git clone -q https://github.com/electricsheephq/lcm-x src && git -C src checkout -q "$CANDIDATE"
+python3 src/scripts/build_claude_code_unit.py "$CANDIDATE" --out asset >/dev/null
+echo "asset: $(cd asset && ls ./*.tar.gz | xargs -n1 basename) $(cut -c1-16 asset/*.sha256)"
+BUILD
+
+# uv for case B (it supplies the 3.10 and, later, the documented 3.11 venv); kept outside the case HOMEs.
+env -i "${PASS[@]}" HOME="$WORKDIR/tools-home" PATH="$SYSPATH" UV_INSTALL_DIR="$WORKDIR/tools/bin" UV_NO_MODIFY_PATH=1 \
+  bash -c 'mkdir -p "$HOME" && curl -LsSf https://astral.sh/uv/install.sh | sh >/dev/null'
+UVENV=(UV_PYTHON_INSTALL_DIR="$WORKDIR/tools/python" UV_CACHE_DIR="$WORKDIR/tools/cache" UV_PYTHON_PREFERENCE=only-managed)
+env -i "${PASS[@]}" "${UVENV[@]}" HOME="$WORKDIR/tools-home" PATH="$SYSPATH" "$WORKDIR/tools/bin/uv" python install -q 3.10
+PY310=$(env -i "${UVENV[@]}" HOME="$WORKDIR/tools-home" PATH="$SYSPATH" "$WORKDIR/tools/bin/uv" python find 3.10)
+mkdir -p "$WORKDIR/caseB/py310" "$WORKDIR/caseB/sysbin"
+ln -s "$PY310" "$WORKDIR/caseB/py310/python3"; ln -s "$WORKDIR/tools/bin/uv" "$WORKDIR/caseB/py310/uv"
+for d in /usr/local/bin /usr/bin /bin; do for f in "$d"/*; do b=$(basename "$f")
+  case "$b" in python*|pydoc*|idle*|2to3*) continue;; esac
+  [ -e "$WORKDIR/caseB/sysbin/$b" ] || [ -L "$WORKDIR/caseB/sysbin/$b" ] || ln -s "$f" "$WORKDIR/caseB/sysbin/$b"; done; done
+
+one_case() {  # $1 case name, $2 PATH after the case HOME's ~/.local/bin
+  local home="$WORKDIR/case$1/home"; mkdir -p "$home"
+  env -i "${PASS[@]}" "${UVENV[@]}" CASE="$1" ASSET="$WORKDIR/asset" HOME="$home" CLAUDE_CONFIG_DIR="$home/.claude" \
+    PATH="$home/.local/bin:$2" bash -s <<'CASE'
+set -euo pipefail
+cd "$HOME"; T0=$(date +%s)
+curl -fsSL https://claude.ai/install.sh | bash >/dev/null 2>&1      # the documented Claude Code install
+mkdir -p Downloads && cp "$ASSET"/*.tar.gz "$ASSET"/*.sha256 Downloads/
+( cd Downloads && sha256sum -c ./*.sha256 >/dev/null && tar -xzf ./*.tar.gz )
+PLUGIN=$(ls -d "$HOME"/Downloads/lcm-x-claude-code-*/)
+mkdir -p proj && cd proj && printf 'alpha\nbeta\n' > a.txt
+# A custom endpoint takes the key as a bearer token; Anthropic's default endpoint takes an API key.
+if [ -n "$BASE_URL" ]; then export ANTHROPIC_BASE_URL="$BASE_URL"; KEYVAR=ANTHROPIC_AUTH_TOKEN; else KEYVAR=ANTHROPIC_API_KEY; fi
+# The key goes in through the environment of `claude` only (exported in a subshell), never an argument list.
+run() { ( export "$KEYVAR=$(cat "$KEY_FILE")"; claude -p "$1" --plugin-dir "$PLUGIN" --dangerously-skip-permissions \
+          --output-format json "${@:2}" < /dev/null || true ) \
+        | python3 -c 'import json,os,sys
+try: d = json.load(sys.stdin)
+except ValueError: d = {"is_error": True, "num_turns": None}
+t = {k: d.get(k) for k in ("session_id", "is_error", "num_turns")}
+print("turn", t); open(os.path.expanduser("~/turns.jsonl"), "a").write(json.dumps(t) + "\n")'; }
+outcomes() { python3 -c "import json,collections,sys; print(dict(collections.Counter(json.loads(l)['event']+':'+str(json.loads(l)['outcome']) for l in open(sys.argv[1]))))" "$HOME/.lcm-x/claude-code/logs/hook.log" 2>/dev/null || echo "{}"; }
+echo "== case $CASE: claude $(claude --version 2>/dev/null | head -1), python3 on PATH $(python3 -V 2>&1)"
+SID=$(python3 -c 'import uuid; print(uuid.uuid4())')
+run "Use Bash to run 'wc -l a.txt' and Read a.txt, then report both." --session-id "$SID"
+run "Use Bash to run 'seq 1 50000' exactly with no pipe and report the line count." --resume "$SID"
+sleep 5; STEPS=0
+PY=$(command -v python3.14 || command -v python3.13 || command -v python3.12 || command -v python3.11 || true)
+if [ -z "$PY" ] && python3 -c 'import sys; sys.exit(sys.version_info < (3, 11))'; then PY=$(command -v python3); fi
+if [ -z "$PY" ]; then
+  echo "before step: hook outcomes $(outcomes)"
+  echo "one step: uv venv --python 3.11 ~/.lcm-x/claude-code/venv (uv was provided on PATH, not installed by the case)"
+  uv venv -q --python 3.11 ~/.lcm-x/claude-code/venv; STEPS=1
+  run "Use Bash to run 'echo after-setup' and report it." --resume "$SID"; sleep 5
+  PY=~/.lcm-x/claude-code/venv/bin/python
+fi
+"$PY" -I "$PLUGIN/lcm-x/scripts/lcm_x_capture.py" audit --home ~/.lcm-x/claude-code > audit.json || true
+"$PY" -I - "$CASE" "$STEPS" "$T0" "$HOME/.lcm-x/claude-code/lcm.db" <<'PYEND'
+import json, pathlib, sqlite3, sys, time
+case, steps, t0, db = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), sys.argv[4]
+try:
+    a = json.load(open("audit.json"))
+except ValueError:
+    a = {"ok": False, "error": "audit_unreadable"}  # the audit crashed before printing; still record the case
+turns = [json.loads(line) for line in open("../turns.jsonl")] if __import__("os").path.exists("../turns.jsonl") else []
+rows = None  # no store at all is a failed install, recorded below with the audit's error
+if pathlib.Path(db).is_file():
+    try:
+        con = sqlite3.connect(pathlib.Path(db).as_uri() + "?mode=ro", uri=True)  # as_uri escapes # and ? in the path
+        rows = con.execute("select count(*) from messages").fetchone()[0]
+    except sqlite3.Error:
+        rows = None  # an unreadable store or one with no messages table; the audit's error says why
+print("RECORD", json.dumps({"case": case, "manual_steps": steps, "rows": rows, "audit_ok": a.get("ok"), "audit_error": a.get("error"),
+      "verified": a.get("verified"), "lineages": len(a.get("lineages") or []),
+      "failures": {k: v for k, v in (a.get("failures") or {}).items() if v}, "spool": a.get("spool"),
+      "turns": len(turns), "turn_errors": sum(1 for t in turns if t.get("is_error") is not False),
+      "wall_s": int(time.time()) - t0}, sort_keys=True))
+PYEND
+echo "after: hook outcomes $(outcomes)"
+CASE
+}
+one_case A "$SYSPATH"
+one_case B "$WORKDIR/caseB/py310:$WORKDIR/caseB/sysbin"
+echo "== done $(date -u +%FT%TZ)"

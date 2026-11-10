@@ -11,7 +11,7 @@ It is built on Lossless Context Management (the [LCM paper](https://papers.voltr
 - older turns are folded into a summary DAG;
 - the agent can always walk back from a summary or a memory to the exact source.
 
-This page states what we are building and how we will know it works. The [roadmap](ROADMAP.md) says when; issue [#658](https://github.com/electricsheephq/lcm-x/issues/658) tracks the work.
+This page states what we are building and how we will know it works. The [roadmap](ROADMAP.md) says when; the old tracker, issue [#658](https://github.com/electricsheephq/lcm-x/issues/658), was closed on 2026-11-06.
 
 ## The promise
 

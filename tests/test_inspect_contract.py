@@ -34,7 +34,6 @@ def inventory(monkeypatch: pytest.MonkeyPatch) -> Any:
         );
         INSERT INTO lcm_rollups VALUES (1, 'day', '2026-07-15', 'session', 'ready', 'café');
         CREATE TABLE lcm_rollup_state (period_kind, scope, last_build_cursor, last_built_at);
-        INSERT INTO lcm_rollup_state VALUES ('day', 'session', 7, 100);
     """)
     row: dict[str, Any] = dict(
         store_id=7, session_id="session", source="cli", conversation_id="conversation",

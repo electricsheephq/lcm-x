@@ -500,16 +500,6 @@ class SummaryDAG:
                 ).fetchall()
         return [self._row_to_node(r) for r in rows]
 
-    def count_at_depth(self, session_id: str, depth: int) -> int:
-        """Count nodes at a specific depth for a session."""
-        with self._db_lock:
-            row = self._conn.execute(
-                """SELECT COUNT(*) FROM summary_nodes
-                   WHERE session_id = ? AND depth = ?""",
-                (session_id, depth),
-            ).fetchone()
-        return row[0] if row else 0
-
     def get_session_node_count(self, session_id: str) -> int:
         """Count summary nodes for a session without loading node rows."""
         row = self._conn.execute(

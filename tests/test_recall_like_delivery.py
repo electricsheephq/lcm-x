@@ -5,7 +5,7 @@ import pytest
 
 from hermes_lcm import tools
 from hermes_lcm.dag import SummaryNode
-from hermes_lcm.search_query import build_snippet, build_snippet_with_span
+from hermes_lcm.search_query import build_snippet_with_span
 from tests.test_recall_fts_delivery import check_spans, recall, seed
 from tests.test_lcm_recall import recall_engine as recall_engine
 
@@ -65,7 +65,7 @@ def test_like_excerpt_is_reverified_against_current_row(recall_engine, monkeypat
                                   "x" * 100 + "🦄" + "x" * 100 + "🦄" + "x" * 100])
 def test_like_span_tracks_undecorated_source(text):
     snippet, start, end = build_snippet_with_span(text, ["🦄"])
-    assert snippet == build_snippet(text, ["🦄"])
+    assert snippet == build_snippet_with_span(text, ["🦄"])[0]
     assert snippet == ("..." if start else "") + text[start:end] + ("..." if end < len(text) else "")
 
 

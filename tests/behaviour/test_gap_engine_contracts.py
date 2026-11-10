@@ -19,7 +19,6 @@ resolution = importlib.import_module("hermes_lcm.access_policy.resolution")
 catalog = importlib.import_module("hermes_lcm.teams.catalog")
 scope_storage = importlib.import_module("hermes_lcm.scope_storage")
 externalize = importlib.import_module("hermes_lcm.externalize")
-preanswer = importlib.import_module("hermes_lcm.preanswer_evidence")
 
 
 @pytest.fixture(autouse=True)
@@ -168,23 +167,6 @@ def test_externalization_removes_partial_file_on_fsync_failure(
     assert result is None
     storage = externalize.get_large_output_storage_dir(cfg, hermes_home=str(tmp_path), create=False)
     assert not list(storage.iterdir())
-
-
-@pytest.mark.parametrize("question, operation, kind", [
-    ("What is the total of the two costs?", "sum", "missing_operand"),
-    ("What is the difference between the two costs?", "difference", "missing_operand"),
-    ("How many days between 2024-01-01 and 2024-01-03?", "date_interval", "missing_operand"),
-])
-def test_preanswer_names_missing_operand_without_fabricating_context(
-    tmp_path: Path, question: str, operation: str, kind: str,
-) -> None:
-    with harness.engine_context(tmp_path) as engine:
-        result = preanswer.build_preanswer_evidence(question, engine=engine, enabled=True)
-        assert result["context"] is None
-        missing = result["decision"]["missing_requirement"]
-        assert missing["operation"] == operation
-        assert missing["kind"] == kind
-        assert missing["current_operands"] == 0
 
 
 @pytest.mark.xfail(strict=True, reason="known gap: scope scanner misses concatenated INSERT; issue #1458")

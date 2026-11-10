@@ -1,0 +1,1 @@
+- New: Opt-in `LCM_RECALL_LATER_STATEMENTS` (default 0) brings one later stored lexical match alongside each of up to five recall message hits, with store-ID links and delivery receipts. Read-only, deadline-bounded, and disabled for internal recall and session delivery; existing delivery caps apply.

@@ -1,14 +1,53 @@
-<h1 align="center">LCM-X</h1>
-<p align="center"><strong>Lossless Context Memory eXtension</strong></p>
+![LCM-X](docs/media/banner.png)
+
+Lossless memory for Hermes Agent: every turn kept in a local store, not compacted away, and searchable by your agent.
+[Watch the demo](https://x.com/ElectricSheepIO/status/2119777119873925155)
 
 [![CI](https://github.com/electricsheephq/lcm-x/actions/workflows/ci.yml/badge.svg)](https://github.com/electricsheephq/lcm-x/actions/workflows/ci.yml)
-[![Latest tag](https://img.shields.io/github/v/tag/electricsheephq/lcm-x?include_prereleases&sort=semver&label=tag)](https://github.com/electricsheephq/lcm-x/tags)
-[![Python 3.11-3.14](https://img.shields.io/badge/Python-3.11--3.14-3776AB?logo=python&logoColor=white)](https://github.com/electricsheephq/lcm-x/actions/workflows/ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/electricsheephq/lcm-x)](https://github.com/electricsheephq/lcm-x/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Hermes >= 0.21.3](https://img.shields.io/badge/Hermes-%3E%3D0.21.3-blue)](plugin.yaml)
 
-**Lossless context memory for [Hermes Agent](https://github.com/NousResearch/hermes-agent).**
+## Install
+
+```bash
+hermes plugins install hermes-lcm-x --enable
+hermes config set context.engine lcm-x
+```
+
+This installs the version the Hermes catalog currently pins, which can trail the [latest release](https://github.com/electricsheephq/lcm-x/releases/latest) by a few days (see [catalog payload](docs/operations/catalog-payload.md)).
+The default local setup needs no API key; optional cloud embeddings and Voyage reranking use configured provider keys (see [embeddings setup](docs/embeddings-setup.md)).
+The first line installs and enables the plugin; the second selects it as the context engine (both checked on a clean Hermes 0.23.0 home). Restart Hermes afterwards.
+
+### Activate it
+
+The plugin has two names:
+
+- plugin manifest name: `hermes-lcm-x`
+- runtime context engine name: `lcm-x`
+
+Both must be configured. The two commands above write this; you can also edit the config by hand:
+
+```yaml
+plugins:
+  enabled:
+    - hermes-lcm-x
+
+context:
+  engine: lcm-x
+```
+
+Restart Hermes after changing plugin or context-engine config.
+
+## Try it
+
+1. Run the two commands above and restart Hermes.
+2. Send a message, then ask your agent to call `lcm_status`.
+3. You will see runtime health, context pressure, configuration, and storage counts for the active session.
 
 > Bounded context, unbounded memory. Nothing is ever lost.
+
+Two opt-ins discard content by design: durable sensitive-pattern redaction (`LCM_SENSITIVE_PATTERNS_ENABLED`) and message ignore patterns (`LCM_IGNORE_MESSAGE_PATTERNS`); the operator's `/lcm doctor clean apply` deletes on purpose (off by default, takes a backup first). Sessions matched by `LCM_IGNORE_SESSION_PATTERNS` or `LCM_STATELESS_SESSION_PATTERNS` (both empty by default) are not stored at all.
 
 <!-- results-highlights:start -->
 <a id="benchmark-highlights"></a>
@@ -96,6 +135,7 @@ LCM-X instead:
 Nothing is lost in normal operation. Raw messages stay recoverable in bounded
 pages, summaries retain source lineage, and oversized externalized payloads keep
 stable refs for later expansion.
+Two opt-ins discard content by design: durable sensitive-pattern redaction (`LCM_SENSITIVE_PATTERNS_ENABLED`) and message ignore patterns (`LCM_IGNORE_MESSAGE_PATTERNS`); the operator's `/lcm doctor clean apply` deletes on purpose (off by default, takes a backup first). Sessions matched by `LCM_IGNORE_SESSION_PATTERNS` or `LCM_STATELESS_SESSION_PATTERNS` (both empty by default) are not stored at all.
 
 <p align="center">
   <img src="docs/standard_compression.png" alt="Standard compression" width="700">
@@ -153,7 +193,7 @@ default (durable sensitive-pattern redaction is opt-in; cloud-embedding privacy
 is an independent flag that transforms only the provider-bound copy — see
 "Sensitive-pattern redaction" below), the PEM private-key redaction hardening,
 loud privacy-policy failures on the recall path, and the rc-first release
-gauntlet, while preserving the 15-tool surface, schema-5 core store, and
+gauntlet, while preserving schema-5 core storage and
 default-off experimental features.
 
 Stable release identity and the continuing `main` development line are
@@ -166,8 +206,10 @@ patch releases are cut from that branch. The `main` line carries the forward ide
 That tag is cut from `main`, while `v0.29.2` comes from `release/v0.29.x`.
 An identity is never a restamp of any past commit's own recorded identity
 (#385 fixed the earlier drift).
-The manifest declares 16 tools; runtime discovery advertises 13 by default,
-or 16 with assertion, adaptive-retrieval and entity flags on.
+The manifest declares 16 tools; runtime discovery advertises 13 by default.
+`LCM_ASSERTIONS_ENABLED` adds `lcm_query_state`, `LCM_ADAPTIVE_RETRIEVAL_ENABLED`
+adds `lcm_retrieve`, and `LCM_ENTITIES_ENABLED` adds `lcm_memory`: 16 with all three on,
+unless `LCM_DISABLED_TOOLS` hides tools.
 
 Every compaction LCM-X starts today runs on the turn thread, so the user waits
 for it. v0.25.0 makes a hidden backlog drain at turn pace (#597); v0.31.0
@@ -222,7 +264,9 @@ rather than running unbounded stdlib `re` matches.
 
 Catalog installs use the [generated runtime payload](docs/operations/catalog-payload.md) pinned to an immutable dist commit.
 
-Canonical install path: clone LCM-X as a general user plugin into
+#### Developers and profile installs
+
+Clone LCM-X as a general user plugin into
 `plugins/hermes-lcm-x`.
 
 ```bash
@@ -302,26 +346,6 @@ export LCM_ENABLE_SLASH_COMMAND=1   # registers /lcm for the setup commands
 
 After setting these in Hermes' environment and restarting, run `/lcm embed warmup`, `/lcm embed backfill` (dry run), `/lcm embed backfill --apply`, then `/lcm status`. See [Voyage setup and key creation](docs/embeddings-setup.md#option-1--voyage-ai-free-tier) and [cloud privacy](#cloud-embedding-privacy).
 
-### Activate it
-
-The plugin has two names:
-
-- plugin manifest name: `hermes-lcm-x`
-- runtime context engine name: `lcm-x`
-
-Both must be configured:
-
-```yaml
-plugins:
-  enabled:
-    - hermes-lcm-x
-
-context:
-  engine: lcm-x
-```
-
-Restart Hermes after changing plugin or context-engine config.
-
 ### Verify it loaded
 
 Run:
@@ -351,8 +375,8 @@ Provider Plugins:
   Context Engine: lcm-x
 ```
 
-Older `v0.23.x` stable tags instead report `hermes-lcm v0.23.x (15 tools)`
-and engine `lcm`; verify the loaded commit before treating either string as
+Older `v0.23.x` stable tags instead report plugin `hermes-lcm`
+and engine `lcm`; verify the loaded commit before treating either name as
 release proof.
 
 For source checkouts, `lcm_status`, `/lcm status`, `lcm_inspect`,
@@ -420,9 +444,9 @@ Before upgrading to v0.23.1, resolve the effective database path from
 restart that runtime so `/lcm` is registered, then run `/lcm backup`.
 Otherwise stop every SQLite writer and copy that configured database with its
 WAL/SHM companions as one cold set. Check out the exact stable tag/SHA, restart
-Hermes, and verify the loaded path, version, database path, schema 5, and all 15
-tools. No manual core migration is required for the upgrade itself. Existing
-cloud vectors from a pre-v0.23.1 identity require privacy-policy warmup, an
+Hermes, and verify the loaded path, version, database path, schema 5, and the
+tools advertised by that release and its enabled flags. No manual core migration
+is required for the upgrade itself. Existing cloud vectors from a pre-v0.23.1 identity require privacy-policy warmup, an
 identity check from the warmup/profile output, and the finite monotonic
 dry-run/apply loop in the operator guide before semantic coverage is complete.
 
@@ -533,9 +557,9 @@ tool schemas (`ContextEngine.get_tool_schemas`), which is the intended path.
 
 ### Agent tools
 
-Use these tools for current-session recall after compaction. Use Hermes
-`session_search` for earlier separate sessions or broad cross-session history
-outside the LCM database.
+Use these tools for recall after compaction; their default scopes differ
+(see [Retrieval contract](#retrieval-contract)). Use Hermes `session_search`
+for cross-session history outside the LCM database.
 
 Both host paths hide `lcm_query_state` until `LCM_ASSERTIONS_ENABLED=true`
 and `lcm_retrieve` until `LCM_ADAPTIVE_RETRIEVAL_ENABLED=true`, plus
@@ -692,6 +716,14 @@ assistant even when doing so exceeds a configured bound.
 
 ### Filtering and storage settings
 
+**What is stored where**
+
+- Raw messages and summaries live in the local SQLite store, `lcm.db`.
+- Large tool outputs move to separate plugin-managed JSON payload files under the Hermes home by default.
+- Keep those payload files with the database: they are needed to recover externalized content.
+- Local FastEmbed runs in process; non-local embedding providers receive copies only when configured and enabled.
+- Optional Voyage reranking sends the query and candidate snippets; cloud-copy privacy is separate from durable redaction.
+
 | Variable | Default | Use |
 |----------|---------|-----|
 | `LCM_IGNORE_SESSION_PATTERNS` | empty | Comma-separated session globs excluded from LCM storage |
@@ -740,7 +772,8 @@ Advanced compaction, assembly, and extraction knobs are defined in `config.py`.
 ### Sensitive-pattern redaction
 
 LCM is lossless by default: durable messages, FTS rows, summaries, and payloads
-remain untouched unless `LCM_SENSITIVE_PATTERNS_ENABLED=true` is explicitly set.
+remain untouched by redaction unless `LCM_SENSITIVE_PATTERNS_ENABLED=true` is explicitly set.
+Two opt-ins discard content by design: durable sensitive-pattern redaction (`LCM_SENSITIVE_PATTERNS_ENABLED`) and message ignore patterns (`LCM_IGNORE_MESSAGE_PATTERNS`); the operator's `/lcm doctor clean apply` deletes on purpose (off by default, takes a backup first). Sessions matched by `LCM_IGNORE_SESSION_PATTERNS` or `LCM_STATELESS_SESSION_PATTERNS` (both empty by default) are not stored at all.
 Cloud embedding privacy is separate and transforms provider-bound copies only;
 it defaults on for known cloud providers and can be explicitly opted out with
 `LCM_EMBEDDING_PRIVACY_ENABLED=false`, which uses the `privacy:off` vector
@@ -1064,7 +1097,26 @@ readable through `externalized_ref`, `lcm_expand`, and `lcm_expand_query`.
 
 ## Retrieval contract
 
-LCM retrieval tools default to current-session scope. `lcm_grep` accepts
+Default scopes in Hermes (all reads stay within this profile's local LCM store):
+
+| Tool | Default scope |
+|------|---------------|
+| `lcm_grep` | Active session and its delegated descendants; `session_scope='all'` or `'session'` opts into broader archive search. |
+| `lcm_recall` | All conversations and all time; the current conversation gets a soft ranking boost, not a scope restriction. |
+| `lcm_recent` | Active conversation; leaf fallback includes its last-finalized session. |
+| `lcm_load_session` | Requires an explicit `session_id`; no implicit scope. |
+| `lcm_describe` | Current-session DAG or payload; explicit `session_id` selects another DAG. |
+| `lcm_expand` | Current-session node or payload; explicit `session_id` selects another session, while `store_id` works across sessions. |
+| `lcm_expand_query` | Current session; explicit `session_ids` selects up to 20 sessions. |
+| `lcm_memory` (opt-in) | Entity mentions across this profile's sessions. |
+| `lcm_query_state` (opt-in) | This profile's assertions for the required subject; optional `scope_key` filters them. |
+| `lcm_compute` | Supplied exact evidence refs. |
+| `lcm_compile_evidence`, `lcm_evidence_pack` | Baseline exact refs; any retrieval probe uses cross-conversation `lcm_recall`. |
+| `lcm_retrieve` (opt-in) | Uses the scope of each retrieval tool it dispatches. |
+
+Payload reads also include compression-rotation predecessors; node expansion can follow source rows from earlier sessions.
+
+`lcm_grep` accepts
 `session_scope='all'` or `session_scope='session'` as an explicit opt-in for
 bounded archive search over rows already present in `lcm.db` (raw-message hits
 only). Once a session id is known, `lcm_load_session` can enumerate that
@@ -1195,8 +1247,8 @@ The script is intentionally conservative:
   migrates compatible summary rows into Hermes `summary_nodes`
 - JSONL imports migrate raw message rows only; JSONL does not carry a summary DAG
 - imported rows keep explicit provenance in `session_id` and `source`, for
-  example `openclaw-lcm:agent:sammy:<source-session>` or
-  `openclaw-jsonl:agent:sammy:<source-session>`
+  example `openclaw-lcm:agent:example:<source-session>` or
+  `openclaw-jsonl:agent:example:<source-session>`
 - the SQLite default provenance identity is the source `conversations.session_id`,
   preserving source session boundaries even when many conversations share one
   `session_key`
@@ -1216,8 +1268,7 @@ The script is intentionally conservative:
   summaries, and tool payloads may contain sensitive user data
 
 This is a local archive migration path. It does not make LCM a general memory
-provider, and it does not change the current-session retrieval contract for
-agent tools.
+provider, and it does not change the per-tool retrieval scopes above.
 
 For databases that already contain large historical tool rows,
 `scripts/backfill_externalized_tool_outputs.py` can pre-create native recovery
@@ -1295,7 +1346,7 @@ exposes retrieval tools that can drill back into exact stored sources.
 - [Operator guide](docs/operator-guide.md) — install, activation, full
   configuration reference, diagnostics
 - [Retrieval tools reference](docs/retrieval-tools.md) — exact tool contracts
-- [Current project state](docs/project-status.md) — v0.27.0 stable baseline,
+- [Current project state](docs/project-status.md) — stable release,
   separate main-development identity, active work, and proof boundaries
 - [Benchmark methodology and results](benchmarks/METHODOLOGY.md) — retrieval
   and judged-QA evaluation contracts, reproduction, and landed result index

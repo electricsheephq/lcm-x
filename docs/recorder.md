@@ -116,7 +116,7 @@ Directories are created 0700 and files 0600. A profile backup that copies `$HERM
   are not proven by replay. Elapsed-time fields (`duration_ms`, `last_compaction_duration_ms`, the no-progress hold's
   wall-clock `until`) are excluded from comparison.
 - LLM callers that call the host's `call_llm` directly (`extraction.py`, `assertion_extraction.py`,
-  `host_evidence.py`, `selective_compiler.py`, `expand_query_tools.py`): their tables are outside the comparison and
+  `selective_compiler.py`, `expand_query_tools.py`): their tables are outside the comparison and
   replay stubs them. The `lcm_expand_query` tool return depends on that synthesis and is excluded from comparison.
 - A caller that reaches the engine other than through a root is not recorded.
 - Changes to payload files made outside LCM after the pin are not recorded.

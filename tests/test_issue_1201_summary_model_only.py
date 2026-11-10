@@ -13,7 +13,7 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
-from hermes_lcm import assertion_extraction, escalation, extraction, host_evidence, selective_compiler
+from hermes_lcm import assertion_extraction, escalation, extraction, selective_compiler
 from hermes_lcm import expand_query_tools
 from tests.harness import make_engine
 from hermes_lcm import engine as engine_module
@@ -597,7 +597,7 @@ def test_t6_existing_metadata_and_host_constant(engine, monkeypatch):
 
 
 @pytest.mark.parametrize("builder", ["summary-l1", "summary-l2", "extraction", "assertion",
-                                    "host-evidence", "selective", "expansion"])
+                                    "selective", "expansion"])
 def test_t7_auxiliary_prompt_builders_never_forward_live_rows(expansion_engine, monkeypatch, tmp_path, builder):
     engine = expansion_engine
     rows = [{"role": "user", "content": "A synthetic decision to preserve.",
@@ -624,8 +624,6 @@ def test_t7_auxiliary_prompt_builders_never_forward_live_rows(expansion_engine, 
                                   hashlib.sha256(content.encode()).hexdigest())
         prompt = assertion_extraction.build_structured_assertion_prompt(snapshot, SimpleNamespace(query_assertions=lambda **k: []))
         assertion_extraction._call_structured_assertion_llm(prompt, "", 1)
-    elif builder == "host-evidence":
-        host_evidence.call_auxiliary_selector({"question": "What was decided?", "baseline_evidence": rows})
     elif builder == "selective":
         selective_compiler.call_selective_auxiliary_selector({
             "status": "selector_required", "prompt": selective_compiler._prompt(
