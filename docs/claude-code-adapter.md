@@ -561,6 +561,8 @@ gate's instrument (see "The audit" in the test plan).
     `tool-results` subfolder, and no other named transcript path holding rows (`named_other_paths`);
   - every selected session, and every subagent transcript on disk (a forgotten session's too),
     has a cursor;
+  - closed world: below a session folder it checks, nothing it cannot tie to a capture (a `*.jsonl` no cursor
+    names, a symlink, a folder that cannot be listed), whatever the folder names around it;
   - every lineage a set-aside (`.failed`) spool record names has a cursor, unless that lineage
     was forgotten. A record names its subagent even when that transcript is not on disk: one never
     written (the compaction summarizer's `SubagentStop` names one) looks the same as one removed
