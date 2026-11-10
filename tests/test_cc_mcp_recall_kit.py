@@ -383,7 +383,7 @@ def _stream_run(tmp_path, calls):
     stream = [{'type': 'system', 'subtype': 'init', 'mcp_servers': [{'name': 'lcm-x', 'status': 'connected'}]}]
     for n, (name, failed, text) in enumerate(calls):
         stream.append({'type': 'assistant', 'message': {'content': [{'type': 'tool_use', 'id': f't{n}', 'name': name}]}})
-        body = json.dumps({'error': text} if failed else {'matches': []})
+        body = json.dumps({'error': text} if failed else {'results': [], 'message_search_error': text} if text else {'matches': []})
         stream.append({'type': 'user', 'message': {'content': [{'type': 'tool_result', 'tool_use_id': f't{n}', 'is_error': failed,
                                                                 'content': [{'type': 'text', 'text': body}]}]}})
     stream.append({'type': 'result', 'is_error': False, 'result': 'NOT FOUND', 'session_id': 'x'})
@@ -411,3 +411,11 @@ def test_bot_round_9(tmp_path):
     inputs = synthetic()
     inputs[4]['answers'][0].update(is_error=True)  # on the measured arm
     assert k.score(*inputs)['verdict'] == 'INCOMPLETE'
+
+
+def test_bot_round_10(tmp_path):
+    # A degraded search (isError false, message_search_error set) searched nothing: a NOT FOUND after it is not credited.
+    grep = 'mcp__lcm-x__lcm_grep'
+    degraded = _stream_run(tmp_path, [(grep, False, 'simulated FTS crash'), (grep, False, None)])
+    assert degraded['reader_errors'] == 1 and degraded['is_error']
+    assert not _stream_run(tmp_path, [(grep, False, None)])['is_error']

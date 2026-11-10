@@ -324,11 +324,15 @@ def claude(command, prompt, args, home, cwd, env=None):
     # reader call failed. A model's own slip (a wrong id, a bad argument) followed by a good call is not.
     failed = [b for b in results if b.get("tool_use_id") in reader_ids and b.get("is_error") is True]
     infra = [b for b in failed if INFRA_ERROR.search(json.dumps(b.get("content")))]
+    # A degraded search reports success with `message_search_error` set (as arm T treats it): nothing was searched.
+    infra += [b for b in results if b.get("tool_use_id") in reader_ids and b not in infra
+              and DEGRADED_SEARCH.search(json.dumps(b.get("content")))]
     answered = {b.get("tool_use_id") for b in results} & reader_ids
     reader_errors = len(infra) + (len(failed) if answered and len(failed) == len(answered) and not infra else 0)
     error = proc.returncode != 0 or result.get("is_error", True) or reader_errors > 0
     return {"rc": proc.returncode, "wall_s": time.monotonic() - start, "is_error": error, "answer": result.get("result", ""), "session_id": result.get("session_id"), "tool_calls": calls, "reader_errors": reader_errors, "reader_not_connected": init is None or [(s.get("name"), s.get("status")) for s in init] != [("lcm-x", "connected")], "limit": bool(error and re.search(r"rate.?limit|usage.?limit|limit.{0,25}(reached|exceeded)|hit.{0,25}limit", json.dumps(result), re.I))}
 
+DEGRADED_SEARCH = re.compile(r'\\?"message_search_error\\?":\s*\\?"')
 INFRA_ERROR = re.compile(r'\\?"error\\?":\s*\\?"(store_offline:|schema_refused:|Error executing )')
 
 
