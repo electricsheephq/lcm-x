@@ -3009,13 +3009,17 @@ def test_a_reused_agent_id_is_pinned(tmp_path, home, hermes, hooks):
 # exactly once under a lineage that maps to exactly one path, and the audit is verified exactly when that holds. An
 # already-flipped store keeps its rows (its old lineage spans two paths, so it stays unverified) and gains the missing
 # lines, with nothing stored twice.
-_REUSE_PATHS = {"direct": ("agent-x1.jsonl",), "workflow": ("workflows", "wf_run1", "agent-x1.jsonl")}
+_REUSE_PATHS = {"direct": ("agent-x1.jsonl",), "workflow": ("workflows", "wf_run1", "agent-x1.jsonl"),
+                "workflow2": ("workflows", "wf_run2", "agent-x1.jsonl")}  # two workflow runs, one id (#2574 review)
 _REUSE_TABLE = [(exist, hooks, grow, state)
                 for exist in (("direct",), ("workflow",), ("direct", "workflow"))
                 for hooks in ((), ("direct",), ("workflow",), ("direct", "workflow"), ("workflow", "direct"))
                 for grow in ((), ("direct",), ("workflow",), ("direct", "workflow"))
                 for state in ("fresh", "flipped")
-                if set(hooks) <= set(exist) and set(grow) <= set(exist) and (state == "fresh" or len(exist) == 2)]
+                if set(hooks) <= set(exist) and set(grow) <= set(exist) and (state == "fresh" or len(exist) == 2)] + [
+    (("workflow", "workflow2"), hooks, grow, "fresh")
+    for hooks in ((), ("workflow",), ("workflow2",), ("workflow", "workflow2"), ("workflow2", "workflow"))
+    for grow in ((), ("workflow",), ("workflow2",), ("workflow", "workflow2"))]
 
 
 @pytest.mark.parametrize("exist,hooks,grow,state", _REUSE_TABLE,
@@ -3026,7 +3030,7 @@ def test_the_reused_agent_id_rule_table(tmp_path, home, hermes, exist, hooks, gr
 
     a = _append(tmp_path / "projects" / "-work" / "s1.jsonl", CONVERSATION[:2])
     agents = a.parent / "s1" / "subagents"
-    content = {"direct": _REUSED["first"], "workflow": _REUSED["second"]}
+    content = {"direct": _REUSED["first"], "workflow": _REUSED["second"], "workflow2": _REUSED["first"]}
     _record(_hook(), home, a)
     cc.run_worker(home, hermes_home=hermes, settle_s=0)  # the parent is captured before its agents write
     paths = {name: _append(agents.joinpath(*_REUSE_PATHS[name]), content[name]) for name in exist}
