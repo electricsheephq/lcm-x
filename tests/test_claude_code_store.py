@@ -2551,3 +2551,33 @@ def test_the_folder_check_is_closed_world_over_generated_layouts(tmp_path, home,
             if kind == "unlistable":
                 (spot / "locked").chmod(0o700)
             shutil.rmtree(root)
+
+
+@pytest.mark.parametrize("shape", ["forgotten_journal", "linked_direct_agent", "folder_named_like_an_agent"])
+def test_the_closed_world_walk_edges(tmp_path, home, hermes, shape):
+    """#2557 review: a forgotten session's own files are never read again, so they never keep it unverified; a symlink or
+    a folder in a judged agent file's place is still looked at, not skipped as judged."""
+    from hermes_lcm import claude_code_audit as ca
+
+    a = _append(tmp_path / "projects" / "-work" / "s1.jsonl", CONVERSATION[:2])
+    agents = a.parent / "s1" / "subagents"
+    captured = agents / "run-1" / "agent-x9.jsonl"  # x9's cursor names this nested copy
+    _append(captured, _SIDE)
+    _record(_hook(), home, a)
+    _record(_hook(), home, a, event="SubagentStop", agent_id="x9", agent_transcript_path=str(captured))
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    assert not [key for key in ca.audit(home)["unverified"] if key.startswith("claude-code:s1")]
+    direct = agents / "agent-x9.jsonl"
+    if shape == "forgotten_journal":
+        store = _open(home, hermes)
+        try:
+            store.delete_session_messages("s1")
+        finally:
+            store.close()
+        _append(a.parent / "s1" / "workflows-run" / "journal.jsonl", [{"type": "result"}])
+    elif shape == "linked_direct_agent":  # a dangling symlink where a direct agent file would be
+        direct.symlink_to(tmp_path / "gone.jsonl")
+    else:  # a folder with an agent file's name, holding a transcript-shaped file
+        _append(direct / "journal.jsonl", [{"type": "result"}])
+    unverified = [key for key in ca.audit(home)["unverified"] if key.startswith("claude-code:s1")]
+    assert bool(unverified) is (shape != "forgotten_journal")
