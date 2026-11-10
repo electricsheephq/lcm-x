@@ -103,24 +103,39 @@ def test_an_ended_bypass_lineage_session_at_ext_off_keeps_its_stored_prefix_rout
         engine.shutdown()
 
 
-def _failing_payload_write(monkeypatch):
+def _payload_fault(monkeypatch, engine, fault):
+    """Make externalization fail at default settings: ``write`` fails the payload file write; ``folder`` puts a
+    regular file where the payload folder goes, so the folder setup fails (both return None to ingest)."""
     from hermes_lcm import externalize
 
-    def fails(*_a, **_k):
-        raise OSError("injected payload write failure")
-    monkeypatch.setattr(externalize, "_write_externalized_payload", fails)
+    if fault == "write":
+        def fails(*_a, **_k):
+            raise OSError("injected payload write failure")
+        monkeypatch.setattr(externalize, "_write_externalized_payload", fails)
+        return
+    folder = externalize.get_large_output_storage_dir(engine._config, hermes_home=str(engine._hermes_home),
+                                                      create=False)
+    if folder.is_dir():
+        pytest.fail("setup: the payload folder already exists")
+    folder.parent.mkdir(parents=True, exist_ok=True)
+    folder.write_bytes(b"")
 
 
+_FAULTS = pytest.mark.parametrize("fault", ["write", "folder"])
+
+
+@_FAULTS
 @pytest.mark.parametrize("location", ["spillover", "hermes-results"])
-def test_a_failed_payload_write_at_default_settings_keeps_the_final_reply(tmp_path, monkeypatch, location):
-    """Default settings, payload file write fails: ingest keeps the marker inline with LCM-X's generation line (the
-    #2547 stored form without the identity line). An off-current end still stores the final reply once."""
+def test_a_failed_payload_write_at_default_settings_keeps_the_final_reply(tmp_path, monkeypatch, location, fault):
+    """Default settings, payload file write or payload folder setup fails: ingest keeps the marker inline with LCM-X's
+    generation line (the #2547 stored form without the identity line). An off-current end still stores the final reply
+    once (main loses it: rows n, no final reply)."""
     home = tmp_path / "hermes"
     engine = LCMEngine(config=LCMConfig(database_path=str(home / "lcm.db"),
                                         large_output_externalization_path=str(home / "externalized")),
                        hermes_home=str(home))
     try:
-        _failing_payload_write(monkeypatch)
+        _payload_fault(monkeypatch, engine, fault)
         marker = _write_output(_path(home, location), FULL_OUTPUT)
         texts = [("user", "A"), ("assistant", "B"), ("user", "C")]
         history = [{"role": r, "content": t, "timestamp": float(i + 1)} for i, (r, t) in enumerate(texts)]
@@ -133,7 +148,7 @@ def test_a_failed_payload_write_at_default_settings_keeps_the_final_reply(tmp_pa
         engine.ingest(copy.deepcopy(history))
         stored = [r for r in engine._store.get_session_messages("S1") if r["role"] == "tool"][0]["content"]
         if not (stored.startswith("<persisted-output>") and "[LCM persisted-output file generation:" in stored):
-            pytest.fail("setup: the failed write did not leave the inline marker with a generation line")
+            pytest.fail("setup: the payload fault did not leave the inline marker with a generation line")
         engine.on_session_start("S2", platform="cli", context_length=200_000, conversation_id="conv2")
         engine.on_session_end("S1", copy.deepcopy(history) + [{"role": "assistant", "content": "FINAL", "timestamp": 11.0}])
         rows = engine._store.get_session_messages("S1")
@@ -142,10 +157,11 @@ def test_a_failed_payload_write_at_default_settings_keeps_the_final_reply(tmp_pa
         engine.shutdown()
 
 
+@_FAULTS
 @pytest.mark.parametrize("location", ["spillover", "hermes-results"])
-def test_a_failed_payload_write_at_default_settings_adds_no_child_copy(host, monkeypatch, location):  # noqa: F811
+def test_a_failed_payload_write_at_default_settings_adds_no_child_copy(host, monkeypatch, location, fault):  # noqa: F811
     _, _, ctx, parent, child, engine = _setup(host, "own_engine")
-    _failing_payload_write(monkeypatch)
+    _payload_fault(monkeypatch, engine, fault)
     handed = [{"role": "user", "content": "Dump the ledger."}, call(1),
               {"role": "tool", "tool_call_id": "c1", "content": _write_output(_path(engine._hermes_home, location, "c1"))}]
     for n in range(3):
