@@ -1514,3 +1514,43 @@ def test_a_cut_precompact_drain_leaves_the_rest_to_the_worker_that_took_the_lock
         monkeypatch.setattr(subprocess, "run", incomplete_then_taken)
         monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: pytest.fail("the holder takes the rest"))
         assert hook.start_worker(home, lane, deadline_s=hook.PRECOMPACT_DEADLINE_S) == "drain_incomplete+holder"
+
+
+def test_a_refused_grok_home_writes_nothing_into_the_claude_home(hook, tmp_path):
+    """#2531 review: a Grok payload whose home setting is refused (relative) logs nowhere, not in Claude Code's home."""
+    env = {"LCMX_CC_HOME": str(tmp_path / "home"), "LCMX_GROK_HOME": "relative/grok",
+           "CLAUDE_CONFIG_DIR": str(tmp_path / "config")}
+    payload = {"hookEventName": "SessionStart", "sessionId": "g-1", "cwd": "/work", "source": "startup"}
+    assert hook.main(io.StringIO(json.dumps(payload)), env) == 0
+    assert not (tmp_path / "home").exists()
+
+
+def test_an_unresolvable_home_never_escapes_the_hook(hook, tmp_path):
+    """#2531 review: a home that raises while resolving (an unknown ~user) still fails open, on a synchronous hook."""
+    env = {"LCMX_CC_HOME": "~no-such-user-2531/home", "CLAUDE_CONFIG_DIR": str(tmp_path / "config")}
+    for raw in (json.dumps({"hook_event_name": "SessionStart", "session_id": "s1",
+                            "transcript_path": str(_transcript(tmp_path))}), "not json"):
+        assert hook.main(io.StringIO(raw), env) == 0
+
+
+@pytest.mark.parametrize("event", ["Stop", "SessionEnd"])
+def test_the_hook_returns_only_after_its_writer_left_the_group(env, tmp_path, event):
+    """#2531 review: the parent waits for the child's setsid, so a group kill the moment the hook returns cannot reach
+    the writer. setsid is slowed here; without the wait the kill lands first and no pointer is spooled."""
+    import signal
+    payload = {"hook_event_name": event, "session_id": "s1", "transcript_path": str(_transcript(tmp_path))}
+    driver = ("import importlib.util, os, sys, time\n"
+              f"spec = importlib.util.spec_from_file_location('h', {str(PLUGIN / 'bin/lcmx_hook.py')!r})\n"
+              "h = importlib.util.module_from_spec(spec); spec.loader.exec_module(h)\n"
+              "real = os.setsid\n"
+              "os.setsid = lambda: (time.sleep(0.3), real())[1]\n"
+              "sys.exit(h.main(sys.stdin, os.environ, detach=True))\n")
+    proc = subprocess.Popen([sys.executable, "-c", driver], env={**os.environ, **env}, stdin=subprocess.PIPE,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    proc.communicate(json.dumps(payload).encode(), timeout=5)
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)  # the moment the hook returned, as a host cleaning up its group would
+    except ProcessLookupError:
+        pass
+    row = _wait_hooks(env, 1)[-1]  # a writer the kill reached never logs (the worker may already have drained the pointer)
+    assert row["detached"] is True and row["event"] == event and not row["outcome"].startswith("error")

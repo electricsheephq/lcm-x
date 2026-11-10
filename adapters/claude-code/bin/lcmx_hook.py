@@ -370,15 +370,25 @@ def main(stdin: TextIO = sys.stdin, environ: Mapping[str, str] = os.environ, *, 
         if detach and _pick(payload, "hook_event_name", "hookEventName") in DETACHED_EVENTS and hasattr(os, "fork"):
             blocking_ms = round((time.monotonic() - started) * 1000, 1)
             try:
+                ready, signal_ready = os.pipe()
                 pid = os.fork()
             except OSError:
                 nofork = "+nofork"
             else:
                 if pid:
+                    # Return only once the child has left the hook's group (or died), so a group kill right after the
+                    # hook returns cannot reach the writer. setsid does no I/O, so this wait is short.
+                    os.close(signal_ready)
+                    try:
+                        os.read(ready, 1)
+                    finally:
+                        os.close(ready)
                     return 0
                 child = True  # set first: the child must always end in os._exit, never return into the caller
                 # Leave the hook's group and release Claude Code's pipes before anything that can touch disk.
+                os.close(ready)
                 os.setsid()
+                os.close(signal_ready)  # the parent may return now
                 null = os.open(os.devnull, os.O_RDWR)
                 for fd in (0, 1, 2):
                     os.dup2(null, fd)
@@ -416,8 +426,14 @@ def main(stdin: TextIO = sys.stdin, environ: Mapping[str, str] = os.environ, *, 
             if not (detach and not child and blocking_ms is not None and not nofork):
                 if child:
                     record["blocking_ms"] = blocking_ms
-                import lcmx_runtime
-                home = home or lcmx_runtime.store_home(environ, "grok-build" if environ.get("GROK_SESSION_ID") else "claude-code")
+                if home is None and not record:  # failed before the payload named its host: the environment's home
+                    try:
+                        import lcmx_runtime
+                        home = lcmx_runtime.store_home(environ, "grok-build" if environ.get("GROK_SESSION_ID")
+                                                       else "claude-code")
+                    except Exception:  # noqa: BLE001 - a home that cannot be resolved logs nothing, as before
+                        home = None
+                # A home the payload's host refused (a relative setting) stays None: nothing is written anywhere.
                 _log(home, record, outcome + nofork, started, steps)
         finally:
             if child:
