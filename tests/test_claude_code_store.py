@@ -2581,3 +2581,43 @@ def test_the_closed_world_walk_edges(tmp_path, home, hermes, shape):
         _append(direct / "journal.jsonl", [{"type": "result"}])
     unverified = [key for key in ca.audit(home)["unverified"] if key.startswith("claude-code:s1")]
     assert bool(unverified) is (shape != "forgotten_journal")
+
+
+# #2562: one table for workflow agents and other nested subagent transcripts. The sweep is the safety net for a missed
+# hook, so it must not depend on a hook naming the path: it takes every agent-*.jsonl below subagents/, to a bounded
+# depth, without following a symlinked folder. Expected: (captured, verified).
+_NESTED = {"direct": ("agent-x1.jsonl",), "workflow": ("workflows", "wf_run1", "agent-x1.jsonl"),
+           "deep": ("a", "b", "c", "d", "agent-x1.jsonl"), "too_deep": ("a", "b", "c", "d", "e", "agent-x1.jsonl"),
+           "linked_folder": ("link", "agent-x1.jsonl")}
+_NESTED_TABLE = [(kind, hook, hook or kind in ("direct", "workflow", "deep"), kind != "linked_folder"
+                  and (hook or kind != "too_deep")) for kind in _NESTED for hook in (True, False)]
+
+
+@pytest.mark.parametrize("kind,hook,captured,verified", _NESTED_TABLE,
+                         ids=[f"{k}-{'hook' if h else 'missed'}" for k, h, _, _ in _NESTED_TABLE])
+def test_the_nested_subagent_rule_table(tmp_path, home, hermes, kind, hook, captured, verified):
+    from hermes_lcm import claude_code_audit as ca
+
+    a = _append(tmp_path / "projects" / "-work" / "s1.jsonl", CONVERSATION[:2])
+    agents = a.parent / "s1" / "subagents"
+    if kind == "linked_folder":  # the transcript lives elsewhere; subagents/link points at its folder
+        elsewhere = tmp_path / "elsewhere"
+        _append(elsewhere / "agent-x1.jsonl", _SIDE)
+        agents.mkdir(parents=True)
+        (agents / "link").symlink_to(elsewhere)
+        path = agents / "link" / "agent-x1.jsonl"
+    else:
+        path = _append(agents.joinpath(*_NESTED[kind]), _SIDE)
+    _record(_hook(), home, a)
+    if hook:  # the record Claude Code sends for a workflow agent (probe on 2026-11-10)
+        _record(_hook(), home, a, event="SubagentStop", agent_id="x1", agent_type="workflow-subagent",
+                agent_transcript_path=str(path))
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)  # a second run sweeps what the first registered
+    store = _open(home, hermes)
+    try:
+        assert bool(store.read_metadata_json(cc.CURSOR_PREFIX + "claude-code:s1/agent:x1")) is captured
+        assert len(_rows(store, cc.row_session_id("s1", "x1"))) == (len(_SIDE) if captured else 0)
+    finally:
+        store.close()
+    assert ca.audit(home)["verified"] is verified
