@@ -242,7 +242,7 @@ def test_no_state_db_gives_no_lineage_root(tmp_path):
         engine.shutdown()
 
 
-class _TimeoutRegex:  # the optional ``regex`` engine's timeout-capable interface (as tests/test_lcm_engine.py)
+class _TimeoutRegex:  # the optional ``regex`` engine's timeout-capable interface (as tests/engine_helpers.py)
     error = re.error
 
     class _Pattern:
