@@ -847,10 +847,14 @@ def test_v0292_keep_and_session_end_agree(preview, location, crlf, incoming, tmp
 
 
 # #2559: exact transform-probe inputs, driven through real ingest on every route.
+# T7D: call arguments with a duplicate key (#2572 NeonDiff P1: they stay text, so a change in the
+# first value is a distinct call). T7K: the payload is an argument KEY (#2572 NeonDiff P2: keys are
+# restored before the canonical sort).
+_INLINE_FORMS = {'T7': ('identical', 'whitespace', 'different', 'invalid-json'),
+                 'T7D': ('identical', 'different'), 'T7K': ('identical', 'whitespace', 'different')}
 INLINE_CASES = [(route, shape, variant, form) for route in ROUTES
-                for shape in ('T7', 'T6i', 'T6ii') for variant in ('X', 'U', 'P')
-                for form in (('identical', 'whitespace', 'different', 'invalid-json')
-                             if shape == 'T7' else ('identical', 'different'))]
+                for shape in ('T7', 'T6i', 'T6ii', 'T7D', 'T7K') for variant in ('X', 'U', 'P')
+                for form in _INLINE_FORMS.get(shape, ('identical', 'different'))]
 
 
 def _inline_row(shape, variant):
@@ -859,11 +863,19 @@ def _inline_row(shape, variant):
         return base64.b64encode(bytes((i * 37 + 11) % 256 for i in range(n))).decode('ascii')
     long = b64(3420)
     wrapped = '\n'.join(long[i:i + 76] for i in range(0, len(long), 76))
-    if shape == 'T7':
+    if shape.startswith('T7'):
         body = {'X': wrapped, 'U': long, 'P': 'plain body'}[variant]
+        arguments = json.dumps({'path': 'a.b64', 'content': 'hdr\n' + body + '\nend'})
+        url = {'X': 'data:image\\/png;base64,' + b64(1200), 'U': 'data:image/png;base64,' + b64(1200),
+               'P': 'data:image\\/png;base64,plain-image-ref'}[variant]
+        if shape == 'T7D':  # duplicate-key text: ingest protects only data-URI and base64 substrings
+            # X is the URL as JSON text escapes it ("data:image\\/png"), written straight into the text.
+            arguments = '{"path": "a.b64", "content": "hdr ' + url.replace('\\', '') .replace(
+                'image/', 'image\\/' if variant == 'X' else 'image/') + '", "content": "plain"}'
+        elif shape == 'T7K':
+            arguments = json.dumps({url: 'v', 'b': 'x'})
         return {'role': 'assistant', 'content': '', 'tool_calls': [
-            {'id': 'm1', 'type': 'function', 'function': {'name': 'write_file',
-             'arguments': json.dumps({'path': 'a.b64', 'content': 'hdr\n' + body + '\nend'})}}]}
+            {'id': 'm1', 'type': 'function', 'function': {'name': 'write_file', 'arguments': arguments}}]}
     if shape == 'T6i':
         url = {'X': 'data:image\\/png;base64,' + b64(1200),
                'U': 'data:image/png;base64,' + b64(1200),
@@ -882,7 +894,7 @@ def _inline_identity(row, storage=None):
     """
     def leaves(value):
         if isinstance(value, dict):
-            return {k: leaves(v) for k, v in value.items()}
+            return {leaves(k): leaves(v) for k, v in value.items()}
         if isinstance(value, list):
             return [leaves(v) for v in value]
         return _restore(value, storage) if storage and isinstance(value, str) else value
@@ -898,8 +910,13 @@ def _inline_identity(row, storage=None):
     for c in calls or []:
         args = c['function'].get('arguments')
         if isinstance(args, str):
+            def unique(pairs):
+                keys = [k for k, _ in pairs]
+                if len(keys) != len(set(keys)):
+                    raise ValueError('duplicate keys stay text')
+                return dict(pairs)
             try:
-                args = json.loads(args)
+                args = json.loads(args, object_pairs_hook=unique)
             except ValueError:
                 args = args.strip()
         c['function']['arguments'] = leaves(args)
@@ -933,15 +950,15 @@ def test_inline_payload_compare_matrix(case, host, tmp_path, monkeypatch, reques
     if form == 'invalid-json':
         shaped['tool_calls'][0]['function']['arguments'] = shaped['tool_calls'][0]['function']['arguments'][:-1]
     if child_route:
-        first = [{'role': 'user', 'content': 'Write the attachment file.' if shape == 'T7'
+        first = [{'role': 'user', 'content': 'Write the attachment file.' if shape.startswith('T7')
                   else 'Look at what I send next.'}, shaped]
-        if shape == 'T7':
+        if shape.startswith('T7'):
             first.append({'role': 'tool', 'tool_call_id': 'm1', 'content': 'wrote a.b64'})
-        first.append({'role': 'assistant', 'content': 'Done: a.b64 written.' if shape == 'T7'
+        first.append({'role': 'assistant', 'content': 'Done: a.b64 written.' if shape.startswith('T7')
                       else 'It is a PNG attachment.'})
     else:
         first = [{'role': 'user', 'content': 'A'}, {'role': 'assistant', 'content': 'B'}]
-        first += ([{'role': 'user', 'content': 'C'}, shaped] if shape == 'T7' else
+        first += ([{'role': 'user', 'content': 'C'}, shaped] if shape.startswith('T7') else
                   [shaped, {'role': 'assistant', 'content': '', 'tool_calls': [
                       {'id': 'm1', 'type': 'function', 'function': {'name': 'terminal', 'arguments': '{}'}}]}])
         first += [{'role': 'tool', 'tool_call_id': 'm1', 'content': 'ok 1'}]
@@ -980,10 +997,17 @@ def test_inline_payload_compare_matrix(case, host, tmp_path, monkeypatch, reques
         assert ('[Externalized LCM ingest payload:' in raw) == (variant != 'P' and form != 'invalid-json')
         view = copy.deepcopy(first)
         target = next(m for m in view if _inline_identity(m) == shaped_id)
-        if form in ('whitespace', 'different', 'invalid-json') and shape == 'T7':
+        if form in ('whitespace', 'different', 'invalid-json') and shape.startswith('T7'):
             function = target['tool_calls'][0]['function']
             if form == 'invalid-json':
                 function['arguments'] = '  ' + function['arguments'] + '  '
+            elif shape == 'T7D':  # only the first, shadowed value changes
+                function['arguments'] = function['arguments'].replace('hdr', 'Hdr', 1)
+            elif shape == 'T7K':
+                args = json.loads(function['arguments'])
+                if form == 'different':
+                    args = {(k + 'A' if k.startswith('data:') else k): v for k, v in args.items()}
+                function['arguments'] = json.dumps(dict(reversed(list(args.items()))), indent=2)
             else:
                 args = json.loads(function['arguments'])
                 if form == 'different':
@@ -1094,9 +1118,9 @@ def test_inline_payload_compare_matrix(case, host, tmp_path, monkeypatch, reques
         if missing:
             gaps.append('bar i: host rows absent')
         if result['replay_growth']:
-            # #2550: a cold replay stores a call with wrapped base64 arguments again on every restart
-            # (main and this head: 10, 13, 15, then 17 on a third replay).
-            tracker = ' (#2550)' if (route, shape, variant) == ('reconcile-replay', 'T7', 'X') else ''
+            # #2550: a cold replay stores a call with X-form arguments (wrapped base64, or an escaped data-URI
+            # key) again on every restart (main and this head: 10, 13, 15, then 17 on a third replay).
+            tracker = ' (#2550)' if (route, variant) == ('reconcile-replay', 'X') and shape in ('T7', 'T7K') else ''
             gaps.append('bar iv: second replay adds rows' + tracker)
         if child_route and form != 'different' and copies[-1] != 1:
             assert main['copies'][-1] != 1, 'new one-copy regression'
