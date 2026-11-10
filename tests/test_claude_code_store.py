@@ -2715,8 +2715,8 @@ def test_the_closed_world_walk_edges(tmp_path, home, hermes, shape):
 # depth, without following a symlinked folder. Expected: (captured, verified).
 _NESTED = {"direct": ("agent-x1.jsonl",), "workflow": ("workflows", "wf_run1", "agent-x1.jsonl"),
            "deep": ("a", "b", "c", "d", "agent-x1.jsonl"), "too_deep": ("a", "b", "c", "d", "e", "agent-x1.jsonl"),
-           "linked_folder": ("link", "agent-x1.jsonl")}
-_NESTED_TABLE = [(kind, hook, hook or kind in ("direct", "workflow", "deep"), kind != "linked_folder"
+           "linked_folder": ("link", "agent-x1.jsonl"), "linked_file": ("agent-x1.jsonl",)}
+_NESTED_TABLE = [(kind, hook, hook or kind in ("direct", "workflow", "deep"), not kind.startswith("linked")
                   and (hook or kind != "too_deep")) for kind in _NESTED for hook in (True, False)]
 
 
@@ -2727,12 +2727,16 @@ def test_the_nested_subagent_rule_table(tmp_path, home, hermes, kind, hook, capt
 
     a = _append(tmp_path / "projects" / "-work" / "s1.jsonl", CONVERSATION[:2])
     agents = a.parent / "s1" / "subagents"
-    if kind == "linked_folder":  # the transcript lives elsewhere; subagents/link points at its folder
+    if kind in ("linked_folder", "linked_file"):  # the transcript lives elsewhere; a symlink in subagents/ reaches it
         elsewhere = tmp_path / "elsewhere"
         _append(elsewhere / "agent-x1.jsonl", _SIDE)
         agents.mkdir(parents=True)
-        (agents / "link").symlink_to(elsewhere)
-        path = agents / "link" / "agent-x1.jsonl"
+        if kind == "linked_folder":
+            (agents / "link").symlink_to(elsewhere)
+            path = agents / "link" / "agent-x1.jsonl"
+        else:
+            path = agents / "agent-x1.jsonl"
+            path.symlink_to(elsewhere / "agent-x1.jsonl")
     else:
         path = _append(agents.joinpath(*_NESTED[kind]), _SIDE)
     _record(_hook(), home, a)

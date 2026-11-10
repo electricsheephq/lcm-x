@@ -883,12 +883,12 @@ def lineages_of(record: dict) -> list[Lineage]:
     return found
 
 
-JOURNAL_PREFIX = "workflow-journal-"  # a run's journal.jsonl is its own child lineage, keyed by the run folder (#2562)
+JOURNAL_PREFIX = "journal/"  # a run's journal.jsonl: its own child lineage; no file-name id or hook id holds "/" (#2562)
 SUBAGENT_DEPTH = 4  # folders below subagents/: workflow agents sit at workflows/<run-id>/ (#2562)
 
 
 def _subagents(lineage: Lineage) -> list[Lineage]:
-    """Every agent-*.jsonl below the session's subagents/ folder, to a bounded depth, never through a symlinked folder,
+    """Every agent-*.jsonl below the session's subagents/ folder, to a bounded depth, never through a symlink,
     and each workflow run's ``workflows/<run-id>/journal.jsonl`` (#2562): the sweep is the safety net for a missed
     hook, so it must not depend on a hook naming the path. No hook names a journal; only the sweep takes it."""
     if lineage.agent_id:
@@ -900,6 +900,8 @@ def _subagents(lineage: Lineage) -> list[Lineage]:
         try:
             with os.scandir(folder) as entries:
                 for entry in entries:
+                    if entry.is_symlink():
+                        continue  # never followed: one transcript reached twice would be two lineages
                     if entry.is_dir(follow_symlinks=False):
                         if depth < SUBAGENT_DEPTH:
                             stack.append((Path(entry.path), depth + 1))
