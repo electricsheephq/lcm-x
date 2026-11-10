@@ -311,7 +311,7 @@ def test_replay_runs_the_edition_under_the_sandbox(tmp_path, monkeypatch):
     receipt, error, range_new = host.replay({"name": "rc", "port": 4242, "sessions": {"L": "s"}},
                                             {"id": "e0-L-0", "conversation": "L"}, "T0", "H8")
     assert (receipt, error, range_new) == ({"checks": {}}, False, 0)
-    assert denied and all(d == [r.sandbox.hermes_home()] for d in denied)  # The live agent home is denied to both steps.
+    assert denied and all(d == r.sandbox.live_homes() for d in denied)  # The live agent home is denied to both steps.
     assert [argv[:4] for argv in seen] == [["/usr/bin/nice", "-n", "19", "/usr/bin/sandbox-exec"]] * 2
     assert seen[0][-5:] == ["python3", "gen", "T0", "H8", os.fspath(tmp_path / "run" / "rc" / "replays" / "e0-L-0")]
     assert 'localhost:4242' in seen[0][5]

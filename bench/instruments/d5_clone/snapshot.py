@@ -42,7 +42,7 @@ def _walk(root):
 
 def _shown(name):
     """A non-payload file name as a receipt may show it: itself when a capture writes it, else its sha256 12."""
-    return name if name in KNOWN_NAMES else "sha256-12:" + hashlib.sha256(name.encode()).hexdigest()[:12]
+    return name if name in KNOWN_NAMES else "sha256-12:" + hashlib.sha256(os.fsencode(name)).hexdigest()[:12]  # fsencode: any name the OS returns
 
 
 def verify(pin_path, snapshot_dir, scratch_dir):

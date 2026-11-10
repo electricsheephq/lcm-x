@@ -358,7 +358,7 @@ def _interpreter_version(interpreter):
     try:
         argv = [str(interpreter), "-I", "-c", "import platform; print(platform.python_version())"]
         if sandbox.available():  # Like every other host process: no network, never the live agent's home.
-            argv = sandbox.wrap(argv, ports=[], deny_paths=[sandbox.hermes_home()])
+            argv = sandbox.wrap(argv, ports=[], deny_paths=sandbox.live_homes())
         probe = subprocess.run(argv, capture_output=True, text=True, timeout=30)
     except (OSError, subprocess.SubprocessError):
         return None

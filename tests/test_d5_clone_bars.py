@@ -309,3 +309,16 @@ def test_bar5_inherited_counts_from_a_clean_rerun_need_its_start_count_to_match(
     result = b.bar5(checks(), checks(failed), checks(), True, inherited=counts(r=3, ga_rerun=3, ga_rerun_start=1))
     assert "start counts differ" in result["inherited_flags"]["summary_quality@abc"]["reason"]
     assert result["verdict"] == b.INCONCLUSIVE
+
+
+def test_bar5_inherited_counts_are_never_judged_against_a_ga_arm_with_turns_missing():
+    """A previous-GA arm that did not complete its turns has a g from less workload: not a clean baseline, so the session
+    is INCONCLUSIVE even when the rc's count rose, as for a re-run that did not complete; a clean re-run still serves."""
+    rose = counts(r=4, g=3)
+    assert b.bar5(checks(), checks(), inherited=rose)["verdict"] == b.FAIL  # Turns complete: judged.
+    result = b.bar5(checks(), checks(), inherited=rose, ga_turns_complete=False)
+    assert result["verdict"] == b.INCONCLUSIVE and result["ga_turns_complete"] is False
+    assert result["inherited_flags"]["summary_quality@abc"]["reason"] == "there is no clean previous-GA arm to compare against"
+    failed = {"kind": "quick_check", "check": "store", "status": "fail"}
+    rerun = counts(r=3, g=2, ga_rerun=3, ga_rerun_start=2)
+    assert b.bar5(checks(), checks(failed), checks(), True, inherited=rerun, ga_turns_complete=False)["verdict"] == b.PASS

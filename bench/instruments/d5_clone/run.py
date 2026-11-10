@@ -612,7 +612,7 @@ class LocalHost:
             argv = sandbox.wrap([str(Path(tree["host_bin"]) / "python"), "-P", "-B",
                                  str(Path(__file__).with_name("doctor_probe.py")), "--text",
                                  str(Path(tree["lcm_tree"]).resolve()), str(clone), str(text)],
-                                ports=[], deny_paths=[sandbox.hermes_home()])
+                                ports=[], deny_paths=sandbox.live_homes())
             child = {**env, "HERMES_HOME": str(clone), "HOME": str(clone / "user-home"), "TMPDIR": str(clone / "tmp"),
                      **{k: str(clone / v) for k, v in gateway.FORCED_LCM_PATHS.items()}}
             done = subprocess.run(["/usr/bin/nice", "-n", "19", *argv], cwd=clone, env=child, capture_output=True,
@@ -638,7 +638,7 @@ class LocalHost:
             raise ValueError("replay_receipt must be a bare file name")
         for key in ("constants_argv", "replay_argv"):
             argv = sandbox.wrap([a.format(**values) for a in self.c[key]], ports=[ctx["port"]], socket_roots=[out],
-                                deny_paths=[sandbox.hermes_home()])  # The live agent's home is never read.
+                                deny_paths=sandbox.live_homes())  # The live agent's home is never read.
             env = {"PATH": "/usr/bin:/bin", "HOME": str(out), "PYTHONDONTWRITEBYTECODE": "1"}
             code = subprocess.run(["/usr/bin/nice", "-n", "19", *argv], cwd=out, env=env, capture_output=True).returncode
             if code:  # An error, or (constants exit 1) a NOT SHOWN bind: no replay runs after it. Either way the
@@ -696,7 +696,7 @@ class LocalHost:
         argv = sandbox.wrap([str(Path(tree["host_bin"]) / "python"), "-P", "-B",  # Never this dir's modules first.
                              str(Path(__file__).with_name("doctor_probe.py")),
                              str(Path(tree["lcm_tree"]).resolve()), str(clone), str(out),
-                             json.dumps(ctx["session_ids"])], ports=[], deny_paths=[sandbox.hermes_home()])
+                             json.dumps(ctx["session_ids"])], ports=[], deny_paths=sandbox.live_homes())
         try:
             done = subprocess.run(["/usr/bin/nice", "-n", "19", *argv], cwd=clone, env=env, capture_output=True,
                                   timeout=self.c.get("doctor_timeout", 1800))
@@ -905,7 +905,8 @@ def run(host, *, rc_id, prior=(), instrument_fix=None):
                                     " counts are 2x on both arms; the verdict compares the arms and is unaffected"},
         "bar5": {**bars.bar5(arms["rc"]["checks"], arms["ga"]["checks"], ga_rerun and ga_rerun["checks"],
                              bool(ga_rerun) and bars.workload_items(ga_rerun["workload"])["turns_completed"],
-                             inherited=inherited_flags(plan, arms, ga_rerun)),
+                             inherited=inherited_flags(plan, arms, ga_rerun),
+                             ga_turns_complete=bars.workload_items(arms["ga"]["workload"])["turns_completed"]),
                  "flagged_summary_nodes": {  # Per driven session: at the start, and in each arm at its end (#2471).
                      "start": _keyed({c["session_id"]: c.get("flagged_summary_nodes") for c in plan["conversations"]}),
                      **{a: arms[a]["flagged_summary_nodes"] for a in arms}}},

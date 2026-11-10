@@ -213,7 +213,7 @@ def _inherited_flags(n, use_rerun, ga_open=False):
     return {**out, "verdict": PASS, "reason": "the rc's flagged-node increase is not over the previous GA's"}
 
 
-def bar5(rc_checks, ga_checks, ga_rerun_checks=None, ga_rerun_turns_complete=True, inherited=None):
+def bar5(rc_checks, ga_checks, ga_rerun_checks=None, ga_rerun_turns_complete=True, inherited=None, ga_turns_complete=True):
     """No failed doctor, quick_check, integrity or schema check in the rc arm; doctor warnings by check name, with
     rc <= GA. Checks are {kind, check, status}; a kind with no check is not shown (INCONCLUSIVE). A failed check in
     the previous-GA arm is never PASS (release manager, 2026-11-07): the GA arm is re-run once; if the re-run fails
@@ -229,7 +229,9 @@ def bar5(rc_checks, ga_checks, ga_rerun_checks=None, ga_rerun_turns_complete=Tru
     hide a further flag; instead the increase is compared (ruling R5-4, #2471): with s the start count, r the rc's end
     and g the baseline GA arm's end, the session holds when r - s <= g - s and fails the bar when r - s > g - s. It is
     INCONCLUSIVE when there is no clean previous-GA arm, when a count is unknown, when the start counts differ, or when a
-    count falls below s (a node can leave its session wholesale, at a compression rollover). A session with s = 0 keeps the warning rule above."""
+    count falls below s (a node can leave its session wholesale, at a compression rollover). A session with s = 0 keeps the warning rule above.
+    A previous-GA arm that did not complete every planned turn (*ga_turns_complete* false) is not a clean baseline for
+    the inherited counts, as for a re-run: those sessions are INCONCLUSIVE unless a clean re-run supplies the counts."""
     failed, ga_failed = failed_checks(rc_checks), failed_checks(ga_checks)
     rerun_failed = failed_checks(ga_rerun_checks) if ga_rerun_checks is not None else None
     rerun_missing = kinds_missing(ga_rerun_checks) if ga_rerun_checks is not None else None
@@ -241,7 +243,9 @@ def bar5(rc_checks, ga_checks, ga_rerun_checks=None, ga_rerun_turns_complete=Tru
     rc_w, ga_w = (Counter(c["check"] for c in checks if c["kind"] == "doctor" and c["status"] == "warn")
                   for checks in (rc_checks, baseline))
     use_rerun = bool(ga_failed) and rerun_clean
-    flags = {name: _inherited_flags(n, use_rerun, ga_open) for name, n in sorted(dict(inherited or {}).items())}
+    baseline_incomplete = not use_rerun and ga_turns_complete is not True  # Fewer GA turns: g is not comparable.
+    flags = {name: _inherited_flags(n, use_rerun, ga_open or baseline_incomplete)
+             for name, n in sorted(dict(inherited or {}).items())}
     over = [] if ga_open or "doctor" in ga_missing else sorted(
         name for name, n in rc_w.items() if n > ga_w[name] and name not in flags)
     flags_failed = sorted(name for name, f in flags.items() if f["verdict"] == FAIL)
@@ -255,7 +259,7 @@ def bar5(rc_checks, ga_checks, ga_rerun_checks=None, ga_rerun_turns_complete=Tru
             "ga_rerun_failed": rerun_failed or [], "ga_rerun_kinds_missing": rerun_missing or [],
             "ga_rerun_turns_complete": None if ga_rerun_checks is None else ga_rerun_turns_complete is True,
             "warnings_judged": not ga_open and not missing_warned,
-            "inherited_flags": flags, "inherited_flags_over_ga": flags_failed, "inherited_flags_unjudged": flags_open,
+            "ga_turns_complete": ga_turns_complete is True, "inherited_flags": flags, "inherited_flags_over_ga": flags_failed, "inherited_flags_unjudged": flags_open,
             "ga_disposition_needed": bool(ga_failed) and ga_rerun_checks is not None and not rerun_clean}
 
 

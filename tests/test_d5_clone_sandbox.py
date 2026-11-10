@@ -147,3 +147,29 @@ def test_the_egress_control_child_never_sees_the_live_home(monkeypatch):
     (argv,) = seen
     assert argv[:2] == ["/usr/bin/sandbox-exec", "-p"]
     assert f'(deny file-read* file-write* (subpath "{os.path.abspath(sandbox.hermes_home())}"))' in argv[2]
+
+
+def test_an_operator_hermes_home_elsewhere_is_denied_too(monkeypatch, tmp_path):
+    monkeypatch.delenv("HERMES_HOME", raising=False)
+    assert sandbox.live_homes() == [sandbox.hermes_home()]
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "live"))
+    assert sandbox.live_homes() == sorted({sandbox.hermes_home(), str(tmp_path / "live")})
+
+
+def test_every_child_of_the_instrument_is_denied_every_live_home():
+    package = Path(sandbox.__file__).parent
+    calls = [line for f in sorted(package.glob("*.py")) for line in f.read_text().splitlines() if "deny_paths=" in line
+             and "def " not in line]
+    assert calls and all("live_homes()" in line for line in calls), calls
+
+
+@pytest.mark.skipif(not sandbox.available(), reason="macOS sandbox-exec required")
+def test_the_sandbox_denies_reading_an_operator_hermes_home(monkeypatch, tmp_path):
+    live = tmp_path / "live"
+    live.mkdir()
+    (live / "state.db").write_text("live")
+    monkeypatch.setenv("HERMES_HOME", str(live))
+    argv = [sys.executable, "-I", "-c", "import sys; open(sys.argv[1]).read()", str(live / "state.db")]
+    denied = subprocess.run(sandbox.wrap(argv, ports=[], deny_paths=sandbox.live_homes()), capture_output=True, check=False)
+    assert denied.returncode != 0 and b"PermissionError" in denied.stderr
+    assert subprocess.run(argv, capture_output=True, check=False).returncode == 0  # Control: readable unsandboxed.

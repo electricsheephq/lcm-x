@@ -3,6 +3,7 @@
 from contextlib import closing
 import hashlib
 import json
+from pathlib import Path
 import sqlite3
 import sys
 import types
@@ -467,3 +468,36 @@ def test_the_producer_entry_point_refuses_a_run_dir_inside_the_package(tmp_path)
     with pytest.raises(ValueError, match="outside the instrument package"):
         pf.main(["--config", str(tmp_path / "decl.json"), "--run-dir", str(inside), "--instrument-dir", str(tmp_path)])
     assert not inside.exists()
+
+
+def test_no_receipt_binds_a_snapshot_pin_that_changed_while_p2_ran(tmp_path, monkeypatch):
+    monkeypatch.setitem(sys.modules, "yaml", types.SimpleNamespace(safe_load=json.loads))
+    host = Tweaked(tmp_path, lambda host, ctx, step: None)
+
+    def snapshot():
+        Path(host.c["snapshot_pin"]).write_text('{"changed": true}')
+        return {"verdict": "PASS"}
+    host.snapshot = snapshot
+    assert pf.produce(host, ["P3", "P4"]) == {"P3": "INCONCLUSIVE", "P4": "INCONCLUSIVE"}
+    assert host.armed == [] and json.loads((tmp_path / "P4.json").read_text())["reasons"] == [
+        "no plan: the snapshot pin changed while P2 ran"]
+
+
+def test_p3_p6_p7_run_the_previous_ga_configuration_in_both_arms(tmp_path, monkeypatch):
+    """R5-5: with one declared commit but two extracted trees, P3, P6 and P7 still run the GA's own configuration in
+    both arms (never the rc entry's path); P4 runs each arm's own; the declaration is unchanged afterwards."""
+    monkeypatch.setitem(sys.modules, "yaml", types.SimpleNamespace(safe_load=json.loads))
+    host = Tweaked(tmp_path, lambda host, ctx, step: None)
+    host.c["rc"] = {**host.c["ga"], "lcm_tree": str(tmp_path / "rc-tree")}
+    saved, seen = dict(host.c), []
+    real_arm = host.arm
+
+    def arm(tree, home, plan):
+        seen.append((home.parent.name[:5], tree, host.c[tree]["lcm_tree"]))
+        return real_arm(tree, home, plan)
+    host.arm = arm
+    pf.produce(host, list(pf.PREFLIGHTS))
+    assert host.c == saved
+    ga_tree, rc_tree = host.c["ga"]["lcm_tree"], host.c["rc"]["lcm_tree"]
+    assert {path for name, _, path in seen if name != "pf-P4"} == {ga_tree}
+    assert {(tree, path) for name, tree, path in seen if name == "pf-P4"} == {("rc", rc_tree), ("ga", ga_tree)}

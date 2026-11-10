@@ -201,7 +201,7 @@ class Gateway:
         if sandbox.available():
             # The live agent's home is never touched, not even a directory stat (as for the replay and the doctor).
             argv = sandbox.wrap(argv, ports=[self.provider_port], socket_roots=[self.run_dir],
-                                deny_paths=[sandbox.hermes_home()])
+                                deny_paths=sandbox.live_homes())
         elif not self.allow_unsandboxed:
             raise RuntimeError("sandbox unavailable; refusing unsandboxed gateway")
         self.run_dir.mkdir(parents=True, exist_ok=True)

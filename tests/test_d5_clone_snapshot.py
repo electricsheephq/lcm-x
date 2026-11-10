@@ -235,3 +235,8 @@ def test_a_name_a_capture_writes_is_reported_as_itself(fixture):
     (root / "store.db-journal").write_bytes(b"")
     result = snapshot.verify(pin, root, scratch)
     assert result["extra_on_disk"]["names"] == ["store.db-journal"]
+
+
+def test_a_name_that_is_not_utf8_is_shown_by_its_hash_never_raises():
+    name = "extra-\udcff.bin"  # What os.walk returns for a name whose bytes are not UTF-8.
+    assert snapshot._shown(name) == "sha256-12:" + hashlib.sha256(b"extra-\xff.bin").hexdigest()[:12]

@@ -72,6 +72,14 @@ def hermes_home():
     return str(Path.home() / ".hermes")
 
 
+def live_homes():
+    """Every live home a child is denied: the default one, and the operator's HERMES_HOME when it names another."""
+    homes = {hermes_home()}
+    if os.environ.get("HERMES_HOME"):
+        homes.add(os.path.abspath(os.path.expanduser(os.environ["HERMES_HOME"])))
+    return sorted(homes)
+
+
 def available():
     return sys.platform == "darwin" and Path("/usr/bin/sandbox-exec").is_file()
 
@@ -117,7 +125,7 @@ def positive_control(local_url):
         other.bind(("127.0.0.1", 0))
         other.listen(1)
         argv = [sys.executable, "-c", _CHILD, local_url, str(other.getsockname()[1])]
-        result = subprocess.run(wrap(argv, ports=[parts.port], deny_paths=[hermes_home()]), capture_output=True,
+        result = subprocess.run(wrap(argv, ports=[parts.port], deny_paths=live_homes()), capture_output=True,
                                 text=True, timeout=20)
     finally:
         other.close()

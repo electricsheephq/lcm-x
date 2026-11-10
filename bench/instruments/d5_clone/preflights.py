@@ -307,6 +307,8 @@ def produce(host, names):
         # and a receipt never binds a snapshot pin that was not verified.
         if host.snapshot().get("verdict") != "PASS":
             raise Inconclusive("P2 snapshot did not pass")
+        if capture._sha256(host.c["snapshot_pin"]) != common["snapshot_pin_sha256"]:  # Bind the pin P2 verified.
+            raise Inconclusive("the snapshot pin changed while P2 ran")
         plan = host.plan(host.clone("pf-plan"))
         common["plan_sha256"] = planner.plan_sha256(plan)
         common["plan_conversations"] = [  # Counts and the session id's sha256 12 only (#2471).
@@ -325,7 +327,13 @@ def produce(host, names):
             if name not in run.TREE_BOUND_PREFLIGHTS and common["trees"]["rc"] != common["trees"]["ga"]:
                 # Ruling R5-5: P3, P6 and P7 run the previous GA in both arms; the runner reads them that way.
                 raise Inconclusive("this check runs the previous GA in both arms, and the rc tree is another tree")
-            reasons, unsure, facts = PREFLIGHTS[name](host, plan)
+            saved = host.c.get("rc")
+            if name not in run.TREE_BOUND_PREFLIGHTS:  # R5-5: the previous GA's own configuration runs in both arms.
+                host.c["rc"] = host.c["ga"]
+            try:
+                reasons, unsure, facts = PREFLIGHTS[name](host, plan)
+            finally:
+                host.c["rc"] = saved
             verdict, reasons = "FAIL" if reasons else "INCONCLUSIVE" if unsure else "PASS", reasons + unsure
         except Exception as exc:  # Never a PASS: the checks did not all run.
             verdict, reasons, facts = "INCONCLUSIVE", [_reason(exc)], {}
