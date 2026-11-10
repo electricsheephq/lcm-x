@@ -48,7 +48,12 @@ def normalize(text):
     return " ".join(re.sub(r"[^A-Z0-9-]", " ", text).split())
 
 # The prompt asks for the exact value only, so any other code or number of 3+ digits is a hedge.
-TOKEN_SHAPE = re.compile(r"(?<![A-Z0-9-])(?:[A-Z]+-\d+|\d{3,})(?![A-Z0-9-])")  # any code length, so an invented alternative is a hedge
+TOKEN_SHAPE = re.compile(r"(?<![A-Z0-9-])(?:[A-Z]+-\d+|\d{3,}(?:-\d+)?)(?![A-Z0-9-])")  # any code length, so an invented alternative is a hedge
+
+def leaked(answer):
+    """Planted values an answer names, whatever the judge makes of it (the empty-store control's leak check)."""
+    text = normalize(answer)
+    return [f["token"] for f in tokens() if re.search(r"(?<![A-Z0-9-])" + re.escape(f["token"]) + r"(?![A-Z0-9-])", text)]
 
 def judge(answer, question, error=False):
     text = normalize(answer)
@@ -410,7 +415,7 @@ def score(manifest, d, t, te, a, a2=None, ae=None, classifications=None):
     def valid(run, qs):
         ids = [r["id"] for r in run["answers"]]  # exactly one answer per question: a duplicate is incomplete
         return not run.get("stop_reason") and len(ids) == len(set(ids)) and set(ids) == {q["id"] for q in qs} and all(not r.get("is_error") and not r.get("reader_not_connected", True) and r.get("rc") == 0 and bool(r.get("answer", "").strip()) for r in run["answers"])
-    empty_ok = len(te["tokens"]) == 44 and {r["id"] for r in te["tokens"]} == {f["id"] for f in tokens() if not f["id"].endswith("-old")} and all(r["pass"] for r in te["tokens"]) and ae is not None and valid(ae, Q[:40]) and not any(judge(r["answer"], next(q for q in Q if q["id"] == r["id"]))["correct"] for r in ae["answers"])
+    empty_ok = len(te["tokens"]) == 44 and {r["id"] for r in te["tokens"]} == {f["id"] for f in tokens() if not f["id"].endswith("-old")} and all(r["pass"] for r in te["tokens"]) and ae is not None and valid(ae, Q[:40]) and not any(leaked(r["answer"]) for r in ae["answers"])  # an empty store names no planted value, hedged or not
     latency = {}
     for name in {c["tool"] for c in t["calls"]}:
         values = sorted(c["ms"] for c in t["calls"] if c["tool"] == name)
@@ -420,7 +425,7 @@ def score(manifest, d, t, te, a, a2=None, ae=None, classifications=None):
     if t.get("empty") is not False or te.get("empty") is not True:  # a control receipt can never stand in for the measured arm
         cover = {**cover, "ok": False, "missing": cover["missing"] + ["t_receipt_mode"]}
     # Every measured arm (T, A, the second A, the empty control) uses the asset that captured, and T and A the store D read.
-    if manifest.get("bundle") is not None and any(arm is not None and arm.get("bundle") != manifest["bundle"] for arm in (t, a, a2, ae)):
+    if manifest.get("bundle") is not None and any(arm is not None and arm.get("bundle") != manifest["bundle"] for arm in (t, te, a, a2, ae)):
         cover = {**cover, "ok": False, "missing": cover["missing"] + ["asset_mismatch"]}
     if "store" in d and any(arm is not None and arm.get("store") != d["store"] for arm in (t, a, a2)):
         cover = {**cover, "ok": False, "missing": cover["missing"] + ["store_mismatch"]}
@@ -455,6 +460,8 @@ def main():
             sub.add_argument("--a-empty", type=Path)
             sub.add_argument("--classifications", type=Path, help="JSON: question id -> classification text, and 'latency' -> text")
     args = parser.parse_args()
+    if getattr(args, "claude", None) and os.sep in args.claude and not os.path.isabs(args.claude):
+        args.claude = os.path.abspath(args.claude)  # a relative launcher path; a bare name stays a PATH lookup
     for key, value in vars(args).items():  # every path is made absolute: subprocesses run in other folders
         if isinstance(value, Path):
             setattr(args, key, value.resolve())

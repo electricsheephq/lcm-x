@@ -245,7 +245,7 @@ def test_bot_round_3(monkeypatch, tmp_path):
     for arm, key in ((4, 'bundle'), (6, 'bundle'), (4, 'store'), (2, 'store')):
         inputs = synthetic()
         inputs[0]['bundle'] = {'core_commit': 'a'}
-        for i in (2, 4, 6):
+        for i in (2, 3, 4, 6):
             inputs[i]['bundle'] = {'core_commit': 'a'}
         inputs[1]['store'] = inputs[2]['store'] = inputs[4]['store'] = 's'
         assert k.score(*inputs)['verdict'] == 'PASS'
@@ -279,3 +279,23 @@ def test_bot_round_4():
     assert k.judge('The port is ' + gold + '.', numeric)['correct']
     code = k.Q[0]
     assert not k.judge(code['gold'] + '.5', code)['correct']
+
+
+def test_bot_round_5():
+    numeric = next(q for q in k.Q if q['kind'] == 'positive' and q['gold'].isdigit())
+    # A separate decimal alternative is a hedge.
+    assert not k.judge(numeric['gold'] + ' or 443.5', numeric)['correct']
+    # The empty control fails on any planted value, even a hedged pair or another question's value.
+    for leak in (k.Q[0]['gold'] + ' or ' + k.Q[1]['gold'], k.Q[1]['gold']):
+        inputs = synthetic()
+        inputs[6]['answers'][0]['answer'] = leak
+        assert k.score(*inputs)['verdict'] == 'VOID'
+    # The empty endpoint control is bound to the capturing asset too.
+    inputs = synthetic()
+    inputs[0]['bundle'] = {'core_commit': 'a'}
+    for i in (2, 4, 6):
+        inputs[i]['bundle'] = {'core_commit': 'a'}
+    inputs[3]['bundle'] = {'core_commit': 'a'}
+    assert k.score(*inputs)['verdict'] == 'PASS'
+    inputs[3]['bundle'] = {'core_commit': 'b'}
+    assert k.score(*inputs)['verdict'] == 'VOID'
