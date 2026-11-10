@@ -2555,3 +2555,25 @@ def test_a_claimed_record_that_cannot_be_read_is_set_aside(tmp_path, home, herme
     assert not path.exists() and len(list((home / "spool").glob("*.failed"))) == 1
     for result in (report, filtered):  # the session's own audit cannot read verified either
         assert not result["verified"] and "spool:unreadable_failed_record" in result["unverified"]
+
+
+def test_an_unreadable_set_aside_record_is_never_overwritten(tmp_path, home, hermes, monkeypatch):
+    """A later record of the same key whose drain raises is set aside beside an unreadable one, never over it, so the
+    marker stays until an operator moves the file (#2535 strict, ruling A). A readable ``{}`` is not set aside."""
+    from hermes_lcm import claude_code_audit as ca
+
+    hook = _hook()
+    path = _append(tmp_path / "projects" / "-work" / "s1.jsonl", CONVERSATION[:2])
+    _record(hook, home, path)
+    (pointer,) = sorted((home / "spool").glob("*.json"))
+    pointer.write_text("")
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    _record(hook, home, path)
+    monkeypatch.setattr(cc, "drain", lambda *args, **kwargs: (_ for _ in ()).throw(OSError("boom")))
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    monkeypatch.undo()
+    assert len(list((home / "spool").glob("*.failed"))) == 2
+    assert "spool:unreadable_failed_record" in ca.audit(home)["unverified"]
+    (home / "spool" / "readable.json").write_text("{}")
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    assert len(list((home / "spool").glob("*.failed"))) == 2 and not (home / "spool" / "readable.json").exists()
