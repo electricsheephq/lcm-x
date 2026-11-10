@@ -369,11 +369,15 @@ def main(stdin: TextIO = sys.stdin, environ: Mapping[str, str] = os.environ, *, 
             return 0
         if detach and _pick(payload, "hook_event_name", "hookEventName") in DETACHED_EVENTS and hasattr(os, "fork"):
             blocking_ms = round((time.monotonic() - started) * 1000, 1)
+            ready = signal_ready = -1
             try:
                 ready, signal_ready = os.pipe()
                 pid = os.fork()
             except OSError:
                 nofork = "+nofork"
+                for fd in (ready, signal_ready):  # a pipe made before a failed fork
+                    if fd >= 0:
+                        os.close(fd)
             else:
                 if pid:
                     # Return only once the child has left the hook's group (or died), so a group kill right after the
@@ -387,8 +391,12 @@ def main(stdin: TextIO = sys.stdin, environ: Mapping[str, str] = os.environ, *, 
                 child = True  # set first: the child must always end in os._exit, never return into the caller
                 # Leave the hook's group and release Claude Code's pipes before anything that can touch disk.
                 os.close(ready)
-                os.setsid()
-                os.close(signal_ready)  # the parent may return now
+                try:
+                    os.setsid()
+                except OSError:
+                    pass  # unreachable for a fork child; carry on in the hook's group rather than lose the record
+                finally:
+                    os.close(signal_ready)  # the parent may return now
                 blocking_ms = round((time.monotonic() - started) * 1000, 1)  # through the handshake (one clock)
                 null = os.open(os.devnull, os.O_RDWR)
                 for fd in (0, 1, 2):

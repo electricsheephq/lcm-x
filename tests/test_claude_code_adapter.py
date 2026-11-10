@@ -1586,3 +1586,32 @@ def test_a_detached_writer_logs_a_failure_before_its_record_is_built(env, tmp_pa
     assert (done.returncode, done.stdout, done.stderr) == (0, "", "")
     row = _wait_hooks(env, 1)[-1]
     assert row["detached"] is True and row["outcome"] == "error:RuntimeError"
+
+
+def test_a_failed_setsid_still_releases_the_parent_before_logging(env, tmp_path):
+    """#2531 review: the handshake's write end closes even if setsid raises, so a slow log cannot hold the parent."""
+    payload = {"hook_event_name": "Stop", "session_id": "s1", "transcript_path": str(_transcript(tmp_path))}
+    driver = ("import importlib.util, os, sys, time\n"
+              f"spec = importlib.util.spec_from_file_location('h', {str(PLUGIN / 'bin/lcmx_hook.py')!r})\n"
+              "h = importlib.util.module_from_spec(spec); spec.loader.exec_module(h)\n"
+              "def boom(): raise OSError('setsid')\n"
+              "os.setsid = boom\n"
+              "log = h._log\n"
+              "h._log = lambda *a, **k: (time.sleep(3), log(*a, **k))\n"
+              "sys.exit(h.main(sys.stdin, os.environ, detach=True))\n")
+    started = time.monotonic()
+    done = subprocess.run([sys.executable, "-c", driver], env={**os.environ, **env}, input=json.dumps(payload),
+                          capture_output=True, text=True, timeout=10, start_new_session=True)
+    assert done.returncode == 0 and time.monotonic() - started < 2
+
+
+def test_a_failed_fork_leaks_no_handshake_descriptor(hook, env, tmp_path, monkeypatch):
+    """#2531 review: a fork that fails after its pipe was made closes both ends and runs the hook in place."""
+    def boom():
+        raise OSError("fork")
+    monkeypatch.setattr(hook.os, "fork", boom)
+    payload = {"hook_event_name": "Stop", "session_id": "s1", "transcript_path": str(_transcript(tmp_path))}
+    before = len(os.listdir("/dev/fd"))
+    assert hook.main(io.StringIO(json.dumps(payload)), env, detach=True) == 0
+    assert len(os.listdir("/dev/fd")) == before
+    assert _log(env)[-1]["outcome"].endswith("+nofork")
