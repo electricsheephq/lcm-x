@@ -230,29 +230,32 @@ def assert_links(payload):
 
 
 @pytest.mark.parametrize("filter_kind", ["delta", "citation", "per_session"])
-def test_orphan_child_removed_after_source_filtered(statements, monkeypatch, filter_kind):
+def test_filtered_source_is_never_expanded(statements, monkeypatch, filter_kind):
     e, source, child = statements
-    entries = [entry(e, source), entry(e, child, later_statement_of=source)]
-    entries[0]["hit"]["has_later_statements"] = [child]
+    entries = [entry(e, source)]
     args = {"query": "orchidpassport", "detail": "answer_ready", "limit": 4}
     if filter_kind == "delta":
         args["seen_refs"] = [f"lcm:{source}:0-{len(e._store.get(source)['content'])}"]
     elif filter_kind == "citation":
-        entries[0]["hit"]["snippet"] = "not present in the stored row"
-        hydrate = tools._lcm_recall_answer_ready_content
-        monkeypatch.setattr(tools, "_lcm_recall_answer_ready_content", lambda engine, entries, **kw:
-                            hydrate(engine, [v for v in entries if v["hit"]["store_id"] != source], **kw))
+        get_batch = e._store.get_batch
+        monkeypatch.setattr(e._store, "get_batch", lambda ids: {sid: row for sid, row in get_batch(ids).items() if sid != source})
     else:
         other = e._store.append("old", {"role": "user", "content": "first old-session row"})
         entries.insert(0, entry(e, other))
         monkeypatch.setattr(tools, "_LCM_RECALL_ANSWER_READY_PER_SESSION_LIMIT", 1)
     ranked(monkeypatch, entries)
-    # Isolate final delivery filtering from source eligibility (F4).
-    monkeypatch.setattr(tools, "_lcm_recall_later_statements", lambda *a, **kw: (
-        entries, dict(requested=1, searched=1, found=1, delivered=0, ms=0), None))
+    place = tools._lcm_recall_later_statements
+    windows = []
+
+    def capture(engine, ordered, **kw):
+        windows.append([v["hit"]["store_id"] for v in ordered])
+        return place(engine, ordered, **kw)
+
+    monkeypatch.setattr(tools, "_lcm_recall_later_statements", capture)
     payload = json.loads(tools.lcm_recall(args, engine=e, later_statements=1))
     assert source not in [h["store_id"] for h in payload["hits"]]
     assert child not in [h["store_id"] for h in payload["hits"]]
+    assert len(windows) == 1 and source not in windows[0]
     assert_links(payload)
 
 
@@ -268,11 +271,16 @@ def test_later_hydrates_own_deep_fts_match(statements, monkeypatch, detail):
         return ([h for h in hits if h["store_id"] in (source, child)], error)
 
     monkeypatch.setattr(tools, "_lcm_recall_fts_arm", search)
+    hydrate = Mock(wraps=tools._lcm_recall_answer_ready_content)
+    monkeypatch.setattr(tools, "_lcm_recall_answer_ready_content", hydrate)
     payload = json.loads(invoke(e, detail, later_statements=1, snippet_window_hits=2))
     hit = next(h for h in payload["hits"] if h["store_id"] == child)
     assert "later_statement" in hit["arms"]
     assert "silver jewelry making" in hit.get("content", hit["snippet"])
     if detail == "answer_ready":
+        batches = [call.args[1] for call in hydrate.call_args_list]
+        assert [[v["hit"]["store_id"] for v in batch] for batch in batches] == [[source], [child]]
+        assert hydrate.call_args.kwargs["expanded_limit"] == 1
         assert hit["content_offset"] > 6000
         assert text[hit["content_offset"]:hit["content_offset"] + hit["content_returned_chars"]] == hit["content"]
         assert hit["evidence_span"]["char_start"] > 6000
@@ -315,7 +323,7 @@ def test_only_eligible_window_sources_spend_searches(statements, monkeypatch, sh
         args["seen_refs"] = [f"lcm:{ignored}:0-{len(e._store.get(ignored)['content'])}"]
     else:
         args["limit"] = 1
-        skip["hit"].update(kind="summary", node_id=123)
+        skip["hit"]["adjacent_to"] = ignored
     entries = [skip, entry(e, source)]
     ranked(monkeypatch, entries)
     original = tools._lcm_recall_fts_arm
@@ -472,7 +480,7 @@ def test_replay_copies_found_by_two_sources_take_one_slot(statements, monkeypatc
     assert_links(result)
 
 
-def test_moved_pooled_group_keeps_aliases(statements, monkeypatch):
+def test_searched_group_keeps_aliases(statements, monkeypatch):
     e, source, child = statements
     second = e._store.append("old2", {"role": "user", "content": "orchidpassport My favorite hobby was pottery.", "timestamp": 1700000010})
     alias = e._store.append("new", {"role": "user", "content": "My favorite hobby is now watercolor painting.", "timestamp": 1700000100})
@@ -480,7 +488,7 @@ def test_moved_pooled_group_keeps_aliases(statements, monkeypatch):
     observe(e, {source: 1700000000, second: 1700000010, child: 1700000100, alias: 1700000100})
     ranked(monkeypatch, [entry(e, source), entry(e, second), *[entry(e, f) for f in fillers],
                          entry(e, child, duplicate_store_ids=[alias])])
-    followups(monkeypatch, e, {source: [child], second: [alias]})
+    followups(monkeypatch, e, {source: [child, alias], second: [alias]})
     result = json.loads(invoke(e, later_statements=2))
     ids = [h["store_id"] for h in result["hits"]]
     assert child in ids and alias not in ids
@@ -488,7 +496,7 @@ def test_moved_pooled_group_keeps_aliases(statements, monkeypatch):
     assert result["provenance"]["later_statements"]["found"] == 1
     assert_links(result)
 
-def test_anchor_displaced_source_keeps_pooled_child(statements, monkeypatch):
+def test_anchor_child_is_ordinary_when_source_not_selected(statements, monkeypatch):
     e, source, child = statements
     fillers = [e._store.append(f"filler-{i}", {"role": "user", "content": "orchidpassport unrelated"}) for i in range(3)]
     ranked(monkeypatch, [*[entry(e, f) for f in fillers], entry(e, source), entry(e, child)])
@@ -501,9 +509,268 @@ def test_anchor_displaced_source_keeps_pooled_child(statements, monkeypatch):
 
     monkeypatch.setattr(tools, "place_fts_anchor", anchor)
     result = json.loads(invoke(e, later_statements=4))
-    assert result["provenance"]["later_statements"]["found"] == 1
+    assert result["provenance"]["later_statements"]["found"] == 0
     ids = [h["store_id"] for h in result["hits"]]
     assert ids == [*fillers, child]
     assert "later_statement" not in result["hits"][-1]["arms"]
     assert "_later_pooled" not in json.dumps(result)
     assert_links(result)
+
+
+def test_per_session_quota_keeps_full_window(statements, monkeypatch):
+    e, source, child = statements
+    monkeypatch.setattr(tools, "_LCM_RECALL_ANSWER_READY_PER_SESSION_LIMIT", 4)
+    prefix = [e._store.append("old", {"role": "user", "content": f"NeonDiff context {i}", "timestamp": 1699999900 + i}) for i in range(3)]
+    rejected = e._store.append("old", {"role": "user", "content": "NeonDiff rejected source", "timestamp": 1700000001})
+    rejected_child = e._store.append("rejected-new", {"role": "user", "content": "watercolor rejected update", "timestamp": 1700000100})
+    quota_child = e._store.append("old", {"role": "user", "content": "watercolor NeonDiff update", "timestamp": 1700000100})
+    tail = [e._store.append(f"tail-{i}", {"role": "user", "content": f"citable tail {i}"}) for i in range(4)]
+    ranked(monkeypatch, [entry(e, sid) for sid in [*prefix, source, rejected, *tail]])
+    followups(monkeypatch, e, {prefix[0]: [quota_child], **{sid: [] for sid in prefix[1:]},
+                             source: [child], rejected: [rejected_child]})
+    result = json.loads(tools.lcm_recall({"query": "orchidpassport", "detail": "answer_ready", "limit": 8}, engine=e, later_statements=5))
+    assert len(result["hits"]) == 8
+    assert source in [h["store_id"] for h in result["hits"]]
+    assert not {rejected, rejected_child} & {h["store_id"] for h in result["hits"]}
+    assert [h["store_id"] for h in result["hits"] if "later_statement_of" in h] == [quota_child, child]
+    assert result["provenance"]["later_statements"]["delivered"] == 2
+    assert_links(result)
+
+
+@pytest.mark.parametrize("detail", ["snippets", "answer_ready"])
+def test_last_plain_hit_displaced_to_tail(statements, monkeypatch, detail):
+    e, source, child = statements
+    fillers = [e._store.append(f"tail-{i}", {"role": "user", "content": f"plain hit {i}"}) for i in range(4)]
+    ranked(monkeypatch, [entry(e, sid) for sid in [source, *fillers]])
+    result = json.loads(invoke(e, detail, later_statements=1, extra_entries=1))
+    assert [h["store_id"] for h in result["hits"][:4]] == [source, child, *fillers[:2]]
+    assert result["provenance"]["later_statements"]["displaced"] == 1
+    if detail == "snippets":
+        assert result["hits"][4]["store_id"] == fillers[2]
+        assert result["hits"][4]["extra"] is True
+        result["hits"] = result["hits"][:4]
+    assert_links(result)
+
+
+def test_pair_cannot_evict_its_source(statements):
+    e, source, _ = statements
+    result = json.loads(tools.lcm_recall({"query": "orchidpassport", "limit": 1}, engine=e, later_statements=1))
+    assert [h["store_id"] for h in result["hits"]] == [source]
+    assert result["provenance"]["later_statements"]["displaced"] == 0
+    assert_links(result)
+
+
+@pytest.mark.parametrize("mode", ["delta", "reference_strict"])
+def test_child_must_have_novel_citable_ref(statements, monkeypatch, mode):
+    e, source, child = statements
+    ranked(monkeypatch, [entry(e, source)])
+    args = {"query": "orchidpassport", "detail": "answer_ready", "limit": 4}
+    hydrate = tools._lcm_recall_answer_ready_content
+    batches = []
+
+    def capture(engine, entries, **kw):
+        ids = [v["hit"]["store_id"] for v in entries]
+        batches.append(ids)
+        if mode == "reference_strict":
+            entries = [v for v in entries if v["hit"]["store_id"] != child]
+        return hydrate(engine, entries, **kw)
+
+    monkeypatch.setattr(tools, "_lcm_recall_answer_ready_content", capture)
+    if mode == "delta":
+        args["seen_refs"] = [f"lcm:{child}:0-{len(e._store.get(child)['content'])}"]
+    result = json.loads(tools.lcm_recall(args, engine=e, later_statements=1))
+    assert [h["store_id"] for h in result["hits"]] == [source]
+    assert [ids for ids in batches if child in ids] == [[child]]
+    assert_links(result)
+
+
+def test_anchor_source_expands_without_splitting_pair(statements, monkeypatch):
+    e, source, child = statements
+    fillers = [e._store.append(f"tail-{i}", {"role": "user", "content": f"plain hit {i}"}) for i in range(4)]
+    ranked(monkeypatch, [entry(e, sid) for sid in [*fillers, source]])
+    anchor = tools.place_fts_anchor
+
+    def two_arms(ordered, arm_hits, arm_order, limit, **kw):
+        return anchor(ordered, {"fts": [entry(e, source)["hit"]]}, ["fts", "chunk"], limit, arm_weights=[.5, .5])
+
+    monkeypatch.setattr(tools, "place_fts_anchor", two_arms)
+    result = json.loads(invoke(e, later_statements=4))
+    assert [h["store_id"] for h in result["hits"]] == [*fillers[:2], source, child]
+    assert_links(result)
+
+
+@pytest.mark.parametrize("replay_anchor", [False, True])
+def test_placed_child_preserves_fts_anchor(statements, monkeypatch, replay_anchor):
+    e, source, child = statements
+    fillers = [e._store.append("fillers", {"role": "user", "content": f"plain hit {i}"}) for i in range(4)]
+    anchor = e._store.append("anchor", {"role": "user", "content": "orchidpassport anchored fact"})
+    alias = e._store.append("alias", {"role": "user", "content": "orchidpassport anchored fact"})
+    anchor_entry = entry(e, anchor, **({"duplicate_store_ids": [alias]} if replay_anchor else {}))
+    ranked(monkeypatch, [entry(e, source), *[entry(e, sid) for sid in fillers], anchor_entry])
+    place_anchor = tools.place_fts_anchor
+
+    def two_arms(ordered, *a, **kw):
+        return place_anchor(ordered, {"fts": [entry(e, alias if replay_anchor else anchor)["hit"]]},
+                            ["fts", "chunk"], 4, arm_weights=[.5, .5])
+
+    monkeypatch.setattr(tools, "place_fts_anchor", two_arms)
+    result = json.loads(invoke(e, later_statements=1, extra_entries=2))
+    assert [h["store_id"] for h in result["hits"][:4]] == [source, child, fillers[0], anchor]
+    assert result["hits"][4]["store_id"] == fillers[1]
+    assert result["hits"][4]["extra"] is True
+    assert result["provenance"]["later_statements"]["displaced"] == 1
+    assert_links({**result, "hits": result["hits"][:4]})
+
+
+@pytest.mark.parametrize("seen_refs", [[], ["lcm:999:0-10"]])
+def test_delta_without_strict_skips_uncitable_child(statements, monkeypatch, seen_refs):
+    e, source, child = statements
+    e._config.recall_reference_strict = False
+    ranked(monkeypatch, [entry(e, source)])
+    hydrate = tools._lcm_recall_answer_ready_content
+
+    def uncitable(engine, entries, **kw):
+        return hydrate(engine, [v for v in entries if v["hit"]["store_id"] != child], **kw)
+
+    monkeypatch.setattr(tools, "_lcm_recall_answer_ready_content", uncitable)
+    result = json.loads(tools.lcm_recall(
+        {"query": "orchidpassport", "detail": "answer_ready", "limit": 4, "seen_refs": seen_refs},
+        engine=e, later_statements=1,
+    ))
+    assert [h["store_id"] for h in result["hits"]] == [source]
+    assert_links(result)
+
+
+@pytest.mark.parametrize("later_n", [0, 1])
+@pytest.mark.parametrize("linked", [False, True])
+def test_strict_ledger_records_delivered_originals(statements, monkeypatch, later_n, linked):
+    e, source, child = statements
+    filler = e._store.append("filler", {"role": "user", "content": "plain hit"})
+    entries = [entry(e, source), entry(e, filler)]
+    ranked(monkeypatch, entries)
+    followups(monkeypatch, e, {source: [child] if linked else []})
+    selector_factory = tools._LcmRecallStrictSelector
+    selectors = []
+    place = tools._lcm_recall_later_statements
+    windows = []
+
+    def capture_placement(*a, **kw):
+        result = place(*a, **kw)
+        windows.append(result[0])
+        return result
+
+    def capture(*a, **kw):
+        selector = selector_factory(*a, **kw)
+        selectors.append(selector)
+        return selector
+
+    monkeypatch.setattr(tools, "_LcmRecallStrictSelector", capture)
+    monkeypatch.setattr(tools, "_lcm_recall_later_statements", capture_placement)
+    result = json.loads(invoke(e, "answer_ready", later_statements=later_n))
+    assert [h["store_id"] for h in result["hits"]] == ([source, child, filler] if later_n and linked else [source, filler])
+    assert [id(v) for v in selectors[0].ledger.delivered_entries()] == [id(v) for v in entries]
+    assert all("has_later_statements" not in v["hit"] for v in entries)
+    if later_n:
+        for original in entries:
+            placed = next(v for v in windows[0] if v["hit"]["store_id"] == original["hit"]["store_id"])
+            if linked and original["hit"]["store_id"] == source:
+                assert placed is not original and placed["hit"] is not original["hit"]
+            else:
+                assert placed is original
+        assert_links(result)
+
+
+def test_child_retains_ranked_tail_replay_aliases(statements, monkeypatch):
+    e, source, child = statements
+    alias = e._store.append("new", {"role": "user", "content": "My favorite hobby is now watercolor painting.", "timestamp": 1700000100})
+    fillers = [e._store.append(f"filler-{i}", {"role": "user", "content": f"plain hit {i}"}) for i in range(3)]
+    ranked(monkeypatch, [entry(e, source), *[entry(e, sid) for sid in fillers],
+                         entry(e, alias, duplicate_store_ids=[child])])
+    followups(monkeypatch, e, {source: [child]})
+    result = json.loads(invoke(e, later_statements=1, extra_entries=2))
+    assert [h["store_id"] for h in result["hits"]] == [source, child, *fillers]
+    assert next(h for h in result["hits"] if h["store_id"] == child)["duplicate_store_ids"] == [alias]
+    assert_links({**result, "hits": result["hits"][:4]})
+
+
+@pytest.mark.parametrize("detail", ["snippets", "answer_ready"])
+def test_fitting_pops_child_before_source(statements, monkeypatch, detail):
+    e, source, _ = statements
+    ranked(monkeypatch, [entry(e, source)])
+    base = json.loads(invoke(e, detail, later_statements=1, snippet_window_hits=2))
+    child = base["hits"][-1]
+    # Keep room for the envelope and one source, but not its child.
+    cap = len(json.dumps(base, ensure_ascii=detail != "answer_ready")) - len(json.dumps(child)) + 80
+    monkeypatch.setattr(tools, "_LCM_RECALL_RESPONSE_CHAR_CAP", cap)
+    raw = invoke(e, detail, later_statements=1, snippet_window_hits=2)
+    result = json.loads(raw)
+    # The documented hard cap holds with the key on: child content costs hits, never overruns the cap.
+    truncated = result.get("response_cap_truncated") or result["provenance"].get("answer_ready", {}).get("response_truncated")
+    assert len(raw) <= cap and truncated is True
+    assert [h["store_id"] for h in result["hits"]] == [source]
+    assert "has_later_statements" not in result["hits"][0]
+    assert result["provenance"]["later_statements"]["displaced"] == 0
+    assert_links(result)
+
+
+@pytest.mark.parametrize("detail", ["snippets", "answer_ready"])
+def test_followup_child_has_ranked_subagent_lineage(statements, monkeypatch, detail):
+    e, source, _ = statements
+    child = e._store.append("delegated", {"role": "user", "content": "watercolor later hobby",
+                                        "timestamp": 1700000100}, source="subagent")
+    peer = e._store.append("delegated", {"role": "user", "content": "ranked delegated fact",
+                                       "timestamp": 1699999900}, source="subagent")
+    e._store.record_session_lineage("delegated", "parent", source="subagent_start")
+    ranked(monkeypatch, [entry(e, source), entry(e, peer, source="subagent")])
+    followups(monkeypatch, e, {source: [child]})
+    result = json.loads(invoke(e, detail, later_statements=1))
+    hits = {h["store_id"]: h for h in result["hits"]}
+    for field, expected in (("parent_session_id", "parent"), ("lineage", "subagent of parent")):
+        assert hits[child].get(field) == hits[peer][field] == expected
+    assert_links(result)
+
+
+def test_child_binds_message_source_beside_summary_with_same_store_id(statements, monkeypatch):
+    e, source, child = statements
+    node = test_lcm_recall._add_summary(e, "hobby summary", session_id="old",
+                                      created_at=1700000000, source_ids=[source])
+    summary = entry(e, source, **test_lcm_recall._summary_hit(e, node))
+    fillers = [e._store.append(f"filler-{i}", {"role": "user", "content": f"plain hit {i}"}) for i in range(2)]
+    ranked(monkeypatch, [summary, entry(e, source), *[entry(e, sid) for sid in fillers]])
+    result = json.loads(invoke(e, later_statements=1))
+    assert [(h["kind"], h["store_id"]) for h in result["hits"]] == [
+        ("summary", source), ("message_excerpt", source), ("message_excerpt", child),
+        ("message_excerpt", fillers[0]),
+    ]
+    assert "has_later_statements" not in result["hits"][0]
+    assert result["hits"][1]["has_later_statements"] == [child]
+    assert_links(result)
+
+
+@pytest.mark.parametrize("detail", ["snippets", "answer_ready"])
+@pytest.mark.parametrize("replay_anchor", [False, True])
+def test_child_preserves_fts_top_already_in_window(statements, monkeypatch, detail, replay_anchor):
+    e, source, child = statements
+    fillers = [e._store.append(f"filler-{i}", {"role": "user", "content": f"plain hit {i}"}) for i in range(2)]
+    anchor = e._store.append("anchor", {"role": "user", "content": "orchidpassport anchored fact"})
+    alias = e._store.append("alias", {"role": "user", "content": "orchidpassport anchored fact"})
+    entries = [entry(e, source), *[entry(e, sid) for sid in fillers],
+               entry(e, anchor, **({"duplicate_store_ids": [alias]} if replay_anchor else {}))]
+    ranked(monkeypatch, entries)
+
+    def fuse(arm_hits, *a):
+        arm_hits["fts"] = [entry(e, alias if replay_anchor else anchor)["hit"]]
+        return entries, ["fts", "chunk"], [.5, .5]
+
+    monkeypatch.setattr(tools, "fuse_candidates", fuse)
+    base = json.loads(invoke(e, detail, later_statements=0))
+    assert [h["store_id"] for h in base["hits"]] == [source, *fillers, anchor]
+    assert base["provenance"]["fts_anchor"]["fired"] is False
+    result = json.loads(invoke(e, detail, later_statements=1, extra_entries=1))
+    assert [h["store_id"] for h in result["hits"][:4]] == [source, child, fillers[0], anchor]
+    assert result["provenance"]["fts_anchor"]["fired"] is False
+    assert result["provenance"]["later_statements"]["displaced"] == 1
+    if detail == "snippets":
+        assert result["hits"][4]["store_id"] == fillers[1]
+        assert result["hits"][4]["extra"] is True
+    assert_links({**result, "hits": result["hits"][:4]})
