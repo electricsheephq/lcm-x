@@ -101,19 +101,35 @@ def _json(value):
 
 PREFLIGHT_SCHEMA = "d5-clone-preflight/1"
 TREE_BOUND_PREFLIGHTS = ("P4",)  # The spec's preflight that both trees store one externalized output identically.
-# Declaration fields a receipt's config_sha256 leaves out, each with its reason. Every other field is bound, so a field
-# added later is bound without anyone remembering it (release manager, 2026-11-11: a changed setting is an instrument
-# change, and the preflights run again).
-RECEIPT_UNBOUND = {
+# What a receipt's config_sha256 leaves out of the declaration, each with its reason. Everything else is bound, so a
+# field added later is bound without anyone remembering it (release manager, 2026-11-10: a changed setting is an
+# instrument change, and the preflights run again). Only what differs by stage by design, or is bound elsewhere, is
+# left out: the preflights stage's P3, P6 and P7 receipts must count in the dry run and the run.
+RECEIPT_UNBOUND = {  # Whole declaration fields.
     "snapshot_dir": "the snapshot pin is bound by its own sha256",
     "snapshot_pin": "the snapshot pin is bound by its own sha256",
-    "rc": "the trees field binds each tree's commit (R5-5); P3, P6 and P7 run the previous GA in both slots",
-    "ga": "the trees field binds each tree's commit (R5-5)",
-    "replay_argv": "carries the rc commit, which the trees field binds; read by bar 2's edition, never by a preflight",
     "preflights": "the receipts' own paths, which differ by stage",
+    "replay_receipt": "a file name that differs by stage; a wrong one makes the replay, and so P6, fail closed",
     "settings_as_of": "a disclosed time, never judged",
     "instrument_dir": "a path; P1 pins its files on every run",
 }
+RECEIPT_TREE_UNBOUND = {  # Fields inside "rc" and "ga"; the rest of each tree (host_bin, host_src, ...) is bound.
+    "commit": "the trees field binds it (R5-5); P3, P6 and P7 run the previous GA in both slots",
+    "lcm_tree": "the stage's own extract of that commit, a path",
+}
+RECEIPT_ARGV_MASKED = {  # The value after these flags in constants_argv and replay_argv; the rest of each argv is bound.
+    "--arm": "the stage's own arm file, a path (its settings and context length come from bound fields)",
+    "--label": "the stage's run label, a name",
+    "--tree-candidate": "masked only when it is the declared rc commit, which the trees field binds",
+}
+
+
+def _masked_argv(argv, rc_commit):
+    out = list(argv)
+    for i in range(len(out) - 1):
+        if out[i] in RECEIPT_ARGV_MASKED and (out[i] != "--tree-candidate" or out[i + 1] == rc_commit):
+            out[i + 1] = "<masked>"
+    return out
 
 
 PACKAGE = Path(__file__).resolve().parent
@@ -142,9 +158,18 @@ def instrument_identity(root=None):
 
 
 def config_identity(config):
-    """The sha256 of the declaration's canonical JSON without the RECEIPT_UNBOUND fields: what a preflight receipt
-    binds as config_sha256 (settings, env, context lengths, timeouts, nonce, kit paths)."""
-    bound = {k: v for k, v in config.items() if k not in RECEIPT_UNBOUND}
+    """The sha256 of the declaration's canonical JSON with the RECEIPT_* parts left out or masked: what a preflight
+    receipt binds as config_sha256 (settings, env, context lengths, timeouts, nonce, the host build, both argv lists)."""
+    rc_commit = (config.get("rc") or {}).get("commit") if isinstance(config.get("rc"), dict) else None
+    bound = {}
+    for key, value in config.items():
+        if key in RECEIPT_UNBOUND:
+            continue
+        if key in ("rc", "ga") and isinstance(value, dict):
+            value = {k: v for k, v in value.items() if k not in RECEIPT_TREE_UNBOUND}
+        elif key in ("constants_argv", "replay_argv") and isinstance(value, list):
+            value = _masked_argv(value, rc_commit)
+        bound[key] = value
     return hashlib.sha256(json.dumps(bound, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
 
 

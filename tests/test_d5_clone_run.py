@@ -973,6 +973,69 @@ def test_a_preflight_receipt_does_not_count_after_a_declared_setting_changes(tmp
         assert (result["verdict"], result["mismatch"]) == ("MISSING", ["config_sha256"]), field
 
 
+def _stage_declaration(stage, pin):
+    """A declaration shaped as the lane's declaration builder writes one per stage (preflights, dryrun, run): the
+    stage folder, its tree extracts, its arm file, its run label and receipt name differ; the rest does not."""
+    ga, rc = "a" * 40, ("c" * 40 if stage == "run" else "a" * 40)
+    d, label = f"/scratch/{stage}", {"preflights": "d5pf", "dryrun": "d5dryrun", "run": "d5run"}[stage]
+    return {
+        "manifest": "/kit/d5-clone-pins.json", "rules_module": "bar1_rules.py", "interpreter": "/host/py",
+        "host_py": "/host/py", "host_pin": "/host/src", "snapshot_dir": "/capture/snapshot", "snapshot_pin": str(pin),
+        **{arm: {"host_src": "/host/src", "host_bin": "/host/bin", "lcm_tree": f"{d}/trees/{arm}-{c[:8]}", "commit": c}
+           for arm, c in (("rc", rc), ("ga", ga))},
+        "settings": {"compression": {"enabled": True}}, "lcm_env": {"LCM_X": "1"}, "context_length": 1000000,
+        "p3_context_length": 64000, "p3_max_turns": 6, "nonce": "d5-v030-clone", "start_timeout": 600,
+        "cold_ingest_timeout": 600, "settings_as_of": "2026-11-07T00:00:00Z",
+        "constants_argv": ["{python}", "-B", "{instrument_dir}/gen_constants.py", "--arm", f"{d}/arm.json",
+                           "--out", "{out}/s7-constants.json"],
+        "replay_argv": ["{python}", "-B", "{instrument_dir}/p_s6r_clone.py", "--shape", "S7", "--label", label,
+                        "--tree-base", ga, "--tree-candidate", rc, "--context-length", "1000000", "--out-dir", "{out}"],
+        "replay_receipt": f"p-s6r-{label}.json",
+        "preflights": {n: f"/scratch/{'run-p4' if stage == 'run' and n == 'P4' else 'preflights'}/receipts/{n}.json"
+                       for n in ("P3", "P4", "P6", "P7")}}
+
+
+def test_the_preflights_stage_receipts_count_in_the_dry_run_and_the_run_and_nothing_else_does(tmp_path):
+    """The configuration binding across the builder's stages: P3, P6 and P7 made in the preflights stage count in the
+    dry run and the run; P4 counts only with the run's own trees; a changed host build or replay command never counts."""
+    _, plan = _bound_host(tmp_path)
+    pin = tmp_path / "pin.json"
+    decl = {stage: _stage_declaration(stage, pin) for stage in ("preflights", "dryrun", "run")}
+    assert len({r.config_identity(c) for c in decl.values()}) == 1
+
+    def made(stage, name):
+        c = decl[stage]
+        trees = {"rc": r.tree_id(c, "rc") if name in r.TREE_BOUND_PREFLIGHTS else c["ga"]["commit"],
+                 "ga": c["ga"]["commit"]}
+        path = tmp_path / f"{stage}-{name}.json"
+        path.write_text(json.dumps({"schema": r.PREFLIGHT_SCHEMA, "name": name, "verdict": "PASS",
+                                    "plan_sha256": planner.plan_sha256(plan), "snapshot_pin_sha256": capture._sha256(pin),
+                                    "instrument_sha256": r.instrument_identity()["instrument_sha256"], "trees": trees,
+                                    "config_sha256": r.config_identity(c)}))
+        return str(path)
+
+    def verdict(c, name, path):
+        return r.LocalHost({**c, "preflights": {name: path}}, tmp_path / "run").preflight(name, plan)["verdict"]
+
+    for name in ("P3", "P6", "P7"):
+        assert verdict(decl["dryrun"], name, made("preflights", name)) == "PASS"
+        assert verdict(decl["run"], name, made("preflights", name)) == "PASS"
+    assert verdict(decl["run"], "P4", made("preflights", "P4")) == "MISSING"  # The run's P4 binds rc5's tree.
+    assert verdict(decl["run"], "P4", made("run", "P4")) == "PASS"
+    run = decl["run"]
+    replay = run["replay_argv"]
+    changed = {
+        "host build": {**run, "rc": {**run["rc"], "host_bin": "/other/bin"}},
+        "replay context": {**run, "replay_argv": [("64000" if v == "1000000" else v) for v in replay]},
+        "replay shape": {**run, "replay_argv": [("S6" if v == "S7" else v) for v in replay]},
+        "candidate not the rc commit": {**run, "replay_argv": [("e" * 40 if v == "c" * 40 else v) for v in replay]},
+        "constants command": {**run, "constants_argv": run["constants_argv"] + ["--extra"]},
+    }
+    for what, c in changed.items():
+        result = r.LocalHost({**c, "preflights": {"P6": made("preflights", "P6")}}, tmp_path / "run").preflight("P6", plan)
+        assert (result["verdict"], result["mismatch"]) == ("MISSING", ["config_sha256"]), what
+
+
 def test_an_unreadable_preflight_receipt_is_missing(tmp_path):
     host, plan = _bound_host(tmp_path)
     (tmp_path / "bad.json").write_text("{not json")
