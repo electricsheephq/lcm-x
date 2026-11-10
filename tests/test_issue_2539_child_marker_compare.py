@@ -41,6 +41,9 @@ def _assert_once(parent, handed, session_id="child"):
     assert Counter(r["tool_call_id"] for r in rows if r["role"] == "tool") == Counter(
         m["tool_call_id"] for m in handed if m["role"] == "tool")
     assert all(parent._session_end_rows_equal(r, m, session_id=session_id) for r, m in zip(rows, handed))
+    # Independent of the helper under test: every non-tool row keeps the host's exact text.
+    assert [r["content"] for r in rows if r["role"] != "tool"] == [
+        m["content"] for m in handed if m["role"] != "tool"]
 
 
 @pytest.mark.parametrize("location", ["spillover", "hermes-results"])
@@ -557,3 +560,50 @@ def test_shared_payload_compression_boundary_preserves_plain_rows_and_new_turn(h
     child.compress(engine, updated)
     child.end(engine, updated)
     _assert_once(parent, updated)
+
+
+@pytest.mark.parametrize("location", ["spillover", "hermes-results"])
+@pytest.mark.parametrize("route", ["pairwise", "counted"])
+def test_bare_marker_whose_file_appears_later_stores_the_inline_body(host, tmp_path, location, route):
+    """Review of a1208c83: a stored bare marker (file missing at ingest) is never re-read from the host's file. When the
+    file appears and the host hands the body inline, the body is stored. Red on a1208c83 (body dropped); main keeps it."""
+    _, _, ctx, parent, child, engine = _setup(host, "own_engine")
+    path = _path(engine._hermes_home, location)
+    marker = _marker(path)
+    first = _view(marker) + ([{"role": "assistant", "content": "old tail"}] if route == "counted" else [])
+    child.api_call(ctx, first, 1)
+    assert child_rows(parent)[2]["content"] == marker
+    _write_output(path)
+    view = (_view(FULL_OUTPUT) if route == "pairwise" else [_view(FULL_OUTPUT)[-1]]) + [
+        {"role": "assistant", "content": "FINAL"}]
+    child.api_call(ctx, view, 2)
+    child.end(engine, view)
+    path.rename(tmp_path / "pruned-source")  # the body must be durable, not read back from the host file
+    restored = [engine._session_end_prefix_compare_value(r["content"], session_id="child") for r in child_rows(parent)]
+    assert restored.count(FULL_OUTPUT) == 1 and restored.count("FINAL") == 1
+
+
+def test_anchor_handover_needs_no_full_store_read(host, monkeypatch):
+    _, _, ctx, parent, child, engine = _setup(host, "own_engine")
+    handed = [*_view(_write_output(_path(engine._hermes_home, "spillover"))),
+              {"role": "assistant", "content": "stored tail"}]
+    child.api_call(ctx, handed, 1)
+    # Drop the prefix; the last stored plain row is now the entire anchor,
+    # with no preceding rows to account for. Main does no full-store read.
+    updated = [handed[-1], {"role": "assistant", "content": "after anchor"}]
+    reads, anchors = [], []
+    read = engine._store.get_session_messages
+    anchor = engine._delegate_child_anchor_end
+    def counted_read(*args, **kwargs):
+        reads.append(args)
+        return read(*args, **kwargs)
+    def observe_anchor(*args, **kwargs):
+        end = anchor(*args, **kwargs)
+        anchors.append(end)
+        return end
+    monkeypatch.setattr(engine._store, "get_session_messages", counted_read)
+    monkeypatch.setattr(engine, "_delegate_child_anchor_end", observe_anchor)
+    child.api_call(ctx, updated, 2)
+    assert anchors == [1], "handover must actually resolve by the stored-tail anchor"
+    assert len(reads) == 0, f"main requires zero get_session_messages calls; got {len(reads)}"
+    assert len(read("child")) == len(handed) + 1

@@ -12496,11 +12496,12 @@ class LCMEngine(
             rows = tail["store"].get_range(session, start_id=start, limit=1000, conversation_id=conversation)
             if not rows:
                 break
-            stored.update((self._session_end_prefix_compare_identity(row, session_id=session, hermes_home=home),
+            stored.update((self._session_end_prefix_compare_identity(row, session_id=session, hermes_home=home, recover_markers=False),
                            _normalize_observed_at(row.get("observed_at"))) for row in rows
                           if _normalize_conversation_id_value(row.get("conversation_id")) == conversation)
             start = rows[-1]["store_id"] + 1
-        wanted = Counter((self._session_end_prefix_compare_identity(message, session_id=session, hermes_home=home),
+        stored_identities = {identity for identity, _ in stored}
+        wanted = Counter((self._session_end_counted_identity(message, stored_identities, session_id=session, hermes_home=home),
                           _normalize_observed_at(message.get("timestamp"))) for message in self._cold_tail_ingest_view(tail))
         missing, available = 0, Counter()
         for (identity, stamp), amount in wanted.items():
