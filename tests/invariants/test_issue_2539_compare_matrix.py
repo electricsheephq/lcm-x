@@ -13,6 +13,7 @@ import os
 import re
 import sys
 import tempfile
+import time
 import types
 from pathlib import Path
 
@@ -273,6 +274,13 @@ def _run_case(case, host, tmp_path, monkeypatch, request, characterization=None)
     produced = set()
 
     def record_step(handed):
+        if child_route:
+            # The host hook waits at most 2 s for a live-child store (#2482); the
+            # store may land later under load, so wait for it before reading.
+            aux = ctx.module('aux_session')  # the host's own copy of the plugin, as in the #2482 tests
+            warned = set(aux._LIVE_CHILD_WARNED)
+            aux.drain_live_child_stores(60.0)  # returns None; a timeout only adds to _LIVE_CHILD_WARNED
+            assert aux._LIVE_CHILD_WARNED <= warned, 'a live-child store did not land within 60 s'
         rows = reader._store.get_session_messages(session)
         counts.append(len(rows))
         multiset = _snapshot(rows, storage, home, temp, {})[3]
@@ -397,7 +405,9 @@ def _run_case(case, host, tmp_path, monkeypatch, request, characterization=None)
                     engine.on_session_end(session, handed)
                 assert engine._pending_session_tails
                 tail = engine._pending_session_tails[-1]
-                engine._retry_pending_session_tails()
+                # The default retry budget is 50 ms; under load it can expire
+                # before the retry commits. The matrix compares rows, not timing.
+                engine._retry_pending_session_tails(deadline=time.monotonic() + 60)
                 if route == 'cold-counted':
                     absent.append(engine._cold_tail_absent_count(tail))
             else:
