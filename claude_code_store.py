@@ -1123,7 +1123,8 @@ def _drain_once(home: Path, report: dict, deadline: Optional[float], config: Any
                     # #2571: only own hooks move the marker; an end always marks (any clock), only a newer own hook clears
                     ended = record.get("event") == ("SubagentStop" if named.agent_id else "SessionEnd")
                     if (named.agent_id or not record.get("agent_id")) and (ended or stamp > newest):
-                        _write_metadata(store, ENDED_PREFIX + lineage.key, {"ns": max(stamp, newest), "ended": ended})
+                        high = record.get("newest_ns") if isinstance(record.get("newest_ns"), int) else stamp
+                        _write_metadata(store, ENDED_PREFIX + lineage.key, {"ns": max(stamp, newest, high), "ended": ended})
                     outcome = drain(store, lineage, deadline=deadline, facts=record_facts(record, named))
                     if outcome == "deadline":
                         report["complete"] = False

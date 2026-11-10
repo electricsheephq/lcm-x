@@ -257,6 +257,9 @@ def _spool_locked(directory: Path, key: str, record: Mapping[str, Any]) -> str:
     except (OSError, ValueError):  # a pointer that cannot be read: its history is unknown, never "not seen" (#2535)
         previous, unknown = None, True
     facts = _merged_facts(record, previous)
+    stamps = [n for n in (record.get("hook_started_ns"), *((previous.get("newest_ns"), previous.get("hook_started_ns"))
+              if isinstance(previous, dict) else ())) if isinstance(n, int) and not isinstance(n, bool)]
+    facts["newest_ns"] = max(stamps) if stamps else None  # #2579: a coalesced pointer keeps the newest stamp it saw
     if unknown:
         facts.update({name: None for name in ("transcript_seen", "agent_transcript_seen") if facts[name] is not True})
         facts["local_gc"] = True  # the lost history may have seen local GC on: no lossless claim (#2503)
