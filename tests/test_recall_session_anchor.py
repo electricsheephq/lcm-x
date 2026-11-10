@@ -206,6 +206,29 @@ def test_v2_later_child_counts_and_displaced_continuation(orchard, monkeypatch, 
     assert e._store.connection.total_changes == changes
 
 
+def test_v2_pool_count_refreshed_when_fitting_drops_a_child(orchard, monkeypatch):
+    e = orchard
+    e._config.recall_guidance = 'v2'
+    monkeypatch.setattr(tools.time, 'time', lambda: 1700000200)
+    a = e._store.append('A', {'role': 'user', 'content': 'needle My hobby is pottery.', 'timestamp': 1700000000})
+    c = e._store.append('C', {'role': 'user', 'content': 'My hobby is now painting.', 'timestamp': 1700000100})
+    original = tools._lcm_recall_fts_arm
+    def ranked(engine, query, **kw):
+        hits, error = original(engine, query, **kw)
+        return ([h for h in hits if h['store_id'] == a] if query == 'needle' else hits), error
+    monkeypatch.setattr(tools, '_lcm_recall_fts_arm', ranked)
+    args = {'query': 'needle', 'detail': 'answer_ready', 'limit': 2}
+    full = json.loads(tools.lcm_recall(args, engine=e, later_statements=1))
+    assert [h['store_id'] for h in full['hits']] == [a, c]
+    assert full['provenance']['answer_ready']['sessions_in_pool'] == 2
+    cap = len(json.dumps(full, ensure_ascii=False)) - len(json.dumps(full['hits'][-1], ensure_ascii=False)) + 40
+    monkeypatch.setattr(tools, '_LCM_RECALL_RESPONSE_CHAR_CAP', cap)
+    fitted = json.loads(tools.lcm_recall(args, engine=e, later_statements=1))
+    assert [h['store_id'] for h in fitted['hits']] == [a]
+    signal = fitted['provenance']['answer_ready']
+    assert signal['sessions_delivered'] == 1 and signal['sessions_in_pool'] == 1
+
+
 @pytest.mark.parametrize('strict', [False, True])
 def test_v2_delta_seen_tail_session_counts(orchard, strict):
     e = orchard

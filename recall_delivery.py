@@ -566,6 +566,7 @@ def deliver_recall(
             response_char_cap=response_char_cap, expansion=expansion,
             delta_requested=delta_requested, arm_hits=arm_hits,
             adjacent_reply=adjacent_reply,
+            ranked_hits=[e["hit"] for e in ordered] if guidance_v2 else None,
         )
         if delivery_order != "time":
             return encoded
@@ -644,6 +645,7 @@ def _fit_answer_ready_response(
     delta_requested: bool,
     arm_hits: dict[str, list[dict[str, Any]]],
     adjacent_reply: list[dict[str, int]] | None = None,
+    ranked_hits: list[dict[str, Any]] | None = None,
 ) -> str:
     anchor_fired = bool(fts_anchor_info and fts_anchor_info.get("fired"))
     if anchor_fired:
@@ -677,6 +679,8 @@ def _fit_answer_ready_response(
         )
         if "sessions_delivered" in expansion:
             expansion["sessions_delivered"] = _sessions(response["hits"])
+            # The pool is the ranked sessions plus delivered children that survived fitting.
+            expansion["sessions_in_pool"] = _sessions((ranked_hits or []) + response["hits"])
         encoded = json.dumps(response, ensure_ascii=False)
     if event_time_marker_deferred is not None:
         # Put the marker back with its original reason, only if it fits.
