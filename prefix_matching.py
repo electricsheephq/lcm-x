@@ -31,6 +31,7 @@ from .message_content import normalize_content_value, text_content_for_pattern_m
 from .ingest_persisted import (
     _expected_persisted_output_chars,
     _is_hermes_persisted_output_marker,
+    _persisted_output_preview_prefix_digest,
     _persisted_output_saved_path,
 )
 from .sqlite_util import _is_ingest_busy_error
@@ -47,6 +48,36 @@ def _recover_marker_for_compare(text, home):
     from .ingest_persisted import recover_hermes_persisted_output_with_file_stat
 
     return recover_hermes_persisted_output_with_file_stat(text, hermes_home=home)
+
+
+_LCM_MARKER_GENERATION_LINE_RE = re.compile(
+    r"(?<=\n)\[LCM persisted-output file generation: size=\d+; mtime_ns=\d+; ctime_ns=\d+\]\n\Z")
+_LCM_MARKER_IDENTITY_LINE_RE = re.compile(
+    r"(?<=\n)\[LCM persisted-output marker identity: preview_sha256=(?P<sha256>[0-9a-f]{64})\]\n\Z")
+_PERSISTED_OUTPUT_CLOSE = "</persisted-output>"
+
+
+def _without_lcm_marker_lines(text, partner_digest=None):
+    """#2547: a Hermes marker without the two lines LCM-X's ingest added to it when externalization is off.
+
+    Ingest inserts ``[LCM persisted-output marker identity: ...]`` and ``[LCM persisted-output file generation: ...]``
+    as whole lines just before the marker's first ``</persisted-output>``; exactly those are removed, and nothing else.
+    The identity line goes only when its digest is the marker's own preview digest, or ``partner_digest`` (the raw
+    digest of the host marker it is compared with, which ingest wrote into the line); otherwise the text is returned
+    unchanged, so the compare behaves as on main.
+    """
+    if not isinstance(text, str) or not _is_hermes_persisted_output_marker(text):
+        return text
+    close = text.find(_PERSISTED_OUTPUT_CLOSE)
+    head, tail = text[:close], text[close:]
+    head = _LCM_MARKER_GENERATION_LINE_RE.sub("", head, count=1)
+    identity = _LCM_MARKER_IDENTITY_LINE_RE.search(head)
+    if identity:
+        bare = head[:identity.start()] + tail
+        if identity["sha256"] not in {_persisted_output_preview_prefix_digest(bare), partner_digest}:
+            return text
+        return bare
+    return head + tail
 
 
 def _marker_payload_metadata(original, config, home):
@@ -146,6 +177,8 @@ class PrefixMatchingMixin:
         )
         if (message or {}).get("role") == "tool":
             text = normalize_content_value(content)
+            if isinstance(text, str) and _is_hermes_persisted_output_marker(text):
+                content = text = _without_lcm_marker_lines(text)  # #2547: LCM-X's own lines are not host content
             if recover_markers and _is_hermes_persisted_output_marker(text):
                 recovered = _recover_marker_for_compare(text, home)
                 if recovered is not None:
@@ -161,11 +194,19 @@ class PrefixMatchingMixin:
         bare = self._session_end_prefix_compare_identity(message, recover_markers=False, **kwargs)
         return bare if bare in stored else self._session_end_prefix_compare_identity(message, **kwargs)
 
-    def _bare_marker_identity(self, content, *, session_id, hermes_home=None):
-        """Bare marker text as stored, with placeholders restored and no file recovery."""
+    def _bare_marker_identity(self, content, *, session_id, hermes_home=None, partner=None):
+        """Bare marker text as stored, with placeholders restored, LCM-X's own marker lines removed (#2547) and no
+        file recovery. ``partner`` is the host marker this one is compared with; its raw digest admits an identity
+        line that ingest wrote from that marker."""
         if not isinstance(content, str):
             return None
         text = self._session_end_prefix_compare_value(content, session_id=session_id, hermes_home=hermes_home)
+        partner_digest = None
+        if isinstance(partner, str):
+            partner_text = _without_lcm_marker_lines(self._session_end_prefix_compare_value(
+                partner, session_id=session_id, hermes_home=hermes_home))
+            partner_digest = _persisted_output_preview_prefix_digest(partner_text)
+        text = _without_lcm_marker_lines(text, partner_digest)
         return normalize_content_value(redact_sensitive_value(text, self._config, parse_json_strings=False))
 
     def _session_end_rows_equal(self, stored_row, host_message, *, session_id, hermes_home=None):
@@ -182,7 +223,8 @@ class PrefixMatchingMixin:
             if _is_hermes_persisted_output_marker(original):
                 # Bare against bare: main's own compare (ingest's transforms undone on the stored side, none recovered).
                 try:
-                    return (self._bare_marker_identity(original, session_id=session_id, hermes_home=hermes_home)
+                    return (self._bare_marker_identity(original, session_id=session_id, hermes_home=hermes_home,
+                                                       partner=incoming)
                             == self._bare_marker_identity(incoming, session_id=session_id, hermes_home=hermes_home))
                 except Exception:  # nothing raised by this compare leaves it: main's compare
                     return (self._session_end_prefix_compare_identity(stored_row, session_id=session_id,

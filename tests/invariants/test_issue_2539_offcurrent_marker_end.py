@@ -72,11 +72,9 @@ def _setup(make_engines, monkeypatch, tmp_path, kind):
     return engine, view, form, len(history)
 
 
-_NOEXT_REASON = ("#2547: class audit row transforms-T1-inline-marker-metadata (externalization disabled, not a default route): "
-                 "storage keeps the marker inline with LCM identity and generation lines, so neither side yields the "
-                 "marker key; pre-existing on main 7e67daf1; out of this PR by release-manager ruling")
-_NOEXT = [pytest.param(kind, marks=pytest.mark.xfail(strict=True, raises=AssertionError, reason=_NOEXT_REASON))
-          for kind in ("spillover-noext", "tempdir-noext")]
+# #2547: with externalization off the stored marker carries LCM-X's identity and generation lines; the compare
+# reads it without them, so these store the final reply as the default does.
+_NOEXT = ["spillover-noext", "tempdir-noext"]
 
 
 def _final_count(engine):
