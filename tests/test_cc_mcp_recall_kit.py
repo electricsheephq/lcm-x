@@ -67,6 +67,8 @@ def synthetic():
     te = {'tokens': [r for r in copy.deepcopy(d['tokens']) if not r['id'].endswith('-old')], 'empty': True, 'store': k.EMPTY_STORE}
     a = {'answers': [{'id': q['id'], 'answer': q['gold'] or 'NOT FOUND', 'rc': 0, 'is_error': False, 'reader_not_connected': False, 'wall_s': .1, 'tool_calls': {'mcp__lcm-x__lcm_grep': 1}} for q in k.Q], 'store': 'S'}
     ae = {'answers': [{**r, 'answer': 'NOT FOUND'} for r in a['answers'] if next(q for q in k.Q if q['id'] == r['id'])['kind'] == 'positive'], 'store': k.EMPTY_STORE}
+    for receipt in (manifest, d, t, te, a, ae):
+        receipt['overrides'] = []
     return [manifest, d, t, te, a, None, ae]
 
 def test_score():
@@ -345,10 +347,14 @@ def test_bot_round_8(tmp_path, monkeypatch):
     # A runtime override in any arm's environment voids the run, and the reason is named.
     monkeypatch.setenv('LCMX_PACKAGE_ROOT', str(tmp_path))
     assert k.overrides() == ['LCMX_PACKAGE_ROOT']
+    for i in (0, 1, 2, 3, 4, 6):  # the manifest, D, T, both controls and A
+        inputs = synthetic()
+        inputs[i]['overrides'] = k.overrides()
+        result = k.score(*inputs)
+        assert result['verdict'] == 'VOID' and 'runtime_override' in result['coverage']['missing']
     inputs = synthetic()
-    inputs[4]['overrides'] = k.overrides()
-    result = k.score(*inputs)
-    assert result['verdict'] == 'VOID' and 'runtime_override' in result['coverage']['missing']
+    del inputs[1]['overrides']  # a receipt that never ran the check is not clean
+    assert k.score(*inputs)['verdict'] == 'VOID'
     # Whole-value matching: a slipped 482130 is not the planted 48213, so the plant check fails at once.
     assert not k.holds('the count was 482130 today', '48213') and k.holds('the count was 48213.', '48213')
     assert not k.holds('48213.5', '48213') and k.holds('ref VELNORA-7101 ok', 'VELNORA-7101')
@@ -358,3 +364,15 @@ def test_bot_round_8(tmp_path, monkeypatch):
     (folder / f'{sid}.jsonl').write_text('{"text": "value 482130"}\n', encoding='utf-8')
     monkeypatch.setattr(k, 'session_files', lambda home, s: sorted(folder.glob('*.jsonl')))
     assert not k.planted(tmp_path / 'home', sid, '48213')
+
+
+def test_bot_round_8_jsonl_escapes(tmp_path, monkeypatch):
+    # A value after an escaped newline or tab in a transcript line is still planted; 482130 still is not 48213.
+    sid = 'sess-2'
+    folder = tmp_path / 'p'
+    (folder / 'tool-results').mkdir(parents=True)
+    (folder / f'{sid}.jsonl').write_text(json.dumps({'text': 'Sum:\n\n54917'}) + '\n' + json.dumps({'t': '1\tVELNORA-7101'}) + '\n', encoding='utf-8')
+    (folder / 'tool-results' / 'out.txt').write_text('total 482130', encoding='utf-8')
+    monkeypatch.setattr(k, 'session_files', lambda home, s: sorted(p for p in folder.rglob('*') if p.is_file()))
+    assert k.planted(tmp_path, sid, '54917') and k.planted(tmp_path, sid, 'VELNORA-7101')
+    assert not k.saved_holds(tmp_path, sid, '48213')

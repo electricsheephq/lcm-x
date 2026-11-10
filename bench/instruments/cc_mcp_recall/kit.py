@@ -135,13 +135,35 @@ def session_files(home, sid):
         files += [p for p in folder.rglob("*") if p.is_file()]
     return files
 
+def strings(value):
+    """Every string inside a decoded JSON value."""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from strings(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from strings(item)
+
+def line_text(line):
+    """A transcript line as the text it holds: JSON escapes (\\n, \\t, \\u2014) decoded, so they never glue onto a value."""
+    try:
+        return "\n".join(strings(json.loads(line)))
+    except ValueError:
+        return line
+
+def file_text(path):
+    raw = path.read_text(encoding="utf-8", errors="replace")
+    return "\n".join(line_text(line) for line in raw.splitlines()) if path.suffix == ".jsonl" else raw
+
 def saved_holds(home, sid, token):
     """Whether one of the session's own saved outputs (tool-results/) holds the value."""
-    return any(p.parent.name == "tool-results" and holds(p.read_text(encoding="utf-8", errors="replace"), token) for p in session_files(home, sid))
+    return any(p.parent.name == "tool-results" and holds(file_text(p), token) for p in session_files(home, sid))
 
 def planted(home, sid, token):
     """Whether the planted value reached the session's own files at all (a model slip is not a capture finding)."""
-    return any(holds(p.read_text(encoding="utf-8", errors="replace"), token) for p in session_files(home, sid))
+    return any(holds(file_text(p), token) for p in session_files(home, sid))
 
 def evidence(home, manifest):
     """Per session: compaction boundaries, subagent transcripts and saved outputs actually present."""
@@ -155,7 +177,7 @@ def evidence(home, manifest):
                 boundaries += len(marks)
                 # A pre-compaction value counts only when a compaction boundary follows the line that planted it.
                 for f in C["facts"]:
-                    first = next((i for i, line in enumerate(lines) if f["token"] in line), None)
+                    first = next((i for i, line in enumerate(lines) if holds(line_text(line), f["token"])), None)
                     if f["class"] == "pre_compact" and f["session"] == label and first is not None and any(m > first for m in marks):
                         compacted.append(f["id"])
         out[label] = {"compact_boundaries": boundaries, "compacted_facts": compacted, "subagent_transcripts": sum(p.parent.name == "subagents" and p.suffix == ".jsonl" for p in files),
@@ -444,7 +466,7 @@ def score(manifest, d, t, te, a, a2=None, ae=None, classifications=None):
         cover = {**cover, "ok": False, "missing": cover["missing"] + ["asset_mismatch"]}
     # T and A use the store D read; the controls use an empty store; a D receipt without its store voids the run.
     # A runtime override in any arm's environment means the arms may not have run the asset they name.
-    if any(arm is not None and arm.get("overrides") for arm in (manifest, d, t, te, a, a2, ae)):
+    if any(arm is not None and ("overrides" not in arm or arm["overrides"]) for arm in (manifest, d, t, te, a, a2, ae)):  # an unrecorded check is not a clean one
         cover = {**cover, "ok": False, "missing": cover["missing"] + ["runtime_override"]}
     if d.get("store") is None or any(arm is not None and arm.get("store") != d["store"] for arm in (t, a, a2)) or any(arm is not None and arm.get("store") != EMPTY_STORE for arm in (te, ae)):
         cover = {**cover, "ok": False, "missing": cover["missing"] + ["store_mismatch"]}

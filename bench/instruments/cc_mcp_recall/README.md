@@ -57,7 +57,9 @@ launcher for the Claude Code CLI that runs it with `HOME="$KIT_HOME"` and
 `CLAUDE_CONFIG_DIR="$KIT_HOME/.claude"` (the kit reads transcripts from `$KIT_HOME/.claude/projects`),
 and passes `KIT_LCMX_CC_HOME` through as the reader's `LCMX_CC_HOME`. The launcher brings its own credentials: the isolated
 `CLAUDE_CONFIG_DIR` does not load the operator's normal Claude settings (an `apiKeyHelper` there is not used),
-so pass them through an environment variable the CLI supports. `PLUGIN` is the unpacked Claude
+so pass them through an environment variable the CLI supports. Any `LCMX_*` variable in the kit's own environment (for example
+`LCMX_PACKAGE_ROOT` or `LCMX_PYTHON`) makes the run VOID, because an arm could then run code other than the asset it
+names; the kit cannot see variables the launcher sets inside `CMD`, so keep `CMD` free of them too. `PLUGIN` is the unpacked Claude
 Code unit asset. `EMPTY`, `READER`, `CAPTURE` and `OUT` are fresh directories.
 
 Stop after the control if `t-empty` finds anything or `a-empty` names a planted value (the run is void; a
