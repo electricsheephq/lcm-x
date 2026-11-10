@@ -46,6 +46,8 @@ def parse_recall_options(raw):
     # Use the selected product's parsers, including bounds, aliases and composite values.
     # Isolate both environment and YAML inputs; never mutate the process environment.
     env = {"LCM_" + key.upper(): value for key, value in options.items()}
+    if not all(hasattr(module, name) for name in ("lcm_env", "_load_hermes_config_yaml_for_env")):
+        raise RecallOptionError("--recall-option unsupported by the selected checkout")
     with patch.object(module, "lcm_env", return_value=env), \
             patch.object(module, "_load_hermes_config_yaml_for_env", return_value={}):
         config = module.LCMConfig.from_env()

@@ -144,7 +144,8 @@ Repeat `--recall-option KEY=VALUE` on `canary`, `answer`, and `judge`, for examp
 are refused before stores or backends are built. Options affect frozen engine
 opens and MCP schemas/results; store building keeps defaults. Repeat the answer's
 options when judging. Non-empty sorted `recall_options` appear in the manifest
-and `/opt:k=v,...` arm suffix; control and treatment pair on the same harness.
+and `/opt:k=v,...` arm suffix (values JSON-encoded, so a string reads `"time"`); control
+and treatment pair on the same harness. `recall_delivery_unit` is refused: use `--delivery-unit`.
 
 For [#995 step 1](https://github.com/electricsheephq/lcm-x/issues/995):
 A0 = `--store-text plain --hit-label role`; A1 = `--store-text plain --hit-label speaker`;
