@@ -372,9 +372,11 @@ def read_lines(path: Path, offset: int, *, max_lines: int = BATCH_LINES,
 # -- ingest --
 
 def _old_lineage(store: MessageStore, lineage: Lineage) -> Optional[Lineage]:
-    """For a path key, the id-keyed lineage whose cursor once named this path (a store the old code flipped, #2566)."""
+    """For a path key, the id-keyed lineage whose cursor once named its path below subagents/, in this folder or a copy
+    of the session folder (a store the old code flipped, #2566)."""
     old = Lineage(lineage.session_id, lineage.path.name[len("agent-"):-len(".jsonl")], lineage.path)
-    named = lineage.agent_id.startswith("/") and str(lineage.path) in named_paths(read_cursor(store, old))
+    named = lineage.agent_id.startswith("/") and any(
+        held.endswith("/subagents" + lineage.agent_id) for held in named_paths(read_cursor(store, old)))
     return old if named else None
 
 

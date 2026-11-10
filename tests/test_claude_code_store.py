@@ -3175,7 +3175,7 @@ def test_an_agent_file_with_no_id_is_never_swept_as_its_session(tmp_path, home, 
     assert not ca.audit(home)["verified"]
 
 
-@pytest.mark.parametrize("then", ["hooks", "sweep", "key_before_delete_then_rewrite"])
+@pytest.mark.parametrize("then", ["hooks", "sweep", "key_before_delete_then_rewrite", "key_before_delete_then_copied"])
 def test_a_forgotten_reused_agent_id_never_comes_back_under_a_path_key(tmp_path, home, hermes, then):
     """#2576 review: a store the old code flipped holds both transcripts under the bare id. Once the user deletes that
     child session, no later hook or sweep may store its lines again under a path key: neither a new one, nor one the
@@ -3190,7 +3190,7 @@ def test_a_forgotten_reused_agent_id_never_comes_back_under_a_path_key(tmp_path,
     try:
         for path in (paths[0], paths[1], paths[0]):  # what the old code left: one id-keyed lineage moved A -> B -> A
             cc.drain(store, cc.Lineage("s1", "x1", path))
-        if then == "key_before_delete_then_rewrite":  # B gets its own path key first: every line a duplicate, no rows
+        if then.startswith("key_before_delete"):  # B gets its own path key first: every line a duplicate, no rows
             keyed = cc.resolve(store, cc.Lineage("s1", "x1", paths[1]))
             assert keyed.agent_id.startswith("/") and cc.drain(store, keyed) == "drained"
         assert store.delete_session_messages(cc.row_session_id("s1", "x1"))
@@ -3200,6 +3200,10 @@ def test_a_forgotten_reused_agent_id_never_comes_back_under_a_path_key(tmp_path,
         paths[1].unlink()
         _append(paths[1], _REUSED["second"])  # rewritten: a new generation, read again from the start
         _record(_hook(), home, a, event="SubagentStop", agent_id="x1", agent_transcript_path=str(paths[1]))
+    elif then == "key_before_delete_then_copied":  # the session folder copied to another project (#2535's move)
+        b = _append(tmp_path / "projects" / "-other" / "s1.jsonl", CONVERSATION[:2])
+        copy = _append(b.parent / "s1" / "subagents" / "workflows" / "wf_run1" / "agent-x1.jsonl", _REUSED["second"])
+        _record(_hook(), home, b, event="SubagentStop", agent_id="x1", agent_transcript_path=str(copy))
     elif then == "hooks":
         for path in (paths[1], paths[0]):
             _record(_hook(), home, a, event="SubagentStop", agent_id="x1", agent_transcript_path=str(path))
