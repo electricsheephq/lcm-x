@@ -250,6 +250,7 @@ def _spool_locked(directory: Path, key: str, record: Mapping[str, Any]) -> str:
     try:
         with open(directory / (key + ".json"), encoding="utf-8") as handle:
             previous = json.load(handle)
+        unknown = not isinstance(previous, dict)  # JSON that is not a pointer object: unknown too (#2535)
     except FileNotFoundError:
         previous = None
     except (OSError, ValueError):  # a pointer that cannot be read: its history is unknown, never "not seen" (#2535)

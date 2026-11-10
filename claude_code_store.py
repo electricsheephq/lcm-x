@@ -424,9 +424,13 @@ def drain(store: MessageStore, lineage: Lineage, *, deadline: Optional[float] = 
         recorded = pending.get("path") if isinstance(pending, dict) else None
         replace = recorded != str(lineage.path) and not (isinstance(recorded, str) and recorded and Path(recorded).exists())
         named = named_paths(pending, lineage.path)
-        # A pending row from an earlier build has no facts: its history is unknown, and unknown never expires (#2535).
-        unknown = {"transcript_seen": None} if facts is not None else None
-        merged = _merge_facts(pending.get("facts", unknown) if isinstance(pending, dict) else None, facts)
+        saved = pending.get("facts") if isinstance(pending, dict) else None
+        if isinstance(pending, dict) and facts is not None and not (
+                isinstance(saved, dict) and isinstance(saved.get("events"), list) and "transcript_seen" in saved):
+            # A pending row from an earlier build has no facts (and a damaged one has none usable): its history is
+            # unknown, and unknown never expires (#2535). Its events are kept as unknown too: a prompt may be missing.
+            saved = {"transcript_seen": None}
+        merged = _merge_facts(saved, facts)
         if not cursor and (replace or not isinstance(pending, dict) or named != pending.get("named")
                            or merged != pending.get("facts")):
             # A newer record's path replaces the recorded one while that one is still absent (the sweep must look
@@ -913,12 +917,12 @@ def _size(path: Path) -> int:
         return -1
 
 
-def claim_records(home: Path) -> list[tuple[Path, dict]]:
+def claim_records(home: Path) -> list[tuple[Path, Optional[dict]]]:
     """Claim every spool record by renaming it, so a hook firing meanwhile writes a new record
     instead of having its record deleted unread. Claimed files left by a crashed worker are
-    processed again; ingest is idempotent."""
+    processed again; ingest is idempotent. A record that cannot be read comes back as None."""
     directory = home / "spool"
-    claimed: list[tuple[Path, dict]] = []
+    claimed: list[tuple[Path, Optional[dict]]] = []
     try:
         names = sorted(os.listdir(directory))
     except OSError:
@@ -936,9 +940,17 @@ def claim_records(home: Path) -> list[tuple[Path, dict]]:
             path = target
         elif not name.endswith(".claimed"):
             continue
-        record = _read_json(path)
-        claimed.append((path, record or {}))
+        claimed.append((path, _read_json(path)))
     return claimed
+
+
+def _set_aside(path: Path) -> None:
+    """Keeps a failed record as ``.failed``. One that cannot be read stays until an operator moves it: a later record
+    of the same key goes beside it, never over it (#2535)."""
+    target = path.with_suffix(".failed")
+    if target.exists() and _read_json(target) is None:
+        target = path.with_suffix(f".{time.time_ns()}.failed")
+    os.replace(path, target)
 
 
 def pending(home: Path) -> bool:
@@ -1029,9 +1041,15 @@ def _drain_once(home: Path, report: dict, deadline: Optional[float], config: Any
         claimed = claim_records(home)
         done: list[Path] = []  # removed only once the sweep below has run: a cut sweep keeps them
         for _path, record in claimed:  # before any drain, so a fork's first rows already know it is one
-            remember_session(store, record)
+            remember_session(store, record or {})
         for path, record in claimed:
             report["records"] += 1
+            if record is None:  # a record that cannot be read is set aside and reported, never drained as nothing (#2535)
+                report["failed"] += 1
+                report["complete"] = False
+                _log_failure(home, "record", "unreadable")
+                _set_aside(path)
+                continue
             try:
                 for lineage in lineages_of(record):
                     outcome = drain(store, lineage, deadline=deadline, facts=record_facts(record, lineage))
@@ -1045,7 +1063,7 @@ def _drain_once(home: Path, report: dict, deadline: Optional[float], config: Any
                 report["failed"] += 1
                 report["complete"] = False
                 _log_failure(home, "record", error)
-                os.replace(path, path.with_suffix(".failed"))
+                _set_aside(path)
                 continue
             done.append(path)
         seen: set[str] = set()

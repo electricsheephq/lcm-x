@@ -2500,3 +2500,95 @@ def test_the_expiry_rule_table(tmp_path, home, hermes, history, events, seen, ex
 
     key = _expiry_case(tmp_path, home, hermes, history, events, seen)
     assert (key not in ca.audit(home)["unverified"]) is expires
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads any file")
+@pytest.mark.parametrize("damage", ["unreadable", "null", "list", "garbage", "empty"])
+def test_a_damaged_pointer_keeps_a_prompted_session_unknown(tmp_path, home, hermes, damage):
+    """A prompt's pointer that the next hook cannot use as a pointer object: its history is unknown, so the session
+    stays unverified instead of expiring as one quit before any prompt (#2535 strict)."""
+    from hermes_lcm import claude_code_audit as ca
+
+    hook = _hook()
+    path = tmp_path / "projects" / "-work" / "s1.jsonl"
+    _record(hook, home, path, event="SessionStart", transcript_seen=False)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    _record(hook, home, path, event="UserPromptSubmit", transcript_seen=True)
+    (pointer,) = sorted((home / "spool").glob("*.json"))
+    if damage == "unreadable":
+        pointer.chmod(0)
+    else:
+        pointer.write_text({"null": "null", "list": "[]", "garbage": "garbage{", "empty": ""}[damage])
+    try:
+        _record(hook, home, path, event="SessionEnd", transcript_seen=False)
+    finally:
+        if pointer.exists():
+            pointer.chmod(0o600)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    assert not path.exists() and "claude-code:s1" in ca.audit(home)["unverified"]
+
+
+@pytest.mark.parametrize("facts", [{}, None, [], {"transcript_seen": False}, {"events": "SessionStart"}],
+                         ids=["empty", "null", "list", "no_events", "events_not_a_list"])
+def test_a_pending_row_with_damaged_facts_stays_unknown(tmp_path, home, hermes, facts):
+    """A pending row whose facts are present but not usable: unknown, never 'not seen' (#2535 strict)."""
+    from hermes_lcm import claude_code_audit as ca
+
+    hook = _hook()
+    path = tmp_path / "projects" / "-work" / "s1.jsonl"
+    store = _open(home, hermes)
+    try:
+        store.update_metadata_json(cc.PENDING_PREFIX + "claude-code:s1", lambda _current: {
+            "session_id": "s1", "agent_id": None, "path": str(path), "named": [str(path)], "first_seen": 100.0,
+            "facts": facts})
+    finally:
+        store.close()
+    for event in ("SessionStart", "SessionEnd"):
+        _record(hook, home, path, event=event, transcript_seen=False)
+        cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    assert not path.exists() and "claude-code:s1" in ca.audit(home)["unverified"]
+
+
+@pytest.mark.parametrize("damage", ["null", "list", "garbage", "empty"])
+def test_a_claimed_record_that_cannot_be_read_is_set_aside(tmp_path, home, hermes, damage):
+    """The worker claims a record it cannot read: it is set aside as ``.failed`` (reported), never drained as nothing
+    and removed, so the events it held cannot be lost and a prompted session cannot expire (#2535 strict)."""
+    from hermes_lcm import claude_code_audit as ca
+
+    hook = _hook()
+    path = tmp_path / "projects" / "-work" / "s1.jsonl"
+    _record(hook, home, path, event="SessionStart", transcript_seen=False)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    _record(hook, home, path, event="UserPromptSubmit", transcript_seen=True)
+    (pointer,) = sorted((home / "spool").glob("*.json"))
+    pointer.write_text({"null": "null", "list": "[]", "garbage": "garbage{", "empty": ""}[damage])
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    assert len(list((home / "spool").glob("*.failed"))) == 1
+    _record(hook, home, path, event="SessionEnd", transcript_seen=False)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    report, filtered = ca.audit(home), ca.audit(home, session="s1")
+    assert not path.exists() and len(list((home / "spool").glob("*.failed"))) == 1
+    for result in (report, filtered):  # the session's own audit cannot read verified either
+        assert not result["verified"] and "spool:unreadable_failed_record" in result["unverified"]
+
+
+def test_an_unreadable_set_aside_record_is_never_overwritten(tmp_path, home, hermes, monkeypatch):
+    """A later record of the same key whose drain raises is set aside beside an unreadable one, never over it, so the
+    marker stays until an operator moves the file (#2535 strict, ruling A). A readable ``{}`` is not set aside."""
+    from hermes_lcm import claude_code_audit as ca
+
+    hook = _hook()
+    path = _append(tmp_path / "projects" / "-work" / "s1.jsonl", CONVERSATION[:2])
+    _record(hook, home, path)
+    (pointer,) = sorted((home / "spool").glob("*.json"))
+    pointer.write_text("")
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    _record(hook, home, path)
+    monkeypatch.setattr(cc, "drain", lambda *args, **kwargs: (_ for _ in ()).throw(OSError("boom")))
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    monkeypatch.undo()
+    assert len(list((home / "spool").glob("*.failed"))) == 2
+    assert "spool:unreadable_failed_record" in ca.audit(home)["unverified"]
+    (home / "spool" / "readable.json").write_text("{}")
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    assert len(list((home / "spool").glob("*.failed"))) == 2 and not (home / "spool" / "readable.json").exists()

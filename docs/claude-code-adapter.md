@@ -145,7 +145,16 @@ record another session spooled while it held the lock is not left for a later ho
 drain raises is set aside as `<key>.failed` and logged by error type only; the session's next hook
 spools a fresh record, and a transcript's cursor is written before its first batch, so the sweep
 retries a transcript whose first batch failed. One bad transcript cannot stall the others or loop
-the worker.
+the worker. A claimed record the worker cannot read (an empty file after a power cut, or one that is
+not a JSON object) is set aside the same way and never drained as nothing; nothing retries it, and the
+audit stays unverified with `spool:unreadable_failed_record`, which names no session. The facts that
+record held are lost to the audit: the session it came from can still expire by the ordinary pending
+rule, so this marker is what keeps every audit unverified. A later record of the same key is set
+aside beside it, never over it. Moving the `*.failed` file out of the home's `spool/` folder clears
+that state: a session that expired meanwhile then reads verified, though its record was lost. So
+check the session first: the file name up to its first dot is the pointer key, the first 32 hex digits
+of sha256 of `host`, `session_id` and `agent_id` joined by NUL (an empty `agent_id` for a session), and
+its modification time is the hook's write time.
 
 ### Transcript facts
 
