@@ -86,7 +86,7 @@ OBSERVED_ATTRIBUTES = frozenset({
     "_generated_ignored_active_replay_placeholder_messages", "_host_uid_counters", "_host_uid_error_logged",
     "_host_uid_read_error", "_identity_anchor_chain_cache", "_identity_anchor_recent", "_identity_anchor_text_memo",
     "_identity_anchor_recoveries", "_identity_anchor_recovery", "_identity_anchor_user_generation",
-    "_identity_anchor_durable_recovery_pending",
+    "_identity_anchor_durable_recovery_pending", "_rotation_lineage_unrecorded",
     "_identity_anchor_versions", "_pressure_yield_tail_token_limit", "_survival_projected_fields",
     "_host_uid_lineage_cache", "_engine_uids_pending", "_engine_uids_recorded",
     "_pending_ingest_frontier", "_last_ingest_attribution", "_end_attribution", "_ingest_read_only",
@@ -373,6 +373,8 @@ def snapshot(engine: Any, canonical: IngestCanonical) -> dict[str, Any]:
                                             # P1h lock-hold telemetry; no ingest decision reads it.
                                             "_ingest_lock_guard", "_ingest_lock_records", "_ingest_lock_totals", "_ingest_lock_warned"}):
         value = observed_attribute(engine, name)
+        if name == "_rotation_lineage_unrecorded" and value == {"absent": True}:
+            continue  # New fail-closed guard: observe it when set; preserve existing absent-state outcomes.
         if name == "_db_path":
             continue  # Observed by the binding assertion above.
         if name in {"_store", "_host_rewrite_store"}:

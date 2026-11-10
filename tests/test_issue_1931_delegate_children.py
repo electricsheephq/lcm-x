@@ -174,13 +174,14 @@ def test_exactly_once_resend_retry_resume_and_host_rewrite(host):
     parent2.on_session_start("parent", platform="cli", context_length=200_000)
     child.turn(ctx2, child_view(2), parent2)
     assert [m["content"] for m in child_rows(parent2)] == [m["content"] for m in child_view(2)]
-    # The host's native compaction rewrote the head: resume after the unique stored tail.
+    # The host's native compaction rewrote the head: LCM did not produce it, so it is stored once (#2071), then
+    # later turns resume after the unique stored tail.
     rewritten = [{"role": "user", "content": "[CONTEXT COMPACTION] earlier turns summarised"},
                  *child_view(2)[-3:], {"role": "assistant", "content": "after compaction"}]
     child.turn(ctx2, rewritten, parent2)
     child.turn(ctx2, rewritten, parent2)
     contents = [m["content"] for m in child_rows(parent2)]
-    assert contents == [m["content"] for m in child_view(2)] + ["after compaction"]
+    assert contents == [m["content"] for m in child_view(2)] + [rewritten[0]["content"], "after compaction"]
 
 
 def test_unmatched_child_view_is_a_visible_fallback(host, caplog):
@@ -499,8 +500,9 @@ def test_short_stored_tail_recovers_later_turns(host, kept):
         rewritten = [*rewritten, {"role": "assistant", "content": f"later {i}"}]
         child.turn(ctx, rewritten, parent)
         child.turn(ctx, rewritten, parent)
+    # #2071: the host's rewritten head is neither stored nor an LCM compaction output, so it is stored once.
     assert [row["content"] for row in child_rows(parent)] == (
-        [row["content"] for row in original] + ["later 0", "later 1"])
+        [row["content"] for row in original] + ["rewritten head", "later 0", "later 1"])
 
 
 @pytest.mark.parametrize("shape", ["repeated", "rewritten"])
@@ -744,7 +746,8 @@ def test_delegate_fallback_reads_real_tail_and_uncapped_rows(host, monkeypatch):
 @pytest.mark.parametrize("route", ["shared", "clone", "prototype"])
 def test_stateless_rotated_parent_requires_delegate_identity(host, monkeypatch, request, parent_kind, route):
     if parent_kind == "ignored" and route != "shared":
-        request.applymarker(pytest.mark.xfail(strict=True, reason="#2070: bypass lineage is per engine"))
+        request.applymarker(pytest.mark.xfail(strict=True, raises=AssertionError,
+                                              reason="#2070: bypass lineage is per engine, so this route stores the child"))
     monkeypatch.setenv("LCM_IGNORE_SESSION_PATTERNS", "old-parent")
     load, clone = host
     ctx, _ = load()
@@ -761,7 +764,8 @@ def test_stateless_rotated_parent_requires_delegate_identity(host, monkeypatch, 
         engine._mark_lcm_bypass_lineage_session("old-child", platform="subagent")
         old_id = "old-child"
     engine.on_session_start("parent", platform="subagent", boundary_reason="compression", old_session_id=old_id)
-    assert engine._session_id == "parent" and engine._session_stateless and not engine._session_ignored
+    if not (engine._session_id == "parent" and engine._session_stateless and not engine._session_ignored):
+        pytest.fail("setup: the rotated parent is not a stateless, unignored binding")
     links_before = lineage_rows(engine)
     child = Agent("child", **DELEGATE)
     child_engine = engine if route == "shared" else None
@@ -770,7 +774,13 @@ def test_stateless_rotated_parent_requires_delegate_identity(host, monkeypatch, 
         child.start(child_engine)
     child.turn(ctx, child_view(), child_engine)
     if parent_kind == "ignored":
-        assert child_rows(engine) == [] and lineage_rows(engine) == []
+        rows, links = [row["content"] for row in child_rows(engine)], lineage_rows(engine)
+        if rows == [] and links == []:
+            return  # refused (the shared route today; a fix shows as a loud XPASS on the others)
+        if route != "shared" and rows == [row["content"] for row in child_view()] and \
+                links == [("child", "parent", "parent_frame")]:
+            raise AssertionError("#2070 known shape: the child is stored whole and linked to the excluded parent")
+        pytest.fail(f"not the #2070 shape on the {route} route: rows={rows} links={links}")
     else:
         assert [row["content"] for row in child_rows(engine)] == [row["content"] for row in child_view()]
         assert lineage_rows(engine) == [*links_before, ("child", "parent", "parent_frame")]

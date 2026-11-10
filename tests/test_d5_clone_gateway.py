@@ -124,7 +124,7 @@ def test_config_keys(tmp_path):
     assert config["auxiliary"] == {t: {"provider": "d5", "model": "d5-aux", "base_url": URL} for t in ("vision", "compression")}
     assert config["context"] == {"engine": "lcm-x"}
     assert config["compression"] == settings["compression"]
-    assert config["lcm"] == {**settings["lcm"], "summary_model": "d5-summary"}
+    assert config["lcm"] == settings["lcm"]  # No dead summary_model key: LCM-X takes it from the env.
     assert config["plugins"] == {"enabled": ["hermes-lcm-x", "d5-local"], "disabled": [], "isolation": "in_process"}
     assert config["platforms"] == {"d5-local": {"enabled": True, "extra": {}}}
     assert config["gateway"]["message_timestamps"]["enabled"] is False
@@ -174,8 +174,8 @@ def test_build_env_drops_every_redirecting_lcm_key(tmp_path):
     env, declaration = g.build_env(lcm, home=tmp_path, provider_url=URL, host_bin="/b", port_file=tmp_path / "p", lcm_tree=ROOT)
     assert declaration["dropped_names"] == sorted(set(lcm) - {"LCM_EMBEDDING_PROVIDER", "LCM_FRESH_TAIL_COUNT", *g.FORCED_LCM_PATHS})
     assert {k: v for k, v in env.items() if k.startswith("LCM_") and k not in g.FORCED_LCM_PATHS} == {
-        "LCM_EMBEDDING_PROVIDER": "fastembed", "LCM_FRESH_TAIL_COUNT": "8"}
-    assert declaration["overridden_names"] == sorted(g.FORCED_LCM_PATHS)
+        "LCM_EMBEDDING_PROVIDER": "fastembed", "LCM_FRESH_TAIL_COUNT": "8", "LCM_SUMMARY_MODEL": "d5-summary"}
+    assert declaration["overridden_names"] == sorted([*g.FORCED_LCM_PATHS, "LCM_SUMMARY_MODEL"])
     assert all(Path(env[k]).is_relative_to(tmp_path) for k in g.FORCED_LCM_PATHS)
     # Every write-location key the LCM-X tree reads is forced.
     named = {m for f in ROOT.glob("*.py") for m in re.findall(r"LCM_[A-Z0-9_]*(?:PATH|DIR)\b", f.read_text())}
@@ -302,7 +302,16 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header('Content-Length', str(len(body)))
         self.end_headers()
         self.wfile.write(body)
-    def do_GET(self): self.respond({'connected': self.path == '/health', 'path': self.path})
+    def do_GET(self):
+        restoring = os.environ.get('D5_FAKE_RESTORING', 'false')  # 'false', 'true', 'absent', or N polls of 'true'
+        polls = Path(os.environ['D5_LOCAL_PORT_FILE'] + '.polls')
+        n = int(polls.read_text()) + 1 if polls.exists() else 1
+        polls.write_text(str(n))
+        state = {'false': False, 'true': True}.get(restoring, n <= int(restoring) if restoring.isdigit() else None)
+        body = {'connected': self.path == '/health', 'path': self.path}
+        if restoring != 'absent':
+            body['restoring'] = state
+        self.respond(body)
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
         self.respond({'step': body['step'], 'completed': True, 'replies': 1,
@@ -420,6 +429,24 @@ def test_build_env_drops_a_remote_recall_provider(tmp_path, value, passed):
     assert ("LCM_PROACTIVE_RECALL_PROVIDER" in declaration["dropped_names"]) is not passed
 
 
+@pytest.mark.parametrize("lcm", [{}, {"LCM_SUMMARY_MODEL": "another-summary-model"}])
+def test_build_env_pins_the_summary_model(tmp_path, lcm):
+    env, declaration = g.build_env(lcm, home=tmp_path, provider_url=URL, host_bin="/b", port_file=tmp_path / "p",
+                                   lcm_tree=ROOT)
+    assert env["LCM_SUMMARY_MODEL"] == "d5-summary" and "LCM_SUMMARY_MODEL" in declaration["overridden_names"]
+
+
+@pytest.mark.parametrize("provider, flag, expected", [
+    ("voyage", "0", "false"), ("voyage", "1", "false"), ("voyage", None, "false"),
+    ("fastembed", "0", "0")])  # The local row is a guard: a local provider's flag passes through as given.
+def test_build_env_turns_embeddings_off_when_a_remote_provider_is_dropped(tmp_path, provider, flag, expected):
+    lcm = {"LCM_EMBEDDING_PROVIDER": provider, **({"LCM_EMBEDDINGS_ENABLED": flag} if flag is not None else {})}
+    env, declaration = g.build_env(lcm, home=tmp_path, provider_url=URL, host_bin="/b", port_file=tmp_path / "p",
+                                   lcm_tree=ROOT)
+    assert env["LCM_EMBEDDINGS_ENABLED"] == expected
+    assert ("LCM_EMBEDDINGS_ENABLED" in declaration["overridden_names"]) is (provider == "voyage")
+
+
 def test_nonlocal_connections(monkeypatch):
     calls = []
 
@@ -455,3 +482,20 @@ def test_build_env_links_the_arm_tree_and_refuses_a_non_plugin_tree(tmp_path):
     with pytest.raises(ValueError):  # An existing link to another tree is never repointed.
         g.build_env({}, home=tmp_path / "home", provider_url=URL, host_bin="/synthetic/bin",
                     port_file=tmp_path / "port", lcm_tree=ROOT)
+
+
+@pytest.mark.parametrize("restoring, ready", [("false", True), ("3", True), ("true", False), ("absent", False)])
+def test_readiness_waits_for_the_host_restore_gate(fake_gateway, restoring, ready):
+    """A gateway is ready only once the host's startup-restore gate is open; a gate that stays shut or cannot be
+    read never reads ready, and the error names its last state."""
+    fake_gateway.env["D5_FAKE_RESTORING"] = restoring
+    try:
+        if ready:
+            fake_gateway.start(5)
+            polls = int(Path(f"{fake_gateway.port_file}.polls").read_text())
+            assert polls >= (4 if restoring == "3" else 1)  # It kept polling while the gate was shut.
+        else:
+            with pytest.raises(RuntimeError, match="host startup-restore gate: " + ("True" if restoring == "true" else "absent")):
+                fake_gateway.start(1.5)
+    finally:
+        fake_gateway.stop(1)

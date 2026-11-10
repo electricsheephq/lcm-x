@@ -603,6 +603,7 @@ class Recorder:
         self.tool, self.root = tool, root
         self.lock = threading.RLock()
         self.opened = False
+        self.exiting = False
         self.seq = itertools.count(1)
         self.last_seq = 0
         self.lost = 0
@@ -1580,7 +1581,11 @@ class Recorder:
         if entry.views or entry.name == "on_session_end":
             self._retain()
         if self.inflight == 0 and self.checkpoints and clock() - self.started >= self.checkpoints[0] * 3600:
-            self._checkpoint(self.checkpoints.pop(0))
+            hours = self.checkpoints.pop(0)
+            if self.exiting:
+                self._skip_checkpoint(hours, "exit")
+            else:
+                self._checkpoint(hours)
 
     def _skip_checkpoint(self, hours, cause):
         self.counters["recorder.checkpoint_skipped"] += 1
@@ -1741,6 +1746,8 @@ class Recorder:
         if self.stopped == "fork":
             return
         try:
+            with self.lock:
+                self.exiting = True
             self._emit({"kind": "exit_begin"}, single=True)
             self.end_state = "exit_begin"
             if self.writer.drain(2.0):

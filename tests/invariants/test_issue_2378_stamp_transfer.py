@@ -174,11 +174,16 @@ def test_unreadable_placeholder_never_links_and_keeps_primary_links(build, monke
     p_copies = [row["store_id"] for row in rows if row["content"] == P]
     evidence = {"t": t_copies, "p": p_copies, "relations": sorted(links)}
     assert len(t_copies) == 2 and (t_copies[1], t_copies[0]) in links, evidence
-    assert len(p_copies) == 2 and not any(a in p_copies for a, _b in links), evidence
+    # The transfer fails closed: no consuming link from a P copy. The borrowed-stamp linker (#2421) reads no
+    # stored form, and may attribute the moved P with its non-consuming link (its borrowed stamp recorded).
+    from_p = {(source, target, stamp) for source, target, stamp in engine._store._conn.execute(
+        "SELECT store_id, related_store_id, observed_at FROM message_relations WHERE kind='possible_replay_of'")
+        if source in p_copies}
+    assert len(p_copies) == 2 and from_p == {(p_copies[1], p_copies[0], T_REQ)}, evidence
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason="625: TODO composite is scaffold before R2 "
-                   "(engine.py:6663; identity_anchor.py:312), so no composite witness is recorded")
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason="625 (#2488, named surplus limit, v0.30.0): the "
+                   "todo composite is treated as scaffold before R2, so no composite witness is recorded")
 def test_625_todo_prompt_composite_with_stamp_transfer_copy_is_replay(build):
     engine = build()
     todo = _PRESERVED_TODO_CONTEXT_PREFIX + "\n- [>] 1. check deployment (in_progress)"
@@ -188,15 +193,17 @@ def test_625_todo_prompt_composite_with_stamp_transfer_copy_is_replay(build):
              {"role": "user", "content": P, "timestamp": T_REQ + 2}]
     engine.ingest(deepcopy(head + parts))
     before = all_rows(engine)
-    assert sum(row["content"] == P for row in before) == 2
-    assert sum(row["content"] == todo for row in before) == 1
+    if sum(row["content"] == P for row in before) != 2 or sum(row["content"] == todo for row in before) != 1:
+        pytest.fail("setup: the todo row and both P rows must be stored once each")
     engine.on_session_end("S", deepcopy(head + parts))
     engine.on_session_start("S", conversation_id="conversation", platform="cli")
     composite = {"role": "user", "content": todo + "\n\n" + P, "timestamp": T_REQ}
     engine.ingest(deepcopy(head + [composite,
                                   {"role": "user", "content": NEW, "timestamp": T_COMMIT}]))
     rows = all_rows(engine)
-    assert sum(row["content"] == NEW for row in rows) == 1
+    if sum(row["content"] == NEW for row in rows) != 1:
+        pytest.fail("not the 625 shape: the new turn must be stored once")
+    # Only the composite-surplus assertions below may raise the expected AssertionError.
     assert not any(row["content"] == composite["content"] for row in rows)
     relations = list(engine._store._conn.execute(
         "SELECT store_id,kind,related_store_id FROM message_relations WHERE kind='composite'"))

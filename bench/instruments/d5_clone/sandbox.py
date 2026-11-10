@@ -33,8 +33,14 @@ def _user_dirs():
     return tuple(found)
 
 
-def profile(ports, socket_roots=()):
+def profile(ports, socket_roots=(), deny_paths=()):
     lines = ["(version 1)", "(allow default)", "(deny network-outbound)"]
+    for root in deny_paths:  # Never read or written by the child, in every spelling of the path.
+        raw = os.path.abspath(root)
+        for d in dict.fromkeys((raw, os.path.realpath(raw), "/System/Volumes/Data" + os.path.realpath(raw))):
+            if '"' in d or "\\" in d:
+                raise ValueError("unsupported denied path name")
+            lines.append(f'(deny file-read* file-write* (subpath "{d}"))')
     for port in ports:
         if isinstance(port, bool) or not isinstance(port, int) or not 0 < port < 65536:
             raise ValueError("expected a TCP port number")
@@ -57,8 +63,13 @@ def profile(ports, socket_roots=()):
     return "\n".join(lines) + "\n"
 
 
-def wrap(argv, *, ports, socket_roots=()):
-    return ["/usr/bin/sandbox-exec", "-p", profile(ports, socket_roots)] + list(argv)
+def wrap(argv, *, ports, socket_roots=(), deny_paths=()):
+    return ["/usr/bin/sandbox-exec", "-p", profile(ports, socket_roots, deny_paths)] + list(argv)
+
+
+def hermes_home():
+    """The live agent's home: the replay and the doctor never read or write it (deny_paths)."""
+    return str(Path.home() / ".hermes")
 
 
 def available():

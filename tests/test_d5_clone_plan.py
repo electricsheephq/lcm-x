@@ -2,9 +2,10 @@
 
 import hashlib
 import json
-import shlex
+import os
 import sqlite3
 import subprocess
+import sys
 
 import pytest
 
@@ -57,8 +58,55 @@ def test_missing_slot_has_counts_only(databases, kwargs):
     with pytest.raises(PlanError) as exc:
         choose_sessions(*databases, lambda sid: sid != "uncovered", **kwargs)
     message = str(exc.value)
-    assert "eligible=4" in message
+    assert "covered=" in message and "checked=" in message
     assert all(sid not in message for sid in ("tie-a", "tie-b", "uncovered", "ended"))
+
+
+def _full_scan(host_db, lcm_db, covered, *, min_large=1000, min_small=20, n_small=2):
+    """The pre-#2199 planner: covered() on every open session, then the top n_small + 1 (the reference)."""
+    with sqlite3.connect(host_db) as host, sqlite3.connect(lcm_db) as lcm:
+        candidates = []
+        for (sid,) in host.execute("SELECT id FROM sessions WHERE end_reason IS NULL"):
+            if covered(sid):
+                counts = [db.execute("SELECT count(*) FROM messages WHERE session_id = ?", (sid,)).fetchone()[0]
+                          for db in (lcm, host)]
+                candidates.append(dict(session_id=sid, lcm_rows=counts[0], host_rows=counts[1]))
+    candidates.sort(key=lambda row: (-row["lcm_rows"], hashlib.sha256(row["session_id"].encode()).hexdigest()))
+    large = sum(row["lcm_rows"] >= min_large for row in candidates)
+    small = sum(row["lcm_rows"] >= min_small for row in candidates[1:])
+    if not large or small < n_small:
+        return PlanError
+    return [dict(row, name=name, chat_id=f"d5-{name}") for row, name in
+            zip(candidates[:n_small + 1], ["L"] + [f"S{i + 1}" for i in range(n_small)])]
+
+
+OPEN = ("large", "tie-a", "tie-b", "tiny", "uncovered")
+
+
+@pytest.mark.parametrize("kwargs", [{}, {"min_large": 1201}, {"n_small": 3}, {"min_small": 41}, {"n_small": 1}])
+@pytest.mark.parametrize("mask", range(2 ** len(OPEN)))
+def test_lazy_coverage_picks_what_the_full_scan_picks_and_stops_at_n_plus_1(databases, kwargs, mask):
+    """Every covered subset of the open sessions (ties on lcm_rows broken by the id's digest, and fewer than three
+    covered): the same sessions, or the same refusal, as the full scan; covered() runs only until n_small + 1 are
+    covered, in size order."""
+    covered_set = {sid for i, sid in enumerate(OPEN) if mask >> i & 1}
+    seen = []
+
+    def covered(sid):
+        seen.append(sid)
+        return sid in covered_set
+
+    expected = _full_scan(*databases, lambda sid: sid in covered_set, **kwargs)
+    try:
+        got = choose_sessions(*databases, covered, **kwargs)
+    except PlanError:
+        got = PlanError
+    assert got == expected
+    order = sorted(OPEN, key=lambda sid: (-{"large": 1200, "tie-a": 40, "tie-b": 40, "tiny": 19, "uncovered": 3000}[sid],
+                                          hashlib.sha256(sid.encode()).hexdigest()))
+    wanted = kwargs.get("n_small", 2) + 1
+    hits = [i for i, sid in enumerate(order) if sid in covered_set]
+    assert seen == order[:hits[wanted - 1] + 1] if len(hits) >= wanted else seen == order
 
 
 @pytest.fixture
@@ -125,6 +173,24 @@ def test_determinism_and_declaration(plan):
 
 @pytest.mark.parametrize("command,size", [(LARGE_COMMAND, 204800), (SMALL_COMMAND, 64)])
 def test_tool_output(command, size):
-    result = subprocess.run(shlex.split(command), check=True, capture_output=True)
+    result = subprocess.run(["/bin/sh", "-c", command], check=True, capture_output=True)  # The terminal tool's shell.
     assert result.stdout == b"d" * size
     assert result.stderr == b""
+
+
+@pytest.mark.parametrize("command,size", [(LARGE_COMMAND, 204800), (SMALL_COMMAND, 64)])
+def test_the_new_commands_write_exactly_the_old_commands_bytes(command, size):
+    """The previous commands, run as they were (no shell), give the same stdout bytes as the new ones."""
+    old = f"import sys; sys.stdout.write('d' * {size})"
+    before = subprocess.run([sys.executable, "-c", old], check=True, capture_output=True).stdout
+    assert subprocess.run(["/bin/sh", "-c", command], check=True, capture_output=True).stdout == before
+
+
+@pytest.mark.skipif(not os.environ.get("D5_HOST_SRC"), reason="D5_HOST_SRC not set")
+@pytest.mark.parametrize("command", [LARGE_COMMAND, SMALL_COMMAND])
+def test_the_pinned_host_does_not_hold_the_tool_commands_for_approval(command, monkeypatch):
+    """The loopback platform answers no approval prompt, so a flagged command is blocked and its step stores no output."""
+    monkeypatch.syspath_prepend(os.environ["D5_HOST_SRC"])
+    from tools.approval_detection import detect_dangerous_command
+
+    assert detect_dangerous_command(command)[0] is False

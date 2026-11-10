@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from hermes_lcm.config import LCMConfig
-from hermes_lcm.evidence_pack import build_evidence_pack
+from hermes_lcm.evidence_pack import build_evidence_pack, normalize_question_date
 from hermes_lcm.store import MessageStore
 from hermes_lcm.tools import lcm_evidence_pack
 
@@ -732,3 +732,14 @@ def test_user_value_conflicting_latest_evidence_falls_back(tmp_path):
         "reason_code": "latest_candidates_tied",
     }
     assert payload["computation"] is None
+
+
+def test_normalize_question_date_accepts_a_matching_weekday_suffix():
+    normalized, error = normalize_question_date("2023/06/06 (Tue) 08:19")
+    assert error is None
+    assert normalized is not None
+    assert normalized.public_dict() == {
+        "input": "2023/06/06 (Tue) 08:19",
+        "date": "2023-06-06",
+        "normalization": "weekday_date_component",
+    }

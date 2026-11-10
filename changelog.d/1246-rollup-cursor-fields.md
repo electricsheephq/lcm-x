@@ -1,0 +1,1 @@
+- Removed: the always-empty rollup cursor fields (`last_build_cursors` and `last_built_at` in `lcm_inspect`, and the matching `/lcm rollups` status lines); no production path ever wrote them.

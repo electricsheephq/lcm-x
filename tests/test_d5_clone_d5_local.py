@@ -165,7 +165,7 @@ def test_http_framing_without_socket(adapter_module):
                 pass
 
         for method, path, body, expected in (
-            ("GET", "/health", b"", {"connected": True}),
+            ("GET", "/health", b"", {"connected": True, "restoring": None}),
             ("POST", "/turn", json.dumps({"chat_id": "chat-a", "step": "1", "text": "verbatim\r\n  "}).encode(), None),
         ):
             reader, writer = asyncio.StreamReader(), Writer()
@@ -205,7 +205,7 @@ def test_http_and_port_file(adapter_module, tmp_path, monkeypatch, from_env):
                 await writer.wait_closed()
                 return json.loads(response.split(b"\r\n\r\n", 1)[1])
 
-            assert await request("GET", "/health") == {"connected": True}
+            assert await request("GET", "/health") == {"connected": True, "restoring": None}
             await adapter.send("chat-b", "outside any turn")
             body = {"chat_id": "chat-a", "step": "one", "text": "verbatim\r\n  ", "timeout": 1}
             result = await request("POST", "/turn", json.dumps(body).encode())
@@ -289,3 +289,41 @@ def test_real_host_never_reads_replayed_text_as_a_command(real_host, text):
         assert event.text == text
 
     asyncio.run(exercise())
+
+
+class _Runner:  # The pinned host keeps the gate on GatewayRunner as a class attribute with an instance value.
+    _startup_restore_in_progress = False
+
+    async def _handle_message(self, event):
+        return None
+
+
+@pytest.mark.parametrize("gate", [None, 0, "", 1, "false", True, False])
+def test_health_reports_the_host_restore_gate_through_the_wrapped_handler(adapter_module, gate):
+    runner = _Runner()
+    runner._startup_restore_in_progress = gate
+    handler = runner._handle_message
+
+    async def scoped(*args):  # As the host's _standalone_scoped wrapper: the runner sits in its closure.
+        return await handler(*args)
+
+    adapter = adapter_module.D5LocalAdapter(SimpleNamespace(extra={}))
+    adapter._message_handler = scoped
+    restoring = adapter._host_restoring()
+    assert restoring is (gate if isinstance(gate, bool) else None)
+    assert (restoring is False) is (gate is False)  # The gateway readiness condition stays closed for unknown values.
+
+
+def test_health_reports_no_gate_when_the_host_has_none(adapter_module):
+    adapter = adapter_module.D5LocalAdapter(SimpleNamespace(extra={}))
+    adapter._message_handler = lambda event: None
+    assert adapter._host_restoring() is None  # Readiness then never reads open (gateway.start).
+
+
+PINNED_HOST = pytest.mark.skipif(not os.environ.get("D5_HOST_SRC"), reason="D5_HOST_SRC not set")
+
+
+@PINNED_HOST
+def test_the_pinned_host_keeps_the_restore_gate_where_the_adapter_reads_it():
+    source = (Path(os.environ["D5_HOST_SRC"]) / "gateway" / "run.py").read_text()
+    assert "    _startup_restore_in_progress: bool = False" in source  # GatewayRunner's class attribute.

@@ -144,7 +144,8 @@ from .message_analysis import (
 )
 from .fresh_tail import FreshTailBoundary, resolve_fresh_tail_boundary, tool_group_safe_end
 from .message_patterns import compile_message_patterns, matches_message_pattern
-from .aux_session import AuxiliarySessionMixin, DelegateChildMixin
+from . import aux_session as _aux_session
+from .aux_session import AuxiliarySessionMixin, DelegateChildMixin, drain_live_child_stores
 from .placeholder_ledger import PlaceholderLedgerMixin
 from .reconcile import _COMPACTION_COMMIT_PROOF_METADATA_PREFIX, ReconcileMixin, _PRESERVED_OBJECTIVE_CONTEXT_PREFIX
 from .reconcile import _HERMES_PRUNED_TOOL_PLACEHOLDER, _emission_identity, _strip_volatile_host_scaffolding
@@ -154,7 +155,7 @@ from .compaction import CompactionMixin
 from . import leaf_prep
 from .compaction_request import CompactionRequest
 from .compress_run import CompressRun
-from .identity_anchor import IdentityAnchorMixin, _raw_remainder
+from .identity_anchor import IdentityAnchorMixin, _ROTATION_LINEAGE_UNRECORDED, _raw_remainder
 from .host_uid import HostUidShadowMixin, _valid_uid
 from .host_uid_emit import carry_identity, identity_emit_enabled, record_absorbed_message, sync_cached_host_metadata
 from .store_complete import HiddenBacklog, StoreCompleteMixin
@@ -277,6 +278,8 @@ _EMBEDDING_SCHEMA_LOCK = threading.Lock()
 
 _EMBEDDING_RETIRE_TIMEOUT_S = 2.0
 _SESSION_END_BUSY_TIMEOUT_MS = 50
+# #2466's presence-window limit is not on main yet; bound this conflict scan independently.
+_COLD_TAIL_CONFLICT_SCAN_ROWS = 10_000
 _SESSION_DIAGNOSTIC_LOG_MAX = 4096
 _SHUTDOWN_COMPACTION_WAIT_MAX_S = 86400.0
 
@@ -5661,6 +5664,8 @@ class LCMEngine(
                 skip_unchanged=True,
             )
         except Exception as exc:  # lineage is best-effort; rotation still continues
+            self._rotation_lineage_unrecorded = getattr(self, "_rotation_lineage_unrecorded", set()) | {session_id}
+            _ROTATION_LINEAGE_UNRECORDED.add((os.path.realpath(str(self._db_path)), str(session_id)))  # survives clones in this process
             logger.warning(
                 "LCM rotation lineage write failed: session=%s predecessor=%s exception=%s",
                 session_id,
@@ -7229,9 +7234,10 @@ class LCMEngine(
                     current = self._store.get_batch([sid for idx, sid in stored_at.items() if idx in previous and sid])
                     incoming = self._store.get_message_relations(
                         [row["store_id"] for row in targets], "possible_replay_of", related=True)
-                    used = {row["related_store_id"] for row in incoming}
+                    used = {row["related_store_id"] for row in incoming if row["observed_at"] is None}
                     # The targets main's loop sees: links main writes too, then its own (not this batch's tool links).
-                    main_used = {row["related_store_id"] for row in incoming if row["store_id"] not in tool_sources}
+                    main_used = {row["related_store_id"] for row in incoming
+                                 if row["observed_at"] is None and row["store_id"] not in tool_sources}
                     linked = {row["store_id"] for kind in ("possible_replay_of", "link_pending")
                               for row in self._store.get_message_relations(list(current), kind)}
                     used.update(allocated_targets)
@@ -7267,9 +7273,10 @@ class LCMEngine(
                                 more = self._store.find_rows_by_observed_at(self._conversation_id, unloaded, stamps)
                                 incoming = self._store.get_message_relations(
                                     [target["store_id"] for target in more], "possible_replay_of", related=True)
-                                used |= {relation["related_store_id"] for relation in incoming}
+                                used |= {relation["related_store_id"] for relation in incoming
+                                         if relation["observed_at"] is None}
                                 main_used |= {relation["related_store_id"] for relation in incoming
-                                              if relation["store_id"] not in tool_sources}
+                                              if relation["observed_at"] is None and relation["store_id"] not in tool_sources}
                                 targets = [*targets, *more]
                         for tier in [s for s in predecessors if s not in tiers] if not matches else ():
                             matches = matches or same_occurrence(tier, row["timestamp"], identity, sid)
@@ -7360,6 +7367,108 @@ class LCMEngine(
             self._raise_ingest_busy(exc)
             logger.warning("LCM re-stamped occurrence link write failed (%s)", type(exc).__name__)
 
+    def _link_borrowed_stamp_occurrences(self, messages, stored_at):
+        """#2055: after a compaction the host can show the next user prompt on the stamp of the prompt that was
+        in flight (the borrowed stamp), so one send is stored at its own stamp and at the borrowed one, in either
+        order. Annotate the later copy only; no row is skipped or changed."""
+        if not self._session_id or not identity_anchor_enabled():  # the kill switch writes no anchor state (R185)
+            return
+        texts, stamps = {}, {}  # A stored, stamped, non-empty user row of this ingest is a possible later copy.
+        for idx, sid in stored_at.items():
+            message = messages[idx] if sid and 0 <= idx < len(messages) else None
+            if (isinstance(message, dict) and message.get("role") == "user" and message.get("content") is not None
+                    and (stamp := self._host_occurrence_metadata(message)["timestamp"]) is not None
+                    and (text := (normalize_content_value(message["content"]) or "").strip())):
+                texts[int(sid)], stamps[int(sid)] = text, stamp
+        if not texts:
+            return
+        try:
+            conn, session = self._store._conn, str(self._session_id)
+            conversation = _normalize_conversation_id_value(self._conversation_id)
+
+            def borrowed(at, carrier, text):
+                # An earlier user row of other text holds this stamp as its own (exact equality; indexed). Two rows
+                # decide it; a cap can only miss a link, never write a wrong one.
+                return any(isinstance(content, str) and content.strip() and content.strip() != text
+                           for (content,) in conn.execute(
+                               "SELECT content FROM messages WHERE conversation_id IN (?, '') AND observed_at=? "
+                               "AND +session_id=? AND role='user' AND +store_id<? LIMIT 2",
+                               (conversation, at, session, carrier)))
+            # Every read goes through an index, so each stored row costs a bounded number of reads: earlier
+            # copies of its text come from the ingest ledger's identity digest, never from a scan of the
+            # session. The unary '+' and CROSS JOIN keep the planner off the session indexes. Without the
+            # ledger there is no indexed way to find the earlier copy, and no link is written.
+            attempt = getattr(self, "_ingest_ledger_attempt", None)
+            if attempt is None or not attempt.get("entries"):
+                return
+            index_of = {sid: idx for idx, sid in stored_at.items() if sid}
+            pairs, shown = [], None
+            for sid, text in sorted(texts.items()):
+                if index_of[sid] >= len(attempt["entries"]):
+                    continue
+                # The pairing needs exactly one earlier copy, so three bindings decide it: a full page means
+                # more copies (or bindings) than one, and the row is skipped.
+                found = conn.execute(
+                    "SELECT m.store_id, m.observed_at, m.content FROM occurrence_bindings b "
+                    "CROSS JOIN messages m ON m.store_id = b.store_id WHERE b.lineage=? AND b.identity_digest=? "
+                    "AND b.store_id<? AND m.role='user' AND +m.session_id=? AND m.conversation_id IN (?, '') LIMIT 3",
+                    (attempt["lineage"], attempt["entries"][index_of[sid]].identity_digest, sid, session,
+                     conversation)).fetchall()
+                copies = sorted({(int(store_id), observed_at) for store_id, observed_at, content in found
+                                 if isinstance(content, str) and content.strip() == text})
+                if len(found) > 2 or len(copies) != 1:
+                    continue
+                target, target_stamp = copies[0]
+                stored = conn.execute("SELECT content, observed_at FROM messages WHERE store_id=?", (sid,)).fetchone()
+                stamp = stored[1] if stored and isinstance(stored[0], str) and stored[0].strip() == text else None
+                # The earlier copy is at another stamp: a copy at this row's own stamp is a plain replay that the
+                # other linkers own.
+                if stamp is None or target_stamp is None or target_stamp == stamp:
+                    continue
+                # The borrowed stamp: an earlier user row of other text holds the later or the earlier copy's
+                # stamp as its own. Indexed, so it runs before the view veto.
+                at = next((at for at, carrier in ((stamp, sid), (target_stamp, target))
+                           if borrowed(at, carrier, text)), None)
+                if at is None:
+                    continue
+                # The veto: a host view that still shows this text at the earlier copy's stamp holds a
+                # second occurrence, so the later copy is a genuine repeat. Absent content never vetoes.
+                # The view's (text, stamp) pairs are built once per ingest.
+                if shown is None:
+                    # The host's volatile scaffolding (a model-switch note) does not make it another prompt: the
+                    # raw form and the form without it both veto, as in the #2378 transfer's veto.
+                    shown = {(form.strip(), self._host_occurrence_metadata(message)["timestamp"])
+                             for message in messages
+                             if isinstance(message, dict) and message.get("role") == "user"
+                             and message.get("content") is not None
+                             for host in [normalize_content_value(message["content"]) or ""]
+                             for form in (host, _strip_volatile_host_scaffolding(host))}
+                if (text, target_stamp) in shown:
+                    continue
+                pairs.append((sid, target, at))
+            if not pairs:
+                return
+            with self._ingest_evidence():
+                # The relations the other linkers already wrote are the shared reservations: a source keeps
+                # its one link, and this linker links a target once.
+                linked = {row["store_id"] for kind in ("possible_replay_of", "link_pending")
+                          for row in self._store.get_message_relations(
+                              [sid for sid, _target, _at in pairs], kind)}
+                linked.update(attempt.get("link_sources_used", ()))
+                used = {row["related_store_id"] for row in self._store.get_message_relations(
+                    [target for _sid, target, _at in pairs], "possible_replay_of", related=True)}
+                for sid, target, at in pairs:
+                    if sid in linked or target in used:
+                        continue
+                    # The borrowed stamp in observed_at marks the link as non-consuming: the other linkers
+                    # still give a later copy of E its own link to E.
+                    self._store.add_message_relations([[(sid, "possible_replay_of", target, None, at)]])
+                    linked.add(sid)
+                    used.add(target)
+        except Exception as exc:
+            self._raise_ingest_busy(exc)
+            logger.warning("LCM borrowed-stamp occurrence link write failed (%s)", type(exc).__name__)
+
     def _link_stored_todo_replays(self, messages, stored_at):
         """Todo scaffolds lack replay identity; annotate exact copies without suppressing rows."""
         ids = [sid for idx, sid in stored_at.items() if sid and messages[idx].get("role") == "user"
@@ -7385,7 +7494,8 @@ class LCMEngine(
                                if _normalize_conversation_id_value(target_conversation) == conversation]
                     # One earlier occurrence supplies at most one replay link: one batched read of the spent targets.
                     spent = {r["related_store_id"] for r in self._store.get_message_relations(
-                        targets, "possible_replay_of", related=True)}
+                        targets, "possible_replay_of", related=True)
+                        if r["observed_at"] is None}  # a borrowed-stamp link never consumes its target
                     target = next((t for t in targets if t not in spent), None)
                     if target is not None:
                         self._store.add_message_relations([[(sid, "possible_replay_of", target, None, None)]])
@@ -8091,7 +8201,7 @@ class LCMEngine(
                                 "SELECT 1 FROM sqlite_master WHERE name='message_relations'").fetchone()
                             used = {row[0] for row in conn.execute(
                                 "SELECT related_store_id FROM message_relations "
-                                "WHERE kind='possible_replay_of' AND related_store_id<?", (first,))} if has_relations else set()
+                                "WHERE kind='possible_replay_of' AND related_store_id<? AND observed_at IS NULL", (first,))} if has_relations else set()
                             used.update(attempt.get("link_targets_used", ()))
                             seeded = list(conn.execute(
                                 "SELECT r.store_id,r.kind,m.content FROM message_relations r "
@@ -8984,6 +9094,7 @@ class LCMEngine(
         tool_sources = {store_ids[pos] for pos, _target in tool_link_plan or ()}
         self._link_restamped_occurrences(messages, stored_at, restamp_metadata, recovery_fallback, link_allocation,
                                          tool_sources)
+        self._link_borrowed_stamp_occurrences(messages, stored_at)
         if anchor_plan is not None:
             try:
                 with self._ingest_evidence():
@@ -12331,11 +12442,14 @@ class LCMEngine(
             self._ingest_messages(tail["view"], allow_session_end_replay_proof=False, no_view=True, retried_tail=tail)
             # The host can still rewrite this view, so the next ingest finds its own cursor.
             self._ingest_cursor_needs_reconcile = True
-            if conflict is not None and not self._cold_tail_conflict_placed(tail, conflict, deadline=deadline):
+            if conflict is not None and (conflict is False or not self._cold_tail_conflict_placed(tail, conflict, deadline=deadline)):
                 tail["kept_on_conflict"] = True
                 self._ledger_count("ledger.tail.cold_unmatched")
+                if conflict is False:
+                    self._ledger_count("ledger.tail.cold_scan_capped")
                 if not tail.get("unmatched_warned"):
-                    logger.warning("LCM session-end cold tail conflicting stamp unplaced; retry pending")
+                    logger.warning("LCM session-end cold tail conflict scan capped; retry pending" if conflict is False else
+                                   "LCM session-end cold tail conflicting stamp unplaced; retry pending")
                     tail["unmatched_warned"] = True
                 return False
             return True
@@ -12343,19 +12457,51 @@ class LCMEngine(
         # check, so a retyped row never stands for the view's own.
         return self._retry_cold_tail_s3(tail, stamps=same, deadline=deadline)
 
+    def _cold_tail_ingest_drops(self, message):
+        """Whether ignore filtering excludes this incoming host row."""
+        return self._matches_ignore_message_patterns(message)
+
+    def _cold_tail_ingest_view(self, tail):
+        """Exclude host rows matching configured ignore patterns from the exit count."""
+        view = tail["view"]
+        if not self._compiled_ignore_message_patterns:
+            return view
+        kept = [message for message in view if not self._cold_tail_ingest_drops(message)]
+        return view if len(kept) == len(view) else kept
+
     def _cold_tail_one_conflict(self, tail):
-        """Return the sole unexplained user stamp conflict in an identity-matching prefix."""
+        """Return the sole unexplained user stamp conflict, None, or False if the scan caps."""
         view, session, home = tail["view"], tail["session_id"], tail["hermes_home"]
         stored = tail["store"].get_range(session, limit=len(view) + 1,
             conversation_id=_normalize_conversation_id_value(tail["conversation_id"]))
-        conflicts = []
-        for index, (row, message) in enumerate(zip(stored, view)):
+        # Extra pages are read only past stored rows the walk skipped; only they count toward the cap.
+        read, conflicts = 0, []
+        stored_index = index = 0
+        while stored and index < len(view):
+            if stored_index == len(stored):
+                if read >= _COLD_TAIL_CONFLICT_SCAN_ROWS:
+                    return False
+                stored = tail["store"].get_range(session, start_id=stored[-1]["store_id"] + 1,
+                    limit=min(1000, _COLD_TAIL_CONFLICT_SCAN_ROWS - read),
+                    conversation_id=_normalize_conversation_id_value(tail["conversation_id"]))
+                read, stored_index = read + len(stored), 0
+                continue
+            row, message = stored[stored_index], view[index]
             if (self._session_end_prefix_compare_identity(row, session_id=session, hermes_home=home) !=
                     self._session_end_prefix_compare_identity(message, session_id=session, hermes_home=home)):
+                if self._cold_tail_ingest_drops(message):
+                    index += 1
+                    continue
+                elif self._matches_ignore_message_patterns(row, stored_row=True):
+                    stored_index += 1
+                    continue
                 return None
             stamp, seen = _normalize_observed_at(message.get("timestamp")), _normalize_observed_at(row.get("observed_at"))
-            if None not in (stamp, seen) and stamp != seen:
+            if (None not in (stamp, seen) and stamp != seen and not
+                    (self._cold_tail_ingest_drops(message) and self._matches_ignore_message_patterns(row, stored_row=True))):
                 conflicts.append((index, row, message, stamp))
+            stored_index += 1
+            index += 1
         if len(conflicts) != 1:
             return None
         index, row, message, stamp = conflicts[0]
@@ -12413,6 +12559,8 @@ class LCMEngine(
         with self._cold_tail_diagnostic_commit(tail["store"], session, ids):
             stored = self._cold_tail_stored(tail, stamps=stamps)
             conflict = self._cold_tail_one_conflict(tail) if stored is None or not stamps else None
+            if conflict is False:
+                stored = None
             if stored is not None and not stamps and conflict is not None:
                 if stored < len(view):
                     ids.extend(self._append_off_current_session_end_suffix(session, view[stored:], source=tail["source"],
@@ -12425,8 +12573,11 @@ class LCMEngine(
                 if conflict is not None:
                     tail["kept_on_conflict"] = True
                 self._ledger_count("ledger.tail.cold_unmatched")
+                if conflict is False:
+                    self._ledger_count("ledger.tail.cold_scan_capped")
                 if not tail.get("unmatched_warned"):
-                    logger.warning("LCM session-end cold tail prefix mismatch; retry pending")
+                    logger.warning("LCM session-end cold tail conflict scan capped; retry pending" if conflict is False else
+                                   "LCM session-end cold tail prefix mismatch; retry pending")
                     tail["unmatched_warned"] = True
                 return False
             if stored < len(view):
@@ -12531,7 +12682,7 @@ class LCMEngine(
                           if _normalize_conversation_id_value(row.get("conversation_id")) == conversation)
             start = rows[-1]["store_id"] + 1
         wanted = Counter((self._session_end_prefix_compare_identity(message, session_id=session, hermes_home=home),
-                          _normalize_observed_at(message.get("timestamp"))) for message in tail["view"])
+                          _normalize_observed_at(message.get("timestamp"))) for message in self._cold_tail_ingest_view(tail))
         missing, available = 0, Counter()
         for (identity, stamp), amount in wanted.items():
             if stamp is not None:
@@ -12627,6 +12778,8 @@ class LCMEngine(
             return self._compaction_closing
 
     def shutdown(self):
+        # #2482: a live delegated child's in-flight or queued store needs this engine open; it is bounded.
+        drain_live_child_stores(_aux_session._LIVE_CHILD_SHUTDOWN_DRAIN_S)
         with self._compaction_gate:
             self._compaction_closing = True
         sender_capture.retire(self)

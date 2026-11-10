@@ -320,7 +320,7 @@ On the `main` line, output with all three opt-in flags enabled is:
 
 ```text
 Plugins (1):
-  ✓ hermes-lcm-x v0.29.1 (16 tools)
+  ✓ hermes-lcm-x v0.30.0 (16 tools)
 
 Provider Plugins:
   Context Engine: lcm-x
@@ -328,15 +328,26 @@ Provider Plugins:
 
 Older `v0.23.x` stable tags report `hermes-lcm v0.23.x (15 tools)` and
 engine `lcm`. Version text alone is not release proof; verify the loaded commit
-and tag. The current stable release is
-[v0.29.1](https://github.com/electricsheephq/lcm-x/releases/tag/v0.29.1)
-at `3a4a08ff501347a79669fab51444c471b09b551d` (2026-11-03); see [project status](project-status.md).
-The rollback target for v0.29.1 is `v0.29.0`; it adds no schema change. Take a
+and tag. `0.30.0` is the forward identity of the next minor release: the `v0.30.0-rc1`
+tag carries it first, the gauntlet runs at the last rc tag, and the GA tree must be
+that rc tree plus the GA release-notes file. The rollback target for this candidate
+is the latest stable release (`v0.29.2`); take a SQLite-safe backup and verify ordered messages and summary
+provenance through rollback and re-upgrade. The current stable release is
+[v0.29.2](https://github.com/electricsheephq/lcm-x/releases/tag/v0.29.2)
+at `261d41ea928eec3dc5b8db13c70f044392adf124` (2026-11-09); see [project status](project-status.md).
+The rollback target for v0.29.2 is `v0.29.1`; it adds no schema change. Take a
 SQLite-safe backup first, and compare ordered raw messages and summary provenance
-through upgrade, rollback and re-upgrade. v0.29.0 does not read the compaction
-escape record that v0.29.1 keeps in the existing session metadata.
+through upgrade, rollback and re-upgrade.
 
 For the previous release,
+[v0.29.1](https://github.com/electricsheephq/lcm-x/releases/tag/v0.29.1)
+at `3a4a08ff501347a79669fab51444c471b09b551d` (2026-11-03),
+the rollback target is `v0.29.0`; it adds no schema change. Take a SQLite-safe backup first, and
+compare ordered raw messages and summary provenance through upgrade, rollback and re-upgrade.
+v0.29.0 does not read the compaction escape record that v0.29.1 and later keep in the existing
+session metadata.
+
+For the release before that,
 [v0.29.0](https://github.com/electricsheephq/lcm-x/releases/tag/v0.29.0)
 at `c13dea3783bdbd1aab52d83dff5d009bfade0bd2` (2026-10-28),
 the rollback target is `v0.28.1`. Take a SQLite-safe backup first, and
@@ -772,8 +783,6 @@ Summary nodes carry no conversation-family key at this layer, so a rollup does
 not automatically span sessions across a `/new` rotation; after a rotation,
 retained higher-depth summaries are carried into the new session and remain
 retrievable, but per-period rollup rows are rebuilt under the new session scope.
-Build-cursor state is tracked per `(period_kind, scope)` so multiple scopes
-sharing one database never share a cursor.
 
 With `LCM_ENABLE_SLASH_COMMAND=true`, operators can inspect the current
 foreground session and request a bounded synchronous rebuild:
@@ -799,10 +808,10 @@ summarization.
 
 `lcm_inspect` always includes a `temporal_rollups` block with the enabled flag,
 ready/stale/building/failed counts for each period kind, oldest stale age,
-last-build cursors, and the last error. `/lcm rollups` renders the same data as a
+and the last error. `/lcm rollups` renders the same data as a
 table. Both paths are read-only and make no LLM calls. When the feature is off
 or its tables are empty, the block remains present with zero counts and null
-age/cursor/error values so monitoring consumers do not need a second schema.
+age/error values so monitoring consumers do not need a second schema.
 
 LCM is lossless by default: durable messages, FTS rows, summaries, and payloads
 remain untouched unless `LCM_SENSITIVE_PATTERNS_ENABLED=true` is explicitly set.

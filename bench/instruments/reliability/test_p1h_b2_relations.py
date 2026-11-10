@@ -610,3 +610,117 @@ def test_composite_of_witness_leaves_a_silent_part_silent():
     split = multiset.split_surplus(groups, [(9, "composite_of", None, 0), (9, "composite_of", 7, 1)], rows)
     assert (split["visible_surplus_rows"], split["silent_surplus_rows"], split["composite_rows"]) == (1, 1, 1)
     assert [e["store_id"] for e in split["silent_surplus_examples"]] == [7]
+
+
+@pytest.mark.parametrize("case,credited,visible", [
+    ("scaffold", {9}, 1), ("stored-todo", {9}, 1), ("repeated-part", {9}, 1),
+    ("replay-link", {9}, 2), ("distinct-parts", {9, 10}, 2), ("partial-overlap", {9}, 1),
+    ("later-part", set(), 0), ("non-user-part", set(), 0), ("stored-non-user-part", set(), 0),
+    ("rejected-claims-nothing", {9, 12}, 2),
+])
+def test_composite_consume_once(case, credited, visible):
+    rows = todo_rows({**PARTS, 7: ("S", "user", "prompt three"), 11: ("S", "user", "later")})
+    composites = {9: [None, 1]}
+    if case == "stored-todo":
+        composites = {9: [5, 1]}
+    elif case in ("repeated-part", "replay-link", "distinct-parts"):
+        composites = {10: [None, 2 if case == "distinct-parts" else 1], 9: [None, 1]}
+    elif case in ("partial-overlap", "rejected-claims-nothing"):
+        composites = {10: [None, 2, 7], 9: [None, 1, 2]}
+        if case == "rejected-claims-nothing":
+            composites = {12: [None, 7], **composites}
+    elif case == "later-part":
+        composites = {9: [None, 11]}
+    elif case in ("non-user-part", "stored-non-user-part"):
+        rows[1] = ("S", "assistant", rows[1][2])
+        if case == "stored-non-user-part":
+            composites = {9: [5, 1]}
+    relations = []
+    for sid, parts in composites.items():  # higher composite first: credit must follow store order
+        rows[sid] = ("S", "user", "\n\n".join(
+            todo_rows({0: ("S", "user", BLOCK)})[0][2] if p is None else rows[p][2] for p in parts))
+        relations += [(sid, "composite_of", p, i) for i, p in enumerate(parts)]
+    if case == "replay-link":
+        relations.append((10, "possible_replay_of", 9))
+    assert multiset.composite_witness(relations, rows) == credited
+    groups = []
+    multiset.score([], [(sid, *rows[sid]) for sid in composites], surplus_keys=groups)
+    split = multiset.split_surplus(groups, relations, rows)
+    assert (split["composite_rows"], split["visible_surplus_rows"], split["silent_surplus_rows"]) == (
+        len(credited), visible, len(composites) - visible)
+
+
+@pytest.mark.parametrize("composite_id,reported,credited", [(3, [], 0), (4, [4], 1)],
+                         ids=["expected-copy-not-reported", "later-copy-reported"])
+def test_creditable_composite_ids_exclude_the_expected_copy(composite_id, reported, credited):
+    """Review of #2495 (probe A): the host shows C once and a second copy is stored. Only the key's later copy can be
+    credited, so a composite_of on the expected copy is witnessed but not reported as a credited row."""
+    rows = todo_rows({1: ("S", "user", "prompt one"), 3: ("S", "user", BLOCK + "\n\nprompt one"),
+                      4: ("S", "user", BLOCK + "\n\nprompt one")})
+    c = rows[3][2]
+    relations = [(composite_id, "composite_of", None, 0), (composite_id, "composite_of", 1, 1)]
+    groups = []
+    multiset.score([("user", "prompt one"), ("user", c)], [(s, *rows[s]) for s in sorted(rows)], surplus_keys=groups)
+    forms, creditable = multiset.attribution_forms(relations, rows), set()
+    split = multiset.split_surplus(groups, relations, rows, forms, creditable)
+    assert forms["composite_rows"] == {composite_id}
+    assert sorted(forms["composite_rows"] & {s for g in groups for s in g[2]}) == [composite_id]  # 22f25b19's list
+    assert sorted(forms["composite_rows"] & creditable) == reported
+    assert (split["composite_rows"], split["visible_surplus_rows"], split["silent_surplus_rows"]) == (
+        credited, credited, 1 - credited)
+
+
+def _composite_split(stored, expected, composites, extra=()):
+    """Score ``stored`` (store_id -> text, session S, role user) against ``expected`` texts, with ``composites``
+    (C -> parts, None for the todo scaffold) and ``extra`` relations; returns (split, reported composite ids)."""
+    rows = todo_rows({sid: ("S", "user", text) for sid, text in stored.items()})
+    relations = [(c, "composite_of", p, i) for c, parts in composites.items() for i, p in enumerate(parts)]
+    relations += list(extra)
+    groups = []
+    multiset.score([("user", rows[s][2]) for s in expected], [(s, *rows[s]) for s in sorted(rows)],
+                   surplus_keys=groups)
+    forms, creditable = multiset.attribution_forms(relations, rows), set()
+    split = multiset.split_surplus(groups, relations, rows, forms, creditable)
+    return split, sorted(forms["composite_rows"] & creditable)
+
+
+def test_composite_ids_exclude_a_key_with_zero_capacity():
+    """Review of #2495 (NeonDiff P2, CodeRabbit): the host shows C twice and three copies are stored, so the unmarked
+    copies take the one surplus copy first and the witnessed composite explains nothing. It is not reported."""
+    c = BLOCK + "\n\nprompt one"
+    split, reported = _composite_split({1: "prompt one", 3: c, 4: c, 5: c}, [1, 3, 4], {3: [None, 1]})
+    assert reported == []
+    assert (split["composite_rows"], split["visible_surplus_rows"], split["silent_surplus_rows"]) == (0, 0, 1)
+
+
+def test_composite_ids_list_only_the_copies_the_matching_credits():
+    """Three valid composites with distinct parts compete for one surplus copy: exactly one is reported."""
+    c = BLOCK + "\n\nprompt one"
+    split, reported = _composite_split({1: "prompt one", 2: "prompt one", 3: "prompt one", 4: c, 5: c, 6: c},
+                                       [1, 2, 3, 4, 5], {4: [None, 1], 5: [None, 2], 6: [None, 3]})
+    assert len(reported) == 1 and set(reported) <= {4, 5, 6}
+    assert (split["composite_rows"], split["visible_surplus_rows"], split["silent_surplus_rows"]) == (1, 1, 0)
+
+
+def test_composite_ids_when_a_replay_link_explains_the_same_copy():
+    """A composite and a possible_replay_of pair compete for one copy: the copy is visible once, the form adds
+    nothing beyond the pair (composite_rows 0), and at most that copy is reported."""
+    c = BLOCK + "\n\nprompt one"
+    split, reported = _composite_split({1: "prompt one", 3: c, 4: c}, [1, 3], {4: [None, 1]},
+                                       [(4, "possible_replay_of", 3)])
+    assert set(reported) <= {4}
+    assert (split["composite_rows"], split["visible_surplus_rows"], split["silent_surplus_rows"]) == (0, 1, 0)
+
+
+def test_composite_ids_exclude_a_reserved_merge_key_with_zero_capacity():
+    """Review of #2495 (Astra, d1d1964c): a key with a reserved merge takes the worst case. Its one unmarked copy
+    fills the one surplus copy, so the witnessed composite explains nothing and is not reported."""
+    rows = todo_rows({1: ("S", "user", "prompt one"), 3: ("S", "user", BLOCK + "\n\nprompt one"),
+                      4: ("S", "user", BLOCK + "\n\nprompt one")})
+    relations = [(3, "composite_of", None, 0), (3, "composite_of", 1, 1)]
+    forms, creditable = multiset.attribution_forms(relations, rows), set()
+    split = multiset.split_surplus([(("user", multiset.h(rows[3][2])), 1, [3, 4], [3])], relations, rows, forms,
+                                   creditable)
+    assert forms["composite_rows"] == {3}
+    assert sorted(forms["composite_rows"] & creditable) == []
+    assert (split["composite_rows"], split["visible_surplus_rows"], split["silent_surplus_rows"]) == (0, 0, 1)

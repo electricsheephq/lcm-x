@@ -96,10 +96,16 @@ Directories are created 0700 and files 0600. A profile backup that copies `$HERM
 - **Checkpoints:** at +24, +72 and +144 hours, between roots, the recorder backs up `lcm.db` and writes a
   `checkpoint_sealed` event with the seq it covers. Reading with a checkpoint returns the prefix through that seq, and
   a replay of it must match the backup, without needing an exit. A checkpoint refused by the cap or disk floor
-  is skipped, counted as `recorder.checkpoint_skipped`, and warned with its cause; recording continues.
-- **Ended without exit:** Hermes ends its gateway and CLI with `os._exit`, so atexit never runs and a recording
-  normally ends as "ended without exit". That is a normal end; the sealed checkpoints are the comparison points. When
-  atexit does run, the recorder writes `exit_begin` and records the exit flushes synchronously after a successful
+  or once the exit drain begins is skipped, counted as `recorder.checkpoint_skipped`, and warned with its cause; recording continues.
+- **Ended without exit:** a recording ends with `exit_begin` only if Python's atexit runs in the process that runs
+  the agent. The Hermes gateway ends with `os._exit`, which skips it, and in Hermes v0.23.0 the CLI (`hermes -z`
+  included), ACP, the TUI and local Desktop run their turns in the gateway, so their recordings end as "ended
+  without exit". That is a normal end; the sealed checkpoints are the comparison points. Before v0.23.0, `hermes -z`
+  one-shot runs end with `os._exit` too, so their recordings end the same way; the interactive CLI and ACP run the
+  agent themselves and end normally, so atexit runs; the TUI's gateway
+  (`tui_gateway`) runs it when its input closes, but a TUI quit stops it with SIGTERM and a short `os._exit`
+  backstop (1 s by default), which can cut `exit_begin` short (checked on v0.21.7 and v0.22.2).
+  When atexit does run, the recorder writes `exit_begin` and records the exit flushes synchronously after a successful
   drain. Session end and shutdown skip the ordinary 2 s event drain while a snapshot or checkpoint backup is
   pending or running. A drain timeout stops admission with `exit_timeout` in status. Recording stops in a forked child (`fork`)
   before it can wait on inherited locks; the parent recording continues.
@@ -110,7 +116,7 @@ Directories are created 0700 and files 0600. A profile backup that copies `$HERM
   are not proven by replay. Elapsed-time fields (`duration_ms`, `last_compaction_duration_ms`, the no-progress hold's
   wall-clock `until`) are excluded from comparison.
 - LLM callers that call the host's `call_llm` directly (`extraction.py`, `assertion_extraction.py`,
-  `host_evidence.py`, `selective_compiler.py`, `expand_query_tools.py`): their tables are outside the comparison and
+  `selective_compiler.py`, `expand_query_tools.py`): their tables are outside the comparison and
   replay stubs them. The `lcm_expand_query` tool return depends on that synthesis and is excluded from comparison.
 - A caller that reaches the engine other than through a root is not recorded.
 - Changes to payload files made outside LCM after the pin are not recorded.

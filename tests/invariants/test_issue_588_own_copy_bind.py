@@ -79,20 +79,68 @@ def test_unstamped_fresh_bind_over_a_copy_set_stores_only_new_rows(tmp_path, mon
     with getattr(engine._store, "ingest_atomic", contextlib.nullcontext)():
         for i in (1, 2):
             engine._store.append("S", deepcopy(view[i]), conversation_id="conv")
-    stored = len(engine._store.get_session_messages("S"))
+    source = [*view, view[1], view[2]]
+    initial = engine._store.get_session_messages("S")
+    _expect_stored_shape([row["content"] for row in initial], [row["content"] for row in source],
+                         [row["content"] for row in source], "setup")
     monkeypatch.setenv("LCM_INGEST_LEDGER", ledger)
-    growth = []
+    snapshots, sent, growth = [], [], []
+    previous = len(initial)
     for bind in (1, 2):
         engine.shutdown()
         engine = _engine(tmp_path)
         view = [*view, {"role": "user", "content": f"new-{bind}"}]
+        sent.append(deepcopy(view))
         engine.ingest(deepcopy(view))
-        if engine._ingest_failure_count:  # a swallowed ingest failure must not pass as the pin
+        if engine._ingest_failure_count:
             pytest.fail(f"ingest failed: {engine._last_ingest_error}")
-        rows = len(engine._store.get_session_messages("S"))
-        if rows <= stored:  # a bind that stored nothing (bypass path) must not pass as the pin
-            pytest.fail(f"bind {bind} stored no row")
-        growth.append(rows - stored)
-        stored = rows
+        rows = engine._store.get_session_messages("S")
+        snapshots.extend((bind, row["role"], row["content"]) for row in rows)
+        growth.append(len(rows) - previous)
+        previous = len(rows)
+    at = {row["store_id"]: index for index, row in enumerate(rows)}
+    links = [(at.get(source), at.get(target)) for source, target in engine._store._conn.execute(
+        "SELECT store_id, related_store_id FROM message_relations WHERE kind = 'possible_replay_of' "
+        "ORDER BY relation_id")] if engine._store._conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE name = 'message_relations'").fetchone() else []
     engine.shutdown()
-    assert growth == [1, 1], growth
+    fixed = [(bind, row["role"], row["content"]) for bind in (1, 2) for row in [*source, *sent[bind - 1][8:]]]
+    known = [(bind, row["role"], row["content"]) for bind in (1, 2)
+             for row in [*source, *(row for view in sent[:bind] for row in view)]]
+    # Main links each re-stored view to unused earlier copies, consuming the initial copy set on bind two.
+    n, start = len(sent[0]) - 1, len(source)
+    known_links = [*((start + i, i) for i in range(n)), (start + n + 1, start),
+                   (start + n + 2, n), (start + n + 3, n + 1),
+                   *((start + n + 4 + i, start + 3 + i) for i in range(n - 2))] if ledger == "shadow" else []
+    diagnostic = dict(growth=growth, stored=[row["content"] for row in rows], links=links)
+    _expect_stored_shape([*snapshots, *(("link", *link) for link in links)], fixed,
+                         [*known, *(("link", *link) for link in known_links)], f"#588 known shape: {diagnostic}")
+
+
+def _expect_stored_shape(observed, fixed, known, message, error_type=AssertionError):
+    """Accept only the complete fixed list or the complete named-limit list, in store order."""
+    if observed == fixed:
+        return
+    if observed == known:
+        raise error_type(message)
+    differences = []
+    for label, expected in (("fixed", fixed), ("known", known)):
+        index = next((i for i, (actual, wanted) in enumerate(zip(observed, expected)) if actual != wanted),
+                     min(len(observed), len(expected)))
+        differences.append(f"{label}: first difference={index}, lengths={len(observed)}/{len(expected)}")
+    pytest.fail("unexpected stored shape; " + "; ".join(differences))
+
+
+@pytest.mark.parametrize("case", ["known", "fixed", "doubled", "swapped"])
+def test_stored_shape_comparison(case):
+    fixed = [("user", "first"), ("assistant", "second")]
+    known = [fixed[0]]
+    observed = {"known": known, "fixed": fixed, "doubled": [fixed[0], *fixed], "swapped": fixed[::-1]}[case]
+    if case == "known":
+        with pytest.raises(AssertionError, match="synthetic known shape"):
+            _expect_stored_shape(observed, fixed, known, "synthetic known shape", AssertionError)
+    elif case == "fixed":
+        _expect_stored_shape(observed, fixed, known, "synthetic known shape", AssertionError)
+    else:
+        with pytest.raises(pytest.fail.Exception, match="first difference=.*lengths="):
+            _expect_stored_shape(observed, fixed, known, "synthetic known shape", AssertionError)
