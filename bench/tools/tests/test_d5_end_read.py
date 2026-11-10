@@ -78,7 +78,7 @@ def test_an_unexplained_difference_is_no_hint_and_inconclusive():
     assert check2["unmatched_by_hint"] == {"equal after stripping edge whitespace": 0,
                                            "payload swapped for a reference": 0,
                                            "session never stored; a parent session matches a declared pattern": 0,
-                                           "no hint": 1}
+                                           "matches a declared message pattern": 0, "no hint": 1}
     assert (check2["stored_rows_not_matched"], verdict) == (1, "INCONCLUSIVE")
 
 
@@ -337,3 +337,18 @@ def test_the_excluded_sessions_are_listed_by_hash():
            "store": [*START["store"], stored(11, "s1", "a")]}
     check2 = er.coverage(START, end, identity, "/x", by_design)
     assert check2["not_stored_by_design"]["session_sha256_12"] == [er._sha12("cron_7")]
+
+
+def test_a_row_a_declared_message_pattern_may_have_dropped_is_unmatched_never_lost():
+    end = {"host": [*START["host"], host(2, "s9", "heartbeat ok"), host(3, "s1", "a")],
+           "store": [*START["store"], stored(11, "s1", "a")]}
+    check2 = er.coverage(START, end, identity, "/x", message_excluded=lambda row: "heartbeat" in row["content"])
+    assert (check2["lost"], check2["unmatched"]) == (0, 1)
+    assert check2["unmatched_by_hint"]["matches a declared message pattern"] == 1
+    assert er.verdict(PRESERVED, check2) == "INCONCLUSIVE"
+
+
+def test_an_invalid_pin_digest_is_never_echoed():
+    args = SimpleNamespace(start_pin_sha256="/private/typed/path", end_pin_sha256="/private/typed/path")
+    result = er.end_read(args)
+    assert result["pins_sha256"] == {} and "typed" not in json.dumps(result)

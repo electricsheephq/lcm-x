@@ -14,7 +14,7 @@ reported as unmatched with a hint class, never as lost.
 
 Output: one JSON object with counts, ids, sha256s and the verdict rule; never row content, a path or a settings value.
 
-Usage: python -m bench.tools.d5_end_read --config DECLARATION --instrument-dir KIT --scratch DIR
+Usage: python -m bench.tools.d5_end_read --config DECLARATION --config-sha256 HEX --instrument-dir KIT --scratch DIR
          --start DIR --start-pin FILE --start-pin-sha256 HEX --end DIR --end-pin FILE --end-pin-sha256 HEX
 """
 from __future__ import annotations
@@ -38,10 +38,12 @@ VERDICT_RULE = ("FAIL when check 1 fails or any window host row is LOST; LOST on
                 "or both pins are the same, when a pin, the declaration or the kit does not verify, when the declaration "
                 "has no settings.lcm session patterns, or when any session in the end store that matches a declared "
                 "pattern holds a stored row; a window row in a session matching a declared ignore or stateless pattern is "
-                "counted apart as not stored by design, never LOST or matched; PASS only with check 1 PASS, a non-empty "
+                "counted apart as not stored by design, never LOST or matched; a window row matching a declared message "
+                "pattern is unmatched, never LOST; PASS only with check 1 PASS, a non-empty "
                 "window of other rows and 0 unmatched")
 HINTS = ("equal after stripping edge whitespace", "payload swapped for a reference",
-         "session never stored; a parent session matches a declared pattern", "no hint")
+         "session never stored; a parent session matches a declared pattern",
+         "matches a declared message pattern", "no hint")
 _HEX64 = re.compile(r"[0-9a-f]{64}")
 
 
@@ -61,7 +63,7 @@ def _hint(host, candidates, end_dir):
         if (isinstance(text, str) and runner._swap_payload(end_dir, stored) == text) or \
                 (isinstance(stored, str) and runner._swap_payload(end_dir, text) == stored):  # Either side the reference.
             return HINTS[1], row["store_id"]
-    return HINTS[3], None
+    return HINTS[4], None
 
 
 def session_matchers(lcm_settings, platforms, parents=None):
@@ -89,7 +91,8 @@ def session_matchers(lcm_settings, platforms, parents=None):
     return by_design, inherits
 
 
-def coverage(start, end, identity, end_dir, by_design=lambda session: False, inherits=lambda session: False):
+def coverage(start, end, identity, end_dir, by_design=lambda session: False, inherits=lambda session: False,
+             message_excluded=lambda row: False):
     """Check 2 over the runner's row dicts ({"store": [...], "host": [...]}) of both captures."""
     top_host = max((h["id"] for h in start["host"]), default=0)
     top_store = max((r["store_id"] for r in start["store"]), default=0)
@@ -111,6 +114,12 @@ def coverage(start, end, identity, end_dir, by_design=lambda session: False, inh
         s["matched"] += len(pairs)
         for j, host in enumerate(hosts):
             if j in used_hosts:
+                continue
+            if message_excluded(host):  # The engine may have dropped it by a declared message pattern: unproven.
+                hints[HINTS[3]] += 1
+                s["unmatched"] += 1
+                unmatched.append({"host_id": host["id"], "session_sha256_12": _sha12(session), "class": HINTS[3],
+                                  "candidate_store_id": None})
                 continue
             if session not in stored_sessions and inherits(session):  # Maybe a bypass handover: never LOST, unproven.
                 hints[HINTS[2]] += 1
@@ -186,7 +195,8 @@ def _sessions(folder):
 
 def end_read(args):
     out = {"schema": "d5-end-read/1", "verdict_rule": VERDICT_RULE, "credits": "none (release manager, 2026-11-10)",
-           "pins_sha256": {"start": args.start_pin_sha256, "end": args.end_pin_sha256}}
+           "pins_sha256": {k: v for k, v in (("start", args.start_pin_sha256), ("end", args.end_pin_sha256))
+                           if isinstance(v, str) and _HEX64.fullmatch(v)}}  # Never an unvalidated argument.
     if args.start_pin_sha256 == args.end_pin_sha256:
         return {**out, "verdict": INCONCLUSIVE, "reason": "the start and end pins are the same capture"}
     for side in ("start", "end"):
@@ -212,7 +222,10 @@ def end_read(args):
     except Exception as exc:  # noqa: BLE001  # Never a message: it can carry a path.
         return {**out, "verdict": INCONCLUSIVE, "reason": f"a store could not be read ({type(exc).__name__})"}
     check1 = bars.bar3(start["store"], end["store"], identity)
-    check2 = coverage(start, end, identity, args.end, *session_matchers(lcm, *_sessions(args.end)))
+    patterns = [re.compile(x) for x in lcm.get("ignore_message_patterns") or [] if isinstance(x, str)]
+    check2 = coverage(start, end, identity, args.end, *session_matchers(lcm, *_sessions(args.end)),
+                      message_excluded=lambda row: any(isinstance(row.get("content"), str) and x.search(row["content"])
+                                                       for x in patterns))
     return {**out, "verdict": verdict(check1, check2), "check1_preservation": check1, "check2_coverage": check2,
             "start_rows": {k: len(v) for k, v in start.items()}, "end_rows": {k: len(v) for k, v in end.items()}}
 
