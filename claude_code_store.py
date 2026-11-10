@@ -1036,6 +1036,12 @@ def _drain_once(home: Path, report: dict, deadline: Optional[float], config: Any
             remember_session(store, record)
         for path, record in claimed:
             report["records"] += 1
+            if not record:  # a record that cannot be read is set aside and reported, never drained as nothing (#2535)
+                report["failed"] += 1
+                report["complete"] = False
+                _log_failure(home, "record", "unreadable")
+                os.replace(path, path.with_suffix(".failed"))
+                continue
             try:
                 for lineage in lineages_of(record):
                     outcome = drain(store, lineage, deadline=deadline, facts=record_facts(record, lineage))

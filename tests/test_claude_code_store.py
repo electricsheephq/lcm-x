@@ -2551,5 +2551,7 @@ def test_a_claimed_record_that_cannot_be_read_is_set_aside(tmp_path, home, herme
     assert len(list((home / "spool").glob("*.failed"))) == 1
     _record(hook, home, path, event="SessionEnd", transcript_seen=False)
     cc.run_worker(home, hermes_home=hermes, settle_s=0)
-    report = ca.audit(home)
-    assert not path.exists() and not report["verified"]
+    report, filtered = ca.audit(home), ca.audit(home, session="s1")
+    assert not path.exists() and len(list((home / "spool").glob("*.failed"))) == 1
+    for result in (report, filtered):  # the session's own audit cannot read verified either
+        assert not result["verified"] and "spool:unreadable_failed_record" in result["unverified"]
