@@ -1288,19 +1288,21 @@ def _reader_payload_search(path: Path, budget: int, in_scope) -> dict[str, Any]:
     return result
 
 
-_PAYLOAD_TERM_CAP = 16  # #2586: a longer query keeps the literal match only, so a payload is scanned at most 17 times
+_PAYLOAD_TERM_CAP = 16  # #2586: words across all operands; a longer query keeps the literal match only
 
 
-def _payload_match(content: str, query: str, tokens: list[str], operands: list[str]) -> tuple[int, int, int, int] | None:
-    """#2586: (tier, start, end, terms) for a saved output. Tier 0 is the query as typed; tier 1 is every operand (a
-    quoted one as a phrase) in any order; tier 2 is any operand, only for an OR query (the any-term retry). The span is
-    the first matched operand. Case-insensitive; a term matches whole words, as the message index does."""
+def _payload_match(content: str, query: str, tokens: list[str], operands: list[str],
+                   any_term: bool = False) -> tuple[int, int, int, int] | None:
+    """#2586: (tier, start, end, terms) for a saved output, in one pass. Tier 0 is the query as typed; tier 1 is every
+    operand (a quoted one as a phrase) in any order; tier 2 is any operand, for an OR query or when ``any_term`` asks
+    for the retry's candidates. The span is the first matched operand. Case-insensitive; a term matches whole words, as
+    the message index does. At most 1 + 16 searches, each linear in the content times a phrase of at most 16 words."""
     if (match := re.search(re.escape(query), content, flags=re.IGNORECASE)) is not None:
         return 0, match.start(), match.end(), len(operands)
     words = [re.findall(r"\w+", operand) for operand in operands]
-    if "NOT" in tokens or not operands or len(operands) > _PAYLOAD_TERM_CAP or not all(words):
+    if "NOT" in tokens or not operands or sum(map(len, words)) > _PAYLOAD_TERM_CAP or not all(words):
         return None
-    any_term, found = "OR" in tokens, []
+    any_term, found = any_term or "OR" in tokens, []
     for operand, parts in zip(operands, words):
         prefix = not operand.startswith('"') and operand.endswith("*")
         hit = re.search(r"(?<!\w)" + r"\W+".join(map(re.escape, parts)) + ("" if prefix else r"(?!\w)"), content, re.IGNORECASE)
@@ -1308,7 +1310,7 @@ def _payload_match(content: str, query: str, tokens: list[str], operands: list[s
             return None
         found += [hit] if hit else []
     first = min(found, key=lambda hit: hit.start(), default=None)
-    return None if first is None else (2 if any_term else 1, first.start(), first.end(), len(found))
+    return None if first is None else (1 if len(found) == len(operands) else 2, first.start(), first.end(), len(found))
 
 
 def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
@@ -1756,8 +1758,7 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
                     return json.dumps({"error": f"Externalized ref is not owned by the active session: {ref}"})
                 continue
             content = str(payload.get("content") or "")
-            match = _payload_match(content, query, match_tokens, match_operands) or (
-                _payload_match(content, query, [*match_tokens, "OR"], match_operands) if stash_any_term else None)
+            match = _payload_match(content, query, match_tokens, match_operands, stash_any_term)
             if match is None:
                 continue
             tier, start, end, terms = match

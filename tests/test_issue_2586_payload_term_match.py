@@ -86,6 +86,21 @@ def test_a_long_query_keeps_the_literal_match_only(archive):
     assert found(archive.call(query=many)) == []
 
 
+def test_the_word_cap_counts_the_words_inside_a_phrase(archive):
+    saved(archive, FACT)
+    phrase = " ".join(f"word{n}" for n in range(tools._PAYLOAD_TERM_CAP))
+    assert found(archive.call(query=f'storm "{phrase}"')) == []  # 17 words: literal only, no any-term candidate
+    assert len(found(archive.call(query=f'storm "{" ".join(phrase.split()[:14])}"'))) == 1  # 15 words: retry finds storm
+
+
+def test_the_private_stash_flag_is_not_taken_from_tool_args(archive):
+    saved(archive, FACT)
+    for mode in ("full_text", "hybrid"):
+        raw, _ = archive.reader.call("lcm_grep", {"query": "storm relay evacuation badge value", "mode": mode,
+                                                  "_payload_any_term_stash": True})
+        assert "_payload_any_term" not in json.loads(raw)
+
+
 def test_the_any_term_retry_is_capped_and_ordered_by_terms(archive):
     for n in range(12):
         saved(archive, f"storm lantern {n}", session=f"one{n}", created_at=100.0 + n)  # newer, one term each
