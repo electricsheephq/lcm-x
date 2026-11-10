@@ -757,8 +757,10 @@ def _unverified(metadata: dict, records: list[dict], lineages: list[dict], sessi
     unknown = {row["lineage"] for row in lineages if not row["forgotten"] and (
         row["transcript_state"] != "ok" or row["generations_gone"] or row["pending_lines"]
         or row["files"]["uncaptured"] or row["named_other_paths"] or _subfolder_files_unverified(row)
-        or (row["partial_tail_bytes"] and isinstance(ended := metadata.get(ENDED_PREFIX + row["lineage"]), dict)
-            and ended.get("ended") is True))}  # #2571: a partial tail after the lineage's end is never taken
+        or (row["partial_tail_bytes"] and any(isinstance(ended := metadata.get(ENDED_PREFIX + key), dict)
+            and ended.get("ended") is True for key in {row["lineage"], row["lineage"].split("/agent:")[0]})))}
+    # #2571: a partial tail after the lineage's end is never taken; a subagent's also after its session's end (#2566:
+    # Claude Code sends no SubagentStop to a session ended mid-task, by exit, /clear or a closed terminal)
     if (session is not None and CURSOR_PREFIX + lineage_key(session) not in metadata
             and PENDING_PREFIX + lineage_key(session) not in metadata):  # a pending session is judged below
         unknown.add(lineage_key(session))

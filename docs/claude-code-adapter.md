@@ -579,10 +579,11 @@ gate's instrument (see "The audit" in the test plan).
     only when that lineage's last observed hook was its end (`SessionEnd`, or `SubagentStop` for a subagent): a crash
     mid-append left a record capture will never take (#2571). An end marks it whatever its timestamp (the hook never
     drops it as stale behind an undrained hook, nor lets another end-class hook replace it); only a newer hook of that lineage (the session resumed) clears it.
-    Known limits: a resumed session whose newer hook's pointer is replaced by a delayed older `Stop` before the
-    worker drains it stays unverified until a newer hook of that session drains (the safe side); a subagent still running when its session ends gets no
-    `SubagentStop` of its own if Claude Code sends none, and then its unterminated last record does not leave it
-    unverified;
+    A subagent's partial tail also counts after its session's end: Claude Code sends no `SubagentStop` to a session
+    ended while a subagent is mid-task (by exit, `/clear` or a closed terminal; checked on real sessions), so the
+    session's end ends its subagents too, until the session resumes (#2566). Known limit: a resumed session whose newer
+    hook's pointer is replaced by a delayed older `Stop` before the worker drains it stays unverified until a newer
+    hook of that session drains (the safe side);
   - files under a `tool-results` subfolder (`subfolder_files`; a symlink to a folder, or a folder that cannot be
     listed, counts one), which capture does not store as files: until #2554 they leave the lineage unverified, and the
     verdict names them ("N files in tool-results subfolders not stored (M lineages)");

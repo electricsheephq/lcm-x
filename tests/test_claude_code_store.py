@@ -3165,6 +3165,31 @@ def test_the_ended_partial_tail_rule_table(tmp_path, home, hermes, kind, end, ta
     assert report["verified"] is not (end and tail and not resumed)
 
 
+@pytest.mark.parametrize("session", ["ended", "resumed"])
+def test_a_subagent_cut_off_by_its_sessions_end_with_a_partial_tail_is_unverified(tmp_path, home, hermes, session):
+    """#2566: Claude Code sends no SubagentStop to a session ended while a subagent is mid-task (by exit, /clear or a
+    closed terminal; checked on real scripted sessions), so the session's end also ends its subagents for the partial-tail
+    rule. A session that resumed (a newer own hook) leaves its subagent's partial tail reported only."""
+    from hermes_lcm import claude_code_audit as ca
+
+    a = _append(tmp_path / "projects" / "-work" / "s1.jsonl", CONVERSATION[:2])
+    child = _append(a.parent / "s1" / "subagents" / "agent-x1.jsonl", _SIDE)
+    _record(_hook(), home, a, hook_started_ns=1)
+    _record(_hook(), home, a, event="SubagentStart", agent_id="x1", agent_transcript_path=str(child), hook_started_ns=2)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    with open(child, "a", encoding="utf-8") as handle:
+        handle.write('{"type": "assistant", "uu')  # a crash mid-append, and no SubagentStop
+    _record(_hook(), home, a, event="SessionEnd", hook_started_ns=5)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    if session == "resumed":
+        _record(_hook(), home, a, event="UserPromptSubmit", hook_started_ns=9)
+        cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    report = ca.audit(home)
+    row = next(row for row in report["lineages"] if row["lineage"] == cc.lineage_key("s1", "x1"))
+    assert row["partial_tail_bytes"] and report["verified"] is (session == "resumed")
+    assert report["unverified"] == ([] if session == "resumed" else [cc.lineage_key("s1", "x1")])
+
+
 @pytest.mark.parametrize("shape", ["child_stops_after_session_end", "older_end_after_resume", "resumed_still_partial",
                                    "end_behind_a_clock_step", "older_hook_after_an_equal_end", "end_with_no_stamp",
                                    "end_behind_a_waiting_stop", "equal_stop_behind_a_waiting_end",
