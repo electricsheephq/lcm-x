@@ -359,8 +359,9 @@ the child's end, two on the counted route and three after the child's own compac
 after the second handover. (c) #2547, at one non-default setting: with payload externalization
 turned off, a delegated child's saved tool result is stored once more at each model call and at the
 child's end (measured on the rc5 head on 2026-11-10: 1, 2 and 3 copies after three calls, 4 after
-the end); with the default setting it is stored once. None loses a row, and all three are disclosed
-in the release notes with a fix planned for v0.30.1. For (a) and (b) the exception covers the probe
+the end); with the default setting it is stored once. None of these copies loses a row (the loss
+#2547 also has at that setting is listed separately in the release notes; v0.29.2 loses the same
+rows), and all three are disclosed in the release notes with a fix planned for v0.30.1. For (a) and (b) the exception covers the probe
 cells that show their shapes, which the rc5 smoke stage runs again: a count above these, growth
 after the last named copy, or a lost row stops the candidate. For (c) it covers that setting only:
 with payload externalization on, a copy of that kind stops the candidate. It does not cover the

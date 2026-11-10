@@ -243,7 +243,9 @@ gh pr merge <PR> --merge --match-head-commit <HEAD_SHA>
   the previous GA (KNOWN under #1674 and disclosed); and, for v0.30.0 only, the named
   duplicates #2558 and #2559 at their recorded shapes and counts, in the probe cells the smoke
   stage runs again, and #2547's helper-agent copy with payload externalization turned off; none
-  is covered in the driven audit. No other duplicate is covered. From v0.29.2
+  is covered in the driven audit. No other duplicate is covered. Separately, and for v0.30.0
+  alone, the upgrade/rollback roundtrip row's 0-duplicated-rows bar excludes one named case
+  (#2552), as the spec records where it adopts that row. From v0.29.2
   the reference-agent canary is judged only by the spec's canary rule and never triggers this
   respin.
 - Agents preparing a release produce the rc tag and receipts; the GA cut itself follows the
