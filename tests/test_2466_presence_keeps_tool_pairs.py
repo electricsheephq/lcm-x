@@ -410,3 +410,28 @@ def test_the_anchor_reads_a_respelled_number_as_the_stored_invocation(tmp_path, 
 def test_the_anchor_reads_different_numerals_as_one_float(tmp_path, stored_args, shown_args):
     """Different numerals are different arguments, so the re-sent call is a new invocation, not the stored one."""
     assert _anchor_presence(tmp_path, stored_args, shown_args) != [1]
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError,
+                   reason="#2172: a replaced unanswered call with a re-spelled float-equal number is taken as the stored call")
+@pytest.mark.parametrize("stored_args,shown_args", [
+    ('{"n": 0.1}', '{"n": 0.10000000000000001}'),
+    ('{"n": 1e400}', '{"n": 2e400}'),
+], ids=["precision", "overflow"])
+def test_a_replaced_unanswered_call_with_a_different_numeral_is_stored(tmp_path, stored_args, shown_args):
+    """Ingest level: turn start stores the unanswered call; the host replaces the turn with a call under the same id
+    whose numeral differs but reads as one float, then its result and a reply. Today the result is stored and the new
+    call is not (v0.29.2 stores neither); a fix stores the new call."""
+    engine = _engine(tmp_path)
+    try:
+        history = [_u("P1 first", 100), _a("A1 reply", 101), _u("P2 second", 110), _a("A2 reply", 111)]
+        engine.ingest(history)
+        engine.ingest([*history, _u("poll the file", 120), _a("let me look", 121), _call("call_0", stored_args, 122)])
+        engine.ingest([*history, _u("poll the other file", 130), _call("call_0", shown_args, 131),
+                       _res("call_0", "B file text", 132), _a("A after B", 133)])
+        rows = _stored(engine)
+        if sum(row.get("content") == "B file text" for row in rows) != 1:
+            pytest.fail("setup: the new call's result was not stored once")
+        assert sum(1 for row in rows if shown_args in json.dumps(row.get("tool_calls") or "")) == 1
+    finally:
+        engine.shutdown()

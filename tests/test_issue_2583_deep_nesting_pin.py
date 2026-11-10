@@ -40,4 +40,7 @@ def test_a_shallow_argument_turn_is_stored(tmp_path):
 @pytest.mark.xfail(sys.version_info >= (3, 12), strict=True, raises=AssertionError,
                    reason="#2583: arguments nested about 2,000 levels deep make ingest store no row of the turn")
 def test_a_deeply_nested_argument_turn_is_stored(tmp_path):
-    assert _stored_rows(tmp_path, "[" * 2000 + "0" + "]" * 2000) == 4
+    stored = _stored_rows(tmp_path, "[" * 2000 + "0" + "]" * 2000)
+    if 0 < stored < 4:  # a partial store is a change of the pinned shape, not the expected failure
+        pytest.fail(f"partial store: {stored} of 4 rows")
+    assert stored == 4
