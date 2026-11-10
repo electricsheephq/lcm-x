@@ -34,13 +34,15 @@ from . import bars, capture, gateway, pins, plan as planner, provider as prov, s
 from ..release_gauntlet import kit_evidence
 
 SCHEMA = "d5-clone-receipt/1"
-_ISO_Z = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?Z")  # The declared settings time, UTC.
+_ISO_Z = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}(:[0-9]{2}(\.[0-9]+)?)?Z")  # The settings time, UTC.
 NEED_FREE = 40 * 10**9
 PREFLIGHTS = ("P3", "P4", "P5", "P6", "P7")
 DOCTOR_STATUS = {"pass": "ok", "ok": "ok", "warn": "warn", "fail": "fail"}  # Any other status stays, and fails bar 5.
 # LCM-X's externalized-payload reference (externalize.py _EXTERNALIZED_REF_RE).
 EXTERNALIZED_REF = re.compile(r"\[(?:Externalized|GC'd externalized) (?:tool output|payload):.*?;\s*ref=([^;\]\s]+)\]")
 CRON_MODEL = "d5-cron"
+# The model names the arm config gives the loopback provider (gateway.build_config); a receipt keeps only these raw.
+OWN_MODELS = frozenset(("d5-agent", "d5-aux", "d5-cron", "d5-summary"))
 CRON_PAUSE_REASON = "d5 clone run: paused before the run"
 COLD_INGEST_TIMEOUT = 120
 # How the probe can exercise each lcm_doctor check on a stopped arm (both trees' tools.py lcm_doctor). Store-wide
@@ -133,13 +135,24 @@ def _sha(text):
     return hashlib.sha256(str(text).encode()).hexdigest()
 
 
+def _utc_time(value):
+    """*value* when it is a real UTC time written as ISO 8601 with a Z; else None."""
+    if not (isinstance(value, str) and _ISO_Z.fullmatch(value)):
+        return None
+    try:
+        datetime.fromisoformat(value[:-1] + "+00:00")
+    except ValueError:
+        return None
+    return value
+
+
 def _private_models(counts):
-    """{model name: n} for a receipt: the provider's own d5-* names stay, any other name (one the arm's settings or
+    """{model name: n} for a receipt: the provider's own names (OWN_MODELS) stay, any other name (one the arm's settings or
     stored routes asked for) becomes its sha256 12, so no value from the snapshot is written (#2471, receipts carry
     counts, ids and hashes only)."""
     out = Counter()
     for name, n in (counts or {}).items():
-        out[name if isinstance(name, str) and name.startswith("d5-") else f"sha256-12:{_sha(name)[:12]}"] += n
+        out[name if name in OWN_MODELS else f"sha256-12:{_sha(name)[:12]}"] += n
     return dict(out)
 
 
@@ -173,7 +186,7 @@ def rekey_copy_conversations(lcm_db, conversations, *, run_dir):
             quoted = '"' + name.replace('"', '""') + '"'
             if any(row[1] == "conversation_id" for row in db.execute(f"PRAGMA table_info({quoted})")):
                 if name not in ("messages", "lcm_lifecycle_state"):
-                    raise ValueError(f"unexpected conversation_id table: {name}")
+                    raise ValueError("unexpected conversation_id table: sha256-12:" + _sha(name)[:12])
                 tables.append(name)
         resolved, groups = [], {}
         for conversation in conversations:
@@ -824,9 +837,8 @@ def run(host, *, rc_id, prior=(), instrument_fix=None):
     prior = [p for p in prior if p.get("rc") == rc_id and "verdict" in p]  # A stopped run is not an attempt.
     prior_verdicts = [p["verdict"]["raw"] for p in prior]
     receipt = {"schema": SCHEMA, "rc": rc_id, "attempt": len(prior_verdicts) + 1, "instrument_fix": instrument_fix}
-    as_of = getattr(host, "c", {}).get("settings_as_of")
     receipt["settings"] = {  # A disclosed fact, never judged (release manager, 2026-11-10); only a UTC time is written.
-        "as_of": as_of if isinstance(as_of, str) and _ISO_Z.fullmatch(as_of) else None,
+        "as_of": _utc_time(getattr(host, "c", {}).get("settings_as_of")),
         "note": "both arms run the declared reference-settings snapshot taken at as_of, assumed unchanged since"}
     refusal = bars.may_run(prior_verdicts, instrument_fix)
     receipt["preflights"] = steps = {"free_space": {"verdict": "PASS" if host.free_bytes() >= NEED_FREE else "FAIL"}}

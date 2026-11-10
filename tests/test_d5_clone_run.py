@@ -595,7 +595,7 @@ def test_rekey_copy_refuses_unsafe_inputs_without_updates(rekey_copy, tmp_path, 
         elif fault == "destination_variant":
             db.execute("INSERT INTO lcm_lifecycle_state VALUES (?, 'other')", (" " + r.gateway.session_key("d5-L") + " ",))
     before = inventory(path.parent)
-    with pytest.raises(ValueError, match={"third_table": "unexpected", "blank_key": "legacy blank conversation_id: L$",
+    with pytest.raises(ValueError, match={"third_table": "unexpected conversation_id table: sha256-12:[0-9a-f]{12}$", "blank_key": "legacy blank conversation_id: L$",
                                           "null_key": "legacy blank conversation_id: L$",
                                           "space_key": "legacy blank conversation_id: L$",
                                           "old_variant": "legacy variants: L$",
@@ -907,6 +907,9 @@ def test_the_receipt_never_names_a_provider_or_model_from_the_snapshot(tmp_path,
 
 def test_private_models_keeps_d5_names_and_merges_nothing_else():
     assert r._private_models({"d5-agent": 1, "d5-summary": 2}) == {"d5-agent": 1, "d5-summary": 2}
+    assert r.OWN_MODELS == {"d5-agent", "d5-aux", "d5-cron", "d5-summary"}
+    for other in ("d5-internal-x", None, 7):  # Only the provider's own four names stay raw; nothing crashes.
+        assert list(r._private_models({other: 1})) == [f"sha256-12:{hashlib.sha256(str(other).encode()).hexdigest()[:12]}"]
     assert r._private_models(None) == {} and r._private_models({}) == {}
     assert list(r._private_models({"x": 1})) == [f"sha256-12:{hashlib.sha256(b'x').hexdigest()[:12]}"]
     assert r._private_arm({"calls_by_model": {"x": 1}}, None)[1] is None
@@ -963,7 +966,9 @@ def test_the_instrument_identity_is_the_package_content():
 
 @pytest.mark.parametrize("as_of, written", [("2026-11-07T01:02:03Z", "2026-11-07T01:02:03Z"),
                                              ("2026-11-07T01:02Z", "2026-11-07T01:02Z"),
-                                             ("not a time", None), (12, None), (None, None)])
+                                             ("not a time", None), (12, None), (None, None),
+                                             ("2026-11-07T01:02:03", None), ("2026-11-07T01:02:03+00:00", None),
+                                             ("2026-99-99T99:99Z", None), ("\u0662026-11-07T01:02Z", None)])
 def test_the_receipt_discloses_the_settings_time_and_nothing_else(tmp_path, as_of, written):
     """The settings snapshot's time is recorded as a disclosed fact (release manager, 2026-11-10); a value that is not a
     UTC time is never written."""
@@ -974,3 +979,9 @@ def test_the_receipt_discloses_the_settings_time_and_nothing_else(tmp_path, as_o
     receipt = r.run(FakeHost(config, tmp_path / "run"), rc_id="rc-synthetic")
     assert receipt["settings"]["as_of"] == written
     assert "not a time" not in json.dumps(receipt, sort_keys=True, default=str)
+
+
+def test_a_host_without_a_config_writes_no_settings_time():
+    class Bare:
+        pass
+    assert r._utc_time(getattr(Bare(), "c", {}).get("settings_as_of")) is None
