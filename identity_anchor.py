@@ -270,7 +270,7 @@ class IdentityAnchorMixin:
             logger.debug("LCM identity-anchor host UID shadow would reject alias edges: count=%d", count)
 
     def _identity_anchor_prematch(self, messages, identity_messages, cursor: int, audit_from: Optional[int] = None,
-                                  *, accepted_prefix: int = 0, ledger_pairs=None, ledger_today=None, cold=False) -> Dict[str, Any]:
+                                  *, accepted_prefix: int = 0, ledger_pairs=None, ledger_today=None) -> Dict[str, Any]:
         """Rows at or after ``cursor`` recognised as replays of stored occurrences, plus the R3
         remainders to store, the relations to record and the R5 backfills. ``audit_from``: the host
         changed its list before the cursor from there (a positional cursor no longer proves those rows
@@ -496,16 +496,6 @@ class IdentityAnchorMixin:
                 self._note_identity_anchor_version(None, message)
                 logger.info("LCM host-rewrite replay: arm=%s parts=%s consumed=%s session=%s",
                             match.arm, match.k, list(match.consumed), self._session_id)
-        if cold:
-            from .ingest_ledger import cold_turn_pairs
-
-            pairs = cold_turn_pairs(self._store._conn, session_id=self._session_id,
-                                    conversation_id=self._conversation_id,
-                                    attempt=self._ingest_ledger_attempt, messages=messages,
-                                    matched={i: rows for i, rows in matched.items() if i not in plan["remainders"]},
-                                    consumed=consumed)
-            for idx, row in pairs.items():
-                self._identity_anchor_take(idx, [row], consumed, matched, plan)
         self._identity_anchor_tool_segments(messages, plan["cursor"], plan["replayed"], matched, plan.get("positional", ()))
         for idx in list(plan["remainders"]):
             if idx in plan["replayed"]:

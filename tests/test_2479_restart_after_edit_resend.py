@@ -1,4 +1,9 @@
-"""#2479: cold turn-local reply consumption after edit-resend; synthetic fixtures only."""
+"""#2479: a cold restart after an edit-resend re-stores the unstamped replies; fix C links those copies.
+
+Fix C keeps #2305's ``possible_replay_of`` linking on when the durable ledger moves the cursor up from 0, so every copy
+the cold restart stores is visible, not silent, and nothing is lost. The guards below pin that a genuinely new reply is
+always stored: five shapes from review round 2 and three from the cross-model review of the withdrawn turn pairing.
+They pass on main and stay as guards for any later attempt to pair replies. Synthetic fixtures only."""
 from collections import Counter
 
 import pytest
@@ -50,6 +55,22 @@ def _counts(engine):
     return Counter(_key(row) for row in _stored(engine))
 
 
+def _visible(engine, view, before):
+    """No host row is lost, and every row this ingest added beyond the host view's new occurrences is a linked copy
+    (``before``: the stored counts before the ingest). Rows an edit-resend left in the store are not copies."""
+    stored = _counts(engine)
+    assert not Counter(map(_key, view)) - stored, "a host row is missing"
+    assert not before - stored, "a stored row is missing"
+    linked = {int(sid) for sid, in engine._store._conn.execute(
+        "SELECT store_id FROM message_relations WHERE kind = 'possible_replay_of'")}
+    added = stored - before
+    for key, count in added.items():
+        copies = count - max(0, Counter(map(_key, view))[key] - before[key])
+        rows = [row for row in _stored(engine) if _key(row) == key][-count:]
+        assert sum(int(row["store_id"]) in linked for row in rows) >= copies, (key[:2], copies)
+    return stored
+
+
 @pytest.mark.parametrize("turns", [3, 40])
 @pytest.mark.parametrize("stamped", [True, False], ids=["stamped", "unstamped"])
 @pytest.mark.parametrize("resend", [True, False], ids=["resend", "plain"])
@@ -59,51 +80,41 @@ def test_restart(engines, turns, stamped, resend):
     before = _counts(engine)
     engine = engines()
     engine.ingest(view)
-    expected = Counter({_key(view[-3]): 1}) if resend and not stamped else Counter()
-    assert _counts(engine) - before == expected
-    assert not before - _counts(engine)
-    before = _counts(engine)
+    restarted = _visible(engine, view, before)
+    if stamped or not resend:
+        assert restarted == before  # Stamped replies or no resend: the restart stores nothing new, as on main.
+    before = restarted
     extra = [_u("after restart", 400), _reply("after reply", 401 if stamped else None)]
     view += extra
     engine.ingest(view)
-    after = _counts(engine)
+    after = _visible(engine, view, before)
     assert after - before == Counter(map(_key, extra))
-    assert not before - after and set(after.values()) == {1}
-    assert not Counter(map(_key, view)) - after
     engine = engines()
     engine.ingest(view)
-    assert _counts(engine) == after
-    if resend and not stamped:
-        duplicate = _reply("duplicate")
-        view += [_u("copies", 500), duplicate, dict(duplicate), _u("replace again", 510), _reply("old again")]
-        engine.ingest(view)
-        view[-2:] = [_u("resent again", 520), _reply("new again")]
-        view += [_u("later again", 530), _reply("later again reply")]
-        engine.ingest(view)
-        engine = engines()
-        view.insert(len(view) - 4, dict(duplicate))
-        engine.ingest(view)
-        assert _counts(engine)[_key(duplicate)] == 3  # Two stored copies fund only two of the three replies.
+    _visible(engine, view, after)
 
 
 @pytest.mark.parametrize("third", [False, True], ids=["two-stored", "third-new"])
-def test_identical_replies_consume_distinct_copies(engines, third):
+def test_identical_replies_are_kept(engines, third):
     engine = engines()
     view = [_u("prompt", 1), _reply("same"), _reply("same")]
     engine.ingest(view)
     assert _counts(engine)[_key(view[-1])] == 2
+    before = _counts(engine)
     engine = engines()
-    engine.ingest(view + ([_reply("same")] if third else []))
-    assert _counts(engine) == Counter(map(_key, view + ([_reply("same")] if third else [])))
+    view += [_reply("same")] if third else []
+    engine.ingest(view)
+    assert _visible(engine, view, before)[_key(view[-1])] >= len(view) - 1
 
 
 def test_rewritten_reply_is_new(engines):
     engine = engines()
     view = [_u("prompt", 1), _reply("old")]
     engine.ingest(view)
+    before = _counts(engine)
     engine = engines()
     engine.ingest([view[0], _reply("rewritten")])
-    assert _counts(engine) == Counter(map(_key, [*view, _reply("rewritten")]))
+    assert _visible(engine, [view[0], _reply("rewritten")], before)[_key(_reply("rewritten"))] == 1
 
 
 def test_ledger_off_keeps_main(engines, monkeypatch):
@@ -135,12 +146,6 @@ def test_tool_segment_keeps_main(engines):
     assert _counts(engine) == before
 
 
-@pytest.fixture(params=[False, True], ids=["pairing", "pairing-disabled"])
-def pairing(request, monkeypatch):
-    if request.param:
-        monkeypatch.setattr("hermes_lcm.ingest_ledger.cold_turn_pairs", lambda *a, **k: {})
-
-
 def _new_reply(engine, view, reply):
     before = _counts(engine)
     def count():
@@ -152,7 +157,7 @@ def _new_reply(engine, view, reply):
     assert count() == expected
 
 
-def test_p1_uid_conflict_keeps_new_reply(engines, pairing):
+def test_p1_uid_conflict_keeps_new_reply(engines):
     engine, view = engines(), []
     for i in range(3):
         view += [_u(f"user {i}", 100 + i * 2), dict(_reply(f"reply {i}"), message_uid=f"reply-{i}")]
@@ -163,7 +168,7 @@ def test_p1_uid_conflict_keeps_new_reply(engines, pairing):
     _new_reply(engines(), view, view[3])
 
 
-def test_p1_conversation_keeps_new_reply(engines, pairing):
+def test_p1_conversation_keeps_new_reply(engines):
     engine = engines()
     session, conversation = engine._session_id, engine._conversation_id
     view = [_u("prompt", 100), _reply("old")]
@@ -177,7 +182,7 @@ def test_p1_conversation_keeps_new_reply(engines, pairing):
     _new_reply(engines(), view, view[2])
 
 
-def test_p1_boundary_keeps_new_reply(engines, pairing, monkeypatch):
+def test_p1_boundary_keeps_new_reply(engines, monkeypatch):
     engine = engines()
     view = [_u("A", 100), _reply("A reply")]
     engine.ingest(view)
@@ -193,7 +198,7 @@ def test_p1_boundary_keeps_new_reply(engines, pairing, monkeypatch):
     _new_reply(engines(), view, view[2])
 
 
-def test_p1_tool_keeps_new_reply(engines, pairing):
+def test_p1_tool_keeps_new_reply(engines):
     engine = engines()
     view = [_u("prompt", 100), _call("C1", 101), _result("C1", "old result", 102), _reply("done")]
     engine.ingest(view)
@@ -201,9 +206,49 @@ def test_p1_tool_keeps_new_reply(engines, pairing):
     _new_reply(engines(), view, view[-1])
 
 
-def test_p1_partial_keeps_new_reply(engines, pairing):
+def test_p1_partial_keeps_new_reply(engines):
     engine = engines()
     view = [_u("P", 100), _reply("reply"), _u("U", 200), _reply("yes")]
     engine.ingest(view)
     view[2] = dict(view[2], content=view[2]["content"] + "\n\nnew question")
     _new_reply(engines(), view, view[-1])
+
+
+def _astra_store(engine, middle):
+    """Warm turns, then an edit-resend of the last turn: the stored shape the cross-model review used."""
+    view = [_u("first", 100), _reply("first reply"), _u("second", 200), *middle, _u("old", 300), _reply("old reply")]
+    engine.ingest(view)
+    view[-2:] = [_u("edited", 400), _reply("edited reply"), _u("next", 500), _reply("next reply")]
+    engine.ingest(view)
+    return view
+
+
+def test_new_reply_with_a_normalized_prefix_is_stored(engines):
+    """A new reply whose text differs from a stored reply only by volatile scaffolding that the identity digest
+    strips (a model-switch note) is a different message: it is stored."""
+    view = _astra_store(engines(), [_reply("OK")])
+    view[3] = _reply("[Note: model was just switched from A to B]\nOK")
+    _new_reply(engines(), view, view[3])
+
+
+def test_new_reply_after_matched_tool_work_is_stored(engines):
+    """A same-text reply that now follows a matched tool call and result, while the earlier commentary before the
+    call is gone, is a new reply: it is stored."""
+    view = _astra_store(engines(), [_reply("OK"), _call("C1", 201), _result("C1", "result", 202)])
+    view[3:6] = [_call("C1", 201), _result("C1", "result", 202), _reply("OK")]
+    _new_reply(engines(), view, view[5])
+
+
+def test_new_reply_beside_a_uid_bound_twin_is_stored(engines):
+    """A uid-less new reply with the same text as a stored reply that carries a host uid is stored. (The review's
+    shape also drifted the lineage between the uid bindings and the occurrences; that only mattered to the withdrawn
+    pairing, which read them under different lineages.)"""
+    engine = engines()
+    view = [_u("P", 100), dict(_reply("OK"), message_uid="old")]
+    engine.ingest(view)
+    view += [_u("old", 300), _reply("old reply")]
+    engine.ingest(view)
+    view[-2:] = [_u("resent", 400), _reply("replaced")]
+    engine.ingest(view)
+    view[1] = _reply("OK")
+    _new_reply(engines(), view, view[1])

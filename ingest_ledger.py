@@ -676,56 +676,6 @@ def cold_cursor_candidate(conn, *, session_id, attempt, ignored):
     return winner, counts
 
 
-def cold_turn_pairs(conn, *, session_id, conversation_id, attempt, messages, matched, consumed):
-    """Pair only whole stamped turns with intact durable boundaries; doubt keeps rows new."""
-    groups, group = {}, None
-    lineage = persisted_lineage(conn, session_id, attempt["lineage"])
-    # UID-bearing occurrences stay with the existing occurrence matchers, never text pairing.
-    uid_rows = {e.ref for (blob,) in conn.execute(
-        "SELECT entries FROM ingest_views WHERE lineage=? AND kind='ingest'", (lineage,))
-        for e in decode_entries(blob) if e.uidset_digest is not None}
-    uid_stores = set()
-    if conn.execute("SELECT 1 FROM sqlite_master WHERE name='host_uid_bindings'").fetchone():
-        uid_stores = {r[0] for r in conn.execute(
-            "SELECT store_id FROM host_uid_bindings WHERE lineage_key=? AND kind IN ('canonical','version')",
-            (attempt["resolved"] or lineage,))}
-    for row in _rows(conn.execute(
-            "SELECT m.store_id,m.role,m.session_id,m.conversation_id,b.identity_digest,b.disposition,b.ordinal,b.occ_id "
-            "FROM messages m LEFT JOIN occurrence_bindings b ON b.store_id=m.store_id AND b.lineage=? "
-            "WHERE m.session_id=? ORDER BY b.ordinal,b.occ_id", (lineage, session_id))):
-        if str(row["conversation_id"] or "").strip() not in ("", str(conversation_id or "").strip()):
-            continue  # #581: a named foreign conversation never donates rows or boundaries.
-        if row["ordinal"] is None:
-            return {}  # Missing bindings (including ledger-off users) cannot establish turn boundaries.
-        if row["role"] == "user":
-            group = (groups.setdefault((row["store_id"], row["identity_digest"]), defaultdict(deque))
-                     if row["disposition"] in ("stored", "migrated") else None)
-        elif (group is not None and row["disposition"] in ("stored", "migrated")
-              and row["occ_id"] not in uid_rows and row["store_id"] not in uid_stores):
-            group[row["identity_digest"]].append(row)
-    available, pairs = None, {}
-    for idx, message in enumerate(messages):
-        if message.get("role") == "user":
-            rows = matched.get(idx, ())
-            available = (groups.get((rows[0]["store_id"], attempt["entries"][idx].identity_digest))
-                         if len(rows) == 1 and attempt["stamps"][idx] is not None else None)
-        elif (available is not None and message.get("role") == "assistant"
-              and not message.get("tool_calls") and attempt["stamps"][idx] is None
-              and attempt["entries"][idx].uidset_digest is None and idx not in matched):
-            bucket = available.get(attempt["entries"][idx].identity_digest, deque())
-            while bucket and bucket[0]["store_id"] in consumed:
-                bucket.popleft()
-            if bucket:
-                row = bucket.popleft()
-                consumed.add(row["store_id"])
-                pairs[idx] = row
-            else:
-                available = None
-        elif idx not in matched:
-            available = None  # A new tool call/result or any other unmatched row starts new work.
-    return pairs
-
-
 def emission_candidate(conn, lineage):
     """Return (newest usable live emission view, reason), without registry reads.
 

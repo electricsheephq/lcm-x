@@ -8664,9 +8664,6 @@ class LCMEngine(
                 # #1403: the accepted output supersedes the stale pre-compaction cache for
                 # this ingest only. The one-shot commit proof has already retired above.
                 accepted = {"accepted_prefix": accepted_compaction_prefix} if accepted_compaction_prefix else {}
-                # Only a cold bind with a ledger-proven prefix admits turn-local consumption.
-                if reconciled_existing_session and not cached_source_identities and ledger_run["k"]:
-                    accepted["cold"] = True
                 if ledger_run["k"]:
                     accepted.update(ledger_pairs=ledger_run["pairs"], ledger_today=today)
                 with self._ingest_evidence(classification=True):
