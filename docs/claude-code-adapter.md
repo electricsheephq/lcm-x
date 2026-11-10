@@ -25,7 +25,8 @@ yet; a later projection version can expose them because their raw lines are kept
 be off (`CLAUDE_CODE_TRANSCRIPT_LOCAL_GC` unset). With it on, the GC can delete history a drain
 has not read yet. Capture still runs, best effort: the `PreCompact` drain reads the history before
 the trim only when the store lock is free and within 10 s. It records the flag per session
-(`capture:local_gc:<session>`, kept once any hook saw it on), and the audit lists those sessions
+(`capture:local_gc:<session>`, kept once any hook saw it on, or found the session's spool pointer
+unreadable), and the audit lists those sessions
 without a lossless claim. One limit holds with the GC off too: a subagent transcript removed before
 the worker first reads it leaves nothing behind (no cursor, no set-aside record, no file), so a
 whole-home audit can still pass. Claude Code's own cleanup removes a whole session, main transcript

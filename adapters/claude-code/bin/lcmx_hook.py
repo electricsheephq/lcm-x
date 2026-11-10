@@ -130,7 +130,9 @@ def _merged_facts(record: Dict[str, Any], previous: Optional[Mapping[str, Any]])
             if isinstance(name, str):
                 seen.add(name)
         prompts.update(value for value in previous.get("compact_prompts") or () if isinstance(value, str))
-    facts = {"seen": sorted(seen), "compact_prompts": sorted(prompts)[-FACTS_CAP:]}
+    facts = {"seen": sorted(seen), "compact_prompts": sorted(prompts)[-FACTS_CAP:],
+             # local GC seen on by any record stays on until the worker records it (#2503)
+             "local_gc": record.get("local_gc") is True or (isinstance(previous, dict) and previous.get("local_gc") is True)}
     for key in ("transcript_seen", "agent_transcript_seen"):  # True once any record saw it; None (unknown) wins over False
         values = [record.get(key), previous.get(key) if isinstance(previous, dict) else False]
         facts[key] = True if True in values else (False if all(value is False for value in values) else None)
@@ -256,6 +258,7 @@ def _spool_locked(directory: Path, key: str, record: Mapping[str, Any]) -> str:
     facts = _merged_facts(record, previous)
     if unknown:
         facts.update({name: None for name in ("transcript_seen", "agent_transcript_seen") if facts[name] is not True})
+        facts["local_gc"] = True  # the lost history may have seen local GC on: no lossless claim (#2503)
     if record.get("event") == "SessionStart" and record.get("source"):
         record["start_source"] = record["source"]
         record["started_at"] = record.get("observed_at")
