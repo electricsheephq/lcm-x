@@ -383,3 +383,17 @@ def test_p3_context_length_stays_in_p3(tmp_path, monkeypatch, raises):
     assert host.c == saved and {n[:5] for n, _ in host.armed} == {"pf-P3", "pf-P4", "pf-P6", "pf-P7"}
     assert all((n.startswith("pf-P3")) == (length == 64000) for n, length in host.armed)
     assert json.loads((tmp_path / "P3.json").read_text())["reasons"] == (["RuntimeError"] if raises else [])
+
+
+def test_a_produced_receipt_is_accepted_by_the_runner_for_the_same_run(tmp_path, monkeypatch):
+    """Ruling R5-5 end to end: the producer records the plan, the snapshot pin, the instrument and the trees, and the
+    runner's receipt check accepts what the producer wrote for the same declaration."""
+    from bench.instruments.d5_clone import run as runner
+    monkeypatch.setitem(sys.modules, "yaml", types.SimpleNamespace(safe_load=json.loads))
+    host = FakeHost(tmp_path)
+    assert pf.produce(host, ["P3", "P4"]) == {"P3": "PASS", "P4": "PASS"}
+    receipt = json.loads((tmp_path / "P3.json").read_text())
+    assert receipt["instrument_sha256"] == runner.instrument_identity()["instrument_sha256"]
+    local = runner.LocalHost({**host.c, "preflights": {n: str(tmp_path / f"{n}.json") for n in ("P3", "P4")}}, tmp_path)
+    plan = host.plan(None)
+    assert [local.preflight(n, plan)["verdict"] for n in ("P3", "P4")] == ["PASS", "PASS"]

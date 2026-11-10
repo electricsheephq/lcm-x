@@ -95,6 +95,29 @@ def _json(value):
     return value if isinstance(value, dict) else None
 
 
+PREFLIGHT_SCHEMA = "d5-clone-preflight/1"
+TREE_BOUND_PREFLIGHTS = ("P4",)  # The spec's preflight that both trees store one externalized output identically.
+
+
+def instrument_identity():
+    """This instrument's identity (ruling R5-5): the sha256 over every file of this package by relative name, which a
+    preflight receipt must match, and the repo commit it runs from ("" outside a checkout), recorded for readers."""
+    root, h = Path(__file__).resolve().parent, hashlib.sha256()
+    for path in sorted(p for p in root.rglob("*") if p.is_file() and "__pycache__" not in p.parts and p.suffix != ".pyc"):
+        h.update(path.relative_to(root).as_posix().encode() + b"\0" + hashlib.sha256(path.read_bytes()).digest())
+    try:
+        commit = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True,
+                                timeout=30, check=False).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        commit = ""
+    return {"instrument_sha256": h.hexdigest(), "instrument_commit": commit}
+
+
+def tree_id(config, tree):
+    """A tree's identity as the receipts record it: its declared commit, else the sha256 of its resolved path."""
+    return config[tree].get("commit") or hashlib.sha256(str(Path(config[tree]["lcm_tree"]).resolve()).encode()).hexdigest()
+
+
 def _store_path(home):
     return next((Path(home) / n for n in ("lcm.db", "store.db") if (Path(home) / n).is_file()), Path(home) / "lcm.db")
 
@@ -425,8 +448,21 @@ class LocalHost:
         path = self.c.get("preflights", {}).get(name)  # The others: a recorded preflight receipt, by sha256.
         if not path:
             return {"verdict": "MISSING"}
-        return {"verdict": json.loads(Path(path).read_text(encoding="utf-8")).get("verdict"),
-                "sha256": capture._sha256(path)}
+        try:
+            recorded = json.loads(Path(path).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {"verdict": "MISSING", "mismatch": ["unreadable"]}
+        # Ruling R5-5: a receipt counts only for this run's plan, snapshot pin and instrument; P4 also for this run's
+        # two trees, and the others, which run the previous GA in both arms by design, for that tree in both slots.
+        ga = tree_id(self.c, "ga")
+        trees = {"rc": tree_id(self.c, "rc"), "ga": ga} if name in TREE_BOUND_PREFLIGHTS else {"rc": ga, "ga": ga}
+        want = {"schema": PREFLIGHT_SCHEMA, "name": name, "plan_sha256": planner.plan_sha256(plan),
+                "snapshot_pin_sha256": capture._sha256(self.c["snapshot_pin"]),
+                "instrument_sha256": instrument_identity()["instrument_sha256"], "trees": trees}
+        mismatch = sorted(k for k, v in want.items() if not isinstance(recorded, dict) or recorded.get(k) != v)
+        if mismatch:  # Treated as missing: an earlier snapshot's, plan's, instrument's or tree's receipt.
+            return {"verdict": "MISSING", "mismatch": mismatch, "sha256": capture._sha256(path)}
+        return {"verdict": recorded.get("verdict"), "sha256": capture._sha256(path), "bound": sorted(want)}
 
     def arm(self, name, home, plan):
         tree = self.c[name]

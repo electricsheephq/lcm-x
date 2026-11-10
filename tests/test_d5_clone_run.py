@@ -10,7 +10,7 @@ import sys
 
 import pytest
 
-from bench.instruments.d5_clone import bars, run as r
+from bench.instruments.d5_clone import bars, capture, plan as planner, run as r
 
 MARKER = "synthetic-marker-7f3a9c"
 
@@ -838,3 +838,53 @@ def test_a_driven_session_that_starts_flagged_is_judged_by_its_increase(tmp_path
     for f in inherited.values():
         assert (f["s"], f["r"], f["g"], f["rc_start"], f["ga_start"], f["verdict"]) == (1, 1, 1, 1, 1, bars.PASS)
     assert receipt["bars"]["bar5"]["verdict"] == bars.PASS, receipt["bars"]["bar5"]
+
+
+def _bound_host(tmp_path):
+    (tmp_path / "pin.json").write_text("{}")
+    config = {"snapshot_pin": str(tmp_path / "pin.json"), "rc": {"commit": "c" * 40}, "ga": {"commit": "a" * 40},
+              "preflights": {}}
+    plan = planner.build_plan([dict(session_id=s, name=n, chat_id=f"d5-{n}", lcm_rows=1, host_rows=1)
+                               for n, s in (("L", "sess-l"), ("S1", "sess-a"), ("S2", "sess-b"))], nonce="t")
+    return r.LocalHost(config, tmp_path / "run"), plan
+
+
+def _receipt(host, plan, preflight, **changes):
+    ga = host.c["ga"]["commit"]
+    receipt = {"schema": r.PREFLIGHT_SCHEMA, "name": preflight, "verdict": "PASS", "plan_sha256": planner.plan_sha256(plan),
+               "snapshot_pin_sha256": capture._sha256(host.c["snapshot_pin"]),
+               "instrument_sha256": r.instrument_identity()["instrument_sha256"],
+               "trees": {"rc": host.c["rc"]["commit"] if preflight in r.TREE_BOUND_PREFLIGHTS else ga, "ga": ga},
+               **changes}
+    path = host.run_dir.parent / f"{preflight}-{len(list(host.run_dir.parent.glob('P*.json')))}.json"
+    path.write_text(json.dumps(receipt))
+    host.c["preflights"][preflight] = str(path)
+    return host.preflight(preflight, plan)
+
+
+@pytest.mark.parametrize("name", ["P3", "P4", "P6", "P7"])
+def test_a_preflight_receipt_counts_only_for_this_run(tmp_path, name):
+    """Ruling R5-5: a PASS receipt counts only when its plan, snapshot pin and instrument are this run's; P4 also binds
+    the run's two trees, and the others bind the previous GA in both slots. Anything else is treated as missing."""
+    host, plan = _bound_host(tmp_path)
+    assert _receipt(host, plan, name)["verdict"] == "PASS"
+    other_trees = {"rc": "a" * 40, "ga": "a" * 40} if name in r.TREE_BOUND_PREFLIGHTS else {"rc": "c" * 40, "ga": "a" * 40}
+    for field, value in (("plan_sha256", "0" * 64), ("snapshot_pin_sha256", "0" * 64), ("instrument_sha256", "0" * 64),
+                         ("schema", "other/1"), ("name", "P0"), ("trees", other_trees)):
+        result = _receipt(host, plan, name, **{field: value})
+        assert (result["verdict"], result["mismatch"]) == ("MISSING", [field]), field
+    for field in ("plan_sha256", "instrument_sha256", "trees"):
+        result = _receipt(host, plan, name, **{field: None})
+        assert result["verdict"] == "MISSING" and field in result["mismatch"]
+
+
+def test_an_unreadable_preflight_receipt_is_missing(tmp_path):
+    host, plan = _bound_host(tmp_path)
+    (tmp_path / "bad.json").write_text("{not json")
+    host.c["preflights"]["P3"] = str(tmp_path / "bad.json")
+    assert host.preflight("P3", plan) == {"verdict": "MISSING", "mismatch": ["unreadable"]}
+
+
+def test_the_instrument_identity_is_the_package_content():
+    one, two = r.instrument_identity(), r.instrument_identity()
+    assert one == two and len(one["instrument_sha256"]) == 64

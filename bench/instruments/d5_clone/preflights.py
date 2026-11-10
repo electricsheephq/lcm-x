@@ -16,7 +16,7 @@ from urllib.request import ProxyHandler, Request, build_opener
 
 from . import bars, capture, plan as planner, provider as prov, run
 
-SCHEMA = "d5-clone-preflight/1"
+SCHEMA = run.PREFLIGHT_SCHEMA  # The runner accepts a receipt only in this schema (ruling R5-5).
 ANCHOR = "identity-anchor recognised"
 HYGIENE = "Session hygiene"  # The host's own gateway session-hygiene compression (gateway/run_turn.py).
 DIGEST12 = re.compile(r"_([0-9a-f]{12})_[0-9a-f]+\.json$")  # The payload filename's content digest prefix.
@@ -293,7 +293,7 @@ PREFLIGHTS = {"P3": p3, "P4": p4, "P6": p6, "P7": p7}
 def produce(host, names):
     """Write <run_dir>/<name>.json for each preflight; returns {name: verdict}."""
     common = {"snapshot_pin_sha256": capture._sha256(host.c["snapshot_pin"]), "plan_sha256": None,
-              "trees": {t: host.c[t].get("commit") or _sha(Path(host.c[t]["lcm_tree"]).resolve()) for t in ("rc", "ga")}}
+              "trees": {t: run.tree_id(host.c, t) for t in ("rc", "ga")}, **run.instrument_identity()}
     failed, verdicts = None, {}
     try:
         if host.pins().get("verdict") != "PASS":  # The rules module is imported for planning only after P1.
