@@ -437,6 +437,16 @@ hook entry handles:
 
 ## Runtime and failure modes
 
+A session whose transcript did not exist at its first drain is remembered as pending and swept
+every worker run until its transcript appears. Pending rows never expire; the audit counts them
+and reports the age of the oldest one.
+
+Known issue in the shipped preview `claude-code-v0.1.0`: before this fix, such a session's final
+rows could be lost if its later hook records were also lost (#2533). Known issue for the preview and for any build before the
+follow-up to #2533 (#2535): the audit counts, but does not fail on, a session whose transcript file never appeared; its
+one-line verdict names how many lineages are awaiting capture and the age of the oldest. Also until #2535: a session whose
+hooks name two transcript paths can be reported verified while one path was never captured.
+
 Detached hook logs include `detached: true` and parent `blocking_ms`; `ms` still measures
 through child completion. The parent parses stdin and forks before filesystem validation.
 

@@ -330,6 +330,105 @@ def _record(hook, home, path, session="s1", event="Stop", **extra):
     hook.spool(home, record)
 
 
+def test_pending_session_is_swept_when_all_later_hooks_are_lost(tmp_path, home, hermes):
+    from hermes_lcm import claude_code_audit as ca
+
+    path = tmp_path / "projects" / "-work" / "s1.jsonl"
+    _record(_hook(), home, path, event="SessionStart")
+    report = cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    assert report["missing"] == 1 and not cc.pending(home)
+    _transcript(tmp_path, [CONVERSATION[0], CONVERSATION[-1]])
+    other = _transcript(tmp_path, [_entry("user", "v1", "other session", session="s2")], session="s2")
+    _record(_hook(), home, other, session="s2")
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    store = _open(home, hermes)
+    try:
+        assert [(role, content) for _, role, content, _ in _rows(store)] == [
+            ("user", "find the secret word"), ("assistant", "The word is ochre.")]
+        assert len(_rows(store, "s2")) == 1
+    finally:
+        cc.to_rollback_journal(store.connection)
+        store.close()
+    report = ca.audit(home)
+    assert {row["lineage"] for row in report["lineages"]} == {"claude-code:s1", "claude-code:s2"}
+    assert report["verified"] and report["failures"]["lost"] == report["failures"]["duplicates"] == 0
+
+
+def test_pending_commit_survives_a_crash_before_claim_unlink(tmp_path, home, hermes, monkeypatch):
+    path = tmp_path / "projects" / "-work" / "s1.jsonl"
+    _record(_hook(), home, path, event="SessionStart")
+    real_unlink = Path.unlink
+    interrupted = []
+
+    def crash_at_unlink(claim, *args, **kwargs):
+        if claim.suffix == ".claimed":
+            with sqlite3.connect(home / "lcm.db") as conn:
+                row = conn.execute("SELECT value FROM metadata WHERE key = ?",
+                                   ("capture:pending:claude-code:s1",)).fetchone()
+            interrupted.append((claim, json.loads(row[0]) if row else None))
+            raise RuntimeError("crash before unlink")
+        return real_unlink(claim, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "unlink", crash_at_unlink)
+        with pytest.raises(RuntimeError, match="crash before unlink"):
+            cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    [(claim, pending)] = interrupted
+    assert claim.exists() and pending and pending["path"] == str(path)
+    # Lose the claim as well: only the committed registry can recover this lineage.
+    claim.unlink()
+    _transcript(tmp_path, CONVERSATION)
+    assert cc.run_worker(home, hermes_home=hermes, settle_s=0)["records"] == 0
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    store = _open(home, hermes)
+    try:
+        assert [(role, tool) for _, role, _, tool in _rows(store)] == [
+            ("user", None), ("assistant", None), ("tool", "toolu_1"), ("assistant", None)]
+        assert _events(store) == ["new", "new", "new", "raw", "raw", "raw", "new"]
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("agent", [None, "worker"])
+def test_pending_lineage_retains_first_seen_and_drains_from_start(tmp_path, home, hermes, monkeypatch, agent):
+    path = tmp_path / "projects" / "-work" / "s1.jsonl"
+    lineage = cc.Lineage("s1", agent, path)
+    key = "capture:pending:" + lineage.key
+    store = _open(home, hermes)
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(cc.time, "time", lambda: 100.0)
+            assert cc.drain(store, lineage) == "missing"
+        expected = {"session_id": "s1", "agent_id": agent, "path": str(path), "first_seen": 100.0}
+        assert store.read_metadata_json(key) == expected
+        assert cc.read_cursor(store, lineage) is None
+        calls, real_stat = [], os.stat
+
+        def stat(name, *args, **kwargs):
+            if name == path:
+                calls.append(name)
+            return real_stat(name, *args, **kwargs)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(cc.os, "stat", stat)
+            assert cc.drain(store, lineage) == "missing"
+        assert calls == [path] and store.read_metadata_json(key) == expected
+        assert cc.registered(store) == [lineage]
+    finally:
+        store.close()
+    _transcript(tmp_path, CONVERSATION)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    store = _open(home, hermes)
+    try:
+        assert len(_rows(store, lineage.rows_session)) == 4
+        assert cc.read_cursor(store, lineage)["line_index"] == len(CONVERSATION)
+        assert store.read_metadata_json(key) is None
+        assert cc.registered(store) == [lineage]
+    finally:
+        store.close()
+
+
 def test_worker_drains_the_spool_and_leaves_the_store_readable(tmp_path, home, hermes):
     path = _transcript(tmp_path, CONVERSATION)
     _record(_hook(), home, path)
@@ -1710,3 +1809,78 @@ def test_a_sweep_cut_by_its_deadline_keeps_the_claimed_record(tmp_path, home, he
                                         ).fetchone()[0] == len(CONVERSATION)
     finally:
         store.close()
+
+
+def test_a_pending_lineage_follows_a_newer_transcript_path(tmp_path, home, hermes):
+    """#2533 review: the pending row keeps the path of the latest record, so the sweep looks where the transcript
+    will appear, and the first sighting's time is kept."""
+    early = tmp_path / "projects" / "-old" / "s1.jsonl"
+    lineage = cc.Lineage("s1", None, early)
+    store = _open(home, hermes)
+    try:
+        assert cc.drain(store, lineage) == "missing"
+        first_seen = store.read_metadata_json("capture:pending:" + lineage.key)["first_seen"]
+        later = tmp_path / "projects" / "-work" / "s1.jsonl"
+        assert cc.drain(store, cc.Lineage("s1", None, later)) == "missing"
+        row = store.read_metadata_json("capture:pending:" + lineage.key)
+        assert (row["path"], row["first_seen"]) == (str(later), first_seen)
+    finally:
+        store.close()
+    _transcript(tmp_path, CONVERSATION)  # appears at the later path; every later record of s1 is lost
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    store = _open(home, hermes)
+    try:
+        assert _rows(store), "the session must be captured at its latest path"
+        assert store.read_metadata_json("capture:pending:" + lineage.key) is None
+    finally:
+        store.close()
+
+
+def test_a_pending_path_that_now_exists_is_not_replaced(tmp_path, home, hermes):
+    """#2533 review: when the recorded transcript has appeared, a newer record naming another missing path keeps
+    the recorded one, so the sweep still drains the transcript that holds rows."""
+    early = _transcript(tmp_path, [])  # the recorded path, still missing
+    early.unlink()
+    lineage = cc.Lineage("s1", None, early)
+    store = _open(home, hermes)
+    try:
+        assert cc.drain(store, lineage) == "missing"
+    finally:
+        store.close()
+    _transcript(tmp_path, CONVERSATION)  # the recorded transcript appears with rows, before any sweep reaches it
+    later = tmp_path / "projects" / "-elsewhere" / "s1.jsonl"
+    store = _open(home, hermes)
+    try:
+        assert cc.drain(store, cc.Lineage("s1", None, later)) == "missing"
+        assert store.read_metadata_json("capture:pending:" + lineage.key)["path"] == str(early)
+    finally:
+        store.close()
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    store = _open(home, hermes)
+    try:
+        assert _rows(store), "the transcript at the recorded path must be captured"
+    finally:
+        store.close()
+
+
+def test_a_resume_from_another_directory_is_captured_from_its_real_path(tmp_path, home, hermes):
+    """#2535 reach evidence: a resume from another directory sends SessionStart with a transcript path under the new
+    directory's project folder that never exists; every later hook names the real transcript. The session is
+    captured in full from the real path, its pending row clears, and the audit verifies it."""
+    from hermes_lcm import claude_code_audit as ca
+
+    phantom = tmp_path / "projects" / "-elsewhere" / "s1.jsonl"
+    _record(_hook(), home, phantom, event="SessionStart")
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    real = _transcript(tmp_path, CONVERSATION)
+    _record(_hook(), home, real)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    store = _open(home, hermes)
+    try:
+        assert len(_rows(store)) == len([e for e in CONVERSATION if e.get("type") in ("user", "assistant")])
+        assert store.read_metadata_json("capture:pending:claude-code:s1") is None
+    finally:
+        cc.to_rollback_journal(store.connection)
+        store.close()
+    report = ca.audit(home)
+    assert report["verified"] and report["pending_lineages"] == 0 and report["failures"]["lost"] == 0

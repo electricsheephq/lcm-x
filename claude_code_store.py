@@ -50,6 +50,7 @@ OWNER_KEY = "capture:owner"  # the stamp this writer puts on every store it crea
 HERMES_MARKERS = ("config.yaml", "state.db")
 FORGOTTEN_PREFIX = "capture:forgotten:"  # a forgotten session's transcript and files are never read again
 CURSOR_PREFIX = "capture:cursor:"
+PENDING_PREFIX = "capture:pending:"
 FORK_PREFIX = "capture:fork:"  # sessions whose SessionStart source was ``fork``, and when they started
 LOCAL_GC_PREFIX = "capture:local_gc:"  # sessions seen with Claude Code's local GC on (sticky)
 BATCH_LINES = 1000
@@ -356,6 +357,23 @@ def drain(store: MessageStore, lineage: Lineage, *, deadline: Optional[float] = 
     cursor = read_cursor(store, lineage)
     state = cursor_state(lineage.path, cursor)
     if state == "missing":
+        key = PENDING_PREFIX + lineage.key
+        pending = store.read_metadata_json(key) if not cursor else None
+        recorded = pending.get("path") if isinstance(pending, dict) else None
+        if not cursor and recorded != str(lineage.path) and not (isinstance(recorded, str) and recorded
+                                                                and Path(recorded).exists()):
+            # A newer record's path replaces the recorded one while that one is still absent (the sweep must look
+            # where the transcript will be); a recorded transcript that has appeared keeps its reference, so the
+            # sweep drains it. first_seen keeps the first sighting.
+            first_seen = pending.get("first_seen") if isinstance(pending, dict) else None
+            with store.atomic():
+                store.connection.execute(
+                    "INSERT INTO metadata(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    (key, json.dumps({"session_id": lineage.session_id, "agent_id": lineage.agent_id,
+                                      "path": str(lineage.path),
+                                      "first_seen": first_seen if isinstance(first_seen, (int, float)) else time.time()},
+                                     sort_keys=True)))
+            # Durable before the worker can mark the claimed record done and unlink it.
         return "missing"
     if state == "replaced":
         old = _set_aside_copy(lineage.path, cursor)
@@ -366,8 +384,11 @@ def drain(store: MessageStore, lineage: Lineage, *, deadline: Optional[float] = 
     if state != "ok":
         cursor = _new_generation(lineage.path, lineage, cursor)
         if state == "new":  # registered before its first batch, so the sweep retries a lineage that fails
-            new = cursor
-            store.update_metadata_json(CURSOR_PREFIX + lineage.key, lambda _current: new)
+            with store.atomic():
+                store.connection.execute(
+                    "INSERT INTO metadata(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    (CURSOR_PREFIX + lineage.key, json.dumps(cursor, sort_keys=True)))
+                store.connection.execute("DELETE FROM metadata WHERE key = ?", (PENDING_PREFIX + lineage.key,))
     return "deadline" if _drain_file(store, lineage, lineage.path, cursor, deadline) is None else "drained"
 
 
@@ -765,16 +786,18 @@ def _keep_file(store: MessageStore, lineage: Lineage, path: Path, uid: str, fing
 # -- worker --
 
 def registered(store: MessageStore) -> list[Lineage]:
-    """Every transcript capture has a cursor for: the sweep's list."""
-    lineages = []
-    for _key, value in store.connection.execute(
-            "SELECT key, value FROM metadata WHERE key >= ? AND key < ?", (CURSOR_PREFIX, CURSOR_PREFIX + "￿")):
-        try:
-            cursor = json.loads(value)
-            lineages.append(Lineage(cursor["session_id"], cursor.get("agent_id"), Path(cursor["path"])))
-        except (TypeError, ValueError, KeyError):
-            continue
-    return lineages
+    """Every cursor or pending transcript, with cursors winning: the sweep's list."""
+    lineages = {}
+    for prefix in (CURSOR_PREFIX, PENDING_PREFIX):
+        for _key, value in store.connection.execute(
+                "SELECT key, value FROM metadata WHERE key >= ? AND key < ?", (prefix, prefix + "￿")):
+            try:
+                saved = json.loads(value)
+                lineage = Lineage(saved["session_id"], saved.get("agent_id"), Path(saved["path"]))
+                lineages.setdefault(lineage.key, lineage)
+            except (TypeError, ValueError, KeyError):
+                continue
+    return list(lineages.values())
 
 
 def lineages_of(record: dict) -> list[Lineage]:
