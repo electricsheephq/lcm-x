@@ -329,11 +329,11 @@ def test_17_recorder_cursor0_and_append(host, caplog):
     records = _route_records(caplog)
     assert len(records) == 1 and records[0].levelno == logging.INFO
     match = re.fullmatch(r"LCM ingest route: session=(\S+) route=(.*?) cursor=(\d+) reason=(.*?) "
-                         r"stored=(\d+)-(\d+) rows=(\d+) replay_pairs=(\d+) stripped=(\d+)", records[0].getMessage())
+                         r"stored=(\d+)-(\d+) rows=(\d+) replay_pairs=(\d+) stripped=(\d+) link_pending=(\d+)", records[0].getMessage())
     assert match is not None
     new = host.engine._store.get_session_messages(SID)[len(before):]
     assert match.groups() == (SID, "persisted_batch", "0", "persisted ambiguous delta", str(new[0]["store_id"]),
-                              str(new[-1]["store_id"]), str(len(new)), "7", "1")
+                              str(new[-1]["store_id"]), str(len(new)), "7", "1", "0")
     assert all(row["content"] not in records[0].getMessage() for row in new)
     caplog.clear()
     with caplog.at_level(logging.DEBUG, logger="hermes_lcm"):
@@ -363,9 +363,9 @@ def test_19_tool_names_without_call_ids_must_match(host, content):
     assert [row["tool_name"] for row in originals] == ["search", "lookup"]
     sources = _ingest_copies(host, [{"role": "tool", "tool_name": name, "content": content}
                                     for name in ("lookup", "different")])
-    # Empty unkeyed content stays unlinked, but a matching-name candidate is counted.
-    assert _pairs(host.engine) == ([(sources[0], originals[1]["store_id"])] if content else [])
-    assert _counts(host.engine)["ledger.replay_pairs.cursor0_unlinked"] == int(not content)
+    # v7 §2.5 includes tool_name in the scorer key even for empty content.
+    assert _pairs(host.engine) == [(sources[0], originals[1]["store_id"])]
+    assert _counts(host.engine)["ledger.replay_pairs.cursor0_unlinked"] == 0
 
 
 @pytest.mark.parametrize("field,value", [("tool_call_id", "call-empty"), ("tool_calls", [
@@ -396,7 +396,7 @@ def test_21_recorder_direct_off_current_session_end(tmp_path, caplog):
         assert len(records) == 1 and records[0].levelno == logging.INFO
         assert records[0].getMessage() == (
             f"LCM ingest route: session=ended route=S3 cursor=1 reason=off-current session end "
-            f"stored={rows[1]['store_id']}-{rows[1]['store_id']} rows=1 replay_pairs=0 stripped=0")
+            f"stored={rows[1]['store_id']}-{rows[1]['store_id']} rows=1 replay_pairs=0 stripped=0 link_pending=0")
     finally:
         engine.shutdown()
 

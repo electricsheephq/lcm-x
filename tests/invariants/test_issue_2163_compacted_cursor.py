@@ -13,6 +13,46 @@ from tests.test_compression_boundary import _turn
 from tests.test_issue_671_stub_first_exit import tool_pair
 
 
+@pytest.mark.parametrize("dangling", [
+    pytest.param(False, id="full-pair"),
+    pytest.param(True, id="dangling-call"),
+])
+def test_compacted_away_identical_pair_is_not_proof(build, monkeypatch, dangling):
+    def fixture(*, uids=False):
+        rows = [row for i in range(2) for row in _turn(i)]
+        rows += [{"role": "user", "content": "poll early"},
+                 *tool_pair("call_0", "OK", tool_name="poll")]
+        rows += [row for i in range(2, 12) for row in _turn(i)]
+        for cid, text, stamp in (("older", "older lookup", 8),
+                                 ("middle", "middle lookup", 9), ("c", "repeat", 10)):
+            rows += [{"role": "user", "content": text, "timestamp": stamp},
+                     *tool_pair(cid, shapes.LONG + cid, tool_name="lookup")]
+        return rows
+
+    monkeypatch.setattr(shapes, "fixture", fixture)
+    engine, host = compact(build, mode="cold")
+    assert not any(row.get("tool_call_id") == "call_0" for row in host)
+    call, result = tool_pair("call_0", "OK", tool_name="poll")
+    if dangling:
+        host = deepcopy(host) + [{"role": "user", "content": "poll again"}, call]
+        engine.ingest(deepcopy(host))
+        engine.shutdown()
+        engine = build()
+        new = [result, {"role": "user", "content": "next"}]
+    else:
+        new = [{"role": "user", "content": "poll again"}, call, result,
+               {"role": "user", "content": "next"}]
+    before = stored(engine)
+    engine.ingest(deepcopy(host) + new)
+    after = stored(engine)
+    assert after[:len(before)] == before
+    added = after[len(before):]
+    assert [(row["role"], row["content"]) for row in added] == [
+        (row["role"], row["content"]) for row in new
+    ]
+    assert added[-2]["tool_call_id"] == "call_0"
+
+
 def _replay_links(engine):
     conn = engine._store._conn
     if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='message_relations'").fetchone():
@@ -282,8 +322,6 @@ _U = {"role": "user", "content": "start", "timestamp": 0.5}
 _V = {"role": "user", "content": "next", "timestamp": 10.0}
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="#2377: a vetoed occurrence's ownership stays spendable by another occurrence")
 def test_issue_2377_vetoed_ownership_stays_spendable(build, monkeypatch):
     """Store A@2(c)·X, B@3(c)·X, A@4(c) dangling; the host's A@1 is another occurrence. The new X at host index 6 is
     the dangling A@4's result: no single stored occurrence proves it, so it is not a replay."""
@@ -294,11 +332,12 @@ def test_issue_2377_vetoed_ownership_stays_spendable(build, monkeypatch):
     source = [_U, a(2.0), x, b(3.0), x, a(4.0)]
     host = [_U, a(1.0), x, b(3.0), y, a(4.0), x, _V]
     observed, replayed = _pooled_shape(build, monkeypatch, source, host, cursor=2, bindings={1: 1})
-    _expect_2377_shape(observed, [*source, *host[2:]], [*source, *host[2:5], host[-1]], 6, replayed)
+    # #2414 keeps the new result (host 6); the exact, ledger-proven dangling
+    # call A@4 (host 5) is already stored and is not copied a second time.
+    _expect_2377_shape(observed, [*source, *host[2:5], *host[6:]],
+                       [*source, *host[2:5], host[-1]], 6, replayed)
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="#2377: partial parallel occurrences pool their pairs into a false replay proof")
 def test_issue_2377_partial_parallel_occurrences_pool(build, monkeypatch):
     """P(c,d)@2·X and P(c,d)@4·D are stored; neither occurrence holds both results. The host's first segment
     P@2·X·D is not proven by one occurrence, so its D (host index 3) is not a replay."""

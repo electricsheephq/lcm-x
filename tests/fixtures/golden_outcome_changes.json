@@ -1,812 +1,812 @@
 {
   "ingest": {
     "admission-aliases": {
-      "outcome_sha": "c43d66e19fb324916f6f7c7fe2a13cece1263b8b6d73dc825d49d042aa5be8b0",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "9bf664456e80eb8fd4dc3ecae0fe3af715f3cfc0319807bcb7977e488faa380a",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "admission-empty": {
-      "outcome_sha": "8559d1c6787c9192ca2db4bf00310443414c618aa5cc30d242bf0584f71abc1d",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "a2ed440ac4785d77ba20f667c2b6850a5260e7f9c8a9fd3d80ed71709d822018",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "admission-full": {
-      "outcome_sha": "5df325f64fc8ac914ad0efd9a7f4edd322b36a1e85509e8bc63e43de81b3d4cc",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then admission-full: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "b6a8f2f7e6fb8f446585c8948a903672b5b0dd48b9be677ecc3688629fb95e00",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then admission-full: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links); then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "admission-ignored": {
-      "outcome_sha": "c1c04bff836ec09b1ce3c9c06c7999c20a0545ee1330807fde763f89d4574c83",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "537189fda87047d7bd36f25eda740bdcf343e1ddf618b8adf1f6828cb1f824ae",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "admission-no-session": {
-      "outcome_sha": "9fd886fca24005588fd249fd0131c52725e49254e88ad8c395c6e7815f06439b",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "d648e4ccd0635042582a9f8ab9b9e87b12880f49c167a7b5ac7c01ed22678e42",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "admission-stateless": {
-      "outcome_sha": "04fc2675cbcc6144d2ffb48936396fa102bc0bc5fca69da2cc5e9393a0af7ad8",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "9ece545e5c958d550ae2445b14626a197b79a5dab510baa7065b75bdf9cc6880",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "anchor-disabled": {
-      "outcome_sha": "f9db413587e27eeb1cf519983cc3406f3a439f029af65d8068da12af79419581",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "7b33e8e1814a12bc232c4107c5c1a34d796ca39b130295a971b8a8dccd03c8d2",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "anchor-remainder": {
-      "outcome_sha": "d77b7d7fc5dcf40bc0a2c495cd069eee0cbab3f7500a9054b19364cfe2b96efc",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "014cc81cdc78f4febaf60980faf2c6534ba422ca135a693059b91b45816fbb5d",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "anchor-stamp-new-uid": {
-      "outcome_sha": "11f9c6bf8237786258ee731230d6106f5b2ccf57098d1a2ffe38c7ddf6f84c68",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "7578402425b42825d65f7805d4b492e6f5a2e54206ddd22db122ccbceb11eb41",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "anchor-stamp-replay": {
-      "outcome_sha": "21e6992058975e99ff6ec24b66a93fc2bc099e17c350c4d04af3c9e264479745",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "d3e7516f77d5d10150c2c35eebbf2f27ace0f552fa624724854adb370eb6b445",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "anchor-version": {
-      "outcome_sha": "711fa0ca5737097a262f7c871a7295b3fd0bb261162fdb6f327912855d5c283c",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "4cf9e350bcf9fdbde8fb966e8545d9ce63805b07d18dbbe21691a552b6fcd74a",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "anchor-version-ignore": {
-      "outcome_sha": "cd08bbfd20dd860f95b81eef49ad0893269d69e8663892928ba1649a3293f987",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "6066545464076d5bdb7372afb0d1760939cae3af760e131ab493c84cb4fe9f5a",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "boundary-exhausted-other-digest": {
-      "outcome_sha": "62a26b9a61c2c93420bc38a6e9522fa49b03e6481288e162df7f7c02bf92937c",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "07b613fedd86a41fc50fded98ffce6dafb7d6328f2c80f5da884851cdb273168",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "boundary-stored-counts-mixed": {
-      "outcome_sha": "d13ff7499b7fb729e2150a15553d3f1e2f1d8f184ac4aa3916b7edb408d9aad6",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "6edf7bf787162a1c3c44d7f1d2425a7b5c42d438312878ca48641867ca6a2237",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "boundary-two-digests": {
-      "outcome_sha": "0f09cc6c85e0399a2c9b72ee92e7c1a7f86633eeb28daa6389a30156e2dff5f4",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "0f5cccfd90ca587c233acb5c27c7b62af2994c2039b0da070062f217801cddc8",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "cache-absent": {
-      "outcome_sha": "21e6992058975e99ff6ec24b66a93fc2bc099e17c350c4d04af3c9e264479745",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "d3e7516f77d5d10150c2c35eebbf2f27ace0f552fa624724854adb370eb6b445",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "cache-divergent-cache": {
-      "outcome_sha": "189daf034a7162cd1af214d94466823d1a385d9f03e9485d9a0dbb2b50f6b926",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "942281d002a10813ed210df1568b8b88e31985991342c32ea6d680d6a848834f",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "cache-empty-delta": {
-      "outcome_sha": "21e6992058975e99ff6ec24b66a93fc2bc099e17c350c4d04af3c9e264479745",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "d3e7516f77d5d10150c2c35eebbf2f27ace0f552fa624724854adb370eb6b445",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "cache-new-stamp": {
-      "outcome_sha": "08dcd26a03130270a6a3dd74d05c9abf964788f5222469cb08edebef91bc8c47",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "9b4a936d36019d25e194ef9a859fea6e77f74b8f92b0b217b02ad5ecfea23f24",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "cache-new-uid": {
-      "outcome_sha": "11f9c6bf8237786258ee731230d6106f5b2ccf57098d1a2ffe38c7ddf6f84c68",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "7578402425b42825d65f7805d4b492e6f5a2e54206ddd22db122ccbceb11eb41",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "cache-rewrite": {
-      "outcome_sha": "00bf8a5efdfc48ed1ebfd8763790c0ee6bf2e62758c9d29c5dce9e5c2b786aef",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "04dbed0cef06000cc243cc4aa139c2c10afbdd7c61e1247d754644fd9e164afc",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "cache-short-cache": {
-      "outcome_sha": "21e6992058975e99ff6ec24b66a93fc2bc099e17c350c4d04af3c9e264479745",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "d3e7516f77d5d10150c2c35eebbf2f27ace0f552fa624724854adb370eb6b445",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "durable-end-allow-end": {
-      "outcome_sha": "ee6a090cc46fb06e55bba1f0c4828b97657e19a5cf7e162b6f03dd9098afe0da",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "5f7913600dd1746950498af8bfe905336207817c65f117c1c9d7d97d99e11796",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "durable-end-delta": {
-      "outcome_sha": "e763b7e88499398a30bcf8ff0ff94a8f53c8b71e3bb65f7fbfca7be90dd54517",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "ee32d7010f029b67bca29607b0ae57ac4c2b4f4fc7a2aaa3c803c95eeef08f29",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "durable-end-full": {
-      "outcome_sha": "ee6a090cc46fb06e55bba1f0c4828b97657e19a5cf7e162b6f03dd9098afe0da",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "5f7913600dd1746950498af8bfe905336207817c65f117c1c9d7d97d99e11796",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "durable-end-new-uid": {
-      "outcome_sha": "ae5660bb9747f76b156878d9e81369526ac3e25fd24338772de18de50e9ceb9b",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "b37957e70f04a40f648b1e7afb95ea3dfeefb01b2c6060faba48d6d0423776a7",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "durable-metadata-conflict": {
-      "outcome_sha": "386c88feb8145c74ce645f977116569c784e5a4d7b77c425d2256b58d5044d76",
-      "reason": "#2378: re-stamped carried row linked possible_replay_of; stored rows unchanged"
+      "outcome_sha": "c8828463cb9fb0972c386a7519136bf253d5c82c6bb97fa7f1d7aa32aed73f2d",
+      "reason": "#2378: re-stamped carried row linked possible_replay_of; stored rows unchanged; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "durable-v2-allow-end": {
-      "outcome_sha": "7812ba51b6aa7e0ed4a99221d14d45f20e9939da25bdfcab579b507176896ea8",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "20305b322704e487975e63374dd5483bd2526ab306f0b4a72da2f96d6e437c3b",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "durable-v2-delta": {
-      "outcome_sha": "c31b1c7a37fccd80d9e076d72e75037d6b736ad6bc7e9161f7356a9642f61910",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "18508e64f4e3017e62326bf831a57af56efe4b9680802a9ca72a254cb7dc3292",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "durable-v2-full": {
-      "outcome_sha": "7812ba51b6aa7e0ed4a99221d14d45f20e9939da25bdfcab579b507176896ea8",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "20305b322704e487975e63374dd5483bd2526ab306f0b4a72da2f96d6e437c3b",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "durable-v2-new-uid": {
-      "outcome_sha": "b3ba3d6773c804fd439fb3351abb3d90defe98b14ec279f1cb71690e9091c621",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "ba90a4fd36514d7c2d4b3743fe6065d2444fa362160a1550f6e21f0af78ed5dc",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "durable-v3-allow-end": {
-      "outcome_sha": "244964efedb0d3cd2d1a985470c3d3a478316aef0127b626edab4ba07a65ce65",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "34fd517d2db3a2272d0731454311a1f70fbd2c348f16355b7bcf188a7eafce2c",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "durable-v3-delta": {
-      "outcome_sha": "817ca3f962343f65a5670309001b43be32242120d5e96162da4626f9e8d17fcc",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "675c3900a61df0b53b3c20cd6cc5ea17ecd4e666c6bc1742996540e8b634ed7b",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "durable-v3-full": {
-      "outcome_sha": "244964efedb0d3cd2d1a985470c3d3a478316aef0127b626edab4ba07a65ce65",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "34fd517d2db3a2272d0731454311a1f70fbd2c348f16355b7bcf188a7eafce2c",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "durable-v3-new-uid": {
-      "outcome_sha": "090743d4f4bfef56ca46db1663f11dbe5dba25a74527ca6cb858b44e291a97d8",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "b4561c2eb527935476089a0f696ee1b5bd2e83829a9f81453627cdfc47a5c099",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "durable-v4-allow-end": {
-      "outcome_sha": "7ab69666a8d5babcafef9e73bdb351cb399018d6b318d221b8842329390b5190",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "58faa3e1ae966cb4fc80a3281440dad7dcb86395a15db7e7d8405e84a90ac52d",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "durable-v4-delta": {
-      "outcome_sha": "80a57497233dcfa8dae38ae2c0738a04b4b42f5c502a3503afc818a63edc3644",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "756cae984cca50278ec582299a57053b29d382fd3dbda7f9d76574d3aa43a655",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "durable-v4-full": {
-      "outcome_sha": "7ab69666a8d5babcafef9e73bdb351cb399018d6b318d221b8842329390b5190",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "58faa3e1ae966cb4fc80a3281440dad7dcb86395a15db7e7d8405e84a90ac52d",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "durable-v4-new-uid": {
-      "outcome_sha": "6042f9d2fed0abc4a8f4b7b899f5588b989db0058cdf848a289d53fbc1e0eb88",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "12bfd3c929f5d9ffa30bf39b46838f005d179eaab021d80efe48b791585286ec",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "empty-all-ordinals": {
-      "outcome_sha": "97b91dab6057e08522e948833fbe46b1978f16b46e04d35837e8318006e3648e",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then empty-all-ordinals: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "1b814efa8b710cd7b586eb3d5cde1867e2490c8f64b66fb193052d5e9f49c2ce",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then empty-all-ordinals: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links); then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "empty-child-placeholder-prefix": {
-      "outcome_sha": "bc37813e310daa7d74d82168bc283b29236c6b1db57ac566977f164fca32a1df",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then empty-child-placeholder-prefix: adds possible_replay_of 3->1 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "26eaf461a7f2fc577035d9bd41226e0142757a0984bd94db35d98f21bf56f881",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then empty-child-placeholder-prefix: adds possible_replay_of 3->1 (#2305 P1h PR5 cursor-0 batch links); then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "ignored-changed": {
-      "outcome_sha": "8520b7eaf3d8f64d1d7e4c06bf670b1bebf0750a3ea20c3ebffa58836376c142",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "dd3ae4a4427488f816f7797a2de207c78f83450e78812578904c03e76c462fb2",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "ignored-delta": {
-      "outcome_sha": "87774324fcc0f6171667ec3579b0400419e3198e6724801a40f7125389f1ae6a",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "65d6c891be2a6ea30d2800d05709ad20926ab02e1ef7d2a7dcb5360fe4649a26",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "ignored-full": {
-      "outcome_sha": "ec820852096da24d3d79a70045662c82370d673c56962851c8449ed145152fa1",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "8bb73aa058daea89ddb1258fd237ac59731e1d9b216dd78e8fb5da35b7f4bc8a",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "ignored-new": {
-      "outcome_sha": "549a6c05efef0106abecbbf19fdb1d1666de66532ae230eaddd79b1c438fb037",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then ignored-new: adds possible_replay_of 6->5 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "f09c5e0ce09fccecf017573bea629618e8cc9b7c2d6074c26cac5108d1d43eb1",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then ignored-new: adds possible_replay_of 6->5 (#2305 P1h PR5 cursor-0 batch links); then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "ignored-prefix": {
-      "outcome_sha": "bb5dc23e6f79dea459fd1664769f3884d26d2a202e2a1015e055785c8e90d001",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "225554618c016749c212134b2c2bbd6d2b7605859ba3edeaae5df4bb04927f4d",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "ignored-rewrite": {
-      "outcome_sha": "e66677a239a5ebc4179fba048424350bf30f1af0287dae7c515fa81705f64685",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "e2b3863f9acf2cbae0f34ead8428048e862472c16414977b6d03d7552e51046f",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "ignored-suffix": {
-      "outcome_sha": "4dc93d7ced361e5de601634c65db1c528dd8b5747566a1bfbaf5662d7a9260fb",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "fefafa0176daa9bb89707e15217a238ee1de461ad040b4668f8f1298a1ef4a8a",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "ignored-warm": {
-      "outcome_sha": "2c0da4c00965bd16f1214072716809a5c5012533bc29ace7c5c2f4648825bbe7",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "9da07c98bbc721574be168d471303c4f3f62d2e405d376fa5f2ac92639082180",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "marker-changed": {
-      "outcome_sha": "c1ad64828e8bec600561014cb03a23680dc079642ce845981dbff54903bb82c3",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then marker-changed: adds possible_replay_of 6->4 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "949df27fde21465909648751a9d21c3788f9493b9357413d32e714608a54c330",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then marker-changed: adds possible_replay_of 6->4 (#2305 P1h PR5 cursor-0 batch links); then #2377 v7: the cold re-ingest links 1 stored tool copy possible_replay_of (silent copies become visible); stored rows unchanged; state snapshots gain the tool-scan diagnostic attributes"
     },
     "marker-delta": {
-      "outcome_sha": "7a1e67ef45af81a2e80f3846ad714861460bf2c8afc58f1bbbecf6b73ea70af4",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then marker-delta: adds possible_replay_of 5->4 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "63de13950928d3f671c1f97cb0e61722c33af676cdd56a31fcf31ce27d17c89e",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then marker-delta: adds possible_replay_of 5->4 (#2305 P1h PR5 cursor-0 batch links); then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "marker-full": {
-      "outcome_sha": "809cd723cbe9486dc9e16528e8b3f6a07d137d92747cf2082b8a85259ca82179",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then marker-full: adds possible_replay_of 5->4 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "0b9000d8ec8c1ab353fa3355976a32932c1d8865cce28e144de8c0680ed855a8",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then marker-full: adds possible_replay_of 5->4 (#2305 P1h PR5 cursor-0 batch links); then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "marker-new": {
-      "outcome_sha": "52492a8d84bc2e95e4c808c6dbf23a92a5a199efc3ff7198175b9642f9e1ce5b",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then marker-new: adds possible_replay_of 6->5 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "c919cee90ec6ffde58c50cc54856ad6eec13cbce017edc682766cb10ce5efaff",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then marker-new: adds possible_replay_of 6->5 (#2305 P1h PR5 cursor-0 batch links); then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "marker-prefix": {
-      "outcome_sha": "baa6b23ffc635d72cd8bca10d61ce90aa0c3b1f9cafad9bfc7d6822ac38ab47f",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "454015e176374f7dc13b72710513b548d31c56976c4032bbf75985c4de4a24af",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "marker-rewrite": {
-      "outcome_sha": "8b5724302a5f3727c6460b6e3c93db7fc30adc6fbfa7283371360d58374d95e4",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then marker-rewrite: adds possible_replay_of 5->4 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "c40acd2178698a844035672b04cadd0854fa6d5b31ff683676ced27b15f05aad",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then marker-rewrite: adds possible_replay_of 5->4 (#2305 P1h PR5 cursor-0 batch links); then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "marker-suffix": {
-      "outcome_sha": "58b041ddcc3ad0ff3dbafa089b1b775d2ee658cf6b442ddcfc3f3f1a37951389",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then marker-suffix: adds possible_replay_of 5->4 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "d126ae708fe5ea6013887a6a176f3b81fbe8594c8b2fda65bd8ecc4a0f68d84b",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then marker-suffix: adds possible_replay_of 5->4 (#2305 P1h PR5 cursor-0 batch links); then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "marker-warm": {
-      "outcome_sha": "ad49857cbbdbb469465bc8dd8d327a029b1c4b1ff7b316d38c6b0965384509e6",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "2418f7051e693472cfbd8f54d6e9d2bb1d9d9308842accc2e52767dc5549cd49",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "opaque-raw-stub-assistant-1": {
-      "outcome_sha": "dc1935da3468b17c7f73d6333ec01c697f9065625e5bf1e46c36b94aa875bec1",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "e1e764765420fc7462a3ee0c95b60d5d91be2314788fbafe14622427e7a9ccf2",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "opaque-raw-stub-assistant-2": {
-      "outcome_sha": "10a302c54a3bfbab608b765761b33c1ea9d5a2bf7d81630b3614a63c9b68a9e5",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "7c5760e7c74e2bb58e7e8af5fde821f0a998a58b8d9656bb67050fef43769056",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "opaque-raw-stub-tool-1": {
-      "outcome_sha": "319e3a03b6849b3293dfb919b77108fc80cda158ff8904d9a7c844ccb0706741",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "eb98a50e043755b31a07a1f9ede1f1e74d5da2605875a2dd8f327a3b264ce296",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "opaque-raw-stub-tool-2": {
-      "outcome_sha": "54ab1d9b9f4904047ed255be7dd57110a7decd241ab57972b57be02b9af180cf",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "bf7c936bb597089ce67ca955887f93929afc85ace3eed65ad94666c7fb84e05e",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "opaque-raw-stub-user-1": {
-      "outcome_sha": "b4347c406bb1a988fa014997a79bc1adb1828bdf82d5d5c6e49da4f666ecf263",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "aef70c5d52de01b22ea8d8b07a8b485171191ab8bceca22e6ab8f824f4c38480",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "opaque-raw-stub-user-2": {
-      "outcome_sha": "e2a4434ce752b66e2407b4f72e1095ba09aa875c6fd7455ac85ba5750bd5943a",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "6830e65e1ff2ef61d49b30c520c1f54f56c75f55f2ab58a83e69c15f22ffac20",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "placeholder-0-1-all": {
-      "outcome_sha": "afb62a6adc905e041af3c2fa530e99d454973b6fcaff39cc47b49b4276e9df98",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-0-1-all: adds possible_replay_of 3->1, 4->2 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "8c01add85d6774b0773e534ff14baf3b080b5578bf76eb7d1b4ed67606b26d1c",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-0-1-all: adds possible_replay_of 3->1, 4->2 (#2305 P1h PR5 cursor-0 batch links); then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "placeholder-0-1-generated": {
-      "outcome_sha": "81b0b8ebafab9a54b6470fb040713281ad70b1d8e5e437d795a544a3e02d293c",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-0-1-generated: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "d1cecb90de6f7bb4f5789ce7c44fa43856228777189fdf3fa87e2e37f4cb34d9",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-0-1-generated: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links); then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "placeholder-0-1-mixed": {
-      "outcome_sha": "d13ff7499b7fb729e2150a15553d3f1e2f1d8f184ac4aa3916b7edb408d9aad6",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "6edf7bf787162a1c3c44d7f1d2425a7b5c42d438312878ca48641867ca6a2237",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "placeholder-0-1-single": {
-      "outcome_sha": "84f43245dc1a39e7f53a7be9919fed7d73a0e92e3460fcbfbc235ac3ce34e859",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-0-1-single: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "dfa4065ca000d08b6efc4972da5b12fd60c54d569deee22d81369283bf0172db",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-0-1-single: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links); then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "placeholder-0-1-stored-counts": {
-      "outcome_sha": "afb62a6adc905e041af3c2fa530e99d454973b6fcaff39cc47b49b4276e9df98",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-0-1-stored-counts: adds possible_replay_of 3->1, 4->2 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "8c01add85d6774b0773e534ff14baf3b080b5578bf76eb7d1b4ed67606b26d1c",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-0-1-stored-counts: adds possible_replay_of 3->1, 4->2 (#2305 P1h PR5 cursor-0 batch links); then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "placeholder-0-1-summary": {
-      "outcome_sha": "02d590655aca5d009f9793ed83e4817cdef3f6f8687d2ad9eea61a6e6e6e90f6",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "43c22f69bbc1868433c4dfb30a846769503ec893917b17244a145bee921c514c",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "placeholder-0-2-all": {
-      "outcome_sha": "afb62a6adc905e041af3c2fa530e99d454973b6fcaff39cc47b49b4276e9df98",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-0-2-all: adds possible_replay_of 3->1, 4->2 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "8c01add85d6774b0773e534ff14baf3b080b5578bf76eb7d1b4ed67606b26d1c",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-0-2-all: adds possible_replay_of 3->1, 4->2 (#2305 P1h PR5 cursor-0 batch links); then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "placeholder-0-2-generated": {
-      "outcome_sha": "81b0b8ebafab9a54b6470fb040713281ad70b1d8e5e437d795a544a3e02d293c",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-0-2-generated: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "d1cecb90de6f7bb4f5789ce7c44fa43856228777189fdf3fa87e2e37f4cb34d9",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-0-2-generated: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links); then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "placeholder-0-2-mixed": {
-      "outcome_sha": "772996163e9c688f0f71b4fad65f01ad9ff9e42120678569ed4d360b124acf84",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "be4ff964e68bdb1621a9731d84fbc203c997cfe1de54325e8792f22a5d592468",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "placeholder-0-2-single": {
-      "outcome_sha": "84f43245dc1a39e7f53a7be9919fed7d73a0e92e3460fcbfbc235ac3ce34e859",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-0-2-single: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "dfa4065ca000d08b6efc4972da5b12fd60c54d569deee22d81369283bf0172db",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-0-2-single: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links); then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "placeholder-0-2-stored-counts": {
-      "outcome_sha": "afb62a6adc905e041af3c2fa530e99d454973b6fcaff39cc47b49b4276e9df98",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-0-2-stored-counts: adds possible_replay_of 3->1, 4->2 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "8c01add85d6774b0773e534ff14baf3b080b5578bf76eb7d1b4ed67606b26d1c",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-0-2-stored-counts: adds possible_replay_of 3->1, 4->2 (#2305 P1h PR5 cursor-0 batch links); then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "placeholder-0-2-summary": {
-      "outcome_sha": "02d590655aca5d009f9793ed83e4817cdef3f6f8687d2ad9eea61a6e6e6e90f6",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "43c22f69bbc1868433c4dfb30a846769503ec893917b17244a145bee921c514c",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "placeholder-1-1-all": {
-      "outcome_sha": "afb62a6adc905e041af3c2fa530e99d454973b6fcaff39cc47b49b4276e9df98",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-1-1-all: adds possible_replay_of 3->1, 4->2 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "8c01add85d6774b0773e534ff14baf3b080b5578bf76eb7d1b4ed67606b26d1c",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-1-1-all: adds possible_replay_of 3->1, 4->2 (#2305 P1h PR5 cursor-0 batch links); then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "placeholder-1-1-generated": {
-      "outcome_sha": "485416bec023ddbcadc21a0356755c54170d34c4a64cfbb7c580e67a84d0c9c1",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "8b99dc77e222d786f41b66bf0417f09681af63fdfb3ce53b6ffe21a210b401fd",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "placeholder-1-1-mixed": {
-      "outcome_sha": "d13ff7499b7fb729e2150a15553d3f1e2f1d8f184ac4aa3916b7edb408d9aad6",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "6edf7bf787162a1c3c44d7f1d2425a7b5c42d438312878ca48641867ca6a2237",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "placeholder-1-1-single": {
-      "outcome_sha": "84f43245dc1a39e7f53a7be9919fed7d73a0e92e3460fcbfbc235ac3ce34e859",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-1-1-single: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "dfa4065ca000d08b6efc4972da5b12fd60c54d569deee22d81369283bf0172db",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-1-1-single: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links); then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "placeholder-1-1-stored-counts": {
-      "outcome_sha": "afb62a6adc905e041af3c2fa530e99d454973b6fcaff39cc47b49b4276e9df98",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-1-1-stored-counts: adds possible_replay_of 3->1, 4->2 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "8c01add85d6774b0773e534ff14baf3b080b5578bf76eb7d1b4ed67606b26d1c",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-1-1-stored-counts: adds possible_replay_of 3->1, 4->2 (#2305 P1h PR5 cursor-0 batch links); then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "placeholder-1-1-summary": {
-      "outcome_sha": "ba58f43d40a473da5b15cd163debf6fc025aa3de0b26d80bf161c180c469c70a",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "d601227770cedebdb46706514d9982969a32ee405b55969d05a202b474a3ac74",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "placeholder-1-2-all": {
-      "outcome_sha": "afb62a6adc905e041af3c2fa530e99d454973b6fcaff39cc47b49b4276e9df98",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-1-2-all: adds possible_replay_of 3->1, 4->2 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "8c01add85d6774b0773e534ff14baf3b080b5578bf76eb7d1b4ed67606b26d1c",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-1-2-all: adds possible_replay_of 3->1, 4->2 (#2305 P1h PR5 cursor-0 batch links); then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "placeholder-1-2-generated": {
-      "outcome_sha": "485416bec023ddbcadc21a0356755c54170d34c4a64cfbb7c580e67a84d0c9c1",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "8b99dc77e222d786f41b66bf0417f09681af63fdfb3ce53b6ffe21a210b401fd",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "placeholder-1-2-mixed": {
-      "outcome_sha": "772996163e9c688f0f71b4fad65f01ad9ff9e42120678569ed4d360b124acf84",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "be4ff964e68bdb1621a9731d84fbc203c997cfe1de54325e8792f22a5d592468",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "placeholder-1-2-single": {
-      "outcome_sha": "84f43245dc1a39e7f53a7be9919fed7d73a0e92e3460fcbfbc235ac3ce34e859",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-1-2-single: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "dfa4065ca000d08b6efc4972da5b12fd60c54d569deee22d81369283bf0172db",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-1-2-single: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links); then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "placeholder-1-2-stored-counts": {
-      "outcome_sha": "afb62a6adc905e041af3c2fa530e99d454973b6fcaff39cc47b49b4276e9df98",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-1-2-stored-counts: adds possible_replay_of 3->1, 4->2 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "8c01add85d6774b0773e534ff14baf3b080b5578bf76eb7d1b4ed67606b26d1c",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-1-2-stored-counts: adds possible_replay_of 3->1, 4->2 (#2305 P1h PR5 cursor-0 batch links); then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "placeholder-1-2-summary": {
-      "outcome_sha": "02d590655aca5d009f9793ed83e4817cdef3f6f8687d2ad9eea61a6e6e6e90f6",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "43c22f69bbc1868433c4dfb30a846769503ec893917b17244a145bee921c514c",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "placeholder-2-1-all": {
-      "outcome_sha": "afb62a6adc905e041af3c2fa530e99d454973b6fcaff39cc47b49b4276e9df98",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-2-1-all: adds possible_replay_of 3->1, 4->2 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "8c01add85d6774b0773e534ff14baf3b080b5578bf76eb7d1b4ed67606b26d1c",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-2-1-all: adds possible_replay_of 3->1, 4->2 (#2305 P1h PR5 cursor-0 batch links); then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "placeholder-2-1-generated": {
-      "outcome_sha": "485416bec023ddbcadc21a0356755c54170d34c4a64cfbb7c580e67a84d0c9c1",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "8b99dc77e222d786f41b66bf0417f09681af63fdfb3ce53b6ffe21a210b401fd",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "placeholder-2-1-mixed": {
-      "outcome_sha": "d13ff7499b7fb729e2150a15553d3f1e2f1d8f184ac4aa3916b7edb408d9aad6",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "6edf7bf787162a1c3c44d7f1d2425a7b5c42d438312878ca48641867ca6a2237",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "placeholder-2-1-single": {
-      "outcome_sha": "84f43245dc1a39e7f53a7be9919fed7d73a0e92e3460fcbfbc235ac3ce34e859",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-2-1-single: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "dfa4065ca000d08b6efc4972da5b12fd60c54d569deee22d81369283bf0172db",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-2-1-single: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links); then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "placeholder-2-1-stored-counts": {
-      "outcome_sha": "afb62a6adc905e041af3c2fa530e99d454973b6fcaff39cc47b49b4276e9df98",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-2-1-stored-counts: adds possible_replay_of 3->1, 4->2 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "8c01add85d6774b0773e534ff14baf3b080b5578bf76eb7d1b4ed67606b26d1c",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-2-1-stored-counts: adds possible_replay_of 3->1, 4->2 (#2305 P1h PR5 cursor-0 batch links); then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "placeholder-2-1-summary": {
-      "outcome_sha": "ba58f43d40a473da5b15cd163debf6fc025aa3de0b26d80bf161c180c469c70a",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "d601227770cedebdb46706514d9982969a32ee405b55969d05a202b474a3ac74",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "placeholder-2-2-all": {
-      "outcome_sha": "afb62a6adc905e041af3c2fa530e99d454973b6fcaff39cc47b49b4276e9df98",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-2-2-all: adds possible_replay_of 3->1, 4->2 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "8c01add85d6774b0773e534ff14baf3b080b5578bf76eb7d1b4ed67606b26d1c",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-2-2-all: adds possible_replay_of 3->1, 4->2 (#2305 P1h PR5 cursor-0 batch links); then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "placeholder-2-2-generated": {
-      "outcome_sha": "485416bec023ddbcadc21a0356755c54170d34c4a64cfbb7c580e67a84d0c9c1",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "8b99dc77e222d786f41b66bf0417f09681af63fdfb3ce53b6ffe21a210b401fd",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "placeholder-2-2-mixed": {
-      "outcome_sha": "772996163e9c688f0f71b4fad65f01ad9ff9e42120678569ed4d360b124acf84",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "be4ff964e68bdb1621a9731d84fbc203c997cfe1de54325e8792f22a5d592468",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "placeholder-2-2-single": {
-      "outcome_sha": "84f43245dc1a39e7f53a7be9919fed7d73a0e92e3460fcbfbc235ac3ce34e859",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-2-2-single: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "dfa4065ca000d08b6efc4972da5b12fd60c54d569deee22d81369283bf0172db",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-2-2-single: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links); then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "placeholder-2-2-stored-counts": {
-      "outcome_sha": "afb62a6adc905e041af3c2fa530e99d454973b6fcaff39cc47b49b4276e9df98",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-2-2-stored-counts: adds possible_replay_of 3->1, 4->2 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "8c01add85d6774b0773e534ff14baf3b080b5578bf76eb7d1b4ed67606b26d1c",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-2-2-stored-counts: adds possible_replay_of 3->1, 4->2 (#2305 P1h PR5 cursor-0 batch links); then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "placeholder-2-2-summary": {
-      "outcome_sha": "02d590655aca5d009f9793ed83e4817cdef3f6f8687d2ad9eea61a6e6e6e90f6",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "43c22f69bbc1868433c4dfb30a846769503ec893917b17244a145bee921c514c",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "proof-consumed-consulted": {
-      "outcome_sha": "8e46667fc820aacc4a51c27c3a847f98372ae5c29f903ab2798a30be70615765",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "e5056179242f3f369f11caf504665980dbf4606de729189bc9c1c2c778355db2",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "proof-consumed-divergent": {
-      "outcome_sha": "49914b8334a5e9d0064a56eded094bc0e72ffaff1b0169b9be3357aa8432298f",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "3c2aeebe13914da26efe65134da61b911bbd06093a2938c109340965818200ca",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "proof-consumed-foreign-conversation": {
-      "outcome_sha": "83082056f6429beabc420d50ac1633e975c23080fb7f88244be04f97090f69b7",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "ed179d9fa5e3c788562824002a39f6620cde78d6e22a96749bce0194aa9cd209",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "proof-consumed-foreign-session": {
-      "outcome_sha": "77b474ed29b63ec3243149fab411d8135a6b4da2caa4932da124a530555840fc",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "2ccf7f2b965ea3cc6a3958c7c0e32add8bdfe864a3a4ebf7a5a889c0a8a3661f",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "proof-consumed-full": {
-      "outcome_sha": "c5ec22b5116297fb7f6ad2b557826a67c30f7c5797ba9fcc27c10da703858e53",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "f4ec97049202781a14a39339e6656766f71958b9b95adced8a75bdb892d94ed3",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "proof-consumed-input": {
-      "outcome_sha": "c5ec22b5116297fb7f6ad2b557826a67c30f7c5797ba9fcc27c10da703858e53",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "f4ec97049202781a14a39339e6656766f71958b9b95adced8a75bdb892d94ed3",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "proof-consumed-merge": {
-      "outcome_sha": "5afe86033a0c6c55f3b013d6ee012b8075f9d707cb5c4ea051519b890c5d26a5",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then proof-consumed-merge: adds possible_replay_of 6->5 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "2853621ffe9505f986433a704931a9d1dace245f16c4a46d179361597fd76c5c",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then proof-consumed-merge: adds possible_replay_of 6->5 (#2305 P1h PR5 cursor-0 batch links); then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "proof-consumed-missing-metadata": {
-      "outcome_sha": "b0cfc7cd1928d2e1e2b66f0d890b3c8453e887f48d5be0a16d44eb77e36b5d95",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "bbac5ce38e93a40bb780528ddd00def5e25d77caf506f093fb567bc0efeb3864",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "proof-consumed-new-stamp": {
-      "outcome_sha": "e5fc5788c1c7ef6e625cf9975c1cc8dfdf6e3252bb2396fe8499fd9961798873",
-      "reason": "#2378: re-stamped carried row linked possible_replay_of; stored rows unchanged"
+      "outcome_sha": "edb789017039f3949818d95d09c066bfaf3082bd6bacfd381d45fa0d25c1c0ef",
+      "reason": "#2378: re-stamped carried row linked possible_replay_of; stored rows unchanged; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "proof-consumed-new-uid": {
-      "outcome_sha": "11f9c6bf8237786258ee731230d6106f5b2ccf57098d1a2ffe38c7ddf6f84c68",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "7578402425b42825d65f7805d4b492e6f5a2e54206ddd22db122ccbceb11eb41",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "proof-consumed-repair": {
-      "outcome_sha": "f46f796daf16a901daa72535feabfce5ed539ff6748d6d5e4773d117615ae8c5",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "959fc180f03acdc7696123fed49bd8f10dd7034737b2d66ac94347a12809db66",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "proof-consumed-short": {
-      "outcome_sha": "0302e2d84ef1908e3acc267b7ffe21e6f6b1907e9424590dded2dd02aa8bd19a",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "38883969e51accaac15f7c373bfa60fb8a16792b52824d6be205750605294d35",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "proof-consumed-zero": {
-      "outcome_sha": "8687a9b62bc6d4db21f07048102f6441f845f7386277c02da753511f82cbbcf9",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "494d90fa3f362c9944f49e0ae13984ef93a9b4da5a3f276ff83f88e196e2a31c",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "proof-native-consulted": {
-      "outcome_sha": "2d4df9926f7884d0974eea87c0934f656515f9e6016fa6803249cdb877174d11",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "e8b08e13142f41c49236781f9ab5d3155d97b3a3a66117eb3e360411ca8f43b1",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "proof-native-divergent": {
-      "outcome_sha": "968cc16fb4dcdf83b6d9aa45f060f5ab8eccf847c4f835ace24ee0223426d785",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "a408ad70fdc8a6f07c81883da77053e8bb8319f870592b1bffe0c2361a3b5c08",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "proof-native-foreign-conversation": {
-      "outcome_sha": "dd441365c8d9086a0abb238fea4222954078ab91136961f62eeb7a7f68e28eb3",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "cef6ff6c06e2f6a7597f0a96dfc16037745cfda47a4be6cdb2e750f30cb6a814",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "proof-native-foreign-session": {
-      "outcome_sha": "e4e947ccbcd823f0c779fbd1c8c7117785ab8773b02a8c574dad971522588704",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "23f6aba9cc96beba389339a1ab73a1b367ac951ba7f9ceb2d71437da1462650a",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "proof-native-full": {
-      "outcome_sha": "c5ec22b5116297fb7f6ad2b557826a67c30f7c5797ba9fcc27c10da703858e53",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "f4ec97049202781a14a39339e6656766f71958b9b95adced8a75bdb892d94ed3",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "proof-native-input": {
-      "outcome_sha": "c5ec22b5116297fb7f6ad2b557826a67c30f7c5797ba9fcc27c10da703858e53",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "f4ec97049202781a14a39339e6656766f71958b9b95adced8a75bdb892d94ed3",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "proof-native-lossy": {
-      "outcome_sha": "c08fe605cbf31f94545c73d947d2ecdcad6117eeac40685cca2523bd134a6622",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "993d9c374e028e8caaa9f6c94c3ffde112e80c4f3effd5ac403121d316f3d071",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "proof-native-merge": {
-      "outcome_sha": "4daef13124c29dda1c6530f2581a0e158dc63e95467946b9ade98e45a0e8a686",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then proof-native-merge: adds possible_replay_of 6->5 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "a64caca360aa90ee99b39ed4f3285895ce1b7fd20c22a55afda5d9f527398ef8",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then proof-native-merge: adds possible_replay_of 6->5 (#2305 P1h PR5 cursor-0 batch links); then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "proof-native-missing-metadata": {
-      "outcome_sha": "b0cfc7cd1928d2e1e2b66f0d890b3c8453e887f48d5be0a16d44eb77e36b5d95",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "bbac5ce38e93a40bb780528ddd00def5e25d77caf506f093fb567bc0efeb3864",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "proof-native-new-stamp": {
-      "outcome_sha": "e5fc5788c1c7ef6e625cf9975c1cc8dfdf6e3252bb2396fe8499fd9961798873",
-      "reason": "#2378: re-stamped carried row linked possible_replay_of; stored rows unchanged"
+      "outcome_sha": "edb789017039f3949818d95d09c066bfaf3082bd6bacfd381d45fa0d25c1c0ef",
+      "reason": "#2378: re-stamped carried row linked possible_replay_of; stored rows unchanged; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "proof-native-new-uid": {
-      "outcome_sha": "11f9c6bf8237786258ee731230d6106f5b2ccf57098d1a2ffe38c7ddf6f84c68",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "7578402425b42825d65f7805d4b492e6f5a2e54206ddd22db122ccbceb11eb41",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "proof-native-remap": {
-      "outcome_sha": "c5a7e78a3835c388cf7c6420afc2163d97794693da10b4fbad5de9d5d325bfd3",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "1b444582b3f00c97db14a2f0046312448c54a57ec7f4c32d7d59bae8ead472e3",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "proof-native-remap-new-stamp": {
-      "outcome_sha": "f673378c2a26abd2970c6d220b408e28c0b3f215b0fc19273fcd10efc558ebeb",
-      "reason": "#2378: re-stamped carried row linked possible_replay_of; stored rows unchanged"
+      "outcome_sha": "6d1d5ad7c48ab771b5708e1d504df835ce8bad195fb511164e293203f662335a",
+      "reason": "#2378: re-stamped carried row linked possible_replay_of; stored rows unchanged; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "proof-native-repair": {
-      "outcome_sha": "e8402a3833bc0674effbe8f88aef6fa66798a0aef081eca6cf681a620137e3bb",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "cf05391adc00cf7cdd49c2e9d81dea8815ee99650b599346a43ab91beff54cc2",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "proof-native-short": {
-      "outcome_sha": "36628838e8d8068637689639c67900c5bfb7d1ccdc67539e397a6e91f2d8315f",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "f946cff35ba9ff62557760e885fbd61db2b9b05617cc41bb9607b48250d6950e",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "proof-native-zero": {
-      "outcome_sha": "25bb80cfffa596d31211ac40cfa632b0b2687651eaeea53083e4dd07a88a7019",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "a37181a39728dd98de79b4931fdc19fbbbc3ca36442231cbd5e13d6dc823dd38",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "proof-output-consulted": {
-      "outcome_sha": "f1a5b2d99b8db10526b1358dc2ad5ae599867fe623a9aa4db534eb9c2d769891",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "2cfcb2aa99caa023985b751972aea9093f51607e93452990c8b6892f2ecae91a",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "proof-output-divergent": {
-      "outcome_sha": "caa96355e725f000148dccecc994454f876ca9253d704864adfe0085e292983a",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "fe503417704d24062026d1f391ba450ff2cca2a96e4d027678c9eb3390aeac29",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "proof-output-foreign-conversation": {
-      "outcome_sha": "5ec8b0501f213ce6fd76ef762411bce20e4ff9c5a95dac40f53ae2b12c5bdd13",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "e2f053fa43662f194dfa84d8029d9ae45810eaa98f9094ebaff7ee701741c2f2",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "proof-output-foreign-session": {
-      "outcome_sha": "9b2ec95d41320a38582907daa9b9c9ad390638841872edd3cfbeece7b60e8874",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "c3bb5c0fa8c5352b3aa124cce44b39fd411831b441a44a0513730620fb9cd77d",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "proof-output-full": {
-      "outcome_sha": "c5ec22b5116297fb7f6ad2b557826a67c30f7c5797ba9fcc27c10da703858e53",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "f4ec97049202781a14a39339e6656766f71958b9b95adced8a75bdb892d94ed3",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "proof-output-input": {
-      "outcome_sha": "c5ec22b5116297fb7f6ad2b557826a67c30f7c5797ba9fcc27c10da703858e53",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "f4ec97049202781a14a39339e6656766f71958b9b95adced8a75bdb892d94ed3",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "proof-output-merge": {
-      "outcome_sha": "47fbe0771af67253cc19d60ee13b3d5cdc8af6e9697ec55b8a0e36fd92273f07",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then proof-output-merge: adds possible_replay_of 6->5 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "4050c8abfd21596e302f94bc0fa5bb1f01620501114bc6a782f9615037ac6e46",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then proof-output-merge: adds possible_replay_of 6->5 (#2305 P1h PR5 cursor-0 batch links); then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "proof-output-missing-metadata": {
-      "outcome_sha": "b0cfc7cd1928d2e1e2b66f0d890b3c8453e887f48d5be0a16d44eb77e36b5d95",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "bbac5ce38e93a40bb780528ddd00def5e25d77caf506f093fb567bc0efeb3864",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "proof-output-new-stamp": {
-      "outcome_sha": "e5fc5788c1c7ef6e625cf9975c1cc8dfdf6e3252bb2396fe8499fd9961798873",
-      "reason": "#2378: re-stamped carried row linked possible_replay_of; stored rows unchanged"
+      "outcome_sha": "edb789017039f3949818d95d09c066bfaf3082bd6bacfd381d45fa0d25c1c0ef",
+      "reason": "#2378: re-stamped carried row linked possible_replay_of; stored rows unchanged; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "proof-output-new-uid": {
-      "outcome_sha": "11f9c6bf8237786258ee731230d6106f5b2ccf57098d1a2ffe38c7ddf6f84c68",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "7578402425b42825d65f7805d4b492e6f5a2e54206ddd22db122ccbceb11eb41",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "proof-output-repair": {
-      "outcome_sha": "9a78ab992378d711265b740e910954bd4998a31555cb5d44bd7eda32243e8046",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "28c8d343b069272e0d52e20c31a39cb2f83fb8d52f6190acb4d0d9e1b6914171",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "proof-output-short": {
-      "outcome_sha": "2d8bbc10dd014d2f9375169f655c57d01c5ce168c2a1034ccec636778e63eaa5",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "2c9eb1ecba461af90da9950521903070df68c24c884da5330ea7eabd5195e6fa",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "proof-output-zero": {
-      "outcome_sha": "d3073f8408dacb76e144da81703ad375d6a440ce9d02ecafa22d98b860836971",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "04c1c4456a03668d3716b5609d32522be47dd034fa14b15317373bc453d5112f",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "protect-after-filter-copy": {
-      "outcome_sha": "c8ce01f5d6cdcfd3f531d7342d51f702a1630f237e36f97f90180ad38d9e3192",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "232795bc67df07d0d55a9563bd0fe85f6bb263b74435e04827bcd39ef38aedb1",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "protect-large-assistant": {
-      "outcome_sha": "b13645e0987309b318d49f96c14ecdc690b5dc9023f02f2334744f05bb61f2ba",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then protect-large-assistant: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "68a2b74910a55b28797a21a1999d7e62bf2a91b14d7d1a6a9f7b1e83d812ec77",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then protect-large-assistant: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links); then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "protect-large-user": {
-      "outcome_sha": "d33936512eb0389d8dc314ad4dcec90bb1fc81b0123be34f0ff35f42ddf7f991",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then protect-large-user: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "91617f72526f0449a384e7c2f34d5e86776380a5d8d1511c95a6355e2723b1cb",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then protect-large-user: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links); then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "protect-path-error": {
-      "outcome_sha": "352525a3c28c381d6bc1cc05530ab8d0bdd396052420d596996f36e41acb9efc",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "9e92384b287ec8d4b9546545fee8b2b468877d8b9dccc17ca07169e307e42aa3",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "reconcile-tool-after-new": {
-      "outcome_sha": "1f2dd325b32b419f64a031cbd624aa7e89ad86210222b1311f950de9799f2007",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then reconcile-tool-after-new: adds possible_replay_of 7->3 (#2305 P1h PR5 cursor-0 batch links); review fix: adds possible_replay_of 6->2 for the empty assistant tool-call copy (#2305 PR #2335)"
+      "outcome_sha": "c8eb2068dd4b41c46fa3bead5bf3acf2fe2c8b98874c8e457120f99dc1864b35",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then reconcile-tool-after-new: adds possible_replay_of 7->3 (#2305 P1h PR5 cursor-0 batch links); review fix: adds possible_replay_of 6->2 for the empty assistant tool-call copy (#2305 PR #2335); then #2377 v7: the cold re-ingest links 2 stored tool copies possible_replay_of (silent copies become visible); stored rows unchanged; state snapshots gain the tool-scan diagnostic attributes"
     },
     "repeated-equal-occurrences": {
-      "outcome_sha": "b66e74141d6ec68a5551fa6c9caa3a042a3858135b20489351e432f9974ca58c",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "80946e99473618217f2a7099282e780c903c124423f25b71b38528648aecc8bf",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "repeated-tool-id": {
-      "outcome_sha": "67e3b96caf3f28bf1ab9cbc0a752815e89a421f54a298454bdacc79b7e14bff7",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then repeated-tool-id: adds possible_replay_of 6->3 (#2305 P1h PR5 cursor-0 batch links); review fix: adds possible_replay_of 5->2 for the empty assistant tool-call copy (#2305 PR #2335)"
+      "outcome_sha": "a7146b81319dbd8768fde65b9a8dd488e62cddfc691fde82043a25171e596902",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then repeated-tool-id: adds possible_replay_of 6->3 (#2305 P1h PR5 cursor-0 batch links); review fix: adds possible_replay_of 5->2 for the empty assistant tool-call copy (#2305 PR #2335); then #2377 v7: the cold re-ingest links 4 stored tool copies possible_replay_of (silent copies become visible); stored rows unchanged; state snapshots gain the tool-scan diagnostic attributes"
     },
     "replay-build-mapped-ignore": {
-      "outcome_sha": "9895704074931ec5cffb6078c20d094c16b2ab1e6336af63a2b0b86d1ed4e535",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "2558776d5203957d53afb0c3b96355be3680989a7fdbba0913141525d3b1b554",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "replay-build-quarantine-prefix": {
-      "outcome_sha": "da83cdcc5bde68d7c666be6a5f768ae6b333bac072c9290676d9793df5314e74",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "be7414c3d54f52f8229fd54a3a364c7e751bce5dd0c9732ece360d249f9db4a7",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "row-filter-generated-append-error": {
-      "outcome_sha": "b2aa35478241aa7b60c216081cc545e1735791bc1e8d788b72480a6c4f7592b7",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then row-filter-generated-append-error: adds possible_replay_of 7->5, 8->6 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "d2c2a0af5efb903ea32b53d1555e0454a5e8145a3633d8f54f1b6ce9f415332d",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then row-filter-generated-append-error: adds possible_replay_of 7->5, 8->6 (#2305 P1h PR5 cursor-0 batch links); then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "row-filter-ignore-ledger-lock": {
-      "outcome_sha": "33474d00806c48a2f415c3270372ec5a3560904d095d4970e371932a946d2aa0",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "be3279bcb2d58b5938abc80c02f7d663b3e0b1949e3f0f21d275d16e38861146",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "row-filter-ignored-append-error": {
-      "outcome_sha": "eb4bd089208db13599496286680fe550a8a6e76e5e524b0db66686231d66cdbb",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "299f1e9985eab0f87c187f68d6002e24c01ceec10f4f0928e06c158d65a55369",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "scaffold-metadata": {
-      "outcome_sha": "8f1d4a919c5533445740f48043c9e454dbf7ac96ad5c0b39579fd940d81f3c26",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "c4ee596afa2547cf3e2409c98d18fac0ea2a9e6545b7d42a08f2144815a8976a",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "sequence-compaction": {
-      "outcome_sha": "b7530134497fd5bca8404b1fc21008e2a47266467e135d183ffe9cd2b5c46272",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2344: compress no longer leaves its id()-keyed store-id map in engine state after the pass; state-after hash only, no row or outcome change"
+      "outcome_sha": "89c3e5bc99bdb77d0f018ed42817b9e30ee4dda25ff8d0b8bf641ea8f5d0c6bc",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2344: compress no longer leaves its id()-keyed store-id map in engine state after the pass; state-after hash only, no row or outcome change; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "sequence-host-merge": {
-      "outcome_sha": "6652f566e1fc0bf3b55282d7f9df9334f8d7ddb7b9b7060aeffce24fa2e00235",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2344: compress no longer leaves its id()-keyed store-id map in engine state after the pass; state-after hash only, no row or outcome change"
+      "outcome_sha": "b1eab452bd0eb0559ca9ab7b28df76e0dd4bcf86387e4faf9d9c742aa8ece9a6",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2344: compress no longer leaves its id()-keyed store-id map in engine state after the pass; state-after hash only, no row or outcome change; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "sequence-rewrite": {
-      "outcome_sha": "3d5b5fe312485983be3ad6ff137d630a81bc4207d09f012fd56cb53ba90b35fd",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2344: compress no longer leaves its id()-keyed store-id map in engine state after the pass; state-after hash only, no row or outcome change"
+      "outcome_sha": "abe13ddcfdc16423db02e86f30bbbb56e4ef51e5dbd648773879b8552ccf7440",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2344: compress no longer leaves its id()-keyed store-id map in engine state after the pass; state-after hash only, no row or outcome change; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "sequence-rotation": {
-      "outcome_sha": "1294da1506dbd42abd196d77b73a9b2b8de7092c772aa74b8e05ecdafe0f70b4",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2344: compress no longer leaves its id()-keyed store-id map in engine state after the pass; state-after hash only, no row or outcome change"
+      "outcome_sha": "b70b30c9bc9775cbf7050df438673f2a33c290379d13008a92e2298d6b94206b",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2344: compress no longer leaves its id()-keyed store-id map in engine state after the pass; state-after hash only, no row or outcome change; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "sqlite-append": {
-      "outcome_sha": "320d20fb18a6a040ab1a1d25b70e0b06c0647b403bf39145d12277fa954d5938",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then sqlite-append: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "0c7e66b1cfd5d372ef2c1c67ffbb35f1b49d4c0ee72ff417c86df34668a265b9",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then sqlite-append: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links); then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "sqlite-duplicate-existing-tail": {
-      "outcome_sha": "702139d7b61dfcdb50f1b9ea3277e11f1056d4d8e47126d5a32f8b1bc20e8cc2",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "5c5dd45574f72c0a36329ea88846535801bea4dee98a43d71753ca92277a55fa",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "sqlite-duplicate-tail": {
-      "outcome_sha": "051df811a1ef0b0b74d1b1da080a4125e2add334c436db0526060ed78817045c",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then sqlite-duplicate-tail: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "2cb4fc5b8ea419ff96c52689bbf75753b4e6c60b6fcf9f42371184f2d50a936b",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then sqlite-duplicate-tail: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links); then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "sqlite-durable": {
-      "outcome_sha": "0b115b03d0f2495bbdd6c3efac4a0ee3096fcad6e0f05d70bcb3c1da48016051",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "8f037e5a3e024142ee64f4b5bbf11bd9c0652c73f05cc3263961b4d30aa94d1b",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "sqlite-locked": {
-      "outcome_sha": "514af1553229c77a2df0e30021cc8e3440cba3c21094f34cc946d0d5791d6c1a",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then sqlite-locked: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "3d9368dcce72db9e9b3da587543255d2bd34eef46519ead64e24aed2c70294ff",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then sqlite-locked: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links); then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "sqlite-locked-existing-tail": {
-      "outcome_sha": "a1f5b8966f775ff29d98f57f860c15ba9e467b00d19ae8eb7d4fd72a4378bd13",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "92523d57ea00c54505ff8b5d23830367def94874d18ebf86918afebbacecbb59",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "sqlite-metadata": {
-      "outcome_sha": "9f42b0bcef170e51636e96a1bb5e4c3f29fad2b9ca590fb07698975c09c8f6e8",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "86820261692a3dd4a6e14018a1e9df7760af6e0c027573cd09c9eb625f14124a",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "sqlite-prematch": {
-      "outcome_sha": "325dd7d33e5d2c20b13eea87d1544d3bafeadcddf3b80d6b3d2bf1b9c860ff2a",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "c7e21308f98d5c73f9f5d520b8269f7c0dce0daa7426d01b80c203cd144e3b45",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "sqlite-probe": {
-      "outcome_sha": "5df325f64fc8ac914ad0efd9a7f4edd322b36a1e85509e8bc63e43de81b3d4cc",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then sqlite-probe: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "b6a8f2f7e6fb8f446585c8948a903672b5b0dd48b9be677ecc3688629fb95e00",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then sqlite-probe: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links); then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "sqlite-relation": {
-      "outcome_sha": "327761efc4b799251295e613f8dafff272078e8e941d5aee9127cd69d5465bf5",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "ecedde46ed46249c0b062a1911fc1a23a31413fe96fc708ade4395829c375d79",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "sqlite-snapshot": {
-      "outcome_sha": "f6b21f76f1e8456533d15e459a4e5f2e7795f226e7941e08bb64158ee914e4fc",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then sqlite-snapshot: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "04da3dbb1636376dc93064e4e401fcd3c775292b426cf7ee9d1c17ba260bc851",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then sqlite-snapshot: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links); then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "tool-segments-after-new": {
-      "outcome_sha": "56232c0ea6412c873730f9a12e0d3e38b49f41e476db16e50d913a90b19062be",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "d082528566157c9047d67c9bc01b46841bcb80c21d5780dd836691b45a47545f",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "tool-stub-host-held": {
-      "outcome_sha": "276b41143ee452f766d32b32d40d77966bf2273918746a6f7ba0ff06042a6f45",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "b4280f5ac63cebaf136af83318a272214e5d9411576efa9a973c893b540d3037",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "tool-stub-pair": {
-      "outcome_sha": "7cb56d23f271b1858714dba893fd0a4155b288ff2a83604865cafd0013a497d3",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "299f6a8df4d66f27ee742d95c4bb2a64f2012864080a27a06526c251e970f019",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "tool-stub-recovery": {
-      "outcome_sha": "d669255161446b04979f08827577c650db1ac104f9169bfdf2f5d4e0cdda090d",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "6791b01367a2ce889fc91a53416d566297a3238c513b5daede17dc2c95a30e70",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "tool-stub-single": {
-      "outcome_sha": "4269640ed7d887c85fb28985a86a8ab4f566936d83f649e415ca1e878dcd4c00",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "80c656567ff978a7d1b832574865a2186759efed53e4c7ece2fbd079dbcc9c93",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "tool-stub-warm": {
-      "outcome_sha": "f712252c4fe8a5695e0d056f86c07603676cfc95c47e7035de6cea6b03f9eff3",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "85d23bd092480a1b3efade7579c87480c76d1891bc16eaa0fc7a3eba257b2152",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "tools-changed": {
-      "outcome_sha": "99446c15729e8becc7fa5ef340eae466fd3138b5ad273440e1aa4c869e317c39",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then tools-changed: adds possible_replay_of 7->3 (#2305 P1h PR5 cursor-0 batch links); review fix: adds possible_replay_of 6->2 for the empty assistant tool-call copy (#2305 PR #2335)"
+      "outcome_sha": "f1417b70dde113e9b12efc966229a3a06b66fc753150ddc8e7b9d60cd889b3b7",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then tools-changed: adds possible_replay_of 7->3 (#2305 P1h PR5 cursor-0 batch links); review fix: adds possible_replay_of 6->2 for the empty assistant tool-call copy (#2305 PR #2335); then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "tools-delta": {
-      "outcome_sha": "7807ec5288139c06d850c41645656f84aa2c9c176ad0d0ab9c5946bed59870b8",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then tools-delta: adds possible_replay_of 6->3 (#2305 P1h PR5 cursor-0 batch links); review fix: adds possible_replay_of 5->2 for the empty assistant tool-call copy (#2305 PR #2335)"
+      "outcome_sha": "58ec6a21e7c69e0a66b279ccc3f7f9ea218f1a4aa9f3bf3160dbd87364da6655",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then tools-delta: adds possible_replay_of 6->3 (#2305 P1h PR5 cursor-0 batch links); review fix: adds possible_replay_of 5->2 for the empty assistant tool-call copy (#2305 PR #2335); then #2377 v7: the cold re-ingest links 2 stored tool copies possible_replay_of (silent copies become visible); stored rows unchanged; state snapshots gain the tool-scan diagnostic attributes"
     },
     "tools-full": {
-      "outcome_sha": "af5a9f38215b7e5e729090422e32707ac4f0f51af2f9dff062ed6e37597e46f7",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then tools-full: adds possible_replay_of 6->3 (#2305 P1h PR5 cursor-0 batch links); review fix: adds possible_replay_of 5->2 for the empty assistant tool-call copy (#2305 PR #2335)"
+      "outcome_sha": "73648bf6695378d4eb60a1a4c10405772615eb72ddc795d569ac80f34d371579",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then tools-full: adds possible_replay_of 6->3 (#2305 P1h PR5 cursor-0 batch links); review fix: adds possible_replay_of 5->2 for the empty assistant tool-call copy (#2305 PR #2335); then #2377 v7: the cold re-ingest links 2 stored tool copies possible_replay_of (silent copies become visible); stored rows unchanged; state snapshots gain the tool-scan diagnostic attributes"
     },
     "tools-new": {
-      "outcome_sha": "ede3a3dc1f53f8b06b71d1d752abc40291eac6f3baebf2d0cd356436655d7592",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then tools-new: adds possible_replay_of 6->5 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "243e54db1358a2ce605c926eb8cc2033c5cb5ff23550069cf6f7fe0ce78b09e1",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then tools-new: adds possible_replay_of 6->5 (#2305 P1h PR5 cursor-0 batch links); then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "tools-prefix": {
-      "outcome_sha": "b29824f161b017f6944b1478c493e4f4e3e9f8e83a9b0a1a26efe7ebe828e789",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "7d58f7bc147fb931fa4442dec9e9c7f3fbeaa36f1ac49833492494d401c7a7a9",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "tools-rewrite": {
-      "outcome_sha": "afd0ee198d32300a57b7253d844b531c1f8409515eb7825e7ecf364472f7cac8",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then tools-rewrite: adds possible_replay_of 6->3 (#2305 P1h PR5 cursor-0 batch links); review fix: adds possible_replay_of 5->2 for the empty assistant tool-call copy (#2305 PR #2335)"
+      "outcome_sha": "a964ddf7709dcd7c08d25ab351d77aba602c1d8b4a493b1119e22defff2f8c5c",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then tools-rewrite: adds possible_replay_of 6->3 (#2305 P1h PR5 cursor-0 batch links); review fix: adds possible_replay_of 5->2 for the empty assistant tool-call copy (#2305 PR #2335); then #2377 v7: the cold re-ingest links 2 stored tool copies possible_replay_of (silent copies become visible); stored rows unchanged; state snapshots gain the tool-scan diagnostic attributes"
     },
     "tools-suffix": {
-      "outcome_sha": "9fe6ae3874862cc83057fa0f9aa336cd05e1f0c9c1508d81049c4d3b8fc3bda2",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then tools-suffix: adds possible_replay_of 5->3 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "ee51d2b7a8b463fd743f585daba99a11b599c0ed7ddf41459d6206fb0582ed9a",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then tools-suffix: adds possible_replay_of 5->3 (#2305 P1h PR5 cursor-0 batch links); then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "tools-warm": {
-      "outcome_sha": "1adac9f41456db1d3542ce6b8de56b35d99cf6d89aa608b995352fa02b78d08f",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "10c5347c1d8313e5e3895673ba23532726a21fcb9b6be5525a78809c65f7c855",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "turns-changed": {
-      "outcome_sha": "5f4bc585c603698139c8384290d82c007fa8adc2add15a1f3d696fc97866630c",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "44aab0dd559fb6c066aee00828dff54554881db649c2551301c2a2c4a4679d1b",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "turns-delta": {
-      "outcome_sha": "e763b7e88499398a30bcf8ff0ff94a8f53c8b71e3bb65f7fbfca7be90dd54517",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "ee32d7010f029b67bca29607b0ae57ac4c2b4f4fc7a2aaa3c803c95eeef08f29",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "turns-full": {
-      "outcome_sha": "ee6a090cc46fb06e55bba1f0c4828b97657e19a5cf7e162b6f03dd9098afe0da",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "5f7913600dd1746950498af8bfe905336207817c65f117c1c9d7d97d99e11796",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "turns-new": {
-      "outcome_sha": "3f8bf5cbf791ba6e30f04e06a5721e5104683d052c3bd7a0a56e87947cdcfb6d",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then turns-new: adds possible_replay_of 6->5 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "12ef5fa73626dd5a51bb57c16755e4276e57e0ae204ef10d7852a41efff35e38",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then turns-new: adds possible_replay_of 6->5 (#2305 P1h PR5 cursor-0 batch links); then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "turns-prefix": {
-      "outcome_sha": "e8cb62995f4e1ee095dae582590668fa1e57d80241e20d416f4635d7236894c7",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "a76d89674e88679eabef6113fdde9dd6adc8f052876eaee88346eaffcb5ff6b9",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "turns-rewrite": {
-      "outcome_sha": "057b81e97bf7bdf12e345a5af440759725a4557c1f5a2d7d56d281f84ffd9f7c",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "3b44fa77157336ecef2779b114835e3e59bf70be53c5e48bfad77c995ef439c5",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "turns-suffix": {
-      "outcome_sha": "b4c7eeb11f2b38e21a66fbeb57e921fec991137672d1670581f060370556c273",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "35fef97b7c986ffd6fc5cedfc51e363109c3e4960ba7350e6714f6b7a864604f",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "turns-warm": {
-      "outcome_sha": "21e6992058975e99ff6ec24b66a93fc2bc099e17c350c4d04af3c9e264479745",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "d3e7516f77d5d10150c2c35eebbf2f27ace0f552fa624724854adb370eb6b445",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "uid-bindings-new": {
-      "outcome_sha": "75164b925cd8a90c34ced6d3bca7c028869aa1a28af23f71145f1e24a521fa02",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "6dab85be58890379b09bddaa99a6b46c8e7d9f1927e768a8a7620e6b2bf856cb",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "uid-bindings-new-occurrence": {
-      "outcome_sha": "750512c61431425e257610243b5cb75e2562aad15698d593340cbe09bec1fcef",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "b104d285309c4b4982e41d22b9e7f0a6c07b6c5b470979a9a3a4aa5181deef7f",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "uid-bindings-replay": {
-      "outcome_sha": "97bc59f1a6d715247b206224d2b831a9b68faab4527475b3be626d39c513a229",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "416714c8690eec003eab419cec264906bf996b1deb1b9269b473b87e141dd905",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "whitespace-changed": {
-      "outcome_sha": "ce0e1820a4a091935d09074aa68b12d77663cf2dcd6c4fc53e91da6ff255a3db",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "98ad4a89eb8a49d3be21fe5a89d249989a5dca2640679841e697bba947bd0b6b",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "whitespace-delta": {
-      "outcome_sha": "e50dff5b292e9810f25e44a5cdbc7ef6acb66bb5abebcdfc85fbe374877a9321",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "4cc6c27c5adca79a5f8d97273da0fb6d20122c402d26380ce31239b70904ba0f",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "whitespace-full": {
-      "outcome_sha": "0f5bbbf36b7a904de099a2a69d67f9bbb2c20dbe182ac78b645948f7d48fefc4",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "1a3b72b631009d6db306f685be5d85469adc574d773c82464d7062b7b97a04ba",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "whitespace-new": {
-      "outcome_sha": "e219783ade1e4bab8172ccfd4b496a521e723068733667ec1b82b826e0f72ec3",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then whitespace-new: adds possible_replay_of 6->5 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "fd7ffaa2302ea19817d7cc5db8665c308236812df9e9c5045a97e789cf4df6af",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then whitespace-new: adds possible_replay_of 6->5 (#2305 P1h PR5 cursor-0 batch links); then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "whitespace-prefix": {
-      "outcome_sha": "def901a3960233e999c74da550924e5b8f079ac5a4888288022c09357bdd867d",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "a4fa6d798c3b3c2645af9fc92b32bc8cf08e40f17b5a19e3ce6f049bd3db2aa0",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "whitespace-rewrite": {
-      "outcome_sha": "07cba92a35eb73d5d1d5abd4d02563567a698cc1f06c0a254131093005214990",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then whitespace-rewrite: adds possible_replay_of 6->5 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "de2904d4dc53683db020e77c6f67865ad280994b22a6f0520d5fc2d0c566840b",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then whitespace-rewrite: adds possible_replay_of 6->5 (#2305 P1h PR5 cursor-0 batch links); then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "whitespace-suffix": {
-      "outcome_sha": "159ac3c4062b1deb9e99356ecea55b7b8895542736b8ea53ff5b7724fcc0d295",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "04ed8a6edf435ed4edc17026ba2f6768d39500efddd2f0a8c5403865bd8dcf98",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     },
     "whitespace-warm": {
-      "outcome_sha": "d87c009c9995b4fba0dea72f6b6c9dc9acbd29683a49d277b3820cf60068ad63",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "e2628e20cae5b2e9fb7ab81fe37d978fff5cc9a208dd79a0a19ba7615411021f",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2377 v7: state snapshots gain the tool-scan diagnostic attributes; stored rows and relations unchanged"
     }
   },
   "compress": {

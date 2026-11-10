@@ -54,6 +54,7 @@ class Run:
     inserted: dict
     skips: set
     host: list
+    bound: frozenset = frozenset()  # ledger-bound HOST indexes (distinguishable by proof)
 
     def violations(self, new):
         """Return both invariant failures without short-circuiting the batch."""
@@ -74,10 +75,44 @@ class Run:
         invalid += [(s, ts, "multiple links") for s, ts in links.items() if len(ts) > 1]
         originals = {key(r) for r in self.before}
         genuinely_new_ids = {self.inserted[i] for i in new if i in self.inserted}
-        silent = [r["store_id"] for r in self.added
-                  if r["store_id"] not in genuinely_new_ids
-                  and key(r) in originals and r["store_id"] not in links
-                  and r["store_id"] not in pending]
+        # Attribution. A replay copy the product CAN tell apart from its key-mates is checked per row:
+        # a ledger-bound host occurrence, or a stamped copy that is unique among the added rows of its
+        # key AND has an equal-stamp original (the evidence §2.5's first tier uses). It must carry the
+        # link itself, and must link to its own equal-stamp original when exactly one exists. A stamped
+        # copy that shares its stamp with other added key-mates AND has an equal-stamp original is
+        # counted per (key, stamp) group: its members are interchangeable, but the group as a whole is
+        # distinguishable from rows of other stamps, so another stamp's link never covers it. On a host
+        # that re-stamps (originals X@2 and X@None, copies [@None, @2, @2] with host 0 new) this can flag a
+        # correct plan; it fails closed (it flags, never hides) and no current test reaches it. Every
+        # other replay row pools with its scorer KEY, across stamps: a stamp no original carries is no
+        # evidence, so WHICH row of the key carries the link is not observable (NOTE §3 I-link) and the
+        # scorer counts per key. Pooling's blind spot, shared with the gate scorer: within one pooled
+        # group in one batch, a dropped new row and an unlinked replay cancel in the count (no text is
+        # missing: the content is identical).
+        bound_ids = {self.inserted[i] for i in self.bound if i in self.inserted}
+        silent = []
+        groups = {}
+        for r in self.added:
+            if key(r) not in originals:
+                continue
+            sid, stamp = r["store_id"], r.get("observed_at")
+            own = [o["store_id"] for o in self.before
+                   if stamp is not None and key(o) == key(r) and o.get("observed_at") == stamp]
+            unique = stamp is not None and sum(
+                key(o) == key(r) and o.get("observed_at") == stamp for o in self.added) == 1
+            if sid in bound_ids or (unique and own):
+                if sid not in genuinely_new_ids and sid not in links and sid not in pending:
+                    silent.append(sid)
+                if sid not in genuinely_new_ids and len(own) == 1 and links.get(sid, own) != own:
+                    invalid.append((sid, links[sid], "replay not linked to its own equal-stamp original"))
+                continue
+            groups.setdefault((key(r), stamp) if own else (key(r),), []).append(sid)
+        for rows in groups.values():
+            replays = sum(sid not in genuinely_new_ids for sid in rows)
+            attributed = [sid for sid in rows if sid in links or sid in pending]
+            unattributed = [sid for sid in rows if sid not in links and sid not in pending]
+            silent += sorted(unattributed)[:max(0, replays - len(attributed))]
+        silent.sort()
         return dict(missing=missing, silent=silent, invalid=invalid)
 
     def check(self, new):
@@ -149,12 +184,10 @@ def ingest_shape(build, monkeypatch, source, host, cursor=1, bindings=None,
         # Existing cold reconciliation may enrich an unknown host stamp. It must
         # preserve all payload/ownership fields and every already known stamp.
         enriched = {"observed_at", "observed_at_source"} if old["observed_at"] is None else set()
-        if {k: v for k, v in old.items() if k not in enriched} != {
-                k: v for k, v in current.items() if k not in enriched}:
-            pytest.fail("durable prefix changed")
+        assert {k: v for k, v in old.items() if k not in enriched} == {
+            k: v for k, v in current.items() if k not in enriched}, "durable prefix changed"
     added = after[len(before):]
-    if not scans:
-        pytest.fail("the cold ingest never ran the tool-segment scan")
-    if Counter(inserted.values()) != Counter(r["store_id"] for r in added):
-        pytest.fail("capture missed inserted rows")
-    return Run(engine, before, added, inserted, scans[0] if scans else set(), host)
+    assert scans, "the cold ingest never ran the tool-segment scan"
+    assert Counter(inserted.values()) == Counter(r["store_id"] for r in added), "capture missed inserted rows"
+    return Run(engine, before, added, inserted, scans[0] if scans else set(), host,
+               frozenset(bindings or ()))

@@ -105,7 +105,10 @@ def test_t2_tool_multiset_excludes_consumed_ids_not_equal_content(engines):
     assert outside not in {r["store_id"] for r in tail}
     identity = engine._message_replay_identity(stored[1], stored_row=True)
     assert any(engine._message_replay_identity(r, stored_row=True) == identity for r in tail)
-    assert helper(view, 1, consumed_store_ids={outside}) == {2, 3}
+    # v7 §2.1: the only tail twin has a different known stamp; identity
+    # alone is the legacy ceiling, never occurrence proof (A25).
+    assert helper(view, 1, consumed_store_ids={outside}) == set()
+    assert engine._last_tool_skip_sets == ({2, 3}, set())
 
 
 
@@ -135,7 +138,16 @@ def test_t2_ledger_pair_is_held_back_once_before_its_replay(engines, monkeypatch
     assert count(engine, "cold_candidate.used_ingest") == int(ledger)
     assert engine._last_ingest_reconciliation["cursor"] == (3 if ledger else 1)
     rows = engine._store.get_session_messages("S")
-    assert [(r["role"], r["content"]) for r in rows[before:]] == [("user", "new")]
+    expected = [("user", "new")]
+    if not ledger and not uids:
+        # v7 §2.2/2.4: the stamped host identity retains two classes, and
+        # its unstamped suffix matches both. Store linked copies (A9/A11b).
+        expected += [(r["role"], r["content"]) for r in replay]
+        copies = {r["store_id"] for r in rows[before + 1:]}
+        linked = {r[0] for r in engine._store._conn.execute(
+            "SELECT store_id FROM message_relations WHERE kind='possible_replay_of'")}
+        assert copies <= linked
+    assert [(r["role"], r["content"]) for r in rows[before:]] == expected
 
 
 @pytest.mark.parametrize("cold", [True, False])
@@ -164,9 +176,11 @@ def test_t2_ledger_pair_out_of_the_tail_keeps_its_host_reservation(engines):
     pairs = {i: row["store_id"] for i, row in enumerate(engine._store.get_session_messages("S"))}
     helper = engine._replayed_tool_segment_indexes_after_cursor
     engine._ingest_messages([p, *tool_pair(2.), *tool_pair(100.)])
-    # The tail holds the pair's stored copy: that copy leaves the counts once,
-    # and the later stored pair proves the replay.
-    assert helper([p, *tool_pair(2.), new, *tool_pair(100.)], 3, consumed_pairs=pairs) == {4, 5}
+    # #2377 (release-manager option a): the warm ingest linked the stored @100 pair
+    # possible_replay_of to the @2 pair (same scorer key), and a copy carrying any
+    # such link is never independent skip capacity. Its replay is stored again as a
+    # linked copy: a visible duplicate, never a lost row (main skipped it).
+    assert helper([p, *tool_pair(2.), new, *tool_pair(100.)], 3, consumed_pairs=pairs) == set()
     engine._ingest_messages([p, *tool_pair(2.), *tool_pair(100.),
                              *[_m("user", f"padding {i}", 120. + i) for i in range(65)], *tool_pair(300.)])
     # Out of the tail's sight, the pair keeps its host reservation, as #2185 does

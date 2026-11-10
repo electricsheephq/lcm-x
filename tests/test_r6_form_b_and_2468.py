@@ -143,11 +143,11 @@ def _presence_read_fails(monkeypatch, engine):
     monkeypatch.setattr(engine, "_rotation_predecessor_session_ids", boom)
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason="#2468: when a call row was not stored at its turn (past the presence window or "
-                   "after a failed presence read), a later full-history ingest stores the call and a second, unlinked "
-                   "copy of its tool result")
 @pytest.mark.parametrize("cause", ["window", "read_failure"])
 def test_2468_a_late_call_does_not_store_an_unlinked_second_result(tmp_path, cause, monkeypatch, caplog):
+    """#2468: a call row not stored at its turn (past the presence window or after a failed presence read) used to
+    leave a second, unlinked copy of its tool result on a later full-history ingest. #2377's per-ingest tool links
+    (#2414) link that copy, so this is an ordinary test now."""
     history, turn_start, turn_end, longer, (call, result, reply) = _views()
     engine = _engine(tmp_path)
     try:

@@ -76,7 +76,8 @@ def test_cold_compaction_cursor_keeps_changed_segment_timestamps(build, monkeypa
     engine.ingest(deepcopy(host))
     after = stored(engine)
     assert engine._ingest_failure_count == 0, engine._last_ingest_error
-    assert scans == [(call_index, {call_index, call_index + 1})]
+    # v7 §2.1 rejects the changed stamps at the proof scan itself (A25).
+    assert scans == [(call_index, set())]
     assert after[:len(before)] == before
     added = after[len(before):]
     assert [(row["role"], row.get("observed_at")) for row in added] == [
