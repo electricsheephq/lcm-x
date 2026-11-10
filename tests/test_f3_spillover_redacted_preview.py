@@ -29,9 +29,10 @@ BODIES = {
     "digest": "api_key=synthetic1234567890abcdef0123456789\n" + "x" * 3000,
     "lossy": "password=synthetic1234\n" + "x" * 3000,
     "cut": "y" * 20 + "api_key=synthetic1234567890abcdef0123456789\n" + "x" * 3000,
+    "inside": "api_key=abcd1234efgh5678ijkl\n" + "x" * 3000,
     "later": "z" * 100 + "\napi_key=synthetic1234567890abcdef0123456789\n" + "x" * 3000,
 }
-REDACTION = pytest.mark.parametrize("body", ["digest", "lossy", "cut"])
+REDACTION = pytest.mark.parametrize("body", ["digest", "lossy", "inside"])
 
 
 @pytest.fixture(autouse=True)
@@ -96,6 +97,14 @@ def test_a_spillover_marker_whose_preview_redaction_changes_keeps_the_final_repl
     assert (form, final, rows) == ("marker", 1, n + 1)  # v0.29.2: the marker, 1, n + 1
 
 
+@pytest.mark.parametrize("kind", ["spillover", "tempdir"])
+def test_a_secret_cut_by_the_preview_boundary_loses_nothing(tmp_path, kind):
+    """The preview ends inside the secret; redaction leaves the preview's part as it is, so the recovered form is kept
+    and the session-end rule still matches (as in rc5)."""
+    form, final, rows, n = _offcurrent_end(tmp_path / "hermes", kind, "cut")
+    assert (form, final, rows) == ("externalized", 1, n + 1)
+
+
 def test_redaction_that_leaves_the_preview_unchanged_keeps_the_recovered_form(tmp_path):
     form, final, rows, n = _offcurrent_end(tmp_path / "hermes", "spillover", "later")
     assert (form, final, rows) == ("externalized", 1, n + 1)
@@ -107,7 +116,7 @@ def test_without_redaction_nothing_changes(tmp_path, kind):
     assert (form, final, rows) == ("externalized", 1, n + 1)
 
 
-_TEMPDIR_REASON = ("known in v0.30.0: a temp-folder saved output whose preview redaction changes loses the rows after "
+_TEMPDIR_REASON = ("#2604, known in v0.30.0: a temp-folder saved output whose preview redaction changes loses the rows after "
                    "it at an off-current end; v0.29.2 loses them too (with or without redaction)")
 
 
