@@ -338,8 +338,8 @@ def test_cli_keeps_fixed_canary_reason_only(tmp_path, monkeypatch, capsys):
     output = tmp_path / "output"
     base = ["run.py", "canary", "--split-label", "synthetic", "--data", str(tmp_path / "synthetic.json"),
             "--store-root", str(tmp_path / "stores"), "--output", str(output), "--agreement-judge", "none"]
-    for text, shown in [("canary_failed: the reader reached no mcp__lcmx tool (Codex code mode off or MCP tools "
-                         "deferred?)", True), ("private corpus text", False)]:
+    for text, shown in [(run.CANARY_NO_MCP, True), (run.CANARY_FAILED, True),
+                        ("canary_failed: private corpus text", False), ("private corpus text", False)]:
         monkeypatch.setattr(run, "execute", Mock(side_effect=RuntimeError(text)))
         monkeypatch.setattr(sys, "argv", base)
         assert run.main() == 1
@@ -376,7 +376,7 @@ def test_launcher_forwards_sigterm_to_python(tmp_path):
         if proc.poll() is None:
             proc.kill()
         started = tmp_path / "started"
-        if started.exists() and started.read_text().strip():
+        if not marker.exists() and started.exists() and started.read_text().strip():
             try:  # never leave the fake reader looping when the launcher dropped the signal
                 os.kill(int(started.read_text()), signal.SIGKILL)
             except ProcessLookupError:
