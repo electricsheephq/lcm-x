@@ -711,3 +711,66 @@ def test_fitting_pops_child_before_source(statements, monkeypatch, detail):
     assert "has_later_statements" not in result["hits"][0]
     assert result["provenance"]["later_statements"]["displaced"] == 0
     assert_links(result)
+
+
+@pytest.mark.parametrize("detail", ["snippets", "answer_ready"])
+def test_followup_child_has_ranked_subagent_lineage(statements, monkeypatch, detail):
+    e, source, _ = statements
+    child = e._store.append("delegated", {"role": "user", "content": "watercolor later hobby",
+                                        "timestamp": 1700000100}, source="subagent")
+    peer = e._store.append("delegated", {"role": "user", "content": "ranked delegated fact",
+                                       "timestamp": 1699999900}, source="subagent")
+    e._store.record_session_lineage("delegated", "parent", source="subagent_start")
+    ranked(monkeypatch, [entry(e, source), entry(e, peer, source="subagent")])
+    followups(monkeypatch, e, {source: [child]})
+    result = json.loads(invoke(e, detail, later_statements=1))
+    hits = {h["store_id"]: h for h in result["hits"]}
+    for field, expected in (("parent_session_id", "parent"), ("lineage", "subagent of parent")):
+        assert hits[child].get(field) == hits[peer][field] == expected
+    assert_links(result)
+
+
+def test_child_binds_message_source_beside_summary_with_same_store_id(statements, monkeypatch):
+    e, source, child = statements
+    node = test_lcm_recall._add_summary(e, "hobby summary", session_id="old",
+                                      created_at=1700000000, source_ids=[source])
+    summary = entry(e, source, **test_lcm_recall._summary_hit(e, node))
+    fillers = [e._store.append(f"filler-{i}", {"role": "user", "content": f"plain hit {i}"}) for i in range(2)]
+    ranked(monkeypatch, [summary, entry(e, source), *[entry(e, sid) for sid in fillers]])
+    result = json.loads(invoke(e, later_statements=1))
+    assert [(h["kind"], h["store_id"]) for h in result["hits"]] == [
+        ("summary", source), ("message_excerpt", source), ("message_excerpt", child),
+        ("message_excerpt", fillers[0]),
+    ]
+    assert "has_later_statements" not in result["hits"][0]
+    assert result["hits"][1]["has_later_statements"] == [child]
+    assert_links(result)
+
+
+@pytest.mark.parametrize("detail", ["snippets", "answer_ready"])
+@pytest.mark.parametrize("replay_anchor", [False, True])
+def test_child_preserves_fts_top_already_in_window(statements, monkeypatch, detail, replay_anchor):
+    e, source, child = statements
+    fillers = [e._store.append(f"filler-{i}", {"role": "user", "content": f"plain hit {i}"}) for i in range(2)]
+    anchor = e._store.append("anchor", {"role": "user", "content": "orchidpassport anchored fact"})
+    alias = e._store.append("alias", {"role": "user", "content": "orchidpassport anchored fact"})
+    entries = [entry(e, source), *[entry(e, sid) for sid in fillers],
+               entry(e, anchor, **({"duplicate_store_ids": [alias]} if replay_anchor else {}))]
+    ranked(monkeypatch, entries)
+
+    def fuse(arm_hits, *a):
+        arm_hits["fts"] = [entry(e, alias if replay_anchor else anchor)["hit"]]
+        return entries, ["fts", "chunk"], [.5, .5]
+
+    monkeypatch.setattr(tools, "fuse_candidates", fuse)
+    base = json.loads(invoke(e, detail, later_statements=0))
+    assert [h["store_id"] for h in base["hits"]] == [source, *fillers, anchor]
+    assert base["provenance"]["fts_anchor"]["fired"] is False
+    result = json.loads(invoke(e, detail, later_statements=1, extra_entries=1))
+    assert [h["store_id"] for h in result["hits"][:4]] == [source, child, fillers[0], anchor]
+    assert result["provenance"]["fts_anchor"]["fired"] is False
+    assert result["provenance"]["later_statements"]["displaced"] == 1
+    if detail == "snippets":
+        assert result["hits"][4]["store_id"] == fillers[1]
+        assert result["hits"][4]["extra"] is True
+    assert_links({**result, "hits": result["hits"][:4]})
