@@ -9,6 +9,10 @@ from types import SimpleNamespace
 from bench.tools import d5_end_read as er
 
 
+def _sha(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else "0" * 64
+
+
 def identity(row):
     return row.get("role"), row.get("content")
 
@@ -140,7 +144,7 @@ def test_the_same_capture_twice_is_inconclusive():
 
 def test_an_unexpected_error_prints_a_fixed_line_never_a_traceback(monkeypatch, capsys):
     monkeypatch.setattr(er, "end_read", lambda args: (_ for _ in ()).throw(FileNotFoundError("/private/typed/path")))
-    code = er.main(["--config", "c", "--instrument-dir", "k", "--scratch", "s", "--start", "a", "--start-pin", "p",
+    code = er.main(["--config", "c", "--config-sha256", "3" * 64, "--instrument-dir", "k", "--scratch", "s", "--start", "a", "--start-pin", "p",
                     "--start-pin-sha256", "1" * 64, "--end", "b", "--end-pin", "q", "--end-pin-sha256", "2" * 64])
     out = capsys.readouterr()
     assert code == 2 and "typed" not in out.out + out.err and "unexpected FileNotFoundError" in out.out
@@ -151,7 +155,7 @@ def test_a_capture_that_does_not_verify_stops_the_read_before_the_kit_or_any_sto
     pin.write_text("{}")
     args = SimpleNamespace(start=str(tmp_path), start_pin=str(pin), start_pin_sha256="0" * 64, end=str(tmp_path),
                            end_pin=str(pin), end_pin_sha256="1" * 64, scratch=str(tmp_path / "s"),
-                           config="/nonexistent", instrument_dir="/nonexistent")
+                           config="/nonexistent", config_sha256="0" * 64, instrument_dir="/nonexistent")
     result = er.end_read(args)
     assert result["verdict"] == "INCONCLUSIVE" and result["reason"].startswith("start: ")
     assert result["verdict_rule"] == er.VERDICT_RULE
@@ -181,7 +185,7 @@ def test_the_read_wires_p1_identity_rows_and_both_checks(monkeypatch, tmp_path):
     lcm = {"ignore_session_patterns": [], "stateless_session_patterns": []}
     (tmp_path / "decl.json").write_text(json.dumps({"manifest": "m", "rules_module": "r", "settings": {"lcm": lcm}}))
     args = SimpleNamespace(start="start-dir", start_pin="p", start_pin_sha256="a" * 64, end="end-dir", end_pin="p",
-                           end_pin_sha256="b" * 64, scratch=str(tmp_path), config=str(tmp_path / "decl.json"),
+                           end_pin_sha256="b" * 64, scratch=str(tmp_path), config=str(tmp_path / "decl.json"), config_sha256=_sha(tmp_path / "decl.json"),
                            instrument_dir="kit")
     verdict_p1 = "PASS"
     result = er.end_read(args)
@@ -197,7 +201,7 @@ def test_condition_1_a_declaration_without_the_session_patterns_is_inconclusive(
     for decl in ({"manifest": "m"}, {"settings": {"lcm": {"ignore_session_patterns": []}}}):
         (tmp_path / "decl.json").write_text(json.dumps(decl))
         args = SimpleNamespace(start="a", start_pin="p", start_pin_sha256="a" * 64, end="b", end_pin="p",
-                               end_pin_sha256="b" * 64, scratch=str(tmp_path), config=str(tmp_path / "decl.json"),
+                               end_pin_sha256="b" * 64, scratch=str(tmp_path), config=str(tmp_path / "decl.json"), config_sha256=_sha(tmp_path / "decl.json"),
                                instrument_dir="kit")
         result = er.end_read(args)
         assert (result["verdict"], result["reason"]) == (
@@ -209,7 +213,7 @@ def test_condition_2_rows_in_a_declared_pattern_session_are_counted_apart_never_
     end = {"host": [*START["host"], host(2, "cron_7", "scheduled"), host(3, "cron_7", "more"), host(4, "s1", "a")],
            "store": [*START["store"], stored(11, "s1", "a")]}
     check2 = er.coverage(START, end, identity, "/nonexistent", by_design)
-    assert check2["not_stored_by_design"] == {"sessions": 1, "rows": 2}
+    assert (check2["not_stored_by_design"]["sessions"], check2["not_stored_by_design"]["rows"]) == (1, 2)
     assert (check2["lost"], check2["unmatched"], check2["matched"], check2["window_host_rows"]) == (0, 0, 1, 1)
     assert er.verdict(PRESERVED, check2) == "PASS"
     only_designed = {"host": [*START["host"], host(2, "cron_7", "scheduled")], "store": [*START["store"]]}
@@ -301,9 +305,35 @@ def test_the_read_passes_the_declared_patterns_to_coverage(monkeypatch, tmp_path
     lcm = {"ignore_session_patterns": ["cron_*"], "stateless_session_patterns": []}
     (tmp_path / "decl.json").write_text(json.dumps({"settings": {"lcm": lcm}}))
     args = SimpleNamespace(start="start-dir", start_pin="p", start_pin_sha256="a" * 64, end="end-dir", end_pin="p",
-                           end_pin_sha256="b" * 64, scratch=str(tmp_path), config=str(tmp_path / "decl.json"),
+                           end_pin_sha256="b" * 64, scratch=str(tmp_path), config=str(tmp_path / "decl.json"), config_sha256=_sha(tmp_path / "decl.json"),
                            instrument_dir="kit")
     result = er.end_read(args)
-    assert seen["result"]["not_stored_by_design"] == {"sessions": 1, "rows": 1} and seen["result"]["lost"] == 0
+    assert (seen["result"]["not_stored_by_design"]["sessions"], seen["result"]["not_stored_by_design"]["rows"]) == (1, 1) and seen["result"]["lost"] == 0
     assert seen["result"]["unmatched_by_hint"]["session never stored; a parent session matches a declared pattern"] == 1
     assert result["verdict"] == "INCONCLUSIVE"  # Only by-design rows: the window of other rows is empty.
+
+
+def test_a_declared_pattern_session_with_stored_rows_outside_the_window_is_inconclusive():
+    by_design = er.session_matchers({"ignore_session_patterns": ["cron_*"], "stateless_session_patterns": []}, {})[0]
+    start = {"host": START["host"], "store": [*START["store"], stored(5, "cron_7", "old")]}
+    end = {"host": [*start["host"], host(2, "s1", "a")], "store": [*start["store"], stored(11, "s1", "a")]}
+    check2 = er.coverage(start, end, identity, "/x", by_design)
+    assert check2["declared_pattern_sessions_with_stored_rows"] == [er._sha12("cron_7")]
+    assert er.verdict(PRESERVED, check2) == "INCONCLUSIVE"
+
+
+def test_the_declaration_must_hash_to_the_sha256_sent(monkeypatch, tmp_path):
+    monkeypatch.setattr(er, "_capture", lambda *a: ({"verdict": "PASS"}, None))
+    (tmp_path / "decl.json").write_text(json.dumps({"settings": {"lcm": {}}}))
+    args = SimpleNamespace(start="a", start_pin="p", start_pin_sha256="a" * 64, end="b", end_pin="p",
+                           end_pin_sha256="b" * 64, scratch=str(tmp_path), config=str(tmp_path / "decl.json"),
+                           config_sha256="0" * 64, instrument_dir="kit")
+    assert er.end_read(args)["reason"] == "the declaration does not hash to the sha256 sent"
+
+
+def test_the_excluded_sessions_are_listed_by_hash():
+    by_design = er.session_matchers({"ignore_session_patterns": ["cron_*"], "stateless_session_patterns": []}, {})[0]
+    end = {"host": [*START["host"], host(2, "cron_7", "x"), host(3, "s1", "a")],
+           "store": [*START["store"], stored(11, "s1", "a")]}
+    check2 = er.coverage(START, end, identity, "/x", by_design)
+    assert check2["not_stored_by_design"]["session_sha256_12"] == [er._sha12("cron_7")]

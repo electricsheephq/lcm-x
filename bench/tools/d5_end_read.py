@@ -32,12 +32,14 @@ from session_patterns import build_session_match_keys, compile_session_patterns,
 
 PASS, FAIL, INCONCLUSIVE = "PASS", "FAIL", "INCONCLUSIVE"
 VERDICT_RULE = ("FAIL when check 1 fails or any window host row is LOST; LOST only for a window host row whose session "
-                "holds no stored row at all in the end store; INCONCLUSIVE while any window host row is unmatched, when "
-                "the window is empty or both pins are the same, when a pin or the kit does not verify, when the "
-                "declaration has no settings.lcm session patterns, or when a session matching a declared pattern holds "
-                "a stored row; a window row in a session matching a declared ignore or stateless pattern is counted "
-                "apart as not stored by design, never LOST or matched; PASS only with check 1 PASS, a non-empty window "
-                "of other rows and 0 unmatched")
+                "holds no stored row at all in the end store, matches no declared pattern and has no ancestor that does; "
+                "a LOST row, and an unmatched row with no hint, is an unconfirmed loss candidate until a replay confirms it "
+                "(the spec's canary rule); INCONCLUSIVE while any window host row is unmatched, when the window is empty "
+                "or both pins are the same, when a pin, the declaration or the kit does not verify, when the declaration "
+                "has no settings.lcm session patterns, or when any session in the end store that matches a declared "
+                "pattern holds a stored row; a window row in a session matching a declared ignore or stateless pattern is "
+                "counted apart as not stored by design, never LOST or matched; PASS only with check 1 PASS, a non-empty "
+                "window of other rows and 0 unmatched")
 HINTS = ("equal after stripping edge whitespace", "payload swapped for a reference",
          "session never stored; a parent session matches a declared pattern", "no hint")
 _HEX64 = re.compile(r"[0-9a-f]{64}")
@@ -96,7 +98,7 @@ def coverage(start, end, identity, end_dir, by_design=lambda session: False, inh
     in_window = [h for h in end["host"] if h["id"] > top_host]
     designed = {h["session_id"] for h in in_window if by_design(h["session_id"])}
     window = [h for h in in_window if h["session_id"] not in designed]
-    disagree = sorted(_sha12(s) for s in designed if s in stored_sessions)
+    disagree = sorted(_sha12(s) for s in stored_sessions if by_design(s))  # Anywhere in the end store.
     counts, hints, per_session, unmatched = Counter(), Counter(), {}, []
     for session in dict.fromkeys(h["session_id"] for h in window):
         hosts = [h for h in window if h["session_id"] == session]
@@ -130,7 +132,8 @@ def coverage(start, end, identity, end_dir, by_design=lambda session: False, inh
         counts["unmatched"] += len(hosts) - len(pairs) - s["lost"]
     counts["window_host_rows"], counts["new_stored_rows"] = len(window), len(new)
     counts["stored_rows_not_matched"] = len(new) - counts["matched"]
-    return {"not_stored_by_design": {"sessions": len(designed), "rows": len(in_window) - len(window)},
+    return {"not_stored_by_design": {"sessions": len(designed), "rows": len(in_window) - len(window),
+                                     "session_sha256_12": sorted(_sha12(s) for s in designed)},
             "declared_pattern_sessions_with_stored_rows": disagree,
             "window_host_rows": counts["window_host_rows"], "new_stored_rows": counts["new_stored_rows"],
             "matched": counts["matched"], "lost": counts["lost"], "unmatched": counts["unmatched"],
@@ -191,6 +194,9 @@ def end_read(args):
                              args.scratch)
         if reason:
             return {**out, "verdict": INCONCLUSIVE, "reason": f"{side}: {reason}"}
+    if not _HEX64.fullmatch(args.config_sha256 or "") or capture._sha256(args.config) != args.config_sha256:
+        return {**out, "verdict": INCONCLUSIVE, "reason": "the declaration does not hash to the sha256 sent"}
+    out["config_sha256"] = args.config_sha256
     config = {**json.loads(Path(args.config).read_text(encoding="utf-8")), "instrument_dir": args.instrument_dir}
     lcm = (config.get("settings") or {}).get("lcm") if isinstance(config.get("settings"), dict) else None
     if not isinstance(lcm, dict) or not all(isinstance(lcm.get(k), list) for k in
@@ -214,6 +220,7 @@ def end_read(args):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--config", required=True, help="the run declaration (JSON): manifest, rules_module, interpreter")
+    parser.add_argument("--config-sha256", required=True, help="the declaration's sha256 as the release manager sent it")
     parser.add_argument("--instrument-dir", required=True, help="the frozen kit folder P1 verifies")
     parser.add_argument("--scratch", required=True, help="a folder outside both captures (snapshot.verify's scratch)")
     for side in ("start", "end"):
