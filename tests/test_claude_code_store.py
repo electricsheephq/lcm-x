@@ -3173,3 +3173,35 @@ def test_an_agent_file_with_no_id_is_never_swept_as_its_session(tmp_path, home, 
     finally:
         store.close()
     assert not ca.audit(home)["verified"]
+
+
+@pytest.mark.parametrize("then", ["hooks", "sweep"])
+def test_a_forgotten_reused_agent_id_never_comes_back_under_a_path_key(tmp_path, home, hermes, then):
+    """#2576 review: a store the old code flipped holds both transcripts under the bare id. Once the user deletes that
+    child session, no later hook or sweep may store its lines again under a new path key."""
+    a = _append(tmp_path / "projects" / "-work" / "s1.jsonl", CONVERSATION[:2])
+    _record(_hook(), home, a)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    agents = a.parent / "s1" / "subagents"
+    paths = [_append(agents / "agent-x1.jsonl", _REUSED["first"]),
+             _append(agents / "workflows" / "wf_run1" / "agent-x1.jsonl", _REUSED["second"])]
+    store = _open(home, hermes)
+    try:
+        for path in (paths[0], paths[1], paths[0]):  # what the old code left: one id-keyed lineage moved A -> B -> A
+            cc.drain(store, cc.Lineage("s1", "x1", path))
+        assert store.delete_session_messages(cc.row_session_id("s1", "x1"))
+    finally:
+        store.close()
+    if then == "hooks":
+        for path in (paths[1], paths[0]):
+            _record(_hook(), home, a, event="SubagentStop", agent_id="x1", agent_transcript_path=str(path))
+            cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    else:
+        _record(_hook(), home, a)
+    for _ in range(2):
+        cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    store = _open(home, hermes)
+    try:
+        assert not store.connection.execute("SELECT COUNT(*) FROM messages WHERE session_id LIKE 's1/agent:%'").fetchone()[0]
+    finally:
+        store.close()

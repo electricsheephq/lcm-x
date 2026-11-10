@@ -908,6 +908,8 @@ def resolve(store: MessageStore, lineage: Lineage) -> Lineage:
     by_path, cursor = path_lineage(lineage), store.read_metadata_json(CURSOR_PREFIX + lineage.key)
     if by_path is not None and store.read_metadata_json(CURSOR_PREFIX + by_path.key):
         return by_path
+    if store.read_metadata_json(FORGOTTEN_PREFIX + lineage.rows_session):  # deleted: no new key brings it back
+        return lineage
     held = Path(cursor["path"]) if isinstance(cursor, dict) and isinstance(cursor.get("path"), str) else None
     if by_path is None or held is None or held == lineage.path or _agents_root(Lineage(*lineage[:2], held)) != _agents_root(lineage):
         return lineage
