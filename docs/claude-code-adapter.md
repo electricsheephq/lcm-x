@@ -146,9 +146,12 @@ drain raises is set aside as `<key>.failed` and logged by error type only; the s
 spools a fresh record, and a transcript's cursor is written before its first batch, so the sweep
 retries a transcript whose first batch failed. One bad transcript cannot stall the others or loop
 the worker. A claimed record the worker cannot read (an empty file after a power cut, or one that is
-not a JSON object) is set aside the same way and never drained as nothing, so its facts are not lost;
-nothing retries it, and the audit stays unverified with `spool:unreadable_failed_record` until an
-operator looks at the `*.failed` file in the home's `spool/` folder and moves it out of that folder.
+not a JSON object) is set aside the same way and never drained as nothing; nothing retries it, and the
+audit stays unverified with `spool:unreadable_failed_record`, which names no session. The facts that
+record held are lost to the audit: the session it came from can still expire by the ordinary pending
+rule, so this marker is what keeps every audit unverified. Moving the `*.failed` file out of the
+home's `spool/` folder clears that state, and LCM-X then no longer knows which session the record
+belonged to, so check the sessions active around the file's modification time before moving it.
 
 ### Transcript facts
 
