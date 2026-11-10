@@ -10,6 +10,7 @@ off. That store also carries the candidate's own replay ledger, so it models can
 not the upgrade.
 """
 
+import json
 import logging
 import sqlite3
 import tempfile
@@ -176,7 +177,8 @@ def test_v0292_users_only_stamped_store_upgrade_replay_stores_each_message_once(
 # --- #2525 review follow-ups: shapes that miss guard (c) and keep the old duplicate path ----------------------------
 
 def _parts_history(marker):
-    """The same host transcript, with the tool result sent as content parts instead of a string."""
+    """The same host transcript, with the tool result sent as content parts instead of a string (the shape Hermes
+    gives a multimodal tool result whose oversized text part it spilled to a marker)."""
     history = _host_history(marker, NEW_TURN)
     history[2]["content"] = [{"type": "text", "text": marker}]
     return history
@@ -193,7 +195,7 @@ def _rebound_session_replay(tmp_path):
 def test_v0292_store_parts_shaped_tool_result_loses_nothing(tmp_path):
     """Guard (c) compares the raw incoming content with the stored marker. A parts-shaped tool result misses it and
     takes the old duplicate path: no row is lost, the call row's copy is linked, and the tool row's copy is stored
-    again (a surplus row, not a loss)."""
+    again, unlinked, with the marker text (a surplus row, not a loss)."""
     original, marker, _ = _v0292_store(tmp_path)
 
     _run_phase(tmp_path, _parts_history(marker))
@@ -203,11 +205,18 @@ def test_v0292_store_parts_shaped_tool_result_loses_nothing(tmp_path):
     assert rows[:len(original)] == original, counts
     assert [row["content"] for row in rows[-2:]] == [content for _, content in NEW_TURN], counts
     assert _tool_rows(rows) == {CALL: 2} and _call_rows(rows) == {CALL: 2}, counts
+    tool_copy = [row for row in rows[len(original):] if row["role"] == "tool"]
+    # The copy stores the parts as JSON; its text part is the marker.
+    assert len(tool_copy) == 1 and json.loads(tool_copy[0]["content"]) == [{"type": "text", "text": marker}], counts
+    with closing(sqlite3.connect(_home(tmp_path) / "lcm.db")) as connection:
+        links = connection.execute("SELECT store_id, kind FROM message_relations ORDER BY store_id").fetchall()
+    call_copy = [row["store_id"] for row in rows[len(original):] if row["role"] == "assistant" and row["tool_calls"]]
+    assert links == [(call_copy[0], "possible_replay_of")], links
 
 
 @pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
     "#2525 review follow-up 1: guard (c) compares raw content, so a parts-shaped tool result re-stores the call "
-    "pair. Changes only if a real host sends tool results as parts."))
+    "pair. Hermes sends a multimodal tool result as parts, so the comparison is a v0.30.1 design question."))
 def test_v0292_store_parts_shaped_tool_result_stores_each_message_once(tmp_path):
     original, marker, _ = _v0292_store(tmp_path)
 
