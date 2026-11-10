@@ -615,6 +615,13 @@ def _unverified(metadata: dict, records: list[dict], lineages: list[dict], sessi
             unknown.add(lineage.key)
         if lineage.agent_id is None:  # under every path its records named (#2535)
             for name in named_paths(pending):
+                try:  # a subagents folder that cannot be checked is not clean (glob would just return nothing)
+                    (session_dir(Path(name)) / "subagents").lstat()
+                    next(iter((session_dir(Path(name)) / "subagents").iterdir()), None)
+                except (FileNotFoundError, NotADirectoryError):
+                    pass
+                except OSError:
+                    unknown.add(lineage.key)
                 for child in _subagents(Lineage(lineage.session_id, None, Path(name))):
                     if (CURSOR_PREFIX + child.key not in metadata
                             and FORGOTTEN_PREFIX + child.rows_session not in metadata):

@@ -2096,3 +2096,26 @@ def test_a_subagent_under_a_pending_rows_earlier_path_is_not_verified(tmp_path, 
     report = ca.audit(home)
     assert not report["verified"] and "claude-code:s1/agent:x1" in report["unverified"]
 
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads any folder")
+def test_an_unreadable_subagents_folder_under_a_pending_path_is_not_verified(tmp_path, home, hermes):
+    """#2548 review: glob returns nothing for a folder it cannot read, so a pending row's subagents folder that cannot be
+    checked must leave the lineage unverified on its own."""
+    from hermes_lcm import claude_code_audit as ca
+
+    other = _append(tmp_path / "projects" / "-work" / "s2.jsonl", [dict(e, sessionId="s2") for e in CONVERSATION[:2]])
+    _record(_hook(), home, other, session="s2")
+    a = tmp_path / "projects" / "-work" / "s1.jsonl"
+    _record(_hook(), home, a, event="SessionStart")
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    _record(_hook(), home, tmp_path / "projects" / "-other" / "s1.jsonl")
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    _append(a.parent / "s1" / "subagents" / "agent-x1.jsonl", [dict(e, isSidechain=True) for e in CONVERSATION[2:]])
+    folder = a.parent / "s1"
+    folder.chmod(0)
+    try:
+        report = ca.audit(home)
+    finally:
+        folder.chmod(0o700)
+    assert not report["verified"] and "claude-code:s1" in report["unverified"]
+
