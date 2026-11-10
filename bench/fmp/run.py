@@ -341,9 +341,9 @@ def run_jobs(jobs, workers):
     if len(jobs) == 1:
         started = time.monotonic()
         if workers == 1:
-            # On the main thread, a SIGTERM interrupts the running model call itself on every OS (subprocess.run
-            # kills and reaps the child), so no later question can start first. A pool thread could: Linux may
-            # deliver the signal to that thread, and the main thread then runs the handler only when it wakes.
+            # On the main thread, a SIGTERM interrupts the wait on the running model call itself (subprocess.run
+            # kills and reaps the child) before the lease is released. In a pool thread the call ran to completion
+            # while the main thread unwound, which can take minutes.
             for row in map(*prepared[0][:2]):
                 jobs[0].send(row)
         else:

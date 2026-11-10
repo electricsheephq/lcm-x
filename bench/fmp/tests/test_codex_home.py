@@ -281,8 +281,7 @@ def test_rejected_output_inside_home_gets_no_failure_record(tmp_path, monkeypatc
 @pytest.mark.parametrize("sender", ["main", "other_thread"])
 def test_sigterm_drain_starts_no_further_model_call(tmp_path, monkeypatch, cli, sender):
     # A leased run (one worker) runs questions on the main thread, so the handler runs before any later call can
-    # start. "other_thread" sends the signal from another thread, as Linux may deliver it, while the main thread is
-    # inside the model call.
+    # start. "other_thread" sends the signal from another thread while the main thread is inside the model call.
     import os
     import signal
     import threading
@@ -449,12 +448,14 @@ def _real_child_drain(tmp_path, monkeypatch, cli, child_code, on_child):
             try:
                 yield
             finally:  # runs before the real lock context releases the flock
-                pid = int(pid_file.read_text())
-                try:
-                    os.kill(pid, 0)
-                    alive_at_release.append(True)
-                except ProcessLookupError:
-                    alive_at_release.append(False)
+                if not pid_file.exists():
+                    alive_at_release.append(None)  # the child never started: report that, not a read error
+                else:
+                    try:
+                        os.kill(int(pid_file.read_text()), 0)
+                        alive_at_release.append(True)
+                    except ProcessLookupError:
+                        alive_at_release.append(False)
 
     run.execute(cli.args())  # the unleased answer run that the judge run reads, before any probe is armed
     monkeypatch.setattr(run, "Backends", backends)
@@ -472,11 +473,12 @@ def _when_child_writes_pid(action):
         deadline = time.monotonic() + 10
         while not (pid_file.exists() and pid_file.read_text().strip()) and time.monotonic() < deadline:
             time.sleep(0.01)
-        action()
+        if pid_file.exists() and pid_file.read_text().strip():  # never signal after a failed start: the guard is gone
+            action()
     return on_child
 
 
-@pytest.mark.parametrize("case", ["running_child", "child_being_reaped", "second_signal_while_unwinding"])
+@pytest.mark.parametrize("case", ["running_child", "child_already_exited", "second_signal_while_unwinding"])
 def test_sigterm_probes_leave_no_live_child_and_start_no_call(tmp_path, monkeypatch, cli, case):
     import os
     import signal
@@ -484,8 +486,8 @@ def test_sigterm_probes_leave_no_live_child_and_start_no_call(tmp_path, monkeypa
     term = lambda: os.kill(os.getpid(), signal.SIGTERM)  # noqa: E731
     if case == "running_child":
         code = "import os,time; open(r'{pid}','w').write(str(os.getpid())); time.sleep(30)"
-    elif case == "child_being_reaped":
-        code = "import os; open(r'{pid}','w').write(str(os.getpid()))"  # exits at once: the signal meets the reap
+    elif case == "child_already_exited":
+        code = "import os; open(r'{pid}','w').write(str(os.getpid()))"  # exits at once; the signal lands after the reap
     else:
         code = "import os,time; open(r'{pid}','w').write(str(os.getpid())); time.sleep(30)"
         kill = subprocess.Popen.kill
