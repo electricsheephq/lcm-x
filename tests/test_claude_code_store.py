@@ -2008,6 +2008,26 @@ def test_three_named_paths_with_identical_lines_are_verified(tmp_path, home, her
     assert report["verified"] and report["lineages"][0]["generations_gone"] == 0
 
 
+def test_an_empty_named_file_never_stands_for_a_generation_with_no_rows(tmp_path, home, hermes):
+    """#2548 delta review: A was empty when drained (a generation with no rows), then gained lines that were never
+    drained, then a hook named B (drained as a new generation), then A was truncated. A's lines are lost: an empty A
+    must not count as the copy of its empty generation."""
+    from hermes_lcm import claude_code_audit as ca
+
+    a = tmp_path / "projects" / "-work" / "s1.jsonl"
+    a.parent.mkdir(parents=True)
+    a.write_bytes(b"")
+    _record(_hook(), home, a)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    _append(a, CONVERSATION[2:4])
+    b = _append(tmp_path / "projects" / "-other" / "s1.jsonl", CONVERSATION[:2])
+    _record(_hook(), home, b)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    a.write_bytes(b"")
+    report = ca.audit(home)
+    assert not report["verified"] and report["unverified"] == ["claude-code:s1"]
+
+
 @pytest.mark.parametrize("failure", ["unreadable", "removed"])
 def test_a_named_path_that_cannot_be_read_leaves_the_lineage_unverified(tmp_path, home, hermes, monkeypatch, failure):
     """#2548 review: a named path that passes stat but cannot be read (denied, or removed between stat and open) must
