@@ -244,7 +244,8 @@ class PrefixMatchingMixin:
                     except ValueError:
                         pass
                 if parsed:
-                    arguments = json.dumps(restore(arguments), sort_keys=True, separators=(",", ":"), default=str)
+                    arguments = json.dumps(restore(arguments), sort_keys=True, separators=(",", ":"), default=str,
+                                           ensure_ascii=False)  # as the redactor writes JSON
                 else:  # text (invalid JSON or duplicate keys) compares stripped
                     arguments = arguments.strip()
                 function["arguments"] = arguments
