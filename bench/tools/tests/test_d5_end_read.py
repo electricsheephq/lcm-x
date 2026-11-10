@@ -3,8 +3,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 from types import SimpleNamespace
+
+import pytest
 
 from bench.tools import d5_end_read as er
 
@@ -352,3 +355,69 @@ def test_an_invalid_pin_digest_is_never_echoed():
     args = SimpleNamespace(start_pin_sha256="/private/typed/path", end_pin_sha256="/private/typed/path")
     result = er.end_read(args)
     assert result["pins_sha256"] == {} and "typed" not in json.dumps(result)
+
+
+def _fake_read(monkeypatch, tmp_path, end, message_patterns):
+    """end_read with the runner's host faked; the start rows are START and the end rows are `end`."""
+    class Host:
+        def __init__(self, config, scratch):
+            pass
+
+        def pins(self):
+            return {"verdict": "PASS"}
+
+        def rules(self):
+            return {"identity": identity}
+
+        def rows(self, folder):
+            return START if folder == "start-dir" else end
+
+    monkeypatch.setattr(er, "_capture", lambda *a: ({"verdict": "PASS"}, None))
+    monkeypatch.setattr(er.runner, "LocalHost", Host)
+    monkeypatch.setattr(er, "_sessions", lambda folder: ({}, {}))
+    lcm = {"ignore_session_patterns": [], "stateless_session_patterns": [], "ignore_message_patterns": message_patterns}
+    (tmp_path / "decl.json").write_text(json.dumps({"settings": {"lcm": lcm}}))
+    return er.end_read(SimpleNamespace(start="start-dir", start_pin="p", start_pin_sha256="a" * 64, end="end-dir",
+                                       end_pin="p", end_pin_sha256="b" * 64, scratch=str(tmp_path),
+                                       config=str(tmp_path / "decl.json"), config_sha256=_sha(tmp_path / "decl.json"),
+                                       instrument_dir="kit"))
+
+
+def test_a_failed_check_1_stands_when_a_declared_message_pattern_is_invalid(monkeypatch, tmp_path):
+    """Review finding: an invalid pattern raised and turned a proven FAIL into INCONCLUSIVE; the runtime skips it."""
+    monkeypatch.setattr(er.message_patterns, "_regex_engine", re)  # Same compile and error API; no regex needed.
+    end = {"host": [*START["host"], host(2, "s1", "a")], "store": [stored(11, "s1", "a")]}  # Start row 10 deleted.
+    result = _fake_read(monkeypatch, tmp_path, end, ["[", "(?P<unclosed"])
+    assert result["verdict"] == "FAIL" and result["check1_preservation"]["verdict"] == "FAIL"
+    kept = {"host": end["host"], "store": [*START["store"], stored(11, "s1", "a")]}
+    assert _fake_read(monkeypatch, tmp_path, kept, ["[", "(?P<unclosed"])["verdict"] == "PASS"  # Skipped, as at runtime.
+
+
+def test_without_the_regex_package_declared_message_patterns_are_inconclusive_and_check_1_still_decides(
+        monkeypatch, tmp_path):
+    monkeypatch.setattr(er.message_patterns, "_regex_engine", None)
+    kept = {"host": [*START["host"], host(2, "s1", "a")], "store": [*START["store"], stored(11, "s1", "a")]}
+    result = _fake_read(monkeypatch, tmp_path, kept, ["private-pattern-text"])
+    assert result["verdict"] == "INCONCLUSIVE" and "regex package" in result["reason"]
+    assert "private-pattern-text" not in json.dumps(result)
+    dropped = {"host": kept["host"], "store": [stored(11, "s1", "a")]}
+    assert _fake_read(monkeypatch, tmp_path, dropped, ["private-pattern-text"])["verdict"] == "FAIL"
+
+
+def test_an_error_inside_check_2_keeps_a_failed_check_1(monkeypatch, tmp_path):
+    monkeypatch.setattr(er, "coverage", lambda *a, **k: (_ for _ in ()).throw(ValueError("/private/typed/path")))
+    end = {"host": [*START["host"], host(2, "s1", "a")], "store": [stored(11, "s1", "a")]}
+    result = _fake_read(monkeypatch, tmp_path, end, [])
+    assert result["verdict"] == "FAIL" and result["reason"] == "check 2 could not be read (ValueError)"
+    assert "typed" not in json.dumps(result)
+
+
+def test_a_catastrophic_message_pattern_is_bounded_and_quotes_nothing(monkeypatch, tmp_path, capsys):
+    """Review finding: stdlib re had no timeout; the runtime's matcher bounds each search and counts a timeout as no
+    match (the row is then judged like any other)."""
+    pytest.importorskip("regex")
+    end = {"host": [*START["host"], host(2, "s9", "a" * 40 + "!")], "store": [*START["store"]]}
+    result = _fake_read(monkeypatch, tmp_path, end, ["(a+)+$"])
+    assert result["check2_coverage"]["lost"] == 1  # Not excluded: the runtime would have stored it.
+    captured = capsys.readouterr()
+    assert "(a+)+$" not in captured.out + captured.err

@@ -22,11 +22,13 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import logging
 import re
 import sys
 from collections import Counter
 from pathlib import Path
 
+import message_patterns
 from bench.instruments.d5_clone import bars, capture, run as runner, snapshot
 from session_patterns import build_session_match_keys, compile_session_patterns, matches_session_pattern
 
@@ -36,7 +38,8 @@ VERDICT_RULE = ("FAIL when check 1 fails or any window host row is LOST; LOST on
                 "a LOST row, and an unmatched row with no hint, is an unconfirmed loss candidate until a replay confirms it "
                 "(the spec's canary rule); INCONCLUSIVE while any window host row is unmatched, when the window is empty "
                 "or both pins are the same, when a pin, the declaration or the kit does not verify, when the declaration "
-                "has no settings.lcm session patterns, or when any session in the end store that matches a declared "
+                "has no settings.lcm session patterns, when message patterns are declared and the regex package that bounds "
+                "their matching is missing, or when any session in the end store that matches a declared "
                 "pattern holds a stored row; a window row in a session matching a declared ignore or stateless pattern is "
                 "counted apart as not stored by design, never LOST or matched; a window row matching a declared message "
                 "pattern is unmatched, never LOST; PASS only with check 1 PASS, a non-empty "
@@ -222,12 +225,26 @@ def end_read(args):
     except Exception as exc:  # noqa: BLE001  # Never a message: it can carry a path.
         return {**out, "verdict": INCONCLUSIVE, "reason": f"a store could not be read ({type(exc).__name__})"}
     check1 = bars.bar3(start["store"], end["store"], identity)
-    patterns = [re.compile(x) for x in lcm.get("ignore_message_patterns") or [] if isinstance(x, str)]
-    check2 = coverage(start, end, identity, args.end, *session_matchers(lcm, *_sessions(args.end)),
-                      message_excluded=lambda row: any(isinstance(row.get("content"), str) and x.search(row["content"])
-                                                       for x in patterns))
-    return {**out, "verdict": verdict(check1, check2), "check1_preservation": check1, "check2_coverage": check2,
-            "start_rows": {k: len(v) for k, v in start.items()}, "end_rows": {k: len(v) for k, v in end.items()}}
+    out = {**out, "check1_preservation": check1, "start_rows": {k: len(v) for k, v in start.items()},
+           "end_rows": {k: len(v) for k, v in end.items()}}
+    unproven = FAIL if check1["verdict"] == FAIL else INCONCLUSIVE  # A failed check 1 stands whatever follows.
+    declared = [x for x in lcm.get("ignore_message_patterns") or [] if isinstance(x, str)]
+    if declared and message_patterns._regex_engine is None:
+        return {**out, "verdict": unproven,
+                "reason": "declared message patterns need the regex package for bounded matching; it is not installed"}
+    log = logging.getLogger(message_patterns.__name__)
+    was_disabled, log.disabled = log.disabled, True  # Its warnings quote a pattern: a settings value.
+    try:
+        # The runtime's own matcher: an invalid pattern is skipped and a search that times out is no match.
+        patterns = message_patterns.compile_message_patterns(declared)
+        check2 = coverage(start, end, identity, args.end, *session_matchers(lcm, *_sessions(args.end)),
+                          message_excluded=lambda row: isinstance(row.get("content"), str)
+                          and message_patterns.matches_message_pattern(row["content"], patterns))
+    except Exception as exc:  # noqa: BLE001  # Never a message: it can carry a path.
+        return {**out, "verdict": unproven, "reason": f"check 2 could not be read ({type(exc).__name__})"}
+    finally:
+        log.disabled = was_disabled
+    return {**out, "verdict": verdict(check1, check2), "check2_coverage": check2}
 
 
 def main(argv=None):
