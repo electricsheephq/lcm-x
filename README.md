@@ -43,8 +43,9 @@ Restart Hermes after changing plugin or context-engine config.
 
 For Claude Code, use LCM-X for Claude Code, which we recommend for every Claude Code user on macOS
 and Linux. It captures your Claude Code sessions into their own local, lossless store and gives the
-agent the same five recall tools. Download the asset from the latest `claude-code-v*` release on the
-[releases page](https://github.com/electricsheephq/lcm-x/releases), unpack it, and start Claude Code
+agent the same five recall tools. Download the asset from the newest
+[`claude-code-v*` release](https://github.com/electricsheephq/lcm-x/releases?q=claude-code-v&expanded=true) (these
+releases are never marked Latest, which stays with the Hermes plugin), unpack it, and start Claude Code
 with `claude --plugin-dir <unpacked folder>`; the steps are in the release notes and in
 [its README](adapters/claude-code/README.md). The read-only server under
 [Use LCM-X memory from Claude Code](#use-lcm-x-memory-from-claude-code-read-only) is a different
