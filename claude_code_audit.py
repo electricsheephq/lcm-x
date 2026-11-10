@@ -270,12 +270,14 @@ def _named_others(lineage: Lineage, cursor: dict, generations: dict, compared: s
             best = max(prefixes.values(), default=0)
             # A generation counted gone (no set-aside copy) that is this file, whole at its own path, is compared as a
             # copy. Among equal matches a still-gone one is chosen, so identical files each clear their own generation.
+            # A generation with no rows never matches (as in _matches_generation): it may have lost them all.
             whole = [generation for generation, matched in prefixes.items()
-                     if generation in gone and matched == len(generations[generation]) == total]
-            if whole and best == total:
-                gone.discard(whole[0])
-                report["generations_gone"] -= 1
+                     if generation in gone and 0 in generations[generation]
+                     and matched == len(generations[generation]) == total]
+            if whole:
                 _compare(other, generations[whole[0]], report, expected, lag)
+                gone.discard(whole[0])  # only once the copy compared, so a failed read leaves the counts whole
+                report["generations_gone"] -= 1
         except OSError:  # passed stat but cannot be read (denied, or removed since): not a clean path
             report["named_uncaptured_lines"] += 1
             continue
