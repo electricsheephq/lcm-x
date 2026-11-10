@@ -64,6 +64,7 @@ if TYPE_CHECKING:
     from typing import Any, Dict, Mapping, Optional, TextIO, Tuple
 
 DETACHED_DEADLINE_S = 30
+SYNC_LOCK_WAIT_S = 1.0  # a synchronous hook never waits longer than this for a detached writer's pointer lock
 MAX_PAYLOAD = 1024 * 1024
 PRECOMPACT_DEADLINE_S = 10
 LOG_ROTATE_BYTES = 5 * 1024 * 1024
@@ -164,8 +165,12 @@ def normalize(payload: Mapping[str, Any], environ: Mapping[str, str]) -> Dict[st
     return record
 
 
-def spool(home: Path, record: Mapping[str, Any]) -> str:
-    """Atomically replace this session's (or subagent's) pointer record."""
+def spool(home: Path, record: Mapping[str, Any], *, wait_s: Optional[float] = None) -> str:
+    """Atomically replace this session's (or subagent's) pointer record.
+
+    ``wait_s`` bounds the wait for the pointer's lock (synchronous hooks): if a stalled detached writer of the same
+    session holds it that long, nothing is written and ``lock_busy`` is returned. That holder writes its own pointer,
+    and the worker this hook still starts sweeps every registered lineage, so the skip delays nothing."""
     directory = home / "spool"
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     identity = "\0".join([record["host"], record["session_id"], record.get("agent_id") or ""])
@@ -174,7 +179,18 @@ def spool(home: Path, record: Mapping[str, Any]) -> str:
     locks = home / "spool-locks"
     locks.mkdir(mode=0o700, parents=True, exist_ok=True)
     with open(locks / key, "a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+        if wait_s is None:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+        else:
+            give_up = time.monotonic() + wait_s
+            while True:
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= give_up:
+                        return "lock_busy"
+                    time.sleep(0.01)
         return _spool_locked(directory, key, record)
 
 
@@ -387,7 +403,7 @@ def main(stdin: TextIO = sys.stdin, environ: Mapping[str, str] = os.environ, *, 
             outcome = "observed"  # never spooled, so it cannot replace a pending record
             return 0
         steps.begin("spool")
-        spooled = spool(home, record)
+        spooled = spool(home, record, wait_s=None if child else SYNC_LOCK_WAIT_S)
         deadline = PRECOMPACT_DEADLINE_S if record["event"] == "PreCompact" else 0
         outcome = start_worker(home, environ, deadline_s=deadline, probe=record["event"] not in ASYNC_EVENTS,
                                steps=steps)

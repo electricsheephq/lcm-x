@@ -140,6 +140,25 @@ def test_a_killed_hook_process_group_still_lands_the_pointer(hook, env, tmp_path
     assert landed.is_file() and json.loads(landed.read_text())["event"] == event
 
 
+def test_a_synchronous_hook_does_not_wait_for_a_stalled_detached_writer(hook, env, tmp_path):
+    """Codex review of #2531: SessionStart and PreCompact take the same pointer lock as the detached children. While a
+    stalled child holds it, a synchronous hook waits at most SYNC_LOCK_WAIT_S, skips its own pointer (lock_busy) and
+    still starts the worker; the holder writes its pointer and the sweep covers the session."""
+    payload = {"session_id": "s1", "transcript_path": str(_transcript(tmp_path))}
+    hook.main(io.StringIO(json.dumps({**payload, "hook_event_name": "UserPromptSubmit"})), env)
+    [lock_path] = list((Path(env["LCMX_CC_HOME"]) / "spool-locks").iterdir())
+    with open(lock_path, "a") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)  # the stalled detached writer
+        started = time.monotonic()
+        done = subprocess.run([sys.executable, "-I", "-S", str(PLUGIN / "bin/lcmx_hook.py")],
+                              input=json.dumps({**payload, "hook_event_name": "SessionStart", "source": "resume"}),
+                              env=env, capture_output=True, text=True, timeout=4)
+        waited = time.monotonic() - started
+    assert (done.returncode, done.stdout, done.stderr) == (0, "", "")
+    assert waited < 3
+    assert _log(env)[-1]["outcome"].endswith("+lock_busy")
+
+
 def test_detached_records_keep_synchronous_start(env, tmp_path):
     payload = {"session_id": "s1", "transcript_path": str(_transcript(tmp_path)), "source": "fork"}
     for index, event in enumerate(("SessionStart", "UserPromptSubmit", "Stop"), 1):
