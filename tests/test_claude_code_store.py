@@ -2420,3 +2420,28 @@ def test_a_child_outside_its_parents_folders_respects_forget_and_layout(tmp_path
         _table_place(b, "saved" if shape == "forgotten_outputs" else "subagent")
     unverified = ca.audit(home)["unverified"]
     assert bool([key for key in unverified if key.startswith("claude-code:s1")]) is (shape == "forgotten_subagent")
+
+
+@pytest.mark.parametrize("forget", [False, True])
+def test_a_pending_parents_uncaptured_subagent_counts_even_when_forgotten(tmp_path, home, hermes, forget):
+    """#2557 review: a forgotten session's subagents are still captured, so a pending (never-captured) parent that was
+    forgotten still has its subagents checked under every path its records named; with another session captured, the
+    audit must not read verified while one waits for the next sweep."""
+    from hermes_lcm import claude_code_audit as ca
+
+    other = _append(tmp_path / "projects" / "-work" / "s2.jsonl", [dict(e, sessionId="s2") for e in CONVERSATION[:2]])
+    _record(_hook(), home, other, session="s2")
+    b = tmp_path / "projects" / "-other" / "s1.jsonl"
+    _record(_hook(), home, b, event="SessionStart")
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    if forget:
+        store = _open(home, hermes)
+        try:
+            store.delete_session_messages("s1")
+        finally:
+            store.close()
+    _append(b.parent / "s1" / "subagents" / "agent-y9.jsonl", _SIDE)
+    report = ca.audit(home)
+    assert not report["verified"] and "claude-code:s1/agent:y9" in report["unverified"]
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)  # the sweep captures it: then it is verified
+    assert "claude-code:s1/agent:y9" not in ca.audit(home)["unverified"]
