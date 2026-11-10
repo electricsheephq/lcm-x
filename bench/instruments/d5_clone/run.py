@@ -197,10 +197,11 @@ def workload_facts(home, before, cron_id=None):
     """Bar 6's host observations, counted from the stopped arm's own files against its marks (counts only)."""
     lcm, host = Path(home) / "lcm.db", Path(home) / "state.db"
     store_after, host_after = (before.get("store_id", 0),), (before.get("host_id", 0),)
-    # A published compaction: a session whose LCM-X commit proof row changed and is not native, with a new summary node.
+    # A published compaction: a session whose LCM-X commit proof row changed, is not native and says published (an
+    # overflow recovery also writes a non-native proof), with a new summary node. Both trees write "published".
     nodes = {s for s, in _rows(lcm, "SELECT DISTINCT session_id FROM summary_nodes WHERE node_id > ?", (before.get("node_id", 0),))}
     published = sum(key.partition(":")[2] in nodes and before.get("proofs", {}).get(key) != _sha(value)
-                    and (_json(value) or {}).get("native") is False
+                    and (_json(value) or {}).get("native") is False and (_json(value) or {}).get("published") is True
                     for key, value in _rows(lcm, "SELECT key, value FROM metadata WHERE key GLOB 'compaction_commit_proof:*'"))
     # A whitespace rewrite: a host_rewrite_identity row for a new user row, recording the edge whitespace stripped.
     users = {str(i) for i, in _rows(lcm, "SELECT store_id FROM messages WHERE role = 'user' AND store_id > ?", store_after)}

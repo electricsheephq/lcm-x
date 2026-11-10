@@ -129,11 +129,15 @@ def p3(host, plan):
                 "summary_calls": stats["calls_by_model"].get("d5-summary", 0),
                 "outside_step": stats["agent_calls_outside_step"], "replay_misses": sum(stats["replay_misses"].values()),
                 "unknown_models": sum(stats["unknown_models"].values()),
-                "unknown_model_names": sorted(stats["unknown_models"]),  # Config strings only.
+                "unknown_model_sha256_12": sorted(_sha(m)[:12] for m in stats["unknown_models"]),  # Never the names.
                 "off_script": [s for s in ran if stats["calls_per_step"][s] != len(plan["provider"]["steps"][s])],
-                "publish_wait_s": ctx.get("settle_s", 0)}
+                "publish_wait_s": ctx.get("settle_s", 0),
+                # Recorded, not judged: S2 at P3's small context may also start the host's own hygiene compression.
+                "hygiene_lines": len({line for line in host.logs(ctx)
+                                      if HYGIENE in line and "skipping compression" not in line})}
             unsure += [f"{tree}: no compaction published within {wait} s of the last turn"] if published < 1 else []
             reasons += [f"{tree}: {k}" for k in _failed([
+                ("no step ran", not ran),  # A compaction with no turn behind it shows nothing about the turns.
                 ("no d5-summary call", published >= 1 and f["summary_calls"] < 1),
                 ("a new summary node not from the fixed rule",
                  published >= 1 and (not nodes or f["fixed_rule_nodes"] != len(nodes))),
@@ -149,7 +153,8 @@ def _home_paths(text, home):
     output and names the file that keeps it in full, under the arm's home and with a timestamp, so the same output
     differs between the trees only there."""
     for root in sorted({str(home), str(Path(home).resolve())}, key=len, reverse=True):
-        text = re.sub(re.escape(root) + r"""/[^\s"'\])\\]*""", "<home-path>", text)  # Beneath it; stops at an escape.
+        # Beneath it, over path characters only: a separator, an escape or any text after the path stays compared.
+        text = re.sub(re.escape(root) + r"/[A-Za-z0-9._/+@-]*", "<home-path>", text)
     return text
 
 
@@ -193,9 +198,13 @@ def p6(host, plan):
     host.pause_cron(ctx)
     sid, ids = ctx["sessions"]["L"], ctx["session_ids"]
 
-    def anchors():  # Distinct records: the host writes each LCM-X line to more than one log file.
-        return len({line for line in host.logs(ctx) if ANCHOR in line and f"session={sid}" in line})
+    def lines():  # Distinct records written since the arm (the host writes each LCM-X line to more than one log file).
+        return set(host.logs(ctx)) - old
 
+    def anchors():
+        return len({line for line in lines() if ANCHOR in line and f"session={sid}" in line})
+
+    old = set(host.logs(ctx))  # A clone that carries older log files never counts their lines.
     try:
         host.start(ctx)
         before = _tops(ctx)
@@ -216,7 +225,7 @@ def p6(host, plan):
         _turn(host, ctx, warm)
         warm_anchors = anchors() - cold_anchors
         # Any hygiene line but a skip: its usual lines name no session, and P6 drives only L.
-        hygiene = len({line for line in host.logs(ctx) if HYGIENE in line and "skipping compression" not in line})
+        hygiene = len({line for line in lines() if HYGIENE in line and "skipping compression" not in line})
         ended = _rows(ctx, "state.db", "SELECT count(*) FROM sessions WHERE end_reason IS NOT NULL"
                       f" AND id IN ({','.join('?' * len(ids))})", ids)[0][0]
     finally:
@@ -229,9 +238,9 @@ def p6(host, plan):
 
     import yaml
     enabled = ((yaml.safe_load((Path(ctx["home"]) / "config.yaml").read_text()) or {}).get("plugins") or {}).get("enabled")
-    live = {c for c, in _rows(ctx, "lcm.db", "SELECT DISTINCT conversation_id FROM messages WHERE session_id = ?"
-                              " AND store_id > ? AND store_id <= ?", (sid, before["store"], mid["store"]))}
-    replayed = {str(c) for c in _find(receipt or {}, "conversation_id")} | {str(k) for k in keys if k}
+    live = {str(c) for c, in _rows(ctx, "lcm.db", "SELECT DISTINCT conversation_id FROM messages WHERE session_id = ?"
+                                   " AND store_id > ? AND store_id <= ?", (sid, before["store"], mid["store"])) if c}
+    replayed = {str(c) for c in _find(receipt or {}, "conversation_id") if c} | {str(k) for k in keys if k}
     f = {"bind": bind, "cold_anchors": cold_anchors, "warm_anchors": warm_anchors, "ended_sessions": ended,
          "warm_rows": [new("lcm.db", "store_id", mid["store"]), new("state.db", "id", mid["host"])],
          "host_rows": [new("state.db", "id", before["host"], False), new("state.db", "id", before["host"])],
@@ -245,12 +254,15 @@ def p6(host, plan):
         ("the warm turn stored fewer than two rows", min(f["warm_rows"]) < 2),  # Its user row and its reply.
         ("a chosen session ended", ended), ("d5-local is not enabled", "d5-local" not in (enabled or ())),
         ("new host rows outside L's session", len(set(f["host_rows"])) != 1 or f["host_rows"][0] < 2),
-        ("the live and replayed conversation_id differ", replayed and live != replayed)])
+        ("the live and replayed conversation_id differ", replayed and live and live != replayed)])
     unsure = _failed([("the cold turn's ingest was not durable within the wait (no H8, no replay)", not durable),
                  ("the edition replay errored (no receipt to judge)", durable and error),
-                 ("neither the T0 session row nor the edition receipt gives a conversation_id to compare", not replayed)])
+                 ("neither the T0 session row nor the edition receipt gives a conversation_id to compare", not replayed),
+                 ("the cold bind's LCM-X rows carry no conversation_id to compare", not live)])
     if hygiene:  # The host's own compression rewrote L during the bind: what P6 saw is not the turn's own bind.
-        return [], [f"host session hygiene ran on L ({hygiene} lines); the checks are not judged"] + fails + unsure, f
+        kept = [r for r in fails if r == "d5-local is not enabled"]  # Configuration: no compression causes it.
+        return kept, [f"host session hygiene ran on L ({hygiene} lines); the checks are not judged"] + [
+            r for r in fails if r not in kept] + unsure, f
     return fails, unsure, f
 
 
