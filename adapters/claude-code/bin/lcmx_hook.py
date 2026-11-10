@@ -119,7 +119,11 @@ def _merged_facts(record: Dict[str, Any], previous: Optional[Mapping[str, Any]])
             if isinstance(name, str):
                 seen.add(name)
         prompts.update(value for value in previous.get("compact_prompts") or () if isinstance(value, str))
-    return {"seen": sorted(seen), "compact_prompts": sorted(prompts)[-FACTS_CAP:]}
+    facts = {"seen": sorted(seen), "compact_prompts": sorted(prompts)[-FACTS_CAP:]}
+    for key in ("transcript_seen", "agent_transcript_seen"):  # True once any record saw it; None (unknown) wins over False
+        values = [record.get(key), previous.get(key) if isinstance(previous, dict) else False]
+        facts[key] = True if True in values else (False if all(value is False for value in values) else None)
+    return facts
 
 
 def normalize(payload: Mapping[str, Any], environ: Mapping[str, str]) -> Dict[str, Any]:
@@ -189,6 +193,10 @@ def normalize(payload: Mapping[str, Any], environ: Mapping[str, str]) -> Dict[st
             record["problem"] = key + "_outside_projects"
             return record
         record[key] = str(path)
+    # Whether this hook found each transcript on disk (#2535): the audit expires a lineage as never written only when no
+    # hook of it ever did. One stat each; for a detached event it runs in the child.
+    for key in ("transcript_path", "agent_transcript_path"):
+        record[key.replace("_path", "_seen")] = os.path.exists(record[key]) if record[key] else None
     if record["transcript_path"] is None:
         record["problem"] = "no_transcript_path"
     return record

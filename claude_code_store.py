@@ -385,7 +385,9 @@ def record_facts(record: dict, lineage: Lineage) -> dict:
     own = lineage.agent_id is not None and lineage.agent_id == record.get("agent_id")
     agent_type = record.get("agent_type") if own and isinstance(record.get("agent_type"), str) else None
     prompt = record.get("prompt_id") if own and isinstance(record.get("prompt_id"), str) else None
-    return {"events": sorted(set(events)), "agent_type": agent_type, "prompt": prompt}
+    seen = record.get("agent_transcript_seen" if lineage.agent_id is not None else "transcript_seen")
+    return {"events": sorted(set(events)), "agent_type": agent_type, "prompt": prompt,
+            "transcript_seen": seen if isinstance(seen, bool) else None}
 
 
 def _merge_facts(saved: Any, facts: Optional[dict]) -> Optional[dict]:
@@ -393,9 +395,14 @@ def _merge_facts(saved: Any, facts: Optional[dict]) -> Optional[dict]:
         return saved if isinstance(saved, dict) else None
     old = saved if isinstance(saved, dict) else {}
     events = set(facts["events"]) | {name for name in old.get("events") or () if isinstance(name, str)}
+    # True once any record saw the transcript on disk; an unknown (an older hook, or a row from before this field)
+    # stays unknown, so the audit never expires on it.
+    values = [facts.get("transcript_seen"), old.get("transcript_seen") if old else False]
+    seen = True if True in values else (False if all(value is False for value in values) else None)
     return {"events": sorted(events),
             "agent_type": facts["agent_type"] if facts["agent_type"] is not None else old.get("agent_type"),
-            "prompt": facts["prompt"] if facts["prompt"] is not None else old.get("prompt")}
+            "prompt": facts["prompt"] if facts["prompt"] is not None else old.get("prompt"),
+            "transcript_seen": seen}
 
 
 def drain(store: MessageStore, lineage: Lineage, *, deadline: Optional[float] = None,

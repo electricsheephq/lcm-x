@@ -1995,17 +1995,20 @@ def test_cursor_alternation_without_growth_is_verified(tmp_path, home, hermes):
     assert report["verified"] and report["lineages"][0]["generations_gone"] == 0
 
 
-def _summarizer_run(tmp_path, home, hermes, *, compact_prompt="c1", agent_type="", stop_first=False):
+def _summarizer_run(tmp_path, home, hermes, *, compact_prompt="c1", agent_type="", stop_first=False,
+                    agent_seen=False, extra_event=None):
     """A compaction as real Claude Code sends it (#2535 fixture): PreCompact, then the summarizer's SubagentStop with a
-    new agent id, type "" and the same prompt id, whose transcript is never written."""
+    new agent id, type "" and the same prompt id, whose transcript is never written (no hook finds it on disk)."""
     path = _transcript(tmp_path, CONVERSATION)
     hook = _hook()
     agent = cc.session_dir(path) / "subagents" / "agent-sum1.jsonl"
     stop = dict(event="SubagentStop", agent_id="sum1", agent_transcript_path=str(agent), agent_type=agent_type,
-                prompt_id="c1")
+                prompt_id="c1", transcript_seen=True, agent_transcript_seen=agent_seen)
     steps = [lambda: _record(hook, home, path, event="PreCompact", prompt_id=compact_prompt,
-                             compact_prompts=[compact_prompt]),
+                             compact_prompts=[compact_prompt], transcript_seen=True),
              lambda: _record(hook, home, path, **stop)]
+    if extra_event:  # another record of the same subagent, claimed in its own run
+        steps.append(lambda: _record(hook, home, path, **{**stop, "event": extra_event}))
     for step in reversed(steps) if stop_first else steps:  # each claimed by its own worker run
         step()
         cc.run_worker(home, hermes_home=hermes, settle_s=0)
@@ -2023,7 +2026,8 @@ def test_a_compaction_summarizer_that_was_never_written_expires(tmp_path, home, 
     assert report["verdict"] == "verified; 1 expired: never written (1 compaction summarizers, 0 sessions with no prompt)"
 
 
-@pytest.mark.parametrize("change", [{"compact_prompt": "other"}, {"agent_type": "general-purpose"}])
+@pytest.mark.parametrize("change", [{"compact_prompt": "other"}, {"agent_type": "general-purpose"},
+                                    {"agent_seen": True}, {"agent_seen": None}, {"extra_event": "PostToolBatch"}])
 def test_a_subagent_without_the_summarizer_link_stays_unverified(tmp_path, home, hermes, change):
     from hermes_lcm import claude_code_audit as ca
 
@@ -2033,14 +2037,15 @@ def test_a_subagent_without_the_summarizer_link_stays_unverified(tmp_path, home,
     assert report["expired_never_written"] == 0 and report["pending_lineages"] == 1
 
 
-def _quit_session(tmp_path, home, hermes, events):
-    """Session s2 is captured normally; session s1's transcript is never on disk while its hooks fire."""
+def _quit_session(tmp_path, home, hermes, events, seen=None):
+    """Session s2 is captured normally; session s1's transcript is not on disk when the worker drains. ``seen`` maps an
+    event to what its hook found on disk (default: absent)."""
     other = _transcript(tmp_path, [_entry("user", "v1", "other session", session="s2")], session="s2")
-    _record(_hook(), home, other, session="s2")
+    _record(_hook(), home, other, session="s2", transcript_seen=True)
     missing = tmp_path / "projects" / "-work" / "s1.jsonl"
     for batch in events:  # each batch is spooled before one worker run claims it
         for event in batch:
-            _record(_hook(), home, missing, event=event)
+            _record(_hook(), home, missing, event=event, transcript_seen=(seen or {}).get(event, False))
         cc.run_worker(home, hermes_home=hermes, settle_s=0)
 
 
@@ -2051,6 +2056,36 @@ def test_a_session_that_ended_with_no_prompt_expires(tmp_path, home, hermes):
     report = ca.audit(home)
     assert report["verified"] and report["expired_never_written"] == 1 and report["pending_lineages"] == 0
     assert report["verdict"].endswith("; 1 expired: never written (0 compaction summarizers, 1 sessions with no prompt)")
+    # The session filter judges it the same way: nothing is unverified (and nothing was checked, so not verified).
+    assert ca.audit(home, "s1")["unverified"] == []
+
+
+@pytest.mark.parametrize("seen", [{"SessionEnd": True}, {"SessionStart": None}])
+def test_a_session_whose_hooks_saw_its_transcript_or_could_not_tell_stays_unverified(tmp_path, home, hermes, seen):
+    """A built-in command alone (/usage) writes a transcript without a UserPromptSubmit, so SessionStart + SessionEnd
+    is not proof of an empty session: a transcript a hook found on disk and later removed before any drain is a loss.
+    A record from an older hook (unknown) never expires either."""
+    from hermes_lcm import claude_code_audit as ca
+
+    _quit_session(tmp_path, home, hermes, [["SessionStart"], ["SessionEnd"]], seen=seen)
+    report = ca.audit(home)
+    assert not report["verified"] and report["unverified"] == ["claude-code:s1"]
+    assert report["expired_never_written"] == 0
+
+
+@pytest.mark.parametrize("row", ["not a dict", {"agent_id": None, "path": "/x.jsonl"}, {"session_id": "s1"}])
+def test_a_malformed_pending_row_is_unverified_and_never_crashes_the_audit(home, hermes, row):
+    from hermes_lcm import claude_code_audit as ca
+
+    store = _open(home, hermes)
+    try:
+        cc._write_metadata(store, "capture:pending:claude-code:s1", row)
+    finally:
+        store.close()
+    for session in (None, "s1"):
+        report = ca.audit(home, session)
+        assert "claude-code:s1" in report["unverified"] and not report["verified"]
+        assert report["expired_never_written"] == 0
 
 
 @pytest.mark.parametrize("events", [

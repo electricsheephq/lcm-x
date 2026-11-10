@@ -444,16 +444,20 @@ and reports the age of the oldest one.
 
 A pending lineage none of whose named transcripts exists is unverified, because a transcript removed before its first
 drain looks the same on disk. Two shapes seen on real sessions are instead counted as expired, never written
-(`expired_never_written`, and in words in the one-line verdict):
+(`expired_never_written`, and in words in the one-line verdict), and only when no hook of the lineage ever found its
+transcript on disk:
 
-- the compaction summarizer: a `SubagentStop` with `agent_type` "" whose prompt id is one of its session's
-  compactions (`PreCompact`, `PostCompact` or a `SessionStart` with source `compact`);
-- a session that ended with no prompt: its hooks were only `SessionStart` and `SessionEnd`.
+- the compaction summarizer: its only hook is a `SubagentStop` with `agent_type` "" whose prompt id is one of its
+  session's compactions (`PreCompact`, `PostCompact` or a `SessionStart` with source `compact`);
+- a session that ended with no prompt: its hooks were only `SessionStart` and `SessionEnd`. Any other event (a prompt,
+  a `Stop`, a tool hook) keeps it unverified. A built-in command such as `/usage` writes a transcript without a
+  `UserPromptSubmit`, which is why the hooks' own look at the disk is required too.
 
-To tell these apart the hook keeps a hash of each record's prompt id and its `agent_type`, and the spool pointer lists
-every event that reached it since the worker last claimed it, so a record the pointer rules replace or keep out still
-counts. A session still open with no prompt yet, or one whose `SessionEnd` was lost, stays unverified. Pending rows
-written by a build before this rule have no hook facts and stay unverified.
+To tell these apart the hook keeps a hash of each record's prompt id, its `agent_type`, and whether it found each
+transcript on disk (one stat). The spool pointer merges these facts from every record that reached it since the worker
+last claimed it, so a record the pointer rules replace or keep out still counts. A session still open with no prompt
+yet, or one whose `SessionEnd` was lost, stays unverified. Pending rows and hook records from a build before this rule
+lack these facts and stay unverified.
 
 Known issue in the shipped preview `claude-code-v0.1.0`: before #2533, such a session's final rows could be lost if its
 later hook records were also lost, and before #2535 the audit counted, but did not fail on, a session whose transcript

@@ -1628,6 +1628,12 @@ def test_records_carry_a_hashed_prompt_id_and_the_raw_agent_type(hook, env, tmp_
     plain = hook.normalize({"hook_event_name": "Stop", "session_id": "s1", "transcript_path": path}, env)
     assert plain["agent_type"] is None and plain["prompt_id"] is None
     assert "p-1" not in json.dumps(summarizer)
+    # What the hook found on disk: the session transcript exists, the summarizer's never does; no agent path is None.
+    assert summarizer["transcript_seen"] is True and summarizer["agent_transcript_seen"] is None
+    absent = hook.normalize({"hook_event_name": "SubagentStop", "session_id": "s1", "agent_id": "a1",
+                             "agent_transcript_path": str(Path(path).parent / "s1" / "subagents" / "agent-a1.jsonl"),
+                             "transcript_path": path}, env)
+    assert absent["agent_transcript_seen"] is False
 
 
 def test_a_replaced_or_kept_pointer_keeps_every_event_seen(hook, env, tmp_path):
@@ -1643,6 +1649,20 @@ def test_a_replaced_or_kept_pointer_keeps_every_event_seen(hook, env, tmp_path):
     assert hook.spool(home, {**base, "event": "PreCompact", "prompt_id": "c1"}) == "spooled"
     assert hook.spool(home, {**base, "event": "PostCompact", "prompt_id": "c2"}) == "kept_end"
     record = claim_records(home)[0][1]
-    assert record["event"] == "PreCompact"
+    assert record["event"] == "PreCompact" and record["transcript_seen"] is True
     assert record["seen"] == ["PostCompact", "PostToolUse", "PreCompact", "SessionEnd", "Stop", "UserPromptSubmit"]
     assert record["compact_prompts"] == ["c1", "c2"]
+
+
+@pytest.mark.parametrize("values,merged", [((False, False), False), ((False, True), True), ((True, False), True),
+                                           ((None, False), None), ((False, None), None), ((None, True), True)])
+def test_the_pointer_keeps_whether_any_record_saw_the_transcript(hook, env, tmp_path, values, merged):
+    """#2535: once any hook found the transcript on disk the lineage is never expired; an unknown (an older hook) is
+    never turned into "absent"."""
+    from hermes_lcm.claude_code_store import claim_records
+    home = Path(env["LCMX_CC_HOME"])
+    base = hook.normalize({"hook_event_name": "SessionStart", "session_id": "s1",
+                           "transcript_path": str(_transcript(tmp_path))}, env)
+    for event, seen in zip(("SessionStart", "SessionEnd"), values):
+        hook.spool(home, {**base, "event": event, "transcript_seen": seen})
+    assert claim_records(home)[0][1]["transcript_seen"] is merged
