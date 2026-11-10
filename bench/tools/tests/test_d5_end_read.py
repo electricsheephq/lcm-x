@@ -436,12 +436,23 @@ def test_a_search_that_times_out_may_match_so_the_row_is_unmatched_never_lost(mo
 
 def test_multimodal_text_parts_are_matched_as_the_runtime_reads_them(monkeypatch, tmp_path):
     monkeypatch.setattr(er.message_patterns, "_regex_engine", re)
-    monkeypatch.setattr(er.message_patterns, "compile_message_patterns", lambda p: [_Pattern(word="heartbeat")])
+    monkeypatch.setattr(er.message_patterns, "compile_message_patterns", lambda p: [_Anchored("heartbeat")])
     parts = [{"type": "text", "text": "heartbeat ok"}, {"type": "image_url", "image_url": {"url": "x"}}]
-    end = {"host": [*START["host"], host(2, "s9", parts), host(3, "s1", "a")],
+    for content in (parts, json.dumps(parts)):  # A host db row reads back as JSON text, never a list.
+        end = {"host": [*START["host"], host(2, "s9", content), host(3, "s1", "a")],
+               "store": [*START["store"], stored(11, "s1", "a")]}
+        check2 = _fake_read(monkeypatch, tmp_path, end, ["x"])["check2_coverage"]
+        assert (check2["lost"], check2["unmatched_by_hint"]["matches a declared message pattern"]) == (0, 1)
+    end = {"host": [*START["host"], host(2, "s9", "[not json"), host(3, "s1", "a")],
            "store": [*START["store"], stored(11, "s1", "a")]}
-    check2 = _fake_read(monkeypatch, tmp_path, end, ["x"])["check2_coverage"]
-    assert (check2["lost"], check2["unmatched_by_hint"]["matches a declared message pattern"]) == (0, 1)
+    assert _fake_read(monkeypatch, tmp_path, end, ["x"])["check2_coverage"]["lost"] == 1  # No match, nothing hidden.
+
+
+class _Anchored(_Pattern):
+    """Matches only at the start of the text, like `^heartbeat`: the raw JSON text starts with `[`."""
+    def search(self, text, timeout=None):
+        assert timeout == er.message_patterns.MESSAGE_PATTERN_MATCH_TIMEOUT_SECONDS
+        return text.startswith(self.word)
 
 
 def test_message_pattern_warnings_are_silenced_and_the_logger_is_restored(monkeypatch, tmp_path, caplog):

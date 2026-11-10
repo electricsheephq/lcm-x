@@ -168,15 +168,19 @@ def verdict(check1, check2):
 def _may_match(content, patterns):
     """True when a declared message pattern matches the row's text as the runtime reads it, or when a search cannot be
     decided within the runtime's time bound: the runtime may have matched it, so the row is never LOST."""
-    text = message_content.text_content_for_pattern_matching(content) or ""
-    if not text:
-        return False
-    for pattern in patterns:
-        try:
-            if pattern.search(text, timeout=message_patterns.MESSAGE_PATTERN_MATCH_TIMEOUT_SECONDS):
+    texts = [message_content.text_content_for_pattern_matching(content)]
+    if isinstance(content, str) and content.lstrip()[:1] in ("[", "{"):
+        try:  # A host row holds structured content as JSON text; the runtime matched the live parts' text.
+            texts.append(message_content.text_content_for_pattern_matching(json.loads(content)))
+        except Exception:  # noqa: BLE001  # Not JSON: the raw text above is all there is.
+            pass
+    for text in dict.fromkeys(t for t in texts if isinstance(t, str) and t):
+        for pattern in patterns:
+            try:
+                if pattern.search(text, timeout=message_patterns.MESSAGE_PATTERN_MATCH_TIMEOUT_SECONDS):
+                    return True
+            except Exception:  # noqa: BLE001  # A timeout, or a search that cannot be bounded: undecided.
                 return True
-        except Exception:  # noqa: BLE001  # A timeout, or a search that cannot be bounded: undecided.
-            return True
     return False
 
 
