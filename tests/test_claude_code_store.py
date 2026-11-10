@@ -2469,7 +2469,7 @@ def test_a_pending_parents_uncaptured_subagent_counts_even_when_forgotten(tmp_pa
     assert "claude-code:s1/agent:y9" not in ca.audit(home)["unverified"]
 
 
-@pytest.mark.parametrize("shape", ["nested_child", "dotted_session"])
+@pytest.mark.parametrize("shape", ["nested_child", "dotted_session", "two_subagents_segments", "inner_folder_named_s1"])
 def test_a_child_elsewhere_finds_its_parents_folder_from_any_layout(tmp_path, home, hermes, shape):
     """#2557 cross-model review: the parent folder of a captured child in a folder its parent never named is the nearest
     ``subagents`` folder's parent, and its transcript is ``<folder name>.jsonl`` even when the session id has a dot."""
@@ -2479,7 +2479,9 @@ def test_a_child_elsewhere_finds_its_parents_folder_from_any_layout(tmp_path, ho
     a = tmp_path / "projects" / "-work" / (session + ".jsonl")
     b = tmp_path / "projects" / "-other" / (session + ".jsonl")
     folder = b.parent / session / "subagents"
-    child = folder / "deep" / "agent-x1.jsonl" if shape == "nested_child" else folder / "agent-x1.jsonl"
+    child = {"nested_child": folder / "deep" / "agent-x1.jsonl",
+             "two_subagents_segments": folder / "deep" / "subagents" / "agent-x1.jsonl",
+             "inner_folder_named_s1": folder / session / "subagents" / "agent-x1.jsonl"}.get(shape, folder / "agent-x1.jsonl")
     _append(child, [dict(e, sessionId=session) for e in _SIDE])
     _append(a, [dict(e, sessionId=session) for e in CONVERSATION[:2]])
     _record(_hook(), home, a, session=session)
