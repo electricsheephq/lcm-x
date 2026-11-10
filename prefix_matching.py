@@ -157,9 +157,14 @@ class PrefixMatchingMixin:
         )
         return normalize_content_value(content)
 
+    def _session_end_counted_identity(self, message, stored, **kwargs):
+        bare = self._session_end_prefix_compare_identity(message, recover_markers=False, **kwargs)
+        return bare if bare in stored else self._session_end_prefix_compare_identity(message, **kwargs)
+
     def _session_end_rows_equal(self, stored_row, host_message, *, session_id, hermes_home=None):
         # Two bare markers are the same row only when their text is byte-identical. A marker and a stored recovered result are the same row when the marker's path and character count equal the ones recorded at ingest and the marker's preview is exactly the start of the stored content. The marker's boilerplate wording is not part of that identity.
         # A stored row takes a marker identity only from its own marker: when its payload's recorded marker source is not unambiguously this row's (a shared payload, a plain row, a marker with another path), the row compares by content.
+        # The stored side is always read as storage wrote it (placeholders restored, never recovered again from the host's file). The host side is read as ingest would store it now. The marker rule is the one bridge between a stored recovered result and a marker.
         def fields(row):
             return self._session_end_prefix_compare_identity(dict(row, content=None),
                 session_id=session_id, hermes_home=hermes_home)
@@ -168,7 +173,10 @@ class PrefixMatchingMixin:
         original, incoming = stored_row.get("content"), host_message.get("content")
         if host_message.get("role") == "tool" and _is_hermes_persisted_output_marker(incoming):
             if _is_hermes_persisted_output_marker(original):
-                return original == incoming
+                # Bare against bare: main's own compare (ingest's transforms undone on the stored side, none recovered).
+                return (self._session_end_prefix_compare_identity(stored_row, session_id=session_id,
+                        hermes_home=hermes_home, recover_markers=False) == self._session_end_prefix_compare_identity(
+                        host_message, session_id=session_id, hermes_home=hermes_home, recover_markers=False))
             payloads = {}
             text = self._session_end_prefix_compare_value(original, session_id=session_id,
                 hermes_home=hermes_home, marker_payloads=payloads)
@@ -185,7 +193,8 @@ class PrefixMatchingMixin:
                     if prefix:
                         return (expected >= 0 and expected == _expected_persisted_output_chars(incoming)
                                 and text.startswith(prefix))
-        return self._session_end_prefix_compare_identity(stored_row, session_id=session_id, hermes_home=hermes_home) == self._session_end_prefix_compare_identity(host_message, session_id=session_id, hermes_home=hermes_home)
+        # The stored side is what storage kept; it is never re-read from the host's current file.
+        return self._session_end_prefix_compare_identity(stored_row, session_id=session_id, hermes_home=hermes_home, recover_markers=False) == self._session_end_prefix_compare_identity(host_message, session_id=session_id, hermes_home=hermes_home)
 
     def _session_end_prefix_compare_tool_calls(
         self,

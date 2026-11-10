@@ -290,3 +290,35 @@ def test_shared_payload_offcurrent_end_preserves_every_row_and_final(engines, mo
     assert [r["content"] for r in rows[-2:]] == ["new question", "FINAL"]
     engine.on_session_end("S1", updated)
     assert len(engine._store.get_session_messages("S1")) == len(updated)
+
+
+
+_DATA_URI = "data:image/png;base64," + "QUJD" * 100  # 400 base64 characters: ingest swaps it for a placeholder
+
+
+@pytest.mark.parametrize("location", ["spillover", "hermes-results"])
+@pytest.mark.parametrize("transform", ["data-uri-default-config", "redaction"])
+def test_unchanged_bare_marker_transformed_at_ingest_keeps_final(engines, monkeypatch, tmp_path, location, transform):  # noqa: F811
+    """Review of a1208c83: a bare marker (file missing) whose stored text an ingest transform changed must still
+    equal the unchanged host marker. Red on a1208c83 (FINAL lost); main 7e67daf1 and 13211798 keep it."""
+    temp_root = tmp_path / "tmpdir"
+    temp_root.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(temp_root))
+    engine = engines(sessions=[("S1", None, None), ("S2", None, None)])
+    if transform == "redaction":
+        engine._config.sensitive_patterns_enabled = True
+        engine._config.sensitive_patterns = ["api_key"]
+    head = (_DATA_URI if transform == "data-uri-default-config" else "api_key=synthetic2539secret") + "\n"
+    folder = (Path(engine._hermes_home) / "cache" / "spillover" if location == "spillover"
+              else Path(tempfile.gettempdir()) / "hermes-results")
+    marker = _marker(folder / f"{CALL}.txt", head + FULL_OUTPUT, preview=(head + FULL_OUTPUT)[:600])
+    history = _history(marker)
+    engine.on_session_start("S1", platform="cli", context_length=200_000, conversation_id="conv1")
+    engine.ingest(copy.deepcopy(history))
+    stored = engine._store.get_session_messages("S1")
+    assert len(stored) == len(history)
+    assert stored[4]["content"] != marker  # ingest transformed the stored text
+    engine.on_session_start("S2", platform="cli", context_length=200_000, conversation_id="conv2")
+    engine.on_session_end("S1", copy.deepcopy(history) + [{"role": "assistant", "content": "FINAL", "timestamp": 11.0}])
+    rows = engine._store.get_session_messages("S1")
+    assert (_final_count(engine), len(rows)) == (1, len(history) + 1)
