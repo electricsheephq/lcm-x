@@ -6,6 +6,7 @@ the final reply is stored once and the host's rows are held exactly once.
 """
 
 import copy
+import sys
 import tempfile
 from collections import Counter
 from pathlib import Path
@@ -105,8 +106,9 @@ def test_an_ended_bypass_lineage_session_at_ext_off_keeps_its_stored_prefix_rout
 
 def _payload_fault(monkeypatch, engine, fault):
     """Make externalization fail at default settings: ``write`` fails the payload file write; ``folder`` puts a
-    regular file where the payload folder goes, so the folder setup fails (both return None to ingest)."""
-    from hermes_lcm import externalize
+    regular file where the payload folder goes, so the folder setup fails (both return None to ingest). The fault goes
+    into the engine's own package copy: a delegated child's host loads a separate copy of the plugin."""
+    externalize = sys.modules[type(engine).__module__.rsplit(".", 1)[0] + ".externalize"]
 
     if fault == "write":
         def fails(*_a, **_k):
@@ -167,6 +169,10 @@ def test_a_failed_payload_write_at_default_settings_adds_no_child_copy(host, mon
     for n in range(3):
         child.api_call(ctx, handed, n + 1)
         rows = child_rows(parent)
+        if n == 0:
+            stored = [r for r in rows if r["role"] == "tool"][0]["content"]
+            if not (stored.startswith("<persisted-output>") and "[LCM persisted-output file generation:" in stored):
+                pytest.fail("setup: the payload fault did not leave the inline marker with a generation line")
         assert (len(rows), Counter(r.get("tool_call_id") for r in rows if r["role"] == "tool")["c1"]) == (3, 1)
     child.end(engine, [*handed, {"role": "assistant", "content": "FINAL"}])
     rows = child_rows(parent)
