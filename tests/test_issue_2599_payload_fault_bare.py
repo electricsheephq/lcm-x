@@ -160,3 +160,76 @@ def test_without_a_fault_the_marker_is_externalized(engines, kind):  # noqa: F81
     engine.ingest(copy.deepcopy(_history(marker)))
     stored = [r for r in engine._store.get_session_messages("S1") if r["role"] == "tool"][0]["content"]
     assert stored.startswith("[Externalized") and LCM_LINE not in stored
+
+
+# Cold replays of a store written under a payload fault (each ingest a fresh engine, as at a restart), at default
+# settings with the fault gone. Counts are (rows, tool rows); a replay that stores nothing again leaves (7, 1).
+# The upgrade replay's keep for a bare stored marker covers spillover markers compared byte for byte on every branch,
+# and on main also temp-folder markers and redacted stored text (#2584); without that keep the replay of a stampless
+# history stores it again, the #2558 shape. v0.29.2 stores as many rows or more in every cell.
+SECRET_BODY = "api_key=differentialsecret1234567890abcdef " + "z" * 2600
+_REPLAY_PINS = {  # (kind, redacted preview, stamps): (with #2584's keep, without it, v0.29.2)
+    ("spillover", False, "all"): ((7, 1), (7, 1), (7, 1)),
+    ("spillover", False, "none"): ((7, 1), (7, 1), (19, 3)),
+    ("spillover", True, "all"): ((7, 1), (7, 1), (7, 1)),
+    ("spillover", True, "none"): ((12, 2), (12, 2), (19, 3)),
+    ("tempdir", False, "all"): ((7, 1), (7, 1), (9, 2)),
+    ("tempdir", False, "none"): ((7, 1), (12, 2), (12, 2)),
+    ("tempdir", True, "all"): ((7, 1), (7, 1), (9, 2)),
+    ("tempdir", True, "none"): ((12, 2), (12, 2), (12, 2)),
+}
+
+
+def _cold_ingest(home, redact, history):
+    from hermes_lcm.config import LCMConfig
+    from hermes_lcm.engine import LCMEngine
+
+    config = LCMConfig(database_path=str(home / "lcm.db"), large_output_externalization_path=str(home / "externalized"))
+    config.sensitive_patterns_enabled = redact
+    config.sensitive_patterns = ["all"] if redact else []
+    engine = LCMEngine(config=config, hermes_home=str(home))
+    try:
+        engine.on_session_start("S1", platform="cli", context_length=200_000, conversation_id="conv1")
+        engine.ingest(copy.deepcopy(history))
+        return [(r["role"], r["content"]) for r in engine._store.get_session_messages("S1")], engine
+    finally:
+        engine.shutdown()
+
+
+def _replay_history(marker, extra=0):
+    rows = [("user", "A"), ("assistant", "B"), ("user", "C")]
+    msgs = [{"role": r, "content": t, "timestamp": 1762700000.0 + i} for i, (r, t) in enumerate(rows)]
+    msgs.append({"role": "assistant", "content": "", "timestamp": 1762700003.0, "tool_calls": [
+        {"id": CALL, "type": "function", "function": {"name": "terminal", "arguments": "{}"}}]})
+    msgs.append({"role": "tool", "tool_call_id": CALL, "content": marker, "timestamp": 1762700004.0})
+    msgs += [{"role": ("user", "assistant")[i % 2], "content": f"later {i}", "timestamp": 1762700005.0 + i}
+             for i in range(extra)]
+    return msgs
+
+
+@pytest.mark.parametrize("stamps", ["all", "none"])
+@pytest.mark.parametrize("redact", [False, True], ids=["plain-preview", "redacted-preview"])
+@KINDS
+def test_cold_replays_of_a_store_written_under_a_payload_fault(tmp_path, monkeypatch, kind, redact, stamps):
+    home = tmp_path / "hermes"
+    marker = _write_output(_marker_path(kind, home), SECRET_BODY)
+    with monkeypatch.context() as patch:
+        from hermes_lcm import externalize
+
+        def fails(*_a, **_k):
+            raise OSError("injected payload write failure")
+        patch.setattr(externalize, "_write_externalized_payload", fails)
+        first, engine = _cold_ingest(home, redact, _replay_history(marker))
+    tool = [content for role, content in first if role == "tool"][0]
+    assert tool.startswith("<persisted-output>") and LCM_LINE not in tool, "stored form is not the bare marker"
+    assert ("[LCM sensitive redaction:" in tool) is redact
+    replay = _replay_history(marker, extra=2)
+    if stamps == "none":
+        for row in replay:
+            row.pop("timestamp", None)
+    for _ in range(2):
+        rows, _engine = _cold_ingest(home, redact, replay)
+    with_keep, without_keep, v0292 = _REPLAY_PINS[(kind, redact, stamps)]
+    expected = with_keep if hasattr(type(engine), "_bare_marker_identity") else without_keep
+    got = (len(rows), sum(role == "tool" for role, _content in rows))
+    assert got == expected, f"got {got}; pinned {expected}; v0.29.2 {v0292}"
