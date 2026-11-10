@@ -75,3 +75,36 @@ def test_an_ext_off_store_replayed_at_ext_on_stores_nothing_twice(tmp_path, kind
     _ingest(tmp_path, True, replay)
     rows = _rows(tmp_path)
     assert (len(rows), sum(role == "tool" for role, _content in rows)) == (6, 1), f"first={len(first)}"
+
+
+# Row counts main 779e9d18 stores on the same inputs (rows, tool rows). The upgrade replay's prefix binding (#2584) and
+# its legacy keep read the stored marker with LCM-X's lines kept, so the candidate must store exactly these.
+MAIN_COUNTS = {
+    "ext-all-full": (6, 1), "ext-all-partial": (9, 2), "ext-none-full": (6, 1), "ext-none-partial": (12, 3),
+    "ext-user-full": (6, 1), "ext-user-partial": (12, 3), "noext-all-full": (6, 1), "noext-all-partial": (11, 3),
+    "noext-none-full": (16, 3), "noext-none-partial": (20, 5), "noext-user-full": (13, 3), "noext-user-partial": (19, 5),
+}  # v0.29.2 261d41ea9 stores as many or more in every cell; the stampless ext-off replays duplicate there too.
+
+
+@pytest.mark.parametrize("shape", ["full", "partial"])
+@pytest.mark.parametrize("stamps", ["all", "none", "user"])
+@pytest.mark.parametrize("replay_ext", [False, True], ids=["replay-noext", "replay-ext"])
+def test_replays_of_an_ext_off_store_match_main(tmp_path, replay_ext, stamps, shape):
+    path = tmp_path / "hermes" / "cache" / "spillover" / f"{CALL}.txt"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(FULL.encode())
+    marker = _marker(path, FULL)
+    _ingest(tmp_path, False, _history(marker))
+    replay = _history(marker, extra=2)
+    if shape == "partial":  # the host re-sends from the call on and reuses the call id with the identical marker
+        replay = replay[1:] + [dict(replay[1]), dict(replay[2], timestamp=1762700010.0), {
+            "role": "assistant", "content": "saved again", "timestamp": 1762700011.0}]
+    for row in replay:
+        if stamps == "none" or (stamps == "user" and row["role"] != "user"):
+            row.pop("timestamp", None)
+    for _ in range(2):
+        _ingest(tmp_path, replay_ext, replay)
+    rows = _rows(tmp_path)
+    got = (len(rows), sum(role == "tool" for role, _content in rows))
+    key = f"{'ext' if replay_ext else 'noext'}-{stamps}-{shape}"
+    assert got == MAIN_COUNTS[key]

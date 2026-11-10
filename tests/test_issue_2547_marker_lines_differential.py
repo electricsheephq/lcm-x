@@ -52,6 +52,10 @@ def _main(fn, monkeypatch):
         return fn()
 
 
+def _main_ident(engine, row):
+    return engine._session_end_prefix_compare_identity(row, session_id='S1', recover_markers=False)
+
+
 def _bare(rng, home):
     path = rng.choice([f'/tmp/hermes-results/{rng.choice(["c1", "c2"])}.txt',
                        f'{home}/cache/spillover/{rng.choice(["c1", "c2"])}.txt'])
@@ -134,6 +138,23 @@ def test_seeded_marker_lines_comparison(engine, monkeypatch):
             # Reduced texts equal, still unequal: a remaining loss shape at an off-current end; counted, not hidden.
             tally['still-unequal:' + ('a-redacted' if red_a != raw_a else 'b-redacted' if red_b != raw_b
                                       else 'other') + f':{kind_a}/{kind_b}'] += 1
+        # Every consumer row (the note's table) reduces to one of these reads. The host side with recovery
+        # (positional and counted routes) and the counted identity against the stored row's identity: a flip only
+        # main-unequal to candidate-equal, and only in the class above.
+        stored_ident = engine._session_end_prefix_compare_identity(stored, session_id='S1', recover_markers=False)
+        for name, read in (
+                ('recovered', lambda: engine._session_end_prefix_compare_identity(host, session_id='S1') == stored_ident),
+                ('counted', lambda: engine._session_end_counted_identity(host, {stored_ident}, session_id='S1')
+                 == stored_ident)):
+            cand = read()
+            base = _main(lambda: (engine._session_end_counted_identity(
+                host, {_main_ident(engine, stored)}, session_id='S1') if name == 'counted'
+                else engine._session_end_prefix_compare_identity(host, session_id='S1')) == _main_ident(engine, stored),
+                monkeypatch)
+            if cand != base:
+                assert (base, cand) == (False, True), (seed, index, name, base, cand)
+                assert red_a is not None and red_b is not None, (seed, index, name, 'flip on a malformed form')
+                tally['flip:' + name] += 1
         # The upgrade replay's legacy keep (reconcile.py) reads the default form, which never strips: main's.
         assert engine._bare_marker_identity(b, session_id='S1') == _main(
             lambda: engine._bare_marker_identity(b, session_id='S1'), monkeypatch), (seed, index, 'legacy keep')
