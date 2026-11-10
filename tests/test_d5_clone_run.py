@@ -930,7 +930,7 @@ def _receipt(host, plan, preflight, **changes):
                "snapshot_pin_sha256": capture._sha256(host.c["snapshot_pin"]),
                "instrument_sha256": r.instrument_identity()["instrument_sha256"],
                "trees": {"rc": host.c["rc"]["commit"] if preflight in r.TREE_BOUND_PREFLIGHTS else ga, "ga": ga},
-               **changes}
+               "config_sha256": r.config_identity(host.c), **changes}
     path = host.run_dir.parent / f"{preflight}-{len(list(host.run_dir.parent.glob('P*.json')))}.json"
     path.write_text(json.dumps(receipt))
     host.c["preflights"][preflight] = str(path)
@@ -945,12 +945,32 @@ def test_a_preflight_receipt_counts_only_for_this_run(tmp_path, name):
     assert _receipt(host, plan, name)["verdict"] == "PASS"
     other_trees = {"rc": "a" * 40, "ga": "a" * 40} if name in r.TREE_BOUND_PREFLIGHTS else {"rc": "c" * 40, "ga": "a" * 40}
     for field, value in (("plan_sha256", "0" * 64), ("snapshot_pin_sha256", "0" * 64), ("instrument_sha256", "0" * 64),
-                         ("schema", "other/1"), ("name", "P0"), ("trees", other_trees)):
+                         ("schema", "other/1"), ("name", "P0"), ("trees", other_trees), ("config_sha256", "0" * 64)):
         result = _receipt(host, plan, name, **{field: value})
         assert (result["verdict"], result["mismatch"]) == ("MISSING", [field]), field
-    for field in ("plan_sha256", "instrument_sha256", "trees"):
+    for field in ("plan_sha256", "instrument_sha256", "trees", "config_sha256"):
         result = _receipt(host, plan, name, **{field: None})
         assert result["verdict"] == "MISSING" and field in result["mismatch"]
+
+
+@pytest.mark.parametrize("name", ["P3", "P4"])
+def test_a_preflight_receipt_does_not_count_after_a_declared_setting_changes(tmp_path, name):
+    """A receipt made under one declaration never counts for a run under another (release manager, 2026-11-11), with
+    the snapshot, plan and trees unchanged; a field that differs by stage by design leaves it counting."""
+    host, plan = _bound_host(tmp_path)
+    host.c.update(settings={"compression": {"enabled": False}}, lcm_env={"K": "v"}, context_length=200000)
+    path = tmp_path / f"{name}-made.json"
+    _receipt(host, plan, name)  # Writes a receipt bound to this declaration; the next lines re-point to a copy.
+    path.write_text(Path(host.c["preflights"][name]).read_text())
+    host.c["preflights"][name] = str(path)
+    assert host.preflight(name, plan)["verdict"] == "PASS"  # Positive control: nothing changed.
+    host.c.update(preflights={name: str(path)}, settings_as_of="2026-11-11T00:00:00Z", instrument_dir=str(tmp_path))
+    assert host.preflight(name, plan)["verdict"] == "PASS"  # Unbound by name: receipt paths, the time, the kit path.
+    for field, value in (("settings", {"compression": {"enabled": True}}), ("lcm_env", {"K": "w"}),
+                         ("context_length", 100000), ("p3_max_turns", 7), ("added_later", 1)):
+        changed = r.LocalHost({**host.c, field: value}, host.run_dir)
+        result = changed.preflight(name, plan)
+        assert (result["verdict"], result["mismatch"]) == ("MISSING", ["config_sha256"]), field
 
 
 def test_an_unreadable_preflight_receipt_is_missing(tmp_path):
@@ -1022,7 +1042,8 @@ def test_only_a_declared_commit_identifies_a_tree(tmp_path, commit, bound):
     receipt = {"schema": r.PREFLIGHT_SCHEMA, "name": "P4", "verdict": "PASS", "plan_sha256": r.planner.plan_sha256(plan),
                "snapshot_pin_sha256": r.capture._sha256(host.c["snapshot_pin"]),
                "instrument_sha256": r.instrument_identity()["instrument_sha256"],
-               "trees": {"rc": r.tree_id(host.c, "rc"), "ga": r.tree_id(host.c, "ga")}}
+               "trees": {"rc": r.tree_id(host.c, "rc"), "ga": r.tree_id(host.c, "ga")},
+               "config_sha256": r.config_identity(host.c)}
     path = tmp_path / "P4.json"
     path.write_text(json.dumps(receipt))
     host.c["preflights"] = {"P4": str(path)}

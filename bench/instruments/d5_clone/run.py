@@ -101,6 +101,19 @@ def _json(value):
 
 PREFLIGHT_SCHEMA = "d5-clone-preflight/1"
 TREE_BOUND_PREFLIGHTS = ("P4",)  # The spec's preflight that both trees store one externalized output identically.
+# Declaration fields a receipt's config_sha256 leaves out, each with its reason. Every other field is bound, so a field
+# added later is bound without anyone remembering it (release manager, 2026-11-11: a changed setting is an instrument
+# change, and the preflights run again).
+RECEIPT_UNBOUND = {
+    "snapshot_dir": "the snapshot pin is bound by its own sha256",
+    "snapshot_pin": "the snapshot pin is bound by its own sha256",
+    "rc": "the trees field binds each tree's commit (R5-5); P3, P6 and P7 run the previous GA in both slots",
+    "ga": "the trees field binds each tree's commit (R5-5)",
+    "replay_argv": "carries the rc commit, which the trees field binds; read by bar 2's edition, never by a preflight",
+    "preflights": "the receipts' own paths, which differ by stage",
+    "settings_as_of": "a disclosed time, never judged",
+    "instrument_dir": "a path; P1 pins its files on every run",
+}
 
 
 PACKAGE = Path(__file__).resolve().parent
@@ -126,6 +139,13 @@ def instrument_identity(root=None):
     except (OSError, subprocess.SubprocessError):
         commit = ""
     return {"instrument_sha256": h.hexdigest(), "instrument_commit": commit}
+
+
+def config_identity(config):
+    """The sha256 of the declaration's canonical JSON without the RECEIPT_UNBOUND fields: what a preflight receipt
+    binds as config_sha256 (settings, env, context lengths, timeouts, nonce, kit paths)."""
+    bound = {k: v for k, v in config.items() if k not in RECEIPT_UNBOUND}
+    return hashlib.sha256(json.dumps(bound, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
 
 
 def tree_id(config, tree):
@@ -502,13 +522,15 @@ class LocalHost:
             recorded = json.loads(Path(path).read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return {"verdict": "MISSING", "mismatch": ["unreadable"]}
-        # Ruling R5-5: a receipt counts only for this run's plan, snapshot pin and instrument; P4 also for this run's
+        # Ruling R5-5: a receipt counts only for this run's plan, snapshot pin, instrument and declared configuration
+        # (config_sha256, release manager 2026-11-11); P4 also for this run's
         # two trees, and the others, which run the previous GA in both arms by design, for that tree in both slots.
         ga = tree_id(self.c, "ga")
         trees = {"rc": tree_id(self.c, "rc"), "ga": ga} if name in TREE_BOUND_PREFLIGHTS else {"rc": ga, "ga": ga}
         want = {"schema": PREFLIGHT_SCHEMA, "name": name, "plan_sha256": planner.plan_sha256(plan),
                 "snapshot_pin_sha256": capture._sha256(self.c["snapshot_pin"]),
-                "instrument_sha256": instrument_identity()["instrument_sha256"], "trees": trees}
+                "instrument_sha256": instrument_identity()["instrument_sha256"], "trees": trees,
+                "config_sha256": config_identity(self.c)}
         mismatch = sorted(k for k, v in want.items() if not isinstance(recorded, dict) or recorded.get(k) != v
                           or (k == "trees" and None in v.values()))  # An undeclared tree never binds a receipt.
         if mismatch:  # Treated as missing: an earlier snapshot's, plan's, instrument's or tree's receipt.

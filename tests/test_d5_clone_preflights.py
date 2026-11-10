@@ -401,6 +401,9 @@ def test_a_produced_receipt_is_accepted_by_the_runner_for_the_same_run(tmp_path,
     local = runner.LocalHost({**host.c, "preflights": {n: str(tmp_path / f"{n}.json") for n in ("P3", "P4")}}, tmp_path)
     plan = host.plan(None)
     assert [local.preflight(n, plan)["verdict"] for n in ("P3", "P4")] == ["PASS", "PASS"]
+    assert receipt["config_sha256"] == runner.config_identity(host.c)
+    other = runner.LocalHost({**local.c, "settings": {"changed": True}}, tmp_path)  # Another declared setting.
+    assert [other.preflight(n, plan)["verdict"] for n in ("P3", "P4")] == ["MISSING", "MISSING"]
 
 
 def test_p3_p6_p7_refuse_a_declaration_whose_rc_tree_is_not_the_previous_ga(tmp_path, monkeypatch):

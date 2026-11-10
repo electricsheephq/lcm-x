@@ -298,7 +298,8 @@ PREFLIGHTS = {"P3": p3, "P4": p4, "P6": p6, "P7": p7}
 def produce(host, names):
     """Write <run_dir>/<name>.json for each preflight; returns {name: verdict}."""
     common = {"snapshot_pin_sha256": capture._sha256(host.c["snapshot_pin"]), "plan_sha256": None,
-              "trees": {t: run.tree_id(host.c, t) for t in ("rc", "ga")}, **run.instrument_identity()}
+              "trees": {t: run.tree_id(host.c, t) for t in ("rc", "ga")}, "config_sha256": run.config_identity(host.c),
+              **run.instrument_identity()}
     failed, verdicts = None, {}
     try:
         if host.pins().get("verdict") != "PASS":  # The rules module is imported for planning only after P1.
