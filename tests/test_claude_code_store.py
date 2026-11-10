@@ -3257,3 +3257,44 @@ def test_an_agent_file_with_no_id_is_never_swept_as_its_session(tmp_path, home, 
     finally:
         store.close()
     assert not ca.audit(home)["verified"]
+
+
+@pytest.mark.parametrize("order", ["end_then_precompact", "precompact_then_end"])
+def test_a_precompact_around_an_undrained_session_end_captures_every_line_once(tmp_path, home, hermes, order):
+    """#2571: a PreCompact spooled behind an undrained SessionEnd is now kept out (kept_end) instead of replacing it.
+    In both arrival orders every transcript line is captured exactly once, as message rows once each, and the audit
+    verdict is the same as before the change: verified, with no partial tail."""
+    from hermes_lcm import claude_code_audit as ca
+
+    a = _append(tmp_path / "projects" / "-work" / "s1.jsonl", CONVERSATION[:2])
+    _record(_hook(), home, a, event="UserPromptSubmit", hook_started_ns=1)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    _append(a, CONVERSATION[2:4])
+    first, second = (("SessionEnd", 5), ("PreCompact", 6)) if order == "end_then_precompact" else (
+        ("PreCompact", 5), ("SessionEnd", 6))
+    hook = _hook()
+    outcomes = [hook.spool(home, {"host": "claude-code", "event": first[0], "session_id": "s1", "agent_id": None,
+                                  "transcript_path": str(a), "agent_transcript_path": None,
+                                  "hook_started_ns": first[1], "prompt_id": "c1"})]
+    _append(a, CONVERSATION[4:])  # written between the two hooks, before any drain
+    outcomes.append(hook.spool(home, {"host": "claude-code", "event": second[0], "session_id": "s1", "agent_id": None,
+                                      "transcript_path": str(a), "agent_transcript_path": None,
+                                      "hook_started_ns": second[1], "prompt_id": "c1"}))
+    assert outcomes == (["spooled", "kept_end"] if order == "end_then_precompact" else ["spooled", "spooled"])
+    for _ in range(2):
+        cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    store = _open(home, hermes)
+    try:
+        held = collections.Counter(row[0] for row in store.connection.execute(
+            "SELECT line_digest FROM capture_events WHERE source_kind = 'line'"))
+        rows = collections.Counter(row[0] for row in store.connection.execute(
+            "SELECT content FROM messages WHERE session_id = 's1'"))
+    finally:
+        store.close()
+    digests = [hashlib.sha256(line).hexdigest() for line in a.read_bytes().splitlines(keepends=True)]
+    assert len(digests) == len(CONVERSATION) and all(held[d] >= 1 for d in digests)  # every line captured
+    assert all(held[d] == digests.count(d) for d in digests)  # ... and none twice (two api-request-blob lines repeat)
+    assert rows and max(rows.values()) == 1  # message rows once each
+    report = ca.audit(home)
+    assert report["verified"] and not report["unverified"]
+    assert not next(row for row in report["lineages"] if row["lineage"] == "claude-code:s1")["partial_tail_bytes"]
