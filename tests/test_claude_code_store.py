@@ -2067,3 +2067,32 @@ def test_a_second_named_path_that_cannot_be_checked_is_not_verified(tmp_path, ho
     finally:
         folder.chmod(0o700)
     assert not report["verified"] and report["lineages"][0]["named_other_paths"] == 1
+
+
+def test_a_subagent_under_another_named_path_is_not_verified(tmp_path, home, hermes):
+    """#2548 review: the cursor is on A; B was named and never appeared, but a subagent transcript with lines sits under
+    B's session folder (its hook record lost). The worker sweeps only A's folder, so the lineage must not verify."""
+    from hermes_lcm import claude_code_audit as ca
+
+    b = _second_path(tmp_path, home, hermes)
+    _append(b.parent / "s1" / "subagents" / "agent-x1.jsonl", [dict(e, isSidechain=True) for e in CONVERSATION[2:]])
+    report = ca.audit(home)
+    assert not report["verified"] and report["lineages"][0]["named_other_paths"] == 1
+
+
+def test_a_subagent_under_a_pending_rows_earlier_path_is_not_verified(tmp_path, home, hermes):
+    """#2548 review: a pending row on A is replaced by B (named [A, B]); a subagent transcript with lines appears under
+    A's folder. Every named path's subagents are checked, so it is unverified (another session keeps the audit checked)."""
+    from hermes_lcm import claude_code_audit as ca
+
+    other = _append(tmp_path / "projects" / "-work" / "s2.jsonl", [dict(e, sessionId="s2") for e in CONVERSATION[:2]])
+    _record(_hook(), home, other, session="s2")
+    a = tmp_path / "projects" / "-work" / "s1.jsonl"
+    _record(_hook(), home, a, event="SessionStart")
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    _record(_hook(), home, tmp_path / "projects" / "-other" / "s1.jsonl")
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    _append(a.parent / "s1" / "subagents" / "agent-x1.jsonl", [dict(e, isSidechain=True) for e in CONVERSATION[2:]])
+    report = ca.audit(home)
+    assert not report["verified"] and "claude-code:s1/agent:x1" in report["unverified"]
+
