@@ -67,9 +67,11 @@ To remove it: `codex mcp remove lcm-x`. That leaves the store and the unpacked u
   Startup problems print as `lcm-x: ...` lines. The usual causes are no Python 3.11+ (install one,
   or run `uv venv --python 3.11 <store home>/venv`) and a relative `LCMX_CC_HOME`. Once the reader
   has started, its own messages go to `<store home>/logs/lcm-x-mcp-<pid>.log` instead of stderr.
-- Recall finds nothing: check that the store home is the one your Claude Code capture writes
-  (`lcm_describe` shows the store's counts). A store home with no `lcm.db` yet still offers the
-  tools, but has nothing to return.
+- Recall finds nothing: check that the store home is the one your Claude Code capture writes. Ask
+  Codex to run `lcm_grep` for a word you know is in your Claude Code history; it searches every
+  session by default. (`lcm_describe` with no arguments describes no session here, because the
+  reader has no current session; give it a `session_id` from a search result.) A store home with
+  no `lcm.db` yet still offers the tools, but has nothing to return.
 
 ## What this does not do yet
 
