@@ -2485,3 +2485,49 @@ def test_the_expiry_rule_table(tmp_path, home, hermes, history, events, seen, ex
 
     key = _expiry_case(tmp_path, home, hermes, history, events, seen)
     assert (key not in ca.audit(home)["unverified"]) is expires
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads any file")
+@pytest.mark.parametrize("damage", ["unreadable", "null", "list", "garbage", "empty"])
+def test_a_damaged_pointer_keeps_a_prompted_session_unknown(tmp_path, home, hermes, damage):
+    """A prompt's pointer that the next hook cannot use as a pointer object: its history is unknown, so the session
+    stays unverified instead of expiring as one quit before any prompt (#2535 strict)."""
+    from hermes_lcm import claude_code_audit as ca
+
+    hook = _hook()
+    path = tmp_path / "projects" / "-work" / "s1.jsonl"
+    _record(hook, home, path, event="SessionStart", transcript_seen=False)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    _record(hook, home, path, event="UserPromptSubmit", transcript_seen=True)
+    (pointer,) = sorted((home / "spool").glob("*.json"))
+    if damage == "unreadable":
+        pointer.chmod(0)
+    else:
+        pointer.write_text({"null": "null", "list": "[]", "garbage": "garbage{", "empty": ""}[damage])
+    try:
+        _record(hook, home, path, event="SessionEnd", transcript_seen=False)
+    finally:
+        if pointer.exists():
+            pointer.chmod(0o600)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    assert not path.exists() and "claude-code:s1" in ca.audit(home)["unverified"]
+
+
+@pytest.mark.parametrize("facts", [{}, None, []], ids=["empty", "null", "list"])
+def test_a_pending_row_with_damaged_facts_stays_unknown(tmp_path, home, hermes, facts):
+    """A pending row whose facts are present but not usable: unknown, never 'not seen' (#2535 strict)."""
+    from hermes_lcm import claude_code_audit as ca
+
+    hook = _hook()
+    path = tmp_path / "projects" / "-work" / "s1.jsonl"
+    store = _open(home, hermes)
+    try:
+        store.update_metadata_json(cc.PENDING_PREFIX + "claude-code:s1", lambda _current: {
+            "session_id": "s1", "agent_id": None, "path": str(path), "named": [str(path)], "first_seen": 100.0,
+            "facts": facts})
+    finally:
+        store.close()
+    for event in ("SessionStart", "SessionEnd"):
+        _record(hook, home, path, event=event, transcript_seen=False)
+        cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    assert not path.exists() and "claude-code:s1" in ca.audit(home)["unverified"]
