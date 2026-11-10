@@ -12,6 +12,8 @@ import pytest
 
 from bench.fmp import models, run
 
+REAL_RUN = subprocess.run  # the cli fixture replaces subprocess.run; the reaping probes need a real child
+
 
 @pytest.fixture(autouse=True)
 def fresh_stop_flag(monkeypatch):
@@ -276,7 +278,10 @@ def test_rejected_output_inside_home_gets_no_failure_record(tmp_path, monkeypatc
     assert sorted(p.name for p in home.iterdir()) == []
 
 
-def test_sigterm_drain_starts_no_further_model_call(tmp_path, monkeypatch, cli):
+@pytest.mark.parametrize("sender", ["main", "other_thread"])
+def test_sigterm_drain_starts_no_further_model_call(tmp_path, monkeypatch, cli, sender):
+    # A leased run (one worker) runs questions on the main thread, so the handler runs before any later call can
+    # start. "other_thread" sends the signal from another thread while the main thread is inside the model call.
     import os
     import signal
     import threading
@@ -285,14 +290,6 @@ def test_sigterm_drain_starts_no_further_model_call(tmp_path, monkeypatch, cli):
                                  dataset="lme-s", session_map={}, question_date="2025-01-01") for i in range(3)]
     monkeypatch.setattr(run.datasets, "load", lambda *a: (questions, "dataset", "ids", {}))
     run.execute(cli.args())
-    handled = threading.Event()
-    terminate = run._terminate
-
-    def observed(signum, frame):
-        try:
-            terminate(signum, frame)
-        finally:
-            handled.set()  # only after the real handler has set the stop flag
 
     def judge(row, q, client, specs, agreement_model=None):
         started.append(q.qid)
@@ -304,10 +301,14 @@ def test_sigterm_drain_starts_no_further_model_call(tmp_path, monkeypatch, cli):
         return {**row, "status": "ok"}
 
     def runner(cmd, **kwargs):
-        calls.append(cmd)
+        calls.append(threading.current_thread() is threading.main_thread())
         if len(calls) == 1:
-            os.kill(os.getpid(), signal.SIGTERM)
-            assert handled.wait(5)  # the main thread is unwinding before this call returns
+            if sender == "main":
+                os.kill(os.getpid(), signal.SIGTERM)
+            else:
+                sent = threading.Event()
+                threading.Thread(target=lambda: (os.kill(os.getpid(), signal.SIGTERM), sent.set())).start()
+                assert sent.wait(5)
         return subprocess.CompletedProcess(cmd, 0, "\n".join(map(json.dumps, [
             {"type": "item.completed", "item": {"type": "agent_message", "text": "yes"}},
             {"type": "turn.completed", "usage": {"output_tokens": 1}},
@@ -320,15 +321,14 @@ def test_sigterm_drain_starts_no_further_model_call(tmp_path, monkeypatch, cli):
         client.codex.runner = runner
         return client
 
-    monkeypatch.setattr(run, "_terminate", observed)
     monkeypatch.setattr(run.judges, "judge_row", judge)
     monkeypatch.setattr(run, "Backends", backends)
     args = cli.args("judge", "--codex-home", str(tmp_path / "lease"),
                     "--judge", models.CODEX_DEFAULT_JUDGE, models.CODEX_DEFAULT_READER)
     with pytest.raises(SystemExit):
         run.execute(args)
-    assert started == ["q0"]  # queued questions never start
-    assert len(calls) == 1  # the second judge of the in-flight question never starts
+    assert calls == [True]  # one model call, made on the main thread; nothing after SIGTERM
+    assert started == ["q0"]  # no queued question starts
     with (tmp_path / "lease" / "holder.lock").open("r+") as contender:
         fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
@@ -381,3 +381,192 @@ def test_launcher_forwards_sigterm_to_python(tmp_path):
                 os.kill(int(started.read_text()), signal.SIGKILL)
             except ProcessLookupError:
                 pass
+
+
+def test_one_worker_main_thread_matches_pool_outputs(tmp_path, monkeypatch, cli):
+    questions = [SimpleNamespace(qid=f"q{i}", store_id="store", qtype="fact", question=f"Synthetic {i}?", gold="yes",
+                                 dataset="lme-s", session_map={}, question_date="2025-01-01") for i in range(4)]
+    monkeypatch.setattr(run.datasets, "load", lambda *a: (questions, "dataset", "ids", {}))
+    outputs = {}
+    for workers in ("1", "2"):  # "2" takes the ThreadPoolExecutor path the one-worker run used before
+        for command in ("answer", "judge"):
+            args = cli.args(command, "--workers", workers)
+            args.output = tmp_path / f"out-{workers}"
+            run.execute(args)
+        outputs[workers] = {name: [json.loads(line) for line in (tmp_path / f"out-{workers}" / name).read_text().splitlines()]
+                            for name in ("answers.jsonl", "judged.jsonl")}
+    volatile = {"latency_s", "at", "started_at", "ended_at", "elapsed_s", "call_dir", "transcripts", "wall_s"}
+
+    def stable(value):
+        if isinstance(value, dict):
+            return {k: stable(v) for k, v in value.items() if k not in volatile}
+        if isinstance(value, list):
+            return [stable(v) for v in value]
+        return value
+
+    assert [r["qid"] for r in outputs["1"]["answers.jsonl"]] == ["q0", "q1", "q2", "q3"]
+    assert stable(outputs["1"]) == stable(outputs["2"])
+
+
+def _real_child_drain(tmp_path, monkeypatch, cli, child_code, on_child, after_reap=None):
+    """Run one leased judge whose first model call is a real child process; return (child pid, alive at release)."""
+    import threading
+    pid_file = tmp_path / "child.pid"
+    calls, alive_at_release = [], []
+
+    sent = threading.Event()
+
+    def send(pid_file):
+        on_child(pid_file)
+        sent.set()
+
+    def runner(cmd, **kwargs):
+        calls.append(cmd)
+        if len(calls) == 1:
+            if after_reap is None:
+                threading.Thread(target=send, args=(pid_file,), daemon=True).start()
+            kwargs.pop("stdin", None)
+            kwargs.pop("cwd", None)
+            REAL_RUN([__import__("sys").executable, "-c", child_code.format(pid=pid_file)], **kwargs)
+            if after_reap is not None:
+                after_reap()  # REAL_RUN has returned, so the child is already reaped
+            else:
+                assert sent.wait(10)
+        return subprocess.CompletedProcess(cmd, 0, "\n".join(map(json.dumps, [
+            {"type": "item.completed", "item": {"type": "agent_message", "text": "yes"}},
+            {"type": "turn.completed", "usage": {"output_tokens": 1}}])), "")
+
+    original, lock = models.Backends, run.codex_home_lock
+
+    def backends(*a, **kw):
+        client = original(*a, **kw)
+        client.codex.runner = runner
+        return client
+
+    import contextlib
+    import os
+
+    @contextlib.contextmanager
+    def watched(home):
+        with lock(home):
+            try:
+                yield
+            finally:  # runs before the real lock context releases the flock
+                if not pid_file.exists():
+                    alive_at_release.append(None)  # the child never started: report that, not a read error
+                else:
+                    try:
+                        os.kill(int(pid_file.read_text()), 0)
+                        alive_at_release.append(True)
+                    except ProcessLookupError:
+                        alive_at_release.append(False)
+
+    run.execute(cli.args())  # the unleased answer run that the judge run reads, before any probe is armed
+    monkeypatch.setattr(run, "Backends", backends)
+    monkeypatch.setattr(run, "codex_home_lock", watched)
+    args = cli.args("judge", "--codex-home", str(tmp_path / "lease"),
+                    "--judge", models.CODEX_DEFAULT_JUDGE, models.CODEX_DEFAULT_READER)
+    with pytest.raises(SystemExit):
+        run.execute(args)
+    return calls, alive_at_release
+
+
+def _when_child_writes_pid(action):
+    def on_child(pid_file):
+        import time
+        deadline = time.monotonic() + 10
+        while not (pid_file.exists() and pid_file.read_text().strip()) and time.monotonic() < deadline:
+            time.sleep(0.01)
+        if pid_file.exists() and pid_file.read_text().strip():  # never signal after a failed start: the guard is gone
+            action()
+    return on_child
+
+
+@pytest.mark.parametrize("case", ["running_child", "child_already_exited", "second_signal_while_unwinding"])
+def test_sigterm_probes_leave_no_live_child_and_start_no_call(tmp_path, monkeypatch, cli, case):
+    import os
+    import signal
+    import time
+    term = lambda: os.kill(os.getpid(), signal.SIGTERM)  # noqa: E731
+    if case == "running_child":
+        code = "import os,time; open(r'{pid}','w').write(str(os.getpid())); time.sleep(30)"
+    elif case == "child_already_exited":
+        code = "import os; open(r'{pid}','w').write(str(os.getpid()))"  # the signal is sent only after the reap
+    else:
+        code = "import os,time; open(r'{pid}','w').write(str(os.getpid())); time.sleep(30)"
+        kill, fired = subprocess.Popen.kill, []
+
+        def kill_with_second_signal(self):
+            fired.append(True)
+            term()  # a second SIGTERM lands while subprocess.run is killing the child
+            time.sleep(0.05)
+            kill(self)
+
+        monkeypatch.setattr(subprocess.Popen, "kill", kill_with_second_signal)
+    started = time.monotonic()
+    previous = signal.signal(signal.SIGTERM, lambda *a: None)  # a stray late signal must never end pytest
+    try:
+        calls, alive = _real_child_drain(tmp_path, monkeypatch, cli, code, _when_child_writes_pid(term),
+                                         after_reap=term if case == "child_already_exited" else None)
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+    assert len(calls) == 1  # no model call starts after the signal
+    assert alive == [False]  # the child is gone before the lease is released
+    assert time.monotonic() - started < 10  # the child was killed, not waited out
+    if case == "second_signal_while_unwinding":
+        assert fired == [True]  # the second signal really landed inside the kill
+
+
+def test_sigterm_between_questions_starts_no_call(tmp_path, monkeypatch, cli):
+    import os
+    import signal
+    calls, started = [], []
+    questions = [SimpleNamespace(qid=f"q{i}", store_id="store", qtype="fact", question="Synthetic?", gold="yes",
+                                 dataset="lme-s", session_map={}, question_date="2025-01-01") for i in range(3)]
+    monkeypatch.setattr(run.datasets, "load", lambda *a: (questions, "dataset", "ids", {}))
+    run.execute(cli.args())
+
+    def judge(row, q, client, specs, agreement_model=None):
+        started.append(q.qid)
+        for spec in specs:
+            client.call(spec, [{"role": "user", "content": q.question}], [])
+        os.kill(os.getpid(), signal.SIGTERM)  # after this question's calls, with no child running
+        return {**row, "status": "ok"}
+
+    def runner(cmd, **kwargs):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, "\n".join(map(json.dumps, [
+            {"type": "item.completed", "item": {"type": "agent_message", "text": "yes"}},
+            {"type": "turn.completed", "usage": {"output_tokens": 1}}])), "")
+
+    original = models.Backends
+
+    def backends(*a, **kw):
+        client = original(*a, **kw)
+        client.codex.runner = runner
+        return client
+
+    monkeypatch.setattr(run.judges, "judge_row", judge)
+    monkeypatch.setattr(run, "Backends", backends)
+    args = cli.args("judge", "--codex-home", str(tmp_path / "lease"),
+                    "--judge", models.CODEX_DEFAULT_JUDGE, models.CODEX_DEFAULT_READER)
+    with pytest.raises(SystemExit):
+        run.execute(args)
+    assert started == ["q0"] and len(calls) == 2  # q0's two judges ran; nothing after the signal
+    with (tmp_path / "lease" / "holder.lock").open("r+") as contender:
+        fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def test_stop_flag_refuses_any_new_model_subprocess(tmp_path):
+    # The guard for multi-worker (pool) runs and any later call path: once STOPPING is set, nothing launches.
+    runner = Mock(side_effect=AssertionError("launched after the stop flag"))
+    harness = models.Codex(tmp_path, models.Quota(tmp_path / "quota.json"), runner=runner)
+    try:
+        models.STOPPING.set()
+        call = harness.directory()
+        with pytest.raises(RuntimeError, match="^stopping$"):
+            harness.run(["codex"], call, "prompt", {})
+        runner.assert_not_called()
+        assert not (call / "prompt.txt").exists()
+    finally:
+        harness.close()

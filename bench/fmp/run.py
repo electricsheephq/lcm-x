@@ -219,8 +219,8 @@ def codex_home_lock(home):
             fcntl.flock(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise RuntimeError("codex home busy") from None
-        # SIGTERM unwinds normally: the running Codex call finishes (or, on the main thread, is killed) before the lock is
-        # released; pool.map cancels queued questions and no further model call starts (models.STOPPING).
+        # SIGTERM unwinds normally: leased runs use one worker, which runs on the main thread, so the running model call
+        # is killed and reaped before the lock is released, and no further model call starts (models.STOPPING).
         models.STOPPING.clear()
         previous = signal.signal(signal.SIGTERM, _terminate) if threading.current_thread() is threading.main_thread() else None
         try:
@@ -231,6 +231,8 @@ def codex_home_lock(home):
 
 
 def _terminate(signum, frame):
+    if models.STOPPING.is_set():
+        return  # already unwinding: a second signal must not interrupt the cleanup that kills and reaps the child
     models.STOPPING.set()
     raise SystemExit(128 + signum)
 
@@ -338,9 +340,16 @@ def run_jobs(jobs, workers):
     prepared = [next(job) for job in jobs]
     if len(jobs) == 1:
         started = time.monotonic()
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            for row in pool.map(*prepared[0][:2]):
+        if workers == 1:
+            # On the main thread, a SIGTERM interrupts the wait on the running model call itself (subprocess.run
+            # kills and reaps the child) before the lease is released. In a pool thread the call ran to completion
+            # while the main thread unwound, which can take minutes.
+            for row in map(*prepared[0][:2]):
                 jobs[0].send(row)
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                for row in pool.map(*prepared[0][:2]):
+                    jobs[0].send(row)
         prepared[0][2]["active_s"] += time.monotonic() - started
     else:
         start = random.Random(1189).randrange(len(jobs))
