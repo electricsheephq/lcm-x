@@ -234,55 +234,46 @@ def _matches_generation(path: Path, rows: dict) -> bool:
     return count == len(rows)
 
 
-def _captured_prefix(path: Path, rows: dict) -> tuple[int, int]:
-    """How many of a file's leading complete lines a generation's rows hold, and how many complete lines it has."""
-    matched, total, matching = 0, 0, True
-    with path.open("rb") as handle:
-        for raw in handle:
-            if not raw.endswith(b"\n"):
-                break
-            row = rows.get(total)
-            matching = matching and row is not None and _digest(raw) == row["line_digest"]
-            matched += matching
-            total += 1
-    return matched, total
-
-
-def _named_others(lineage: Lineage, cursor: dict, generations: dict, compared: set, gone: set, report: dict,
-                  expected: set, lag: list[float]) -> None:
-    """#2535: another transcript path this lineage's records named. One that never appeared (a resume's SessionStart
-    names a path under the new directory) holds nothing. One that exists must be held by a generation: its lines
-    past that generation's rows, or all of them when no generation holds its start, are uncaptured."""
+def _named_others(lineage: Lineage, cursor: dict, report: dict) -> None:
+    """#2535: another transcript path this lineage's records named. Capture follows one path, and the audit does not
+    match another one against the store: one that holds lines, or saved outputs under its session folder, leaves the
+    lineage unverified. One that never appeared (a resume's SessionStart names a path under the new directory), or an
+    empty one with no saved outputs, holds nothing. One that cannot be checked is not clean."""
+    try:
+        own = lineage.path.stat()
+        own = (own.st_dev, own.st_ino)
+    except OSError:
+        own = None
+    own_folder = results_dir(session_dir(lineage.path))
     for name in named_paths(cursor):
         other = Path(name)
+        if other == lineage.path:
+            continue
         try:
-            status = other.stat()
-        except (FileNotFoundError, NotADirectoryError):  # never appeared, or cannot exist
-            continue
-        except OSError:  # a named path that cannot be checked is not a clean one
-            report["named_uncaptured_lines"] += 1
-            continue
-        if other == lineage.path or not stat.S_ISREG(status.st_mode) or (status.st_dev, status.st_ino) in compared:
-            continue
-        compared.add((status.st_dev, status.st_ino))
-        try:
-            total = _captured_prefix(other, {})[1]
-            prefixes = {generation: _captured_prefix(other, rows)[0] for generation, rows in generations.items()}
-            best = max(prefixes.values(), default=0)
-            # A generation counted gone (no set-aside copy) that is this file, whole at its own path, is compared as a
-            # copy. Among equal matches a still-gone one is chosen, so identical files each clear their own generation.
-            # A generation with no rows never matches (as in _matches_generation): it may have lost them all.
-            whole = [generation for generation, matched in prefixes.items()
-                     if generation in gone and 0 in generations[generation]
-                     and matched == len(generations[generation]) == total]
-            if whole:
-                _compare(other, generations[whole[0]], report, expected, lag)
-                gone.discard(whole[0])  # only once the copy compared, so a failed read leaves the counts whole
-                report["generations_gone"] -= 1
-        except OSError:  # passed stat but cannot be read (denied, or removed since): not a clean path
-            report["named_uncaptured_lines"] += 1
-            continue
-        report["named_uncaptured_lines"] += max(0, total - best)  # separate reads: a file rewritten meanwhile
+            try:
+                status = other.stat()
+            except (FileNotFoundError, NotADirectoryError):  # never appeared, or cannot exist
+                status = None
+            holds = (status is not None and (status.st_dev, status.st_ino) != own
+                     and (not stat.S_ISREG(status.st_mode) or status.st_size > 0))
+            results = session_dir(other) / "tool-results"
+            try:
+                results.lstat()
+            except (FileNotFoundError, NotADirectoryError):  # no saved outputs there
+                results = None
+            if not holds and results is not None:
+                folder = results_dir(session_dir(other))  # None when a symlink or unreadable: not a clean folder
+                holds = folder is None or (folder != own_folder and any(True for _ in folder.iterdir()))
+            agents = session_dir(other) / "subagents"  # subagent transcripts the worker sweeps only under the cursor's
+            if not holds and session_dir(other) != session_dir(lineage.path):
+                try:
+                    agents.lstat()
+                except (FileNotFoundError, NotADirectoryError):
+                    agents = None
+                holds = agents is not None and any(True for _ in agents.iterdir())
+        except OSError:
+            holds = True
+        report["named_other_paths"] += holds
 
 
 def _present(path: Path) -> bool:
@@ -340,26 +331,15 @@ def _transcripts(lineage: Lineage, cursor: dict, events: list[dict], report: dic
             report["pending_lines"] = sum(line.endswith(b"\n") for line in handle)
         report["failures"]["surplus_lines"] += sum(i >= cursor["line_index"] for i in rows)
     siblings = _set_aside_siblings(lineage.path) if cursor["generation"] else []
-    compared = set()
-    for path in (lineage.path,):
-        try:
-            status = path.stat()
-            compared.add((status.st_dev, status.st_ino))
-        except OSError:
-            pass
-    gone = set()
     for generation in range(cursor["generation"]):
         rows = generations[generation]
         copy = _older_copy(siblings, rows)
         if copy is None:
             report["generations_gone"] += 1
-            gone.add(generation)
             continue
-        status = copy.stat()
-        compared.add((status.st_dev, status.st_ino))
         length = _compare(copy, rows, report, expected, lag)
         report["failures"]["surplus_lines"] += sum(i >= length for i in rows)
-    _named_others(lineage, cursor, generations, compared, gone, report, expected, lag)
+    _named_others(lineage, cursor, report)
     return expected
 
 
@@ -459,7 +439,7 @@ def _lineage_report(lineage: Lineage, cursor: dict, events: list[dict], messages
               "surplus": 0, "unverifiable": 0, "fork_copies": 0, "unanswered": 0,
               "forgotten": forgotten, "transcript_state": "forgotten" if forgotten else "ok",
               "other_projection": 0, "projected_without_uuid": 0,
-              "named_uncaptured_lines": 0,
+              "named_other_paths": 0,
               "files": dict.fromkeys(("held", "kept", "uncaptured"), 0), "failures": dict.fromkeys(FAILURES, 0)}
     report.update(classes={}, unknown_types={})
     if forgotten:
@@ -643,7 +623,7 @@ def _unverified(metadata: dict, records: list[dict], lineages: list[dict], sessi
                 failed: list[Lineage | None]) -> list[str]:
     unknown = {row["lineage"] for row in lineages if not row["forgotten"] and (
         row["transcript_state"] != "ok" or row["generations_gone"] or row["pending_lines"]
-        or row["files"]["uncaptured"] or row["named_uncaptured_lines"])}
+        or row["files"]["uncaptured"] or row["named_other_paths"])}
     if (session is not None and CURSOR_PREFIX + lineage_key(session) not in metadata
             and PENDING_PREFIX + lineage_key(session) not in metadata):  # a pending session is judged below
         unknown.add(lineage_key(session))
@@ -664,10 +644,19 @@ def _unverified(metadata: dict, records: list[dict], lineages: list[dict], sessi
             continue
         if any(_present(Path(name)) for name in named_paths(pending)) or not _expired(pending, metadata):
             unknown.add(lineage.key)  # every path its records named (#2535)
-        if lineage.agent_id is None:
-            for child in _subagents(lineage):
-                if CURSOR_PREFIX + child.key not in metadata and FORGOTTEN_PREFIX + child.rows_session not in metadata:
-                    unknown.add(child.key)
+        if lineage.agent_id is None:  # under every path its records named (#2535)
+            for name in named_paths(pending):
+                try:  # a subagents folder that cannot be checked is not clean (glob would just return nothing)
+                    (session_dir(Path(name)) / "subagents").lstat()
+                    next(iter((session_dir(Path(name)) / "subagents").iterdir()), None)
+                except (FileNotFoundError, NotADirectoryError):
+                    pass
+                except OSError:
+                    unknown.add(lineage.key)
+                for child in _subagents(Lineage(lineage.session_id, None, Path(name))):
+                    if (CURSOR_PREFIX + child.key not in metadata
+                            and FORGOTTEN_PREFIX + child.rows_session not in metadata):
+                        unknown.add(child.key)
     # A record set aside before its transcript had a cursor names a lineage nothing else shows.
     for lineage in failed:
         if lineage is None:
@@ -732,6 +721,9 @@ def audit(home: Path, session: str | None = None) -> dict:
     if expired:
         verdict += (f"; {len(expired)} expired: never written ({expired.count('summarizer')} compaction summarizers, "
                     f"{expired.count('no_prompt')} sessions with no prompt)")
+    others = sum(1 for row in lineages if not row["forgotten"] and row["named_other_paths"])
+    if others:  # #2535: capture follows one path, and another that holds rows is not matched against the store
+        verdict += f"; {others} lineages: a second transcript path holds rows; not matched"
     return {"verdict": verdict, "ok": not any(failures.values()), "opened_immutable": immutable, "failures": failures,
             "pending_lineages": len(pending), "oldest_pending_age_s": oldest_pending_age,
             "expired_never_written": len(expired),
