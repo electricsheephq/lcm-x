@@ -408,7 +408,7 @@ def test_one_worker_main_thread_matches_pool_outputs(tmp_path, monkeypatch, cli)
     assert stable(outputs["1"]) == stable(outputs["2"])
 
 
-def _real_child_drain(tmp_path, monkeypatch, cli, child_code, on_child):
+def _real_child_drain(tmp_path, monkeypatch, cli, child_code, on_child, after_reap=None):
     """Run one leased judge whose first model call is a real child process; return (child pid, alive at release)."""
     import threading
     pid_file = tmp_path / "child.pid"
@@ -423,11 +423,15 @@ def _real_child_drain(tmp_path, monkeypatch, cli, child_code, on_child):
     def runner(cmd, **kwargs):
         calls.append(cmd)
         if len(calls) == 1:
-            threading.Thread(target=send, args=(pid_file,), daemon=True).start()
+            if after_reap is None:
+                threading.Thread(target=send, args=(pid_file,), daemon=True).start()
             kwargs.pop("stdin", None)
             kwargs.pop("cwd", None)
             REAL_RUN([__import__("sys").executable, "-c", child_code.format(pid=pid_file)], **kwargs)
-            assert sent.wait(10)  # a child that exits at once: the signal still lands inside this call
+            if after_reap is not None:
+                after_reap()  # REAL_RUN has returned, so the child is already reaped
+            else:
+                assert sent.wait(10)
         return subprocess.CompletedProcess(cmd, 0, "\n".join(map(json.dumps, [
             {"type": "item.completed", "item": {"type": "agent_message", "text": "yes"}},
             {"type": "turn.completed", "usage": {"output_tokens": 1}}])), "")
@@ -487,7 +491,7 @@ def test_sigterm_probes_leave_no_live_child_and_start_no_call(tmp_path, monkeypa
     if case == "running_child":
         code = "import os,time; open(r'{pid}','w').write(str(os.getpid())); time.sleep(30)"
     elif case == "child_already_exited":
-        code = "import os; open(r'{pid}','w').write(str(os.getpid()))"  # exits at once; the signal lands after the reap
+        code = "import os; open(r'{pid}','w').write(str(os.getpid()))"  # the signal is sent only after the reap
     else:
         code = "import os,time; open(r'{pid}','w').write(str(os.getpid())); time.sleep(30)"
         kill, fired = subprocess.Popen.kill, []
@@ -502,7 +506,8 @@ def test_sigterm_probes_leave_no_live_child_and_start_no_call(tmp_path, monkeypa
     started = time.monotonic()
     previous = signal.signal(signal.SIGTERM, lambda *a: None)  # a stray late signal must never end pytest
     try:
-        calls, alive = _real_child_drain(tmp_path, monkeypatch, cli, code, _when_child_writes_pid(term))
+        calls, alive = _real_child_drain(tmp_path, monkeypatch, cli, code, _when_child_writes_pid(term),
+                                         after_reap=term if case == "child_already_exited" else None)
     finally:
         signal.signal(signal.SIGTERM, previous)
     assert len(calls) == 1  # no model call starts after the signal
