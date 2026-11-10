@@ -7,6 +7,7 @@ session-file capture off until its own proof.
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import importlib.util
 import io
 import json
@@ -70,6 +71,177 @@ def _log(env, setting="LCMX_CC_HOME") -> list[dict]:
 def _spooled(env, setting="LCMX_CC_HOME") -> list[Path]:
     directory = Path(env[setting]) / "spool"
     return sorted(directory.glob("*.json")) if directory.exists() else []
+
+
+def _wait_hooks(env, count):
+    end = time.monotonic() + 5
+    while time.monotonic() < end:
+        try:
+            rows = _log(env)
+            if len(rows) >= count:
+                return rows
+        except (OSError, ValueError):
+            pass
+        time.sleep(0.02)
+    pytest.fail("hook children did not finish")
+
+
+def _release(pointer):
+    """Feed the stalled reader of a FIFO pointer once it has opened it: data written before any reader is lost."""
+    import errno
+    end = time.monotonic() + 5
+    while True:
+        try:
+            fd = os.open(pointer, os.O_WRONLY | os.O_NONBLOCK)
+            break
+        except OSError as exc:  # ENXIO: no reader has the FIFO open yet
+            if exc.errno != errno.ENXIO or time.monotonic() > end:
+                raise
+            time.sleep(0.01)
+    with os.fdopen(fd, "w") as handle:
+        handle.write("{}")
+
+
+@pytest.mark.parametrize("event", ["Stop", "SessionEnd"])
+def test_detached_fifo_does_not_block(hook, env, tmp_path, event):
+    payload = {"hook_event_name": event, "session_id": "s1", "transcript_path": str(_transcript(tmp_path))}
+    hook.main(io.StringIO(json.dumps(payload)), env)
+    [pointer] = _spooled(env)
+    pointer.unlink()
+    os.mkfifo(pointer)
+    started = time.monotonic()
+    try:
+        done = subprocess.run([sys.executable, "-I", "-S", str(PLUGIN / "bin/lcmx_hook.py")],
+                              input=json.dumps(payload), env=env, capture_output=True, text=True, timeout=2,
+                              start_new_session=True)
+        assert (done.returncode, done.stdout, done.stderr) == (0, "", "")
+        assert time.monotonic() - started < 2
+    finally:
+        _release(pointer)
+    row = _wait_hooks(env, 2)[-1]
+    assert row["detached"] is True and row["blocking_ms"] < 1000 and row["outcome"]
+
+
+@pytest.mark.parametrize("event", ["Stop", "SessionEnd"])
+def test_a_killed_hook_process_group_still_lands_the_pointer(hook, env, tmp_path, event):
+    """A3 (#2350): Claude Code may kill the hook's process group (a -p exit). The detached child has its own
+    session, so a SIGKILL to the hook's group while the child is stalled on the pointer does not reach it."""
+    import signal
+    payload = {"hook_event_name": event, "session_id": "s1", "transcript_path": str(_transcript(tmp_path))}
+    hook.main(io.StringIO(json.dumps(payload)), env)  # a previous pointer to read
+    [pointer] = _spooled(env)
+    pointer.unlink()
+    os.mkfifo(pointer)  # stalls whichever process reads the previous pointer
+    proc = subprocess.Popen([sys.executable, "-I", "-S", str(PLUGIN / "bin/lcmx_hook.py")], env=env,
+                            stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                            start_new_session=True)
+    try:
+        proc.stdin.write(json.dumps(payload).encode())
+        proc.stdin.close()
+        try:
+            proc.wait(timeout=1)  # the parent returns at once; the old synchronous hook stays stalled here
+        except subprocess.TimeoutExpired:
+            pass
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)  # the hook's whole group, as a host would
+        except ProcessLookupError:
+            pass  # nothing is left in the group: the child runs in its own session
+        proc.wait(timeout=5)
+    finally:
+        _release(pointer)
+    row = _wait_hooks(env, 2)[-1]
+    assert row["detached"] is True and row["outcome"]
+    [landed] = _spooled(env)
+    assert landed.is_file() and json.loads(landed.read_text())["event"] == event
+
+
+def test_a_synchronous_hook_does_not_wait_for_a_stalled_detached_writer(hook, env, tmp_path):
+    """Codex review of #2531: SessionStart and PreCompact take the same pointer lock as the detached children. While a
+    stalled child holds it, a synchronous hook waits at most SYNC_LOCK_WAIT_S, skips its own pointer (lock_busy) and
+    still starts the worker; the holder writes its pointer and the sweep covers the session."""
+    payload = {"session_id": "s1", "transcript_path": str(_transcript(tmp_path))}
+    hook.main(io.StringIO(json.dumps({**payload, "hook_event_name": "UserPromptSubmit"})), env)
+    [lock_path] = list((Path(env["LCMX_CC_HOME"]) / "spool-locks").iterdir())
+    with open(lock_path, "a") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)  # the stalled detached writer
+        started = time.monotonic()
+        done = subprocess.run([sys.executable, "-I", "-S", str(PLUGIN / "bin/lcmx_hook.py")],
+                              input=json.dumps({**payload, "hook_event_name": "SessionStart", "source": "resume"}),
+                              env=env, capture_output=True, text=True, timeout=4)
+        waited = time.monotonic() - started
+    assert (done.returncode, done.stdout, done.stderr) == (0, "", "")
+    assert waited < 3
+    assert _log(env)[-1]["outcome"].endswith("+lock_busy")
+
+
+def test_detached_records_keep_synchronous_start(env, tmp_path):
+    payload = {"session_id": "s1", "transcript_path": str(_transcript(tmp_path)), "source": "fork"}
+    for index, event in enumerate(("SessionStart", "UserPromptSubmit", "Stop"), 1):
+        done = subprocess.run([sys.executable, "-I", "-S", str(PLUGIN / "bin/lcmx_hook.py")],
+                              input=json.dumps({**payload, "hook_event_name": event}), env=env,
+                              capture_output=True, text=True, timeout=2)
+        assert (done.returncode, done.stdout, done.stderr) == (0, "", "")
+        if index == 1:
+            [pointer] = _spooled(env)
+            initial = json.loads(pointer.read_text())
+            assert initial["start_source"] == "fork"
+        rows = _wait_hooks(env, index)
+    final = json.loads(pointer.read_text())
+    assert (final["start_source"], final["started_at"]) == ("fork", initial["started_at"])
+    assert all(row.get("detached") for row in rows[1:])
+
+
+@pytest.mark.parametrize("older,newer,expected", [("Stop", "UserPromptSubmit", "Stop"),
+                                                  ("UserPromptSubmit", "Stop", "Stop"),
+                                                  ("Stop", "SessionEnd", "SessionEnd"),
+                                                  ("PostToolUse", "UserPromptSubmit", "UserPromptSubmit")])
+def test_spool_end_guard_and_wall_stamp(hook, env, tmp_path, older, newer, expected):
+    from hermes_lcm.claude_code_store import claim_records
+    home = Path(env["LCMX_CC_HOME"])
+    record = hook.normalize({"hook_event_name": newer, "session_id": "s1",
+                             "transcript_path": str(_transcript(tmp_path))}, env)
+    hook.spool(home, {**record, "hook_started_ns": 20})
+    hook.spool(home, {**record, "event": older, "hook_started_ns": 10})
+    assert claim_records(home)[0][1]["event"] == expected
+
+
+def test_delayed_child_and_lost_stop_sweep(hook, env, tmp_path, monkeypatch):
+    from hermes_lcm import claude_code_store as cc
+    path, parent = _transcript(tmp_path), os.getpid()
+    home, children, fork = Path(env["LCMX_CC_HOME"]), [], os.fork
+    normal = hook.normalize
+    def normalize(*args):
+        assert os.getpid() != parent  # no filesystem validation in the parent
+        return normal(*args)
+    def tracked_fork():
+        pid = fork()
+        if pid:
+            children.append(pid)
+        return pid
+    monkeypatch.setattr(hook, "normalize", normalize)
+    monkeypatch.setattr(os, "fork", tracked_fork)
+    def fire(event, delay):
+        hook.main(io.StringIO(json.dumps({"hook_event_name": event, "session_id": "s1",
+                  "transcript_path": str(path)})), {**env, "LCMX_TEST_HOOK_DELAY_MS": str(delay)}, detach=True)
+    fire("UserPromptSubmit", 500)
+    fire("Stop", 0)
+    for pid in children:
+        os.waitpid(pid, 0)
+    assert cc.claim_records(home)[0][1]["event"] == "Stop"
+    hermes = tmp_path / "hermes"
+    assert cc.run_worker(home, hermes_home=hermes, settle_s=0)["complete"]
+    fire("Stop", 500)
+    os.kill(children[-1], 9)  # last pointer never lands
+    os.waitpid(children[-1], 0)
+    path.write_text(json.dumps({"type": "assistant", "uuid": "final", "sessionId": "s1",
+                               "message": {"role": "assistant", "content": "last reply"}}) + "\n")
+    hook.spool(home, {"host": "claude-code", "session_id": "s2", "event": "UserPromptSubmit"})
+    assert cc.run_worker(home, hermes_home=hermes, settle_s=0)["complete"]
+    store = cc.open_store(home / "lcm.db", home)
+    try:
+        assert store.connection.execute("SELECT content FROM messages").fetchall() == [("last reply",)]
+    finally:
+        store.close()
 
 
 EXEC_ARGS = ["-I", "-S", "${CLAUDE_PLUGIN_ROOT}/bin/lcmx_hook.py"]
@@ -507,6 +679,7 @@ def test_a_hook_that_finds_a_worker_running_imports_nothing_it_does_not_need(env
         fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
         done = subprocess.run([sys.executable, "-I", "-S", "-X", "importtime", str(PLUGIN / "bin" / "lcmx_hook.py")],
                               input=json.dumps(payload), env=lane, capture_output=True, text=True, timeout=60)
+        _wait_hooks(env, 1)
     assert (done.returncode, done.stdout) == (0, "")
     imported = {line.rsplit("|", 1)[-1].strip() for line in done.stderr.splitlines() if line.startswith("import time:")}
     assert "json" in imported  # the import log is complete
@@ -559,6 +732,7 @@ def test_any_other_python_keeps_its_own_bytecode_cache(env, tmp_path):
         fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
         done = subprocess.run([sys.executable, "-I", "-S", "-v", str(PLUGIN / "bin" / "lcmx_hook.py")], input=payload,
                               env={**lane, "HOME": str(user)}, capture_output=True, text=True, timeout=60)
+        _wait_hooks(env, 1)
     assert (done.returncode, done.stdout) == (0, "")
     assert "# code object from" in done.stderr  # the import log is complete
     assert "com.apple.python" not in done.stderr and not (user / "Library").exists()
@@ -588,6 +762,7 @@ def test_the_cache_fix_fails_open(env, tmp_path):
             runs["no home"] = subprocess.run([sys.executable, "-I", "-S", "-c", as_apple,
                                               str(PLUGIN / "bin" / "lcmx_hook.py")], input=payload, env=lane,
                                              capture_output=True, text=True, timeout=60)
+            _wait_hooks(env, 3)
     finally:
         for folder in (locked, locked / "home"):
             folder.chmod(0o700)
@@ -620,6 +795,7 @@ def test_apples_python_reads_its_bytecode_cache_under_the_registered_flags(env, 
             runs = [subprocess.run(argv, input=payload, env={**lane, "HOME": str(home)}, capture_output=True, text=True,
                                    timeout=60) for home in (user, user, unwritable)]
             runs.append(subprocess.run(argv, input=payload, env=lane, capture_output=True, text=True, timeout=60))
+            _wait_hooks(env, 4)
     finally:
         unwritable.chmod(0o700)
     assert [(done.returncode, done.stdout) for done in runs] == [(0, "")] * 4
@@ -677,7 +853,7 @@ def test_each_hook_log_line_times_the_steps_that_ran(hook, env, tmp_path, monkey
     runs = [  # event, environment, what each lock check finds, the drain's exit code, outcome, steps
         ("Stop", lane, [False], 0, "worker_started", spooled + ["probe", "subprocess", "start", "log"]),
         ("Stop", lane, [True], 0, "worker_running", spooled + ["probe", "log"]),
-        ("PostToolBatch", lane, [], 0, "worker_started", spooled + ["subprocess", "start", "log"]),
+        ("PostToolBatch", lane, [], 0, "worker_started+kept_end", spooled + ["subprocess", "start", "log"]),
         ("PreCompact", lane, [False], 0, "drained", drained + ["log"]),
         ("PreCompact", lane, [False, True], 5, "drain_bound+holder", drained + ["recheck", "log"]),
         ("PreCompact", lane, [False, False], 5, "drain_bound+worker", drained + ["recheck", "start", "log"]),
@@ -750,6 +926,7 @@ def test_the_registered_hook_command_ignores_the_users_python_settings(env, tmp_
             fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
             done = subprocess.run(_argv(registered), input=json.dumps(payload), env=lane,
                                   capture_output=True, text=True, timeout=60)
+            _wait_hooks(env, runs)
         assert (done.returncode, done.stdout, done.stderr) == (0, "", "")
         assert len(_spooled(env)) == 1
         assert [row["outcome"] for row in _log(env)] == ["worker_running"] * runs  # each form logged its own run
@@ -1352,3 +1529,170 @@ def test_a_cut_precompact_drain_leaves_the_rest_to_the_worker_that_took_the_lock
         monkeypatch.setattr(subprocess, "run", incomplete_then_taken)
         monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: pytest.fail("the holder takes the rest"))
         assert hook.start_worker(home, lane, deadline_s=hook.PRECOMPACT_DEADLINE_S) == "drain_incomplete+holder"
+
+
+def test_a_refused_grok_home_writes_nothing_into_the_claude_home(hook, tmp_path):
+    """#2531 review: a Grok payload whose home setting is refused (relative) logs nowhere, not in Claude Code's home."""
+    env = {"LCMX_CC_HOME": str(tmp_path / "home"), "LCMX_GROK_HOME": "relative/grok",
+           "CLAUDE_CONFIG_DIR": str(tmp_path / "config")}
+    payload = {"hookEventName": "SessionStart", "sessionId": "g-1", "cwd": "/work", "source": "startup"}
+    assert hook.main(io.StringIO(json.dumps(payload)), env) == 0
+    assert not (tmp_path / "home").exists()
+
+
+def test_an_unresolvable_home_never_escapes_the_hook(hook, tmp_path):
+    """#2531 review: a home that raises while resolving (an unknown ~user) still fails open, on a synchronous hook."""
+    env = {"LCMX_CC_HOME": "~no-such-user-2531/home", "CLAUDE_CONFIG_DIR": str(tmp_path / "config")}
+    for raw in (json.dumps({"hook_event_name": "SessionStart", "session_id": "s1",
+                            "transcript_path": str(_transcript(tmp_path))}), "not json"):
+        assert hook.main(io.StringIO(raw), env) == 0
+
+
+@pytest.mark.parametrize("event", ["Stop", "SessionEnd"])
+def test_the_hook_returns_only_after_its_writer_left_the_group(env, tmp_path, event):
+    """#2531 review: the parent waits for the child's setsid, so a group kill the moment the hook returns cannot reach
+    the writer. setsid is slowed here; without the wait the kill lands first and no pointer is spooled."""
+    import signal
+    payload = {"hook_event_name": event, "session_id": "s1", "transcript_path": str(_transcript(tmp_path))}
+    driver = ("import importlib.util, os, sys, time\n"
+              f"spec = importlib.util.spec_from_file_location('h', {str(PLUGIN / 'bin/lcmx_hook.py')!r})\n"
+              "h = importlib.util.module_from_spec(spec); spec.loader.exec_module(h)\n"
+              "real = os.setsid\n"
+              "os.setsid = lambda: (time.sleep(0.3), real())[1]\n"
+              "sys.exit(h.main(sys.stdin, os.environ, detach=True))\n")
+    proc = subprocess.Popen([sys.executable, "-c", driver], env={**os.environ, **env}, stdin=subprocess.PIPE,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    proc.communicate(json.dumps(payload).encode(), timeout=5)
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)  # the moment the hook returned, as a host cleaning up its group would
+    except ProcessLookupError:
+        pass
+    row = _wait_hooks(env, 1)[-1]  # a writer the kill reached never logs (the worker may already have drained the pointer)
+    assert row["detached"] is True and row["event"] == event and not row["outcome"].startswith("error")
+    assert row["blocking_ms"] >= 300  # the parent's wait for the slowed setsid is part of what it blocked
+
+
+def test_a_detached_writer_logs_a_failure_before_its_record_is_built(env, tmp_path):
+    """#2531 review: a detached child that fails before normalize returns still logs its error in the environment's
+    home, as main and the earlier head did."""
+    payload = {"hook_event_name": "Stop", "session_id": "s1", "transcript_path": str(_transcript(tmp_path))}
+    driver = ("import importlib.util, os, sys\n"
+              f"spec = importlib.util.spec_from_file_location('h', {str(PLUGIN / 'bin/lcmx_hook.py')!r})\n"
+              "h = importlib.util.module_from_spec(spec); spec.loader.exec_module(h)\n"
+              "def boom(*a, **k): raise RuntimeError('no such user')\n"
+              "h.normalize = boom\n"
+              "sys.exit(h.main(sys.stdin, os.environ, detach=True))\n")
+    done = subprocess.run([sys.executable, "-c", driver], env={**os.environ, **env}, input=json.dumps(payload),
+                          capture_output=True, text=True, timeout=5)
+    assert (done.returncode, done.stdout, done.stderr) == (0, "", "")
+    row = _wait_hooks(env, 1)[-1]
+    assert row["detached"] is True and row["outcome"] == "error:RuntimeError"
+
+
+def test_a_failed_setsid_still_releases_the_parent_before_logging(env, tmp_path):
+    """#2531 review: the handshake's write end closes even if setsid raises, so a slow log cannot hold the parent."""
+    payload = {"hook_event_name": "Stop", "session_id": "s1", "transcript_path": str(_transcript(tmp_path))}
+    driver = ("import importlib.util, os, sys, time\n"
+              f"spec = importlib.util.spec_from_file_location('h', {str(PLUGIN / 'bin/lcmx_hook.py')!r})\n"
+              "h = importlib.util.module_from_spec(spec); spec.loader.exec_module(h)\n"
+              "def boom(): raise OSError('setsid')\n"
+              "os.setsid = boom\n"
+              "log = h._log\n"
+              "h._log = lambda *a, **k: (time.sleep(3), log(*a, **k))\n"
+              "sys.exit(h.main(sys.stdin, os.environ, detach=True))\n")
+    started = time.monotonic()
+    done = subprocess.run([sys.executable, "-c", driver], env={**os.environ, **env}, input=json.dumps(payload),
+                          capture_output=True, text=True, timeout=10, start_new_session=True)
+    assert done.returncode == 0 and time.monotonic() - started < 2
+
+
+def test_a_failed_fork_leaks_no_handshake_descriptor(hook, env, tmp_path, monkeypatch):
+    """#2531 review: a fork that fails after its pipe was made closes both ends and runs the hook in place."""
+    def boom():
+        raise OSError("fork")
+    monkeypatch.setattr(hook.os, "fork", boom)
+    payload = {"hook_event_name": "Stop", "session_id": "s1", "transcript_path": str(_transcript(tmp_path))}
+    before = len(os.listdir("/dev/fd"))
+    assert hook.main(io.StringIO(json.dumps(payload)), env, detach=True) == 0
+    assert len(os.listdir("/dev/fd")) == before
+    assert _log(env)[-1]["outcome"].endswith("+nofork")
+
+
+def test_records_carry_a_hashed_prompt_id_and_the_raw_agent_type(hook, env, tmp_path):
+    """#2535: the audit tells the compaction summarizer (agent_type "") from other subagents, and links it to its
+    compaction by prompt id. Only a hash of the id is kept; an absent type stays None, apart from ""."""
+    path = str(_transcript(tmp_path))
+    summarizer = hook.normalize({"hook_event_name": "SubagentStop", "session_id": "s1", "agent_id": "a1",
+                                 "agent_type": "", "prompt_id": "p-1", "transcript_path": path}, env)
+    assert summarizer["agent_type"] == "" and summarizer["prompt_id"] == hashlib.sha256(b"p-1").hexdigest()[:16]
+    plain = hook.normalize({"hook_event_name": "Stop", "session_id": "s1", "transcript_path": path}, env)
+    assert plain["agent_type"] is None and plain["prompt_id"] is None
+    assert "p-1" not in json.dumps(summarizer)
+    # What the hook found on disk: the session transcript exists, the summarizer's never does; no agent path is None.
+    assert summarizer["transcript_seen"] is True and summarizer["agent_transcript_seen"] is None
+    absent = hook.normalize({"hook_event_name": "SubagentStop", "session_id": "s1", "agent_id": "a1",
+                             "agent_transcript_path": str(Path(path).parent / "s1" / "subagents" / "agent-a1.jsonl"),
+                             "transcript_path": path}, env)
+    assert absent["agent_transcript_seen"] is False
+    assert hook._on_disk(str(tmp_path / "no-such-dir" / "x.jsonl")) is False
+    assert hook._on_disk(path + "/below-a-file.jsonl") is False  # NotADirectoryError
+    blocked = tmp_path / "blocked"
+    blocked.mkdir()
+    blocked.chmod(0)
+    try:
+        assert os.geteuid() == 0 or hook._on_disk(str(blocked / "x.jsonl")) is None  # a failed stat is unknown
+    finally:
+        blocked.chmod(0o700)
+
+
+def test_a_replaced_or_kept_pointer_keeps_every_event_seen(hook, env, tmp_path):
+    """#2535: the pointer rules replace a record or keep it out, but the claimed pointer still lists its event (and a
+    compaction's prompt id), so the audit never mistakes a session that had a turn for one with no prompt."""
+    from hermes_lcm.claude_code_store import claim_records
+    home = Path(env["LCMX_CC_HOME"])
+    base = hook.normalize({"hook_event_name": "Stop", "session_id": "s1",
+                           "transcript_path": str(_transcript(tmp_path))}, env)
+    for event in ("UserPromptSubmit", "Stop", "SessionEnd"):
+        hook.spool(home, {**base, "event": event})
+    assert hook.spool(home, {**base, "event": "PostToolUse"}) == "kept_end"
+    assert hook.spool(home, {**base, "event": "PreCompact", "prompt_id": "c1"}) == "spooled"
+    assert hook.spool(home, {**base, "event": "PostCompact", "prompt_id": "c2"}) == "kept_end"
+    record = claim_records(home)[0][1]
+    assert record["event"] == "PreCompact" and record["transcript_seen"] is True
+    assert record["seen"] == ["PostCompact", "PostToolUse", "PreCompact", "SessionEnd", "Stop", "UserPromptSubmit"]
+    assert record["compact_prompts"] == ["c1", "c2"]
+
+
+@pytest.mark.parametrize("values,merged", [((False, False), False), ((False, True), True), ((True, False), True),
+                                           ((None, False), None), ((False, None), None), ((None, True), True)])
+def test_the_pointer_keeps_whether_any_record_saw_the_transcript(hook, env, tmp_path, values, merged):
+    """#2535: once any hook found the transcript on disk the lineage is never expired; an unknown (an older hook) is
+    never turned into "absent"."""
+    from hermes_lcm.claude_code_store import claim_records
+    home = Path(env["LCMX_CC_HOME"])
+    base = hook.normalize({"hook_event_name": "SessionStart", "session_id": "s1",
+                           "transcript_path": str(_transcript(tmp_path))}, env)
+    for event, seen in zip(("SessionStart", "SessionEnd"), values):
+        hook.spool(home, {**base, "event": event, "transcript_seen": seen})
+    assert claim_records(home)[0][1]["transcript_seen"] is merged
+
+
+@pytest.mark.parametrize("first,second", [
+    (("UserPromptSubmit", None, 10), ("Stop", None, 20)),        # replaced
+    (("Stop", None, 10), ("PostToolUse", None, 20)),             # kept_end
+    (("Stop", None, 20), ("Stop", None, 10)),                    # stale
+    (("UserPromptSubmit", None, 10), ("SessionStart", "resume", 20)),  # SessionStart's own branch
+    (None, ("Stop", None, 20)),                                  # an unreadable pointer: history unknown
+], ids=["replace", "kept_end", "stale", "session_start", "unreadable"])
+def test_local_gc_stays_on_through_every_pointer_branch(hook, env, tmp_path, first, second):
+    """#2503: a record that saw local GC on keeps the flag on the pointer whichever branch the next record takes."""
+    from hermes_lcm.claude_code_store import claim_records
+    home = Path(env["LCMX_CC_HOME"])
+    base = hook.normalize({"hook_event_name": "Stop", "session_id": "s1",
+                           "transcript_path": str(_transcript(tmp_path))}, env)
+    if first is None:  # the earlier record's pointer cannot be read: it may have seen local GC on
+        hook.spool(home, {**base, "event": "Stop", "hook_started_ns": 5, "local_gc": False})
+        _spooled(env)[0].write_text("{not json", encoding="utf-8")
+    for (event, source, stamp), gc in ((first, True), (second, False)) if first else ((second, False),):
+        hook.spool(home, {**base, "event": event, "source": source, "hook_started_ns": stamp, "local_gc": gc})
+    assert claim_records(home)[0][1]["local_gc"] is True

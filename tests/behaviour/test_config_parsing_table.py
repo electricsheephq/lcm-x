@@ -63,7 +63,10 @@ CONFIG_ROWS = (
     ('recall_adjacent_reply', 'LCM_RECALL_ADJACENT_REPLY', 'bool', False),
     ('recall_snippet_window_hits', 'LCM_RECALL_SNIPPET_WINDOW_HITS', 'int', 0),
     ('recall_extra_entries', 'LCM_RECALL_EXTRA_ENTRIES', 'int', 0),
+    ('recall_later_statements', 'LCM_RECALL_LATER_STATEMENTS', 'int', 0),
     ('recall_fts_anchor', 'LCM_RECALL_FTS_ANCHOR', 'bool', True),
+    ('recall_session_hints', 'LCM_RECALL_SESSION_HINTS', 'bool', False),
+    ('recall_guidance', 'LCM_RECALL_GUIDANCE', 'str', 'v1'),
     ('recall_summary_event_time', 'LCM_RECALL_SUMMARY_EVENT_TIME', 'bool', False),
     ('proactive_recall_enabled', 'LCM_PROACTIVE_RECALL_ENABLED', 'bool', False),
     ('preanswer_evidence_enabled', 'LCM_PREANSWER_EVIDENCE_ENABLED', 'bool', False),
@@ -181,10 +184,12 @@ EXTRA_CONFIG_ROWS = (
 SPECIAL = {
     "recall_snippet_window_hits": (D, D, D, D, 1, 0, D, D, D, D, D, D, D, D, D, 25),
     "recall_extra_entries": (D, D, D, D, 1, 0, D, D, D, D, D, D, D, D, D, 25),
+    "recall_later_statements": (D, D, D, D, 1, 0, D, D, D, D, D, D, D, D, D, 5),
     "embeddings_enabled": FLAG,  # R3: unset local ON; invalid/blank stays OFF.
     "embedding_provider": (D, D, *VALUES[2:]),  # R4: blank provider follows unset local default.
     "recall_delivery_unit": ("hits",) * 16,
     "recall_delivery_order": ("score",) * 16,
+    "recall_guidance": ("v1",) * 16,
     "fresh_tail_max_tokens": (D, D, D, D, 1, 0, D, D, D, D, D, D, D, 0, D, HUGE),
     "leaf_target_ratio": (D, D, D, D, 1.0, D, D, D, D, D, D, D, D, D, 0.5, D),
     "leaf_target_min_tokens": (D, D, D, D, 1, D, D, D, D, D, D, D, D, D, D, D),
@@ -235,6 +240,64 @@ def isolated_environment(monkeypatch):
     monkeypatch.setattr(config, "_host_message_uid_mode_warned", False)
     monkeypatch.setattr(config, "_ingest_ledger_mode_warned", False)
     monkeypatch.setattr(config, "_sqlite_mmap_size_warned", False)
+
+
+@pytest.mark.parametrize("env", [False, True])
+def test_recall_guidance_and_hints_yaml(monkeypatch, tmp_path, env):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(config, "_load_hermes_config_yaml", lambda *a: {
+        "lcm": {"recall_guidance": "v2", "recall_session_hints": True}})
+    if env:
+        monkeypatch.setenv("LCM_RECALL_GUIDANCE", "v1")
+        monkeypatch.setenv("LCM_RECALL_SESSION_HINTS", "false")
+    cfg = config.LCMConfig.from_env()
+    assert cfg.recall_guidance == ("v1" if env else "v2")
+    assert cfg.recall_session_hints is (not env)
+    assert not {"recall_guidance", "recall_session_hints"} & set(cfg.ignored_config_yaml_lcm_keys)
+    for name in ("recall_guidance", "recall_session_hints"):
+        assert cfg.config_sources[name] == (f"env:LCM_{name.upper()}" if env else f"config_yaml:lcm.{name}")
+
+
+@pytest.mark.parametrize("guidance,hints", [(2, "true"), ("unknown", 1), (None, None)])
+def test_invalid_recall_guidance_and_hints_yaml(monkeypatch, guidance, hints):
+    monkeypatch.setattr(config, "_load_hermes_config_yaml", lambda *a: {
+        "lcm": {"recall_guidance": guidance, "recall_session_hints": hints}})
+    cfg = config.LCMConfig.from_env()
+    assert cfg.recall_guidance == "v1" and cfg.recall_session_hints is False
+    for name in ("recall_guidance", "recall_session_hints"):
+        assert any(f"invalid config.yaml lcm.{name}" in w for w in cfg.config_source_warnings)
+        assert cfg.config_sources[name] == "default"
+        assert name not in cfg.ignored_config_yaml_lcm_keys
+
+
+@pytest.mark.parametrize("raw", ["V2", " v2 "])
+@pytest.mark.parametrize("yaml", [False, True])
+def test_recall_guidance_normalizes_case_and_spaces(monkeypatch, raw, yaml):
+    if yaml:
+        monkeypatch.setattr(config, "_load_hermes_config_yaml", lambda *a: {"lcm": {"recall_guidance": raw}})
+    else:
+        monkeypatch.setenv("LCM_RECALL_GUIDANCE", raw)
+    assert config.LCMConfig.from_env().recall_guidance == "v2"
+
+
+@pytest.mark.parametrize("name,yaml_value,default", [
+    ("recall_guidance", "v2", "v1"), ("recall_session_hints", True, False),
+])
+@pytest.mark.parametrize("raw", ["", " \t", "invalid"])
+@pytest.mark.parametrize("yaml", [False, True])
+def test_recall_guidance_and_hints_empty_invalid_env(monkeypatch, name, yaml_value, default, raw, yaml):
+    monkeypatch.setattr(config, "_load_hermes_config_yaml", lambda *a: {
+        "lcm": {name: yaml_value} if yaml else {}})
+    key = "LCM_" + name.upper()
+    monkeypatch.setenv(key, raw)
+    cfg = config.LCMConfig.from_env()
+    invalid = bool(raw.strip())
+    assert getattr(cfg, name) == (yaml_value if yaml and not invalid else default)
+    assert cfg.config_sources.get(name, "default") == (f"config_yaml:lcm.{name}" if yaml and not invalid else "default")
+    warnings = [w for w in cfg.config_source_warnings if key in w]
+    assert bool(warnings) is invalid
+    if invalid:
+        assert "invalid env " + key in warnings[0]
 
 
 @pytest.fixture(scope="module")

@@ -27,7 +27,7 @@ M = main 4aca75d5a, R = rc1 7594beb7, H = Hermes bench pin 71d34bad. "held" = th
 | atexit callables | `maintenance_scheduler.py:152-154`, :409-428 | `engine.py:404-408`, :664-694 | — | held |
 | host-written attributes | — | — | `conversation_compression.py:176-189`, :414, :1970-1982; `codex_runtime.py:192`, :233-243 | held; extra H writes found: `_tail_token_budget`, `model_thresholds` (`agent_init.py:1981`), `_config_context_length` (:1758), `_context_probed`/`_context_probe_persistable` (`turn_usage.py:171-172`), `last_compression_rough_tokens`, `_verify_compaction_cleared_threshold`, `_proactive_prune_rearm_tokens`, `_flush_scan_cursor_invalidated`, `_compression_attempt_*` |
 | bounded-hook thread name reuse | — | — | `plugins_dispatch.py:333` | held |
-| `os._exit` on every gateway/CLI exit | — | — | `gateway/run.py:6034-6078`, `hermes_cli/main.py:97` | held |
+| `os._exit` on every gateway exit and on `hermes -z` one-shot exits (the interactive CLI returns normally) | — | — | `gateway/run.py:6034-6078`, `hermes_cli/main.py:97` | held |
 | fresh structural clones to on_turn_complete (strings shared) | — | — | `conversation_loop.py:1018-1026`, :1338 | held |
 | sessions row created after on_session_start | — | — | `run_agent.py:313-343`, `agent_init.py:2144` | held |
 | PluginManager per home / force reload | — | — | `plugins.py:1715`, :1294 | held |

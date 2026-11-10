@@ -365,6 +365,19 @@ def test_toolset_is_production_registration_under_effective_config(stores, quest
     assert delivery.dispatch("lcm_expand_query", {}, None, delivery.schemas(engine)).startswith('{"error"')
 
 
+def test_toolset_serves_recall_guidance_v2(stores, question):
+    from hermes_lcm.engine import LCMEngine
+    stores.build(question)
+    with stores.engine(question) as (engine, _):
+        engine._config.recall_guidance = "v2"
+        served = {s["function"]["name"]: s["function"] for s in delivery.schemas(engine)}
+        production = {s["name"]: s for s in LCMEngine.get_tool_schemas(
+            SimpleNamespace(_config=engine._config, _omitted_tool_names=set))}
+    assert served["lcm_recall"] == production["lcm_recall"]
+    assert "For questions that combine or compare" in served["lcm_recall"]["description"]
+    assert "anchor_store_id" in served["lcm_load_session"]["parameters"]["properties"]
+
+
 def test_tools_run_at_question_date(stores, question):
     from hermes_lcm import tools as production
     stores.build(question)
@@ -646,6 +659,7 @@ def test_codex_backend_isolated_text_call_and_accounting(tmp_path, monkeypatch):
         assert cmd[cmd.index("-s") + 1] == "read-only" and "web_search=disabled" in cmd
         disabled = {cmd[i + 1] for i, a in enumerate(cmd) if a == "--disable"}
         assert {"shell_tool", "unified_exec", "apps", "plugins", "multi_agent"} <= disabled
+        assert [cmd[i + 1] for i, a in enumerate(cmd) if a == "--enable"] == ["code_mode"]  # MCP tools need code mode
         cwd = Path(cmd[cmd.index("--cd") + 1])
         assert cwd.parent.parent == tmp_path / "run" / "harness" and not list(cwd.iterdir())
         assert Path(env["CODEX_HOME"], "auth.json").is_symlink() and env["HOME"] != str(Path.home())
@@ -945,5 +959,7 @@ def test_canary_fails_on_leak_violation_or_missing_mcp_and_cleans_up(tmp_path, q
         for client in (Harnessed(leak=True), Harnessed(violations=["Bash"]), Harnessed(mcp_calls=0)):
             with pytest.raises(RuntimeError, match="canary_failed"):
                 run.canary(args, client, "sha", question)
+        with pytest.raises(RuntimeError, match="reached no mcp__lcmx tool"):
+            run.canary(args, Harnessed(mcp_calls=0), "sha", question)
     assert not list(data.iterdir()) and not list(args.output.glob("fmp-canary-*"))
     assert "REF-" not in (args.output / "canary.json").read_text()

@@ -80,9 +80,15 @@ class Projection(NamedTuple):
     problems: list[str]  # persisted outputs kept as their preview, by reason
 
 
+SUBAGENT_DEPTH = 4  # folders below subagents/: workflow agents sit at workflows/<run-id>/ (#2562)
+
+
 def session_dir(transcript: Path) -> Path:
-    """``<session>/`` beside ``<session>.jsonl``; a subagent transcript lives inside it."""
-    return transcript.parent.parent if transcript.parent.name == "subagents" else transcript.with_suffix("")
+    """``<session>/`` beside ``<session>.jsonl``; a subagent transcript lives inside it, directly in ``subagents/`` or,
+    for a workflow agent, up to four folders below it (#2562)."""
+    depth = SUBAGENT_DEPTH + 1 if transcript.name.startswith("agent-") else 1  # a main transcript is never agent-*
+    folder = next((up for up in list(transcript.parents)[:depth] if up.name == "subagents"), None)
+    return folder.parent if folder is not None else transcript.with_suffix("")
 
 
 def results_dir(folder: Path) -> Path | None:

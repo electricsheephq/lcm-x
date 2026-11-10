@@ -2,12 +2,15 @@
 import argparse
 import contextlib
 import copy
+import fcntl
 import json
 import math
 import os
 import random
+import signal
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -22,9 +25,9 @@ from . import datasets, delivery, judges, models
 from .common import commit, digest_file, load_lcm, quiet, sha, utc, write_json
 from .models import (AGENTIC_TOOL_CAP, CLAUDE_AGREEMENT_JUDGE, CODEX_DEFAULT_JUDGE, CODEX_DEFAULT_READER,
                      CODEX_DISABLED, GLM_HOST, JUDGE_MAX_TOKENS, READER_MAX_TOKENS, READERS, REASONING, Backends, BudgetStopped,
-                     OpenRouter, Quota, Spend, ToolViolation, glm_key, harness, parse_spec)
+                     Codex, OpenRouter, Quota, Spend, ToolViolation, glm_key, harness, parse_spec)
 from .score import delivery_identity, percentile, score
-from .stores import Stores
+from .stores import RecallOptionError, Stores, parse_recall_options
 
 
 def parser():
@@ -42,6 +45,8 @@ def parser():
     p.add_argument("--summaries", choices=("none", "deterministic"), default="none")
     p.add_argument("--store-text", choices=("speaker-prefix", "plain", "name-date"), default="speaker-prefix")
     p.add_argument("--hit-label", choices=("speaker", "role"), default="speaker")
+    p.add_argument("--recall-option", action="append", default=[], metavar="KEY=VALUE",
+                   help="repeatable recall_ config override for canary/answer/judge; ignored during store building")
     p.add_argument("--embed-cache", type=Path)
     p.add_argument("--store-root", type=Path, required=True)
     p.add_argument("--output", type=Path, required=True)
@@ -56,6 +61,7 @@ def parser():
     p.add_argument("--agreement-fraction", type=float, default=0.1)
     p.add_argument("--agreement-seed", type=int, default=1189)
     p.add_argument("--workers", type=int, default=4, help="concurrent questions per backend")
+    p.add_argument("--codex-home", type=Path, help="existing absolute leased Codex home (requires --workers 1)")
     p.add_argument("--quota-stop", type=float, default=95.0, help="Codex weekly used percent that stops new questions")
     p.add_argument("--quota-ledger", type=Path, help="shared quota state (default: <output>/quota.json)")
     p.add_argument("--max-spend", type=float)
@@ -110,7 +116,9 @@ def estimate(args, n):
 
 
 def switches(args):
-    return {**({"include_adversarial": True} if getattr(args, "include_adversarial", False) else {}),
+    return {**({"recall_options": args.recall_options} if getattr(args, "recall_options", None)
+               and args.command != "build-stores" else {}),
+            **({"include_adversarial": True} if getattr(args, "include_adversarial", False) else {}),
             **({"delivery_unit": "session", "delivery_budget": 16000}
                if getattr(args, "delivery_unit", "hits") == "session" else {}),
             "store_text": getattr(args, "store_text", "speaker-prefix"),
@@ -198,11 +206,69 @@ def canary(args, client, dataset_sha, q):
         # Positive control: in MCP mode the reader must reach the lcmx tools, or the run proves nothing.
         results[-1]["passed"] &= mode != "mcp" or results[-1]["mcp_calls"] > 0
     write_json(args.output / "canary.json", {"at": utc(), "results": results, "versions": versions(), **switches(args)})
+    if any(r["mode"] == "mcp" and not r["mcp_calls"] for r in results):
+        raise RuntimeError(CANARY_NO_MCP)
     if not all(r["passed"] for r in results):
-        raise RuntimeError("canary_failed")
+        raise RuntimeError(CANARY_FAILED)
+
+
+CANARY_NO_MCP = "canary_failed: the reader reached no mcp__lcmx tool (Codex code mode off or MCP tools deferred?)"
+CANARY_FAILED = "canary_failed"
+
+
+@contextlib.contextmanager
+def codex_home_lock(home):
+    with os.fdopen(os.open(home / "holder.lock", os.O_CREAT | os.O_RDWR, 0o600), "r+") as holder:
+        try:
+            fcntl.flock(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise RuntimeError("codex home busy") from None
+        # SIGTERM unwinds normally: leased runs use one worker, which runs on the main thread, so the running model call
+        # is killed and reaped before the lock is released, and no further model call starts (models.STOPPING).
+        models.STOPPING.clear()
+        previous = signal.signal(signal.SIGTERM, _terminate) if threading.current_thread() is threading.main_thread() else None
+        try:
+            yield
+        finally:
+            if previous is not None:
+                signal.signal(signal.SIGTERM, previous)
+
+
+def _terminate(signum, frame):
+    if models.STOPPING.is_set():
+        return  # already unwinding: a second signal must not interrupt the cleanup that kills and reaps the child
+    models.STOPPING.set()
+    raise SystemExit(128 + signum)
+
+
+def inside_home(path, home):
+    resolved, home = Path(path).resolve(), Path(home).resolve()
+    return resolved == home or home in resolved.parents
 
 
 def execute(args):
+    home = getattr(args, "codex_home", None)
+    if home is not None and args.command in ("canary", "answer", "judge"):
+        if not home.is_absolute() or not home.is_dir():
+            raise ValueError("--codex-home must name an existing absolute directory")
+        if args.workers != 1:
+            raise ValueError("--codex-home requires --workers 1")
+        # Codex reads instructions and skills from CODEX_HOME that --ignore-user-config does not skip.
+        extra = [name for name in ("AGENTS.md", "AGENTS.override.md") if (home / name).exists()]
+        extra += [f"skills/{p.name}" for p in sorted((home / "skills").glob("*")) if p.name != ".system"] \
+            if (home / "skills").is_dir() else []
+        if extra:
+            raise ValueError("--codex-home holds instructions or skills a reader would load: " + ", ".join(extra))
+        for path in (args.output, args.store_root):
+            if inside_home(path, home):
+                raise ValueError("--output and --store-root must be outside --codex-home")
+    leased = home is not None and args.command in ("canary", "answer", "judge")
+    lease = codex_home_lock(home) if leased else contextlib.nullcontext()
+    with lease:
+        _execute(args)
+
+
+def _execute(args):
     if not 1 <= args.workers <= 64:
         raise ValueError("invalid worker count")
     if args.command in ("answer", "canary"):
@@ -223,6 +289,8 @@ def execute(args):
     if commit(args.lcmx_repo).endswith("-dirty") and not args.allow_dirty:
         raise ValueError("LCM-X checkout has uncommitted changes")
     lme = load_lcm(args.lcmx_repo)
+    args.recall_options = parse_recall_options(getattr(args, "recall_option", []))
+    store_options = {"recall_options": args.recall_options} if args.recall_options else {}
     questions, dataset_sha, ids_sha, excluded = datasets.load(
         args.data, args.dataset, lme, args.question_ids, args.include_adversarial)
     ids_sha = ids_sha or sha(json.dumps([q.qid for q in questions]).encode())
@@ -231,7 +299,8 @@ def execute(args):
     if args.command == "canary":
         questions = questions[:1]
     if args.command in ("build-stores", "canary", "answer"):
-        store = Stores(args.store_root, args.config, args.lcmx_repo, dataset_sha, lme, args.summaries, args.embed_cache, args.store_text)
+        store = Stores(args.store_root, args.config, args.lcmx_repo, dataset_sha, lme, args.summaries, args.embed_cache, args.store_text,
+                       **store_options)
         seen = set()
         for q in questions:
             if q.store_id not in seen:
@@ -248,7 +317,10 @@ def execute(args):
             raise ValueError("OpenRouter is opt-in: pass --max-spend and --spend-ledger")
         openrouter = OpenRouter(Spend(args.spend_ledger, args.max_spend))
     quota = Quota(args.quota_ledger or args.output / "quota.json", args.quota_stop)
-    client = Backends(args.output, quota, specs(args), openrouter)
+    backend_options = {}
+    if getattr(args, "codex_home", None) is not None and any(parse_spec(s)[0] == "codex" for s in specs(args)):
+        backend_options["codex"] = Codex(args.output, quota, codex_home=args.codex_home)
+    client = Backends(args.output, quota, specs(args), openrouter, **backend_options)
     try:
         if args.command == "canary":
             canary(args, client, dataset_sha, questions[0])
@@ -261,7 +333,7 @@ def execute(args):
                 arm.output = args.output / f"{config}-{args.delivery}" if args.paired_config else args.output
                 arm.output.mkdir(parents=True, exist_ok=True)
                 arm_store = store if config == args.config else Stores(args.store_root, config, args.lcmx_repo,
-                    dataset_sha, lme, args.summaries, args.embed_cache, args.store_text)
+                    dataset_sha, lme, args.summaries, args.embed_cache, args.store_text, **store_options)
                 if config != args.config and args.command == "answer":
                     for q in questions:
                         arm_store.build(q)
@@ -275,9 +347,16 @@ def run_jobs(jobs, workers):
     prepared = [next(job) for job in jobs]
     if len(jobs) == 1:
         started = time.monotonic()
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            for row in pool.map(*prepared[0][:2]):
+        if workers == 1:
+            # On the main thread, a SIGTERM interrupts the wait on the running model call itself (subprocess.run
+            # kills and reaps the child) before the lease is released. In a pool thread the call ran to completion
+            # while the main thread unwound, which can take minutes.
+            for row in map(*prepared[0][:2]):
                 jobs[0].send(row)
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                for row in pool.map(*prepared[0][:2]):
+                    jobs[0].send(row)
         prepared[0][2]["active_s"] += time.monotonic() - started
     else:
         start = random.Random(1189).randrange(len(jobs))
@@ -313,7 +392,8 @@ def run(args, client, questions, dataset_sha, ids_sha, excluded, store):
             "start_utc": utc(), "end_utc": None, "spend": 0, "status": "running"}
         if harness(args.reader):
             manifest.update(harness={"versions": versions(), "codex_disabled_features": list(CODEX_DISABLED),
-                "codex_sandbox": "read-only; isolated CODEX_HOME and HOME; --ignore-user-config --ignore-rules",
+                "codex_sandbox": ("read-only; leased CODEX_HOME, isolated HOME" if getattr(args, "codex_home", None) is not None
+                                  else "read-only; isolated CODEX_HOME and HOME") + "; --ignore-user-config --ignore-rules",
                 "claude": "isolated CLAUDE_CONFIG_DIR, --tools '' --strict-mcp-config, PreToolUse deny hook",
                 "agentic": "harness-native loop over mcp_reader, sufficiency stop = harness, cap "
                            f"{AGENTIC_TOOL_CAP} counted tool calls"},
@@ -331,6 +411,8 @@ def run(args, client, questions, dataset_sha, ids_sha, excluded, store):
         write_json(manifest_path, manifest)
     else:
         manifest = json.loads(manifest_path.read_text())
+        if manifest.get("recall_options", {}) != getattr(args, "recall_options", {}):
+            raise RecallOptionError("judging run identity mismatch: recall_options")
         if manifest.get("include_adversarial", False) != getattr(args, "include_adversarial", False):
             raise ValueError("judging run identity mismatch: include_adversarial")
         if delivery_identity(manifest) != delivery_identity(switches(args)):
@@ -343,6 +425,9 @@ def run(args, client, questions, dataset_sha, ids_sha, excluded, store):
                            ("lcmx_commit", commit(args.lcmx_repo))):
             if manifest.get(key) != value:
                 raise ValueError("judging run identity mismatch")
+    home_manifest = manifest.get("harness", manifest)
+    mode_key = "codex_home_mode" if args.command == "answer" else "judge_codex_home_mode"
+    home_manifest[mode_key] = "leased" if getattr(args, "codex_home", None) is not None else "symlink"
     manifest.setdefault("endpoint_hosts", {}).update({s: GLM_HOST for s in specs(args) if parse_spec(s)[0] == "glm"})
     timing = {"active_s": 0.0}
     if args.command == "answer":
@@ -519,10 +604,20 @@ def main():
             execute(args)
     except Exception as exc:
         import traceback
-        write_json(args.output / "failure.json", {"error": type(exc).__name__, "at": utc(),
+        # Only harness canary/option diagnostics are shown; other exception text may carry corpus content.
+        reason = str(exc) if isinstance(exc, RecallOptionError) or (
+            isinstance(exc, RuntimeError) and str(exc) in (CANARY_NO_MCP, CANARY_FAILED)) else None
+        message = "FMP failed: " + type(exc).__name__ + (f" ({reason})" if reason else "") + " (no corpus logged)"
+        home = getattr(args, "codex_home", None)
+        if home is not None and inside_home(args.output, home):
+            # A rejected output inside the leased home is never written, not even with the failure record.
+            print(message, file=sys.stderr)
+            return 1
+        write_json(args.output / "failure.json", {"error": type(exc).__name__, **({"reason": reason} if reason else {}),
+            "at": utc(),
             "frames": [{"file": Path(f.filename).name, "line": f.lineno, "function": f.name}
                        for f in traceback.extract_tb(exc.__traceback__)]})
-        print("FMP failed: " + type(exc).__name__ + " (no corpus logged)", file=sys.stderr)
+        print(message, file=sys.stderr)
         return 1
     return 0
 

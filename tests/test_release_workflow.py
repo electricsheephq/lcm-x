@@ -4,8 +4,8 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RELEASE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release.yml"
-IDENTITY_VERSION = "0.29.1"
-RC_TAG = "0.29.1-rc2"
+IDENTITY_VERSION = "0.30.0"
+RC_TAG = "0.30.0-rc3"
 RELEASE_NOTES = REPO_ROOT / ".github" / "release-notes" / f"v{RC_TAG}.md"
 
 
@@ -105,13 +105,13 @@ def test_release_candidate_notes_cover_only_the_merged_release_scope():
     section_headers = [line for line in lines if line.startswith("## ")]
 
     assert notes.startswith(f"# v{RC_TAG} — ")
-    assert any(header.startswith("## Changes since v0.29.0") for header in section_headers)
+    assert any(header.startswith("## Changes since v0.29.1") for header in section_headers)
     assert any(header.startswith("## Qualification") for header in section_headers)
     assert any(header.startswith("## Known issues") for header in section_headers)
     assert "## On by default in this release" in section_headers
     assert "## Upgrade" in section_headers
     assert "**BREAKING.**" not in notes  # the v0.24.0 rename stays documented in README
-    # Curated and bounded; the longest rc body so far (v0.24.0-rc4) ran 165 lines.
+    # Curated and bounded; the longest rc body so far (v0.30.0-rc3) ran 169 lines. Keep the cap: trim, do not raise it.
     assert 45 <= len(lines) <= 170
     # Curated notes, never a pasted commit log: no one-line log entries or full `git log` blocks.
     one_line_log = re.compile(r"^\s*(?:[-*]\s+)?`?[0-9a-f]{7,40}`?\s")

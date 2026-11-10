@@ -144,7 +144,8 @@ from .message_analysis import (
 )
 from .fresh_tail import FreshTailBoundary, resolve_fresh_tail_boundary, tool_group_safe_end
 from .message_patterns import compile_message_patterns, matches_message_pattern
-from .aux_session import AuxiliarySessionMixin, DelegateChildMixin
+from . import aux_session as _aux_session
+from .aux_session import AuxiliarySessionMixin, DelegateChildMixin, drain_live_child_stores
 from .placeholder_ledger import PlaceholderLedgerMixin
 from .reconcile import _COMPACTION_COMMIT_PROOF_METADATA_PREFIX, ReconcileMixin, _PRESERVED_OBJECTIVE_CONTEXT_PREFIX
 from .reconcile import _HERMES_PRUNED_TOOL_PLACEHOLDER, _emission_identity, _strip_volatile_host_scaffolding
@@ -154,7 +155,7 @@ from .compaction import CompactionMixin
 from . import leaf_prep
 from .compaction_request import CompactionRequest
 from .compress_run import CompressRun
-from .identity_anchor import IdentityAnchorMixin, _raw_remainder
+from .identity_anchor import IdentityAnchorMixin, _ROTATION_LINEAGE_UNRECORDED, _raw_remainder
 from .host_uid import HostUidShadowMixin, _valid_uid
 from .host_uid_emit import carry_identity, identity_emit_enabled, record_absorbed_message, sync_cached_host_metadata
 from .store_complete import HiddenBacklog, StoreCompleteMixin
@@ -277,6 +278,8 @@ _EMBEDDING_SCHEMA_LOCK = threading.Lock()
 
 _EMBEDDING_RETIRE_TIMEOUT_S = 2.0
 _SESSION_END_BUSY_TIMEOUT_MS = 50
+# #2466's presence-window limit is not on main yet; bound this conflict scan independently.
+_COLD_TAIL_CONFLICT_SCAN_ROWS = 10_000
 _SESSION_DIAGNOSTIC_LOG_MAX = 4096
 _SHUTDOWN_COMPACTION_WAIT_MAX_S = 86400.0
 
@@ -5661,6 +5664,8 @@ class LCMEngine(
                 skip_unchanged=True,
             )
         except Exception as exc:  # lineage is best-effort; rotation still continues
+            self._rotation_lineage_unrecorded = getattr(self, "_rotation_lineage_unrecorded", set()) | {session_id}
+            _ROTATION_LINEAGE_UNRECORDED.add((os.path.realpath(str(self._db_path)), str(session_id)))  # survives clones in this process
             logger.warning(
                 "LCM rotation lineage write failed: session=%s predecessor=%s exception=%s",
                 session_id,
@@ -5783,6 +5788,8 @@ class LCMEngine(
         if getattr(getattr(self, "_config", None), "recall_delivery_unit", "hits") == "session":
             from .recall_session import session_schema
             schemas = [session_schema(s) for s in schemas]
+        from .schemas import recall_guidance_schemas
+        schemas = recall_guidance_schemas(schemas, getattr(getattr(self, "_config", None), "recall_guidance", "v1"))
         if disabled:
             return [s for s in schemas if s.get("name") not in disabled]
         return schemas
@@ -5829,7 +5836,7 @@ class LCMEngine(
         handler = handlers.get(name)
         if handler:
             return handler(args, engine=self,
-                           **{k: v for k, v in kwargs.items() if k in {"delivery_unit", "delivery_order", "adjacent_reply", "summary_event_time", "snippet_window_hits", "extra_entries"}})
+                           **{k: v for k, v in kwargs.items() if k in {"delivery_unit", "delivery_order", "adjacent_reply", "summary_event_time", "snippet_window_hits", "extra_entries", "later_statements", "session_hints", "recall_guidance"}})
         return json.dumps({"error": f"Unknown LCM tool: {name}"})
 
     def _database_path_source(self) -> str:
@@ -8758,10 +8765,10 @@ class LCMEngine(
                 self._ingest_ledger_attempt["recovery_probe"] = (
                     reconciled_existing_session and bool(bind_session_counts and bind_session_counts[0]))
                 cursor0_batch = (
-                    reconciled_existing_session and cursor == 0
+                    reconciled_existing_session and today == 0
                     and self._last_ingest_reconciliation.get("action") == "persisted batch"
                     and self._last_ingest_reconciliation.get("reason") == "persisted ambiguous delta"
-                    and self._last_ingest_reconciliation.get("cursor") == 0)
+                    or reconciled_existing_session and today == 0 and ledger_run["k"] > 0)
                 # #2029: a rotation child re-sent from cursor 0 without a commit proof (no reconciliation ran) stores
                 # its predecessors' rows again; annotate them against the recorded rotation chain.
                 # Only the unreconciled route gains the chain: #2305's reconciled route keeps its own-session targets.
@@ -10691,7 +10698,7 @@ class LCMEngine(
                 # FTS-only anchor under the floor would displace an eligible hit.
                 fts_anchor=False,
                 delivery_unit="hits",
-                delivery_order="score", adjacent_reply=False,
+                delivery_order="score", adjacent_reply=False, later_statements=0, session_hints=False, recall_guidance="v1",
                 snippet_window_hits=0, extra_entries=0,
                 summary_event_time=False,
             )
@@ -12259,11 +12266,14 @@ class LCMEngine(
             self._ingest_messages(tail["view"], allow_session_end_replay_proof=False, no_view=True, retried_tail=tail)
             # The host can still rewrite this view, so the next ingest finds its own cursor.
             self._ingest_cursor_needs_reconcile = True
-            if conflict is not None and not self._cold_tail_conflict_placed(tail, conflict, deadline=deadline):
+            if conflict is not None and (conflict is False or not self._cold_tail_conflict_placed(tail, conflict, deadline=deadline)):
                 tail["kept_on_conflict"] = True
                 self._ledger_count("ledger.tail.cold_unmatched")
+                if conflict is False:
+                    self._ledger_count("ledger.tail.cold_scan_capped")
                 if not tail.get("unmatched_warned"):
-                    logger.warning("LCM session-end cold tail conflicting stamp unplaced; retry pending")
+                    logger.warning("LCM session-end cold tail conflict scan capped; retry pending" if conflict is False else
+                                   "LCM session-end cold tail conflicting stamp unplaced; retry pending")
                     tail["unmatched_warned"] = True
                 return False
             return True
@@ -12271,19 +12281,50 @@ class LCMEngine(
         # check, so a retyped row never stands for the view's own.
         return self._retry_cold_tail_s3(tail, stamps=same, deadline=deadline)
 
+    def _cold_tail_ingest_drops(self, message):
+        """Whether ignore filtering excludes this incoming host row."""
+        return self._matches_ignore_message_patterns(message)
+
+    def _cold_tail_ingest_view(self, tail):
+        """Exclude host rows matching configured ignore patterns from the exit count."""
+        view = tail["view"]
+        if not self._compiled_ignore_message_patterns:
+            return view
+        kept = [message for message in view if not self._cold_tail_ingest_drops(message)]
+        return view if len(kept) == len(view) else kept
+
     def _cold_tail_one_conflict(self, tail):
-        """Return the sole unexplained user stamp conflict in an identity-matching prefix."""
+        """Return the sole unexplained user stamp conflict, None, or False if the scan caps."""
         view, session, home = tail["view"], tail["session_id"], tail["hermes_home"]
         stored = tail["store"].get_range(session, limit=len(view) + 1,
             conversation_id=_normalize_conversation_id_value(tail["conversation_id"]))
-        conflicts = []
-        for index, (row, message) in enumerate(zip(stored, view)):
-            if (self._session_end_prefix_compare_identity(row, session_id=session, hermes_home=home) !=
-                    self._session_end_prefix_compare_identity(message, session_id=session, hermes_home=home)):
+        # Extra pages are read only past stored rows the walk skipped; only they count toward the cap.
+        read, conflicts = 0, []
+        stored_index = index = 0
+        while stored and index < len(view):
+            if stored_index == len(stored):
+                if read >= _COLD_TAIL_CONFLICT_SCAN_ROWS:
+                    return False
+                stored = tail["store"].get_range(session, start_id=stored[-1]["store_id"] + 1,
+                    limit=min(1000, _COLD_TAIL_CONFLICT_SCAN_ROWS - read),
+                    conversation_id=_normalize_conversation_id_value(tail["conversation_id"]))
+                read, stored_index = read + len(stored), 0
+                continue
+            row, message = stored[stored_index], view[index]
+            if not self._session_end_rows_equal(row, message, session_id=session, hermes_home=home):
+                if self._cold_tail_ingest_drops(message):
+                    index += 1
+                    continue
+                elif self._matches_ignore_message_patterns(row, stored_row=True):
+                    stored_index += 1
+                    continue
                 return None
             stamp, seen = _normalize_observed_at(message.get("timestamp")), _normalize_observed_at(row.get("observed_at"))
-            if None not in (stamp, seen) and stamp != seen:
+            if (None not in (stamp, seen) and stamp != seen and not
+                    (self._cold_tail_ingest_drops(message) and self._matches_ignore_message_patterns(row, stored_row=True))):
                 conflicts.append((index, row, message, stamp))
+            stored_index += 1
+            index += 1
         if len(conflicts) != 1:
             return None
         index, row, message, stamp = conflicts[0]
@@ -12297,12 +12338,11 @@ class LCMEngine(
         _, message, stamp = conflict
         session, home, start = tail["session_id"], tail["hermes_home"], 0
         conversation = _normalize_conversation_id_value(tail["conversation_id"])
-        identity = self._session_end_prefix_compare_identity(message, session_id=session, hermes_home=home)
         while rows := tail["store"].get_range(session, start_id=start, limit=1000,
                 conversation_id=conversation):
             if any(_normalize_conversation_id_value(row.get("conversation_id")) == conversation and
                    _normalize_observed_at(row.get("observed_at")) == stamp and
-                   self._session_end_prefix_compare_identity(row, session_id=session, hermes_home=home) == identity
+                   self._session_end_rows_equal(row, message, session_id=session, hermes_home=home)
                    for row in rows):
                 return True
             if deadline is not None and time.monotonic() >= deadline:
@@ -12319,8 +12359,7 @@ class LCMEngine(
         conversation = _normalize_conversation_id_value(tail["conversation_id"])
         stored = tail["store"].get_range(session, limit=len(view) + 1, conversation_id=conversation)
         for row, message in zip(stored, view):
-            if (self._session_end_prefix_compare_identity(row, session_id=session, hermes_home=hermes_home) !=
-                    self._session_end_prefix_compare_identity(message, session_id=session, hermes_home=hermes_home)):
+            if not self._session_end_rows_equal(row, message, session_id=session, hermes_home=hermes_home):
                 return None
             stamp, seen = _normalize_observed_at(message.get("timestamp")), _normalize_observed_at(row.get("observed_at"))
             if stamps and None not in (stamp, seen) and stamp != seen:
@@ -12341,6 +12380,8 @@ class LCMEngine(
         with self._cold_tail_diagnostic_commit(tail["store"], session, ids):
             stored = self._cold_tail_stored(tail, stamps=stamps)
             conflict = self._cold_tail_one_conflict(tail) if stored is None or not stamps else None
+            if conflict is False:
+                stored = None
             if stored is not None and not stamps and conflict is not None:
                 if stored < len(view):
                     ids.extend(self._append_off_current_session_end_suffix(session, view[stored:], source=tail["source"],
@@ -12353,8 +12394,11 @@ class LCMEngine(
                 if conflict is not None:
                     tail["kept_on_conflict"] = True
                 self._ledger_count("ledger.tail.cold_unmatched")
+                if conflict is False:
+                    self._ledger_count("ledger.tail.cold_scan_capped")
                 if not tail.get("unmatched_warned"):
-                    logger.warning("LCM session-end cold tail prefix mismatch; retry pending")
+                    logger.warning("LCM session-end cold tail conflict scan capped; retry pending" if conflict is False else
+                                   "LCM session-end cold tail prefix mismatch; retry pending")
                     tail["unmatched_warned"] = True
                 return False
             if stored < len(view):
@@ -12454,12 +12498,13 @@ class LCMEngine(
             rows = tail["store"].get_range(session, start_id=start, limit=1000, conversation_id=conversation)
             if not rows:
                 break
-            stored.update((self._session_end_prefix_compare_identity(row, session_id=session, hermes_home=home),
+            stored.update((self._session_end_prefix_compare_identity(row, session_id=session, hermes_home=home, recover_markers=False),
                            _normalize_observed_at(row.get("observed_at"))) for row in rows
                           if _normalize_conversation_id_value(row.get("conversation_id")) == conversation)
             start = rows[-1]["store_id"] + 1
-        wanted = Counter((self._session_end_prefix_compare_identity(message, session_id=session, hermes_home=home),
-                          _normalize_observed_at(message.get("timestamp"))) for message in tail["view"])
+        stored_identities = {identity for identity, _ in stored}
+        wanted = Counter((self._session_end_counted_identity(message, stored_identities, session_id=session, hermes_home=home),
+                          _normalize_observed_at(message.get("timestamp"))) for message in self._cold_tail_ingest_view(tail))
         missing, available = 0, Counter()
         for (identity, stamp), amount in wanted.items():
             if stamp is not None:
@@ -12555,6 +12600,8 @@ class LCMEngine(
             return self._compaction_closing
 
     def shutdown(self):
+        # #2482: a live delegated child's in-flight or queued store needs this engine open; it is bounded.
+        drain_live_child_stores(_aux_session._LIVE_CHILD_SHUTDOWN_DRAIN_S)
         with self._compaction_gate:
             self._compaction_closing = True
         sender_capture.retire(self)

@@ -1209,6 +1209,64 @@ def test_a_witnessed_composite_is_a_visible_copy(tmp_path, relations, credited):
                                                                                        credited)
 
 
+@pytest.mark.parametrize("case,credited,visible", [
+    ("scaffold", [3], 1), ("stored-todo", [4], 1), ("repeated-part", [3], 1),
+    ("replay-link", [3], 2), ("distinct-parts", [5, 6], 2), ("partial-overlap", [7], 1),
+    ("later-part", [], 0), ("non-user-part", [], 0), ("expected-composite", [], 0),
+])
+def test_composite_consume_once_audit(tmp_path, case, credited, visible):
+    host, composites = turn(1), {3: [None, 1]}
+    stored = list(host)
+    if case == "stored-todo":
+        stored.append(("S1", dict(role="user", content=TODO, _ts=T0, _obs=T0)))
+        host = list(stored)
+        composites = {4: [3, 1]}
+    elif case in ("repeated-part", "replay-link"):
+        composites = {4: [None, 1], 3: [None, 1]}
+    elif case == "distinct-parts":
+        host += turn(2)
+        stored, composites = list(host), {6: [None, 3], 5: [None, 1]}
+    elif case == "partial-overlap":
+        host += turn(2) + turn(3)
+        stored, composites = list(host), {8: [None, 3, 5], 7: [None, 1, 3]}
+    elif case == "later-part":
+        composites = {3: [None, 4]}
+    elif case == "non-user-part":
+        composites = {3: [None, 2]}
+    texts = {i: m["content"] for i, (_s, m) in enumerate(stored, 1)}
+    if case == "later-part":
+        texts[4] = u("later")["content"]
+    relations = []
+    for sid, parts in sorted(composites.items()):
+        stored.append(("S1", {"role": "user", "content": "\n\n".join(
+            TODO if p is None else texts[p] for p in parts)}))
+    if case == "expected-composite":
+        stored[-1] = ("S1", dict(stored[-1][1], _ts=T0, _obs=T0))
+        host.append(stored[-1])
+    for sid, parts in composites.items():  # reverse relation order must not affect the winner
+        relations += [(sid, "composite_of", p, i) for i, p in enumerate(parts)]
+    if case == "later-part":
+        host.append(("S1", u("later")))
+        stored.append(host[-1])
+    replay = [(4, "possible_replay_of", 3)] if case == "replay-link" else []
+    outputs = []
+    for name, links in (("without", replay), ("with", replay + relations)):
+        path = tmp_path / name
+        path.mkdir()
+        outputs.append(Home(path, ONE, host, stored=stored, relations=links).run())
+    before, out = outputs
+    t = out["parity"]["totals"]
+    surplus = 0 if case == "expected-composite" else len(composites)
+    assert (t["composite_rows"], t["visible_surplus_rows"], t["silent_surplus_rows"]) == (
+        len(credited), visible, surplus - visible)
+    assert t["composite_store_ids"] == out["parity"]["lineages"]["S1"]["composite_store_ids"] == credited
+    assert before["m3"] == out["m3"]  # composite credit is never doubt; replay links still are
+    assert out["m3"]["store_ids"] == ([4] if replay else [])
+    assert before["parity"]["totals"]["composite_rows"] == 0
+    assert before["parity"]["totals"]["silent_surplus_rows"] == surplus - len(replay)
+    assert before["parity"]["totals"]["composite_store_ids"] == []
+
+
 def test_scaffold_provenance_metadata_never_clears_a_surplus_row(tmp_path):
     home = dup_home(tmp_path)
     con = sqlite3.connect(home.lcm)

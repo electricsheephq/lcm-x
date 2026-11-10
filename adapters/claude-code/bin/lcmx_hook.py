@@ -46,12 +46,14 @@ import hashlib
 import json
 import os
 import re
+import signal
 import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import lcmx_runtime  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # before stdin, so A7 allows it
+if __name__ != "__main__":
+    import lcmx_runtime  # noqa: E402
 
 _IMPORTS_MS = round((time.perf_counter() - _T0) * 1000, 1)
 
@@ -61,6 +63,8 @@ TYPE_CHECKING = False
 if TYPE_CHECKING:
     from typing import Any, Dict, Mapping, Optional, TextIO, Tuple
 
+DETACHED_DEADLINE_S = 30
+SYNC_LOCK_WAIT_S = 1.0  # a synchronous hook never waits longer than this for a detached writer's pointer lock
 MAX_PAYLOAD = 1024 * 1024
 PRECOMPACT_DEADLINE_S = 10
 LOG_ROTATE_BYTES = 5 * 1024 * 1024
@@ -70,6 +74,8 @@ EVENTS = frozenset({
     "SessionStart", "UserPromptSubmit", "PostToolBatch", "PostToolUse", "Stop", "StopFailure",
     "SubagentStop", "PreCompact", "PostCompact", "SessionEnd",
 })
+DETACHED_EVENTS = EVENTS - {"SessionStart", "PreCompact"}
+END_EVENTS = frozenset({"Stop", "StopFailure", "SubagentStop", "SessionEnd", "PreCompact"})
 # Registered "async" in hooks.json: Claude Code does not wait for these and may kill one at any
 # point, so they never probe the store lock (start_worker).
 ASYNC_EVENTS = frozenset({"PostToolBatch"})
@@ -90,6 +96,47 @@ def _within(value: Any, root: Path) -> Optional[Path]:
         return None
     resolved = path.resolve()
     return resolved if resolved.is_relative_to(root.resolve()) else None
+
+
+def _hashed(value: Any) -> Optional[str]:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:16] if isinstance(value, str) and value else None
+
+
+def _on_disk(path: str) -> Optional[bool]:
+    """True or False when the file is known to exist or not; None when the stat itself failed (unknown, never absent)."""
+    try:
+        os.stat(path)
+        return True
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    except OSError:
+        return None
+
+
+COMPACT_EVENTS = frozenset({"PreCompact", "PostCompact"})
+FACTS_CAP = 64
+
+
+def _merged_facts(record: Dict[str, Any], previous: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+    """The events (and compaction prompt ids) of every record that reached this pointer since the worker last claimed
+    it, so a record the pointer rules replace or keep out still counts for the audit (#2535)."""
+    seen = {record["event"]}
+    prompts = set()
+    if record["event"] in COMPACT_EVENTS or (record["event"] == "SessionStart" and record.get("source") == "compact"):
+        if record.get("prompt_id"):
+            prompts.add(record["prompt_id"])
+    if isinstance(previous, dict):
+        for name in previous.get("seen") or [previous.get("event")]:
+            if isinstance(name, str):
+                seen.add(name)
+        prompts.update(value for value in previous.get("compact_prompts") or () if isinstance(value, str))
+    facts = {"seen": sorted(seen), "compact_prompts": sorted(prompts)[-FACTS_CAP:],
+             # local GC seen on by any record stays on until the worker records it (#2503)
+             "local_gc": record.get("local_gc") is True or (isinstance(previous, dict) and previous.get("local_gc") is True)}
+    for key in ("transcript_seen", "agent_transcript_seen"):  # True once any record saw it; None (unknown) wins over False
+        values = [record.get(key), previous.get(key) if isinstance(previous, dict) else False]
+        facts[key] = True if True in values else (False if all(value is False for value in values) else None)
+    return facts
 
 
 def normalize(payload: Mapping[str, Any], environ: Mapping[str, str]) -> Dict[str, Any]:
@@ -120,6 +167,11 @@ def normalize(payload: Mapping[str, Any], environ: Mapping[str, str]) -> Dict[st
         # Claude Code's opt-in local GC deletes pre-compaction history from the transcript, so
         # capture cannot be lossless under it; the audit reports such sessions.
         "local_gc": environ.get("CLAUDE_CODE_TRANSCRIPT_LOCAL_GC") == "1",
+        # Facts the audit uses to tell a transcript never written from a lost one (#2535): a hash of the prompt id
+        # (no content) and the subagent type ("" for the compaction summarizer, kept apart from absent).
+        "prompt_id": _hashed(payload.get("prompt_id", payload.get("promptId"))),
+        "agent_type": _pick(payload, "agent_type", "agentType") if isinstance(
+            _pick(payload, "agent_type", "agentType"), str) else None,
     }
     if record["event"] not in EVENTS:
         record["problem"] = "unsupported_event"
@@ -154,36 +206,89 @@ def normalize(payload: Mapping[str, Any], environ: Mapping[str, str]) -> Dict[st
             record["problem"] = key + "_outside_projects"
             return record
         record[key] = str(path)
+    # Whether this hook found each transcript on disk (#2535): the audit expires a lineage as never written only when no
+    # hook of it ever did. One stat each; for a detached event it runs in the child.
+    for key in ("transcript_path", "agent_transcript_path"):
+        record[key.replace("_path", "_seen")] = _on_disk(record[key]) if record[key] else None
     if record["transcript_path"] is None:
         record["problem"] = "no_transcript_path"
     return record
 
 
-def spool(home: Path, record: Mapping[str, Any]) -> str:
-    """Atomically replace this session's (or subagent's) pointer record."""
+def spool(home: Path, record: Mapping[str, Any], *, wait_s: Optional[float] = None) -> str:
+    """Atomically replace this session's (or subagent's) pointer record.
+
+    ``wait_s`` bounds the wait for the pointer's lock (synchronous hooks): if a stalled detached writer of the same
+    session holds it that long, nothing is written and ``lock_busy`` is returned. That holder writes its own pointer,
+    and the worker this hook still starts sweeps every registered lineage, so the skip delays nothing."""
     directory = home / "spool"
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     identity = "\0".join([record["host"], record["session_id"], record.get("agent_id") or ""])
     key = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:32]
+    import fcntl
+    locks = home / "spool-locks"
+    locks.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with open(locks / key, "a") as lock:
+        if wait_s is None:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+        else:
+            give_up = time.monotonic() + wait_s
+            while True:
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= give_up:
+                        return "lock_busy"
+                    time.sleep(0.01)
+        return _spool_locked(directory, key, record)
+
+
+def _spool_locked(directory: Path, key: str, record: Mapping[str, Any]) -> str:
     record = dict(record)
+    unknown = False
+    try:
+        with open(directory / (key + ".json"), encoding="utf-8") as handle:
+            previous = json.load(handle)
+        unknown = not isinstance(previous, dict)  # JSON that is not a pointer object: unknown too (#2535)
+    except FileNotFoundError:
+        previous = None
+    except (OSError, ValueError):  # a pointer that cannot be read: its history is unknown, never "not seen" (#2535)
+        previous, unknown = None, True
+    facts = _merged_facts(record, previous)
+    if unknown:
+        facts.update({name: None for name in ("transcript_seen", "agent_transcript_seen") if facts[name] is not True})
+        facts["local_gc"] = True  # the lost history may have seen local GC on: no lossless claim (#2503)
     if record.get("event") == "SessionStart" and record.get("source"):
         record["start_source"] = record["source"]
         record["started_at"] = record.get("observed_at")
     else:  # a later hook of the session keeps how and when it started (a fork's copies predate it)
-        try:
-            with open(directory / (key + ".json"), encoding="utf-8") as handle:
-                previous = json.load(handle)
-        except (OSError, ValueError):
-            previous = None
+        # SessionStart is synchronous; children retain its fork provenance. Only the transcript
+        # names content; local_gc is session environment. The guard preserves end-event ordering.
+        if isinstance(previous, dict):
+            kept = None
+            if previous.get("event") in END_EVENTS and record["event"] not in END_EVENTS:
+                kept = "kept_end"
+            elif ((previous.get("event") in END_EVENTS) == (record["event"] in END_EVENTS)
+                    and previous.get("hook_started_ns", -1) > record.get("hook_started_ns", 0)):
+                kept = "stale"
+            if kept:  # the kept pointer still learns this record's facts
+                if facts != {name: previous.get(name) for name in facts}:
+                    _write_pointer(directory, key, {**previous, **facts})
+                return kept
         if isinstance(previous, dict) and previous.get("start_source"):
             record["start_source"] = previous["start_source"]
             record["started_at"] = previous.get("started_at")
+    _write_pointer(directory, key, {**record, **facts})
+    return "spooled"
+
+
+def _write_pointer(directory: Path, key: str, record: Mapping[str, Any]) -> None:
     temporary = directory / (".%s.%d.tmp" % (key, os.getpid()))
     descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
         json.dump(record, handle, sort_keys=True)
     os.replace(temporary, directory / (key + ".json"))
-    return "spooled"
 
 
 def _lock_held(lock: Path) -> bool:
@@ -296,6 +401,8 @@ def _log(home: Optional[Path], record: Mapping[str, Any], outcome: str, started:
         line = {"t": round(time.time(), 3), "event": record.get("event"), "host": record.get("host"),
                 "session": record.get("session_id"), "outcome": outcome,
                 "ms": round((time.monotonic() - started) * 1000, 1)}
+        if "blocking_ms" in record:
+            line.update(detached=True, blocking_ms=record["blocking_ms"])
         if steps is not None:
             line["t0"] = round(_T0_WALL, 3)
             line["phases"] = steps.end()
@@ -306,8 +413,10 @@ def _log(home: Optional[Path], record: Mapping[str, Any], outcome: str, started:
         pass
 
 
-def main(stdin: TextIO = sys.stdin, environ: Mapping[str, str] = os.environ) -> int:
-    started = time.monotonic()
+def main(stdin: TextIO = sys.stdin, environ: Mapping[str, str] = os.environ, *, detach: bool = False) -> int:
+    global lcmx_runtime
+    started, hook_started_ns = time.monotonic(), time.time_ns()
+    child, nofork, blocking_ms = False, "", None
     if environ.get("LCMX_CAPTURE", "").strip().lower() in OFF_VALUES:
         return 0
     steps = _Steps(_IMPORTS_MS)
@@ -317,7 +426,6 @@ def main(stdin: TextIO = sys.stdin, environ: Mapping[str, str] = os.environ) -> 
     home: Optional[Path] = None
     try:
         # A relative home setting gives None: nothing is written anywhere, not even the log.
-        home = lcmx_runtime.store_home(environ, "grok-build" if environ.get("GROK_SESSION_ID") else "claude-code")
         raw = stdin.read(MAX_PAYLOAD + 1)
         if len(raw) > MAX_PAYLOAD:
             outcome = "payload_too_large"
@@ -326,7 +434,51 @@ def main(stdin: TextIO = sys.stdin, environ: Mapping[str, str] = os.environ) -> 
         if not isinstance(payload, dict):
             outcome = "payload_not_object"
             return 0
+        if detach and _pick(payload, "hook_event_name", "hookEventName") in DETACHED_EVENTS and hasattr(os, "fork"):
+            blocking_ms = round((time.monotonic() - started) * 1000, 1)
+            ready = signal_ready = -1
+            try:
+                ready, signal_ready = os.pipe()
+                pid = os.fork()
+            except OSError:
+                nofork = "+nofork"
+                for fd in (ready, signal_ready):  # a pipe made before a failed fork
+                    if fd >= 0:
+                        os.close(fd)
+            else:
+                if pid:
+                    # Return only once the child has left the hook's group (or died), so a group kill right after the
+                    # hook returns cannot reach the writer. setsid does no I/O, so this wait is short.
+                    os.close(signal_ready)
+                    try:
+                        os.read(ready, 1)
+                    finally:
+                        os.close(ready)
+                    return 0
+                child = True  # set first: the child must always end in os._exit, never return into the caller
+                # Leave the hook's group and release Claude Code's pipes before anything that can touch disk.
+                os.close(ready)
+                try:
+                    os.setsid()
+                except OSError:
+                    pass  # unreachable for a fork child; carry on in the hook's group rather than lose the record
+                finally:
+                    os.close(signal_ready)  # the parent may return now
+                blocking_ms = round((time.monotonic() - started) * 1000, 1)  # through the handshake (one clock)
+                null = os.open(os.devnull, os.O_RDWR)
+                for fd in (0, 1, 2):
+                    os.dup2(null, fd)
+                os.close(null)
+                signal.signal(signal.SIGHUP, signal.SIG_IGN)
+                signal.alarm(DETACHED_DEADLINE_S)
+                try:  # test-only delay before spooling; a malformed value never costs the record
+                    delay_ms = float(environ.get("LCMX_TEST_HOOK_DELAY_MS", "0"))
+                except ValueError:
+                    delay_ms = 0
+                time.sleep(min(500, max(0, delay_ms)) / 1000)
+        import lcmx_runtime
         record = normalize(payload, environ)
+        record["hook_started_ns"] = hook_started_ns
         home = lcmx_runtime.store_home(environ, record["host"])  # camelCase payloads are Grok's too
         if home is None:
             return 0
@@ -337,16 +489,33 @@ def main(stdin: TextIO = sys.stdin, environ: Mapping[str, str] = os.environ) -> 
             outcome = "observed"  # never spooled, so it cannot replace a pending record
             return 0
         steps.begin("spool")
-        spool(home, record)
+        spooled = spool(home, record, wait_s=None if child else SYNC_LOCK_WAIT_S)
         deadline = PRECOMPACT_DEADLINE_S if record["event"] == "PreCompact" else 0
         outcome = start_worker(home, environ, deadline_s=deadline, probe=record["event"] not in ASYNC_EVENTS,
                                steps=steps)
+        if spooled != "spooled":
+            outcome += "+" + spooled
     except Exception as exc:  # noqa: BLE001 - a hook never fails the session
         outcome = "error:" + type(exc).__name__
     finally:
-        _log(home, record, outcome, started, steps)
+        try:
+            if not (detach and not child and blocking_ms is not None and not nofork):
+                if child:
+                    record["blocking_ms"] = blocking_ms
+                if home is None and "host" not in record:  # failed before the payload named its host: the environment's home
+                    try:
+                        import lcmx_runtime
+                        home = lcmx_runtime.store_home(environ, "grok-build" if environ.get("GROK_SESSION_ID")
+                                                       else "claude-code")
+                    except Exception:  # noqa: BLE001 - a home that cannot be resolved logs nothing, as before
+                        home = None
+                # A home the payload's host refused (a relative setting) stays None: nothing is written anywhere.
+                _log(home, record, outcome + nofork, started, steps)
+        finally:
+            if child:
+                os._exit(0)
     return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(detach=True))

@@ -76,7 +76,7 @@ def invalid(row, models):
 EXCLUDED = ("skipped", "not_run")  # skips: explicit denominators; not_run: spend stops (D7)
 IDENTITY = ("lcmx_commit", "harness_commit", "split_label", "dataset_sha256", "id_list_sha256", "judges",
             "agreement_judge", "summaries", "agreement_sample", "agreement_seed", "agreement_fraction",
-            "harness_tree_sha256", "toolset", "store_text", "hit_label", "include_adversarial")
+            "harness_tree_sha256", "toolset", "store_text", "hit_label", "include_adversarial", "recall_options")
 TOKEN_KEYS = ("input_tokens", "cached_input_tokens", "output_tokens", "reasoning_tokens", "wrapper_overhead_tokens")
 
 
@@ -128,6 +128,9 @@ def score(runs, output, allow_partial=False, pair_across_commits=False):
         unit, budget = delivery_identity(manifest)
         if (unit, budget) != ("hits", None):
             arm += f"/{unit}-{budget}"
+        if manifest.get("recall_options"):
+            arm += "/opt:" + ",".join(k + "=" + json.dumps(v, sort_keys=True, separators=(",", ":"))
+                                      for k, v in sorted(manifest["recall_options"].items()))
         if pair_across_commits:
             identity = manifest["lcmx_commit"]
             arm += "@" + (identity if identity.endswith("-dirty") else identity[:12])
@@ -138,7 +141,7 @@ def score(runs, output, allow_partial=False, pair_across_commits=False):
     if not sets or any(ids != sets[0] for ids in sets):
         raise ValueError("paired runs require identical question ids")
     for key in IDENTITY:
-        if key in ("store_text", "hit_label"):  # Experimental arm axes, compared within cross-commit pairs.
+        if key in ("store_text", "hit_label", "recall_options"):  # Experimental arm axes, compared within cross-commit pairs.
             continue
         if pair_across_commits and key in ("lcmx_commit", "toolset"):
             continue
@@ -225,7 +228,9 @@ def score(runs, output, allow_partial=False, pair_across_commits=False):
     for left, right in itertools.combinations(arms, 2):
         if pair_across_commits and (manifests[left]["lcmx_commit"] == manifests[right]["lcmx_commit"] or
                 delivery_identity(manifests[left]) != delivery_identity(manifests[right]) or any(
-                manifests[left].get(key) != manifests[right].get(key) for key in ("config", "delivery", "reader", "store_text", "hit_label"))):
+                manifests[left].get(key, {} if key == "recall_options" else None) !=
+                manifests[right].get(key, {} if key == "recall_options" else None)
+                for key in ("config", "delivery", "reader", "store_text", "hit_label", "recall_options"))):
             continue
         # An error in either arm (reader error, budget or tool violation) removes the question
         # from both arms: the paired tests compare answers, not failure rates.

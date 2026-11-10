@@ -56,9 +56,26 @@ logger = logging.getLogger(__name__)
 SERVER_NAME = "lcm-x"
 # Newest first; an unknown client version is answered with the newest we speak.
 PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
+def _reader_grep_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """lcm_grep as the reader serves it (#2225): no history default, payload search in any session scope."""
+    schema = copy.deepcopy(schema)
+    properties = schema["parameters"]["properties"]
+    properties["content_scope"].pop("default", None)
+    properties["content_scope"]["description"] = (
+        "Content stores to search. Omitted (the reader's default): raw messages first (summaries too only with "
+        "session_scope='current'), then, when they return fewer than limit, saved tool outputs (externalized "
+        "payloads) of this store, matched as a literal phrase. 'history': raw messages only (and summaries with "
+        "session_scope='current'). 'externalized': saved tool outputs only. 'both': both. Saved-output search "
+        "works with session_scope 'all' or 'session'; session_scope='current' stays history-only.")
+    properties["externalized_refs"]["description"] = (
+        "Optional saved-output ref filenames to search. Valid only with content_scope='externalized' or 'both'. "
+        "Each ref must be a payload of this store in the requested session scope.")
+    return schema
+
+
 READER_TOOLS = {
     "lcm_recall": schemas.LCM_RECALL,
-    "lcm_grep": schemas.LCM_GREP,
+    "lcm_grep": _reader_grep_schema(schemas.LCM_GREP),
     "lcm_expand": schemas.LCM_EXPAND,
     "lcm_load_session": schemas.LCM_LOAD_SESSION,
     "lcm_describe": schemas.LCM_DESCRIBE,
@@ -68,13 +85,14 @@ READER_NOTE = (
     "session_scope='all', a node_id without session_id resolves in the node's own session, "
     "externalized payloads resolve from any session of this store when its payload folder is "
     "inside the profile, and ids may carry a '<store_uuid>:' prefix."
+    " Large tool outputs are searched too, and partial says when a search was cut."
 )
 PROFILE_ENV_EXTRA_KEYS = ("FASTEMBED_CACHE_PATH",)
 TOKENIZER_WAIT_S = 30.0
 
 _QUALIFIED_ID = re.compile(r"([0-9a-f]{32}):(.*)", re.DOTALL)
-_SCALAR_ID_ARGS = ("store_id", "node_id", "session_id", "externalized_ref", "after_store_id")
-_INTEGER_ID_ARGS = frozenset({"store_id", "node_id", "after_store_id"})
+_SCALAR_ID_ARGS = ("store_id", "node_id", "session_id", "externalized_ref", "after_store_id", "anchor_store_id")
+_INTEGER_ID_ARGS = frozenset({"store_id", "node_id", "after_store_id", "anchor_store_id"})
 _LIST_ID_ARGS = ("seen_refs", "exclude_session_ids", "externalized_refs")
 # python-dotenv's grammar (Hermes' profile loader parses <home>/.env with it), applied one line at a time.
 _DOTENV_LINE_BREAK = re.compile(r"\r\n|\n|\r")
@@ -156,11 +174,16 @@ def disabled_tool_names(environ: MutableMapping[str, str] | None = None) -> set[
     return {part.strip() for part in raw.split(",") if part.strip()}
 
 
-def tool_definitions(disabled: set[str]) -> list[dict[str, Any]]:
+def tool_definitions(disabled: set[str], config: LCMConfig | None = None) -> list[dict[str, Any]]:
+    selected = list(READER_TOOLS.values())
+    if getattr(config, "recall_delivery_unit", "hits") == "session":
+        from .recall_session import session_schema
+        selected = [session_schema(s) for s in selected]
+    selected = schemas.recall_guidance_schemas(selected, getattr(config, "recall_guidance", "v1"))
     return [{"name": name, "description": schema.get("description", "") + READER_NOTE,
              "inputSchema": schema.get("parameters") or {"type": "object", "properties": {}},
              "annotations": {"readOnlyHint": True}}  # every reader tool only reads the store
-            for name, schema in READER_TOOLS.items() if name not in disabled]
+            for schema in selected if (name := schema["name"]) not in disabled]
 
 
 # -- Engine shim ----------------------------------------------------------------
@@ -489,7 +512,7 @@ def handle(reader: StoreReader, request: Any) -> dict[str, Any] | None:
             "serverInfo": {"name": SERVER_NAME, "version": _plugin_version()},
         }
     elif method == "tools/list":
-        result = {"tools": tool_definitions(reader.disabled)}
+        result = {"tools": tool_definitions(reader.disabled, reader.config)}
     elif method == "tools/call":
         text, is_error = reader.call(params.get("name"), params.get("arguments"))
         result = {"content": [{"type": "text", "text": text}], "isError": is_error}

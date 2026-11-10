@@ -11,10 +11,11 @@ from pathlib import Path
 
 import pytest
 
-from hermes_lcm import maintenance_scheduler
+from hermes_lcm import engine as engine_module, maintenance_scheduler
 from hermes_lcm.engine import LCMEngine
 from hermes_lcm.externalize import get_large_output_storage_dir, load_externalized_payload, extract_externalized_ref
 from hermes_lcm.host_uid import HOST_UID_COUNTER_KEY
+from hermes_lcm.ingest_content import _volatile_quarantined_assistant_placeholder
 from hermes_lcm.session_patterns import compile_session_patterns
 from hermes_lcm.store import MessageStore
 from tests.invariants.test_p1e_decided_tails import contents, history, queue, replay
@@ -22,6 +23,10 @@ from tests.test_issue_2055_ingest_ledger_writes import count, engines as engines
 from tests.test_host_uid_shadow import _m, _state_db
 from tests.test_host_uid_emit_carry import _ContainsPattern
 from tests.test_issue_671_stub_first_exit import tool_pair
+
+
+class PlaceholderHidesConflict(AssertionError):
+    """The exact #2474 shape, with the earlier occurrence silently lost."""
 
 
 def queue_cold(engine, monkeypatch, view=None, *, read="get_session_count", error=sqlite3.OperationalError,
@@ -1237,11 +1242,9 @@ def test_resumed_engine_resend_keeps_the_earlier_cold_occurrence(engines, monkey
         assert count(engine, "tail.cold_unmatched") == 1
         assert committed_rows(tail["store"].db_path, "S") == before
 
-
 @pytest.mark.parametrize("then", ["same", "older"])
 @pytest.mark.parametrize("shape", ["uidless", "uids", "two_conflicts", "tool_conflict", "same_reply_text",
-    "scaffold_row", "store_longer", pytest.param("ignored_row", marks=pytest.mark.xfail(strict=True, raises=AssertionError,
-        reason="#2247: known limit: an ignored row plus a stamp conflict takes the cold start; planned for v0.30.x (DECISION-1838 known limits)"))])
+    "scaffold_row", "store_longer", "ignored_row"])
 def test_noop_ingest_after_a_resumed_resend_keeps_the_earlier_occurrence(engines, monkeypatch, then, shape):
     engine = ignoring(engines()) if shape == "ignored_row" else engines()
     queued, resent = cold_resend_views(shape)
@@ -1261,13 +1264,337 @@ def test_noop_ingest_after_a_resumed_resend_keeps_the_earlier_occurrence(engines
         kept = engine._pending_session_tails == [tail]
         unmatched = count(engine, "tail.cold_unmatched")
         observed = [(stage, _row(row)) for stage, rows in (("noop", noop), ("retry", retry)) for row in rows]
-        # The configured ignore row is never stored; main drops the earlier Q occurrence's tail uncounted.
+        # The configured ignore row is never stored; the earlier Q occurrence stays pending and counted.
         expected = [(row["role"], row["content"], row["timestamp"]) for row in resent if row["content"] != "ignore"]
         fixed = [(stage, row) for stage in ("noop", "retry") for row in expected] + [("tail", True, True)]
         known = [(stage, row) for stage in ("noop", "retry") for row in expected] + [("tail", False, 0)]
         diagnostic = dict(noop=[_row(r) for r in noop], kept=kept, unmatched=unmatched, retry=[_row(r) for r in retry])
         _expect_stored_shape([*observed, ("tail", kept, unmatched >= 1 if kept else unmatched)], fixed, known,
                              f"#2247 known shape: {diagnostic}")
+
+
+@pytest.mark.parametrize("then", ["same", "older"])
+def test_ignored_row_without_a_stamp_conflict_takes_the_normal_path(engines, monkeypatch, then):
+    engine = ignoring(engines())
+    queued, resent = cold_resend_views("ignored_row")
+    resent[-1]["timestamp"] = queued[-1]["timestamp"]
+    with resumed_cold_resend(engine, monkeypatch, queued, resent) as (tail, _):
+        before = committed_rows(tail["store"].db_path, "S")
+        expected = [(m["role"], m["content"], m["timestamp"]) for m in queued if m["content"] != "ignore"]
+        assert [_row(row) for row in before] == expected
+        unmatched = count(engine, "tail.cold_unmatched")
+        engine.ingest(copy.deepcopy(resent if then == "same" else queued[:4]))
+        assert committed_rows(tail["store"].db_path, "S") == before
+        engine._retry_pending_session_tails()
+        assert not engine._pending_session_tails
+        assert count(engine, "tail.cold_unmatched") == unmatched
+        assert committed_rows(tail["store"].db_path, "S") == before
+        assert tail["view"] == queued
+
+
+def test_kept_ignored_row_conflict_exit_count_excludes_the_ignored_row(engines, monkeypatch, caplog):
+    engine = ignoring(engines())
+    queued, resent = cold_resend_views("ignored_row")
+    with resumed_cold_resend(engine, monkeypatch, queued, resent) as (tail, _):
+        before = committed_rows(tail["store"].db_path, "S")
+        engine.ingest(copy.deepcopy(resent))
+        engine._retry_pending_session_tails()
+        caplog.clear()
+        engine._warn_unflushed_session_tails("SQLite lock")
+        assert engine._pending_session_tails == [tail]
+        assert count(engine, "tail.cold_unmatched") >= 1
+        assert count(engine, "tail.unflushed") == 1
+        warning = [r.getMessage() for r in caplog.records if "after shutdown retry" in r.getMessage()]
+        assert len(warning) == 1 and "stamp conflict" in warning[0] and "unflushed=1" in warning[0]
+        assert committed_rows(tail["store"].db_path, "S") == before
+        assert tail["view"] == queued
+
+
+@pytest.mark.parametrize("noop", [False, True])
+def test_ignored_row_stored_before_patterns_keeps_the_conflict(engines, monkeypatch, noop, caplog):
+    engine = engines()
+    queued, resent = cold_resend_views("ignored_row")
+    engine.ingest(copy.deepcopy(queued[:3]))
+    ignoring(engine)
+    tail = queue_cold(engine, monkeypatch, queued, stored=queued[:3])
+    resumed = LCMEngine(config=engine._config, hermes_home=engine._hermes_home)
+    resumed._compiled_ignore_message_patterns = engine._compiled_ignore_message_patterns
+    try:
+        locker = sqlite3.connect(engine._store.db_path, isolation_level=None)
+        locker.execute("BEGIN IMMEDIATE")
+        try:
+            resumed.on_session_start("S", platform="cli", context_length=200_000, conversation_id="conv")
+        finally:
+            locker.rollback()
+            locker.close()
+        resumed.ingest(copy.deepcopy(resent))
+        before = committed_rows(tail["store"].db_path, "S")
+        assert [_row(row) for row in before] == [(m["role"], m["content"], m["timestamp"]) for m in resent]
+        if noop:
+            engine.ingest(copy.deepcopy(resent))
+            assert committed_rows(tail["store"].db_path, "S") == before
+        engine._retry_pending_session_tails()
+        caplog.clear()
+        engine._warn_unflushed_session_tails("SQLite lock")
+        assert engine._pending_session_tails == [tail]
+        assert tail.get("kept_on_conflict") and count(engine, "tail.cold_unmatched") >= 1
+        assert count(engine, "tail.unflushed") == 1
+        assert "stamp conflict" in caplog.text and "unflushed=1" in caplog.text
+        assert committed_rows(tail["store"].db_path, "S") == before
+        assert tail["view"] == queued
+    finally:
+        resumed.shutdown()
+
+
+@pytest.mark.xfail(strict=True, raises=PlaceholderHidesConflict,
+                   reason="#2474: a generated placeholder hides the cold-tail stamp conflict")
+@pytest.mark.parametrize("patterns", [False, True])
+def test_ignored_placeholder_in_view_keeps_the_conflict(engines, monkeypatch, patterns):
+    engine = engines()
+    if patterns:
+        engine._config.ignore_message_patterns = ["SECRET"]
+        engine._compiled_ignore_message_patterns = [_ContainsPattern("SECRET")]
+    queued, resent = cold_resend_views()
+    placeholder = _m("user", engine._ignored_active_replay_placeholder("SECRET"), 2.5)
+    queued.insert(2, placeholder)
+    resent.insert(2, dict(placeholder))
+    engine._remember_generated_ignored_placeholder_hash(engine._active_replay_placeholder_digest(placeholder["content"]))
+    with resumed_cold_resend(engine, monkeypatch, queued, resent, named_limit=True) as (tail, _):
+        before = committed_rows(tail["store"].db_path, "S")
+        expected = [(m["role"], m["content"], m["timestamp"]) for m in [*resent[:2], *resent[3:]]]
+        _expect_stored_shape([_row(row) for row in before], expected, expected, "setup")
+        engine.ingest(copy.deepcopy(resent))
+        noop = committed_rows(tail["store"].db_path, "S")
+        engine._retry_pending_session_tails()
+        retry = committed_rows(tail["store"].db_path, "S")
+        if noop != before or retry != before or tail["view"] != queued:
+            pytest.fail(f"unexpected #2474 stored rows or view: {noop!r}, {retry!r}, {tail['view']!r}")
+        _expect_placeholder_conflict_shape(engine, tail, noop, retry, expected)
+
+
+@pytest.mark.parametrize("patterns", ["added_after_resend", "resumed_without_patterns"])
+def test_pattern_free_resend_keeps_the_conflict_after_patterns_change(engines, monkeypatch, caplog, patterns):
+    engine = engines()
+    if patterns == "resumed_without_patterns":
+        ignoring(engine)
+    queued, resent = cold_resend_views("ignored_row")
+    tail = queue_cold(engine, monkeypatch, queued)
+    resumed = LCMEngine(config=engine._config, hermes_home=engine._hermes_home)
+    resumed._compiled_ignore_message_patterns = []
+    try:
+        locker = sqlite3.connect(engine._store.db_path, isolation_level=None)
+        locker.execute("BEGIN IMMEDIATE")
+        try:
+            resumed.on_session_start("S", platform="cli", context_length=200_000, conversation_id="conv")
+        finally:
+            locker.rollback()
+            locker.close()
+        resumed.ingest(copy.deepcopy(resent))
+        before = committed_rows(tail["store"].db_path, "S")
+        assert [_row(row) for row in before] == [(m["role"], m["content"], m["timestamp"]) for m in resent]
+        if patterns == "added_after_resend":
+            ignoring(engine)
+        engine._retry_pending_session_tails()
+        caplog.clear()
+        engine._warn_unflushed_session_tails("SQLite lock")
+        assert engine._pending_session_tails == [tail] and tail.get("kept_on_conflict")
+        assert count(engine, "tail.cold_unmatched") == 1
+        assert count(engine, "tail.unflushed") == 1
+        assert "stamp conflict" in caplog.text and "unflushed=1" in caplog.text
+        assert committed_rows(tail["store"].db_path, "S") == before
+        assert tail["view"] == queued
+    finally:
+        resumed.shutdown()
+
+
+@pytest.mark.parametrize("placeholder", [
+    pytest.param(True, marks=pytest.mark.xfail(strict=True, raises=PlaceholderHidesConflict,
+        reason="#2474: a generated quarantine placeholder hides the cold-tail stamp conflict"),
+        id="volatile_placeholder"),
+    pytest.param(False, id="plain_ignore"),
+])
+def test_volatile_placeholder_or_plain_ignore_keeps_the_conflict(engines, monkeypatch, caplog, placeholder):
+    engine = engines()
+    # This stand-in matches only the source text, not the placeholder's metadata.
+    engine._config.ignore_message_patterns = ["SECRET"]
+    engine._compiled_ignore_message_patterns = [_ContainsPattern("SECRET")]
+    queued, resent = cold_resend_views()
+    ignored = (_m("assistant", _volatile_quarantined_assistant_placeholder("SECRET", reason="loop"), 2.5)
+               if placeholder else _m("user", "SECRET", 2.5))
+    queued.insert(2, ignored)
+    resent.insert(2, dict(ignored))
+    if placeholder:
+        if (engine._matches_ignore_message_patterns(ignored) or
+                not engine._is_volatile_ignored_quarantine_placeholder(ignored, ignored["content"])):
+            pytest.fail("setup: expected generated quarantine text outside the ignore patterns")
+        digest = engine._active_replay_placeholder_digest(ignored["content"])
+        if not digest:
+            pytest.fail("setup: quarantine placeholder digest missing")
+        engine._remember_generated_ignored_placeholder_hash(digest)
+    with resumed_cold_resend(engine, monkeypatch, queued, resent, named_limit=True) as (tail, _):
+        before = committed_rows(tail["store"].db_path, "S")
+        expected = [(m["role"], m["content"], m["timestamp"]) for m in [*resent[:2], *resent[3:]]]
+        _expect_stored_shape([_row(row) for row in before], expected, expected, "setup")
+        engine.ingest(copy.deepcopy(resent))
+        noop = committed_rows(tail["store"].db_path, "S")
+        engine._retry_pending_session_tails()
+        retry = committed_rows(tail["store"].db_path, "S")
+        if noop != before or retry != before or tail["view"] != queued:
+            pytest.fail(f"unexpected #2474 stored rows or view: {noop!r}, {retry!r}, {tail['view']!r}")
+        _expect_placeholder_conflict_shape(engine, tail, noop, retry, expected)
+        if placeholder:
+            return  # A fixed shape must XPASS without another condition hiding it.
+        caplog.clear()
+        engine._warn_unflushed_session_tails("SQLite lock")
+        assert engine._pending_session_tails == [tail] and tail.get("kept_on_conflict")
+        assert count(engine, "tail.cold_unmatched") == 1
+        assert count(engine, "tail.unflushed") == 1
+        assert "stamp conflict" in caplog.text and "unflushed=1" in caplog.text
+        assert committed_rows(tail["store"].db_path, "S") == before
+        assert tail["view"] == queued
+
+
+def test_different_ignored_rows_on_both_sides_keep_the_conflict_with_anchor_off(engines, monkeypatch):
+    monkeypatch.setenv("LCM_IDENTITY_ANCHOR", "off")
+    engine = engines()
+    stored = [_m("user", "A", 1.), _m("user", "ignore-stored", 2.), _m("user", "Q", 6.)]
+    queued = [_m("user", "A", 1.), _m("user", "ignore-view", 3.), _m("user", "Q", 5.)]
+    tail = queue_cold(engine, monkeypatch, queued, stored=stored)
+    engine._config.ignore_message_patterns = ["ignore"]
+    engine._compiled_ignore_message_patterns = [_ContainsPattern("ignore")]
+    before = committed_rows(tail["store"].db_path, "S")
+    assert [_row(row) for row in before] == [(m["role"], m["content"], m["timestamp"]) for m in stored]
+    engine._retry_pending_session_tails()
+    assert engine._pending_session_tails == [tail] and tail.get("kept_on_conflict")
+    assert count(engine, "tail.cold_unmatched") >= 1
+    assert committed_rows(tail["store"].db_path, "S") == before
+    assert tail["view"] == queued
+
+
+@pytest.mark.parametrize("shape", ["stored_skips", "ignored_pair"])
+def test_paged_or_restamped_ignored_rows_keep_the_real_conflict(engines, monkeypatch, caplog, shape):
+    engine = engines()
+    a, q = _m("user", "A", 1.), _m("user", "Q", 6.)
+    if shape == "stored_skips":
+        stored = [a, _m("user", "ignore-1", 2.), _m("user", "ignore-2", 3.), q]
+        queued = [a, _m("user", "Q", 5.)]
+    else:
+        middle = history()[1:]
+        stored = [a, _m("user", "ignore", 2.5), *middle, q]
+        queued = [a, _m("user", "ignore", 2.6), *middle, _m("user", "Q", 5.)]
+    tail = queue_cold(engine, monkeypatch, queued, stored=stored)
+    ignoring(engine)  # These ignored rows were stored before patterns were configured.
+    before = committed_rows(tail["store"].db_path, "S")
+    assert [_row(row) for row in before] == [(m["role"], m["content"], m["timestamp"]) for m in stored]
+    engine._retry_pending_session_tails()
+    assert committed_rows(tail["store"].db_path, "S") == before
+    assert engine._pending_session_tails == [tail] and tail.get("kept_on_conflict")
+    assert count(engine, "tail.cold_unmatched") >= 1 and tail["view"] == queued
+    caplog.clear()
+    engine._warn_unflushed_session_tails("SQLite lock")
+    assert count(engine, "tail.unflushed") == 1
+    assert "stamp conflict" in caplog.text and "unflushed=1" in caplog.text
+    assert committed_rows(tail["store"].db_path, "S") == before
+
+
+@pytest.mark.parametrize("sibling", [False, True], ids=["same_session", "S3"])
+def test_cold_conflict_scan_cap_keeps_counts_and_warns(engines, monkeypatch, caplog, sibling):
+    engine = engines()
+    stored = [_m("user", "A", 1.), *[_m("user", f"ignore-{i}", 2. + i / 10) for i in range(6)],
+              _m("user", "Q", 6.)]
+    queued = [stored[0], _m("user", "Q", 5.)]
+    tail = queue_cold(engine, monkeypatch, queued, stored=stored)
+    ignoring(engine)
+    # The cap bounds the extra pages read past skipped stored rows; the first page is len(view) + 1, as on main.
+    monkeypatch.setattr(engine_module, "_COLD_TAIL_CONFLICT_SCAN_ROWS", 3)
+    before = committed_rows(tail["store"].db_path, "S")
+    assert [_row(row) for row in before] == [(m["role"], m["content"], m["timestamp"]) for m in stored]
+    pages, read = [], tail["store"].get_range
+
+    def observed(*args, **kwargs):
+        rows = read(*args, **kwargs)
+        pages.append((kwargs, len(rows)))
+        return rows
+
+    with monkeypatch.context() as patch:
+        patch.setattr(tail["store"], "get_range", observed)
+        assert engine._cold_tail_one_conflict(tail) is False
+    assert [size for _, size in pages] == [3, 3]
+    assert all(kwargs["conversation_id"] == "conv" for kwargs, _ in pages)
+    assert pages[1][0]["start_id"] == before[2]["store_id"] + 1
+    caplog.clear()
+    engine._retry_pending_session_tails(sibling=sibling)
+    assert engine._pending_session_tails == [tail] and tail.get("kept_on_conflict")
+    assert count(engine, "tail.cold_scan_capped") == count(engine, "tail.cold_unmatched") == 1
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert warnings == ["LCM session-end cold tail conflict scan capped; retry pending"]
+    assert committed_rows(tail["store"].db_path, "S") == before and tail["view"] == queued
+    engine._retry_pending_session_tails(sibling=sibling)
+    assert count(engine, "tail.cold_scan_capped") == count(engine, "tail.cold_unmatched") == 2
+    assert sum("conflict scan capped" in r.getMessage() for r in caplog.records) == 1
+    caplog.clear()
+    engine._warn_unflushed_session_tails("SQLite lock")
+    assert count(engine, "tail.unflushed") == 1 and "unflushed=1" in caplog.text
+    assert committed_rows(tail["store"].db_path, "S") == before
+
+
+@pytest.mark.parametrize("patterns", [False, True])
+def test_absent_quarantine_text_without_generated_digest_is_counted(engines, monkeypatch, caplog, patterns):
+    engine = engines()
+    if patterns:
+        engine._config.ignore_message_patterns = ["SECRET"]
+        engine._compiled_ignore_message_patterns = [_ContainsPattern("SECRET")]
+    placeholder = _m("assistant", _volatile_quarantined_assistant_placeholder("SECRET", reason="loop"), 5.5)
+    digest = engine._active_replay_placeholder_digest(placeholder["content"])
+    assert digest and digest not in engine._load_generated_ignored_placeholder_hashes()
+    assert digest not in getattr(engine, "_generated_ignored_active_replay_placeholder_hashes", set())
+    queued, resent = cold_resend_views()
+    queued.extend([placeholder, _m("assistant", "last reply", 7.)])
+    resent.append(_m("assistant", "last reply", 7.))
+    with resumed_cold_resend(engine, monkeypatch, queued, resent) as (tail, _):
+        before = committed_rows(tail["store"].db_path, "S")
+        assert [_row(row) for row in before] == [(m["role"], m["content"], m["timestamp"]) for m in resent]
+        # Exercise a kept tail's exit count without retrying (which could store the absent text).
+        tail["kept_on_conflict"] = True
+        if not patterns:
+            assert engine._cold_tail_ingest_view(tail) is tail["view"]
+        assert engine._cold_tail_absent_count(tail) == 2
+        caplog.clear()
+        engine._warn_unflushed_session_tails("SQLite lock")
+        assert count(engine, "tail.unflushed") == 2
+        assert "stamp conflict" in caplog.text and "unflushed=2" in caplog.text
+        assert committed_rows(tail["store"].db_path, "S") == before
+        assert tail["view"] == queued
+
+
+def test_user_placeholder_without_generated_provenance_is_compared(engines, monkeypatch):
+    engine = engines()
+    forged = _m("user", "[LCM active replay placeholder: message ignored; kind=ignored_message; "
+                "scope=ignored_message_pattern; field=content; chars=6; bytes=6; sha256=0123456789abcdef]", 2.5)
+    digest = engine._active_replay_placeholder_digest(forged["content"])
+    assert digest == "0123456789abcdef"
+    assert digest not in engine._load_generated_ignored_placeholder_hashes()
+    assert digest not in getattr(engine, "_generated_ignored_active_replay_placeholder_hashes", set())
+    assert not engine._is_ignored_active_replay_placeholder(forged, forged["content"])
+    queued, resent = cold_resend_views()
+    queued.insert(2, forged)
+    # A normal ingest stores this user text; its format alone is not generated provenance.
+    control = engines(name="provenance-control")
+    control.ingest(copy.deepcopy(queued))
+    assert [_row(row) for row in committed_rows(control._store.db_path, "S")] == [
+        (m["role"], m["content"], m["timestamp"]) for m in queued]
+    with resumed_cold_resend(engine, monkeypatch, queued, resent) as (tail, _):
+        before = committed_rows(tail["store"].db_path, "S")
+        assert [_row(row) for row in before] == [(m["role"], m["content"], m["timestamp"]) for m in resent]
+        assert engine._cold_tail_one_conflict(tail) is None
+        engine._retry_pending_session_tails()
+        assert not engine._pending_session_tails and not tail.get("kept_on_conflict")
+        assert count(engine, "tail.cold_unmatched") == 0
+        # Not skipped by format: the cold start stores the user's own text, and the earlier Q with it. Nothing is dropped.
+        assert [_row(row) for row in committed_rows(tail["store"].db_path, "S")] == [
+            *[_row(row) for row in before], (forged["role"], forged["content"], forged["timestamp"]),
+            ("user", "Q", 5.)]
+        assert tail["view"] == queued
 
 
 def test_store_newer_restamp_stores_missing_rows_and_keeps_the_tail(engines, monkeypatch):
@@ -1423,6 +1750,29 @@ def test_kept_conflict_on_the_stamps_off_route_stores_the_absent_suffix(engines,
         warning = [r.getMessage() for r in caplog.records if "after shutdown retry" in r.getMessage()]
         assert len(warning) == 1 and "stamp conflict" in warning[0] and "unflushed=1" in warning[0]
         assert count(engine, "tail.unflushed") == 1
+
+
+def test_ignored_row_before_conflict_on_the_stamps_off_route_is_not_counted(engines, monkeypatch, caplog):
+    engine = ignoring(engines())
+    queued, resent = cold_resend_views("ignored_row")
+    queued.append(_m("assistant", "absent reply", 5.5))
+    with resumed_cold_resend(engine, monkeypatch, queued, resent) as (tail, resumed):
+        before = committed_rows(tail["store"].db_path, "S")
+        expected = [(m["role"], m["content"], m["timestamp"]) for m in resent if m["content"] != "ignore"]
+        assert [_row(row) for row in before] == expected
+        resumed.on_session_start("S9", platform="cli", conversation_id="c9")
+        rows = committed_rows(tail["store"].db_path, "S")
+        # The ignored row makes the raw prefix differ, so S3 conservatively retains the absent suffix too.
+        assert rows == before
+        assert engine._pending_session_tails == [tail] and tail.get("kept_on_conflict")
+        assert count(engine, "tail.cold_unmatched") == 1
+        caplog.clear()
+        engine._warn_unflushed_session_tails("SQLite lock")
+        assert count(engine, "tail.unflushed") == 2
+        assert "stamp conflict" in caplog.text and "unflushed=2" in caplog.text
+        assert committed_rows(tail["store"].db_path, "S") == rows
+        assert not committed_rows(tail["store"].db_path, "S9")
+        assert tail["view"] == queued
 
 
 def test_kept_conflict_exit_count_matches_each_stored_row_once(engines, monkeypatch, caplog):
@@ -1657,3 +2007,24 @@ def test_stored_shape_comparison(case):
     else:
         with pytest.raises(pytest.fail.Exception, match="first difference=.*lengths="):
             _expect_stored_shape(observed, fixed, known, "synthetic known shape", AssertionError)
+
+
+def _expect_placeholder_conflict_shape(engine, tail, noop, retry, expected):
+    kept = engine._pending_session_tails == [tail]
+    unmatched = count(engine, "tail.cold_unmatched")
+    observed = [(stage, _row(row)) for stage, rows in (("noop", noop), ("retry", retry)) for row in rows]
+    observed.append(("tail", kept, unmatched >= 1 if kept else unmatched))
+    rows = [(stage, row) for stage in ("noop", "retry") for row in expected]
+    _expect_stored_shape(observed, [*rows, ("tail", True, True)], [*rows, ("tail", False, 0)],
+                         f"#2474 known shape: {observed!r}", PlaceholderHidesConflict)
+
+
+def test_placeholder_shape_comparison():
+    fixed = [("user", "first"), ("assistant", "second"), ("tail", True, True)]
+    known = [*fixed[:2], ("tail", False, 0)]
+    with pytest.raises(PlaceholderHidesConflict, match="synthetic #2474"):
+        _expect_stored_shape(known, fixed, known, "synthetic #2474", PlaceholderHidesConflict)
+    _expect_stored_shape(fixed, fixed, known, "synthetic #2474", PlaceholderHidesConflict)
+    for unexpected in ([fixed[0], *known], [known[1], known[0], *known[2:]]):
+        with pytest.raises(pytest.fail.Exception, match="first difference=.*lengths="):
+            _expect_stored_shape(unexpected, fixed, known, "synthetic #2474", PlaceholderHidesConflict)

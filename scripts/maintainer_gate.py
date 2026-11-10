@@ -49,7 +49,7 @@ TURN_PATH_FILES = {
     "__init__.py", "assembly_plan.py", "aux_session.py", "bypass.py", "codex_routing.py", "compaction.py",
     "compaction_policy.py", "compaction_request.py", "compress_run.py",
     "dag.py", "engine.py", "escalation.py", "externalize.py", "extraction.py", "fresh_tail.py",
-    "host_uid.py", "host_uid_emit.py", "identity_anchor.py", "ingest_protection.py",
+    "host_rewrite.py", "host_uid.py", "host_uid_emit.py", "identity_anchor.py", "ingest_protection.py",
     "leaf_prep.py", "lifecycle_state.py", "message_analysis.py", "message_content.py", "placeholder_ledger.py",
     "prefix_matching.py", "reconcile.py", "sanitize.py", "sender_capture.py", "store_complete.py",
     "summary_attempt.py", "summary_input_clip.py", "summary_outcome.py", "survival_codec.py",
@@ -109,7 +109,6 @@ NON_TURN_PATH_FILES = {
     "expand_tools.py",  # Explicit lcm_describe/lcm_expand tool handlers only.
     "expansion_evidence.py",  # Explicit expansion context/provenance only.
     "guidance.py",  # Exported policy loader unused by default prompt.
-    "host_evidence.py",  # Unwired opt-in host evidence helper.
     "inactive_record.py",  # Inactive-plugin diagnostic receipts only.
     "inspect_tools.py",  # Explicit lcm_inspect tool handler; read-only metadata.
     "level3_repair.py",  # Explicit repair or read-only doctor scan.
@@ -117,7 +116,6 @@ NON_TURN_PATH_FILES = {
     "mcp_reader.py",  # Separate read-only `lcm-x mcp` process; never loaded by Hermes.
     "memory_tools.py",  # Default-off, read-only entity cards.
     "occurrence_time.py",  # Retrieval metadata; never durable turn occurrence.
-    "preanswer_evidence.py",  # Unwired opt-in pre-answer helper.
     "presets.py",  # Status/dry-run suggestions; no live config mutation.
     "query_view_store.py",  # Default-off query views; optional-schema verification.
     "readonly_store.py",  # Read-only store views for the `lcm-x mcp` reader only.

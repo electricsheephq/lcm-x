@@ -320,7 +320,7 @@ On the `main` line, output with all three opt-in flags enabled is:
 
 ```text
 Plugins (1):
-  ✓ hermes-lcm-x v0.29.1 (16 tools)
+  ✓ hermes-lcm-x v0.30.0 (16 tools)
 
 Provider Plugins:
   Context Engine: lcm-x
@@ -328,15 +328,26 @@ Provider Plugins:
 
 Older `v0.23.x` stable tags report `hermes-lcm v0.23.x (15 tools)` and
 engine `lcm`. Version text alone is not release proof; verify the loaded commit
-and tag. The current stable release is
-[v0.29.1](https://github.com/electricsheephq/lcm-x/releases/tag/v0.29.1)
-at `3a4a08ff501347a79669fab51444c471b09b551d` (2026-11-03); see [project status](project-status.md).
-The rollback target for v0.29.1 is `v0.29.0`; it adds no schema change. Take a
+and tag. `0.30.0` is the forward identity of the next minor release: the `v0.30.0-rc1`
+tag carries it first, the gauntlet runs at the last rc tag, and the GA tree must be
+that rc tree plus the GA release-notes file. The rollback target for this candidate
+is the latest stable release (`v0.29.2`); take a SQLite-safe backup and verify ordered messages and summary
+provenance through rollback and re-upgrade. The current stable release is
+[v0.29.2](https://github.com/electricsheephq/lcm-x/releases/tag/v0.29.2)
+at `261d41ea928eec3dc5b8db13c70f044392adf124` (2026-11-09); see [project status](project-status.md).
+The rollback target for v0.29.2 is `v0.29.1`; it adds no schema change. Take a
 SQLite-safe backup first, and compare ordered raw messages and summary provenance
-through upgrade, rollback and re-upgrade. v0.29.0 does not read the compaction
-escape record that v0.29.1 keeps in the existing session metadata.
+through upgrade, rollback and re-upgrade.
 
 For the previous release,
+[v0.29.1](https://github.com/electricsheephq/lcm-x/releases/tag/v0.29.1)
+at `3a4a08ff501347a79669fab51444c471b09b551d` (2026-11-03),
+the rollback target is `v0.29.0`; it adds no schema change. Take a SQLite-safe backup first, and
+compare ordered raw messages and summary provenance through upgrade, rollback and re-upgrade.
+v0.29.0 does not read the compaction escape record that v0.29.1 and later keep in the existing
+session metadata.
+
+For the release before that,
 [v0.29.0](https://github.com/electricsheephq/lcm-x/releases/tag/v0.29.0)
 at `c13dea3783bdbd1aab52d83dff5d009bfade0bd2` (2026-10-28),
 the rollback target is `v0.28.1`. Take a SQLite-safe backup first, and
@@ -587,9 +598,12 @@ Useful environment variables:
 | `LCM_RERANK_ENABLED` | `false` | Let `lcm_recall` ask Voyage to rerank its bounded fused candidate window. Failures preserve the incoming RRF order; `lcm_grep` is unaffected |
 | `LCM_RERANK_MODEL` | `rerank-2.5-lite` | Voyage reranker model used by `lcm_recall`; set `rerank-2.5` for the quality-oriented model |
 | `LCM_RECALL_DELIVERY_ORDER` | `score` | Config field `recall_delivery_order`; `time` delivers the same selected hits oldest to newest by host observation time, then untimed hits and summaries in score order. Ties keep score order. Applies only to model-called hits delivery; session delivery and internal recall keep their existing order. Unknown values warn and use `score`. |
+| `LCM_RECALL_GUIDANCE` | `v1` | `recall_guidance` (YAML `lcm.recall_guidance`; environment wins). `v2` adds guidance for questions spanning sessions and advertises `lcm_load_session` anchor parameters. With `detail="answer_ready"`, hits delivery reports `provenance.answer_ready.sessions_delivered` and `sessions_in_pool` (distinct sessions in the ranked pool plus delivered later-statement children). When fewer sessions were delivered than are in the pool, call again with `exclude_session_ids` set to the sessions already read. When a hit carries a `session_hint`, use it to read around that hit. Session delivery omits the hits-only provenance instruction. Values are stripped and lowercased; other values use `v1`. Internal recall is unchanged. See [retrieval tools](retrieval-tools.md). |
+| `LCM_RECALL_SESSION_HINTS` | `false` | Bool `recall_session_hints` (YAML `lcm.recall_session_hints`; environment wins). Adds a callable `session_hint` to answer-ready hits and summary leads, using the anchor row's own session ID so it survives summary rollover. Independent of guidance version; internal recall is unchanged. See [retrieval tools](retrieval-tools.md). |
 | `LCM_RECALL_SUMMARY_EVENT_TIME` | `false` | Config field `recall_summary_event_time` (also `lcm.recall_summary_event_time` in config.yaml; the environment wins). `true` gives model-called `lcm_recall` summary hits and session-delivery summary leads `event_time_start`/`event_time_end`: the earliest and latest host `observed_at` over all their source messages, never LCM's write time, omitted when no source has one. A late or failed read omits them for every summary and sets `provenance.summary_event_time_unavailable` (`deadline` or `read_error`). Internal recall keeps its existing output. |
 | `LCM_RECALL_ADJACENT_REPLY` | `false` | Bool config field `recall_adjacent_reply` (also `lcm.recall_adjacent_reply` in YAML; environment overrides YAML). In hits delivery, place the next stored same-session, same-conversation reply from the other role (user ↔ assistant, not older than its source) after the rank-1 raw message and any question among the top three. At most three single-row reads, under the recall deadline; tool/empty/subagent replies are skipped without walking further. Keeps the candidate pool and hit limit; existing citation, session-density and character caps still apply. Session delivery and internal recall skip it. Not a tool argument. |
 | `LCM_RECALL_SNIPPET_WINDOW_HITS` | `0` | `recall_snippet_window_hits` (env `LCM_RECALL_SNIPPET_WINDOW_HITS`, YAML `lcm.recall_snippet_window_hits`) is off by default (`0`). Set N (clamped to 25) to give the first N selected message-excerpt hits in `detail="snippets"`, from chunk (vector) or keyword search, windows of up to 2,400 characters centred on the matched chunk, else the keyword match, else the query match; shorter messages come back whole. Each window carries `snippet_window` offsets, lengths and truncation metadata. Summary hits, adjacent replies and hits without hydrated content keep their existing snippets. Ranking and selection are unchanged. Larger snippets can mean fewer hits fit under `response_char_cap`; the response then sets `response_cap_truncated: true`. A skipped window read keeps the original snippets and reports `snippet_window_skipped` (`deadline` or `read_error`). Proactive recall ignores this setting. `answer_ready` and `delivery_unit="session"` are unchanged. Invalid values (including bools and negatives) warn and use `0`; environment overrides YAML. |
+| `LCM_RECALL_LATER_STATEMENTS` | `0` | Integer `recall_later_statements` (YAML `lcm.recall_later_statements`; environment overrides YAML), clamped to 5; invalid/negative values warn and use 0. After final selection, place one later lexical match after each of the first N eligible message hits (chronological with time ordering), within scope and deadline, never after the call’s wall clock. Children need an exact ref unseen by the caller in delta mode and a citable ref in reference-strict mode. They bypass the per-session limit; a full window loses its last plain hit to the undelivered tail, never a linked source, another child, or the FTS-anchored hit. Children hydrate around their own match with their own allowance; expanded counts can exceed the expanded-hit limit. `response_char_cap` still applies. Read-only; source/child store-ID links and requested/searched/found/delivered/displaced/ms provenance, plus deadline/read errors. Internal recall and session delivery skip it. Default output and schemas stay unchanged. See [retrieval tools](retrieval-tools.md). |
 | `LCM_RECALL_EXTRA_ENTRIES` | `0` | `recall_extra_entries` (env `LCM_RECALL_EXTRA_ENTRIES`, YAML `lcm.recall_extra_entries`; environment overrides YAML) is off by default (`0`). The value is a cap (clamped to 25); a call appends at most min(cap, floor(L/2)) extras from ranks L+1.. in snippets-only hits delivery, where L is the call's delivered limit (`limit` clamped to 25): at cap 25, L=20 → 10 extras and L=25 → 12. Extras are not counted in `total_results`; the candidate pool and rerank window are still sized from L. Each extra has exactly `kind`, `store_id`, `session_id`, `event_time`, `window` (up to 300 characters centred like snippet windows), and `extra=true`; `event_time` is the row's own host time, or null for summaries, missing rows and rows whose time was carried from a neighbour; summaries and missing rows use their own snippet. Duplicates of full hits (including `duplicate_store_ids`) or earlier extras are skipped without refill. Full hits and existing envelope fields stay unchanged; extras are dropped from the end to fit the response cap. A skipped read reports `extra_entries_skipped` (`deadline` or `read_error`). Response-cap truncation of full hits or exhausted ranking gives no extras or reason flag. Internal recall, `answer_ready` and session delivery ignore it. Invalid values warn and use `0`. |
 | `LCM_RECALL_FTS_ANCHOR` | `true` | With two or more `lcm_recall` arms, keep the full-text arm's best match in the ranked window when fusion pushed it out (at most one session displaced; the hit keeps its own score). Reported under `provenance.fts_anchor` (`fired`, `position`, `delivered`). Embeddings-off output is unchanged; an `fts` weight of `0` turns it off; `false` restores the previous order. Managed (evaOS fleet) profiles can set it only after a provisioning release adds it to the environment allowlist. See [retrieval tools](retrieval-tools.md#fts-anchor-slot-lcm_recall_fts_anchor) |
 | `LCM_EMBEDDING_BACKFILL_BATCH_SIZE` | `32` | Documents claimed per backfill batch (`/lcm embed backfill` and state/chunk backfill). Non-positive or non-integer values fall back to the default. The effective value also clamps to the provider request-item ceiling — the lower of `LCM_EMBEDDING_MAX_BATCH_ITEMS` (normalized like the provider: non-positive means 1) and 1000 — so the dry-run estimate always matches real request splits |
@@ -772,8 +786,6 @@ Summary nodes carry no conversation-family key at this layer, so a rollup does
 not automatically span sessions across a `/new` rotation; after a rotation,
 retained higher-depth summaries are carried into the new session and remain
 retrievable, but per-period rollup rows are rebuilt under the new session scope.
-Build-cursor state is tracked per `(period_kind, scope)` so multiple scopes
-sharing one database never share a cursor.
 
 With `LCM_ENABLE_SLASH_COMMAND=true`, operators can inspect the current
 foreground session and request a bounded synchronous rebuild:
@@ -799,10 +811,10 @@ summarization.
 
 `lcm_inspect` always includes a `temporal_rollups` block with the enabled flag,
 ready/stale/building/failed counts for each period kind, oldest stale age,
-last-build cursors, and the last error. `/lcm rollups` renders the same data as a
+and the last error. `/lcm rollups` renders the same data as a
 table. Both paths are read-only and make no LLM calls. When the feature is off
 or its tables are empty, the block remains present with zero counts and null
-age/cursor/error values so monitoring consumers do not need a second schema.
+age/error values so monitoring consumers do not need a second schema.
 
 LCM is lossless by default: durable messages, FTS rows, summaries, and payloads
 remain untouched unless `LCM_SENSITIVE_PATTERNS_ENABLED=true` is explicitly set.

@@ -245,7 +245,20 @@ found model-card prefixes raised EmbeddingGemma 2 nDCG@10 by about 6% and pixie-
 
 The contributor reported that `embeddinggemma-2:270m` with Ollama's default batch size rejected inputs over about 2,000 tokens
 with HTTP 413 even with `num_ctx` 8192; raising `num_batch` to 8192 as well worked. LCM-X does not send Ollama `options`.
-Try setting both on the model with Modelfile `PARAMETER` entries; that method was not verified by the contributor.
+Setting both on a derived model with Modelfile `PARAMETER` entries works; the contributor verified it on Ollama 0.40.13
+([#1118](https://github.com/electricsheephq/lcm-x/issues/1118#issuecomment-6550418215)):
+
+```text
+FROM embeddinggemma-2:270m
+PARAMETER num_ctx 8192
+PARAMETER num_batch 8192
+```
+
+```bash
+ollama create embeddinggemma-2-8k -f Modelfile
+```
+
+Then set `LCM_EMBEDDING_MODEL=embeddinggemma-2-8k`.
 
 Ollama requests set `truncate: false`, so an input that exceeds the model's context fails loudly
 rather than being silently truncated to a misleading embedding. As with Voyage, an Ollama

@@ -5,6 +5,8 @@ import importlib.util
 from pathlib import Path
 import sys
 
+import pytest
+
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -93,3 +95,66 @@ def test_bundled_skill_has_valid_minimal_frontmatter_and_matching_tool_reference
     schemas_text = (REPO_ROOT / "schemas.py").read_text(encoding="utf-8")
     for tool_name in documented:
         assert f'"name": "{tool_name}"' in schemas_text
+
+
+@pytest.mark.parametrize('unit', ['hits', 'session'])
+def test_v2_served_identically_on_every_path(monkeypatch, unit):
+    import json
+    from types import SimpleNamespace
+    from hermes_lcm import mcp_reader
+    from hermes_lcm.config import LCMConfig
+    from hermes_lcm.engine import LCMEngine
+
+    golden = json.loads((REPO_ROOT / 'tests/fixtures/recall_anchor_main_golden.json').read_text())
+    guidance = _load_guidance_module()
+    plugin = sys.modules[guidance.__package__]
+    cfg = LCMConfig()
+    cfg.recall_delivery_unit = unit
+    shim = SimpleNamespace(_config=cfg, _disabled_tool_names=lambda: set(),
+                           _omitted_tool_names=lambda: set(), apply_identity_migration=lambda notice: None)
+    monkeypatch.setattr(LCMConfig, 'from_env', classmethod(lambda cls: cfg))
+    # register() imports within its independently loaded package.
+    engine_module = __import__(f'{plugin.__name__}.engine', fromlist=['LCMEngine'])
+    config_module = __import__(f'{plugin.__name__}.config', fromlist=['LCMConfig'])
+    monkeypatch.setattr(engine_module, 'LCMEngine', lambda **kw: shim)
+    monkeypatch.setattr(config_module.LCMConfig, 'from_env', classmethod(lambda cls: cfg))
+    monkeypatch.setattr(plugin, '_engine_took_slot', lambda *a: True)
+    for variant in ('v1', 'v2'):
+        cfg.recall_guidance = variant
+        engine = LCMEngine.get_tool_schemas(shim)
+        captured = []
+        ctx = SimpleNamespace(context_engine_tool_handlers_receive_messages=True,
+                              register_context_engine=lambda e: None,
+                              register_tool=lambda **kw: captured.append(kw['schema']))
+        plugin.register(ctx)
+        # Default invocation remains a backwards-compatible reader API.
+        reader = mcp_reader.tool_definitions(set(), cfg) if variant == 'v2' or unit == 'session' else mcp_reader.tool_definitions(set())
+        if variant == 'v1' and unit == 'hits':
+            assert json.dumps(engine) == golden['engine_schemas']
+            assert json.dumps(captured) == golden['engine_schemas']
+            assert json.dumps(reader) == golden['reader_schemas']
+        by_name = {s['name']: s for s in engine}
+        for name in ('lcm_recall', 'lcm_load_session'):
+            host = next(s for s in captured if s['name'] == name)
+            served = next(s for s in reader if s['name'] == name)
+            assert host == by_name[name]
+            assert served['description'] == host['description'] + mcp_reader.READER_NOTE
+            assert served['inputSchema'] == host['parameters']
+        if variant == 'v2':
+            description = by_name['lcm_recall']['description']
+            assert 'more_available' not in description
+            assert 'When a hit carries a session_hint, read around it using that hint.' in description
+            if unit == 'session':
+                assert 'provenance.answer_ready' not in by_name['lcm_recall']['description']
+            else:
+                assert ('With detail="answer_ready", check `provenance.answer_ready.sessions_delivered` '
+                        'against `provenance.answer_ready.sessions_in_pool`.') in description
+                assert ('If fewer sessions were delivered than are in the pool, call again with '
+                        '`exclude_session_ids` set to the sessions you have read.') in description
+            assert 'For questions that combine or compare' in by_name['lcm_recall']['description']
+            assert 'min_sessions' not in json.dumps(engine)
+            props = by_name['lcm_load_session']['parameters']['properties']
+            assert props['anchor_store_id']['type'] == 'integer'
+            assert 'call again without anchor_store_id' in props['anchor_store_id']['description']
+            assert props['before']['default'] == 6 and props['after']['default'] == 12
+            # The FMP bench path (bench/fmp/delivery.py) is checked in bench/fmp/tests, which has its dependencies.

@@ -522,12 +522,8 @@ def test_rotation_acp_trimmed_restamp_is_linked(build, caplog, monkeypatch):
     assert (copy, original) in replay_links(engine)
 
 
-@pytest.mark.issue(2390)
-def test_rotation_metadata_failure_degrades_to_durable_recovery(build, caplog, monkeypatch):
-    """Grok review thread on #2387: if the re-stamp helper raises, the #1523 durable recovery still runs.
-
-    The recovery links only rows of the current session, so a carried row whose original is in the predecessor
-    session stays unlinked, as on main before #2387 (#2392 review thread)."""
+def _run_with_a_failing_restamp_helper(build, caplog, monkeypatch):
+    """The re-stamp helper raises during the carried ingest; returns (engine, rows, whether the recovery ran)."""
     called = []
 
     def break_helper(engine, _view):
@@ -544,12 +540,38 @@ def test_rotation_metadata_failure_degrades_to_durable_recovery(build, caplog, m
         monkeypatch.setattr(engine, "_identity_anchor_link_durable_recovery", spy)
 
     engine, rows = run(build, caplog, mode="rotating", uids=False, restamp=True, before_ingest=break_helper)
-    assert called
+    return engine, rows, bool(called)
+
+
+@pytest.mark.issue(2490)
+def test_rotation_metadata_failure_degrades_to_durable_recovery(build, caplog, monkeypatch):
+    """Grok review thread on #2387: if the re-stamp helper raises, the #1523 durable recovery still runs.
+
+    The recovery links only rows of the current session, so a carried row whose original is in the predecessor
+    session stays unlinked, as on main before #2387 (#2392 review thread). That unlinked copy is #2490, a named
+    surplus limit (v0.30.0), pinned by the strict xfail below."""
+    engine, rows, recovered = _run_with_a_failing_restamp_helper(build, caplog, monkeypatch)
+    assert recovered
     assert sum(row["content"] == T for row in rows) == 2
     assert engine._ingest_failure_count == 0
-    # Pins today's behaviour on this injected fault, a KNOWN gap rather than the desired outcome: the second T is a
-    # silent copy. Update this expectation if the gap is closed.
-    assert replay_links(engine) == set()
+    # Any link that does form joins a T copy only to a T copy (the strict xfail below wants that one link).
+    t_ids = {row["store_id"] for row in rows if row["content"] == T}
+    assert all((source in t_ids) == (target in t_ids) for source, target in replay_links(engine))
+
+
+@pytest.mark.issue(2490)
+@pytest.mark.xfail(strict=True, raises=AssertionError,
+                   reason="#2490 named surplus limit (v0.30.0): when the re-stamp helper raises, the carried "
+                          "turn's second copy in the child session is stored with no link to its original")
+def test_rotation_metadata_failure_still_links_the_carried_copy(build, caplog, monkeypatch):
+    try:
+        engine, rows, recovered = _run_with_a_failing_restamp_helper(build, caplog, monkeypatch)
+    except AssertionError as error:
+        pytest.fail(f"setup: {error}")
+    copies = {row["session_id"]: row["store_id"] for row in rows if row["content"] == T}
+    if not recovered or set(copies) != {"S", "rotated"} or engine._ingest_failure_count:
+        pytest.fail(f"setup: recovery ran={recovered}, T copies by session={sorted(copies)}")
+    assert (copies["rotated"], copies["S"]) in replay_links(engine), "#2490 known shape: the carried copy is unlinked"
 
 
 @pytest.mark.issue(2390)
