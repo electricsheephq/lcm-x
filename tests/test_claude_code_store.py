@@ -3287,8 +3287,9 @@ _MATRIX_XFAIL = {  # cell id -> reason, for cells where main is wrong the same w
     **{f"named_early-{first}-copy-b{b}-{r}": "#2566 residual: a pending second path in the id-keyed cursor makes its "
        "path key consult the first lineage, so shared-uuid lines merge into the first's rows (main: one lineage)"
        for first in ("on_disk", "deleted") for b in (1, 2) for r in ("readable", "locked")},
-    **{f"named_early-forgotten-{second}-b{b}-{r}": "a same-id transcript never captured before the delete stays "
-       "forgotten with the deleted id, as on main" for second in ("new", "copy", "nested") for b in (1, 2)
+    **{f"named_early-forgotten-{second}-b{b}-{r}": "a same-id transcript the deleted lineage saw only as a pending "
+       "path stops being captured after the delete (forgotten through that path), as on main where both are one lineage"
+       for second in ("new", "copy", "nested") for b in (1, 2)
        for r in ("readable", "locked")}}
 
 
@@ -3338,9 +3339,10 @@ def test_the_reused_agent_id_scenario_matrix(tmp_path, home, hermes, old, first,
     elif first == "forgotten":
         store = _open(home, hermes)
         try:
-            gone = collections.Counter(store.connection.execute("SELECT session_id, content FROM messages").fetchall())
+            rows = store.connection.execute("SELECT session_id, content FROM messages").fetchall()
+            gone = {"deleted": {content for session, content in rows if session == bare},
+                    "kept": collections.Counter(content for session, content in rows if session != bare)}
             assert store.delete_session_messages(bare)
-            gone = {key: count for key, count in gone.items() if key[0] != bare}  # what the other sessions held
         finally:
             store.close()
     if not readable:
@@ -3382,11 +3384,23 @@ def test_the_reused_agent_id_scenario_matrix(tmp_path, home, hermes, old, first,
             sessions = {row[0] for row in conn.execute("SELECT session_id FROM messages WHERE content = ?", (base,))}
             assert len(sessions) == 2, "the second transcript's lines were merged into the first's rows"
         assert active == sorted(expected)  # one active version per transcript, the newest in arrival order
-        if first == "forgotten":  # a forgotten id stays gone
+        rows = conn.execute("SELECT session_id, content FROM messages WHERE session_id LIKE 's1/agent:%'").fetchall()
+        assert max(collections.Counter(rows).values(), default=1) == 1  # no row stored twice in one session
+        texts_of = {name: [e["message"]["content"] if isinstance(e["message"]["content"], str)
+                           else e["message"]["content"][0]["text"] for e in content[name] if "message" in e]
+                    for name in content}
+        alive = [name for name in ("first", "second") if not (first == "forgotten" and (name == "first" or second_forgotten))]
+        stored = {text for _session, text in rows}
+        for name in alive:  # every message of a transcript that is not forgotten has its row
+            wanted = texts_of[name] + (["late one", *texts] if name == "second" else [])
+            assert not [text for text in wanted if text not in stored], f"{name}: message rows missing"
+        if "second" in alive:
+            assert sum(1 for _session, text in rows if text == "late one") == 1
+        if first == "forgotten":  # a forgotten id stays gone, under any session
             assert not conn.execute("SELECT COUNT(*) FROM messages WHERE session_id = ?", (bare,)).fetchone()[0]
-            now = collections.Counter(conn.execute("SELECT session_id, content FROM messages").fetchall())
-            back = {key: count for key, count in now.items() if key[0] != bare and key in gone and count > gone[key]}
-            assert not back, f"deleted content came back: {len(back)}"
+            now = collections.Counter(text for _session, text in rows)
+            back = [text for text in gone["deleted"] if now[text] > gone["kept"][text]]
+            assert not back, f"deleted content came back: {back}"
     finally:
         store.close()
 
@@ -3408,8 +3422,8 @@ def test_a_locked_folder_never_aborts_the_worker_and_its_id_falls_back(tmp_path,
     first.parent.chmod(0)
     try:
         _record(_hook(), home, a, event="SubagentStop", agent_id="x1", agent_transcript_path=str(second))
-        for _ in range(2):
-            cc.run_worker(home, hermes_home=hermes, settle_s=0)  # finishes: no PermissionError escapes
+        for _ in range(2):  # finishes: no PermissionError escapes, and nothing is swallowed as a failure
+            assert cc.run_worker(home, hermes_home=hermes, settle_s=0)["failed"] == 0
         store = _open(home, hermes)
         try:
             assert cc.resolve(store, cc.Lineage("s1", "x1", second)).agent_id == "x1"
