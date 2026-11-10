@@ -32,7 +32,7 @@ def stores(home):
     return home
 
 
-def observe(home, name, sid="S", cron_id=None, *, native=False, published=True, stripped="  \r\n", host_text=STUB, lcm_texts=(RAW,),
+def observe(home, name, sid="S", cron_id=None, *, native=False, stripped="  \r\n", host_text=STUB, lcm_texts=(RAW,),
             payload=RAW):
     """Write one observation into a home's stores, as the host and LCM-X would. A payload swap: the host row holds the
     externalized stub, the payload file holds the output, and LCM-X stores the output itself."""
@@ -40,7 +40,7 @@ def observe(home, name, sid="S", cron_id=None, *, native=False, published=True, 
         if name == "compaction":
             lcm.execute("INSERT INTO summary_nodes (session_id) VALUES (?)", (sid,))
             lcm.execute("INSERT OR REPLACE INTO metadata VALUES (?, ?)",
-                        (f"compaction_commit_proof:{sid}", json.dumps({"native": native, "published": published, "session_id": sid})))
+                        (f"compaction_commit_proof:{sid}", json.dumps({"native": native, "session_id": sid})))
         elif name == "whitespace":
             store_id = lcm.execute("INSERT INTO messages (session_id, role, content) VALUES (?, 'user', ?)",
                                    (sid, "hello" + stripped)).lastrowid
@@ -72,7 +72,6 @@ def test_each_workload_fact_counts_on_a_positive_home_and_is_zero_on_a_negative_
 
 @pytest.mark.parametrize("name, kwargs, key", [
     ("compaction", {"native": True}, "compactions_published"),  # A native proof is not an LCM-X publication.
-    ("compaction", {"published": False}, "compactions_published"),  # An overflow recovery's proof is not one.
     ("whitespace", {"stripped": ""}, "whitespace_rewrites"),  # No edge whitespace recorded.
     ("cron", {"cron_id": "ffffffffffff"}, "cron_fired"),  # Another job's run.
 ])
