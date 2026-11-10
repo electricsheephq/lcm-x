@@ -3268,14 +3268,14 @@ def test_a_second_path_named_before_it_exists_after_the_first_vanished_is_stored
     _append(second, _REUSED["second"])
     _record(_hook(), home, a, event="SubagentStop", agent_id="x1", agent_transcript_path=str(second))
     for _ in range(3):
-        cc.run_worker(home, hermes_home=hermes, settle_s=0)
+        assert cc.run_worker(home, hermes_home=hermes, settle_s=0)["failed"] == 0
     store = _open(home, hermes)
     try:
         rows = store.connection.execute("SELECT session_id, content FROM messages WHERE session_id LIKE 's1/agent:%'").fetchall()
     finally:
         store.close()
     texts = collections.Counter(text for _session, text in rows)
-    assert max(texts.values()) == 1 and {"second task", "three"} <= set(texts)
+    assert texts == collections.Counter(["first task", "one", "second task", "two", "three"])
     assert {session for session, _text in rows} == {cc.row_session_id("s1", "x1")}
     assert not ca.audit(home)["verified"]
 
@@ -3349,15 +3349,15 @@ def test_an_intact_upgraded_store_audit_is_pinned(tmp_path, home, hermes):
     _append(paths[1], [dict(_entry("assistant", "sb4", [{"type": "text", "text": "four"}]), isSidechain=True)])
     _record(_hook(), home, a, event="SubagentStop", agent_id="x1", agent_transcript_path=str(paths[1]))
     for _ in range(2):
-        cc.run_worker(home, hermes_home=hermes, settle_s=0)
+        assert cc.run_worker(home, hermes_home=hermes, settle_s=0)["failed"] == 0
     _events, rows = _agent_rows(home, hermes)
     texts = collections.Counter(text for _session, text in rows)
-    assert max(texts.values()) == 1 and {"first task", "one", "second task", "two", "three", "four"} <= set(texts)
+    assert texts == collections.Counter(["first task", "one", "second task", "two", "three", "four"])
     report = ca.audit(home)
     assert report["verdict"] == "not verified; 1 lineages: a second transcript path holds rows; not matched"
     assert not report["ok"] and {name: n for name, n in report["failures"].items() if n} == {"lost": 3}
     keyed = {row["lineage"]: row for row in report["lineages"]}["claude-code:s1/agent:/workflows/wf_run1/agent-x1.jsonl"]
-    assert keyed["pending_lines"] == 0 and keyed["surplus"] == 0
+    assert keyed["pending_lines"] == 0 and keyed["surplus"] == 0 and keyed["failures"]["lost"] == 3  # all on the path lineage
 
 
 def test_an_inherited_forget_is_pinned_in_the_audit(tmp_path, home, hermes):

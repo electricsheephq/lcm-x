@@ -189,8 +189,8 @@ its modification time is the hook's write time.
   although every row is stored once. If the user then deletes the id-keyed child session after the
   second path got its key, capture stores nothing more, but that path session keeps its ledger
   events (duplicates and shared raw lines, each holding its raw line) and the audit still reads
-  them and lists that lineage unverified. They never re-enter messages or recall; deleting the path
-  session too removes them.
+  them and lists that lineage unverified. They never re-enter messages, which recall reads; deleting
+  the path session too removes them.
 - **One API response, several entries.** Claude Code writes each content block of a response as its
   own entry with its own uuid; the entries share `message.id`.
 - **Format** is internal and changes between versions, hence the per-type classes below and the
