@@ -7,6 +7,7 @@ session-file capture off until its own proof.
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import importlib.util
 import io
 import json
@@ -1615,3 +1616,62 @@ def test_a_failed_fork_leaks_no_handshake_descriptor(hook, env, tmp_path, monkey
     assert hook.main(io.StringIO(json.dumps(payload)), env, detach=True) == 0
     assert len(os.listdir("/dev/fd")) == before
     assert _log(env)[-1]["outcome"].endswith("+nofork")
+
+
+def test_records_carry_a_hashed_prompt_id_and_the_raw_agent_type(hook, env, tmp_path):
+    """#2535: the audit tells the compaction summarizer (agent_type "") from other subagents, and links it to its
+    compaction by prompt id. Only a hash of the id is kept; an absent type stays None, apart from ""."""
+    path = str(_transcript(tmp_path))
+    summarizer = hook.normalize({"hook_event_name": "SubagentStop", "session_id": "s1", "agent_id": "a1",
+                                 "agent_type": "", "prompt_id": "p-1", "transcript_path": path}, env)
+    assert summarizer["agent_type"] == "" and summarizer["prompt_id"] == hashlib.sha256(b"p-1").hexdigest()[:16]
+    plain = hook.normalize({"hook_event_name": "Stop", "session_id": "s1", "transcript_path": path}, env)
+    assert plain["agent_type"] is None and plain["prompt_id"] is None
+    assert "p-1" not in json.dumps(summarizer)
+    # What the hook found on disk: the session transcript exists, the summarizer's never does; no agent path is None.
+    assert summarizer["transcript_seen"] is True and summarizer["agent_transcript_seen"] is None
+    absent = hook.normalize({"hook_event_name": "SubagentStop", "session_id": "s1", "agent_id": "a1",
+                             "agent_transcript_path": str(Path(path).parent / "s1" / "subagents" / "agent-a1.jsonl"),
+                             "transcript_path": path}, env)
+    assert absent["agent_transcript_seen"] is False
+    assert hook._on_disk(str(tmp_path / "no-such-dir" / "x.jsonl")) is False
+    assert hook._on_disk(path + "/below-a-file.jsonl") is False  # NotADirectoryError
+    blocked = tmp_path / "blocked"
+    blocked.mkdir()
+    blocked.chmod(0)
+    try:
+        assert os.geteuid() == 0 or hook._on_disk(str(blocked / "x.jsonl")) is None  # a failed stat is unknown
+    finally:
+        blocked.chmod(0o700)
+
+
+def test_a_replaced_or_kept_pointer_keeps_every_event_seen(hook, env, tmp_path):
+    """#2535: the pointer rules replace a record or keep it out, but the claimed pointer still lists its event (and a
+    compaction's prompt id), so the audit never mistakes a session that had a turn for one with no prompt."""
+    from hermes_lcm.claude_code_store import claim_records
+    home = Path(env["LCMX_CC_HOME"])
+    base = hook.normalize({"hook_event_name": "Stop", "session_id": "s1",
+                           "transcript_path": str(_transcript(tmp_path))}, env)
+    for event in ("UserPromptSubmit", "Stop", "SessionEnd"):
+        hook.spool(home, {**base, "event": event})
+    assert hook.spool(home, {**base, "event": "PostToolUse"}) == "kept_end"
+    assert hook.spool(home, {**base, "event": "PreCompact", "prompt_id": "c1"}) == "spooled"
+    assert hook.spool(home, {**base, "event": "PostCompact", "prompt_id": "c2"}) == "kept_end"
+    record = claim_records(home)[0][1]
+    assert record["event"] == "PreCompact" and record["transcript_seen"] is True
+    assert record["seen"] == ["PostCompact", "PostToolUse", "PreCompact", "SessionEnd", "Stop", "UserPromptSubmit"]
+    assert record["compact_prompts"] == ["c1", "c2"]
+
+
+@pytest.mark.parametrize("values,merged", [((False, False), False), ((False, True), True), ((True, False), True),
+                                           ((None, False), None), ((False, None), None), ((None, True), True)])
+def test_the_pointer_keeps_whether_any_record_saw_the_transcript(hook, env, tmp_path, values, merged):
+    """#2535: once any hook found the transcript on disk the lineage is never expired; an unknown (an older hook) is
+    never turned into "absent"."""
+    from hermes_lcm.claude_code_store import claim_records
+    home = Path(env["LCMX_CC_HOME"])
+    base = hook.normalize({"hook_event_name": "SessionStart", "session_id": "s1",
+                           "transcript_path": str(_transcript(tmp_path))}, env)
+    for event, seen in zip(("SessionStart", "SessionEnd"), values):
+        hook.spool(home, {**base, "event": event, "transcript_seen": seen})
+    assert claim_records(home)[0][1]["transcript_seen"] is merged

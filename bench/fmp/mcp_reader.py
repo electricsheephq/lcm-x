@@ -97,7 +97,8 @@ def prepare(spec, stack):
                                  spec["question"]["question_date"], False, [], spec["question"]["store_id"],
                                  spec["question"]["session_map"])
     stores = Stores(spec["store_root"], spec["config"], spec["repo"], spec["dataset_sha"], lme,
-                    spec["summaries"], spec.get("embed_cache"), spec.get("store_text", "speaker-prefix"))
+                    spec["summaries"], spec.get("embed_cache"), spec.get("store_text", "speaker-prefix"),
+                    **({"recall_options": spec["recall_options"]} if spec.get("recall_options") else {}))
     engine, _ = stack.enter_context(stores.engine(question))
     if spec.get("delivery_unit", "hits") == "session":
         delivery.session_mode(engine)
