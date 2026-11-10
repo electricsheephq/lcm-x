@@ -8763,10 +8763,10 @@ class LCMEngine(
                 self._ingest_ledger_attempt["recovery_probe"] = (
                     reconciled_existing_session and bool(bind_session_counts and bind_session_counts[0]))
                 cursor0_batch = (
-                    reconciled_existing_session and cursor == 0
+                    reconciled_existing_session and today == 0
                     and self._last_ingest_reconciliation.get("action") == "persisted batch"
                     and self._last_ingest_reconciliation.get("reason") == "persisted ambiguous delta"
-                    and self._last_ingest_reconciliation.get("cursor") == 0)
+                    or reconciled_existing_session and today == 0 and ledger_run["k"] > 0)
                 # #2029: a rotation child re-sent from cursor 0 without a commit proof (no reconciliation ran) stores
                 # its predecessors' rows again; annotate them against the recorded rotation chain.
                 # Only the unreconciled route gains the chain: #2305's reconciled route keeps its own-session targets.

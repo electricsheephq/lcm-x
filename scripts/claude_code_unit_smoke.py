@@ -210,18 +210,30 @@ class Smoke:
         self.summary["hook_wall_ms"] = timings(wall)
 
     def hook_records(self) -> None:
-        records = [json.loads(line) for line in (self.home / "store/logs/hook.log").read_text().splitlines()]
+        end, records = time.monotonic() + 10, []
+        while len(records) < len(self.hook_events) and time.monotonic() < end:
+            try:
+                records = [json.loads(line) for line in (self.home / "store/logs/hook.log").read_text().splitlines()]
+            except (OSError, ValueError):
+                pass
+            time.sleep(0.05)
+        records.sort(key=lambda row: row.get("t0", row["t"]))
         require(len(records) == len(self.hook_events), "hook log must contain one record per hook run")
         measured: list[tuple[str, float]] = []
         for event, record in zip(self.hook_events, records):
             require(record.get("event") == event and record.get("host") == "claude-code",
                     "hook log event or host differs from the fired hook")
             outcome = record.get("outcome")
-            require(outcome in {"worker_started", "worker_running"}, f"{event}: {outcome}")
+            require(outcome.split("+")[0] in {"worker_started", "worker_running"} and
+                    all(part in {"kept_end", "stale"} for part in outcome.split("+")[1:]), f"{event}: {outcome}")
             require(isinstance(record.get("ms"), (int, float)) and math.isfinite(record["ms"])
                     and record["ms"] >= 0, f"{event}: invalid in-process timing")
+            blocking = record.get("blocking_ms", record["ms"])
+            require(isinstance(blocking, (int, float)) and math.isfinite(blocking) and blocking >= 0,
+                    f"{event}: invalid blocking timing")
             measured.append((event, record["ms"]))
         self.summary["hook_in_process_ms"] = timings(measured)
+        self.summary["hook_blocking_ms"] = timings([(row["event"], row.get("blocking_ms", row["ms"])) for row in records])
 
     def wait_worker(self, timeout: float = 5) -> None:
         lock = self.home / "store/capture.lock"

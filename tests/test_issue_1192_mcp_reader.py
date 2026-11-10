@@ -435,6 +435,10 @@ def test_t2_outputs_equal_a_normal_engine_byte_for_byte(fx, monkeypatch):
             # The store-id expansion of the s2 externalized row: the normal engine under the
             # reader's any-session policy, ordinary storage, no current session.
             any_session = name == "lcm_expand" and args.get("store_id") == fx.s2_tool_id
+            # #2225: a reader lcm_grep without content_scope also searches saved tool outputs of any
+            # session, by design; the normal engine runs the same call under the reader's policy.
+            any_session = any_session or (name == "lcm_grep" and "content_scope" not in args
+                                          and args.get("mode", "full_text") == "full_text")
             if any_session:
                 engine._reader_any_session = True
             try:
@@ -1058,7 +1062,13 @@ def test_t9_tools_list_honours_disabled_tools_and_production_schemas(monkeypatch
     assert [d["name"] for d in definitions] == FIVE
     for definition in definitions:
         production = getattr(schemas, definition["name"].upper())
-        assert definition["inputSchema"] == production["parameters"]
+        if definition["name"] == "lcm_grep":  # #2225: the reader states its own content_scope contract
+            served, base = definition["inputSchema"]["properties"], production["parameters"]["properties"]
+            assert {k for k in base if served[k] != base[k]} == {"content_scope", "externalized_refs"}
+            assert {k: v for k, v in definition["inputSchema"].items() if k != "properties"} == {
+                k: v for k, v in production["parameters"].items() if k != "properties"}
+        else:
+            assert definition["inputSchema"] == production["parameters"]
         assert definition["description"] == production["description"] + mcp_reader.READER_NOTE
         assert definition["annotations"] == {"readOnlyHint": True}  # #2180
     assert [d["name"] for d in mcp_reader.tool_definitions({"lcm_grep", "lcm_recall"})] == [
