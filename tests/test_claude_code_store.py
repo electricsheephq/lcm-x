@@ -2244,6 +2244,16 @@ def _table_place(where, kind):
     elif kind == "saved":
         (folder / "tool-results").mkdir(parents=True, exist_ok=True)
         (folder / "tool-results" / "toolu_9.txt").write_text("saved output\n")
+    elif kind in ("saved_symlink", "results_symlink"):  # capture reads neither: a symlinked file, or a symlinked folder
+        outside = where.parent.parent / "elsewhere"
+        outside.mkdir(parents=True, exist_ok=True)
+        (outside / "toolu_9.txt").write_text("saved output\n")
+        folder.mkdir(parents=True, exist_ok=True)
+        if kind == "results_symlink":
+            (folder / "tool-results").symlink_to(outside, target_is_directory=True)
+        else:
+            (folder / "tool-results").mkdir(exist_ok=True)
+            (folder / "tool-results" / "toolu_9.txt").symlink_to(outside / "toolu_9.txt")
     elif kind in ("subagent", "subagent_empty", "unreadable_subagents"):
         child = folder / "subagents" / "agent-y9.jsonl"
         child.parent.mkdir(parents=True, exist_ok=True)
@@ -2254,8 +2264,9 @@ def _table_place(where, kind):
     return None
 
 
-_PARENT_KINDS = ["lines", "empty", "saved", "subagent", "subagent_empty", "unreadable_subagents"]
-_HOLDS = {"lines", "saved", "subagent", "unreadable_subagents"}
+_PARENT_KINDS = ["lines", "empty", "saved", "saved_symlink", "results_symlink", "subagent", "subagent_empty",
+                 "unreadable_subagents"]
+_HOLDS = {"lines", "saved", "saved_symlink", "results_symlink", "subagent", "unreadable_subagents"}
 _TABLE = [(state, where, kind, where != "unnamed" and kind in _HOLDS)
           for state in ("pending", "captured") for where in ("followed", "named", "unnamed") for kind in _PARENT_KINDS
           if not (state == "captured" and where == "followed" and kind == "empty")]  # A exists: no empty file to add
