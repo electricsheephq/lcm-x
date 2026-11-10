@@ -622,3 +622,25 @@ def test_interior_closing_tag_in_preview_does_not_shorten_the_preview(host, loca
     path.rename(path.with_name("pruned-" + path.name))  # the changed result is only in the host's marker
     child.api_call(ctx, _view(changed), 2)
     assert len(child_rows(parent)) == 4  # the changed result is stored, as on main
+
+
+@pytest.mark.parametrize("location", ["spillover", "hermes-results"])
+@pytest.mark.parametrize("route", ["child-live", "child-end"])
+def test_2544_rewritten_file_behind_identical_marker_keeps_first_content_on_child_routes(host, location, route):
+    """Characterization of named limit #2544 on the delegated-child routes (review of 1e2eda46). The saved file is
+    rewritten in place with the same length and preview, so the marker text is unchanged: the marker rule calls it
+    the same row and the first-ingested content is kept. Main 7e67daf16 stored the replacement among its per-handover
+    duplicates (rows 3, 5, 6, 6, 8 against 3, 4, 4, 4, 6 here). No supported Hermes rewrites a saved file under the
+    same call id with the same size and the same first 1,500 characters."""
+    _, _, ctx, parent, child, engine = _setup(host, "own_engine")
+    path = _path(engine._hermes_home, location)
+    marker = _write_output(path)
+    child.api_call(ctx, _view(marker), 1)
+    changed = FULL_OUTPUT[:30] + "X" * (len(FULL_OUTPUT) - 30)
+    assert _write_output(path, changed) == marker  # same path, count and preview
+    view = _view(marker) + [{"role": "assistant", "content": "FINAL"}]
+    if route == "child-live":
+        child.api_call(ctx, view, 2)
+    child.end(engine, view)
+    restored = [engine._session_end_prefix_compare_value(r["content"], session_id="child") for r in child_rows(parent)]
+    assert FULL_OUTPUT in restored and changed not in restored and restored.count("FINAL") == 1  # #2544
