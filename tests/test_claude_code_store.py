@@ -6,6 +6,7 @@ Design: docs/claude-code-adapter.md.
 from __future__ import annotations
 
 import ast
+import collections
 import fcntl
 import gc
 import hashlib
@@ -2937,3 +2938,55 @@ def test_an_unreadable_set_aside_record_is_never_overwritten(tmp_path, home, her
     (home / "spool" / "readable.json").write_text("{}")
     cc.run_worker(home, hermes_home=hermes, settle_s=0)
     assert len(list((home / "spool").glob("*.failed"))) == 2 and not (home / "spool" / "readable.json").exists()
+
+
+# #2562 ruling: Claude Code reused one agent id in one real session (a direct and a workflow transcript, different
+# content, a few shared lines). Keys stay the id for GA; this pins what capture and the audit do today.
+_REUSED_SHARED = [{"type": "attachment", "uuid": f"sh{n}", "sessionId": "s1", "isSidechain": True,
+                   "attachment": {"type": "plan", "n": n}} for n in range(2)]
+_REUSED = {"first": _REUSED_SHARED + [dict(_entry("user", "fa1", "first task"), isSidechain=True),
+                                      dict(_entry("assistant", "fa2", [{"type": "text", "text": "one"}]), isSidechain=True)],
+           "second": _REUSED_SHARED + [dict(_entry("user", "sb1", "second task"), isSidechain=True),
+                                       dict(_entry("assistant", "sb2", [{"type": "text", "text": "two"}]), isSidechain=True),
+                                       dict(_entry("assistant", "sb3", [{"type": "text", "text": "three"}]), isSidechain=True)]}
+
+
+@pytest.mark.parametrize("hooks", ["both_alternating", "first_then_sweep", "sweep_only"])
+def test_a_reused_agent_id_is_pinned(tmp_path, home, hermes, hooks):
+    """(file lines, lines missing from the ledger, lines held more than once) per transcript, rows, and the verdict."""
+    from hermes_lcm import claude_code_audit as ca
+
+    a = _append(tmp_path / "projects" / "-work" / "s1.jsonl", CONVERSATION[:2])
+    agents = a.parent / "s1" / "subagents"
+    paths = {"first": _append(agents / "agent-x1.jsonl", _REUSED["first"]),
+             "second": _append(agents / "workflows" / "wf_run1" / "agent-x1.jsonl", _REUSED["second"])}
+    _record(_hook(), home, a)
+    order = {"both_alternating": ["first", "second", "first", "second"], "first_then_sweep": ["first"],
+             "sweep_only": []}[hooks]
+    for name in order:
+        _record(_hook(), home, a, event="SubagentStop", agent_id="x1", agent_transcript_path=str(paths[name]))
+        cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    for _ in range(2):
+        cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    store = _open(home, hermes)
+    try:
+        held = collections.Counter(row[0] for row in store.connection.execute(
+            "SELECT line_digest FROM capture_events WHERE source_kind = 'line'"))
+        rows = collections.Counter(row[0] for row in store.connection.execute(
+            "SELECT content FROM messages WHERE session_id = ?", (cc.row_session_id("s1", "x1"),)))
+    finally:
+        store.close()
+    seen = {}
+    for name, path in paths.items():
+        digests = [hashlib.sha256(line).hexdigest() for line in path.read_bytes().splitlines(keepends=True)]
+        seen[name] = (len(digests), sum(1 for d in digests if not held[d]), sum(1 for d in digests if held[d] > 1))
+    report = ca.audit(home)
+    assert report["unverified"] == ["claude-code:s1/agent:x1"] and not report["verified"]
+    if hooks == "both_alternating":  # nothing lost: each switch re-reads a file as a new generation, so its raw lines
+        # are held more than once; its message rows are stored once, both agents' under the one child session
+        assert seen == {"first": (4, 0, 4), "second": (5, 0, 5)}
+        assert dict(rows) == {"first task": 1, "one": 1, "second task": 1, "two": 1, "three": 1}
+        assert "a second transcript path holds rows" in report["verdict"]
+    else:  # the first path in sort order is taken; the second transcript's own lines are not captured separately
+        assert seen == {"first": (4, 0, 0), "second": (5, 3, 0)}
+        assert dict(rows) == {"first task": 1, "one": 1}

@@ -174,8 +174,11 @@ its modification time is the hook's write time.
   `agent-*.jsonl` up to four folders below `subagents/`, never through a symlink, each as its own
   child lineage of the session. Each run's `journal.jsonl` in that run folder is captured too, as
   child lineage `journal/<run-id>` with every line kept raw (`unknown_type`): some of its results
-  appear in no transcript. The `<session>/workflows/` folder holds run state and scripts, not
-  transcripts, so it is not read.
+  appear in no transcript. Its lines are workflow events (started, result, launched, failed), not
+  model-visible messages, so they become no message rows. The `<session>/workflows/` folder holds
+  run state and scripts, not transcripts, so it is not read. If Claude Code reuses an agent id
+  within one session, the two transcripts share one lineage: the audit reports the session
+  unverified, and the second transcript is not captured separately (#2566).
 - **One API response, several entries.** Claude Code writes each content block of a response as its
   own entry with its own uuid; the entries share `message.id`.
 - **Format** is internal and changes between versions, hence the per-type classes below and the
