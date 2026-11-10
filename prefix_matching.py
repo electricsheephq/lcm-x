@@ -243,8 +243,9 @@ class PrefixMatchingMixin:
                         arguments, parsed = json.loads(arguments), True
                     except ValueError:
                         pass
-                if parsed:
-                    arguments = json.dumps(restore(arguments), sort_keys=True, separators=(",", ":"), default=str,
+                if parsed:  # redact before sorting: a redacted key sorts by its redacted text, as stored
+                    arguments = redact_sensitive_value(restore(arguments), self._config, parse_json_strings=True)
+                    arguments = json.dumps(arguments, sort_keys=True, separators=(",", ":"), default=str,
                                            ensure_ascii=False)  # as the redactor writes JSON
                 else:  # text (invalid JSON or duplicate keys) compares stripped
                     arguments = arguments.strip()
