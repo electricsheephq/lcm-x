@@ -11,6 +11,7 @@ import re
 import sqlite3
 import threading
 import time
+import unicodedata
 from contextlib import closing, nullcontext
 from types import SimpleNamespace
 from datetime import datetime, timezone
@@ -104,7 +105,7 @@ from .search_query import (
 from .store import _normalize_observed_at, build_message_fts_spec
 from .vector_store import VectorStore, _interrupt_read_on_deadline
 from .config import effective_embedding_model, LCMConfig, embedding_provider_id, normalize_embedding_provider, profile_bound
-from .config import _recall_extra_entries, _recall_snippet_window_hits
+from .config import _recall_extra_entries, _recall_later_statements, _recall_snippet_window_hits
 
 if TYPE_CHECKING:
     from .engine import LCMEngine
@@ -3377,7 +3378,8 @@ def _lcm_recall_answer_ready_content(
                 if like_span is not None:
                     span = {"char_start": like_span[0], "char_end": sum(like_span)}
                     break
-        if not span and fts_arm_index is not None and fts_arm_index in entry.get("ranks", {}):
+        if not span and (hit.get("later_statement_of") is not None or
+                         fts_arm_index is not None and fts_arm_index in entry.get("ranks", {})):
             # Fusion may retain a chunk preview; use the FTS representation of
             # this same row when it is available, before the literal fallback.
             for candidate in [hit, *entry.get("_alternates", [])]:
@@ -4390,6 +4392,101 @@ def _lcm_recall_adjacent_reply(
     return placed, pairs, None
 
 
+def _lcm_recall_later_statements(engine, ordered, identity_rows, *, n, limit, query, seen_refs, fts_arm_index, deadline, excluded, allowed):
+    """Place one later lexical match per source, atomically and read-only."""
+    started, now = time.monotonic(), time.time()
+    info = dict(requested=n, searched=0, found=0, delivered=0, ms=0)
+    placed = [{**entry, "hit": dict(entry["hit"])} for entry in ordered]
+    seen = {sid for entry in ordered[:limit] for sid in
+            [entry["hit"].get("store_id"), *entry["hit"].get("duplicate_store_ids", [])]}
+    sources = [entry for entry in placed[:limit] if entry["hit"].get("store_id") is not None
+               and entry["hit"].get("kind") != "summary" and entry["hit"].get("node_id") is None
+               and entry["hit"].get("adjacent_to") is None]
+    def normalize(text):
+        return " ".join(unicodedata.normalize("NFKC", str(text or "")).casefold().split())
+    reason = None
+    try:
+        if time.monotonic() >= deadline:
+            raise TimeoutError
+        if any(s["hit"]["store_id"] not in identity_rows for s in sources):
+            raise OSError
+        hydrated = _lcm_recall_answer_ready_content(
+            engine, sources, query=query, expanded_limit=len(sources),
+            rows_by_id=identity_rows, fts_arm_index=fts_arm_index,
+        ) if seen_refs else {}
+        if seen_refs:
+            sources = [s for s in sources if (ref := recall_delivery._exact_ref(
+                s["hit"], hydrated.get(_hit_identity(s["hit"])))) is not None and ref not in seen_refs]
+        for source in sources[:n]:
+            hit = source["hit"]
+            row = identity_rows.get(hit["store_id"], {})
+            if not str(row.get("content") or "").strip():
+                continue
+            observed = _normalize_observed_at(row.get("observed_at"))
+            source_time = observed or _normalize_observed_at(hit.get("timestamp"))
+            if source_time is None:
+                continue
+            info["searched"] += 1
+            candidates, error = _lcm_recall_fts_arm(
+                engine, hit.get("_fts_snippet") or hit.get("snippet") or "",
+                candidate_limit=10, deadline=deadline, excluded_session_ids=excluded,
+            )
+            if error:
+                raise TimeoutError if time.monotonic() >= deadline or error.get("timeout") else OSError
+            candidates = [c for c in candidates if c["store_id"] not in seen
+                          and c.get("session_id") not in excluded
+                          and (allowed is None or c.get("session_id") in allowed)]
+            rows, reason = _lcm_recall_event_time_rows(
+                engine, [c["store_id"] for c in candidates], deadline=deadline,
+            ) if candidates else ({}, None)
+            if reason:
+                raise TimeoutError if reason == "deadline" else OSError
+            prior = [{"hit": {"store_id": sid}, "rrf_score": 0.0, "ranks": {}} for sid in seen if sid is not None]
+            fresh = [{"hit": c, "rrf_score": 0.0, "ranks": {}} for c in candidates]
+            texts = duplicate_identity_rows(engine, prior + fresh, deadline=deadline) if candidates else {}
+            if any(c["store_id"] not in texts or c["store_id"] not in rows for c in candidates):
+                raise OSError
+            # Replay copies of a delivered or already chosen row join its group, never a second slot.
+            candidates = [g["hit"] for g in collapse_duplicate_candidates(prior + fresh, texts)
+                          if not {g["hit"]["store_id"], *g["hit"].get("duplicate_store_ids", [])} & seen]
+            for candidate in candidates:
+                candidate_observed = _normalize_observed_at(rows[candidate["store_id"]].get("observed_at"))
+                if ((observed is None) != (candidate_observed is None)
+                        or normalize(texts[candidate["store_id"]]["content"]) == normalize(row.get("content"))):
+                    continue
+                stamp = candidate_observed if observed is not None else _normalize_observed_at(candidate.get("timestamp"))
+                if stamp is None or not source_time < stamp <= now:
+                    continue
+                store_id = candidate["store_id"]
+                group = {store_id, *candidate.get("duplicate_store_ids", [])}
+                existing = next((e for e in placed if e["hit"].get("kind") != "summary" and group & {
+                    e["hit"].get("store_id"), *e["hit"].get("duplicate_store_ids", [])}), None)
+                candidate = {**candidate, "later_statement_of": hit["store_id"]}
+                if existing is not None:
+                    # A pooled row was retrieved on its own: it keeps its group, and
+                    # delivery keeps it as an ordinary hit if its source cannot ship.
+                    placed.remove(existing)
+                    group |= {existing["hit"]["store_id"], *existing["hit"].get("duplicate_store_ids", [])}
+                    candidate["_later_pooled"] = True
+                if group - {store_id}:
+                    candidate["duplicate_store_ids"] = sorted(group - {store_id})
+                hit["has_later_statements"] = [store_id]
+                entry = existing if existing is not None else {
+                    "rrf_score": source["rrf_score"], "_final_score": source["_final_score"], "ranks": {},
+                }
+                placed.insert(placed.index(source) + 1, {**entry, "hit": candidate})
+                seen |= group
+                info["found"] += 1
+                break
+        if time.monotonic() >= deadline:
+            raise TimeoutError
+    except Exception as exc:  # noqa: BLE001 - optional expansion never fails recall
+        reason = "deadline" if isinstance(exc, TimeoutError) or time.monotonic() >= deadline else "read_error"
+        placed = ordered
+    info["ms"] = round((time.monotonic() - started) * 1000, 3)
+    return placed, info, reason
+
+
 def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
     """Search the agent's entire memory (all conversations, all time) by meaning.
 
@@ -4886,6 +4983,14 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
             engine, ordered, identity_rows, limit=limit, deadline=deadline,
             excluded=excluded_session_ids, allowed=candidate_session_ids,
         )
+    later_info, later_unavailable = None, None
+    later_n = _recall_later_statements(kwargs.get("later_statements", getattr(engine._config, "recall_later_statements", 0)))
+    if later_n and kwargs.get("delivery_unit", getattr(engine._config, "recall_delivery_unit", "hits")) != "session":
+        ordered, later_info, later_unavailable = _lcm_recall_later_statements(
+            engine, ordered, identity_rows, n=min(later_n, limit), limit=limit, query=query,
+            seen_refs=seen_refs, fts_arm_index=fts_arm_index, deadline=deadline,
+            excluded=excluded_session_ids, allowed=candidate_session_ids,
+        )
     fts_anchor_info: dict[str, Any] | None = None
     if bool(kwargs.get("fts_anchor", True)) and bool(
         getattr(engine._config, "recall_fts_anchor", True)
@@ -4959,6 +5064,7 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
         session_delivery=session_delivery,
         adjacent_reply=adjacent_pairs,
         adjacent_reply_unavailable=adjacent_unavailable,
+        later_statements=later_info, later_statements_unavailable=later_unavailable,
         extra_entries=_recall_extra_entries(
             kwargs.get("extra_entries", getattr(engine._config, "recall_extra_entries", 0)),
         ),
