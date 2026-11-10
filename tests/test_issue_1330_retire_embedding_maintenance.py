@@ -358,12 +358,26 @@ def test_quiesce_bounds_wait_drops_pending_and_closes(scheduler, caplog, short_p
         assert started.wait(5)
         assert scheduler.schedule(key, pending_ran.set, owner=owner)
         assert scheduler.schedule(queued_key, pending_ran.set, owner=owner)
+        timeout, waits = (1 if short_pass else 0.1), []
+        real_wait, quiescing = scheduler._condition.wait, threading.get_ident()
+
+        def wait(remaining=None):  # record the quiesce thread's own waits: the bound it asked for and how it ended
+            woken = real_wait(remaining)
+            if threading.get_ident() == quiescing:
+                waits.append((remaining, woken))
+            return woken
+        scheduler._condition.wait = wait
         with caplog.at_level(logging.WARNING, logger=engine_mod.__name__):
             before = time.monotonic()
-            result = scheduler.quiesce(timeout=1 if short_pass else 0.1)
+            result = scheduler.quiesce(timeout=timeout)
             elapsed = time.monotonic() - before
         assert result is short_pass
-        assert (0.2 if short_pass else 0.08) <= elapsed < (1 if short_pass else 0.5)
+        # The wait is proven from the recorded calls, not timed (#2573): it waited, each wait was bounded by the
+        # quiesce timeout, and a timed-out quiesce ended on a wait that timed out. A hang backstop stays.
+        # (A finished pass may end before quiesce waits at all, so only a timed-out one must have waited.)
+        assert (waits or short_pass) and all(remaining is not None and 0 < remaining <= timeout for remaining, _ in waits), waits
+        assert short_pass or waits[-1][1] is False, waits
+        assert elapsed < 5
         assert any(
             "timeout" in record.getMessage().lower()
             and f"database={key[0]}" in record.getMessage()
