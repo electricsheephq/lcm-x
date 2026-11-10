@@ -2384,6 +2384,9 @@ def _table_place(where, kind):
     elif kind == "saved":
         (folder / "tool-results").mkdir(parents=True, exist_ok=True)
         (folder / "tool-results" / "toolu_9.txt").write_text("saved output\n")
+    elif kind == "subfolder_file":  # a tool's own file in a tool-results subfolder (page renders, #2535)
+        (folder / "tool-results" / "p1").mkdir(parents=True, exist_ok=True)
+        (folder / "tool-results" / "p1" / "page-1.jpg").write_bytes(b"\xff\xd8\xff")
     elif kind in ("saved_symlink", "results_symlink"):  # capture reads neither: a symlinked file, or a symlinked folder
         outside = where.parent.parent / "elsewhere"
         outside.mkdir(parents=True, exist_ok=True)
@@ -2404,9 +2407,9 @@ def _table_place(where, kind):
     return None
 
 
-_PARENT_KINDS = ["lines", "empty", "saved", "saved_symlink", "results_symlink", "subagent", "subagent_empty",
-                 "unreadable_subagents"]
-_HOLDS = {"lines", "saved", "saved_symlink", "results_symlink", "subagent", "unreadable_subagents"}
+_PARENT_KINDS = ["lines", "empty", "saved", "saved_symlink", "results_symlink", "subfolder_file", "subagent",
+                 "subagent_empty", "unreadable_subagents"]
+_HOLDS = {"lines", "saved", "saved_symlink", "results_symlink", "subfolder_file", "subagent", "unreadable_subagents"}
 _TABLE = [(state, where, kind, where != "unnamed" and kind in _HOLDS)
           for state in ("pending", "captured") for where in ("followed", "named", "unnamed") for kind in _PARENT_KINDS
           if not (state == "captured" and where == "followed" and kind == "empty")]  # A exists: no empty file to add
@@ -2436,6 +2439,78 @@ def test_the_named_path_rule_table(tmp_path, home, hermes, state, where, kind, u
         if locked is not None:
             locked.chmod(0o700)
     assert bool([key for key in report["unverified"] if key.startswith("claude-code:s1")]) is unverified
+
+
+def test_files_in_a_tool_results_subfolder_are_counted_and_named(tmp_path, home, hermes):
+    """#2535: page renders a tool saved under tool-results/<folder>/ are not stored. The audit counts them on the
+    lineage and names them in the verdict; by ruling they leave the lineage unverified."""
+    from hermes_lcm import claude_code_audit as ca
+
+    a = _append(tmp_path / "projects" / "-work" / "s1.jsonl", CONVERSATION[:2])
+    _record(_hook(), home, a)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    assert ca.audit(home)["verified"]
+    pages = a.parent / "s1" / "tool-results" / "p1"
+    pages.mkdir(parents=True)
+    for n in (1, 2):
+        (pages / f"page-{n}.jpg").write_bytes(b"\xff\xd8\xff")
+    report = ca.audit(home)
+    assert report["lineages"][0]["subfolder_files"] == 2 and report["lineages"][0]["files"]["uncaptured"] == 0
+    assert not report["verified"] and "claude-code:s1" in report["unverified"]
+    assert report["verdict"].endswith("; 2 files in tool-results subfolders not stored (1 lineages)")
+
+
+def test_a_deep_tool_results_subfolder_is_counted_never_crashes(tmp_path):
+    """#2554 review: the walk does not recurse (os.walk does on Python 3.11), so a tree deeper than the recursion limit
+    is counted instead of aborting the audit."""
+    import inspect
+    import sys
+
+    from hermes_lcm import claude_code_audit as ca
+
+    leaf = tmp_path / "p1"
+    for _ in range(60):
+        leaf = leaf / "d"
+    leaf.mkdir(parents=True)
+    (leaf / "page-1.jpg").write_bytes(b"x")
+    limit = sys.getrecursionlimit()
+    sys.setrecursionlimit(len(inspect.stack()) + 30)
+    try:
+        count = ca._files_under(tmp_path / "p1")
+    finally:
+        sys.setrecursionlimit(limit)
+    assert count == 1
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads any folder")
+@pytest.mark.parametrize("shape,count", [("nested", 2), ("folder_symlink", 1), ("unreadable", 1)])
+def test_every_kind_of_entry_under_a_tool_results_subfolder_counts(tmp_path, home, hermes, shape, count):
+    """#2554 review: nested folders are walked; a symlink to a folder counts (not followed); a subfolder that cannot be
+    listed counts one."""
+    from hermes_lcm import claude_code_audit as ca
+
+    a = _append(tmp_path / "projects" / "-work" / "s1.jsonl", CONVERSATION[:2])
+    _record(_hook(), home, a)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    pages = a.parent / "s1" / "tool-results" / "p1"
+    (pages / "inner").mkdir(parents=True)
+    if shape == "nested":
+        (pages / "page-1.jpg").write_bytes(b"x")
+        (pages / "inner" / "page-2.jpg").write_bytes(b"x")
+    elif shape == "folder_symlink":
+        (pages / "inner").rmdir()
+        (tmp_path / "elsewhere").mkdir()
+        (tmp_path / "elsewhere" / "page-9.jpg").write_bytes(b"x")  # counted once as the link, never followed
+        (pages / "link").symlink_to(tmp_path / "elsewhere", target_is_directory=True)
+    else:
+        (pages / "inner" / "page-1.jpg").write_bytes(b"x")
+        (pages / "inner").chmod(0)
+    try:
+        report = ca.audit(home)
+    finally:
+        if shape == "unreadable":
+            (pages / "inner").chmod(0o700)
+    assert report["lineages"][0]["subfolder_files"] == count and not report["verified"]
 
 
 # #2535 strict: one table for when a pending record expires. The rule: a pending record expires only on facts this

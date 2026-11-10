@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import sqlite3
 import stat
 import time
@@ -456,6 +457,9 @@ def _files(lineage: Lineage, events: list[dict], report: dict) -> None:
     versions = {(row["uid"], row["content_digest"]): row["disposition"]
                 for row in events if row["source_kind"] == "file"}
     for path in sorted(folder.iterdir()):
+        if path.is_dir() and not path.is_symlink():  # a tool's own files (page renders): capture does not store them
+            report["subfolder_files"] += _files_under(path)
+            continue
         if path.is_symlink() or not (path.is_file() or path.is_dir()):  # capture never reads it
             report["files"]["uncaptured"] += 1
         if path.is_symlink() or not path.is_file():
@@ -465,6 +469,29 @@ def _files(lineage: Lineage, events: list[dict], report: dict) -> None:
             report["files"][disposition] += 1
         else:
             report["files"]["uncaptured"] += 1
+
+
+def _files_under(folder: Path) -> int:
+    """Every entry under ``folder`` that is not a real folder (a symlink to a folder counts; it is not followed); a
+    folder that cannot be listed counts one."""
+    count, stack = 0, [folder]
+    while stack:  # no recursion: os.walk recurses on Python 3.11, and a deep tree must be counted, never crash
+        try:
+            with os.scandir(stack.pop()) as entries:
+                for entry in entries:
+                    if entry.is_dir(follow_symlinks=False):
+                        stack.append(entry.path)
+                    else:
+                        count += 1
+        except OSError:
+            count += 1
+    return count
+
+
+def _subfolder_files_unverified(row: dict) -> bool:
+    """#2535: files a tool wrote into a tool-results subfolder are not stored and match nothing the model was shown
+    inline in 30 of 42 real cases. Release-manager ruling: a lineage with any is unverified until #2554 lands."""
+    return row["subfolder_files"] > 0
 
 
 def _file_digest(path: Path) -> str:
@@ -482,7 +509,7 @@ def _lineage_report(lineage: Lineage, cursor: dict, events: list[dict], messages
               "surplus": 0, "unverifiable": 0, "fork_copies": 0, "unanswered": 0,
               "forgotten": forgotten, "transcript_state": "forgotten" if forgotten else "ok",
               "other_projection": 0, "projected_without_uuid": 0,
-              "named_other_paths": 0,
+              "named_other_paths": 0, "subfolder_files": 0,
               "files": dict.fromkeys(("held", "kept", "uncaptured"), 0), "failures": dict.fromkeys(FAILURES, 0)}
     report.update(classes={}, unknown_types={})
     if forgotten:
@@ -668,7 +695,7 @@ def _unverified(metadata: dict, records: list[dict], lineages: list[dict], sessi
                 failed: list[Lineage | None]) -> list[str]:
     unknown = {row["lineage"] for row in lineages if not row["forgotten"] and (
         row["transcript_state"] != "ok" or row["generations_gone"] or row["pending_lines"]
-        or row["files"]["uncaptured"] or row["named_other_paths"])}
+        or row["files"]["uncaptured"] or row["named_other_paths"] or _subfolder_files_unverified(row))}
     if (session is not None and CURSOR_PREFIX + lineage_key(session) not in metadata
             and PENDING_PREFIX + lineage_key(session) not in metadata):  # a pending session is judged below
         unknown.add(lineage_key(session))
@@ -776,6 +803,9 @@ def audit(home: Path, session: str | None = None) -> dict:
     others = sum(1 for row in lineages if not row["forgotten"] and row["named_other_paths"])
     if others:  # #2535: capture follows one path, and another that holds rows is not matched against the store
         verdict += f"; {others} lineages: a second transcript path holds rows; not matched"
+    subfolder = [row["subfolder_files"] for row in lineages if not row["forgotten"] and row["subfolder_files"]]
+    if subfolder:  # #2535: e.g. page renders a tool saved beside the transcript
+        verdict += f"; {sum(subfolder)} files in tool-results subfolders not stored ({len(subfolder)} lineages)"
     return {"verdict": verdict, "ok": not any(failures.values()), "opened_immutable": immutable, "failures": failures,
             "pending_lineages": len(pending), "oldest_pending_age_s": oldest_pending_age,
             "expired_never_written": len(expired),
