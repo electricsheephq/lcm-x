@@ -137,6 +137,15 @@ LME store data stays identical across variants. Store manifests bind this option
 uses the stored role and ignores the sidecar. Stored prefixes are stripped once.
 Both options are recorded in run manifests and checked for judging; the label is
 `n/a` for agentic and full-context delivery. Score keys distinguish these arm axes.
+
+Repeat `--recall-option KEY=VALUE` on `canary`, `answer`, and `judge`, for example
+`--recall-option recall_later_statements=2`, to override a selected checkout's
+`recall_` config fields using its environment parsers. Invalid keys and values
+are refused before stores or backends are built. Options affect frozen engine
+opens and MCP schemas/results; store building keeps defaults. Repeat the answer's
+options when judging. Non-empty sorted `recall_options` appear in the manifest
+and `/opt:k=v,...` arm suffix; control and treatment pair on the same harness.
+
 For [#995 step 1](https://github.com/electricsheephq/lcm-x/issues/995):
 A0 = `--store-text plain --hit-label role`; A1 = `--store-text plain --hit-label speaker`;
 A2 = `--store-text name-date --hit-label speaker`. The agentic check compares

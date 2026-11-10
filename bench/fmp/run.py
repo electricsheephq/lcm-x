@@ -27,7 +27,7 @@ from .models import (AGENTIC_TOOL_CAP, CLAUDE_AGREEMENT_JUDGE, CODEX_DEFAULT_JUD
                      CODEX_DISABLED, GLM_HOST, JUDGE_MAX_TOKENS, READER_MAX_TOKENS, READERS, REASONING, Backends, BudgetStopped,
                      Codex, OpenRouter, Quota, Spend, ToolViolation, glm_key, harness, parse_spec)
 from .score import delivery_identity, percentile, score
-from .stores import Stores
+from .stores import RecallOptionError, Stores, parse_recall_options
 
 
 def parser():
@@ -45,6 +45,8 @@ def parser():
     p.add_argument("--summaries", choices=("none", "deterministic"), default="none")
     p.add_argument("--store-text", choices=("speaker-prefix", "plain", "name-date"), default="speaker-prefix")
     p.add_argument("--hit-label", choices=("speaker", "role"), default="speaker")
+    p.add_argument("--recall-option", action="append", default=[], metavar="KEY=VALUE",
+                   help="repeatable recall_ config override for canary/answer/judge; ignored during store building")
     p.add_argument("--embed-cache", type=Path)
     p.add_argument("--store-root", type=Path, required=True)
     p.add_argument("--output", type=Path, required=True)
@@ -114,7 +116,9 @@ def estimate(args, n):
 
 
 def switches(args):
-    return {**({"include_adversarial": True} if getattr(args, "include_adversarial", False) else {}),
+    return {**({"recall_options": args.recall_options} if getattr(args, "recall_options", None)
+               and args.command != "build-stores" else {}),
+            **({"include_adversarial": True} if getattr(args, "include_adversarial", False) else {}),
             **({"delivery_unit": "session", "delivery_budget": 16000}
                if getattr(args, "delivery_unit", "hits") == "session" else {}),
             "store_text": getattr(args, "store_text", "speaker-prefix"),
@@ -285,6 +289,8 @@ def _execute(args):
     if commit(args.lcmx_repo).endswith("-dirty") and not args.allow_dirty:
         raise ValueError("LCM-X checkout has uncommitted changes")
     lme = load_lcm(args.lcmx_repo)
+    args.recall_options = parse_recall_options(getattr(args, "recall_option", []))
+    store_options = {"recall_options": args.recall_options} if args.recall_options else {}
     questions, dataset_sha, ids_sha, excluded = datasets.load(
         args.data, args.dataset, lme, args.question_ids, args.include_adversarial)
     ids_sha = ids_sha or sha(json.dumps([q.qid for q in questions]).encode())
@@ -293,7 +299,8 @@ def _execute(args):
     if args.command == "canary":
         questions = questions[:1]
     if args.command in ("build-stores", "canary", "answer"):
-        store = Stores(args.store_root, args.config, args.lcmx_repo, dataset_sha, lme, args.summaries, args.embed_cache, args.store_text)
+        store = Stores(args.store_root, args.config, args.lcmx_repo, dataset_sha, lme, args.summaries, args.embed_cache, args.store_text,
+                       **store_options)
         seen = set()
         for q in questions:
             if q.store_id not in seen:
@@ -326,7 +333,7 @@ def _execute(args):
                 arm.output = args.output / f"{config}-{args.delivery}" if args.paired_config else args.output
                 arm.output.mkdir(parents=True, exist_ok=True)
                 arm_store = store if config == args.config else Stores(args.store_root, config, args.lcmx_repo,
-                    dataset_sha, lme, args.summaries, args.embed_cache, args.store_text)
+                    dataset_sha, lme, args.summaries, args.embed_cache, args.store_text, **store_options)
                 if config != args.config and args.command == "answer":
                     for q in questions:
                         arm_store.build(q)
@@ -404,6 +411,8 @@ def run(args, client, questions, dataset_sha, ids_sha, excluded, store):
         write_json(manifest_path, manifest)
     else:
         manifest = json.loads(manifest_path.read_text())
+        if manifest.get("recall_options", {}) != getattr(args, "recall_options", {}):
+            raise RecallOptionError("judging run identity mismatch: recall_options")
         if manifest.get("include_adversarial", False) != getattr(args, "include_adversarial", False):
             raise ValueError("judging run identity mismatch: include_adversarial")
         if delivery_identity(manifest) != delivery_identity(switches(args)):
@@ -595,8 +604,9 @@ def main():
             execute(args)
     except Exception as exc:
         import traceback
-        # Only the harness's own fixed canary reasons are shown; other exception text may carry corpus content.
-        reason = str(exc) if isinstance(exc, RuntimeError) and str(exc) in (CANARY_NO_MCP, CANARY_FAILED) else None
+        # Only harness canary/option diagnostics are shown; other exception text may carry corpus content.
+        reason = str(exc) if isinstance(exc, RecallOptionError) or (
+            isinstance(exc, RuntimeError) and str(exc) in (CANARY_NO_MCP, CANARY_FAILED)) else None
         message = "FMP failed: " + type(exc).__name__ + (f" ({reason})" if reason else "") + " (no corpus logged)"
         home = getattr(args, "codex_home", None)
         if home is not None and inside_home(args.output, home):
