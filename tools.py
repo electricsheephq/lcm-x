@@ -105,7 +105,7 @@ from .retrieval_core import (
 from .search_query import (
     AGE_DECAY_RATE, build_recall_or_query, contains_emoji, is_identifier_shaped_query,
     normalize_search_sort, recall_content_terms,
-    requires_like_fallback, sanitize_fts5_query,
+    requires_like_fallback, sanitize_fts5_query, agent_grep_operands,
 )
 from .store import _normalize_observed_at, build_message_fts_spec
 from .vector_store import VectorStore, _interrupt_read_on_deadline
@@ -128,7 +128,7 @@ def _combined_result_sort_key(result: dict[str, Any], sort: str) -> tuple:
     # BM25 ranks and payload byte offsets are incomparable. Keep the existing
     # history ordering in tier 0; sidecars follow in tier 1 and use byte offset
     # only as their native in-tier tie-break.
-    rank_tier = 1 if result.get("type") == "externalized" else 0
+    rank_tier = 1 + int(result.get("_match_tier") or 0) if result.get("type") == "externalized" else 0  # #2586
     role = result.get("role")
     if role == "user":
         role_bias = 0
@@ -1288,6 +1288,29 @@ def _reader_payload_search(path: Path, budget: int, in_scope) -> dict[str, Any]:
     return result
 
 
+_PAYLOAD_TERM_CAP = 16  # #2586: a longer query keeps the literal match only, so a payload is scanned at most 17 times
+
+
+def _payload_match(content: str, query: str, tokens: list[str], operands: list[str]) -> tuple[int, int, int, int] | None:
+    """#2586: (tier, start, end, terms) for a saved output. Tier 0 is the query as typed; tier 1 is every operand (a
+    quoted one as a phrase) in any order; tier 2 is any operand, only for an OR query (the any-term retry). The span is
+    the first matched operand. Case-insensitive; a term matches whole words, as the message index does."""
+    if (match := re.search(re.escape(query), content, flags=re.IGNORECASE)) is not None:
+        return 0, match.start(), match.end(), len(operands)
+    words = [re.findall(r"\w+", operand) for operand in operands]
+    if "NOT" in tokens or not operands or len(operands) > _PAYLOAD_TERM_CAP or not all(words):
+        return None
+    any_term, found = "OR" in tokens, []
+    for operand, parts in zip(operands, words):
+        prefix = not operand.startswith('"') and operand.endswith("*")
+        hit = re.search(r"(?<!\w)" + r"\W+".join(map(re.escape, parts)) + ("" if prefix else r"(?!\w)"), content, re.IGNORECASE)
+        if hit is None and not any_term:
+            return None
+        found += [hit] if hit else []
+    first = min(found, key=lambda hit: hit.start(), default=None)
+    return None if first is None else (2 if any_term else 1, first.start(), first.end(), len(found))
+
+
 def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
     """Search raw messages + summaries with optional cross-session scoping.
 
@@ -1543,6 +1566,7 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
             partial_reasons.append("containment")
     externalized_scan: dict[str, Any] | None = None
     externalized_results_omitted = False
+    stashed_any_term: list[dict[str, Any]] = []
     if searches_externalized and externalized_filter_active:
         # Externalized sidecars are tool/ingest payloads, not raw messages, and
         # carry no role/timestamp/source/conversation lane comparable to history
@@ -1660,6 +1684,11 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
         scan_counts["candidate_files"] = len(candidate_refs)
 
         externalized_matches: list[dict[str, Any]] = []
+        # #2586: one parse with message search. The reader's history-only any-term retry gets the payload any-term hits
+        # from this scan (content already read, no second payload budget).
+        _, match_tokens, match_operands = agent_grep_operands(query)
+        stash_any_term = reader_default_payloads and args.get("_payload_any_term_stash") is True and len(match_operands) >= 2
+        any_term_matches: list[dict[str, Any]] = []
         for ref in candidate_refs:
             content_bytes = _LCM_GREP_EXTERNALIZED_CONTENT_BYTES
             if reader_mode:
@@ -1726,13 +1755,15 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
                     return json.dumps({"error": f"Externalized ref is not owned by the active session: {ref}"})
                 continue
             content = str(payload.get("content") or "")
-            match = re.search(re.escape(query), content, flags=re.IGNORECASE)
+            match = _payload_match(content, query, match_tokens, match_operands) or (
+                _payload_match(content, query, [*match_tokens, "OR"], match_operands) if stash_any_term else None)
             if match is None:
                 continue
-            byte_position = len(content[: match.start()].encode("utf-8"))
-            line = content.count("\n", 0, match.start()) + 1
-            snippet_start = max(0, match.start() - 120)
-            snippet_end = min(len(content), match.end() + 180)
+            tier, start, end, terms = match
+            byte_position = len(content[:start].encode("utf-8"))
+            line = content.count("\n", 0, start) + 1
+            snippet_start = max(0, start - 120)
+            snippet_end = min(len(content), end + 180)
             item = {
                 "type": "externalized",
                 "depth": "payload",
@@ -1749,9 +1780,14 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
                 "_sort_ts": payload.get("created_at") or 0,
                 "_sort_rank": byte_position,
                 "_sort_directness": 10.0,
+                "_match_tier": tier,
+                "_terms": terms,
             }
             if reader_mode:
                 item.update(session_id=payload.get("session_id"), from_current_session=False)
+            if stash_any_term and tier == 2:
+                any_term_matches.append(item)  # only the any-term retry shows it, after history
+                continue
             externalized_matches.append(item)
             scan_counts["matched_files"] += 1
 
@@ -1768,6 +1804,13 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
                 break
             response_chars += item_chars
             results.append(item)
+        any_term_matches.sort(key=lambda result: (-result["_terms"], _combined_result_sort_key(result, sort)))
+        for item in any_term_matches[:payload_slots]:
+            for key in ("_sort_ts", "_sort_rank", "_sort_directness", "_match_tier", "_terms"):
+                item.pop(key, None)
+            if (response_chars := response_chars + len(json.dumps(item, ensure_ascii=False))) > _LCM_GREP_RESPONSE_CHAR_CAP:
+                break
+            stashed_any_term.append(item)
         externalized_scan = {
             **scan_counts,
             "file_limit": READER_PAYLOAD_FILE_CAP if reader_mode else _LCM_GREP_EXTERNALIZED_FILE_CAP,
@@ -1792,6 +1835,8 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
         result.pop("_sort_rank", None)
         result.pop("_sort_directness", None)
         result.pop("_hybrid_summary_override", None)
+        result.pop("_match_tier", None)
+        result.pop("_terms", None)
     _annotate_subagent_lineage(engine, results)
 
     response: Dict[str, Any] = {
@@ -1840,6 +1885,8 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
                                "prefix_bytes": _LCM_GREP_EXTERNALIZED_CONTENT_BYTES}
     if message_search_error is not None:
         response["message_search_error"] = message_search_error
+    if stashed_any_term:
+        response["_payload_any_term"] = stashed_any_term  # private: the dispatch pops it (#2586)
     return json.dumps(response)
 
 
@@ -2702,17 +2749,14 @@ def lcm_grep(args: Dict[str, Any], **kwargs) -> str:
     parsed_args.pop("_agent_operators", None)
     parsed_args.pop("_grep_any_term", None)
     parsed_args.pop("_stemmed", None)
+    parsed_args.pop("_payload_any_term_stash", None)
     parsed_args["_agent_operators"] = True
     parsed_args["_reader_default_payloads"] = _reader_any_session(engine) and mode == "full_text" and "content_scope" not in args
     if mode == "full_text":
-        payload = json.loads(_lcm_grep_full_text(parsed_args, **kwargs))
+        payload = json.loads(_lcm_grep_full_text({**parsed_args, "_payload_any_term_stash": True}, **kwargs))
+        stashed = payload.pop("_payload_any_term", None) or []
         query = _coerce_query_arg(args.get("query"))
-        safe = sanitize_fts5_query(query, agent_operators=True)
-        tokens = re.findall(r'"[^"]*"|[^\s"]+', safe)
-        operands = list(dict.fromkeys(
-            token for token in tokens
-            if token.startswith('"') or token.upper() not in {"NOT", "NEAR", "OR", "AND"}
-        ))
+        safe, tokens, operands = agent_grep_operands(query)
         or_query = " OR ".join(operands)
         if (
             payload.get("total_results") == 0 and not payload.get("message_search_error")
@@ -2733,6 +2777,10 @@ def lcm_grep(args: Dict[str, Any], **kwargs) -> str:
                 for key in ("partial", "externalized_scan", "externalized_results_omitted", "content_scope", "externalized_refs"):
                     if key in payload:
                         retried_payload[key] = payload[key]
+                if stashed and isinstance(retried_payload.get("results"), list):
+                    # #2586: payload any-term hits rank after every history hit in each sort, so they follow it
+                    retried_payload["total_results"] += len(stashed)
+                    retried_payload["results"] = (retried_payload["results"] + stashed)[:retried_payload["limit"]]
             payload = retried_payload
             payload["query"] = query
             payload["retried"] = "any_term"
