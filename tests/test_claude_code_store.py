@@ -3217,3 +3217,33 @@ def test_a_forgotten_reused_agent_id_never_comes_back_under_a_path_key(tmp_path,
         assert not store.connection.execute("SELECT COUNT(*) FROM messages WHERE session_id LIKE 's1/agent:%'").fetchone()[0]
     finally:
         store.close()
+
+
+def test_a_deleted_id_does_not_forget_a_separate_transcript_with_the_same_relative_name(tmp_path, home, hermes):
+    """#2576 review: the bare id holds a transcript at subagents/workflows/subagents/agent-x1.jsonl; a separate direct
+    transcript gets the path key /agent-x1.jsonl. Deleting the bare session must not forget the direct one."""
+    a = _append(tmp_path / "projects" / "-work" / "s1.jsonl", CONVERSATION[:2])
+    _record(_hook(), home, a)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    agents = a.parent / "s1" / "subagents"
+    nested = _append(agents / "workflows" / "subagents" / "agent-x1.jsonl", _REUSED["first"])
+    direct = _append(agents / "agent-x1.jsonl", _REUSED["second"])
+    for path in (nested, direct):
+        _record(_hook(), home, a, event="SubagentStop", agent_id="x1", agent_transcript_path=str(path))
+        cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    store = _open(home, hermes)
+    try:
+        assert store.delete_session_messages(cc.row_session_id("s1", "x1"))
+    finally:
+        store.close()
+    _append(direct, [dict(_entry("assistant", "late", [{"type": "text", "text": "late"}]), isSidechain=True)])
+    _record(_hook(), home, a, event="SubagentStop", agent_id="x1", agent_transcript_path=str(direct))
+    for _ in range(2):
+        cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    store = _open(home, hermes)
+    try:
+        rows = [row[0] for row in store.connection.execute(
+            "SELECT content FROM messages WHERE session_id = ?", (cc.row_session_id("s1", "/agent-x1.jsonl"),))]
+    finally:
+        store.close()
+    assert "late" in rows and len(rows) == len(set(rows))

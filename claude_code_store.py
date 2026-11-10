@@ -375,8 +375,8 @@ def _old_lineage(store: MessageStore, lineage: Lineage) -> Optional[Lineage]:
     """For a path key, the id-keyed lineage whose cursor once named its path below subagents/, in this folder or a copy
     of the session folder (a store the old code flipped, #2566)."""
     old = Lineage(lineage.session_id, lineage.path.name[len("agent-"):-len(".jsonl")], lineage.path)
-    named = lineage.agent_id.startswith("/") and any(
-        held.endswith("/subagents" + lineage.agent_id) for held in named_paths(read_cursor(store, old)))
+    named = lineage.agent_id.startswith("/") and any(getattr(path_lineage(old._replace(path=Path(held))), "agent_id", None)
+                                                     == lineage.agent_id for held in named_paths(read_cursor(store, old)))
     return old if named else None
 
 
