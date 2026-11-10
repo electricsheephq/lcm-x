@@ -173,6 +173,72 @@ def test_v0292_users_only_stamped_store_upgrade_replay_stores_each_message_once(
     assert _call_rows(rows) == {CALL: 1}, counts
 
 
+# --- #2525 review follow-ups: shapes that miss guard (c) and keep the old duplicate path ----------------------------
+
+def _parts_history(marker):
+    """The same host transcript, with the tool result sent as content parts instead of a string."""
+    history = _host_history(marker, NEW_TURN)
+    history[2]["content"] = [{"type": "text", "text": marker}]
+    return history
+
+
+def _rebound_session_replay(tmp_path):
+    """The v0.29.2 history replayed under a new session id in the same conversation."""
+    original, marker, _ = _v0292_store(tmp_path)
+    history = _host_history(marker, NEW_TURN)
+    _run_phase(tmp_path, history, session="u1-session-rebound")
+    return original, history, _read_store(tmp_path)
+
+
+def test_v0292_store_parts_shaped_tool_result_loses_nothing(tmp_path):
+    """Guard (c) compares the raw incoming content with the stored marker. A parts-shaped tool result misses it and
+    takes the old duplicate path: no row is lost, the call row's copy is linked, and the tool row's copy is stored
+    again (a surplus row, not a loss)."""
+    original, marker, _ = _v0292_store(tmp_path)
+
+    _run_phase(tmp_path, _parts_history(marker))
+
+    rows = _read_store(tmp_path)
+    counts = f"stored rows={len(rows)}, tool rows={dict(_tool_rows(rows))}"
+    assert rows[:len(original)] == original, counts
+    assert [row["content"] for row in rows[-2:]] == [content for _, content in NEW_TURN], counts
+    assert _tool_rows(rows) == {CALL: 2} and _call_rows(rows) == {CALL: 2}, counts
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
+    "#2525 review follow-up 1: guard (c) compares raw content, so a parts-shaped tool result re-stores the call "
+    "pair. Changes only if a real host sends tool results as parts."))
+def test_v0292_store_parts_shaped_tool_result_stores_each_message_once(tmp_path):
+    original, marker, _ = _v0292_store(tmp_path)
+
+    _run_phase(tmp_path, _parts_history(marker))
+
+    rows = _read_store(tmp_path)
+    assert len(rows) == len(original) + len(NEW_TURN), f"stored rows={len(rows)}"
+
+
+def test_v0292_store_rebound_session_replay_loses_nothing(tmp_path):
+    """The stored-row lookup is session-scoped, like the #773 matcher. A rebound session id takes the old duplicate
+    path: the replayed history is stored once more under the new session id (the #1674 class), and nothing is
+    lost."""
+    original, history, rows = _rebound_session_replay(tmp_path)
+
+    rebound = [row for row in rows if row["session_id"] == "u1-session-rebound"]
+    assert rows[:len(original)] == original
+    assert [(row["role"], row["content"]) for row in rebound][-2:] == list(NEW_TURN)
+    assert len(rebound) == len(history)
+    assert _tool_rows(rows) == {CALL: 2} and _call_rows(rows) == {CALL: 2}
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
+    "#2525 review follow-up 2: a rebound session id re-stores the v0.29.2 history (#1674 class; the conversation "
+    "alias work in #2461 is the candidate fix)."))
+def test_v0292_store_rebound_session_replay_stores_each_message_once(tmp_path):
+    original, _history, rows = _rebound_session_replay(tmp_path)
+
+    assert len(rows) == len(original) + len(NEW_TURN), f"stored rows={len(rows)}"
+
+
 def test_v0292_store_second_replay_after_upgrade_adds_nothing(tmp_path, caplog):
     original, marker, _ = _v0292_store(tmp_path)
     history = _host_history(marker, NEW_TURN)
