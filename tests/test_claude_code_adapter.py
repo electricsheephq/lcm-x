@@ -1554,3 +1554,20 @@ def test_the_hook_returns_only_after_its_writer_left_the_group(env, tmp_path, ev
         pass
     row = _wait_hooks(env, 1)[-1]  # a writer the kill reached never logs (the worker may already have drained the pointer)
     assert row["detached"] is True and row["event"] == event and not row["outcome"].startswith("error")
+
+
+def test_a_detached_writer_logs_a_failure_before_its_record_is_built(env, tmp_path):
+    """#2531 review: a detached child that fails before normalize returns still logs its error in the environment's
+    home, as main and the earlier head did."""
+    payload = {"hook_event_name": "Stop", "session_id": "s1", "transcript_path": str(_transcript(tmp_path))}
+    driver = ("import importlib.util, os, sys\n"
+              f"spec = importlib.util.spec_from_file_location('h', {str(PLUGIN / 'bin/lcmx_hook.py')!r})\n"
+              "h = importlib.util.module_from_spec(spec); spec.loader.exec_module(h)\n"
+              "def boom(*a, **k): raise RuntimeError('no such user')\n"
+              "h.normalize = boom\n"
+              "sys.exit(h.main(sys.stdin, os.environ, detach=True))\n")
+    done = subprocess.run([sys.executable, "-c", driver], env={**os.environ, **env}, input=json.dumps(payload),
+                          capture_output=True, text=True, timeout=5)
+    assert (done.returncode, done.stdout, done.stderr) == (0, "", "")
+    row = _wait_hooks(env, 1)[-1]
+    assert row["detached"] is True and row["outcome"] == "error:RuntimeError"

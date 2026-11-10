@@ -426,7 +426,7 @@ def main(stdin: TextIO = sys.stdin, environ: Mapping[str, str] = os.environ, *, 
             if not (detach and not child and blocking_ms is not None and not nofork):
                 if child:
                     record["blocking_ms"] = blocking_ms
-                if home is None and not record:  # failed before the payload named its host: the environment's home
+                if home is None and "host" not in record:  # failed before the payload named its host: the environment's home
                     try:
                         import lcmx_runtime
                         home = lcmx_runtime.store_home(environ, "grok-build" if environ.get("GROK_SESSION_ID")
