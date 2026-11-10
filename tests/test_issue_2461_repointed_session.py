@@ -87,6 +87,31 @@ def test_T4_compression_handoff(host):
     assert engine._store.get_session_count("child") == 0
 
 
+def test_K2_live_holder_survives_repoint_start(host):
+    """Pinned case 3: start must preserve the live destination before ingest."""
+    engine, other = host(), host()
+    start(engine)
+    engine.ingest(deepcopy(history(2)))
+    start(other, sid="S1", cid="K2")
+    other.ingest([{"role": "user", "content": "separate S1 turn", "timestamp": 100.0}])
+    before = other._lifecycle.get_by_conversation("K2")
+    stored = other._store.get_range("S1", conversation_id="K2")
+    assert resolve_active_lcm_engine(conversation_id="K2") is other
+    start(engine, cid="K2")
+    after = other._lifecycle.get_by_conversation("K2")
+    # Report both independently owned surfaces even when the first is clobbered.
+    assert (
+        resolve_active_lcm_engine(conversation_id="K2") is other,
+        after == before,
+        other._store.get_range("S1", conversation_id="K2") == stored,
+    ) == (True, True, True), (before, after)
+    engine.ingest(deepcopy(history(4)))
+    assert engine._conversation_id == "K2"
+    assert resolve_active_lcm_engine(conversation_id="K2") is other
+    assert other._lifecycle.get_by_conversation("K2") == before
+    assert other._store.get_range("S1", conversation_id="K2") == stored
+
+
 @pytest.mark.parametrize("case", ["N1_separate", "N2_split", "N3_live"])
 def test_controls(host, case):
     engine = host()
