@@ -155,3 +155,35 @@ def test_a_failed_payload_write_at_default_settings_adds_no_child_copy(host, mon
     child.end(engine, [*handed, {"role": "assistant", "content": "FINAL"}])
     rows = child_rows(parent)
     assert (len(rows), sum(r["content"] == "FINAL" for r in rows)) == (4, 1)
+
+
+@pytest.mark.parametrize("location", ["spillover", "hermes-results"])
+def test_a_delegate_child_turn_store_at_ext_off_stores_each_row_once(tmp_path, monkeypatch, location):
+    """The delegated child's turn store (aux_session `_append_delegate_child_rows`): a re-sent turn holding the
+    marker adds nothing, and the final reply is stored once."""
+    from hermes_lcm import aux_session
+    from tests.test_issue_1931_delegate_children import DELEGATE, Agent
+    monkeypatch.setattr(aux_session, "_DELEGATE_AUXILIARY_IDS", set())
+    home = tmp_path / "home"
+    engine = LCMEngine(config=LCMConfig(database_path=str(tmp_path / "store.db"), embeddings_enabled=False,
+                                        large_output_externalization_enabled=False), hermes_home=str(home))
+    try:
+        engine.on_session_start("parent", platform="desktop")
+        class Child(Agent):  # the store finds its delegate agent on the call stack, as in the host
+            def store(self, engine, history):
+                return engine._store_delegate_child_turn(self.session_id, copy.deepcopy(history), platform="subagent")
+
+        child = Child("child", **DELEGATE)
+        child.start(engine)
+        marker = _write_output(_path(home, location, "c1"), FULL_OUTPUT)
+        turn = [{"role": "user", "content": "Dump the ledger."}, call(1),
+                {"role": "tool", "tool_call_id": "c1", "content": marker}]
+        engine.ingest(copy.deepcopy(turn))
+        assert child.store(engine, turn) == 3
+        assert child.store(engine, turn) == 0
+        final = turn + [{"role": "assistant", "content": "FINAL"}]
+        assert child.store(engine, final) == 1
+        rows = engine._store.get_session_messages("child")
+        assert (len(rows), sum(r["content"] == "FINAL" for r in rows)) == (4, 1)
+    finally:
+        engine.shutdown()
