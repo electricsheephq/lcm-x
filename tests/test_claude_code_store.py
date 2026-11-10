@@ -2490,3 +2490,21 @@ def test_a_child_elsewhere_finds_its_parents_folder_from_any_layout(tmp_path, ho
     assert "claude-code:" + session not in ca.audit(home)["unverified"]
     _append(b, [dict(e, sessionId=session) for e in CONVERSATION[:2]])  # rows at B the store never took
     assert "claude-code:" + session in ca.audit(home)["unverified"]
+
+
+def test_a_child_elsewhere_in_an_inner_session_folder_checks_that_folder(tmp_path, home, hermes):
+    """#2557 cross-model review: the folder found above a child is checked itself, not the one session_dir() maps its
+    transcript back to (an inner ``s1`` folder directly under ``subagents`` maps to the outer one)."""
+    from hermes_lcm import claude_code_audit as ca
+
+    a = tmp_path / "projects" / "-work" / "s1.jsonl"
+    inner = tmp_path / "projects" / "-other" / "s1" / "subagents" / "s1"
+    child = inner / "subagents" / "agent-x1.jsonl"
+    _append(child, _SIDE)
+    _append(a, CONVERSATION[:2])
+    _record(_hook(), home, a)
+    _record(_hook(), home, a, event="SubagentStop", agent_id="x1", agent_transcript_path=str(child))
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    assert not [key for key in ca.audit(home)["unverified"] if key.startswith("claude-code:s1")]
+    _append(inner / "subagents" / "agent-y9.jsonl", _SIDE)  # a sibling nothing captured, in the inner folder
+    assert "claude-code:s1/agent:y9" in ca.audit(home)["unverified"]
