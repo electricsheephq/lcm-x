@@ -167,10 +167,11 @@ def test_reused_call_id_two_occurrences_child_end(host, tmp_path, monkeypatch, l
     _assert_reused_once(parent, "child", view)
 
 
+@pytest.mark.parametrize("ext", ["", "-noext"], ids=["ext", "noext"])  # #2547: the route callers at ext off too
 @pytest.mark.parametrize("location", ["spillover", "hermes-results"])
 @pytest.mark.parametrize("route", ["direct-bypass", "same-id-bypass"])
-def test_class_A_bypass_decision_with_marker(engines, monkeypatch, tmp_path, location, route):  # noqa: F811
-    kind = "spillover" if location == "spillover" else "tempdir"
+def test_class_A_bypass_decision_with_marker(engines, monkeypatch, tmp_path, location, route, ext):  # noqa: F811
+    kind = ("spillover" if location == "spillover" else "tempdir") + ext
     engine, view, _, n = _setup(engines, monkeypatch, tmp_path, kind)
     if route == "direct-bypass":
         # Pin the audit's non-default, suppressed auxiliary id reused as normal.
