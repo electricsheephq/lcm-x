@@ -1304,7 +1304,8 @@ def recall_guidance_schemas(schemas, variant):
                 "that already exists in lcm.db; pass anchor_store_id to read the conversation around one hit."),
                 "parameters": {**params, "properties": {**params["properties"],
                     "anchor_store_id": {"type": "integer", "description":
-                        "Optional exact message anchor belonging to session_id; returns its surrounding window."},
+                        ("Optional exact message anchor belonging to session_id; returns its surrounding window. "
+                         "To read past the window, call again without anchor_store_id and with after_store_id set to next_cursor.")},
                     **{key: {"type": "integer", "default": default, "description":
                              f"Rows {key} the anchor, clamped to 0..40; used only with anchor_store_id."}
                        for key, default in (("before", 6), ("after", 12))}}}}

@@ -155,5 +155,6 @@ def test_v2_served_identically_on_every_path(monkeypatch, unit):
             assert 'min_sessions' not in json.dumps(engine)
             props = by_name['lcm_load_session']['parameters']['properties']
             assert props['anchor_store_id']['type'] == 'integer'
+            assert 'call again without anchor_store_id' in props['anchor_store_id']['description']
             assert props['before']['default'] == 6 and props['after']['default'] == 12
             # The FMP bench path (bench/fmp/delivery.py) is checked in bench/fmp/tests, which has its dependencies.
