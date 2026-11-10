@@ -1108,10 +1108,10 @@ def _drain_once(home: Path, report: dict, deadline: Optional[float], config: Any
                     stamp = record.get("hook_started_ns") if isinstance(record.get("hook_started_ns"), int) else 0
                     marked = store.read_metadata_json(ENDED_PREFIX + lineage.key)
                     newest = marked.get("ns") if isinstance(marked, dict) and isinstance(marked.get("ns"), int) else -1
-                    # #2571: only a lineage's own hooks move its marker, newest first (the spool is not in hook order)
-                    if (named.agent_id or not record.get("agent_id")) and stamp >= newest:
-                        _write_metadata(store, ENDED_PREFIX + lineage.key, {"ns": stamp, "ended": record.get("event") == (
-                            "SubagentStop" if named.agent_id else "SessionEnd")})
+                    # #2571: only own hooks move the marker; an end always marks (any clock), only a newer own hook clears
+                    ended = record.get("event") == ("SubagentStop" if named.agent_id else "SessionEnd")
+                    if (named.agent_id or not record.get("agent_id")) and (ended or stamp > newest):
+                        _write_metadata(store, ENDED_PREFIX + lineage.key, {"ns": max(stamp, newest), "ended": ended})
                     outcome = drain(store, lineage, deadline=deadline, facts=record_facts(record, named))
                     if outcome == "deadline":
                         report["complete"] = False

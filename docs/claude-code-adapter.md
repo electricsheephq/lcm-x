@@ -568,7 +568,8 @@ gate's instrument (see "The audit" in the test plan).
   - an unterminated last record after the cursor (`partial_tail_bytes`), which Claude Code may still be writing:
     counted and named in the verdict ("N lineages end in an unterminated record"). It leaves the lineage unverified
     only when that lineage's last observed hook was its end (`SessionEnd`, or `SubagentStop` for a subagent): a crash
-    mid-append left a record capture will never take (#2571). A later hook (the session resumed) clears that;
+    mid-append left a record capture will never take (#2571). An end marks it whatever its timestamp; only a newer hook
+    of that lineage (the session resumed) clears it;
   - files under a `tool-results` subfolder (`subfolder_files`; a symlink to a folder, or a folder that cannot be
     listed, counts one), which capture does not store as files: until #2554 they leave the lineage unverified, and the
     verdict names them ("N files in tool-results subfolders not stored (M lineages)");

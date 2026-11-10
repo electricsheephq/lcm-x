@@ -3161,10 +3161,13 @@ def test_the_ended_partial_tail_rule_table(tmp_path, home, hermes, kind, end, ta
     assert report["verified"] is not (end and tail and not resumed)
 
 
-@pytest.mark.parametrize("shape", ["child_stops_after_session_end", "older_end_after_resume", "resumed_still_partial"])
+@pytest.mark.parametrize("shape", ["child_stops_after_session_end", "older_end_after_resume", "resumed_still_partial",
+                                   "end_behind_a_clock_step", "older_hook_after_an_equal_end", "end_with_no_stamp"])
 def test_the_ended_marker_follows_the_lineages_own_newest_hook(tmp_path, home, hermes, shape):
-    """#2571 review: a child's SubagentStop never clears its session's end; an older SessionEnd drained after a newer
-    resume does not mark it ended; a resumed session whose tail is still partial stays reported only."""
+    """#2571 review: a child's SubagentStop never clears its session's end; an end marks the lineage ended whatever its
+    stamp (a clock stepped back, a tie, no stamp), so an older SessionEnd drained after a newer resume is unverified until
+    the next newer own hook; only a strictly newer own hook clears it, and a resumed session whose tail is still partial
+    stays reported only."""
     from hermes_lcm import claude_code_audit as ca
 
     a = _append(tmp_path / "projects" / "-work" / "s1.jsonl", CONVERSATION[:2])
@@ -3181,9 +3184,20 @@ def test_the_ended_marker_follows_the_lineages_own_newest_hook(tmp_path, home, h
         _record(_hook(), home, a, event="UserPromptSubmit", hook_started_ns=9)
         cc.run_worker(home, hermes_home=hermes, settle_s=0)
         _record(_hook(), home, a, event="SessionEnd", hook_started_ns=5)  # delayed: drained after the newer resume
-    else:
+        cc.run_worker(home, hermes_home=hermes, settle_s=0)
+        assert not ca.audit(home)["verified"]  # fails toward unverified ...
+        _record(_hook(), home, a, event="UserPromptSubmit", hook_started_ns=12)  # ... until the next newer own hook
+    elif shape == "resumed_still_partial":
         _record(_hook(), home, a, event="SessionEnd", hook_started_ns=5)
         cc.run_worker(home, hermes_home=hermes, settle_s=0)
         _record(_hook(), home, a, event="UserPromptSubmit", hook_started_ns=9)
+    else:  # an own hook at 9, then the end at 5 (clock stepped back), at 9 then an older hook at 9, or with no stamp
+        _record(_hook(), home, a, event="UserPromptSubmit", hook_started_ns=9)
+        cc.run_worker(home, hermes_home=hermes, settle_s=0)
+        stamp = {"end_behind_a_clock_step": {"hook_started_ns": 5}, "end_with_no_stamp": {}}.get(shape, {"hook_started_ns": 9})
+        _record(_hook(), home, a, event="SessionEnd", **stamp)
+        if shape == "older_hook_after_an_equal_end":
+            cc.run_worker(home, hermes_home=hermes, settle_s=0)
+            _record(_hook(), home, a, event="UserPromptSubmit", hook_started_ns=9)
     cc.run_worker(home, hermes_home=hermes, settle_s=0)
-    assert ca.audit(home)["verified"] is (shape != "child_stops_after_session_end")
+    assert ca.audit(home)["verified"] is (shape in {"older_end_after_resume", "resumed_still_partial"})
