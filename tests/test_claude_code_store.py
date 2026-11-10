@@ -2212,6 +2212,24 @@ def _table_state(tmp_path, home, hermes, state):
     a = tmp_path / "projects" / "-work" / "s1.jsonl"
     b = tmp_path / "projects" / "-other" / "s1.jsonl"
     c = tmp_path / "projects" / "-third" / "s1.jsonl"
+    if state == "child_elsewhere":  # #2557: the pending parent names only A; x1's own hook puts it under B's folder
+        child = _append(b.parent / "s1" / "subagents" / "agent-x1.jsonl", _SIDE)
+        _record(_hook(), home, a, event="SessionStart")
+        _record(_hook(), home, a, event="SubagentStop", agent_id="x1", agent_transcript_path=str(child))
+        cc.run_worker(home, hermes_home=hermes, settle_s=0)
+        return {"followed": child, "folder": b}
+    if state == "forgotten_parent":  # #2557: captured at A, a record names B, then the session is forgotten
+        _append(a, CONVERSATION[:2])
+        _record(_hook(), home, a)
+        cc.run_worker(home, hermes_home=hermes, settle_s=0)
+        _record(_hook(), home, b)
+        cc.run_worker(home, hermes_home=hermes, settle_s=0)
+        store = _open(home, hermes)
+        try:
+            store.delete_session_messages("s1")
+        finally:
+            store.close()
+        return {"named": b}
     if state == "captured":  # cursor on A; a later record names B, which never appeared
         _append(a, CONVERSATION[:2])
         _record(_hook(), home, a)
@@ -2275,6 +2293,12 @@ _TABLE = [(state, where, kind, where != "unnamed" and kind in _HOLDS)
           if not (state == "captured" and where == "followed" and kind == "empty")]  # A exists: no empty file to add
 _TABLE += [("child", "followed", "lines", True), ("child", "uncursored", "lines", True),
            ("child", "uncursored", "empty", False)]
+# #2557: a child in a folder its parent never named (that folder's artifacts count as the parent's do), and a
+# forgotten parent (its own content is excluded on purpose; its subagents are still captured and checked).
+_TABLE += [("child_elsewhere", "followed", "lines", True)]
+_TABLE += [("child_elsewhere", "folder", kind, kind in _HOLDS) for kind in _PARENT_KINDS
+           if kind != "unreadable_subagents"]  # x1 itself is in that folder: the audit raises (#2551), never verified
+_TABLE += [("forgotten_parent", "named", kind, kind in {"subagent", "unreadable_subagents"}) for kind in _PARENT_KINDS]
 # Where the code is stricter than the rule (it fails closed): an empty file, as a pending row's transcript or as a
 # subagent transcript with no cursor, holds no rows but is unverified. Reported to the release manager; strict xfail
 # so a change in either direction shows here.
