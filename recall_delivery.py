@@ -11,7 +11,6 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 import json
 import logging
-import re
 from typing import Any
 
 from .reasoning import resolve_occurrence_time
@@ -540,26 +539,8 @@ def deliver_recall(
                 "back here as non-evidence drill-down leads"
             )
         if guidance_v2:
-            shipped = {_hit_identity(h) for h in hits_out}
-            candidates = {_hit_identity(e["hit"]): e for e in ordered + selected_entries}
-            seen_ids = {int(ref.split(":")[1]) for ref in seen_refs if re.fullmatch(r"lcm:\d+:\d+-\d+", ref)}
-            def available(entry):
-                hit = entry["hit"]
-                if delta_requested and (f"lcm-summary:{hit.get('node_id')}" in seen_refs
-                        if hit.get("kind") == "summary" else
-                        seen_ids.intersection([hit.get("store_id"), *hit.get("duplicate_store_ids", [])])):
-                    return False
-                if reference_strict:
-                    return hit.get("kind") != "summary" and strict_selector._rejected.get(id(entry)) is not True
-                # Non-strict hydration covers only the selected window and later children.
-                return not delta_requested or (hit.get("kind") != "summary" and
-                    _exact_ref(hit, answer_ready_content.get(_hit_identity(hit))) is not None)
-            # It can say true once more than needed, never false while a deliverable
-            # unseen candidate remains, and a follow-up chain ends.
             expansion.update(sessions_delivered=_sessions(hits_out),
-                             sessions_in_pool=_sessions([e["hit"] for e in ordered] + hits_out),
-                             more_available=response_cap_truncated or any(
-                                 available(e) for key, e in candidates.items() if key not in shipped))
+                             sessions_in_pool=_sessions([e["hit"] for e in ordered] + hits_out))
         response["detail"] = detail
         response["provenance"]["detail"] = detail
         response["provenance"]["answer_ready"] = expansion
@@ -695,7 +676,7 @@ def _fit_answer_ready_response(
             "content" in hit for hit in response["hits"]
         )
         if "sessions_delivered" in expansion:
-            expansion.update(sessions_delivered=_sessions(response["hits"]), more_available=True)
+            expansion["sessions_delivered"] = _sessions(response["hits"])
         encoded = json.dumps(response, ensure_ascii=False)
     if event_time_marker_deferred is not None:
         # Put the marker back with its original reason, only if it fits.

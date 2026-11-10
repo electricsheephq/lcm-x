@@ -141,8 +141,16 @@ def test_v2_served_identically_on_every_path(monkeypatch, unit):
             assert served['description'] == host['description'] + mcp_reader.READER_NOTE
             assert served['inputSchema'] == host['parameters']
         if variant == 'v2':
+            description = by_name['lcm_recall']['description']
+            assert 'more_available' not in description
+            assert 'When a hit carries a session_hint, read around it using that hint.' in description
             if unit == 'session':
                 assert 'provenance.answer_ready' not in by_name['lcm_recall']['description']
+            else:
+                assert ('With detail="answer_ready", check `provenance.answer_ready.sessions_delivered` '
+                        'against `provenance.answer_ready.sessions_in_pool`.') in description
+                assert ('If fewer sessions were delivered than are in the pool, call again with '
+                        '`exclude_session_ids` set to the sessions you have read.') in description
             assert 'For questions that combine or compare' in by_name['lcm_recall']['description']
             assert 'min_sessions' not in json.dumps(engine)
             props = by_name['lcm_load_session']['parameters']['properties']

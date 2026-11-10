@@ -1112,10 +1112,16 @@ def lcm_load_session(args: Dict[str, Any], **kwargs) -> str:
                 return json.dumps({"error": error or f"{key} must be an integer"})
             window[key] = max(0, min(40, value))
         rows = engine._store.load_session_window(
-            session_id, anchor_store_id=anchor, window_cap=40, **window,
-            roles=roles or None, time_from=time_from, time_to=time_to)
-        page_rows = [r for r in rows if r["store_id"] > after_store_id][:limit]
-        next_cursor = page_rows[-1]["store_id"] if page_rows else None
+            session_id, anchor_store_id=anchor, window_cap=40, **window)
+        boundary = rows[-1]["store_id"]
+        if roles or time_from is not None or time_to is not None:
+            rows = [r for r in engine._store.load_session_page(
+                session_id, after_store_id=rows[0]["store_id"] - 1, limit=len(rows),
+                roles=roles or None, time_from=time_from, time_to=time_to)
+                if r["store_id"] <= boundary]
+        remaining = [r for r in rows if r["store_id"] > after_store_id]
+        page_rows = remaining[:limit]
+        next_cursor = page_rows[-1]["store_id"] if len(remaining) > limit else boundary
         has_more = bool(next_cursor is not None and engine._store.load_session_page(
             session_id, after_store_id=next_cursor, limit=1, roles=roles or None,
             time_from=time_from, time_to=time_to))
@@ -4727,13 +4733,16 @@ def _lcm_recall_later_statements(engine, ordered, identity_rows, *, n, limit, qu
 
 
 def _lcm_recall_session_hint(engine: "LCMEngine", hit: dict[str, Any]) -> str | None:
-    store_id = hit.get("store_id")
-    if hit.get("node_id") is not None and (hit.get("kind") == "summary" or store_id is None):
-        sources = engine._dag.source_message_ids(hit["node_id"], limit=1)
-        store_id = sources[0] if sources else None
-    row = engine._store.get(store_id) if store_id is not None else None
-    session = row.get("session_id") if row else None
-    return f"lcm_load_session(session_id={session!r}, anchor_store_id={store_id})" if session else None
+    try:
+        store_id = hit.get("store_id")
+        if hit.get("node_id") is not None and (hit.get("kind") == "summary" or store_id is None):
+            sources = engine._dag.source_message_ids(hit["node_id"], limit=1)
+            store_id = sources[0] if sources else None
+        row = engine._store.get(store_id) if store_id is not None else None
+        session = row.get("session_id") if row else None
+        return f"lcm_load_session(session_id={session!r}, anchor_store_id={store_id})" if session else None
+    except Exception:  # Optional hints must not fail recall or suppress other hints.
+        return None
 
 
 def lcm_recall(args: Dict[str, Any], **kwargs) -> str:

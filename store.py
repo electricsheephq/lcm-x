@@ -1190,9 +1190,6 @@ class MessageStore:
         before: int = 2,
         after: int = 3,
         window_cap: int = 12,
-        roles: list[str] | None = None,
-        time_from: float | None = None,
-        time_to: float | None = None,
     ) -> List[Dict[str, Any]]:
         """Load one bounded ordered window around an exact message anchor."""
         before = min(window_cap, max(0, int(before)))
@@ -1212,15 +1209,6 @@ class MessageStore:
             (session_id, anchor_store_id, after + 1),
         ).fetchall()
         rows = list(reversed(prior)) + list(following)
-        if rows and (roles or time_from is not None or time_to is not None):
-            where, args = self._session_load_where(
-                session_id, roles=roles, time_from=time_from, time_to=time_to)
-            where.append(f"store_id IN ({','.join('?' for _ in rows)})")
-            args.extend(row[0] for row in rows)
-            rows = self._conn.execute(
-                f"SELECT {_MESSAGE_SELECT_COLUMNS} FROM messages WHERE {' AND '.join(where)} ORDER BY store_id",
-                args,
-            ).fetchall()
         return [self._row_to_dict(row) for row in rows]
 
     def get_session_messages(self, session_id: str,

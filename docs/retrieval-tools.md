@@ -64,13 +64,12 @@ internal recall consumers keep their existing order.
 Set `recall_guidance: v2` (env `LCM_RECALL_GUIDANCE=v2`; default `v1`) to
 give the model guidance for questions spanning several conversations. The engine,
 plugin registry and read-only MCP reader serve the same guidance. In hits delivery,
-`detail="answer_ready"` adds `sessions_delivered`, `sessions_in_pool` and
-`more_available` under `provenance.answer_ready`. The counts describe distinct
-sessions in the returned hits and ranked candidate pool plus delivered later-statement
-children; `more_available` also accounts for displaced candidates and candidates left
-by hydration or response limits. In delta mode, seen exact refs do not count as more.
-This conservative hint can say true once more than needed, never false while a deliverable
-unseen candidate remains, and a follow-up chain ends.
+`detail="answer_ready"` adds `sessions_delivered` and `sessions_in_pool` under
+`provenance.answer_ready`. The counts describe distinct sessions in the returned hits
+and ranked candidate pool plus delivered later-statement children. With
+`detail="answer_ready"`, compare the counts; when fewer sessions were delivered than
+are in the pool, call again with `exclude_session_ids` set to the sessions already read.
+When a hit carries a `session_hint`, use it to read around that hit.
 Session-delivery guidance omits the hits-only provenance instruction. These are bounded
 retrieval signals, not proof that all matching sessions have been searched.
 
@@ -88,7 +87,7 @@ Set `recall_session_hints: true` (env `LCM_RECALL_SESSION_HINTS=true`; default
 call string such as `lcm_load_session(session_id='session-a', anchor_store_id=42)`.
 The session ID comes from the anchor's stored row, including for summary sources,
 so the hint still works after a compression rollover moves summary ownership.
-A missing source row has no hint. The two settings are independent; environment
+A missing source row or failed hint read omits only that hint. The two settings are independent; environment
 values override their `lcm.*` YAML keys. For example:
 
 ```yaml

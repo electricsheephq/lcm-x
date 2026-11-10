@@ -1288,10 +1288,12 @@ def recall_guidance_schemas(schemas, variant):
             schema = {**schema, "description": schema["description"] + " " + (
                 "For questions that combine or compare facts from several conversations, read across "
                 "sessions to support totals, lists, changes over time, 'how many' or 'which ... first'. "
-                + ("First check `provenance.answer_ready.sessions_delivered` and `more_available`. "
-                   "If more sessions are available, call again with "
+                + ('With detail="answer_ready", check `provenance.answer_ready.sessions_delivered` '
+                   "against `provenance.answer_ready.sessions_in_pool`. "
+                   "If fewer sessions were delivered than are in the pool, call again with "
                    if "Session delivery" not in schema["description"] else "To look for more sessions, call again with ") +
-                "`exclude_session_ids` set to the sessions you have read. Read around a hit with its `session_hint`. "
+                "`exclude_session_ids` set to the sessions you have read. "
+                "When a hit carries a session_hint, read around it using that hint. "
                 "Stop when cited spans support every part of the question or a call finds no new sessions; say what you could not find.")}
         elif name == "lcm_load_session":
             params = schema["parameters"]
