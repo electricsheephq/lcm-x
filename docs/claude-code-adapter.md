@@ -450,9 +450,11 @@ A lineage's records can name more than one transcript path: a resume from anothe
 a path under the new directory that never appears. Capture follows one path. The pending row and the cursor list every
 path named in a record the worker reads. The audit does not match another named path against the store: if one exists and holds lines, or saved
 outputs or subagent transcripts under its session folder, or cannot be checked, the lineage is unverified (`named_other_paths`, and in words in
-the verdict: "a second transcript path holds rows; not matched"). A named path that never appeared, or an empty one with
-no saved outputs, holds nothing. No real session has shown a second path holding rows; matching and capturing one is
-a follow-up for when one does.
+the verdict: "a second transcript path holds rows; not matched"). For a lineage with a cursor, a named path that never
+appeared, or an empty one with no saved outputs, holds nothing. A pending lineage (no cursor yet) is stricter: any named
+path that exists, even empty, or cannot be checked, or saved outputs or subagent transcripts under any named path's
+session folder, leave it unverified. No real session has shown a second path holding rows; matching and capturing one
+is a follow-up for when one does.
 
 Detached hook logs include `detached: true` and parent `blocking_ms`; `ms` still measures
 through child completion. The parent parses stdin and forks before filesystem validation.
