@@ -84,7 +84,8 @@ def plan_sha256(plan):
 
 def declaration(plan):
     steps = [step for epoch in plan["epochs"] for step in epoch["steps"]]
-    return {"conversations": [{key: c[key] for key in ("name", "lcm_rows", "host_rows")}
+    return {"conversations": [{**{key: c[key] for key in ("name", "lcm_rows", "host_rows")},
+                               "flagged_summary_nodes": c.get("flagged_summary_nodes")}
                               for c in plan["conversations"]],
             "steps_by_kind": dict(Counter(s["kind"] for s in steps)),
             "cold_binds": dict(Counter(s["conversation"] for s in steps if s["kind"] == "cold")),

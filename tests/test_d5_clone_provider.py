@@ -133,8 +133,8 @@ def test_cron_is_independent(provider):
 
 
 def test_models_and_embeddings(provider):
-    assert {m["id"] for m in request(provider, "/v1/models")["data"]} == {
-        "d5-agent", "d5-cron", "d5-summary"}
+    assert {m["id"] for m in request(provider, "/v1/models")["data"]} == {  # d5-aux: the arm's auxiliary tasks.
+        "d5-agent", "d5-aux", "d5-cron", "d5-summary"}
     with pytest.raises(HTTPError) as exc:
         request(provider, "/v1/embeddings", {"input": "not served"})
     assert exc.value.code == 404
@@ -159,6 +159,7 @@ def test_configured_models_and_string_steps_only():
         request(instance, "/_d5/step", {"step": "0"})
         assert complete(instance, "agent")["choices"][0]["message"]["content"] == "zero"
         complete(instance, "digest")
+        complete(instance, "d5-aux")  # An auxiliary task (title, compression) is the arm's own model, never unknown.
         assert request(instance, "/_d5/stats")["unknown_models"] == {}
     finally:
         instance.stop()

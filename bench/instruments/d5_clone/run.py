@@ -15,6 +15,7 @@ P1) provides ``identity(row)``, ``credits`` (the two host-rewrite credits, each 
 """
 
 import argparse
+from collections import Counter
 from datetime import datetime, timedelta
 import hashlib
 import importlib.util
@@ -33,12 +34,15 @@ from . import bars, capture, gateway, pins, plan as planner, provider as prov, s
 from ..release_gauntlet import kit_evidence
 
 SCHEMA = "d5-clone-receipt/1"
+_ISO_Z = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}(:[0-9]{2}(\.[0-9]+)?)?Z")  # The settings time, UTC.
 NEED_FREE = 40 * 10**9
 PREFLIGHTS = ("P3", "P4", "P5", "P6", "P7")
 DOCTOR_STATUS = {"pass": "ok", "ok": "ok", "warn": "warn", "fail": "fail"}  # Any other status stays, and fails bar 5.
 # LCM-X's externalized-payload reference (externalize.py _EXTERNALIZED_REF_RE).
 EXTERNALIZED_REF = re.compile(r"\[(?:Externalized|GC'd externalized) (?:tool output|payload):.*?;\s*ref=([^;\]\s]+)\]")
 CRON_MODEL = "d5-cron"
+# The model names the arm config gives the loopback provider (gateway.build_config); a receipt keeps only these raw.
+OWN_MODELS = frozenset(("d5-agent", "d5-aux", "d5-cron", "d5-summary"))
 CRON_PAUSE_REASON = "d5 clone run: paused before the run"
 COLD_INGEST_TIMEOUT = 120
 # How the probe can exercise each lcm_doctor check on a stopped arm (both trees' tools.py lcm_doctor). Store-wide
@@ -50,6 +54,19 @@ DOCTOR_STORE_WIDE = frozenset((
     "payload_storage", "source_lineage_hygiene", "lifecycle_fragmentation", "sensitive_pattern_handling",
     "config_validation", "embedding_provider_health"))
 DOCTOR_PER_SESSION = ("fts_index_sync", "orphaned_dag_nodes", "summary_quality")
+# The nodes the doctor's summary_quality check flags (tools._summary_quality_stats): source/summary >= 400, or a
+# source of 100k tokens or more summarized in under 500.
+FLAGGED_NODES = ("SELECT count(*) FROM summary_nodes WHERE session_id = ? AND ((source_token_count >= 100000"
+                 " AND token_count < 500) OR (token_count > 0 AND CAST(source_token_count AS REAL) / token_count >= 400))")
+
+
+def flagged_summary_nodes(store, session_ids):
+    """{session id: flagged summary nodes} in *store*, read-only (#2471); None for a store that cannot be read."""
+    try:
+        with closing(capture._readonly(store)) as db:
+            return {sid: db.execute(FLAGGED_NODES, (sid,)).fetchone()[0] for sid in session_ids}
+    except (sqlite3.DatabaseError, capture.CaptureError, OSError):
+        return None
 DOCTOR_PRE_OPEN = ("messages_fts_integrity@pre_open", "nodes_fts_integrity@pre_open")  # Before the engine repairs FTS.
 DOCTOR_NOT_EXERCISED = {
     "identity_migration": "no plugin registration step in the probe",
@@ -82,8 +99,131 @@ def _json(value):
     return value if isinstance(value, dict) else None
 
 
+PREFLIGHT_SCHEMA = "d5-clone-preflight/1"
+TREE_BOUND_PREFLIGHTS = ("P4",)  # The spec's preflight that both trees store one externalized output identically.
+# What a receipt's config_sha256 leaves out of the declaration, each with its reason. Everything else is bound, so a
+# field added later is bound without anyone remembering it (release manager, 2026-11-10: a changed setting is an
+# instrument change, and the preflights run again). Only what differs by stage by design, or is bound elsewhere, is
+# left out: the preflights stage's P3, P6 and P7 receipts must count in the dry run and the run.
+RECEIPT_UNBOUND = {  # Whole declaration fields.
+    "snapshot_dir": "the snapshot pin is bound by its own sha256",
+    "snapshot_pin": "the snapshot pin is bound by its own sha256",
+    "preflights": "the receipts' own paths, which differ by stage",
+    "replay_receipt": "a file name that differs by stage; a wrong one makes the replay, and so P6, fail closed",
+    "settings_as_of": "a disclosed time, never judged",
+    "instrument_dir": "a path; P1 pins its files on every run",
+}
+RECEIPT_TREE_UNBOUND = {  # Fields inside "rc" and "ga"; the rest of each tree (host_bin, host_src, ...) is bound.
+    "commit": "the trees field binds it (R5-5); P3, P6 and P7 run the previous GA in both slots",
+    "lcm_tree": "the stage's own extract of that commit, a path",
+}
+RECEIPT_ARGV_MASKED = {  # The value after these flags in constants_argv and replay_argv; the rest of each argv is bound.
+    "--arm": "the stage's own arm file, a path (its settings and context length come from bound fields)",
+    "--label": "the stage's run label, a name",
+    "--tree-candidate": "masked only when it is the declared rc commit, which the trees field binds",
+}
+
+
+def _masked_argv(argv, rc_commit):
+    out = list(argv)
+    for i in range(len(out) - 1):
+        if out[i] in RECEIPT_ARGV_MASKED and (out[i] != "--tree-candidate" or out[i + 1] == rc_commit):
+            out[i + 1] = "<masked>"
+    return out
+
+
+PACKAGE = Path(__file__).resolve().parent
+
+
+def outside_package(run_dir):
+    """*run_dir*, refused when it lies in this package: files written there would change the instrument's own hash
+    after a receipt recorded it, and the receipt would then never match (ruling R5-5)."""
+    if Path(run_dir).resolve().is_relative_to(PACKAGE):
+        raise ValueError("the run dir must be outside the instrument package")
+    return run_dir
+
+
+def instrument_identity(root=None):
+    """This instrument's identity (ruling R5-5): the sha256 over every file of this package by relative name, which a
+    preflight receipt must match, and the repo commit it runs from ("" outside a checkout), recorded for readers."""
+    root, h = Path(root).resolve() if root else PACKAGE, hashlib.sha256()
+    for path in sorted(p for p in root.rglob("*") if p.is_file() and "__pycache__" not in p.parts and p.suffix != ".pyc"):
+        h.update(path.relative_to(root).as_posix().encode() + b"\0" + hashlib.sha256(path.read_bytes()).digest())
+    try:
+        commit = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True,
+                                timeout=30, check=False).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        commit = ""
+    return {"instrument_sha256": h.hexdigest(), "instrument_commit": commit}
+
+
+def config_identity(config):
+    """The sha256 of the declaration's canonical JSON with the RECEIPT_* parts left out or masked: what a preflight
+    receipt binds as config_sha256 (settings, env, context lengths, timeouts, nonce, the host build, both argv lists)."""
+    rc_commit = (config.get("rc") or {}).get("commit") if isinstance(config.get("rc"), dict) else None
+    bound = {}
+    for key, value in config.items():
+        if key in RECEIPT_UNBOUND:
+            continue
+        if key in ("rc", "ga") and isinstance(value, dict):
+            value = {k: v for k, v in value.items() if k not in RECEIPT_TREE_UNBOUND}
+        elif key in ("constants_argv", "replay_argv") and isinstance(value, list):
+            value = _masked_argv(value, rc_commit)
+        bound[key] = value
+    return hashlib.sha256(json.dumps(bound, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
+
+
+def tree_id(config, tree):
+    """A tree's identity as the receipts record it: its declared 40-hex commit (the builder extracts the tree from that
+    commit), else None. A path is no identity: another tree can take the same path."""
+    commit = config[tree].get("commit")
+    return commit if isinstance(commit, str) and re.fullmatch(r"[0-9a-f]{40}", commit) else None
+
+
+def _store_path(home):
+    return next((Path(home) / n for n in ("lcm.db", "store.db") if (Path(home) / n).is_file()), Path(home) / "lcm.db")
+
+
+def _keyed(counts):
+    """A {session id: count} map keyed by the ids' sha256 12, as the receipt names sessions; None stays None."""
+    return None if counts is None else {_sha(sid)[:12]: n for sid, n in counts.items()}
+
+
 def _sha(text):
     return hashlib.sha256(str(text).encode()).hexdigest()
+
+
+def _utc_time(value):
+    """*value* when it is a real UTC time written as ISO 8601 with a Z; else None."""
+    if not (isinstance(value, str) and _ISO_Z.fullmatch(value)):
+        return None
+    try:
+        datetime.fromisoformat(value[:-1] + "+00:00")
+    except ValueError:
+        return None
+    return value
+
+
+def _private_models(counts):
+    """{model name: n} for a receipt: the provider's own names (OWN_MODELS) stay, any other name (one the arm's settings or
+    stored routes asked for) becomes its sha256 12, so no value from the snapshot is written (#2471, receipts carry
+    counts, ids and hashes only)."""
+    out = Counter()
+    for name, n in (counts or {}).items():
+        out[name if name in OWN_MODELS else f"sha256-12:{_sha(name)[:12]}"] += n
+    return dict(out)
+
+
+def _private_arm(provider, routing=None):
+    """The receipt's provider stats and routing record, with the snapshot's provider and model names hashed."""
+    provider = {**provider, **{k: _private_models(provider.get(k)) for k in ("calls_by_model", "unknown_models")
+                               if k in provider}}
+    if routing is None:
+        return provider, None
+    names = routing.get("stored_route_providers") or []
+    return provider, {**{k: v for k, v in routing.items() if k != "stored_route_providers"},
+                      "stored_route_providers": len(names),
+                      "stored_route_provider_sha256_12": sorted(_sha(n)[:12] for n in names)}
 
 
 def _owned_key(value):
@@ -104,7 +244,7 @@ def rekey_copy_conversations(lcm_db, conversations, *, run_dir):
             quoted = '"' + name.replace('"', '""') + '"'
             if any(row[1] == "conversation_id" for row in db.execute(f"PRAGMA table_info({quoted})")):
                 if name not in ("messages", "lcm_lifecycle_state"):
-                    raise ValueError(f"unexpected conversation_id table: {name}")
+                    raise ValueError("unexpected conversation_id table: sha256-12:" + _sha(name)[:12])
                 tables.append(name)
         resolved, groups = [], {}
         for conversation in conversations:
@@ -180,6 +320,7 @@ def workload_facts(home, before, cron_id=None):
     lcm, host = Path(home) / "lcm.db", Path(home) / "state.db"
     store_after, host_after = (before.get("store_id", 0),), (before.get("host_id", 0),)
     # A published compaction: a session whose LCM-X commit proof row changed and is not native, with a new summary node.
+    # (The stored proof has no "published" field: compaction._compress_commit_proof_payload writes "native" only.)
     nodes = {s for s, in _rows(lcm, "SELECT DISTINCT session_id FROM summary_nodes WHERE node_id > ?", (before.get("node_id", 0),))}
     published = sum(key.partition(":")[2] in nodes and before.get("proofs", {}).get(key) != _sha(value)
                     and (_json(value) or {}).get("native") is False
@@ -379,7 +520,9 @@ class LocalHost:
     def plan(self, copy):
         self.configure_planning(copy)
         chosen = planner.choose_sessions(copy / "host-0.db", copy / "store.db", self.rules()["covered"])
-        return planner.build_plan(chosen, nonce=self.c["nonce"])
+        flagged = flagged_summary_nodes(copy / "store.db", [c["session_id"] for c in chosen]) or {}
+        return planner.build_plan([dict(c, flagged_summary_nodes=flagged.get(c["session_id"])) for c in chosen],
+                                  nonce=self.c["nonce"])
 
     def rows(self, path):
         out = {}
@@ -400,8 +543,24 @@ class LocalHost:
         path = self.c.get("preflights", {}).get(name)  # The others: a recorded preflight receipt, by sha256.
         if not path:
             return {"verdict": "MISSING"}
-        return {"verdict": json.loads(Path(path).read_text(encoding="utf-8")).get("verdict"),
-                "sha256": capture._sha256(path)}
+        try:
+            recorded = json.loads(Path(path).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {"verdict": "MISSING", "mismatch": ["unreadable"]}
+        # Ruling R5-5: a receipt counts only for this run's plan, snapshot pin, instrument and declared configuration
+        # (config_sha256, release manager 2026-11-11); P4 also for this run's
+        # two trees, and the others, which run the previous GA in both arms by design, for that tree in both slots.
+        ga = tree_id(self.c, "ga")
+        trees = {"rc": tree_id(self.c, "rc"), "ga": ga} if name in TREE_BOUND_PREFLIGHTS else {"rc": ga, "ga": ga}
+        want = {"schema": PREFLIGHT_SCHEMA, "name": name, "plan_sha256": planner.plan_sha256(plan),
+                "snapshot_pin_sha256": capture._sha256(self.c["snapshot_pin"]),
+                "instrument_sha256": instrument_identity()["instrument_sha256"], "trees": trees,
+                "config_sha256": config_identity(self.c)}
+        mismatch = sorted(k for k, v in want.items() if not isinstance(recorded, dict) or recorded.get(k) != v
+                          or (k == "trees" and None in v.values()))  # An undeclared tree never binds a receipt.
+        if mismatch:  # Treated as missing: an earlier snapshot's, plan's, instrument's or tree's receipt.
+            return {"verdict": "MISSING", "mismatch": mismatch, "sha256": capture._sha256(path)}
+        return {"verdict": recorded.get("verdict"), "sha256": capture._sha256(path), "bound": sorted(want)}
 
     def arm(self, name, home, plan):
         tree = self.c[name]
@@ -500,7 +659,7 @@ class LocalHost:
             argv = sandbox.wrap([str(Path(tree["host_bin"]) / "python"), "-P", "-B",
                                  str(Path(__file__).with_name("doctor_probe.py")), "--text",
                                  str(Path(tree["lcm_tree"]).resolve()), str(clone), str(text)],
-                                ports=[], deny_paths=[sandbox.hermes_home()])
+                                ports=[], deny_paths=sandbox.live_homes())
             child = {**env, "HERMES_HOME": str(clone), "HOME": str(clone / "user-home"), "TMPDIR": str(clone / "tmp"),
                      **{k: str(clone / v) for k, v in gateway.FORCED_LCM_PATHS.items()}}
             done = subprocess.run(["/usr/bin/nice", "-n", "19", *argv], cwd=clone, env=child, capture_output=True,
@@ -526,7 +685,7 @@ class LocalHost:
             raise ValueError("replay_receipt must be a bare file name")
         for key in ("constants_argv", "replay_argv"):
             argv = sandbox.wrap([a.format(**values) for a in self.c[key]], ports=[ctx["port"]], socket_roots=[out],
-                                deny_paths=[sandbox.hermes_home()])  # The live agent's home is never read.
+                                deny_paths=sandbox.live_homes())  # The live agent's home is never read.
             env = {"PATH": "/usr/bin:/bin", "HOME": str(out), "PYTHONDONTWRITEBYTECODE": "1"}
             code = subprocess.run(["/usr/bin/nice", "-n", "19", *argv], cwd=out, env=env, capture_output=True).returncode
             if code:  # An error, or (constants exit 1) a NOT SHOWN bind: no replay runs after it. Either way the
@@ -584,7 +743,7 @@ class LocalHost:
         argv = sandbox.wrap([str(Path(tree["host_bin"]) / "python"), "-P", "-B",  # Never this dir's modules first.
                              str(Path(__file__).with_name("doctor_probe.py")),
                              str(Path(tree["lcm_tree"]).resolve()), str(clone), str(out),
-                             json.dumps(ctx["session_ids"])], ports=[], deny_paths=[sandbox.hermes_home()])
+                             json.dumps(ctx["session_ids"])], ports=[], deny_paths=sandbox.live_homes())
         try:
             done = subprocess.run(["/usr/bin/nice", "-n", "19", *argv], cwd=clone, env=env, capture_output=True,
                                   timeout=self.c.get("doctor_timeout", 1800))
@@ -632,6 +791,7 @@ def _range_new_rows(out):
 def run_arm(host, name, home, plan, extras):
     ctx = host.arm(name, home, plan)
     cron_paused = host.pause_cron(ctx)  # Before the first gateway start: no snapshot job fires in the run.
+    flagged_start = _keyed(flagged_summary_nodes(_store_path(home), [c["session_id"] for c in plan["conversations"]]))
     sid = {c["name"]: c["session_id"] for c in plan["conversations"]}
     binds, restarts, egress, tool_turns, started = [], [], [], 0, time.monotonic()
     planned, not_completed, cron_job_sha256 = 0, [], None
@@ -705,7 +865,31 @@ def run_arm(host, name, home, plan, extras):
             "provider": stats, "logs": host.logs(ctx), "roots": host.roots(ctx), "checks": checks,
             "doctor_not_exercised": ctx.get("doctor_not_exercised", []), "cron_paused": cron_paused,
             "routing": ctx.get("routing", {}),
+            "flagged_summary_nodes_start": flagged_start,  # Before the first turn (ruling R5-4).
+            "flagged_summary_nodes": _keyed(flagged_summary_nodes(
+                _store_path(home), [c["session_id"] for c in plan["conversations"]])),
             "rows": rows, "wall_s": round(time.monotonic() - started, 3)}
+
+
+def inherited_flags(plan, arms, ga_rerun=None):
+    """Bar 5's inherited sessions (ruling R5-4): each driven session whose snapshot count of flagged summary nodes is not
+    0 (or unknown), keyed by its summary_quality check name, with its counts at the start and at each arm's end."""
+    def count(arm, key, h12):
+        return ((arm or {}).get(key) or {}).get(h12)
+
+    out = {}
+    for c in plan["conversations"]:
+        if c.get("flagged_summary_nodes") == 0:
+            continue
+        h12 = _sha(c["session_id"])[:12]
+        n = {"start": c.get("flagged_summary_nodes"),
+             **{f"{a}{k}": count(arms.get(a), f"flagged_summary_nodes{key}", h12)
+                for a in ("rc", "ga") for k, key in (("_start", "_start"), ("", ""))}}
+        if ga_rerun:
+            n.update(ga_rerun_start=count(ga_rerun, "flagged_summary_nodes_start", h12),
+                     ga_rerun=count(ga_rerun, "flagged_summary_nodes", h12))
+        out[f"summary_quality@{h12}"] = n
+    return out
 
 
 def run(host, *, rc_id, prior=(), instrument_fix=None):
@@ -714,6 +898,9 @@ def run(host, *, rc_id, prior=(), instrument_fix=None):
     prior = [p for p in prior if p.get("rc") == rc_id and "verdict" in p]  # A stopped run is not an attempt.
     prior_verdicts = [p["verdict"]["raw"] for p in prior]
     receipt = {"schema": SCHEMA, "rc": rc_id, "attempt": len(prior_verdicts) + 1, "instrument_fix": instrument_fix}
+    receipt["settings"] = {  # A disclosed fact, never judged (release manager, 2026-11-10); only a UTC time is written.
+        "as_of": _utc_time(getattr(host, "c", {}).get("settings_as_of")),
+        "note": "both arms run the declared reference-settings snapshot taken at as_of, assumed unchanged since"}
     refusal = bars.may_run(prior_verdicts, instrument_fix)
     receipt["preflights"] = steps = {"free_space": {"verdict": "PASS" if host.free_bytes() >= NEED_FREE else "FAIL"}}
     if refusal is None and steps["free_space"]["verdict"] == "PASS":
@@ -760,9 +947,16 @@ def run(host, *, rc_id, prior=(), instrument_fix=None):
                           missing_receipts=[b["bind"] for b in binds if not isinstance(b["receipt"], dict)]),
         "bar2": bars.bar2([b["bar2"] for b in binds]),
         "bar3": bars.bar3(snap["store"], arms["rc"]["rows"]["store"], rules["identity"]),
-        "bar4": bars.bar4(arms["rc"]["logs"], arms["ga"]["logs"], arms["rc"]["roots"], arms["ga"]["roots"]),
-        "bar5": bars.bar5(arms["rc"]["checks"], arms["ga"]["checks"], ga_rerun and ga_rerun["checks"],
-                          bool(ga_rerun) and bars.workload_items(ga_rerun["workload"])["turns_completed"]),
+        "bar4": {**bars.bar4(arms["rc"]["logs"], arms["ga"]["logs"], arms["rc"]["roots"], arms["ga"]["roots"]),
+                 "raw_counts_note": "the host writes each log line to two files (agent.log and gateway.log), so the raw"
+                                    " counts are 2x on both arms; the verdict compares the arms and is unaffected"},
+        "bar5": {**bars.bar5(arms["rc"]["checks"], arms["ga"]["checks"], ga_rerun and ga_rerun["checks"],
+                             bool(ga_rerun) and bars.workload_items(ga_rerun["workload"])["turns_completed"],
+                             inherited=inherited_flags(plan, arms, ga_rerun),
+                             ga_turns_complete=bars.workload_items(arms["ga"]["workload"])["turns_completed"]),
+                 "flagged_summary_nodes": {  # Per driven session: at the start, and in each arm at its end (#2471).
+                     "start": _keyed({c["session_id"]: c.get("flagged_summary_nodes") for c in plan["conversations"]}),
+                     **{a: arms[a]["flagged_summary_nodes"] for a in arms}}},
         "bar6": bars.bar6({a: arms[a]["workload"] for a in arms})}
     if "rc" in unreadable:  # Bars 1 and 3 judge the rc's rows: without them neither can pass or fail.
         for bar in ("bar1", "bar3"):
@@ -770,11 +964,18 @@ def run(host, *, rc_id, prior=(), instrument_fix=None):
     elif unreadable:  # Only GA's rows: bar 3 never reads them, and an rc failure bar 1 finds without GA stands.
         verdict = bars.FAIL if results["bar1"]["verdict"] == bars.FAIL else bars.INCONCLUSIVE
         results["bar1"] = {**results["bar1"], "verdict": verdict, "rows_unreadable": unreadable}
+    results["bar1"]["known_risk"] = (  # Release manager, 2026-11-07: recorded, not changed (the K6 rule is frozen).
+        "class 3's GA allowance matches rows by content identity across the arms; a tool output that names its arm's"
+        " home path differs between the arms there, so such a leftover can show as over GA (a false FAIL, never a"
+        " false PASS); the fix would be path parity in the runner")
+    private = {a: _private_arm(arms[a]["provider"], arms[a]["routing"]) for a in arms}
     receipt.update(
-        arms={a: {**{k: arms[a][k] for k in ("workload", "egress", "provider", "doctor_not_exercised", "cron_paused", "routing")},
+        arms={a: {**{k: arms[a][k] for k in ("workload", "egress", "doctor_not_exercised", "cron_paused")},
+                  "provider": private[a][0], "routing": private[a][1],
                   "checks": bars.check_counts(arms[a]["checks"])} for a in arms},
-        ga_rerun=ga_rerun and {**{k: ga_rerun[k] for k in ("workload", "egress", "provider", "wall_s",
+        ga_rerun=ga_rerun and {**{k: ga_rerun[k] for k in ("workload", "egress", "wall_s",
                                                          "doctor_not_exercised", "cron_paused")},
+                               "provider": _private_arm(ga_rerun["provider"])[0],
                                "checks": bars.check_counts(ga_rerun["checks"])},
         binds=[{k: v for k, v in b.items() if k not in ("dup_store_ids", "receipt")} for b in binds], bars=results,
         verdict=bars.verdict(results, prior_verdicts),
@@ -793,7 +994,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     config = {**json.loads(Path(args.config).read_text(encoding="utf-8")), "instrument_dir": args.instrument_dir}
     prior = [json.loads(Path(p).read_text(encoding="utf-8")) for p in args.prior_receipt]
-    receipt = run(LocalHost(config, args.run_dir), rc_id=args.rc_id, prior=prior, instrument_fix=args.instrument_fix)
+    receipt = run(LocalHost(config, outside_package(args.run_dir)), rc_id=args.rc_id, prior=prior, instrument_fix=args.instrument_fix)
     with (Path(args.run_dir) / "d5-clone-receipt.json").open("x", encoding="utf-8") as out:
         json.dump(receipt, out, sort_keys=True, indent=2)
     print(json.dumps({"verdict": receipt.get("verdict"), "stopped_at": receipt.get("stopped_at")}))

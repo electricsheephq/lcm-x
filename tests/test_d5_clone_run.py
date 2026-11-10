@@ -10,12 +10,13 @@ import sys
 
 import pytest
 
-from bench.instruments.d5_clone import bars, run as r
+from bench.instruments.d5_clone import bars, capture, plan as planner, run as r
 
 MARKER = "synthetic-marker-7f3a9c"
 
 
-def make_snapshot(root):
+def make_snapshot(root, flagged=()):
+    """*flagged*: sessions given one summary node the doctor's summary_quality check flags (#2471)."""
     root.mkdir()
     (root / "lcm-large-outputs").mkdir()
     (root / "lcm-large-outputs" / "out-1.json").write_text(MARKER)
@@ -25,6 +26,10 @@ def make_snapshot(root):
                     " observed_at REAL)")
         host.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, end_reason TEXT)")
         host.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, content TEXT)")
+        lcm.execute("CREATE TABLE summary_nodes (node_id INTEGER PRIMARY KEY, session_id TEXT, token_count INTEGER,"
+                    " source_token_count INTEGER)")
+        lcm.executemany("INSERT INTO summary_nodes (session_id, token_count, source_token_count) VALUES (?, ?, ?)",
+                        [(sid, 100, 4_000) for sid in sessions] + [(sid, 10, 4_000) for sid in flagged])
         for sid, count in sessions.items():
             host.execute("INSERT INTO sessions VALUES (?, NULL)", (sid,))
             rows = [(sid, "user" if i % 2 else "assistant", f"{MARKER} {sid} {i}") for i in range(count)]
@@ -268,6 +273,7 @@ def test_a_turn_not_completed_is_never_swallowed(setup, fail, missing):
     work = receipt["arms"]["rc"]["workload"]
     assert (work["turns_planned"], len(work["turns_not_completed"])) == (36, missing)
     assert receipt["bars"]["bar6"]["items"]["ga"]["turns_completed"] is False
+    assert receipt["bars"]["bar5"]["ga_turns_complete"] is False  # The runner passes the GA arm's completion to bar 5.
 
 
 def test_p1_failure_with_an_instrument_fix_stops_cleanly(setup):
@@ -306,7 +312,7 @@ def test_replay_runs_the_edition_under_the_sandbox(tmp_path, monkeypatch):
     receipt, error, range_new = host.replay({"name": "rc", "port": 4242, "sessions": {"L": "s"}},
                                             {"id": "e0-L-0", "conversation": "L"}, "T0", "H8")
     assert (receipt, error, range_new) == ({"checks": {}}, False, 0)
-    assert denied and all(d == [r.sandbox.hermes_home()] for d in denied)  # The live agent home is denied to both steps.
+    assert denied and all(d == r.sandbox.live_homes() for d in denied)  # The live agent home is denied to both steps.
     assert [argv[:4] for argv in seen] == [["/usr/bin/nice", "-n", "19", "/usr/bin/sandbox-exec"]] * 2
     assert seen[0][-5:] == ["python3", "gen", "T0", "H8", os.fspath(tmp_path / "run" / "rc" / "replays" / "e0-L-0")]
     assert 'localhost:4242' in seen[0][5]
@@ -446,7 +452,9 @@ def test_an_unreadable_final_store_keeps_its_failed_checks_and_never_passes(setu
     receipt = r.run(host, rc_id="rc-synthetic")  # A receipt, not a crash.
     if arm == "rc":
         for bar in ("bar1", "bar3"):
-            assert receipt["bars"][bar] == {"verdict": bars.INCONCLUSIVE, "rows_unreadable": ["rc"]}
+            assert {k: v for k, v in receipt["bars"][bar].items() if k != "known_risk"} == {
+                "verdict": bars.INCONCLUSIVE, "rows_unreadable": ["rc"]}
+        assert "known_risk" in receipt["bars"]["bar1"]  # Kept in every receipt.
         assert receipt["bars"]["bar5"]["verdict"] == bars.FAIL and receipt["verdict"]["raw"] == bars.FAIL
     else:
         assert (receipt["bars"]["bar1"]["verdict"], receipt["bars"]["bar1"]["rows_unreadable"]) == (
@@ -588,7 +596,7 @@ def test_rekey_copy_refuses_unsafe_inputs_without_updates(rekey_copy, tmp_path, 
         elif fault == "destination_variant":
             db.execute("INSERT INTO lcm_lifecycle_state VALUES (?, 'other')", (" " + r.gateway.session_key("d5-L") + " ",))
     before = inventory(path.parent)
-    with pytest.raises(ValueError, match={"third_table": "unexpected", "blank_key": "legacy blank conversation_id: L$",
+    with pytest.raises(ValueError, match={"third_table": "unexpected conversation_id table: sha256-12:[0-9a-f]{12}$", "blank_key": "legacy blank conversation_id: L$",
                                           "null_key": "legacy blank conversation_id: L$",
                                           "space_key": "legacy blank conversation_id: L$",
                                           "old_variant": "legacy variants: L$",
@@ -797,3 +805,318 @@ def test_a_cold_bind_whose_turn_did_not_complete_skips_the_wait(setup, monkeypat
     assert bind["bar2"]["verdict"] == bars.INCONCLUSIVE and bind["bar2"]["error"] is True
     assert bind["bar2"]["reason"] == "cold turn not completed"
     assert result["workload"]["turns_not_completed"] == [step_id]
+
+
+def test_flagged_summary_nodes_counts_what_the_doctor_flags(tmp_path):
+    """The doctor's summary_quality predicate (tools._summary_quality_stats), at its boundaries."""
+    store = tmp_path / "store.db"
+    with closing(sqlite3.connect(store)) as db, db:
+        db.execute("CREATE TABLE summary_nodes (node_id INTEGER PRIMARY KEY, session_id TEXT, token_count INTEGER,"
+                   " source_token_count INTEGER)")
+        db.executemany("INSERT INTO summary_nodes (session_id, token_count, source_token_count) VALUES (?, ?, ?)", [
+            ("s", 10, 4_000), ("s", 10, 3_999), ("s", 499, 100_000), ("s", 500, 100_000), ("s", 499, 99_999),
+            ("s", 0, 50_000), ("s", 0, 100_000), ("t", 10, 4_000)])
+    assert r.flagged_summary_nodes(store, ["s", "t", "u"]) == {"s": 3, "t": 1, "u": 0}
+    assert r.flagged_summary_nodes(tmp_path / "missing.db", ["s"]) is None
+
+
+@pytest.mark.parametrize("flagged", [(), ("sess-a",)])
+def test_a_driven_session_that_starts_flagged_is_judged_by_its_increase(tmp_path, flagged):
+    """#2471, ruling R5-4: the plan records each driven session's starting count of flagged summary nodes, each arm
+    records its own count before its first turn and at its end, and a session that starts flagged is judged by the
+    increase (here none in either arm: it holds)."""
+    snap = tmp_path / "snapshot"
+    config = {"snapshot_dir": str(snap), "snapshot_pin": str(make_snapshot(snap, flagged)), "nonce": "synthetic"}
+    receipt = r.run(FakeHost(config, tmp_path / "run"), rc_id="rc-synthetic")
+    keys = {sid: r._sha(sid)[:12] for sid in ("sess-l", "sess-a", "sess-b")}
+    counts = receipt["bars"]["bar5"]["flagged_summary_nodes"]
+    assert counts["start"] == {keys[s]: int(s in flagged) for s in keys}
+    assert set(counts) == {"start", "rc", "ga"}
+    assert {c["name"]: c["flagged_summary_nodes"] for c in receipt["plan"]["declaration"]["conversations"]} == {
+        "L": 0, "S1": int(bool(flagged)), "S2": 0}  # S1 is sess-a, the larger of the two small sessions.
+    inherited = receipt["bars"]["bar5"]["inherited_flags"]
+    assert list(inherited) == ([f"summary_quality@{keys['sess-a']}"] if flagged else [])
+    for f in inherited.values():
+        assert (f["s"], f["r"], f["g"], f["rc_start"], f["ga_start"], f["verdict"]) == (1, 1, 1, 1, 1, bars.PASS)
+    assert receipt["bars"]["bar5"]["verdict"] == bars.PASS, receipt["bars"]["bar5"]
+
+
+class FlagsOnFirstStart(FakeHost):
+    """Each arm's first gateway start adds one flagged summary node to sess-a in that arm's own store."""
+
+    def start(self, ctx):
+        super().start(ctx)
+        if ctx["epoch"] == 0:
+            with closing(sqlite3.connect(ctx["home"] / "lcm.db")) as db, db:
+                db.execute("INSERT INTO summary_nodes (session_id, token_count, source_token_count)"
+                           " VALUES ('sess-a', 10, 4000)")
+
+
+def test_each_arm_reads_its_start_count_from_its_own_store_before_its_first_turn(tmp_path):
+    """Ruling R5-4: rc_start and ga_start are read before the first gateway start, so a node flagged during the arm
+    counts in its increase (here 1 in each arm: equal increases hold) and not in its start."""
+    snap = tmp_path / "snapshot"
+    config = {"snapshot_dir": str(snap), "snapshot_pin": str(make_snapshot(snap, ("sess-a",))), "nonce": "synthetic"}
+    receipt = r.run(FlagsOnFirstStart(config, tmp_path / "run"), rc_id="rc-synthetic")
+    (f,) = receipt["bars"]["bar5"]["inherited_flags"].values()
+    assert (f["s"], f["rc_start"], f["ga_start"], f["r"], f["g"], f["verdict"]) == (1, 1, 1, 2, 2, bars.PASS)
+
+
+def test_inherited_flags_take_the_rerun_counts_only_when_a_rerun_ran():
+    plan = {"conversations": [{"session_id": "sess-a", "flagged_summary_nodes": 1},
+                              {"session_id": "sess-b", "flagged_summary_nodes": 0}]}
+    h = r._sha("sess-a")[:12]
+    arm = {"flagged_summary_nodes_start": {h: 1}, "flagged_summary_nodes": {h: 2}}
+    rerun = {"flagged_summary_nodes_start": {h: 1}, "flagged_summary_nodes": {h: 3}}
+    assert r.inherited_flags(plan, {"rc": arm, "ga": arm}) == {f"summary_quality@{h}": {
+        "start": 1, "rc_start": 1, "rc": 2, "ga_start": 1, "ga": 2}}
+    with_rerun = r.inherited_flags(plan, {"rc": arm, "ga": arm}, rerun)[f"summary_quality@{h}"]
+    assert (with_rerun["ga_rerun_start"], with_rerun["ga_rerun"]) == (1, 3)
+    assert r.inherited_flags(plan, {"rc": None, "ga": None})[f"summary_quality@{h}"]["rc"] is None
+
+class NamesFromTheSnapshot(FakeHost):
+    """An arm whose copied routes named a provider of the agent's own, and whose gateway asked for a model of its own."""
+
+    def arm(self, name, home, plan):
+        ctx = super().arm(name, home, plan)
+        ctx["routing"] = {"sessions": 3, "routing_rows": 3, "changes": [],
+                          "stored_route_providers": ["acme-private-provider"]}
+        return ctx
+
+    def stats(self, ctx):
+        return {"replay_misses": {}, "calls_by_model": {"d5-agent": 36, "acme-private-model": 2},
+                "unknown_models": {"acme-private-model": 2}}
+
+
+@pytest.mark.parametrize("fail", [None, "ga_once"])
+def test_the_receipt_never_names_a_provider_or_model_from_the_snapshot(tmp_path, fail):
+    """Receipts carry counts, ids and hashes only (release manager, 2026-11-10): a stored route's provider name and
+    any model name that is not one of the provider's own d5-* names are written as their sha256 12."""
+    snap = tmp_path / "snapshot"
+    config = {"snapshot_dir": str(snap), "snapshot_pin": str(make_snapshot(snap)), "nonce": "synthetic"}
+    receipt = r.run(NamesFromTheSnapshot(config, tmp_path / "run", fail=fail), rc_id="rc-synthetic")
+    assert "acme-private" not in json.dumps(receipt, sort_keys=True, default=str)
+    assert bool(receipt["ga_rerun"]) == (fail == "ga_once")  # The re-run's provider stats are hashed too.
+    h = {n: hashlib.sha256(n.encode()).hexdigest()[:12] for n in ("acme-private-provider", "acme-private-model")}
+    for arm in receipt["arms"].values():
+        assert (arm["routing"]["stored_route_providers"], arm["routing"]["stored_route_provider_sha256_12"]) == (
+            1, [h["acme-private-provider"]])
+        assert arm["routing"]["sessions"] == 3
+        assert arm["provider"]["calls_by_model"] == {"d5-agent": 36, f"sha256-12:{h['acme-private-model']}": 2}
+        assert arm["provider"]["unknown_models"] == {f"sha256-12:{h['acme-private-model']}": 2}
+
+
+def test_private_models_keeps_d5_names_and_merges_nothing_else():
+    assert r._private_models({"d5-agent": 1, "d5-summary": 2}) == {"d5-agent": 1, "d5-summary": 2}
+    assert r.OWN_MODELS == {"d5-agent", "d5-aux", "d5-cron", "d5-summary"}
+    for other in ("d5-internal-x", None, 7):  # Only the provider's own four names stay raw; nothing crashes.
+        assert list(r._private_models({other: 1})) == [f"sha256-12:{hashlib.sha256(str(other).encode()).hexdigest()[:12]}"]
+    assert r._private_models(None) == {} and r._private_models({}) == {}
+    assert list(r._private_models({"x": 1})) == [f"sha256-12:{hashlib.sha256(b'x').hexdigest()[:12]}"]
+    assert r._private_arm({"calls_by_model": {"x": 1}}, None)[1] is None
+
+def _bound_host(tmp_path):
+    (tmp_path / "pin.json").write_text("{}")
+    config = {"snapshot_pin": str(tmp_path / "pin.json"), "rc": {"commit": "c" * 40}, "ga": {"commit": "a" * 40},
+              "preflights": {}}
+    plan = planner.build_plan([dict(session_id=s, name=n, chat_id=f"d5-{n}", lcm_rows=1, host_rows=1)
+                               for n, s in (("L", "sess-l"), ("S1", "sess-a"), ("S2", "sess-b"))], nonce="t")
+    return r.LocalHost(config, tmp_path / "run"), plan
+
+
+def _receipt(host, plan, preflight, **changes):
+    ga = host.c["ga"]["commit"]
+    receipt = {"schema": r.PREFLIGHT_SCHEMA, "name": preflight, "verdict": "PASS", "plan_sha256": planner.plan_sha256(plan),
+               "snapshot_pin_sha256": capture._sha256(host.c["snapshot_pin"]),
+               "instrument_sha256": r.instrument_identity()["instrument_sha256"],
+               "trees": {"rc": host.c["rc"]["commit"] if preflight in r.TREE_BOUND_PREFLIGHTS else ga, "ga": ga},
+               "config_sha256": r.config_identity(host.c), **changes}
+    path = host.run_dir.parent / f"{preflight}-{len(list(host.run_dir.parent.glob('P*.json')))}.json"
+    path.write_text(json.dumps(receipt))
+    host.c["preflights"][preflight] = str(path)
+    return host.preflight(preflight, plan)
+
+
+@pytest.mark.parametrize("name", ["P3", "P4", "P6", "P7"])
+def test_a_preflight_receipt_counts_only_for_this_run(tmp_path, name):
+    """Ruling R5-5: a PASS receipt counts only when its plan, snapshot pin and instrument are this run's; P4 also binds
+    the run's two trees, and the others bind the previous GA in both slots. Anything else is treated as missing."""
+    host, plan = _bound_host(tmp_path)
+    assert _receipt(host, plan, name)["verdict"] == "PASS"
+    other_trees = {"rc": "a" * 40, "ga": "a" * 40} if name in r.TREE_BOUND_PREFLIGHTS else {"rc": "c" * 40, "ga": "a" * 40}
+    for field, value in (("plan_sha256", "0" * 64), ("snapshot_pin_sha256", "0" * 64), ("instrument_sha256", "0" * 64),
+                         ("schema", "other/1"), ("name", "P0"), ("trees", other_trees), ("config_sha256", "0" * 64)):
+        result = _receipt(host, plan, name, **{field: value})
+        assert (result["verdict"], result["mismatch"]) == ("MISSING", [field]), field
+    for field in ("plan_sha256", "instrument_sha256", "trees", "config_sha256"):
+        result = _receipt(host, plan, name, **{field: None})
+        assert result["verdict"] == "MISSING" and field in result["mismatch"]
+
+
+@pytest.mark.parametrize("name", ["P3", "P4"])
+def test_a_preflight_receipt_does_not_count_after_a_declared_setting_changes(tmp_path, name):
+    """A receipt made under one declaration never counts for a run under another (release manager, 2026-11-11), with
+    the snapshot, plan and trees unchanged; a field that differs by stage by design leaves it counting."""
+    host, plan = _bound_host(tmp_path)
+    host.c.update(settings={"compression": {"enabled": False}}, lcm_env={"K": "v"}, context_length=200000)
+    path = tmp_path / f"{name}-made.json"
+    _receipt(host, plan, name)  # Writes a receipt bound to this declaration; the next lines re-point to a copy.
+    path.write_text(Path(host.c["preflights"][name]).read_text())
+    host.c["preflights"][name] = str(path)
+    assert host.preflight(name, plan)["verdict"] == "PASS"  # Positive control: nothing changed.
+    host.c.update(preflights={name: str(path)}, settings_as_of="2026-11-11T00:00:00Z", instrument_dir=str(tmp_path))
+    assert host.preflight(name, plan)["verdict"] == "PASS"  # Unbound by name: receipt paths, the time, the kit path.
+    for field, value in (("settings", {"compression": {"enabled": True}}), ("lcm_env", {"K": "w"}),
+                         ("context_length", 100000), ("p3_max_turns", 7), ("added_later", 1)):
+        changed = r.LocalHost({**host.c, field: value}, host.run_dir)
+        result = changed.preflight(name, plan)
+        assert (result["verdict"], result["mismatch"]) == ("MISSING", ["config_sha256"]), field
+
+
+def _stage_declaration(stage, pin):
+    """A declaration shaped as the lane's declaration builder writes one per stage (preflights, dryrun, run): the
+    stage folder, its tree extracts, its arm file, its run label and receipt name differ; the rest does not."""
+    ga, rc = "a" * 40, ("c" * 40 if stage == "run" else "a" * 40)
+    d, label = f"/scratch/{stage}", {"preflights": "d5pf", "dryrun": "d5dryrun", "run": "d5run"}[stage]
+    return {
+        "manifest": "/kit/d5-clone-pins.json", "rules_module": "bar1_rules.py", "interpreter": "/host/py",
+        "host_py": "/host/py", "host_pin": "/host/src", "snapshot_dir": "/capture/snapshot", "snapshot_pin": str(pin),
+        **{arm: {"host_src": "/host/src", "host_bin": "/host/bin", "lcm_tree": f"{d}/trees/{arm}-{c[:8]}", "commit": c}
+           for arm, c in (("rc", rc), ("ga", ga))},
+        "settings": {"compression": {"enabled": True}}, "lcm_env": {"LCM_X": "1"}, "context_length": 1000000,
+        "p3_context_length": 64000, "p3_max_turns": 6, "nonce": "d5-v030-clone", "start_timeout": 600,
+        "cold_ingest_timeout": 600, "settings_as_of": "2026-11-07T00:00:00Z",
+        "constants_argv": ["{python}", "-B", "{instrument_dir}/gen_constants.py", "--arm", f"{d}/arm.json",
+                           "--out", "{out}/s7-constants.json"],
+        "replay_argv": ["{python}", "-B", "{instrument_dir}/p_s6r_clone.py", "--shape", "S7", "--label", label,
+                        "--tree-base", ga, "--tree-candidate", rc, "--context-length", "1000000", "--out-dir", "{out}"],
+        "replay_receipt": f"p-s6r-{label}.json",
+        "preflights": {n: f"/scratch/{'run-p4' if stage == 'run' and n == 'P4' else 'preflights'}/receipts/{n}.json"
+                       for n in ("P3", "P4", "P6", "P7")}}
+
+
+def test_the_preflights_stage_receipts_count_in_the_dry_run_and_the_run_and_nothing_else_does(tmp_path):
+    """The configuration binding across the builder's stages: P3, P6 and P7 made in the preflights stage count in the
+    dry run and the run; P4 counts only with the run's own trees; a changed host build or replay command never counts."""
+    _, plan = _bound_host(tmp_path)
+    pin = tmp_path / "pin.json"
+    decl = {stage: _stage_declaration(stage, pin) for stage in ("preflights", "dryrun", "run")}
+    assert len({r.config_identity(c) for c in decl.values()}) == 1
+
+    def made(stage, name):
+        c = decl[stage]
+        trees = {"rc": r.tree_id(c, "rc") if name in r.TREE_BOUND_PREFLIGHTS else c["ga"]["commit"],
+                 "ga": c["ga"]["commit"]}
+        path = tmp_path / f"{stage}-{name}.json"
+        path.write_text(json.dumps({"schema": r.PREFLIGHT_SCHEMA, "name": name, "verdict": "PASS",
+                                    "plan_sha256": planner.plan_sha256(plan), "snapshot_pin_sha256": capture._sha256(pin),
+                                    "instrument_sha256": r.instrument_identity()["instrument_sha256"], "trees": trees,
+                                    "config_sha256": r.config_identity(c)}))
+        return str(path)
+
+    def verdict(c, name, path):
+        return r.LocalHost({**c, "preflights": {name: path}}, tmp_path / "run").preflight(name, plan)["verdict"]
+
+    for name in ("P3", "P6", "P7"):
+        assert verdict(decl["dryrun"], name, made("preflights", name)) == "PASS"
+        assert verdict(decl["run"], name, made("preflights", name)) == "PASS"
+    assert verdict(decl["run"], "P4", made("preflights", "P4")) == "MISSING"  # The run's P4 binds rc5's tree.
+    assert verdict(decl["run"], "P4", made("run", "P4")) == "PASS"
+    run = decl["run"]
+    replay = run["replay_argv"]
+    changed = {
+        "host build": {**run, "rc": {**run["rc"], "host_bin": "/other/bin"}},
+        "replay context": {**run, "replay_argv": [("64000" if v == "1000000" else v) for v in replay]},
+        "replay shape": {**run, "replay_argv": [("S6" if v == "S7" else v) for v in replay]},
+        "candidate not the rc commit": {**run, "replay_argv": [("e" * 40 if v == "c" * 40 else v) for v in replay]},
+        "constants command": {**run, "constants_argv": run["constants_argv"] + ["--extra"]},
+    }
+    for what, c in changed.items():
+        result = r.LocalHost({**c, "preflights": {"P6": made("preflights", "P6")}}, tmp_path / "run").preflight("P6", plan)
+        assert (result["verdict"], result["mismatch"]) == ("MISSING", ["config_sha256"]), what
+
+
+def test_an_unreadable_preflight_receipt_is_missing(tmp_path):
+    host, plan = _bound_host(tmp_path)
+    (tmp_path / "bad.json").write_text("{not json")
+    host.c["preflights"]["P3"] = str(tmp_path / "bad.json")
+    assert host.preflight("P3", plan) == {"verdict": "MISSING", "mismatch": ["unreadable"]}
+
+
+def test_the_instrument_identity_is_the_package_content():
+    one, two = r.instrument_identity(), r.instrument_identity()
+    assert one == two and len(one["instrument_sha256"]) == 64
+
+
+@pytest.mark.parametrize("as_of, written", [("2026-11-07T01:02:03Z", "2026-11-07T01:02:03Z"),
+                                             ("2026-11-07T01:02Z", "2026-11-07T01:02Z"),
+                                             ("not a time", None), (12, None), (None, None),
+                                             ("2026-11-07T01:02:03", None), ("2026-11-07T01:02:03+00:00", None),
+                                             ("2026-99-99T99:99Z", None), ("\u0662026-11-07T01:02Z", None)])
+def test_the_receipt_discloses_the_settings_time_and_nothing_else(tmp_path, as_of, written):
+    """The settings snapshot's time is recorded as a disclosed fact (release manager, 2026-11-10); a value that is not a
+    UTC time is never written."""
+    snap = tmp_path / "snapshot"
+    config = {"snapshot_dir": str(snap), "snapshot_pin": str(make_snapshot(snap)), "nonce": "synthetic"}
+    if as_of is not None:
+        config["settings_as_of"] = as_of
+    receipt = r.run(FakeHost(config, tmp_path / "run"), rc_id="rc-synthetic")
+    assert receipt["settings"]["as_of"] == written
+    assert "not a time" not in json.dumps(receipt, sort_keys=True, default=str)
+
+
+def test_a_host_without_a_config_writes_no_settings_time():
+    class Bare:
+        pass
+    assert r._utc_time(getattr(Bare(), "c", {}).get("settings_as_of")) is None
+
+
+def test_the_instrument_hash_follows_source_and_ignores_bytecode(tmp_path):
+    """R5-5's instrument identity is computed from the package's files: a source edit changes it, a bytecode cache does
+    not, and a different package root gives a different hash."""
+    pkg = tmp_path / "pkg"
+    (pkg / "sub").mkdir(parents=True)
+    (pkg / "a.py").write_text("x = 1\n")
+    (pkg / "sub" / "b.json").write_text("{}")
+    first = r.instrument_identity(pkg)["instrument_sha256"]
+    (pkg / "__pycache__").mkdir()
+    (pkg / "__pycache__" / "a.cpython-312.pyc").write_bytes(b"cache")
+    (pkg / "sub" / "c.pyc").write_bytes(b"cache")
+    assert r.instrument_identity(pkg)["instrument_sha256"] == first
+    (pkg / "a.py").write_text("x = 2\n")
+    assert r.instrument_identity(pkg)["instrument_sha256"] != first
+    assert r.instrument_identity()["instrument_sha256"] != first  # The real package is hashed by default.
+
+
+def test_a_run_dir_inside_the_instrument_package_is_refused(tmp_path):
+    with pytest.raises(ValueError, match="outside the instrument package"):
+        r.outside_package(r.PACKAGE / "runs" / "x")
+    assert r.outside_package(tmp_path / "run") == tmp_path / "run"
+
+
+@pytest.mark.parametrize("commit, bound", [("a" * 40, True), (None, False), ("", False), ("main", False),
+                                           ("A" * 40, False)])
+def test_only_a_declared_commit_identifies_a_tree(tmp_path, commit, bound):
+    """A path is no tree identity (another tree can take the same path); an undeclared tree never binds a receipt."""
+    host, plan = _bound_host(tmp_path)
+    for t in ("rc", "ga"):
+        host.c[t] = {"lcm_tree": str(tmp_path), **({"commit": commit} if commit is not None else {})}
+    assert r.tree_id(host.c, "rc") == (commit if bound else None)
+    receipt = {"schema": r.PREFLIGHT_SCHEMA, "name": "P4", "verdict": "PASS", "plan_sha256": r.planner.plan_sha256(plan),
+               "snapshot_pin_sha256": r.capture._sha256(host.c["snapshot_pin"]),
+               "instrument_sha256": r.instrument_identity()["instrument_sha256"],
+               "trees": {"rc": r.tree_id(host.c, "rc"), "ga": r.tree_id(host.c, "ga")},
+               "config_sha256": r.config_identity(host.c)}
+    path = tmp_path / "P4.json"
+    path.write_text(json.dumps(receipt))
+    host.c["preflights"] = {"P4": str(path)}
+    assert host.preflight("P4", plan)["verdict"] == ("PASS" if bound else "MISSING")
+
+
+def test_the_run_entry_point_refuses_a_run_dir_inside_the_package(tmp_path):
+    (tmp_path / "decl.json").write_text("{}")
+    inside = r.PACKAGE / f"refused-{tmp_path.name}"
+    with pytest.raises(ValueError, match="outside the instrument package"):
+        r.main(["--config", str(tmp_path / "decl.json"), "--run-dir", str(inside), "--instrument-dir", str(tmp_path),
+                "--rc-id", "rc-synthetic"])
+    assert not inside.exists()

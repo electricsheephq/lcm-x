@@ -3165,6 +3165,47 @@ def test_the_ended_partial_tail_rule_table(tmp_path, home, hermes, kind, end, ta
     assert report["verified"] is not (end and tail and not resumed)
 
 
+@pytest.mark.parametrize("shape", ["id_keyed_ended", "path_keyed_ended", "resumed", "ended_whole", "cleared"])
+def test_a_subagent_cut_off_by_its_sessions_end_with_a_partial_tail_is_unverified(tmp_path, home, hermes, shape):
+    """#2566: Claude Code sends no SubagentStop to a session ended while a subagent is mid-task (by exit, /clear or a
+    closed terminal; checked on real scripted sessions), so a subagent's partial tail also counts after its session's
+    end, for an id-keyed and a path-keyed child alike. A resumed session leaves it reported only; a whole last record
+    stays verified; after a /clear the new session's lineage of the same agent is judged on its own file."""
+    from hermes_lcm import claude_code_audit as ca
+
+    a = _append(tmp_path / "projects" / "-work" / "s1.jsonl", CONVERSATION[:2])
+    agents = a.parent / "s1" / "subagents"
+    _record(_hook(), home, a, hook_started_ns=1)
+    if shape == "path_keyed_ended":  # a reused id: the first path keeps x1, the second gets its path key (#2576)
+        first = _append(agents / "workflows" / "wf_run1" / "agent-x1.jsonl", _REUSED["first"])
+        _record(_hook(), home, a, event="SubagentStop", agent_id="x1", agent_transcript_path=str(first), hook_started_ns=2)
+        cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    child = _append(agents / "agent-x1.jsonl", _SIDE)
+    _record(_hook(), home, a, event="SubagentStart", agent_id="x1", agent_transcript_path=str(child), hook_started_ns=3)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    if shape != "ended_whole":
+        with open(child, "a", encoding="utf-8") as handle:
+            handle.write('{"type": "assistant", "uu')  # a crash mid-append, and no SubagentStop
+    _record(_hook(), home, a, event="SessionEnd", hook_started_ns=5)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    if shape == "resumed":
+        _record(_hook(), home, a, event="UserPromptSubmit", hook_started_ns=9)
+    elif shape == "cleared":  # /clear: a new session; the agent goes on in a new transcript under it
+        b = _append(tmp_path / "projects" / "-work" / "s2.jsonl", [dict(entry, sessionId="s2") for entry in CONVERSATION[:2]])
+        later = _append(b.parent / "s2" / "subagents" / "agent-x1.jsonl", [dict(entry, sessionId="s2") for entry in _SIDE])
+        _record(_hook(), home, b, session="s2", event="SessionStart", source="clear", hook_started_ns=6)
+        _record(_hook(), home, b, session="s2", event="SubagentStop", agent_id="x1", agent_transcript_path=str(later),
+                hook_started_ns=7)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    report = ca.audit(home)
+    keyed = cc.lineage_key("s1", "/agent-x1.jsonl" if shape == "path_keyed_ended" else "x1")
+    row = next(row for row in report["lineages"] if row["lineage"] == keyed)
+    assert bool(row["partial_tail_bytes"]) is (shape != "ended_whole")
+    assert report["unverified"] == ([] if shape in {"resumed", "ended_whole"} else [keyed])
+    if shape == "cleared":  # the new session's lineage of the same agent: its own whole file, verified
+        assert cc.lineage_key("s2", "x1") in {row["lineage"] for row in report["lineages"]}
+
+
 @pytest.mark.parametrize("shape", ["child_stops_after_session_end", "older_end_after_resume", "resumed_still_partial",
                                    "end_behind_a_clock_step", "older_hook_after_an_equal_end", "end_with_no_stamp",
                                    "end_behind_a_waiting_stop", "equal_stop_behind_a_waiting_end",

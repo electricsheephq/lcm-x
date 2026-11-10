@@ -303,8 +303,8 @@ class ObservingHost(FakeHost):
         with closing(sqlite3.connect(home / "lcm.db")) as lcm, closing(sqlite3.connect(home / "state.db")) as host:
             for db in (lcm, host):
                 db.execute("ALTER TABLE messages ADD COLUMN tool_call_id TEXT")
-            lcm.executescript("CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT);"
-                              " CREATE TABLE summary_nodes (node_id INTEGER PRIMARY KEY, session_id TEXT);")
+            lcm.executescript("CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT);"  # The clone has summary_nodes.
+                              " CREATE TABLE IF NOT EXISTS summary_nodes (node_id INTEGER PRIMARY KEY, session_id TEXT);")
         (home / "cron").mkdir()
         (home / "cron" / "jobs.json").write_text(json.dumps({"jobs": [{"id": "snap-job", "enabled": True}]}))
         payloads = sum(p.is_file() for p in (home / "lcm-large-outputs").rglob("*"))

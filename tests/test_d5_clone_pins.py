@@ -450,3 +450,21 @@ def test_a_cross_file_data_name_must_be_a_literal(tmp_path):
     with pytest.raises(ValueError, match="plain values"):
         pins.build(tmp_path, ["rules.py", "helper.py"], {"rules.py": ["rule"]}, {"rules.py": ["helper.py"]}, interpreter,
                    {"helper.py": ["PRED"]})
+
+
+def test_the_interpreter_version_probe_runs_sandboxed(monkeypatch):
+    """The host interpreter's version probe runs its startup code under the no-network profile with the live agent's
+    home denied, like every other host process."""
+    import subprocess
+    seen = []
+
+    def fake_run(argv, **kw):
+        seen.append(argv)
+        return subprocess.CompletedProcess(argv, 0, stdout="3.11.15\n", stderr="")
+
+    monkeypatch.setattr(pins.sandbox, "available", lambda: True)
+    monkeypatch.setattr(pins.subprocess, "run", fake_run)
+    assert pins._interpreter_version("/x/python") == "3.11.15"
+    (argv,) = seen
+    assert argv[:2] == ["/usr/bin/sandbox-exec", "-p"] and "(deny network-outbound)" in argv[2]
+    assert pins.sandbox.hermes_home() in argv[2] and argv[3:5] == ["/x/python", "-I"]
