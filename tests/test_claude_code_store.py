@@ -3037,8 +3037,9 @@ def test_a_swept_workflow_agent_keeps_its_saved_tool_output(tmp_path, home, herm
 
 @pytest.mark.parametrize("where", [(), ("workflows", "wf_run1")], ids=["direct", "nested"])
 def test_an_agent_file_with_no_id_is_never_swept_as_its_session(tmp_path, home, hermes, where):
-    """#2574 review: `agent-.jsonl` has an empty id, which would key it as the session itself and move the session's
-    cursor onto it. The sweep skips it; the closed-world audit reports the session unverified."""
+    """#2574 review: `agent-.jsonl` has an empty id, so its lineage key is the session's own. The sweep never takes it
+    (the session's key is already seen, and the name check now says so first); the closed-world audit reports the
+    session unverified, since the file ties to no cursor."""
     from hermes_lcm import claude_code_audit as ca
 
     a = _append(tmp_path / "projects" / "-work" / "s1.jsonl", CONVERSATION[:2])
