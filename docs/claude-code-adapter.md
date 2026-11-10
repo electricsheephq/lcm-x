@@ -348,9 +348,13 @@ line with a note (`projected_entry_without_uuid`, `projection_error:<type>`), an
   searches this store's saved tool outputs (externalized payloads), newest first. `content_scope`
   `externalized` and `both` work with `session_scope` `all` and `session`. With `session_scope`
   `current` the default stays history-only, and an explicit `externalized` or `both` is an error,
-  because the reader has no active session.
+  because the reader has no active session. The default searches saved outputs in
+  `mode='full_text'` only. In `semantic` or `hybrid` it is history-only (adding the saved-output pass
+  there measured about +130 ms p90 on a store of 8,000 saved outputs; #2592), and an explicit
+  `content_scope` is served by full-text retrieval. Use `mode='full_text'` to include saved outputs.
   - A payload hit carries `type: externalized`, its `ref` and its `session_id`. A payload matches the
-    query as a literal phrase.
+    query as typed, or all its terms in any order (quoted phrases kept, uppercase OR honoured); a
+    `NOT` query, or one with emoji or CJK, matches only as typed.
   - `lcm_expand(externalized_ref, session_id)` returns the output in pages of `max_tokens`; follow
     `has_more` and `next_content_offset` for the rest.
   - The pass is bounded: 4096 names discovered, 128 files and 8 MiB read per call, 512 KB per file.

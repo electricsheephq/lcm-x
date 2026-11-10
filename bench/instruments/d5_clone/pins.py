@@ -18,6 +18,8 @@ import subprocess
 import sys
 import symtable
 
+from . import sandbox
+
 
 def _sha(data):
     return hashlib.sha256(data).hexdigest()
@@ -354,8 +356,10 @@ def _interpreter_version(interpreter):
     if interpreter is None:
         return platform.python_version()
     try:
-        probe = subprocess.run([str(interpreter), "-I", "-c", "import platform; print(platform.python_version())"],
-                               capture_output=True, text=True, timeout=30)
+        argv = [str(interpreter), "-I", "-c", "import platform; print(platform.python_version())"]
+        if sandbox.available():  # Like every other host process: no network, never the live agent's home.
+            argv = sandbox.wrap(argv, ports=[], deny_paths=sandbox.live_homes())
+        probe = subprocess.run(argv, capture_output=True, text=True, timeout=30)
     except (OSError, subprocess.SubprocessError):
         return None
     return probe.stdout.strip() if probe.returncode == 0 else None

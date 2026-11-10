@@ -64,9 +64,11 @@ def _reader_grep_schema(schema: dict[str, Any]) -> dict[str, Any]:
     properties["content_scope"]["description"] = (
         "Content stores to search. Omitted (the reader's default): raw messages first (summaries too only with "
         "session_scope='current'), then, when they return fewer than limit, saved tool outputs (externalized "
-        "payloads) of this store, matched as a literal phrase. 'history': raw messages only (and summaries with "
+        "payloads) of this store, matched as typed or by all terms in any order. 'history': raw messages only (and summaries with "
         "session_scope='current'). 'externalized': saved tool outputs only. 'both': both. Saved-output search "
-        "works with session_scope 'all' or 'session'; session_scope='current' stays history-only.")
+        "works with session_scope 'all' or 'session'; session_scope='current' stays history-only. The default searches "
+        "saved outputs in mode='full_text' only; in 'semantic' or 'hybrid' it is history-only, and an explicit "
+        "content_scope is served by full-text retrieval. Use mode='full_text' to include saved outputs.")
     properties["externalized_refs"]["description"] = (
         "Optional saved-output ref filenames to search. Valid only with content_scope='externalized' or 'both'. "
         "Each ref must be a payload of this store in the requested session scope.")

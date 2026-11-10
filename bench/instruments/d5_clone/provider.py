@@ -114,8 +114,8 @@ class Provider:
         self.plan = deepcopy(plan)
         self.agent = plan.get("agent_model", "d5-agent")
         self.cron = plan.get("cron_model", "d5-cron")
-        self.models = sorted(set(plan.get("models", [])) | {
-            self.agent, self.cron, plan.get("summary_model", "d5-summary")})
+        self.models = sorted(set(plan.get("models", [])) | {  # d5-aux: the arm config's auxiliary tasks (gateway.py).
+            self.agent, self.cron, plan.get("summary_model", "d5-summary"), plan.get("aux_model", "d5-aux")})
         self.step, self.cron_index = None, 0
         self.lock = threading.Lock()
         self.stats = {k: Counter() for k in

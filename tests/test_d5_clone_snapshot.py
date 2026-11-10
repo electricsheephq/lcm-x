@@ -9,6 +9,8 @@ import pytest
 from bench.instruments.d5_clone import snapshot
 from bench.instruments.d5_clone.capture import _readonly
 
+from tests.test_d5_clone_capture import _hot_journal_copy
+
 
 def sha(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -92,9 +94,10 @@ def test_failures_and_payload_redaction(fixture, mode):
     assert result["verdict"] == "FAIL"
     category = {"size": "size_mismatch", "sha": "sha_mismatch",
                 "missing": "missing", "extra": "extra_on_disk"}[mode]
-    assert result[category] == {"names": ["extra.json" if mode == "extra" else "settings.json"],
+    name = "extra.json" if mode == "extra" else "settings.json"  # A name a capture never writes: reported hashed.
+    assert result[category] == {"names": ["sha256-12:" + hashlib.sha256(name.encode()).hexdigest()[:12]],
                                 "payload": 1}
-    assert "opaque" not in json.dumps(result)
+    assert "opaque" not in json.dumps(result) and name not in json.dumps(result)
     assert list(scratch.iterdir()) == []
 
 
@@ -112,8 +115,10 @@ def test_corrupt_database_is_fail(fixture):
     corrupt.write_bytes(b"not a database")
     result = snapshot.verify(pin, root, scratch)
     assert result["verdict"] == "FAIL"
-    assert result["quick_check"]["broken.db"] == "failed"
-    assert result["extra_on_disk"] == {"names": ["broken.db"], "payload": 0}
+    assert result["quick_check"]["sha256-12:" + hashlib.sha256(b"broken.db").hexdigest()[:12]] == "failed"
+    assert "broken" not in json.dumps(result)
+    assert result["extra_on_disk"] == {"names": ["sha256-12:" + hashlib.sha256(b"broken.db").hexdigest()[:12]],
+                                       "payload": 0}
     assert list(scratch.iterdir()) == []
 
 
@@ -204,23 +209,24 @@ def test_an_unreadable_pinned_file_fails_without_raising(tmp_path):
 
 
 def test_a_snapshot_with_a_hot_rollback_journal_fails(tmp_path):
-    root, scratch, pin = tmp_path / "snapshot", tmp_path / "scratch", tmp_path / "pin.json"
+    root = _hot_journal_copy(tmp_path, "store.db").parent  # The hot state is asserted by the helper.
+    scratch, pin = tmp_path / "scratch", tmp_path / "pin.json"
     scratch.mkdir()
-    live = tmp_path / "live"
-    live.mkdir()
-    with sqlite3.connect(live / "store.db", isolation_level=None) as conn:
-        conn.execute("CREATE TABLE t (x TEXT)")
-        conn.executemany("INSERT INTO t VALUES (?)", [("a" * 900,)] * 400)
-        conn.execute("PRAGMA cache_size=1")
-        conn.execute("BEGIN")
-        conn.execute("UPDATE t SET x = ?", ("b" * 900,))
-        root.mkdir()
-        for suffix in ("", "-journal"):
-            (root / ("store.db" + suffix)).write_bytes((live / ("store.db" + suffix)).read_bytes())
-        conn.execute("ROLLBACK")
-    conn.close()
     _pin_of(root, pin)
     result = snapshot.verify(pin, root, scratch)
     assert result["verdict"] == "FAIL"
     assert result["quick_check"]["store.db"] == "failed"
     assert list(scratch.iterdir()) == []
+
+
+def test_a_name_a_capture_writes_is_reported_as_itself(fixture):
+    """store.db and host-0.db (and their -wal, -shm and -journal) are fixed names, not snapshot content."""
+    pin, root, scratch = fixture
+    (root / "store.db-journal").write_bytes(b"")
+    result = snapshot.verify(pin, root, scratch)
+    assert result["extra_on_disk"]["names"] == ["store.db-journal"]
+
+
+def test_a_name_that_is_not_utf8_is_shown_by_its_hash_never_raises():
+    name = "extra-\udcff.bin"  # What os.walk returns for a name whose bytes are not UTF-8.
+    assert snapshot._shown(name) == "sha256-12:" + hashlib.sha256(b"extra-\xff.bin").hexdigest()[:12]
