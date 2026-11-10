@@ -3033,6 +3033,9 @@ def test_a_swept_workflow_agent_keeps_its_saved_tool_output(tmp_path, home, herm
     finally:
         store.close()
     assert "chars=60000" in str(content) and "toolu_9" in str(content)
+    from hermes_lcm.externalize import extract_externalized_ref
+    [payload] = (home / "lcm-large-outputs").glob(extract_externalized_ref(str(content)))  # the saved bytes, not a preview
+    assert json.loads(payload.read_text(encoding="utf-8"))["content"] == "full output\n" * 5000
 
 
 @pytest.mark.parametrize("where", [(), ("workflows", "wf_run1")], ids=["direct", "nested"])

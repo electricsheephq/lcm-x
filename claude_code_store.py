@@ -28,6 +28,7 @@ from .claude_code_capture import (
     PROJECTION_VERSION,
     SHARED_RAW,
     SOURCE,
+    SUBAGENT_DEPTH,
     UNKNOWN,
     classify_entry,
     content_digest,
@@ -884,7 +885,6 @@ def lineages_of(record: dict) -> list[Lineage]:
 
 
 JOURNAL_PREFIX = "journal/"  # a run's journal.jsonl: its own child lineage; no file-name id or hook id holds "/" (#2562)
-SUBAGENT_DEPTH = 4  # folders below subagents/: workflow agents sit at workflows/<run-id>/ (#2562)
 
 
 def _subagents(lineage: Lineage) -> list[Lineage]:
