@@ -87,6 +87,16 @@ class PrefixMatchingMixin:
         if not isinstance(value, str):
             return value
 
+        if extract_ingest_externalized_refs(value):
+            try:
+                decoded = json.loads(value)
+            except ValueError:
+                decoded = None
+            if isinstance(decoded, (dict, list)):  # list content or JSON stored as text: restore per leaf
+                return self._restore_ingest_payload_placeholders_in_content_identity(
+                    value, session_id=session_id, hermes_home=hermes_home,
+                )
+
         text = restore_ingest_payload_placeholders(
             value,
             config=self._config,
@@ -208,10 +218,32 @@ class PrefixMatchingMixin:
         *,
         session_id: str, hermes_home=None,
     ) -> str:
-        tool_calls = self._session_end_prefix_compare_value(
-            (message or {}).get("tool_calls"),
-            session_id=session_id, hermes_home=hermes_home,
-        )
+        def compare_call(call):
+            if not isinstance(call, dict) or not isinstance(call.get("function"), dict):
+                return self._session_end_prefix_compare_value(
+                    call, session_id=session_id, hermes_home=hermes_home)
+            function = dict(call["function"])
+            if "arguments" in function:
+                arguments = function["arguments"]
+                if isinstance(arguments, str):
+                    try:
+                        arguments = json.loads(arguments)
+                    except ValueError:
+                        arguments = arguments.strip()
+                    else:
+                        arguments = self._session_end_prefix_compare_value(
+                            arguments, session_id=session_id, hermes_home=hermes_home)
+                        arguments = json.dumps(arguments, sort_keys=True, separators=(",", ":"), default=str)
+                else:
+                    arguments = self._session_end_prefix_compare_value(
+                        arguments, session_id=session_id, hermes_home=hermes_home)
+                    arguments = json.dumps(arguments, sort_keys=True, separators=(",", ":"), default=str)
+                function["arguments"] = arguments
+            return self._session_end_prefix_compare_value(
+                dict(call, function=function), session_id=session_id, hermes_home=hermes_home)
+
+        calls = (message or {}).get("tool_calls")
+        tool_calls = [compare_call(call) for call in calls] if isinstance(calls, list) else calls
         tool_calls = redact_sensitive_value(
             tool_calls,
             self._config,
