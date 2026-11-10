@@ -11,10 +11,13 @@ site and ``self._*`` reference unchanged.
 import hashlib
 import json
 import logging
+import re
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .externalize import (
     extract_externalized_ref,
+    get_large_output_storage_dir,
     is_externalized_placeholder,
     load_externalized_payload,
 )
@@ -25,6 +28,11 @@ from .ingest_protection import (
     restore_ingest_payload_placeholders,
 )
 from .message_content import normalize_content_value, text_content_for_pattern_matching
+from .ingest_persisted import (
+    _expected_persisted_output_chars,
+    _is_hermes_persisted_output_marker,
+    _persisted_output_saved_path,
+)
 from .sqlite_util import _is_ingest_busy_error
 from .tokens import count_message_tokens
 
@@ -33,6 +41,25 @@ from .tokens import count_message_tokens
 logger = logging.getLogger("hermes_lcm.engine")
 
 _LCM_MESSAGE_PREFIX_FINGERPRINT_LIMIT = 8
+
+def _recover_marker_for_compare(text, home):
+    """Keep storage-recovery version differences in this content-path adapter."""
+    from .ingest_persisted import recover_hermes_persisted_output_with_file_stat
+
+    return recover_hermes_persisted_output_with_file_stat(text, hermes_home=home)
+
+
+def _marker_payload_metadata(original, config, home):
+    # load_externalized_payload deliberately drops source metadata from its summary.
+    ref = extract_externalized_ref(original.strip()) or ""
+    if not ref or Path(ref).name != ref:
+        return None
+    try:
+        payload = json.loads((get_large_output_storage_dir(config, hermes_home=home, create=False) / ref).read_text(
+            encoding="utf-8"))
+        return payload if isinstance(payload, dict) else None
+    except (OSError, ValueError):
+        return None
 
 
 class PrefixMatchingMixin:
@@ -44,15 +71,17 @@ class PrefixMatchingMixin:
         prefix_count = self._session_end_store_prefix_count(session_id, messages)
         return prefix_count is not None and prefix_count > 0
 
-    def _session_end_prefix_compare_value(self, value: Any, *, session_id: str, hermes_home=None) -> Any:
+    def _session_end_prefix_compare_value(self, value: Any, *, session_id: str, hermes_home=None, marker_payloads=None) -> Any:
         if isinstance(value, dict):
             return {
-                key: self._session_end_prefix_compare_value(child, session_id=session_id, hermes_home=hermes_home)
+                key: self._session_end_prefix_compare_value(child, session_id=session_id, hermes_home=hermes_home,
+                                                       marker_payloads=marker_payloads)
                 for key, child in value.items()
             }
         if isinstance(value, list):
             return [
-                self._session_end_prefix_compare_value(child, session_id=session_id, hermes_home=hermes_home)
+                self._session_end_prefix_compare_value(child, session_id=session_id, hermes_home=hermes_home,
+                                                       marker_payloads=marker_payloads)
                 for child in value
             ]
         if not isinstance(value, str):
@@ -85,11 +114,16 @@ class PrefixMatchingMixin:
 
         if is_externalized_placeholder(stripped):
             ref = extract_externalized_ref(stripped)
-            payload = load_externalized_payload(
-                ref or "",
-                config=self._config,
-                hermes_home=self._hermes_home if hermes_home is None else hermes_home,
-            )
+            if marker_payloads is not None and stripped.startswith("[Externalized tool output:"):
+                # Tool-result payloads can carry persisted_output_*; retain the
+                # same JSON read for content and identity, including non-marker rows.
+                payload = _marker_payload_metadata(stripped, self._config,
+                    self._hermes_home if hermes_home is None else hermes_home)
+                marker_payloads[stripped] = payload
+            else:
+                payload = load_externalized_payload(
+                    ref or "", config=self._config,
+                    hermes_home=self._hermes_home if hermes_home is None else hermes_home)
             if payload is not None:
                 payload_session_id = str(payload.get("session_id") or "")
                 if not session_id or not payload_session_id or payload_session_id == session_id:
@@ -102,18 +136,65 @@ class PrefixMatchingMixin:
         self,
         message: Dict[str, Any],
         *,
-        session_id: str, hermes_home=None,
-    ) -> str:
+        session_id: str, hermes_home=None, recover_markers=True,
+    ) -> str | tuple:
+        home = self._hermes_home if hermes_home is None else hermes_home
+        marker_payloads = {} if (message or {}).get("role") == "tool" else None
         content = self._session_end_prefix_compare_value(
             (message or {}).get("content"),
-            session_id=session_id, hermes_home=hermes_home,
+            session_id=session_id, hermes_home=hermes_home, marker_payloads=marker_payloads,
         )
+        if (message or {}).get("role") == "tool":
+            text = normalize_content_value(content)
+            if recover_markers and _is_hermes_persisted_output_marker(text):
+                recovered = _recover_marker_for_compare(text, home)
+                if recovered is not None:
+                    content = recovered[0]
         content = redact_sensitive_value(
             content,
             self._config,
             parse_json_strings=False,
         )
         return normalize_content_value(content)
+
+    def _session_end_counted_identity(self, message, stored, **kwargs):
+        bare = self._session_end_prefix_compare_identity(message, recover_markers=False, **kwargs)
+        return bare if bare in stored else self._session_end_prefix_compare_identity(message, **kwargs)
+
+    def _session_end_rows_equal(self, stored_row, host_message, *, session_id, hermes_home=None):
+        # Two bare markers are the same row only when their text is byte-identical. A marker and a stored recovered result are the same row when the marker's path and character count equal the ones recorded at ingest and the marker's preview is exactly the start of the stored content. The marker's boilerplate wording is not part of that identity.
+        # A stored row takes a marker identity only from its own marker: when its payload's recorded marker source is not unambiguously this row's (a shared payload, a plain row, a marker with another path), the row compares by content.
+        # The stored side is always read as storage wrote it (placeholders restored, never recovered again from the host's file). The host side is read as ingest would store it now. The marker rule is the one bridge between a stored recovered result and a marker.
+        def fields(row):
+            return self._session_end_prefix_compare_identity(dict(row, content=None),
+                session_id=session_id, hermes_home=hermes_home)
+        if fields(stored_row) != fields(host_message):
+            return False
+        original, incoming = stored_row.get("content"), host_message.get("content")
+        if host_message.get("role") == "tool" and _is_hermes_persisted_output_marker(incoming):
+            if _is_hermes_persisted_output_marker(original):
+                # Bare against bare: main's own compare (ingest's transforms undone on the stored side, none recovered).
+                return (self._session_end_prefix_compare_identity(stored_row, session_id=session_id,
+                        hermes_home=hermes_home, recover_markers=False) == self._session_end_prefix_compare_identity(
+                        host_message, session_id=session_id, hermes_home=hermes_home, recover_markers=False))
+            payloads = {}
+            text = self._session_end_prefix_compare_value(original, session_id=session_id,
+                hermes_home=hermes_home, marker_payloads=payloads)
+            payload = payloads.get(original.strip()) if isinstance(original, str) else None
+            if (isinstance(payload, dict) and isinstance(payload.get("content"), str) and payload["content"] == text
+                    and (not payload.get("session_id") or payload["session_id"] == session_id)):
+                source, expected = payload.get("persisted_output_source_path"), payload.get("persisted_output_expected_chars")
+                if source and source == _persisted_output_saved_path(incoming) and type(expected) is int:
+                    preview = re.search(r"^Preview \(first \d+ chars\):[^\S\r\n]*\r?\n(.*?)\r?\n</persisted-output>\s*\Z",
+                        incoming, re.MULTILINE | re.DOTALL)
+                    prefix = preview[1] if preview else None
+                    if prefix is not None and prefix.endswith("\n..."):
+                        prefix = prefix[:-4].removesuffix("\r")
+                    if prefix:
+                        return (expected >= 0 and expected == _expected_persisted_output_chars(incoming)
+                                and text.startswith(prefix))
+        # The stored side is what storage kept; it is never re-read from the host's current file.
+        return self._session_end_prefix_compare_identity(stored_row, session_id=session_id, hermes_home=hermes_home, recover_markers=False) == self._session_end_prefix_compare_identity(host_message, session_id=session_id, hermes_home=hermes_home)
 
     def _session_end_prefix_compare_tool_calls(
         self,
@@ -144,11 +225,11 @@ class PrefixMatchingMixin:
         self,
         message: Dict[str, Any],
         *,
-        session_id: str, hermes_home=None,
-    ) -> tuple[str, str, str, str, str]:
+        session_id: str, hermes_home=None, recover_markers=True,
+    ) -> tuple[str, str | tuple, str, str, str]:
         return (
             str((message or {}).get("role") or ""),
-            self._session_end_prefix_compare_content(message, session_id=session_id, hermes_home=hermes_home),
+            self._session_end_prefix_compare_content(message, session_id=session_id, hermes_home=hermes_home, recover_markers=recover_markers),
             str((message or {}).get("tool_call_id") or ""),
             str((message or {}).get("tool_name") or ""),
             self._session_end_prefix_compare_tool_calls(message, session_id=session_id, hermes_home=hermes_home),
@@ -180,18 +261,11 @@ class PrefixMatchingMixin:
         for idx, stored_msg in enumerate(stored_messages):
             msg = messages[idx]
             try:
-                message_identity = self._session_end_prefix_compare_identity(
-                    msg,
-                    session_id=session_id,
-                )
-                stored_identity = self._session_end_prefix_compare_identity(
-                    stored_msg,
-                    session_id=session_id,
-                )
+                equal = self._session_end_rows_equal(stored_msg, msg, session_id=session_id)
             except Exception:
                 logger.debug("LCM session-end prefix compare normalization failed", exc_info=True)
                 return None
-            if message_identity != stored_identity:
+            if not equal:
                 return None
         return len(stored_messages)
 
