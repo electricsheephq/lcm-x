@@ -3304,6 +3304,11 @@ def test_the_reused_agent_id_scenario_matrix(tmp_path, home, hermes, old, first,
     a = _append(tmp_path / "projects" / "-work" / "s1.jsonl", CONVERSATION[:2])
     _record(_hook(), home, a)
     cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    store = _open(home, hermes)
+    try:  # the parent conversation's rows, which the exact count below includes
+        parent = collections.Counter(row[0] for row in store.connection.execute("SELECT content FROM messages"))
+    finally:
+        store.close()
     agents = a.parent / "s1" / "subagents"
     first_path = agents.joinpath(*(("workflows", "subagents") if second == "nested" else ("workflows", "wf_run1")),
                                  "agent-x1.jsonl")
@@ -3390,11 +3395,12 @@ def test_the_reused_agent_id_scenario_matrix(tmp_path, home, hermes, old, first,
                            else e["message"]["content"][0]["text"] for e in content[name] if "message" in e]
                     for name in content}
         alive = [name for name in ("first", "second") if not (first == "forgotten" and (name == "first" or second_forgotten))]
-        want = collections.Counter()  # every message of each transcript that is not forgotten has exactly one row
+        want = collections.Counter(parent)  # the parent's rows, and every message of each live transcript, once each
         for name in alive:
             merged = name == "second" and old == "flipped" and second == "copy" and "first" in alive
             want.update(([] if merged else texts_of[name]) + (["late one", *texts] if name == "second" else []))
-        assert collections.Counter(text for _session, text in rows) == want  # merged: the old code's one lineage
+        everything = collections.Counter(row[0] for row in conn.execute("SELECT content FROM messages"))
+        assert everything == want  # in every session of the store; merged: the old code's one lineage, as on main
         if first == "forgotten":  # a forgotten id stays gone, under any session
             assert not conn.execute("SELECT COUNT(*) FROM messages WHERE session_id = ?", (bare,)).fetchone()[0]
             now = collections.Counter(row[0] for row in conn.execute("SELECT content FROM messages"))
