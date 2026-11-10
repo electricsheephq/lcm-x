@@ -432,6 +432,16 @@ def test_a_replaced_unanswered_call_with_a_different_numeral_is_stored(tmp_path,
         rows = _stored(engine)
         if sum(row.get("content") == "B file text" for row in rows) != 1:
             pytest.fail("setup: the new call's result was not stored once")
-        assert sum(1 for row in rows if shown_args in json.dumps(row.get("tool_calls") or "")) == 1
+
+        def calls_with(args):
+            count = 0
+            for row in rows:
+                calls = row.get("tool_calls") or []
+                calls = json.loads(calls) if isinstance(calls, str) else calls
+                count += sum(1 for c in calls if c.get("function", {}).get("arguments") == args)
+            return count
+        if calls_with(stored_args) != 1:  # positive control for the matcher, outside the xfail
+            pytest.fail("setup: the stored call was not found by its arguments")
+        assert calls_with(shown_args) == 1
     finally:
         engine.shutdown()
