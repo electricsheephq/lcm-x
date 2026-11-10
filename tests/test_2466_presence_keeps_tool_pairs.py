@@ -374,3 +374,27 @@ def test_a_string_and_an_object_with_the_same_text_are_different_arguments(tmp_p
             [] if isinstance(stored_args, str) else None)  # reused, or a non-standard stored shape (a trip)
     finally:
         engine.shutdown()
+
+
+@pytest.mark.parametrize("stored_args,shown_args", [
+    ('{"n": 1.0}', '{"n": 1.00}'),  # same number, one invocation
+    ('{"n": 0}', '{"n": -0}'),  # same number, one invocation
+    ('{"n": 0.1}', '{"n": 0.10000000000000001}'),  # different numbers that read as one float: known exception, #2172
+    ('{"n": 1e400}', '{"n": 2e400}'),  # different numbers that read as one float: known exception, #2172
+], ids=["reformat", "signed-zero", "precision", "overflow"])
+def test_the_anchor_reads_numerals_as_floats(tmp_path, stored_args, shown_args):
+    """Today's anchor parses numbers as floats, so a re-spelled numeral is the stored invocation: only its result is
+    unaccounted. Pinned as it is; one definition of "same arguments" for both compare sites is #2172 (v0.30.1)."""
+    from tests.test_anchor_unstored_before_cursor import _engine, _presence, SESSION
+
+    def call(args):
+        return {"role": "assistant", "content": "", "tool_calls": [
+            {"id": "call_s", "type": "function", "function": {"name": "read_file", "arguments": args}}]}
+
+    engine = _engine(tmp_path)
+    try:
+        engine._store.append_batch(SESSION, [call(stored_args)])
+        result = {"role": "tool", "tool_call_id": "call_s", "tool_name": "read_file", "content": "file text"}
+        assert _presence(engine, [call(shown_args), result]) == [1]
+    finally:
+        engine.shutdown()
