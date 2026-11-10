@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 from types import SimpleNamespace
 
 from bench.tools import d5_end_read as er
@@ -226,3 +227,67 @@ def test_condition_3_a_declared_pattern_session_with_a_stored_row_is_inconclusiv
     check2 = er.coverage(START, end, identity, "/nonexistent", by_design)
     assert check2["declared_pattern_sessions_with_stored_rows"] == [er._sha12("cron_7")]
     assert er.verdict(PRESERVED, check2) == "INCONCLUSIVE"
+
+
+def test_a_child_of_a_declared_pattern_session_is_not_stored_by_design():
+    by_design = er.by_design_matcher({"ignore_session_patterns": ["cron_*"], "stateless_session_patterns": []},
+                                     {}, {"child": "cron_7", "grandchild": "child", "loop": "loop"})
+    assert by_design("child") and by_design("grandchild") and not by_design("s1") and not by_design("loop")
+
+
+def test_a_stateless_pattern_alone_counts():
+    assert er.by_design_matcher({"ignore_session_patterns": [], "stateless_session_patterns": ["tmp_**"]}, {})("tmp_a:b")
+
+
+def test_the_host_db_maps_are_read_only_and_tolerate_missing_columns(tmp_path):
+    con = sqlite3.connect(tmp_path / "host-0.db")
+    con.execute("CREATE TABLE sessions (id TEXT)")
+    con.execute("INSERT INTO sessions VALUES ('s1')")
+    con.commit()
+    con.close()
+    assert er._sessions(tmp_path) == ({}, {})
+    con = sqlite3.connect(tmp_path / "host-0.db")
+    con.execute("ALTER TABLE sessions ADD COLUMN source TEXT")
+    con.execute("ALTER TABLE sessions ADD COLUMN parent_session_id TEXT")
+    con.execute("INSERT INTO sessions VALUES ('s2', 'cron', 's1')")
+    con.commit()
+    con.close()
+    before = sorted(p.name for p in tmp_path.iterdir())
+    assert er._sessions(tmp_path) == ({"s1": None, "s2": "cron"}, {"s2": "s1"})
+    assert sorted(p.name for p in tmp_path.iterdir()) == before  # No sidecar written beside the input.
+
+
+def test_the_read_passes_the_declared_patterns_to_coverage(monkeypatch, tmp_path):
+    seen = {}
+
+    class Host:
+        def __init__(self, config, scratch):
+            pass
+
+        def pins(self):
+            return {"verdict": "PASS"}
+
+        def rules(self):
+            return {"identity": identity}
+
+        def rows(self, folder):
+            return START if folder == "start-dir" else {"host": [*START["host"], host(2, "cron_1", "x")],
+                                                        "store": [*START["store"]]}
+
+    real = er.coverage
+
+    def coverage(*a, **k):
+        seen["result"] = real(*a, **k)
+        return seen["result"]
+    monkeypatch.setattr(er, "_capture", lambda *a: ({"verdict": "PASS"}, None))
+    monkeypatch.setattr(er.runner, "LocalHost", Host)
+    monkeypatch.setattr(er, "_sessions", lambda folder: ({}, {}))
+    monkeypatch.setattr(er, "coverage", coverage)
+    lcm = {"ignore_session_patterns": ["cron_*"], "stateless_session_patterns": []}
+    (tmp_path / "decl.json").write_text(json.dumps({"settings": {"lcm": lcm}}))
+    args = SimpleNamespace(start="start-dir", start_pin="p", start_pin_sha256="a" * 64, end="end-dir", end_pin="p",
+                           end_pin_sha256="b" * 64, scratch=str(tmp_path), config=str(tmp_path / "decl.json"),
+                           instrument_dir="kit")
+    result = er.end_read(args)
+    assert seen["result"]["not_stored_by_design"] == {"sessions": 1, "rows": 1} and seen["result"]["lost"] == 0
+    assert result["verdict"] == "INCONCLUSIVE"  # Only by-design rows: the window of other rows is empty.

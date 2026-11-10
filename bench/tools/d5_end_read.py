@@ -35,7 +35,8 @@ VERDICT_RULE = ("FAIL when check 1 fails or any window host row is LOST; LOST on
                 "holds no stored row at all in the end store; INCONCLUSIVE while any window host row is unmatched, when "
                 "the window is empty or both pins are the same, when a pin or the kit does not verify, when the "
                 "declaration has no settings.lcm session patterns, or when a session matching a declared pattern holds "
-                "a stored row; a window row in a session matching a declared ignore or stateless pattern is counted "
+                "a stored row; a window row in a session matching a declared ignore or stateless pattern (directly or through a "
+                "parent session) is counted "
                 "apart as not stored by design, never LOST or matched; PASS only with check 1 PASS, a non-empty window "
                 "of other rows and 0 unmatched")
 HINTS = ("equal after stripping edge whitespace", "payload swapped for a reference", "no hint")
@@ -61,13 +62,28 @@ def _hint(host, candidates, end_dir):
     return HINTS[2], None
 
 
-def by_design_matcher(lcm_settings, platforms):
+def by_design_matcher(lcm_settings, platforms, parents=None):
     """session_id -> True when LCM-X never stores it by its declared ignore or stateless patterns (LCM-X's own matcher,
-    with the session's platform from the end capture's host db as a match key, as the engine does)."""
+    with the session's platform from the end capture's host db as a match key, as the engine does), directly or through
+    a parent session that matches (the engine's bypass lineage, approximated by the host db's parent links; a session
+    the engine stored anyway shows up as a declaration/store disagreement, never as a PASS)."""
     compiled = compile_session_patterns([*lcm_settings["ignore_session_patterns"],
                                          *lcm_settings["stateless_session_patterns"]])
-    return lambda session: bool(compiled) and matches_session_pattern(
-        build_session_match_keys(session, platform=platforms.get(session) or ""), compiled)
+    parents = parents or {}
+
+    def direct(session):
+        return matches_session_pattern(build_session_match_keys(session, platform=platforms.get(session) or ""),
+                                       compiled)
+
+    def matcher(session):
+        seen = set()
+        while compiled and session and session not in seen and len(seen) < 64:
+            if direct(session):
+                return True
+            seen.add(session)
+            session = parents.get(session)
+        return False
+    return matcher
 
 
 def coverage(start, end, identity, end_dir, by_design=lambda session: False):
@@ -141,16 +157,19 @@ def _capture(pin, folder, pin_sha256, scratch):
     return result, None
 
 
-def _platforms(folder):
-    """{session id: platform} from the end capture's host db (read-only); {} when it has no source column."""
+def _sessions(folder):
+    """({session id: platform}, {session id: parent session id}) from the end capture's host db (read-only); a missing
+    column gives an empty map."""
     db = next((Path(folder) / n for n in ("host-0.db", "state.db") if (Path(folder) / n).is_file()), None)
     if db is None:
-        return {}
+        return {}, {}
     con = capture._readonly(db)
     try:
-        if "source" not in {r[1] for r in con.execute("PRAGMA table_info(sessions)")}:
-            return {}
-        return {sid: src for sid, src in con.execute("SELECT id, source FROM sessions")}
+        cols = {r[1] for r in con.execute("PRAGMA table_info(sessions)")}
+        platforms = dict(con.execute("SELECT id, source FROM sessions")) if "source" in cols else {}
+        parents = dict(con.execute("SELECT id, parent_session_id FROM sessions WHERE parent_session_id IS NOT NULL")) \
+            if "parent_session_id" in cols else {}
+        return platforms, parents
     finally:
         con.close()
 
@@ -180,7 +199,7 @@ def end_read(args):
     except Exception as exc:  # noqa: BLE001  # Never a message: it can carry a path.
         return {**out, "verdict": INCONCLUSIVE, "reason": f"a store could not be read ({type(exc).__name__})"}
     check1 = bars.bar3(start["store"], end["store"], identity)
-    check2 = coverage(start, end, identity, args.end, by_design_matcher(lcm, _platforms(args.end)))
+    check2 = coverage(start, end, identity, args.end, by_design_matcher(lcm, *_sessions(args.end)))
     return {**out, "verdict": verdict(check1, check2), "check1_preservation": check1, "check2_coverage": check2,
             "start_rows": {k: len(v) for k, v in start.items()}, "end_rows": {k: len(v) for k, v in end.items()}}
 
