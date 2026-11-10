@@ -799,3 +799,23 @@ def test_an_empty_generation_never_matches_a_set_aside_copy(tmp_path):
     report = ca.audit(home)
     assert report["ok"] is True and report["lineages"][0]["generations_gone"] == 1
     assert report["verified"] is False and report["unverified"] == [lineage.key]
+
+
+def test_pending_rows_that_cannot_be_checked_stay_unverified(tmp_path):
+    """#2533 review: a pending row without a usable path, and an uncaptured subagent of a pending main session,
+    leave the audit unverified."""
+    home = tmp_path / "home"
+    store = _open(home, tmp_path / "hermes")
+    try:
+        parent = tmp_path / "projects" / "-work" / "s1.jsonl"
+        assert cc.drain(store, cc.Lineage("s1", None, parent)) == "missing"
+    finally:
+        _close(store)
+    child = parent.with_suffix("") / "subagents" / "agent-a1.jsonl"
+    child.parent.mkdir(parents=True)
+    child.write_text(json.dumps(CONVERSATION[0]) + "\n", encoding="utf-8")
+    report = ca.audit(home)
+    assert not report["verified"] and any("a1" in key for key in report["unverified"])
+    _tamper(home, "UPDATE metadata SET value = json_remove(value, '$.path') WHERE key = ?",
+            ("capture:pending:claude-code:s1",))
+    assert "claude-code:s1" in ca.audit(home)["unverified"]

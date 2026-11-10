@@ -1791,3 +1791,28 @@ def test_a_sweep_cut_by_its_deadline_keeps_the_claimed_record(tmp_path, home, he
                                         ).fetchone()[0] == len(CONVERSATION)
     finally:
         store.close()
+
+
+def test_a_pending_lineage_follows_a_newer_transcript_path(tmp_path, home, hermes):
+    """#2533 review: the pending row keeps the path of the latest record, so the sweep looks where the transcript
+    will appear, and the first sighting's time is kept."""
+    early = tmp_path / "projects" / "-old" / "s1.jsonl"
+    lineage = cc.Lineage("s1", None, early)
+    store = _open(home, hermes)
+    try:
+        assert cc.drain(store, lineage) == "missing"
+        first_seen = store.read_metadata_json("capture:pending:" + lineage.key)["first_seen"]
+        later = tmp_path / "projects" / "-work" / "s1.jsonl"
+        assert cc.drain(store, cc.Lineage("s1", None, later)) == "missing"
+        row = store.read_metadata_json("capture:pending:" + lineage.key)
+        assert (row["path"], row["first_seen"]) == (str(later), first_seen)
+    finally:
+        store.close()
+    _transcript(tmp_path, CONVERSATION)  # appears at the later path; every later record of s1 is lost
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    store = _open(home, hermes)
+    try:
+        assert _rows(store), "the session must be captured at its latest path"
+        assert store.read_metadata_json("capture:pending:" + lineage.key) is None
+    finally:
+        store.close()

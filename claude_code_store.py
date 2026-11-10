@@ -358,12 +358,18 @@ def drain(store: MessageStore, lineage: Lineage, *, deadline: Optional[float] = 
     state = cursor_state(lineage.path, cursor)
     if state == "missing":
         key = PENDING_PREFIX + lineage.key
-        if not cursor and store.read_metadata_json(key) is None:
+        pending = store.read_metadata_json(key) if not cursor else None
+        if not cursor and (not isinstance(pending, dict) or pending.get("path") != str(lineage.path)):
+            # A newer record's path replaces the recorded one (the sweep must look where the transcript will be);
+            # first_seen keeps the first sighting.
+            first_seen = pending.get("first_seen") if isinstance(pending, dict) else None
             with store.atomic():
-                store.connection.execute("INSERT INTO metadata(key, value) VALUES(?, ?) ON CONFLICT(key) DO NOTHING",
-                                         (key, json.dumps({"session_id": lineage.session_id,
-                                                           "agent_id": lineage.agent_id, "path": str(lineage.path),
-                                                           "first_seen": time.time()}, sort_keys=True)))
+                store.connection.execute(
+                    "INSERT INTO metadata(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    (key, json.dumps({"session_id": lineage.session_id, "agent_id": lineage.agent_id,
+                                      "path": str(lineage.path),
+                                      "first_seen": first_seen if isinstance(first_seen, (int, float)) else time.time()},
+                                     sort_keys=True)))
             # Durable before the worker can mark the claimed record done and unlink it.
         return "missing"
     if state == "replaced":

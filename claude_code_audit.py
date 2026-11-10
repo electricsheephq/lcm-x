@@ -537,12 +537,23 @@ def _unverified(metadata: dict, records: list[dict], lineages: list[dict], sessi
         unknown.add(lineage_key(session))
     # A pending lineage (#2533) whose transcript now exists but has no cursor is uncaptured. One whose transcript never
     # appeared holds nothing to lose: it is counted in pending_lineages, not left unverified forever.
+    # A pending row without a usable path cannot be checked, so it is unverified too. A pending main session's
+    # subagents are checked like a captured one's: the worker sweeps them.
     for key, pending in metadata.items():
-        if key.startswith(PENDING_PREFIX) and (session is None or pending.get("session_id") == session):
-            lineage = Lineage(pending.get("session_id"), pending.get("agent_id"), Path(pending.get("path") or ""))
-            if (CURSOR_PREFIX + lineage.key not in metadata and FORGOTTEN_PREFIX + lineage.rows_session not in metadata
-                    and pending.get("path") and lineage.path.exists()):
-                unknown.add(lineage.key)
+        if not key.startswith(PENDING_PREFIX) or (session is not None and pending.get("session_id") != session):
+            continue
+        if not isinstance(pending, dict) or not isinstance(pending.get("path"), str) or not pending["path"]:
+            unknown.add(key[len(PENDING_PREFIX):])
+            continue
+        lineage = Lineage(pending.get("session_id"), pending.get("agent_id"), Path(pending["path"]))
+        if CURSOR_PREFIX + lineage.key in metadata or FORGOTTEN_PREFIX + lineage.rows_session in metadata:
+            continue
+        if lineage.path.exists():
+            unknown.add(lineage.key)
+        if lineage.agent_id is None:
+            for child in _subagents(lineage):
+                if CURSOR_PREFIX + child.key not in metadata and FORGOTTEN_PREFIX + child.rows_session not in metadata:
+                    unknown.add(child.key)
     # A record set aside before its transcript had a cursor names a lineage nothing else shows.
     for lineage in failed:
         if lineage is None:
@@ -582,8 +593,11 @@ def audit(home: Path, session: str | None = None) -> dict:
     unverified = _unverified(metadata, records, lineages, session, _failed_records(home))
     home_report = _home_report(home)
     checked = any(not row["forgotten"] for row in lineages)
-    pending = [value for key, value in metadata.items() if key.startswith(PENDING_PREFIX)
-               and (session is None or value.get("session_id") == session)]
+    # A pending row next to a cursor (a store downgraded and upgraded) or a forgotten session's is not pending.
+    pending = [value for key, value in metadata.items() if key.startswith(PENDING_PREFIX) and isinstance(value, dict)
+               and (session is None or value.get("session_id") == session)
+               and CURSOR_PREFIX + key[len(PENDING_PREFIX):] not in metadata
+               and FORGOTTEN_PREFIX + Lineage(value.get("session_id"), value.get("agent_id"), Path(".")).rows_session not in metadata]
     seen = [row["first_seen"] for row in pending if isinstance(row.get("first_seen"), (int, float))]
     oldest_pending_age = max(0.0, time.time() - min(seen)) if seen else None
     return {"ok": not any(failures.values()), "opened_immutable": immutable, "failures": failures,
