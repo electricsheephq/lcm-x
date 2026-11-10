@@ -298,6 +298,33 @@ def _check_folder(folder: Path, session_id: str, key: str, metadata: dict, unkno
         child = Lineage(session_id, name[len("agent-"):-len(".jsonl")], folder / "subagents" / name)
         if _uncaptured_child(child, metadata):
             unknown.add(child.key)
+    stack, captured = [folder], None  # closed world (#2557): every transcript-shaped file below must be captured
+    while stack:
+        try:
+            with os.scandir(stack.pop()) as entries:
+                for entry in entries:
+                    path = Path(entry.path)
+                    if path == folder / "tool-results" or (path.parent == folder / "subagents" and path.name in names):
+                        continue  # judged above
+                    if entry.is_symlink():
+                        unknown.add(key)  # never followed, so never seen: not clean
+                    elif entry.is_dir():
+                        stack.append(entry.path)
+                    elif entry.name.endswith(".jsonl"):
+                        if entry.name.startswith("agent-"):
+                            child = Lineage(session_id, entry.name[len("agent-"):-len(".jsonl")], path)
+                            if _uncaptured_child(child, metadata):
+                                unknown.add(child.key)
+                            continue
+                        if captured is None:
+                            captured = {name for meta, value in metadata.items() if meta.startswith(CURSOR_PREFIX)
+                                        for name in named_paths(value)}
+                        if str(path) not in captured:
+                            unknown.add(key)
+        except (FileNotFoundError, NotADirectoryError):
+            continue  # no folder: nothing there
+        except OSError:
+            unknown.add(key)
 
 
 def _uncaptured_child(child: Lineage, metadata: dict) -> bool:
