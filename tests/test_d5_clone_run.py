@@ -873,6 +873,44 @@ def test_inherited_flags_take_the_rerun_counts_only_when_a_rerun_ran():
     assert (with_rerun["ga_rerun_start"], with_rerun["ga_rerun"]) == (1, 3)
     assert r.inherited_flags(plan, {"rc": None, "ga": None})[f"summary_quality@{h}"]["rc"] is None
 
+class NamesFromTheSnapshot(FakeHost):
+    """An arm whose copied routes named a provider of the agent's own, and whose gateway asked for a model of its own."""
+
+    def arm(self, name, home, plan):
+        ctx = super().arm(name, home, plan)
+        ctx["routing"] = {"sessions": 3, "routing_rows": 3, "changes": [],
+                          "stored_route_providers": ["acme-private-provider"]}
+        return ctx
+
+    def stats(self, ctx):
+        return {"replay_misses": {}, "calls_by_model": {"d5-agent": 36, "acme-private-model": 2},
+                "unknown_models": {"acme-private-model": 2}}
+
+
+@pytest.mark.parametrize("fail", [None, "ga_once"])
+def test_the_receipt_never_names_a_provider_or_model_from_the_snapshot(tmp_path, fail):
+    """Receipts carry counts, ids and hashes only (release manager, 2026-11-10): a stored route's provider name and
+    any model name that is not one of the provider's own d5-* names are written as their sha256 12."""
+    snap = tmp_path / "snapshot"
+    config = {"snapshot_dir": str(snap), "snapshot_pin": str(make_snapshot(snap)), "nonce": "synthetic"}
+    receipt = r.run(NamesFromTheSnapshot(config, tmp_path / "run", fail=fail), rc_id="rc-synthetic")
+    assert "acme-private" not in json.dumps(receipt, sort_keys=True, default=str)
+    assert bool(receipt["ga_rerun"]) == (fail == "ga_once")  # The re-run's provider stats are hashed too.
+    h = {n: hashlib.sha256(n.encode()).hexdigest()[:12] for n in ("acme-private-provider", "acme-private-model")}
+    for arm in receipt["arms"].values():
+        assert (arm["routing"]["stored_route_providers"], arm["routing"]["stored_route_provider_sha256_12"]) == (
+            1, [h["acme-private-provider"]])
+        assert arm["routing"]["sessions"] == 3
+        assert arm["provider"]["calls_by_model"] == {"d5-agent": 36, f"sha256-12:{h['acme-private-model']}": 2}
+        assert arm["provider"]["unknown_models"] == {f"sha256-12:{h['acme-private-model']}": 2}
+
+
+def test_private_models_keeps_d5_names_and_merges_nothing_else():
+    assert r._private_models({"d5-agent": 1, "d5-summary": 2}) == {"d5-agent": 1, "d5-summary": 2}
+    assert r._private_models(None) == {} and r._private_models({}) == {}
+    assert list(r._private_models({"x": 1})) == [f"sha256-12:{hashlib.sha256(b'x').hexdigest()[:12]}"]
+    assert r._private_arm({"calls_by_model": {"x": 1}}, None)[1] is None
+
 def _bound_host(tmp_path):
     (tmp_path / "pin.json").write_text("{}")
     config = {"snapshot_pin": str(tmp_path / "pin.json"), "rc": {"commit": "c" * 40}, "ga": {"commit": "a" * 40},

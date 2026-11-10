@@ -15,6 +15,7 @@ P1) provides ``identity(row)``, ``credits`` (the two host-rewrite credits, each 
 """
 
 import argparse
+from collections import Counter
 from datetime import datetime, timedelta
 import hashlib
 import importlib.util
@@ -129,6 +130,28 @@ def _keyed(counts):
 
 def _sha(text):
     return hashlib.sha256(str(text).encode()).hexdigest()
+
+
+def _private_models(counts):
+    """{model name: n} for a receipt: the provider's own d5-* names stay, any other name (one the arm's settings or
+    stored routes asked for) becomes its sha256 12, so no value from the snapshot is written (#2471, receipts carry
+    counts, ids and hashes only)."""
+    out = Counter()
+    for name, n in (counts or {}).items():
+        out[name if isinstance(name, str) and name.startswith("d5-") else f"sha256-12:{_sha(name)[:12]}"] += n
+    return dict(out)
+
+
+def _private_arm(provider, routing=None):
+    """The receipt's provider stats and routing record, with the snapshot's provider and model names hashed."""
+    provider = {**provider, **{k: _private_models(provider.get(k)) for k in ("calls_by_model", "unknown_models")
+                               if k in provider}}
+    if routing is None:
+        return provider, None
+    names = routing.get("stored_route_providers") or []
+    return provider, {**{k: v for k, v in routing.items() if k != "stored_route_providers"},
+                      "stored_route_providers": len(names),
+                      "stored_route_provider_sha256_12": sorted(_sha(n)[:12] for n in names)}
 
 
 def _owned_key(value):
@@ -866,11 +889,14 @@ def run(host, *, rc_id, prior=(), instrument_fix=None):
         "class 3's GA allowance matches rows by content identity across the arms; a tool output that names its arm's"
         " home path differs between the arms there, so such a leftover can show as over GA (a false FAIL, never a"
         " false PASS); the fix would be path parity in the runner")
+    private = {a: _private_arm(arms[a]["provider"], arms[a]["routing"]) for a in arms}
     receipt.update(
-        arms={a: {**{k: arms[a][k] for k in ("workload", "egress", "provider", "doctor_not_exercised", "cron_paused", "routing")},
+        arms={a: {**{k: arms[a][k] for k in ("workload", "egress", "doctor_not_exercised", "cron_paused")},
+                  "provider": private[a][0], "routing": private[a][1],
                   "checks": bars.check_counts(arms[a]["checks"])} for a in arms},
-        ga_rerun=ga_rerun and {**{k: ga_rerun[k] for k in ("workload", "egress", "provider", "wall_s",
+        ga_rerun=ga_rerun and {**{k: ga_rerun[k] for k in ("workload", "egress", "wall_s",
                                                          "doctor_not_exercised", "cron_paused")},
+                               "provider": _private_arm(ga_rerun["provider"])[0],
                                "checks": bars.check_counts(ga_rerun["checks"])},
         binds=[{k: v for k, v in b.items() if k not in ("dup_store_ids", "receipt")} for b in binds], bars=results,
         verdict=bars.verdict(results, prior_verdicts),
