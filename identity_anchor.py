@@ -500,8 +500,10 @@ class IdentityAnchorMixin:
             from .ingest_ledger import cold_turn_pairs
 
             pairs = cold_turn_pairs(self._store._conn, session_id=self._session_id,
+                                    conversation_id=self._conversation_id,
                                     attempt=self._ingest_ledger_attempt, messages=messages,
-                                    matched=matched, consumed=consumed)
+                                    matched={i: rows for i, rows in matched.items() if i not in plan["remainders"]},
+                                    consumed=consumed)
             for idx, row in pairs.items():
                 self._identity_anchor_take(idx, [row], consumed, matched, plan)
         self._identity_anchor_tool_segments(messages, plan["cursor"], plan["replayed"], matched, plan.get("positional", ()))

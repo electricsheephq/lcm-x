@@ -133,3 +133,77 @@ def test_tool_segment_keeps_main(engines):
     engine = engines()
     engine.ingest(view)
     assert _counts(engine) == before
+
+
+@pytest.fixture(params=[False, True], ids=["pairing", "pairing-disabled"])
+def pairing(request, monkeypatch):
+    if request.param:
+        monkeypatch.setattr("hermes_lcm.ingest_ledger.cold_turn_pairs", lambda *a, **k: {})
+
+
+def _new_reply(engine, view, reply):
+    before = _counts(engine)
+    def count():
+        return sum(_key(r) == _key(reply) for r in _stored(engine)
+                   if str(r.get("conversation_id") or "").strip() in ("", engine._conversation_id))
+    expected = count() + 1
+    engine.ingest(view)
+    assert not before - _counts(engine)
+    assert count() == expected
+
+
+def test_p1_uid_conflict_keeps_new_reply(engines, pairing):
+    engine, view = engines(), []
+    for i in range(3):
+        view += [_u(f"user {i}", 100 + i * 2), dict(_reply(f"reply {i}"), message_uid=f"reply-{i}")]
+        engine.ingest(view)
+    view[-2:] = [_u("resent", 300), _reply("replaced"), _u("next", 302), _reply("next reply")]
+    engine.ingest(view)
+    view[3] = dict(view[3], message_uid="new-reply")
+    _new_reply(engines(), view, view[3])
+
+
+def test_p1_conversation_keeps_new_reply(engines, pairing):
+    engine = engines()
+    session, conversation = engine._session_id, engine._conversation_id
+    view = [_u("prompt", 100), _reply("old")]
+    engine.ingest(view)
+    engine.on_session_start(session, conversation_id="B", context_length=1_000_000)
+    engine.ingest([_reply("foreign")])
+    engine.on_session_start(session, conversation_id=conversation, context_length=1_000_000)
+    view += [_u("resent", 300), _reply("replaced"), _u("next", 302), _reply("next reply")]
+    engine.ingest(view)
+    view.insert(2, _reply("foreign"))
+    _new_reply(engines(), view, view[2])
+
+
+def test_p1_boundary_keeps_new_reply(engines, pairing, monkeypatch):
+    engine = engines()
+    view = [_u("A", 100), _reply("A reply")]
+    engine.ingest(view)
+    monkeypatch.setenv("LCM_INGEST_LEDGER", "off")
+    view += [{"role": "user", "content": "B"}]
+    engine.ingest(view)
+    monkeypatch.setenv("LCM_INGEST_LEDGER", "shadow")
+    view += [_reply("B reply"), _u("old", 200), _reply("old reply")]
+    engine.ingest(view)
+    view[-2:] = [_u("resent", 300), _reply("replaced"), _u("next", 302), _reply("next reply")]
+    engine.ingest(view)
+    view = [*view[:2], _reply("B reply"), *view[-4:]]
+    _new_reply(engines(), view, view[2])
+
+
+def test_p1_tool_keeps_new_reply(engines, pairing):
+    engine = engines()
+    view = [_u("prompt", 100), _call("C1", 101), _result("C1", "old result", 102), _reply("done")]
+    engine.ingest(view)
+    view[1:3] = [_call("C2", 201), _result("C2", "new result", 202)]
+    _new_reply(engines(), view, view[-1])
+
+
+def test_p1_partial_keeps_new_reply(engines, pairing):
+    engine = engines()
+    view = [_u("P", 100), _reply("reply"), _u("U", 200), _reply("yes")]
+    engine.ingest(view)
+    view[2] = dict(view[2], content=view[2]["content"] + "\n\nnew question")
+    _new_reply(engines(), view, view[-1])
