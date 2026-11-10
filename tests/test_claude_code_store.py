@@ -1995,6 +1995,44 @@ def test_a_cursor_written_before_named_paths_audits_as_before(tmp_path, home, he
     assert ca.audit(home)["verified"]
 
 
+def test_three_named_paths_with_identical_lines_are_verified(tmp_path, home, hermes):
+    """#2548 review: A, B and C (the same complete lines) drained as three generations, each still whole at its own
+    path. Each older file must clear a different gone generation, not tie onto the same one."""
+    from hermes_lcm import claude_code_audit as ca
+
+    for folder in ("-work", "-other", "-third"):
+        path = _append(tmp_path / "projects" / folder / "s1.jsonl", CONVERSATION[:2])
+        _record(_hook(), home, path)
+        cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    report = ca.audit(home)
+    assert report["verified"] and report["lineages"][0]["generations_gone"] == 0
+
+
+@pytest.mark.parametrize("failure", ["unreadable", "removed"])
+def test_a_named_path_that_cannot_be_read_leaves_the_lineage_unverified(tmp_path, home, hermes, monkeypatch, failure):
+    """#2548 review: a named path that passes stat but cannot be read (denied, or removed between stat and open) must
+    not abort the audit; the lineage is unverified and every other lineage is still reported."""
+    from hermes_lcm import claude_code_audit as ca
+
+    a = _append(tmp_path / "projects" / "-work" / "s1.jsonl", CONVERSATION[:2])
+    _record(_hook(), home, a)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    b = _append(tmp_path / "projects" / "-other" / "s1.jsonl", CONVERSATION[:2])
+    _record(_hook(), home, b)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    real = ca._captured_prefix
+
+    def failing(path, rows):
+        if path == a:
+            raise PermissionError(13, "denied") if failure == "unreadable" else FileNotFoundError(2, "gone")
+        return real(path, rows)
+
+    monkeypatch.setattr(ca, "_captured_prefix", failing)
+    report = ca.audit(home)
+    assert not report["verified"] and report["unverified"] == ["claude-code:s1"]
+    assert report["lineages"][0]["named_uncaptured_lines"] > 0
+
+
 def test_cursor_alternation_without_growth_is_verified(tmp_path, home, hermes):
     """#2535 review: A drained, then B (same lines) drained as a new generation, and A unchanged: the old generation is
     found whole at its own named path, so nothing is gone and the lineage is verified."""
