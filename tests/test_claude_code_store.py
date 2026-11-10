@@ -2994,3 +2994,75 @@ def test_a_reused_agent_id_is_pinned(tmp_path, home, hermes, hooks):
     else:  # the first path in sort order is taken; the second transcript's own lines are not captured separately
         assert seen == {"first": (4, 0, 0), "second": (5, 3, 0)}
         assert dict(rows) == {"first task": 1, "one": 1}
+
+
+# #2566: one table for a reused agent id. Rows: which paths exist x hook order x which file grows afterwards x store
+# state (fresh, or already flipped by the old code). ONE rule decides every row: every line of every transcript is stored
+# exactly once under a lineage that maps to exactly one path, and the audit is verified exactly when that holds. An
+# already-flipped store keeps its rows (its old lineage spans two paths, so it stays unverified) and gains the missing
+# lines, with nothing stored twice.
+_REUSE_PATHS = {"direct": ("agent-x1.jsonl",), "workflow": ("workflows", "wf_run1", "agent-x1.jsonl")}
+_REUSE_TABLE = [(exist, hooks, grow, state)
+                for exist in (("direct",), ("workflow",), ("direct", "workflow"))
+                for hooks in ((), ("direct",), ("workflow",), ("direct", "workflow"), ("workflow", "direct"))
+                for grow in ((), ("direct",), ("workflow",), ("direct", "workflow"))
+                for state in ("fresh", "flipped")
+                if set(hooks) <= set(exist) and set(grow) <= set(exist) and (state == "fresh" or len(exist) == 2)]
+
+
+@pytest.mark.parametrize("exist,hooks,grow,state", _REUSE_TABLE,
+                         ids=["-".join(["+".join(e), "hooks:" + ("+".join(h) or "none"), "grow:" + ("+".join(g) or "none"), s])
+                              for e, h, g, s in _REUSE_TABLE])
+def test_the_reused_agent_id_rule_table(tmp_path, home, hermes, exist, hooks, grow, state):
+    from hermes_lcm import claude_code_audit as ca
+
+    a = _append(tmp_path / "projects" / "-work" / "s1.jsonl", CONVERSATION[:2])
+    agents = a.parent / "s1" / "subagents"
+    content = {"direct": _REUSED["first"], "workflow": _REUSED["second"]}
+    paths = {name: _append(agents.joinpath(*_REUSE_PATHS[name]), content[name]) for name in exist}
+    _record(_hook(), home, a)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    if state == "flipped":  # what the old code left: one id-keyed lineage moved A -> B -> A
+        store = _open(home, hermes)
+        try:
+            for name in ("direct", "workflow", "direct"):
+                cc.drain(store, cc.Lineage("s1", "x1", paths[name]))
+        finally:
+            store.close()
+    for name in hooks:
+        _record(_hook(), home, a, event="SubagentStop", agent_id="x1", agent_transcript_path=str(paths[name]))
+        cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    for name in grow:
+        _append(paths[name], [dict(_entry("assistant", f"late-{name}", [{"type": "text", "text": f"late {name}"}]),
+                                   isSidechain=True)])
+    for _ in range(2):
+        cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    store = _open(home, hermes)
+    try:
+        conn = store.connection
+        held = collections.defaultdict(set)  # line digest -> lineage keys holding it
+        for digest, key in conn.execute("SELECT line_digest, lineage_key FROM capture_events WHERE source_kind = 'line'"):
+            held[digest].add(key)
+        rows = collections.Counter(row[0] for row in conn.execute(
+            "SELECT content FROM messages WHERE session_id LIKE 's1/agent:%'"))
+        cursors = {key[len(cc.CURSOR_PREFIX):]: json.loads(value) for key, value in conn.execute(
+            "SELECT key, value FROM metadata WHERE key LIKE ?", (cc.CURSOR_PREFIX + "claude-code:s1/agent:%",))}
+    finally:
+        store.close()
+    owner = {}  # path -> the one lineage whose cursor names only that path
+    for key, cursor in cursors.items():
+        named = set(cc.named_paths(cursor))
+        if len(named) == 1:
+            owner[named.pop()] = key
+    lost = twice = 0
+    one_to_one = all(str(path) in owner for path in paths.values()) and len(owner) == len(cursors)
+    for name, path in paths.items():
+        for line in path.read_bytes().splitlines(keepends=True):
+            keys = held[hashlib.sha256(line).hexdigest()]
+            lost += not keys
+            one_to_one = one_to_one and owner.get(str(path)) in keys
+    twice = sum(count - 1 for count in rows.values() if count > 1)
+    holds = not lost and not twice and one_to_one
+    assert (lost, twice) == (0, 0)
+    assert holds is (state == "fresh")
+    assert ca.audit(home)["verified"] is holds
