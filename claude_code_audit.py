@@ -263,6 +263,13 @@ def _named_others(lineage: Lineage, cursor: dict, report: dict) -> None:
             if not holds and results is not None:
                 folder = results_dir(session_dir(other))  # None when a symlink or unreadable: not a clean folder
                 holds = folder is None or (folder != own_folder and any(True for _ in folder.iterdir()))
+            agents = session_dir(other) / "subagents"  # subagent transcripts the worker sweeps only under the cursor's
+            if not holds and session_dir(other) != session_dir(lineage.path):
+                try:
+                    agents.lstat()
+                except (FileNotFoundError, NotADirectoryError):
+                    agents = None
+                holds = agents is not None and any(True for _ in agents.iterdir())
         except OSError:
             holds = True
         report["named_other_paths"] += holds
@@ -606,10 +613,12 @@ def _unverified(metadata: dict, records: list[dict], lineages: list[dict], sessi
             continue
         if any(_present(Path(name)) for name in named_paths(pending)):  # every path its records named (#2535)
             unknown.add(lineage.key)
-        if lineage.agent_id is None:
-            for child in _subagents(lineage):
-                if CURSOR_PREFIX + child.key not in metadata and FORGOTTEN_PREFIX + child.rows_session not in metadata:
-                    unknown.add(child.key)
+        if lineage.agent_id is None:  # under every path its records named (#2535)
+            for name in named_paths(pending):
+                for child in _subagents(Lineage(lineage.session_id, None, Path(name))):
+                    if (CURSOR_PREFIX + child.key not in metadata
+                            and FORGOTTEN_PREFIX + child.rows_session not in metadata):
+                        unknown.add(child.key)
     # A record set aside before its transcript had a cursor names a lineage nothing else shows.
     for lineage in failed:
         if lineage is None:

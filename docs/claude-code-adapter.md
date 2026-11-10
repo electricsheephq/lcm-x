@@ -448,8 +448,8 @@ one-line verdict names how many lineages are awaiting capture and the age of the
 
 A lineage's records can name more than one transcript path: a resume from another directory sends `SessionStart` with
 a path under the new directory that never appears. Capture follows one path. The pending row and the cursor list every
-named path. The audit does not match another named path against the store: if one exists and holds lines, or saved
-outputs under its session folder, or cannot be checked, the lineage is unverified (`named_other_paths`, and in words in
+path named in a record the worker reads. The audit does not match another named path against the store: if one exists and holds lines, or saved
+outputs or subagent transcripts under its session folder, or cannot be checked, the lineage is unverified (`named_other_paths`, and in words in
 the verdict: "a second transcript path holds rows; not matched"). A named path that never appeared, or an empty one with
 no saved outputs, holds nothing. No real session has shown a second path holding rows; matching and capturing one is
 a follow-up for when one does.
