@@ -311,6 +311,9 @@ def produce(host, names):
         try:
             if failed:
                 raise Inconclusive(failed)
+            if name not in run.TREE_BOUND_PREFLIGHTS and common["trees"]["rc"] != common["trees"]["ga"]:
+                # Ruling R5-5: P3, P6 and P7 run the previous GA in both arms; the runner reads them that way.
+                raise Inconclusive("this check runs the previous GA in both arms, and the rc tree is another tree")
             reasons, unsure, facts = PREFLIGHTS[name](host, plan)
             verdict, reasons = "FAIL" if reasons else "INCONCLUSIVE" if unsure else "PASS", reasons + unsure
         except Exception as exc:  # Never a PASS: the checks did not all run.

@@ -840,6 +840,39 @@ def test_a_driven_session_that_starts_flagged_is_judged_by_its_increase(tmp_path
     assert receipt["bars"]["bar5"]["verdict"] == bars.PASS, receipt["bars"]["bar5"]
 
 
+class FlagsOnFirstStart(FakeHost):
+    """Each arm's first gateway start adds one flagged summary node to sess-a in that arm's own store."""
+
+    def start(self, ctx):
+        super().start(ctx)
+        if ctx["epoch"] == 0:
+            with closing(sqlite3.connect(ctx["home"] / "lcm.db")) as db, db:
+                db.execute("INSERT INTO summary_nodes (session_id, token_count, source_token_count)"
+                           " VALUES ('sess-a', 10, 4000)")
+
+
+def test_each_arm_reads_its_start_count_from_its_own_store_before_its_first_turn(tmp_path):
+    """Ruling R5-4: rc_start and ga_start are read before the first gateway start, so a node flagged during the arm
+    counts in its increase (here 1 in each arm: equal increases hold) and not in its start."""
+    snap = tmp_path / "snapshot"
+    config = {"snapshot_dir": str(snap), "snapshot_pin": str(make_snapshot(snap, ("sess-a",))), "nonce": "synthetic"}
+    receipt = r.run(FlagsOnFirstStart(config, tmp_path / "run"), rc_id="rc-synthetic")
+    (f,) = receipt["bars"]["bar5"]["inherited_flags"].values()
+    assert (f["s"], f["rc_start"], f["ga_start"], f["r"], f["g"], f["verdict"]) == (1, 1, 1, 2, 2, bars.PASS)
+
+
+def test_inherited_flags_take_the_rerun_counts_only_when_a_rerun_ran():
+    plan = {"conversations": [{"session_id": "sess-a", "flagged_summary_nodes": 1},
+                              {"session_id": "sess-b", "flagged_summary_nodes": 0}]}
+    h = r._sha("sess-a")[:12]
+    arm = {"flagged_summary_nodes_start": {h: 1}, "flagged_summary_nodes": {h: 2}}
+    rerun = {"flagged_summary_nodes_start": {h: 1}, "flagged_summary_nodes": {h: 3}}
+    assert r.inherited_flags(plan, {"rc": arm, "ga": arm}) == {f"summary_quality@{h}": {
+        "start": 1, "rc_start": 1, "rc": 2, "ga_start": 1, "ga": 2}}
+    with_rerun = r.inherited_flags(plan, {"rc": arm, "ga": arm}, rerun)[f"summary_quality@{h}"]
+    assert (with_rerun["ga_rerun_start"], with_rerun["ga_rerun"]) == (1, 3)
+    assert r.inherited_flags(plan, {"rc": None, "ga": None})[f"summary_quality@{h}"]["rc"] is None
+
 def _bound_host(tmp_path):
     (tmp_path / "pin.json").write_text("{}")
     config = {"snapshot_pin": str(tmp_path / "pin.json"), "rc": {"commit": "c" * 40}, "ga": {"commit": "a" * 40},

@@ -259,6 +259,8 @@ def counts(s=2, r=2, g=2, rc_start=None, ga_start=None, **extra):
     ("differing start", counts(ga_start=3, g=3), b.INCONCLUSIVE, "start counts differ"),
     ("rc count falls", counts(r=1, g=2), b.INCONCLUSIVE, "fell below"),
     ("GA count falls", counts(r=2, g=1), b.INCONCLUSIVE, "fell below"),
+    ("rc start alone differs", counts(rc_start=3, r=3), b.INCONCLUSIVE, "start counts differ"),
+    ("a bool is not a count", counts(r=True), b.INCONCLUSIVE, "unknown"),
 ])
 def test_bar5_an_inherited_session_is_judged_by_its_flagged_node_increase(case, inherited, verdict, reason):
     """Ruling R5-4 (#2471): a session that starts with flagged summary nodes is judged by the increase in its flagged
@@ -288,3 +290,22 @@ def test_bar5_inherited_counts_take_the_clean_rerun_as_the_baseline():
     result = b.bar5(checks(), checks(failed), checks(), True, inherited=rerun)
     assert result["verdict"] == b.PASS and result["inherited_flags"]["summary_quality@abc"]["ga_from_rerun"] is True
     assert b.bar5(checks(), checks(), inherited=rerun)["verdict"] == b.FAIL  # No re-run: g is the GA arm's 2.
+
+
+@pytest.mark.parametrize("rerun", [None, "failed", "incomplete"])
+def test_bar5_inherited_counts_are_never_judged_against_a_failed_ga_arm(rerun):
+    """No clean previous-GA arm, so no g: the session is INCONCLUSIVE, never FAIL, even when the rc's count rose."""
+    failed = {"kind": "quick_check", "check": "store", "status": "fail"}
+    rerun_checks = {None: None, "failed": checks(failed), "incomplete": checks()}[rerun]
+    result = b.bar5(checks(), checks(failed), rerun_checks, rerun != "incomplete",
+                    inherited=counts(r=5, g=2, ga_rerun=2, ga_rerun_start=2))
+    flags = result["inherited_flags"]["summary_quality@abc"]
+    assert (result["verdict"], flags["verdict"]) == (b.INCONCLUSIVE, b.INCONCLUSIVE)
+    assert flags["reason"] == "there is no clean previous-GA arm to compare against"
+
+
+def test_bar5_inherited_counts_from_a_clean_rerun_need_its_start_count_to_match():
+    failed = {"kind": "quick_check", "check": "store", "status": "fail"}
+    result = b.bar5(checks(), checks(failed), checks(), True, inherited=counts(r=3, ga_rerun=3, ga_rerun_start=1))
+    assert "start counts differ" in result["inherited_flags"]["summary_quality@abc"]["reason"]
+    assert result["verdict"] == b.INCONCLUSIVE

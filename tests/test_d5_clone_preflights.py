@@ -397,3 +397,17 @@ def test_a_produced_receipt_is_accepted_by_the_runner_for_the_same_run(tmp_path,
     local = runner.LocalHost({**host.c, "preflights": {n: str(tmp_path / f"{n}.json") for n in ("P3", "P4")}}, tmp_path)
     plan = host.plan(None)
     assert [local.preflight(n, plan)["verdict"] for n in ("P3", "P4")] == ["PASS", "PASS"]
+
+
+def test_p3_p6_p7_refuse_a_declaration_whose_rc_tree_is_not_the_previous_ga(tmp_path, monkeypatch):
+    """Ruling R5-5: P3, P6 and P7 run the previous GA in both arms, and the runner reads their receipts that way. With
+    another rc tree they run nothing and are INCONCLUSIVE; P4, bound to the run's two trees, still runs."""
+    monkeypatch.setitem(sys.modules, "yaml", types.SimpleNamespace(safe_load=json.loads))
+    host = Tweaked(tmp_path, lambda host, ctx, step: None)
+    host.c["rc"] = {**host.c["rc"], "commit": "b" * 40}
+    assert pf.produce(host, list(pf.PREFLIGHTS)) == {"P3": "INCONCLUSIVE", "P4": "PASS", "P6": "INCONCLUSIVE",
+                                                     "P7": "INCONCLUSIVE"}
+    assert {n[:5] for n, _ in host.armed} == {"pf-P4"}
+    for name in ("P3", "P6", "P7"):
+        assert json.loads((tmp_path / f"{name}.json").read_text())["reasons"] == [
+            "this check runs the previous GA in both arms, and the rc tree is another tree"]

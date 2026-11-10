@@ -193,12 +193,15 @@ def check_counts(checks):
             "warnings": dict(Counter(c["check"] for c in checks if c["status"] == "warn"))}
 
 
-def _inherited_flags(n, use_rerun):
-    """One inherited session under ruling R5-4: its counts, the comparison and a verdict with its reason."""
+def _inherited_flags(n, use_rerun, ga_open=False):
+    """One inherited session under ruling R5-4: its counts, the comparison and a verdict with its reason. With no clean
+    previous-GA arm (*ga_open*) there is no g to compare against, so the session is INCONCLUSIVE, never FAIL or PASS."""
     s, r = n.get("start"), n.get("rc")
     g, g_start = (n.get("ga_rerun"), n.get("ga_rerun_start")) if use_rerun else (n.get("ga"), n.get("ga_start"))
     starts = (s, n.get("rc_start"), g_start)
     out = {"s": s, "r": r, "g": g, "rc_start": n.get("rc_start"), "ga_start": g_start, "ga_from_rerun": use_rerun}
+    if ga_open:
+        return {**out, "verdict": INCONCLUSIVE, "reason": "there is no clean previous-GA arm to compare against"}
     if any(not isinstance(v, int) or isinstance(v, bool) for v in (*starts, r, g)):
         return {**out, "verdict": INCONCLUSIVE, "reason": "a flagged-node count is unknown"}
     if len(set(starts)) != 1:
@@ -225,8 +228,8 @@ def bar5(rc_checks, ga_checks, ga_rerun_checks=None, ga_rerun_turns_complete=Tru
     when a GA re-run ran, "ga_rerun" and "ga_rerun_start". One such node keeps the check warning, so its warning would
     hide a further flag; instead the increase is compared (ruling R5-4, #2471): with s the start count, r the rc's end
     and g the baseline GA arm's end, the session holds when r - s <= g - s and fails the bar when r - s > g - s. It is
-    INCONCLUSIVE when a count is unknown, when the start counts differ, or when a count falls below s (a node can leave
-    its session wholesale, at a compression rollover). A session with s = 0 keeps the warning rule above."""
+    INCONCLUSIVE when there is no clean previous-GA arm, when a count is unknown, when the start counts differ, or when a
+    count falls below s (a node can leave its session wholesale, at a compression rollover). A session with s = 0 keeps the warning rule above."""
     failed, ga_failed = failed_checks(rc_checks), failed_checks(ga_checks)
     rerun_failed = failed_checks(ga_rerun_checks) if ga_rerun_checks is not None else None
     rerun_missing = kinds_missing(ga_rerun_checks) if ga_rerun_checks is not None else None
@@ -238,7 +241,7 @@ def bar5(rc_checks, ga_checks, ga_rerun_checks=None, ga_rerun_turns_complete=Tru
     rc_w, ga_w = (Counter(c["check"] for c in checks if c["kind"] == "doctor" and c["status"] == "warn")
                   for checks in (rc_checks, baseline))
     use_rerun = bool(ga_failed) and rerun_clean
-    flags = {name: _inherited_flags(n, use_rerun) for name, n in sorted(dict(inherited or {}).items())}
+    flags = {name: _inherited_flags(n, use_rerun, ga_open) for name, n in sorted(dict(inherited or {}).items())}
     over = [] if ga_open or "doctor" in ga_missing else sorted(
         name for name, n in rc_w.items() if n > ga_w[name] and name not in flags)
     flags_failed = sorted(name for name, f in flags.items() if f["verdict"] == FAIL)
