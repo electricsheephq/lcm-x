@@ -75,20 +75,27 @@ class EngineUnloadGroup:
         from .config import profile_bound
 
         def finish():
-            try:
-                if wait_for_children:
-                    drain_live_child_stores(None, owner=self)
-                with engine._compaction_gate:
-                    engine._compaction_gate.wait_for(lambda: engine._compaction_inflight == 0)
-                # A terminal tail cannot consume every retry budget while a
-                # later tail waits. Keep it for the final warning and close.
-                terminal_tails: set[int] = set()
-                while not engine._stable_use_closed:
+            # A terminal tail cannot consume every retry budget while a
+            # later tail waits. Keep it for the final warning and close.
+            terminal_tails: set[int] = set()
+            delay = 0.1
+            warned = False
+            while not engine._stable_use_closed:
+                try:
+                    if wait_for_children:
+                        drain_live_child_stores(None, owner=self)
+                    with engine._compaction_gate:
+                        engine._compaction_gate.wait_for(
+                            lambda: engine._compaction_inflight == 0 and engine._plugin_operations_inflight == 0,
+                        )
                     engine.shutdown(terminal_tails=terminal_tails)
-                    if not engine._stable_use_closed:
-                        time.sleep(0.1)
-            except Exception:
-                logger.exception("LCM deferred engine cleanup failed after plugin unload")
+                except Exception:
+                    if not warned:
+                        logger.exception("LCM deferred engine cleanup failed after plugin unload; retrying")
+                        warned = True
+                if not engine._stable_use_closed:
+                    time.sleep(delay)
+                    delay = min(delay * 2, 2.0)
 
         with self.lock:
             if engine in self._deferred:
@@ -120,15 +127,15 @@ class EngineUnloadGroup:
             drained = not worker.is_alive() and drained
 
         for engine in engines:
+            if not children_drained:
+                self._defer_shutdown(engine, wait_for_children=True)
+                continue
             try:
-                if not children_drained:
-                    self._defer_shutdown(engine, wait_for_children=True)
-                    continue
                 engine.shutdown(deadline=deadline)
-                if not engine._stable_use_closed:
-                    self._defer_shutdown(engine)
             except Exception:
-                logger.exception("LCM engine cleanup failed during plugin unload")
+                logger.exception("LCM engine cleanup failed during plugin unload; deferring cleanup")
+            if not engine._stable_use_closed:
+                self._defer_shutdown(engine)
 
         for owner in rollup_owners:
             drained = _ROLLUP_MAINTENANCE_SCHEDULER.drain_owner(

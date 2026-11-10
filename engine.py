@@ -783,6 +783,7 @@ class LCMEngine(
         self._stable_use_lock = threading.Lock()
         self._compaction_gate = threading.Condition()
         self._compaction_inflight = 0
+        self._plugin_operations_inflight = 0
         self._compaction_closing = False
         # #667: node ids a condensation has selected, until it publishes or fails; the level 3 repair skips them.
         self._condensation_inflight_ids: Counter[int] = Counter()
@@ -3113,7 +3114,7 @@ class LCMEngine(
         try:
             scheduler = maintenance_scheduler._EMBEDDING_MAINTENANCE_SCHEDULER
             drained = scheduler.retire_owner(owner, timeout=timeout)
-            if not wait and self._unload_group is not None:
+            if self._unload_group is not None:
                 self._unload_group.remember_embedding_retirement(scheduler, owner, drained=drained)
             if deadline is not None and not drained:
                 logger.warning("LCM unload: incremental embedding work still running")
@@ -5100,7 +5101,14 @@ class LCMEngine(
         sender_capture.retire(self)
         admission_started = time.perf_counter()
         with self._exclusive_lifecycle("end"):
-            if self._stable_use_closed or self._plugin_is_unloading():
+            if self._plugin_is_unloading():
+                if messages:
+                    logger.warning(
+                        "LCM session end skipped during plugin unload; final messages may be absent "
+                        "from the plugin-local store supplied_rows=%d", len(messages),
+                    )
+                return
+            if self._stable_use_closed:
                 return
             with self._session_end_diagnostic(messages, started, time.perf_counter(), admission_started):
                 self._frozen_tail_reached = False
@@ -5747,15 +5755,10 @@ class LCMEngine(
         by spanning the same current + last-finalized sessions its leaf fallback
         uses (see ``_recent_ready_rollups``), so no window content is dropped.
         """
-        if self._plugin_is_unloading():
-            return 0
-        if self._unload_group is not None and self._stable_use_owner_thread != threading.get_ident():
-            result = self._run_stably(
-                lambda engine: engine._carry_over_new_session_context(old_session_id, new_session_id),
-                timeout=None,
-            )
-            return result.value if result.used else 0
-        return self._carry_over_new_session_context(old_session_id, new_session_id)
+        with self._admit_plugin_operation() as admitted:
+            if not admitted:
+                return 0
+            return self._carry_over_new_session_context(old_session_id, new_session_id)
 
     def _carry_over_new_session_context(self, old_session_id: str, new_session_id: str) -> int:
         if not old_session_id or not new_session_id or old_session_id == new_session_id:
@@ -5863,12 +5866,13 @@ class LCMEngine(
         return _disabled_tool_names()
 
     def handle_tool_call(self, name: str, args: Dict[str, Any], **kwargs) -> str:
-        # Hermes' native context-engine tool dispatch does not take the plugin
-        # lifecycle lease. Hooks that already hold it can call through directly.
-        if self._unload_group is None or self._stable_use_owner_thread == threading.get_ident():
+        # Registered hooks that already hold a stable lease are already admitted.
+        if self._stable_use_owner_thread == threading.get_ident():
             return self._handle_tool_call(name, args, **kwargs)
-        result = self._run_stably(lambda engine: engine._handle_tool_call(name, args, **kwargs), timeout=None)
-        return result.value if result.used else json.dumps({"error": "LCM plugin is unloading"})
+        with self._admit_plugin_operation() as admitted:
+            if not admitted:
+                return json.dumps({"error": "LCM plugin is unloading"})
+            return self._handle_tool_call(name, args, **kwargs)
 
     def _handle_tool_call(self, name: str, args: Dict[str, Any], **kwargs) -> str:
         if name in self._disabled_tool_names():
@@ -12676,6 +12680,28 @@ class LCMEngine(
     def _plugin_is_unloading(self) -> bool:
         return self._unload_group is not None and self._unload_group.closing.is_set()
 
+    @contextmanager
+    def _admit_plugin_operation(self):
+        """Keep admitted native calls live through unload without serializing them."""
+        if self._unload_group is None or getattr(self._thread_context, "plugin_operation", False):
+            yield True
+            return
+        with self._compaction_gate:
+            admitted = not (self._compaction_closing or self._plugin_is_unloading())
+            if admitted:
+                self._plugin_operations_inflight += 1
+        if not admitted:
+            yield False
+            return
+        self._thread_context.plugin_operation = True
+        try:
+            yield True
+        finally:
+            del self._thread_context.plugin_operation
+            with self._compaction_gate:
+                self._plugin_operations_inflight -= 1
+                self._compaction_gate.notify_all()
+
     def _enable_plugin_unload(self) -> Callable[[], None]:
         self._unload_group = EngineUnloadGroup(self)
         return self._unload_group.shutdown
@@ -12686,6 +12712,15 @@ class LCMEngine(
             drain_live_child_stores(_aux_session._LIVE_CHILD_SHUTDOWN_DRAIN_S)
         with self._compaction_gate:
             self._compaction_closing = True
+            if self._plugin_operations_inflight:
+                wait_s = _shutdown_compaction_wait_s()
+                if deadline is not None:
+                    wait_s = min(wait_s, max(0.0, deadline - time.monotonic()))
+                # An admitted operation may call a helper that takes a stable
+                # lease. Drain it before acquiring the lifecycle lock.
+                if not self._compaction_gate.wait_for(lambda: self._plugin_operations_inflight == 0, timeout=wait_s):
+                    logger.warning("LCM shutdown: plugin operations still running; connections left open")
+                    return
         sender_capture.retire(self)
         with self._exclusive_lifecycle("shutdown", deadline=deadline) as acquired:
             if not acquired:

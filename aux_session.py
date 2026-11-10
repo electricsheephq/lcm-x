@@ -858,6 +858,7 @@ _LIVE_CHILD_SHUTDOWN_DRAIN_S = 5.0  # the most an engine shutdown waits for in-f
 LIVE_STORE_RETRY = "retry"  # a live-child store that found the database busy: its worker tries the same list again
 _LIVE_CHILD_STORE_RETRIES = 3  # retries per list, unless a newer list is handed over first
 _LIVE_CHILD_RETRY_DELAY_S = 0.25  # times the retry number
+_LIVE_CHILD_UNLOAD_RETRY_S = 30.0  # grace for admitted busy writes after plugin unload starts
 _DELEGATE_AUXILIARY_IDS: set[tuple[str, str]] = set()
 _DELEGATE_RESUME_BOUNDARIES: dict[tuple[str, str], list[bytes]] = {}
 _DELEGATE_COMPRESSION_PARENTS: dict[tuple[str, str], str] = {}
@@ -931,6 +932,7 @@ def run_live_child_store(session_id: str, operation, rows: int = 0, *, owner=Non
         try:
             while current is not None:
                 attempt = 0
+                unload_retry_deadline = None
                 while True:
                     try:
                         stored = current[0]()
@@ -944,14 +946,31 @@ def run_live_child_store(session_id: str, operation, rows: int = 0, *, owner=Non
                     with _LIVE_CHILD_LOCK:
                         superseded = session_id in _LIVE_CHILD_PENDING
                     closing = current[2] is not None and current[2].closing.is_set()
-                    if stored != LIVE_STORE_RETRY or superseded or (attempt >= _LIVE_CHILD_STORE_RETRIES and not closing):
+                    if stored != LIVE_STORE_RETRY or superseded:
                         break
-                    # Once unload takes ownership, there is no later child end
-                    # callback to recover admitted rows. Keep retrying a busy
-                    # store with capped backoff while teardown waits separately.
+                    if not closing and attempt >= _LIVE_CHILD_STORE_RETRIES:
+                        break
                     attempt += 1
                     delay_step = min(attempt, max(1, _LIVE_CHILD_STORE_RETRIES))
-                    time.sleep(_LIVE_CHILD_RETRY_DELAY_S * delay_step)
+                    delay = _LIVE_CHILD_RETRY_DELAY_S * delay_step
+                    if closing:
+                        # Give admitted writes time to finish after unload returns,
+                        # then release the old engine even if SQLite stays busy.
+                        now = time.monotonic()
+                        if unload_retry_deadline is None:
+                            unload_retry_deadline = now + _LIVE_CHILD_UNLOAD_RETRY_S
+                        remaining = unload_retry_deadline - now
+                        if remaining <= 0:
+                            with _LIVE_CHILD_LOCK:
+                                unstored = max(0, current[1] - _LIVE_CHILD_STORED_ROWS.get(session_id, 0))
+                            logger.warning(
+                                "LCM delegated-child store unload retry expired: child=%s has up to %d "
+                                "handed-over row(s) not stored",
+                                hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:12], unstored,
+                            )
+                            break
+                        delay = min(delay, remaining)
+                    time.sleep(delay)
                 with _LIVE_CHILD_LOCK:
                     current = _LIVE_CHILD_PENDING.pop(session_id, None)
                     if current is None:

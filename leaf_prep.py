@@ -664,8 +664,9 @@ class _LeafPrep:
             ):  # D-7: one worker model call per process
                 return
             try:
-                if self.generation(job.db_path) != job.generation:
-                    return
+                with self._condition:
+                    if not self._matches_generation(job):
+                        return
                 result = summarize_leaf_chunk_with_rescue(
                     chunk,
                     config=config,

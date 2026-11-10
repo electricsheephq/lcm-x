@@ -359,6 +359,33 @@ def test_session_end_preserves_other_owners_queued_pass(make_engine, scheduler, 
         assert ran.is_set()
 
 
+def test_plugin_unload_keeps_ownership_of_timed_out_embedding(make_engine, scheduler, monkeypatch):
+    engine = make_engine()
+    unload = engine._enable_plugin_unload()
+    owner = engine._embedding_maintenance_owner
+    key = engine._rollup_maintenance_key("embeddings")
+    opened, release = threading.Event(), threading.Event()
+    monkeypatch.setenv("LCM_SHUTDOWN_COMPACTION_WAIT_S", "0.05")
+
+    def run(db_path, _config, **kwargs):
+        with closing(sqlite3.connect(db_path)) as reader:
+            reader.execute("SELECT 1")
+            opened.set()
+            assert release.wait(5)
+
+    monkeypatch.setattr(engine_mod, "run_incremental_embedding_pass", run)
+    try:
+        _bind(engine)
+        assert opened.wait(5)
+        unload()
+        assert not scheduler.retire_owner(owner, timeout=0)
+        assert owner in engine._unload_group._retired_embedding_owners
+    finally:
+        release.set()
+        assert scheduler.drain({key}, timeout=5)
+    assert scheduler.retire_owner(owner, timeout=0)
+
+
 def test_new_bind_rearms_embedding_maintenance(make_engine, monkeypatch):
     ran = threading.Event()
     monkeypatch.setattr(engine_mod, "run_incremental_embedding_pass", lambda *_a, **_k: ran.set())

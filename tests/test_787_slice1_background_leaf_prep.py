@@ -881,10 +881,40 @@ def test_shutdown_and_rebind_clear_the_cache_and_discard_a_late_job(
         engine.shutdown()
 
 
-def test_plugin_unload_drains_leaf_preparation(engine, provider, _isolated):
+def test_leaf_preparation_resumes_after_owner_scoped_rebind(tmp_path, engine, provider, _isolated):
     unload = engine._enable_plugin_unload()
+    try:
+        view = _crossing_view(engine)
+        _turn_end(engine, view)
+        before = len(provider.calls)
+        assert before > 0 and _isolated.status()["cached_leaves"] > 0
+        path = engine._store.db_path
+        engine.on_session_start(
+            "S2", platform="telegram", context_length=WINDOW,
+            conversation_id="conv2", hermes_home=str(tmp_path / "home2"),
+        )
+        assert engine._store.db_path == path
+        assert _isolated.status()["cached_leaves"] == 0
+        _turn_end(engine, view)
+        assert len(provider.calls) > before
+        assert _isolated.status()["cached_leaves"] > 0
+    finally:
+        unload()
+
+
+def test_plugin_unload_drains_leaf_preparation(engine, provider, _isolated, monkeypatch):
+    unload = engine._enable_plugin_unload()
+    owner = engine._unload_group
     view = _crossing_view(engine)
-    started, release = threading.Event(), threading.Event()
+    started, release, waiting = threading.Event(), threading.Event(), threading.Event()
+    wait = _isolated._condition.wait
+
+    def observe_wait(timeout=None):
+        if owner.closing.is_set() and _isolated._running_owner is owner:
+            waiting.set()
+        return wait(timeout)
+
+    monkeypatch.setattr(_isolated._condition, "wait", observe_wait)
 
     def hold_worker():
         started.set()
@@ -898,7 +928,7 @@ def test_plugin_unload_drains_leaf_preparation(engine, provider, _isolated):
         try:
             assert started.wait(5)
             finished = executor.submit(unload)
-            assert engine._unload_group.closing.wait(5)
+            assert waiting.wait(5)
             assert not finished.done()
         finally:
             release.set()

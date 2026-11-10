@@ -185,7 +185,7 @@ def test_unload_refuses_clone_that_finishes_construction_after_unload(preflight,
     assert preflight.connects == []
 
 
-def test_unload_drains_timed_out_sqlite_worker(preflight, monkeypatch):
+def test_unload_drains_timed_out_sqlite_worker(preflight, monkeypatch, caplog):
     from hermes_lcm.tools import _run_within_deadline
 
     prototype, ctx = preflight.register(supports_unload=True)
@@ -229,6 +229,9 @@ def test_unload_drains_timed_out_sqlite_worker(preflight, monkeypatch):
             assert prototype._lifecycle.get_by_conversation(conversation) == ended
             assert prototype._lifecycle.get_by_session("late-reset") is None
             active.on_session_end("active", [first, {"role": "assistant", "content": "late tail"}])
+            assert "LCM session end skipped during plugin unload" in caplog.text
+            assert "supplied_rows=2" in caplog.text
+            assert "late tail" not in caplog.text
             assert active.should_compress_preflight([first, {"role": "assistant", "content": "late turn"}]) is False
             assert active._store.get_session_count("active") == 1
             assert active.carry_over_new_session_context("active", "late") == 0
@@ -276,6 +279,30 @@ def test_unload_waits_for_admitted_compaction_preflight(preflight, monkeypatch):
     assert engine._stable_use_closed
 
 
+def test_unload_capable_host_does_not_serialize_native_tool_and_session_end(preflight, monkeypatch):
+    engine, _ = preflight.register(supports_unload=True)
+    engine.on_session_start("parallel", platform="cli")
+    entered, release = threading.Event(), threading.Event()
+    original = engine._handle_tool_call
+
+    def held_tool(*args, **kwargs):
+        entered.set()
+        assert release.wait(5)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(engine, "_handle_tool_call", held_tool)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        tool = executor.submit(engine.handle_tool_call, "lcm_status", {})
+        try:
+            assert entered.wait(5)
+            end = executor.submit(engine.on_session_end, "parallel", [])
+            end.result(timeout=2)
+            assert not tool.done()
+        finally:
+            release.set()
+        assert "error" not in json.loads(tool.result(timeout=5))
+
+
 def test_timed_out_unload_closes_storage_after_native_tool_finishes(preflight, monkeypatch):
     engine, ctx = preflight.register(supports_unload=True)
     engine.on_session_start("tool", platform="cli")
@@ -307,6 +334,31 @@ def test_timed_out_unload_closes_storage_after_native_tool_finishes(preflight, m
             release.set()
         assert "error" not in json.loads(tool.result(timeout=5))
     assert closed.wait(5)
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        connection.execute("SELECT 1")
+
+
+def test_unload_retries_transient_store_close_failures(preflight, monkeypatch):
+    engine, ctx = preflight.register(supports_unload=True)
+    engine.on_session_start("store", platform="cli")
+    connection = engine._store.connection
+    closed = threading.Event()
+    original_close = engine._store.close
+    attempts = 0
+
+    def close():
+        nonlocal attempts
+        attempts += 1
+        if attempts <= 2:
+            raise sqlite3.OperationalError("transient close failure")
+        original_close()
+        closed.set()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(engine._store, "close", close)
+        ctx.unload_callbacks[0]()
+        assert closed.wait(5)
+    assert attempts >= 3
     with pytest.raises(sqlite3.ProgrammingError, match="closed"):
         connection.execute("SELECT 1")
 

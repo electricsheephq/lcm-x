@@ -213,8 +213,8 @@ def _make_command_handler(handle_lcm_command, engine, resolve_active_lcm_engine)
 
         if getattr(active_engine, "_unload_group", None) is None:
             return run(active_engine)
-        result = active_engine._run_stably(run, timeout=None)
-        return result.value if result.used else "LCM plugin is unloading."
+        with active_engine._admit_plugin_operation() as admitted:
+            return run(active_engine) if admitted else "LCM plugin is unloading."
 
     return _handler
 def _hook_question_date(payload: dict) -> object:

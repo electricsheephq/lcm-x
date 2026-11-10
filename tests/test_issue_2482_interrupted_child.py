@@ -542,12 +542,22 @@ def _stored_after_close(aux, db_path, release, session_id="child"):
 @pytest.mark.parametrize("budget_expires", [False, True])
 def test_plugin_unload_preserves_already_queued_child_rows(host, monkeypatch, budget_expires):
     ctx, aux, _, engines, db_path, release = _blocked_drain(host, monkeypatch, supports_unload=True)
+    owner = ctx.offered._unload_group
+    draining = threading.Event()
+    wait = aux._LIVE_CHILD_LOCK.wait
+
+    def observe_wait(timeout=None):
+        if owner.closing.is_set() and not release.is_set():
+            draining.set()
+        return wait(timeout)
+
+    monkeypatch.setattr(aux._LIVE_CHILD_LOCK, "wait", observe_wait)
     if budget_expires:
         monkeypatch.setenv("LCM_SHUTDOWN_COMPACTION_WAIT_S", "0.05")
     with ThreadPoolExecutor(max_workers=1) as executor:
         unloaded = executor.submit(ctx.unload)
         try:
-            assert ctx.offered._unload_group.closing.wait(5)
+            assert draining.wait(5)
             if budget_expires:
                 unloaded.result(timeout=5)
                 assert not any(engine._stable_use_closed for engine in engines)
@@ -604,6 +614,52 @@ def test_plugin_unload_retries_admitted_child_after_sqlite_busy(host, monkeypatc
     with closing(sqlite3.connect(db_path)) as reader:
         rows = reader.execute("SELECT role, content FROM messages WHERE session_id = ? ORDER BY store_id", ("child",)).fetchall()
     assert rows == _contents(view(1))
+
+
+def test_plugin_unload_closes_after_persistent_child_sqlite_busy(host, monkeypatch, caplog):
+    import sqlite3
+    from contextlib import closing
+
+    _, _, ctx, parent, child, engine = _setup(host, "own_engine", supports_unload=True)
+    aux = ctx.module("aux_session")
+    monkeypatch.setenv("LCM_SHUTDOWN_COMPACTION_WAIT_S", "0.05")
+    monkeypatch.setattr(aux, "_LIVE_CHILD_UNLOAD_RETRY_S", 0.15, raising=False)
+    monkeypatch.setattr(aux, "_LIVE_CHILD_RETRY_DELAY_S", 0.02)
+    connection = engine._store.connection
+    connection.execute("PRAGMA busy_timeout=20")
+    entered, release = threading.Event(), threading.Event()
+    append = engine._append_delegate_child_rows
+
+    def hold_first_append(*args, **kwargs):
+        if not entered.is_set():
+            entered.set()
+            assert release.wait(5)
+        return append(*args, **kwargs)
+
+    monkeypatch.setattr(engine, "_append_delegate_child_rows", hold_first_append)
+    db_path = parent._store.db_path
+    owner = ctx.offered._unload_group
+    with closing(sqlite3.connect(db_path, isolation_level=None)) as writer, ThreadPoolExecutor(max_workers=2) as executor:
+        writer.execute("BEGIN IMMEDIATE")
+        call = executor.submit(child.api_call, ctx, view(1), 1)
+        try:
+            assert entered.wait(5)
+            unload = executor.submit(ctx.unload)
+            assert owner.closing.wait(5)
+            release.set()
+            unload.result(timeout=5)
+            assert aux.drain_live_child_stores(3, owner=owner)
+            deadline = time.monotonic() + 3
+            while not engine._stable_use_closed and time.monotonic() < deadline:
+                time.sleep(0.01)
+            with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+                connection.execute("SELECT 1")
+            assert "unload retry expired" in caplog.text
+            assert f"up to {len(view(1))} handed-over row(s)" in caplog.text
+        finally:
+            release.set()
+            writer.rollback()
+        call.result(timeout=5)
 
 
 @pytest.mark.xfail(strict=True, reason="#2482 named loss limit (v0.30.0, #2483): a delegated child's rows after its "

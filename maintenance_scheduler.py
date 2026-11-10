@@ -271,21 +271,20 @@ class _RollupMaintenanceScheduler:
                     if self._follow_up_key == key:
                         self._follow_up_key = None
                         self._follow_up_job = None
-                keys |= self._retired_active_keys.pop(owner, set()) & self._active_keys
+                active = keys & self._active_keys
+                if active:
+                    # Keep the active receipt until the worker releases its key.
+                    self._retired_active_keys.setdefault(owner, set()).update(active)
                 self._condition.notify_all()
-                if timeout <= 0:
-                    active = keys & self._active_keys
-                    if active:
-                        self._retired_active_keys[owner] = active
-                    return not bool(active)
-                while keys & self._active_keys:
+                while active := self._retired_active_keys.get(owner):
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
-                        for key in sorted(keys & self._active_keys):
-                            logger.warning(
-                                "LCM %s maintenance retirement timeout for database=%s scope=%s",
-                                self._kind, key[0], key[1],
-                            )
+                        if timeout > 0:
+                            for key in sorted(active):
+                                logger.warning(
+                                    "LCM %s maintenance retirement timeout for database=%s scope=%s",
+                                    self._kind, key[0], key[1],
+                                )
                         return False
                     self._condition.wait(remaining)
                 return True
