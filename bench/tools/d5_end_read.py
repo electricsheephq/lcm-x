@@ -31,8 +31,9 @@ from bench.instruments.d5_clone import bars, capture, run as runner, snapshot
 
 PASS, FAIL, INCONCLUSIVE = "PASS", "FAIL", "INCONCLUSIVE"
 VERDICT_RULE = ("FAIL when check 1 fails or any window host row is LOST; LOST only for a window host row whose session "
-                "holds no stored row at all in the end store; INCONCLUSIVE while any window host row is unmatched, or a "
-                "pin or the kit does not verify; PASS only with check 1 PASS and 0 unmatched")
+                "holds no stored row at all in the end store; INCONCLUSIVE while any window host row is unmatched, when "
+                "the window is empty or both pins are the same, or when a pin or the kit does not verify; PASS only with "
+                "check 1 PASS, a non-empty window and 0 unmatched")
 HINTS = ("equal after stripping edge whitespace", "payload swapped for a reference", "no hint")
 _HEX64 = re.compile(r"[0-9a-f]{64}")
 
@@ -50,7 +51,8 @@ def _hint(host, candidates, end_dir):
         stored = row.get("content")
         if isinstance(text, str) and isinstance(stored, str) and text != stored and text.strip() == stored.strip():
             return HINTS[0], row["store_id"]
-        if isinstance(text, str) and runner._swap_payload(end_dir, stored) == text:
+        if (isinstance(text, str) and runner._swap_payload(end_dir, stored) == text) or \
+                (isinstance(stored, str) and runner._swap_payload(end_dir, text) == stored):  # Either side the reference.
             return HINTS[1], row["store_id"]
     return HINTS[2], None
 
@@ -100,8 +102,8 @@ def coverage(start, end, identity, end_dir):
 def verdict(check1, check2):
     if check1["verdict"] == FAIL or check2["lost"]:
         return FAIL
-    if check1["verdict"] != PASS or check2["unmatched"]:
-        return INCONCLUSIVE
+    if check1["verdict"] != PASS or check2["unmatched"] or not check2["window_host_rows"]:
+        return INCONCLUSIVE  # An empty window proves nothing about coverage.
     return PASS
 
 
@@ -113,7 +115,7 @@ def _capture(pin, folder, pin_sha256, scratch):
         return None, "the pin file does not hash to the sha256 sent"
     try:
         result = snapshot.verify(pin, folder, scratch)
-    except (OSError, ValueError, KeyError):
+    except (OSError, ValueError, KeyError, TypeError):
         return None, "the capture could not be verified against its pin"
     if result.get("verdict") != PASS:
         return None, "the capture does not verify against its pin"
@@ -123,6 +125,8 @@ def _capture(pin, folder, pin_sha256, scratch):
 def end_read(args):
     out = {"schema": "d5-end-read/1", "verdict_rule": VERDICT_RULE, "credits": "none (release manager, 2026-11-10)",
            "pins_sha256": {"start": args.start_pin_sha256, "end": args.end_pin_sha256}}
+    if args.start_pin_sha256 == args.end_pin_sha256:
+        return {**out, "verdict": INCONCLUSIVE, "reason": "the start and end pins are the same capture"}
     for side in ("start", "end"):
         _, reason = _capture(getattr(args, f"{side}_pin"), getattr(args, side), getattr(args, f"{side}_pin_sha256"),
                              args.scratch)
@@ -153,7 +157,11 @@ def main(argv=None):
         parser.add_argument(f"--{side}-pin", required=True, help=f"the {side} capture's runner pin")
         parser.add_argument(f"--{side}-pin-sha256", required=True, help="the pin's sha256 as the release manager sent it")
     args = parser.parse_args(argv)
-    result = end_read(args)
+    try:
+        result = end_read(args)
+    except Exception as exc:  # noqa: BLE001  # A fixed line, never a traceback: one can show a path typed here.
+        result = {"schema": "d5-end-read/1", "verdict_rule": VERDICT_RULE, "verdict": INCONCLUSIVE,
+                  "reason": f"unexpected {type(exc).__name__}"}
     print(json.dumps(result, indent=1, sort_keys=True))
     return {PASS: 0, FAIL: 1}.get(result["verdict"], 2)
 

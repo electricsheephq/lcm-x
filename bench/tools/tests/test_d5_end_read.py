@@ -40,7 +40,7 @@ def test_every_window_host_row_stored_in_order_passes():
 def test_rows_at_or_below_the_start_capture_are_not_in_the_window():
     end = {"host": [*START["host"]], "store": [*START["store"]]}
     check2, verdict = read(end)
-    assert (check2["window_host_rows"], check2["new_stored_rows"], verdict) == (0, 0, "PASS")
+    assert (check2["window_host_rows"], check2["new_stored_rows"], verdict) == (0, 0, "INCONCLUSIVE")  # Proves nothing.
 
 
 def test_lost_only_when_the_session_holds_no_stored_row_at_all():
@@ -76,10 +76,33 @@ def test_an_unexplained_difference_is_no_hint_and_inconclusive():
 
 
 def test_check1_decides_first():
-    clean = {"lost": 0, "unmatched": 0}
+    clean = {"lost": 0, "unmatched": 0, "window_host_rows": 1}
     assert er.verdict({"verdict": "FAIL"}, clean) == "FAIL"
     assert er.verdict({"verdict": "INCONCLUSIVE"}, clean) == "INCONCLUSIVE"
-    assert er.verdict({"verdict": "PASS"}, {"lost": 1, "unmatched": 3}) == "FAIL"
+    assert er.verdict({"verdict": "PASS"}, {"lost": 1, "unmatched": 3, "window_host_rows": 4}) == "FAIL"
+    assert er.verdict({"verdict": "PASS"}, clean) == "PASS"
+
+
+def test_a_session_whose_only_stored_rows_predate_the_window_is_unmatched_not_lost():
+    end = {"host": [*START["host"], host(2, "s1", "new and not stored")], "store": [*START["store"]]}
+    check2, verdict = read(end)
+    assert (check2["lost"], check2["unmatched"], verdict) == (0, 1, "INCONCLUSIVE")
+
+
+def test_matching_keeps_the_order_within_a_session():
+    end = {"host": [*START["host"], host(2, "s1", "a"), host(3, "s1", "b")],
+           "store": [*START["store"], stored(11, "s1", "b"), stored(12, "s1", "a")]}
+    check2, _ = read(end)
+    assert (check2["matched"], check2["unmatched"]) == (1, 1)
+
+
+def test_a_host_side_reference_to_the_stored_payload_gets_the_payload_hint(tmp_path):
+    (tmp_path / "lcm-large-outputs").mkdir()
+    (tmp_path / "lcm-large-outputs" / "p2.json").write_text(json.dumps({"content": "stored in full"}))
+    end = {"host": [*START["host"], host(2, "s1", "[Externalized tool output: 14 chars; ref=p2.json]", role="tool")],
+           "store": [*START["store"], stored(11, "s1", "stored in full", role="tool")]}
+    check2, _ = read(end, tmp_path)
+    assert check2["unmatched_by_hint"]["payload swapped for a reference"] == 1
 
 
 def test_the_output_carries_no_row_text_and_names_sessions_by_hash():
@@ -99,11 +122,32 @@ def test_a_pin_is_refused_unless_it_hashes_to_the_sha256_sent(tmp_path):
     assert er._capture(pin, tmp_path, good, tmp_path / "s")[1] is not None  # An empty pin never verifies.
 
 
+def test_a_pin_that_hashes_right_but_does_not_verify_is_refused(monkeypatch, tmp_path):
+    pin = tmp_path / "pin.json"
+    pin.write_text("{}")
+    good = hashlib.sha256(pin.read_bytes()).hexdigest()
+    monkeypatch.setattr(er.snapshot, "verify", lambda *a: {"verdict": "FAIL"})
+    assert er._capture(pin, tmp_path, good, tmp_path / "s")[1] == "the capture does not verify against its pin"
+
+
+def test_the_same_capture_twice_is_inconclusive():
+    args = SimpleNamespace(start_pin_sha256="a" * 64, end_pin_sha256="a" * 64)
+    assert er.end_read(args)["reason"] == "the start and end pins are the same capture"
+
+
+def test_an_unexpected_error_prints_a_fixed_line_never_a_traceback(monkeypatch, capsys):
+    monkeypatch.setattr(er, "end_read", lambda args: (_ for _ in ()).throw(FileNotFoundError("/private/typed/path")))
+    code = er.main(["--config", "c", "--instrument-dir", "k", "--scratch", "s", "--start", "a", "--start-pin", "p",
+                    "--start-pin-sha256", "1" * 64, "--end", "b", "--end-pin", "q", "--end-pin-sha256", "2" * 64])
+    out = capsys.readouterr()
+    assert code == 2 and "typed" not in out.out + out.err and "unexpected FileNotFoundError" in out.out
+
+
 def test_a_capture_that_does_not_verify_stops_the_read_before_the_kit_or_any_store(tmp_path):
     pin = tmp_path / "pin.json"
     pin.write_text("{}")
     args = SimpleNamespace(start=str(tmp_path), start_pin=str(pin), start_pin_sha256="0" * 64, end=str(tmp_path),
-                           end_pin=str(pin), end_pin_sha256="0" * 64, scratch=str(tmp_path / "s"),
+                           end_pin=str(pin), end_pin_sha256="1" * 64, scratch=str(tmp_path / "s"),
                            config="/nonexistent", instrument_dir="/nonexistent")
     result = er.end_read(args)
     assert result["verdict"] == "INCONCLUSIVE" and result["reason"].startswith("start: ")
