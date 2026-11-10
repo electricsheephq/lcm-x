@@ -582,15 +582,19 @@ def main():
             execute(args)
     except Exception as exc:
         import traceback
+        # Only the harness's own fixed canary reasons are shown; other exception text may carry corpus content.
+        reason = str(exc) if isinstance(exc, RuntimeError) and str(exc).startswith("canary_failed") else None
+        message = "FMP failed: " + type(exc).__name__ + (f" ({reason})" if reason else "") + " (no corpus logged)"
         home = getattr(args, "codex_home", None)
         if home is not None and inside_home(args.output, home):
             # A rejected output inside the leased home is never written, not even with the failure record.
-            print("FMP failed: " + type(exc).__name__ + " (no corpus logged)", file=sys.stderr)
+            print(message, file=sys.stderr)
             return 1
-        write_json(args.output / "failure.json", {"error": type(exc).__name__, "at": utc(),
+        write_json(args.output / "failure.json", {"error": type(exc).__name__, **({"reason": reason} if reason else {}),
+            "at": utc(),
             "frames": [{"file": Path(f.filename).name, "line": f.lineno, "function": f.name}
                        for f in traceback.extract_tb(exc.__traceback__)]})
-        print("FMP failed: " + type(exc).__name__ + " (no corpus logged)", file=sys.stderr)
+        print(message, file=sys.stderr)
         return 1
     return 0
 

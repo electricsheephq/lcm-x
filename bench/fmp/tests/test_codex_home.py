@@ -331,3 +331,53 @@ def test_sigterm_drain_starts_no_further_model_call(tmp_path, monkeypatch, cli):
     assert len(calls) == 1  # the second judge of the in-flight question never starts
     with (tmp_path / "lease" / "holder.lock").open("r+") as contender:
         fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def test_cli_keeps_fixed_canary_reason_only(tmp_path, monkeypatch, capsys):
+    import sys
+    output = tmp_path / "output"
+    base = ["run.py", "canary", "--split-label", "synthetic", "--data", str(tmp_path / "synthetic.json"),
+            "--store-root", str(tmp_path / "stores"), "--output", str(output), "--agreement-judge", "none"]
+    for text, shown in [("canary_failed: the reader reached no mcp__lcmx tool (Codex code mode off or MCP tools "
+                         "deferred?)", True), ("private corpus text", False)]:
+        monkeypatch.setattr(run, "execute", Mock(side_effect=RuntimeError(text)))
+        monkeypatch.setattr(sys, "argv", base)
+        assert run.main() == 1
+        err = capsys.readouterr().err
+        failure = json.loads((output / "failure.json").read_text())
+        assert (text in err) is shown and (failure.get("reason") == text) is shown
+        assert "private corpus text" not in err + json.dumps(failure)
+
+
+def test_launcher_forwards_sigterm_to_python(tmp_path):
+    import os
+    import signal
+    import time
+    marker = tmp_path / "got-sigterm"
+    fake = tmp_path / "python"
+    fake.write_text("#!/bin/bash\n"
+                    "if [[ \"$1\" == -c ]]; then exit 0; fi\n"
+                    f"trap 'touch {marker}; exit 0' TERM\n"
+                    f"echo $$ > {tmp_path / 'started'}\n"
+                    "while true; do sleep 0.05; done\n")
+    fake.chmod(0o700)
+    script = Path(run.__file__).with_name("run.sh")
+    proc = subprocess.Popen(["bash", str(script), "answer"], env={**os.environ, "FMP_PYTHON": str(fake)},
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        deadline = time.monotonic() + 10
+        while not (tmp_path / "started").exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert (tmp_path / "started").exists()
+        proc.send_signal(signal.SIGTERM)  # to the launcher's own PID
+        proc.wait(timeout=10)
+        assert marker.exists()
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        started = tmp_path / "started"
+        if started.exists() and started.read_text().strip():
+            try:  # never leave the fake reader looping when the launcher dropped the signal
+                os.kill(int(started.read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
