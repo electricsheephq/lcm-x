@@ -1210,6 +1210,16 @@ class MessageStore:
         rows = list(reversed(prior)) + list(following)
         return [self._row_to_dict(row) for row in rows]
 
+    def session_conversation_owner(self, session_id: str) -> str | None:
+        """Return the sole nonblank owner; split histories prove no routing alias."""
+        rows = self._conn.execute(
+            "SELECT DISTINCT TRIM(COALESCE(conversation_id, '')) FROM messages "
+            "INDEXED BY idx_msg_session WHERE session_id = ? "
+            "AND TRIM(COALESCE(conversation_id, '')) != '' LIMIT 2",
+            (session_id,),
+        ).fetchall()
+        return str(rows[0][0]) if len(rows) == 1 else None
+
     def get_session_messages(self, session_id: str,
                              limit: int = 10000) -> List[Dict[str, Any]]:
         """Get all messages for a session, ordered by store_id."""

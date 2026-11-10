@@ -182,6 +182,11 @@ class LifecycleStateStore:
         ).fetchone()
         return self._row_to_state(row)
 
+    def held_by_other_session(self, conversation_id: str, session_id: str) -> bool:
+        """A current durable binding belongs exclusively to its live session."""
+        state = self.get_by_conversation(conversation_id)
+        return bool(state and state.current_session_id not in (None, session_id))
+
     def get_by_session(self, session_id: str | None) -> LifecycleState | None:
         if not session_id:
             return None

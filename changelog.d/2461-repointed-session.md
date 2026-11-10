@@ -1,0 +1,1 @@
+- Fix: Preserve stored conversation ownership when Hermes re-points an existing session to a new routing key, including after restart and compression (#2461).

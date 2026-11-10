@@ -28,6 +28,8 @@ row marked `proven` names its receipt.
 | I13 | **Trial assembly publishes nothing:** no payloads, lineage, proof, emissions or recall. | engine.py (trial assembly) | test_issue_671_stub_first_exit.py | #671 | proven: [#671](invariants/receipts.md#i13-671) |
 | I14 | **Atomic publication.** Node, provenance and frontier commit in one DAG transaction, with no stale frontier generation. Background compaction (#787) relies on it. | dag.py; lifecycle_state.py | test_issue_5_contiguous_frontier.py | #5 | proven: [#5](invariants/receipts.md#i14-5) |
 
+Under I1, a session's stored history remains owned by its sole nonblank conversation when the host re-points its routing key; adopt that owner only when no other live session holds it, otherwise retain the requested binding and count `ledger.repoint_unadopted` (#2461).
+
 ## Recording a seed proof
 
 1. Name the seed defect and its fix commit.

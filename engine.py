@@ -3195,6 +3195,9 @@ class LCMEngine(
                 _ACTIVE_ENGINES_BY_SESSION_ID[session_id] = self
                 if conversation_id:
                     _ACTIVE_ENGINES_BY_CONVERSATION_ID[conversation_id] = self
+                routing_id = getattr(self, "_routing_conversation_id", None)
+                if routing_id:
+                    _ACTIVE_ENGINES_BY_CONVERSATION_ID[routing_id] = self
 
     def _unregister_active_engine_binding(self) -> None:
         with _ACTIVE_ENGINE_REGISTRY_LOCK:
@@ -3968,6 +3971,7 @@ class LCMEngine(
 
     def _apply_session_start_runtime_metadata(self, session_id: str, kwargs: Dict[str, Any]) -> None:
         self._session_id = session_id
+        self._routing_conversation_id = kwargs.get("_routing_conversation_id")
         self._session_platform = str(kwargs.get("platform") or "")
         self._refresh_session_filters()
         # Hold the foreground view stable when the new binding is a side
@@ -4169,6 +4173,7 @@ class LCMEngine(
             state = self._lifecycle.advance_frontier(self._conversation_id, session_id, frontier) or state
         self._apply_session_start_metadata(session_id, kwargs)
         self._frontier_holder().publish_frontier(int(state.current_frontier_store_id or 0))
+        self._register_active_engine_binding()
         proof = self._compress_commit_proof
         if (
             proof
@@ -4698,6 +4703,16 @@ class LCMEngine(
 
         boundary_reason = str(kwargs.get("boundary_reason") or "")
         old_session_id = str(kwargs.get("old_session_id") or "")
+        # #2461: host routing changes cannot move history to a new owner.
+        routing_id = kwargs.get("conversation_id")
+        owner_session = old_session_id if boundary_reason == "compression" and old_session_id else session_id
+        owner = self._store.session_conversation_owner(owner_session)
+        if owner and owner != str(routing_id or session_id):
+            if self._lifecycle.held_by_other_session(owner, owner_session):
+                self._ledger_count("ledger.repoint_unadopted")
+            else:
+                kwargs["_routing_conversation_id"] = routing_id
+                kwargs["conversation_id"] = owner
         previous_session_id = self._session_id
         previous_conversation_id = self._conversation_id
         requested_conversation_id = str(kwargs.get("conversation_id") or session_id)
