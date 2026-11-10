@@ -48,7 +48,7 @@ def engine(tmp_path, request):
 
 def _main(fn, monkeypatch):
     with monkeypatch.context() as patch:
-        patch.setattr(prefix_matching, '_without_lcm_marker_lines', lambda text, partner_digest=None: text)
+        patch.setattr(prefix_matching, '_without_lcm_marker_lines', lambda text: text)
         return fn()
 
 
@@ -134,6 +134,9 @@ def test_seeded_marker_lines_comparison(engine, monkeypatch):
             # Reduced texts equal, still unequal: a remaining loss shape at an off-current end; counted, not hidden.
             tally['still-unequal:' + ('a-redacted' if red_a != raw_a else 'b-redacted' if red_b != raw_b
                                       else 'other') + f':{kind_a}/{kind_b}'] += 1
+        # The upgrade replay's legacy keep (reconcile.py) reads the default form, which never strips: main's.
+        assert engine._bare_marker_identity(b, session_id='S1') == _main(
+            lambda: engine._bare_marker_identity(b, session_id='S1'), monkeypatch), (seed, index, 'legacy keep')
         if red_b is None:
             assert ident == ident_main, (seed, index, 'identity changed on a malformed form')
         elif ident != ident_main:

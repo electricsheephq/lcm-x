@@ -203,14 +203,18 @@ class PrefixMatchingMixin:
         bare = self._session_end_prefix_compare_identity(message, recover_markers=False, **kwargs)
         return bare if bare in stored else self._session_end_prefix_compare_identity(message, **kwargs)
 
-    def _bare_marker_identity(self, content, *, session_id, hermes_home=None):
-        """Bare marker text as stored, with placeholders restored, no file recovery, and LCM-X's own marker lines
-        removed (#2547)."""
+    def _bare_marker_identity(self, content, *, session_id, hermes_home=None, strip_lcm_lines=False):
+        """Bare marker text as stored, with placeholders restored and no file recovery.
+
+        ``strip_lcm_lines`` (#2547) also removes the two lines LCM-X's ingest adds at externalization off; only the
+        session-end row compare asks for it. The upgrade replay's legacy keep (reconcile.py) keeps the text as is: there
+        a stored row with those lines already matches the host side that the replay rebuilds with them.
+        """
         if not isinstance(content, str):
             return None
         text = self._session_end_prefix_compare_value(content, session_id=session_id, hermes_home=hermes_home)
-        return _without_lcm_marker_lines(
-            normalize_content_value(redact_sensitive_value(text, self._config, parse_json_strings=False)))
+        text = normalize_content_value(redact_sensitive_value(text, self._config, parse_json_strings=False))
+        return _without_lcm_marker_lines(text) if strip_lcm_lines else text
 
     def _session_end_rows_equal(self, stored_row, host_message, *, session_id, hermes_home=None):
         # Two bare markers are the same row only when their text is byte-identical. A marker and a stored recovered result are the same row when the marker's path and character count equal the ones recorded at ingest and the marker's preview is exactly the start of the stored content. The marker's boilerplate wording is not part of that identity.
@@ -226,8 +230,10 @@ class PrefixMatchingMixin:
             if _is_hermes_persisted_output_marker(original):
                 # Bare against bare: main's own compare (ingest's transforms undone on the stored side, none recovered).
                 try:
-                    return (self._bare_marker_identity(original, session_id=session_id, hermes_home=hermes_home)
-                            == self._bare_marker_identity(incoming, session_id=session_id, hermes_home=hermes_home))
+                    return (self._bare_marker_identity(original, session_id=session_id, hermes_home=hermes_home,
+                                                       strip_lcm_lines=True)
+                            == self._bare_marker_identity(incoming, session_id=session_id, hermes_home=hermes_home,
+                                                          strip_lcm_lines=True))
                 except Exception:  # nothing raised by this compare leaves it: main's compare
                     return (self._session_end_prefix_compare_identity(stored_row, session_id=session_id,
                             hermes_home=hermes_home, recover_markers=False) == self._session_end_prefix_compare_identity(
