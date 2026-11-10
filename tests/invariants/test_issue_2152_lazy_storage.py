@@ -363,7 +363,8 @@ def test_unload_retries_transient_store_close_failures(preflight, monkeypatch):
         connection.execute("SELECT 1")
 
 
-def test_unload_retries_a_busy_tail_in_the_previous_profile(preflight, monkeypatch):
+@pytest.mark.parametrize("close_fails", [False, True])
+def test_unload_retries_a_busy_tail_in_the_previous_profile(preflight, monkeypatch, close_fails):
     from hermes_lcm import maintenance_scheduler
 
     engine, ctx = preflight.register(supports_unload=True)
@@ -376,6 +377,16 @@ def test_unload_retries_a_busy_tail_in_the_previous_profile(preflight, monkeypat
     old_store = engine._store
     connection = old_store.connection
     retry_exhausted = threading.Event()
+    close = old_store.close
+    close_attempts = 0
+
+    def close_old_store():
+        nonlocal close_attempts
+        close_attempts += 1
+        if close_fails and close_attempts == 1:
+            raise sqlite3.OperationalError("transient detached close failure")
+        close()
+
     with closing(sqlite3.connect(old_store.db_path, isolation_level=None)) as writer:
         writer.execute("BEGIN IMMEDIATE")
         try:
@@ -383,6 +394,7 @@ def test_unload_retries_a_busy_tail_in_the_previous_profile(preflight, monkeypat
             engine.on_session_start("new", platform="cli", hermes_home=str(preflight.home / "new"))
             assert engine._store is not old_store
             assert len(engine._pending_session_tails) == 1
+            monkeypatch.setattr(old_store, "close", close_old_store)
             monkeypatch.setenv("LCM_SHUTDOWN_COMPACTION_WAIT_S", "0.05")
             monkeypatch.setattr(maintenance_scheduler, "_SESSION_END_SHUTDOWN_TIMEOUT_MS", 100)
             retry = engine._retry_pending_session_tails
@@ -403,6 +415,8 @@ def test_unload_retries_a_busy_tail_in_the_previous_profile(preflight, monkeypat
     while not engine._stable_use_closed and time.monotonic() < deadline:
         time.sleep(0.01)
     assert engine._stable_use_closed
+    assert close_attempts == 1 + close_fails
+    assert engine not in maintenance_scheduler._PENDING_TAIL_ENGINES
     with pytest.raises(sqlite3.ProgrammingError, match="closed"):
         connection.execute("SELECT 1")
     with closing(sqlite3.connect(old_store.db_path)) as reader:

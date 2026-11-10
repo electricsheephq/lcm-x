@@ -21,7 +21,7 @@ from bisect import bisect_left, bisect_right
 from collections import Counter, defaultdict, deque
 from contextlib import contextmanager
 from datetime import datetime
-from functools import lru_cache
+from functools import lru_cache, partial
 from pathlib import Path
 from time import perf_counter as _perf_counter
 from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple
@@ -791,6 +791,7 @@ class LCMEngine(
         self._stable_use_owner_thread: int | None = None
         self._stable_use_closed = False
         self._pending_session_tails: list[dict] = []
+        self._detached_stores_to_close: set[MessageStore] = set()
         self._session_end_flush_active = False
         self._assertion_extraction_metrics_lock = threading.RLock()
         self._assertion_extraction_idle = threading.Event()
@@ -12480,6 +12481,16 @@ class LCMEngine(
         self._ingest_telemetry(self._log_ingest_route, session, "S3", stored or 0, "tail retry", ids)
         return True
 
+    def _close_detached_store(self, store: MessageStore) -> None:
+        try:
+            store.close()
+        except Exception:
+            if self._unload_group is not None:
+                # The committed tail is gone. Keep the handle for unload retry.
+                self._detached_stores_to_close.add(store)
+            raise
+        self._detached_stores_to_close.discard(store)
+
     def _retry_pending_session_tails(self, *, deadline: float | None = None, exiting: bool = False,
                                      sibling: bool = False, terminal_tails: set[int] | None = None) -> bool:
         """Drain under the lifecycle lock and report whether busy work needs another attempt."""
@@ -12556,13 +12567,13 @@ class LCMEngine(
             finally:
                 if (store is not self.__dict__.get("_store")
                         and not any(t["store"] is store for t in self._pending_session_tails)):
-                    store.close()
+                    self._close_detached_store(store)
             if time.monotonic() >= deadline:
                 retry_busy = index + 1 < len(tails)
                 break
         if exiting:
             self._warn_unflushed_session_tails("SQLite lock", deadline=deadline)
-        elif not self._pending_session_tails:
+        elif not self._pending_session_tails and not self._detached_stores_to_close:
             maintenance_scheduler._PENDING_TAIL_ENGINES.discard(self)
         return retry_busy
 
@@ -12764,7 +12775,7 @@ class LCMEngine(
             deadline=deadline, exiting=unload_deadline is None and terminal_tails is None,
             terminal_tails=terminal_tails,
         )
-        detached_stores = set()
+        detached_stores = self._detached_stores_to_close.copy()
         if self._pending_session_tails:
             if unload_deadline is not None:
                 # A tail can still own an old profile's store. Finish its retry
@@ -12775,13 +12786,13 @@ class LCMEngine(
                 if retry_busy:
                     return False
                 self._warn_unflushed_session_tails("unresolved session-end tail", deadline=deadline)
-                detached_stores = {tail["store"] for tail in self._pending_session_tails
-                                   if tail["store"] is not self.__dict__.get("_store")}
+                detached_stores.update(tail["store"] for tail in self._pending_session_tails
+                                       if tail["store"] is not self.__dict__.get("_store"))
         self._discard_prepared_leaves()
         self._retire_embedding_maintenance(wait=True, deadline=unload_deadline)
         cleanup = [
             self._unregister_active_engine_binding,
-            *(store.close for store in detached_stores),
+            *(partial(self._close_detached_store, store) for store in detached_stores),
             *(
                 helper.close
                 for attr in ("_adaptive_retrieval", "_store", "_dag", "_lifecycle",
@@ -12798,6 +12809,8 @@ class LCMEngine(
                 logger.warning("LCM shutdown cleanup failed", exc_info=True)
         if failures:
             raise failures[0]
+        if not self._pending_session_tails:
+            maintenance_scheduler._PENDING_TAIL_ENGINES.discard(self)
 
     def _bound_store_unopened(self):
         """The bound store object, read without a lazy open (#2152): a failed rebind stays failed."""
