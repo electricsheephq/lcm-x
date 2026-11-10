@@ -2016,6 +2016,128 @@ def test_cursor_alternation_without_growth_is_not_matched(tmp_path, home, hermes
     assert not report["verified"] and report["lineages"][0]["named_other_paths"] == 1
 
 
+def _summarizer_run(tmp_path, home, hermes, *, compact_prompt="c1", agent_type="", stop_first=False,
+                    agent_seen=False, extra_event=None):
+    """A compaction as real Claude Code sends it (#2535 fixture): PreCompact, then the summarizer's SubagentStop with a
+    new agent id, type "" and the same prompt id, whose transcript is never written (no hook finds it on disk)."""
+    path = _transcript(tmp_path, CONVERSATION)
+    hook = _hook()
+    agent = cc.session_dir(path) / "subagents" / "agent-sum1.jsonl"
+    stop = dict(event="SubagentStop", agent_id="sum1", agent_transcript_path=str(agent), agent_type=agent_type,
+                prompt_id="c1", transcript_seen=True, agent_transcript_seen=agent_seen)
+    steps = [lambda: _record(hook, home, path, event="PreCompact", prompt_id=compact_prompt,
+                             compact_prompts=[compact_prompt], transcript_seen=True),
+             lambda: _record(hook, home, path, **stop)]
+    if extra_event:  # another record of the same subagent, claimed in its own run
+        steps.append(lambda: _record(hook, home, path, **{**stop, "event": extra_event}))
+    for step in reversed(steps) if stop_first else steps:  # each claimed by its own worker run
+        step()
+        cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    assert not agent.exists()
+
+
+@pytest.mark.parametrize("stop_first", [False, True])
+def test_a_compaction_summarizer_that_was_never_written_expires(tmp_path, home, hermes, stop_first):
+    from hermes_lcm import claude_code_audit as ca
+
+    _summarizer_run(tmp_path, home, hermes, stop_first=stop_first)
+    report = ca.audit(home)
+    assert report["verified"] and report["unverified"] == [] and report["pending_lineages"] == 0
+    assert report["expired_never_written"] == 1
+    assert report["verdict"] == "verified; 1 expired: never written (1 compaction summarizers, 0 sessions with no prompt)"
+
+
+@pytest.mark.parametrize("change", [{"compact_prompt": "other"}, {"agent_type": "general-purpose"},
+                                    {"agent_seen": True}, {"agent_seen": None}, {"extra_event": "PostToolBatch"}])
+def test_a_subagent_without_the_summarizer_link_stays_unverified(tmp_path, home, hermes, change):
+    from hermes_lcm import claude_code_audit as ca
+
+    _summarizer_run(tmp_path, home, hermes, **change)
+    report = ca.audit(home)
+    assert not report["verified"] and report["unverified"] == ["claude-code:s1/agent:sum1"]
+    assert report["expired_never_written"] == 0 and report["pending_lineages"] == 1
+
+
+def _quit_session(tmp_path, home, hermes, events, seen=None):
+    """Session s2 is captured normally; session s1's transcript is not on disk when the worker drains. ``seen`` maps an
+    event to what its hook found on disk (default: absent)."""
+    other = _transcript(tmp_path, [_entry("user", "v1", "other session", session="s2")], session="s2")
+    _record(_hook(), home, other, session="s2", transcript_seen=True)
+    missing = tmp_path / "projects" / "-work" / "s1.jsonl"
+    for batch in events:  # each batch is spooled before one worker run claims it
+        for event in batch:
+            _record(_hook(), home, missing, event=event, transcript_seen=(seen or {}).get(event, False))
+        cc.run_worker(home, hermes_home=hermes, settle_s=0)
+
+
+def test_a_session_that_ended_with_no_prompt_expires(tmp_path, home, hermes):
+    from hermes_lcm import claude_code_audit as ca
+
+    _quit_session(tmp_path, home, hermes, [["SessionStart"], ["SessionEnd"]])
+    report = ca.audit(home)
+    assert report["verified"] and report["expired_never_written"] == 1 and report["pending_lineages"] == 0
+    assert report["verdict"].endswith("; 1 expired: never written (0 compaction summarizers, 1 sessions with no prompt)")
+    # The session filter judges it the same way: nothing is unverified (and nothing was checked, so not verified).
+    assert ca.audit(home, "s1")["unverified"] == []
+
+
+@pytest.mark.parametrize("seen", [{"SessionEnd": True}, {"SessionStart": None}])
+def test_a_session_whose_hooks_saw_its_transcript_or_could_not_tell_stays_unverified(tmp_path, home, hermes, seen):
+    """A built-in command alone (/usage) writes a transcript without a UserPromptSubmit, so SessionStart + SessionEnd
+    is not proof of an empty session: a transcript a hook found on disk and later removed before any drain is a loss.
+    A record from an older hook (unknown) never expires either."""
+    from hermes_lcm import claude_code_audit as ca
+
+    _quit_session(tmp_path, home, hermes, [["SessionStart"], ["SessionEnd"]], seen=seen)
+    report = ca.audit(home)
+    assert not report["verified"] and report["unverified"] == ["claude-code:s1"]
+    assert report["expired_never_written"] == 0
+
+
+@pytest.mark.parametrize("row", ["not a dict", {"agent_id": None, "path": "/x.jsonl"}, {"session_id": "s1"}])
+def test_a_malformed_pending_row_is_unverified_and_never_crashes_the_audit(home, hermes, row):
+    from hermes_lcm import claude_code_audit as ca
+
+    store = _open(home, hermes)
+    try:
+        cc._write_metadata(store, "capture:pending:claude-code:s1", row)
+    finally:
+        store.close()
+    for session in (None, "s1"):
+        report = ca.audit(home, session)
+        assert "claude-code:s1" in report["unverified"] and not report["verified"]
+        assert report["expired_never_written"] == 0
+
+
+@pytest.mark.parametrize("events", [
+    [["SessionStart"], ["UserPromptSubmit"], ["SessionEnd"]],  # a turn ran: its transcript was removed, not unwritten
+    [["SessionStart"], ["UserPromptSubmit", "Stop", "SessionEnd"]],  # the turn's records replaced before a claim
+    [["SessionStart"], ["SessionEnd", "UserPromptSubmit"]],  # a late record kept out by the end pointer
+    [["SessionStart"]],  # still open, or its end was lost
+])
+def test_a_session_with_a_turn_or_no_end_and_no_transcript_stays_unverified(tmp_path, home, hermes, events):
+    from hermes_lcm import claude_code_audit as ca
+
+    _quit_session(tmp_path, home, hermes, events)
+    report = ca.audit(home)
+    assert not report["verified"] and report["unverified"] == ["claude-code:s1"]
+    assert report["expired_never_written"] == 0 and report["pending_lineages"] == 1
+
+
+def test_the_compaction_list_is_capped_and_written_only_when_new(home, hermes):
+    store = _open(home, hermes)
+    try:
+        for index in range(300):
+            cc.remember_session(store, {"session_id": "s1", "compact_prompts": [f"p{index}"]})
+        saved = store.read_metadata_json("capture:compact:s1")
+        assert len(saved) == cc.COMPACT_CAP and saved[0] == "p44" and saved[-1] == "p299"
+        before = store.connection.total_changes
+        cc.remember_session(store, {"session_id": "s1", "compact_prompts": ["p299"]})
+        assert store.connection.total_changes == before
+    finally:
+        store.close()
+
+
 def _second_path(tmp_path, home, hermes):
     """The cursor is on A (captured); a record names B while B is missing."""
     a = _append(tmp_path / "projects" / "-work" / "s1.jsonl", CONVERSATION[:2])
@@ -2153,23 +2275,25 @@ def test_a_subagents_copy_under_a_captured_parents_folder_is_not_verified(tmp_pa
 @pytest.mark.parametrize("saved", ["file", "empty"])
 def test_a_saved_output_under_a_pending_rows_earlier_path_is_not_verified(tmp_path, home, hermes, saved):
     """#2548 review: a pending row on A is replaced by B (named [A, B]); a saved output appears under A's session folder.
-    The worker sweeps only B, so it is unverified. An empty saved-outputs folder holds nothing and stays verified."""
+    The worker sweeps only B, so it is unverified. An empty saved-outputs folder holds nothing: the session, quit before
+    any prompt with neither transcript ever seen, expires (#2535 strict) and is not unverified."""
     from hermes_lcm import claude_code_audit as ca
 
     other = _append(tmp_path / "projects" / "-work" / "s2.jsonl", [dict(e, sessionId="s2") for e in CONVERSATION[:2]])
     _record(_hook(), home, other, session="s2")
     a = tmp_path / "projects" / "-work" / "s1.jsonl"
-    _record(_hook(), home, a, event="SessionStart")
+    _record(_hook(), home, a, event="SessionStart", transcript_seen=False)
     cc.run_worker(home, hermes_home=hermes, settle_s=0)
-    _record(_hook(), home, tmp_path / "projects" / "-other" / "s1.jsonl")
+    _record(_hook(), home, tmp_path / "projects" / "-other" / "s1.jsonl", event="SessionEnd", transcript_seen=False)
     cc.run_worker(home, hermes_home=hermes, settle_s=0)
     results = a.parent / "s1" / "tool-results"
     results.mkdir(parents=True)
     if saved == "file":
         (results / "toolu_1.txt").write_text("saved output\n")
     report = ca.audit(home)
-    if saved == "file":
+    if saved == "file":  # a saved output: never counted as expired, never written (#2560 review)
         assert not report["verified"] and "claude-code:s1" in report["unverified"]
+        assert report["expired_never_written"] == 0 and "never written" not in report["verdict"]
     else:
         assert "claude-code:s1" not in report["unverified"]
 
@@ -2197,7 +2321,6 @@ def test_an_unreadable_subagents_folder_under_a_pending_path_is_not_verified(tmp
     assert not report["verified"] and "claude-code:s1" in report["unverified"]
 
 
-
 # #2535 / #2548: one table for the audit's rule on paths a lineage's records named. The rule: anything holding rows the
 # store was not seen to take, or that cannot be read, makes the lineage unverified; nothing else does. "followed" is
 # the path capture follows (the cursor's, or the pending row's), "named" another path the lineage's records named, and
@@ -2212,9 +2335,11 @@ def _table_state(tmp_path, home, hermes, state):
     a = tmp_path / "projects" / "-work" / "s1.jsonl"
     b = tmp_path / "projects" / "-other" / "s1.jsonl"
     c = tmp_path / "projects" / "-third" / "s1.jsonl"
-    if state == "child_elsewhere":  # #2557: the pending parent names only A; x1's own hook puts it under B's folder
+    if state == "child_elsewhere":  # #2557: the parent names only A; x1's own hook puts it under B's folder. The parent
+        # is captured: a never-written pending parent with a child's hook is unknown and never expires (#2535 strict)
         child = _append(b.parent / "s1" / "subagents" / "agent-x1.jsonl", _SIDE)
-        _record(_hook(), home, a, event="SessionStart")
+        _append(a, CONVERSATION[:2])
+        _record(_hook(), home, a)
         _record(_hook(), home, a, event="SubagentStop", agent_id="x1", agent_transcript_path=str(child))
         cc.run_worker(home, hermes_home=hermes, settle_s=0)
         return {"followed": child, "folder": b}
@@ -2237,11 +2362,13 @@ def _table_state(tmp_path, home, hermes, state):
         _record(_hook(), home, b)
         cc.run_worker(home, hermes_home=hermes, settle_s=0)
         return {"followed": a, "named": b, "unnamed": c}
-    _record(_hook(), home, a, event="SessionStart")  # pending: records name A, then B; the pending row follows B
+    # pending: records name A, then B; the pending row follows B. Quit before a prompt with neither transcript ever
+    # seen, so it expires (#2535 strict) and only the artifact under test can make it unverified.
+    _record(_hook(), home, a, event="SessionStart", transcript_seen=False)
     cc.run_worker(home, hermes_home=hermes, settle_s=0)
     if state == "child":  # agent x1 under B is swept and captured
         _append(b.parent / "s1" / "subagents" / "agent-x1.jsonl", _SIDE)
-    _record(_hook(), home, b)
+    _record(_hook(), home, b, event="SessionEnd", transcript_seen=False)
     cc.run_worker(home, hermes_home=hermes, settle_s=0)
     if state == "child":
         return {"followed": b.parent / "s1" / "subagents" / "agent-x1.jsonl",
@@ -2581,3 +2708,160 @@ def test_the_closed_world_walk_edges(tmp_path, home, hermes, shape):
         _append(direct / "journal.jsonl", [{"type": "result"}])
     unverified = [key for key in ca.audit(home)["unverified"] if key.startswith("claude-code:s1")]
     assert bool(unverified) is (shape != "forgotten_journal")
+
+
+# #2535 strict: one table for when a pending record expires. The rule: a pending record expires only on facts this
+# home observed itself; history that is missing or cannot be read is unknown, and unknown never expires.
+_EXPIRY_EVENTS = {"end_only": ["SessionEnd"], "start_end": ["SessionStart", "SessionEnd"],
+                  "with_prompt": ["SessionStart", "UserPromptSubmit", "SessionEnd"],
+                  "summarizer": ["SubagentStop"], "summarizer_plus": ["SubagentStop", "SubagentStart"]}
+
+
+def _expiry_case(tmp_path, home, hermes, history, events, seen):
+    """Spools ``events`` for a lineage whose transcript never appears and returns its key."""
+    hook = _hook()
+    agent = events.startswith("summarizer")
+    parent = _transcript(tmp_path, CONVERSATION) if agent else tmp_path / "projects" / "-work" / "s1.jsonl"
+    path = cc.session_dir(parent) / "subagents" / "agent-sum1.jsonl" if agent else parent
+    key = "claude-code:s1/agent:sum1" if agent else "claude-code:s1"
+    if agent:  # the compaction this summarizer belongs to, as Claude Code sends it
+        _record(hook, home, parent, event="PreCompact", prompt_id="c1", compact_prompts=["c1"], transcript_seen=True)
+        cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    if history == "earlier_build":  # the pending row main writes since #2533: no facts
+        store = _open(home, hermes)
+        try:
+            store.update_metadata_json(cc.PENDING_PREFIX + key, lambda _current: {
+                "session_id": "s1", "agent_id": "sum1" if agent else None, "path": str(path),
+                "named": [str(path)], "first_seen": 100.0})
+        finally:
+            store.close()
+    names = _EXPIRY_EVENTS[events]
+    for n, event in enumerate(names):
+        extra = (dict(agent_id="sum1", agent_transcript_path=str(path), agent_type="", prompt_id="c1",
+                      transcript_seen=True, agent_transcript_seen=seen) if agent else dict(transcript_seen=seen))
+        if history == "pointer_unreadable" and n == len(names) - 1:  # an earlier pointer the hook cannot read
+            if n == 0:  # a first pointer to make unreadable
+                _record(hook, home, parent, event=event, **extra)
+            pointers = sorted((home / "spool").glob("*.json"))
+            for pointer in pointers:
+                pointer.chmod(0)
+            try:
+                _record(hook, home, parent, event=event, **extra)
+            finally:
+                for pointer in pointers:
+                    if pointer.exists():
+                        pointer.chmod(0o600)
+            cc.run_worker(home, hermes_home=hermes, settle_s=0)
+            continue
+        _record(hook, home, parent, event=event, **extra)
+        if history != "pointer_unreadable":
+            cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    assert not path.exists()
+    return key
+
+
+_EXPIRY = [(history, events, seen, history == "known" and seen is False and events in ("start_end", "summarizer"))
+           for history in ("known", "earlier_build", "pointer_unreadable") for events in _EXPIRY_EVENTS
+           for seen in (True, False, None)]
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads any file")
+@pytest.mark.parametrize("history,events,seen,expires", _EXPIRY,
+                         ids=[f"{h}-{e}-{s}" for h, e, s, _ in _EXPIRY])
+def test_the_expiry_rule_table(tmp_path, home, hermes, history, events, seen, expires):
+    from hermes_lcm import claude_code_audit as ca
+
+    key = _expiry_case(tmp_path, home, hermes, history, events, seen)
+    assert (key not in ca.audit(home)["unverified"]) is expires
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads any file")
+@pytest.mark.parametrize("damage", ["unreadable", "null", "list", "garbage", "empty"])
+def test_a_damaged_pointer_keeps_a_prompted_session_unknown(tmp_path, home, hermes, damage):
+    """A prompt's pointer that the next hook cannot use as a pointer object: its history is unknown, so the session
+    stays unverified instead of expiring as one quit before any prompt (#2535 strict)."""
+    from hermes_lcm import claude_code_audit as ca
+
+    hook = _hook()
+    path = tmp_path / "projects" / "-work" / "s1.jsonl"
+    _record(hook, home, path, event="SessionStart", transcript_seen=False)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    _record(hook, home, path, event="UserPromptSubmit", transcript_seen=True)
+    (pointer,) = sorted((home / "spool").glob("*.json"))
+    if damage == "unreadable":
+        pointer.chmod(0)
+    else:
+        pointer.write_text({"null": "null", "list": "[]", "garbage": "garbage{", "empty": ""}[damage])
+    try:
+        _record(hook, home, path, event="SessionEnd", transcript_seen=False)
+    finally:
+        if pointer.exists():
+            pointer.chmod(0o600)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    assert not path.exists() and "claude-code:s1" in ca.audit(home)["unverified"]
+
+
+@pytest.mark.parametrize("facts", [{}, None, [], {"transcript_seen": False}, {"events": "SessionStart"}],
+                         ids=["empty", "null", "list", "no_events", "events_not_a_list"])
+def test_a_pending_row_with_damaged_facts_stays_unknown(tmp_path, home, hermes, facts):
+    """A pending row whose facts are present but not usable: unknown, never 'not seen' (#2535 strict)."""
+    from hermes_lcm import claude_code_audit as ca
+
+    hook = _hook()
+    path = tmp_path / "projects" / "-work" / "s1.jsonl"
+    store = _open(home, hermes)
+    try:
+        store.update_metadata_json(cc.PENDING_PREFIX + "claude-code:s1", lambda _current: {
+            "session_id": "s1", "agent_id": None, "path": str(path), "named": [str(path)], "first_seen": 100.0,
+            "facts": facts})
+    finally:
+        store.close()
+    for event in ("SessionStart", "SessionEnd"):
+        _record(hook, home, path, event=event, transcript_seen=False)
+        cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    assert not path.exists() and "claude-code:s1" in ca.audit(home)["unverified"]
+
+
+@pytest.mark.parametrize("damage", ["null", "list", "garbage", "empty"])
+def test_a_claimed_record_that_cannot_be_read_is_set_aside(tmp_path, home, hermes, damage):
+    """The worker claims a record it cannot read: it is set aside as ``.failed`` (reported), never drained as nothing
+    and removed, so the events it held cannot be lost and a prompted session cannot expire (#2535 strict)."""
+    from hermes_lcm import claude_code_audit as ca
+
+    hook = _hook()
+    path = tmp_path / "projects" / "-work" / "s1.jsonl"
+    _record(hook, home, path, event="SessionStart", transcript_seen=False)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    _record(hook, home, path, event="UserPromptSubmit", transcript_seen=True)
+    (pointer,) = sorted((home / "spool").glob("*.json"))
+    pointer.write_text({"null": "null", "list": "[]", "garbage": "garbage{", "empty": ""}[damage])
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    assert len(list((home / "spool").glob("*.failed"))) == 1
+    _record(hook, home, path, event="SessionEnd", transcript_seen=False)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    report, filtered = ca.audit(home), ca.audit(home, session="s1")
+    assert not path.exists() and len(list((home / "spool").glob("*.failed"))) == 1
+    for result in (report, filtered):  # the session's own audit cannot read verified either
+        assert not result["verified"] and "spool:unreadable_failed_record" in result["unverified"]
+
+
+def test_an_unreadable_set_aside_record_is_never_overwritten(tmp_path, home, hermes, monkeypatch):
+    """A later record of the same key whose drain raises is set aside beside an unreadable one, never over it, so the
+    marker stays until an operator moves the file (#2535 strict, ruling A). A readable ``{}`` is not set aside."""
+    from hermes_lcm import claude_code_audit as ca
+
+    hook = _hook()
+    path = _append(tmp_path / "projects" / "-work" / "s1.jsonl", CONVERSATION[:2])
+    _record(hook, home, path)
+    (pointer,) = sorted((home / "spool").glob("*.json"))
+    pointer.write_text("")
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    _record(hook, home, path)
+    monkeypatch.setattr(cc, "drain", lambda *args, **kwargs: (_ for _ in ()).throw(OSError("boom")))
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    monkeypatch.undo()
+    assert len(list((home / "spool").glob("*.failed"))) == 2
+    assert "spool:unreadable_failed_record" in ca.audit(home)["unverified"]
+    (home / "spool" / "readable.json").write_text("{}")
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    assert len(list((home / "spool").glob("*.failed"))) == 2 and not (home / "spool" / "readable.json").exists()
