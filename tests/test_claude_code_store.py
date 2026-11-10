@@ -3169,7 +3169,8 @@ def test_the_ended_partial_tail_rule_table(tmp_path, home, hermes, kind, end, ta
                                    "end_behind_a_clock_step", "older_hook_after_an_equal_end", "end_with_no_stamp",
                                    "end_behind_a_waiting_stop", "equal_stop_behind_a_waiting_end",
                                    "newer_stop_behind_a_waiting_end", "end_behind_a_waiting_stop_then_a_delayed_hook",
-                                   "newer_stop_behind_a_waiting_end_then_a_delayed_hook"])
+                                   "newer_stop_behind_a_waiting_end_then_a_delayed_hook",
+                                   "a_delayed_stop_after_a_resume_stays_unverified"])
 def test_the_ended_marker_follows_the_lineages_own_newest_hook(tmp_path, home, hermes, shape):
     """#2571 review: a child's SubagentStop never clears its session's end; an end marks the lineage ended whatever its
     stamp (a clock stepped back, a tie, no stamp), so an older SessionEnd drained after a newer resume is unverified until
@@ -3200,6 +3201,11 @@ def test_the_ended_marker_follows_the_lineages_own_newest_hook(tmp_path, home, h
     elif "stop_behind_a_waiting_end" in shape:  # no other end-class hook replaces an undrained end
         _record(_hook(), home, a, event="SessionEnd", hook_started_ns=9)
         _record(_hook(), home, a, event="Stop", hook_started_ns=9 if shape.startswith("equal") else 12)
+    elif shape.startswith("a_delayed_stop_after_a_resume"):  # #2579 bot review: a known limit, pinned (fails safe)
+        _record(_hook(), home, a, event="SessionEnd", hook_started_ns=9)
+        cc.run_worker(home, hermes_home=hermes, settle_s=0)
+        _record(_hook(), home, a, event="UserPromptSubmit", hook_started_ns=12)  # the session resumed ...
+        _record(_hook(), home, a, event="Stop", hook_started_ns=5)  # ... and a delayed Stop replaces its pointer
     elif shape == "resumed_still_partial":
         _record(_hook(), home, a, event="SessionEnd", hook_started_ns=5)
         cc.run_worker(home, hermes_home=hermes, settle_s=0)
