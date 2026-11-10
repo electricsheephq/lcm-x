@@ -35,11 +35,11 @@ VERDICT_RULE = ("FAIL when check 1 fails or any window host row is LOST; LOST on
                 "holds no stored row at all in the end store; INCONCLUSIVE while any window host row is unmatched, when "
                 "the window is empty or both pins are the same, when a pin or the kit does not verify, when the "
                 "declaration has no settings.lcm session patterns, or when a session matching a declared pattern holds "
-                "a stored row; a window row in a session matching a declared ignore or stateless pattern (directly or through a "
-                "parent session) is counted "
+                "a stored row; a window row in a session matching a declared ignore or stateless pattern is counted "
                 "apart as not stored by design, never LOST or matched; PASS only with check 1 PASS, a non-empty window "
                 "of other rows and 0 unmatched")
-HINTS = ("equal after stripping edge whitespace", "payload swapped for a reference", "no hint")
+HINTS = ("equal after stripping edge whitespace", "payload swapped for a reference",
+         "session never stored; a parent session matches a declared pattern", "no hint")
 _HEX64 = re.compile(r"[0-9a-f]{64}")
 
 
@@ -59,34 +59,35 @@ def _hint(host, candidates, end_dir):
         if (isinstance(text, str) and runner._swap_payload(end_dir, stored) == text) or \
                 (isinstance(stored, str) and runner._swap_payload(end_dir, text) == stored):  # Either side the reference.
             return HINTS[1], row["store_id"]
-    return HINTS[2], None
+    return HINTS[3], None
 
 
-def by_design_matcher(lcm_settings, platforms, parents=None):
-    """session_id -> True when LCM-X never stores it by its declared ignore or stateless patterns (LCM-X's own matcher,
-    with the session's platform from the end capture's host db as a match key, as the engine does), directly or through
-    a parent session that matches (the engine's bypass lineage, approximated by the host db's parent links; a session
-    the engine stored anyway shows up as a declaration/store disagreement, never as a PASS)."""
+def session_matchers(lcm_settings, platforms, parents=None):
+    """(by_design, inherits): by_design(session) is True when the session itself matches a declared ignore or stateless
+    pattern (LCM-X's own matcher, with the session's platform from the end capture's host db as a key, as the engine
+    does); LCM-X never stores it. inherits(session) is True when an ancestor through the host db's parent links matches.
+    The engine passes bypass on only at a compression handover, while branch and delegate children are stored normally,
+    so inherits() never makes a row "by design": it only turns a would-be LOST row into an unmatched one (INCONCLUSIVE)."""
     compiled = compile_session_patterns([*lcm_settings["ignore_session_patterns"],
                                          *lcm_settings["stateless_session_patterns"]])
     parents = parents or {}
 
-    def direct(session):
-        return matches_session_pattern(build_session_match_keys(session, platform=platforms.get(session) or ""),
-                                       compiled)
+    def by_design(session):
+        return bool(compiled) and matches_session_pattern(
+            build_session_match_keys(session, platform=platforms.get(session) or ""), compiled)
 
-    def matcher(session):
-        seen = set()
-        while compiled and session and session not in seen and len(seen) < 64:
-            if direct(session):
+    def inherits(session):
+        seen, session = {session}, parents.get(session)
+        while session and session not in seen and len(seen) < 64:
+            if by_design(session):
                 return True
             seen.add(session)
             session = parents.get(session)
         return False
-    return matcher
+    return by_design, inherits
 
 
-def coverage(start, end, identity, end_dir, by_design=lambda session: False):
+def coverage(start, end, identity, end_dir, by_design=lambda session: False, inherits=lambda session: False):
     """Check 2 over the runner's row dicts ({"store": [...], "host": [...]}) of both captures."""
     top_host = max((h["id"] for h in start["host"]), default=0)
     top_store = max((r["store_id"] for r in start["store"]), default=0)
@@ -108,6 +109,12 @@ def coverage(start, end, identity, end_dir, by_design=lambda session: False):
         s["matched"] += len(pairs)
         for j, host in enumerate(hosts):
             if j in used_hosts:
+                continue
+            if session not in stored_sessions and inherits(session):  # Maybe a bypass handover: never LOST, unproven.
+                hints[HINTS[2]] += 1
+                s["unmatched"] += 1
+                unmatched.append({"host_id": host["id"], "session_sha256_12": _sha12(session), "class": HINTS[2],
+                                  "candidate_store_id": None})
                 continue
             if session not in stored_sessions:
                 counts["lost"] += 1
@@ -199,7 +206,7 @@ def end_read(args):
     except Exception as exc:  # noqa: BLE001  # Never a message: it can carry a path.
         return {**out, "verdict": INCONCLUSIVE, "reason": f"a store could not be read ({type(exc).__name__})"}
     check1 = bars.bar3(start["store"], end["store"], identity)
-    check2 = coverage(start, end, identity, args.end, by_design_matcher(lcm, *_sessions(args.end)))
+    check2 = coverage(start, end, identity, args.end, *session_matchers(lcm, *_sessions(args.end)))
     return {**out, "verdict": verdict(check1, check2), "check1_preservation": check1, "check2_coverage": check2,
             "start_rows": {k: len(v) for k, v in start.items()}, "end_rows": {k: len(v) for k, v in end.items()}}
 

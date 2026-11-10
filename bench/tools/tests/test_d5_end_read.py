@@ -72,7 +72,9 @@ def test_an_unexplained_difference_is_no_hint_and_inconclusive():
     end = {"host": [*START["host"], host(2, "s1", "one text")], "store": [*START["store"], stored(11, "s1", "another")]}
     check2, verdict = read(end)
     assert check2["unmatched_by_hint"] == {"equal after stripping edge whitespace": 0,
-                                           "payload swapped for a reference": 0, "no hint": 1}
+                                           "payload swapped for a reference": 0,
+                                           "session never stored; a parent session matches a declared pattern": 0,
+                                           "no hint": 1}
     assert (check2["stored_rows_not_matched"], verdict) == (1, "INCONCLUSIVE")
 
 
@@ -203,7 +205,7 @@ def test_condition_1_a_declaration_without_the_session_patterns_is_inconclusive(
 
 
 def test_condition_2_rows_in_a_declared_pattern_session_are_counted_apart_never_lost():
-    by_design = er.by_design_matcher({"ignore_session_patterns": ["cron_*"], "stateless_session_patterns": []}, {})
+    by_design = er.session_matchers({"ignore_session_patterns": ["cron_*"], "stateless_session_patterns": []}, {})[0]
     end = {"host": [*START["host"], host(2, "cron_7", "scheduled"), host(3, "cron_7", "more"), host(4, "s1", "a")],
            "store": [*START["store"], stored(11, "s1", "a")]}
     check2 = er.coverage(START, end, identity, "/nonexistent", by_design)
@@ -215,13 +217,13 @@ def test_condition_2_rows_in_a_declared_pattern_session_are_counted_apart_never_
 
 
 def test_condition_2_a_platform_key_matches_as_the_engine_matches():
-    by_design = er.by_design_matcher({"ignore_session_patterns": [], "stateless_session_patterns": ["cron:*"]},
-                                     {"s5": "cron"})
+    by_design = er.session_matchers({"ignore_session_patterns": [], "stateless_session_patterns": ["cron:*"]},
+                                     {"s5": "cron"})[0]
     assert by_design("s5") and not by_design("s1")
 
 
 def test_condition_3_a_declared_pattern_session_with_a_stored_row_is_inconclusive():
-    by_design = er.by_design_matcher({"ignore_session_patterns": ["cron_*"], "stateless_session_patterns": []}, {})
+    by_design = er.session_matchers({"ignore_session_patterns": ["cron_*"], "stateless_session_patterns": []}, {})[0]
     end = {"host": [*START["host"], host(2, "cron_7", "x"), host(3, "s1", "a")],
            "store": [*START["store"], stored(11, "s1", "a"), stored(12, "cron_7", "x")]}
     check2 = er.coverage(START, end, identity, "/nonexistent", by_design)
@@ -229,14 +231,26 @@ def test_condition_3_a_declared_pattern_session_with_a_stored_row_is_inconclusiv
     assert er.verdict(PRESERVED, check2) == "INCONCLUSIVE"
 
 
-def test_a_child_of_a_declared_pattern_session_is_not_stored_by_design():
-    by_design = er.by_design_matcher({"ignore_session_patterns": ["cron_*"], "stateless_session_patterns": []},
-                                     {}, {"child": "cron_7", "grandchild": "child", "loop": "loop"})
-    assert by_design("child") and by_design("grandchild") and not by_design("s1") and not by_design("loop")
+def test_a_child_of_a_declared_pattern_session_is_never_by_design_and_never_lost():
+    by_design, inherits = er.session_matchers({"ignore_session_patterns": ["cron_*"], "stateless_session_patterns": []},
+                                              {}, {"child": "cron_7", "grandchild": "child", "loop": "loop"})
+    assert inherits("child") and inherits("grandchild") and not inherits("s1") and not inherits("loop")
+    assert not by_design("child")
+    # A child with no stored row: unmatched with its hint (INCONCLUSIVE), never by design, never LOST, never PASS.
+    end = {"host": [*START["host"], host(2, "child", "x"), host(3, "s1", "a")],
+           "store": [*START["store"], stored(11, "s1", "a")]}
+    check2 = er.coverage(START, end, identity, "/x", by_design, inherits)
+    assert (check2["lost"], check2["unmatched"], check2["not_stored_by_design"]["rows"]) == (0, 1, 0)
+    assert check2["unmatched_by_hint"]["session never stored; a parent session matches a declared pattern"] == 1
+    assert er.verdict(PRESERVED, check2) == "INCONCLUSIVE"
+    # A child the engine stored (a branch or delegate child) is matched like any session.
+    end["store"].append(stored(12, "child", "x"))
+    check2 = er.coverage(START, end, identity, "/x", by_design, inherits)
+    assert (check2["matched"], check2["unmatched"], er.verdict(PRESERVED, check2)) == (2, 0, "PASS")
 
 
 def test_a_stateless_pattern_alone_counts():
-    assert er.by_design_matcher({"ignore_session_patterns": [], "stateless_session_patterns": ["tmp_**"]}, {})("tmp_a:b")
+    assert er.session_matchers({"ignore_session_patterns": [], "stateless_session_patterns": ["tmp_**"]}, {})[0]("tmp_a:b")
 
 
 def test_the_host_db_maps_are_read_only_and_tolerate_missing_columns(tmp_path):
@@ -271,7 +285,8 @@ def test_the_read_passes_the_declared_patterns_to_coverage(monkeypatch, tmp_path
             return {"identity": identity}
 
         def rows(self, folder):
-            return START if folder == "start-dir" else {"host": [*START["host"], host(2, "cron_1", "x")],
+            return START if folder == "start-dir" else {"host": [*START["host"], host(2, "cron_1", "x"),
+                                                                 host(3, "branch_1", "y")],
                                                         "store": [*START["store"]]}
 
     real = er.coverage
@@ -281,7 +296,7 @@ def test_the_read_passes_the_declared_patterns_to_coverage(monkeypatch, tmp_path
         return seen["result"]
     monkeypatch.setattr(er, "_capture", lambda *a: ({"verdict": "PASS"}, None))
     monkeypatch.setattr(er.runner, "LocalHost", Host)
-    monkeypatch.setattr(er, "_sessions", lambda folder: ({}, {}))
+    monkeypatch.setattr(er, "_sessions", lambda folder: ({}, {"branch_1": "cron_1"}))
     monkeypatch.setattr(er, "coverage", coverage)
     lcm = {"ignore_session_patterns": ["cron_*"], "stateless_session_patterns": []}
     (tmp_path / "decl.json").write_text(json.dumps({"settings": {"lcm": lcm}}))
@@ -290,4 +305,5 @@ def test_the_read_passes_the_declared_patterns_to_coverage(monkeypatch, tmp_path
                            instrument_dir="kit")
     result = er.end_read(args)
     assert seen["result"]["not_stored_by_design"] == {"sessions": 1, "rows": 1} and seen["result"]["lost"] == 0
+    assert seen["result"]["unmatched_by_hint"]["session never stored; a parent session matches a declared pattern"] == 1
     assert result["verdict"] == "INCONCLUSIVE"  # Only by-design rows: the window of other rows is empty.
