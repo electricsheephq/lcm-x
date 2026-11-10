@@ -3159,3 +3159,31 @@ def test_the_ended_partial_tail_rule_table(tmp_path, home, hermes, kind, end, ta
     row = next(row for row in report["lineages"] if row["lineage"] == cc.lineage_key("s1", "x1" if child else None))
     assert bool(row["partial_tail_bytes"]) is (tail and not resumed)
     assert report["verified"] is not (end and tail and not resumed)
+
+
+@pytest.mark.parametrize("shape", ["child_stops_after_session_end", "older_end_after_resume", "resumed_still_partial"])
+def test_the_ended_marker_follows_the_lineages_own_newest_hook(tmp_path, home, hermes, shape):
+    """#2571 review: a child's SubagentStop never clears its session's end; an older SessionEnd drained after a newer
+    resume does not mark it ended; a resumed session whose tail is still partial stays reported only."""
+    from hermes_lcm import claude_code_audit as ca
+
+    a = _append(tmp_path / "projects" / "-work" / "s1.jsonl", CONVERSATION[:2])
+    child = _append(a.parent / "s1" / "subagents" / "agent-x1.jsonl", _SIDE)
+    _record(_hook(), home, a, hook_started_ns=1)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    with open(a, "a", encoding="utf-8") as handle:
+        handle.write('{"type": "assistant", "uu')  # a crash mid-append
+    if shape == "child_stops_after_session_end":
+        _record(_hook(), home, a, event="SessionEnd", hook_started_ns=5)
+        cc.run_worker(home, hermes_home=hermes, settle_s=0)
+        _record(_hook(), home, a, event="SubagentStop", agent_id="x1", agent_transcript_path=str(child), hook_started_ns=6)
+    elif shape == "older_end_after_resume":
+        _record(_hook(), home, a, event="UserPromptSubmit", hook_started_ns=9)
+        cc.run_worker(home, hermes_home=hermes, settle_s=0)
+        _record(_hook(), home, a, event="SessionEnd", hook_started_ns=5)  # delayed: drained after the newer resume
+    else:
+        _record(_hook(), home, a, event="SessionEnd", hook_started_ns=5)
+        cc.run_worker(home, hermes_home=hermes, settle_s=0)
+        _record(_hook(), home, a, event="UserPromptSubmit", hook_started_ns=9)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    assert ca.audit(home)["verified"] is (shape != "child_stops_after_session_end")
