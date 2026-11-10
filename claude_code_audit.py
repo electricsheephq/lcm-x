@@ -275,6 +275,17 @@ def _named_others(lineage: Lineage, cursor: dict, report: dict) -> None:
         report["named_other_paths"] += holds
 
 
+def _holds_lines(path: Path) -> bool:
+    """Not empty (a regular file with bytes, or anything else that exists), or cannot be checked (fail closed)."""
+    try:
+        status = path.stat()
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    except OSError:
+        return True
+    return not stat.S_ISREG(status.st_mode) or status.st_size > 0
+
+
 def _present(path: Path) -> bool:
     """Exists, or cannot be checked (fail closed): only a clean not-found is absent."""
     try:
@@ -632,8 +643,11 @@ def _unverified(metadata: dict, records: list[dict], lineages: list[dict], sessi
                 except OSError:
                     unknown.add(lineage.key)
                 for child in _subagents(Lineage(lineage.session_id, None, Path(name))):
-                    if (CURSOR_PREFIX + child.key not in metadata
-                            and FORGOTTEN_PREFIX + child.rows_session not in metadata):
+                    if FORGOTTEN_PREFIX + child.rows_session in metadata:
+                        continue
+                    if CURSOR_PREFIX + child.key not in metadata or (  # or a copy at a path its cursor never named
+                            str(child.path) not in named_paths(metadata[CURSOR_PREFIX + child.key])
+                            and _holds_lines(child.path)):
                         unknown.add(child.key)
     # A record set aside before its transcript had a cursor names a lineage nothing else shows.
     for lineage in failed:
