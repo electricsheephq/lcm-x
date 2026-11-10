@@ -44,7 +44,7 @@ from .externalize import (
     find_externalized_tool_result_content_for_call,
     load_externalized_payload,
 )
-from .ingest_persisted import _safe_hermes_spillover_file
+from .ingest_persisted import _safe_hermes_spillover_file, _safe_temp_hermes_results_file
 from .ingest_protection import (
     _add_inline_persisted_output_generation_metadata,
     _add_inline_persisted_output_identity_metadata,
@@ -1099,19 +1099,30 @@ class ReconcileMixin:
                     # #2521: v0.29.2 stored spillover markers bare. Keep that
                     # identity only for an exact stored counterpart; occurrence
                     # matching still consumes each durable row at most once.
-                    legacy_spillover = (
-                        durable_content is None
-                        and _safe_hermes_spillover_file(
-                            Path(persisted_output_source_path),
-                            self._hermes_home if hermes_home is None else hermes_home,
-                        ) is not None
-                        and any(row["content"] == msg.get("content") for row in
-                            (self._store if store is None else store).find_session_tool_rows(
+                    def legacy_tool_rows():
+                        try:
+                            return (self._store if store is None else store).find_session_tool_rows(
                                 str(msg.get("session_id") or (self._session_id if session_id is None else session_id) or ""),
                                 str(msg.get("tool_call_id") or ""),
                                 conversation_id=str((self._conversation_id if conversation_id is None else conversation_id) or ""),
                                 tool_name=str(msg.get("tool_name") or msg.get("name") or ""),
-                            ))
+                            )
+                        except Exception:  # an unreadable store proves nothing: the row keeps its own identity
+                            return ()
+
+                    legacy_spillover = (
+                        durable_content is None
+                        and (_safe_temp_hermes_results_file(Path(persisted_output_source_path))
+                             or _safe_hermes_spillover_file(
+                            Path(persisted_output_source_path),
+                            self._hermes_home if hermes_home is None else hermes_home,
+                        )) is not None
+                        and any(self._bare_marker_identity(row["content"],
+                                    session_id=str(row.get("session_id") or ""), hermes_home=hermes_home)
+                                == self._bare_marker_identity(msg.get("content"),
+                                    session_id=str(msg.get("session_id") or (self._session_id if session_id is None else session_id) or ""),
+                                    hermes_home=hermes_home)
+                                for row in legacy_tool_rows())
                     )
                     if not legacy_spillover:
                         content = _add_inline_persisted_output_generation_metadata(
@@ -1657,6 +1668,18 @@ class ReconcileMixin:
             id(m): self._message_replay_identity(m, stored_row=True) if _merged_composite(e) else i
             for m, (e, i) in zip(messages, occurrences) if i is not None
         }
+        # A legacy bare marker and a later recovered occurrence have different
+        # durable identities. Bind an exactly proven ordered prefix one row at
+        # a time, rather than lending the recovered row to both host occurrences.
+        bare = [i for i, row in enumerate(stored_tail_rows or ()) if row.get("role") == "tool"
+                and _is_hermes_persisted_output_marker(row.get("content") or "")]
+        if bare and len(stored_tail_rows) <= len(messages):
+            pairs = list(zip(stored_tail_rows, messages))
+            if (all(self._session_end_rows_equal(row, msg, session_id=self._session_id)
+                    and (not msg.get("session_id") or msg["session_id"] == row["session_id"]) for row, msg in pairs)
+                    and all(self._session_end_prefix_compare_value(pairs[i][0]["content"], session_id=self._session_id)
+                            == pairs[i][1].get("content") for i in bare)):
+                occurrence_identities.update((id(msg), identity) for (_row, msg), identity in zip(pairs, stored_tail))
         scaffold_ids = {id(m) for m, (_e, i) in zip(messages, occurrences) if i is None}
         objective_ids = {
             id(m) for m, (e, _i) in zip(messages, occurrences) if e.kind == "objective" and e.generated_span is not None
