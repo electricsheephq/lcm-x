@@ -258,6 +258,7 @@ def _spool_locked(directory: Path, key: str, record: Mapping[str, Any]) -> str:
     facts = _merged_facts(record, previous)
     if unknown:
         facts.update({name: None for name in ("transcript_seen", "agent_transcript_seen") if facts[name] is not True})
+        facts["local_gc"] = True  # the lost history may have seen local GC on: no lossless claim (#2503)
     if record.get("event") == "SessionStart" and record.get("source"):
         record["start_source"] = record["source"]
         record["started_at"] = record.get("observed_at")

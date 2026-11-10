@@ -1682,13 +1682,17 @@ def test_the_pointer_keeps_whether_any_record_saw_the_transcript(hook, env, tmp_
     (("Stop", None, 10), ("PostToolUse", None, 20)),             # kept_end
     (("Stop", None, 20), ("Stop", None, 10)),                    # stale
     (("UserPromptSubmit", None, 10), ("SessionStart", "resume", 20)),  # SessionStart's own branch
-], ids=["replace", "kept_end", "stale", "session_start"])
+    (None, ("Stop", None, 20)),                                  # an unreadable pointer: history unknown
+], ids=["replace", "kept_end", "stale", "session_start", "unreadable"])
 def test_local_gc_stays_on_through_every_pointer_branch(hook, env, tmp_path, first, second):
     """#2503: a record that saw local GC on keeps the flag on the pointer whichever branch the next record takes."""
     from hermes_lcm.claude_code_store import claim_records
     home = Path(env["LCMX_CC_HOME"])
     base = hook.normalize({"hook_event_name": "Stop", "session_id": "s1",
                            "transcript_path": str(_transcript(tmp_path))}, env)
-    for (event, source, stamp), gc in ((first, True), (second, False)):
+    if first is None:  # the earlier record's pointer cannot be read: it may have seen local GC on
+        hook.spool(home, {**base, "event": "Stop", "hook_started_ns": 5, "local_gc": False})
+        _spooled(env)[0].write_text("{not json", encoding="utf-8")
+    for (event, source, stamp), gc in ((first, True), (second, False)) if first else ((second, False),):
         hook.spool(home, {**base, "event": event, "source": source, "hook_started_ns": stamp, "local_gc": gc})
     assert claim_records(home)[0][1]["local_gc"] is True
