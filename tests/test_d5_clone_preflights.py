@@ -29,6 +29,9 @@ class FakeHost:
     def pins(self):
         return {"verdict": "PASS"}
 
+    def snapshot(self):
+        return {"verdict": "PASS"}
+
     def plan(self, copy):
         return planner.build_plan([dict(session_id=s, name=n, chat_id=f"d5-{n}", lcm_rows=1, host_rows=1)
                                    for n, s in (("L", "sess-l"), ("S1", "sess-a"), ("S2", "sess-b"))], nonce="t")
@@ -423,6 +426,25 @@ def test_no_preflight_runs_for_a_tree_without_a_declared_commit(tmp_path, monkey
         "a tree has no declared 40-hex commit, so no receipt could bind it"]
 
 
+@pytest.mark.parametrize("snap", [{"verdict": "FAIL", "reasons": ["a symlink in the snapshot"]}, {}, "raises"])
+def test_no_clone_or_preflight_runs_unless_the_snapshot_verifies(tmp_path, monkeypatch, snap):
+    """P2 before any clone: a snapshot that fails verification (a symlinked config.yaml, an unpinned file) is never
+    cloned, planned or armed, so write_config never follows a copied link; every receipt is INCONCLUSIVE."""
+    monkeypatch.setitem(sys.modules, "yaml", types.SimpleNamespace(safe_load=json.loads))
+    host = Tweaked(tmp_path, lambda host, ctx, step: None)
+
+    def snapshot():
+        if snap == "raises":
+            raise RuntimeError("verify failed")
+        return snap
+    host.snapshot, cloned = snapshot, []
+    host.clone = lambda name: cloned.append(name)
+    assert pf.produce(host, list(pf.PREFLIGHTS)) == dict.fromkeys(pf.PREFLIGHTS, "INCONCLUSIVE")
+    assert cloned == [] and host.armed == [] and not (tmp_path / "plan-counts.json").exists()
+    reason = json.loads((tmp_path / "P3.json").read_text())["reasons"][0]
+    assert reason == ("no plan: RuntimeError" if snap == "raises" else "no plan: P2 snapshot did not pass")
+
+
 @pytest.mark.parametrize("value, kept", [(12, 12), ("twelve chars", None), (True, None), (None, None), (1.5, None)])
 def test_p4_never_copies_a_payload_size_field_as_text(value, kept):
     assert pf._count(value) == kept
@@ -431,7 +453,8 @@ def test_p4_never_copies_a_payload_size_field_as_text(value, kept):
 def test_p4_writes_a_text_size_field_as_null_and_fails(tmp_path, monkeypatch):
     """Through P4 itself: a payload whose size fields hold text gives a FAIL whose receipt never carries that text."""
     monkeypatch.setitem(sys.modules, "yaml", types.SimpleNamespace(safe_load=json.loads))
-    tweak = lambda h, c, s: _payload(c, content_chars="PRIVATE-SIZE-TEXT", content_bytes="PRIVATE-SIZE-TEXT")
+    def tweak(h, c, s):
+        return _payload(c, content_chars="PRIVATE-SIZE-TEXT", content_bytes="PRIVATE-SIZE-TEXT")
     assert pf.produce(Tweaked(tmp_path, tweak), ["P4"]) == {"P4": "FAIL"}
     text = (tmp_path / "P4.json").read_text()
     assert "PRIVATE-SIZE-TEXT" not in text

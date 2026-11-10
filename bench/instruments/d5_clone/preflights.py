@@ -303,6 +303,10 @@ def produce(host, names):
     try:
         if host.pins().get("verdict") != "PASS":  # The rules module is imported for planning only after P1.
             raise Inconclusive("P1 pins did not pass")
+        # P2 before any clone, as in the runner: a symlink or unpinned file in the snapshot never reaches a clone,
+        # and a receipt never binds a snapshot pin that was not verified.
+        if host.snapshot().get("verdict") != "PASS":
+            raise Inconclusive("P2 snapshot did not pass")
         plan = host.plan(host.clone("pf-plan"))
         common["plan_sha256"] = planner.plan_sha256(plan)
         common["plan_conversations"] = [  # Counts and the session id's sha256 12 only (#2471).
