@@ -1909,7 +1909,8 @@ def test_a_second_named_path_with_uncaptured_lines_is_not_verified(tmp_path, hom
     cc.run_worker(home, hermes_home=hermes, settle_s=0)
     report = ca.audit(home)
     assert not report["verified"] and "claude-code:s1" in report["unverified"]
-    assert report["lineages"][0]["named_uncaptured_lines"] == len(CONVERSATION[2:])
+    assert report["lineages"][0]["named_other_paths"] == 1
+    assert "a second transcript path holds rows; not matched" in report["verdict"]
 
 
 def test_a_path_named_while_pending_and_later_filled_keeps_the_lineage_unverified(tmp_path, home, hermes):
@@ -1942,7 +1943,7 @@ def test_cursor_alternation_stays_unverified(tmp_path, home, hermes):
     cc.run_worker(home, hermes_home=hermes, settle_s=0)
     _append(a, CONVERSATION[2:])
     report = ca.audit(home)
-    assert not report["verified"] and report["lineages"][0]["named_uncaptured_lines"] == len(CONVERSATION[2:])
+    assert not report["verified"] and report["lineages"][0]["named_other_paths"] == 1
 
 
 def test_a_known_path_adds_no_metadata_write(tmp_path, home, hermes):
@@ -1980,19 +1981,6 @@ def test_a_cursor_written_before_named_paths_audits_as_before(tmp_path, home, he
     assert ca.audit(home)["verified"]
 
 
-def test_three_named_paths_with_identical_lines_are_verified(tmp_path, home, hermes):
-    """#2548 review: A, B and C (the same complete lines) drained as three generations, each still whole at its own
-    path. Each older file must clear a different gone generation, not tie onto the same one."""
-    from hermes_lcm import claude_code_audit as ca
-
-    for folder in ("-work", "-other", "-third"):
-        path = _append(tmp_path / "projects" / folder / "s1.jsonl", CONVERSATION[:2])
-        _record(_hook(), home, path)
-        cc.run_worker(home, hermes_home=hermes, settle_s=0)
-    report = ca.audit(home)
-    assert report["verified"] and report["lineages"][0]["generations_gone"] == 0
-
-
 def test_an_empty_named_file_never_stands_for_a_generation_with_no_rows(tmp_path, home, hermes):
     """#2548 delta review: A was empty when drained (a generation with no rows), then gained lines that were never
     drained, then a hook named B (drained as a new generation), then A was truncated. A's lines are lost: an empty A
@@ -2013,59 +2001,69 @@ def test_an_empty_named_file_never_stands_for_a_generation_with_no_rows(tmp_path
     assert not report["verified"] and report["unverified"] == ["claude-code:s1"]
 
 
-def test_a_saved_output_under_an_older_named_path_is_audited(tmp_path, home, hermes):
-    """#2548 review: A is captured, a saved output then appears under A's session folder, and a hook moves the cursor
-    to B. The worker sweeps only B's folder now, so A's output is uncaptured and the session must not verify."""
+def test_cursor_alternation_without_growth_is_not_matched(tmp_path, home, hermes):
+    """#2535 (release-manager ruling): A drained, then B with the same lines drained as a new generation, A unchanged.
+    The audit does not match A against the store, so a second path holding rows leaves the lineage unverified."""
     from hermes_lcm import claude_code_audit as ca
 
     a = _append(tmp_path / "projects" / "-work" / "s1.jsonl", CONVERSATION[:2])
     _record(_hook(), home, a)
     cc.run_worker(home, hermes_home=hermes, settle_s=0)
-    folder = tmp_path / "projects" / "-work" / "s1" / "tool-results"
+    b = _append(tmp_path / "projects" / "-other" / "s1.jsonl", CONVERSATION[:2])
+    _record(_hook(), home, b)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    report = ca.audit(home)
+    assert not report["verified"] and report["lineages"][0]["named_other_paths"] == 1
+
+
+def _second_path(tmp_path, home, hermes):
+    """The cursor is on A (captured); a record names B while B is missing."""
+    a = _append(tmp_path / "projects" / "-work" / "s1.jsonl", CONVERSATION[:2])
+    _record(_hook(), home, a)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    b = tmp_path / "projects" / "-other" / "s1.jsonl"
+    _record(_hook(), home, b)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    b.parent.mkdir(parents=True, exist_ok=True)
+    return b
+
+
+def test_a_second_named_path_with_only_saved_outputs_is_not_verified(tmp_path, home, hermes):
+    """#2535: B's transcript never appears, but its session folder holds a saved output the worker never sweeps."""
+    from hermes_lcm import claude_code_audit as ca
+
+    b = _second_path(tmp_path, home, hermes)
+    folder = b.parent / "s1" / "tool-results"
     folder.mkdir(parents=True)
     (folder / "toolu_9.txt").write_text("saved output\n", encoding="utf-8")
-    b = _append(tmp_path / "projects" / "-other" / "s1.jsonl", CONVERSATION[:2])
-    _record(_hook(), home, b)
-    cc.run_worker(home, hermes_home=hermes, settle_s=0)
     report = ca.audit(home)
-    assert not report["verified"] and report["lineages"][0]["files"]["uncaptured"] == 1
+    assert not report["verified"] and report["lineages"][0]["named_other_paths"] == 1
 
 
-@pytest.mark.parametrize("failure", ["unreadable", "removed"])
-def test_a_named_path_that_cannot_be_read_leaves_the_lineage_unverified(tmp_path, home, hermes, monkeypatch, failure):
-    """#2548 review: a named path that passes stat but cannot be read (denied, or removed between stat and open) must
-    not abort the audit; the lineage is unverified and every other lineage is still reported."""
+def test_an_empty_second_named_path_does_not_make_the_lineage_unverified(tmp_path, home, hermes):
+    """#2535: an empty B with no saved outputs holds nothing, like the resume's phantom path."""
     from hermes_lcm import claude_code_audit as ca
 
-    a = _append(tmp_path / "projects" / "-work" / "s1.jsonl", CONVERSATION[:2])
-    _record(_hook(), home, a)
-    cc.run_worker(home, hermes_home=hermes, settle_s=0)
-    b = _append(tmp_path / "projects" / "-other" / "s1.jsonl", CONVERSATION[:2])
-    _record(_hook(), home, b)
-    cc.run_worker(home, hermes_home=hermes, settle_s=0)
-    real = ca._captured_prefix
-
-    def failing(path, rows):
-        if path == a:
-            raise PermissionError(13, "denied") if failure == "unreadable" else FileNotFoundError(2, "gone")
-        return real(path, rows)
-
-    monkeypatch.setattr(ca, "_captured_prefix", failing)
+    b = _second_path(tmp_path, home, hermes)
+    b.write_bytes(b"")
     report = ca.audit(home)
-    assert not report["verified"] and report["unverified"] == ["claude-code:s1"]
-    assert report["lineages"][0]["named_uncaptured_lines"] > 0
+    assert report["verified"] and report["lineages"][0]["named_other_paths"] == 0
 
 
-def test_cursor_alternation_without_growth_is_verified(tmp_path, home, hermes):
-    """#2535 review: A drained, then B (same lines) drained as a new generation, and A unchanged: the old generation is
-    found whole at its own named path, so nothing is gone and the lineage is verified."""
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads any folder")
+@pytest.mark.parametrize("blocked", ["transcript_folder", "session_folder"])
+def test_a_second_named_path_that_cannot_be_checked_is_not_verified(tmp_path, home, hermes, blocked):
+    """#2535: a named path or its session folder that cannot be checked is not clean, and the audit still reports."""
     from hermes_lcm import claude_code_audit as ca
 
-    a = _append(tmp_path / "projects" / "-work" / "s1.jsonl", CONVERSATION[:2])
-    _record(_hook(), home, a)
-    cc.run_worker(home, hermes_home=hermes, settle_s=0)
-    b = _append(tmp_path / "projects" / "-other" / "s1.jsonl", CONVERSATION[:2])
-    _record(_hook(), home, b)
-    cc.run_worker(home, hermes_home=hermes, settle_s=0)
-    report = ca.audit(home)
-    assert report["verified"] and report["lineages"][0]["generations_gone"] == 0
+    b = _second_path(tmp_path, home, hermes)
+    b.write_bytes(b"")
+    folder = b.parent if blocked == "transcript_folder" else b.parent / "s1"
+    if blocked == "session_folder":
+        (folder / "tool-results").mkdir(parents=True)
+    folder.chmod(0)
+    try:
+        report = ca.audit(home)
+    finally:
+        folder.chmod(0o700)
+    assert not report["verified"] and report["lineages"][0]["named_other_paths"] == 1
