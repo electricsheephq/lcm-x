@@ -101,3 +101,57 @@ def test_an_ended_bypass_lineage_session_at_ext_off_keeps_its_stored_prefix_rout
         assert (len(rows), sum(r["content"] == "FINAL" for r in rows)) == (len(history) + 1, 1)
     finally:
         engine.shutdown()
+
+
+def _failing_payload_write(monkeypatch):
+    from hermes_lcm import externalize
+
+    def fails(*_a, **_k):
+        raise OSError("injected payload write failure")
+    monkeypatch.setattr(externalize, "_write_externalized_payload", fails)
+
+
+@pytest.mark.parametrize("location", ["spillover", "hermes-results"])
+def test_a_failed_payload_write_at_default_settings_keeps_the_final_reply(tmp_path, monkeypatch, location):
+    """Default settings, payload file write fails: ingest keeps the marker inline with LCM-X's generation line (the
+    #2547 stored form without the identity line). An off-current end still stores the final reply once."""
+    home = tmp_path / "hermes"
+    engine = LCMEngine(config=LCMConfig(database_path=str(home / "lcm.db"),
+                                        large_output_externalization_path=str(home / "externalized")),
+                       hermes_home=str(home))
+    try:
+        _failing_payload_write(monkeypatch)
+        marker = _write_output(_path(home, location), FULL_OUTPUT)
+        texts = [("user", "A"), ("assistant", "B"), ("user", "C")]
+        history = [{"role": r, "content": t, "timestamp": float(i + 1)} for i, (r, t) in enumerate(texts)]
+        history.append({"role": "assistant", "content": "", "timestamp": 4.0, "tool_calls": [
+            {"id": CALL, "type": "function", "function": {"name": "terminal", "arguments": "{}"}}]})
+        history.append({"role": "tool", "tool_call_id": CALL, "content": marker, "timestamp": 5.0})
+        history += [{"role": r, "content": t, "timestamp": float(6 + i)} for i, (r, t) in
+                    enumerate((("assistant", "D"), ("user", "E"), ("assistant", "F"), ("user", "G"), ("assistant", "H")))]
+        engine.on_session_start("S1", platform="cli", context_length=200_000, conversation_id="conv1")
+        engine.ingest(copy.deepcopy(history))
+        stored = [r for r in engine._store.get_session_messages("S1") if r["role"] == "tool"][0]["content"]
+        if not (stored.startswith("<persisted-output>") and "[LCM persisted-output file generation:" in stored):
+            pytest.fail("setup: the failed write did not leave the inline marker with a generation line")
+        engine.on_session_start("S2", platform="cli", context_length=200_000, conversation_id="conv2")
+        engine.on_session_end("S1", copy.deepcopy(history) + [{"role": "assistant", "content": "FINAL", "timestamp": 11.0}])
+        rows = engine._store.get_session_messages("S1")
+        assert (len(rows), sum(r["content"] == "FINAL" for r in rows)) == (len(history) + 1, 1)
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("location", ["spillover", "hermes-results"])
+def test_a_failed_payload_write_at_default_settings_adds_no_child_copy(host, monkeypatch, location):  # noqa: F811
+    _, _, ctx, parent, child, engine = _setup(host, "own_engine")
+    _failing_payload_write(monkeypatch)
+    handed = [{"role": "user", "content": "Dump the ledger."}, call(1),
+              {"role": "tool", "tool_call_id": "c1", "content": _write_output(_path(engine._hermes_home, location, "c1"))}]
+    for n in range(3):
+        child.api_call(ctx, handed, n + 1)
+        rows = child_rows(parent)
+        assert (len(rows), Counter(r.get("tool_call_id") for r in rows if r["role"] == "tool")["c1"]) == (3, 1)
+    child.end(engine, [*handed, {"role": "assistant", "content": "FINAL"}])
+    rows = child_rows(parent)
+    assert (len(rows), sum(r["content"] == "FINAL" for r in rows)) == (4, 1)
