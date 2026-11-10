@@ -8,6 +8,9 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## v0.30.0 (nothing lost)
 
+- Fix: after an upgrade from v0.29.2, replaying a conversation that holds a saved-output marker (a tool result
+  too large for the conversation, which Hermes saved to a file) no longer stores the tool call and its result a
+  second time while the saved file still exists (#2521).
 - Fix: the opt-in recorder could hang at interpreter exit when a checkpoint came due during the exit drain (#2512).
 - Fix: a delegated child (sub-agent) that is interrupted before it finishes no longer loses its whole transcript
   (#2482). Before, its rows were stored only when its turn ended, at its session end or before its own compaction,
