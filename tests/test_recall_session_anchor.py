@@ -141,7 +141,7 @@ def test_v2_delta_seen_tail_is_not_more_available(orchard, strict):
     e._config.recall_reference_strict = strict
     args = {'query': 'orchard', 'detail': 'answer_ready', 'limit': 3, 'seen_refs': []}
     initial = json.loads(tools.lcm_recall(args, engine=e))
-    # Keep only the first-ranked ref novel; the probe encounters a seen ref.
+    # Keep only the first-ranked ref novel; every unshipped tail ref is seen.
     seen = [h['exact_ref'] for h in initial['hits'][1:]]
     result = json.loads(tools.lcm_recall({**args, 'limit': 1, 'seen_refs': seen}, engine=e))
     assert result['delta']['novel_ref_count'] == 1
@@ -192,35 +192,56 @@ def test_v2_strict_delta_post_budget_rejection_reports_continuation(orchard, mon
     assert e._store.connection.total_changes == changes
 
 
-def test_v2_delta_probe_stops_at_first_novel_and_skips_summaries(orchard, monkeypatch):
-    from copy import deepcopy
-    from hermes_lcm import recall_delivery
+def test_v2_strict_delta_refill_keeps_session_blocked_tail(orchard, monkeypatch):
     e = orchard
     e._config.recall_guidance = 'v2'
-    e._config.recall_reference_strict = False
-    ids = [e._store.append(f'probe-{i}', {'role': 'user', 'content': f'needle row {i}'})
-           for i in range(8)]
-    calls = []
-    original = recall_delivery.deliver_recall
+    e._config.recall_reference_strict = True
+    ids = [e._store.append(sid, {'role': 'user', 'content': f'needle row {i}'})
+           for i, sid in enumerate(['A'] * 5 + ['B', 'A'])]
+    original = tools._lcm_recall_fts_arm
+    def ranked(*a, **kw):
+        hits, error = original(*a, **kw)
+        return sorted(hits, key=lambda h: h['store_id']), error
+    monkeypatch.setattr(tools, '_lcm_recall_fts_arm', ranked)
+    args = {'query': 'needle', 'detail': 'answer_ready', 'limit': 5,
+            'seen_refs': [f'lcm:{ids[5]}:0-12']}
+    first = json.loads(tools.lcm_recall(args, engine=e))
+    assert [h['store_id'] for h in first['hits']] == ids[:5]
+    assert first['provenance']['answer_ready']['more_available'] is True
+    second = json.loads(tools.lcm_recall(
+        {**args, 'seen_refs': args['seen_refs'] + first['delta']['novel_refs']}, engine=e))
+    assert [h['store_id'] for h in second['hits']] == ids[6:]
+    assert second['provenance']['answer_ready']['more_available'] is False
+
+
+@pytest.mark.parametrize('strict', [False, True])
+def test_v2_delta_hint_adds_no_hydration_or_store_reads(orchard, monkeypatch, strict):
+    from hermes_lcm import recall_delivery
+    e = orchard
+    e._config.recall_reference_strict = strict
+    for i in range(8):
+        e._store.append(f'reads-{i}', {'role': 'user', 'content': f'needle row {i}'})
+    counts = [0, 0]
+    original, get_batch = recall_delivery.deliver_recall, e._store.get_batch
     def deliver(ordered, **kw):
-        by_id = {entry['hit']['store_id']: entry for entry in ordered}
-        # Put a non-evidence summary before the first unseen message, then
-        # more messages after it. Probe reads must stop at that first message.
-        summary = {'hit': {'kind': 'summary', 'node_id': 999, 'session_id': 'summary'},
-                   'ranks': {0: 2}, '_final_score': 0.5}
-        ordered = [by_id[ids[0]], summary, *[by_id[sid] for sid in ids[1:]]]
         hydrate = kw['hydrate']
-        def counted(entries, **options):
-            calls.append(deepcopy(entries))
-            return hydrate(entries, **options)
+        def counted(*a, **options):
+            counts[0] += 1
+            return hydrate(*a, **options)
         kw['hydrate'] = counted
         return original(ordered, **kw)
+    def batch(*a, **kw):
+        counts[1] += 1
+        return get_batch(*a, **kw)
     monkeypatch.setattr(recall_delivery, 'deliver_recall', deliver)
+    monkeypatch.setattr(e._store, 'get_batch', batch)
     args = {'query': 'needle', 'detail': 'answer_ready', 'limit': 1, 'seen_refs': []}
-    result = json.loads(tools.lcm_recall(args, engine=e))
-    assert result['provenance']['answer_ready']['more_available'] is True
-    assert [[entry['hit'].get('store_id') for entry in batch] for batch in calls] == [[ids[0]], [ids[1]]]
-    assert all(entry['hit']['kind'] != 'summary' for batch in calls for entry in batch)
+    tools.lcm_recall(args, engine=e)
+    baseline = counts[:]
+    counts[:] = [0, 0]
+    e._config.recall_guidance = 'v2'
+    tools.lcm_recall(args, engine=e)
+    assert counts == baseline
 
 
 @pytest.mark.parametrize('strict', [True, False])
@@ -370,3 +391,127 @@ def test_proactive_and_baseline_disable_guidance(orchard, monkeypatch):
     assert len(captured) == 2
     assert all(kw.get('session_hints') is False and kw.get('recall_guidance') == 'v1'
                for kw in captured)
+
+
+def test_generated_delta_chains_end_within_pool_size_plus_one(monkeypatch, record_property):
+    """256 seeded pools, both strict modes and children on/off; <= pool size + 1 calls."""
+    from copy import deepcopy
+    from functools import partial
+    import random
+    from types import SimpleNamespace
+
+    from hermes_lcm import recall_delivery
+    from hermes_lcm.retrieval_core import _hit_identity
+
+    rng = random.Random(1188)
+    longest, chains, displaced = 0, 0, 0
+    features = set()
+    for pool_number in range(256):
+        rows, nodes, children, pool = {}, {}, {}, []
+        limit, session_cap = rng.randint(2, 9), rng.randint(1, 4)
+        for index in range(rng.randint(10, 38)):
+            sid = rng.choice(['A', 'A', 'A', 'B', 'C', 'D'])
+            store_id = index + 1
+            text = f'needle source {index}'
+            row = dict(store_id=store_id, session_id=sid, role='user', content=text,
+                       source='', timestamp=100, observed_at=100)
+            hit = dict(kind='message_excerpt', store_id=store_id, session_id=sid,
+                       role='user', snippet=text, content_offset=0, timestamp=100)
+            if rng.random() < .15:
+                node_id = 500 + index
+                hit.update(kind='summary', node_id=node_id)
+                nodes[node_id] = SimpleNamespace(summary=text)
+                features.add('summary')
+            elif rng.random() < .15:
+                # Missing rows are permanently uncitable, including non-strict delta.
+                features.add('uncitable')
+            else:
+                rows[store_id] = row
+                if rng.random() < .25:
+                    alias = 1000 + index
+                    rows[alias] = {**row, 'store_id': alias}
+                    hit['duplicate_store_ids'] = [alias]
+                    features.add('alias')
+                if rng.random() < .45:
+                    child_id = 2000 + index
+                    child = dict(kind='message_excerpt', store_id=child_id, session_id='child',
+                                 role='user', snippet=f'needle later {index}', content_offset=0, timestamp=200)
+                    rows[child_id] = dict(store_id=child_id, session_id='child', role='user',
+                                          source='', content=child['snippet'], timestamp=200, observed_at=200)
+                    children[text] = child
+            pool.append(dict(hit=hit, ranks={0: index + 1}, rrf_score=1 / (index + 1),
+                             _final_score=1 / (index + 1)))
+        engine = SimpleNamespace(
+            _store=SimpleNamespace(get_batch=lambda ids: {sid: rows[sid] for sid in ids if sid in rows}),
+            _dag=SimpleNamespace(get_node=nodes.get), current_session_id='current')
+        # In-memory read adapters; selection, hydration and later placement are production code.
+        monkeypatch.setattr(tools, '_lcm_recall_fts_arm', lambda e, q, **kw:
+                            ([deepcopy(children[q])] if q in children else [], None))
+        monkeypatch.setattr(tools, '_lcm_recall_event_time_rows', lambda e, ids, **kw:
+                            ({sid: rows[sid] for sid in ids if sid in rows}, None))
+        monkeypatch.setattr(tools, 'duplicate_identity_rows', lambda e, entries, **kw: rows)
+        window, dropped = recall_delivery._diverse_entries(pool, limit=limit, per_session_limit=session_cap)
+        window_ids = {e['hit']['store_id'] for e in window}
+        if dropped:
+            features.add('session_cap')
+        for strict in (False, True):
+            for later in (False, True):
+                seen, previous_empty = set(), False
+                for call in range(1, len(pool) + 2):
+                    ordered = deepcopy(pool)
+                    # A replay can choose the other representative of the same collapsed group.
+                    if call % 2 == 0:
+                        for entry in ordered:
+                            hit = entry['hit']
+                            if hit.get('duplicate_store_ids'):
+                                hit['store_id'], hit['duplicate_store_ids'] = hit['duplicate_store_ids'][0], [hit['store_id']]
+                    place_later = partial(
+                        tools._lcm_recall_later_statements, engine, identity_rows=rows, n=2,
+                        query='needle', fts_arm_index=0, deadline=float('inf'), excluded=set(), allowed=None,
+                    ) if later else None
+                    result = json.loads(recall_delivery.deliver_recall(
+                        ordered, query='needle', limit=limit, requested_limit=limit, scope_bias=0,
+                        include='all', detail='answer_ready', reference_strict=strict,
+                        delta_requested=True, seen_refs=seen, include_occurrence_time=False,
+                        deadline=float('inf'), fts_arm_index=0, arm_order=['fts'], arm_weights=[1],
+                        arm_hits={'fts': []}, coverage={}, served_fts_index='messages_fts',
+                        rerank_status='off', rerank_scores=[], embedding_query_metrics=[],
+                        degraded_reasons=[], timed_out=False, fts_anchor_info=None, summary_leads=[],
+                        limit_cap=25, snippet_chars=320, response_char_cap=40000,
+                        per_session_limit=session_cap, expanded_hit_limit=10, content_chars=4000,
+                        strict_selector_factory=partial(tools._LcmRecallStrictSelector, engine=engine),
+                        hydrate=partial(tools._lcm_recall_answer_ready_content, engine),
+                        read_event_time=partial(tools._lcm_recall_event_time_rows, engine),
+                        event_time_fields=tools._lcm_recall_event_time,
+                        read_occurrence_source=lambda sid: ({}, rows.get(sid)), rerank_enabled=lambda: False,
+                        guidance_v2=True, place_later=place_later,
+                    ))
+                    context = (pool_number, strict, later, call, limit, session_cap, pool, sorted(seen))
+                    refs = {h['exact_ref'] for h in result['hits'] if h.get('exact_ref')}
+                    more = result['provenance']['answer_ready']['more_available']
+                    empty = more and not refs - seen
+                    assert not (previous_empty and empty), context
+                    previous_empty = empty
+                    seen.update(refs)
+                    displaced += result['provenance'].get('later_statements', {}).get('displaced', 0)
+                    if not more:
+                        break
+                else:
+                    pytest.fail(f'chain exceeded pool size + 1: {context}')
+                longest = max(longest, call)
+                chains += 1
+                seen_ids = {int(ref.split(':')[1]) for ref in seen if ref.startswith('lcm:')}
+                for entry in pool:
+                    hit = entry['hit']
+                    group = {hit['store_id'], *hit.get('duplicate_store_ids', [])}
+                    # Summaries have no exact message ref in delta's novelty filter,
+                    # regardless of strictness; missing rows likewise cannot ship.
+                    undeliverable = (hit['kind'] == 'summary' or hit['store_id'] not in rows
+                                     or not strict and hit['store_id'] not in window_ids)
+                    assert undeliverable or group & seen_ids, (context, _hit_identity(hit))
+    assert features == {'summary', 'uncitable', 'alias', 'session_cap'}
+    assert displaced > 0
+    record_property('generated_pools', 256)
+    record_property('generated_chains', chains)
+    record_property('longest_chain', longest)
+    record_property('displaced_candidates', displaced)

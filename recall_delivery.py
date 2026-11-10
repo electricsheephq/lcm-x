@@ -11,6 +11,7 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 import json
 import logging
+import re
 from typing import Any
 
 from .reasoning import resolve_occurrence_time
@@ -540,28 +541,25 @@ def deliver_recall(
             )
         if guidance_v2:
             shipped = {_hit_identity(h) for h in hits_out}
-            pending = [e for e in selected_entries if _hit_identity(e["hit"]) not in shipped]
-            more = False
-            if reference_strict:
-                pending += strict_selector.take(strict_selector.ledger.live_count + 1)
-                # Deferred rows may hydrate next call; selection evicts their cache.
-                pending += [e for e in ordered if id(e) in strict_selector._blocked
-                            or strict_selector._rejected.get(id(e)) is False]
-            else:
-                pending = [e for e in ordered if _hit_identity(e["hit"]) not in shipped] + pending
-            while delta_requested and pending:
-                entry = pending.pop(0)
-                if entry["hit"].get("kind") != "summary":
-                    answer_ready_content.update(hydrate([entry], query=query, expanded_limit=1,
-                        rows_by_id=None, fts_arm_index=fts_arm_index))
-                    if _novel([entry]):
-                        more = True
-                        break
-                if not pending:
-                    pending = strict_selector.take(strict_selector.ledger.live_count + 1) if reference_strict else []
+            candidates = {_hit_identity(e["hit"]): e for e in ordered + selected_entries}
+            seen_ids = {int(ref.split(":")[1]) for ref in seen_refs if re.fullmatch(r"lcm:\d+:\d+-\d+", ref)}
+            def available(entry):
+                hit = entry["hit"]
+                if delta_requested and (f"lcm-summary:{hit.get('node_id')}" in seen_refs
+                        if hit.get("kind") == "summary" else
+                        seen_ids.intersection([hit.get("store_id"), *hit.get("duplicate_store_ids", [])])):
+                    return False
+                if reference_strict:
+                    return hit.get("kind") != "summary" and strict_selector._rejected.get(id(entry)) is not True
+                # Non-strict hydration covers only the selected window and later children.
+                return not delta_requested or (hit.get("kind") != "summary" and
+                    _exact_ref(hit, answer_ready_content.get(_hit_identity(hit))) is not None)
+            # It can say true once more than needed, never false while a deliverable
+            # unseen candidate remains, and a follow-up chain ends.
             expansion.update(sessions_delivered=_sessions(hits_out),
                              sessions_in_pool=_sessions([e["hit"] for e in ordered] + hits_out),
-                             more_available=bool(more or pending or response_cap_truncated))
+                             more_available=response_cap_truncated or any(
+                                 available(e) for key, e in candidates.items() if key not in shipped))
         response["detail"] = detail
         response["provenance"]["detail"] = detail
         response["provenance"]["answer_ready"] = expansion

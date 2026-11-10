@@ -69,6 +69,8 @@ plugin registry and read-only MCP reader serve the same guidance. In hits delive
 sessions in the returned hits and ranked candidate pool plus delivered later-statement
 children; `more_available` also accounts for displaced candidates and candidates left
 by hydration or response limits. In delta mode, seen exact refs do not count as more.
+This conservative hint can say true once more than needed, never false while a deliverable
+unseen candidate remains, and a follow-up chain ends.
 Session-delivery guidance omits the hits-only provenance instruction. These are bounded
 retrieval signals, not proof that all matching sessions have been searched.
 
