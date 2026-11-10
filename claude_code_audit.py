@@ -696,6 +696,9 @@ def _unverified(metadata: dict, records: list[dict], lineages: list[dict], sessi
             continue
         lineage = Lineage(pending.get("session_id"), pending.get("agent_id"), Path(pending["path"]))
         if CURSOR_PREFIX + lineage.key in metadata or FORGOTTEN_PREFIX + lineage.rows_session in metadata:
+            if lineage.agent_id is None and CURSOR_PREFIX + lineage.key not in metadata:  # #2557: forgotten, but its
+                for name in named_paths(pending):  # subagents are still captured: check them under every named path
+                    _check_folder(Path(name), lineage.session_id, lineage.key, metadata, unknown, outputs=False)
             continue
         if any(_present(Path(name)) for name in named_paths(pending)):  # every path its records named (#2535)
             unknown.add(lineage.key)
