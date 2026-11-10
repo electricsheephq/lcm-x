@@ -86,7 +86,7 @@ def session_matchers(lcm_settings, platforms, parents=None):
 
     def inherits(session):
         seen, session = {session}, parents.get(session)
-        while session and session not in seen and len(seen) < 64:
+        while session and session not in seen:  # The seen set ends a cycle; a finite chain is walked to its root.
             if by_design(session):
                 return True
             seen.add(session)

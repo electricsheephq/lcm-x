@@ -496,3 +496,13 @@ def test_a_catastrophic_message_pattern_is_bounded_and_quotes_nothing(monkeypatc
     # (unmatched); the timeout path itself is pinned by the stand-in test above.
     assert check2["lost"] + check2["unmatched_by_hint"]["matches a declared message pattern"] == 1
     assert "(a+)+$" not in caplog.text
+
+
+def test_a_matching_ancestor_far_up_the_chain_is_found_and_a_cycle_ends_the_walk():
+    """Review finding: the walk stopped after 63 links, so a far matching ancestor left the row LOST (a false FAIL)."""
+    lcm = {"ignore_session_patterns": ["cron_*"], "stateless_session_patterns": []}
+    parents = {f"c{i}": f"c{i + 1}" for i in range(99)} | {"c99": "cron_root"}
+    _, inherits = er.session_matchers(lcm, {}, parents)
+    assert inherits("c0") is True
+    _, loop = er.session_matchers(lcm, {}, {"a": "b", "b": "a"})
+    assert loop("a") is False
