@@ -790,7 +790,8 @@ def write_fixture(records, destination):
         result['steps'] = [indexes[json.dumps(step)] for step in result['steps']]
     fixture = dict(pools, cells=cells, markers=markers, main_sha='7e67daf16478eff0d153b5973648c6d251f13d89')
     encoded = json.dumps(fixture, sort_keys=True, separators=(',', ':')) + '\n'
-    assert len(encoded.encode('utf-8')) <= 1_000_000, 'STOP: fixture exceeds 1 MB'
+    # A size budget, not a bar: raised from 1 MB for the #2559 cells (lane owner, 2026-11-10).
+    assert len(encoded.encode('utf-8')) <= 1_500_000, 'STOP: fixture exceeds 1.5 MB'
     Path(destination).write_text(encoded)
 
 
@@ -826,3 +827,265 @@ def test_v0292_keep_and_session_end_agree(preview, location, crlf, incoming, tmp
             f'keep={keep_equal}, session-end={end_equal}, incoming={incoming}')
     finally:
         engine.shutdown()
+
+
+# #2559: exact transform-probe inputs, driven through real ingest on every route.
+INLINE_CASES = [(route, shape, variant, form) for route in ROUTES
+                for shape in ('T7', 'T6i', 'T6ii') for variant in ('X', 'U', 'P')
+                for form in (('identical', 'whitespace', 'different', 'invalid-json')
+                             if shape == 'T7' else ('identical', 'different'))]
+
+
+def _inline_row(shape, variant):
+    import base64
+    def b64(n):
+        return base64.b64encode(bytes((i * 37 + 11) % 256 for i in range(n))).decode('ascii')
+    long = b64(3420)
+    wrapped = '\n'.join(long[i:i + 76] for i in range(0, len(long), 76))
+    if shape == 'T7':
+        body = {'X': wrapped, 'U': long, 'P': 'plain body'}[variant]
+        return {'role': 'assistant', 'content': '', 'tool_calls': [
+            {'id': 'm1', 'type': 'function', 'function': {'name': 'write_file',
+             'arguments': json.dumps({'path': 'a.b64', 'content': 'hdr\n' + body + '\nend'})}}]}
+    if shape == 'T6i':
+        url = {'X': 'data:image\\/png;base64,' + b64(1200),
+               'U': 'data:image/png;base64,' + b64(1200),
+               'P': 'data:image\\/png;base64,plain-image-ref'}[variant]
+        return {'role': 'user', 'content': [{'type': 'text', 'text': 'inspect'},
+                {'type': 'image_url', 'image_url': {'url': url}}]}
+    return {'role': 'user', 'content': [{'type': 'text', 'text': 'att:\n' +
+            {'X': wrapped, 'U': long, 'P': 'plain body'}[variant]}]}
+
+
+def _inline_identity(row, storage=None):
+    """Independent oracle: decode storage envelopes before restoring individual leaves.
+
+    Include arguments in the digest: content-only snapshots cannot detect a lost
+    or duplicated T7 call. No product compare or restore helper is consulted.
+    """
+    def leaves(value):
+        if isinstance(value, dict):
+            return {k: leaves(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [leaves(v) for v in value]
+        return _restore(value, storage) if storage and isinstance(value, str) else value
+
+    content = row.get('content') or ''
+    if isinstance(content, str) and content.startswith('[{'):
+        content = json.loads(content)
+    content = leaves(content)
+    calls = row.get('tool_calls') or None
+    if isinstance(calls, str):
+        calls = json.loads(calls)
+    calls = copy.deepcopy(calls)
+    for c in calls or []:
+        args = c['function'].get('arguments')
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except ValueError:
+                args = args.strip()
+        c['function']['arguments'] = leaves(args)
+    body = json.dumps([content, calls], sort_keys=True, separators=(',', ':'), ensure_ascii=False)
+    return row['role'], row.get('tool_call_id') or '', _sha(body)
+
+
+def _inline_snapshot(rows, storage):
+    counts = Counter(_inline_identity(row, storage) for row in rows)
+    return [[r, c, d, n] for (r, c, d), n in sorted(counts.items())]
+
+
+@pytest.mark.parametrize('case', INLINE_CASES, ids=_cell_id)
+def test_inline_payload_compare_matrix(case, host, tmp_path, monkeypatch, request):
+    route, shape, variant, form = case
+    key = ('inline-2559', *case)
+    child_route = route.startswith('child-')
+    temp = tmp_path / 'host-temp'
+    temp.mkdir()
+    monkeypatch.setattr(tempfile, 'tempdir', str(temp))
+    if child_route:
+        _, _, ctx, reader, child, engine = _setup(host, 'own_engine')
+        session = 'child'
+    else:
+        engine = reader = _engine(tmp_path)
+        session = 'S1'
+    home = Path(engine._hermes_home)
+    from hermes_lcm.externalize import DEFAULT_LARGE_OUTPUT_DIRNAME
+    storage = Path(engine._config.large_output_externalization_path or home / DEFAULT_LARGE_OUTPUT_DIRNAME)
+    shaped = _inline_row(shape, variant)
+    if form == 'invalid-json':
+        shaped['tool_calls'][0]['function']['arguments'] = shaped['tool_calls'][0]['function']['arguments'][:-1]
+    if child_route:
+        first = [{'role': 'user', 'content': 'Write the attachment file.' if shape == 'T7'
+                  else 'Look at what I send next.'}, shaped]
+        if shape == 'T7':
+            first.append({'role': 'tool', 'tool_call_id': 'm1', 'content': 'wrote a.b64'})
+        first.append({'role': 'assistant', 'content': 'Done: a.b64 written.' if shape == 'T7'
+                      else 'It is a PNG attachment.'})
+    else:
+        first = [{'role': 'user', 'content': 'A'}, {'role': 'assistant', 'content': 'B'}]
+        first += ([{'role': 'user', 'content': 'C'}, shaped] if shape == 'T7' else
+                  [shaped, {'role': 'assistant', 'content': '', 'tool_calls': [
+                      {'id': 'm1', 'type': 'function', 'function': {'name': 'terminal', 'arguments': '{}'}}]}])
+        first += [{'role': 'tool', 'tool_call_id': 'm1', 'content': 'ok 1'}]
+        first += [{'role': r, 'content': t} for r, t in
+                  (('assistant', 'D'), ('user', 'E'), ('assistant', 'F'), ('user', 'G'), ('assistant', 'H'))]
+    for i, m in enumerate(first):
+        m['timestamp'] = float(i + 1)
+    counts, steps, host_steps, copies = [], [], [], []
+    shaped_id = _inline_identity(shaped)
+    produced = set()
+
+    def record(handed):
+        if child_route:
+            aux = ctx.module('aux_session')
+            warned = set(aux._LIVE_CHILD_WARNED)
+            aux.drain_live_child_stores(60.0)
+            assert aux._LIVE_CHILD_WARNED <= warned, 'live-child store timed out'
+        rows = reader._store.get_session_messages(session)
+        counts.append(len(rows))
+        steps.append(_inline_snapshot(rows, storage))
+        host_steps.append(Counter(_inline_identity(m) for m in handed))
+        copies.append(sum(_inline_identity(row, storage) == shaped_id for row in rows))
+        return rows
+
+    try:
+        if child_route:
+            child.api_call(ctx, first, 1)
+        else:
+            engine.on_session_start(session, platform='cli', context_length=200_000, conversation_id='conv1')
+            engine.ingest(copy.deepcopy(first))
+            if route != 'reconcile-replay':
+                engine.on_session_start('foreground', platform='cli', context_length=200_000)
+        initial = record(first)
+        # Assert the stored forms came from real protection, never synthetic rows.
+        raw = json.dumps(initial, ensure_ascii=False)
+        assert ('[Externalized LCM ingest payload:' in raw) == (variant != 'P' and form != 'invalid-json')
+        view = copy.deepcopy(first)
+        target = next(m for m in view if _inline_identity(m) == shaped_id)
+        if form in ('whitespace', 'different', 'invalid-json') and shape == 'T7':
+            function = target['tool_calls'][0]['function']
+            if form == 'invalid-json':
+                function['arguments'] = '  ' + function['arguments'] + '  '
+            else:
+                args = json.loads(function['arguments'])
+                if form == 'different':
+                    args['content'] = args['content'].replace('hdr', 'Hdr', 1)
+                function['arguments'] = json.dumps(dict(reversed(list(args.items()))), indent=2)
+        elif form == 'different':
+            part = target['content'][-1]
+            if shape == 'T6i':
+                part['image_url']['url'] += 'A'
+            else:
+                part['text'] += 'A'
+        if route == 'child-counted':
+            view = view[1:-1]  # no stored-tail anchor: use the counted fallback
+        if route.startswith('child-compress-'):
+            summary = {'role': 'user', 'content': '[CONTEXT COMPACTION] attachment summary'}
+            compression_input = [*copy.deepcopy(view), {'role': 'assistant', 'content': 'compression input tail'}]
+            invocations = []
+
+            class ContextCompressor:
+                def __init__(self, **kwargs):
+                    self.compression_count = 0
+
+                def compress(self, messages, **kwargs):
+                    invocations.append(copy.deepcopy(messages))
+                    self.compression_count += 1
+                    kept = copy.deepcopy(messages[1:-2])
+                    if route.endswith('-s2'):
+                        for m in kept:
+                            if m['role'] == 'tool':
+                                m['content'] = _CLEARED_OUTPUT
+                    return [copy.deepcopy(summary), *kept, copy.deepcopy(messages[-1])]
+
+            module = types.ModuleType('agent.context_compressor')
+            module.ContextCompressor = ContextCompressor
+            monkeypatch.setitem(sys.modules, 'agent.context_compressor', module)
+            monkeypatch.setattr(engine, 'model', 'matrix-host-model')
+            output = child.compress(engine, compression_input)
+            assert invocations == [compression_input]
+            assert any(_inline_identity(m) == _inline_identity(target) for m in output)
+            before = {_inline_identity(m) for m in compression_input}
+            produced = {_inline_identity(m) for m in output} - before
+            view = copy.deepcopy(output[:-1])
+        view.append({'role': 'assistant', 'content': 'FINAL', 'timestamp': 11.0})
+
+        def replay(n):
+            nonlocal engine, reader
+            if route == 'reconcile-replay':
+                engine.shutdown()
+                engine = reader = _engine(tmp_path)
+                engine.on_session_start(session, platform='cli', context_length=200_000, conversation_id='conv1')
+                engine.ingest(copy.deepcopy(view))
+            elif child_route:
+                if route == 'child-end':
+                    child.end(engine, view)
+                else:
+                    child.api_call(ctx, view, n)
+            elif route.startswith('cold-'):
+                with monkeypatch.context() as patch:
+                    patch.setattr(engine._store, 'get_range', fail_end_read(engine))
+                    engine.on_session_end(session, view)
+                assert engine._pending_session_tails
+                engine._retry_pending_session_tails(deadline=time.monotonic() + 60)
+            else:
+                engine.on_session_end(session, view)
+            return record(view)
+
+        replay(2)
+        rows = replay(3)
+        if child_route:
+            child.end(engine, view)
+            rows = record(view)
+        current = Counter({(r, c, d): n for r, c, d, n in steps[-1]})
+        missing = sorted(set(_inline_identity(m) for m in view) - set(current))
+        contents = defaultdict(set)
+        for r, c, d in current:
+            contents[r, c].add(d)
+        result = {'counts': counts, 'steps': steps,
+                  'contents': [[r, c, sorted(ds)] for (r, c), ds in sorted(contents.items())],
+                  'missing': [list(m) for m in missing], 'markers': {}, 'absent': [],
+                  'replay_growth': counts[2] - counts[1], 'copies': copies}
+        record_dir = os.environ.get('LCM_2539_MATRIX_RECORD')
+        if record_dir:
+            directory = Path(record_dir)
+            directory.mkdir(parents=True, exist_ok=True)
+            (directory / ('--'.join(key) + '.json')).write_text(json.dumps({_cell_id(key): result}, sort_keys=True))
+            return
+        fixture = _fixture()
+        main = fixture['cells'][_cell_id(key)]
+        recovered = False
+        for old, new, handed in zip(main['steps'], steps, host_steps, strict=True):
+            baseline = Counter({(r, c, d): n for r, c, d, n in fixture['multisets'][old]})
+            candidate = Counter({(r, c, d): n for r, c, d, n in new})
+            allowed = handed - baseline
+            for identity in produced:
+                allowed.pop(identity, None)
+            assert not (candidate - baseline - allowed), f'STOP bar iii {_cell_id(key)}: {main["counts"]} / {counts}'
+            recovered |= bool(candidate - baseline)
+        if recovered:
+            _HOST_RECOVERY_CELLS.add(_cell_id(key))
+        kept_main = {(r, c, d) for r, c, ds in fixture['content_sets'][main['contents']] for d in ds}
+        assert kept_main <= set(current), f'STOP bar ii {_cell_id(key)}: {main["counts"]} / {counts}'
+        assert set(missing) <= set(map(tuple, fixture['missing_sets'][main['missing']])), 'STOP bar i: new host loss'
+        assert result['replay_growth'] <= main['replay_growth'], f'STOP bar iv {_cell_id(key)}'
+        # A changed string value must be a distinct row, including T7 */different.
+        if form == 'different':
+            assert _inline_identity(target) != shaped_id
+        gaps = []
+        if missing:
+            gaps.append('bar i: host rows absent')
+        if result['replay_growth']:
+            gaps.append('bar iv: second replay adds rows')
+        if child_route and form != 'different' and copies[-1] != 1:
+            assert main['copies'][-1] != 1, 'new one-copy regression'
+            gaps.append('bar v: shaped row must have one copy')
+        print(f'INLINE {_cell_id(key)} main={main["counts"]} candidate={counts} copies={copies} gaps={gaps}')
+        if gaps:
+            request.node.add_marker(pytest.mark.xfail(strict=True, raises=MainGap,
+                reason='main 7e67daf16 fixture: ' + ', '.join(gaps)))
+            raise MainGap(', '.join(gaps))
+    finally:
+        if not child_route:
+            engine.shutdown()
