@@ -541,7 +541,7 @@ def ingest_lines(store: MessageStore, lineage: Lineage, cursor: dict, lines: lis
     old = _old_lineage(store, lineage) if lineage.agent_id else None
     if old is not None:  # #2566: rows the old id-keyed lineage holds stay its own
         for uid, versions in _versions(store, old.key, uids).items():
-            known.setdefault(uid, []).extend(versions)
+            known[uid] = versions + known.get(uid, [])  # the old lineage's versions are the older ones
     fork, started = _fork_start(store, lineage)
     origins = _origins(store, lineage.key, uids) if fork else {}
     copied_from = cursor.get("fork_parent")  # the session that wrote the latest copy so far
@@ -923,7 +923,7 @@ def resolve(store: MessageStore, lineage: Lineage) -> Lineage:
     held = Path(cursor["path"]) if isinstance(cursor, dict) and isinstance(cursor.get("path"), str) else None
     if by_path is None or held is None or held == lineage.path or _agents_root(Lineage(*lineage[:2], held)) != _agents_root(lineage):
         return lineage
-    return by_path if held.exists() else lineage
+    return by_path if os.path.exists(held) else lineage  # never raises: an unreadable folder reads as gone
 
 
 JOURNAL_PREFIX = "journal/"  # a run's journal.jsonl: its own child lineage; no file-name id or hook id holds "/" (#2562)

@@ -180,7 +180,7 @@ its modification time is the hook's write time.
   run state and scripts, not transcripts, so it is not read. If Claude Code reuses an agent id
   within one session, each transcript gets its own lineage: a lineage is found by its path first,
   the first path keeps the agent id, and a later path is keyed by its path below `subagents/`
-  (#2566). A store written before that change, whose one lineage already moved between the two
+  while the first transcript is still on disk (#2566). A store written before that change, whose one lineage already moved between the two
   paths, keeps its rows and gains the missing lines; its audit stays unverified for that agent.
 - **One API response, several entries.** Claude Code writes each content block of a response as its
   own entry with its own uuid; the entries share `message.id`.

@@ -3247,3 +3247,27 @@ def test_a_deleted_id_does_not_forget_a_separate_transcript_with_the_same_relati
     finally:
         store.close()
     assert "late" in rows and len(rows) == len(set(rows))
+
+
+def test_a_path_key_revision_supersedes_its_real_predecessor_across_batches(tmp_path, home, hermes):
+    """#2576 review: in a store the old code flipped, the old id-keyed lineage holds V0 of sb1. The path key then takes
+    V1 and V2 in separate drains: V1 supersedes V0 and V2 supersedes V1 (never V0 again), so one version stays active."""
+    a = _append(tmp_path / "projects" / "-work" / "s1.jsonl", CONVERSATION[:2])
+    agents = a.parent / "s1" / "subagents"
+    paths = [_append(agents / "agent-x1.jsonl", _REUSED["first"]),
+             _append(agents / "workflows" / "wf_run1" / "agent-x1.jsonl", _REUSED["second"])]
+    store = _open(home, hermes)
+    try:
+        for path in (paths[0], paths[1], paths[0]):  # what the old code left: one id-keyed lineage moved A -> B -> A
+            cc.drain(store, cc.Lineage("s1", "x1", path))
+        keyed = cc.resolve(store, cc.Lineage("s1", "x1", paths[1]))
+        assert keyed.agent_id.startswith("/")
+        ids = []
+        for text in ("second task, v1", "second task, v2"):
+            _append(paths[1], [dict(_entry("user", "sb1", text), isSidechain=True)])
+            cc.drain(store, keyed)
+            ids.append(store.connection.execute("SELECT store_id FROM messages WHERE content = ?", (text,)).fetchone()[0])
+        [v0] = store.connection.execute("SELECT store_id FROM messages WHERE content = 'second task'").fetchone()
+        assert _relations(store, "supersedes") == sorted([(ids[0], v0), (ids[1], ids[0])])
+    finally:
+        store.close()
