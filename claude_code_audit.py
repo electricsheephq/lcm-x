@@ -752,15 +752,22 @@ def _expired(pending: dict, metadata: dict) -> str | None:
     return "no_prompt" if events == NO_PROMPT_EVENTS else None  # both seen by this home, nothing else
 
 
+def _ended_keys(metadata: dict, key: str) -> set[str]:
+    """#2571: a partial tail after the lineage's end is never taken. A subagent's also counts after its session's end
+    (#2566): Claude Code sends no SubagentStop to a session ended mid-task (exit, /clear, a closed terminal). The session
+    comes from the child's own cursor, for an id-keyed and a path-keyed child alike."""
+    cursor = metadata.get(CURSOR_PREFIX + key)
+    child = isinstance(cursor, dict) and cursor.get("agent_id") and isinstance(cursor.get("session_id"), str)
+    return {key, lineage_key(cursor["session_id"])} if child else {key}
+
+
 def _unverified(metadata: dict, records: list[dict], lineages: list[dict], session: str | None,
                 failed: list[Lineage | None]) -> list[str]:
     unknown = {row["lineage"] for row in lineages if not row["forgotten"] and (
         row["transcript_state"] != "ok" or row["generations_gone"] or row["pending_lines"]
         or row["files"]["uncaptured"] or row["named_other_paths"] or _subfolder_files_unverified(row)
         or (row["partial_tail_bytes"] and any(isinstance(ended := metadata.get(ENDED_PREFIX + key), dict)
-            and ended.get("ended") is True for key in {row["lineage"], row["lineage"].split("/agent:")[0]})))}
-    # #2571: a partial tail after the lineage's end is never taken; a subagent's also after its session's end (#2566:
-    # Claude Code sends no SubagentStop to a session ended mid-task, by exit, /clear or a closed terminal)
+            and ended.get("ended") is True for key in _ended_keys(metadata, row["lineage"]))))}
     if (session is not None and CURSOR_PREFIX + lineage_key(session) not in metadata
             and PENDING_PREFIX + lineage_key(session) not in metadata):  # a pending session is judged below
         unknown.add(lineage_key(session))

@@ -581,9 +581,12 @@ gate's instrument (see "The audit" in the test plan).
     drops it as stale behind an undrained hook, nor lets another end-class hook replace it); only a newer hook of that lineage (the session resumed) clears it.
     A subagent's partial tail also counts after its session's end: Claude Code sends no `SubagentStop` to a session
     ended while a subagent is mid-task (by exit, `/clear` or a closed terminal; checked on real sessions), so the
-    session's end ends its subagents too, until the session resumes (#2566). Known limit: a resumed session whose newer
-    hook's pointer is replaced by a delayed older `Stop` before the worker drains it stays unverified until a newer
-    hook of that session drains (the safe side);
+    session's end ends its subagents too, until the session resumes (#2566). Known limits: a Claude Code process
+    killed before any end hook (no `SessionEnd`, no `SubagentStop`) leaves a torn last record counted in the verdict
+    while the session still reads verified; a resumed session whose newer hook's pointer is replaced by a delayed older
+    `Stop` before the worker drains it stays unverified until a newer hook of that session drains (the safe side); and
+    a subagent whose tool call and result span a `/clear` (it goes on in a new transcript under the new session) leaves
+    the new session's audit not ok with one orphan (it fails closed; nothing is lost);
   - files under a `tool-results` subfolder (`subfolder_files`; a symlink to a folder, or a folder that cannot be
     listed, counts one), which capture does not store as files: until #2554 they leave the lineage unverified, and the
     verdict names them ("N files in tool-results subfolders not stored (M lineages)");
