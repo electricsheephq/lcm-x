@@ -3266,25 +3266,37 @@ def test_an_agent_file_with_no_id_is_never_swept_as_its_session(tmp_path, home, 
 @pytest.mark.parametrize("order", ["end_then_precompact", "precompact_then_end"])
 def test_a_precompact_around_an_undrained_session_end_captures_every_line_once(tmp_path, home, hermes, order):
     """#2571: a PreCompact spooled behind an undrained SessionEnd is now kept out (kept_end) instead of replacing it.
-    In both arrival orders every transcript line is captured exactly once, as message rows once each, and the audit
-    verdict is the same as before the change: verified, with no partial tail."""
+    Between the SessionEnd and the session's next hook, a transcript still mid-write reads unverified (before this
+    change, in the kept_end order, it read verified); that is the safe direction. After the next hook, in both orders,
+    every transcript line is captured exactly once, message rows once each, and the verdict is unchanged: verified."""
     from hermes_lcm import claude_code_audit as ca
 
+    def spool(event, stamp):
+        return hook.spool(home, {"host": "claude-code", "event": event, "session_id": "s1", "agent_id": None,
+                                 "transcript_path": str(a), "agent_transcript_path": None,
+                                 "hook_started_ns": stamp, "prompt_id": "c1"})
+
+    hook = _hook()
     a = _append(tmp_path / "projects" / "-work" / "s1.jsonl", CONVERSATION[:2])
-    _record(_hook(), home, a, event="UserPromptSubmit", hook_started_ns=1)
+    _record(hook, home, a, event="UserPromptSubmit", hook_started_ns=1)
     cc.run_worker(home, hermes_home=hermes, settle_s=0)
     _append(a, CONVERSATION[2:4])
     first, second = (("SessionEnd", 5), ("PreCompact", 6)) if order == "end_then_precompact" else (
         ("PreCompact", 5), ("SessionEnd", 6))
-    hook = _hook()
-    outcomes = [hook.spool(home, {"host": "claude-code", "event": first[0], "session_id": "s1", "agent_id": None,
-                                  "transcript_path": str(a), "agent_transcript_path": None,
-                                  "hook_started_ns": first[1], "prompt_id": "c1"})]
-    _append(a, CONVERSATION[4:])  # written between the two hooks, before any drain
-    outcomes.append(hook.spool(home, {"host": "claude-code", "event": second[0], "session_id": "s1", "agent_id": None,
-                                      "transcript_path": str(a), "agent_transcript_path": None,
-                                      "hook_started_ns": second[1], "prompt_id": "c1"}))
+    outcomes = [spool(*first)]
+    _append(a, CONVERSATION[4:-1])  # written between the two hooks, before any drain
+    outcomes.append(spool(*second))
     assert outcomes == (["spooled", "kept_end"] if order == "end_then_precompact" else ["spooled", "spooled"])
+    last = json.dumps(CONVERSATION[-1]) + "\n"
+    with open(a, "a", encoding="utf-8") as handle:  # the resumed session is still writing its last record
+        handle.write(last[:20])
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    between = ca.audit(home)
+    assert not between["verified"]  # the end is the lineage's newest drained hook and its tail is partial: never held
+    assert next(row for row in between["lineages"] if row["lineage"] == "claude-code:s1")["partial_tail_bytes"]
+    with open(a, "a", encoding="utf-8") as handle:
+        handle.write(last[20:])
+    _record(hook, home, a, event="UserPromptSubmit", hook_started_ns=7)  # the session's next hook
     for _ in range(2):
         cc.run_worker(home, hermes_home=hermes, settle_s=0)
     store = _open(home, hermes)
