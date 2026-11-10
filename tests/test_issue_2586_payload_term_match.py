@@ -82,6 +82,13 @@ def test_a_capped_any_term_retry_reports_response_cap(archive, monkeypatch):
     assert "response_cap" in result["partial"]["reasons"]
 
 
+def test_a_case_fold_that_changes_length_still_matches_by_terms(archive):
+    dotted_i = chr(0x130)  # lower() turns it into two characters, so offsets fall back to the plain regex search
+    saved(archive, f"{dotted_i}stanbul storm relay evacuation badge: {GOLD}")
+    hit, = found(archive.call(query="badge storm"))
+    assert hit["snippet"].find("storm") >= 0
+
+
 def test_an_out_of_scope_payload_never_matches(archive):
     saved(archive, FACT, session="other")
     archive.store.append("saved", {"role": "user", "content": "unrelated"})

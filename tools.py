@@ -1315,10 +1315,19 @@ def _payload_match(content: str, query: str, tokens: list[str], operands: list[s
             groups.append([])
         elif token in words:
             groups[-1].append(token)
+    lower = content.lower()
+    lower = lower if len(lower) == len(content) else None  # a case fold that changes length: offsets would drift
     for operand, parts in words.items():
         prefix = not operand.startswith('"') and operand.endswith("*")
-        pattern = f"(?<!{_PAYLOAD_TOKEN})" + f"(?:(?!{_PAYLOAD_TOKEN})[\\s\\S])+".join(map(re.escape, parts))
-        if (hit := re.search(pattern + ("" if prefix else f"(?!{_PAYLOAD_TOKEN})"), content, re.IGNORECASE)) is not None:
+        pattern = re.compile(f"(?<!{_PAYLOAD_TOKEN})" + f"(?:(?!{_PAYLOAD_TOKEN})[\\s\\S])+".join(map(re.escape, parts))
+                             + ("" if prefix else f"(?!{_PAYLOAD_TOKEN})"), re.IGNORECASE)
+        if lower is None:
+            hit = pattern.search(content)
+        else:  # find the first word at C speed, then check the boundaries and the phrase only there
+            first, hit, position = parts[0].lower(), None, lower.find(parts[0].lower())
+            while position != -1 and (hit := pattern.match(content, position)) is None:
+                position = lower.find(first, position + 1)
+        if hit is not None:
             hits[operand] = hit
     full = [group for group in groups if group and all(operand in hits for operand in group)]
     if not full and not (any_term and hits):
