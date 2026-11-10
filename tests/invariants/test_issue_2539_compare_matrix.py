@@ -199,8 +199,8 @@ def _print_exception_cells(request, tmp_path_factory):
         reporter.write_line(f'#2539 corrected bar (iii): {len(_HOST_RECOVERY_CELLS)} cells where the candidate keeps rows main loses (#2543)')
 
 
-def _legacy_marker_losses(original, rows, main, candidate, storage, home, temp):
-    """R4-7: unchanged v0.29.2 bare row in place of its own file's body only."""
+def _legacy_marker_losses(original, rows, handed, main, candidate, storage, home, temp):
+    """R4-7: unchanged v0.29.2 bare row in place of its own file's body only, when the host re-sent that marker."""
     if candidate - main:
         return set()  # No candidate-only row in this step, even a host recovery.
     allowed = set()
@@ -211,6 +211,9 @@ def _legacy_marker_losses(original, rows, main, candidate, storage, home, temp):
         match = _MARKER.fullmatch(marker)
         if not match:
             continue
+        if not any(m.get('role') == 'tool' and m.get('tool_call_id') == old['tool_call_id']
+                   and m.get('content') == marker for m in handed):
+            continue  # The host must have re-sent this exact marker, not the body or other text.
         path = Path(match[2])  # The actual dump's file, never a guessed body.
         if not path.is_file():
             continue
@@ -346,7 +349,7 @@ def _run_case(case, host, tmp_path, monkeypatch, request, characterization=None)
     if route == 'reconcile-replay':
         for i, message in enumerate(first):
             message.setdefault('timestamp', 1762700001.0 + i)
-    counts, absent, steps, host_steps, row_steps = [], [], [], [], []
+    counts, absent, steps, host_steps, row_steps, handed_steps = [], [], [], [], [], []
     produced = set()
 
     def record_step(handed):
@@ -359,6 +362,7 @@ def _run_case(case, host, tmp_path, monkeypatch, request, characterization=None)
             assert aux._LIVE_CHILD_WARNED <= warned, 'a live-child store did not land within 60 s'
         rows = reader._store.get_session_messages(session)
         row_steps.append(rows)
+        handed_steps.append(copy.deepcopy(handed))
         counts.append(len(rows))
         multiset = _snapshot(rows, storage, home, temp, {})[3]
         steps.append([[r, c, d, n] for (r, c, d), n in sorted(multiset.items())])
@@ -545,12 +549,13 @@ def _run_case(case, host, tmp_path, monkeypatch, request, characterization=None)
         extras = False
         unmatched = []
         legacy_losses = set()
-        for main_index, current, host_rows, step_rows in zip(baseline['steps'], steps, host_steps, row_steps, strict=True):
+        for main_index, current, host_rows, step_rows, handed in zip(baseline['steps'], steps, host_steps, row_steps,
+                                                                   handed_steps, strict=True):
             main = Counter({(r, c, d): n for r, c, d, n in fixture['multisets'][main_index]})
             candidate = Counter({(r, c, d): n for r, c, d, n in current})
             extras |= bool(candidate - main)
             unmatched.extend(_unmatched_extras(main, candidate, host_rows, produced))
-            permitted = (_legacy_marker_losses(row_steps[0], step_rows, main, candidate, storage, home, temp)
+            permitted = (_legacy_marker_losses(row_steps[0], step_rows, handed, main, candidate, storage, home, temp)
                          if legacy else set())
             # Bar (ii) concerns what main ends with; retain the last step's
             # proof, including its no-candidate-only-row condition.
@@ -620,7 +625,7 @@ def test_step_multiset_requires_distinct_host_rows():
     assert _unmatched_extras(main, main + Counter({lost: 1}), host_rows, {lost}) == [lost]
 
 
-@pytest.mark.parametrize('wrong', [None, 'changed-row', 'different-file-body', 'call-id', 'extra-row'])
+@pytest.mark.parametrize('wrong', [None, 'changed-row', 'different-file-body', 'call-id', 'extra-row', 'host-sent-body'])
 def test_legacy_exception_requires_dump_row_and_its_file(wrong, tmp_path):
     path = tmp_path / 'saved.txt'
     path.write_text('abcde')
@@ -638,7 +643,9 @@ def test_legacy_exception_requires_dump_row_and_its_file(wrong, tmp_path):
         main = Counter({('tool', 'other', missing[2]): 1, held: 1})
     elif wrong == 'extra-row':
         candidate[('assistant', '', _sha('new'))] += 1
-    assert _legacy_marker_losses([old], [row], main, candidate, tmp_path, tmp_path, tmp_path) == (
+    handed = [{'role': 'tool', 'tool_call_id': 'c1',
+               'content': 'abcde' if wrong == 'host-sent-body' else old['content']}]
+    assert _legacy_marker_losses([old], [row], handed, main, candidate, tmp_path, tmp_path, tmp_path) == (
         {missing} if wrong is None else set())
 
 
