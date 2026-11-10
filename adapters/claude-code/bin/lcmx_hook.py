@@ -270,7 +270,8 @@ def _spool_locked(directory: Path, key: str, record: Mapping[str, Any]) -> str:
             if previous.get("event") in END_EVENTS and record["event"] not in END_EVENTS:
                 kept = "kept_end"
             elif ((previous.get("event") in END_EVENTS) == (record["event"] in END_EVENTS)
-                    and previous.get("hook_started_ns", -1) > record.get("hook_started_ns", 0)):
+                    and previous.get("hook_started_ns", -1) > record.get("hook_started_ns", 0)
+                    and record["event"] not in {"SessionEnd", "SubagentStop"} - {previous.get("event")}):  # #2571: end beats any clock
                 kept = "stale"
             if kept:  # the kept pointer still learns this record's facts
                 if facts != {name: previous.get(name) for name in facts}:

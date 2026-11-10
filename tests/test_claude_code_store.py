@@ -3162,7 +3162,8 @@ def test_the_ended_partial_tail_rule_table(tmp_path, home, hermes, kind, end, ta
 
 
 @pytest.mark.parametrize("shape", ["child_stops_after_session_end", "older_end_after_resume", "resumed_still_partial",
-                                   "end_behind_a_clock_step", "older_hook_after_an_equal_end", "end_with_no_stamp"])
+                                   "end_behind_a_clock_step", "older_hook_after_an_equal_end", "end_with_no_stamp",
+                                   "end_behind_a_waiting_stop"])
 def test_the_ended_marker_follows_the_lineages_own_newest_hook(tmp_path, home, hermes, shape):
     """#2571 review: a child's SubagentStop never clears its session's end; an end marks the lineage ended whatever its
     stamp (a clock stepped back, a tie, no stamp), so an older SessionEnd drained after a newer resume is unverified until
@@ -3187,6 +3188,9 @@ def test_the_ended_marker_follows_the_lineages_own_newest_hook(tmp_path, home, h
         cc.run_worker(home, hermes_home=hermes, settle_s=0)
         assert not ca.audit(home)["verified"]  # fails toward unverified ...
         _record(_hook(), home, a, event="UserPromptSubmit", hook_started_ns=12)  # ... until the next newer own hook
+    elif shape == "end_behind_a_waiting_stop":  # the hook must not drop the end as stale against an undrained Stop
+        _record(_hook(), home, a, event="Stop", hook_started_ns=9)
+        _record(_hook(), home, a, event="SessionEnd", hook_started_ns=5)
     elif shape == "resumed_still_partial":
         _record(_hook(), home, a, event="SessionEnd", hook_started_ns=5)
         cc.run_worker(home, hermes_home=hermes, settle_s=0)
