@@ -145,6 +145,8 @@ Two opt-ins discard content by design: durable sensitive-pattern redaction (`LCM
   <img src="docs/lcm_compression.png" alt="LCM compression" width="700">
 </p>
 
+<p align="center"><sub>Illustration. The protected fresh tail is configurable: by default it is the last 24 messages (<code>LCM_FRESH_TAIL_COUNT</code>) within a token cap (<code>LCM_FRESH_TAIL_MAX_TOKENS</code>). Under host-observed context pressure it yields once it alone has blocked compaction three times in a row (the default). See <a href="#common-settings">Common settings</a>.</sub></p>
+
 Core capabilities:
 
 - **SQLite message store** - preserves raw messages before compaction
@@ -1324,6 +1326,8 @@ exposes retrieval tools that can drill back into exact stored sources.
 <p align="center">
   <img src="docs/architecture.png" alt="LCM-X architecture" width="700">
 </p>
+
+<p align="center"><sub>Illustration. The fresh tail defaults to the last 24 messages (<code>LCM_FRESH_TAIL_COUNT</code>) within a token cap (<code>LCM_FRESH_TAIL_MAX_TOKENS</code>). The store is a local SQLite file that keeps every raw message by default. It is not write-protected. The opt-ins listed under <a href="#try-it">Try it</a> (sensitive-pattern redaction, message ignore patterns and the operator's <code>/lcm doctor clean apply</code>) remove content on purpose, and sessions matched by the ignore or stateless session patterns are not stored at all.</sub></p>
 
 ## How it works
 

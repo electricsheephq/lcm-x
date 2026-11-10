@@ -374,3 +374,74 @@ def test_a_string_and_an_object_with_the_same_text_are_different_arguments(tmp_p
             [] if isinstance(stored_args, str) else None)  # reused, or a non-standard stored shape (a trip)
     finally:
         engine.shutdown()
+
+
+def _anchor_presence(tmp_path, stored_args, shown_args):
+    from tests.test_anchor_unstored_before_cursor import _engine, _presence, SESSION
+
+    def call(args):
+        return {"role": "assistant", "content": "", "tool_calls": [
+            {"id": "call_s", "type": "function", "function": {"name": "read_file", "arguments": args}}]}
+
+    engine = _engine(tmp_path)
+    try:
+        engine._store.append_batch(SESSION, [call(stored_args)])
+        result = {"role": "tool", "tool_call_id": "call_s", "tool_name": "read_file", "content": "file text"}
+        return _presence(engine, [call(shown_args), result])
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("stored_args,shown_args", [
+    ('{"n": 1.0}', '{"n": 1.00}'),
+    ('{"n": 0}', '{"n": -0}'),
+], ids=["reformat", "signed-zero"])
+def test_the_anchor_reads_a_respelled_number_as_the_stored_invocation(tmp_path, stored_args, shown_args):
+    """The same number spelled differently is one invocation: only its result is unaccounted."""
+    assert _anchor_presence(tmp_path, stored_args, shown_args) == [1]
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError,
+                   reason="#2172: the anchor reads different numerals as one float (one definition planned for v0.30.1)")
+@pytest.mark.parametrize("stored_args,shown_args", [
+    ('{"n": 0.1}', '{"n": 0.10000000000000001}'),
+    ('{"n": 1e400}', '{"n": 2e400}'),
+], ids=["precision", "overflow"])
+def test_the_anchor_reads_different_numerals_as_one_float(tmp_path, stored_args, shown_args):
+    """Different numerals are different arguments, so the re-sent call is a new invocation, not the stored one."""
+    assert _anchor_presence(tmp_path, stored_args, shown_args) != [1]
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError,
+                   reason="#2172: a replaced unanswered call with a re-spelled float-equal number is taken as the stored call")
+@pytest.mark.parametrize("stored_args,shown_args", [
+    ('{"n": 0.1}', '{"n": 0.10000000000000001}'),
+    ('{"n": 1e400}', '{"n": 2e400}'),
+], ids=["precision", "overflow"])
+def test_a_replaced_unanswered_call_with_a_different_numeral_is_stored(tmp_path, stored_args, shown_args):
+    """Ingest level: turn start stores the unanswered call; the host replaces the turn with a call under the same id
+    whose numeral differs but reads as one float, then its result and a reply. Today the result is stored and the new
+    call is not (v0.29.2 stores neither); a fix stores the new call."""
+    engine = _engine(tmp_path)
+    try:
+        history = [_u("P1 first", 100), _a("A1 reply", 101), _u("P2 second", 110), _a("A2 reply", 111)]
+        engine.ingest(history)
+        engine.ingest([*history, _u("poll the file", 120), _a("let me look", 121), _call("call_0", stored_args, 122)])
+        engine.ingest([*history, _u("poll the other file", 130), _call("call_0", shown_args, 131),
+                       _res("call_0", "B file text", 132), _a("A after B", 133)])
+        rows = _stored(engine)
+        if sum(row.get("content") == "B file text" for row in rows) != 1:
+            pytest.fail("setup: the new call's result was not stored once")
+
+        def calls_with(args):
+            count = 0
+            for row in rows:
+                calls = row.get("tool_calls") or []
+                calls = json.loads(calls) if isinstance(calls, str) else calls
+                count += sum(1 for c in calls if c.get("function", {}).get("arguments") == args)
+            return count
+        if calls_with(stored_args) != 1:  # positive control for the matcher, outside the xfail
+            pytest.fail("setup: the stored call was not found by its arguments")
+        assert calls_with(shown_args) == 1
+    finally:
+        engine.shutdown()

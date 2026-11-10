@@ -91,8 +91,8 @@ PROFILE_ENV_EXTRA_KEYS = ("FASTEMBED_CACHE_PATH",)
 TOKENIZER_WAIT_S = 30.0
 
 _QUALIFIED_ID = re.compile(r"([0-9a-f]{32}):(.*)", re.DOTALL)
-_SCALAR_ID_ARGS = ("store_id", "node_id", "session_id", "externalized_ref", "after_store_id")
-_INTEGER_ID_ARGS = frozenset({"store_id", "node_id", "after_store_id"})
+_SCALAR_ID_ARGS = ("store_id", "node_id", "session_id", "externalized_ref", "after_store_id", "anchor_store_id")
+_INTEGER_ID_ARGS = frozenset({"store_id", "node_id", "after_store_id", "anchor_store_id"})
 _LIST_ID_ARGS = ("seen_refs", "exclude_session_ids", "externalized_refs")
 # python-dotenv's grammar (Hermes' profile loader parses <home>/.env with it), applied one line at a time.
 _DOTENV_LINE_BREAK = re.compile(r"\r\n|\n|\r")
@@ -174,11 +174,16 @@ def disabled_tool_names(environ: MutableMapping[str, str] | None = None) -> set[
     return {part.strip() for part in raw.split(",") if part.strip()}
 
 
-def tool_definitions(disabled: set[str]) -> list[dict[str, Any]]:
+def tool_definitions(disabled: set[str], config: LCMConfig | None = None) -> list[dict[str, Any]]:
+    selected = list(READER_TOOLS.values())
+    if getattr(config, "recall_delivery_unit", "hits") == "session":
+        from .recall_session import session_schema
+        selected = [session_schema(s) for s in selected]
+    selected = schemas.recall_guidance_schemas(selected, getattr(config, "recall_guidance", "v1"))
     return [{"name": name, "description": schema.get("description", "") + READER_NOTE,
              "inputSchema": schema.get("parameters") or {"type": "object", "properties": {}},
              "annotations": {"readOnlyHint": True}}  # every reader tool only reads the store
-            for name, schema in READER_TOOLS.items() if name not in disabled]
+            for schema in selected if (name := schema["name"]) not in disabled]
 
 
 # -- Engine shim ----------------------------------------------------------------
@@ -507,7 +512,7 @@ def handle(reader: StoreReader, request: Any) -> dict[str, Any] | None:
             "serverInfo": {"name": SERVER_NAME, "version": _plugin_version()},
         }
     elif method == "tools/list":
-        result = {"tools": tool_definitions(reader.disabled)}
+        result = {"tools": tool_definitions(reader.disabled, reader.config)}
     elif method == "tools/call":
         text, is_error = reader.call(params.get("name"), params.get("arguments"))
         result = {"content": [{"type": "text", "text": text}], "isError": is_error}

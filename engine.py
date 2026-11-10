@@ -5845,6 +5845,8 @@ class LCMEngine(
         if getattr(getattr(self, "_config", None), "recall_delivery_unit", "hits") == "session":
             from .recall_session import session_schema
             schemas = [session_schema(s) for s in schemas]
+        from .schemas import recall_guidance_schemas
+        schemas = recall_guidance_schemas(schemas, getattr(getattr(self, "_config", None), "recall_guidance", "v1"))
         if disabled:
             return [s for s in schemas if s.get("name") not in disabled]
         return schemas
@@ -5900,7 +5902,7 @@ class LCMEngine(
         handler = handlers.get(name)
         if handler:
             return handler(args, engine=self,
-                           **{k: v for k, v in kwargs.items() if k in {"delivery_unit", "delivery_order", "adjacent_reply", "summary_event_time", "snippet_window_hits", "extra_entries", "later_statements"}})
+                           **{k: v for k, v in kwargs.items() if k in {"delivery_unit", "delivery_order", "adjacent_reply", "summary_event_time", "snippet_window_hits", "extra_entries", "later_statements", "session_hints", "recall_guidance"}})
         return json.dumps({"error": f"Unknown LCM tool: {name}"})
 
     def _database_path_source(self) -> str:
@@ -8829,10 +8831,10 @@ class LCMEngine(
                 self._ingest_ledger_attempt["recovery_probe"] = (
                     reconciled_existing_session and bool(bind_session_counts and bind_session_counts[0]))
                 cursor0_batch = (
-                    reconciled_existing_session and cursor == 0
+                    reconciled_existing_session and today == 0
                     and self._last_ingest_reconciliation.get("action") == "persisted batch"
                     and self._last_ingest_reconciliation.get("reason") == "persisted ambiguous delta"
-                    and self._last_ingest_reconciliation.get("cursor") == 0)
+                    or reconciled_existing_session and today == 0 and ledger_run["k"] > 0)
                 # #2029: a rotation child re-sent from cursor 0 without a commit proof (no reconciliation ran) stores
                 # its predecessors' rows again; annotate them against the recorded rotation chain.
                 # Only the unreconciled route gains the chain: #2305's reconciled route keeps its own-session targets.
@@ -10765,7 +10767,7 @@ class LCMEngine(
                 # FTS-only anchor under the floor would displace an eligible hit.
                 fts_anchor=False,
                 delivery_unit="hits",
-                delivery_order="score", adjacent_reply=False, later_statements=0,
+                delivery_order="score", adjacent_reply=False, later_statements=0, session_hints=False, recall_guidance="v1",
                 snippet_window_hits=0, extra_entries=0,
                 summary_event_time=False,
             )
@@ -12378,8 +12380,7 @@ class LCMEngine(
                 read, stored_index = read + len(stored), 0
                 continue
             row, message = stored[stored_index], view[index]
-            if (self._session_end_prefix_compare_identity(row, session_id=session, hermes_home=home) !=
-                    self._session_end_prefix_compare_identity(message, session_id=session, hermes_home=home)):
+            if not self._session_end_rows_equal(row, message, session_id=session, hermes_home=home):
                 if self._cold_tail_ingest_drops(message):
                     index += 1
                     continue
@@ -12406,12 +12407,11 @@ class LCMEngine(
         _, message, stamp = conflict
         session, home, start = tail["session_id"], tail["hermes_home"], 0
         conversation = _normalize_conversation_id_value(tail["conversation_id"])
-        identity = self._session_end_prefix_compare_identity(message, session_id=session, hermes_home=home)
         while rows := tail["store"].get_range(session, start_id=start, limit=1000,
                 conversation_id=conversation):
             if any(_normalize_conversation_id_value(row.get("conversation_id")) == conversation and
                    _normalize_observed_at(row.get("observed_at")) == stamp and
-                   self._session_end_prefix_compare_identity(row, session_id=session, hermes_home=home) == identity
+                   self._session_end_rows_equal(row, message, session_id=session, hermes_home=home)
                    for row in rows):
                 return True
             if deadline is not None and time.monotonic() >= deadline:
@@ -12428,8 +12428,7 @@ class LCMEngine(
         conversation = _normalize_conversation_id_value(tail["conversation_id"])
         stored = tail["store"].get_range(session, limit=len(view) + 1, conversation_id=conversation)
         for row, message in zip(stored, view):
-            if (self._session_end_prefix_compare_identity(row, session_id=session, hermes_home=hermes_home) !=
-                    self._session_end_prefix_compare_identity(message, session_id=session, hermes_home=hermes_home)):
+            if not self._session_end_rows_equal(row, message, session_id=session, hermes_home=hermes_home):
                 return None
             stamp, seen = _normalize_observed_at(message.get("timestamp")), _normalize_observed_at(row.get("observed_at"))
             if stamps and None not in (stamp, seen) and stamp != seen:
@@ -12588,11 +12587,12 @@ class LCMEngine(
             rows = tail["store"].get_range(session, start_id=start, limit=1000, conversation_id=conversation)
             if not rows:
                 break
-            stored.update((self._session_end_prefix_compare_identity(row, session_id=session, hermes_home=home),
+            stored.update((self._session_end_prefix_compare_identity(row, session_id=session, hermes_home=home, recover_markers=False),
                            _normalize_observed_at(row.get("observed_at"))) for row in rows
                           if _normalize_conversation_id_value(row.get("conversation_id")) == conversation)
             start = rows[-1]["store_id"] + 1
-        wanted = Counter((self._session_end_prefix_compare_identity(message, session_id=session, hermes_home=home),
+        stored_identities = {identity for identity, _ in stored}
+        wanted = Counter((self._session_end_counted_identity(message, stored_identities, session_id=session, hermes_home=home),
                           _normalize_observed_at(message.get("timestamp"))) for message in self._cold_tail_ingest_view(tail))
         missing, available = 0, Counter()
         for (identity, stamp), amount in wanted.items():

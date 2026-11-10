@@ -61,6 +61,46 @@ score order; ties keep score order. The default `score` preserves existing outpu
 Only time mode adds `provenance.delivery_order: "time"`; session delivery and
 internal recall consumers keep their existing order.
 
+Set `recall_guidance: v2` (env `LCM_RECALL_GUIDANCE=v2`; default `v1`) to
+give the model guidance for questions spanning several conversations. The engine,
+plugin registry and read-only MCP reader serve the same guidance. In hits delivery,
+`detail="answer_ready"` adds `sessions_delivered` and `sessions_in_pool` under
+`provenance.answer_ready`. The counts describe distinct sessions in the returned hits
+and ranked candidate pool plus delivered later-statement children. With
+`detail="answer_ready"`, compare the counts; when fewer sessions were delivered than
+are in the pool, call again with `exclude_session_ids` set to the sessions already read.
+When a hit carries a `session_hint`, use it to read around that hit.
+Session-delivery guidance omits the hits-only provenance instruction. These are bounded
+retrieval signals, not proof that all matching sessions have been searched.
+
+With v2, `lcm_load_session` advertises `anchor_store_id`, `before` (default 6)
+and `after` (default 12). The anchor must belong to the supplied `session_id`;
+otherwise the tool returns an error without rows. Each side clamps to 0..40,
+and rows come back in store order. Role and inclusive stored-write-time filters
+apply within that window, followed by `after_store_id` and the page limit.
+When `has_more` is true, continue with `after_store_id=next_cursor` without the anchor to read onward
+through the session. The handler accepts anchor arguments under either guidance
+version; `next_cursor` is null when `has_more` is false. Existing internal window callers retain their 12-row clamp per side.
+
+Set `recall_session_hints: true` (env `LCM_RECALL_SESSION_HINTS=true`; default
+`false`) to add `session_hint` to answer-ready hits and summary leads. It is a
+call string such as `lcm_load_session(session_id='session-a', anchor_store_id=42)`.
+The session ID comes from the anchor's stored row, including for summary sources,
+so the hint still works after a compression rollover moves summary ownership.
+A missing source row or failed hint read omits only that hint. The two settings are independent; environment
+values override their `lcm.*` YAML keys. For example:
+
+```yaml
+lcm:
+  recall_guidance: v2
+  recall_session_hints: true
+```
+
+Both settings leave internal recall consumers unchanged, including proactive
+recall, pre-answer retrieval and evidence wrappers. Defaults preserve existing
+output and schemas. Agentic FMP runs must set these keys through `--recall-option`;
+FMP constructs its config explicitly and ignores environment overrides.
+
 Set `recall_summary_event_time: true` (or `LCM_RECALL_SUMMARY_EVENT_TIME=true`,
 which wins over the YAML key) to give model-called `lcm_recall` summary hits, and
 session-delivery summary leads, the span of their events:
@@ -114,7 +154,7 @@ step. This is configuration, not a model-visible tool argument.
 
 `recall_snippet_window_hits` (env `LCM_RECALL_SNIPPET_WINDOW_HITS`, YAML `lcm.recall_snippet_window_hits`) is off by default (`0`). Set N (clamped to 25) to give the first N selected message-excerpt hits in `detail="snippets"`, from chunk (vector) or keyword search, windows of up to 2,400 characters centred on the matched chunk, else the keyword match, else the query match; shorter messages come back whole. Each window carries `snippet_window` offsets, lengths and truncation metadata. Summary hits, adjacent replies and hits without hydrated content keep their existing snippets. Ranking and selection are unchanged. Larger snippets can mean fewer hits fit under `response_char_cap`; the response then sets `response_cap_truncated: true`. A skipped window read keeps the original snippets and reports `snippet_window_skipped` (`deadline` or `read_error`). Proactive recall ignores this setting. `answer_ready` and `delivery_unit="session"` are unchanged. Invalid values (including bools and negatives) warn and use `0`; environment overrides YAML.
 
-- `recall_later_statements` (env `LCM_RECALL_LATER_STATEMENTS`, YAML `lcm.recall_later_statements`; environment overrides YAML) defaults to `0`, preserving recall output and tool schemas. Integers clamp to 0..5; negative or invalid values warn and use 0. When enabled, the first N eligible message hits within the delivery window get one bounded FTS follow-up using its subject terms, with at most one later stored row placed directly after its source (chronological with time ordering). Scope and exclusions remain in force; candidates already in the delivery window, verbatim normalized copies, older/equal rows, and rows after the call's wall clock are skipped. Eligibility compares observed event times, or stored write times only when both observations are absent; failed time reads skip expansion. Adjacent-reply rows and already-seen delta refs are not sources; pool matches outside the window are moved into it. Children ship only with their source. This is a lexical match, not a claim of replacement. The child carries `later_statement_of` and the source `has_later_statements`, naming stored row IDs. Existing hydration, citation, density, hit and character caps apply. `provenance.later_statements` reports `requested`, `searched`, `found`, `delivered`, and `ms`; failure discards the expansion and adds `later_statements_unavailable` (`deadline` or `read_error`). Internal recall and session delivery skip it. Not a tool argument; no stored rows are changed.
+- `recall_later_statements` (env `LCM_RECALL_LATER_STATEMENTS`, YAML `lcm.recall_later_statements`; environment overrides YAML) defaults to `0`, preserving recall output and tool schemas. Integers clamp to 0..5; negative or invalid values warn and use 0. After final selection, the first N eligible message hits get one bounded FTS follow-up using their subject terms, with at most one later stored row placed after its source (chronological with time ordering). Scope and exclusions remain in force; candidates already in the window, normalized copies, older/equal rows, and rows after the call’s wall clock are skipped. Compare observed times, or write times only when both observations are absent; failed time reads skip expansion. Adjacent replies and already-seen delta refs are not sources. A child needs an exact ref the caller has not seen in delta mode, and a citable ref in reference-strict mode. Children ship with their source, do not count against the per-session limit, and in a full window displace the last plain hit to the undelivered tail, never a linked source, another child, or the FTS-anchored hit. Children hydrate around their own match with their own allowance, so the expanded count can exceed the expanded-hit limit; `response_char_cap` still applies. Links `later_statement_of` and `has_later_statements` name store IDs; a lexical match does not claim replacement. `provenance.later_statements` reports `requested`, `searched`, `found`, `delivered`, `displaced`, and `ms`; failure discards expansion and adds `later_statements_unavailable` (`deadline` or `read_error`). Internal recall and session delivery skip it. Not a tool argument; no stored rows change.
 
 - `recall_extra_entries` (env `LCM_RECALL_EXTRA_ENTRIES`, YAML `lcm.recall_extra_entries`; environment overrides YAML) is off by default (`0`). The value is a cap (clamped to 25); a call appends at most min(cap, floor(L/2)) extras from ranks L+1.. in snippets-only hits delivery, where L is the call's delivered limit (`limit` clamped to 25): at cap 25, L=20 → 10 extras and L=25 → 12. Extras are not counted in `total_results`; the candidate pool and rerank window are still sized from L. Each extra has exactly `kind`, `store_id`, `session_id`, `event_time`, `window` (up to 300 characters centred like snippet windows), and `extra=true`; `event_time` is the row's own host time, or null for summaries, missing rows and rows whose time was carried from a neighbour; summaries and missing rows use their own snippet. Duplicates of full hits (including `duplicate_store_ids`) or earlier extras are skipped without refill. Full hits and existing envelope fields stay unchanged; extras are dropped from the end to fit the response cap. A skipped read reports `extra_entries_skipped` (`deadline` or `read_error`). Response-cap truncation of full hits or exhausted ranking gives no extras or reason flag. Internal recall, `answer_ready` and session delivery ignore it. Invalid values warn and use `0`.
 

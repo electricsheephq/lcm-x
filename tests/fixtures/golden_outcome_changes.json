@@ -197,8 +197,8 @@
       "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "marker-changed": {
-      "outcome_sha": "c1ad64828e8bec600561014cb03a23680dc079642ce845981dbff54903bb82c3",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then marker-changed: adds possible_replay_of 6->4 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "86a40d98594f1726ad7d79732c816c106fa7678270f5ac37e55d534eb4650316",
+      "reason": "#2479 design C: a cold restart now links (possible_replay_of) the copies main already stores there; stored rows unchanged"
     },
     "marker-delta": {
       "outcome_sha": "7a1e67ef45af81a2e80f3846ad714861460bf2c8afc58f1bbbecf6b73ea70af4",
@@ -217,8 +217,8 @@
       "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "marker-rewrite": {
-      "outcome_sha": "8b5724302a5f3727c6460b6e3c93db7fc30adc6fbfa7283371360d58374d95e4",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then marker-rewrite: adds possible_replay_of 5->4 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "1f61c2485e89516fdbc37946ebafa074a3aa8d2f97ca985a0ab5e29b4c0b8e41",
+      "reason": "#2479 design C: a cold restart now links (possible_replay_of) the copies main already stores there; stored rows unchanged"
     },
     "marker-suffix": {
       "outcome_sha": "58b041ddcc3ad0ff3dbafa089b1b775d2ee658cf6b442ddcfc3f3f1a37951389",
@@ -581,20 +581,20 @@
       "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "reconcile-tool-after-new": {
-      "outcome_sha": "1f2dd325b32b419f64a031cbd624aa7e89ad86210222b1311f950de9799f2007",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then reconcile-tool-after-new: adds possible_replay_of 7->3 (#2305 P1h PR5 cursor-0 batch links); review fix: adds possible_replay_of 6->2 for the empty assistant tool-call copy (#2305 PR #2335)"
+      "outcome_sha": "5330aa8abf9b152f9750b969b665ab6edf71ca4eca2072e53f9746345babc11c",
+      "reason": "#2479 design C: a cold restart now links (possible_replay_of) the copies main already stores there; stored rows unchanged"
     },
     "repeated-equal-occurrences": {
       "outcome_sha": "b66e74141d6ec68a5551fa6c9caa3a042a3858135b20489351e432f9974ca58c",
       "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "repeated-tool-id": {
-      "outcome_sha": "67e3b96caf3f28bf1ab9cbc0a752815e89a421f54a298454bdacc79b7e14bff7",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then repeated-tool-id: adds possible_replay_of 6->3 (#2305 P1h PR5 cursor-0 batch links); review fix: adds possible_replay_of 5->2 for the empty assistant tool-call copy (#2305 PR #2335)"
+      "outcome_sha": "a3013ea19ff05032c08b19fe5b4f1324e73f7752f463abaf193833446197e2d9",
+      "reason": "#2479 design C: a cold restart now links (possible_replay_of) the copies main already stores there; stored rows unchanged"
     },
     "replay-build-mapped-ignore": {
-      "outcome_sha": "9895704074931ec5cffb6078c20d094c16b2ab1e6336af63a2b0b86d1ed4e535",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "e68b25e313cf9e67ada9053b55b5ca61da06366d2951fee38655d4bf3efd9f0e",
+      "reason": "#2479 design C: a cold restart now links (possible_replay_of) the copies main already stores there; stored rows unchanged"
     },
     "replay-build-quarantine-prefix": {
       "outcome_sha": "da83cdcc5bde68d7c666be6a5f768ae6b333bac072c9290676d9793df5314e74",
@@ -705,12 +705,12 @@
       "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then tools-changed: adds possible_replay_of 7->3 (#2305 P1h PR5 cursor-0 batch links); review fix: adds possible_replay_of 6->2 for the empty assistant tool-call copy (#2305 PR #2335)"
     },
     "tools-delta": {
-      "outcome_sha": "7807ec5288139c06d850c41645656f84aa2c9c176ad0d0ab9c5946bed59870b8",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then tools-delta: adds possible_replay_of 6->3 (#2305 P1h PR5 cursor-0 batch links); review fix: adds possible_replay_of 5->2 for the empty assistant tool-call copy (#2305 PR #2335)"
+      "outcome_sha": "a185f47b9cc4a6b03f399b818fe3cfa4fbe519c8fbdc7ba9b45ee5a5d406d169",
+      "reason": "#2479 design C: a cold restart now links (possible_replay_of) the copies main already stores there; stored rows unchanged"
     },
     "tools-full": {
-      "outcome_sha": "af5a9f38215b7e5e729090422e32707ac4f0f51af2f9dff062ed6e37597e46f7",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then tools-full: adds possible_replay_of 6->3 (#2305 P1h PR5 cursor-0 batch links); review fix: adds possible_replay_of 5->2 for the empty assistant tool-call copy (#2305 PR #2335)"
+      "outcome_sha": "dd401ed1bd7093cbf05b3d9464554f49dbd0c79085a436669111695ffa51382f",
+      "reason": "#2479 design C: a cold restart now links (possible_replay_of) the copies main already stores there; stored rows unchanged"
     },
     "tools-new": {
       "outcome_sha": "ede3a3dc1f53f8b06b71d1d752abc40291eac6f3baebf2d0cd356436655d7592",
@@ -721,8 +721,8 @@
       "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "tools-rewrite": {
-      "outcome_sha": "afd0ee198d32300a57b7253d844b531c1f8409515eb7825e7ecf364472f7cac8",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then tools-rewrite: adds possible_replay_of 6->3 (#2305 P1h PR5 cursor-0 batch links); review fix: adds possible_replay_of 5->2 for the empty assistant tool-call copy (#2305 PR #2335)"
+      "outcome_sha": "39f8866bcfba425aa80204bde3d00f35ac2f102352aa8dc232aa73553b3b1c27",
+      "reason": "#2479 design C: a cold restart now links (possible_replay_of) the copies main already stores there; stored rows unchanged"
     },
     "tools-suffix": {
       "outcome_sha": "9fe6ae3874862cc83057fa0f9aa336cd05e1f0c9c1508d81049c4d3b8fc3bda2",

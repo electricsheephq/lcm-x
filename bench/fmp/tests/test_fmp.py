@@ -365,6 +365,19 @@ def test_toolset_is_production_registration_under_effective_config(stores, quest
     assert delivery.dispatch("lcm_expand_query", {}, None, delivery.schemas(engine)).startswith('{"error"')
 
 
+def test_toolset_serves_recall_guidance_v2(stores, question):
+    from hermes_lcm.engine import LCMEngine
+    stores.build(question)
+    with stores.engine(question) as (engine, _):
+        engine._config.recall_guidance = "v2"
+        served = {s["function"]["name"]: s["function"] for s in delivery.schemas(engine)}
+        production = {s["name"]: s for s in LCMEngine.get_tool_schemas(
+            SimpleNamespace(_config=engine._config, _omitted_tool_names=set))}
+    assert served["lcm_recall"] == production["lcm_recall"]
+    assert "For questions that combine or compare" in served["lcm_recall"]["description"]
+    assert "anchor_store_id" in served["lcm_load_session"]["parameters"]["properties"]
+
+
 def test_tools_run_at_question_date(stores, question):
     from hermes_lcm import tools as production
     stores.build(question)

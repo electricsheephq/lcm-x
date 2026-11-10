@@ -25,7 +25,8 @@ yet; a later projection version can expose them because their raw lines are kept
 be off (`CLAUDE_CODE_TRANSCRIPT_LOCAL_GC` unset). With it on, the GC can delete history a drain
 has not read yet. Capture still runs, best effort: the `PreCompact` drain reads the history before
 the trim only when the store lock is free and within 10 s. It records the flag per session
-(`capture:local_gc:<session>`, kept once any hook saw it on), and the audit lists those sessions
+(`capture:local_gc:<session>`, kept once any hook saw it on, or found the session's spool pointer
+unreadable), and the audit lists those sessions
 without a lossless claim. One limit holds with the GC off too: a subagent transcript removed before
 the worker first reads it leaves nothing behind (no cursor, no set-aside record, no file), so a
 whole-home audit can still pass. Claude Code's own cleanup removes a whole session, main transcript
@@ -71,20 +72,16 @@ logged without content and capture catches up on a later run.
 | `PreCompact` | Drain synchronously, bounded to 10 s, only when the store lock is free; it never waits for the lock. If a worker holds it, the hook returns at once (`worker_running`) and the holder takes the spooled record. The hook logs `drained` only for a worker-confirmed complete drain, otherwise `drain_bound` (the worker's deadline ended it), `drain_incomplete` (work left for another reason), `drain_failed:<code>` or `drain_timeout`; any of these but a refused store then starts a detached worker for the rest (`+worker`), or leaves it to the worker that has taken the lock since (`+holder`). The drain captures only; it never embeds. The hook kills a drain still running 2 s after its bound. | Bounded, never on the lock |
 | `SessionEnd` | Spool; start a detached drain and return at once. | No |
 
-`PostToolBatch` is registered `async`, so Claude Code does not wait for it (#2141). The other hooks
-stay synchronous:
-- the worker settles a transcript only after an end event (`Stop`, `StopFailure`, `SubagentStop`,
-  `SessionEnd`, `PreCompact`);
-- a later hook copies how the session started from `SessionStart`'s record, so that record is
-  written first;
-- in `-p`, Claude Code kills an async hook still running when the session exits.
-
-An async hook killed while it writes leaves at most a temporary dotfile, which the worker never
-reads. One that finishes after a later hook replaces that hook's record. If that was an end event's
-record, the worker skips the settle, and the next run's sweep captures any line the settle would
-have waited for. The async hook never takes the store lock (step 1 below), so its death never
-leaves a synchronous hook waiting on it. A test kills the hook before and after it writes its
-record, in a session that goes on and at a `-p` exit, and finds every row stored.
+`PostToolBatch` is registered `async`. Other hooks return after forking a detached child,
+except SessionStart and PreCompact, which stay synchronous; without fork, hooks stay synchronous.
+The child validates paths, spools and starts the worker under a 30 s deadline, ignores SIGHUP
+and closes inherited pipes; a kill between create and rename can leave a zero-byte `.tmp`.
+A sibling spool lock preserves an unclaimed end pointer against late non-end hooks (`kept_end`)
+and rejects older same-kind records (`stale`); a claimed pointer is gone, so a late write only
+adds an idempotent drain. An extra settle costs at most 2 s, within PreCompact's 10 s worker
+deadline; an ordinary worker has no overall deadline. Based on the `registered(store)` sweep,
+the worst case of a lost pointer or a skipped settle is a delay until the next hook on the
+machine, not a loss (for already registered lineages).
 
 Each hook writes one line to `logs/hook.log` in the home: the event, the session id, the outcome and
 its in-process milliseconds (`ms`), without content or paths. For #2164 the line also carries `t0`,
@@ -149,7 +146,16 @@ record another session spooled while it held the lock is not left for a later ho
 drain raises is set aside as `<key>.failed` and logged by error type only; the session's next hook
 spools a fresh record, and a transcript's cursor is written before its first batch, so the sweep
 retries a transcript whose first batch failed. One bad transcript cannot stall the others or loop
-the worker.
+the worker. A claimed record the worker cannot read (an empty file after a power cut, or one that is
+not a JSON object) is set aside the same way and never drained as nothing; nothing retries it, and the
+audit stays unverified with `spool:unreadable_failed_record`, which names no session. The facts that
+record held are lost to the audit: the session it came from can still expire by the ordinary pending
+rule, so this marker is what keeps every audit unverified. A later record of the same key is set
+aside beside it, never over it. Moving the `*.failed` file out of the home's `spool/` folder clears
+that state: a session that expired meanwhile then reads verified, though its record was lost. So
+check the session first: the file name up to its first dot is the pointer key, the first 32 hex digits
+of sha256 of `host`, `session_id` and `agent_id` joined by NUL (an empty `agent_id` for a session), and
+its modification time is the hook's write time.
 
 ### Transcript facts
 
@@ -164,6 +170,27 @@ the worker.
   file on most entries.
 - **Subagents** write `<session>/subagents/agent-<id>.jsonl`; their entries carry the parent's
   `sessionId`, plus `agentId` and `isSidechain`. The main transcript holds no sidechain entries.
+  Workflow agents write `<session>/subagents/workflows/<run-id>/agent-<id>.jsonl`, and their
+  `SubagentStop` hook (`agent_type` `workflow-subagent`) names that path. The sweep takes every
+  `agent-*.jsonl` up to four folders below `subagents/`, never through a symlink, each as its own
+  child lineage of the session. Each run's `journal.jsonl` in that run folder is captured too, as
+  child lineage `journal/<run-id>` with every line kept raw (`unknown_type`): some of its results
+  appear in no transcript. Its lines are workflow events (started, result, launched, failed), not
+  model-visible messages, so they become no message rows. The `<session>/workflows/` folder holds
+  run state and scripts, not transcripts, so it is not read. If Claude Code reuses an agent id
+  within one session, each transcript gets its own lineage: a lineage is found by its path first,
+  the first path keeps the agent id, and a later path is keyed by its path below `subagents/`
+  while the first transcript is still on disk (#2566). A store written before that change, whose one lineage already moved between the two
+  paths, keeps its rows and gains the missing lines; its audit stays unverified for that agent.
+  Known limits of such a store, each pinned by a test, none losing a row or storing one twice:
+  a tool call the old lineage holds stays in its session when the result is written after the
+  upgrade, so the result's row is in the path session and the old lineage counts one unanswered
+  call; the audit's failures count the path lineage's duplicate entries as lost, so `ok` is false
+  although every row is stored once. If the user then deletes the id-keyed child session after the
+  second path got its key, capture stores nothing more, but that path session keeps its ledger
+  events (duplicates and shared raw lines, each holding its raw line) and the audit still reads
+  them and lists that lineage unverified. They never re-enter messages, which recall reads; deleting
+  the path session too removes them.
 - **One API response, several entries.** Claude Code writes each content block of a response as its
   own entry with its own uuid; the entries share `message.id`.
 - **Format** is internal and changes between versions, hence the per-type classes below and the
@@ -300,7 +327,7 @@ at worst an unreferenced payload file, never a lost row; a rerun is idempotent b
 | `user`, text or image parts | One `user` row. Meta entries, compact summaries and transcript-only entries become `system` rows. |
 | `user`, `tool_result` parts | One `tool` row per result, `tool_call_id` = `tool_use_id`. When Claude Code saved the output to a file inside the session's own `tool-results/` folder (`persistedOutputPath`, or the path in the marker), the row holds the file's full text (up to 64 MiB, as Hermes's persisted-output recovery does); the preview stays in the ledger's raw line. |
 | `assistant` | One row per entry: text parts as content, `tool_use` parts as `tool_calls`. An entry with only thinking gives no row. `message.id` stays in the ledger, so a reader can regroup one response. API-error entries become `system` rows. |
-| `tool-results` files | Ledger rows each. A saved output is held, with no bytes of its own, only when a row of the entry that references it, as stored, holds its exact text, inline or as one externalized payload. Every other file (images, PDFs, unreferenced or large files, and saved outputs that ingest protection redacts or externalizes in parts, such as a long base64 run, or that changed after their line was read) keeps its bytes in the ledger, in rows of at most 64 MiB, with no size limit; a file whose bytes change is kept again, a held one included. A `tool-results` folder that is a symlink, or in a symlinked session folder, is never read, for files or for saved outputs. |
+| `tool-results` files | Ledger rows each. A saved output is held, with no bytes of its own, only when a row of the entry that references it, as stored, holds its exact text, inline or as one externalized payload. Every other file (images, PDFs, unreferenced or large files, and saved outputs that ingest protection redacts or externalizes in parts, such as a long base64 run, or that changed after their line was read) keeps its bytes in the ledger, in rows of at most 64 MiB, with no size limit; a file whose bytes change is kept again, a held one included. A `tool-results` folder that is a symlink, or in a symlinked session folder, is never read, for files or for saved outputs. Only files directly in `tool-results/` are captured as files; its subfolders (for example page renders of a PDF) are not (#2554). |
 | `system`, `attachment`, bookkeeping (`queue-operation`, `last-prompt`, `mode`, `custom-title`, `file-history-*`, `tools-used`, desktop types such as `bridge-session` and `frame-link`) | None; raw line in the ledger. |
 | Request snapshots (`api-request`, `api-request-blob`, `api-request-shape`) | None; raw line kept once per line digest. They hold the exact model input, including system text and injected reminders that appear nowhere else in the transcript. |
 | Unknown types | None; raw line in the ledger, counted as `unknown_type`. |
@@ -317,15 +344,29 @@ line with a note (`projected_entry_without_uuid`, `projection_error:<type>`), an
   signatures stay as they are. #1216 gets two behaviour changes in its own PR: host-neutral error
   texts, and the offline check re-reads the header once before refusing.
 - **Saved tool outputs in `lcm_grep` (#2225).** In this reader, a full-text `lcm_grep` with no
-  `content_scope` searches raw messages first, then this store's saved tool outputs (externalized
-  payloads), newest first; `content_scope` `externalized` and `both` work with every `session_scope`.
-  A payload hit carries `type: externalized`, its `ref` and its `session_id`, and
-  `lcm_expand(externalized_ref, session_id)` returns the whole output. A payload matches the query as
-  a literal phrase. The pass is bounded (4096 names discovered, 128 files and 8 MiB read per call,
-  512 KB per file); whenever a bound, an unreadable payload or the store-containment check cuts it,
-  the response carries `partial` with its `reasons`, and that means incomplete coverage: narrow the
-  query or pass `externalized_refs`. A named ref that cannot be read is an error. Hermes' own
-  `lcm_grep` is unchanged.
+  `content_scope` searches raw messages first. When they return fewer than `limit` results, it then
+  searches this store's saved tool outputs (externalized payloads), newest first. `content_scope`
+  `externalized` and `both` work with `session_scope` `all` and `session`. With `session_scope`
+  `current` the default stays history-only, and an explicit `externalized` or `both` is an error,
+  because the reader has no active session.
+  - A payload hit carries `type: externalized`, its `ref` and its `session_id`. A payload matches the
+    query as a literal phrase.
+  - `lcm_expand(externalized_ref, session_id)` returns the output in pages of `max_tokens`; follow
+    `has_more` and `next_content_offset` for the rest.
+  - The pass is bounded: 4096 names discovered, 128 files and 8 MiB read per call, 512 KB per file.
+    Whenever a bound, an unreadable payload or the store-containment check cuts it, the response
+    carries `partial` with its `reasons`, which means incomplete coverage. The remedy depends on the
+    reason:
+    - `discovery_cap`, `file_cap` and `byte_cap`: narrow `session_scope` or pass `externalized_refs`.
+    - `prefix` (a file past 512 KB was searched only in its first part): page that ref with
+      `lcm_expand`.
+    - `containment` (the payload pass is off for this store, named refs included) and a folder-level
+      `unreadable`: nothing in the payload folder was searched, so the result is history only.
+  - A named ref that cannot be read is an error: no payload folder, a name missing from it, a symlink,
+    an unparseable payload, or one outside the requested scope. There are two exceptions, both
+    reported as `partial` rather than as an error: a named ref cut short by the byte budget
+    (`byte_cap`), and the containment check turning the payload pass off (`containment`, #2518).
+  - Hermes' own `lcm_grep` is unchanged.
 - **Reader override.** A valid `reader-override.json` in the store home makes the server start
   another reader in place of the plain one. Something outside the plugin writes the file to opt in
   and removes it to opt out; the plugin never writes it. Each harness reads the file in its own home.
@@ -416,7 +457,8 @@ hook entry handles:
   `${GROK_HOME:-~/.grok}/sessions/<URL-encoded cwd>/<sessionId>/`, matched by its `.cwd` sidecar
   for long paths; never the newest session as a guess.
 - The end-of-session `Stop` (reason not `end_turn`) and `SessionEnd` (1.5 s budget) are
-  observe-only: logged, never spooled, so they cannot replace a pending record.
+  observe-only: logged, never spooled, so they cannot replace a spooled hook record that the worker
+  has not yet claimed.
 - The Grok reader (`updates.jsonl`) is not in this release, so the hook refuses every Grok event
   (`grok_capture_off`) and spools nothing; no setting enables it. It lands only after a
   real-session proof shows tool results are complete, `/compact` and `/rewind` never
@@ -426,6 +468,44 @@ hook entry handles:
   stderr) unless the Grok store home holds an `lcm.db` or a `reader-override.json`.
 
 ## Runtime and failure modes
+
+A session whose transcript did not exist at its first drain is remembered as pending and swept
+every worker run until its transcript appears. Pending rows are never deleted; the audit counts them
+and reports the age of the oldest one.
+
+A pending lineage none of whose named transcripts exists is unverified, because a transcript removed before its first
+drain looks the same on disk. Two shapes seen on real sessions are instead counted as expired, never written
+(`expired_never_written`, and in words in the one-line verdict), and only when no hook of the lineage ever found its
+transcript on disk:
+
+- the compaction summarizer: its only hook is a `SubagentStop` with `agent_type` "" whose prompt id is one of its
+  session's compactions (`PreCompact`, `PostCompact` or a `SessionStart` with source `compact`);
+- a session that ended with no prompt: its hooks were only `SessionStart` and `SessionEnd`. Any other event (a prompt,
+  a `Stop`, a tool hook) keeps it unverified. A built-in command such as `/usage` writes a transcript without a
+  `UserPromptSubmit`, which is why the hooks' own look at the disk is required too.
+
+To tell these apart the hook keeps a hash of each record's prompt id, its `agent_type`, and whether it found each
+transcript on disk (one stat). The spool pointer merges these facts from every record that reached it since the worker
+last claimed it, so a record the pointer rules replace or keep out still counts. A session still open with no prompt
+yet, or one whose `SessionEnd` was lost, stays unverified. Pending rows and hook records from a build before this rule
+lack these facts and stay unverified.
+
+Known issue in the shipped preview `claude-code-v0.1.0`: before #2533, such a session's final rows could be lost if its
+later hook records were also lost, and before #2535 the audit counted, but did not fail on, a session whose transcript
+file never appeared.
+
+A lineage's records can name more than one transcript path: a resume from another directory sends `SessionStart` with
+a path under the new directory that never appears. Capture follows one path. The pending row and the cursor list every
+path named in a record the worker reads. The audit does not match another named path against the store: if one exists and holds lines, or saved
+outputs or subagent transcripts under its session folder, or cannot be checked, the lineage is unverified (`named_other_paths`, and in words in
+the verdict: "a second transcript path holds rows; not matched"). For a lineage with a cursor, a named path that never
+appeared, or an empty one with no saved outputs, holds nothing. A pending lineage (no cursor yet) is stricter: any named
+path that exists, even empty, or cannot be checked, or saved outputs or subagent transcripts under any named path's
+session folder, leave it unverified. No real session has shown a second path holding rows; matching and capturing one
+is a follow-up for when one does.
+
+Detached hook logs include `detached: true` and parent `blocking_ms`; `ms` still measures
+through child completion. The parent parses stdin and forks before filesystem validation.
 
 - Claude Code starts the hook in exec form (`hooks/hooks.json`): `python3` found on `PATH`, with
   `${CLAUDE_PLUGIN_ROOT}` substituted in its arguments and no shell before it, which saves the
@@ -494,6 +574,24 @@ gate's instrument (see "The audit" in the test plan).
 - **Reported, never failures:**
   - lines after the cursor (`pending_lines`) and `tool-results` files whose current bytes have no
     captured version (`files.uncaptured`): both leave the lineage unverified;
+  - an unterminated last record after the cursor (`partial_tail_bytes`), which Claude Code may still be writing:
+    counted and named in the verdict ("N lineages end in an unterminated record"). It leaves the lineage unverified
+    only when that lineage's last observed hook was its end (`SessionEnd`, or `SubagentStop` for a subagent): a crash
+    mid-append left a record capture will never take (#2571). An end marks it whatever its timestamp (the hook never
+    drops it as stale behind an undrained hook, nor lets another end-class hook replace it); only a newer hook of that lineage (the session resumed) clears it.
+    A subagent's partial tail also counts after its session's end: Claude Code sends no `SubagentStop` to a session
+    ended while a subagent is mid-task (by exit, `/clear` or a closed terminal; checked on real sessions), so the
+    session's end ends its subagents too, until the session resumes (#2566). Known limits: once the session resumes
+    (`claude --resume`), a subagent cut off at its end, which never resumes, has its torn last record reported only
+    again while the session reads verified; a Claude Code process
+    killed before any end hook (no `SessionEnd`, no `SubagentStop`) leaves a torn last record counted in the verdict
+    while the session still reads verified; a resumed session whose newer hook's pointer is replaced by a delayed older
+    `Stop` before the worker drains it stays unverified until a newer hook of that session drains (the safe side); and
+    on one real session, a subagent still working at a `/clear` went on in a new transcript under the new session,
+    and the new session's audit read not ok with one orphan (it fails closed; nothing is lost);
+  - files under a `tool-results` subfolder (`subfolder_files`; a symlink to a folder, or a folder that cannot be
+    listed, counts one), which capture does not store as files: until #2554 they leave the lineage unverified, and the
+    verdict names them ("N files in tool-results subfolders not stored (M lineages)");
   - forgotten lineages, which are not checked; rows of an older projection version
     (`other_projection`); projected entries without a `uuid` (`projected_without_uuid`);
   - a transcript that is gone, replaced or rewritten (`transcript_state`), and older generations
@@ -520,9 +618,12 @@ gate's instrument (see "The audit" in the test plan).
 - **A run passes the gate** when the audit exits 0 and `verified` is true:
   - at least one lineage was checked;
   - every selected lineage's transcript was read in full (`transcript_state` `ok`, no generation
-    gone), with nothing pending: no line after the cursor and no uncaptured file;
+    gone), with nothing pending: no line after the cursor, no uncaptured file, no file under a
+    `tool-results` subfolder, and no other named transcript path holding rows (`named_other_paths`);
   - every selected session, and every subagent transcript on disk (a forgotten session's too),
     has a cursor;
+  - closed world: below a session folder it checks, nothing it cannot tie to a capture (a `*.jsonl` no cursor
+    names, a symlink, a folder that cannot be listed), whatever the folder names around it;
   - every lineage a set-aside (`.failed`) spool record names has a cursor, unless that lineage
     was forgotten. A record names its subagent even when that transcript is not on disk: one never
     written (the compaction summarizer's `SubagentStop` names one) looks the same as one removed

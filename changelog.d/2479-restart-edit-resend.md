@@ -1,0 +1,1 @@
+- Fix: Link the reply copies a cold restart stores again after an edit-resend (`possible_replay_of`), so they are visible instead of silent; the durable ledger moving the cursor up from 0 no longer turns the #2305 linking off. Nothing is stored or skipped differently.

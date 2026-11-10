@@ -893,6 +893,20 @@ def apply_prior(
     return ordered
 
 
+def fts_anchor_index(ordered, arm_hits, arm_order, limit, arm_weights=None):
+    """Find the enabled FTS anchor, including a representative of a replay group."""
+    if len(arm_order) < 2 or "fts" not in arm_order or limit < 4 or not arm_hits.get("fts"):
+        return None
+    fts_index = arm_order.index("fts")
+    if arm_weights is not None and fts_index < len(arm_weights) and arm_weights[fts_index] <= 0:
+        return None
+    anchor = _hit_identity(arm_hits["fts"][0])
+    return next((i for i, entry in enumerate(ordered) if (
+        _hit_identity(entry["hit"]) == anchor
+        or (anchor[0] == "message" and anchor[1] in entry["hit"].get("duplicate_store_ids", []))
+    )), None)
+
+
 def place_fts_anchor(
     ordered: list[dict[str, Any]],
     arm_hits: dict[str, list[dict[str, Any]]],
@@ -917,19 +931,7 @@ def place_fts_anchor(
     zero or less: an operator who switched the arm off gets no anchor from it.
     """
     info: dict[str, Any] = {"fired": False, "position": None}
-    if len(arm_order) < 2 or "fts" not in arm_order or limit < 4 or not arm_hits.get("fts"):
-        return ordered, info
-    fts_index = arm_order.index("fts")
-    if arm_weights is not None and fts_index < len(arm_weights) and arm_weights[fts_index] <= 0:
-        return ordered, info
-    anchor = _hit_identity(arm_hits["fts"][0])
-    j = next(
-        (i for i, entry in enumerate(ordered) if (
-            _hit_identity(entry["hit"]) == anchor
-            or (anchor[0] == "message" and anchor[1] in entry["hit"].get("duplicate_store_ids", []))
-        )),
-        None,
-    )
+    j = fts_anchor_index(ordered, arm_hits, arm_order, limit, arm_weights)
     if j is None or j < limit:
         return ordered, info
     window = ordered[:limit]

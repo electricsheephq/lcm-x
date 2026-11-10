@@ -89,6 +89,7 @@ from .retrieval_core import (
     collapse_duplicate_candidates,
     collapse_duplicate_hits,
     duplicate_identity_rows,
+    fts_anchor_index,
     place_fts_anchor,
     _lcm_grep_confidence,
     _lcm_grep_deadline_error,
@@ -1097,17 +1098,43 @@ def lcm_load_session(args: Dict[str, Any], **kwargs) -> str:
         time_from=time_from,
         time_to=time_to,
     )
-    rows = engine._store.load_session_page(
-        session_id,
-        after_store_id=after_store_id,
-        limit=limit + 1,
-        roles=roles or None,
-        time_from=time_from,
-        time_to=time_to,
-    )
-    page_rows = rows[:limit]
-    has_more = len(rows) > limit
-    next_cursor = page_rows[-1]["store_id"] if has_more and page_rows else None
+    if "anchor_store_id" in args:
+        anchor, error = _parse_strict_int(args["anchor_store_id"], "anchor_store_id")
+        if error:
+            return json.dumps({"error": error})
+        row = engine._store.get(anchor) if anchor is not None else None
+        if not row or row.get("session_id") != session_id:
+            return json.dumps({"error": "anchor_store_id must identify a message in session_id"})
+        window = {}
+        for key, default in (("before", 6), ("after", 12)):
+            value, error = _parse_strict_int(args.get(key, default), key)
+            if error or value is None:
+                return json.dumps({"error": error or f"{key} must be an integer"})
+            window[key] = max(0, min(40, value))
+        rows = engine._store.load_session_window(
+            session_id, anchor_store_id=anchor, window_cap=40, **window)
+        window_end = rows[-1]["store_id"]
+        if roles or time_from is not None or time_to is not None:
+            rows = [r for r in engine._store.load_session_page(
+                session_id, after_store_id=rows[0]["store_id"] - 1, limit=len(rows),
+                roles=roles or None, time_from=time_from, time_to=time_to)
+                if r["store_id"] <= window_end]
+        remaining = [r for r in rows if r["store_id"] > after_store_id]
+        page_rows = remaining[:limit]
+        # Never hand back a cursor behind the caller's own exclusive cursor.
+        next_cursor = page_rows[-1]["store_id"] if len(remaining) > limit else max(window_end, after_store_id)
+        has_more = bool(next_cursor is not None and engine._store.load_session_page(
+            session_id, after_store_id=next_cursor, limit=1, roles=roles or None,
+            time_from=time_from, time_to=time_to))
+        if not has_more:
+            next_cursor = None
+    else:
+        rows = engine._store.load_session_page(
+            session_id, after_store_id=after_store_id, limit=limit + 1,
+            roles=roles or None, time_from=time_from, time_to=time_to)
+        page_rows = rows[:limit]
+        has_more = len(rows) > limit
+        next_cursor = page_rows[-1]["store_id"] if has_more and page_rows else None
 
     response: dict[str, Any] = {
         "session_id": session_id,
@@ -4611,31 +4638,27 @@ def _lcm_recall_adjacent_reply(
     return placed, pairs, None
 
 
-def _lcm_recall_later_statements(engine, ordered, identity_rows, *, n, limit, query, seen_refs, fts_arm_index, deadline, excluded, allowed):
+def _lcm_recall_later_statements(engine, ordered, identity_rows, *, n, limit, query, seen_refs, fts_arm_index, deadline, excluded, allowed,
+                               hydrate=None, rows_by_id=None, reference_strict=False, answer_ready_content=None,
+                               delta_requested=False, fts_anchor_identity=None):
     """Place one later lexical match per source, atomically and read-only."""
     started, now = time.monotonic(), time.time()
-    info = dict(requested=n, searched=0, found=0, delivered=0, ms=0)
-    placed = [{**entry, "hit": dict(entry["hit"])} for entry in ordered]
-    seen = {sid for entry in ordered[:limit] for sid in
-            [entry["hit"].get("store_id"), *entry["hit"].get("duplicate_store_ids", [])]}
+    info = dict(requested=n, searched=0, found=0, delivered=0, ms=0, displaced=0)
+    placed, tail = ordered[:limit], ordered[limit:]
+    def replay_ids(hit):
+        return {hit.get("store_id"), *hit.get("duplicate_store_ids", [])}
+    seen = set().union(*(replay_ids(e["hit"]) for e in placed))
     sources = [entry for entry in placed[:limit] if entry["hit"].get("store_id") is not None
                and entry["hit"].get("kind") != "summary" and entry["hit"].get("node_id") is None
                and entry["hit"].get("adjacent_to") is None]
     def normalize(text):
         return " ".join(unicodedata.normalize("NFKC", str(text or "")).casefold().split())
-    reason = None
+    reason, children, child_rows, displaced, child_sources = None, [], {}, [], {}
     try:
         if time.monotonic() >= deadline:
             raise TimeoutError
         if any(s["hit"]["store_id"] not in identity_rows for s in sources):
             raise OSError
-        hydrated = _lcm_recall_answer_ready_content(
-            engine, sources, query=query, expanded_limit=len(sources),
-            rows_by_id=identity_rows, fts_arm_index=fts_arm_index,
-        ) if seen_refs else {}
-        if seen_refs:
-            sources = [s for s in sources if (ref := recall_delivery._exact_ref(
-                s["hit"], hydrated.get(_hit_identity(s["hit"])))) is not None and ref not in seen_refs]
         for source in sources[:n]:
             hit = source["hit"]
             row = identity_rows.get(hit["store_id"], {})
@@ -4665,9 +4688,10 @@ def _lcm_recall_later_statements(engine, ordered, identity_rows, *, n, limit, qu
             texts = duplicate_identity_rows(engine, prior + fresh, deadline=deadline) if candidates else {}
             if any(c["store_id"] not in texts or c["store_id"] not in rows for c in candidates):
                 raise OSError
+            child_rows.update(texts)
             # Replay copies of a delivered or already chosen row join its group, never a second slot.
             candidates = [g["hit"] for g in collapse_duplicate_candidates(prior + fresh, texts)
-                          if not {g["hit"]["store_id"], *g["hit"].get("duplicate_store_ids", [])} & seen]
+                          if not replay_ids(g["hit"]) & seen]
             for candidate in candidates:
                 candidate_observed = _normalize_observed_at(rows[candidate["store_id"]].get("observed_at"))
                 if ((observed is None) != (candidate_observed is None)
@@ -4677,33 +4701,62 @@ def _lcm_recall_later_statements(engine, ordered, identity_rows, *, n, limit, qu
                 if stamp is None or not source_time < stamp <= now:
                     continue
                 store_id = candidate["store_id"]
-                group = {store_id, *candidate.get("duplicate_store_ids", [])}
-                existing = next((e for e in placed if e["hit"].get("kind") != "summary" and group & {
-                    e["hit"].get("store_id"), *e["hit"].get("duplicate_store_ids", [])}), None)
-                candidate = {**candidate, "later_statement_of": hit["store_id"]}
-                if existing is not None:
-                    # A pooled row was retrieved on its own: it keeps its group, and
-                    # delivery keeps it as an ordinary hit if its source cannot ship.
-                    placed.remove(existing)
-                    group |= {existing["hit"]["store_id"], *existing["hit"].get("duplicate_store_ids", [])}
-                    candidate["_later_pooled"] = True
+                group = replay_ids(candidate)
+                group |= set().union(*(replay_ids(e["hit"]) for e in tail if e["hit"].get("kind") != "summary" and group & replay_ids(e["hit"])))
                 if group - {store_id}:
-                    candidate["duplicate_store_ids"] = sorted(group - {store_id})
-                hit["has_later_statements"] = [store_id]
-                entry = existing if existing is not None else {
-                    "rrf_score": source["rrf_score"], "_final_score": source["_final_score"], "ranks": {},
-                }
-                placed.insert(placed.index(source) + 1, {**entry, "hit": candidate})
+                    candidate = {**candidate, "duplicate_store_ids": sorted(group - {store_id})}
+                children.append({"hit": {**candidate, "later_statement_of": hit["store_id"]},
+                                 "rrf_score": source["rrf_score"], "_final_score": source["_final_score"], "ranks": {}})
+                child_sources[_hit_identity(candidate)] = _hit_identity(hit)
                 seen |= group
                 info["found"] += 1
                 break
+        _annotate_subagent_lineage(engine, [child["hit"] for child in children])
+        hydrated = hydrate(children, query=query, expanded_limit=len(children),
+                           rows_by_id={**child_rows, **(rows_by_id or {})},
+                           fts_arm_index=fts_arm_index) if hydrate and children else {}
+        for child in children:
+            hit = child["hit"]
+            ref = recall_delivery._exact_ref(hit, hydrated.get(_hit_identity(hit)))
+            source = next((e for e in placed if _hit_identity(e["hit"]) == child_sources[_hit_identity(hit)]), None)
+            if source is None or ref in seen_refs or (reference_strict or delta_requested) and ref is None:
+                continue
+            if len(placed) >= limit:
+                removable = next((e for e in reversed(placed)
+                                  if e is not source and _hit_identity(e["hit"]) != fts_anchor_identity
+                                  and not e["hit"].get("has_later_statements") and "later_statement_of" not in e["hit"]), None)
+                if removable is None:
+                    continue
+                placed.remove(removable)
+                displaced.insert(0, removable)
+                info["displaced"] += 1
+            index = placed.index(source)
+            placed[index:index + 1] = [{**source, "hit": {**source["hit"], "has_later_statements": [hit["store_id"]]}}, child]
+            tail = [e for e in tail if e["hit"].get("kind") == "summary" or not replay_ids(e["hit"]) & replay_ids(hit)]
+        placed += displaced + tail
         if time.monotonic() >= deadline:
             raise TimeoutError
+        if answer_ready_content is not None:
+            answer_ready_content.update(hydrated)
     except Exception as exc:  # noqa: BLE001 - optional expansion never fails recall
         reason = "deadline" if isinstance(exc, TimeoutError) or time.monotonic() >= deadline else "read_error"
-        placed = ordered
+        placed, info["displaced"] = ordered, 0
     info["ms"] = round((time.monotonic() - started) * 1000, 3)
     return placed, info, reason
+
+
+def _lcm_recall_session_hint(engine: "LCMEngine", hit: dict[str, Any]) -> str | None:
+    try:
+        store_id = hit.get("store_id")
+        if hit.get("node_id") is not None and (hit.get("kind") == "summary" or store_id is None):
+            sources = engine._dag.source_message_ids(hit["node_id"], limit=1)
+            store_id = sources[0] if sources else None
+        row = engine._store.get(store_id) if store_id is not None else None
+        session = row.get("session_id") if row else None
+        return f"lcm_load_session(session_id={session!r}, anchor_store_id={store_id})" if session else None
+    except Exception:  # Optional hints must not fail recall or suppress other hints.
+        logger.debug("LCM session hint skipped", exc_info=True)
+        return None
 
 
 def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
@@ -5202,14 +5255,7 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
             engine, ordered, identity_rows, limit=limit, deadline=deadline,
             excluded=excluded_session_ids, allowed=candidate_session_ids,
         )
-    later_info, later_unavailable = None, None
     later_n = _recall_later_statements(kwargs.get("later_statements", getattr(engine._config, "recall_later_statements", 0)))
-    if later_n and kwargs.get("delivery_unit", getattr(engine._config, "recall_delivery_unit", "hits")) != "session":
-        ordered, later_info, later_unavailable = _lcm_recall_later_statements(
-            engine, ordered, identity_rows, n=min(later_n, limit), limit=limit, query=query,
-            seen_refs=seen_refs, fts_arm_index=fts_arm_index, deadline=deadline,
-            excluded=excluded_session_ids, allowed=candidate_session_ids,
-        )
     fts_anchor_info: dict[str, Any] | None = None
     if bool(kwargs.get("fts_anchor", True)) and bool(
         getattr(engine._config, "recall_fts_anchor", True)
@@ -5217,6 +5263,14 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
         ordered, fts_anchor_info = place_fts_anchor(
             ordered, arm_hits, arm_order, limit, arm_weights=arm_weights
         )
+    anchor_index = (fts_anchor_info["position"] - 1 if fts_anchor_info["fired"] else
+                    fts_anchor_index(ordered, arm_hits, arm_order, limit, arm_weights)) if later_n and fts_anchor_info is not None else None
+    place_later = partial(
+        _lcm_recall_later_statements, engine, identity_rows=identity_rows, n=min(later_n, limit),
+        deadline=deadline, excluded=excluded_session_ids, allowed=candidate_session_ids,
+        query=query, fts_arm_index=fts_arm_index,
+        fts_anchor_identity=_hit_identity(ordered[anchor_index]["hit"]) if anchor_index is not None else None,
+    ) if later_n and kwargs.get("delivery_unit", getattr(engine._config, "recall_delivery_unit", "hits")) != "session" else None
 
     _annotate_subagent_lineage(engine, [entry["hit"] for entry in ordered if isinstance(entry.get("hit"), dict)])
     # Only the model's own call follows config; internal callers pin it off.
@@ -5263,6 +5317,9 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
         fts_anchor_info=fts_anchor_info,
         fts_rerun=fts_rerun,
         summary_leads=summary_leads,
+        session_hint=partial(_lcm_recall_session_hint, engine) if kwargs.get(
+            "session_hints", getattr(engine._config, "recall_session_hints", False)) else None,
+        guidance_v2=kwargs.get("recall_guidance", getattr(engine._config, "recall_guidance", "v1")) == "v2",
         limit_cap=_LCM_RECALL_LIMIT_CAP,
         snippet_chars=_LCM_RECALL_SNIPPET_CHARS,
         response_char_cap=_LCM_RECALL_RESPONSE_CHAR_CAP,
@@ -5283,7 +5340,7 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
         session_delivery=session_delivery,
         adjacent_reply=adjacent_pairs,
         adjacent_reply_unavailable=adjacent_unavailable,
-        later_statements=later_info, later_statements_unavailable=later_unavailable,
+        place_later=place_later,
         extra_entries=_recall_extra_entries(
             kwargs.get("extra_entries", getattr(engine._config, "recall_extra_entries", 0)),
         ),

@@ -3,6 +3,7 @@
 Symlinks anywhere under the snapshot fail the check: a snapshot made of links to a live store must never pass.
 """
 
+import hashlib
 import json
 import os
 import shutil
@@ -15,6 +16,9 @@ from pathlib import Path
 from .capture import _quick_check, _relative, _sha256
 
 PAYLOAD = "lcm-large-outputs/"
+# The file names a capture writes. Any other name is reported by its sha256 12: receipts carry counts, ids and hashes
+# only (release manager, 2026-11-10), and a file added to a snapshot folder can name anything.
+KNOWN_NAMES = frozenset(db + s for db in ("store.db", "host-0.db") for s in ("", "-wal", "-shm", "-journal"))
 
 
 def _raise(error):
@@ -36,6 +40,11 @@ def _walk(root):
     return files, links
 
 
+def _shown(name):
+    """A non-payload file name as a receipt may show it: itself when a capture writes it, else its sha256 12."""
+    return name if name in KNOWN_NAMES else "sha256-12:" + hashlib.sha256(os.fsencode(name)).hexdigest()[:12]  # fsencode: any name the OS returns
+
+
 def verify(pin_path, snapshot_dir, scratch_dir):
     root = Path(snapshot_dir)
     if root.is_symlink() or not root.is_dir():
@@ -53,7 +62,7 @@ def verify(pin_path, snapshot_dir, scratch_dir):
         if name.startswith(PAYLOAD):
             result[category]["payload"] += 1  # Payload names are never echoed.
         else:
-            result[category]["names"].append(name)
+            result[category]["names"].append(_shown(name))
         result["verdict"] = "FAIL"
 
     if not pin["files"]:
@@ -108,7 +117,7 @@ def verify(pin_path, snapshot_dir, scratch_dir):
             if name.startswith(PAYLOAD):
                 result["quick_check"].setdefault("payload", []).append(check)
             else:
-                result["quick_check"][name] = check
+                result["quick_check"][_shown(name)] = check
             if check != "ok":
                 result["verdict"] = "FAIL"
     return result

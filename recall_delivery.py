@@ -63,13 +63,14 @@ def deliver_recall(
     event_time_fields: Callable[[dict[str, Any] | None], dict[str, str]],
     read_occurrence_source: Callable[[int], tuple[dict, dict | None]],
     rerank_enabled: Callable[[], bool],
+    session_hint: Callable[[dict[str, Any]], str | None] | None = None,
+    guidance_v2: bool = False,
     session_delivery: Callable[..., str] | None = None,
     delivery_order: str = "score",
     read_summary_event_time: Callable[..., tuple[dict[int, dict[str, str]], str | None]] | None = None,
     adjacent_reply: list[dict[str, int]] | None = None,
     adjacent_reply_unavailable: str | None = None,
-    later_statements: dict[str, Any] | None = None,
-    later_statements_unavailable: str | None = None,
+    place_later: Callable[..., tuple[list, dict, str | None]] | None = None,
     snippet_window_hits: int = 0,
     read_snippet_windows: Callable[..., tuple[dict, str | None]] | None = None,
     extra_entries: int = 0,
@@ -177,6 +178,15 @@ def deliver_recall(
         selected_entries = ordered
         diversity_dropped = 0
         answer_ready_content = {}
+    later_statements, later_statements_unavailable = None, None
+    if place_later is not None:
+        later_originals = {_hit_identity(e["hit"]): e for e in selected_entries} if reference_strict else {}
+        selected_entries, later_statements, later_statements_unavailable = place_later(
+            selected_entries, limit=limit, seen_refs=seen_refs, reference_strict=reference_strict, delta_requested=delta_requested,
+            hydrate=hydrate if detail == "answer_ready" else None,
+            rows_by_id=strict_rows if detail == "answer_ready" else None,
+            answer_ready_content=answer_ready_content,
+        )
     snippet_window_content = {}
     snippet_window_skipped = None
     if detail == "snippets" and snippet_window_hits > 0:
@@ -261,7 +271,7 @@ def deliver_recall(
             item.update(adjacent_to=hit["adjacent_to"], arms=[*arms, "adjacent"])
         if hit.get("later_statement_of") is not None:
             item["arms"] = [*arms, "later_statement"]
-        for key in ("later_statement_of", "has_later_statements", "_later_pooled"):
+        for key in ("later_statement_of", "has_later_statements"):
             if key in hit:
                 item[key] = hit[key]
         window = snippet_window_content.get(_hit_identity(hit))
@@ -289,6 +299,8 @@ def deliver_recall(
             if _hit_identity(hit) not in answer_ready_content and hit.get("store_id") is not None:
                 item.update(event_time_fields(event_time_rows.get(int(hit.get("store_id") or 0))))
         if detail == "answer_ready":
+            if session_hint and (hint := session_hint(hit)):
+                item["session_hint"] = hint
             item["role"] = hit.get("role")
             item["source"] = hit.get("source") or (
                 "summary" if hit.get("kind") == "summary" else ""
@@ -371,7 +383,7 @@ def deliver_recall(
             len(json.dumps(item, ensure_ascii=window is not None)) - item_chars
         )
         if reference_strict:
-            strict_selector.deliver(entry)
+            strict_selector.deliver(later_originals.get(_hit_identity(hit), entry) if place_later is not None else entry)
         if (
             hit.get("kind") != "summary"
             and hit.get("store_id") is not None
@@ -512,6 +524,10 @@ def deliver_recall(
                 strict_selector.unreferenced_dropped
             )
             expansion["unreferenced_omitted_count"] = unreferenced_omitted
+            if session_hint:
+                for lead in summary_leads:
+                    if hint := session_hint(lead):
+                        lead["session_hint"] = hint
             expansion["summary_leads"] = summary_leads
             expansion["reference_policy"] = (
                 "every delivered hit publishes the (store_id, content_offset, "
@@ -522,6 +538,9 @@ def deliver_recall(
                 "source messages beneath them, and the nodes themselves come "
                 "back here as non-evidence drill-down leads"
             )
+        if guidance_v2:
+            expansion.update(sessions_delivered=_sessions(hits_out),
+                             sessions_in_pool=_sessions([e["hit"] for e in ordered] + hits_out))
         response["detail"] = detail
         response["provenance"]["detail"] = detail
         response["provenance"]["answer_ready"] = expansion
@@ -547,6 +566,7 @@ def deliver_recall(
             response_char_cap=response_char_cap, expansion=expansion,
             delta_requested=delta_requested, arm_hits=arm_hits,
             adjacent_reply=adjacent_reply,
+            ranked_hits=[e["hit"] for e in ordered] if guidance_v2 else None,
         )
         if delivery_order != "time":
             return encoded
@@ -625,6 +645,7 @@ def _fit_answer_ready_response(
     delta_requested: bool,
     arm_hits: dict[str, list[dict[str, Any]]],
     adjacent_reply: list[dict[str, int]] | None = None,
+    ranked_hits: list[dict[str, Any]] | None = None,
 ) -> str:
     anchor_fired = bool(fts_anchor_info and fts_anchor_info.get("fired"))
     if anchor_fired:
@@ -656,6 +677,10 @@ def _fit_answer_ready_response(
         expansion["expanded_hit_count"] = sum(
             "content" in hit for hit in response["hits"]
         )
+        if "sessions_delivered" in expansion:
+            expansion["sessions_delivered"] = _sessions(response["hits"])
+            # The pool is the ranked sessions plus delivered children that survived fitting.
+            expansion["sessions_in_pool"] = _sessions((ranked_hits or []) + response["hits"])
         encoded = json.dumps(response, ensure_ascii=False)
     if event_time_marker_deferred is not None:
         # Put the marker back with its original reason, only if it fits.
@@ -716,20 +741,6 @@ def _refresh_later_statements(response):
         return
     hits = response["hits"]
     by_id = {h.get("store_id"): h for h in hits if h.get("kind") != "summary"}
-    kept = []
-    for h in hits:
-        # The first refresh settles every orphan; fitting later pops from the
-        # end, where a child sits after its source, so no new orphan appears.
-        pooled = h.pop("_later_pooled", False)
-        if h.get("later_statement_of") is not None and h["later_statement_of"] not in by_id:
-            if not pooled:
-                continue
-            h.pop("later_statement_of")
-            h["arms"] = [arm for arm in h.get("arms", []) if arm != "later_statement"]
-        kept.append(h)
-    hits[:] = kept
-    by_id = {h.get("store_id"): h for h in hits if h.get("kind") != "summary"}
-    response["total_results"] = len(hits)
     for hit in hits:
         links = [sid for sid in hit.get("has_later_statements", []) if sid in by_id
                  and by_id[sid].get("later_statement_of") == hit.get("store_id")]
@@ -738,11 +749,7 @@ def _refresh_later_statements(response):
                 hit["has_later_statements"] = links
             else:
                 hit.pop("has_later_statements")
-    children = [h for h in hits if h.get("later_statement_of") in by_id]
-    for child in children:
-        hits.remove(child)
-        hits.insert(hits.index(by_id[child["later_statement_of"]]) + 1, child)
-    info["delivered"] = len(children)
+    info["delivered"] = sum("later_statement_of" in h for h in hits)
 
 
 def _delivered_adjacent_receipts(
@@ -892,3 +899,7 @@ def _fts_anchor_delivered(
 # The opt-in empty-envelope call must not re-enter observer wrappers installed
 # on deliver_recall (FMP observes the real tools.py caller's effective K caps).
 _deliver_hits = deliver_recall
+
+
+def _sessions(hits: list[dict[str, Any]]) -> int:
+    return len({h.get("session_id") for h in hits} - {None, ""})

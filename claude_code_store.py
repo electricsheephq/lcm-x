@@ -28,6 +28,7 @@ from .claude_code_capture import (
     PROJECTION_VERSION,
     SHARED_RAW,
     SOURCE,
+    SUBAGENT_DEPTH,
     UNKNOWN,
     classify_entry,
     content_digest,
@@ -50,8 +51,12 @@ OWNER_KEY = "capture:owner"  # the stamp this writer puts on every store it crea
 HERMES_MARKERS = ("config.yaml", "state.db")
 FORGOTTEN_PREFIX = "capture:forgotten:"  # a forgotten session's transcript and files are never read again
 CURSOR_PREFIX = "capture:cursor:"
+PENDING_PREFIX = "capture:pending:"
+COMPACT_PREFIX = "capture:compact:"  # hashed prompt ids of a session's compactions (#2535)
+COMPACT_CAP = 256
 FORK_PREFIX = "capture:fork:"  # sessions whose SessionStart source was ``fork``, and when they started
 LOCAL_GC_PREFIX = "capture:local_gc:"  # sessions seen with Claude Code's local GC on (sticky)
+ENDED_PREFIX = "capture:ended:"  # lineages whose last observed hook was their end: SessionEnd, or SubagentStop (#2571)
 BATCH_LINES = 1000
 BATCH_BYTES = 8 * 1024 * 1024
 FILE_CHUNK_BYTES = 64 * 1024 * 1024  # a larger tool-results file is kept as several rows
@@ -321,7 +326,30 @@ def _new_generation(path: Path, lineage: Lineage, cursor: Optional[dict]) -> dic
     kept = {key: cursor[key] for key in ("fork_parent", "fork_linked") if cursor and key in cursor}
     return {"path": str(path), "session_id": lineage.session_id, "agent_id": lineage.agent_id,
             "dev": status.st_dev, "ino": status.st_ino, "generation": cursor["generation"] + 1 if cursor else 0,
-            "offset": 0, "line_index": 0, "first": None, "last_offset": None, "last": None, **kept}
+            "offset": 0, "line_index": 0, "first": None, "last_offset": None, "last": None, **kept,
+            "named": named_paths(cursor, path)}
+
+
+def named_paths(saved: Optional[dict], path: Optional[Path] = None) -> list[str]:
+    """Every transcript path a lineage's records named (#2535): its saved ``named`` list, its own ``path`` and
+    ``path``. A cursor or pending row written before #2535 has no list and names only its own path."""
+    names = set()
+    if isinstance(saved, dict):
+        listed = saved.get("named")
+        if isinstance(listed, list):
+            names.update(name for name in listed if isinstance(name, str) and name)
+        if isinstance(saved.get("path"), str) and saved["path"]:
+            names.add(saved["path"])
+    if path is not None:
+        names.add(str(path))
+    return sorted(names)
+
+
+def _write_metadata(store: MessageStore, key: str, value: Any) -> None:
+    with store.atomic():
+        store.connection.execute(
+            "INSERT INTO metadata(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, json.dumps(value, sort_keys=True)))
 
 
 def read_lines(path: Path, offset: int, *, max_lines: int = BATCH_LINES,
@@ -344,18 +372,90 @@ def read_lines(path: Path, offset: int, *, max_lines: int = BATCH_LINES,
 
 # -- ingest --
 
+def _old_lineage(store: MessageStore, lineage: Lineage) -> Optional[Lineage]:
+    """For a path key, the id-keyed lineage whose cursor once named its path below subagents/, in this folder or a copy
+    of the session folder (a store the old code flipped, #2566)."""
+    old = Lineage(lineage.session_id, lineage.path.name[len("agent-"):-len(".jsonl")], lineage.path)
+    named = lineage.agent_id.startswith("/") and any(getattr(path_lineage(old._replace(path=Path(held))), "agent_id", None)
+                                                     == lineage.agent_id for held in named_paths(read_cursor(store, old)))
+    return old if named else None
+
+
 def forgotten(store: MessageStore, lineage: Lineage) -> bool:
-    """The session was deleted from the store (this module's purge marks it): never read its transcript or files again."""
-    return bool(store.read_metadata_json(FORGOTTEN_PREFIX + lineage.rows_session))
+    """The session was deleted from the store (this module's purge marks it): never read its transcript or files again.
+    A path key whose path the deleted id-keyed lineage once held is deleted with it (#2576)."""
+    old = _old_lineage(store, lineage) if lineage.agent_id else None
+    return any(store.read_metadata_json(FORGOTTEN_PREFIX + each.rows_session) for each in (lineage, old) if each)
 
 
-def drain(store: MessageStore, lineage: Lineage, *, deadline: Optional[float] = None) -> str:
-    """Ingest a transcript to its current end: ``drained``, ``missing``, ``forgotten`` or ``deadline``."""
+def record_facts(record: dict, lineage: Lineage) -> dict:
+    """What a pending row keeps from the records that named it (#2535): the events they saw and, for the record's own
+    subagent, its type and hashed prompt id. The audit expires only lineages these facts show were never written."""
+    seen = record.get("seen")
+    events = [name for name in seen if isinstance(name, str)] if isinstance(seen, list) else []
+    if isinstance(record.get("event"), str):
+        events.append(record["event"])
+    own = lineage.agent_id is not None and lineage.agent_id == record.get("agent_id")
+    agent_type = record.get("agent_type") if own and isinstance(record.get("agent_type"), str) else None
+    prompt = record.get("prompt_id") if own and isinstance(record.get("prompt_id"), str) else None
+    seen = record.get("agent_transcript_seen" if lineage.agent_id is not None else "transcript_seen")
+    return {"events": sorted(set(events)), "agent_type": agent_type, "prompt": prompt,
+            "transcript_seen": seen if isinstance(seen, bool) else None}
+
+
+def _merge_facts(saved: Any, facts: Optional[dict]) -> Optional[dict]:
+    if facts is None:
+        return saved if isinstance(saved, dict) else None
+    old = saved if isinstance(saved, dict) else {}
+    events = set(facts["events"]) | {name for name in old.get("events") or () if isinstance(name, str)}
+    # True once any record saw the transcript on disk; an unknown (an older hook, or a row from before this field)
+    # stays unknown, so the audit never expires on it.
+    values = [facts.get("transcript_seen"), old.get("transcript_seen") if old else False]
+    seen = True if True in values else (False if all(value is False for value in values) else None)
+    return {"events": sorted(events),
+            "agent_type": facts["agent_type"] if facts["agent_type"] is not None else old.get("agent_type"),
+            "prompt": facts["prompt"] if facts["prompt"] is not None else old.get("prompt"),
+            "transcript_seen": seen}
+
+
+def drain(store: MessageStore, lineage: Lineage, *, deadline: Optional[float] = None,
+          facts: Optional[dict] = None) -> str:
+    """Ingest a transcript to its current end: ``drained``, ``missing``, ``forgotten`` or ``deadline``.
+    ``facts`` (from :func:`record_facts`) are kept on a pending row for the audit."""
     if forgotten(store, lineage):
         return "forgotten"
     cursor = read_cursor(store, lineage)
+    if cursor and str(lineage.path) not in named_paths(cursor):
+        # Another path named for a captured lineage is remembered once, so the audit checks it if it ever holds lines
+        # (#2535). The cursor still follows one path; capture is unchanged.
+        cursor = {**cursor, "named": named_paths(cursor, lineage.path)}
+        _write_metadata(store, CURSOR_PREFIX + lineage.key, cursor)
     state = cursor_state(lineage.path, cursor)
     if state == "missing":
+        key = PENDING_PREFIX + lineage.key
+        pending = store.read_metadata_json(key) if not cursor else None
+        recorded = pending.get("path") if isinstance(pending, dict) else None
+        replace = recorded != str(lineage.path) and not (isinstance(recorded, str) and recorded and Path(recorded).exists())
+        named = named_paths(pending, lineage.path)
+        saved = pending.get("facts") if isinstance(pending, dict) else None
+        if isinstance(pending, dict) and facts is not None and not (
+                isinstance(saved, dict) and isinstance(saved.get("events"), list) and "transcript_seen" in saved):
+            # A pending row from an earlier build has no facts (and a damaged one has none usable): its history is
+            # unknown, and unknown never expires (#2535). Its events are kept as unknown too: a prompt may be missing.
+            saved = {"transcript_seen": None}
+        merged = _merge_facts(saved, facts)
+        if not cursor and (replace or not isinstance(pending, dict) or named != pending.get("named")
+                           or merged != pending.get("facts")):
+            # A newer record's path replaces the recorded one while that one is still absent (the sweep must look
+            # where the transcript will be); a recorded transcript that has appeared keeps its reference, so the
+            # sweep drains it. Every named path is kept for the audit (#2535). first_seen keeps the first sighting.
+            first_seen = pending.get("first_seen") if isinstance(pending, dict) else None
+            _write_metadata(store, key, {
+                "session_id": lineage.session_id, "agent_id": lineage.agent_id,
+                "path": str(lineage.path) if replace else recorded, "named": named,
+                "first_seen": first_seen if isinstance(first_seen, (int, float)) else time.time(),
+                **({"facts": merged} if merged is not None else {})})
+            # Durable before the worker can mark the claimed record done and unlink it.
         return "missing"
     if state == "replaced":
         old = _set_aside_copy(lineage.path, cursor)
@@ -365,9 +465,15 @@ def drain(store: MessageStore, lineage: Lineage, *, deadline: Optional[float] = 
                 return "deadline"
     if state != "ok":
         cursor = _new_generation(lineage.path, lineage, cursor)
+        if state == "new":  # the pending row's named paths carry into the first cursor
+            cursor["named"] = sorted(set(cursor["named"])
+                                     | set(named_paths(store.read_metadata_json(PENDING_PREFIX + lineage.key))))
         if state == "new":  # registered before its first batch, so the sweep retries a lineage that fails
-            new = cursor
-            store.update_metadata_json(CURSOR_PREFIX + lineage.key, lambda _current: new)
+            with store.atomic():
+                store.connection.execute(
+                    "INSERT INTO metadata(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    (CURSOR_PREFIX + lineage.key, json.dumps(cursor, sort_keys=True)))
+                store.connection.execute("DELETE FROM metadata WHERE key = ?", (PENDING_PREFIX + lineage.key,))
     return "deadline" if _drain_file(store, lineage, lineage.path, cursor, deadline) is None else "drained"
 
 
@@ -433,6 +539,10 @@ def ingest_lines(store: MessageStore, lineage: Lineage, cursor: dict, lines: lis
                             content_digest(entry) if entry else None))
     uids = {line.uid for line in parsed if line.uid and line.entry_class == PROJECTED}
     known = _versions(store, lineage.key, uids)
+    old = _old_lineage(store, lineage) if lineage.agent_id else None
+    if old is not None:  # #2566: rows the old id-keyed lineage holds stay its own
+        for uid, versions in _versions(store, old.key, uids).items():
+            known[uid] = versions + known.get(uid, [])  # the old lineage's versions are the older ones
     fork, started = _fork_start(store, lineage)
     origins = _origins(store, lineage.key, uids) if fork else {}
     copied_from = cursor.get("fork_parent")  # the session that wrote the latest copy so far
@@ -765,16 +875,18 @@ def _keep_file(store: MessageStore, lineage: Lineage, path: Path, uid: str, fing
 # -- worker --
 
 def registered(store: MessageStore) -> list[Lineage]:
-    """Every transcript capture has a cursor for: the sweep's list."""
-    lineages = []
-    for _key, value in store.connection.execute(
-            "SELECT key, value FROM metadata WHERE key >= ? AND key < ?", (CURSOR_PREFIX, CURSOR_PREFIX + "￿")):
-        try:
-            cursor = json.loads(value)
-            lineages.append(Lineage(cursor["session_id"], cursor.get("agent_id"), Path(cursor["path"])))
-        except (TypeError, ValueError, KeyError):
-            continue
-    return lineages
+    """Every cursor or pending transcript, with cursors winning: the sweep's list."""
+    lineages = {}
+    for prefix in (CURSOR_PREFIX, PENDING_PREFIX):
+        for _key, value in store.connection.execute(
+                "SELECT key, value FROM metadata WHERE key >= ? AND key < ?", (prefix, prefix + "￿")):
+            try:
+                saved = json.loads(value)
+                lineage = Lineage(saved["session_id"], saved.get("agent_id"), Path(saved["path"]))
+                lineages.setdefault(lineage.key, lineage)
+            except (TypeError, ValueError, KeyError):
+                continue
+    return list(lineages.values())
 
 
 def lineages_of(record: dict) -> list[Lineage]:
@@ -788,15 +900,62 @@ def lineages_of(record: dict) -> list[Lineage]:
     return found
 
 
+def _agents_root(lineage: Lineage) -> Optional[Path]:
+    return next((up for up in lineage.path.parents if up.name == "subagents" and up.parent.name == lineage.session_id), None)
+
+
+def path_lineage(lineage: Lineage) -> Optional[Lineage]:
+    """A child keyed by its path below the session's subagents/ ("/workflows/<run-id>/agent-<id>.jsonl": no agent id
+    holds a "/"), for a path whose agent id another live transcript of that tree already holds (#2566)."""
+    root = _agents_root(lineage)
+    if root is None or not lineage.agent_id or lineage.path.name != f"agent-{lineage.agent_id}.jsonl":
+        return None
+    return Lineage(lineage.session_id, "/" + lineage.path.relative_to(root).as_posix(), lineage.path)
+
+
+def resolve(store: MessageStore, lineage: Lineage) -> Lineage:
+    """Path first (#2566): a path's own key, once assigned, is kept. Otherwise a path keeps its agent id unless that id's
+    cursor holds a live path elsewhere in the same subagents/ folder (another folder is #2535's moved session)."""
+    by_path, cursor = path_lineage(lineage), store.read_metadata_json(CURSOR_PREFIX + lineage.key)
+    if by_path is not None and store.read_metadata_json(CURSOR_PREFIX + by_path.key):
+        return by_path
+    if store.read_metadata_json(FORGOTTEN_PREFIX + lineage.rows_session):  # deleted: no new key brings it back
+        return lineage
+    held = Path(cursor["path"]) if isinstance(cursor, dict) and isinstance(cursor.get("path"), str) else None
+    if by_path is None or held is None or held == lineage.path or _agents_root(Lineage(*lineage[:2], held)) != _agents_root(lineage):
+        return lineage
+    return by_path if os.path.exists(held) else lineage  # never raises: an unreadable folder reads as gone
+
+
+JOURNAL_PREFIX = "journal/"  # a run's journal.jsonl: its own child lineage; no file-name id or hook id holds "/" (#2562)
+
+
 def _subagents(lineage: Lineage) -> list[Lineage]:
+    """Every agent-*.jsonl below the session's subagents/ folder, to a bounded depth, never through a symlink,
+    and each workflow run's ``workflows/<run-id>/journal.jsonl`` (#2562): the sweep is the safety net for a missed
+    hook, so it must not depend on a hook naming the path. No hook names a journal; only the sweep takes it."""
     if lineage.agent_id:
         return []
-    folder = session_dir(lineage.path) / "subagents"
-    try:
-        names = sorted(path.name for path in folder.glob("agent-*.jsonl"))
-    except OSError:
-        return []
-    return [Lineage(lineage.session_id, name[len("agent-"):-len(".jsonl")], folder / name) for name in names]
+    root = session_dir(lineage.path) / "subagents"
+    found, stack = [], [(root, 0)]
+    while stack:
+        folder, depth = stack.pop()
+        try:
+            with os.scandir(folder) as entries:
+                for entry in entries:
+                    if entry.is_symlink():
+                        continue  # never followed: one transcript reached twice would be two lineages
+                    if entry.is_dir(follow_symlinks=False):
+                        if depth < SUBAGENT_DEPTH:
+                            stack.append((Path(entry.path), depth + 1))
+                    elif entry.name.startswith("agent-") and entry.name.endswith(".jsonl") and len(entry.name) > 12:
+                        found.append((entry.name[len("agent-"):-len(".jsonl")], Path(entry.path)))
+                    elif entry.name == "journal.jsonl" and folder.parent == root / "workflows":
+                        # a workflow run's log: 31 of 15,262 real results were held by no transcript (#2562)
+                        found.append((JOURNAL_PREFIX + folder.name, Path(entry.path)))
+        except OSError:
+            continue
+    return [Lineage(lineage.session_id, agent, path) for agent, path in sorted(found, key=lambda item: item[1])]
 
 
 def _settle(store: MessageStore, lineage: Lineage, deadline: Optional[float], settle_s: float) -> None:
@@ -822,12 +981,12 @@ def _size(path: Path) -> int:
         return -1
 
 
-def claim_records(home: Path) -> list[tuple[Path, dict]]:
+def claim_records(home: Path) -> list[tuple[Path, Optional[dict]]]:
     """Claim every spool record by renaming it, so a hook firing meanwhile writes a new record
     instead of having its record deleted unread. Claimed files left by a crashed worker are
-    processed again; ingest is idempotent."""
+    processed again; ingest is idempotent. A record that cannot be read comes back as None."""
     directory = home / "spool"
-    claimed: list[tuple[Path, dict]] = []
+    claimed: list[tuple[Path, Optional[dict]]] = []
     try:
         names = sorted(os.listdir(directory))
     except OSError:
@@ -845,9 +1004,17 @@ def claim_records(home: Path) -> list[tuple[Path, dict]]:
             path = target
         elif not name.endswith(".claimed"):
             continue
-        record = _read_json(path)
-        claimed.append((path, record or {}))
+        claimed.append((path, _read_json(path)))
     return claimed
+
+
+def _set_aside(path: Path) -> None:
+    """Keeps a failed record as ``.failed``. One that cannot be read stays until an operator moves it: a later record
+    of the same key goes beside it, never over it (#2535)."""
+    target = path.with_suffix(".failed")
+    if target.exists() and _read_json(target) is None:
+        target = path.with_suffix(f".{time.time_ns()}.failed")
+    os.replace(path, target)
 
 
 def pending(home: Path) -> bool:
@@ -938,12 +1105,27 @@ def _drain_once(home: Path, report: dict, deadline: Optional[float], config: Any
         claimed = claim_records(home)
         done: list[Path] = []  # removed only once the sweep below has run: a cut sweep keeps them
         for _path, record in claimed:  # before any drain, so a fork's first rows already know it is one
-            remember_session(store, record)
+            remember_session(store, record or {})
         for path, record in claimed:
             report["records"] += 1
+            if record is None:  # a record that cannot be read is set aside and reported, never drained as nothing (#2535)
+                report["failed"] += 1
+                report["complete"] = False
+                _log_failure(home, "record", "unreadable")
+                _set_aside(path)
+                continue
             try:
-                for lineage in lineages_of(record):
-                    outcome = drain(store, lineage, deadline=deadline)
+                for named in lineages_of(record):
+                    lineage = resolve(store, named)  # the facts stay the hook's own (#2566)
+                    stamp = record.get("hook_started_ns") if isinstance(record.get("hook_started_ns"), int) else 0
+                    marked = store.read_metadata_json(ENDED_PREFIX + lineage.key)
+                    newest = marked.get("ns") if isinstance(marked, dict) and isinstance(marked.get("ns"), int) else -1
+                    # #2571: only own hooks move the marker; an end always marks (any clock), only a newer own hook clears
+                    ended = record.get("event") == ("SubagentStop" if named.agent_id else "SessionEnd")
+                    if (named.agent_id or not record.get("agent_id")) and (ended or stamp > newest):
+                        high = record.get("newest_ns") if isinstance(record.get("newest_ns"), int) else stamp
+                        _write_metadata(store, ENDED_PREFIX + lineage.key, {"ns": max(stamp, newest, high), "ended": ended})
+                    outcome = drain(store, lineage, deadline=deadline, facts=record_facts(record, named))
                     if outcome == "deadline":
                         report["complete"] = False
                         return "deadline"  # the claimed record stays for the next run
@@ -954,12 +1136,12 @@ def _drain_once(home: Path, report: dict, deadline: Optional[float], config: Any
                 report["failed"] += 1
                 report["complete"] = False
                 _log_failure(home, "record", error)
-                os.replace(path, path.with_suffix(".failed"))
+                _set_aside(path)
                 continue
             done.append(path)
         seen: set[str] = set()
         for lineage in registered(store):
-            for each in (lineage, *_subagents(lineage)):
+            for each in (resolve(store, item) for item in (lineage, *_subagents(lineage))):
                 if each.key in seen:
                     continue
                 seen.add(each.key)
@@ -1099,6 +1281,13 @@ def remember_session(store: MessageStore, record: dict) -> None:
         store.update_metadata_json(FORK_PREFIX + session, lambda current: current if isinstance(current, dict) else flag)
     if record.get("local_gc") is True and not store.read_metadata_json(LOCAL_GC_PREFIX + session):
         store.update_metadata_json(LOCAL_GC_PREFIX + session, lambda _current: True)
+    prompts = [value for value in record.get("compact_prompts") or () if isinstance(value, str)]
+    if prompts:  # kept even when the session has a cursor: the summarizer subagent is matched against it (#2535)
+        known = store.read_metadata_json(COMPACT_PREFIX + session)
+        known = [value for value in known if isinstance(value, str)] if isinstance(known, list) else []
+        new = [value for value in prompts if value not in known]
+        if new:
+            _write_metadata(store, COMPACT_PREFIX + session, (known + new)[-COMPACT_CAP:])
 
 
 def _log_failure(home: Path, stage: str, error: BaseException | str) -> None:
