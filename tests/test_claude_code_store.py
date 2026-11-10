@@ -2338,12 +2338,14 @@ def test_every_kind_of_entry_under_a_tool_results_subfolder_counts(tmp_path, hom
     elif shape == "folder_symlink":
         (pages / "inner").rmdir()
         (tmp_path / "elsewhere").mkdir()
+        (tmp_path / "elsewhere" / "page-9.jpg").write_bytes(b"x")  # counted once as the link, never followed
         (pages / "link").symlink_to(tmp_path / "elsewhere", target_is_directory=True)
     else:
         (pages / "inner" / "page-1.jpg").write_bytes(b"x")
-        pages.chmod(0)
+        (pages / "inner").chmod(0)
     try:
         report = ca.audit(home)
     finally:
-        pages.chmod(0o700)
+        if shape == "unreadable":
+            (pages / "inner").chmod(0o700)
     assert report["lineages"][0]["subfolder_files"] == count and not report["verified"]
