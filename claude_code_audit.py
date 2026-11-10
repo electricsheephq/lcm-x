@@ -479,7 +479,7 @@ def _files_under(folder: Path) -> int:
 
 def _subfolder_files_unverified(row: dict) -> bool:
     """#2535: files a tool wrote into a tool-results subfolder are not stored and match nothing the model was shown
-    inline in 30 of 42 real cases. Release-manager ruling: a lineage with any is unverified."""
+    inline in 30 of 42 real cases. Release-manager ruling: a lineage with any is unverified until #2554 lands."""
     return row["subfolder_files"] > 0
 
 
