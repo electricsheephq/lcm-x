@@ -62,11 +62,11 @@ def synthetic():
     manifest = {'sessions': {s['label']: {'session_id': 's1', 'audit': dict(rc=0, ok=True, verified=True)} for s in k.C['sessions']}}
     compacted = [f['id'] for f in k.C['facts'] if f['class'] == 'pre_compact']
     evidence = {s['label']: {'compact_boundaries': 1, 'compacted_facts': compacted, 'subagent_transcripts': 2, 'saved_outputs': 4} for s in k.C['sessions']}
-    d = {'tokens': [{'id': f['id'], 'pass': True} for f in k.tokens()], 'evidence': evidence, 'plant_failed': []}
+    d = {'tokens': [{'id': f['id'], 'pass': True} for f in k.tokens()], 'evidence': evidence, 'plant_failed': [], 'store': 'S'}
     t = {**copy.deepcopy(d), 'calls': [{'tool': 'lcm_grep', 'ms': 1}], 'empty': False}
-    te = {'tokens': [r for r in copy.deepcopy(d['tokens']) if not r['id'].endswith('-old')], 'empty': True}
-    a = {'answers': [{'id': q['id'], 'answer': q['gold'] or 'NOT FOUND', 'rc': 0, 'is_error': False, 'reader_not_connected': False, 'wall_s': .1, 'tool_calls': {'mcp__lcm-x__lcm_grep': 1}} for q in k.Q]}
-    ae = {'answers': [{**r, 'answer': 'NOT FOUND'} for r in a['answers'][:40]]}
+    te = {'tokens': [r for r in copy.deepcopy(d['tokens']) if not r['id'].endswith('-old')], 'empty': True, 'store': k.EMPTY_STORE}
+    a = {'answers': [{'id': q['id'], 'answer': q['gold'] or 'NOT FOUND', 'rc': 0, 'is_error': False, 'reader_not_connected': False, 'wall_s': .1, 'tool_calls': {'mcp__lcm-x__lcm_grep': 1}} for q in k.Q], 'store': 'S'}
+    ae = {'answers': [{**r, 'answer': 'NOT FOUND'} for r in a['answers'] if next(q for q in k.Q if q['id'] == r['id'])['kind'] == 'positive'], 'store': k.EMPTY_STORE}
     return [manifest, d, t, te, a, None, ae]
 
 def test_score():
@@ -314,3 +314,28 @@ def test_bot_round_6():
             r['answer'] = '?'
     result = k.score(*inputs)
     assert not result['bars']['false_recall'] and result['verdict'] != 'PASS'
+
+
+def test_bot_round_7(tmp_path):
+    assert k.store_identity(_empty(tmp_path)) == k.EMPTY_STORE
+    # Asset binding holds when capture recorded no bundle: an arm that names one is a mismatch.
+    inputs = synthetic()
+    inputs[2]['bundle'] = {'core_commit': 'x'}
+    assert k.score(*inputs)['verdict'] == 'VOID'
+    # A D receipt without its store voids the run.
+    inputs = synthetic()
+    del inputs[1]['store']
+    assert k.score(*inputs)['verdict'] == 'VOID'
+    # Both controls must have run on an empty store.
+    for i in (3, 6):
+        inputs = synthetic()
+        inputs[i]['store'] = 'S'
+        assert k.score(*inputs)['verdict'] == 'VOID'
+    assert k.score(*synthetic())['verdict'] == 'PASS'
+
+
+def _empty(tmp_path):
+    store_home = tmp_path / 'home/.lcm-x/claude-code'
+    store_home.mkdir(parents=True)
+    k.empty_store(store_home)
+    return store_home

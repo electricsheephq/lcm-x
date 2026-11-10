@@ -55,10 +55,13 @@ REQUIRED, FAIL (A), CLASSIFICATION REQUIRED, PASS.
 Run from the repository root. `KIT` is this folder (`bench/instruments/cc_mcp_recall`). `CMD` is a
 launcher for the Claude Code CLI that runs it with `HOME="$KIT_HOME"` and
 `CLAUDE_CONFIG_DIR="$KIT_HOME/.claude"` (the kit reads transcripts from `$KIT_HOME/.claude/projects`),
-and passes `KIT_LCMX_CC_HOME` through as the reader's `LCMX_CC_HOME`. `PLUGIN` is the unpacked Claude
+and passes `KIT_LCMX_CC_HOME` through as the reader's `LCMX_CC_HOME`. The launcher brings its own credentials: the isolated
+`CLAUDE_CONFIG_DIR` does not load the operator's normal Claude settings (an `apiKeyHelper` there is not used),
+so pass them through an environment variable the CLI supports. `PLUGIN` is the unpacked Claude
 Code unit asset. `EMPTY`, `READER`, `CAPTURE` and `OUT` are fresh directories.
 
-Stop after the control if `t-empty` finds anything or `a-empty` names a value (the run is void), and
+Stop after the control if `t-empty` finds anything or `a-empty` names a planted value (the run is void; a
+value that is not in the corpus does not void it), and
 after arm D if any value is missing (a capture finding); the scorer reports both, but the later arms
 would only spend model calls.
 

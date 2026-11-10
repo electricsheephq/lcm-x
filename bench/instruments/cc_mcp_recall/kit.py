@@ -91,6 +91,8 @@ def store_identity(store_home):
         rows = db.execute("SELECT session_id, COUNT(*) FROM messages GROUP BY session_id ORDER BY session_id").fetchall()
     return hashlib.sha256(json.dumps(rows).encode()).hexdigest()
 
+EMPTY_STORE = hashlib.sha256(json.dumps([]).encode()).hexdigest()  # store_identity of a store with no sessions
+
 def empty_store(home):
     cc = package()
     store = cc.open_store(cc.admit(home, hermes_home=home.parent / "unused-hermes"), home)
@@ -418,7 +420,7 @@ def score(manifest, d, t, te, a, a2=None, ae=None, classifications=None):
     def valid(run, qs):
         ids = [r["id"] for r in run["answers"]]  # exactly one answer per question: a duplicate is incomplete
         return not run.get("stop_reason") and len(ids) == len(set(ids)) and set(ids) == {q["id"] for q in qs} and all(not r.get("is_error") and not r.get("reader_not_connected", True) and r.get("rc") == 0 and bool(r.get("answer", "").strip()) for r in run["answers"])
-    empty_ok = len(te["tokens"]) == 44 and {r["id"] for r in te["tokens"]} == {f["id"] for f in tokens() if not f["id"].endswith("-old")} and all(r["pass"] for r in te["tokens"]) and ae is not None and valid(ae, Q[:40]) and not any(leaked(r["answer"]) for r in ae["answers"])  # an empty store names no planted value, hedged or not
+    empty_ok = len(te["tokens"]) == 44 and {r["id"] for r in te["tokens"]} == {f["id"] for f in tokens() if not f["id"].endswith("-old")} and all(r["pass"] for r in te["tokens"]) and ae is not None and valid(ae, [q for q in Q if q["kind"] == "positive"]) and not any(leaked(r["answer"]) for r in ae["answers"])  # an empty store names no planted value, hedged or not
     latency = {}
     for name in {c["tool"] for c in t["calls"]}:
         values = sorted(c["ms"] for c in t["calls"] if c["tool"] == name)
@@ -428,9 +430,11 @@ def score(manifest, d, t, te, a, a2=None, ae=None, classifications=None):
     if t.get("empty") is not False or te.get("empty") is not True:  # a control receipt can never stand in for the measured arm
         cover = {**cover, "ok": False, "missing": cover["missing"] + ["t_receipt_mode"]}
     # Every measured arm (T, A, the second A, the empty control) uses the asset that captured, and T and A the store D read.
-    if manifest.get("bundle") is not None and any(arm is not None and arm.get("bundle") != manifest["bundle"] for arm in (t, te, a, a2, ae)):
+    # Bound even when capture recorded no bundle: None then has to match None.
+    if any(arm is not None and arm.get("bundle") != manifest.get("bundle") for arm in (t, te, a, a2, ae)):
         cover = {**cover, "ok": False, "missing": cover["missing"] + ["asset_mismatch"]}
-    if "store" in d and any(arm is not None and arm.get("store") != d["store"] for arm in (t, a, a2)):
+    # T and A use the store D read; the controls use an empty store; a D receipt without its store voids the run.
+    if d.get("store") is None or any(arm is not None and arm.get("store") != d["store"] for arm in (t, a, a2)) or any(arm is not None and arm.get("store") != EMPTY_STORE for arm in (te, ae)):
         cover = {**cover, "ok": False, "missing": cover["missing"] + ["store_mismatch"]}
     bars = {"empty_control": empty_ok, "coverage": cover["ok"], "capture": not manifest.get("stop") and set(manifest["sessions"]) == {s["label"] for s in C["sessions"]} and all(s.get("audit", {}).get("rc") == 0 and s["audit"].get("ok") and s["audit"].get("verified") for s in manifest["sessions"].values()), "D": all(dm.get(f["id"], False) for f in tokens() if gated(f)), "T": all(tm.get(f["id"], False) for f in tokens() if gated(f)), "A": min(positives) >= 36, "false_recall": max(fabricated) <= 1, "answers_complete": all(valid(run, Q) for run in runs)}
     second = window and a2 is None
