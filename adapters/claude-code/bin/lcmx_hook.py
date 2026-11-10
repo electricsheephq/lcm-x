@@ -389,6 +389,7 @@ def main(stdin: TextIO = sys.stdin, environ: Mapping[str, str] = os.environ, *, 
                 os.close(ready)
                 os.setsid()
                 os.close(signal_ready)  # the parent may return now
+                blocking_ms = round((time.monotonic() - started) * 1000, 1)  # through the handshake (one clock)
                 null = os.open(os.devnull, os.O_RDWR)
                 for fd in (0, 1, 2):
                     os.dup2(null, fd)

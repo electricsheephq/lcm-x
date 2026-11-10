@@ -85,6 +85,22 @@ def _wait_hooks(env, count):
     pytest.fail("hook children did not finish")
 
 
+def _release(pointer):
+    """Feed the stalled reader of a FIFO pointer once it has opened it: data written before any reader is lost."""
+    import errno
+    end = time.monotonic() + 5
+    while True:
+        try:
+            fd = os.open(pointer, os.O_WRONLY | os.O_NONBLOCK)
+            break
+        except OSError as exc:  # ENXIO: no reader has the FIFO open yet
+            if exc.errno != errno.ENXIO or time.monotonic() > end:
+                raise
+            time.sleep(0.01)
+    with os.fdopen(fd, "w") as handle:
+        handle.write("{}")
+
+
 @pytest.mark.parametrize("event", ["Stop", "SessionEnd"])
 def test_detached_fifo_does_not_block(hook, env, tmp_path, event):
     payload = {"hook_event_name": event, "session_id": "s1", "transcript_path": str(_transcript(tmp_path))}
@@ -100,8 +116,7 @@ def test_detached_fifo_does_not_block(hook, env, tmp_path, event):
         assert (done.returncode, done.stdout, done.stderr) == (0, "", "")
         assert time.monotonic() - started < 2
     finally:
-        with os.fdopen(os.open(pointer, os.O_RDWR | os.O_NONBLOCK), "w") as handle:
-            handle.write("{}")
+        _release(pointer)
     row = _wait_hooks(env, 2)[-1]
     assert row["detached"] is True and row["blocking_ms"] < 1000 and row["outcome"]
 
@@ -132,8 +147,7 @@ def test_a_killed_hook_process_group_still_lands_the_pointer(hook, env, tmp_path
             pass  # nothing is left in the group: the child runs in its own session
         proc.wait(timeout=5)
     finally:
-        with os.fdopen(os.open(pointer, os.O_RDWR | os.O_NONBLOCK), "w") as handle:
-            handle.write("{}")
+        _release(pointer)
     row = _wait_hooks(env, 2)[-1]
     assert row["detached"] is True and row["outcome"]
     [landed] = _spooled(env)
@@ -1554,6 +1568,7 @@ def test_the_hook_returns_only_after_its_writer_left_the_group(env, tmp_path, ev
         pass
     row = _wait_hooks(env, 1)[-1]  # a writer the kill reached never logs (the worker may already have drained the pointer)
     assert row["detached"] is True and row["event"] == event and not row["outcome"].startswith("error")
+    assert row["blocking_ms"] >= 300  # the parent's wait for the slowed setsid is part of what it blocked
 
 
 def test_a_detached_writer_logs_a_failure_before_its_record_is_built(env, tmp_path):
