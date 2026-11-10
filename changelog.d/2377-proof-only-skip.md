@@ -1,1 +1,2 @@
 - Fix: Require occurrence proof for cold tool replay skips and record ambiguous replay copies.
+- Fix: A tool replay copy whose link cannot be written is marked pending instead; if that write fails too, the ingest fails and stores nothing, so an unmarked copy never funds a later skip.

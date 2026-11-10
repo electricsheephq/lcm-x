@@ -7163,17 +7163,29 @@ class LCMEngine(
                 "AND store_id NOT IN (SELECT value FROM json_each(?1))",
                 (json.dumps([r["store_id"] for r in targets]),))) if conn.execute(
                     "SELECT 1 FROM sqlite_master WHERE name='message_relations'").fetchone() else []
-            return self._plan_tool_replay_links(rows, targets, seeds=seeds)
+
+            def restored(row, session):
+                # #2414: both sides keyed on the skip proof's placeholder-restored identity,
+                # so a payload re-externalized under a fresh ref still links to its original.
+                if row.get("role") != "tool" and not row.get("tool_calls"):
+                    return row
+                session = str(session or self._session_id or "")
+                return dict(row, content=self._restore_ingest_payload_placeholders_in_content_identity(
+                    normalize_content_value(row.get("content")) or "", session_id=session),
+                    tool_calls=self._restore_ingest_payload_placeholders_in_value(
+                        row.get("tool_calls"), session_id=session))
+            return self._plan_tool_replay_links([restored(row, None) for row in rows],
+                                                [restored(row, row.get("session_id")) for row in targets], seeds=seeds)
         except Exception as exc:
             if (_is_ingest_busy_error(exc)
                     or (getattr(exc, "sqlite_errorcode", 0) or 0) & 255 == sqlite3.SQLITE_INTERRUPT):
                 raise
             self._raise_ingest_busy(exc)
-            logger.warning("LCM tool replay computation failed reason=%s", type(exc).__name__)
+            logger.warning("LCM tool replay computation failed reason=%s", type(exc).__name__, exc_info=True)
             return None
 
     def _write_tool_replay_links(self, plan, ids, after_commit):
-        """Rows survive deterministic attribution faults; transient faults retry atomically."""
+        """A deterministic link fault leaves its rows link_pending; a fault on that mark fails the ingest."""
         pending = len(ids) if plan is None else 0
         groups = ([[(sid, "link_pending", None, None, None)] for sid in ids] if plan is None else
                   [[(ids[pos], "possible_replay_of", target, None, None)] for pos, target in plan])
@@ -7194,8 +7206,10 @@ class LCMEngine(
                     or (getattr(exc, "sqlite_errorcode", 0) or 0) & 255 == sqlite3.SQLITE_INTERRUPT):
                 raise
             self._raise_ingest_busy(exc)
-            reason = "pending_write_failed" if plan is None else "relation_write_failed"
-            failures = [dict(source_store_id=g[0][0], target_store_id=g[0][2], reason=reason) for g in groups]
+            if plan is None:
+                raise  # #2414: neither a link nor its mark, so these copies never commit unmarked
+            failures = [dict(source_store_id=g[0][0], target_store_id=g[0][2], reason="relation_write_failed")
+                        for g in groups]
 
             def record():
                 self._last_tool_link_failures.extend(failures)
@@ -7204,7 +7218,11 @@ class LCMEngine(
                     logger.warning("LCM tool replay link failed source_store_id=%s target_store_id=%s reason=%s",
                                    failure["source_store_id"], failure["target_store_id"], failure["reason"])
             after_commit.append(record)
-            return sources, targets
+            # #2414: an unmarked copy would fund a later skip. Mark it pending in a fresh savepoint;
+            # if that fails too, the error rolls the whole ingest back like any failed ingest.
+            pending = len(groups)
+            with self._ingest_evidence():
+                self._store.add_message_relations([[(g[0][0], "link_pending", None, None, None)] for g in groups])
         if pending:
             def count():
                 self._last_tool_link_pending_count += pending

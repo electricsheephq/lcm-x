@@ -3275,6 +3275,9 @@ class ReconcileMixin:
             consumed_pairs=consumed_pairs, tail_rows=tail)
         self._tool_borrow_proofs = {pair: ids for pair, ids in self._tool_borrow_proofs.items()
                                    if set(pair) <= ceiling}
+        if not ceiling:  # The proof only narrows the ceiling; skip its summary-coverage read.
+            self._last_tool_skip_sets = (set(), set())
+            return set()
         result = self._proof_tool_segment_skips(messages, cursor, tail, ceiling,
                                                 consumed_store_ids, consumed_pairs or {})
         result &= ceiling
@@ -3340,7 +3343,9 @@ class ReconcileMixin:
         # A stored copy carrying any possible_replay_of is never independent
         # capacity, whatever its target's class or stamp (any writer's link).
         # Nor is a link_pending row: its link computation failed, so it may be
-        # a copy. Less capacity can only store more.
+        # a copy. Less capacity can only store more. #2414: so the writer must
+        # never commit an unmarked copy: its mark is written in the transaction
+        # that stores it, or that ingest fails and stores nothing.
         conn = self._store._conn
         copies = {row_owner[row[0]] for row in conn.execute(
             "SELECT store_id FROM message_relations WHERE kind IN ('possible_replay_of','link_pending') "
