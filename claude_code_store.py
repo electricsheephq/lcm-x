@@ -55,6 +55,7 @@ COMPACT_PREFIX = "capture:compact:"  # hashed prompt ids of a session's compacti
 COMPACT_CAP = 256
 FORK_PREFIX = "capture:fork:"  # sessions whose SessionStart source was ``fork``, and when they started
 LOCAL_GC_PREFIX = "capture:local_gc:"  # sessions seen with Claude Code's local GC on (sticky)
+ENDED_PREFIX = "capture:ended:"  # lineages whose last observed hook was their end: SessionEnd, or SubagentStop (#2571)
 BATCH_LINES = 1000
 BATCH_BYTES = 8 * 1024 * 1024
 FILE_CHUNK_BYTES = 64 * 1024 * 1024  # a larger tool-results file is kept as several rows
@@ -1105,6 +1106,9 @@ def _drain_once(home: Path, report: dict, deadline: Optional[float], config: Any
                 for named in lineages_of(record):
                     lineage = resolve(store, named)  # the facts stay the hook's own (#2566)
                     outcome = drain(store, lineage, deadline=deadline, facts=record_facts(record, named))
+                    ended = record.get("event") == ("SubagentStop" if named.agent_id else "SessionEnd")
+                    if bool(store.read_metadata_json(ENDED_PREFIX + lineage.key)) is not ended:  # a later hook clears it
+                        _write_metadata(store, ENDED_PREFIX + lineage.key, ended)
                     if outcome == "deadline":
                         report["complete"] = False
                         return "deadline"  # the claimed record stays for the next run
