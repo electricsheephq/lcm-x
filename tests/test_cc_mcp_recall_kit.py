@@ -419,3 +419,20 @@ def test_bot_round_10(tmp_path):
     degraded = _stream_run(tmp_path, [(grep, False, 'simulated FTS crash'), (grep, False, None)])
     assert degraded['reader_errors'] == 1 and degraded['is_error']
     assert not _stream_run(tmp_path, [(grep, False, None)])['is_error']
+
+
+def test_bot_round_11(tmp_path):
+    # Store identity binds the measured content: equal row counts with other content, or another saved output, differ.
+    import sqlite3
+    home = _empty(tmp_path)
+    with sqlite3.connect(home / 'lcm.db') as db:
+        db.execute("INSERT INTO messages(session_id, role, content, timestamp) VALUES('s1', 'user', 'value 48213', 1)")
+    first = k.store_identity(home)
+    assert first != k.EMPTY_STORE
+    with sqlite3.connect(home / 'lcm.db') as db:
+        db.execute("UPDATE messages SET content = 'value 99999'")
+    second = k.store_identity(home)
+    assert second != first
+    (home / 'lcm-large-outputs').mkdir()
+    (home / 'lcm-large-outputs' / 'p1.json').write_text('{"content": "x"}')
+    assert k.store_identity(home) not in (first, second)

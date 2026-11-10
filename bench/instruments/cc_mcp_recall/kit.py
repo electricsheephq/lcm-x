@@ -94,12 +94,25 @@ def bundle(plugin):
     return read(plugin / "bundle.json") if (plugin / "bundle.json").is_file() else None
 
 def store_identity(store_home):
-    """Which store an arm measured: a digest of its sessions and their row counts (the corpus store is static)."""
+    """Which store an arm measured: per session its row count and a digest of every row's id, role and content, then
+    every saved tool output (externalized payload) by name and digest. Equal identities mean equal measured content."""
+    rows, digests = [], {}
     with sqlite3.connect((store_home / "lcm.db").as_uri() + "?mode=ro", uri=True) as db:
-        rows = db.execute("SELECT session_id, COUNT(*) FROM messages GROUP BY session_id ORDER BY session_id").fetchall()
+        for session, store_id, role, content in db.execute(
+                "SELECT session_id, store_id, role, content FROM messages ORDER BY session_id, store_id"):
+            digest = digests.setdefault(session, hashlib.sha256())
+            digest.update(json.dumps([store_id, role, content]).encode() + b"\n")
+            if not rows or rows[-1][0] != session:
+                rows.append([session, 0])
+            rows[-1][1] += 1
+    rows = [[session, count, digests[session].hexdigest()] for session, count in rows]
+    payloads = store_home / "lcm-large-outputs"  # the reader's default saved-output folder under its home
+    if payloads.is_dir():
+        rows += [[str(path.relative_to(payloads)), hashlib.sha256(path.read_bytes()).hexdigest()]
+                 for path in sorted(payloads.rglob("*")) if path.is_file()]
     return hashlib.sha256(json.dumps(rows).encode()).hexdigest()
 
-EMPTY_STORE = hashlib.sha256(json.dumps([]).encode()).hexdigest()  # store_identity of a store with no sessions
+EMPTY_STORE = hashlib.sha256(json.dumps([]).encode()).hexdigest()  # store_identity of a store with no rows or payloads
 
 def empty_store(home):
     cc = package()
