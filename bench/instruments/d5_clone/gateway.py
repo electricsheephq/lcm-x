@@ -199,7 +199,9 @@ class Gateway:
             raise ValueError("gateway home and port file must be inside run_dir")
         argv = [str(self.host_bin / "hermes"), "gateway", "run", "--no-supervise"]
         if sandbox.available():
-            argv = sandbox.wrap(argv, ports=[self.provider_port], socket_roots=[self.run_dir])
+            # The live agent's home is never touched, not even a directory stat (as for the replay and the doctor).
+            argv = sandbox.wrap(argv, ports=[self.provider_port], socket_roots=[self.run_dir],
+                                deny_paths=[sandbox.hermes_home()])
         elif not self.allow_unsandboxed:
             raise RuntimeError("sandbox unavailable; refusing unsandboxed gateway")
         self.run_dir.mkdir(parents=True, exist_ok=True)

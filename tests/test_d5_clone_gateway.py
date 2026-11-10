@@ -343,7 +343,7 @@ def test_gateway_process(fake_gateway, monkeypatch, wrapped):
         assert os.getpgid(pid) == pid
         assert len(calls) == int(wrapped)
         if wrapped:
-            assert calls[0] == {"ports": [9], "socket_roots": [fake_gateway.run_dir]}
+            assert calls[0] == {"ports": [9], "socket_roots": [fake_gateway.run_dir], "deny_paths": [g.sandbox.hermes_home()]}
         assert fake_gateway.stop(2) == -signal.SIGTERM
         assert fake_gateway.pids() == []
         child, deadline = int(Path(f"{fake_gateway.port_file}.child").read_text()), time.monotonic() + 5
