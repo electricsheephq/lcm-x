@@ -9,6 +9,7 @@ import hashlib
 import json
 import math
 import sqlite3
+import stat
 import time
 import zlib
 from collections import Counter, defaultdict
@@ -38,6 +39,7 @@ from .claude_code_store import (
     _subagents,
     _wal_without_sidecars,
     cursor_state,
+    named_paths,
     read_stamp,
 )
 from .config import LCMConfig
@@ -231,6 +233,93 @@ def _matches_generation(path: Path, rows: dict) -> bool:
     return count == len(rows)
 
 
+def _named_others(lineage: Lineage, cursor: dict, report: dict) -> None:
+    """#2535: another transcript path this lineage's records named. Capture follows one path, and the audit does not
+    match another one against the store: one that holds lines, or saved outputs under its session folder, leaves the
+    lineage unverified. One that never appeared (a resume's SessionStart names a path under the new directory), or an
+    empty one with no saved outputs, holds nothing. One that cannot be checked is not clean."""
+    try:
+        own = lineage.path.stat()
+        own = (own.st_dev, own.st_ino)
+    except OSError:
+        own = None
+    own_folder = results_dir(session_dir(lineage.path))
+    for name in named_paths(cursor):
+        other = Path(name)
+        if other == lineage.path:
+            continue
+        try:
+            try:
+                status = other.stat()
+            except (FileNotFoundError, NotADirectoryError):  # never appeared, or cannot exist
+                status = None
+            holds = (status is not None and (status.st_dev, status.st_ino) != own
+                     and (not stat.S_ISREG(status.st_mode) or status.st_size > 0))
+            results = session_dir(other) / "tool-results"
+            try:
+                results.lstat()
+            except (FileNotFoundError, NotADirectoryError):  # no saved outputs there
+                results = None
+            if not holds and results is not None:
+                folder = results_dir(session_dir(other))  # None when a symlink or unreadable: not a clean folder
+                holds = folder is None or (folder != own_folder and any(True for _ in folder.iterdir()))
+            agents = session_dir(other) / "subagents"  # subagent transcripts the worker sweeps only under the cursor's
+            if not holds and session_dir(other) != session_dir(lineage.path):
+                try:
+                    agents.lstat()
+                except (FileNotFoundError, NotADirectoryError):
+                    agents = None
+                holds = agents is not None and any(True for _ in agents.iterdir())
+        except OSError:
+            holds = True
+        report["named_other_paths"] += holds
+
+
+def _uncaptured_child(child: Lineage, metadata: dict) -> bool:
+    """A subagent transcript with no cursor, or a copy at a path its cursor never named that holds lines (#2535: no
+    matching). A forgotten one is never read again."""
+    if FORGOTTEN_PREFIX + child.rows_session in metadata:
+        return False
+    if CURSOR_PREFIX + child.key not in metadata:
+        return True
+    return str(child.path) not in named_paths(metadata[CURSOR_PREFIX + child.key]) and _holds_lines(child.path)
+
+
+def _unlistable_subagents(path: Path) -> bool:
+    """The session folder's subagents folder exists but cannot be listed: glob would just return nothing."""
+    folder = session_dir(path) / "subagents"
+    try:
+        folder.lstat()
+        next(iter(folder.iterdir()), None)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    except OSError:
+        return True
+    return False
+
+
+def _holds_lines(path: Path) -> bool:
+    """Not empty (a regular file with bytes, or anything else that exists), or cannot be checked (fail closed)."""
+    try:
+        status = path.stat()
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    except OSError:
+        return True
+    return not stat.S_ISREG(status.st_mode) or status.st_size > 0
+
+
+def _present(path: Path) -> bool:
+    """Exists, or cannot be checked (fail closed): only a clean not-found is absent."""
+    try:
+        path.stat()
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    except OSError:
+        return True
+    return True
+
+
 def _older_copy(siblings: list[Path], rows: dict) -> Path | None:
     for sibling in siblings:
         if _matches_generation(sibling, rows):
@@ -283,6 +372,7 @@ def _transcripts(lineage: Lineage, cursor: dict, events: list[dict], report: dic
             continue
         length = _compare(copy, rows, report, expected, lag)
         report["failures"]["surplus_lines"] += sum(i >= length for i in rows)
+    _named_others(lineage, cursor, report)
     return expected
 
 
@@ -353,11 +443,20 @@ def _files(lineage: Lineage, events: list[dict], report: dict) -> None:
     if lineage.agent_id is not None:
         return
     folder = results_dir(session_dir(lineage.path))
-    if folder is None:
+    if folder is None:  # none, or one capture will not read (a symlink, or not a real folder): that holds rows
+        try:
+            (session_dir(lineage.path) / "tool-results").lstat()
+            report["files"]["uncaptured"] += 1
+        except (FileNotFoundError, NotADirectoryError):
+            pass
+        except OSError:
+            report["files"]["uncaptured"] += 1
         return
     versions = {(row["uid"], row["content_digest"]): row["disposition"]
                 for row in events if row["source_kind"] == "file"}
     for path in sorted(folder.iterdir()):
+        if path.is_symlink() or not (path.is_file() or path.is_dir()):  # capture never reads it
+            report["files"]["uncaptured"] += 1
         if path.is_symlink() or not path.is_file():
             continue
         disposition = versions.get(("tool-results/" + path.name, _file_digest(path)))
@@ -382,6 +481,7 @@ def _lineage_report(lineage: Lineage, cursor: dict, events: list[dict], messages
               "surplus": 0, "unverifiable": 0, "fork_copies": 0, "unanswered": 0,
               "forgotten": forgotten, "transcript_state": "forgotten" if forgotten else "ok",
               "other_projection": 0, "projected_without_uuid": 0,
+              "named_other_paths": 0,
               "files": dict.fromkeys(("held", "kept", "uncaptured"), 0), "failures": dict.fromkeys(FAILURES, 0)}
     report.update(classes={}, unknown_types={})
     if forgotten:
@@ -538,7 +638,7 @@ def _unverified(metadata: dict, records: list[dict], lineages: list[dict], sessi
                 failed: list[Lineage | None]) -> list[str]:
     unknown = {row["lineage"] for row in lineages if not row["forgotten"] and (
         row["transcript_state"] != "ok" or row["generations_gone"] or row["pending_lines"]
-        or row["files"]["uncaptured"])}
+        or row["files"]["uncaptured"] or row["named_other_paths"])}
     if session is not None and CURSOR_PREFIX + lineage_key(session) not in metadata:
         unknown.add(lineage_key(session))
     # A pending lineage (#2533) whose transcript now exists but has no cursor is uncaptured. One whose transcript never
@@ -554,12 +654,24 @@ def _unverified(metadata: dict, records: list[dict], lineages: list[dict], sessi
         lineage = Lineage(pending.get("session_id"), pending.get("agent_id"), Path(pending["path"]))
         if CURSOR_PREFIX + lineage.key in metadata or FORGOTTEN_PREFIX + lineage.rows_session in metadata:
             continue
-        if lineage.path.exists():
+        if any(_present(Path(name)) for name in named_paths(pending)):  # every path its records named (#2535)
             unknown.add(lineage.key)
-        if lineage.agent_id is None:
-            for child in _subagents(lineage):
-                if CURSOR_PREFIX + child.key not in metadata and FORGOTTEN_PREFIX + child.rows_session not in metadata:
-                    unknown.add(child.key)
+        if lineage.agent_id is None:  # under every path its records named (#2535)
+            for name in named_paths(pending):
+                if _unlistable_subagents(Path(name)):
+                    unknown.add(lineage.key)
+                try:  # saved outputs with no cursor are uncaptured; a folder that cannot be checked is not clean
+                    (session_dir(Path(name)) / "tool-results").lstat()
+                    folder = results_dir(session_dir(Path(name)))
+                    if folder is None or any(True for _ in folder.iterdir()):
+                        unknown.add(lineage.key)
+                except (FileNotFoundError, NotADirectoryError):
+                    pass
+                except OSError:
+                    unknown.add(lineage.key)
+                for child in _subagents(Lineage(lineage.session_id, None, Path(name))):
+                    if _uncaptured_child(child, metadata):
+                        unknown.add(child.key)
     # A record set aside before its transcript had a cursor names a lineage nothing else shows.
     for lineage in failed:
         if lineage is None:
@@ -568,8 +680,10 @@ def _unverified(metadata: dict, records: list[dict], lineages: list[dict], sessi
               and FORGOTTEN_PREFIX + lineage.rows_session not in metadata):
             unknown.add(lineage.key)
     for record in records:  # a forgotten session's subagents are still captured
+        if record["lineage"].agent_id is None and _unlistable_subagents(record["lineage"].path):
+            unknown.add(record["lineage"].key)
         for child in _subagents(record["lineage"]):
-            if CURSOR_PREFIX + child.key not in metadata and FORGOTTEN_PREFIX + child.rows_session not in metadata:
+            if _uncaptured_child(child, metadata):
                 unknown.add(child.key)
     return sorted(unknown)
 
@@ -616,6 +730,9 @@ def audit(home: Path, session: str | None = None) -> dict:
         age = "unknown" if oldest_pending_age is None else f"{oldest_pending_age / 3600:.1f} h"
         verdict += (f"; {len(pending)} lineages awaiting capture ({absent} transcripts not yet seen), "
                     f"oldest{' known' if seen and len(seen) < len(pending) else ''} {age}")
+    others = sum(1 for row in lineages if not row["forgotten"] and row["named_other_paths"])
+    if others:  # #2535: capture follows one path, and another that holds rows is not matched against the store
+        verdict += f"; {others} lineages: a second transcript path holds rows; not matched"
     return {"verdict": verdict, "ok": not any(failures.values()), "opened_immutable": immutable, "failures": failures,
             "pending_lineages": len(pending), "oldest_pending_age_s": oldest_pending_age,
             "unverified": unverified, "verified": verified,

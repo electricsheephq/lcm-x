@@ -322,7 +322,30 @@ def _new_generation(path: Path, lineage: Lineage, cursor: Optional[dict]) -> dic
     kept = {key: cursor[key] for key in ("fork_parent", "fork_linked") if cursor and key in cursor}
     return {"path": str(path), "session_id": lineage.session_id, "agent_id": lineage.agent_id,
             "dev": status.st_dev, "ino": status.st_ino, "generation": cursor["generation"] + 1 if cursor else 0,
-            "offset": 0, "line_index": 0, "first": None, "last_offset": None, "last": None, **kept}
+            "offset": 0, "line_index": 0, "first": None, "last_offset": None, "last": None, **kept,
+            "named": named_paths(cursor, path)}
+
+
+def named_paths(saved: Optional[dict], path: Optional[Path] = None) -> list[str]:
+    """Every transcript path a lineage's records named (#2535): its saved ``named`` list, its own ``path`` and
+    ``path``. A cursor or pending row written before #2535 has no list and names only its own path."""
+    names = set()
+    if isinstance(saved, dict):
+        listed = saved.get("named")
+        if isinstance(listed, list):
+            names.update(name for name in listed if isinstance(name, str) and name)
+        if isinstance(saved.get("path"), str) and saved["path"]:
+            names.add(saved["path"])
+    if path is not None:
+        names.add(str(path))
+    return sorted(names)
+
+
+def _write_metadata(store: MessageStore, key: str, value: dict) -> None:
+    with store.atomic():
+        store.connection.execute(
+            "INSERT INTO metadata(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, json.dumps(value, sort_keys=True)))
 
 
 def read_lines(path: Path, offset: int, *, max_lines: int = BATCH_LINES,
@@ -355,24 +378,27 @@ def drain(store: MessageStore, lineage: Lineage, *, deadline: Optional[float] = 
     if forgotten(store, lineage):
         return "forgotten"
     cursor = read_cursor(store, lineage)
+    if cursor and str(lineage.path) not in named_paths(cursor):
+        # Another path named for a captured lineage is remembered once, so the audit checks it if it ever holds lines
+        # (#2535). The cursor still follows one path; capture is unchanged.
+        cursor = {**cursor, "named": named_paths(cursor, lineage.path)}
+        _write_metadata(store, CURSOR_PREFIX + lineage.key, cursor)
     state = cursor_state(lineage.path, cursor)
     if state == "missing":
         key = PENDING_PREFIX + lineage.key
         pending = store.read_metadata_json(key) if not cursor else None
         recorded = pending.get("path") if isinstance(pending, dict) else None
-        if not cursor and recorded != str(lineage.path) and not (isinstance(recorded, str) and recorded
-                                                                and Path(recorded).exists()):
+        replace = recorded != str(lineage.path) and not (isinstance(recorded, str) and recorded and Path(recorded).exists())
+        named = named_paths(pending, lineage.path)
+        if not cursor and (replace or not isinstance(pending, dict) or named != pending.get("named")):
             # A newer record's path replaces the recorded one while that one is still absent (the sweep must look
             # where the transcript will be); a recorded transcript that has appeared keeps its reference, so the
-            # sweep drains it. first_seen keeps the first sighting.
+            # sweep drains it. Every named path is kept for the audit (#2535). first_seen keeps the first sighting.
             first_seen = pending.get("first_seen") if isinstance(pending, dict) else None
-            with store.atomic():
-                store.connection.execute(
-                    "INSERT INTO metadata(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                    (key, json.dumps({"session_id": lineage.session_id, "agent_id": lineage.agent_id,
-                                      "path": str(lineage.path),
-                                      "first_seen": first_seen if isinstance(first_seen, (int, float)) else time.time()},
-                                     sort_keys=True)))
+            _write_metadata(store, key, {
+                "session_id": lineage.session_id, "agent_id": lineage.agent_id,
+                "path": str(lineage.path) if replace else recorded, "named": named,
+                "first_seen": first_seen if isinstance(first_seen, (int, float)) else time.time()})
             # Durable before the worker can mark the claimed record done and unlink it.
         return "missing"
     if state == "replaced":
@@ -383,6 +409,9 @@ def drain(store: MessageStore, lineage: Lineage, *, deadline: Optional[float] = 
                 return "deadline"
     if state != "ok":
         cursor = _new_generation(lineage.path, lineage, cursor)
+        if state == "new":  # the pending row's named paths carry into the first cursor
+            cursor["named"] = sorted(set(cursor["named"])
+                                     | set(named_paths(store.read_metadata_json(PENDING_PREFIX + lineage.key))))
         if state == "new":  # registered before its first batch, so the sweep retries a lineage that fails
             with store.atomic():
                 store.connection.execute(

@@ -444,8 +444,17 @@ and reports the age of the oldest one.
 Known issue in the shipped preview `claude-code-v0.1.0`: before this fix, such a session's final
 rows could be lost if its later hook records were also lost (#2533). Known issue for the preview and for any build before the
 follow-up to #2533 (#2535): the audit counts, but does not fail on, a session whose transcript file never appeared; its
-one-line verdict names how many lineages are awaiting capture and the age of the oldest. Also until #2535: a session whose
-hooks name two transcript paths can be reported verified while one path was never captured.
+one-line verdict names how many lineages are awaiting capture and the age of the oldest.
+
+A lineage's records can name more than one transcript path: a resume from another directory sends `SessionStart` with
+a path under the new directory that never appears. Capture follows one path. The pending row and the cursor list every
+path named in a record the worker reads. The audit does not match another named path against the store: if one exists and holds lines, or saved
+outputs or subagent transcripts under its session folder, or cannot be checked, the lineage is unverified (`named_other_paths`, and in words in
+the verdict: "a second transcript path holds rows; not matched"). For a lineage with a cursor, a named path that never
+appeared, or an empty one with no saved outputs, holds nothing. A pending lineage (no cursor yet) is stricter: any named
+path that exists, even empty, or cannot be checked, or saved outputs or subagent transcripts under any named path's
+session folder, leave it unverified. No real session has shown a second path holding rows; matching and capturing one
+is a follow-up for when one does.
 
 Detached hook logs include `detached: true` and parent `blocking_ms`; `ms` still measures
 through child completion. The parent parses stdin and forks before filesystem validation.
