@@ -4599,11 +4599,13 @@ def _lcm_recall_adjacent_reply(
     return placed, pairs, None
 
 
-def _lcm_recall_later_statements(engine, ordered, identity_rows, *, n, limit, query, seen_refs, fts_arm_index, deadline, excluded, allowed):
+def _lcm_recall_later_statements(engine, ordered, identity_rows, *, n, limit, query, seen_refs, fts_arm_index, deadline, excluded, allowed,
+                               hydrate=None, rows_by_id=None, reference_strict=False, answer_ready_content=None):
     """Place one later lexical match per source, atomically and read-only."""
     started, now = time.monotonic(), time.time()
-    info = dict(requested=n, searched=0, found=0, delivered=0, ms=0)
-    placed = [{**entry, "hit": dict(entry["hit"])} for entry in ordered]
+    info = dict(requested=n, searched=0, found=0, delivered=0, ms=0, displaced=0)
+    placed = [{**entry, "hit": dict(entry["hit"])} for entry in ordered[:limit]]
+    tail = ordered[limit:]
     seen = {sid for entry in ordered[:limit] for sid in
             [entry["hit"].get("store_id"), *entry["hit"].get("duplicate_store_ids", [])]}
     sources = [entry for entry in placed[:limit] if entry["hit"].get("store_id") is not None
@@ -4611,19 +4613,12 @@ def _lcm_recall_later_statements(engine, ordered, identity_rows, *, n, limit, qu
                and entry["hit"].get("adjacent_to") is None]
     def normalize(text):
         return " ".join(unicodedata.normalize("NFKC", str(text or "")).casefold().split())
-    reason = None
+    reason, children, child_rows = None, [], {}
     try:
         if time.monotonic() >= deadline:
             raise TimeoutError
         if any(s["hit"]["store_id"] not in identity_rows for s in sources):
             raise OSError
-        hydrated = _lcm_recall_answer_ready_content(
-            engine, sources, query=query, expanded_limit=len(sources),
-            rows_by_id=identity_rows, fts_arm_index=fts_arm_index,
-        ) if seen_refs else {}
-        if seen_refs:
-            sources = [s for s in sources if (ref := recall_delivery._exact_ref(
-                s["hit"], hydrated.get(_hit_identity(s["hit"])))) is not None and ref not in seen_refs]
         for source in sources[:n]:
             hit = source["hit"]
             row = identity_rows.get(hit["store_id"], {})
@@ -4653,6 +4648,7 @@ def _lcm_recall_later_statements(engine, ordered, identity_rows, *, n, limit, qu
             texts = duplicate_identity_rows(engine, prior + fresh, deadline=deadline) if candidates else {}
             if any(c["store_id"] not in texts or c["store_id"] not in rows for c in candidates):
                 raise OSError
+            child_rows.update(texts)
             # Replay copies of a delivered or already chosen row join its group, never a second slot.
             candidates = [g["hit"] for g in collapse_duplicate_candidates(prior + fresh, texts)
                           if not {g["hit"]["store_id"], *g["hit"].get("duplicate_store_ids", [])} & seen]
@@ -4666,30 +4662,41 @@ def _lcm_recall_later_statements(engine, ordered, identity_rows, *, n, limit, qu
                     continue
                 store_id = candidate["store_id"]
                 group = {store_id, *candidate.get("duplicate_store_ids", [])}
-                existing = next((e for e in placed if e["hit"].get("kind") != "summary" and group & {
-                    e["hit"].get("store_id"), *e["hit"].get("duplicate_store_ids", [])}), None)
-                candidate = {**candidate, "later_statement_of": hit["store_id"]}
-                if existing is not None:
-                    # A pooled row was retrieved on its own: it keeps its group, and
-                    # delivery keeps it as an ordinary hit if its source cannot ship.
-                    placed.remove(existing)
-                    group |= {existing["hit"]["store_id"], *existing["hit"].get("duplicate_store_ids", [])}
-                    candidate["_later_pooled"] = True
-                if group - {store_id}:
-                    candidate["duplicate_store_ids"] = sorted(group - {store_id})
-                hit["has_later_statements"] = [store_id]
-                entry = existing if existing is not None else {
-                    "rrf_score": source["rrf_score"], "_final_score": source["_final_score"], "ranks": {},
-                }
-                placed.insert(placed.index(source) + 1, {**entry, "hit": candidate})
+                children.append({"hit": {**candidate, "later_statement_of": hit["store_id"]},
+                                 "rrf_score": source["rrf_score"], "_final_score": source["_final_score"], "ranks": {}})
                 seen |= group
                 info["found"] += 1
                 break
+        hydrated = hydrate(children, query=query, expanded_limit=len(children),
+                           rows_by_id={**child_rows, **(rows_by_id or {})},
+                           fts_arm_index=fts_arm_index) if hydrate and children else {}
+        displaced = []
+        for child in children:
+            hit = child["hit"]
+            ref = recall_delivery._exact_ref(hit, hydrated.get(_hit_identity(hit)))
+            source = next((e for e in placed[:limit] if e["hit"].get("store_id") == hit["later_statement_of"]), None)
+            if source is None or ref in seen_refs or reference_strict and ref is None:
+                continue
+            source["hit"]["has_later_statements"] = [hit["store_id"]]
+            placed.insert(placed.index(source) + 1, child)
+            if len(placed) > limit:
+                removable = next((e for e in reversed(placed)
+                                  if not e["hit"].get("has_later_statements") and "later_statement_of" not in e["hit"]), None)
+                if removable is None:
+                    placed.remove(child)
+                    source["hit"].pop("has_later_statements")
+                    continue
+                placed.remove(removable)
+                displaced.insert(0, removable)
+                info["displaced"] += 1
+        placed += displaced + tail
         if time.monotonic() >= deadline:
             raise TimeoutError
+        if answer_ready_content is not None:
+            answer_ready_content.update(hydrated)
     except Exception as exc:  # noqa: BLE001 - optional expansion never fails recall
         reason = "deadline" if isinstance(exc, TimeoutError) or time.monotonic() >= deadline else "read_error"
-        placed = ordered
+        placed, info["displaced"] = ordered, 0
     info["ms"] = round((time.monotonic() - started) * 1000, 3)
     return placed, info, reason
 
@@ -5190,14 +5197,12 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
             engine, ordered, identity_rows, limit=limit, deadline=deadline,
             excluded=excluded_session_ids, allowed=candidate_session_ids,
         )
-    later_info, later_unavailable = None, None
     later_n = _recall_later_statements(kwargs.get("later_statements", getattr(engine._config, "recall_later_statements", 0)))
-    if later_n and kwargs.get("delivery_unit", getattr(engine._config, "recall_delivery_unit", "hits")) != "session":
-        ordered, later_info, later_unavailable = _lcm_recall_later_statements(
-            engine, ordered, identity_rows, n=min(later_n, limit), limit=limit, query=query,
-            seen_refs=seen_refs, fts_arm_index=fts_arm_index, deadline=deadline,
-            excluded=excluded_session_ids, allowed=candidate_session_ids,
-        )
+    place_later = partial(
+        _lcm_recall_later_statements, engine, identity_rows=identity_rows, n=min(later_n, limit),
+        deadline=deadline, excluded=excluded_session_ids, allowed=candidate_session_ids,
+        query=query, fts_arm_index=fts_arm_index,
+    ) if later_n and kwargs.get("delivery_unit", getattr(engine._config, "recall_delivery_unit", "hits")) != "session" else None
     fts_anchor_info: dict[str, Any] | None = None
     if bool(kwargs.get("fts_anchor", True)) and bool(
         getattr(engine._config, "recall_fts_anchor", True)
@@ -5271,7 +5276,7 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
         session_delivery=session_delivery,
         adjacent_reply=adjacent_pairs,
         adjacent_reply_unavailable=adjacent_unavailable,
-        later_statements=later_info, later_statements_unavailable=later_unavailable,
+        place_later=place_later,
         extra_entries=_recall_extra_entries(
             kwargs.get("extra_entries", getattr(engine._config, "recall_extra_entries", 0)),
         ),

@@ -68,8 +68,7 @@ def deliver_recall(
     read_summary_event_time: Callable[..., tuple[dict[int, dict[str, str]], str | None]] | None = None,
     adjacent_reply: list[dict[str, int]] | None = None,
     adjacent_reply_unavailable: str | None = None,
-    later_statements: dict[str, Any] | None = None,
-    later_statements_unavailable: str | None = None,
+    place_later: Callable[..., tuple[list, dict, str | None]] | None = None,
     snippet_window_hits: int = 0,
     read_snippet_windows: Callable[..., tuple[dict, str | None]] | None = None,
     extra_entries: int = 0,
@@ -177,6 +176,14 @@ def deliver_recall(
         selected_entries = ordered
         diversity_dropped = 0
         answer_ready_content = {}
+    later_statements, later_statements_unavailable = None, None
+    if place_later is not None:
+        selected_entries, later_statements, later_statements_unavailable = place_later(
+            selected_entries, limit=limit, seen_refs=seen_refs, reference_strict=reference_strict,
+            hydrate=hydrate if detail == "answer_ready" else None,
+            rows_by_id=strict_rows if detail == "answer_ready" else None,
+            answer_ready_content=answer_ready_content,
+        )
     snippet_window_content = {}
     snippet_window_skipped = None
     if detail == "snippets" and snippet_window_hits > 0:
@@ -261,7 +268,7 @@ def deliver_recall(
             item.update(adjacent_to=hit["adjacent_to"], arms=[*arms, "adjacent"])
         if hit.get("later_statement_of") is not None:
             item["arms"] = [*arms, "later_statement"]
-        for key in ("later_statement_of", "has_later_statements", "_later_pooled"):
+        for key in ("later_statement_of", "has_later_statements"):
             if key in hit:
                 item[key] = hit[key]
         window = snippet_window_content.get(_hit_identity(hit))
@@ -716,20 +723,6 @@ def _refresh_later_statements(response):
         return
     hits = response["hits"]
     by_id = {h.get("store_id"): h for h in hits if h.get("kind") != "summary"}
-    kept = []
-    for h in hits:
-        # The first refresh settles every orphan; fitting later pops from the
-        # end, where a child sits after its source, so no new orphan appears.
-        pooled = h.pop("_later_pooled", False)
-        if h.get("later_statement_of") is not None and h["later_statement_of"] not in by_id:
-            if not pooled:
-                continue
-            h.pop("later_statement_of")
-            h["arms"] = [arm for arm in h.get("arms", []) if arm != "later_statement"]
-        kept.append(h)
-    hits[:] = kept
-    by_id = {h.get("store_id"): h for h in hits if h.get("kind") != "summary"}
-    response["total_results"] = len(hits)
     for hit in hits:
         links = [sid for sid in hit.get("has_later_statements", []) if sid in by_id
                  and by_id[sid].get("later_statement_of") == hit.get("store_id")]
@@ -738,11 +731,7 @@ def _refresh_later_statements(response):
                 hit["has_later_statements"] = links
             else:
                 hit.pop("has_later_statements")
-    children = [h for h in hits if h.get("later_statement_of") in by_id]
-    for child in children:
-        hits.remove(child)
-        hits.insert(hits.index(by_id[child["later_statement_of"]]) + 1, child)
-    info["delivered"] = len(children)
+    info["delivered"] = sum("later_statement_of" in h for h in hits)
 
 
 def _delivered_adjacent_receipts(
