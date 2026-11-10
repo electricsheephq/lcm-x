@@ -167,7 +167,7 @@ def test_without_a_fault_the_marker_is_externalized(engines, kind):  # noqa: F81
 # The upgrade replay's keep for a bare stored marker covers spillover markers compared byte for byte on every branch,
 # and on main also temp-folder markers and redacted stored text (#2584); without that keep the replay of a stampless
 # history stores it again, the #2558 shape. v0.29.2 stores as many rows or more in every cell.
-SECRET_BODY = "api_key=differentialsecret1234567890abcdef " + "z" * 2600
+REDACTABLE_BODY = "api_key=differentialsecret1234567890abcdef " + "z" * 2600
 _REPLAY_PINS = {  # (kind, redacted preview, stamps): (with #2584's keep, without it, v0.29.2)
     ("spillover", False, "all"): ((7, 1), (7, 1), (7, 1)),
     ("spillover", False, "none"): ((7, 1), (7, 1), (19, 3)),
@@ -212,7 +212,7 @@ def _replay_history(marker, extra=0):
 @KINDS
 def test_cold_replays_of_a_store_written_under_a_payload_fault(tmp_path, monkeypatch, kind, redact, stamps):
     home = tmp_path / "hermes"
-    marker = _write_output(_marker_path(kind, home), SECRET_BODY)
+    marker = _write_output(_marker_path(kind, home), REDACTABLE_BODY)
     with monkeypatch.context() as patch:
         from hermes_lcm import externalize
 
