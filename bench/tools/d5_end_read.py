@@ -28,12 +28,16 @@ from collections import Counter
 from pathlib import Path
 
 from bench.instruments.d5_clone import bars, capture, run as runner, snapshot
+from session_patterns import build_session_match_keys, compile_session_patterns, matches_session_pattern
 
 PASS, FAIL, INCONCLUSIVE = "PASS", "FAIL", "INCONCLUSIVE"
 VERDICT_RULE = ("FAIL when check 1 fails or any window host row is LOST; LOST only for a window host row whose session "
                 "holds no stored row at all in the end store; INCONCLUSIVE while any window host row is unmatched, when "
-                "the window is empty or both pins are the same, or when a pin or the kit does not verify; PASS only with "
-                "check 1 PASS, a non-empty window and 0 unmatched")
+                "the window is empty or both pins are the same, when a pin or the kit does not verify, when the "
+                "declaration has no settings.lcm session patterns, or when a session matching a declared pattern holds "
+                "a stored row; a window row in a session matching a declared ignore or stateless pattern is counted "
+                "apart as not stored by design, never LOST or matched; PASS only with check 1 PASS, a non-empty window "
+                "of other rows and 0 unmatched")
 HINTS = ("equal after stripping edge whitespace", "payload swapped for a reference", "no hint")
 _HEX64 = re.compile(r"[0-9a-f]{64}")
 
@@ -57,13 +61,25 @@ def _hint(host, candidates, end_dir):
     return HINTS[2], None
 
 
-def coverage(start, end, identity, end_dir):
+def by_design_matcher(lcm_settings, platforms):
+    """session_id -> True when LCM-X never stores it by its declared ignore or stateless patterns (LCM-X's own matcher,
+    with the session's platform from the end capture's host db as a match key, as the engine does)."""
+    compiled = compile_session_patterns([*lcm_settings["ignore_session_patterns"],
+                                         *lcm_settings["stateless_session_patterns"]])
+    return lambda session: bool(compiled) and matches_session_pattern(
+        build_session_match_keys(session, platform=platforms.get(session) or ""), compiled)
+
+
+def coverage(start, end, identity, end_dir, by_design=lambda session: False):
     """Check 2 over the runner's row dicts ({"store": [...], "host": [...]}) of both captures."""
     top_host = max((h["id"] for h in start["host"]), default=0)
     top_store = max((r["store_id"] for r in start["store"]), default=0)
-    window = [h for h in end["host"] if h["id"] > top_host]
     new = [r for r in end["store"] if r["store_id"] > top_store]
     stored_sessions = {r["session_id"] for r in end["store"]}
+    in_window = [h for h in end["host"] if h["id"] > top_host]
+    designed = {h["session_id"] for h in in_window if by_design(h["session_id"])}
+    window = [h for h in in_window if h["session_id"] not in designed]
+    disagree = sorted(_sha12(s) for s in designed if s in stored_sessions)
     counts, hints, per_session, unmatched = Counter(), Counter(), {}, []
     for session in dict.fromkeys(h["session_id"] for h in window):
         hosts = [h for h in window if h["session_id"] == session]
@@ -91,7 +107,9 @@ def coverage(start, end, identity, end_dir):
         counts["unmatched"] += len(hosts) - len(pairs) - s["lost"]
     counts["window_host_rows"], counts["new_stored_rows"] = len(window), len(new)
     counts["stored_rows_not_matched"] = len(new) - counts["matched"]
-    return {"window_host_rows": counts["window_host_rows"], "new_stored_rows": counts["new_stored_rows"],
+    return {"not_stored_by_design": {"sessions": len(designed), "rows": len(in_window) - len(window)},
+            "declared_pattern_sessions_with_stored_rows": disagree,
+            "window_host_rows": counts["window_host_rows"], "new_stored_rows": counts["new_stored_rows"],
             "matched": counts["matched"], "lost": counts["lost"], "unmatched": counts["unmatched"],
             "stored_rows_not_matched": counts["stored_rows_not_matched"],
             "unmatched_by_hint": {h: hints[h] for h in HINTS}, "unmatched_rows": unmatched,
@@ -102,7 +120,8 @@ def coverage(start, end, identity, end_dir):
 def verdict(check1, check2):
     if check1["verdict"] == FAIL or check2["lost"]:
         return FAIL
-    if check1["verdict"] != PASS or check2["unmatched"] or not check2["window_host_rows"]:
+    if check1["verdict"] != PASS or check2["unmatched"] or not check2["window_host_rows"] \
+            or check2.get("declared_pattern_sessions_with_stored_rows"):
         return INCONCLUSIVE  # An empty window proves nothing about coverage.
     return PASS
 
@@ -122,6 +141,20 @@ def _capture(pin, folder, pin_sha256, scratch):
     return result, None
 
 
+def _platforms(folder):
+    """{session id: platform} from the end capture's host db (read-only); {} when it has no source column."""
+    db = next((Path(folder) / n for n in ("host-0.db", "state.db") if (Path(folder) / n).is_file()), None)
+    if db is None:
+        return {}
+    con = capture._readonly(db)
+    try:
+        if "source" not in {r[1] for r in con.execute("PRAGMA table_info(sessions)")}:
+            return {}
+        return {sid: src for sid, src in con.execute("SELECT id, source FROM sessions")}
+    finally:
+        con.close()
+
+
 def end_read(args):
     out = {"schema": "d5-end-read/1", "verdict_rule": VERDICT_RULE, "credits": "none (release manager, 2026-11-10)",
            "pins_sha256": {"start": args.start_pin_sha256, "end": args.end_pin_sha256}}
@@ -133,6 +166,11 @@ def end_read(args):
         if reason:
             return {**out, "verdict": INCONCLUSIVE, "reason": f"{side}: {reason}"}
     config = {**json.loads(Path(args.config).read_text(encoding="utf-8")), "instrument_dir": args.instrument_dir}
+    lcm = (config.get("settings") or {}).get("lcm") if isinstance(config.get("settings"), dict) else None
+    if not isinstance(lcm, dict) or not all(isinstance(lcm.get(k), list) for k in
+                                            ("ignore_session_patterns", "stateless_session_patterns")):
+        return {**out, "verdict": INCONCLUSIVE,
+                "reason": "the declaration has no settings.lcm ignore and stateless session patterns"}
     host = runner.LocalHost(config, args.scratch)
     if host.pins().get("verdict") != PASS:
         return {**out, "verdict": INCONCLUSIVE, "reason": "P1: the kit does not verify against its manifest"}
@@ -142,7 +180,7 @@ def end_read(args):
     except Exception as exc:  # noqa: BLE001  # Never a message: it can carry a path.
         return {**out, "verdict": INCONCLUSIVE, "reason": f"a store could not be read ({type(exc).__name__})"}
     check1 = bars.bar3(start["store"], end["store"], identity)
-    check2 = coverage(start, end, identity, args.end)
+    check2 = coverage(start, end, identity, args.end, by_design_matcher(lcm, _platforms(args.end)))
     return {**out, "verdict": verdict(check1, check2), "check1_preservation": check1, "check2_coverage": check2,
             "start_rows": {k: len(v) for k, v in start.items()}, "end_rows": {k: len(v) for k, v in end.items()}}
 

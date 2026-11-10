@@ -175,7 +175,8 @@ def test_the_read_wires_p1_identity_rows_and_both_checks(monkeypatch, tmp_path):
 
     monkeypatch.setattr(er, "_capture", lambda *a: ({"verdict": "PASS"}, None))
     monkeypatch.setattr(er.runner, "LocalHost", Host)
-    (tmp_path / "decl.json").write_text(json.dumps({"manifest": "m", "rules_module": "r"}))
+    lcm = {"ignore_session_patterns": [], "stateless_session_patterns": []}
+    (tmp_path / "decl.json").write_text(json.dumps({"manifest": "m", "rules_module": "r", "settings": {"lcm": lcm}}))
     args = SimpleNamespace(start="start-dir", start_pin="p", start_pin_sha256="a" * 64, end="end-dir", end_pin="p",
                            end_pin_sha256="b" * 64, scratch=str(tmp_path), config=str(tmp_path / "decl.json"),
                            instrument_dir="kit")
@@ -183,6 +184,45 @@ def test_the_read_wires_p1_identity_rows_and_both_checks(monkeypatch, tmp_path):
     result = er.end_read(args)
     assert result["verdict"] == "PASS" and result["check1_preservation"]["verdict"] == "PASS"
     assert result["check2_coverage"]["matched"] == 1 and result["pins_sha256"] == {"start": "a" * 64, "end": "b" * 64}
-    assert seen[0] == ("config", ["instrument_dir", "manifest", "rules_module"])
+    assert seen[0] == ("config", ["instrument_dir", "manifest", "rules_module", "settings"])
     verdict_p1 = "FAIL"
     assert er.end_read(args)["reason"] == "P1: the kit does not verify against its manifest"
+
+
+def test_condition_1_a_declaration_without_the_session_patterns_is_inconclusive(monkeypatch, tmp_path):
+    monkeypatch.setattr(er, "_capture", lambda *a: ({"verdict": "PASS"}, None))
+    for decl in ({"manifest": "m"}, {"settings": {"lcm": {"ignore_session_patterns": []}}}):
+        (tmp_path / "decl.json").write_text(json.dumps(decl))
+        args = SimpleNamespace(start="a", start_pin="p", start_pin_sha256="a" * 64, end="b", end_pin="p",
+                               end_pin_sha256="b" * 64, scratch=str(tmp_path), config=str(tmp_path / "decl.json"),
+                               instrument_dir="kit")
+        result = er.end_read(args)
+        assert (result["verdict"], result["reason"]) == (
+            "INCONCLUSIVE", "the declaration has no settings.lcm ignore and stateless session patterns"), decl
+
+
+def test_condition_2_rows_in_a_declared_pattern_session_are_counted_apart_never_lost():
+    by_design = er.by_design_matcher({"ignore_session_patterns": ["cron_*"], "stateless_session_patterns": []}, {})
+    end = {"host": [*START["host"], host(2, "cron_7", "scheduled"), host(3, "cron_7", "more"), host(4, "s1", "a")],
+           "store": [*START["store"], stored(11, "s1", "a")]}
+    check2 = er.coverage(START, end, identity, "/nonexistent", by_design)
+    assert check2["not_stored_by_design"] == {"sessions": 1, "rows": 2}
+    assert (check2["lost"], check2["unmatched"], check2["matched"], check2["window_host_rows"]) == (0, 0, 1, 1)
+    assert er.verdict(PRESERVED, check2) == "PASS"
+    only_designed = {"host": [*START["host"], host(2, "cron_7", "scheduled")], "store": [*START["store"]]}
+    assert er.verdict(PRESERVED, er.coverage(START, only_designed, identity, "/x", by_design)) == "INCONCLUSIVE"
+
+
+def test_condition_2_a_platform_key_matches_as_the_engine_matches():
+    by_design = er.by_design_matcher({"ignore_session_patterns": [], "stateless_session_patterns": ["cron:*"]},
+                                     {"s5": "cron"})
+    assert by_design("s5") and not by_design("s1")
+
+
+def test_condition_3_a_declared_pattern_session_with_a_stored_row_is_inconclusive():
+    by_design = er.by_design_matcher({"ignore_session_patterns": ["cron_*"], "stateless_session_patterns": []}, {})
+    end = {"host": [*START["host"], host(2, "cron_7", "x"), host(3, "s1", "a")],
+           "store": [*START["store"], stored(11, "s1", "a"), stored(12, "cron_7", "x")]}
+    check2 = er.coverage(START, end, identity, "/nonexistent", by_design)
+    assert check2["declared_pattern_sessions_with_stored_rows"] == [er._sha12("cron_7")]
+    assert er.verdict(PRESERVED, check2) == "INCONCLUSIVE"
