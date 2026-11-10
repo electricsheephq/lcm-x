@@ -985,3 +985,44 @@ def test_a_host_without_a_config_writes_no_settings_time():
     class Bare:
         pass
     assert r._utc_time(getattr(Bare(), "c", {}).get("settings_as_of")) is None
+
+
+def test_the_instrument_hash_follows_source_and_ignores_bytecode(tmp_path):
+    """R5-5's instrument identity is computed from the package's files: a source edit changes it, a bytecode cache does
+    not, and a different package root gives a different hash."""
+    pkg = tmp_path / "pkg"
+    (pkg / "sub").mkdir(parents=True)
+    (pkg / "a.py").write_text("x = 1\n")
+    (pkg / "sub" / "b.json").write_text("{}")
+    first = r.instrument_identity(pkg)["instrument_sha256"]
+    (pkg / "__pycache__").mkdir()
+    (pkg / "__pycache__" / "a.cpython-312.pyc").write_bytes(b"cache")
+    (pkg / "sub" / "c.pyc").write_bytes(b"cache")
+    assert r.instrument_identity(pkg)["instrument_sha256"] == first
+    (pkg / "a.py").write_text("x = 2\n")
+    assert r.instrument_identity(pkg)["instrument_sha256"] != first
+    assert r.instrument_identity()["instrument_sha256"] != first  # The real package is hashed by default.
+
+
+def test_a_run_dir_inside_the_instrument_package_is_refused(tmp_path):
+    with pytest.raises(ValueError, match="outside the instrument package"):
+        r.outside_package(r.PACKAGE / "runs" / "x")
+    assert r.outside_package(tmp_path / "run") == tmp_path / "run"
+
+
+@pytest.mark.parametrize("commit, bound", [("a" * 40, True), (None, False), ("", False), ("main", False),
+                                           ("A" * 40, False)])
+def test_only_a_declared_commit_identifies_a_tree(tmp_path, commit, bound):
+    """A path is no tree identity (another tree can take the same path); an undeclared tree never binds a receipt."""
+    host, plan = _bound_host(tmp_path)
+    for t in ("rc", "ga"):
+        host.c[t] = {"lcm_tree": str(tmp_path), **({"commit": commit} if commit is not None else {})}
+    assert r.tree_id(host.c, "rc") == (commit if bound else None)
+    receipt = {"schema": r.PREFLIGHT_SCHEMA, "name": "P4", "verdict": "PASS", "plan_sha256": r.planner.plan_sha256(plan),
+               "snapshot_pin_sha256": r.capture._sha256(host.c["snapshot_pin"]),
+               "instrument_sha256": r.instrument_identity()["instrument_sha256"],
+               "trees": {"rc": r.tree_id(host.c, "rc"), "ga": r.tree_id(host.c, "ga")}}
+    path = tmp_path / "P4.json"
+    path.write_text(json.dumps(receipt))
+    host.c["preflights"] = {"P4": str(path)}
+    assert host.preflight("P4", plan)["verdict"] == ("PASS" if bound else "MISSING")

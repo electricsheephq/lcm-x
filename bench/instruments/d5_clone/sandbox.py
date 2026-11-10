@@ -117,7 +117,8 @@ def positive_control(local_url):
         other.bind(("127.0.0.1", 0))
         other.listen(1)
         argv = [sys.executable, "-c", _CHILD, local_url, str(other.getsockname()[1])]
-        result = subprocess.run(wrap(argv, ports=[parts.port]), capture_output=True, text=True, timeout=20)
+        result = subprocess.run(wrap(argv, ports=[parts.port], deny_paths=[hermes_home()]), capture_output=True,
+                                text=True, timeout=20)
     finally:
         other.close()
     if result.returncode:

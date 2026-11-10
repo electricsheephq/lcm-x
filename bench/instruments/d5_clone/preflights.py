@@ -26,6 +26,11 @@ class Inconclusive(Exception):
     """The preflight could not run to its checks. Its message is this module's own fixed text."""
 
 
+def _count(value):
+    """A payload's size field as a receipt may carry it: an int, else None (never the field's text)."""
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
 def _reason(exc):
     """A receipt reason for an exception: this module's own message, else the exception's type only. Another
     exception's text can quote its input (a parser error quotes the document), and receipts carry no content."""
@@ -172,8 +177,8 @@ def p4(host, plan):
                 lambda m: m[0].replace(m[1], "<ref>"), t or ""), ctx["home"])) for t in hosts + lcms],
             "content_sha256": _sha(payload.get("content")),
             "content_masked_sha256": _sha(_home_paths(payload["content"], ctx["home"]))
-            if isinstance(payload.get("content"), str) else None, "content_chars": payload.get("content_chars"),
-            "content_bytes": payload.get("content_bytes"), "digest12": [m[1] for m in map(DIGEST12.search, refs) if m]}
+            if isinstance(payload.get("content"), str) else None, "content_chars": _count(payload.get("content_chars")),
+            "content_bytes": _count(payload.get("content_bytes")), "digest12": [m[1] for m in map(DIGEST12.search, refs) if m]}
         reasons += _failed([(f"{tree}: not one tool row per store, one reference and one payload file",
                              (f["rows"], f["refs"], f["files"]) != ([1, 1], 1, 1)),
                             (f"{tree}: the payload file holds no content and sizes",  # Two empty payloads compare equal.
@@ -311,6 +316,8 @@ def produce(host, names):
         try:
             if failed:
                 raise Inconclusive(failed)
+            if None in common["trees"].values():
+                raise Inconclusive("a tree has no declared 40-hex commit, so no receipt could bind it")
             if name not in run.TREE_BOUND_PREFLIGHTS and common["trees"]["rc"] != common["trees"]["ga"]:
                 # Ruling R5-5: P3, P6 and P7 run the previous GA in both arms; the runner reads them that way.
                 raise Inconclusive("this check runs the previous GA in both arms, and the rc tree is another tree")
@@ -333,7 +340,7 @@ def main(argv=None):
     parser.add_argument("--only", default=",".join(PREFLIGHTS))
     args = parser.parse_args(argv)
     config = {**json.loads(Path(args.config).read_text(encoding="utf-8")), "instrument_dir": args.instrument_dir}
-    Path(args.run_dir).mkdir(parents=True)
+    Path(run.outside_package(args.run_dir)).mkdir(parents=True)
     verdicts = produce(run.LocalHost(config, args.run_dir), [n for n in args.only.split(",") if n])
     print(json.dumps(verdicts))
     return 0 if all(v == "PASS" for v in verdicts.values()) else 1

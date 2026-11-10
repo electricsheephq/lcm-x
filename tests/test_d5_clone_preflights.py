@@ -411,3 +411,18 @@ def test_p3_p6_p7_refuse_a_declaration_whose_rc_tree_is_not_the_previous_ga(tmp_
     for name in ("P3", "P6", "P7"):
         assert json.loads((tmp_path / f"{name}.json").read_text())["reasons"] == [
             "this check runs the previous GA in both arms, and the rc tree is another tree"]
+
+
+def test_no_preflight_runs_for_a_tree_without_a_declared_commit(tmp_path, monkeypatch):
+    monkeypatch.setitem(sys.modules, "yaml", types.SimpleNamespace(safe_load=json.loads))
+    host = Tweaked(tmp_path, lambda host, ctx, step: None)
+    host.c["ga"] = {"lcm_tree": host.c["ga"]["lcm_tree"]}  # No commit: a path alone is no identity.
+    assert pf.produce(host, list(pf.PREFLIGHTS)) == dict.fromkeys(pf.PREFLIGHTS, "INCONCLUSIVE")
+    assert host.armed == []
+    assert json.loads((tmp_path / "P4.json").read_text())["reasons"] == [
+        "a tree has no declared 40-hex commit, so no receipt could bind it"]
+
+
+@pytest.mark.parametrize("value, kept", [(12, 12), ("twelve chars", None), (True, None), (None, None), (1.5, None)])
+def test_p4_never_copies_a_payload_size_field_as_text(value, kept):
+    assert pf._count(value) == kept

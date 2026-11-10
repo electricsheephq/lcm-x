@@ -103,10 +103,21 @@ PREFLIGHT_SCHEMA = "d5-clone-preflight/1"
 TREE_BOUND_PREFLIGHTS = ("P4",)  # The spec's preflight that both trees store one externalized output identically.
 
 
-def instrument_identity():
+PACKAGE = Path(__file__).resolve().parent
+
+
+def outside_package(run_dir):
+    """*run_dir*, refused when it lies in this package: files written there would change the instrument's own hash
+    after a receipt recorded it, and the receipt would then never match (ruling R5-5)."""
+    if Path(run_dir).resolve().is_relative_to(PACKAGE):
+        raise ValueError("the run dir must be outside the instrument package")
+    return run_dir
+
+
+def instrument_identity(root=None):
     """This instrument's identity (ruling R5-5): the sha256 over every file of this package by relative name, which a
     preflight receipt must match, and the repo commit it runs from ("" outside a checkout), recorded for readers."""
-    root, h = Path(__file__).resolve().parent, hashlib.sha256()
+    root, h = Path(root).resolve() if root else PACKAGE, hashlib.sha256()
     for path in sorted(p for p in root.rglob("*") if p.is_file() and "__pycache__" not in p.parts and p.suffix != ".pyc"):
         h.update(path.relative_to(root).as_posix().encode() + b"\0" + hashlib.sha256(path.read_bytes()).digest())
     try:
@@ -118,8 +129,10 @@ def instrument_identity():
 
 
 def tree_id(config, tree):
-    """A tree's identity as the receipts record it: its declared commit, else the sha256 of its resolved path."""
-    return config[tree].get("commit") or hashlib.sha256(str(Path(config[tree]["lcm_tree"]).resolve()).encode()).hexdigest()
+    """A tree's identity as the receipts record it: its declared 40-hex commit (the builder extracts the tree from that
+    commit), else None. A path is no identity: another tree can take the same path."""
+    commit = config[tree].get("commit")
+    return commit if isinstance(commit, str) and re.fullmatch(r"[0-9a-f]{40}", commit) else None
 
 
 def _store_path(home):
@@ -496,7 +509,8 @@ class LocalHost:
         want = {"schema": PREFLIGHT_SCHEMA, "name": name, "plan_sha256": planner.plan_sha256(plan),
                 "snapshot_pin_sha256": capture._sha256(self.c["snapshot_pin"]),
                 "instrument_sha256": instrument_identity()["instrument_sha256"], "trees": trees}
-        mismatch = sorted(k for k, v in want.items() if not isinstance(recorded, dict) or recorded.get(k) != v)
+        mismatch = sorted(k for k, v in want.items() if not isinstance(recorded, dict) or recorded.get(k) != v
+                          or (k == "trees" and None in v.values()))  # An undeclared tree never binds a receipt.
         if mismatch:  # Treated as missing: an earlier snapshot's, plan's, instrument's or tree's receipt.
             return {"verdict": "MISSING", "mismatch": mismatch, "sha256": capture._sha256(path)}
         return {"verdict": recorded.get("verdict"), "sha256": capture._sha256(path), "bound": sorted(want)}
@@ -932,7 +946,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     config = {**json.loads(Path(args.config).read_text(encoding="utf-8")), "instrument_dir": args.instrument_dir}
     prior = [json.loads(Path(p).read_text(encoding="utf-8")) for p in args.prior_receipt]
-    receipt = run(LocalHost(config, args.run_dir), rc_id=args.rc_id, prior=prior, instrument_fix=args.instrument_fix)
+    receipt = run(LocalHost(config, outside_package(args.run_dir)), rc_id=args.rc_id, prior=prior, instrument_fix=args.instrument_fix)
     with (Path(args.run_dir) / "d5-clone-receipt.json").open("x", encoding="utf-8") as out:
         json.dump(receipt, out, sort_keys=True, indent=2)
     print(json.dumps({"verdict": receipt.get("verdict"), "stopped_at": receipt.get("stopped_at")}))
