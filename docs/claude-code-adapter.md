@@ -177,9 +177,10 @@ its modification time is the hook's write time.
   appear in no transcript. Its lines are workflow events (started, result, launched, failed), not
   model-visible messages, so they become no message rows. The `<session>/workflows/` folder holds
   run state and scripts, not transcripts, so it is not read. If Claude Code reuses an agent id
-  within one session, the two transcripts share one lineage: a transcript no hook names is not
-  read, and lines the second transcript writes after both hooks fired may not be captured. The
-  audit lists that agent's lineage unverified, so the session never reads verified (#2566).
+  within one session, each transcript gets its own lineage: a lineage is found by its path first,
+  the first path keeps the agent id, and a later path is keyed by its path below `subagents/`
+  (#2566). A store written before that change, whose one lineage already moved between the two
+  paths, keeps its rows and gains the missing lines; its audit stays unverified for that agent.
 - **One API response, several entries.** Claude Code writes each content block of a response as its
   own entry with its own uuid; the entries share `message.id`.
 - **Format** is internal and changes between versions, hence the per-type classes below and the
