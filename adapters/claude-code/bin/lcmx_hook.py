@@ -98,6 +98,30 @@ def _within(value: Any, root: Path) -> Optional[Path]:
     return resolved if resolved.is_relative_to(root.resolve()) else None
 
 
+def _hashed(value: Any) -> Optional[str]:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:16] if isinstance(value, str) and value else None
+
+
+COMPACT_EVENTS = frozenset({"PreCompact", "PostCompact"})
+FACTS_CAP = 64
+
+
+def _merged_facts(record: Dict[str, Any], previous: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+    """The events (and compaction prompt ids) of every record that reached this pointer since the worker last claimed
+    it, so a record the pointer rules replace or keep out still counts for the audit (#2535)."""
+    seen = {record["event"]}
+    prompts = set()
+    if record["event"] in COMPACT_EVENTS or (record["event"] == "SessionStart" and record.get("source") == "compact"):
+        if record.get("prompt_id"):
+            prompts.add(record["prompt_id"])
+    if isinstance(previous, dict):
+        for name in previous.get("seen") or [previous.get("event")]:
+            if isinstance(name, str):
+                seen.add(name)
+        prompts.update(value for value in previous.get("compact_prompts") or () if isinstance(value, str))
+    return {"seen": sorted(seen), "compact_prompts": sorted(prompts)[-FACTS_CAP:]}
+
+
 def normalize(payload: Mapping[str, Any], environ: Mapping[str, str]) -> Dict[str, Any]:
     """One record shape for Claude Code's snake_case and Grok Build's camelCase payloads.
 
@@ -126,6 +150,11 @@ def normalize(payload: Mapping[str, Any], environ: Mapping[str, str]) -> Dict[st
         # Claude Code's opt-in local GC deletes pre-compaction history from the transcript, so
         # capture cannot be lossless under it; the audit reports such sessions.
         "local_gc": environ.get("CLAUDE_CODE_TRANSCRIPT_LOCAL_GC") == "1",
+        # Facts the audit uses to tell a transcript never written from a lost one (#2535): a hash of the prompt id
+        # (no content) and the subagent type ("" for the compaction summarizer, kept apart from absent).
+        "prompt_id": _hashed(payload.get("prompt_id", payload.get("promptId"))),
+        "agent_type": _pick(payload, "agent_type", "agentType") if isinstance(
+            _pick(payload, "agent_type", "agentType"), str) else None,
     }
     if record["event"] not in EVENTS:
         record["problem"] = "unsupported_event"
@@ -196,32 +225,42 @@ def spool(home: Path, record: Mapping[str, Any], *, wait_s: Optional[float] = No
 
 def _spool_locked(directory: Path, key: str, record: Mapping[str, Any]) -> str:
     record = dict(record)
+    try:
+        with open(directory / (key + ".json"), encoding="utf-8") as handle:
+            previous = json.load(handle)
+    except (OSError, ValueError):
+        previous = None
+    facts = _merged_facts(record, previous)
     if record.get("event") == "SessionStart" and record.get("source"):
         record["start_source"] = record["source"]
         record["started_at"] = record.get("observed_at")
     else:  # a later hook of the session keeps how and when it started (a fork's copies predate it)
-        try:
-            with open(directory / (key + ".json"), encoding="utf-8") as handle:
-                previous = json.load(handle)
-        except (OSError, ValueError):
-            previous = None
         # SessionStart is synchronous; children retain its fork provenance. Only the transcript
         # names content; local_gc is session environment. The guard preserves end-event ordering.
         if isinstance(previous, dict):
+            kept = None
             if previous.get("event") in END_EVENTS and record["event"] not in END_EVENTS:
-                return "kept_end"
-            if ((previous.get("event") in END_EVENTS) == (record["event"] in END_EVENTS)
+                kept = "kept_end"
+            elif ((previous.get("event") in END_EVENTS) == (record["event"] in END_EVENTS)
                     and previous.get("hook_started_ns", -1) > record.get("hook_started_ns", 0)):
-                return "stale"
+                kept = "stale"
+            if kept:  # the kept pointer still learns this record's facts
+                if facts != {name: previous.get(name) for name in facts}:
+                    _write_pointer(directory, key, {**previous, **facts})
+                return kept
         if isinstance(previous, dict) and previous.get("start_source"):
             record["start_source"] = previous["start_source"]
             record["started_at"] = previous.get("started_at")
+    _write_pointer(directory, key, {**record, **facts})
+    return "spooled"
+
+
+def _write_pointer(directory: Path, key: str, record: Mapping[str, Any]) -> None:
     temporary = directory / (".%s.%d.tmp" % (key, os.getpid()))
     descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
         json.dump(record, handle, sort_keys=True)
     os.replace(temporary, directory / (key + ".json"))
-    return "spooled"
 
 
 def _lock_held(lock: Path) -> bool:

@@ -1993,3 +1993,90 @@ def test_cursor_alternation_without_growth_is_verified(tmp_path, home, hermes):
     cc.run_worker(home, hermes_home=hermes, settle_s=0)
     report = ca.audit(home)
     assert report["verified"] and report["lineages"][0]["generations_gone"] == 0
+
+
+def _summarizer_run(tmp_path, home, hermes, *, compact_prompt="c1", agent_type="", stop_first=False):
+    """A compaction as real Claude Code sends it (#2535 fixture): PreCompact, then the summarizer's SubagentStop with a
+    new agent id, type "" and the same prompt id, whose transcript is never written."""
+    path = _transcript(tmp_path, CONVERSATION)
+    hook = _hook()
+    agent = cc.session_dir(path) / "subagents" / "agent-sum1.jsonl"
+    stop = dict(event="SubagentStop", agent_id="sum1", agent_transcript_path=str(agent), agent_type=agent_type,
+                prompt_id="c1")
+    steps = [lambda: _record(hook, home, path, event="PreCompact", prompt_id=compact_prompt,
+                             compact_prompts=[compact_prompt]),
+             lambda: _record(hook, home, path, **stop)]
+    for step in reversed(steps) if stop_first else steps:  # each claimed by its own worker run
+        step()
+        cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    assert not agent.exists()
+
+
+@pytest.mark.parametrize("stop_first", [False, True])
+def test_a_compaction_summarizer_that_was_never_written_expires(tmp_path, home, hermes, stop_first):
+    from hermes_lcm import claude_code_audit as ca
+
+    _summarizer_run(tmp_path, home, hermes, stop_first=stop_first)
+    report = ca.audit(home)
+    assert report["verified"] and report["unverified"] == [] and report["pending_lineages"] == 0
+    assert report["expired_never_written"] == 1
+    assert report["verdict"] == "verified; 1 expired: never written (1 compaction summarizers, 0 sessions with no prompt)"
+
+
+@pytest.mark.parametrize("change", [{"compact_prompt": "other"}, {"agent_type": "general-purpose"}])
+def test_a_subagent_without_the_summarizer_link_stays_unverified(tmp_path, home, hermes, change):
+    from hermes_lcm import claude_code_audit as ca
+
+    _summarizer_run(tmp_path, home, hermes, **change)
+    report = ca.audit(home)
+    assert not report["verified"] and report["unverified"] == ["claude-code:s1/agent:sum1"]
+    assert report["expired_never_written"] == 0 and report["pending_lineages"] == 1
+
+
+def _quit_session(tmp_path, home, hermes, events):
+    """Session s2 is captured normally; session s1's transcript is never on disk while its hooks fire."""
+    other = _transcript(tmp_path, [_entry("user", "v1", "other session", session="s2")], session="s2")
+    _record(_hook(), home, other, session="s2")
+    missing = tmp_path / "projects" / "-work" / "s1.jsonl"
+    for batch in events:  # each batch is spooled before one worker run claims it
+        for event in batch:
+            _record(_hook(), home, missing, event=event)
+        cc.run_worker(home, hermes_home=hermes, settle_s=0)
+
+
+def test_a_session_that_ended_with_no_prompt_expires(tmp_path, home, hermes):
+    from hermes_lcm import claude_code_audit as ca
+
+    _quit_session(tmp_path, home, hermes, [["SessionStart"], ["SessionEnd"]])
+    report = ca.audit(home)
+    assert report["verified"] and report["expired_never_written"] == 1 and report["pending_lineages"] == 0
+    assert report["verdict"].endswith("; 1 expired: never written (0 compaction summarizers, 1 sessions with no prompt)")
+
+
+@pytest.mark.parametrize("events", [
+    [["SessionStart"], ["UserPromptSubmit"], ["SessionEnd"]],  # a turn ran: its transcript was removed, not unwritten
+    [["SessionStart"], ["UserPromptSubmit", "Stop", "SessionEnd"]],  # the turn's records replaced before a claim
+    [["SessionStart"], ["SessionEnd", "UserPromptSubmit"]],  # a late record kept out by the end pointer
+    [["SessionStart"]],  # still open, or its end was lost
+])
+def test_a_session_with_a_turn_or_no_end_and_no_transcript_stays_unverified(tmp_path, home, hermes, events):
+    from hermes_lcm import claude_code_audit as ca
+
+    _quit_session(tmp_path, home, hermes, events)
+    report = ca.audit(home)
+    assert not report["verified"] and report["unverified"] == ["claude-code:s1"]
+    assert report["expired_never_written"] == 0 and report["pending_lineages"] == 1
+
+
+def test_the_compaction_list_is_capped_and_written_only_when_new(home, hermes):
+    store = _open(home, hermes)
+    try:
+        for index in range(300):
+            cc.remember_session(store, {"session_id": "s1", "compact_prompts": [f"p{index}"]})
+        saved = store.read_metadata_json("capture:compact:s1")
+        assert len(saved) == cc.COMPACT_CAP and saved[0] == "p44" and saved[-1] == "p299"
+        before = store.connection.total_changes
+        cc.remember_session(store, {"session_id": "s1", "compact_prompts": ["p299"]})
+        assert store.connection.total_changes == before
+    finally:
+        store.close()

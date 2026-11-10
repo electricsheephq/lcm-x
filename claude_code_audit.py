@@ -28,6 +28,7 @@ from .claude_code_capture import (
     session_dir,
 )
 from .claude_code_store import (
+    COMPACT_PREFIX,
     CURSOR_PREFIX,
     FORGOTTEN_PREFIX,
     FORK_PREFIX,
@@ -604,6 +605,26 @@ def _failed_records(home: Path) -> list[Lineage | None]:
     return found
 
 
+NO_PROMPT_EVENTS = frozenset({"SessionStart", "SessionEnd"})
+
+
+def _expired(pending: dict, metadata: dict) -> str | None:
+    """Why a pending lineage none of whose named transcripts exists was never written, or None (#2535). Only two shapes
+    seen on real sessions qualify: the compaction summarizer (a SubagentStop of type "" whose prompt id is one of its
+    session's compactions) and a session that ended with no prompt. Anything else may be a removed transcript."""
+    facts = pending.get("facts")
+    if not isinstance(facts, dict):  # a row from before #2535 cannot be told apart
+        return None
+    events = {name for name in facts.get("events") or () if isinstance(name, str)}
+    if pending.get("agent_id"):
+        compactions = metadata.get(COMPACT_PREFIX + str(pending.get("session_id")))
+        if (facts.get("agent_type") == "" and "SubagentStop" in events and isinstance(facts.get("prompt"), str)
+                and isinstance(compactions, list) and facts["prompt"] in compactions):
+            return "summarizer"
+        return None
+    return "no_prompt" if "SessionEnd" in events and events <= NO_PROMPT_EVENTS else None
+
+
 def _unverified(metadata: dict, records: list[dict], lineages: list[dict], session: str | None,
                 failed: list[Lineage | None]) -> list[str]:
     unknown = {row["lineage"] for row in lineages if not row["forgotten"] and (
@@ -611,10 +632,10 @@ def _unverified(metadata: dict, records: list[dict], lineages: list[dict], sessi
         or row["files"]["uncaptured"] or row["named_uncaptured_lines"])}
     if session is not None and CURSOR_PREFIX + lineage_key(session) not in metadata:
         unknown.add(lineage_key(session))
-    # A pending lineage (#2533) whose transcript now exists but has no cursor is uncaptured. One whose transcript never
-    # appeared holds nothing to lose: it is counted in pending_lineages, not left unverified forever.
-    # A pending row without a usable path cannot be checked, so it is unverified too. A pending main session's
-    # subagents are checked like a captured one's: the worker sweeps them.
+    # A pending lineage (#2533) whose transcript now exists but has no cursor is uncaptured. One whose transcripts never
+    # appeared is unverified too, unless its hook facts show it was never written (_expired, #2535): a transcript
+    # removed before its first drain looks the same on disk. A pending row without a usable path cannot be checked.
+    # A pending main session's subagents are checked like a captured one's: the worker sweeps them.
     for key, pending in metadata.items():
         if not key.startswith(PENDING_PREFIX) or (session is not None and pending.get("session_id") != session):
             continue
@@ -624,8 +645,8 @@ def _unverified(metadata: dict, records: list[dict], lineages: list[dict], sessi
         lineage = Lineage(pending.get("session_id"), pending.get("agent_id"), Path(pending["path"]))
         if CURSOR_PREFIX + lineage.key in metadata or FORGOTTEN_PREFIX + lineage.rows_session in metadata:
             continue
-        if any(_present(Path(name)) for name in named_paths(pending)):  # every path its records named (#2535)
-            unknown.add(lineage.key)
+        if any(_present(Path(name)) for name in named_paths(pending)) or not _expired(pending, metadata):
+            unknown.add(lineage.key)  # every path its records named (#2535)
         if lineage.agent_id is None:
             for child in _subagents(lineage):
                 if CURSOR_PREFIX + child.key not in metadata and FORGOTTEN_PREFIX + child.rows_session not in metadata:
@@ -674,6 +695,11 @@ def audit(home: Path, session: str | None = None) -> dict:
                and (session is None or value.get("session_id") == session)
                and CURSOR_PREFIX + key[len(PENDING_PREFIX):] not in metadata
                and FORGOTTEN_PREFIX + Lineage(value.get("session_id"), value.get("agent_id"), Path(".")).rows_session not in metadata]
+    # Expired lineages hold nothing to capture; they are reported apart and named in the verdict, never as pending.
+    classified = [(row, None if any(_present(Path(name)) for name in named_paths(row)) else _expired(row, metadata))
+                  for row in pending]
+    expired = [kind for _row, kind in classified if kind]
+    pending = [row for row, kind in classified if not kind]
     seen = [row["first_seen"] for row in pending if isinstance(row.get("first_seen"), (int, float))]
     oldest_pending_age = max(0.0, time.time() - min(seen)) if seen else None
     verified = checked and not unverified and not home_report["spool"]["waiting"]
@@ -686,8 +712,12 @@ def audit(home: Path, session: str | None = None) -> dict:
         age = "unknown" if oldest_pending_age is None else f"{oldest_pending_age / 3600:.1f} h"
         verdict += (f"; {len(pending)} lineages awaiting capture ({absent} transcripts not yet seen), "
                     f"oldest{' known' if seen and len(seen) < len(pending) else ''} {age}")
+    if expired:
+        verdict += (f"; {len(expired)} expired: never written ({expired.count('summarizer')} compaction summarizers, "
+                    f"{expired.count('no_prompt')} sessions with no prompt)")
     return {"verdict": verdict, "ok": not any(failures.values()), "opened_immutable": immutable, "failures": failures,
             "pending_lineages": len(pending), "oldest_pending_age_s": oldest_pending_age,
+            "expired_never_written": len(expired),
             "unverified": unverified, "verified": verified,
             "lineages": lineages, "sessions": _session_report(metadata, records, session),
             **home_report, "lag_s": _percentiles(lag), "growth": _growth(home, records)}
