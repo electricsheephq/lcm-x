@@ -28,6 +28,7 @@ import sys
 from collections import Counter
 from pathlib import Path
 
+import message_content
 import message_patterns
 from bench.instruments.d5_clone import bars, capture, run as runner, snapshot
 from session_patterns import build_session_match_keys, compile_session_patterns, matches_session_pattern
@@ -164,6 +165,21 @@ def verdict(check1, check2):
     return PASS
 
 
+def _may_match(content, patterns):
+    """True when a declared message pattern matches the row's text as the runtime reads it, or when a search cannot be
+    decided within the runtime's time bound: the runtime may have matched it, so the row is never LOST."""
+    text = message_content.text_content_for_pattern_matching(content) or ""
+    if not text:
+        return False
+    for pattern in patterns:
+        try:
+            if pattern.search(text, timeout=message_patterns.MESSAGE_PATTERN_MATCH_TIMEOUT_SECONDS):
+                return True
+        except Exception:  # noqa: BLE001  # A timeout, or a search that cannot be bounded: undecided.
+            return True
+    return False
+
+
 def _capture(pin, folder, pin_sha256, scratch):
     """(None, reason) unless the pin file hashes to the sha256 sent and the folder verifies against it."""
     if not _HEX64.fullmatch(pin_sha256 or ""):
@@ -228,18 +244,16 @@ def end_read(args):
     out = {**out, "check1_preservation": check1, "start_rows": {k: len(v) for k, v in start.items()},
            "end_rows": {k: len(v) for k, v in end.items()}}
     unproven = FAIL if check1["verdict"] == FAIL else INCONCLUSIVE  # A failed check 1 stands whatever follows.
-    declared = [x for x in lcm.get("ignore_message_patterns") or [] if isinstance(x, str)]
-    if declared and message_patterns._regex_engine is None:
-        return {**out, "verdict": unproven,
-                "reason": "declared message patterns need the regex package for bounded matching; it is not installed"}
     log = logging.getLogger(message_patterns.__name__)
     was_disabled, log.disabled = log.disabled, True  # Its warnings quote a pattern: a settings value.
     try:
-        # The runtime's own matcher: an invalid pattern is skipped and a search that times out is no match.
-        patterns = message_patterns.compile_message_patterns(declared)
+        declared = [x for x in lcm.get("ignore_message_patterns") or [] if isinstance(x, str)]
+        if declared and message_patterns._regex_engine is None:
+            return {**out, "verdict": unproven, "reason": "declared message patterns need the regex package for "
+                                                          "bounded matching; it is not installed"}
+        patterns = message_patterns.compile_message_patterns(declared)  # An invalid pattern is skipped, as at runtime.
         check2 = coverage(start, end, identity, args.end, *session_matchers(lcm, *_sessions(args.end)),
-                          message_excluded=lambda row: isinstance(row.get("content"), str)
-                          and message_patterns.matches_message_pattern(row["content"], patterns))
+                          message_excluded=lambda row: _may_match(row.get("content"), patterns))
     except Exception as exc:  # noqa: BLE001  # Never a message: it can carry a path.
         return {**out, "verdict": unproven, "reason": f"check 2 could not be read ({type(exc).__name__})"}
     finally:

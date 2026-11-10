@@ -412,12 +412,60 @@ def test_an_error_inside_check_2_keeps_a_failed_check_1(monkeypatch, tmp_path):
     assert "typed" not in json.dumps(result)
 
 
-def test_a_catastrophic_message_pattern_is_bounded_and_quotes_nothing(monkeypatch, tmp_path, capsys):
-    """Review finding: stdlib re had no timeout; the runtime's matcher bounds each search and counts a timeout as no
-    match (the row is then judged like any other)."""
+class _Pattern:
+    """A compiled pattern stand-in: matches a word, or raises what a bounded search raises."""
+    def __init__(self, word=None, raises=None):
+        self.word, self.raises, self.pattern = word, raises, "private-pattern-text"
+
+    def search(self, text, timeout=None):
+        assert timeout == er.message_patterns.MESSAGE_PATTERN_MATCH_TIMEOUT_SECONDS
+        if self.raises:
+            raise self.raises
+        return self.word in text
+
+
+def test_a_search_that_times_out_may_match_so_the_row_is_unmatched_never_lost(monkeypatch, tmp_path):
+    """Review finding: a timeout counted as no match made a row the runtime may have dropped LOST (a false FAIL)."""
+    monkeypatch.setattr(er.message_patterns, "_regex_engine", re)
+    monkeypatch.setattr(er.message_patterns, "compile_message_patterns", lambda p: [_Pattern(raises=TimeoutError())])
+    end = {"host": [*START["host"], host(2, "s9", "a long tool output"), host(3, "s1", "a")],
+           "store": [*START["store"], stored(11, "s1", "a")]}
+    check2 = _fake_read(monkeypatch, tmp_path, end, ["x"])["check2_coverage"]
+    assert (check2["lost"], check2["unmatched_by_hint"]["matches a declared message pattern"]) == (0, 1)
+
+
+def test_multimodal_text_parts_are_matched_as_the_runtime_reads_them(monkeypatch, tmp_path):
+    monkeypatch.setattr(er.message_patterns, "_regex_engine", re)
+    monkeypatch.setattr(er.message_patterns, "compile_message_patterns", lambda p: [_Pattern(word="heartbeat")])
+    parts = [{"type": "text", "text": "heartbeat ok"}, {"type": "image_url", "image_url": {"url": "x"}}]
+    end = {"host": [*START["host"], host(2, "s9", parts), host(3, "s1", "a")],
+           "store": [*START["store"], stored(11, "s1", "a")]}
+    check2 = _fake_read(monkeypatch, tmp_path, end, ["x"])["check2_coverage"]
+    assert (check2["lost"], check2["unmatched_by_hint"]["matches a declared message pattern"]) == (0, 1)
+
+
+def test_message_pattern_warnings_are_silenced_and_the_logger_is_restored(monkeypatch, tmp_path, caplog):
+    monkeypatch.setattr(er.message_patterns, "_regex_engine", re)
+    caplog.set_level("DEBUG")
+    end = {"host": [*START["host"], host(2, "s1", "a")], "store": [*START["store"], stored(11, "s1", "a")]}
+    assert _fake_read(monkeypatch, tmp_path, end, ["[private-pattern-text"])["verdict"] == "PASS"
+    assert "private-pattern-text" not in caplog.text and not caplog.records
+    assert er.logging.getLogger(er.message_patterns.__name__).disabled is False
+
+
+def test_a_malformed_message_pattern_list_keeps_a_failed_check_1(monkeypatch, tmp_path):
+    end = {"host": [*START["host"], host(2, "s1", "a")], "store": [stored(11, "s1", "a")]}  # Start row 10 deleted.
+    result = _fake_read(monkeypatch, tmp_path, end, 5)
+    assert result["verdict"] == "FAIL" and result["reason"] == "check 2 could not be read (TypeError)"
+
+
+def test_a_catastrophic_message_pattern_is_bounded_and_quotes_nothing(monkeypatch, tmp_path, caplog):
+    """Review finding: stdlib re had no timeout; with the regex package each search is bounded, and a search that
+    times out may have matched at runtime, so the row is unmatched, never LOST."""
     pytest.importorskip("regex")
-    end = {"host": [*START["host"], host(2, "s9", "a" * 40 + "!")], "store": [*START["store"]]}
-    result = _fake_read(monkeypatch, tmp_path, end, ["(a+)+$"])
-    assert result["check2_coverage"]["lost"] == 1  # Not excluded: the runtime would have stored it.
-    captured = capsys.readouterr()
-    assert "(a+)+$" not in captured.out + captured.err
+    caplog.set_level("DEBUG")
+    end = {"host": [*START["host"], host(2, "s9", "a" * 40 + "!"), host(3, "s1", "a")],
+           "store": [*START["store"], stored(11, "s1", "a")]}
+    check2 = _fake_read(monkeypatch, tmp_path, end, ["(a+)+$"])["check2_coverage"]
+    assert (check2["lost"], check2["unmatched_by_hint"]["matches a declared message pattern"]) == (0, 1)
+    assert "(a+)+$" not in caplog.text
