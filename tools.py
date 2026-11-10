@@ -105,7 +105,7 @@ from .retrieval_core import (
 from .search_query import (
     AGE_DECAY_RATE, build_recall_or_query, contains_emoji, is_identifier_shaped_query,
     normalize_search_sort, recall_content_terms,
-    requires_like_fallback, sanitize_fts5_query, agent_grep_operands,
+    requires_like_fallback, agent_grep_operands,
 )
 from .store import _normalize_observed_at, build_message_fts_spec
 from .vector_store import VectorStore, _interrupt_read_on_deadline
@@ -1687,7 +1687,8 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
         # #2586: one parse with message search. The reader's history-only any-term retry gets the payload any-term hits
         # from this scan (content already read, no second payload budget).
         _, match_tokens, match_operands = agent_grep_operands(query)
-        stash_any_term = reader_default_payloads and args.get("_payload_any_term_stash") is True and len(match_operands) >= 2
+        stash_any_term = (reader_default_payloads and args.get("_payload_any_term_stash") is True
+                          and len(match_operands) >= 2 and not {"OR", "NOT"}.intersection(match_tokens))
         any_term_matches: list[dict[str, Any]] = []
         for ref in candidate_refs:
             content_bytes = _LCM_GREP_EXTERNALIZED_CONTENT_BYTES

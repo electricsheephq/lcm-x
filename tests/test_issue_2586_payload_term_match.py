@@ -47,6 +47,12 @@ def test_absent_terms_a_reversed_phrase_and_not_never_match(archive, query):
     assert found(archive.call(query=query)) == []
 
 
+def test_an_explicit_or_query_shows_its_payload_hits_at_once(archive):
+    saved(archive, FACT)
+    result = archive.call(query="zzabsentterm OR evacuation")
+    assert "retried" not in result and len(found(result)) == 1, result
+
+
 def test_an_out_of_scope_payload_never_matches(archive):
     saved(archive, FACT, session="other")
     archive.store.append("saved", {"role": "user", "content": "unrelated"})
