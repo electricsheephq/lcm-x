@@ -350,7 +350,8 @@ line with a note (`projected_entry_without_uuid`, `projection_error:<type>`), an
   `current` the default stays history-only, and an explicit `externalized` or `both` is an error,
   because the reader has no active session.
   - A payload hit carries `type: externalized`, its `ref` and its `session_id`. A payload matches the
-    query as a literal phrase.
+    query as typed, or all its terms in any order (quoted phrases kept, uppercase OR honoured); a
+    `NOT` query, or one with emoji or CJK, matches only as typed.
   - `lcm_expand(externalized_ref, session_id)` returns the output in pages of `max_tokens`; follow
     `has_more` and `next_content_offset` for the rest.
   - The pass is bounded: 4096 names discovered, 128 files and 8 MiB read per call, 512 KB per file.
