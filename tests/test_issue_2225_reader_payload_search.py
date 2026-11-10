@@ -510,6 +510,7 @@ def test_any_term_retry_with_explicit_refs_is_not_an_error(archive):
     ref, _ = archive.save()
     result = archive.call(query="absentword otherabsent", content_scope="both", externalized_refs=[ref])
     assert "error" not in result and result["retried"] == "any_term"
+    assert result["externalized_refs"] == [ref]
 
 
 def test_reader_schema_advertises_its_own_content_scope(archive):
@@ -549,8 +550,16 @@ def test_discovery_cap_keeps_the_newest_names_whatever_the_listing_order(archive
     # Bot review of #2528: the cap must keep the newest payloads, not the first ones the file system lists.
     refs = [archive.save(name=f"20261110_12000{i}_p.json")[0] for i in range(5)]
     monkeypatch.setattr(tools, "_LCM_GREP_EXTERNALIZED_DISCOVERY_CAP", 2)
-    real_listdir = tools.os.listdir
-    monkeypatch.setattr(tools.os, "listdir", lambda path: sorted(real_listdir(path)))  # oldest first
+    real_scandir = tools.os.scandir
+    class OldestFirst:
+        def __init__(self, path):
+            with real_scandir(path) as entries:
+                self.entries = sorted(entries, key=lambda entry: entry.name)
+        def __enter__(self):
+            return iter(self.entries)
+        def __exit__(self, *exc):
+            return False
+    monkeypatch.setattr(tools.os, "scandir", OldestFirst)
     result = archive.grep()
     assert sorted(hit["ref"] for hit in payload_hits(result)) == sorted(refs[-2:])
     assert "discovery_cap" in result["partial"]["reasons"]
@@ -565,3 +574,59 @@ def test_a_payload_the_reader_cannot_parse_is_disclosed(archive):
     result = archive.grep()
     assert [hit["ref"] for hit in payload_hits(result)] == [good]
     assert "unreadable" in result["partial"]["reasons"]
+
+
+@pytest.mark.parametrize("shape", ["invalid_utf8", "complete_malformed"])
+def test_a_confirmed_unreadable_ref_still_errors_at_the_budget_boundary(archive, monkeypatch, shape):
+    # Codex re-review of #2528: bytes already read that are malformed are a confirmed failure, and a read that
+    # reaches the file's end is not a budget cut, so neither becomes a silent byte_cap.
+    mine, _ = archive.save(session="mine", name="20261110_120002_mine.json")
+    bad = "20261110_120001_bad.json"
+    body = b'{"\xff\xfe' + b"x" * 5000 if shape == "invalid_utf8" else b'{"session_id": "mine", "kind": "x"}'
+    (archive.storage / bad).write_bytes(body)
+    spent = []
+    original = tools._reader_payload_search
+    def measured(*args, **kwargs):
+        result = original(*args, **kwargs)
+        spent.append(result["bytes_read"])
+        return result
+    monkeypatch.setattr(tools, "_reader_payload_search", measured)
+    args = dict(content_scope="externalized", session_scope="session", session_id="mine")
+    archive.reader.call("lcm_grep", dict(query=TOKEN, externalized_refs=[mine], **args))
+    left = 32 if shape == "invalid_utf8" else len(body)  # a cut read, or a budget that ends at the file's end
+    monkeypatch.setattr(tools, "READER_PAYLOAD_BYTE_CAP", spent[0] + left)
+    raw, error = archive.reader.call("lcm_grep", dict(query=TOKEN, externalized_refs=[mine, bad], **args))
+    assert "not readable" in json.loads(raw).get("error", "")
+
+
+def test_a_payload_folder_that_cannot_be_listed_is_disclosed(archive, monkeypatch):
+    # NeonDiff on #2528: a listing failure is not a complete search with no matches.
+    archive.save()
+    def refuse(path):
+        raise PermissionError("denied")
+    monkeypatch.setattr(tools.os, "scandir", refuse)
+    result = archive.grep()
+    assert payload_hits(result) == [] and "unreadable" in result["partial"]["reasons"]
+
+
+def test_a_budget_cut_inside_a_multibyte_character_stays_byte_cap(archive, monkeypatch):
+    # A cut that splits a character in a valid header is a budget cut, not a corrupt ref.
+    mine, _ = archive.save(session="mine", name="20261110_120002_mine.json")
+    wide, _ = archive.save(session="mine", name="20261110_120001_wide.json")
+    path = archive.storage / wide
+    path.write_text(json.dumps({"note": "\u00e9" * 3000, **json.loads(path.read_text())}, ensure_ascii=False, indent=2))
+    spent = []
+    original = tools._reader_payload_search
+    def measured(*args, **kwargs):
+        result = original(*args, **kwargs)
+        spent.append(result["bytes_read"])
+        return result
+    monkeypatch.setattr(tools, "_reader_payload_search", measured)
+    args = dict(content_scope="externalized", session_scope="session", session_id="mine")
+    archive.reader.call("lcm_grep", dict(query=TOKEN, externalized_refs=[mine], **args))
+    middle = path.read_bytes().index("\u00e9".encode()) + 2 * 50 + 1  # inside the 51st character
+    monkeypatch.setattr(tools, "READER_PAYLOAD_BYTE_CAP", spent[0] + middle)
+    raw, error = archive.reader.call("lcm_grep", dict(query=TOKEN, externalized_refs=[mine, wide], **args))
+    result = json.loads(raw)
+    assert "error" not in result and result["partial"]["reasons"] == ["byte_cap"]
+    assert [hit["ref"] for hit in payload_hits(result)] == [mine]

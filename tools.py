@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import codecs
 import copy
+import heapq
 import json
 import logging
 import math
@@ -1189,14 +1191,26 @@ def _reader_payload_search(path: Path, budget: int, in_scope) -> dict[str, Any]:
             def read(size):
                 allowed = budget - result["bytes_read"]
                 data = handle.read(min(size, allowed))
-                if allowed < size and len(data) == allowed:
+                if allowed < size and len(data) == allowed and handle.tell() < opened.st_size:
                     # The budget, not the file's end, stopped this read: the file's checks did not finish, so a
                     # rejection here is not a confirmed failure.
                     result["budget_cut"] = True
                 result["bytes_read"] += len(data)
                 return data
-            prefix, fields, seen, _ = _read_externalized_payload_metadata_prefix_from_handle(
-                SimpleNamespace(read=read), max_read_bytes=_LCM_GREP_EXTERNALIZED_METADATA_READ_BYTES)
+            header = bytearray()
+            def read_header(size):
+                data = read(size)
+                header.extend(data)
+                return data
+            try:
+                prefix, fields, seen, _ = _read_externalized_payload_metadata_prefix_from_handle(
+                    SimpleNamespace(read=read_header), max_read_bytes=_LCM_GREP_EXTERNALIZED_METADATA_READ_BYTES)
+            except ValueError:
+                try:  # a cut can split a character; only an invalid sequence inside the bytes read is confirmed
+                    codecs.getincrementaldecoder("utf-8")("strict").decode(bytes(header), final=False)
+                except UnicodeDecodeError:
+                    result.pop("budget_cut", None)
+                return result
             if not seen:
                 return result
             if not in_scope(fields.get("session_id")):
@@ -1526,11 +1540,17 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
         if externalized_refs is None or reader_mode:
             discovered_refs = []
             try:
-                paths = (storage_dir / ref for ref in externalized_refs) if externalized_refs is not None else storage_dir.iterdir()
-                if reader_mode and externalized_refs is None:
+                if externalized_refs is not None:
+                    paths = (storage_dir / ref for ref in externalized_refs)
+                elif reader_mode:
                     # The reader keeps the newest names, not the first ones the file system lists: names only (no
-                    # stat or open), sorted newest first, then capped below.
-                    paths = (storage_dir / name for name in sorted(os.listdir(storage_dir), reverse=True))
+                    # stat or open), streamed into a heap that keeps the newest cap+1 by name (memory and sort bounded
+                    # by the cap), then capped below. Path.iterdir is never called here: from 3.13 it lists eagerly.
+                    with os.scandir(storage_dir) as entries:
+                        paths = [storage_dir / name for name in heapq.nlargest(
+                            _LCM_GREP_EXTERNALIZED_DISCOVERY_CAP + 1, (entry.name for entry in entries))]
+                else:
+                    paths = storage_dir.iterdir()
                 for entries_seen, path in enumerate(paths, start=1):
                     if entries_seen > _LCM_GREP_EXTERNALIZED_DISCOVERY_CAP:
                         scan_counts["discovery_truncated"] = True
@@ -1540,6 +1560,8 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
                     discovered_refs.append(path.name)
             except OSError:
                 discovered_refs = []
+                if reader_mode and externalized_refs is None:
+                    partial_reasons.append("unreadable")  # the payload folder could not be listed: nothing was searched
             # Bound directory consumption before sorting so one busy payload
             # directory cannot make a search materialize every sidecar name.
             discovered_refs.sort(reverse=True)
