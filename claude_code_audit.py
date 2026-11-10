@@ -264,16 +264,21 @@ def _named_others(lineage: Lineage, cursor: dict, generations: dict, compared: s
         if other == lineage.path or not stat.S_ISREG(status.st_mode) or (status.st_dev, status.st_ino) in compared:
             continue
         compared.add((status.st_dev, status.st_ino))
-        best, total, held = 0, _captured_prefix(other, {})[1], None
-        for generation, rows in generations.items():
-            matched = _captured_prefix(other, rows)[0]
-            if matched > best:
-                best, held = matched, generation
-        if held in gone and best == len(generations[held]) == total:
-            # A generation counted gone (no set-aside copy) is this file, whole at its own path: compare it as a copy.
-            gone.discard(held)
-            report["generations_gone"] -= 1
-            _compare(other, generations[held], report, expected, lag)
+        try:
+            total = _captured_prefix(other, {})[1]
+            prefixes = {generation: _captured_prefix(other, rows)[0] for generation, rows in generations.items()}
+            best = max(prefixes.values(), default=0)
+            # A generation counted gone (no set-aside copy) that is this file, whole at its own path, is compared as a
+            # copy. Among equal matches a still-gone one is chosen, so identical files each clear their own generation.
+            whole = [generation for generation, matched in prefixes.items()
+                     if generation in gone and matched == len(generations[generation]) == total]
+            if whole and best == total:
+                gone.discard(whole[0])
+                report["generations_gone"] -= 1
+                _compare(other, generations[whole[0]], report, expected, lag)
+        except OSError:  # passed stat but cannot be read (denied, or removed since): not a clean path
+            report["named_uncaptured_lines"] += 1
+            continue
         report["named_uncaptured_lines"] += max(0, total - best)  # separate reads: a file rewritten meanwhile
 
 
