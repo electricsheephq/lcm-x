@@ -41,6 +41,11 @@ CASES += [(r, 'v0292', p, loc, h) for r in (*ROUTES[3:6], 'reconcile-replay')
           for p in ('plain', 'data-uri') for loc in ('spillover', 'hermes-results') for h in HOSTS]
 CASES += [(r, 'v0292-crlf', 'plain', 'hermes-results', h)
           for r in (*ROUTES[3:6], 'reconcile-replay') for h in HOSTS]
+# Existing keys are occurrence 1; occurrence 2 repeats the same host call id/result.
+REPEATED_CASES = [(*case, 'occurrences-2') for case in CASES
+                  if case[0] == 'reconcile-replay' or
+                  (case[0].startswith(('child-', 'cold-')) and case[2] == 'data-uri')]
+CASES += REPEATED_CASES
 # S1/S2 replace the synthetic child-compress and child-output-counted routes.
 # Hermes 0.21.3 (345cd2b0), agent/context_compressor.py:651 (literal),
 # :440 (rewrite), cited by R4-5 Q2; the test hoststub has no compressor module.
@@ -306,7 +311,8 @@ def test_recovered_temp_different_path_characterization(preview, host, tmp_path,
 
 
 def _run_case(case, host, tmp_path, monkeypatch, request, characterization=None):
-    route, stored_form, preview, location, host_form = case
+    route, stored_form, preview, location, host_form = case[:5]
+    repeated = len(case) == 6
     legacy = stored_form.startswith('v0292')
     temp = tmp_path / 'host-temp'
     temp.mkdir()
@@ -507,6 +513,16 @@ def _run_case(case, host, tmp_path, monkeypatch, request, characterization=None)
                 engine.on_session_end(session, handed)
             record_step(handed)
 
+        if repeated:
+            second_call = copy.deepcopy(next(m for m in first if m.get('tool_calls')))
+            second_tool = copy.deepcopy(tool)
+            # S2 hands back a cleared first result; the second occurrence is the
+            # original host result, with the same id and unmodified marker.
+            second_tool['content'] = replay_content
+            stamp = max(m.get('timestamp', 1762700000.0) for m in view)
+            second_call['timestamp'], second_tool['timestamp'] = stamp + 1, stamp + 2
+            view += [second_call, second_tool, {'role': 'assistant', 'content': 'second occurrence',
+                                              'timestamp': stamp + 3}]
         if route == 'reconcile-replay':
             for i, message in enumerate(view):
                 message.setdefault('timestamp', 1762700001.0 + i)
@@ -514,6 +530,8 @@ def _run_case(case, host, tmp_path, monkeypatch, request, characterization=None)
         if route.startswith('child-compress-'):
             assert any('resuming with counted identities' in reason for reason in fallbacks)
         replay(view, 3)
+        if repeated:
+            replay(view, 4)
         if child_route:
             child.end(engine, view)
             record_step(view)
@@ -533,6 +551,9 @@ def _run_case(case, host, tmp_path, monkeypatch, request, characterization=None)
                                  for r, c, t in missing)
         result = {'steps': steps, 'counts': counts, 'contents': contents, 'markers': markers,
                   'missing': missing_digests, 'replay_growth': counts[2] - counts[1], 'absent': absent}
+        if repeated:
+            result['third_replay_growth'] = counts[3] - counts[2]
+            print(f'OCCURRENCES {_cell_id(case)} counts={counts} third_growth={result["third_replay_growth"]}')
         if characterization is not None:
             assert counts == characterization
             if host_form == 'path':
@@ -583,8 +604,13 @@ def _run_case(case, host, tmp_path, monkeypatch, request, characterization=None)
             if missing_ids - produced:
                 gaps.append('host rows absent (#2543 on off-current routes)' if not child_route else 'host rows absent')
         if result['replay_growth']:
-            assert baseline['replay_growth'] >= result['replay_growth'] > 0, 'new second-replay growth'
+            assert baseline['replay_growth'] >= result['replay_growth'] > 0, (
+                f'STOP bar iv {_cell_id(case)}: main={baseline["counts"]} candidate={counts}; new second-replay growth')
             gaps.append('second replay adds rows')
+        if repeated and result['third_replay_growth']:
+            assert baseline['third_replay_growth'] >= result['third_replay_growth'] > 0, (
+                f'STOP bar iv {_cell_id(case)}: main={baseline["counts"]} candidate={counts}; new third-replay growth')
+            gaps.append('third replay adds rows')
         if gaps:
             request.node.add_marker(pytest.mark.xfail(strict=True, raises=MainGap,
                 reason='main 7e67daf16 fixture: ' + ', '.join(gaps)))
