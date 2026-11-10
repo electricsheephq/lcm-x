@@ -1506,7 +1506,7 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
             if not reader_storage.exists():
                 searches_externalized = False
             contained = not searches_externalized or _payload_storage_contained(engine, reader_storage)
-        except (OSError, ValueError):
+        except (OSError, ValueError, RuntimeError):  # RuntimeError: a symlink loop before Python 3.13
             contained = False
         if not contained:
             searches_externalized = False

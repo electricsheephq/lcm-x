@@ -2,6 +2,7 @@
 
 import json
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -379,13 +380,14 @@ def test_storage_containment_skips_before_open(archive, tmp_path, monkeypatch, l
     link = archive.home / "linked"
     link.symlink_to(target, target_is_directory=True)
     archive.reader.config.large_output_externalization_path = str(link)  # the reader keeps its own copy of the config
-    original = type(archive.storage).iterdir
-    def guarded(self, *args, **kwargs):
-        # The containment check may list the profiles folder; only listing the payload dir is discovery.
-        if self.resolve() == target.resolve():
+    real_scandir = tools.os.scandir
+    def guarded(path="."):
+        # Reader discovery lists with os.scandir; the containment check may list the profiles folder, so only
+        # listing the payload dir is discovery.
+        if not isinstance(path, int) and Path(path).resolve() == target.resolve():  # an int is a dir fd (rmtree)
             pytest.fail("containment failure must skip discovery")
-        return original(self, *args, **kwargs)
-    monkeypatch.setattr(type(archive.storage), "iterdir", guarded)
+        return real_scandir(path)
+    monkeypatch.setattr(tools.os, "scandir", guarded)
     result = archive.grep()
     assert result["results"] == []
     assert result["partial"]["reasons"] == ["containment"]
@@ -660,3 +662,13 @@ def test_a_file_that_grows_after_it_is_opened_is_still_a_budget_cut(archive, mon
     raw, error = archive.reader.call("lcm_grep", dict(query=TOKEN, externalized_refs=[mine, wide], **args))
     result = json.loads(raw)
     assert "error" not in result and result["partial"]["reasons"] == ["byte_cap"]
+
+
+def test_a_storage_path_that_cannot_be_resolved_degrades_to_containment(archive, monkeypatch):
+    # CodeRabbit on #2528: before Python 3.13 a symlink loop raises RuntimeError; history results must stand.
+    ref, _ = archive.save()
+    def loop(*args, **kwargs):
+        raise RuntimeError("Symlink loop")
+    monkeypatch.setattr(tools, "get_large_output_storage_dir", loop)
+    result = archive.call(query="call-saved")
+    assert "error" not in result and result["partial"]["reasons"] == ["containment"]
