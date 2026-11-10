@@ -346,6 +346,20 @@ respins on any path without an injected fault. This sentence has two recorded ex
 v0.29.1-only D5 rc3-window decision below, and, from v0.29.2 while #1674 is open, a cold-bind
 copy that the D5 clone run's bar 2 matches against the previous GA (below). A matched copy is
 recorded as KNOWN under #1674 and disclosed in the release notes; no other duplicate is covered.
+Amended 2026-11-10 (v0.30.0 only, adopted before the v0.30.0-rc5 tag and before any rc5 data): a third
+recorded exception covers two named duplicates that the rc4 class audit found by probe. Their fixes
+were cut from rc5 because review found that each fix could take a changed row for one already
+stored. (a) #2558: on the first replay after an upgrade from v0.29.2, a tool call and its saved
+tool result are stored once more while the saved file still exists, in two shapes only: the file is
+in Hermes's spillover folder and the marker's preview holds a data URI, or the file is in the
+system temp folder and has CRLF line ends. (b) #2559: a delegated child's row that holds an inline
+encoded block is stored again at a later handover: at most one extra copy on the live hook and at
+the child's end, two on the counted route and three after the child's own compaction, and none
+after the second handover. Neither loses a row, and both are disclosed in the release notes with a
+fix planned for v0.30.1. The exception covers the probe cells that show these two shapes, which the
+rc5 smoke stage runs again: a count above these, growth after the last named copy, or a lost row
+stops the candidate. It does not cover the driven audit, where a copy of either kind still counts
+as silent surplus and fails the gate.
 From v0.29.2, what the reference-agent canary sees is judged only by the canary paragraph below
 and never triggers this sentence. A further exception to the respin rule: a duplicate-only shape reachable
 only under an injected crash or kill may ship as a disclosed known issue at P2, with a tracked
@@ -664,7 +678,7 @@ A non-green raw row is never presented as an unqualified gate PASS. In particula
 no blanket “mean passed, spread waived” disposition. Past receipts and release decisions stand
 as recorded; these prospective rules grant no retroactive PASS.
 
-The rows not marked "v0.29.0 only", "v0.29.1 only", "v0.29.2 only" or "v0.30.0 only" are adopted as of 2026-10-22 and apply from the next release candidate. The v0.30.0-only D7 row was adopted on 2026-11-08, before the v0.30.0-rc1 tag and before any v0.30.0 D7 run; it applies to v0.30.0 alone and grants no PASS. On 2026-11-09, before the v0.30.0-rc3 tag and before any rc3 D7 data, the release manager extended the "v0.30.0 only: D7 at rc2 in floor-pending mode" row to v0.30.0-rc3: each of its conditions applies to rc3 as written for rc2, and it still grants no PASS on bar 4. D7 did not run at rc2: rc2's smoke stage ended in a release-manager respin for a P2 fix (#2512) before any long row started. On 2026-11-10, before the v0.30.0-rc4 tag and before any rc4 D7 data, the release manager extended the same row to v0.30.0-rc4: each of its conditions applies to rc4 as written for rc2, and it still grants no PASS on bar 4. D7 did not run at rc3: rc3's smoke stage ended in a release-manager respin for a P1 fix (#2521) before any long row started.
+The rows not marked "v0.29.0 only", "v0.29.1 only", "v0.29.2 only" or "v0.30.0 only" are adopted as of 2026-10-22 and apply from the next release candidate. The v0.30.0-only D7 row was adopted on 2026-11-08, before the v0.30.0-rc1 tag and before any v0.30.0 D7 run; it applies to v0.30.0 alone and grants no PASS. On 2026-11-09, before the v0.30.0-rc3 tag and before any rc3 D7 data, the release manager extended the "v0.30.0 only: D7 at rc2 in floor-pending mode" row to v0.30.0-rc3: each of its conditions applies to rc3 as written for rc2, and it still grants no PASS on bar 4. D7 did not run at rc2: rc2's smoke stage ended in a release-manager respin for a P2 fix (#2512) before any long row started. On 2026-11-10, before the v0.30.0-rc4 tag and before any rc4 D7 data, the release manager extended the same row to v0.30.0-rc4: each of its conditions applies to rc4 as written for rc2, and it still grants no PASS on bar 4. D7 did not run at rc3: rc3's smoke stage ended in a release-manager respin for a P1 fix (#2521) before any long row started. On 2026-11-10, before the v0.30.0-rc5 tag and before any rc5 D7 data, the release manager extended the same row to v0.30.0-rc5: each of its conditions applies to rc5 as written for rc2, and it still grants no PASS on bar 4. D7 did not run at rc4: rc4's smoke stage ended in a release-manager respin for a P1 fix (#2539) before D7 started. On 2026-11-10, before the v0.30.0-rc5 tag and before any rc5 roundtrip data, the release manager narrowed the upgrade/rollback roundtrip row for v0.30.0 alone: a rollback to v0.29.2 must still lose 0 rows, and its 0-duplicated-rows bar excludes rows that v0.30.0 stored in a form v0.29.2 does not know. One case is known (#2552): a tool result that Hermes saved to a file, which v0.30.0 stores in full, is stored once more with its tool call at the first v0.29.2 replay, unlinked and never growing. The rc5 smoke stage re-runs the four rollback probe cells with pinned counts (11 stored rows for 9 handed, 2 extra, 0 lost, no growth; the three controls at 9 rows), and any other count stops the candidate.
 The evidence below binds candidate `54e8d21d891271d84623e89087f87dd0eb617271` versus
 comparison `709099b3a397a7893a7abae8802ebe7bf605f79e`; it is rationale, not proof that a
 future candidate meets the proposed conditions. #1617's D4 scheduling/resume and injected-crash

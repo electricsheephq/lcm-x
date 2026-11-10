@@ -376,7 +376,7 @@ A tail exists because the store hit SQLite busy at session end. The ledger is in
 - **Re-upgrade (#534, L4-9).** A summary that an older reader published is read as a rank-4 descriptor when that reader persisted its proof. A memory-only legacy proof leaves no descriptor, and the replayed summary is stored with `generated_unproven`. That is visible, and disclosed.
 - **Disclosed residual (#758(a)):** a redaction-policy change before the first ledger ingest leaves a one-time visible duplicate.
 - **Disclosed, not counted:** the store mark is per lineage while the probe is per session. When a compression child advances the lineage's mark past its parent's S3 tail written after rotation, a later foreground ingest of the parent does not re-examine those rows; P2's anti-join does.
-- **Rollback is a supported path** (docs/process/schema-changes.md:14-18; invariant I5).
+- **Rollback is a supported path** (docs/process/schema-changes.md:14-18; invariant I5). From v0.30.0, a rollback to v0.29.2 loses no rows and has one named duplicate (#2552): a tool result that Hermes saved to a file, which v0.30.0 stores in full, is stored once more with its tool call the first time v0.29.2 replays that history. The copy is not linked to the first one and does not grow.
 
 ### 3.7 Other insert routes and state
 - S3 is the session end for a non-current session (prefix_matching.py:157-196, 314-363). At P1 it writes no bindings or vector; a later foreground ingest of that session can re-bind its exact copies unless another session of the same lineage has advanced the store mark past them (§3.6). P2 uses the shared classifier.

@@ -8,6 +8,9 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## v0.30.0 (nothing lost)
 
+- Fix: a tool result that Hermes saved to a file is recognised as the row already stored when Hermes sends its
+  marker again. A session that ends while another is active no longer loses the rows after such a result, and a
+  delegated child's live session no longer stores the result again on each model call (#2539).
 - Fix: after an upgrade from v0.29.2, replaying a conversation that holds a saved-output marker (a tool result
   too large for the conversation, which Hermes saved to a file) no longer stores the tool call and its result a
   second time while the saved file still exists (#2521).
