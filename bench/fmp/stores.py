@@ -2,13 +2,16 @@
 import importlib.metadata
 import json
 import os
+import math
 import sqlite3
 import struct
 import uuid
 from contextlib import contextmanager
+from dataclasses import fields
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from .common import commit, sha, write_json
 from .delivery import question_clock
@@ -17,6 +20,44 @@ MODELS = {"off": ("", ""), "local": ("fastembed", "BAAI/bge-small-en-v1.5"),
           "voyage": ("voyage", "voyage-context-3")}
 # Optional directory of earlier embedding caches, read only; misses use the run-owned cache.
 CACHE_ROOT = Path(os.environ["FMP_CACHE_ROOT"]) if os.environ.get("FMP_CACHE_ROOT") else None
+
+
+class RecallOptionError(ValueError):
+    """Fixed harness diagnostics safe to show without logging corpus text."""
+
+
+def parse_recall_options(raw):
+    if not raw:
+        return {}
+    from hermes_lcm import config as module
+    allowed = {f.name for f in fields(module.LCMConfig) if f.name.startswith("recall_")}
+    # --delivery-unit owns the delivery unit (session_mode would silently override an option).
+    allowed.discard("recall_delivery_unit")
+    options = {}
+    for item in raw:
+        key, sep, value = item.partition("=")
+        if not sep or key not in allowed:
+            raise RecallOptionError("--recall-option requires a known recall_ field and KEY=VALUE")
+        if not value.strip():
+            raise RecallOptionError("invalid --recall-option value for " + key)
+        if key in options:
+            raise RecallOptionError("repeated --recall-option " + key)
+        options[key] = value
+    # Use the selected product's parsers, including bounds, aliases and composite values.
+    # Isolate both environment and YAML inputs; never mutate the process environment.
+    env = {"LCM_" + key.upper(): value for key, value in options.items()}
+    if not all(hasattr(module, name) for name in ("lcm_env", "_load_hermes_config_yaml_for_env")):
+        raise RecallOptionError("--recall-option unsupported by the selected checkout")
+    with patch.object(module, "lcm_env", return_value=env), \
+            patch.object(module, "_load_hermes_config_yaml_for_env", return_value={}):
+        config = module.LCMConfig.from_env()
+    if config.config_source_warnings:
+        raise RecallOptionError("invalid --recall-option value")
+    parsed = {key: getattr(config, key) for key in sorted(options)}
+    # NaN or infinity cannot round-trip a manifest identity check (nan != nan).
+    if any(isinstance(v, float) and not math.isfinite(v) for v in parsed.values()):
+        raise RecallOptionError("invalid --recall-option value")
+    return parsed
 
 
 def safe(value):
@@ -49,11 +90,12 @@ class ReadCache:
 
 
 class Stores:
-    def __init__(self, root, config, repo, dataset_sha, lme, summaries="none", cache=None, store_text="speaker-prefix"):
+    def __init__(self, root, config, repo, dataset_sha, lme, summaries="none", cache=None, store_text="speaker-prefix", recall_options=None):
         self.root, self.config, self.repo = Path(root), config, Path(repo)
         self.root.mkdir(parents=True, exist_ok=True)
         self.dataset_sha, self.lme, self.summaries = dataset_sha, lme, summaries
         self.store_text = store_text
+        self.recall_options = recall_options or {}
         self.base, sep, self.rerank = config.partition("+rerank:")
         if self.base not in MODELS or (sep and not self.rerank):
             raise ValueError("unsupported store configuration")
@@ -120,6 +162,9 @@ class Stores:
                            embedding_provider=self.provider_name or "fastembed", embedding_model=self.model,
                            embedding_privacy_enabled=False, rerank_enabled=bool(self.rerank),
                            rerank_model=self.rerank or "rerank-2.5-lite")
+        if frozen:
+            for key, value in self.recall_options.items():
+                setattr(config, key, value)
         store = MessageStore(config.database_path, ingest_protection_config=config)
         dag = SummaryDAG(config.database_path)
         vector = VectorStore(config.database_path, config=config)

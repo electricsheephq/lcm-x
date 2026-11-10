@@ -145,7 +145,16 @@ record another session spooled while it held the lock is not left for a later ho
 drain raises is set aside as `<key>.failed` and logged by error type only; the session's next hook
 spools a fresh record, and a transcript's cursor is written before its first batch, so the sweep
 retries a transcript whose first batch failed. One bad transcript cannot stall the others or loop
-the worker.
+the worker. A claimed record the worker cannot read (an empty file after a power cut, or one that is
+not a JSON object) is set aside the same way and never drained as nothing; nothing retries it, and the
+audit stays unverified with `spool:unreadable_failed_record`, which names no session. The facts that
+record held are lost to the audit: the session it came from can still expire by the ordinary pending
+rule, so this marker is what keeps every audit unverified. A later record of the same key is set
+aside beside it, never over it. Moving the `*.failed` file out of the home's `spool/` folder clears
+that state: a session that expired meanwhile then reads verified, though its record was lost. So
+check the session first: the file name up to its first dot is the pointer key, the first 32 hex digits
+of sha256 of `host`, `session_id` and `agent_id` joined by NUL (an empty `agent_id` for a session), and
+its modification time is the hook's write time.
 
 ### Transcript facts
 
@@ -431,7 +440,8 @@ hook entry handles:
   `${GROK_HOME:-~/.grok}/sessions/<URL-encoded cwd>/<sessionId>/`, matched by its `.cwd` sidecar
   for long paths; never the newest session as a guess.
 - The end-of-session `Stop` (reason not `end_turn`) and `SessionEnd` (1.5 s budget) are
-  observe-only: logged, never spooled, so they cannot replace a pending record.
+  observe-only: logged, never spooled, so they cannot replace a spooled hook record that the worker
+  has not yet claimed.
 - The Grok reader (`updates.jsonl`) is not in this release, so the hook refuses every Grok event
   (`grok_capture_off`) and spools nothing; no setting enables it. It lands only after a
   real-session proof shows tool results are complete, `/compact` and `/rewind` never
@@ -443,13 +453,29 @@ hook entry handles:
 ## Runtime and failure modes
 
 A session whose transcript did not exist at its first drain is remembered as pending and swept
-every worker run until its transcript appears. Pending rows never expire; the audit counts them
+every worker run until its transcript appears. Pending rows are never deleted; the audit counts them
 and reports the age of the oldest one.
 
-Known issue in the shipped preview `claude-code-v0.1.0`: before this fix, such a session's final
-rows could be lost if its later hook records were also lost (#2533). Known issue for the preview and for any build before the
-follow-up to #2533 (#2535): the audit counts, but does not fail on, a session whose transcript file never appeared; its
-one-line verdict names how many lineages are awaiting capture and the age of the oldest.
+A pending lineage none of whose named transcripts exists is unverified, because a transcript removed before its first
+drain looks the same on disk. Two shapes seen on real sessions are instead counted as expired, never written
+(`expired_never_written`, and in words in the one-line verdict), and only when no hook of the lineage ever found its
+transcript on disk:
+
+- the compaction summarizer: its only hook is a `SubagentStop` with `agent_type` "" whose prompt id is one of its
+  session's compactions (`PreCompact`, `PostCompact` or a `SessionStart` with source `compact`);
+- a session that ended with no prompt: its hooks were only `SessionStart` and `SessionEnd`. Any other event (a prompt,
+  a `Stop`, a tool hook) keeps it unverified. A built-in command such as `/usage` writes a transcript without a
+  `UserPromptSubmit`, which is why the hooks' own look at the disk is required too.
+
+To tell these apart the hook keeps a hash of each record's prompt id, its `agent_type`, and whether it found each
+transcript on disk (one stat). The spool pointer merges these facts from every record that reached it since the worker
+last claimed it, so a record the pointer rules replace or keep out still counts. A session still open with no prompt
+yet, or one whose `SessionEnd` was lost, stays unverified. Pending rows and hook records from a build before this rule
+lack these facts and stay unverified.
+
+Known issue in the shipped preview `claude-code-v0.1.0`: before #2533, such a session's final rows could be lost if its
+later hook records were also lost, and before #2535 the audit counted, but did not fail on, a session whose transcript
+file never appeared.
 
 A lineage's records can name more than one transcript path: a resume from another directory sends `SessionStart` with
 a path under the new directory that never appears. Capture follows one path. The pending row and the cursor list every
