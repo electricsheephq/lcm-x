@@ -295,7 +295,7 @@ def arm_t(plugin, home, direct, empty=False):
     return {"tokens": rows, "calls": mcp.calls, "empty": empty, "bundle": bundle(plugin), "store": store_identity(home / ".lcm-x/claude-code"), "overrides": overrides()}
 
 def claude(command, prompt, args, home, cwd, env=None):
-    start, result, init, calls = time.monotonic(), {}, None, {}
+    start, result, init, calls, reader_ids, reader_errors = time.monotonic(), {}, None, {}, set(), 0
     try:
         # The launcher isolates HOME and CLAUDE_CONFIG_DIR itself (from KIT_HOME); it needs the caller's own
         # environment to find its backend credentials, so HOME is not replaced here.
@@ -314,8 +314,15 @@ def claude(command, prompt, args, home, cwd, env=None):
         for block in (event.get("message") or {}).get("content", []) if event.get("type") == "assistant" else []:
             if isinstance(block, dict) and block.get("type") == "tool_use":
                 calls[block["name"]] = calls.get(block["name"], 0) + 1
-    error = proc.returncode != 0 or result.get("is_error", True)
-    return {"rc": proc.returncode, "wall_s": time.monotonic() - start, "is_error": error, "answer": result.get("result", ""), "session_id": result.get("session_id"), "tool_calls": calls, "reader_not_connected": init is None or [(s.get("name"), s.get("status")) for s in init] != [("lcm-x", "connected")], "limit": bool(error and re.search(r"rate.?limit|usage.?limit|limit.{0,25}(reached|exceeded)|hit.{0,25}limit", json.dumps(result), re.I))}
+                if str(block.get("name", "")).startswith("mcp__lcm-x__"):
+                    reader_ids.add(block.get("id"))
+        # A reader call that failed (the store offline after connect) is an infrastructure error, not an agent miss:
+        # the answer is marked so answers_complete fails and the run is INCOMPLETE.
+        for block in (event.get("message") or {}).get("content", []) if event.get("type") == "user" else []:
+            if isinstance(block, dict) and block.get("type") == "tool_result" and block.get("tool_use_id") in reader_ids and block.get("is_error"):
+                reader_errors += 1
+    error = proc.returncode != 0 or result.get("is_error", True) or reader_errors > 0
+    return {"rc": proc.returncode, "wall_s": time.monotonic() - start, "is_error": error, "answer": result.get("result", ""), "session_id": result.get("session_id"), "tool_calls": calls, "reader_errors": reader_errors, "reader_not_connected": init is None or [(s.get("name"), s.get("status")) for s in init] != [("lcm-x", "connected")], "limit": bool(error and re.search(r"rate.?limit|usage.?limit|limit.{0,25}(reached|exceeded)|hit.{0,25}limit", json.dumps(result), re.I))}
 
 def quiesce(home):
     end, quiet = time.monotonic() + 180, 0

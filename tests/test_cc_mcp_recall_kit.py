@@ -376,3 +376,22 @@ def test_bot_round_8_jsonl_escapes(tmp_path, monkeypatch):
     monkeypatch.setattr(k, 'session_files', lambda home, s: sorted(p for p in folder.rglob('*') if p.is_file()))
     assert k.planted(tmp_path, sid, '54917') and k.planted(tmp_path, sid, 'VELNORA-7101')
     assert not k.saved_holds(tmp_path, sid, '48213')
+
+
+def test_bot_round_9(tmp_path):
+    # A reader error after connect marks the answer, so an offline store can never pass the empty-store control.
+    stream = [{'type': 'system', 'subtype': 'init', 'mcp_servers': [{'name': 'lcm-x', 'status': 'connected'}]},
+              {'type': 'assistant', 'message': {'content': [{'type': 'tool_use', 'id': 't1', 'name': 'mcp__lcm-x__lcm_grep'}]}},
+              {'type': 'user', 'message': {'content': [{'type': 'tool_result', 'tool_use_id': 't1', 'is_error': True}]}},
+              {'type': 'result', 'is_error': False, 'result': 'NOT FOUND', 'session_id': 'x'}]
+    fake = tmp_path / 'fake-claude'
+    fake.write_text('#!/bin/sh\ncat <<\'EOF\'\n' + ''.join(json.dumps(e) + '\n' for e in stream) + 'EOF\n')
+    fake.chmod(0o755)
+    run = k.claude(str(fake), 'q', [], tmp_path, tmp_path)
+    assert run['answer'] == 'NOT FOUND' and run['reader_errors'] == 1 and run['is_error']
+    inputs = synthetic()
+    inputs[6]['answers'][0].update(is_error=True)  # on the empty-store control the control itself is unusable
+    assert k.score(*inputs)['verdict'] == 'VOID'
+    inputs = synthetic()
+    inputs[4]['answers'][0].update(is_error=True)  # on the measured arm
+    assert k.score(*inputs)['verdict'] == 'INCOMPLETE'
