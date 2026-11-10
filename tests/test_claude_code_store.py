@@ -3059,3 +3059,50 @@ def test_the_reused_agent_id_rule_table(tmp_path, home, hermes, exist, hooks, gr
     assert (lost, twice) == (0, 0)
     assert holds is (state == "fresh")
     assert ca.audit(home)["verified"] is holds
+
+
+@pytest.mark.parametrize("shape", ["bare_path_gone", "moved_folder", "slash_never_an_id"])
+def test_the_reused_agent_id_edges(tmp_path, home, hermes, shape):
+    """#2566 review: a path's own key is kept once assigned (the bare path vanishing must not move it back); an agent
+    whose session folder was copied elsewhere (#2535) keeps one id-keyed lineage; a path key's leading "/" cannot be any
+    hook or file-name id."""
+    from hermes_lcm import claude_code_audit as ca
+
+    a = _append(tmp_path / "projects" / "-work" / "s1.jsonl", CONVERSATION[:2])
+    _record(_hook(), home, a)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    agents = a.parent / "s1" / "subagents"
+    if shape == "slash_never_an_id":
+        record = _hook().normalize({"hook_event_name": "SubagentStop", "session_id": "s1", "agent_id": "workflows/x1",
+                                    "transcript_path": str(a), "agent_transcript_path": str(agents / "x.jsonl")}, {})
+        lineage = cc.path_lineage(cc.Lineage("s1", "x1", agents / "workflows" / "wf_run1" / "agent-x1.jsonl"))
+        assert record["problem"] == "bad_agent_id" and lineage.agent_id == "/workflows/wf_run1/agent-x1.jsonl"
+        return
+    if shape == "bare_path_gone":
+        paths = [_append(agents / "agent-x1.jsonl", _REUSED["first"]),
+                 _append(agents / "workflows" / "wf_run1" / "agent-x1.jsonl", _REUSED["second"])]
+    else:  # the same agent's transcript, also present in a copy of the session folder under another project
+        paths = [_append(agents / "agent-x1.jsonl", _REUSED["first"]),
+                 _append(tmp_path / "projects" / "-other" / "s1" / "subagents" / "agent-x1.jsonl", _REUSED["first"])]
+    for path in paths:
+        _record(_hook(), home, a, event="SubagentStop", agent_id="x1", agent_transcript_path=str(path))
+        cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    if shape == "bare_path_gone":
+        paths[0].unlink()  # deleted (or set aside) after both were captured; then the workflow agent's hook again
+        _record(_hook(), home, a, event="SubagentStop", agent_id="x1", agent_transcript_path=str(paths[1]))
+    for _ in range(2):
+        cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    store = _open(home, hermes)
+    try:
+        rows = collections.Counter(row[0] for row in store.connection.execute(
+            "SELECT content FROM messages WHERE session_id LIKE 's1/agent:%'"))
+        keys = sorted(key[len(cc.CURSOR_PREFIX):] for (key,) in store.connection.execute(
+            "SELECT key FROM metadata WHERE key LIKE ?", (cc.CURSOR_PREFIX + "claude-code:s1/agent:%",)))
+    finally:
+        store.close()
+    assert max(rows.values()) == 1  # nothing stored twice
+    if shape == "bare_path_gone":
+        assert keys == ["claude-code:s1/agent:/workflows/wf_run1/agent-x1.jsonl", "claude-code:s1/agent:x1"]
+        assert set(rows) == {"first task", "one", "second task", "two", "three"}
+    else:  # one id-keyed lineage; the copy is reported, never captured again (#2535)
+        assert keys == ["claude-code:s1/agent:x1"] and not ca.audit(home)["verified"]

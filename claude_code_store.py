@@ -888,20 +888,27 @@ def lineages_of(record: dict) -> list[Lineage]:
     return found
 
 
+def _agents_root(lineage: Lineage) -> Optional[Path]:
+    return next((up for up in lineage.path.parents if up.name == "subagents" and up.parent.name == lineage.session_id), None)
+
+
 def path_lineage(lineage: Lineage) -> Optional[Lineage]:
     """A child keyed by its path below the session's subagents/ ("/workflows/<run-id>/agent-<id>.jsonl": no agent id
     holds a "/"), for a path whose agent id another live transcript of that tree already holds (#2566)."""
-    root = next((up for up in lineage.path.parents if up.name == "subagents" and up.parent.name == lineage.session_id), None)
-    if not lineage.agent_id or "/" in lineage.agent_id or root is None:
+    root = _agents_root(lineage)
+    if root is None or not lineage.agent_id or lineage.path.name != f"agent-{lineage.agent_id}.jsonl":
         return None
     return Lineage(lineage.session_id, "/" + lineage.path.relative_to(root).as_posix(), lineage.path)
 
 
 def resolve(store: MessageStore, lineage: Lineage) -> Lineage:
-    """Path first (#2566): a path keeps its agent id unless that id's cursor holds a live path elsewhere in the same tree."""
+    """Path first (#2566): a path's own key, once assigned, is kept. Otherwise a path keeps its agent id unless that id's
+    cursor holds a live path elsewhere in the same subagents/ folder (another folder is #2535's moved session)."""
     by_path, cursor = path_lineage(lineage), store.read_metadata_json(CURSOR_PREFIX + lineage.key)
+    if by_path is not None and store.read_metadata_json(CURSOR_PREFIX + by_path.key):
+        return by_path
     held = Path(cursor["path"]) if isinstance(cursor, dict) and isinstance(cursor.get("path"), str) else None
-    if by_path is None or held is None or held == lineage.path or path_lineage(Lineage(*lineage[:2], held)) is None:
+    if by_path is None or held is None or held == lineage.path or _agents_root(Lineage(*lineage[:2], held)) != _agents_root(lineage):
         return lineage
     return by_path if held.exists() else lineage
 
@@ -1095,8 +1102,9 @@ def _drain_once(home: Path, report: dict, deadline: Optional[float], config: Any
                 _set_aside(path)
                 continue
             try:
-                for lineage in map(lambda each: resolve(store, each), lineages_of(record)):
-                    outcome = drain(store, lineage, deadline=deadline, facts=record_facts(record, lineage))
+                for named in lineages_of(record):
+                    lineage = resolve(store, named)  # the facts stay the hook's own (#2566)
+                    outcome = drain(store, lineage, deadline=deadline, facts=record_facts(record, named))
                     if outcome == "deadline":
                         report["complete"] = False
                         return "deadline"  # the claimed record stays for the next run
