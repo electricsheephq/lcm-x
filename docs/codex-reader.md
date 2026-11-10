@@ -1,0 +1,86 @@
+# Recall LCM-X memory from Codex (read-only)
+
+Codex can search and read an LCM-X store through LCM-X's read-only MCP reader, the same one the
+Claude Code plugin uses. This is step 1 of the Codex harness (#2227): **install and recall only**.
+Codex sessions are not captured into any store yet; capture needs its own design.
+
+What you get in Codex: five read-only tools, `lcm_recall`, `lcm_grep`, `lcm_expand`,
+`lcm_load_session` and `lcm_describe`, over one store. The reader opens `lcm.db` read-only and never writes it; each start adds one log file
+under `<store home>/logs/` (and creates that folder if it is missing).
+
+## Which store
+
+The reader serves one store home. The usual choice is the store that LCM-X for Claude Code fills
+(`$HOME/.lcm-x/claude-code` unless you set `LCMX_CC_HOME`), so Codex can recall what you did in Claude
+Code. Any LCM-X capture store home works the same way. Do not point it at a Hermes profile folder.
+
+## Install
+
+1. **Get the reader.** Download the Claude Code unit asset from the latest `claude-code-v*` release
+   (`lcm-x-claude-code-<version>.tar.gz` and its `.sha256`), check it and unpack it somewhere that
+   will stay put:
+
+   ```bash
+   shasum -a 256 -c lcm-x-claude-code-<version>.tar.gz.sha256
+   mkdir -p "$HOME/.lcm-x/units" && tar -xzf lcm-x-claude-code-<version>.tar.gz -C "$HOME/.lcm-x/units"
+   ```
+
+   The reader needs Python 3.11 or newer. It uses `LCMX_PYTHON` if set, else
+   `<store home>/venv/bin/python`, else a Python 3.11+ found on `PATH`. Codex passes a stdio server
+   only a short list of variables (such as `HOME` and `PATH`) plus the ones its config names, so a
+   `LCMX_PYTHON` exported in your shell does not reach the reader. To use a particular interpreter
+   (for example a venv with FastEmbed for vector recall), add `--env LCMX_PYTHON=<absolute path>` in
+   step 2. A venv in the Claude Code plugin's data folder is not visible to Codex.
+
+2. **Add it to Codex.** Use absolute paths. `$HOME` is expanded by your shell here, not by Codex:
+
+   ```bash
+   codex mcp add lcm-x --env LCMX_CC_HOME="$HOME/.lcm-x/claude-code" -- \
+     python3 "$HOME/.lcm-x/units/lcm-x-claude-code-<version>/bin/lcmx_mcp.py"
+   codex mcp list
+   ```
+
+   That writes this to `$HOME/.codex/config.toml` (or `$CODEX_HOME/config.toml`), which you can also
+   write by hand, with `<home>` replaced by your home folder's absolute path:
+
+   ```toml
+   [mcp_servers.lcm-x]
+   command = "python3"
+   args = ["<home>/.lcm-x/units/lcm-x-claude-code-<version>/bin/lcmx_mcp.py"]
+
+   [mcp_servers.lcm-x.env]
+   LCMX_CC_HOME = "<home>/.lcm-x/claude-code"
+   ```
+
+3. **Try it.** In a new Codex session, ask about something from an earlier Claude Code session,
+   for example "Use the lcm-x tools: what did we decide about the release freeze last week?".
+
+To remove it: `codex mcp remove lcm-x`. That leaves the store and the unpacked unit untouched.
+
+## When it does not work
+
+- `codex mcp list` shows the server but Codex has no `lcm_*` tools: the launcher printed why on
+  stderr. Start it yourself with the same settings to see the message. `env -i` keeps only the
+  variables named, close to what Codex passes (add any `--env` you gave Codex); with no input it
+  exits after starting:
+
+  ```bash
+  env -i HOME="$HOME" PATH="$PATH" LCMX_CC_HOME="$HOME/.lcm-x/claude-code" \
+    python3 "$HOME/.lcm-x/units/lcm-x-claude-code-<version>/bin/lcmx_mcp.py" < /dev/null
+  ```
+
+  Startup problems print as `lcm-x: ...` lines. The usual causes are no Python 3.11+ (install one,
+  or run `uv venv --python 3.11 <store home>/venv`) and a relative `LCMX_CC_HOME`. Once the reader
+  has started, its own messages go to `<store home>/logs/lcm-x-mcp-<pid>.log` instead of stderr.
+- Recall finds nothing: check that the store home is the one your Claude Code capture writes. Ask
+  Codex to run `lcm_grep` for a word you know is in your Claude Code history; it searches every
+  session by default. (`lcm_describe` with no arguments describes no session here, because the
+  reader has no current session; give it a `session_id` from a search result.) A store home with
+  no `lcm.db` yet still offers the tools, but has nothing to return.
+
+## What this does not do yet
+
+- No Codex capture: Codex's own sessions do not go into the store.
+- No shared store: each harness has its own store home, and this reader reads one of them.
+- The proof for this step is one install on a fresh Codex setup and one end-to-end recall from
+  Codex. It is not a recall measurement; the Claude Code reader's recall is measured under #2225.
