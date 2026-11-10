@@ -259,3 +259,48 @@ def test_an_identical_call_with_a_redacted_argument_key_is_stored_once(host, red
         counts.append(len(reader._store.get_session_messages('child')))
     calls = [r for r in reader._store.get_session_messages('child') if r.get('tool_calls')]
     assert counts == [4, 5, 5] and len(calls) == 1, (counts, len(calls))
+
+
+@pytest.mark.parametrize('route', ['live', 'end'])
+@pytest.mark.parametrize('transport', ['direct', 'json'])
+@pytest.mark.parametrize('note', ['😀', '\ud800'], ids=['surrogate-pair', 'lone-surrogate'])
+@pytest.mark.parametrize('redaction', [False, True], ids=['redaction-off', 'redaction-on'])
+def test_an_identical_call_with_surrogate_code_units(host, redaction, note, transport, route, request):  # noqa: F811
+    # gpt-6-astra (#2572 round 5): arguments holding raw surrogate code units, sent as Python strings (direct) or
+    # through JSON text (json). Recorded on main 7e67daf16 first: [4, 5, 5] rows and one call row in all 16 cases.
+    import copy
+    import dataclasses
+    import os
+
+    from tests.test_issue_2482_interrupted_child import _setup
+
+    _, _, ctx, reader, child, engine = _setup(host, 'own_engine')
+    for each in {id(e): e for e in (reader, engine)}.values():
+        each._config = dataclasses.replace(each._config, sensitive_patterns_enabled=redaction)
+    first = [{'role': 'user', 'content': 'go'},
+             _call(json.dumps({'api_key': 'sk-' + 'A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0', 'note': note},
+                              ensure_ascii=False)),
+             {'role': 'tool', 'tool_call_id': 'k1', 'content': 'ok'}, {'role': 'assistant', 'content': 'done'}]
+    for i, row in enumerate(first):
+        row['timestamp'] = i + 1.0
+    if transport == 'json':
+        first = json.loads(json.dumps(first, ensure_ascii=True))
+    aux = ctx.module('aux_session')
+    child.api_call(ctx, copy.deepcopy(first), 1)
+    aux.drain_live_child_stores(60)
+    counts = [len(reader._store.get_session_messages('child'))]
+    view = copy.deepcopy(first) + [{'role': 'assistant', 'content': 'final', 'timestamp': 5.0}]
+    for n in (2, 3):
+        if route == 'live':
+            child.api_call(ctx, copy.deepcopy(view), n)
+        else:
+            child.end(engine, copy.deepcopy(view))
+        aux.drain_live_child_stores(60)
+        counts.append(len(reader._store.get_session_messages('child')))
+    calls = len([r for r in reader._store.get_session_messages('child') if r.get('tool_calls')])
+    record = os.environ.get('SURROGATE_RECORD')
+    if record:
+        with open(record, 'a') as out:
+            out.write(json.dumps([request.node.callspec.id, counts, calls]) + '\n')
+        return
+    assert (counts, calls) == ([4, 5, 5], 1), (counts, calls)
