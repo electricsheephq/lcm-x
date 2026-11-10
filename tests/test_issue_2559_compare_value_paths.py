@@ -187,3 +187,40 @@ def test_a_changed_value_under_colliding_content_keys_is_stored_for_a_live_child
     users = [r['content'] if isinstance(r['content'], str) else json.dumps(r['content'])
              for r in rows if r['role'] == 'user']
     assert counts == [2, 4, 4, 4] and sum('CHANGED' in text for text in users) == 1, (counts, len(users))
+
+
+@pytest.mark.parametrize('route', ['live', 'end'])
+@pytest.mark.parametrize('note', ['plain', 'café'], ids=['ascii', 'non-ascii'])
+@pytest.mark.parametrize('redaction', [False, True], ids=['redaction-off', 'redaction-on'])
+def test_an_identical_call_with_a_redacted_argument_is_stored_once(host, redaction, note, route):  # noqa: F811
+    # NeonDiff (#2572 round 4): with redaction on, the redactor writes JSON unescaped while the compare's canonical
+    # dump escaped non-ASCII, so an identical call compared unequal and was stored again. Recorded on main 7e67daf16
+    # first: [4, 5, 5] rows and one call row in all eight cases.
+    import copy
+    import dataclasses
+
+    from tests.test_issue_2482_interrupted_child import _setup
+
+    _, _, ctx, reader, child, engine = _setup(host, 'own_engine')
+    for each in {id(e): e for e in (reader, engine)}.values():
+        each._config = dataclasses.replace(each._config, sensitive_patterns_enabled=redaction)
+    secret = 'sk-' + 'A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0'
+    first = [{'role': 'user', 'content': 'go'},
+             _call(json.dumps({'api_key': secret, 'note': note}, ensure_ascii=False)),
+             {'role': 'tool', 'tool_call_id': 'k1', 'content': 'ok'}, {'role': 'assistant', 'content': 'done'}]
+    for i, row in enumerate(first):
+        row['timestamp'] = i + 1.0
+    aux = ctx.module('aux_session')
+    child.api_call(ctx, copy.deepcopy(first), 1)
+    aux.drain_live_child_stores(60)
+    counts = [len(reader._store.get_session_messages('child'))]
+    view = copy.deepcopy(first) + [{'role': 'assistant', 'content': 'final', 'timestamp': 5.0}]
+    for n in (2, 3):
+        if route == 'live':
+            child.api_call(ctx, copy.deepcopy(view), n)
+        else:
+            child.end(engine, copy.deepcopy(view))
+        aux.drain_live_child_stores(60)
+        counts.append(len(reader._store.get_session_messages('child')))
+    calls = [r for r in reader._store.get_session_messages('child') if r.get('tool_calls')]
+    assert counts == [4, 5, 5] and len(calls) == 1, (counts, len(calls))
