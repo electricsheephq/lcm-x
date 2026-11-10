@@ -10,6 +10,7 @@ off. That store also carries the candidate's own replay ledger, so it models can
 not the upgrade.
 """
 
+import json
 import logging
 import sqlite3
 import tempfile
@@ -27,6 +28,8 @@ from tests.test_issue_10_persisted_output_spillover import _messages, _write_out
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "v0292_spillover_store.sql"
+# The same turn written by v0.29.2 with a host timestamp on the user row only.
+FIXTURE_USER_STAMPS = Path(__file__).parent / "fixtures" / "v0292_spillover_store_user_stamps.sql"
 SESSION, CONVERSATION, CALL = "u1-session", "u1-conv", "call_spill"
 T0 = 1762700000.0
 # The spill file v0.29.2's marker points at: 5,427 characters, 7,227 bytes.
@@ -83,13 +86,13 @@ def _call_rows(rows):
 
 # --- the v0.29.2 store -------------------------------------------------------------------------------------------
 
-def _v0292_store(tmp_path):
+def _v0292_store(tmp_path, fixture=FIXTURE):
     """Load the dump written by the real v0.29.2 engine; write the spill file its marker points at."""
     home = _home(tmp_path)
     spill = home / "cache" / "spillover" / f"{CALL}.txt"
     spill.parent.mkdir(parents=True)
     spill.write_bytes(SPILL_TEXT.encode("utf-8"))
-    dump = FIXTURE.read_text(encoding="utf-8").replace("@HERMES_HOME@", str(home))
+    dump = fixture.read_text(encoding="utf-8").replace("@HERMES_HOME@", str(home))
     with closing(sqlite3.connect(home / "lcm.db")) as connection:
         connection.executescript(dump)
     # The dump declares the FTS tables through writable_schema, so they load on the next connection. Re-index them
@@ -107,10 +110,12 @@ def _v0292_store(tmp_path):
     return rows, marker, spill
 
 
-def _host_history(marker, extra=()):
-    """The host transcript the v0.29.2 store was written from (all stamped), plus any later rows."""
+def _host_history(marker, extra=(), stamps="all"):
+    """The host transcript the v0.29.2 store was written from, plus any later rows."""
     def row(i, role, content, **fields):
-        return {"role": role, "content": content, "timestamp": T0 + i, **fields}
+        if stamps == "all" or role == "user":
+            fields["timestamp"] = T0 + i
+        return {"role": role, "content": content, **fields}
     first = [
         row(1, "user", "Please dump the big report."),
         row(2, "assistant", "", tool_calls=[{"id": CALL, "type": "function",
@@ -153,6 +158,94 @@ def test_v0292_store_upgrade_replay_adds_only_new_turn(tmp_path, caplog, spill_f
     assert len(rows) == 6, counts
     assert _tool_rows(rows) == {CALL: 1}, counts
     assert _call_rows(rows) == {CALL: 1}, counts
+
+
+def test_v0292_users_only_stamped_store_upgrade_replay_stores_each_message_once(tmp_path, caplog):
+    original, marker, _ = _v0292_store(tmp_path, FIXTURE_USER_STAMPS)
+    history = _host_history(marker, NEW_TURN, stamps="user")
+
+    rows, _ = _replay(tmp_path, history, original, caplog)
+
+    # One stored row per host message, in order. v0.29.2's own replay of this history stores 9 rows: its 3 extra
+    # rows repeat messages already stored, so none of them is a new message.
+    counts = f"stored rows={len(rows)}, tool rows={dict(_tool_rows(rows))}"
+    assert [(row["role"], row["content"]) for row in rows] == [(m["role"], m["content"]) for m in history], counts
+    assert _tool_rows(rows) == {CALL: 1}, counts
+    assert _call_rows(rows) == {CALL: 1}, counts
+
+
+# --- #2525 review follow-ups: shapes that miss guard (c) and keep the old duplicate path ----------------------------
+
+def _parts_history(marker):
+    """The same host transcript, with the tool result sent as content parts instead of a string (the shape Hermes
+    gives a multimodal tool result whose oversized text part it spilled to a marker)."""
+    history = _host_history(marker, NEW_TURN)
+    history[2]["content"] = [{"type": "text", "text": marker}]
+    return history
+
+
+def _rebound_session_replay(tmp_path):
+    """The v0.29.2 history replayed under a new session id in the same conversation."""
+    original, marker, _ = _v0292_store(tmp_path)
+    history = _host_history(marker, NEW_TURN)
+    _run_phase(tmp_path, history, session="u1-session-rebound")
+    return original, history, _read_store(tmp_path)
+
+
+def test_v0292_store_parts_shaped_tool_result_loses_nothing(tmp_path):
+    """Guard (c) compares the raw incoming content with the stored marker. A parts-shaped tool result misses it and
+    takes the old duplicate path: no row is lost, the call row's copy is linked, and the tool row's copy is stored
+    again, unlinked, with the marker text (a surplus row, not a loss)."""
+    original, marker, _ = _v0292_store(tmp_path)
+
+    _run_phase(tmp_path, _parts_history(marker))
+
+    rows = _read_store(tmp_path)
+    counts = f"stored rows={len(rows)}, tool rows={dict(_tool_rows(rows))}"
+    assert rows[:len(original)] == original, counts
+    assert [row["content"] for row in rows[-2:]] == [content for _, content in NEW_TURN], counts
+    assert _tool_rows(rows) == {CALL: 2} and _call_rows(rows) == {CALL: 2}, counts
+    tool_copy = [row for row in rows[len(original):] if row["role"] == "tool"]
+    # The copy stores the parts as JSON; its text part is the marker.
+    assert len(tool_copy) == 1 and json.loads(tool_copy[0]["content"]) == [{"type": "text", "text": marker}], counts
+    with closing(sqlite3.connect(_home(tmp_path) / "lcm.db")) as connection:
+        links = connection.execute("SELECT store_id, kind FROM message_relations ORDER BY store_id").fetchall()
+    call_copy = [row["store_id"] for row in rows[len(original):] if row["role"] == "assistant" and row["tool_calls"]]
+    assert links == [(call_copy[0], "possible_replay_of")], links
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
+    "#2525 review follow-up 1: guard (c) compares raw content, so a parts-shaped tool result re-stores the call "
+    "pair. Hermes sends a multimodal tool result as parts, so the comparison is a v0.30.1 design question."))
+def test_v0292_store_parts_shaped_tool_result_stores_each_message_once(tmp_path):
+    original, marker, _ = _v0292_store(tmp_path)
+
+    _run_phase(tmp_path, _parts_history(marker))
+
+    rows = _read_store(tmp_path)
+    assert len(rows) == len(original) + len(NEW_TURN), f"stored rows={len(rows)}"
+
+
+def test_v0292_store_rebound_session_replay_loses_nothing(tmp_path):
+    """The stored-row lookup is session-scoped, like the #773 matcher. A rebound session id takes the old duplicate
+    path: the replayed history is stored once more under the new session id (the #1674 class), and nothing is
+    lost."""
+    original, history, rows = _rebound_session_replay(tmp_path)
+
+    rebound = [row for row in rows if row["session_id"] == "u1-session-rebound"]
+    assert rows[:len(original)] == original
+    assert [(row["role"], row["content"]) for row in rebound][-2:] == list(NEW_TURN)
+    assert len(rebound) == len(history)
+    assert _tool_rows(rows) == {CALL: 2} and _call_rows(rows) == {CALL: 2}
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
+    "#2525 review follow-up 2: a rebound session id re-stores the v0.29.2 history (#1674 class; the conversation "
+    "alias work in #2461 is the candidate fix)."))
+def test_v0292_store_rebound_session_replay_stores_each_message_once(tmp_path):
+    original, _history, rows = _rebound_session_replay(tmp_path)
+
+    assert len(rows) == len(original) + len(NEW_TURN), f"stored rows={len(rows)}"
 
 
 def test_v0292_store_second_replay_after_upgrade_adds_nothing(tmp_path, caplog):
