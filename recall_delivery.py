@@ -178,8 +178,9 @@ def deliver_recall(
         answer_ready_content = {}
     later_statements, later_statements_unavailable = None, None
     if place_later is not None:
+        later_originals = {_hit_identity(e["hit"]): e for e in selected_entries} if reference_strict else {}
         selected_entries, later_statements, later_statements_unavailable = place_later(
-            selected_entries, limit=limit, seen_refs=seen_refs, reference_strict=reference_strict,
+            selected_entries, limit=limit, seen_refs=seen_refs, reference_strict=reference_strict, delta_requested=delta_requested,
             hydrate=hydrate if detail == "answer_ready" else None,
             rows_by_id=strict_rows if detail == "answer_ready" else None,
             answer_ready_content=answer_ready_content,
@@ -378,7 +379,7 @@ def deliver_recall(
             len(json.dumps(item, ensure_ascii=window is not None)) - item_chars
         )
         if reference_strict:
-            strict_selector.deliver(entry)
+            strict_selector.deliver(later_originals.get(_hit_identity(hit), entry) if place_later is not None else entry)
         if (
             hit.get("kind") != "summary"
             and hit.get("store_id") is not None
