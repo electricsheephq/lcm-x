@@ -1075,7 +1075,10 @@ def test_turn_path_budget(lab):
     def first_view(session_id):
         samples = [0.0]
         _timed(rec, samples)
-        post(session_id=session_id, platform="cli", conversation_history=list(view))  # the session's first view
+        # The session's first view. A re-measure gets fresh message objects: the recorder caches rows by identity.
+        fresh = [{k: (v.encode().decode() if isinstance(v, str) else copy.deepcopy(v)) for k, v in m.items()}
+                 for m in view] if session_id != "s" else list(view)
+        post(session_id=session_id, platform="cli", conversation_history=fresh)
         rec._enter, rec._exit = type(rec)._enter.__get__(rec), type(rec)._exit.__get__(rec)
         return samples[-1]
     first = [first_view("s")]
