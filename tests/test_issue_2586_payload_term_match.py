@@ -41,7 +41,11 @@ def test_a_saved_output_matches_by_terms(archive, query):
     assert len(found(result)) == 1, result
 
 
-@pytest.mark.parametrize("query", ["zzabsentterm", '"relay storm"', "storm NOT badge", "relays"])
+ROCKET, STORM_CJK = chr(0x1F680), chr(0x5D50)  # emoji and CJK take message search's raw substring route
+
+
+@pytest.mark.parametrize("query", ["zzabsentterm", '"relay storm"', "storm NOT badge", "relays",
+                                   f"storm {ROCKET}", f'"storm {ROCKET}"', f"storm {STORM_CJK}"])
 def test_absent_terms_a_reversed_phrase_and_not_never_match(archive, query):
     saved(archive, FACT)
     assert found(archive.call(query=query)) == []

@@ -1306,7 +1306,8 @@ def _payload_match(content: str, query: str, tokens: list[str], operands: list[s
     if (match := re.search(re.escape(query), content, flags=re.IGNORECASE)) is not None:
         return 0, match.start(), match.end(), len(operands)
     words = {operand: re.findall(_PAYLOAD_TOKEN + "+", operand) for operand in operands}
-    if "NOT" in tokens or not operands or sum(map(len, words.values())) > _PAYLOAD_TERM_CAP or not all(words.values()):
+    # Emoji and CJK go to message search's raw substring route, so a saved output matches them only as typed too.
+    if requires_like_fallback(query) or "NOT" in tokens or not operands or sum(map(len, words.values())) > _PAYLOAD_TERM_CAP or not all(words.values()):
         return None
     groups, hits = [[]], {}
     for token in tokens:
