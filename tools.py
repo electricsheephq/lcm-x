@@ -1191,7 +1191,7 @@ def _reader_payload_search(path: Path, budget: int, in_scope) -> dict[str, Any]:
             def read(size):
                 allowed = budget - result["bytes_read"]
                 data = handle.read(min(size, allowed))
-                if allowed < size and len(data) == allowed and handle.tell() < opened.st_size:
+                if allowed < size and len(data) == allowed and handle.tell() < os.fstat(handle.fileno()).st_size:
                     # The budget, not the file's end, stopped this read: the file's checks did not finish, so a
                     # rejection here is not a confirmed failure.
                     result["budget_cut"] = True
@@ -1205,8 +1205,12 @@ def _reader_payload_search(path: Path, budget: int, in_scope) -> dict[str, Any]:
             try:
                 prefix, fields, seen, _ = _read_externalized_payload_metadata_prefix_from_handle(
                     SimpleNamespace(read=read_header), max_read_bytes=_LCM_GREP_EXTERNALIZED_METADATA_READ_BYTES)
-            except ValueError:
-                try:  # a cut can split a character; only an invalid sequence inside the bytes read is confirmed
+            except ValueError as exc:
+                # A cut can split a character, so a decode failure is confirmed only when the bytes read hold an
+                # invalid sequence; any other parse failure is about bytes already read, so it is confirmed too.
+                try:
+                    if not isinstance(exc.__cause__, UnicodeDecodeError):
+                        raise UnicodeDecodeError("utf-8", b"", 0, 1, "not a decode failure")
                     codecs.getincrementaldecoder("utf-8")("strict").decode(bytes(header), final=False)
                 except UnicodeDecodeError:
                     result.pop("budget_cut", None)

@@ -630,3 +630,33 @@ def test_a_budget_cut_inside_a_multibyte_character_stays_byte_cap(archive, monke
     result = json.loads(raw)
     assert "error" not in result and result["partial"]["reasons"] == ["byte_cap"]
     assert [hit["ref"] for hit in payload_hits(result)] == [mine]
+
+
+def test_a_file_that_grows_after_it_is_opened_is_still_a_budget_cut(archive, monkeypatch):
+    # Reviews of #2528: the size check uses the file's size at the cut, not at open, so a payload the in-place
+    # writer is still growing is a budget cut, not a confirmed bad ref.
+    mine, _ = archive.save(session="mine", name="20261110_120002_mine.json")
+    wide, _ = archive.save(session="mine", name="20261110_120001_wide.json")
+    spent = []
+    original = tools._reader_payload_search
+    def measured(*args, **kwargs):
+        result = original(*args, **kwargs)
+        spent.append(result["bytes_read"])
+        return result
+    monkeypatch.setattr(tools, "_reader_payload_search", measured)
+    args = dict(content_scope="externalized", session_scope="session", session_id="mine")
+    archive.reader.call("lcm_grep", dict(query=TOKEN, externalized_refs=[mine], **args))
+    real_fstat, seen = tools.os.fstat, set()
+    def stale_at_open(fd):  # the first look at each open file sees it empty, as if the writer had not written yet
+        result = real_fstat(fd)
+        if (result.st_dev, result.st_ino) in seen:
+            return result
+        seen.add((result.st_dev, result.st_ino))
+        fields = list(result)
+        fields[6] = 0
+        return type(result)(fields)
+    monkeypatch.setattr(tools.os, "fstat", stale_at_open)
+    monkeypatch.setattr(tools, "READER_PAYLOAD_BYTE_CAP", spent[0] + 32)
+    raw, error = archive.reader.call("lcm_grep", dict(query=TOKEN, externalized_refs=[mine, wide], **args))
+    result = json.loads(raw)
+    assert "error" not in result and result["partial"]["reasons"] == ["byte_cap"]
