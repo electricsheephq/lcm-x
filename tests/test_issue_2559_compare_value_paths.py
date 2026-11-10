@@ -299,8 +299,7 @@ def test_an_identical_call_with_surrogate_code_units(host, redaction, note, tran
         counts.append(len(reader._store.get_session_messages('child')))
     calls = len([r for r in reader._store.get_session_messages('child') if r.get('tool_calls')])
     record = os.environ.get('SURROGATE_RECORD')
-    if record:
+    if record:  # recording never skips the assert below
         with open(record, 'a') as out:
             out.write(json.dumps([request.node.callspec.id, counts, calls]) + '\n')
-        return
     assert (counts, calls) == ([4, 5, 5], 1), (counts, calls)
