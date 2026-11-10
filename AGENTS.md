@@ -236,11 +236,14 @@ gh pr merge <PR> --merge --match-head-commit <HEAD_SHA>
   named in the Phase B receipt. The shape is disclosed at P2 with a tracked fix planned for
   the next patch release. If any condition fails, the normal P0/P1 rule applies and the rc
   respins. A duplicate on any path without an injected fault still respins. The spec records
-  two exceptions: its v0.29.1-only D5 rc3-window decision, extended to rc4 (#1286's
+  three exceptions: its v0.29.1-only D5 rc3-window decision, extended to rc4 (#1286's
   upgrade-time duplicate, probe P-S2; #1674's cold-bind re-store, probes P-S6 and P-S6R, and
-  from amendment 5 its comparison with v0.29.0 on each bind's own inputs, shape S7), and, from
+  from amendment 5 its comparison with v0.29.0 on each bind's own inputs, shape S7); from
   v0.29.2 while #1674 is open, a cold-bind copy that the D5 clone run's bar 2 matches against
-  the previous GA (KNOWN under #1674 and disclosed; no other duplicate is covered). From v0.29.2
+  the previous GA (KNOWN under #1674 and disclosed); and, for v0.30.0 only, the named
+  duplicates #2558 and #2559 at their recorded shapes and counts, in the probe cells the smoke
+  stage runs again, and #2547's helper-agent copy with payload externalization turned off; none
+  is covered in the driven audit. No other duplicate is covered. From v0.29.2
   the reference-agent canary is judged only by the spec's canary rule and never triggers this
   respin.
 - Agents preparing a release produce the rc tag and receipts; the GA cut itself follows the
