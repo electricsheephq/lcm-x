@@ -38,6 +38,7 @@ from .claude_code_store import (
     SET_ASIDE_TAGS,
     Lineage,
     _digest,
+    path_lineage,
     _wal_without_sidecars,
     cursor_state,
     named_paths,
@@ -334,6 +335,9 @@ def _uncaptured_child(child: Lineage, metadata: dict) -> bool:
     matching). A forgotten one is never read again."""
     if FORGOTTEN_PREFIX + child.rows_session in metadata:
         return False
+    by_path = path_lineage(child)  # #2566: a path whose agent id another transcript holds has its own key
+    if by_path is not None and CURSOR_PREFIX + by_path.key in metadata:
+        return str(child.path) not in named_paths(metadata[CURSOR_PREFIX + by_path.key])
     if CURSOR_PREFIX + child.key not in metadata:
         return True
     return str(child.path) not in named_paths(metadata[CURSOR_PREFIX + child.key]) and _holds_lines(child.path)

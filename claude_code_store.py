@@ -526,6 +526,11 @@ def ingest_lines(store: MessageStore, lineage: Lineage, cursor: dict, lines: lis
                             content_digest(entry) if entry else None))
     uids = {line.uid for line in parsed if line.uid and line.entry_class == PROJECTED}
     known = _versions(store, lineage.key, uids)
+    if lineage.agent_id and lineage.agent_id.startswith("/"):  # #2566: rows the old id-keyed lineage holds stay its own
+        old = Lineage(lineage.session_id, lineage.path.name[len("agent-"):-len(".jsonl")], lineage.path)
+        if str(lineage.path) in named_paths(store.read_metadata_json(CURSOR_PREFIX + old.key)):
+            for uid, versions in _versions(store, old.key, uids).items():
+                known.setdefault(uid, []).extend(versions)
     fork, started = _fork_start(store, lineage)
     origins = _origins(store, lineage.key, uids) if fork else {}
     copied_from = cursor.get("fork_parent")  # the session that wrote the latest copy so far
@@ -883,6 +888,24 @@ def lineages_of(record: dict) -> list[Lineage]:
     return found
 
 
+def path_lineage(lineage: Lineage) -> Optional[Lineage]:
+    """A child keyed by its path below the session's subagents/ ("/workflows/<run-id>/agent-<id>.jsonl": no agent id
+    holds a "/"), for a path whose agent id another live transcript of that tree already holds (#2566)."""
+    root = next((up for up in lineage.path.parents if up.name == "subagents" and up.parent.name == lineage.session_id), None)
+    if not lineage.agent_id or "/" in lineage.agent_id or root is None:
+        return None
+    return Lineage(lineage.session_id, "/" + lineage.path.relative_to(root).as_posix(), lineage.path)
+
+
+def resolve(store: MessageStore, lineage: Lineage) -> Lineage:
+    """Path first (#2566): a path keeps its agent id unless that id's cursor holds a live path elsewhere in the same tree."""
+    by_path, cursor = path_lineage(lineage), store.read_metadata_json(CURSOR_PREFIX + lineage.key)
+    held = Path(cursor["path"]) if isinstance(cursor, dict) and isinstance(cursor.get("path"), str) else None
+    if by_path is None or held is None or held == lineage.path or path_lineage(Lineage(*lineage[:2], held)) is None:
+        return lineage
+    return by_path if held.exists() else lineage
+
+
 JOURNAL_PREFIX = "journal/"  # a run's journal.jsonl: its own child lineage; no file-name id or hook id holds "/" (#2562)
 SUBAGENT_DEPTH = 4  # folders below subagents/: workflow agents sit at workflows/<run-id>/ (#2562)
 
@@ -1072,7 +1095,7 @@ def _drain_once(home: Path, report: dict, deadline: Optional[float], config: Any
                 _set_aside(path)
                 continue
             try:
-                for lineage in lineages_of(record):
+                for lineage in map(lambda each: resolve(store, each), lineages_of(record)):
                     outcome = drain(store, lineage, deadline=deadline, facts=record_facts(record, lineage))
                     if outcome == "deadline":
                         report["complete"] = False
@@ -1089,7 +1112,7 @@ def _drain_once(home: Path, report: dict, deadline: Optional[float], config: Any
             done.append(path)
         seen: set[str] = set()
         for lineage in registered(store):
-            for each in (lineage, *_subagents(lineage)):
+            for each in (resolve(store, item) for item in (lineage, *_subagents(lineage))):
                 if each.key in seen:
                     continue
                 seen.add(each.key)

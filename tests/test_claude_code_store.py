@@ -2941,7 +2941,7 @@ def test_an_unreadable_set_aside_record_is_never_overwritten(tmp_path, home, her
 
 
 # #2562 ruling: Claude Code reused one agent id in one real session (a direct and a workflow transcript, different
-# content, a few shared lines). Keys stay the id for GA; this pins what capture and the audit do today.
+# content, a few shared lines). Since #2566 the second path has its own lineage; this pins that in four shapes.
 _REUSED_SHARED = [{"type": "attachment", "uuid": f"sh{n}", "sessionId": "s1", "isSidechain": True,
                    "attachment": {"type": "plan", "n": n}} for n in range(2)]
 _REUSED = {"first": _REUSED_SHARED + [dict(_entry("user", "fa1", "first task"), isSidechain=True),
@@ -2966,7 +2966,7 @@ def test_a_reused_agent_id_is_pinned(tmp_path, home, hermes, hooks):
     for name in order:
         _record(_hook(), home, a, event="SubagentStop", agent_id="x1", agent_transcript_path=str(paths[name]))
         cc.run_worker(home, hermes_home=hermes, settle_s=0)
-    if hooks == "both_then_second_grows":  # the sweep lists the direct path first and moves the lineage back to it
+    if hooks == "both_then_second_grows":  # before #2566 the sweep moved the shared lineage back and lost this line
         _append(paths["second"], [dict(_entry("assistant", "sb4", [{"type": "text", "text": "late"}]), isSidechain=True)])
     for _ in range(2):
         cc.run_worker(home, hermes_home=hermes, settle_s=0)
@@ -2975,25 +2975,18 @@ def test_a_reused_agent_id_is_pinned(tmp_path, home, hermes, hooks):
         held = collections.Counter(row[0] for row in store.connection.execute(
             "SELECT line_digest FROM capture_events WHERE source_kind = 'line'"))
         rows = collections.Counter(row[0] for row in store.connection.execute(
-            "SELECT content FROM messages WHERE session_id = ?", (cc.row_session_id("s1", "x1"),)))
+            "SELECT content FROM messages WHERE session_id LIKE 's1/agent:%'"))
     finally:
         store.close()
     seen = {}
     for name, path in paths.items():
         digests = [hashlib.sha256(line).hexdigest() for line in path.read_bytes().splitlines(keepends=True)]
         seen[name] = (len(digests), sum(1 for d in digests if not held[d]), sum(1 for d in digests if held[d] > 1))
-    report = ca.audit(home)
-    assert report["unverified"] == ["claude-code:s1/agent:x1"] and not report["verified"]
-    if hooks == "both_alternating":  # nothing lost: each switch re-reads a file as a new generation, so its raw lines
-        # are held more than once; its message rows are stored once, both agents' under the one child session
-        assert seen == {"first": (4, 0, 4), "second": (5, 0, 5)}
-        assert dict(rows) == {"first task": 1, "one": 1, "second task": 1, "two": 1, "three": 1}
-        assert "a second transcript path holds rows" in report["verdict"]
-    elif hooks == "both_then_second_grows":  # #2566: the line the second transcript wrote after both hooks is lost
-        assert seen["first"][1] == 0 and seen["second"][:2] == (6, 1) and "late" not in rows
-    else:  # the first path in sort order is taken; the second transcript's own lines are not captured separately
-        assert seen == {"first": (4, 0, 0), "second": (5, 3, 0)}
-        assert dict(rows) == {"first task": 1, "one": 1}
+    report = ca.audit(home)  # #2566: each transcript is its own lineage, so every shape captures both in full
+    assert report["verified"] and not report["unverified"]
+    assert [missing for _lines, missing, _held in seen.values()] == [0, 0]
+    assert dict(rows) == {"first task": 1, "one": 1, "second task": 1, "two": 1, "three": 1,
+                          **({"late": 1} if hooks == "both_then_second_grows" else {})}
 
 
 # #2566: one table for a reused agent id. Rows: which paths exist x hook order x which file grows afterwards x store
@@ -3019,9 +3012,9 @@ def test_the_reused_agent_id_rule_table(tmp_path, home, hermes, exist, hooks, gr
     a = _append(tmp_path / "projects" / "-work" / "s1.jsonl", CONVERSATION[:2])
     agents = a.parent / "s1" / "subagents"
     content = {"direct": _REUSED["first"], "workflow": _REUSED["second"]}
-    paths = {name: _append(agents.joinpath(*_REUSE_PATHS[name]), content[name]) for name in exist}
     _record(_hook(), home, a)
-    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)  # the parent is captured before its agents write
+    paths = {name: _append(agents.joinpath(*_REUSE_PATHS[name]), content[name]) for name in exist}
     if state == "flipped":  # what the old code left: one id-keyed lineage moved A -> B -> A
         store = _open(home, hermes)
         try:
