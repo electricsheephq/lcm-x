@@ -72,6 +72,10 @@ class PrefixMatchingMixin:
         prefix_count = self._session_end_store_prefix_count(session_id, messages)
         return prefix_count is not None and prefix_count > 0
 
+    def _session_end_compare_is_mains(self) -> bool:
+        # With sensitive-pattern redaction on, #2559's compare changes are off and the compare is main's (#2172).
+        return bool(getattr(self._config, "sensitive_patterns_enabled", False))
+
     def _session_end_prefix_compare_value(self, value: Any, *, session_id: str, hermes_home=None, marker_payloads=None) -> Any:
         if isinstance(value, dict):
             return {
@@ -88,7 +92,7 @@ class PrefixMatchingMixin:
         if not isinstance(value, str):
             return value
 
-        if extract_ingest_externalized_refs(value):
+        if extract_ingest_externalized_refs(value) and not self._session_end_compare_is_mains():
             try:
                 decoded = json.loads(value)
             except ValueError:
@@ -220,8 +224,7 @@ class PrefixMatchingMixin:
         session_id: str, hermes_home=None,
     ) -> str:
         def compare_call(call):
-            # With redaction on, the argument compare keeps main's path: a named limit on #2172 (#2572 review).
-            if getattr(self._config, "sensitive_patterns_enabled", False) or not isinstance(call, dict) \
+            if self._session_end_compare_is_mains() or not isinstance(call, dict) \
                     or not isinstance(call.get("function"), dict):
                 return self._session_end_prefix_compare_value(
                     call, session_id=session_id, hermes_home=hermes_home)
