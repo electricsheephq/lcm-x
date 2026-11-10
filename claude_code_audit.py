@@ -534,6 +534,7 @@ def _home_report(home: Path) -> dict:
     path each PreCompact run took (a drain, a poke of the worker holding the lock, or neither:
     no runtime, package or worker, a record the hook would not spool, or a hook error) and how
     many drains reached their bound."""
+    blocking = defaultdict(list)
     hooks, first, seen = defaultdict(list), [], set()
     precompact = {"drain": 0, "poke": 0, "bound": 0, "other": 0}
     for name in ("hook.log.1", "hook.log"):
@@ -547,6 +548,10 @@ def _home_report(home: Path) -> dict:
                 # The worker says when its deadline ended the run (drain_bound); the hook's kill at
                 # its own timeout (drain_timeout) also means the drain ran out its time.
                 precompact["bound"] += outcome.startswith(("drain_bound", "drain_timeout"))
+            value = row.get("blocking_ms")
+            if type(value) in (int, float) and math.isfinite(value):
+                # Per event only: a session's first hook is the synchronous SessionStart, which never forks.
+                blocking[row["event"]].append(value)
             if isinstance(session, str) and session not in seen:
                 seen.add(session)
                 first.append(ms)
@@ -560,6 +565,7 @@ def _home_report(home: Path) -> dict:
     return {"spool": {"failed": sum(path.is_file() and path.suffix == ".failed" for path in spool),
                       "waiting": sum(path.is_file() and path.suffix in (".json", ".claimed") for path in spool)},
             "hooks_in_process_ms": latency, "precompact": precompact,
+            "hooks_blocking_ms": {event: {"n": len(values), **_percentiles(values)} for event, values in blocking.items()},
             "worker_log": dict(worker)}
 
 

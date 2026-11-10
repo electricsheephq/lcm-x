@@ -646,6 +646,7 @@ def test_codex_backend_isolated_text_call_and_accounting(tmp_path, monkeypatch):
         assert cmd[cmd.index("-s") + 1] == "read-only" and "web_search=disabled" in cmd
         disabled = {cmd[i + 1] for i, a in enumerate(cmd) if a == "--disable"}
         assert {"shell_tool", "unified_exec", "apps", "plugins", "multi_agent"} <= disabled
+        assert [cmd[i + 1] for i, a in enumerate(cmd) if a == "--enable"] == ["code_mode"]  # MCP tools need code mode
         cwd = Path(cmd[cmd.index("--cd") + 1])
         assert cwd.parent.parent == tmp_path / "run" / "harness" and not list(cwd.iterdir())
         assert Path(env["CODEX_HOME"], "auth.json").is_symlink() and env["HOME"] != str(Path.home())
@@ -945,5 +946,7 @@ def test_canary_fails_on_leak_violation_or_missing_mcp_and_cleans_up(tmp_path, q
         for client in (Harnessed(leak=True), Harnessed(violations=["Bash"]), Harnessed(mcp_calls=0)):
             with pytest.raises(RuntimeError, match="canary_failed"):
                 run.canary(args, client, "sha", question)
+        with pytest.raises(RuntimeError, match="reached no mcp__lcmx tool"):
+            run.canary(args, Harnessed(mcp_calls=0), "sha", question)
     assert not list(data.iterdir()) and not list(args.output.glob("fmp-canary-*"))
     assert "REF-" not in (args.output / "canary.json").read_text()

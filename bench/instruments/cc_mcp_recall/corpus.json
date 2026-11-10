@@ -1,0 +1,736 @@
+{
+  "version": 1,
+  "project": "The invented Velmora workshop coordinates imaginary lantern relays. All decisions are synthetic.",
+  "files": {
+    "notes/a.txt": {
+      "text": "mauve gate inspection code: VORNALI-8201\n"
+    },
+    "notes/b.txt": {
+      "text": "umber fan calibration seal: XEMDORA-8202\n"
+    },
+    "notes/c.txt": {
+      "text": "jade dock launch badge: NELVORI-8203\n"
+    },
+    "notes/d.txt": {
+      "text": "pearl mast service key: BRIMZEL-8204\n"
+    },
+    "notes/e.txt": {
+      "text": "scarlet vane test stamp: CALVEXI-8205\n"
+    },
+    "notes/f.txt": {
+      "text": "cobalt loom acceptance tag: DRONVIA-8206\n"
+    },
+    "notes/g.txt": {
+      "text": "ivory bell routing phrase: FELZARI-8207\n"
+    },
+    "notes/h.txt": {
+      "text": "russet lens repair code: HOVNELA-8208\n"
+    },
+    "logs/a.log": {
+      "generate": "log",
+      "lines": 5000,
+      "seed": 91,
+      "insert": {
+        "line": 2500,
+        "text": "night lantern overflow seal: JELVORA-9301"
+      }
+    },
+    "logs/b.log": {
+      "generate": "log",
+      "lines": 5000,
+      "seed": 92,
+      "insert": {
+        "line": 2500,
+        "text": "storm relay evacuation badge: KAZNIRI-9302"
+      }
+    },
+    "logs/c.log": {
+      "generate": "log",
+      "lines": 5000,
+      "seed": 93,
+      "insert": {
+        "line": 2500,
+        "text": "winter canopy recovery key: LUMVEXA-9303"
+      }
+    },
+    "logs/d.log": {
+      "generate": "log",
+      "lines": 5000,
+      "seed": 94,
+      "insert": {
+        "line": 2500,
+        "text": "dawn ferry archive stamp: MORZELI-9304"
+      }
+    },
+    "delegated/a.txt": {
+      "text": "delegated finch inspection seal: SARNEXI-9501\n"
+    },
+    "delegated/b.txt": {
+      "text": "delegated moth calibration key: TOVZELA-9502\n"
+    }
+  },
+  "sessions": [
+    {
+      "label": "S1",
+      "start": "new",
+      "turns": [
+        "Remember our amber lantern freeze code is VELNORA-7101. Confirm briefly without using tools.",
+        "Remember our violet relay handoff badge is ZEMBRIL-7102. Confirm briefly without using tools.",
+        "Remember our copper ferry fallback key is ORVEXA-7103. Confirm briefly without using tools.",
+        "Remember our silver canopy audit seal is PELDRIN-7104. Confirm briefly without using tools.",
+        "Remember our indigo beacon repair tag is TALVORA-7105. Confirm briefly without using tools.",
+        "Remember our ochre turbine routing stamp is DREMBIX-7106. Confirm briefly without using tools.",
+        "Remember our coral orchard rollback phrase is SOVRILA-7107. Confirm briefly without using tools.",
+        "Remember our teal spindle approval code is KELNAVI-7108. Confirm briefly without using tools.",
+        "We settle the staging relay port at forty thousand plus 8213. Compute that sum, state the resulting value in plain decimal digits without separators, and confirm we use it; do not call any tools.",
+        "We settle the canopy retry ceiling at forty thousand plus 9327. Compute that sum, state the resulting value in plain decimal digits without separators, and confirm we use it; do not call any tools.",
+        "Use the Write tool to create config/setting-a.env with VALUE equal to sixty thousand plus 1333, computed as plain decimal digits without separators, for the quartz relay write port. Then use the Read tool on that new file to verify it. Do not use Bash to compute the value.",
+        "Use the Write tool to create config/setting-b.env with VALUE equal to sixty thousand plus 3447, computed as plain decimal digits without separators, for the linen canopy write limit. Then use the Read tool on that new file to verify it. Do not use Bash to compute the value.",
+        "Use the Read tool to read notes/a.txt completely and report the mauve gate inspection code.",
+        "Use the Read tool to read notes/b.txt completely and report the umber fan calibration seal."
+      ]
+    },
+    {
+      "label": "S2",
+      "start": "new",
+      "turns": [
+        "We settle the ferry buffer capacity at forty thousand plus 10641. Compute that sum, state the resulting value in plain decimal digits without separators, and confirm we use it; do not call any tools.",
+        "We settle the orchard batch budget at forty thousand plus 12873. Compute that sum, state the resulting value in plain decimal digits without separators, and confirm we use it; do not call any tools.",
+        "Use the Write tool to create config/setting-c.env with VALUE equal to sixty thousand plus 5561, computed as plain decimal digits without separators, for the opal ferry write quota. Then use the Read tool on that new file to verify it. Do not use Bash to compute the value.",
+        "Use the Write tool to create config/setting-d.env with VALUE equal to sixty thousand plus 7675, computed as plain decimal digits without separators, for the maroon orchard write budget. Then use the Read tool on that new file to verify it. Do not use Bash to compute the value.",
+        "Use the Read tool to read notes/c.txt completely and report the jade dock launch badge.",
+        "Use the Read tool to read notes/d.txt completely and report the pearl mast service key.",
+        "Our magenta cradle deployment key is XORNIVA-9701. Confirm briefly.",
+        "Our bronze wicket recovery seal is YELZARI-9702. Confirm briefly.",
+        "Our turquoise arch routing badge is ZAVMORA-9703. Confirm briefly.",
+        "Our lavender chute inspection stamp is BRENZIX-9704. Confirm briefly."
+      ]
+    },
+    {
+      "label": "S3",
+      "start": "new",
+      "turns": [
+        "We settle the spindle archive quota at forty thousand plus 14917. Compute that sum, state the resulting value in plain decimal digits without separators, and confirm we use it; do not call any tools.",
+        "We settle the beacon queue capacity at forty thousand plus 17139. Compute that sum, state the resulting value in plain decimal digits without separators, and confirm we use it; do not call any tools.",
+        "Use the Write tool to create config/setting-e.env with VALUE equal to sixty thousand plus 9789, computed as plain decimal digits without separators, for the saffron spindle write capacity. Then use the Read tool on that new file to verify it. Do not use Bash to compute the value.",
+        "Use the Write tool to create config/setting-f.env with VALUE equal to sixty thousand plus 11903, computed as plain decimal digits without separators, for the azure beacon write ceiling. Then use the Read tool on that new file to verify it. Do not use Bash to compute the value.",
+        "Use the Read tool to read notes/e.txt completely and report the scarlet vane test stamp.",
+        "Use the Read tool to read notes/f.txt completely and report the cobalt loom acceptance tag.",
+        "Use the Read tool to read notes/g.txt completely and report the ivory bell routing phrase.",
+        "Use the Read tool to read notes/h.txt completely and report the russet lens repair code."
+      ]
+    },
+    {
+      "label": "S4",
+      "start": "new",
+      "turns": [
+        "Use Bash to run exactly cat logs/a.log, with no pipe, truncation, filtering or redirection. Request the entire output verbatim so it can be saved as a large tool result. Then say only that the output was read.",
+        "Use Bash to run exactly cat logs/b.log, with no pipe, truncation, filtering or redirection. Request the entire output verbatim so it can be saved as a large tool result. Then say only that the output was read.",
+        "Use Bash to run exactly cat logs/c.log, with no pipe, truncation, filtering or redirection. Request the entire output verbatim so it can be saved as a large tool result. Then say only that the output was read.",
+        "Use Bash to run exactly cat logs/d.log, with no pipe, truncation, filtering or redirection. Request the entire output verbatim so it can be saved as a large tool result. Then say only that the output was read."
+      ]
+    },
+    {
+      "label": "S5",
+      "start": "new",
+      "turns": [
+        "Before we compact, remember the early prism freeze seal is NAVZORI-9401. Confirm briefly.",
+        "Before we compact, remember the early rotor handoff badge is PERNIVA-9402. Confirm briefly.",
+        "Before we compact, remember the early cradle fallback key is QUELZAR-9403. Confirm briefly.",
+        "Before we compact, remember the early wicket audit stamp is RIMVOLA-9404. Confirm briefly.",
+        "/compact",
+        "Confirm the earlier decisions remain our choices. Do not restate their values."
+      ],
+      "env": {
+        "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "5",
+        "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "16000"
+      }
+    },
+    {
+      "label": "S6",
+      "start": "new",
+      "turns": [
+        "Use the Task tool (Agent tool if named Agent) to delegate a subagent that reads delegated/a.txt with the Read tool and reports the delegated finch inspection seal. Do not read it yourself.",
+        "Use the Task tool (Agent tool if named Agent) to delegate a subagent that reads delegated/b.txt with the Read tool and reports the delegated moth calibration key. Do not read it yourself."
+      ]
+    },
+    {
+      "label": "S7",
+      "start": "resume:S1",
+      "turns": [
+        "Remember the resumed flute continuity seal is VARZONI-9601. Confirm briefly.",
+        "Replace the earlier magenta cradle deployment key; the current value is COVNIRA-9801. Confirm briefly.",
+        "Replace the earlier bronze wicket recovery seal; the current value is DARNEXA-9802. Confirm briefly.",
+        "Replace the earlier turquoise arch routing badge; the current value is ELVZORI-9803. Confirm briefly.",
+        "Replace the earlier lavender chute inspection stamp; the current value is FIMNELA-9804. Confirm briefly."
+      ]
+    },
+    {
+      "label": "S8",
+      "start": "fork:S2",
+      "turns": [
+        "Remember the forked harp routing badge is WELNIRA-9602. Confirm briefly."
+      ]
+    }
+  ],
+  "facts": [
+    {
+      "id": "F01",
+      "token": "VELNORA-7101",
+      "class": "user_text",
+      "session": "S1",
+      "roles": [
+        "user"
+      ],
+      "topic": "amber lantern freeze code"
+    },
+    {
+      "id": "F02",
+      "token": "ZEMBRIL-7102",
+      "class": "user_text",
+      "session": "S1",
+      "roles": [
+        "user"
+      ],
+      "topic": "violet relay handoff badge"
+    },
+    {
+      "id": "F03",
+      "token": "ORVEXA-7103",
+      "class": "user_text",
+      "session": "S1",
+      "roles": [
+        "user"
+      ],
+      "topic": "copper ferry fallback key"
+    },
+    {
+      "id": "F04",
+      "token": "PELDRIN-7104",
+      "class": "user_text",
+      "session": "S1",
+      "roles": [
+        "user"
+      ],
+      "topic": "silver canopy audit seal"
+    },
+    {
+      "id": "F05",
+      "token": "TALVORA-7105",
+      "class": "user_text",
+      "session": "S1",
+      "roles": [
+        "user"
+      ],
+      "topic": "indigo beacon repair tag"
+    },
+    {
+      "id": "F06",
+      "token": "DREMBIX-7106",
+      "class": "user_text",
+      "session": "S1",
+      "roles": [
+        "user"
+      ],
+      "topic": "ochre turbine routing stamp"
+    },
+    {
+      "id": "F07",
+      "token": "SOVRILA-7107",
+      "class": "user_text",
+      "session": "S1",
+      "roles": [
+        "user"
+      ],
+      "topic": "coral orchard rollback phrase"
+    },
+    {
+      "id": "F08",
+      "token": "KELNAVI-7108",
+      "class": "user_text",
+      "session": "S1",
+      "roles": [
+        "user"
+      ],
+      "topic": "teal spindle approval code"
+    },
+    {
+      "id": "F09",
+      "token": "48213",
+      "class": "assistant",
+      "session": "S1",
+      "roles": [
+        "assistant"
+      ],
+      "topic": "staging relay port",
+      "derive": {
+        "operation": "add",
+        "operands": [
+          40000,
+          8213
+        ]
+      }
+    },
+    {
+      "id": "F10",
+      "token": "49327",
+      "class": "assistant",
+      "session": "S1",
+      "roles": [
+        "assistant"
+      ],
+      "topic": "canopy retry ceiling",
+      "derive": {
+        "operation": "add",
+        "operands": [
+          40000,
+          9327
+        ]
+      }
+    },
+    {
+      "id": "F11",
+      "token": "50641",
+      "class": "assistant",
+      "session": "S2",
+      "roles": [
+        "assistant"
+      ],
+      "topic": "ferry buffer capacity",
+      "derive": {
+        "operation": "add",
+        "operands": [
+          40000,
+          10641
+        ]
+      }
+    },
+    {
+      "id": "F12",
+      "token": "52873",
+      "class": "assistant",
+      "session": "S2",
+      "roles": [
+        "assistant"
+      ],
+      "topic": "orchard batch budget",
+      "derive": {
+        "operation": "add",
+        "operands": [
+          40000,
+          12873
+        ]
+      }
+    },
+    {
+      "id": "F13",
+      "token": "54917",
+      "class": "assistant",
+      "session": "S3",
+      "roles": [
+        "assistant"
+      ],
+      "topic": "spindle archive quota",
+      "derive": {
+        "operation": "add",
+        "operands": [
+          40000,
+          14917
+        ]
+      }
+    },
+    {
+      "id": "F14",
+      "token": "57139",
+      "class": "assistant",
+      "session": "S3",
+      "roles": [
+        "assistant"
+      ],
+      "topic": "beacon queue capacity",
+      "derive": {
+        "operation": "add",
+        "operands": [
+          40000,
+          17139
+        ]
+      }
+    },
+    {
+      "id": "F15",
+      "token": "61333",
+      "class": "tool_input",
+      "session": "S1",
+      "roles": [
+        "tool"
+      ],
+      "topic": "quartz relay write port",
+      "derive": {
+        "operation": "add",
+        "operands": [
+          60000,
+          1333
+        ]
+      }
+    },
+    {
+      "id": "F16",
+      "token": "63447",
+      "class": "tool_input",
+      "session": "S1",
+      "roles": [
+        "tool"
+      ],
+      "topic": "linen canopy write limit",
+      "derive": {
+        "operation": "add",
+        "operands": [
+          60000,
+          3447
+        ]
+      }
+    },
+    {
+      "id": "F17",
+      "token": "65561",
+      "class": "tool_input",
+      "session": "S2",
+      "roles": [
+        "tool"
+      ],
+      "topic": "opal ferry write quota",
+      "derive": {
+        "operation": "add",
+        "operands": [
+          60000,
+          5561
+        ]
+      }
+    },
+    {
+      "id": "F18",
+      "token": "67675",
+      "class": "tool_input",
+      "session": "S2",
+      "roles": [
+        "tool"
+      ],
+      "topic": "maroon orchard write budget",
+      "derive": {
+        "operation": "add",
+        "operands": [
+          60000,
+          7675
+        ]
+      }
+    },
+    {
+      "id": "F19",
+      "token": "69789",
+      "class": "tool_input",
+      "session": "S3",
+      "roles": [
+        "tool"
+      ],
+      "topic": "saffron spindle write capacity",
+      "derive": {
+        "operation": "add",
+        "operands": [
+          60000,
+          9789
+        ]
+      }
+    },
+    {
+      "id": "F20",
+      "token": "71903",
+      "class": "tool_input",
+      "session": "S3",
+      "roles": [
+        "tool"
+      ],
+      "topic": "azure beacon write ceiling",
+      "derive": {
+        "operation": "add",
+        "operands": [
+          60000,
+          11903
+        ]
+      }
+    },
+    {
+      "id": "F21",
+      "token": "VORNALI-8201",
+      "class": "tool_result_inline",
+      "session": "S1",
+      "roles": [
+        "tool"
+      ],
+      "topic": "mauve gate inspection code"
+    },
+    {
+      "id": "F22",
+      "token": "XEMDORA-8202",
+      "class": "tool_result_inline",
+      "session": "S1",
+      "roles": [
+        "tool"
+      ],
+      "topic": "umber fan calibration seal"
+    },
+    {
+      "id": "F23",
+      "token": "NELVORI-8203",
+      "class": "tool_result_inline",
+      "session": "S2",
+      "roles": [
+        "tool"
+      ],
+      "topic": "jade dock launch badge"
+    },
+    {
+      "id": "F24",
+      "token": "BRIMZEL-8204",
+      "class": "tool_result_inline",
+      "session": "S2",
+      "roles": [
+        "tool"
+      ],
+      "topic": "pearl mast service key"
+    },
+    {
+      "id": "F25",
+      "token": "CALVEXI-8205",
+      "class": "tool_result_inline",
+      "session": "S3",
+      "roles": [
+        "tool"
+      ],
+      "topic": "scarlet vane test stamp"
+    },
+    {
+      "id": "F26",
+      "token": "DRONVIA-8206",
+      "class": "tool_result_inline",
+      "session": "S3",
+      "roles": [
+        "tool"
+      ],
+      "topic": "cobalt loom acceptance tag"
+    },
+    {
+      "id": "F27",
+      "token": "FELZARI-8207",
+      "class": "tool_result_inline",
+      "session": "S3",
+      "roles": [
+        "tool"
+      ],
+      "topic": "ivory bell routing phrase"
+    },
+    {
+      "id": "F28",
+      "token": "HOVNELA-8208",
+      "class": "tool_result_inline",
+      "session": "S3",
+      "roles": [
+        "tool"
+      ],
+      "topic": "russet lens repair code"
+    },
+    {
+      "id": "F29",
+      "token": "JELVORA-9301",
+      "class": "tool_result_saved",
+      "session": "S4",
+      "roles": [
+        "tool"
+      ],
+      "topic": "night lantern overflow seal"
+    },
+    {
+      "id": "F30",
+      "token": "KAZNIRI-9302",
+      "class": "tool_result_saved",
+      "session": "S4",
+      "roles": [
+        "tool"
+      ],
+      "topic": "storm relay evacuation badge"
+    },
+    {
+      "id": "F31",
+      "token": "LUMVEXA-9303",
+      "class": "tool_result_saved",
+      "session": "S4",
+      "roles": [
+        "tool"
+      ],
+      "topic": "winter canopy recovery key"
+    },
+    {
+      "id": "F32",
+      "token": "MORZELI-9304",
+      "class": "tool_result_saved",
+      "session": "S4",
+      "roles": [
+        "tool"
+      ],
+      "topic": "dawn ferry archive stamp"
+    },
+    {
+      "id": "F33",
+      "token": "NAVZORI-9401",
+      "class": "pre_compact",
+      "session": "S5",
+      "roles": [
+        "user"
+      ],
+      "topic": "early prism freeze seal"
+    },
+    {
+      "id": "F34",
+      "token": "PERNIVA-9402",
+      "class": "pre_compact",
+      "session": "S5",
+      "roles": [
+        "user"
+      ],
+      "topic": "early rotor handoff badge"
+    },
+    {
+      "id": "F35",
+      "token": "QUELZAR-9403",
+      "class": "pre_compact",
+      "session": "S5",
+      "roles": [
+        "user"
+      ],
+      "topic": "early cradle fallback key"
+    },
+    {
+      "id": "F36",
+      "token": "RIMVOLA-9404",
+      "class": "pre_compact",
+      "session": "S5",
+      "roles": [
+        "user"
+      ],
+      "topic": "early wicket audit stamp"
+    },
+    {
+      "id": "F37",
+      "token": "SARNEXI-9501",
+      "class": "subagent",
+      "session": "S6",
+      "roles": [
+        "tool"
+      ],
+      "topic": "delegated finch inspection seal"
+    },
+    {
+      "id": "F38",
+      "token": "TOVZELA-9502",
+      "class": "subagent",
+      "session": "S6",
+      "roles": [
+        "tool"
+      ],
+      "topic": "delegated moth calibration key"
+    },
+    {
+      "id": "F39",
+      "token": "VARZONI-9601",
+      "class": "resume_fork",
+      "session": "S7",
+      "roles": [
+        "user"
+      ],
+      "topic": "resumed flute continuity seal"
+    },
+    {
+      "id": "F40",
+      "token": "WELNIRA-9602",
+      "class": "resume_fork",
+      "session": "S8",
+      "roles": [
+        "user"
+      ],
+      "topic": "forked harp routing badge"
+    }
+  ],
+  "superseded": [
+    {
+      "id": "L1",
+      "old": {
+        "token": "XORNIVA-9701",
+        "roles": [
+          "user"
+        ]
+      },
+      "new": {
+        "token": "COVNIRA-9801",
+        "roles": [
+          "user"
+        ]
+      },
+      "old_session": "S2",
+      "new_session": "S7",
+      "topic": "magenta cradle deployment key"
+    },
+    {
+      "id": "L2",
+      "old": {
+        "token": "YELZARI-9702",
+        "roles": [
+          "user"
+        ]
+      },
+      "new": {
+        "token": "DARNEXA-9802",
+        "roles": [
+          "user"
+        ]
+      },
+      "old_session": "S2",
+      "new_session": "S7",
+      "topic": "bronze wicket recovery seal"
+    },
+    {
+      "id": "L3",
+      "old": {
+        "token": "ZAVMORA-9703",
+        "roles": [
+          "user"
+        ]
+      },
+      "new": {
+        "token": "ELVZORI-9803",
+        "roles": [
+          "user"
+        ]
+      },
+      "old_session": "S2",
+      "new_session": "S7",
+      "topic": "turquoise arch routing badge"
+    },
+    {
+      "id": "L4",
+      "old": {
+        "token": "BRENZIX-9704",
+        "roles": [
+          "user"
+        ]
+      },
+      "new": {
+        "token": "FIMNELA-9804",
+        "roles": [
+          "user"
+        ]
+      },
+      "old_session": "S2",
+      "new_session": "S7",
+      "topic": "lavender chute inspection stamp"
+    }
+  ]
+}

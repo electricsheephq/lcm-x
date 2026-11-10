@@ -294,6 +294,10 @@ def retry_call(call, records, receipt, retryable=None):
                 receipt["attempts"] = attempt
 
 
+# Set by the leased-run SIGTERM handler: no new model subprocess starts while the run drains.
+STOPPING = threading.Event()
+
+
 class Harness:
     def __init__(self, root, quota, runner=None, binary=None, timeout=(600, 1800)):
         self.root = Path(root) / "harness"
@@ -328,6 +332,8 @@ class Harness:
         return call / "cwd"
 
     def run(self, cmd, call, prompt, env, agentic=False):
+        if STOPPING.is_set():
+            raise RuntimeError("stopping")
         prompt_path = call / "prompt.txt"
         prompt_path.write_text(prompt)
         try:
@@ -403,6 +409,8 @@ class Codex(Harness):
                "-c", "web_search=disabled"]
         for feature in CODEX_DISABLED:
             cmd += ["--disable", feature]
+        # codex-cli 0.167 no longer enables code mode by default; without it MCP tools are deferred and unreachable.
+        cmd += ["--enable", "code_mode"]
         if mcp:
             prefix = f"mcp_servers.{SERVER}."
             cmd += ["-c", prefix + "command=" + json.dumps(mcp["command"]),
