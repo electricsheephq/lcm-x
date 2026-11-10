@@ -95,6 +95,10 @@ def _json(value):
     return value if isinstance(value, dict) else None
 
 
+def _store_path(home):
+    return next((Path(home) / n for n in ("lcm.db", "store.db") if (Path(home) / n).is_file()), Path(home) / "lcm.db")
+
+
 def _keyed(counts):
     """A {session id: count} map keyed by the ids' sha256 12, as the receipt names sessions; None stays None."""
     return None if counts is None else {_sha(sid)[:12]: n for sid, n in counts.items()}
@@ -653,6 +657,7 @@ def _range_new_rows(out):
 def run_arm(host, name, home, plan, extras):
     ctx = host.arm(name, home, plan)
     cron_paused = host.pause_cron(ctx)  # Before the first gateway start: no snapshot job fires in the run.
+    flagged_start = _keyed(flagged_summary_nodes(_store_path(home), [c["session_id"] for c in plan["conversations"]]))
     sid = {c["name"]: c["session_id"] for c in plan["conversations"]}
     binds, restarts, egress, tool_turns, started = [], [], [], 0, time.monotonic()
     planned, not_completed, cron_job_sha256 = 0, [], None
@@ -726,10 +731,31 @@ def run_arm(host, name, home, plan, extras):
             "provider": stats, "logs": host.logs(ctx), "roots": host.roots(ctx), "checks": checks,
             "doctor_not_exercised": ctx.get("doctor_not_exercised", []), "cron_paused": cron_paused,
             "routing": ctx.get("routing", {}),
+            "flagged_summary_nodes_start": flagged_start,  # Before the first turn (ruling R5-4).
             "flagged_summary_nodes": _keyed(flagged_summary_nodes(
-                next((Path(home) / n for n in ("lcm.db", "store.db") if (Path(home) / n).is_file()), Path(home) / "lcm.db"),
-                [c["session_id"] for c in plan["conversations"]])),
+                _store_path(home), [c["session_id"] for c in plan["conversations"]])),
             "rows": rows, "wall_s": round(time.monotonic() - started, 3)}
+
+
+def inherited_flags(plan, arms, ga_rerun=None):
+    """Bar 5's inherited sessions (ruling R5-4): each driven session whose snapshot count of flagged summary nodes is not
+    0 (or unknown), keyed by its summary_quality check name, with its counts at the start and at each arm's end."""
+    def count(arm, key, h12):
+        return ((arm or {}).get(key) or {}).get(h12)
+
+    out = {}
+    for c in plan["conversations"]:
+        if c.get("flagged_summary_nodes") == 0:
+            continue
+        h12 = _sha(c["session_id"])[:12]
+        n = {"start": c.get("flagged_summary_nodes"),
+             **{f"{a}{k}": count(arms.get(a), f"flagged_summary_nodes{key}", h12)
+                for a in ("rc", "ga") for k, key in (("_start", "_start"), ("", ""))}}
+        if ga_rerun:
+            n.update(ga_rerun_start=count(ga_rerun, "flagged_summary_nodes_start", h12),
+                     ga_rerun=count(ga_rerun, "flagged_summary_nodes", h12))
+        out[f"summary_quality@{h12}"] = n
+    return out
 
 
 def run(host, *, rc_id, prior=(), instrument_fix=None):
@@ -789,8 +815,7 @@ def run(host, *, rc_id, prior=(), instrument_fix=None):
                                     " counts are 2x on both arms; the verdict compares the arms and is unaffected"},
         "bar5": {**bars.bar5(arms["rc"]["checks"], arms["ga"]["checks"], ga_rerun and ga_rerun["checks"],
                              bool(ga_rerun) and bars.workload_items(ga_rerun["workload"])["turns_completed"],
-                             inherited=[f"summary_quality@{_sha(c['session_id'])[:12]}" for c in plan["conversations"]
-                                        if c.get("flagged_summary_nodes") != 0]),
+                             inherited=inherited_flags(plan, arms, ga_rerun)),
                  "flagged_summary_nodes": {  # Per driven session: at the start, and in each arm at its end (#2471).
                      "start": _keyed({c["session_id"]: c.get("flagged_summary_nodes") for c in plan["conversations"]}),
                      **{a: arms[a]["flagged_summary_nodes"] for a in arms}}},

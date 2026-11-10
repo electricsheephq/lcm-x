@@ -242,16 +242,49 @@ def test_verdict_rerun_and_instrument_defect():
     assert b.may_run([], None) is None and b.may_run([b.INCONCLUSIVE] * 2, "fix") is None
 
 
-def test_bar5_a_session_that_started_flagged_is_not_judged_and_never_passes():
-    """#2471: a driven session whose store already had a flagged summary node keeps summary_quality warning, so a
-    further flag in that session would not show. Its warnings are not judged: INCONCLUSIVE, never PASS or a FAIL from
-    that check alone; the release manager judges the node counts."""
-    flag = {"kind": "doctor", "check": "summary_quality@abc", "status": "warn"}
+FLAG = {"kind": "doctor", "check": "summary_quality@abc", "status": "warn"}
+
+
+def counts(s=2, r=2, g=2, rc_start=None, ga_start=None, **extra):
+    return {"summary_quality@abc": {"start": s, "rc": r, "ga": g, "rc_start": s if rc_start is None else rc_start,
+                                    "ga_start": s if ga_start is None else ga_start, **extra}}
+
+
+@pytest.mark.parametrize("case, inherited, verdict, reason", [
+    ("equal increase", counts(r=3, g=3), b.PASS, "not over"),
+    ("rc under GA", counts(r=2, g=4), b.PASS, "not over"),
+    ("rc higher", counts(r=4, g=3), b.FAIL, "over the previous GA"),
+    ("unknown rc count", counts(r=None), b.INCONCLUSIVE, "unknown"),
+    ("unknown start count", counts(s=None, rc_start=2, ga_start=2), b.INCONCLUSIVE, "unknown"),
+    ("differing start", counts(ga_start=3, g=3), b.INCONCLUSIVE, "start counts differ"),
+    ("rc count falls", counts(r=1, g=2), b.INCONCLUSIVE, "fell below"),
+    ("GA count falls", counts(r=2, g=1), b.INCONCLUSIVE, "fell below"),
+])
+def test_bar5_an_inherited_session_is_judged_by_its_flagged_node_increase(case, inherited, verdict, reason):
+    """Ruling R5-4 (#2471): a session that starts with flagged summary nodes is judged by the increase in its flagged
+    count, rc against the previous GA, never by its summary_quality warning, which the inherited nodes keep on."""
+    result = b.bar5(checks(FLAG, FLAG), checks(FLAG), inherited=inherited)  # The rc warns twice: not judged here.
+    flags = result["inherited_flags"]["summary_quality@abc"]
+    assert (result["verdict"], flags["verdict"]) == (verdict, verdict) and reason in flags["reason"], case
+    assert result["warnings_over_ga"] == []
+    assert {k: flags[k] for k in ("s", "r", "g")} == {k: inherited["summary_quality@abc"][v]
+                                                      for k, v in (("s", "start"), ("r", "rc"), ("g", "ga"))}
+
+
+def test_bar5_a_session_that_starts_unflagged_keeps_the_warning_rule():
+    assert b.bar5(checks(FLAG, FLAG), checks(FLAG))["verdict"] == b.FAIL  # s = 0: judged as before.
+    assert b.bar5(checks(FLAG), checks(FLAG))["verdict"] == b.PASS
+    assert b.bar5(checks(), checks())["inherited_flags"] == {}
+
+
+def test_bar5_inherited_counts_never_mask_another_check():
     other = {"kind": "doctor", "check": "survival_fit", "status": "warn"}
-    assert b.bar5(checks(flag, flag), checks(flag))["verdict"] == b.FAIL  # Not inherited: judged as before.
-    result = b.bar5(checks(flag, flag), checks(flag), inherited=["summary_quality@abc"])
-    assert result["verdict"] == b.INCONCLUSIVE and result["inherited_flags_not_judged"] == ["summary_quality@abc"]
-    assert result["warnings_over_ga"] == [] and result["warnings_judged"] is False
-    assert b.bar5(checks(), checks(), inherited=["summary_quality@abc"])["verdict"] == b.INCONCLUSIVE
-    assert b.bar5(checks(other, other), checks(other), inherited=["summary_quality@abc"])["verdict"] == b.FAIL
-    assert b.bar5(checks(), checks())["inherited_flags_not_judged"] == []
+    assert b.bar5(checks(other, other), checks(other), inherited=counts())["verdict"] == b.FAIL
+
+
+def test_bar5_inherited_counts_take_the_clean_rerun_as_the_baseline():
+    failed = {"kind": "quick_check", "check": "store", "status": "fail"}
+    rerun = counts(r=3, g=2, ga_rerun=3, ga_rerun_start=2)
+    result = b.bar5(checks(), checks(failed), checks(), True, inherited=rerun)
+    assert result["verdict"] == b.PASS and result["inherited_flags"]["summary_quality@abc"]["ga_from_rerun"] is True
+    assert b.bar5(checks(), checks(), inherited=rerun)["verdict"] == b.FAIL  # No re-run: g is the GA arm's 2.
