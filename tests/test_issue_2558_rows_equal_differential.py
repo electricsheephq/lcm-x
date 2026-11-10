@@ -1,7 +1,8 @@
 """#2558: a seeded differential for the session-end row compare.
 
-(1) Every generated pair WITHOUT a bare saved-output marker compares exactly as main's code does: the oracle is this
-head with the bare-marker identity made to raise, which takes main's compare (the fallback). (2) Bare marker against
+(1) Every generated pair WITHOUT a bare saved-output marker stays off the new code: with the bare-marker identity made
+to raise, every result is unchanged. This is a structural check that the new identity is unreachable there; it is not
+an independent oracle for the shared compare, which main's own tests cover. (2) Bare marker against
 bare marker: the pair is one row exactly when its texts are byte-identical once ingest placeholders are replaced by
 their payloads, a reference written here apart from the product code.
 """
