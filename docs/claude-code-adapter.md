@@ -585,8 +585,8 @@ gate's instrument (see "The audit" in the test plan).
     killed before any end hook (no `SessionEnd`, no `SubagentStop`) leaves a torn last record counted in the verdict
     while the session still reads verified; a resumed session whose newer hook's pointer is replaced by a delayed older
     `Stop` before the worker drains it stays unverified until a newer hook of that session drains (the safe side); and
-    a subagent whose tool call and result span a `/clear` (it goes on in a new transcript under the new session) leaves
-    the new session's audit not ok with one orphan (it fails closed; nothing is lost);
+    on one real session, a subagent still working at a `/clear` went on in a new transcript under the new session,
+    and the new session's audit read not ok with one orphan (it fails closed; nothing is lost);
   - files under a `tool-results` subfolder (`subfolder_files`; a symlink to a folder, or a folder that cannot be
     listed, counts one), which capture does not store as files: until #2554 they leave the lineage unverified, and the
     verdict names them ("N files in tool-results subfolders not stored (M lineages)");
