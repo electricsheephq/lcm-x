@@ -130,7 +130,9 @@ def _merged_facts(record: Dict[str, Any], previous: Optional[Mapping[str, Any]])
             if isinstance(name, str):
                 seen.add(name)
         prompts.update(value for value in previous.get("compact_prompts") or () if isinstance(value, str))
-    facts = {"seen": sorted(seen), "compact_prompts": sorted(prompts)[-FACTS_CAP:]}
+    facts = {"seen": sorted(seen), "compact_prompts": sorted(prompts)[-FACTS_CAP:],
+             # local GC seen on by any record stays on until the worker records it (#2503)
+             "local_gc": record.get("local_gc") is True or (isinstance(previous, dict) and previous.get("local_gc") is True)}
     for key in ("transcript_seen", "agent_transcript_seen"):  # True once any record saw it; None (unknown) wins over False
         values = [record.get(key), previous.get(key) if isinstance(previous, dict) else False]
         facts[key] = True if True in values else (False if all(value is False for value in values) else None)
