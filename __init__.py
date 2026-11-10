@@ -604,12 +604,16 @@ def register(ctx):
     engine.apply_identity_migration(identity_notice)
     _identity.warn_identity_migration_once(identity_notice)
 
-    # Register as the context engine (replaces ContextCompressor)
+    # Establish unload ownership before publishing a cloneable prototype.
     on_unload = getattr(ctx, "on_unload", None)
-    shutdown = engine._enable_plugin_unload() if callable(on_unload) else None
+    if callable(on_unload):
+        shutdown = engine._enable_plugin_unload()
+        try:
+            on_unload(shutdown)
+        except Exception:
+            engine._unload_group = None
+            logger.info("LCM unload callback registration failed; stop Hermes to release lcm.db", exc_info=True)
     ctx.register_context_engine(engine)
-    if shutdown is not None:
-        on_unload(shutdown)
     active = _engine_took_slot(ctx, engine, hermes_home)
 
     # Ship the same recall contract through both Hermes plugin skill

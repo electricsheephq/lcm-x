@@ -27,6 +27,8 @@ from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Any, Dict, Iterator, TYPE_CHECKING
 
+from .engine_registry import engine_unload_group
+
 if TYPE_CHECKING:
     from .engine import LCMEngine
 
@@ -121,7 +123,7 @@ def _acquire_vector_store(
     """
     resolved_scan = int(scan_rows) if scan_rows is not None else -1
     key = (str(engine._store.db_path), resolved_scan)
-    group = getattr(engine, "_unload_group", None)
+    group = engine_unload_group(engine)
     if group is not None:
         key = (*key, group)
     with _pool_lock:

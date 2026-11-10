@@ -12,6 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -54,7 +55,7 @@ def preflight(tmp_path, monkeypatch):
     monkeypatch.setattr(sqlite3, "connect", connect_spy)
     monkeypatch.setattr(LCMEngine, "_bind_storage", bind_spy)
 
-    def register(*, inactive=False, abandoned=False, supports_unload=False, on_publish=None):
+    def register(*, inactive=False, abandoned=False, supports_unload=False, on_publish=None, on_unload=None):
         ctx = SimpleNamespace(
             _manager=SimpleNamespace(_context_engine=object() if inactive else None),
             _load_abandoned=abandoned,
@@ -77,7 +78,7 @@ def preflight(tmp_path, monkeypatch):
         ctx.register_command = lambda name, handler, **kwargs: ctx.commands.update({name: handler})
         if supports_unload:
             ctx.unload_callbacks = []
-            ctx.on_unload = ctx.unload_callbacks.append
+            ctx.on_unload = on_unload if on_unload is not None else ctx.unload_callbacks.append
         hermes_lcm.register(ctx)
         return engines[-1], ctx
 
@@ -113,6 +114,69 @@ def test_shutdown_before_use_opens_nothing(preflight):
     engine.shutdown()
     engine.shutdown()
     assert (preflight.home.exists(), preflight.connects) == (False, [])
+
+
+def test_rejected_unload_callback_keeps_legacy_registration(preflight, caplog):
+    from hermes_lcm import logger
+
+    clones, order = [], []
+
+    def reject(_callback):
+        order.append("unload")
+        raise TypeError("unsupported callback")
+
+    def publish(engine):
+        order.append("publish")
+        clones.append(engine.clone_for_agent())
+
+    with caplog.at_level(logging.INFO, logger=logger.name):
+        prototype, ctx = preflight.register(supports_unload=True, on_unload=reject, on_publish=publish)
+    clone, = clones
+    try:
+        assert order == ["unload", "publish"]
+        assert ctx.hooks and ctx.tools and ctx.commands
+        assert prototype._unload_group is None and clone._unload_group is None
+        assert ctx.unload_callbacks == []
+        assert "unload callback registration failed" in caplog.text
+        clone.on_session_start("legacy", platform="cli")
+        clone.ingest([{"role": "user", "content": "store normally"}])
+        assert clone._store.get_session_count("legacy") == 1
+    finally:
+        clone.shutdown()
+
+
+def test_deadline_worker_ignores_mock_unload_group():
+    from hermes_lcm.engine_registry import EngineUnloadGroup
+    from hermes_lcm.tools import _run_within_deadline
+
+    engine = MagicMock(wraps=SimpleNamespace(_unload_group=None))
+    engine._unload_group = MagicMock(spec=EngineUnloadGroup)
+    slots = threading.BoundedSemaphore(1)
+    for expected in (1, 2):
+        assert _run_within_deadline(
+            lambda: expected, remaining_s=2.0, name="test-unowned", worker_slots=slots, engine=engine,
+        ) == expected
+
+
+def test_vector_store_ignores_mock_unload_group(preflight):
+    from hermes_lcm.engine_registry import EngineUnloadGroup
+    from hermes_lcm.retrieval_core import _reset_vector_store_pool
+
+    engine, _ = preflight.register()
+    engine.on_session_start("legacy", platform="cli")
+    wrapped = SimpleNamespace(
+        _store=engine._store, _config=engine._config, _unload_group=MagicMock(spec=EngineUnloadGroup),
+    )
+    try:
+        store, lease, transient = _acquire_vector_store(wrapped, vector_store_cls=VectorStore, scan_rows=None)
+        with lease:
+            assert not transient
+            assert store.connection.execute("SELECT 1").fetchone()[0] == 1
+        same_store, lease, _ = _acquire_vector_store(engine, vector_store_cls=VectorStore, scan_rows=None)
+        with lease:
+            assert same_store is store
+    finally:
+        _reset_vector_store_pool()
 
 
 def test_plugin_unload_closes_all_owned_engines(preflight):

@@ -156,6 +156,13 @@ class EngineUnloadGroup:
             logger.warning("LCM plugin unload timed out waiting for SQLite work to finish")
 
 
+def engine_unload_group(engine: Any) -> EngineUnloadGroup | None:
+    """Get the real unload owner for workers and stores that also serve stand-in engines."""
+    group = getattr(engine, "_unload_group", None)
+    # Use the actual type because a wrapper can advertise a mocked __class__.
+    return group if issubclass(type(group), EngineUnloadGroup) else None
+
+
 class ActiveEngineUseStatus(str, Enum):
     """Terminal result of one stable active-engine use attempt."""
 

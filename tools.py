@@ -80,6 +80,7 @@ from . import expand_tools as _expand_tools
 from .presets import preset_status_payload
 from . import recent as _recent
 from .retrieval_context import RetrievalContext
+from .engine_registry import engine_unload_group
 from .retrieval_core import (
     _hit_identity,
     _lcm_recall_excerpt_expand_hint,
@@ -1892,7 +1893,7 @@ def _run_within_deadline(
 
     worker = threading.Thread(target=profile_bound(invoke), name=name, daemon=True)
     try:
-        group = getattr(engine, "_unload_group", None)
+        group = engine_unload_group(engine)
         if group is None:
             worker.start()
         elif not group.start_worker(worker):
