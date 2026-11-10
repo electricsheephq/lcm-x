@@ -224,3 +224,38 @@ def test_an_identical_call_with_a_redacted_argument_is_stored_once(host, redacti
         counts.append(len(reader._store.get_session_messages('child')))
     calls = [r for r in reader._store.get_session_messages('child') if r.get('tool_calls')]
     assert counts == [4, 5, 5] and len(calls) == 1, (counts, len(calls))
+
+
+@pytest.mark.parametrize('route', ['live', 'end'])
+@pytest.mark.parametrize('other', ['A', 'Bearer a', 'c'], ids=['sorts-below', 'sorts-between', 'sorts-above'])
+@pytest.mark.parametrize('redaction', [False, True], ids=['redaction-off', 'redaction-on'])
+def test_an_identical_call_with_a_redacted_argument_key_is_stored_once(host, redaction, other, route):  # noqa: F811
+    # Codex connector (#2572 round 5): a key holding a bearer token sorted by its original text on the host side but
+    # by its redacted text on the stored side, so a key sorting between the two flipped the order and the identical
+    # call was stored again. Recorded on main 7e67daf16 first: [4, 5, 5] rows and one call row in all twelve cases.
+    import copy
+    import dataclasses
+
+    from tests.test_issue_2482_interrupted_child import _setup
+
+    _, _, ctx, reader, child, engine = _setup(host, 'own_engine')
+    for each in {id(e): e for e in (reader, engine)}.values():
+        each._config = dataclasses.replace(each._config, sensitive_patterns_enabled=redaction)
+    first = [{'role': 'user', 'content': 'go'}, _call(json.dumps({'Bearer ' + 'a' * 20 + '0' * 20: 'v', other: 'x'})),
+             {'role': 'tool', 'tool_call_id': 'k1', 'content': 'ok'}, {'role': 'assistant', 'content': 'done'}]
+    for i, row in enumerate(first):
+        row['timestamp'] = i + 1.0
+    aux = ctx.module('aux_session')
+    child.api_call(ctx, copy.deepcopy(first), 1)
+    aux.drain_live_child_stores(60)
+    counts = [len(reader._store.get_session_messages('child'))]
+    view = copy.deepcopy(first) + [{'role': 'assistant', 'content': 'final', 'timestamp': 5.0}]
+    for n in (2, 3):
+        if route == 'live':
+            child.api_call(ctx, copy.deepcopy(view), n)
+        else:
+            child.end(engine, copy.deepcopy(view))
+        aux.drain_live_child_stores(60)
+        counts.append(len(reader._store.get_session_messages('child')))
+    calls = [r for r in reader._store.get_session_messages('child') if r.get('tool_calls')]
+    assert counts == [4, 5, 5] and len(calls) == 1, (counts, len(calls))
