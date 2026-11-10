@@ -317,15 +317,22 @@ line with a note (`projected_entry_without_uuid`, `projection_error:<type>`), an
   signatures stay as they are. #1216 gets two behaviour changes in its own PR: host-neutral error
   texts, and the offline check re-reads the header once before refusing.
 - **Saved tool outputs in `lcm_grep` (#2225).** In this reader, a full-text `lcm_grep` with no
-  `content_scope` searches raw messages first, then this store's saved tool outputs (externalized
-  payloads), newest first; `content_scope` `externalized` and `both` work with every `session_scope`.
-  A payload hit carries `type: externalized`, its `ref` and its `session_id`, and
-  `lcm_expand(externalized_ref, session_id)` returns the whole output. A payload matches the query as
-  a literal phrase. The pass is bounded (4096 names discovered, 128 files and 8 MiB read per call,
-  512 KB per file); whenever a bound, an unreadable payload or the store-containment check cuts it,
-  the response carries `partial` with its `reasons`, and that means incomplete coverage: narrow the
-  query or pass `externalized_refs`. A named ref that cannot be read is an error. Hermes' own
-  `lcm_grep` is unchanged.
+  `content_scope` searches raw messages first. When they return fewer than `limit` results, it then
+  searches this store's saved tool outputs (externalized payloads), newest first. `content_scope`
+  `externalized` and `both` work with `session_scope` `all` and `session`; `session_scope` `current`
+  stays history-only, because the reader has no active session.
+  - A payload hit carries `type: externalized`, its `ref` and its `session_id`. A payload matches the
+    query as a literal phrase.
+  - `lcm_expand(externalized_ref, session_id)` returns the output in pages of `max_tokens`; follow
+    `has_more` and `next_content_offset` for the rest.
+  - The pass is bounded: 4096 names discovered, 128 files and 8 MiB read per call, 512 KB per file.
+    Whenever a bound, an unreadable payload or the store-containment check cuts it, the response
+    carries `partial` with its `reasons`. That means incomplete coverage: narrow `session_scope` or
+    pass `externalized_refs`.
+  - A named ref with no payload folder is an error. A named ref cut short by the byte budget reports
+    `partial` with `byte_cap`, not an error. A named ref that the containment check skips is
+    reported as `partial` with `containment` (#2518).
+  - Hermes' own `lcm_grep` is unchanged.
 - **Reader override.** A valid `reader-override.json` in the store home makes the server start
   another reader in place of the plain one. Something outside the plugin writes the file to opt in
   and removes it to opt out; the plugin never writes it. Each harness reads the file in its own home.
