@@ -330,6 +330,105 @@ def _record(hook, home, path, session="s1", event="Stop", **extra):
     hook.spool(home, record)
 
 
+def test_pending_session_is_swept_when_all_later_hooks_are_lost(tmp_path, home, hermes):
+    from hermes_lcm import claude_code_audit as ca
+
+    path = tmp_path / "projects" / "-work" / "s1.jsonl"
+    _record(_hook(), home, path, event="SessionStart")
+    report = cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    assert report["missing"] == 1 and not cc.pending(home)
+    _transcript(tmp_path, [CONVERSATION[0], CONVERSATION[-1]])
+    other = _transcript(tmp_path, [_entry("user", "v1", "other session", session="s2")], session="s2")
+    _record(_hook(), home, other, session="s2")
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    store = _open(home, hermes)
+    try:
+        assert [(role, content) for _, role, content, _ in _rows(store)] == [
+            ("user", "find the secret word"), ("assistant", "The word is ochre.")]
+        assert len(_rows(store, "s2")) == 1
+    finally:
+        cc.to_rollback_journal(store.connection)
+        store.close()
+    report = ca.audit(home)
+    assert {row["lineage"] for row in report["lineages"]} == {"claude-code:s1", "claude-code:s2"}
+    assert report["verified"] and report["failures"]["lost"] == report["failures"]["duplicates"] == 0
+
+
+def test_pending_commit_survives_a_crash_before_claim_unlink(tmp_path, home, hermes, monkeypatch):
+    path = tmp_path / "projects" / "-work" / "s1.jsonl"
+    _record(_hook(), home, path, event="SessionStart")
+    real_unlink = Path.unlink
+    interrupted = []
+
+    def crash_at_unlink(claim, *args, **kwargs):
+        if claim.suffix == ".claimed":
+            with sqlite3.connect(home / "lcm.db") as conn:
+                row = conn.execute("SELECT value FROM metadata WHERE key = ?",
+                                   ("capture:pending:claude-code:s1",)).fetchone()
+            interrupted.append((claim, json.loads(row[0]) if row else None))
+            raise RuntimeError("crash before unlink")
+        return real_unlink(claim, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "unlink", crash_at_unlink)
+        with pytest.raises(RuntimeError, match="crash before unlink"):
+            cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    [(claim, pending)] = interrupted
+    assert claim.exists() and pending and pending["path"] == str(path)
+    # Lose the claim as well: only the committed registry can recover this lineage.
+    claim.unlink()
+    _transcript(tmp_path, CONVERSATION)
+    assert cc.run_worker(home, hermes_home=hermes, settle_s=0)["records"] == 0
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    store = _open(home, hermes)
+    try:
+        assert [(role, tool) for _, role, _, tool in _rows(store)] == [
+            ("user", None), ("assistant", None), ("tool", "toolu_1"), ("assistant", None)]
+        assert _events(store) == ["new", "new", "new", "raw", "raw", "raw", "new"]
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("agent", [None, "worker"])
+def test_pending_lineage_retains_first_seen_and_drains_from_start(tmp_path, home, hermes, monkeypatch, agent):
+    path = tmp_path / "projects" / "-work" / "s1.jsonl"
+    lineage = cc.Lineage("s1", agent, path)
+    key = "capture:pending:" + lineage.key
+    store = _open(home, hermes)
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(cc.time, "time", lambda: 100.0)
+            assert cc.drain(store, lineage) == "missing"
+        expected = {"session_id": "s1", "agent_id": agent, "path": str(path), "named": [str(path)], "first_seen": 100.0}
+        assert store.read_metadata_json(key) == expected
+        assert cc.read_cursor(store, lineage) is None
+        calls, real_stat = [], os.stat
+
+        def stat(name, *args, **kwargs):
+            if name == path:
+                calls.append(name)
+            return real_stat(name, *args, **kwargs)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(cc.os, "stat", stat)
+            assert cc.drain(store, lineage) == "missing"
+        assert calls == [path] and store.read_metadata_json(key) == expected
+        assert cc.registered(store) == [lineage]
+    finally:
+        store.close()
+    _transcript(tmp_path, CONVERSATION)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    store = _open(home, hermes)
+    try:
+        assert len(_rows(store, lineage.rows_session)) == 4
+        assert cc.read_cursor(store, lineage)["line_index"] == len(CONVERSATION)
+        assert store.read_metadata_json(key) is None
+        assert cc.registered(store) == [lineage]
+    finally:
+        store.close()
+
+
 def test_worker_drains_the_spool_and_leaves_the_store_readable(tmp_path, home, hermes):
     path = _transcript(tmp_path, CONVERSATION)
     _record(_hook(), home, path)
@@ -433,15 +532,15 @@ def _argv(event):
 @pytest.mark.parametrize("case", ["session_goes_on", "print_mode_exit"])
 def test_a_killed_async_post_tool_batch_hook_loses_no_row(tmp_path, home, hermes, case, killed):
     """#2141 runs PostToolBatch async: Claude Code kills an async hook still running when a -p
-    session exits, and one can also die in a session that goes on. Wherever the hook dies, before
-    or after it writes its record, the synchronous Stop and SessionEnd hooks that follow lead the
+    session exits; #2350 detaches its writer. Wherever that detached child dies, before
+    or after it writes its record, the detached Stop and SessionEnd hooks that follow lead the
     worker to every row, and the store matches a run in which no hook died.
 
-    Each hook runs its registered command. A worker holds the lock while the synchronous hooks
+    Each hook runs its entrypoint. A worker holds the lock while the detached end hooks
     run, so they leave their records to it, and the worker run after them is that holder's rescan.
     The async hook never takes the lock, so its death cannot leave them waiting on it. The worker
     script it starts is a stub, and a FIFO in place of the hook log stops it just before it exits,
-    unless the kill, which waits only for its record, comes first."""
+    unless killed first. A launcher records the child PID, stopping it before spooling for that case."""
     import signal
     import subprocess
     assert _registered("PostToolBatch").get("async") is True
@@ -473,16 +572,25 @@ def test_a_killed_async_post_tool_batch_hook_loses_no_row(tmp_path, home, hermes
             handle.write("".join(json.dumps(entry) + "\n" for entry in CONVERSATION[3:]))
         with open(home / "capture.lock", "a") as held:  # the running worker
             fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            for event in events:
+            for index, event in enumerate(events, 1):
                 done = subprocess.run(_argv(event), input=payload(event),
                                       env=env, capture_output=True, text=True, timeout=60)
                 assert (done.returncode, done.stdout, done.stderr) == (0, "", "")
+                deadline = time.monotonic() + 30
+                while not log.exists() or len(log.read_text(encoding="utf-8").splitlines()) < index:
+                    assert time.monotonic() < deadline, "the detached end hooks never logged"
+                    time.sleep(0.01)
         outcomes = [json.loads(line)["outcome"] for line in log.read_text(encoding="utf-8").splitlines()]
         assert outcomes[-len(events):] == ["worker_running"] * len(events)  # left to the holder
         assert cc.run_worker(home, hermes_home=hermes, settle_s=0)["complete"]
         return stored(home)
 
-    tool_batch = subprocess.Popen(_argv("PostToolBatch"), env=env,
+    child_pid = tmp_path / "child.pid"
+    launch = ("import os,runpy,signal; os.register_at_fork(after_in_child=lambda: "
+              f"(open({str(child_pid)!r},'w').write(str(os.getpid())), "
+              f"signal.raise_signal(signal.SIGSTOP) if {killed == 'before_its_record'} else None)); "
+              "runpy.run_path(__import__('sys').argv[-1],run_name='__main__')")
+    tool_batch = subprocess.Popen([sys.executable, "-I", "-S", "-c", launch, _argv("PostToolBatch")[-1]], env=env,
                                   stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                   start_new_session=True)  # waits for its payload until it gets one
 
@@ -499,9 +607,15 @@ def test_a_killed_async_post_tool_batch_hook_loses_no_row(tmp_path, home, hermes
             time.sleep(0.01)
 
     def kill():
-        assert tool_batch.poll() is None, "the hook ended before it was killed"
-        os.killpg(tool_batch.pid, signal.SIGKILL)
-        tool_batch.wait(timeout=60)
+        if killed == "before_its_record":
+            tool_batch.stdin.write(payload("PostToolBatch").encode())
+            tool_batch.stdin.close()
+        deadline = time.monotonic() + 30
+        while not child_pid.exists() or not child_pid.read_text():
+            assert time.monotonic() < deadline, "the hook never forked its writer"
+            time.sleep(0.01)
+        os.kill(int(child_pid.read_text()), signal.SIGKILL)
+        assert tool_batch.wait(timeout=60) == 0  # only its detached writer was killed
         tool_batch.stdin.close()
         if log.is_fifo():
             log.unlink()
@@ -1272,20 +1386,23 @@ def test_a_lineage_whose_first_batch_fails_is_retried_by_the_sweep(tmp_path, hom
 
 def test_a_final_reply_after_a_late_async_record_replaced_the_end_record_is_captured_by_the_next_run(
         tmp_path, home, hermes, monkeypatch):
-    """REGRESSION (#2262): an async PostToolBatch record that lands after the session's end record
-    replaces it in the spool (one record per session), so the worker skips the settle. A final reply
-    written after that drain waits for the next run, whose sweep captures it from the cursor: every
-    transcript line in order, once. The transcript stays the source, so nothing is lost."""
+    """REGRESSION (#2262): A1 (#2350) now keeps an unclaimed end pointer and settles once.
+    A lost pointer still defers a later final reply to the next run's registered-lineage sweep:
+    every transcript line in order, once."""
     path = _transcript(tmp_path, CONVERSATION[:-1])
     hook = _hook()
     _record(hook, home, path, event="Stop")
-    _record(hook, home, path, event="PostToolBatch")  # the late async hook
+    assert hook.spool(home, {"host": "claude-code", "session_id": "s1", "event": "PostToolBatch",
+                             "transcript_path": str(path)}) == "kept_end"
     [spooled] = list((home / "spool").glob("*.json"))
-    assert json.loads(spooled.read_text(encoding="utf-8"))["event"] == "PostToolBatch"
+    assert json.loads(spooled.read_text(encoding="utf-8"))["event"] == "Stop"
     settled = []
     monkeypatch.setattr(cc, "_settle", lambda *args: settled.append(args))
     assert cc.run_worker(home, hermes_home=hermes, settle_s=0)["complete"]
-    assert settled == []  # no end record was left to settle
+    assert len(settled) == 1
+    _record(hook, home, path, event="Stop")
+    [spooled] = list((home / "spool").glob("*.json"))
+    spooled.unlink()  # simulate a lost last pointer; no fresh hook below
     with open(path, "a", encoding="utf-8") as handle:
         handle.write(json.dumps(CONVERSATION[-1]) + "\n")
     final = "The word is ochre."
@@ -1692,3 +1809,490 @@ def test_a_sweep_cut_by_its_deadline_keeps_the_claimed_record(tmp_path, home, he
                                         ).fetchone()[0] == len(CONVERSATION)
     finally:
         store.close()
+
+
+def test_a_pending_lineage_follows_a_newer_transcript_path(tmp_path, home, hermes):
+    """#2533 review: the pending row keeps the path of the latest record, so the sweep looks where the transcript
+    will appear, and the first sighting's time is kept."""
+    early = tmp_path / "projects" / "-old" / "s1.jsonl"
+    lineage = cc.Lineage("s1", None, early)
+    store = _open(home, hermes)
+    try:
+        assert cc.drain(store, lineage) == "missing"
+        first_seen = store.read_metadata_json("capture:pending:" + lineage.key)["first_seen"]
+        later = tmp_path / "projects" / "-work" / "s1.jsonl"
+        assert cc.drain(store, cc.Lineage("s1", None, later)) == "missing"
+        row = store.read_metadata_json("capture:pending:" + lineage.key)
+        assert (row["path"], row["first_seen"]) == (str(later), first_seen)
+    finally:
+        store.close()
+    _transcript(tmp_path, CONVERSATION)  # appears at the later path; every later record of s1 is lost
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    store = _open(home, hermes)
+    try:
+        assert _rows(store), "the session must be captured at its latest path"
+        assert store.read_metadata_json("capture:pending:" + lineage.key) is None
+    finally:
+        store.close()
+
+
+def test_a_pending_path_that_now_exists_is_not_replaced(tmp_path, home, hermes):
+    """#2533 review: when the recorded transcript has appeared, a newer record naming another missing path keeps
+    the recorded one, so the sweep still drains the transcript that holds rows."""
+    early = _transcript(tmp_path, [])  # the recorded path, still missing
+    early.unlink()
+    lineage = cc.Lineage("s1", None, early)
+    store = _open(home, hermes)
+    try:
+        assert cc.drain(store, lineage) == "missing"
+    finally:
+        store.close()
+    _transcript(tmp_path, CONVERSATION)  # the recorded transcript appears with rows, before any sweep reaches it
+    later = tmp_path / "projects" / "-elsewhere" / "s1.jsonl"
+    store = _open(home, hermes)
+    try:
+        assert cc.drain(store, cc.Lineage("s1", None, later)) == "missing"
+        assert store.read_metadata_json("capture:pending:" + lineage.key)["path"] == str(early)
+    finally:
+        store.close()
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    store = _open(home, hermes)
+    try:
+        assert _rows(store), "the transcript at the recorded path must be captured"
+    finally:
+        store.close()
+
+
+def test_a_resume_from_another_directory_is_captured_from_its_real_path(tmp_path, home, hermes):
+    """#2535 reach evidence: a resume from another directory sends SessionStart with a transcript path under the new
+    directory's project folder that never exists; every later hook names the real transcript. The session is
+    captured in full from the real path, its pending row clears, and the audit verifies it."""
+    from hermes_lcm import claude_code_audit as ca
+
+    phantom = tmp_path / "projects" / "-elsewhere" / "s1.jsonl"
+    _record(_hook(), home, phantom, event="SessionStart")
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    real = _transcript(tmp_path, CONVERSATION)
+    _record(_hook(), home, real)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    store = _open(home, hermes)
+    try:
+        assert len(_rows(store)) == len([e for e in CONVERSATION if e.get("type") in ("user", "assistant")])
+        assert store.read_metadata_json("capture:pending:claude-code:s1") is None
+    finally:
+        cc.to_rollback_journal(store.connection)
+        store.close()
+    report = ca.audit(home)
+    assert report["verified"] and report["pending_lineages"] == 0 and report["failures"]["lost"] == 0
+
+
+def _append(path, entries):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write("".join(json.dumps(entry) + "\n" for entry in entries))
+    return path
+
+
+def test_a_second_named_path_with_uncaptured_lines_is_not_verified(tmp_path, home, hermes):
+    """#2535 (ii): the cursor is on A; a record names B while B is missing; B is then written with rows that nothing
+    drains. The audit must not report verified, and the resume's phantom path rule keeps (i) verified."""
+    from hermes_lcm import claude_code_audit as ca
+
+    a = _append(tmp_path / "projects" / "-work" / "s1.jsonl", CONVERSATION[:2])
+    _record(_hook(), home, a)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    b = tmp_path / "projects" / "-other" / "s1.jsonl"
+    _record(_hook(), home, b)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    assert ca.audit(home)["verified"]  # B never existed so far: the phantom case
+    _append(b, CONVERSATION[2:])
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    report = ca.audit(home)
+    assert not report["verified"] and "claude-code:s1" in report["unverified"]
+    assert report["lineages"][0]["named_other_paths"] == 1
+    assert "a second transcript path holds rows; not matched" in report["verdict"]
+
+
+def test_a_path_named_while_pending_and_later_filled_keeps_the_lineage_unverified(tmp_path, home, hermes):
+    """#2535: pending A appears with rows; in the same run a record names a missing B, A is kept and drained, and the
+    first cursor inherits B as a named path. When B later fills, the audit does not report verified."""
+    from hermes_lcm import claude_code_audit as ca
+
+    a = tmp_path / "projects" / "-work" / "s1.jsonl"
+    _record(_hook(), home, a, event="SessionStart")
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    _append(a, CONVERSATION[:2])
+    b = tmp_path / "projects" / "-other" / "s1.jsonl"
+    _record(_hook(), home, b)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    assert ca.audit(home)["verified"]  # A is captured; B has not appeared
+    _append(b, CONVERSATION[2:])
+    report = ca.audit(home)
+    assert not report["verified"] and "claude-code:s1" in report["unverified"]
+
+
+def test_cursor_alternation_stays_unverified(tmp_path, home, hermes):
+    """#2535 (iii): A drained, B named and drained as a new generation, then A grows: A's new lines are uncaptured."""
+    from hermes_lcm import claude_code_audit as ca
+
+    a = _append(tmp_path / "projects" / "-work" / "s1.jsonl", CONVERSATION[:2])
+    _record(_hook(), home, a)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    b = _append(tmp_path / "projects" / "-other" / "s1.jsonl", CONVERSATION[:2])
+    _record(_hook(), home, b)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    _append(a, CONVERSATION[2:])
+    report = ca.audit(home)
+    assert not report["verified"] and report["lineages"][0]["named_other_paths"] == 1
+
+
+def test_a_known_path_adds_no_metadata_write(tmp_path, home, hermes):
+    """#2535 (iv): a drain of the path the cursor already names, with no new lines, leaves metadata unchanged."""
+    a = _append(tmp_path / "projects" / "-work" / "s1.jsonl", CONVERSATION)
+    lineage = cc.Lineage("s1", None, a)
+    store = _open(home, hermes)
+    try:
+        cc.drain(store, lineage)
+        before = store.connection.execute("SELECT key, value FROM metadata ORDER BY key").fetchall()
+        assert cc.drain(store, lineage) == "drained"
+        assert store.connection.execute("SELECT key, value FROM metadata ORDER BY key").fetchall() == before
+        assert cc.read_cursor(store, lineage)["named"] == [str(a)]
+    finally:
+        store.close()
+
+
+def test_a_cursor_written_before_named_paths_audits_as_before(tmp_path, home, hermes):
+    """#2535 (v): a cursor without `named` names only its own path; a complete capture stays verified."""
+    from hermes_lcm import claude_code_audit as ca
+
+    a = _append(tmp_path / "projects" / "-work" / "s1.jsonl", CONVERSATION)
+    _record(_hook(), home, a)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    _tamper_cursor = cc.CURSOR_PREFIX + "claude-code:s1"
+    store = _open(home, hermes)
+    try:
+        cursor = store.read_metadata_json(_tamper_cursor)
+        cursor.pop("named", None)
+        store.connection.execute("UPDATE metadata SET value = ? WHERE key = ?", (json.dumps(cursor), _tamper_cursor))
+        store.connection.commit()
+    finally:
+        cc.to_rollback_journal(store.connection)
+        store.close()
+    assert ca.audit(home)["verified"]
+
+
+def test_an_empty_named_file_never_stands_for_a_generation_with_no_rows(tmp_path, home, hermes):
+    """#2548 delta review: A was empty when drained (a generation with no rows), then gained lines that were never
+    drained, then a hook named B (drained as a new generation), then A was truncated. A's lines are lost: an empty A
+    must not count as the copy of its empty generation."""
+    from hermes_lcm import claude_code_audit as ca
+
+    a = tmp_path / "projects" / "-work" / "s1.jsonl"
+    a.parent.mkdir(parents=True)
+    a.write_bytes(b"")
+    _record(_hook(), home, a)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    _append(a, CONVERSATION[2:4])
+    b = _append(tmp_path / "projects" / "-other" / "s1.jsonl", CONVERSATION[:2])
+    _record(_hook(), home, b)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    a.write_bytes(b"")
+    report = ca.audit(home)
+    assert not report["verified"] and report["unverified"] == ["claude-code:s1"]
+
+
+def test_cursor_alternation_without_growth_is_not_matched(tmp_path, home, hermes):
+    """#2535 (release-manager ruling): A drained, then B with the same lines drained as a new generation, A unchanged.
+    The audit does not match A against the store, so a second path holding rows leaves the lineage unverified."""
+    from hermes_lcm import claude_code_audit as ca
+
+    a = _append(tmp_path / "projects" / "-work" / "s1.jsonl", CONVERSATION[:2])
+    _record(_hook(), home, a)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    b = _append(tmp_path / "projects" / "-other" / "s1.jsonl", CONVERSATION[:2])
+    _record(_hook(), home, b)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    report = ca.audit(home)
+    assert not report["verified"] and report["lineages"][0]["named_other_paths"] == 1
+
+
+def _second_path(tmp_path, home, hermes):
+    """The cursor is on A (captured); a record names B while B is missing."""
+    a = _append(tmp_path / "projects" / "-work" / "s1.jsonl", CONVERSATION[:2])
+    _record(_hook(), home, a)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    b = tmp_path / "projects" / "-other" / "s1.jsonl"
+    _record(_hook(), home, b)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    b.parent.mkdir(parents=True, exist_ok=True)
+    return b
+
+
+def test_a_second_named_path_with_only_saved_outputs_is_not_verified(tmp_path, home, hermes):
+    """#2535: B's transcript never appears, but its session folder holds a saved output the worker never sweeps."""
+    from hermes_lcm import claude_code_audit as ca
+
+    b = _second_path(tmp_path, home, hermes)
+    folder = b.parent / "s1" / "tool-results"
+    folder.mkdir(parents=True)
+    (folder / "toolu_9.txt").write_text("saved output\n", encoding="utf-8")
+    report = ca.audit(home)
+    assert not report["verified"] and report["lineages"][0]["named_other_paths"] == 1
+
+
+def test_an_empty_second_named_path_does_not_make_the_lineage_unverified(tmp_path, home, hermes):
+    """#2535: an empty B with no saved outputs holds nothing, like the resume's phantom path."""
+    from hermes_lcm import claude_code_audit as ca
+
+    b = _second_path(tmp_path, home, hermes)
+    b.write_bytes(b"")
+    report = ca.audit(home)
+    assert report["verified"] and report["lineages"][0]["named_other_paths"] == 0
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads any folder")
+@pytest.mark.parametrize("blocked", ["transcript_folder", "session_folder"])
+def test_a_second_named_path_that_cannot_be_checked_is_not_verified(tmp_path, home, hermes, blocked):
+    """#2535: a named path or its session folder that cannot be checked is not clean, and the audit still reports."""
+    from hermes_lcm import claude_code_audit as ca
+
+    b = _second_path(tmp_path, home, hermes)
+    b.write_bytes(b"")
+    folder = b.parent if blocked == "transcript_folder" else b.parent / "s1"
+    if blocked == "session_folder":
+        (folder / "tool-results").mkdir(parents=True)
+    folder.chmod(0)
+    try:
+        report = ca.audit(home)
+    finally:
+        folder.chmod(0o700)
+    assert not report["verified"] and report["lineages"][0]["named_other_paths"] == 1
+
+
+def test_a_subagent_under_another_named_path_is_not_verified(tmp_path, home, hermes):
+    """#2548 review: the cursor is on A; B was named and never appeared, but a subagent transcript with lines sits under
+    B's session folder (its hook record lost). The worker sweeps only A's folder, so the lineage must not verify."""
+    from hermes_lcm import claude_code_audit as ca
+
+    b = _second_path(tmp_path, home, hermes)
+    _append(b.parent / "s1" / "subagents" / "agent-x1.jsonl", [dict(e, isSidechain=True) for e in CONVERSATION[2:]])
+    report = ca.audit(home)
+    assert not report["verified"] and report["lineages"][0]["named_other_paths"] == 1
+
+
+def test_a_subagent_under_a_pending_rows_earlier_path_is_not_verified(tmp_path, home, hermes):
+    """#2548 review: a pending row on A is replaced by B (named [A, B]); a subagent transcript with lines appears under
+    A's folder. Every named path's subagents are checked, so it is unverified (another session keeps the audit checked)."""
+    from hermes_lcm import claude_code_audit as ca
+
+    other = _append(tmp_path / "projects" / "-work" / "s2.jsonl", [dict(e, sessionId="s2") for e in CONVERSATION[:2]])
+    _record(_hook(), home, other, session="s2")
+    a = tmp_path / "projects" / "-work" / "s1.jsonl"
+    _record(_hook(), home, a, event="SessionStart")
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    _record(_hook(), home, tmp_path / "projects" / "-other" / "s1.jsonl")
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    _append(a.parent / "s1" / "subagents" / "agent-x1.jsonl", [dict(e, isSidechain=True) for e in CONVERSATION[2:]])
+    report = ca.audit(home)
+    assert not report["verified"] and "claude-code:s1/agent:x1" in report["unverified"]
+
+
+@pytest.mark.parametrize("copy", ["lines", "empty"])
+def test_a_captured_subagents_copy_under_a_pending_rows_other_path_is_not_verified(tmp_path, home, hermes, copy):
+    """#2548 review: a pending parent names A and B; the worker sweeps B, so agent x1 under B gets a cursor. Another
+    agent-x1.jsonl under A is not a path that cursor names: holding lines it is unverified (no matching, #2551); empty,
+    it holds nothing."""
+    from hermes_lcm import claude_code_audit as ca
+
+    other = _append(tmp_path / "projects" / "-work" / "s2.jsonl", [dict(e, sessionId="s2") for e in CONVERSATION[:2]])
+    _record(_hook(), home, other, session="s2")
+    a = tmp_path / "projects" / "-work" / "s1.jsonl"
+    b = tmp_path / "projects" / "-other" / "s1.jsonl"
+    _record(_hook(), home, a, event="SessionStart")
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    _append(b.parent / "s1" / "subagents" / "agent-x1.jsonl", [dict(e, isSidechain=True) for e in CONVERSATION[2:]])
+    _record(_hook(), home, b)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    assert "claude-code:s1/agent:x1" not in ca.audit(home)["unverified"]  # captured under B
+    stray = a.parent / "s1" / "subagents" / "agent-x1.jsonl"
+    if copy == "lines":
+        _append(stray, [dict(e, isSidechain=True) for e in CONVERSATION[:2]])
+    else:
+        stray.parent.mkdir(parents=True)
+        stray.write_bytes(b"")
+    report = ca.audit(home)
+    if copy == "lines":
+        assert not report["verified"] and "claude-code:s1/agent:x1" in report["unverified"]
+    else:
+        assert "claude-code:s1/agent:x1" not in report["unverified"]
+
+
+@pytest.mark.parametrize("copy", ["lines", "empty"])
+def test_a_subagents_copy_under_a_captured_parents_folder_is_not_verified(tmp_path, home, hermes, copy):
+    """#2548 review: x1 is captured under B while the parent was pending; the parent is then captured at A. A copy of
+    x1 under A's folder is at a path x1's cursor never named, so x1 itself is unverified when it holds lines. (The
+    parent is unverified too, through B's subagents folder: stricter than the rule, #2551.)"""
+    from hermes_lcm import claude_code_audit as ca
+
+    a = tmp_path / "projects" / "-work" / "s1.jsonl"
+    b = tmp_path / "projects" / "-other" / "s1.jsonl"
+    _record(_hook(), home, a, event="SessionStart")
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    _append(b.parent / "s1" / "subagents" / "agent-x1.jsonl", [dict(e, isSidechain=True) for e in CONVERSATION[:2]])
+    _record(_hook(), home, b)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    _append(a, CONVERSATION[:2])
+    _record(_hook(), home, a)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    assert "claude-code:s1/agent:x1" not in ca.audit(home)["unverified"]
+    stray = a.parent / "s1" / "subagents" / "agent-x1.jsonl"
+    _append(stray, [dict(e, isSidechain=True) for e in CONVERSATION[2:4]] if copy == "lines" else [])
+    assert ("claude-code:s1/agent:x1" in ca.audit(home)["unverified"]) is (copy == "lines")
+
+
+@pytest.mark.parametrize("saved", ["file", "empty"])
+def test_a_saved_output_under_a_pending_rows_earlier_path_is_not_verified(tmp_path, home, hermes, saved):
+    """#2548 review: a pending row on A is replaced by B (named [A, B]); a saved output appears under A's session folder.
+    The worker sweeps only B, so it is unverified. An empty saved-outputs folder holds nothing and stays verified."""
+    from hermes_lcm import claude_code_audit as ca
+
+    other = _append(tmp_path / "projects" / "-work" / "s2.jsonl", [dict(e, sessionId="s2") for e in CONVERSATION[:2]])
+    _record(_hook(), home, other, session="s2")
+    a = tmp_path / "projects" / "-work" / "s1.jsonl"
+    _record(_hook(), home, a, event="SessionStart")
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    _record(_hook(), home, tmp_path / "projects" / "-other" / "s1.jsonl")
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    results = a.parent / "s1" / "tool-results"
+    results.mkdir(parents=True)
+    if saved == "file":
+        (results / "toolu_1.txt").write_text("saved output\n")
+    report = ca.audit(home)
+    if saved == "file":
+        assert not report["verified"] and "claude-code:s1" in report["unverified"]
+    else:
+        assert "claude-code:s1" not in report["unverified"]
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads any folder")
+def test_an_unreadable_subagents_folder_under_a_pending_path_is_not_verified(tmp_path, home, hermes):
+    """#2548 review: glob returns nothing for a folder it cannot read, so a pending row's subagents folder that cannot be
+    checked must leave the lineage unverified on its own."""
+    from hermes_lcm import claude_code_audit as ca
+
+    other = _append(tmp_path / "projects" / "-work" / "s2.jsonl", [dict(e, sessionId="s2") for e in CONVERSATION[:2]])
+    _record(_hook(), home, other, session="s2")
+    a = tmp_path / "projects" / "-work" / "s1.jsonl"
+    _record(_hook(), home, a, event="SessionStart")
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    _record(_hook(), home, tmp_path / "projects" / "-other" / "s1.jsonl")
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    _append(a.parent / "s1" / "subagents" / "agent-x1.jsonl", [dict(e, isSidechain=True) for e in CONVERSATION[2:]])
+    folder = a.parent / "s1" / "subagents"  # only this folder: the saved-outputs check must not be what flags it
+    folder.chmod(0)
+    try:
+        report = ca.audit(home)
+    finally:
+        folder.chmod(0o700)
+    assert not report["verified"] and "claude-code:s1" in report["unverified"]
+
+
+
+# #2535 / #2548: one table for the audit's rule on paths a lineage's records named. The rule: anything holding rows the
+# store was not seen to take, or that cannot be read, makes the lineage unverified; nothing else does. "followed" is
+# the path capture follows (the cursor's, or the pending row's), "named" another path the lineage's records named, and
+# "unnamed" a path no record or cursor names (the audit cannot tie it to the lineage, so it is out of scope).
+_SIDE = [dict(e, isSidechain=True) for e in CONVERSATION[:2]]
+
+
+def _table_state(tmp_path, home, hermes, state):
+    """Builds a state whose audit has no s1 key unverified, and returns its locations."""
+    other = _append(tmp_path / "projects" / "-work" / "s2.jsonl", [dict(e, sessionId="s2") for e in CONVERSATION[:2]])
+    _record(_hook(), home, other, session="s2")
+    a = tmp_path / "projects" / "-work" / "s1.jsonl"
+    b = tmp_path / "projects" / "-other" / "s1.jsonl"
+    c = tmp_path / "projects" / "-third" / "s1.jsonl"
+    if state == "captured":  # cursor on A; a later record names B, which never appeared
+        _append(a, CONVERSATION[:2])
+        _record(_hook(), home, a)
+        cc.run_worker(home, hermes_home=hermes, settle_s=0)
+        _record(_hook(), home, b)
+        cc.run_worker(home, hermes_home=hermes, settle_s=0)
+        return {"followed": a, "named": b, "unnamed": c}
+    _record(_hook(), home, a, event="SessionStart")  # pending: records name A, then B; the pending row follows B
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    if state == "child":  # agent x1 under B is swept and captured
+        _append(b.parent / "s1" / "subagents" / "agent-x1.jsonl", _SIDE)
+    _record(_hook(), home, b)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    if state == "child":
+        return {"followed": b.parent / "s1" / "subagents" / "agent-x1.jsonl",
+                "uncursored": a.parent / "s1" / "subagents" / "agent-x1.jsonl"}
+    return {"followed": b, "named": a, "unnamed": c}
+
+
+def _table_place(where, kind):
+    """Puts one artifact of ``kind`` at transcript path ``where`` (or under its session folder); returns a folder to
+    unlock after the audit, if any."""
+    folder = where.parent / where.stem
+    if kind == "lines":
+        _append(where, [dict(e, isSidechain=True) for e in CONVERSATION[2:4]] if "subagents" in where.parts
+                else CONVERSATION[2:4])
+    elif kind == "empty":
+        where.parent.mkdir(parents=True, exist_ok=True)
+        where.write_bytes(b"")
+    elif kind == "saved":
+        (folder / "tool-results").mkdir(parents=True, exist_ok=True)
+        (folder / "tool-results" / "toolu_9.txt").write_text("saved output\n")
+    elif kind in ("saved_symlink", "results_symlink"):  # capture reads neither: a symlinked file, or a symlinked folder
+        outside = where.parent.parent / "elsewhere"
+        outside.mkdir(parents=True, exist_ok=True)
+        (outside / "toolu_9.txt").write_text("saved output\n")
+        folder.mkdir(parents=True, exist_ok=True)
+        if kind == "results_symlink":
+            (folder / "tool-results").symlink_to(outside, target_is_directory=True)
+        else:
+            (folder / "tool-results").mkdir(exist_ok=True)
+            (folder / "tool-results" / "toolu_9.txt").symlink_to(outside / "toolu_9.txt")
+    elif kind in ("subagent", "subagent_empty", "unreadable_subagents"):
+        child = folder / "subagents" / "agent-y9.jsonl"
+        child.parent.mkdir(parents=True, exist_ok=True)
+        child.write_text("" if kind == "subagent_empty" else "".join(json.dumps(e) + "\n" for e in _SIDE))
+        if kind == "unreadable_subagents":
+            child.parent.chmod(0)
+            return child.parent
+    return None
+
+
+_PARENT_KINDS = ["lines", "empty", "saved", "saved_symlink", "results_symlink", "subagent", "subagent_empty",
+                 "unreadable_subagents"]
+_HOLDS = {"lines", "saved", "saved_symlink", "results_symlink", "subagent", "unreadable_subagents"}
+_TABLE = [(state, where, kind, where != "unnamed" and kind in _HOLDS)
+          for state in ("pending", "captured") for where in ("followed", "named", "unnamed") for kind in _PARENT_KINDS
+          if not (state == "captured" and where == "followed" and kind == "empty")]  # A exists: no empty file to add
+_TABLE += [("child", "followed", "lines", True), ("child", "uncursored", "lines", True),
+           ("child", "uncursored", "empty", False)]
+# Where the code is stricter than the rule (it fails closed): an empty file, as a pending row's transcript or as a
+# subagent transcript with no cursor, holds no rows but is unverified. Reported to the release manager; strict xfail
+# so a change in either direction shows here.
+_STRICTER = {("pending", "followed", "empty"), ("pending", "named", "empty"), ("pending", "followed", "subagent_empty"),
+             ("pending", "named", "subagent_empty"), ("captured", "followed", "subagent_empty"),
+             ("captured", "named", "subagent_empty")}
+_TABLE = [pytest.param(*row, id="-".join(row[:3]), marks=pytest.mark.xfail(strict=True, reason="stricter than the rule"))
+          if row[:3] in _STRICTER else pytest.param(*row, id="-".join(row[:3])) for row in _TABLE]
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads any folder")
+@pytest.mark.parametrize("state,where,kind,unverified", _TABLE)
+def test_the_named_path_rule_table(tmp_path, home, hermes, state, where, kind, unverified):
+    from hermes_lcm import claude_code_audit as ca
+
+    places = _table_state(tmp_path, home, hermes, state)
+    assert not [key for key in ca.audit(home)["unverified"] if key.startswith("claude-code:s1")]  # control
+    locked = _table_place(places[where], kind)
+    try:
+        report = ca.audit(home)
+    finally:
+        if locked is not None:
+            locked.chmod(0o700)
+    assert bool([key for key in report["unverified"] if key.startswith("claude-code:s1")]) is unverified

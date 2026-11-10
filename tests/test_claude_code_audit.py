@@ -27,6 +27,19 @@ def _close(store):
     store.close()
 
 
+@pytest.mark.parametrize("blocking", [False, True])
+def test_hook_blocking_latency(tmp_path, blocking):
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    # As in real logs, the session starts with the synchronous SessionStart, which has no blocking_ms.
+    rows = [{"event": "SessionStart", "session": "s1", "ms": 5}] + [
+        {"event": "Stop", "session": "s1", "ms": value, **({"blocking_ms": value / 10} if blocking else {})}
+        for value in (10, 20)]
+    (logs / "hook.log").write_text("".join(json.dumps(row) + "\n" for row in rows))
+    result = ca._home_report(tmp_path)["hooks_blocking_ms"]
+    assert result == ({"Stop": {"n": 2, "p50": 1.0, "p95": 2.0, "max": 2.0}} if blocking else {})
+
+
 def _tamper(home, sql, args=()):
     with closing(sqlite3.connect(home / "lcm.db")) as conn, conn:
         conn.execute(sql, args)
@@ -90,6 +103,31 @@ def test_clean_capture(captured, capsys):
     assert str(home) not in json.dumps(report) and "complete saved output" not in json.dumps(report)
     assert _cli().main(["audit", "--home", str(home)]) == 0
     assert json.loads(capsys.readouterr().out) == report
+
+
+@pytest.mark.parametrize("exists", [False, True])
+def test_pending_lineage_is_counted_without_claiming_capture(tmp_path, monkeypatch, exists):
+    home = tmp_path / "home"
+    path = tmp_path / "projects" / "-work" / "s1.jsonl"
+    store = _open(home, tmp_path / "hermes")
+    try:
+        assert cc.drain(store, cc.Lineage("s1", None, path)) == "missing"
+    finally:
+        _close(store)
+    if exists:
+        _transcript(tmp_path, CONVERSATION)
+    monkeypatch.setattr(cc.time, "time", lambda: 200.0)
+    _tamper(home, "UPDATE metadata SET value = json_set(value, '$.first_seen', 100.0) WHERE key = ?",
+            ("capture:pending:claude-code:s1",))
+    report = ca.audit(home)
+    assert report["pending_lineages"] == 1 and report["oldest_pending_age_s"] == 100.0
+    assert report["verdict"].endswith(f"; 1 lineages awaiting capture ({0 if exists else 1} transcripts not yet seen), oldest 0.0 h")
+    assert report["lineages"] == []
+    # Uncaptured once its transcript exists; a transcript that never appeared holds nothing to lose.
+    assert report["unverified"] == (["claude-code:s1"] if exists else [])
+    assert str(path) not in json.dumps(report)
+    assert ca.audit(home, "other")["pending_lineages"] == 0
+    assert ca.audit(home, "other")["oldest_pending_age_s"] is None
 
 
 @pytest.mark.parametrize("counter", ["lost_lines", "lost"])
@@ -775,3 +813,23 @@ def test_an_empty_generation_never_matches_a_set_aside_copy(tmp_path):
     report = ca.audit(home)
     assert report["ok"] is True and report["lineages"][0]["generations_gone"] == 1
     assert report["verified"] is False and report["unverified"] == [lineage.key]
+
+
+def test_pending_rows_that_cannot_be_checked_stay_unverified(tmp_path):
+    """#2533 review: a pending row without a usable path, and an uncaptured subagent of a pending main session,
+    leave the audit unverified."""
+    home = tmp_path / "home"
+    store = _open(home, tmp_path / "hermes")
+    try:
+        parent = tmp_path / "projects" / "-work" / "s1.jsonl"
+        assert cc.drain(store, cc.Lineage("s1", None, parent)) == "missing"
+    finally:
+        _close(store)
+    child = parent.with_suffix("") / "subagents" / "agent-a1.jsonl"
+    child.parent.mkdir(parents=True)
+    child.write_text(json.dumps(CONVERSATION[0]) + "\n", encoding="utf-8")
+    report = ca.audit(home)
+    assert not report["verified"] and any("a1" in key for key in report["unverified"])
+    _tamper(home, "UPDATE metadata SET value = json_remove(value, '$.path') WHERE key = ?",
+            ("capture:pending:claude-code:s1",))
+    assert "claude-code:s1" in ca.audit(home)["unverified"]

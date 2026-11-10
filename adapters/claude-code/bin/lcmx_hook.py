@@ -46,12 +46,14 @@ import hashlib
 import json
 import os
 import re
+import signal
 import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import lcmx_runtime  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # before stdin, so A7 allows it
+if __name__ != "__main__":
+    import lcmx_runtime  # noqa: E402
 
 _IMPORTS_MS = round((time.perf_counter() - _T0) * 1000, 1)
 
@@ -61,6 +63,8 @@ TYPE_CHECKING = False
 if TYPE_CHECKING:
     from typing import Any, Dict, Mapping, Optional, TextIO, Tuple
 
+DETACHED_DEADLINE_S = 30
+SYNC_LOCK_WAIT_S = 1.0  # a synchronous hook never waits longer than this for a detached writer's pointer lock
 MAX_PAYLOAD = 1024 * 1024
 PRECOMPACT_DEADLINE_S = 10
 LOG_ROTATE_BYTES = 5 * 1024 * 1024
@@ -70,6 +74,8 @@ EVENTS = frozenset({
     "SessionStart", "UserPromptSubmit", "PostToolBatch", "PostToolUse", "Stop", "StopFailure",
     "SubagentStop", "PreCompact", "PostCompact", "SessionEnd",
 })
+DETACHED_EVENTS = EVENTS - {"SessionStart", "PreCompact"}
+END_EVENTS = frozenset({"Stop", "StopFailure", "SubagentStop", "SessionEnd", "PreCompact"})
 # Registered "async" in hooks.json: Claude Code does not wait for these and may kill one at any
 # point, so they never probe the store lock (start_worker).
 ASYNC_EVENTS = frozenset({"PostToolBatch"})
@@ -159,12 +165,36 @@ def normalize(payload: Mapping[str, Any], environ: Mapping[str, str]) -> Dict[st
     return record
 
 
-def spool(home: Path, record: Mapping[str, Any]) -> str:
-    """Atomically replace this session's (or subagent's) pointer record."""
+def spool(home: Path, record: Mapping[str, Any], *, wait_s: Optional[float] = None) -> str:
+    """Atomically replace this session's (or subagent's) pointer record.
+
+    ``wait_s`` bounds the wait for the pointer's lock (synchronous hooks): if a stalled detached writer of the same
+    session holds it that long, nothing is written and ``lock_busy`` is returned. That holder writes its own pointer,
+    and the worker this hook still starts sweeps every registered lineage, so the skip delays nothing."""
     directory = home / "spool"
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     identity = "\0".join([record["host"], record["session_id"], record.get("agent_id") or ""])
     key = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:32]
+    import fcntl
+    locks = home / "spool-locks"
+    locks.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with open(locks / key, "a") as lock:
+        if wait_s is None:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+        else:
+            give_up = time.monotonic() + wait_s
+            while True:
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= give_up:
+                        return "lock_busy"
+                    time.sleep(0.01)
+        return _spool_locked(directory, key, record)
+
+
+def _spool_locked(directory: Path, key: str, record: Mapping[str, Any]) -> str:
     record = dict(record)
     if record.get("event") == "SessionStart" and record.get("source"):
         record["start_source"] = record["source"]
@@ -175,6 +205,14 @@ def spool(home: Path, record: Mapping[str, Any]) -> str:
                 previous = json.load(handle)
         except (OSError, ValueError):
             previous = None
+        # SessionStart is synchronous; children retain its fork provenance. Only the transcript
+        # names content; local_gc is session environment. The guard preserves end-event ordering.
+        if isinstance(previous, dict):
+            if previous.get("event") in END_EVENTS and record["event"] not in END_EVENTS:
+                return "kept_end"
+            if ((previous.get("event") in END_EVENTS) == (record["event"] in END_EVENTS)
+                    and previous.get("hook_started_ns", -1) > record.get("hook_started_ns", 0)):
+                return "stale"
         if isinstance(previous, dict) and previous.get("start_source"):
             record["start_source"] = previous["start_source"]
             record["started_at"] = previous.get("started_at")
@@ -296,6 +334,8 @@ def _log(home: Optional[Path], record: Mapping[str, Any], outcome: str, started:
         line = {"t": round(time.time(), 3), "event": record.get("event"), "host": record.get("host"),
                 "session": record.get("session_id"), "outcome": outcome,
                 "ms": round((time.monotonic() - started) * 1000, 1)}
+        if "blocking_ms" in record:
+            line.update(detached=True, blocking_ms=record["blocking_ms"])
         if steps is not None:
             line["t0"] = round(_T0_WALL, 3)
             line["phases"] = steps.end()
@@ -306,8 +346,10 @@ def _log(home: Optional[Path], record: Mapping[str, Any], outcome: str, started:
         pass
 
 
-def main(stdin: TextIO = sys.stdin, environ: Mapping[str, str] = os.environ) -> int:
-    started = time.monotonic()
+def main(stdin: TextIO = sys.stdin, environ: Mapping[str, str] = os.environ, *, detach: bool = False) -> int:
+    global lcmx_runtime
+    started, hook_started_ns = time.monotonic(), time.time_ns()
+    child, nofork, blocking_ms = False, "", None
     if environ.get("LCMX_CAPTURE", "").strip().lower() in OFF_VALUES:
         return 0
     steps = _Steps(_IMPORTS_MS)
@@ -317,7 +359,6 @@ def main(stdin: TextIO = sys.stdin, environ: Mapping[str, str] = os.environ) -> 
     home: Optional[Path] = None
     try:
         # A relative home setting gives None: nothing is written anywhere, not even the log.
-        home = lcmx_runtime.store_home(environ, "grok-build" if environ.get("GROK_SESSION_ID") else "claude-code")
         raw = stdin.read(MAX_PAYLOAD + 1)
         if len(raw) > MAX_PAYLOAD:
             outcome = "payload_too_large"
@@ -326,7 +367,51 @@ def main(stdin: TextIO = sys.stdin, environ: Mapping[str, str] = os.environ) -> 
         if not isinstance(payload, dict):
             outcome = "payload_not_object"
             return 0
+        if detach and _pick(payload, "hook_event_name", "hookEventName") in DETACHED_EVENTS and hasattr(os, "fork"):
+            blocking_ms = round((time.monotonic() - started) * 1000, 1)
+            ready = signal_ready = -1
+            try:
+                ready, signal_ready = os.pipe()
+                pid = os.fork()
+            except OSError:
+                nofork = "+nofork"
+                for fd in (ready, signal_ready):  # a pipe made before a failed fork
+                    if fd >= 0:
+                        os.close(fd)
+            else:
+                if pid:
+                    # Return only once the child has left the hook's group (or died), so a group kill right after the
+                    # hook returns cannot reach the writer. setsid does no I/O, so this wait is short.
+                    os.close(signal_ready)
+                    try:
+                        os.read(ready, 1)
+                    finally:
+                        os.close(ready)
+                    return 0
+                child = True  # set first: the child must always end in os._exit, never return into the caller
+                # Leave the hook's group and release Claude Code's pipes before anything that can touch disk.
+                os.close(ready)
+                try:
+                    os.setsid()
+                except OSError:
+                    pass  # unreachable for a fork child; carry on in the hook's group rather than lose the record
+                finally:
+                    os.close(signal_ready)  # the parent may return now
+                blocking_ms = round((time.monotonic() - started) * 1000, 1)  # through the handshake (one clock)
+                null = os.open(os.devnull, os.O_RDWR)
+                for fd in (0, 1, 2):
+                    os.dup2(null, fd)
+                os.close(null)
+                signal.signal(signal.SIGHUP, signal.SIG_IGN)
+                signal.alarm(DETACHED_DEADLINE_S)
+                try:  # test-only delay before spooling; a malformed value never costs the record
+                    delay_ms = float(environ.get("LCMX_TEST_HOOK_DELAY_MS", "0"))
+                except ValueError:
+                    delay_ms = 0
+                time.sleep(min(500, max(0, delay_ms)) / 1000)
+        import lcmx_runtime
         record = normalize(payload, environ)
+        record["hook_started_ns"] = hook_started_ns
         home = lcmx_runtime.store_home(environ, record["host"])  # camelCase payloads are Grok's too
         if home is None:
             return 0
@@ -337,16 +422,33 @@ def main(stdin: TextIO = sys.stdin, environ: Mapping[str, str] = os.environ) -> 
             outcome = "observed"  # never spooled, so it cannot replace a pending record
             return 0
         steps.begin("spool")
-        spool(home, record)
+        spooled = spool(home, record, wait_s=None if child else SYNC_LOCK_WAIT_S)
         deadline = PRECOMPACT_DEADLINE_S if record["event"] == "PreCompact" else 0
         outcome = start_worker(home, environ, deadline_s=deadline, probe=record["event"] not in ASYNC_EVENTS,
                                steps=steps)
+        if spooled != "spooled":
+            outcome += "+" + spooled
     except Exception as exc:  # noqa: BLE001 - a hook never fails the session
         outcome = "error:" + type(exc).__name__
     finally:
-        _log(home, record, outcome, started, steps)
+        try:
+            if not (detach and not child and blocking_ms is not None and not nofork):
+                if child:
+                    record["blocking_ms"] = blocking_ms
+                if home is None and "host" not in record:  # failed before the payload named its host: the environment's home
+                    try:
+                        import lcmx_runtime
+                        home = lcmx_runtime.store_home(environ, "grok-build" if environ.get("GROK_SESSION_ID")
+                                                       else "claude-code")
+                    except Exception:  # noqa: BLE001 - a home that cannot be resolved logs nothing, as before
+                        home = None
+                # A home the payload's host refused (a relative setting) stays None: nothing is written anywhere.
+                _log(home, record, outcome + nofork, started, steps)
+        finally:
+            if child:
+                os._exit(0)
     return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(detach=True))
