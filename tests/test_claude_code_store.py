@@ -3121,3 +3121,41 @@ def test_the_reused_agent_id_edges(tmp_path, home, hermes, shape):
         assert set(rows) == {"first task", "one", "second task", "two", "three"}
     else:  # one id-keyed lineage; the copy is reported, never captured again (#2535)
         assert keys == ["claude-code:s1/agent:x1"] and not ca.audit(home)["verified"]
+
+
+# #2571: one table for an unterminated last record. The rule: a partial tail on a lineage whose last observed hook was
+# its end (SessionEnd for a session, SubagentStop for a subagent) makes that lineage unverified, since capture will never
+# take those bytes; with no observed end, or after the session resumed, the tail stays reported only.
+_TAIL_TABLE = [(kind, end, tail, resumed) for kind in ("session", "subagent") for end in (False, True)
+               for tail in (False, True) for resumed in (False, True)]
+
+
+@pytest.mark.parametrize("kind,end,tail,resumed", _TAIL_TABLE,
+                         ids=[f"{k}-{'end' if e else 'live'}-{'tail' if t else 'whole'}-{'resumed' if r else 'still'}"
+                              for k, e, t, r in _TAIL_TABLE])
+def test_the_ended_partial_tail_rule_table(tmp_path, home, hermes, kind, end, tail, resumed):
+    from hermes_lcm import claude_code_audit as ca
+
+    a = _append(tmp_path / "projects" / "-work" / "s1.jsonl", CONVERSATION[:2])
+    child = _append(a.parent / "s1" / "subagents" / "agent-x1.jsonl", _SIDE) if kind == "subagent" else None
+    path, extra = (child, {"agent_id": "x1", "agent_transcript_path": str(child)}) if child else (a, {})
+    live, last = ("SubagentStart", "SubagentStop") if child else ("UserPromptSubmit", "SessionEnd")
+    _record(_hook(), home, a)
+    _record(_hook(), home, a, event=live, **extra)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    partial = json.dumps(dict(_entry("assistant", "late", [{"type": "text", "text": "late"}]), isSidechain=bool(child)))
+    if tail:  # a crash mid-append leaves the last record without its newline
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(partial[:20])
+    if end:
+        _record(_hook(), home, a, event=last, **extra)
+    cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    if resumed:  # the session goes on: a later hook, and the record is finished
+        _record(_hook(), home, a, event=live, **extra)
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(partial[20:] + "\n" if tail else partial + "\n")
+        cc.run_worker(home, hermes_home=hermes, settle_s=0)
+    report = ca.audit(home)
+    row = next(row for row in report["lineages"] if row["lineage"] == cc.lineage_key("s1", "x1" if child else None))
+    assert bool(row["partial_tail_bytes"]) is (tail and not resumed)
+    assert report["verified"] is not (end and tail and not resumed)
