@@ -15,7 +15,7 @@ CHILD_BARS = ("B10",)  # scorers/delegated.py: delegated children stored under t
 TRANSPORTS = ("acp", "gateway")
 FAULTS = {"crash_after_compaction_before_reply", "clean_exit_before_turn", "crash_mid_tool_call",
           "crash_after_rotation_before_child_row", "crash_between_session_end_and_start", "cancel_then_retry",
-          "publication_failure", "plugin_switch", "forced_recovery", "p8_inject", "forced_compaction_then_turn"}
+          "publication_failure", "plugin_switch", "forced_recovery", "p8_inject", "forced_compaction_then_turn", "crash_after_host_reply_before_store"}
 # issue -> (the bars that decide it, what an uncovered issue would need)
 ISSUES = {
     1623: (("B1", "B2"), "acp-process stopped-turn immediate persistence"),
@@ -335,6 +335,19 @@ def registry() -> list[dict]:
                    faults=[] if v == "none" else [{"kind": "p8_inject", "variant": v}],
                    doc="P8 flush positive control; none is the negative control.")
               for v in ("archived", "other-active", "random-snapshot", "none")]
+    cells += [cell("reply-held-crash/" + name, targets, in_place=ip, user={"trailing_ws": True},
+                   faults=[fault], doc=proof + " Reservation holds the store; does not prove natural crash timing.")
+              for name, ip, targets, fault, proof in (
+                  ("rotation-turn", False, [2624], {"kind": "crash_after_host_reply_before_store", "turn": 12, "depth": 1},
+                   "First rotation child reply survives a crash and reload."),
+                  ("plain-turn", False, [2624], {"kind": "crash_after_host_reply_before_store", "turn": 15, "depth": 1},
+                   "A later reply in the first child survives a crash and reload."),
+                  ("multi-hop", False, [2624], {"kind": "crash_after_host_reply_before_store", "turn": 22, "depth": 2},
+                   "A reply two compression hops from the ACP root survives reload."),
+                  ("pre-rotation", False, [], {"kind": "crash_after_host_reply_before_store", "turn": 5, "depth": 0},
+                   "Root-session crash control before rotation."),
+                  ("in-place", True, [], {"kind": "crash_after_host_reply_before_store", "turn": 15, "depth": 0},
+                   "Default in-place compaction crash control without a rotation child."))]
     return cells
 
 

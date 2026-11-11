@@ -25,6 +25,7 @@ from pathlib import Path
 
 from bench.instruments.reliability import acp_driver as AD, cells as C, fake_provider as FP, plugin_tree, probe as P1
 from bench.instruments.reliability import run_matrix as RM, stop_turn
+from bench.instruments.reliability import reply_fault as RF
 from bench.instruments.reliability.scorers import continuity
 
 OBSERVER = Path(__file__).with_name("observer")
@@ -34,7 +35,7 @@ SANDBOX = ('(version 1)(allow default)(deny network-outbound)(allow network-outb
 FAKE_KEY = "rel-fake-key-not-a-secret"
 PROCESS_FAULTS = {"acp-process": {"crash_after_compaction_before_reply", "cancel_then_retry",
                                    "crash_after_rotation_before_child_row", "clean_exit_before_turn", "p8_inject",
-                                   "forced_compaction_then_turn"}}
+                                   "forced_compaction_then_turn", RF.KIND}}
 # R2-only: the main route over the Anthropic Messages API (a ``/anthropic`` base path selects the anthropic_messages
 # transport, hermes_cli/runtime_provider.py _detect_api_mode_for_url); the #550 class.
 R2_CELLS = [C.cell("stop-after-tool/no-retry/in-place", [1623], in_place=True, turns=2, repeat=1,
@@ -230,6 +231,11 @@ class Scenario:
             return {"tool_calls": calls, "log": log, **extra}
         text = reply_text(self.cell, "T", t)
         run.event(turn=t, event="emit", tag=f"T{t:02d}", text=text)
+        fault = next((f for f in self.cell["faults"] if f["kind"] == RF.KIND and f["turn"] == t), None)
+        if fault and st["phase"] == "A" and run.reply_fault is None and RF.KIND not in run.fired:
+            run.reply_fault = held = RF.HeldReply(run, fault, text)
+            extra.update(before_release=held.before_release, after_release=held.after_release,
+                         release_failed=held.release_failed)
         return {"content": text, "log": log, **extra}
 
 
@@ -247,6 +253,7 @@ class ProcessCell:
         self.transcript, self.proc, self.sid, self.text_tag = d / "transcript.jsonl", None, None, None
         self.phase, self.log_mark, self.fired, self.backlog_log, self.last_turn = "A", 0, set(), [], 0
         self.scenario, self.carriers, self.rewritten = Scenario(self), None, False
+        self.reply_fault = None
         self.provider = FP.FakeProvider(d / "provider-requests.jsonl", main=self.scenario.main,
                                         usage_scale=float(cell["assistant"].get("usage_scale", 1.0)),
                                         continuity_context=self.continuity_context)
@@ -282,7 +289,8 @@ class ProcessCell:
             append(self.d / "observer.jsonl", {"phase": self.phase, "ts": time.time(), "kind": "probe_rewrite", "turn": t})
 
     def fire(self, kind: str, turn: int, **extra) -> None:
-        append(self.d / "faults-fired.jsonl", {"kind": kind, "phase": self.phase, "turn": turn})
+        append(self.d / "faults-fired.jsonl", {"kind": kind, "phase": self.phase, "turn": turn,
+                                              **(extra if kind == RF.KIND else {})})
         self.fired.add(kind)
         self.event(turn=turn, event="crash" if kind.startswith("crash") else kind, fault=kind, session_prefix="T",
                    host_commits=self.host_log()[self.log_mark:].count(P1.COMMITTED), **extra)
@@ -358,12 +366,24 @@ class ProcessCell:
             else None
         if killer:  # --kill-after-rotation: SIGKILL while the rotated child session has no lcm rows yet
             killer.start()
+        err = None
         try:
             answer, stop = self.proc.prompt(self.sid, text, self.budget())
+        except BaseException as exc:
+            err = exc
+            raise
         finally:
             if killer:
                 killer.stop.set()
                 killer.join()
+            held = self.reply_fault
+            if held and self.phase == "A" and held.fault["turn"] == t:
+                if not held.done.wait(15):
+                    held.invalid("completion timeout")
+                if err is not None and not isinstance(err, AD.ProcessGone):
+                    held.invalid("prompt error: " + type(err).__name__)
+                elif self.proc.killed and RF.KIND in self.fired:
+                    raise AD.ProcessGone("held-reply fault killed host")
         self.event(turn=t, event="acp_response", tag=f"T{t:02d}", stop_reason=stop, chars=len(answer))
         self.wait_for_child(t)
         return stop
@@ -445,6 +465,10 @@ class ProcessCell:
             self.budget()  # work after the last request may have crossed the deadline: never a late "done"
             return {"exit": "done", "next_turn": None, **({"final_check": final} if final else {})}
         except AD.ProcessGone as exc:
+            if self.reply_fault and self.phase == "A" and self.proc.killed:
+                if not self.reply_fault.done.wait(15):
+                    self.reply_fault.invalid("completion timeout")
+                    return {"exit": "error", "reason": "reply-held fault completion timeout; restart withheld"}
             if self.proc.killed and any(k.startswith("crash") for k in self.fired):
                 if self.deadline is not None and time.monotonic() >= self.deadline:
                     return {"exit": "error", "reason": f"PhaseDeadline: phase {self.phase} exceeded its "
@@ -459,6 +483,8 @@ class ProcessCell:
         finally:
             if not closed:
                 rc = self.proc.close()
+            if self.reply_fault and self.phase == "A" and not self.reply_fault.done.wait(15):
+                self.reply_fault.invalid("completion timeout")
             self.event(event="host_exit", returncode=rc, killed=self.proc.killed)
 
     def low_backlog(self, last_turn: int) -> bool:
@@ -598,9 +624,23 @@ def run_cell_process(cell: dict, host_name: str, host: dict, plugin: dict, out: 
     d.mkdir(parents=True)
     rec = {"cell": cell["id"], "transport": transport, "host": host_name, "host_sha": host["sha"], "plugin_ref": plugin["ref"],
            "plugin_sha": plugin["sha"], "targets": cell["targets"], "dir": str(d), "host_identity": identity}
+    run, last = None, {}
 
     def done(**fields):
         rec.update(fields)
+        if run and any(f["kind"] == RF.KIND for f in cell["faults"]):
+            if run.reply_fault:
+                run.reply_fault.verdict(rec, last.get("exit") if run.phase == "B" else None)
+                # Enrich the original crash records once restart_exit and post-kill checks are known.
+                for name in ("faults-fired.jsonl", "transcript.jsonl"):
+                    path = d / name
+                    rows = read_jsonl(path)
+                    if rows:
+                        path.write_text("".join(json.dumps({**row, **rec["reply_fault"]} if
+                            row.get("fault", row.get("kind")) == RF.KIND else row) + "\n" for row in rows))
+            else:
+                RF.invalid_verdict(rec, "trigger never armed")
+                rec["reply_fault"] = {"valid": False, "invalid_reason": "trigger never armed"}
         (d / "verdict.json").write_text(json.dumps(rec, indent=1, default=str))
         return rec
     if not identity or "error" in identity:  # before anything reads or runs the host tree
@@ -676,6 +716,13 @@ def run_cell_process(cell: dict, host_name: str, host: dict, plugin: dict, out: 
             return done(verdict="ERROR", reason=f"provider request log does not account for the transcript: {acct}")
         if cell.get("stop_after_tool"):
             return done(**stop_turn.score(run, last))
+        if any(f["kind"] == RF.KIND for f in cell["faults"]) and last.get("exit") == "error":
+            return done(verdict="ERROR", reason=last.get("reason") or str(last))
+        if run.reply_fault:
+            if not run.reply_fault.record["valid"] or run.phase != "B" or last.get("exit") != "done":
+                return done()
+        elif any(f["kind"] == RF.KIND for f in cell["faults"]):
+            return done()
         run.fired.update(n["kind"] for n in read_jsonl(d / "faults-fired.jsonl"))
         rec.update(RM.verdict_fields({**cell, "chat_root": run.sid, "transport": transport}, d, last, run.fired, rec["citations"], backup_errors,
                                      s / "db"))

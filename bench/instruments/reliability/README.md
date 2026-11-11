@@ -495,3 +495,49 @@ The nightly gate checks this pattern per host and transport, with B9 required in
 `controls.py` records the measured must-support pairs, where missing or UNSUPPORTED controls gate; other pairs
 may be UNSUPPORTED, but any PASS/FAIL must match.
 Disable wraps with `LCM_RELIABILITY_P8=off` or `--lcm-env LCM_RELIABILITY_P8=off`; faults stay.
+
+## Held-reply crash (#2624)
+
+`crash_after_host_reply_before_store` runs only under `acp-process`: reserve the
+plugin store with `BEGIN IMMEDIATE`, release the scripted MAIN reply, poll the
+read-only host DB every 2 ms for a new assistant row, then kill immediately.
+Validate the row's ACP root and compression depth, check that the host kept the
+reply and the store did not, release all connections, and restart the same ACP
+session. Phase B must finish `done`. Reservation failure, a five-second poll
+timeout, invalid lineage, failed post-kill checks, or failed restart yields ERROR
+with `reply-held fault INVALID`. Evidence records contain times and counts, not content.
+
+The held-reply fault follows this order:
+
+| step | what happens | invariant it protects |
+|---|---|---|
+| reservation | `BEGIN IMMEDIATE` before release | Store writer is blocked |
+| release | Release turn N's reply | Reservation precedes response bytes |
+| poll | Read-only poll every 2 ms | Witness a new host reply |
+| kill | Signal on the poll that sees the row; no read in between | Close the witnessed window |
+| exit confirmed | Group gone and leader exited; bounded 5 s, else INVALID | No host writer can commit later |
+| validity read | Check new row, root, depth | Correct reply and lineage |
+| post-kill check | Host has the witnessed row; store has none | Confirm the held-reply window |
+| ROLLBACK | Last, on every path | Hold reservation through checks; release before restart |
+| restart | Phase B `session/load` must end `done` | Recovery completes in the same session |
+
+The five cells use provisional turn/depth pairs: `rotation-turn` (12/1),
+`plain-turn` (15/1), `multi-hop` (22/2), `pre-rotation` (5/0), and `in-place`
+(15/0). The first three target #2624; the controls gate every host. On main,
+upstream-main and upstream-uid should FAIL the first three with B1/B2, classified
+KNOWN under #2624: `rotation-turn` lacks the T12 reply (B1 `reply T12`, B2 deficit
+1), and in some runs also the T12 user row (B1 `T12` and `reply T12`, B2 deficit
+2), because at a run's first rotation the plugin sometimes stores the user row
+only together with the reply; `plain-turn` lacks the T15 user row and reply
+(B1 `T15` and `reply T15`, B2 deficit 2); `multi-hop` lacks the T22 user row and
+reply (B1 `T22` and `reply T22`, B2 deficit 2). Both controls should PASS.
+All five should PASS on r34.10-0.21.5.
+Other exact known failures retain their existing classification; other failed bars
+remain findings. Depth validation decides validity, not the cell's name.
+
+The measured upstream-main store uses WAL journal mode. The reservation blocks
+every writer in either WAL or delete journal mode. This proves behavior while
+the reservation prevents a store commit. The
+reservation, rather than natural slowness, creates that window. It does not prove
+natural crash timing, real-model timing, or behavior on host versions other than
+the pins. No timed-crash variant is provided.

@@ -1,4 +1,6 @@
 """#1588 exact-cell gate promotions; no host process or message payloads needed."""
+import json
+
 import pytest
 
 from bench.instruments.reliability import cells, ci, report
@@ -67,6 +69,53 @@ def test_existing_gate_and_open_target_behavior_is_unchanged():
 def test_abandoned_rotation_child_2624_gate_scope(host, transport, failed, open_issues, gates):
     problems = ci.gate(rows_for("crash-after-rotation/rotation", host, transport, failed), open_issues)
     assert len(problems) == int(gates)
+
+
+HELD_TARGETS = ["reply-held-crash/" + name for name in ("rotation-turn", "plain-turn", "multi-hop")]
+HELD_CONTROLS = ["reply-held-crash/pre-rotation", "reply-held-crash/in-place"]
+CI_HOST_NAMES = list(json.loads(ci.CI_HOSTS.read_text())["hosts"])
+
+
+@pytest.mark.parametrize("cell", HELD_TARGETS)
+@pytest.mark.parametrize("host", ["upstream-main", "upstream-uid"])
+def test_held_reply_known_only_while_2624_open(cell, host):
+    rows = rows_for(cell, host, "acp-process", ["B1", "B2"])
+    assert ci.gate(rows, {2624}) == []
+    assert len(ci.gate(rows, set())) == 1
+
+
+@pytest.mark.parametrize("cell", HELD_TARGETS)
+@pytest.mark.parametrize("host", ["r34.10-0.21.5", "ref-0.21.5", "r34.15-0.21.5",
+                                  "floor-0.21.3", "r34.4-0.21.5"])
+def test_held_reply_known_entry_excludes_other_hosts(cell, host):
+    assert len(ci.gate(rows_for(cell, host, "acp-process", ["B1", "B2"]), {2624})) == 1
+
+
+@pytest.mark.parametrize("cell", HELD_TARGETS)
+@pytest.mark.parametrize("host", ["upstream-main", "upstream-uid"])
+@pytest.mark.parametrize("bar", ["B3", "B4", "B5"])
+def test_held_reply_uncovered_bar_gates(cell, host, bar):
+    problems = ci.gate(rows_for(cell, host, "acp-process", ["B1", "B2", bar]), {2624})
+    assert len(problems) == 1 and f"uncovered bars ['{bar}']" in problems[0]
+
+
+@pytest.mark.parametrize("cell", HELD_CONTROLS)
+@pytest.mark.parametrize("host", CI_HOST_NAMES)
+def test_held_reply_controls_gate_every_host(cell, host):
+    assert len(ci.gate(rows_for(cell, host, "acp-process", ["B1", "B2"]), {2624})) == 1
+
+
+@pytest.mark.parametrize("cell", HELD_TARGETS + HELD_CONTROLS)
+@pytest.mark.parametrize("host", CI_HOST_NAMES)
+def test_held_reply_errors_gate_every_host(cell, host):
+    rows = rows_for(cell, host, "acp-process", ["B1", "B2"])
+    next(row for row in rows if row["cell"] == cell)["verdict"] = "ERROR"
+    assert len(ci.gate(rows, {2624})) == 1
+
+
+def test_2624_targets_are_exact():
+    assert sorted(c["id"] for c in cells.registry() if 2624 in c["targets"]) == sorted(
+        ["crash-after-rotation/rotation", *HELD_TARGETS])
 
 
 @pytest.mark.parametrize("host,gates_b9", [("upstream-uid", True), ("ref-0.21.5", False)])

@@ -610,6 +610,9 @@ def main():
     needed += ["cron_agent", "cron_close"] if cell.get("cron_every") else []
     needed += ["tool_dispatch", "engine_tool_dispatch"] if cell.get("tool_plan") else []
     cited_modules += sorted({ANCHORS[k][0][:-3].replace("/", ".") for k in needed})
+    if "crash_after_host_reply_before_store" in faults:
+        finish("unsupported", reason="acp-process only: the held-reply crash needs a real host process")
+        return
     if cell.get("drain"):
         finish("unsupported", reason="drain cells need the R2 observer's per-compaction counters (acp-process only)")
         return
