@@ -90,9 +90,9 @@ exclusions and fail-closed reasons; attempts needing an unknown session get no r
 expectations in both directions, never surplus licences: a missing stored reply or an extra copy fails.
 `numbers.B2.host_held_inflight_replies` lists each selected tag, lineage, 12-character key and host row ids, and is
 absent when empty. Any other assistant row is surplus.
-On the upstream-main host a restart resumes the parent session and abandons the rotation child whose last row
-is the interrupted turn's reply, so the host keeps a reply the plugin is never shown again; the scorer fails
-that run on B1 and B2, tracked in #2624.
+On the upstream-main and upstream-uid hosts a restart resumes the parent session and abandons the rotation child
+whose last row is the interrupted turn's reply, so the host keeps a reply the plugin is never shown again; the
+scorer fails that run on B1 and B2, tracked in #2624.
 - **B1** every `[Tnn]` user tag (`[A-Z]\d{2,3}`: T100-T103 on 100-turn cells) and `reply to Tnn` sits in
   exactly as many stored rows as expected,
   and every stored `continue` row has the reply of its own host occurrence.

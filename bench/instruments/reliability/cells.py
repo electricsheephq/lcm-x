@@ -45,10 +45,10 @@ ISSUES = {
     # session; LCM stores the parts only
     821: (("B1", "B2", "B3", "B4", "B5", "B8"), "r34.4/upstream-uid host: held composite vs durable parts after a crash on rotation"),
     871: (("B2",), "r34.4 rotation: crash between parent end and child start, the crash turn's user row unstored"),
-    # acp-process only in practice: the crash point races reply persistence (3 of 12 runs fail on either plugin ref);
-    # the same two shapes occur on ref, customer, r34.4 and upstream-uid (not seen on upstream-main)
+    # acp-process, crash after rotation: the scorer now expects an in-flight reply the host kept, so #861 covers only
+    # the crash turn's user row left unstored; a host-kept reply in an abandoned rotation child is #2624
     861: (("B1", "B2"), "acp-process: intermittent around the crash after rotation"),
-    2624: (("B1", "B2"), "upstream-main acp-process: the restart resumes the parent and abandons the rotation child, so the interrupted turn's host-kept reply is never shown to the plugin"),
+    2624: (("B1", "B2"), "upstream-main and upstream-uid acp-process: the restart resumes the parent and abandons the rotation child, so the interrupted turn's host-kept reply is never shown to the plugin"),
     916: (("F4",), "acp-process continuity: survival projection removes the current user tag"),
     1501: (("B1", "B2"), "rotation replay after a carried host stamp, including a previous-GA store"),
     1505: (("B1", "B2"), "forced-recovery user turn stored twice after the crash and cold restart (since #1328)"),
@@ -58,7 +58,7 @@ ISSUES = {
 }
 # issue -> host-name prefixes on which its bars are declared (absent: every host); ci.gate reads it
 ISSUE_HOSTS = {534: ("ref-", "floor-", "upstream-main"), 1501: ("ref-", "floor-", "upstream-main"),
-               2624: ("upstream-main",),
+               2624: ("upstream-main", "upstream-uid"),
                1797: ("r34.4-", "r34.10-", "r34.15-"), 1799: ("floor-",), 821: ("r34.4-", "upstream-uid"), 861: ("ref-", "customer-", "r34.4-", "r34.10-", "r34.15-", "upstream-uid"),
                871: ("r34.4-", "r34.10-", "r34.15-"), 1506: ("ref-", "floor-", "upstream-main"), 1508: ("ref-", "floor-", "upstream-main")}
 # issue -> transports on which its bars are declared (absent: every transport); ci.gate reads it

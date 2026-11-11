@@ -59,6 +59,10 @@ def test_existing_gate_and_open_target_behavior_is_unchanged():
     ("floor-0.21.3", "acp-process", ["B1", "B2"], {2624}, True),
     ("upstream-main", "in-process", ["B1", "B2"], {2624}, True),
     ("upstream-main", "acp-process", ["B1", "B2"], set(), True),
+    ("upstream-uid", "acp-process", ["B1", "B2"], {2624}, False),
+    ("upstream-uid", "acp-process", ["B1", "B2", "B5"], {2624}, True),
+    ("upstream-uid", "in-process", ["B1", "B2"], {2624}, True),
+    ("upstream-uid", "acp-process", ["B1", "B2"], set(), True),
 ])
 def test_abandoned_rotation_child_2624_gate_scope(host, transport, failed, open_issues, gates):
     problems = ci.gate(rows_for("crash-after-rotation/rotation", host, transport, failed), open_issues)
