@@ -133,9 +133,32 @@ function setup(args: string[]): void {
   process.stdout.write(`${JSON.stringify({ runtime: join(root, RUNTIME_FILE), ...(checked.out as object) })}\n`);
 }
 
+async function importCommand(args: string[]): Promise<void> {
+  const { eveSessionIds, importEveSessions } = await import("./import.js");
+  const root = rootOf(args);
+  const url = option(args, "--eve-url");
+  const bearerFile = option(args, "--bearer-file");
+  const namespace = option(args, "--namespace");
+  const workflowData = option(args, "--workflow-data");
+  if (!url || !bearerFile || !namespace || !workflowData) {
+    fail("usage: lcmx-eve import --root <dir> --eve-url <url> --bearer-file <file> --namespace lcmx:<agent> --workflow-data <dir> [--before <ISO time>] [--skip id,id]");
+  }
+  const before = option(args, "--before");
+  const skip = new Set((option(args, "--skip") ?? "").split(",").filter(Boolean));
+  const sessions = eveSessionIds(workflowData!, before ? new Date(before) : undefined).filter((id) => !skip.has(id));
+  const reports = await importEveSessions({ root, baseUrl: url!, bearer: readFileSync(bearerFile!, "utf8").trim(), namespace: namespace!, sessions });
+  for (const report of reports) process.stdout.write(`${JSON.stringify(report)}\n`);
+  const count = (status: string) => reports.filter((report) => report.status === status).length;
+  process.stdout.write(`${JSON.stringify({ sessions: reports.length, imported: count("imported"), empty: count("empty"), failed: count("failed"), messages: reports.reduce((sum, report) => sum + report.messages, 0) })}\n`);
+}
+
 function main(): void {
   const [command, ...args] = process.argv.slice(2);
   if (command === "setup") return setup(args);
+  if (command === "import") {
+    importCommand(args).catch((error) => fail(String(error)));
+    return;
+  }
   if (command === "check") {
     const { python } = runtime(rootOf(args));
     const result = host(python, ["check"]);
@@ -154,7 +177,7 @@ function main(): void {
     process.exit(status);
   }
   process.stdout.write(
-    "usage: lcmx-eve setup|check|drain|audit --root <absolute folder> [--python <abs>] [--fastembed]\n",
+    "usage: lcmx-eve setup|check|drain|audit|import --root <absolute folder> [--python <abs>] [--fastembed]\n",
   );
   process.exit(command ? 2 : 0);
 }

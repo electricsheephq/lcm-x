@@ -123,3 +123,21 @@ Back up `scopes/` (both `.db` files with an SQLite online backup, or with the ag
 
 Install the new package version, then run `setup` again. The store stays. The package pins its LCM-X core
 commit in `core/BUNDLE.json`.
+
+## Import sessions from before the install
+
+An agent that ran on Eve before LCM-X has sessions that the store does not have. Copy their conversations in once,
+as the agent user, while the agent's Eve server runs:
+
+```bash
+npx lcmx-eve import --root /srv/agents/scout/.lcm-x --eve-url http://127.0.0.1:<eve port> \
+  --bearer-file <file with the Eve HTTP bearer> --namespace lcmx:scout \
+  --workflow-data <agent app>/.eve/.workflow-data --before <install time, ISO>
+```
+
+Each Eve session becomes its own LCM-X session `import-<eve session id>`: user messages and completed replies (no
+tool calls, reasoning or attachments). The running Eve's engine host stores them within seconds; when Eve is
+stopped, run `lcmx-eve drain`. A second run stores nothing new for a session that did not grow.
+
+Limit: an imported message carries the time of the import, not its original time (Eve's transcript gives the text
+only). Time filters such as `lcm_recent` therefore put the imported history at the import date.

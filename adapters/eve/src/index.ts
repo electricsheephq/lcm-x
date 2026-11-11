@@ -138,12 +138,14 @@ function alreadyVisible(snippet: string, visible: string): boolean {
 export function formatRecall(result: { hits?: RecallHit[] } | null, limit = 5, perSession = 2, visible = ""): string {
   const lines: string[] = [];
   const counts = new Map<string, number>();
+  const seen = new Set<string>(); // the same text in two sessions (an imported copy and the live session): once
   for (const hit of result?.hits ?? []) {
     if (lines.length >= limit) break;
     const session = String(hit.session_id ?? "?");
     if ((counts.get(session) ?? 0) >= perSession) continue;
     const full = squash(String(hit.snippet ?? ""));
-    if (!full || alreadyVisible(full, visible)) continue;
+    if (!full || alreadyVisible(full, visible) || seen.has(full)) continue;
+    seen.add(full);
     const snippet = full.slice(0, 400);
     counts.set(session, (counts.get(session) ?? 0) + 1);
     const seconds = typeof hit.timestamp === "number" ? hit.timestamp : Date.parse(String(hit.timestamp ?? "")) / 1000;

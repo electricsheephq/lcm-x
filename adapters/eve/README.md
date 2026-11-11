@@ -14,7 +14,7 @@ drives it. Built for `eve@1.0.0-rc.6` exactly. Install: [INSTALL.md](INSTALL.md)
 | Tools: 13 by default, 3 behind flags | Same 13 as `lcmx__<name>`; the flags work the same (`LCM_*` env) |
 | Vector recall (FastEmbed local, or an API provider) | OpenAI embeddings by default (key for embeddings only), caught up between turns; FastEmbed optional |
 | LCM-X builds the model's context window (compaction, assembly) | **Not possible**: Eve rc.6 has no hook. Eve compacts its own window; LCM-X compacts its own view |
-| Proactive recall at `pre_llm_call` | `recall["turn.started"]`: Eve calls it before every turn (also scheduled runs). The best hits for the turn's user text (at most 5, 2 per session; also earlier, compacted parts of the current session; text the model still sees is left out), one message replaced each turn |
+| Proactive recall at `pre_llm_call` | `recall["turn.started"]`: Eve calls it before every turn (also scheduled runs). The best hits for the turn's user text (at most 5, 2 per session; also earlier, compacted parts of the current session; text the model still sees is left out, the same text only once), one message replaced each turn |
 
 ## How it works
 
@@ -64,6 +64,8 @@ npm pack            # prepack builds dist/ and vendors core/
 - The bridge needs the Eve process: a timer drain stores messages but writes no summaries.
 - Not yet tested with a real `chatgpt()` subscription model (only with `mockModel` and the OpenAI API).
 - Subagent sessions are stored as their own sessions, without a parent link.
+- Sessions from before the install: `lcmx-eve import` (INSTALL) copies only their text (no tool calls, reasoning
+  or attachments), and each imported message carries the import time, not its original time.
 - After `clear()`, an exact repeat of the last exchange that is not the new turn's input may be taken as carried.
 - `writer/lcmx_eve_writer.py` still has its own store mode (r1, Claude Code unit pattern); the package uses only
   its planning functions.

@@ -174,6 +174,17 @@ test("formatRecall keeps at most two hits per session and strips highlight marks
   assert.equal(turnQuery([{ role: "user", content: "first" }, { role: "assistant", content: "x" }, { role: "user", content: [{ type: "text", text: "last" }] }]), "last");
 });
 
+test("formatRecall shows the same text once, and the import computes Eve's scope key", async () => {
+  const { formatRecall } = await import("../dist/index.js");
+  const { eveScopeKey } = await import("../dist/import.js");
+  const { createMemoryScope } = await import("../node_modules/eve/dist/src/shared/memory-state.js");
+  const text = formatRecall({ hits: [{ session_id: "eve:import-a", snippet: "release handover on 19 November" }, { session_id: "eve:a", snippet: "release handover on 19 November" }] });
+  assert.equal(text.split("\n").length, 2, text);
+  for (const agent of ["scout", "ranger"]) {
+    assert.equal(eveScopeKey(`lcmx:${agent}`, "agent"), createMemoryScope({ namespace: `lcmx:${agent}`, scope: "agent", slot: "lcmx" }).key);
+  }
+});
+
 test("the provider has only Eve's keys", () => {
   const provider = lcmxMemory({ root: "/tmp/x", python: "/usr/bin/python3", packageRoot: "/x" });
   assert.deepEqual(Object.keys(provider).sort(), ["capture", "recall", "tools"]);
