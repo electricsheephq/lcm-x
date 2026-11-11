@@ -38,6 +38,64 @@ def test_fitting_responses_match_main_bytes(guidance, order, mode):
     assert "query_truncated" not in json.loads(raw)
 
 
+@pytest.mark.parametrize("guidance", [False, True])
+@pytest.mark.parametrize("order", ["score", "time"])
+@pytest.mark.parametrize("mode", MODES)
+def test_fitting_5000_character_query_matches_main_bytes(guidance, order, mode):
+    d = make_delivery((1300,) * 6)
+    expected = json.loads(json.loads(GOLDEN.read_text())[f"{guidance}-{order}-{mode}"])
+    expected["query"] = "q" * 5000
+    raw = d.invoke(query=expected["query"], limit=4, guidance_v2=guidance,
+                   delivery_order=order, **options(d, mode))
+    assert len(raw) < 64_000
+    assert raw == json.dumps(expected)
+    assert "query_truncated" not in json.loads(raw)
+
+
+@pytest.mark.parametrize("order", ["score", "time"])
+@pytest.mark.parametrize("mode", MODES)
+def test_query_cut_precedes_event_time_strip_and_hit_drop(mode, order):
+    d = make_delivery((1300,) * 12)
+    for entry in d.entries:
+        entry["hit"]["snippet"] = d.rows[entry["hit"]["store_id"]]["content"]
+    for row in d.rows.values():
+        row.update(observed_at=1_700_000_000, observed_at_source="host_message_timestamp")
+    kwargs = dict(limit=8, snippet_chars=1300, delivery_order=order, **options(d, mode))
+    # Main's full response exceeds the cap, but its no-hit envelope fits.
+    full = d.invoke(query="q" * 55_000, response_char_cap=100_000, **kwargs)
+    assert len(full) > 64_000
+    envelope = json.loads(full)
+    envelope.update(hits=[], total_results=0)
+    assert len(json.dumps(envelope)) < 64_000
+    raw = d.invoke(query="q" * 55_000, **kwargs)
+    result = json.loads(raw)
+    assert len(raw) <= 64_000
+    assert result["query"] == "q" * 4096
+    assert result.pop("query_truncated") is True
+    expected = json.loads(full)
+    expected["query"] = "q" * 4096
+    assert result == expected  # Includes every hit, date, and optional marker.
+    assert all("event_time" in hit for hit in result["hits"][:8])
+    assert "response_cap_truncated" not in result
+
+
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize("order", ["score", "time"])
+def test_emoji_query_cut_still_fits_when_hits_must_be_dropped(mode, order):
+    d = make_delivery((1300,) * 25)
+    for entry in d.entries:
+        entry["hit"]["snippet"] = d.rows[entry["hit"]["store_id"]]["content"]
+    query = "🌿" * 55_000
+    assert len(json.dumps(query[:4096])) == 49_154  # Quotes plus 12 chars/code point.
+    raw = d.invoke(query=query, snippet_chars=1300, delivery_order=order, **options(d, mode))
+    result = json.loads(raw)
+    assert len(raw) <= 64_000
+    assert result["query"] == query[:4096] and result["query_truncated"] is True
+    assert result["response_cap_truncated"] is True
+    assert 0 < len(result["hits"]) < 25
+    assert [hit["store_id"] for hit in result["hits"]] == list(range(1, len(result["hits"]) + 1))
+
+
 @pytest.mark.parametrize("mode", MODES)
 @pytest.mark.parametrize("order", ["score", "time"])
 @pytest.mark.parametrize("character", ["q", "🌿"])
@@ -95,7 +153,7 @@ def test_session_delivery_receives_the_original_envelope():
 @pytest.mark.parametrize("deficit", [0, 1])
 def test_exact_boundary_and_one_character_over(mode, deficit):
     d = make_delivery((1300,) * 4)
-    kwargs = dict(query="q" * 5000, **options(d, mode))
+    kwargs = dict(query="q" * 4000, **options(d, mode))
     baseline = d.invoke(**kwargs)
     cap = len(baseline) - deficit
     raw = d.invoke(**kwargs, response_char_cap=cap)
@@ -111,17 +169,17 @@ def test_exact_boundary_and_one_character_over(mode, deficit):
     assert "query_truncated" not in result
 
 
-def test_production_cap_counts_mid_size_envelope_and_keeps_rank_prefix():
+def test_production_cap_cuts_long_query_before_dropping_ranked_hits():
     d = make_delivery((1300,) * 3)
     # Exactly one character above the production cap, although the hit bodies
-    # alone fit comfortably. The no-hit envelope fits, so keep the query echo.
+    # alone fit comfortably. Cut the query even though the no-hit envelope fits.
     query = "q" * (64_001 - len(d.invoke(query="")))
     raw = d.invoke(query=query)
     result = json.loads(raw)
     assert len(raw) <= 64_000
-    assert [hit["store_id"] for hit in result["hits"]] == [1, 2]
-    assert result["total_results"] == 2 and result["response_cap_truncated"] is True
-    assert result["query"] == query and "query_truncated" not in result
+    assert [hit["store_id"] for hit in result["hits"]] == [1, 2, 3]
+    assert result["total_results"] == 3 and "response_cap_truncated" not in result
+    assert result["query"] == query[:4096] and result["query_truncated"] is True
 
 
 def test_hit_bodies_just_below_production_cap_still_budget_the_envelope():
@@ -211,18 +269,21 @@ def test_no_hit_envelope_reserves_truncation_markers(mode, order, slack, observe
     assert len(result["hits"]) == 3
 
 
-@pytest.mark.parametrize("case", ["time-marker", "event-time"])
+@pytest.mark.parametrize("case", ["time-marker", "time-marker-long-query", "event-time"])
 def test_windows_boundary_matches_main_bytes(case):
     d = make_delivery((1300,) * 3)
     if case == "event-time":
         for row in d.rows.values():
             row.update(observed_at=1_700_000_000, observed_at_source="host_message_timestamp")
-    kwargs = dict(snippet_window_hits=5, delivery_order="time" if case == "time-marker" else "score")
+    kwargs = dict(snippet_window_hits=5,
+                  delivery_order="time" if case.startswith("time-marker") else "score")
+    if case == "time-marker-long-query":
+        kwargs["query"] = "q" * 5000
     full = json.loads(d.invoke(**kwargs))
     # Main budgets the time marker, then drops the ranked tail without an
     # envelope-level event-time strip. Pin the complete resulting JSON bytes.
     cap = len(json.dumps(full)) - 1
-    if case == "time-marker":
+    if case.startswith("time-marker"):
         unmarked = deepcopy(full)
         unmarked["provenance"].pop("delivery_order")
         assert len(json.dumps(unmarked)) <= cap < len(json.dumps(full))

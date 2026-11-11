@@ -511,17 +511,12 @@ def deliver_recall(
                 }}))
             return len(json.dumps(payload))
 
+        # Cut a redundant long echo before sacrificing dates or ranked hits.
+        # The optional windows time marker alone must not trigger a query cut.
+        if len(query) > 4_096 and len(json.dumps(response)) > response_char_cap:
+            response.update(query=query[:4_096], query_truncated=True)
         deferred_reason = None
         if encoded_size() > response_char_cap:
-            envelope = json.loads(json.dumps(response))
-            envelope.update(hits=[], total_results=0)
-            if hits_out:
-                envelope["response_cap_truncated"] = True
-            if not window_fit and any(any(k in hit for k in _EVENT_TIME_KEYS) for hit in hits_out):
-                envelope.setdefault("event_time_unavailable", True)
-                envelope.setdefault("event_time_unavailable_reason", "response_cap")
-            if encoded_size(envelope) > response_char_cap and len(query) > 4_096:
-                response.update(query=query[:4_096], query_truncated=True)
             if not window_fit:
                 _, deferred_reason = _fit_event_time(
                     response, response_char_cap=response_char_cap, ensure_ascii=True,
@@ -618,12 +613,15 @@ def deliver_recall(
         )
         return observed_at is None, observed_at if observed_at is not None else 0.0
 
+    ensure_ascii = detail != "answer_ready"
+    score_order = list(hits_out) if detail == "snippets" else None
+    unmarked = json.dumps(response, ensure_ascii=ensure_ascii)
     if delivery_order == "time":
         hits_out.sort(key=event_time_key)
-    ensure_ascii = detail != "answer_ready"
+    if detail == "answer_ready":
+        unmarked = json.dumps(response, ensure_ascii=ensure_ascii)
     # Reordering keeps the encoded length; the marker is extra, so it is added
     # only when it still fits the response cap (never by dropping a hit).
-    unmarked = json.dumps(response, ensure_ascii=ensure_ascii)
     if delivery_order == "time":
         response["provenance"]["delivery_order"] = "time"
     marked = json.dumps(response, ensure_ascii=ensure_ascii)
@@ -632,6 +630,7 @@ def deliver_recall(
         marked = unmarked
         if detail == "answer_ready":
             return unmarked
+        hits_out[:] = score_order
     if (detail == "snippets" and extra_entries > 0 and len(hits_out) == limit
             and not response_cap_truncated and not response.get("response_cap_truncated")):
         seen = {hit["store_id"] for hit in hits_out if hit.get("store_id") is not None}

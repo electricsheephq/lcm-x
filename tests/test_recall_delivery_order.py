@@ -112,7 +112,17 @@ def test_response_cap_keeps_score_survivors(delivery, detail):
             timed["hits"], key=lambda h: h["store_id"])
 
 
-def test_stripped_dates_still_order_by_existing_rows(delivery):
+def test_snippets_without_room_for_time_marker_keep_score_order(delivery):
+    invoke, _ = delivery
+    score_raw = invoke()
+    timed_raw = invoke(response_char_cap=len(score_raw), delivery_order="time")
+    assert timed_raw == score_raw
+    payload = json.loads(timed_raw)
+    assert [h["store_id"] for h in payload["hits"]] == list(range(1, 7))
+    assert "delivery_order" not in payload["provenance"]
+
+
+def test_stripped_dates_without_room_for_time_marker_keep_score_order(delivery):
     invoke, _ = delivery
     # All six hit bodies fit, but their optional dates exceed this cap.
     full = json.loads(invoke())
@@ -122,7 +132,7 @@ def test_stripped_dates_still_order_by_existing_rows(delivery):
     cap = len(json.dumps(full))
     payload = json.loads(invoke(response_char_cap=cap, delivery_order="time"))
     assert "delivery_order" not in payload["provenance"]
-    assert [h["store_id"] for h in payload["hits"]] == [3, 4, 5, 1, 2, 6]
+    assert [h["store_id"] for h in payload["hits"]] == list(range(1, 7))
     assert any("event_time" not in h for h in payload["hits"] if h["store_id"] in {1, 3, 4, 5})
 
 
