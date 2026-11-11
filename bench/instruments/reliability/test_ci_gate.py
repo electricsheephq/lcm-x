@@ -93,9 +93,10 @@ def test_held_reply_known_entry_excludes_other_hosts(cell, host):
 
 @pytest.mark.parametrize("cell", HELD_TARGETS)
 @pytest.mark.parametrize("host", ["upstream-main", "upstream-uid"])
-def test_held_reply_uncovered_bar_gates(cell, host):
-    problems = ci.gate(rows_for(cell, host, "acp-process", ["B1", "B2", "B4"]), {2624})
-    assert len(problems) == 1 and "uncovered bars ['B4']" in problems[0]
+@pytest.mark.parametrize("bar", ["B3", "B4", "B5"])
+def test_held_reply_uncovered_bar_gates(cell, host, bar):
+    problems = ci.gate(rows_for(cell, host, "acp-process", ["B1", "B2", bar]), {2624})
+    assert len(problems) == 1 and f"uncovered bars ['{bar}']" in problems[0]
 
 
 @pytest.mark.parametrize("cell", HELD_CONTROLS)

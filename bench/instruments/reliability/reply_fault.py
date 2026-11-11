@@ -144,6 +144,6 @@ class HeldReply:
         self.record["restart_exit"] = restart_exit
         if restart_exit != "done":
             self.invalid("restart did not finish done")
-        rec["reply_fault"] = self.record.copy()
+        rec["reply_fault"] = {**self.record, "polls": list(self.record["polls"])}
         if not self.record["valid"]:
             invalid_verdict(rec, self.record["invalid_reason"])

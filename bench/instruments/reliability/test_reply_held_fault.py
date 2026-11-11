@@ -76,6 +76,8 @@ def test_valid_depth_and_crash_records(tmp_path, depth):
     held.verdict(rec, 'done')
     assert rec['verdict'] == 'FAIL'
     assert rec['reply_fault']['polls'] == event['polls']
+    held.record['polls'].append([0, 'busy'])
+    assert rec['reply_fault']['polls'] == event['polls']
     held.verdict(rec, 'error')
     assert rec['verdict'] == 'ERROR' and rec['reason'].startswith('reply-held fault INVALID: restart')
 
@@ -462,3 +464,33 @@ def test_turn_waits_for_witness_before_advancing(tmp_path, monkeypatch, outcome)
     else:
         assert results[0]['exit'] == 'done' and len(turns) == 2
         assert held.record['invalid_reason'] == ('completion timeout' if outcome == 'timeout' else 'poll timeout')
+
+
+@pytest.mark.parametrize('error', [PC.AD.JsonRpcError('session/prompt', {'code': -1}),
+                                 PC.AD.ProcessGone('test crash')])
+def test_prompt_error_during_witness_kill(tmp_path, monkeypatch, error):
+    run, held, _ = fixture(tmp_path)
+    run.phase_timeout, run.turn_timeout, run.last_turn = None, 1, 0
+    run.argv, run.env, run.work, run.files = lambda: [], lambda: {}, tmp_path, tmp_path
+    run.scenario = PC.Scenario(run)
+    stub = SimpleNamespace(killed=False, initialize=lambda _: None, new_session=lambda *_: 'root', close=lambda: -9)
+    stub.kill = lambda: setattr(stub, 'killed', True)
+
+    def prompt(*_):
+        held.before_release()
+        insert(run, held.text)
+        held.after_release()
+        raise error
+
+    stub.prompt = prompt
+    monkeypatch.setattr(PC.AD, 'AcpProcess', lambda *_: stub)
+    monkeypatch.setattr(PC.P1, 'extend_turns', lambda *_: [5])
+    result = run.run_phase(5)
+    released(held)
+    if isinstance(error, PC.AD.ProcessGone):
+        assert result == dict(exit='crash', next_turn=6, turn=5)
+        assert held.record['valid']
+    else:
+        assert result['exit'] == 'error' and result['reason'].startswith('JsonRpcError:')
+        assert held.record['valid'] is False
+        assert held.record['invalid_reason'].startswith('prompt error')

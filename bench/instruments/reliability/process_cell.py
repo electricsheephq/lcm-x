@@ -366,8 +366,12 @@ class ProcessCell:
             else None
         if killer:  # --kill-after-rotation: SIGKILL while the rotated child session has no lcm rows yet
             killer.start()
+        err = None
         try:
             answer, stop = self.proc.prompt(self.sid, text, self.budget())
+        except BaseException as exc:
+            err = exc
+            raise
         finally:
             if killer:
                 killer.stop.set()
@@ -376,7 +380,9 @@ class ProcessCell:
             if held and self.phase == "A" and held.fault["turn"] == t:
                 if not held.done.wait(15):
                     held.invalid("completion timeout")
-                if self.proc.killed and RF.KIND in self.fired:
+                if err is not None and not isinstance(err, AD.ProcessGone):
+                    held.invalid("prompt error: " + type(err).__name__)
+                elif self.proc.killed and RF.KIND in self.fired:
                     raise AD.ProcessGone("held-reply fault killed host")
         self.event(turn=t, event="acp_response", tag=f"T{t:02d}", stop_reason=stop, chars=len(answer))
         self.wait_for_child(t)
