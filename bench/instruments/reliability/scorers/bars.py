@@ -459,11 +459,13 @@ def score(cell: dict, cell_dir: Path, db_dir: Path | None = None) -> dict:
     bound = tool_calls.bind(atts, lambda a: attempt_group(a, group),  # no host_sha in the cell: no licence
                             license_wire_notices=cell.get("host_sha") in tool_calls.HOSTS_WITHOUT_POST_TOOL_REANCHOR)
     held_turns = {f["turn"] for f in cell.get("faults", []) if f["kind"] == RF.KIND} if cell.get("tool_plan") else set()
+    held_tools_unavailable = None
     if held_turns:
         receipt = tool_calls.host_held(atts, bound, db_dir / "state.db", group, held_turns,
                                       lambda a: attempt_group(a, group))
         if receipt is not None:
             numbers["B2"]["host_held_tool_rows"] = receipt
+            held_tools_unavailable = receipt.get("unavailable")
     # This emergency cell deliberately drops the active result before the next provider call. B2 still requires
     # its durably stored bytes to match the real HOST dispatch; the unseen-result failure remains a B6 diagnostic.
     recovery_turns = {f["turn"] for f in cell.get("faults", []) if f["kind"] == "forced_recovery"} & {
@@ -520,6 +522,8 @@ def score(cell: dict, cell_dir: Path, db_dir: Path | None = None) -> dict:
                and not any(a.get("conflicts") or a.get("exception") or a.get("engine_status") == "error"
                            for a in final.get("attempts", [])))
     inconclusive = {}
+    if held_tools_unavailable is not None and "B2" not in failed:
+        inconclusive["B2"] = "host tool rows unavailable: " + held_tools_unavailable
     outcome = (final or {}).get("outcome", "published" if (final or {}).get("published") else "failed")
     if failed_turns or (cell.get("final_compaction_check", True) and outcome == "failed"):
         failed["B4"] = numbers["B4"]
@@ -548,11 +552,11 @@ def score(cell: dict, cell_dir: Path, db_dir: Path | None = None) -> dict:
     numbers["B6"] = {"groups": tg["groups"], "split_groups": tg["split_groups"], "host_orphan_drops": orphans,
                      "tool_results": sum(1 for e in events if e["event"] == "tool_result")}
     numbers["B6"]["tool_execution_failures"] = len(bound["failures"])
-    if held_turns and not tg["groups"]:
-        applicable = [b for b in applicable if b != "B6"]
-        numbers["B6"]["not_applicable"] = "no tool group stored"
     if tg["split_groups"] or orphans or bound["failures"]:
         failed["B6"] = {**numbers["B6"], "splits": tg["splits"][:3], "tool_failures": bound["failures"][:5]}
+    if held_turns and not tg["groups"] and held_tools_unavailable is None and "B6" not in failed:
+        applicable = [b for b in applicable if b != "B6"]
+        numbers["B6"]["not_applicable"] = "no tool group stored"
     native = {"native_unusable": sum(p.get("log_counts", {}).get("native_unusable", 0) for p in phases),
               "summary_generation_aborted": sum(p.get("log_counts", {}).get("summary_generation_aborted", 0) for p in phases),
               "max_native_attempts_per_turn": max((p.get("counters", {}).get("native_max", 0) for p in phases), default=0)}

@@ -215,6 +215,7 @@ class Scenario:
         log = {"turn": t, "kind": st["kind"], "step": step}
         if (st["phase"] == "A" and step >= 1 and getattr(run, "reply_fault", None) is not None
                 and run.reply_fault.fault.get("at") == "tool_results" and run.reply_fault.fault["turn"] == t):
+            run.event(turn=t, event="reply_fault_hold", tag=f"T{t:02d}", step=step, session_prefix="T")
             return {"hold_until_killed": True, "log": log}
         if run.crash_due(t):
             return {"hold_until_killed": True, "on_hold": lambda: run.crash(t), "log": log}
@@ -534,7 +535,8 @@ RECEIVE_START_SLACK_NS = 1_000_000_000
 def accounting(d: Path, events: list[dict]) -> dict:
     """The provider log is the complete request set. Every distinct request is a model-role completion, a
     ``/models`` catalog read, or unexpected (an unrouted path/method or an unknown role: the cell ERRORs). Each main
-    request is exactly one scripted step (a reply, a tool-call step, a crash hold or an unexpected main request)."""
+    request is exactly one scripted step (a reply, a tool-call step, a crash/reply-fault hold or an unexpected main
+    request)."""
     reqs = read_jsonl(d / "provider-requests.jsonl")
     by_role, by_route, unexpected, truncated = {}, {}, [], []
     for r in {r["rid"]: r for r in reqs}.values():
@@ -550,6 +552,7 @@ def accounting(d: Path, events: list[dict]) -> dict:
     implied = {"emit": sum(1 for e in events if e["event"] == "emit"),
                "tool_steps": len({(e["phase"], e["id"].rsplit("_", 1)[0]) for e in events if e["event"] == "tool_issue"}),
                "crash_holds": sum(1 for e in events if e.get("fault") == "crash_after_compaction_before_reply"),
+               "reply_fault_holds": sum(1 for e in events if e["event"] == "reply_fault_hold"),
                "child_emit": sum(1 for e in events if e["event"] == "child_emit"),
                "unexpected": len({r["rid"] for r in reqs if r.get("unexpected")})}
     kills = sorted(e["kill_monotonic_ns"] for e in events

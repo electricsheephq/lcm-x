@@ -525,7 +525,8 @@ The `tool_results` position arms on step 0's tool-call response, before any tool
 It polls for every issued call id's tool result in the host DB. The next main request
 still records `tool_seen`, then is held until killed and never released: no final reply
 exists. Root/depth and the call row plus all results are checked after group exit;
-poll timeout or exception also kills and confirms exit, without firing the fault.
+Reservation failure, response release failure, or a poll timeout or exception also
+kills and confirms exit, without firing the fault.
 
 | step | what happens | invariant it protects | final when read? |
 |---|---|---|---|
@@ -561,8 +562,10 @@ On upstream-main and upstream-uid, KNOWN under #2624: `tool-turn` should FAIL B1
 FAIL B1 (`T15`), B2 deficit 1 and `tool_missing_rows` 4. Both should PASS on every
 other host. The opt-in `reply-held-crash-control/tool-loop-in-place` (15/0) should
 PASS on every host; it is excluded from `--cells all` and the nightly matrix.
-B6 is judged when a tool group is stored; for these held tool cells alone, no stored
-group makes B6 not applicable, leaving the other bars to decide the verdict.
+B6 is judged when a tool group is stored or a split, orphan drop, or tool execution
+failure is recorded. For these held tool cells alone, no stored group otherwise
+makes B6 not applicable when host tool rows are readable. Unavailable host tool rows
+keep B6 applicable and cap a passing B2 at INCONCLUSIVE.
 Other exact known failures retain their existing classification; other failed bars
 remain findings. Depth validation decides validity, not the cell's name.
 

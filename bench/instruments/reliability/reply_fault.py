@@ -53,7 +53,18 @@ class HeldReply:
 
     def release_failed(self):
         self.invalid("response release failed")
-        self.finish()
+        try:
+            self.stop_invalid_tool_loop()
+        finally:
+            self.finish()
+
+    def stop_invalid_tool_loop(self):
+        r = self.record
+        if self.position == "tool_results" and r["kill_wall"] is None:
+            r["kill_wall"], r["kill_monotonic_ns"] = time.time(), time.monotonic_ns()
+            self.run.proc.kill()  # Close any held next request, even if reservation/release failed.
+            if not self.wait_for_exit():
+                self.invalid("host group did not exit")
 
     def release_reservation(self):
         if self.reservation is not None:
@@ -76,7 +87,11 @@ class HeldReply:
                 self.done.set()
 
     def after_release(self):
-        if self.done.is_set():
+        if self.done.is_set() or (self.position == "tool_results" and self.record["invalid_reason"]):
+            try:
+                self.stop_invalid_tool_loop()
+            finally:
+                self.finish()
             return
         r, end = self.record, time.monotonic() + self.timeout
         try:
@@ -85,7 +100,7 @@ class HeldReply:
                 r["first_poll_wall"] = r["first_poll_wall"] or wall
                 try:
                     if self.ids:
-                        rows = self.host.execute("SELECT id, session_id FROM messages WHERE id > ? AND role = 'tool' "
+                        rows = self.host.execute("SELECT id, session_id, tool_call_id FROM messages WHERE id > ? AND role = 'tool' "
                                                  f"AND tool_call_id IN ({','.join('?' for _ in self.ids)}) ORDER BY id",
                                                  (self.max_id, *self.ids)).fetchall()
                     else:
@@ -99,7 +114,7 @@ class HeldReply:
                     rows = []
                 r["poll_count"] += 1
                 r["polls"].append([round(wall, 4), self.polls[-1][1]])
-                if rows and (not self.ids or len(rows) == len(self.ids)):
+                if rows and (not self.ids or {row[2] for row in rows} == set(self.ids)):
                     r["seen_poll_wall"], r["kill_wall"] = wall, time.time()
                     r["kill_monotonic_ns"] = time.monotonic_ns()
                     self.run.proc.kill()  # No DB read between the witness and the signal.
@@ -111,7 +126,7 @@ class HeldReply:
                         break
                     self.witness_id = rows[0][0]  # In memory only; never part of the evidence record.
                     self.witness_rows = rows
-                    if self.ids and len({session for _, session in rows}) != 1:
+                    if self.ids and len({row[1] for row in rows}) != 1:
                         self.invalid("witness rows in several sessions")
                         break
                     self.validate(rows[0][1])
@@ -123,11 +138,7 @@ class HeldReply:
             self.invalid("poll/validation: " + type(exc).__name__)
         finally:
             try:
-                if self.ids and r["kill_wall"] is None:
-                    r["kill_wall"], r["kill_monotonic_ns"] = time.time(), time.monotonic_ns()
-                    self.run.proc.kill()  # INVALID tool-loop: close any held next request before releasing the store.
-                    if not self.wait_for_exit():
-                        self.invalid("host group did not exit")
+                self.stop_invalid_tool_loop()
             finally:
                 self.finish()
 
@@ -165,11 +176,11 @@ class HeldReply:
         r.update(root=current[:12], depth=len(seen) - 1)
         if self.ids:
             marks = ','.join('?' for _ in self.ids)
-            rows = self.host.execute("SELECT id, session_id FROM messages WHERE id > ? AND role = 'tool' "
+            rows = self.host.execute("SELECT id, session_id, tool_call_id FROM messages WHERE id > ? AND role = 'tool' "
                                      f"AND tool_call_id IN ({marks}) ORDER BY id", (self.max_id, *self.ids)).fetchall()
             calls = self.host.execute("SELECT tool_calls FROM messages WHERE id > ? AND session_id = ? "
                                       "AND role = 'assistant' AND tool_calls IS NOT NULL", (self.max_id, session))
-            r["host_has_row"] = rows == self.witness_rows and any(
+            r["host_has_row"] = rows == self.witness_rows and {row[2] for row in rows} == set(self.ids) and any(
                 set(self.ids) <= {c.get("id") for c in json.loads(row[0])} for row in calls)
         else:
             r["host_has_row"] = bool(self.host.execute("SELECT 1 FROM messages WHERE id = ? AND role = 'assistant' "
@@ -183,6 +194,11 @@ class HeldReply:
                     (*self.ids, *self.ids)).fetchone())
             else:
                 r["store_has_row"] = bool(store.execute("SELECT 1 FROM messages WHERE content = ?", (self.text,)).fetchone())
+                if any(self.fault["turn"] in plan["turns"] for plan in self.run.cell.get("tool_plan", [])):
+                    prefix = f"call_T{self.fault['turn']:02d}_"
+                    r["store_turn_tool_rows"] = store.execute(
+                        "SELECT COUNT(*) FROM messages WHERE (role = 'tool' AND tool_call_id LIKE ?) OR "
+                        "(role = 'assistant' AND instr(tool_calls, ?) > 0)", (prefix + '%', prefix)).fetchone()[0]
         finally:
             store.close()
         if current != self.run.sid:

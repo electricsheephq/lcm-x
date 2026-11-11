@@ -362,7 +362,8 @@ def held_tool_cell(name, *, in_place=False):
                     {"name": "read_file", "args": {"path": "{files}/small.txt"}},
                     {"name": "read_file", "args": {"path": "{files}/big.txt"}}]}],
                 doc=("User row, call row and both results survive a mid-tool-loop crash (no final reply) and reload."
-                     if loop else "Whole tool turn (user, call row, two results, final reply) survives crash and reload.")
+                     if loop else "Whole tool turn survives crash and reload; the final reply is held at the kill; "
+                                  "whether the tool rows were already stored is recorded as store_turn_tool_rows.")
                     + " Reservation holds the store; does not prove natural crash timing.")
 
 
