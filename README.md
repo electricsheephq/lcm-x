@@ -3,6 +3,8 @@
 Lossless memory for Hermes Agent: every turn kept in a local store, not compacted away, and searchable by your agent.
 [Watch the demo](https://x.com/ElectricSheepIO/status/2119777119873925155)
 
+https://github.com/user-attachments/assets/c215bf7f-e8c8-428f-9510-ba1da3571f53
+
 [![CI](https://github.com/electricsheephq/lcm-x/actions/workflows/ci.yml/badge.svg)](https://github.com/electricsheephq/lcm-x/actions/workflows/ci.yml)
 [![Latest release](https://img.shields.io/github/v/release/electricsheephq/lcm-x)](https://github.com/electricsheephq/lcm-x/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
