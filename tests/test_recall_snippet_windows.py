@@ -84,6 +84,17 @@ def test_default_bytes_match_base():
     d.hydrate.assert_not_called()
 
 
+def test_session_floor_delivered_refreshed_during_envelope_fitting():
+    d = make_delivery(lengths=(2150,) * 25)
+    raw = d.invoke(snippet_window_hits=25, session_floor_info=dict(
+        requested=10, achieved=25, promoted=0, delivered=None))
+    result = json.loads(raw)
+    assert result['response_cap_truncated'] is True
+    assert len({hit['session_id'] for hit in result['hits']}) == 24
+    assert result['provenance']['session_floor']['delivered'] == 24
+    assert len(raw) <= tools._LCM_RECALL_RESPONSE_CHAR_CAP
+
+
 def test_first_five_windows_and_one_batch():
     d = make_delivery()
     before = [entry["hit"]["snippet"] for entry in d.entries]

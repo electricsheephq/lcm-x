@@ -72,6 +72,22 @@ def extra_reader(d):
     return Mock(side_effect=read)
 
 
+@pytest.mark.parametrize('fit_boundary', [False, True])
+def test_session_floor_extras_refresh_count_inside_size_budget(fit_boundary):
+    d = make_delivery((80,) * 10)
+    options = dict(limit=9, extra_entries=1, read_extra_entries=extra_reader(d),
+                   session_floor_info=dict(requested=9, achieved=9, promoted=0, delivered=None))
+    full = d.invoke(**options)
+    assert len(json.loads(full)['hits']) == 10
+    cap = len(full) - 1 if fit_boundary else tools._LCM_RECALL_RESPONSE_CHAR_CAP
+    raw = d.invoke(**options, response_char_cap=cap)
+    result = json.loads(raw)
+    delivered = len({hit['session_id'] for hit in result['hits']})
+    assert len(raw) <= cap
+    assert delivered == (9 if fit_boundary else 10)
+    assert result['provenance']['session_floor']['delivered'] == delivered
+
+
 @pytest.mark.parametrize("name", ["lme", "locomo", "pmv2"])
 def test_zero_golden(name):
     d, limit = shaped(name)

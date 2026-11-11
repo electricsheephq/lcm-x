@@ -484,6 +484,8 @@ def deliver_recall(
         # Include the envelope and optional time-order marker in the encoded
         # budget. Keep the flag-off and skipped-read fitting paths unchanged.
         def encoded_size() -> int:
+            if "session_floor" in response["provenance"]:
+                response["provenance"]["session_floor"]["delivered"] = _sessions(hits_out)
             _refresh_later_statements(response)
             if adjacent_reply:
                 response["provenance"].pop("adjacent_reply", None)
@@ -633,7 +635,11 @@ def deliver_recall(
                 response["extra_entries_skipped"] = skipped
             else:
                 hits_out.extend(extras)
-                while len(hits_out) > limit and len(json.dumps(response)) > response_char_cap:
+                while len(hits_out) > limit:
+                    if "session_floor" in response["provenance"]:
+                        response["provenance"]["session_floor"]["delivered"] = _sessions(hits_out)
+                    if len(json.dumps(response)) <= response_char_cap:
+                        break
                     hits_out.pop()
             if "session_floor" in response["provenance"]:
                 response["provenance"]["session_floor"]["delivered"] = _sessions(hits_out)

@@ -1688,6 +1688,8 @@ class LCMConfig:
             "config_yaml:lcm.recall_min_sessions" if isinstance(prefix_yaml, dict)
             and "recall_min_sessions" in prefix_yaml else "default")
         try:
+            if isinstance(floor_value, bool):
+                raise ValueError
             c.recall_min_sessions = max(0, min(10, int(floor_value)))
         except (ValueError, TypeError, OverflowError):
             _record("recall_min_sessions", "default", "invalid recall_min_sessions ignored; expected int")

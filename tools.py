@@ -4858,9 +4858,12 @@ def _lcm_recall_session_floor(
         sid = candidate["hit"].get("session_id")
         if not sid or sid in represented:
             continue
-        cut = next((i for i in reversed(range(len(sessions)))
-                    if result[i] is not protected_entry
-                    and (not sessions[i] or sessions.count(sessions[i]) > 1)), None)
+        seen = set()
+        cut = None
+        for i, session in enumerate(sessions):
+            if result[i] is not protected_entry and (not session or session in seen):
+                cut = i
+            seen.add(session)
         if cut is None:
             break
         index = next(i for i, entry in enumerate(result) if entry is candidate)
@@ -4906,7 +4909,11 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
 
     floor_default = max(0, min(10, _parse_int_value(getattr(engine._config, "recall_min_sessions", 0), 0)))
     floor_arg = kwargs.get("min_sessions", args.get("min_sessions"))
-    min_sessions = max(0, min(10, _parse_int_value(floor_arg, floor_default)))
+    try:
+        min_sessions = (floor_default if isinstance(floor_arg, bool) else
+                        max(0, min(10, _parse_int_value(floor_arg, floor_default))))
+    except OverflowError:
+        min_sessions = floor_default
 
     scope_bias, scope_bias_error = _parse_optional_float(args.get("scope_bias"), "scope_bias")
     if scope_bias_error:
@@ -5391,6 +5398,9 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
     if min_sessions:
         ordered, session_floor_info = _lcm_recall_session_floor(
             ordered, limit, min_sessions, protected_entry=protected_entry)
+        if fts_anchor_info is not None and fts_anchor_info["fired"]:
+            fts_anchor_info["position"] = next(
+                i for i, entry in enumerate(ordered, 1) if entry is protected_entry)
     place_later = partial(
         _lcm_recall_later_statements, engine, identity_rows=identity_rows, n=min(later_n, limit),
         deadline=deadline, excluded=excluded_session_ids, allowed=candidate_session_ids,
