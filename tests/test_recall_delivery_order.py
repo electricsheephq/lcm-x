@@ -136,6 +136,23 @@ def test_stripped_dates_without_room_for_time_marker_keep_score_order(delivery):
     assert any("event_time" not in h for h in payload["hits"] if h["store_id"] in {1, 3, 4, 5})
 
 
+def test_stripped_dates_with_room_for_time_marker_use_stored_row_order(delivery):
+    invoke, read = delivery
+    full = json.loads(invoke())
+    for hit in full["hits"]:
+        for key in ("event_time", "event_time_source", "time_uncertain"):
+            hit.pop(key, None)
+    cap = len(json.dumps(full)) + 26
+    read.reset_mock()
+    raw = invoke(response_char_cap=cap, delivery_order="time")
+    payload = json.loads(raw)
+    read.assert_called_once_with([1, 3, 4, 5, 6], deadline=float("inf"))
+    assert len(raw) <= cap
+    assert payload["provenance"]["delivery_order"] == "time"
+    assert [hit["store_id"] for hit in payload["hits"]] == [3, 4, 5, 1, 2, 6]
+    assert any("event_time" not in h for h in payload["hits"] if h["store_id"] in {1, 3, 4, 5})
+
+
 @pytest.mark.parametrize("raw,expected", [(None, "score"), ("time", "time"),
                                           (" TIME ", "time"), ("bad", "score")])
 def test_env_choice(monkeypatch, raw, expected):

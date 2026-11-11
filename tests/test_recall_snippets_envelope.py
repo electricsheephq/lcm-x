@@ -2,17 +2,53 @@
 from copy import deepcopy
 import json
 from pathlib import Path
+import subprocess
+from types import ModuleType
 from unittest.mock import Mock
 
 import pytest
 
-from hermes_lcm import tools
+from hermes_lcm import recall_delivery, tools
 from tests.test_recall_extra_entries import extra_reader
 from tests.test_recall_snippet_windows import make_delivery, recall_engine as recall_engine
 
 
 GOLDEN = Path(__file__).parent / "fixtures/recall_snippets_envelope_main.json"
 MODES = ("plain", "windows", "window-deadline", "window-error", "extras", "extra-error")
+
+
+@pytest.fixture
+def invoke_main(monkeypatch):
+    source = subprocess.check_output(
+        ["git", "show", "9d9f0e8c97b1b6e408300f8cfe64227b3e2afe6c:recall_delivery.py"],
+        cwd=Path(__file__).resolve().parents[1], text=True,
+    )
+    module = ModuleType("hermes_lcm._snippets_main_delivery")
+    module.__package__ = "hermes_lcm"
+    exec(compile(source, "main:recall_delivery.py", "exec"), module.__dict__)
+
+    def invoke(delivery, **kwargs):
+        with monkeypatch.context() as patch:
+            patch.setattr(recall_delivery, "deliver_recall", module.deliver_recall)
+            return delivery.invoke(**kwargs)
+
+    return invoke
+
+
+@pytest.mark.parametrize("query_chars", [5000, 4097])
+@pytest.mark.parametrize("order", ["score", "time"])
+def test_windows_tail_drop_preserves_main_query_bytes(invoke_main, query_chars, order):
+    d = make_delivery((1300,) * 6)
+    kwargs = dict(query="q" * query_chars, snippet_window_hits=5, delivery_order=order)
+    unmarked_full = invoke_main(d, **{**kwargs, "delivery_order": "score"})
+    cap = len(unmarked_full) - 1
+    expected = invoke_main(d, **kwargs, response_char_cap=cap)
+    result = json.loads(expected)
+    assert result["total_results"] == 5
+    assert result["query"] == kwargs["query"]
+    marker_chars = len(', "delivery_order": "time"') if order == "time" else 0
+    assert len(expected) == 14_044 + query_chars - 5000 + marker_chars
+    assert d.invoke(**kwargs, response_char_cap=cap) == expected
 
 
 def options(d, mode):
@@ -54,7 +90,7 @@ def test_fitting_5000_character_query_matches_main_bytes(guidance, order, mode):
 
 @pytest.mark.parametrize("order", ["score", "time"])
 @pytest.mark.parametrize("mode", MODES)
-def test_query_cut_precedes_event_time_strip_and_hit_drop(mode, order):
+def test_query_cut_precedes_event_time_strip_and_hit_drop(mode, order, invoke_main):
     d = make_delivery((1300,) * 12)
     for entry in d.entries:
         entry["hit"]["snippet"] = d.rows[entry["hit"]["store_id"]]["content"]
@@ -70,6 +106,16 @@ def test_query_cut_precedes_event_time_strip_and_hit_drop(mode, order):
     raw = d.invoke(query="q" * 55_000, **kwargs)
     result = json.loads(raw)
     assert len(raw) <= 64_000
+    if mode == "windows":
+        # Main already fitted windows by dropping the ranked tail. Preserve its
+        # query and dates whenever the no-hit envelope (with markers) fits.
+        assert raw == invoke_main(d, query="q" * 55_000, **kwargs)
+        assert result["query"] == "q" * 55_000
+        assert "query_truncated" not in result
+        assert result["response_cap_truncated"] is True
+        assert 0 < len(result["hits"]) < 8
+        assert all("event_time" in hit for hit in result["hits"])
+        return
     assert result["query"] == "q" * 4096
     assert result.pop("query_truncated") is True
     expected = json.loads(full)

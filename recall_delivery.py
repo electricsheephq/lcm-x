@@ -8,6 +8,7 @@ it neither resolves an engine nor reads a clock or opens a database.
 from __future__ import annotations
 
 from collections.abc import Callable
+from copy import deepcopy
 from datetime import datetime, timezone
 import json
 import logging
@@ -511,10 +512,18 @@ def deliver_recall(
                 }}))
             return len(json.dumps(payload))
 
-        # Cut a redundant long echo before sacrificing dates or ranked hits.
-        # The optional windows time marker alone must not trigger a query cut.
-        if len(query) > 4_096 and len(json.dumps(response)) > response_char_cap:
-            response.update(query=query[:4_096], query_truncated=True)
+        if len(query) > 4_096:
+            # Windows already fitted whole envelopes on main. Keep their query
+            # unless the no-hit envelope, including fit markers, cannot fit.
+            query_budget = len(json.dumps(response))
+            if window_fit:
+                empty = deepcopy(response)
+                empty.update(hits=[], total_results=0)
+                if hits_out:
+                    empty["response_cap_truncated"] = True
+                query_budget = encoded_size(empty)
+            if query_budget > response_char_cap:
+                response.update(query=query[:4_096], query_truncated=True)
         deferred_reason = None
         if encoded_size() > response_char_cap:
             if not window_fit:
