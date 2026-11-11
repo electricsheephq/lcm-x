@@ -11,7 +11,7 @@ import time
 from . import tokens
 from .message_analysis import _tool_call_id
 from .reasoning import resolve_occurrence_time
-from .recall_delivery import _without_event_time
+from .recall_delivery import _without_event_time, session_group_view
 from .retrieval_context import RetrievalContext
 
 TOKEN_BUDGET, CHAR_BUDGET = 16_000, 64_000
@@ -35,7 +35,8 @@ def session_schema(schema):
 
 
 def deliver_session(ordered, response, *, engine, deadline, excluded, allowed, seen_refs,
-                    delta_requested, event_time_fields, occurrence, summary_leads, summary_event_time=None):
+                    delta_requested, event_time_fields, occurrence, summary_leads, summary_event_time=None,
+                    group_by_session=False):
     encoder = tokens._get_encoder()
     count = partial(tokens.count_tokens_with_encoder, encoder=encoder)
     delivery = dict(unit="session", seed_limit=response["limit"], requested_seed_limit=response.get(
@@ -55,6 +56,7 @@ def deliver_session(ordered, response, *, engine, deadline, excluded, allowed, s
     conn = None
     live_reads = ExitStack()
     last_encoded = ""
+    refresh_grouping = None
 
     def check():
         if time.monotonic() >= deadline:
@@ -68,6 +70,8 @@ def deliver_session(ordered, response, *, engine, deadline, excluded, allowed, s
         response["hits"], response["total_results"] = hits, len(hits)
         if "session_floor" in response["provenance"]:
             response["provenance"]["session_floor"]["delivered"] = len({h["session_id"] for h in hits})
+        if refresh_grouping is not None:
+            refresh_grouping()
         delivery.update(message_count=len(hits), session_count=len({h["session_id"] for h in hits}))
         for meta in delivery["sessions"]:
             ids = [h["store_id"] for h in hits if h["session_id"] == meta["session_id"]]
@@ -447,6 +451,14 @@ def deliver_session(ordered, response, *, engine, deadline, excluded, allowed, s
             response.update(error="session_base_envelope_over_budget", query="",
                             provenance={"delivery": delivery})
             break
+    if group_by_session:
+        refresh_grouping = session_group_view(response)
+        if refresh_grouping is not None:
+            # Refit only already-admitted atomic groups; no retrieval or retries.
+            refit()
+            if not fits():
+                return json.dumps(dict(error="session_base_envelope_over_budget", hits=[], total_results=0,
+                    provenance={"session_groups_dropped": response["provenance"]["session_groups_dropped"]}))
     raw = encode()
     if raw is not None:
         return raw

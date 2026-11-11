@@ -67,6 +67,7 @@ CONFIG_ROWS = (
     ('recall_fts_anchor', 'LCM_RECALL_FTS_ANCHOR', 'bool', True),
     ('recall_min_sessions', 'LCM_RECALL_MIN_SESSIONS', 'int', 0),
     ('recall_session_hints', 'LCM_RECALL_SESSION_HINTS', 'bool', False),
+    ('recall_group_by_session', 'LCM_RECALL_GROUP_BY_SESSION', 'bool', False),
     ('recall_guidance', 'LCM_RECALL_GUIDANCE', 'str', 'v1'),
     ('recall_summary_event_time', 'LCM_RECALL_SUMMARY_EVENT_TIME', 'bool', False),
     ('proactive_recall_enabled', 'LCM_PROACTIVE_RECALL_ENABLED', 'bool', False),

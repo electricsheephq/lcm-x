@@ -654,6 +654,7 @@ def _fit_answer_ready_response(
     arm_hits: dict[str, list[dict[str, Any]]],
     adjacent_reply: list[dict[str, int]] | None = None,
     ranked_hits: list[dict[str, Any]] | None = None,
+    refresh_response: Callable[[], None] | None = None,
 ) -> str:
     anchor_fired = bool(fts_anchor_info and fts_anchor_info.get("fired"))
     if anchor_fired:
@@ -661,9 +662,11 @@ def _fit_answer_ready_response(
         # recompute below can never grow the encoded response past the cap.
         fts_anchor_info["delivered"] = False
     _refresh_later_statements(response)
+    if refresh_response is not None:
+        refresh_response()
     encoded = json.dumps(response, ensure_ascii=False)
     event_time_marker_deferred: str | None = None
-    if len(encoded) > response_char_cap:
+    if len(encoded) > response_char_cap and refresh_response is None:
         encoded, event_time_marker_deferred = _fit_event_time(
             response, response_char_cap=response_char_cap
         )
@@ -676,7 +679,10 @@ def _fit_answer_ready_response(
         response["hits"] or expansion.get("summary_leads")
     ):
         if response["hits"]:
-            response["hits"].pop()
+            if refresh_response is None:
+                response["hits"].pop()
+            else:
+                response["hits"].remove(max(response["hits"], key=lambda h: h["rank"]))
         else:
             expansion["summary_leads"].pop()
         response["total_results"] = len(response["hits"])
@@ -684,6 +690,8 @@ def _fit_answer_ready_response(
         _refresh_later_statements(response)
         if "session_floor" in response["provenance"]:
             response["provenance"]["session_floor"]["delivered"] = _sessions(response["hits"])
+        if refresh_response is not None:
+            refresh_response()
         expansion["expanded_hit_count"] = sum(
             "content" in hit for hit in response["hits"]
         )
@@ -743,6 +751,67 @@ def _fit_answer_ready_response(
             response["provenance"]["adjacent_reply"] = receipts
             encoded = marked_encoded
     return encoded
+
+
+def session_group_view(response: dict) -> Callable[[], None] | None:
+    """Capture legacy ranks, returning a read-free view refresh for size fitting."""
+    hits = response.get("hits", [])
+    if not hits:
+        return None
+    original_count = len(hits)
+    for rank, hit in enumerate(hits, 1):
+        hit["rank"] = rank
+
+    def stamp(hit):
+        try:
+            return datetime.fromtimestamp(float(hit.get("timestamp") or 0), tz=timezone.utc)
+        except (ValueError, TypeError, OverflowError, OSError):
+            return datetime.fromtimestamp(0, tz=timezone.utc)
+
+    def refresh():
+        hits = response["hits"]
+        groups = {}
+        for hit in hits:
+            groups.setdefault(hit.get("session_id") or None, []).append(hit)
+        sessions = sorted(groups, key=lambda sid: (
+            sid is None, min(stamp(h) for h in groups[sid]),
+            min(h["rank"] for h in groups[sid]),
+        ))
+        for sid in sessions:
+            groups[sid].sort(key=(lambda h: h["rank"]) if sid is None
+                             else lambda h: (stamp(h), h["rank"]))
+        hits[:] = [hit for sid in sessions for hit in groups[sid]]
+        response["session_groups"] = [dict(
+            session_id=sid, first_at=min(stamp(h) for h in groups[sid]).isoformat(),
+            last_at=max(stamp(h) for h in groups[sid]).isoformat(),
+            hit_ranks=[h["rank"] for h in groups[sid]],
+        ) for sid in sessions]
+        dates = [stamp(h).isoformat() for h in hits]
+        response["sessions_covered"] = (
+            f"{sum(sid is not None for sid in sessions)} sessions; dates "
+            f"{min(dates) if dates else 'none'} to {max(dates) if dates else 'none'}"
+        )
+        response["provenance"]["session_groups_dropped"] = original_count - len(hits)
+        response["total_results"] = sum(not h.get("extra") for h in hits)
+
+    return refresh
+
+
+def group_session_response(encoded: str, *, response_char_cap: int,
+                           arm_hits: dict, ranked_hits: list) -> str:
+    """Group the legacy response, then fit the added view without any reads."""
+    response = json.loads(encoded)
+    refresh = session_group_view(response)
+    if refresh is None:
+        return encoded
+    expansion = response["provenance"].get("answer_ready", {})
+    return _fit_answer_ready_response(
+        response=response, response_char_cap=response_char_cap, expansion=expansion,
+        delta_requested="delta" in response, arm_hits=arm_hits,
+        fts_anchor_info=response["provenance"].get("fts_anchor"),
+        adjacent_reply=response["provenance"].pop("adjacent_reply", None),
+        ranked_hits=ranked_hits, refresh_response=refresh,
+    )
 
 
 def _refresh_later_statements(response):

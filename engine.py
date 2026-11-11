@@ -5836,7 +5836,7 @@ class LCMEngine(
         handler = handlers.get(name)
         if handler:
             return handler(args, engine=self,
-                           **{k: v for k, v in kwargs.items() if k in {"delivery_unit", "delivery_order", "adjacent_reply", "summary_event_time", "snippet_window_hits", "extra_entries", "later_statements", "min_sessions", "session_hints", "recall_guidance"}})
+                           **{k: v for k, v in kwargs.items() if k in {"delivery_unit", "delivery_order", "adjacent_reply", "summary_event_time", "snippet_window_hits", "extra_entries", "later_statements", "min_sessions", "session_hints", "group_by_session", "recall_guidance"}})
         return json.dumps({"error": f"Unknown LCM tool: {name}"})
 
     def _database_path_source(self) -> str:
@@ -10698,7 +10698,7 @@ class LCMEngine(
                 # FTS-only anchor under the floor would displace an eligible hit.
                 fts_anchor=False,
                 delivery_unit="hits",
-                delivery_order="score", adjacent_reply=False, later_statements=0, min_sessions=0, session_hints=False, recall_guidance="v1",
+                delivery_order="score", adjacent_reply=False, later_statements=0, min_sessions=0, session_hints=False, group_by_session=False, recall_guidance="v1",
                 snippet_window_hits=0, extra_entries=0,
                 summary_event_time=False,
             )

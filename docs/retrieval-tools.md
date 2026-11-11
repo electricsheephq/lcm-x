@@ -95,6 +95,21 @@ remain unchanged. `provenance.session_floor` records `requested`, `achieved`,
 size fitting (extra entries are not counted), so the floor is a ranking target rather than a delivery guarantee.
 Proactive recall, pre-answer retrieval and evidence wrappers keep the floor off.
 
+Set `recall_group_by_session: true` (env `LCM_RECALL_GROUP_BY_SESSION=true`;
+default `false`, YAML `lcm.recall_group_by_session`; environment wins) to group
+model-called recall hits by session. Sessions sort by their earliest hit timestamp;
+hits sort by timestamp, with original rank breaking ties. Sessionless hits form a
+final group in rank order. Every hit gains its original 1-based `rank`;
+`session_groups` lists `session_id`, UTC ISO `first_at`/`last_at` and `hit_ranks`.
+`sessions_covered` reports the named-session count and the overall hit date range
+(including sessionless hits). Later-statement children keep their own session and
+`later_statement_of` link. Group fields count toward the final response character
+cap; `provenance.session_groups_dropped` reports any additional whole-hit removals.
+Selection and content stay the same when they fit. This view adds no reads or
+stored-row writes. Proactive recall, pre-answer baseline, evidence wrappers,
+requirements retrieval, grep and session loading keep their existing outputs.
+Tool schemas and descriptions stay unchanged under v1 and v2 guidance.
+
 Set `recall_session_hints: true` (env `LCM_RECALL_SESSION_HINTS=true`; default
 `false`) to add `session_hint` to answer-ready hits and summary leads. It is a
 call string such as `lcm_load_session(session_id='session-a', anchor_store_id=42)`.
@@ -108,6 +123,7 @@ lcm:
   recall_guidance: v2
   recall_session_hints: true
   recall_min_sessions: 3
+  recall_group_by_session: true
 ```
 
 Both settings leave internal recall consumers unchanged, including proactive

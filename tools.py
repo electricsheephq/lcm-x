@@ -5425,9 +5425,10 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
             event_time_fields=_lcm_recall_event_time,
             occurrence=include_occurrence_time,
             summary_leads=summary_leads,
+            group_by_session=kwargs.get("group_by_session", getattr(engine._config, "recall_group_by_session", False)),
             **({"summary_event_time": read_summary_event_time} if read_summary_event_time else {}),
         )
-    return recall_delivery.deliver_recall(
+    encoded = recall_delivery.deliver_recall(
         ordered,
         query=query,
         limit=limit,
@@ -5488,6 +5489,12 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
         delivery_order=kwargs.get("delivery_order", getattr(engine._config, "recall_delivery_order", "score")),
         **({"read_summary_event_time": read_summary_event_time} if read_summary_event_time else {}),
     )
+    if session_delivery is None and kwargs.get("group_by_session", getattr(engine._config, "recall_group_by_session", False)):
+        return recall_delivery.group_session_response(
+            encoded, response_char_cap=_LCM_RECALL_RESPONSE_CHAR_CAP, arm_hits=arm_hits,
+            ranked_hits=[e["hit"] for e in ordered],
+        )
+    return encoded
 
 
 def lcm_describe(args: Dict[str, Any], **kwargs) -> str:
