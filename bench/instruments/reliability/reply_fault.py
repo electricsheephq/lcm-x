@@ -1,4 +1,5 @@
 """Held-reply fault: harness-owned reservation, host-row witness, and fail-closed evidence."""
+import os
 import sqlite3
 import threading
 import time
@@ -26,7 +27,7 @@ class HeldReply:
                            session=None, parent=None, root=None, depth=None, journal_mode=None,
                            reservation_wall=None, reservation_result=None, release_wall=None,
                            first_poll_wall=None, seen_poll_wall=None, kill_wall=None, poll_count=0,
-                           busy_poll_count=0, kill_offset_ms=None, host_has_row=None,
+                           busy_poll_count=0, kill_offset_ms=None, exit_confirmed_ms=None, host_has_row=None,
                            store_has_row=None, restart_exit=None, polls=[])
 
     def invalid(self, reason):
@@ -96,7 +97,9 @@ class HeldReply:
                     self.run.proc.kill()  # No DB read between the witness and the signal.
                     r["kill_offset_ms"] = (r["kill_wall"] - r["release_wall"]) * 1000
                     self.run.fire(KIND, self.fault["turn"], **{k: v for k, v in r.items() if k != "turn"})
-                    self.release_reservation()
+                    if not self.wait_for_exit():
+                        self.invalid("host group did not exit")
+                        break
                     self.witness_id = rows[0][0]  # In memory only; never part of the evidence record.
                     self.validate(rows[0][1])
                     break
@@ -107,6 +110,22 @@ class HeldReply:
             self.invalid("poll/validation: " + type(exc).__name__)
         finally:
             self.finish()
+
+    def wait_for_exit(self):
+        end = self.record["kill_monotonic_ns"] / 1_000_000_000 + 5
+        while time.monotonic() < end:
+            exited = self.run.proc.process.poll() is not None
+            try:
+                os.killpg(self.run.proc.pid, 0)
+            except ProcessLookupError:
+                if exited:
+                    self.record["exit_confirmed_ms"] = (
+                        time.monotonic_ns() - self.record["kill_monotonic_ns"]) / 1_000_000
+                    return True
+            except PermissionError:
+                pass  # A group we cannot signal is still present.
+            time.sleep(0.005)
+        return False
 
     def validate(self, session):
         r, current, seen = self.record, session, set()

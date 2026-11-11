@@ -507,6 +507,20 @@ session. Phase B must finish `done`. Reservation failure, a five-second poll
 timeout, invalid lineage, failed post-kill checks, or failed restart yields ERROR
 with `reply-held fault INVALID`. Evidence records contain times and counts, not content.
 
+The held-reply fault follows this order:
+
+| step | what happens | invariant it protects |
+|---|---|---|
+| reservation | `BEGIN IMMEDIATE` before release | Store writer is blocked |
+| release | Release turn N's reply | Reservation precedes response bytes |
+| poll | Read-only poll every 2 ms | Witness a new host reply |
+| kill | Signal on the poll that sees the row; no read in between | Close the witnessed window |
+| exit confirmed | Group gone and leader exited; bounded 5 s, else INVALID | No host writer can commit later |
+| validity read | Check new row, root, depth | Correct reply and lineage |
+| post-kill check | Host has the witnessed row; store has none | Confirm the held-reply window |
+| ROLLBACK | Last, on every path | Hold reservation through checks; release before restart |
+| restart | Phase B `session/load` must end `done` | Recovery completes in the same session |
+
 The five cells use provisional turn/depth pairs: `rotation-turn` (12/1),
 `plain-turn` (15/1), `multi-hop` (22/2), `pre-rotation` (5/0), and `in-place`
 (15/0). The first three target #2624; the controls gate every host. On main,

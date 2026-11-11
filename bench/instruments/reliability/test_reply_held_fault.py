@@ -6,6 +6,8 @@ OLD_SHA = "16e364c39241264ce704a0f9d5a31a3e960cd97c476c33c7e37ec73b928772e6"
 
 import socket
 import sqlite3
+import subprocess
+import sys
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,12 +18,24 @@ import pytest
 from bench.instruments.reliability import cells, ci, fake_provider as FP, process_cell as PC, reply_fault as RF, run_matrix as RM
 
 
+@pytest.fixture(autouse=True)
+def stub_host_group(monkeypatch):
+    killpg = RF.os.killpg
+
+    def signal_group(pid, sig):
+        if pid == -2624:
+            raise ProcessLookupError
+        return killpg(pid, sig)
+
+    monkeypatch.setattr(RF.os, 'killpg', signal_group)
+
+
 def fixture(tmp_path, depth=0, expected=None):
     run = object.__new__(PC.ProcessCell)
     run.home, run.d, run.transcript = tmp_path, tmp_path, tmp_path / 'transcript.jsonl'
     run.sid, run.phase, run.fired, run.log_mark = 'root', 'A', set(), 0
     run.host_log = lambda: ''
-    run.proc = SimpleNamespace(kill=Mock())
+    run.proc = SimpleNamespace(kill=Mock(), pid=-2624, process=SimpleNamespace(poll=lambda: -9))
     run.cell = cells.cell('fixture', [], in_place=True)
     run.text_tag = 'T05'
     run.reply_fault = None
@@ -53,6 +67,98 @@ def released(held):
     con = sqlite3.connect(held.run.home / 'lcm.db', timeout=0)
     con.execute('BEGIN IMMEDIATE')
     con.close()
+
+
+@pytest.mark.parametrize('checks_fail', [False, True])
+def test_kill_exit_checks_rollback_order(tmp_path, monkeypatch, checks_fail):
+    run, held, _ = fixture(tmp_path)
+    held.before_release()
+    insert(run, held.text)
+    order = []
+    run.proc.kill.side_effect = lambda: order.append('kill')
+    probe = Mock(side_effect=[None, PermissionError(), ProcessLookupError()])
+
+    def group(pid, sig):
+        assert order == ['kill'] and pid == run.proc.pid and sig == 0
+        try:
+            return probe()
+        except ProcessLookupError:
+            order.append('exit confirmed')
+            raise
+
+    validate = held.validate
+
+    def checks(session):
+        assert held.record['exit_confirmed_ms'] >= 0
+        assert held.reservation.in_transaction
+        order.append('checks')
+        if checks_fail:
+            raise ValueError('test validation failure')
+        validate(session)
+
+    held.reservation.set_trace_callback(lambda sql: order.append(sql) if sql == 'ROLLBACK' else None)
+    monkeypatch.setattr(RF.os, 'killpg', group)
+    monkeypatch.setattr(held, 'validate', checks)
+    held.after_release()
+    assert order == ['kill', 'exit confirmed', 'checks', 'ROLLBACK']
+    assert held.record['valid'] is (not checks_fail)
+    released(held)
+
+
+@pytest.mark.parametrize('shape', ['present', 'permission', 'leader running'])
+def test_exit_timeout_invalid_and_releases_reservation(tmp_path, monkeypatch, shape):
+    run, held, _ = fixture(tmp_path)
+    held.before_release()
+    insert(run, held.text)
+    clock = [0.0]
+    monkeypatch.setattr(RF.time, 'monotonic', lambda: clock[0])
+    monkeypatch.setattr(RF.time, 'monotonic_ns', lambda: int(clock[0] * 1_000_000_000))
+
+    def sleep(delay):
+        assert delay == 0.005
+        clock[0] += delay
+
+    monkeypatch.setattr(RF.time, 'sleep', sleep)
+    monkeypatch.setattr(RF.os, 'killpg', Mock(side_effect=(
+        PermissionError if shape == 'permission' else ProcessLookupError if shape == 'leader running' else None)))
+    if shape == 'leader running':
+        run.proc.process.poll = lambda: None
+    held.validate = Mock(side_effect=AssertionError('must skip checks'))
+    held.after_release()
+    assert 5 <= clock[0] < 5.01
+    assert held.record['invalid_reason'] == 'host group did not exit'
+    assert held.record['valid'] is False and held.record['exit_confirmed_ms'] is None
+    held.validate.assert_not_called()
+    released(held)
+
+
+def test_blocked_writer_cannot_commit_before_confirmed_exit(tmp_path):
+    run, held, _ = fixture(tmp_path)
+    held.before_release()
+    script = ("import sqlite3, sys; con = sqlite3.connect(sys.argv[1], timeout=10); "
+              "print('ready', flush=True); con.execute('BEGIN IMMEDIATE'); "
+              "con.execute('INSERT INTO messages(content) VALUES (?)', (sys.argv[2],)); con.commit()")
+    writer = subprocess.Popen([sys.executable, '-c', script, str(tmp_path / 'lcm.db'), held.text],
+                              start_new_session=True, stdout=subprocess.PIPE, text=True)
+    run.proc = SimpleNamespace(pid=writer.pid, process=writer,
+                               kill=lambda: RF.os.killpg(writer.pid, 9))
+    try:
+        assert writer.stdout.readline().strip() == 'ready'
+        assert writer.poll() is None
+        insert(run, held.text)
+        held.after_release()
+        assert writer.poll() is not None and held.record['exit_confirmed_ms'] >= 0
+        assert held.record['valid'] and held.record['store_has_row'] is False
+        with sqlite3.connect(tmp_path / 'lcm.db') as store:
+            assert store.execute('SELECT COUNT(*) FROM messages').fetchone()[0] == 0
+        released(held)
+    finally:
+        if writer.poll() is None:
+            run.proc.kill()
+        writer.wait(timeout=5)
+        writer.stdout.close()
+        if not held.done.is_set():
+            held.finish()
 
 
 @pytest.mark.parametrize('depth', [0, 1, 2])
@@ -220,7 +326,8 @@ def test_run_phase_waits_for_post_kill_completion(tmp_path, monkeypatch, complet
     if completion_timeout:
         held.done = Mock(wraps=held.done)
         held.done.wait.return_value = False
-    stub = SimpleNamespace(killed=False, initialize=lambda _: None, new_session=lambda *_: 'root', close=lambda: -9)
+    stub = SimpleNamespace(killed=False, initialize=lambda _: None, new_session=lambda *_: 'root', close=lambda: -9,
+                           pid=run.proc.pid, process=run.proc.process)
     stub.kill = lambda: setattr(stub, 'killed', True)
     monkeypatch.setattr(PC.AD, 'AcpProcess', lambda *_: stub)
     monkeypatch.setattr(PC.P1, 'extend_turns', lambda *_: [5])
@@ -402,6 +509,18 @@ def test_offline_rescore_refuses_invalid_reply_fault(tmp_path, capsys, verdict):
     assert 'reply-held fault INVALID (reply_fault.valid is false)' in capsys.readouterr().err
 
 
+@pytest.mark.parametrize('evidence', [{}, {'reply_fault': None}, {'reply_fault': {}},
+                                    {'reply_fault': {'valid': None}}, {'reply_fault': {'valid': 1}}])
+def test_offline_rescore_requires_affirmative_reply_fault_validity(tmp_path, capsys, evidence):
+    from bench.instruments.reliability.scorers import cli
+    (tmp_path / 'cell.json').write_text(json.dumps({'faults': [{'kind': RF.KIND}]}))
+    (tmp_path / 'verdict.json').write_text(json.dumps({'verdict': 'PASS', **evidence}))
+    with pytest.raises(SystemExit) as exc:
+        cli.main(['--cell-dir', str(tmp_path)])
+    assert exc.value.code == 2
+    assert 'reply-held fault validity is missing' in capsys.readouterr().err
+
+
 @pytest.mark.parametrize('outcome', ['kill', 'invalid', 'timeout'])
 def test_turn_waits_for_witness_before_advancing(tmp_path, monkeypatch, outcome):
     run, held, _ = fixture(tmp_path)
@@ -473,7 +592,8 @@ def test_prompt_error_during_witness_kill(tmp_path, monkeypatch, error):
     run.phase_timeout, run.turn_timeout, run.last_turn = None, 1, 0
     run.argv, run.env, run.work, run.files = lambda: [], lambda: {}, tmp_path, tmp_path
     run.scenario = PC.Scenario(run)
-    stub = SimpleNamespace(killed=False, initialize=lambda _: None, new_session=lambda *_: 'root', close=lambda: -9)
+    stub = SimpleNamespace(killed=False, initialize=lambda _: None, new_session=lambda *_: 'root', close=lambda: -9,
+                           pid=run.proc.pid, process=run.proc.process)
     stub.kill = lambda: setattr(stub, 'killed', True)
 
     def prompt(*_):

@@ -83,6 +83,9 @@ def main(argv=None) -> int:
 
         if (uploaded.get("reply_fault") or {}).get("valid") is False:
             refuse("reply-held fault INVALID (reply_fault.valid is false)")
+        if any(f.get("kind") == "crash_after_host_reply_before_store" for f in cell.get("faults", [])) and (
+                uploaded.get("reply_fault") or {}).get("valid") is not True:
+            refuse("reply-held fault validity is missing")
         if uploaded.get("verdict") == "ERROR":
             refuse("uploaded verdict is ERROR (a harness decision)")
         if cell.get("drain") and cell.get("transport") != "acp-process":
