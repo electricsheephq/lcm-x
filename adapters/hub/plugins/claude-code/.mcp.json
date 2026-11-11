@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "lcmx": {
+      "command": "python3",
+      "args": [
+        "-I",
+        "-S",
+        "${CLAUDE_PLUGIN_ROOT}/bin/lcmx_recall_remote"
+      ]
+    }
+  }
+}
