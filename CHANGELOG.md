@@ -8,6 +8,8 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## v0.30.0 (nothing lost)
 
+- Fix: At default settings, when the payload of a saved tool result cannot be written (the payload folder cannot be created, or the file write fails), the saved-output marker is now stored as the host sent it, as in v0.29.2. A session that ends while another is active (or while the store is busy) no longer loses the rows after it, usually the final reply, and a helper agent no longer stores the result again on each model call (#2599).
+- Fix: With sensitive-pattern redaction on, a session that ends while another is active no longer loses the rows after a saved tool result from Hermes's spillover folder whose preview contains redacted text, usually the final reply (#2603). The saved-output marker is stored as the host sent it, as in v0.29.2. For those rows LCM-X keeps that marker, not the saved file's full text: v0.30.0-rc1 to rc5 kept the text and could lose the final reply, and v0.29.2 never kept it (#2604 tracks bringing the recovery back). A replay without stamps on assistant and tool rows can then store that replay again, as v0.29.2 does (#2604).
 - Fix: a tool result that Hermes saved to a file is recognised as the row already stored when Hermes sends its
   marker again. A session that ends while another is active no longer loses the rows after such a result, and a
   delegated child's live session no longer stores the result again on each model call (#2539). This holds with
