@@ -11,6 +11,7 @@ Self-contained: helpers come only from test modules present on main and on relea
 """
 
 import copy
+import sys
 import tempfile
 from collections import Counter
 from pathlib import Path
@@ -24,15 +25,18 @@ from tests.test_issue_1931_delegate_children import child_rows, host  # noqa: F4
 from tests.test_issue_2482_interrupted_child import _setup as setup_child, call
 
 CALL = "m1"
-# Redactable bodies: the preview (the first 30 characters) shows part of the redacted span, except "later".
+# Redactable bodies: the preview (the first 30 characters) shows part of the redacted span, except "cut" (the preview
+# ends exactly where redaction starts) and "later". "straddle" starts the redacted span inside the preview's last
+# character.
 BODIES = {
     "digest": "api_key=synthetic1234567890abcdef0123456789\n" + "x" * 3000,
     "lossy": "password=synthetic1234\n" + "x" * 3000,
-    "cut": "y" * 20 + "api_key=synthetic1234567890abcdef0123456789\n" + "x" * 3000,
+    "cut": "y" * 21 + " api_key=synthetic1234567890abcdef0123456789\n" + "x" * 3000,
+    "straddle": "y" * 20 + " api_key=synthetic1234567890abcdef0123456789\n" + "x" * 3000,
     "inside": "api_key=abcd1234efgh5678ijkl\n" + "x" * 3000,
     "later": "z" * 100 + "\napi_key=synthetic1234567890abcdef0123456789\n" + "x" * 3000,
 }
-REDACTION = pytest.mark.parametrize("body", ["digest", "lossy", "inside"])
+REDACTION = pytest.mark.parametrize("body", ["digest", "lossy", "inside", "straddle"])
 
 
 @pytest.fixture(autouse=True)
@@ -99,8 +103,8 @@ def test_a_spillover_marker_whose_preview_redaction_changes_keeps_the_final_repl
 
 @pytest.mark.parametrize("kind", ["spillover", "tempdir"])
 def test_a_secret_cut_by_the_preview_boundary_loses_nothing(tmp_path, kind):
-    """The preview ends inside the secret; redaction leaves the preview's part as it is, so the recovered form is kept
-    and the session-end rule still matches (as in rc5)."""
+    """The preview ends where the redacted span starts; redaction leaves the preview's part as it is, so the recovered
+    form is kept and the session-end rule still matches (as in rc5)."""
     form, final, rows, n = _offcurrent_end(tmp_path / "hermes", kind, "cut")
     assert (form, final, rows) == ("externalized", 1, n + 1)
 
@@ -181,6 +185,18 @@ def test_a_restart_on_a_store_that_holds_the_marker_ends_off_current_with_the_fi
 _T0 = 1762700000.0
 _RCALL = "call_spill"
 _REPLAY_PINS = {  # (kind, body, stamps, shape): (this change, rc5, v0.29.2)
+    ('K1', 'straddle', 'all', 'full'): ((4, 6, 8, 10), (4, 6, 8, 10), (4, 6, 8, 10)),
+    ('K1', 'straddle', 'all', 'partial'): ((4, 9, 11, 13), (4, 9, 11, 13), (4, 9, 11, 13)),
+    ('K1', 'straddle', 'none', 'full'): ((4, 6, 8, 10), (4, 6, 8, 10), (4, 10, 18, 28)),
+    ('K1', 'straddle', 'none', 'partial'): ((4, 12, 22, 34), (4, 9, 11, 13), (4, 12, 22, 34)),
+    ('K1', 'straddle', 'user', 'full'): ((4, 6, 8, 10), (4, 6, 8, 10), (4, 9, 15, 22)),
+    ('K1', 'straddle', 'user', 'partial'): ((4, 12, 21, 31), (4, 9, 11, 13), (4, 12, 21, 31)),
+    ('K2', 'straddle', 'all', 'full'): ((4, 6, 8, 10), (4, 6, 8, 10), (4, 6, 8, 10)),
+    ('K2', 'straddle', 'all', 'partial'): ((4, 9, 11, 13), (4, 9, 11, 13), (4, 9, 11, 13)),
+    ('K2', 'straddle', 'none', 'full'): ((4, 6, 8, 10), (4, 6, 8, 10), (4, 6, 8, 10)),
+    ('K2', 'straddle', 'none', 'partial'): ((4, 9, 11, 13), (4, 9, 11, 13), (4, 9, 11, 13)),
+    ('K2', 'straddle', 'user', 'full'): ((4, 6, 8, 10), (4, 6, 8, 10), (4, 6, 8, 10)),
+    ('K2', 'straddle', 'user', 'partial'): ((4, 9, 11, 13), (4, 9, 11, 13), (4, 9, 11, 13)),
     ('K1', 'cut', 'all', 'full'): ((4, 6, 8, 10), (4, 6, 8, 10), (4, 6, 8, 10)),
     ('K1', 'cut', 'all', 'partial'): ((4, 9, 11, 13), (4, 9, 11, 13), (4, 9, 11, 13)),
     ('K1', 'cut', 'none', 'full'): ((4, 6, 8, 10), (4, 6, 8, 10), (4, 10, 18, 28)),
@@ -273,3 +289,149 @@ def test_three_cold_replays_with_redaction_on(tmp_path, kind, body, stamps, shap
             engine.shutdown()
     this_change, rc5, v0292 = _REPLAY_PINS[(kind, body, stamps, shape)]
     assert tuple(counts) == this_change, f"got {counts}; pinned {this_change}; rc5 {rc5}; v0.29.2 {v0292}"
+
+
+# Stores a release candidate wrote (#2604, accepted by the release manager for v0.30.0): rc1 to rc5 stored such a row as
+# its externalized redacted text. A later occurrence with the same call id and the identical marker is stored as the
+# marker by this change, and the compare cannot pair the two forms: a delegated child stores one extra copy, and
+# compaction of that session cannot prove contiguous coverage. No row is lost. The typed compare planned for v0.30.1
+# (#2604) closes both. A candidate-written row is made here by turning this change's condition off for the first write.
+_CANDIDATE_REASON = ("#2604, accepted for v0.30.0: a store written by v0.30.0-rc1 to rc5 holding the externalized form, then "
+                     "the same call id with the identical marker")
+_PAD = " alpha beta gamma delta" * 100
+
+
+def _occurrence(marker, occurrence=0, call_id="m1", pad=""):
+    n = occurrence * 10
+    return [
+        {"role": "user", "content": f"U{n}" + pad, "timestamp": 1762700000.0 + n},
+        {"role": "assistant", "content": "", "timestamp": 1762700001.0 + n,
+         "tool_calls": [{"id": call_id, "type": "function", "function": {"name": "terminal", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": call_id, "content": marker, "timestamp": 1762700002.0 + n},
+        {"role": "assistant", "content": f"A{n}" + pad, "timestamp": 1762700003.0 + n},
+    ] + [{"role": ("user", "assistant")[i % 2], "content": f"T{n + i}" + pad, "timestamp": 1762700004.0 + n + i}
+         for i in range(6)]
+
+
+def _as_a_candidate_wrote(engine, monkeypatch):
+    module = sys.modules[type(engine).__module__.rsplit(".", 1)[0] + ".ingest_protection"]
+    monkeypatch.setattr(module, "_safe_hermes_spillover_file", lambda *a, **k: None)
+
+
+def _compacting_engine(home, monkeypatch):
+    config = LCMConfig(database_path=str(home / "lcm.db"), large_output_externalization_path=str(home / "externalized"),
+                       sensitive_patterns_enabled=True, sensitive_patterns=["all"], fresh_tail_count=2,
+                       leaf_chunk_tokens=400, context_threshold=0.001, threshold_full_sweep_enabled=False)
+    engine = LCMEngine(config=config, hermes_home=str(home))
+    monkeypatch.setattr(sys.modules[type(engine).__module__], "summarize_with_escalation",
+                        lambda **kw: ("Earlier turns.\nExpand for details about: turns", 1))
+    engine.on_session_start("S1", platform="cli", context_length=128000, conversation_id="conv1")
+    return engine
+
+
+def _compact(home, monkeypatch, handed):
+    engine = _compacting_engine(home, monkeypatch)
+    try:
+        engine.ingest(copy.deepcopy(handed))
+        rows = engine._store.get_session_messages("S1")
+        mapped = len(engine._get_store_id_map_for_messages(handed))
+        engine.compress(copy.deepcopy(handed), current_tokens=1_000_000, force=True)
+        covered = [sid for node in engine._dag.get_session_nodes("S1") if node.source_type == "messages"
+                   for sid in node.source_ids]
+        return engine._last_compression_status, len(rows), mapped, len(covered), len(set(covered))
+    finally:
+        engine.shutdown()
+
+
+def _three_results(home):
+    handed = []
+    for i in range(3):
+        full = f"api_key=synthetic{i}1234567890abcdef0123456789\n" + "x" * 3000
+        handed += _occurrence(_write_output(_path("spillover", home, f"c{i}"), full), i, f"c{i}", _PAD)[:4]
+    return handed + [{"role": ("user", "assistant")[k % 2], "content": f"T{k}" + _PAD, "timestamp": 1762700040.0 + k}
+                     for k in range(6)]
+
+
+@pytest.mark.parametrize("replay", [False, True], ids=["stored", "after-a-stampless-replay"])
+def test_compaction_publishes_with_three_spillover_markers_stored_bare(tmp_path, monkeypatch, replay):
+    """Three spillover results whose previews hold redacted text, all outside the fresh tail, on a store this change
+    wrote; with a stampless replay that stored the calls and results again (the state accepted with #2604), too.
+    v0.29.2, on its own store, publishes in both states and maps the same rows (15 of 18)."""
+    home = tmp_path / "hermes"
+    handed = _three_results(home)
+    first = _engine(home)
+    try:
+        first.on_session_start("S1", platform="cli", context_length=128000, conversation_id="conv1")
+        first.ingest(copy.deepcopy(handed))
+        assert [_form(r["content"]) for r in first._store.get_session_messages("S1") if r["role"] == "tool"] == ["marker"] * 3
+    finally:
+        first.shutdown()
+    if replay:
+        again = _engine(home)
+        try:
+            again.on_session_start("S1", platform="cli", context_length=128000, conversation_id="conv1")
+            again.ingest([{k: v for k, v in r.items() if not (k == "timestamp" and r["role"] != "user")} for r in handed])
+        finally:
+            again.shutdown()
+    status, rows, mapped, covered, unique = _compact(home, monkeypatch, handed)
+    assert (status, rows, mapped, covered == unique, covered > 0) == ("compacted", 30 if replay else 18, 15, True, True)
+
+
+def test_a_candidate_written_store_compacts_when_no_call_id_comes_back(tmp_path, monkeypatch):
+    home = tmp_path / "hermes"
+    marker = _write_output(_path("spillover", home, "m1"), BODIES["digest"])
+    handed = _occurrence(marker, pad=_PAD)
+    seed = _compacting_engine(home, monkeypatch)
+    try:
+        with monkeypatch.context() as patch:
+            _as_a_candidate_wrote(seed, patch)
+            seed.ingest(copy.deepcopy(handed))
+        assert _form(seed._store.get_session_messages("S1")[2]["content"]) == "externalized"
+    finally:
+        seed.shutdown()
+    handed += [r for r in _occurrence(marker, 1, pad=_PAD) if r["role"] != "tool" and not r.get("tool_calls")]
+    status, rows, mapped, covered, unique = _compact(home, monkeypatch, handed)
+    assert (status, rows, mapped, covered == unique, covered > 0) == ("compacted", 18, 18, True, True)
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=_CANDIDATE_REASON)
+def test_a_candidate_written_store_compacts_when_the_call_id_comes_back(tmp_path, monkeypatch):
+    home = tmp_path / "hermes"
+    marker = _write_output(_path("spillover", home, "m1"), BODIES["digest"])
+    handed = _occurrence(marker, pad=_PAD)
+    seed = _compacting_engine(home, monkeypatch)
+    try:
+        with monkeypatch.context() as patch:
+            _as_a_candidate_wrote(seed, patch)
+            seed.ingest(copy.deepcopy(handed))
+        assert _form(seed._store.get_session_messages("S1")[2]["content"]) == "externalized"
+    finally:
+        seed.shutdown()
+    handed += _occurrence(marker, 1)
+    status, rows, mapped, covered, unique = _compact(home, monkeypatch, handed)
+    assert rows == 20  # nothing lost, nothing stored twice
+    assert status == "compacted"  # the candidate publishes nothing: "could not prove contiguous source coverage"
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=_CANDIDATE_REASON)
+def test_a_delegated_child_on_a_candidate_written_store_stores_a_returning_call_once(host, monkeypatch):  # noqa: F811
+    _, _, ctx, parent, child, engine = setup_child(host, "own_engine")
+    engine._config.sensitive_patterns_enabled = True
+    engine._config.sensitive_patterns = ["all"]
+    marker = _write_output(_path("spillover", engine._hermes_home, "m1"), BODIES["digest"])
+    first = _occurrence(marker)
+    with monkeypatch.context() as patch:
+        _as_a_candidate_wrote(engine, patch)
+        engine._append_off_current_session_end_suffix("child", copy.deepcopy(first), source="delegate_child",
+                                                      conversation_id="child")
+    assert _form(child_rows(parent)[2]["content"]) == "externalized"
+    counts = [len(child_rows(parent))]
+    handed = first + _occurrence(marker, 1)
+    for n in (1, 2, 3, 4):
+        child.api_call(ctx, copy.deepcopy(handed), n)
+        counts.append(len(child_rows(parent)))
+    child.end(engine, copy.deepcopy(handed) + [{"role": "assistant", "content": "FINAL", "timestamp": 1762700030.0}])
+    rows = child_rows(parent)
+    counts.append(len(rows))
+    assert sum(r["content"] == "FINAL" for r in rows) == 1  # nothing lost
+    assert counts == [10, 20, 20, 20, 20, 21]  # the candidate: 10, 20, 21, 21, 21, 22 (one extra copy, bounded)
