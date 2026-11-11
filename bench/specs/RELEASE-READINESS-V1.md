@@ -108,7 +108,8 @@ never wait for it.
   commit that carries them, so the tag workflow adds the bundled core commit and core version from
   `bundle.json` as the last line of the release body.
 - **Publishing.** The release manager publishes the draft as a prerelease while the unit's version
-  is below 1.0.0, and never marks it as the latest release: "latest" stays with the Hermes line.
+  is below 1.0.0, and as a full release from 1.0.0. It never marks a unit release as the latest
+  release: "latest" stays with the Hermes line.
 - **Shared core.** The unit ships core at its own tagged commit. A Hermes release does not release
   the unit, and a unit release does not release Hermes. Changes to shared core files are judged by
   the Hermes row selection like any other core change; changes that touch only the adapter and the
