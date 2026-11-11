@@ -85,13 +85,14 @@ version; `next_cursor` is null when `has_more` is false. Existing internal windo
 Set `recall_min_sessions: 3` (env `LCM_RECALL_MIN_SESSIONS=3`; default `0`,
 clamped to 0..10) to widen the candidate pool and promote missing sessions into
 the ranked window. The best candidate from each missing session replaces only a
-redundant-session or sessionless slot, keeping every candidate and score and
-protecting the FTS anchor. This runs before later-statement placement.
-Per-call `min_sessions` overrides the key in either guidance mode; null or
-unparseable values use the key. Guidance v2 exposes this argument; v1 schemas
+later repeat of an already-represented session or a sessionless slot, never a
+session's first occurrence, keeping every candidate and score and protecting the
+FTS anchor. This runs before later-statement placement.
+Per-call `min_sessions` overrides the key in either guidance mode; null,
+fractional or unparseable values use the key. Guidance v2 exposes this argument; v1 schemas
 remain unchanged. `provenance.session_floor` records `requested`, `achieved`,
 `promoted` and `delivered`; the last counts distinct sessions in final hits after
-size fitting, so the floor is a ranking target rather than a delivery guarantee.
+size fitting (extra entries are not counted), so the floor is a ranking target rather than a delivery guarantee.
 Proactive recall, pre-answer retrieval and evidence wrappers keep the floor off.
 
 Set `recall_session_hints: true` (env `LCM_RECALL_SESSION_HINTS=true`; default
