@@ -331,7 +331,7 @@ def main(argv=None) -> int:
             sink.flush()
             print(f"{rec['verdict']:<11} {rec['host']:<16} {rec['plugin_ref']:<12} {rec['cell']}"
                   + (f"  {sorted(rec.get('failed_bars', {}))}" if rec.get("failed_bars") else "")
-                  + (f"  {str(rec.get('reason'))[:120]}" if rec.get("reason") else ""), flush=True)
+                  + (f"  {report.edges(str(rec.get('reason')))}" if rec.get("reason") else ""), flush=True)
     report.write(out, results, time.time() - started, lcm_env)
     if a.control:
         problems = CT.check(a.control, results, list(hosts))
