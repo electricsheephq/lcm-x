@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "lcmx": {
+      "command": "./bin/lcmx_recall_remote",
+      "cwd": ".",
+      "enabled": true
+    }
+  }
+}

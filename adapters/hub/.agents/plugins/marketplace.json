@@ -1,0 +1,20 @@
+{
+  "name": "lcm-x-hub",
+  "interface": {
+    "displayName": "LCM-X hub"
+  },
+  "plugins": [
+    {
+      "name": "lcmx-hub",
+      "source": {
+        "source": "local",
+        "path": "./plugins/codex"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}
