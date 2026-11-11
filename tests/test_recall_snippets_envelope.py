@@ -1,14 +1,13 @@
 """Whole-envelope snippets caps, with fitting responses pinned to unchanged main."""
 from copy import deepcopy
+import hashlib
 import json
 from pathlib import Path
-import subprocess
-from types import ModuleType
 from unittest.mock import Mock
 
 import pytest
 
-from hermes_lcm import recall_delivery, tools
+from hermes_lcm import tools
 from tests.test_recall_extra_entries import extra_reader
 from tests.test_recall_snippet_windows import make_delivery, recall_engine as recall_engine
 
@@ -17,38 +16,49 @@ GOLDEN = Path(__file__).parent / "fixtures/recall_snippets_envelope_main.json"
 MODES = ("plain", "windows", "window-deadline", "window-error", "extras", "extra-error")
 
 
-@pytest.fixture
-def invoke_main(monkeypatch):
-    source = subprocess.check_output(
-        ["git", "show", "9d9f0e8c97b1b6e408300f8cfe64227b3e2afe6c:recall_delivery.py"],
-        cwd=Path(__file__).resolve().parents[1], text=True,
-    )
-    module = ModuleType("hermes_lcm._snippets_main_delivery")
-    module.__package__ = "hermes_lcm"
-    exec(compile(source, "main:recall_delivery.py", "exec"), module.__dict__)
+MAIN_BASE = "9d9f0e8c97b1b6e408300f8cfe64227b3e2afe6c"
+# Main's windows outputs at MAIN_BASE, pinned as sha256 and length. Regenerate from the repo root with
+#   python -m pytest -p no:cacheprovider tests/fixtures/capture_recall_snippets_envelope_main_windows.py
+MAIN_WINDOWS = Path(__file__).parent / "fixtures/recall_snippets_envelope_main_windows_9d9f0e8c.json"
 
-    def invoke(delivery, **kwargs):
-        with monkeypatch.context() as patch:
-            patch.setattr(recall_delivery, "deliver_recall", module.deliver_recall)
-            return delivery.invoke(**kwargs)
 
-    return invoke
+def pinned(raw):
+    return {"sha256": hashlib.sha256(raw.encode()).hexdigest(), "chars": len(raw)}
+
+
+def windows_cases(invoke):
+    """The windows inputs whose main outputs MAIN_WINDOWS pins; invoke(delivery, **kwargs) runs one."""
+    cases = {}
+    for query_chars in (5000, 4097):
+        d = make_delivery((1300,) * 6)
+        kwargs = dict(query="q" * query_chars, snippet_window_hits=5)
+        cap = len(invoke(d, **kwargs, delivery_order="score")) - 1
+        for order in ("score", "time"):
+            cases[f"tail-{query_chars}-{order}"] = invoke(d, **kwargs, delivery_order=order, response_char_cap=cap)
+    for order in ("score", "time"):
+        d = dated_delivery()
+        cases[f"cut-55000-{order}"] = invoke(d, query="q" * 55_000, **cut_kwargs(d, "windows", order))
+    return cases
+
+
+@pytest.fixture(scope="module")
+def main_windows():
+    # A missing or unreadable pin fails the test; it never skips.
+    return json.loads(MAIN_WINDOWS.read_text())["cases"]
 
 
 @pytest.mark.parametrize("query_chars", [5000, 4097])
 @pytest.mark.parametrize("order", ["score", "time"])
-def test_windows_tail_drop_preserves_main_query_bytes(invoke_main, query_chars, order):
-    d = make_delivery((1300,) * 6)
-    kwargs = dict(query="q" * query_chars, snippet_window_hits=5, delivery_order=order)
-    unmarked_full = invoke_main(d, **{**kwargs, "delivery_order": "score"})
-    cap = len(unmarked_full) - 1
-    expected = invoke_main(d, **kwargs, response_char_cap=cap)
+def test_windows_tail_drop_preserves_main_query_bytes(main_windows, query_chars, order):
+    cases = windows_cases(lambda d, **kwargs: d.invoke(**kwargs))
+    assert set(cases) == set(main_windows)
+    expected = cases[f"tail-{query_chars}-{order}"]
+    assert pinned(expected) == main_windows[f"tail-{query_chars}-{order}"]
     result = json.loads(expected)
     assert result["total_results"] == 5
-    assert result["query"] == kwargs["query"]
+    assert result["query"] == "q" * query_chars
     marker_chars = len(', "delivery_order": "time"') if order == "time" else 0
     assert len(expected) == 14_044 + query_chars - 5000 + marker_chars
-    assert d.invoke(**kwargs, response_char_cap=cap) == expected
 
 
 def options(d, mode):
@@ -63,6 +73,19 @@ def options(d, mode):
         return dict(extra_entries=2, read_extra_entries=Mock(return_value=({}, "read_error")))
     return {}
 
+
+
+def dated_delivery():
+    d = make_delivery((1300,) * 12)
+    for entry in d.entries:
+        entry["hit"]["snippet"] = d.rows[entry["hit"]["store_id"]]["content"]
+    for row in d.rows.values():
+        row.update(observed_at=1_700_000_000, observed_at_source="host_message_timestamp")
+    return d
+
+
+def cut_kwargs(d, mode, order):
+    return dict(limit=8, snippet_chars=1300, delivery_order=order, **options(d, mode))
 
 @pytest.mark.parametrize("guidance", [False, True])
 @pytest.mark.parametrize("order", ["score", "time"])
@@ -90,13 +113,9 @@ def test_fitting_5000_character_query_matches_main_bytes(guidance, order, mode):
 
 @pytest.mark.parametrize("order", ["score", "time"])
 @pytest.mark.parametrize("mode", MODES)
-def test_query_cut_precedes_event_time_strip_and_hit_drop(mode, order, invoke_main):
-    d = make_delivery((1300,) * 12)
-    for entry in d.entries:
-        entry["hit"]["snippet"] = d.rows[entry["hit"]["store_id"]]["content"]
-    for row in d.rows.values():
-        row.update(observed_at=1_700_000_000, observed_at_source="host_message_timestamp")
-    kwargs = dict(limit=8, snippet_chars=1300, delivery_order=order, **options(d, mode))
+def test_query_cut_precedes_event_time_strip_and_hit_drop(mode, order, main_windows):
+    d = dated_delivery()
+    kwargs = cut_kwargs(d, mode, order)
     # Main's full response exceeds the cap, but its no-hit envelope fits.
     full = d.invoke(query="q" * 55_000, response_char_cap=100_000, **kwargs)
     assert len(full) > 64_000
@@ -109,7 +128,7 @@ def test_query_cut_precedes_event_time_strip_and_hit_drop(mode, order, invoke_ma
     if mode == "windows":
         # Main already fitted windows by dropping the ranked tail. Preserve its
         # query and dates whenever the no-hit envelope (with markers) fits.
-        assert raw == invoke_main(d, query="q" * 55_000, **kwargs)
+        assert pinned(raw) == main_windows[f"cut-55000-{order}"]
         assert result["query"] == "q" * 55_000
         assert "query_truncated" not in result
         assert result["response_cap_truncated"] is True

@@ -1,0 +1,29 @@
+{
+ "base": "9d9f0e8c97b1b6e408300f8cfe64227b3e2afe6c",
+ "cases": {
+  "cut-55000-score": {
+   "sha256": "36b8545d0fcf09805497ac896a5d10760ff9d4d4a3e62f58922d6d17f5e2ab3c",
+   "chars": 62706
+  },
+  "cut-55000-time": {
+   "sha256": "4b898eacabadfe080eb977b1b63b1f72e4ee179f553798bad7eb5968220cf4ca",
+   "chars": 62732
+  },
+  "tail-4097-score": {
+   "sha256": "4f5618792521dddc1473ad33f956e363a204538fcd4495a2e17d7e7d55f44c0c",
+   "chars": 13141
+  },
+  "tail-4097-time": {
+   "sha256": "8db906f684b915898b224b267f39bc8312662c9295a54308674cc33e692c0296",
+   "chars": 13167
+  },
+  "tail-5000-score": {
+   "sha256": "56407678ca50f43e245c69f58323aba2e4b271d621ba8edc86a5345b7fc9debe",
+   "chars": 14044
+  },
+  "tail-5000-time": {
+   "sha256": "70478fcbe52cf6600954e35e0a4c17435865b456ea16c58dad1d377934b00058",
+   "chars": 14070
+  }
+ }
+}
