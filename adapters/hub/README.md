@@ -51,8 +51,9 @@ node (each machine with agents)                           hub (one host)
 
 ## Tested
 
-- Unit tests: 17 (`hub/test_lcmx_hub.py`): mirror and push confinement, keyed ingest, baseline and exclude, the
-  context capsule and proactive recall, the SSH verbs, the daemon, the hook script, backup and audit.
+- Unit tests: 18 (`hub/test_lcmx_hub.py`): mirror and push confinement, keyed ingest, baseline and exclude, the
+  context capsule and proactive recall, an idle summary (keeps the harness; no row stored twice), the SSH verbs, the
+  daemon, the hook script, backup and audit.
 - Real harnesses in a throwaway container (Claude Code 2.1.311, Codex 0.167.0, both plugins installed from the
   marketplaces in this folder): Claude Code found a fact from a Codex session and Codex found a fact from a Claude Code
   session, through `lcmx`; the hub wrote a summary through `codex exec`; hooks of both harnesses started the sync;

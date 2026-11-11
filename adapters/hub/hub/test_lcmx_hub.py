@@ -438,6 +438,34 @@ def summarizing_model(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(auxiliary, "BRIDGE", Model())
 
 
+def test_idle_summary_keeps_the_harness_and_stores_no_row_twice(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An idle summary once bound the session as platform "cc" (its id prefix), not "claude-code"; the engine then
+    stored the session's tail again, and every later turn of it too."""
+    import sqlite3
+
+    summarizing_model(monkeypatch)
+    lines = []
+    for index in range(40):
+        lines += [cc_user(f"u{index}", f"Note {index}: " + "words " * 250), cc_assistant(f"a{index}", f"noted {index}")]
+    write(cc_file(root), lines)
+    quiet = hub_module.Hub(root, context_length=8_000, summarize=False)
+    try:
+        quiet.scan()  # over the threshold, no summary yet: the idle backlog summarizes it
+    finally:
+        quiet.close()
+    hub = hub_module.Hub(root, context_length=8_000, summarize=True)
+    try:
+        assert hub.summarize_backlog() == {"session": "cc:laptop:s-1"}
+        write(cc_file(root), lines + [cc_user("u-late", "a later turn about the pier"), cc_assistant("a-late", "ok")])
+        hub.scan()
+    finally:
+        hub.close()
+    report = hub_module.audit(root)
+    assert report["ok"], report
+    with closing(sqlite3.connect(root / "store" / "lcm.db")) as db:
+        assert db.execute("SELECT DISTINCT source FROM messages").fetchall() == [("claude-code",)]
+
+
 def test_hub_context_capsule_and_prompt_recall(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     summarizing_model(monkeypatch)
     lines = []

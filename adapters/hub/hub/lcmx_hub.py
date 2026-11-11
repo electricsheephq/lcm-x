@@ -90,16 +90,18 @@ class Hub:
         self.ledger.execute("PRAGMA journal_mode=WAL")
         for sql in LEDGER_DDL:
             self.ledger.execute(sql)
-        self.bound: Optional[str] = None
+        self.bound: Optional[tuple[str, str]] = None
         self.backlog_tried: dict[str, int] = {}
 
     def bind(self, session: str, platform: str) -> None:
-        if self.bound == session:
+        # The engine keys a session's rows by session and platform: the same session under another platform name
+        # stores its rows again. So bind again when either changes.
+        if self.bound == (session, platform):
             return
         self.engine.on_session_start(session, platform=platform, conversation_id=session, model="dev-agent",
                                      provider=platform, context_length=self.context_length)
         self.engine.update_model(model="dev-agent", context_length=self.context_length, provider=platform)
-        self.bound = session
+        self.bound = (session, platform)
 
     # -- capture --
 
@@ -197,6 +199,13 @@ class Hub:
         row = self.ledger.execute(f"SELECT value FROM {table} WHERE session = ?", (session,)).fetchone()
         return row[0] if row else None
 
+    def harness_of(self, session: str) -> str:
+        """The harness a session's transcript came from (as ``ingest`` binds it), not its id prefix (cc, codex)."""
+        row = self.ledger.execute("SELECT harness FROM cursors WHERE session = ? LIMIT 1", (session,)).fetchone()
+        if row and row[0]:
+            return str(row[0])
+        return transcripts.CODEX if session.startswith("codex:") else transcripts.CLAUDE
+
     def summarize_backlog(self) -> Optional[dict]:
         """Idle: summarize one session whose view is still over the threshold (never twice for an unchanged view)."""
         from hermes_lcm import tokens
@@ -208,7 +217,7 @@ class Hub:
             current = tokens.count_messages_tokens(shadow)
             if self.backlog_tried.get(session) == current:
                 continue
-            self.bind(session, session.split(":", 1)[0])
+            self.bind(session, self.harness_of(session))
             if not self.engine.should_compress(current):
                 self.backlog_tried[session] = current
                 continue
