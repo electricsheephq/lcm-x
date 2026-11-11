@@ -1,12 +1,12 @@
 {
-  "source_sha": "fb9147102e462cb02ba835d6d214186685086730",
-  "tooling_sha": "fb9147102e462cb02ba835d6d214186685086730",
+  "source_sha": "04ae371985970ab8ac1cb112c0a1e6951ec510ef",
+  "tooling_sha": "04ae371985970ab8ac1cb112c0a1e6951ec510ef",
   "allowlist_sha256": "83b8bf2418d229639abd5bd72bae468b6263549fa601bb763943864add830f07",
   "builder_version": 2,
   "tooling_dirty": false,
   "readme_omitted_links": [],
   "file_count": 122,
-  "total_bytes": 4861788,
+  "total_bytes": 4863303,
   "files": [
     {
       "path": "LICENSE",
@@ -16,7 +16,7 @@
     {
       "path": "README.md",
       "bytes": 1094,
-      "sha256": "005e74b512b8bba208ee273b955735a3ea3213589ae4a56fdf8d07c8dab6c917"
+      "sha256": "ddbef2fd9fd00138762cc5596db37a8152b06315acc0fe978fe025572432b7ef"
     },
     {
       "path": "__init__.py",
@@ -300,8 +300,8 @@
     },
     {
       "path": "ingest_protection.py",
-      "bytes": 42080,
-      "sha256": "55d6d1f569c5af1bdf0cf8c987eea9ef72c56dad56d8c058f8b6cf5dcdc0c635"
+      "bytes": 43595,
+      "sha256": "da0aaef595a1a4acd615f532e1414571f8bca1340aa63046e688df1e2ab49452"
     },
     {
       "path": "inspect_tools.py",
