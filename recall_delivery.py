@@ -65,6 +65,7 @@ def deliver_recall(
     rerank_enabled: Callable[[], bool],
     session_hint: Callable[[dict[str, Any]], str | None] | None = None,
     guidance_v2: bool = False,
+    session_floor_info: dict[str, Any] | None = None,
     session_delivery: Callable[..., str] | None = None,
     delivery_order: str = "score",
     read_summary_event_time: Callable[..., tuple[dict[int, dict[str, str]], str | None]] | None = None,
@@ -435,6 +436,8 @@ def deliver_recall(
         },
         "degraded": degraded,
     }
+    if session_floor_info is not None:
+        response["provenance"]["session_floor"] = {**session_floor_info, "delivered": _sessions(hits_out)}
     if later_statements is not None:
         response["provenance"]["later_statements"] = later_statements
         _refresh_later_statements(response)
@@ -481,6 +484,8 @@ def deliver_recall(
         # Include the envelope and optional time-order marker in the encoded
         # budget. Keep the flag-off and skipped-read fitting paths unchanged.
         def encoded_size() -> int:
+            if "session_floor" in response["provenance"]:
+                response["provenance"]["session_floor"]["delivered"] = _sessions(hits_out)
             _refresh_later_statements(response)
             if adjacent_reply:
                 response["provenance"].pop("adjacent_reply", None)
@@ -630,8 +635,11 @@ def deliver_recall(
                 response["extra_entries_skipped"] = skipped
             else:
                 hits_out.extend(extras)
-                while len(hits_out) > limit and len(json.dumps(response)) > response_char_cap:
+                while len(hits_out) > limit:
+                    if len(json.dumps(response)) <= response_char_cap:
+                        break
                     hits_out.pop()
+            # Extras are not window hits: session_floor.delivered keeps the full-hit count.
             return json.dumps(response)
     return marked
 
@@ -674,6 +682,8 @@ def _fit_answer_ready_response(
         response["total_results"] = len(response["hits"])
         expansion["response_truncated"] = True
         _refresh_later_statements(response)
+        if "session_floor" in response["provenance"]:
+            response["provenance"]["session_floor"]["delivered"] = _sessions(response["hits"])
         expansion["expanded_hit_count"] = sum(
             "content" in hit for hit in response["hits"]
         )

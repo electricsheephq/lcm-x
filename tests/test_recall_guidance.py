@@ -150,9 +150,12 @@ def test_v2_served_identically_on_every_path(monkeypatch, unit):
                 assert ('With detail="answer_ready", check `provenance.answer_ready.sessions_delivered` '
                         'against `provenance.answer_ready.sessions_in_pool`.') in description
                 assert ('If fewer sessions were delivered than are in the pool, call again with '
-                        '`exclude_session_ids` set to the sessions you have read.') in description
+                        '`exclude_session_ids` set to the sessions you have read or raise `min_sessions`.') in description
             assert 'For questions that combine or compare' in by_name['lcm_recall']['description']
-            assert 'min_sessions' not in json.dumps(engine)
+            props = by_name['lcm_recall']['parameters']['properties']
+            assert props['min_sessions'] == {
+                'type': 'integer', 'minimum': 0, 'maximum': 10,
+                'description': 'minimum distinct sessions in the window; 0 disables; when omitted uses LCM_RECALL_MIN_SESSIONS'}
             props = by_name['lcm_load_session']['parameters']['properties']
             assert props['anchor_store_id']['type'] == 'integer'
             assert 'call again without anchor_store_id' in props['anchor_store_id']['description']

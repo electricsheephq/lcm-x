@@ -10,6 +10,8 @@ and inspect omissions. The entire JSON is capped at 16,000 estimated tokens and
 64,000 characters. Neighbors have zero score and no retrieval arms. Existing
 exact refs, `seen_refs`, occurrence-time validation and explicit exclusions apply.
 
+Guidance v2 advertises `min_sessions` (0..10); either guidance mode accepts it. Omitted, null or unparseable values use `LCM_RECALL_MIN_SESSIONS` (default 0). Raise it for broader session coverage; inspect `provenance.session_floor.delivered` after fitting.
+
 ## Empty optional arrays
 
 An empty optional array (`[]`) behaves like omitting the argument, with the

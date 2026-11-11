@@ -1292,9 +1292,13 @@ def recall_guidance_schemas(schemas, variant):
                    "against `provenance.answer_ready.sessions_in_pool`. "
                    "If fewer sessions were delivered than are in the pool, call again with "
                    if "Session delivery" not in schema["description"] else "To look for more sessions, call again with ") +
-                "`exclude_session_ids` set to the sessions you have read. "
+                "`exclude_session_ids` set to the sessions you have read or raise `min_sessions`. "
                 "When a hit carries a session_hint, read around it using that hint. "
                 "Stop when cited spans support every part of the question or a call finds no new sessions; say what you could not find.")}
+            params = schema["parameters"]
+            schema = {**schema, "parameters": {**params, "properties": {**params["properties"],
+                "min_sessions": {"type": "integer", "minimum": 0, "maximum": 10,
+                    "description": "minimum distinct sessions in the window; 0 disables; when omitted uses LCM_RECALL_MIN_SESSIONS"}}}}
         elif name == "lcm_load_session":
             params = schema["parameters"]
             schema = {**schema, "description": schema["description"].replace(
