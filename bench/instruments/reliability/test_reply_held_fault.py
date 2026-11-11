@@ -739,50 +739,73 @@ def test_unavailable_host_tool_rows_never_pass(tmp_path, monkeypatch, shape, sto
     receipt = out['numbers']['B2']['host_held_tool_rows']
     assert receipt['unavailable'].startswith('state.db unreadable')
     assert 'B6' in out['applicable_bars'] and 'not_applicable' not in out['numbers']['B6']
+    if not stored:
+        assert out['verdict'] == 'UNSUPPORTED' and 'B6: no tool-call group was stored' in out['reason']
     if missing_user:
-        assert out['verdict'] == 'FAIL' and 'B2' in out['failed_bars']
+        assert out['verdict'] == ('FAIL' if stored else 'UNSUPPORTED') and 'B2' in out['failed_bars']
         assert 'B2' not in out['inconclusive_bars']
     else:
-        assert out['verdict'] == 'INCONCLUSIVE' and not out['failed_bars']
+        assert out['verdict'] == ('INCONCLUSIVE' if stored else 'UNSUPPORTED') and not out['failed_bars']
         assert out['inconclusive_bars']['B2'] == 'host tool rows unavailable: ' + receipt['unavailable']
 
 
-@pytest.mark.parametrize('held,stored,missing_user', [(True, False, False), (True, False, True),
-                                                   (True, True, False), (False, False, False)])
-def test_b6_no_group_exception_is_only_for_held_tool_cells(tmp_path, held, stored, missing_user):
+@pytest.mark.parametrize('held,stored,host_tools,missing_user', [
+    (True, False, False, False), (True, False, False, True),
+    (True, False, True, False), (True, False, True, True),
+    (True, True, True, False), (False, False, True, False)])
+def test_b6_no_group_exception_requires_host_held_tool_rows(tmp_path, held, stored, host_tools, missing_user):
     from tests import test_reliability_scorers as fx
 
     ev, tools = fx.tool_turn(15)
     user = fx.U.format(15, 15)
     host = [('S0', r, c, *((rest + [None, None])[:2]), i)
-            for i, (r, c, *rest) in enumerate([('user', user)] + (tools if stored else []), 1)]
+            for i, (r, c, *rest) in enumerate([('user', user)] + (tools if host_tools else []), 1)]
     out = fx.make(tmp_path, rows=([] if missing_user else [('user', user)]) + (tools if stored else []),
                   host_occurrences=host,
                   events=fx.turn_events(15)[:1] + ev, bars=['B1', 'B2', 'B6'],
                   tool_plan=[{'turns': [15], 'calls': []}], faults=[dict(kind=RF.KIND, turn=15)] if held else [])
-    if held:
+    if held and host_tools:
+        assert out['numbers']['B2']['host_held_tool_rows']['rows'] == 4
         assert ('B6' in out['applicable_bars']) == stored
-        assert out['verdict'] == ('FAIL' if missing_user else 'PASS')
+        assert out['verdict'] == ('FAIL' if missing_user or not stored else 'PASS')
+        assert out['numbers']['B2']['tool_missing_rows'] == (0 if stored else 4)
         if not stored:
             assert out['numbers']['B6']['not_applicable'] == 'no tool group stored'
         else:
             assert 'not_applicable' not in out['numbers']['B6']
     else:
         assert out['verdict'] == 'UNSUPPORTED' and 'B6: no tool-call group was stored' in out['reason']
+        assert 'B6' in out['applicable_bars'] and 'not_applicable' not in out['numbers']['B6']
+        if held:
+            assert out['numbers']['B2']['host_held_tool_rows']['rows'] == 0
+
+
+def test_b6_no_group_exception_requires_a_receipt(tmp_path):
+    from tests import test_reliability_scorers as fx
+
+    out = fx.make(tmp_path, rows=fx.clean_rows(1), events=fx.turn_events(1), host_occurrences=[],
+                  bars=['B1', 'B2', 'B6'], tool_plan=[{'turns': [1], 'calls': []}],
+                  faults=[dict(kind=RF.KIND, turn=1)])
+    assert 'host_held_tool_rows' not in out['numbers']['B2']
+    assert out['verdict'] == 'UNSUPPORTED' and 'B6: no tool-call group was stored' in out['reason']
+    assert 'B6' in out['applicable_bars'] and 'not_applicable' not in out['numbers']['B6']
 
 
 @pytest.mark.parametrize('failure', ['orphan', 'tool'])
 def test_held_tool_cell_no_stored_group_keeps_b6_failures(tmp_path, failure):
     from tests import test_reliability_scorers as fx
 
-    ev, _ = fx.tool_turn(15, ok=failure != 'tool')
+    ev, tools = fx.tool_turn(15, ok=failure != 'tool')
     turn = fx.turn_events(15)
     events = turn[:1] + ev + (turn[1:] if failure == 'tool' else [])
     rows = [('user', fx.U.format(15, 15))] + ([('assistant', fx.R.format(15, 15))] if failure == 'tool' else [])
-    out = fx.make(tmp_path, rows=rows, events=events, host_occurrences=[],
+    host = [('S0', r, c, *((rest + [None, None])[:2]), i)
+            for i, (r, c, *rest) in enumerate(tools, 1)] if failure == 'orphan' else []
+    out = fx.make(tmp_path, rows=rows, events=events, host_occurrences=host,
                   phase={'counters': {'orphan_drops': int(failure == 'orphan')}}, bars=['B1', 'B2', 'B6'],
                   tool_plan=[{'turns': [15], 'calls': []}], faults=[dict(kind=RF.KIND, turn=15)])
-    assert out['verdict'] == 'FAIL' and 'B6' in out['applicable_bars'] and 'B6' in out['failed_bars']
+    assert out['verdict'] == ('FAIL' if failure == 'orphan' else 'UNSUPPORTED')
+    assert 'B6' in out['applicable_bars'] and 'B6' in out['failed_bars']
     assert out['numbers']['B6']['groups'] == 0 and 'not_applicable' not in out['numbers']['B6']
     assert out['numbers']['B6']['host_orphan_drops' if failure == 'orphan' else 'tool_execution_failures'] > 0
 
