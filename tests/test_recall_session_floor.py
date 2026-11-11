@@ -172,7 +172,7 @@ def test_floor_never_replaces_first_occurrence_when_repeat_is_protected():
     assert info == dict(requested=3, achieved=2, promoted=0, delivered=None)
 
 
-@pytest.mark.parametrize('value', [True, False, float('inf'), float('-inf')])
+@pytest.mark.parametrize('value', [True, False, float('inf'), float('-inf'), 2.5])
 @pytest.mark.parametrize('via_keyword', [False, True])
 def test_invalid_override_falls_back_to_key(ranked, value, via_keyword):
     e, _, _ = ranked
@@ -191,8 +191,8 @@ def test_invalid_override_falls_back_to_key(ranked, value, via_keyword):
     assert e._store.connection.total_changes == changes
 
 
-@pytest.mark.parametrize('value', [True, False])
-def test_config_yaml_boolean_rejected_with_warning(monkeypatch, value):
+@pytest.mark.parametrize('value', [True, False, 3.9, float('nan')])
+def test_config_yaml_boolean_or_fraction_rejected_with_warning(monkeypatch, value):
     monkeypatch.delenv('LCM_RECALL_MIN_SESSIONS', raising=False)
     monkeypatch.setattr(config, '_load_hermes_config_yaml_for_env', lambda env: {
         'lcm': {'recall_min_sessions': value}})
@@ -278,3 +278,12 @@ def test_real_anchor_receipt_after_floor(recall_engine, monkeypatch, delivery_un
     assert result['provenance']['fts_anchor']['fired'] is True
     assert sorted(entry['hit']['store_id'] for entry in captured) == ids
     assert e._store.connection.total_changes == changes
+
+
+def test_config_yaml_integral_float_accepted(monkeypatch):
+    monkeypatch.delenv('LCM_RECALL_MIN_SESSIONS', raising=False)
+    monkeypatch.setattr(config, '_load_hermes_config_yaml_for_env', lambda env: {
+        'lcm': {'recall_min_sessions': 4.0}})
+    cfg = config.LCMConfig.from_env()
+    assert cfg.recall_min_sessions == 4
+    assert cfg.config_sources['recall_min_sessions'] == 'config_yaml:lcm.recall_min_sessions'

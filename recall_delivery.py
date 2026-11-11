@@ -636,13 +636,10 @@ def deliver_recall(
             else:
                 hits_out.extend(extras)
                 while len(hits_out) > limit:
-                    if "session_floor" in response["provenance"]:
-                        response["provenance"]["session_floor"]["delivered"] = _sessions(hits_out)
                     if len(json.dumps(response)) <= response_char_cap:
                         break
                     hits_out.pop()
-            if "session_floor" in response["provenance"]:
-                response["provenance"]["session_floor"]["delivered"] = _sessions(hits_out)
+            # Extras are not window hits: session_floor.delivered keeps the full-hit count.
             return json.dumps(response)
     return marked
 

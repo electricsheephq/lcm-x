@@ -4910,7 +4910,8 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
     floor_default = max(0, min(10, _parse_int_value(getattr(engine._config, "recall_min_sessions", 0), 0)))
     floor_arg = kwargs.get("min_sessions", args.get("min_sessions"))
     try:
-        min_sessions = (floor_default if isinstance(floor_arg, bool) else
+        min_sessions = (floor_default if isinstance(floor_arg, bool) or (
+            isinstance(floor_arg, float) and not floor_arg.is_integer()) else
                         max(0, min(10, _parse_int_value(floor_arg, floor_default))))
     except OverflowError:
         min_sessions = floor_default

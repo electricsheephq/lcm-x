@@ -3,14 +3,14 @@
 Use recall tools when the answer depends on historical evidence that may have been compacted or lives in another LCM session.
 
 With `LCM_RECALL_DELIVERY_UNIT=session` (opt-in; default `hits`), `lcm_recall`
-Guidance v2 advertises `min_sessions` (0..10); either guidance mode accepts it. Omitted, null or unparseable values use `LCM_RECALL_MIN_SESSIONS` (default 0). Raise it for broader session coverage; inspect `provenance.session_floor.delivered` after fitting.
-
 returns bounded source-message neighborhoods for either detail. `limit` counts
 ranked seeds; `include` chooses seed arms, while delivery can include raw rows.
 Use `provenance.delivery` to distinguish complete sessions from partial ranges
 and inspect omissions. The entire JSON is capped at 16,000 estimated tokens and
 64,000 characters. Neighbors have zero score and no retrieval arms. Existing
 exact refs, `seen_refs`, occurrence-time validation and explicit exclusions apply.
+
+Guidance v2 advertises `min_sessions` (0..10); either guidance mode accepts it. Omitted, null or unparseable values use `LCM_RECALL_MIN_SESSIONS` (default 0). Raise it for broader session coverage; inspect `provenance.session_floor.delivered` after fitting.
 
 ## Empty optional arrays
 
