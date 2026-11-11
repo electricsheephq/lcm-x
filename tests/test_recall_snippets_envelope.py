@@ -342,11 +342,12 @@ def test_windows_boundary_matches_main_bytes(case):
         assert "event_time_unavailable" not in expected
 
 
-def test_plain_item_loop_drop_reports_truncation():
+@pytest.mark.parametrize("mode", ["plain", "window-deadline", "window-error"])
+def test_plain_item_loop_drop_reports_truncation(mode):
     d = make_delivery((1300,) * 2)
     d.entries[1]["hit"]["expand_hint"] += "x" * 5000
-    cap = len(d.invoke(limit=1)) + len(', "response_cap_truncated": true')
-    raw = d.invoke(limit=2, response_char_cap=cap)
+    cap = len(d.invoke(limit=1, **options(d, mode))) + len(', "response_cap_truncated": true')
+    raw = d.invoke(limit=2, response_char_cap=cap, **options(d, mode))
     result = json.loads(raw)
     assert len(raw) <= cap
     assert [hit["store_id"] for hit in result["hits"]] == [1]

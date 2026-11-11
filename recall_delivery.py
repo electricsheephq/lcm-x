@@ -481,14 +481,12 @@ def deliver_recall(
         response["provenance"]["summary_event_time_unavailable"] = summary_event_time_unavailable
     if snippet_window_skipped is not None:
         response["snippet_window_skipped"] = snippet_window_skipped
-    if detail == "snippets" and _fit_snippets and snippet_window_hits <= 0 and response_cap_truncated:
+    if detail == "snippets" and _fit_snippets and response_cap_truncated:
         response["response_cap_truncated"] = True
     if detail == "snippets" and _fit_snippets and (
         (snippet_window_hits > 0 and snippet_window_skipped is None)
         or len(json.dumps(response)) > response_char_cap
     ):
-        if response_cap_truncated and snippet_window_hits > 0:
-            response["response_cap_truncated"] = True
         window_fit = snippet_window_hits > 0 and snippet_window_skipped is None
         # Every snippets path budgets the serialized envelope. Refresh receipts
         # to a fixed point; windows retain main's time-marker budget and fit order.
