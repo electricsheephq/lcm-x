@@ -243,7 +243,12 @@ gh pr merge <PR> --merge --match-head-commit <HEAD_SHA>
   the previous GA (KNOWN under #1674 and disclosed); and, for v0.30.0 only, the named
   duplicates #2558 and #2559 at their recorded shapes and counts, in the probe cells the smoke
   stage runs again, and #2547's helper-agent copy with payload externalization turned off; none
-  is covered in the driven audit. No other duplicate is covered. Separately, and for v0.30.0
+  is covered in the driven audit. From the 2026-11-11 amendment, and for v0.30.0 only, the
+  third exception also covers the bounded extra after a payload write fault clears (#2599),
+  the two replay shapes recorded as KNOWN because v0.29.2 has them (#2604 with redaction on,
+  #2605 while payload files cannot be written), and the accepted trade on a store that rc1 to
+  rc5 wrote with redaction on (#2604), each at its pinned counts. No other duplicate is
+  covered. Separately, and for v0.30.0
   alone, the upgrade/rollback roundtrip row's 0-duplicated-rows bar excludes one named case
   (#2552), as the spec records where it adopts that row. From v0.29.2
   the reference-agent canary is judged only by the spec's canary rule and never triggers this
