@@ -48,6 +48,7 @@ ISSUES = {
     # acp-process only in practice: the crash point races reply persistence (3 of 12 runs fail on either plugin ref);
     # the same two shapes occur on ref, customer, r34.4 and upstream-uid (not seen on upstream-main)
     861: (("B1", "B2"), "acp-process: intermittent around the crash after rotation"),
+    2624: (("B1", "B2"), "upstream-main acp-process: the restart resumes the parent and abandons the rotation child, so the interrupted turn's host-kept reply is never shown to the plugin"),
     916: (("F4",), "acp-process continuity: survival projection removes the current user tag"),
     1501: (("B1", "B2"), "rotation replay after a carried host stamp, including a previous-GA store"),
     1505: (("B1", "B2"), "forced-recovery user turn stored twice after the crash and cold restart (since #1328)"),
@@ -57,10 +58,12 @@ ISSUES = {
 }
 # issue -> host-name prefixes on which its bars are declared (absent: every host); ci.gate reads it
 ISSUE_HOSTS = {534: ("ref-", "floor-", "upstream-main"), 1501: ("ref-", "floor-", "upstream-main"),
+               2624: ("upstream-main",),
                1797: ("r34.4-", "r34.10-", "r34.15-"), 1799: ("floor-",), 821: ("r34.4-", "upstream-uid"), 861: ("ref-", "customer-", "r34.4-", "r34.10-", "r34.15-", "upstream-uid"),
                871: ("r34.4-", "r34.10-", "r34.15-"), 1506: ("ref-", "floor-", "upstream-main"), 1508: ("ref-", "floor-", "upstream-main")}
 # issue -> transports on which its bars are declared (absent: every transport); ci.gate reads it
 ISSUE_TRANSPORTS = {1797: ("in-process",), 1798: ("acp-process",), 1799: ("acp-process",), 861: ("acp-process",),
+                    2624: ("acp-process",),
                     1931: ("acp-process",)}
 
 
@@ -304,7 +307,7 @@ def registry() -> list[dict]:
         cell("window-1m/in-place", [], in_place=True, window=1000000, turns=60,
              doc="1M window through engine.update_model; tight tuning and text volume scaled x15.6 from the 64k probes, "
                  "so LCM's threshold math runs at 1M (threshold 500k tokens, ~36k tokens per turn)."),
-        cell("crash-after-rotation/rotation", [519, 549, 821, 861], in_place=False, user={"trailing_ws": True},
+        cell("crash-after-rotation/rotation", [519, 549, 821, 861, 2624], in_place=False, user={"trailing_ws": True},
              faults=[{"kind": "crash_after_rotation_before_child_row"}],
              doc="os._exit right after the engine's rotation on_session_start, before any child row (#519/#549)."),
         cell("upgrade-crash-after-rotation/rotation", [1501, 1506], in_place=False, user={"trailing_ws": True},

@@ -1614,3 +1614,23 @@ def test_inflight_861_14_child_own_reply_collision(tmp_path):
     assert out["numbers"]["B2"]["per_session"] == {"C1": "PASS", "chat": "PASS"}
     assert inflight_records(out) == [{"tag": "T04", "session": "chat", "host_row_ids": [35],
                                       "key": inflight_multiset.h(inflight_fixture.R.format(4, 4))[:12]}]
+
+
+def test_inflight_861_15_abandoned_rotation_child(tmp_path):
+    f = inflight_fixture
+    later = [("user", f.U.format(5, 5)), ("assistant", f.R.format(5, 5))]
+    out = f.make(tmp_path,
+                 rows=f.clean_rows() + [("user", f.U.format(4, 4))] + later,
+                 events=f.clean_events() + f.turn_events(4)[:2] + f.turn_events(5),
+                 sids=["S0"] * 6 + ["S1"] + ["S0"] * 2,
+                 host=f.held() + [("S1", "user", f.U.format(4, 4), 1),
+                                  ("S1", "assistant", f.R.format(4, 4), 1)]
+                      + [("S0", role, text, 1) for role, text in later],
+                 parents={"S0": None, "S1": "S0"}, plugin=f.TREE)
+    inflight_mismatch(out, 1, 0, "missing")
+    assert set(out["failed_bars"]) == {"B1", "B2"}
+    assert len(out["failed_bars"]["B2"]["missing"]) == 1
+    assert out["failed_bars"]["B2"]["missing"][0]["session"] == "chat"
+    assert out["numbers"]["B2"]["deficit_rows"] == 1
+    assert inflight_records(out) == [{"tag": "T04", "session": "chat", "host_row_ids": [8],
+                                      "key": inflight_multiset.h(f.R.format(4, 4))[:12]}]

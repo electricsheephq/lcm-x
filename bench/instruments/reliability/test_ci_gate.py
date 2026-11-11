@@ -52,6 +52,19 @@ def test_existing_gate_and_open_target_behavior_is_unchanged():
     assert ci.gate(rows, {7}) == []
 
 
+@pytest.mark.parametrize("host,transport,failed,open_issues,gates", [
+    ("upstream-main", "acp-process", ["B1", "B2"], {2624}, False),
+    ("upstream-main", "acp-process", ["B1", "B2", "B5"], {2624}, True),
+    ("r34.4-0.21.5", "acp-process", ["B1", "B2"], {2624}, True),
+    ("floor-0.21.3", "acp-process", ["B1", "B2"], {2624}, True),
+    ("upstream-main", "in-process", ["B1", "B2"], {2624}, True),
+    ("upstream-main", "acp-process", ["B1", "B2"], set(), True),
+])
+def test_abandoned_rotation_child_2624_gate_scope(host, transport, failed, open_issues, gates):
+    problems = ci.gate(rows_for("crash-after-rotation/rotation", host, transport, failed), open_issues)
+    assert len(problems) == int(gates)
+
+
 @pytest.mark.parametrize("host,gates_b9", [("upstream-uid", True), ("ref-0.21.5", False)])
 def test_promoted_continuity_bars_are_exact(host, gates_b9):
     cell = "continuity/forced-compaction-then-turn/rotation"
