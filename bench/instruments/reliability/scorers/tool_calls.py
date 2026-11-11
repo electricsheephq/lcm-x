@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 from collections import Counter
 
 
@@ -125,6 +126,34 @@ def stored_keys(rows, lineage=lambda sid: "chat", *, store_ids=None) -> Counter:
                 fn = c.get("function") or {}
                 record((g, "call", c.get("id"), fn.get("name"), canon(fn.get("arguments") or "{}")), store_id)
     return keys
+
+
+def host_held(atts, bound, state, group, turns, lineage_of):
+    """Require host-held keys of interrupted held-fault tool turns, once per distinct key."""
+    selected = [a for a in atts if a["prefix"] == "T" and not a["ended"] and a["turn"] in turns]
+    if not selected:
+        return None
+    try:
+        con = sqlite3.connect(state.resolve().as_uri() + "?mode=ro", uri=True)
+        try:
+            rows = con.execute("SELECT id, session_id, role, content, tool_calls, tool_call_id FROM messages "
+                               "WHERE role = 'tool' OR (role = 'assistant' AND tool_calls IS NOT NULL)").fetchall()
+        finally:
+            con.close()
+    except sqlite3.Error as exc:
+        return {"unavailable": "state.db unreadable: " + type(exc).__name__}
+    keys, records = stored_keys(rows, group), []
+    for a in selected:
+        g = lineage_of(a)
+        for c in a["tool_issues"]:
+            bound["loose"] = {k for k in bound["loose"] if not (k[0] == g and k[2] == c["id"])}
+            for k in keys:
+                if k[:3] not in ((g, "call", c["id"]), (g, "tool", c["id"])):
+                    continue
+                bound["expected"][k] = 1
+                records.append(dict(tag=a["tag"], session=g, id=c["id"], kind=k[1],
+                                    key=hashlib.sha256(json.dumps(k[1:]).encode()).hexdigest()[:12]))
+    return {"rows": len(records), "records": records}
 
 
 def compare(expected: Counter, loose: set, stored: Counter, *, store_ids=None, surplus_keys=None) -> dict:

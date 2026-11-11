@@ -48,7 +48,7 @@ R2_CELLS = [C.cell("stop-after-tool/no-retry/in-place", [1623], in_place=True, t
              "api": "anthropic"}] + C.continuity_cells()
 # #659 probes: selected by an explicit --cells pattern only (cells.select opt_in), so --cells all, the nightly matrix and
 # ci.expected_cells are unchanged.
-R2_PROBE_CELLS = C.probe_cells()
+R2_PROBE_CELLS = C.probe_cells() + [C.held_tool_cell("tool-loop", in_place=True)]
 # #659: the only probe class with a declared bar (the host rebuilds its system prompt at every commit).
 PROBE_BARS = {"host-instruction": 1.0, "host-instruction-rebuild": 1.0}
 # gateway-process: why no local platform can drive an R1 gateway cell, cited per host at run time.
@@ -213,6 +213,9 @@ class Scenario:
             return {"content": "ok", "log": {"unexpected": True}}
         step, st["step"] = st["step"], st["step"] + 1
         log = {"turn": t, "kind": st["kind"], "step": step}
+        if (st["phase"] == "A" and step >= 1 and getattr(run, "reply_fault", None) is not None
+                and run.reply_fault.fault.get("at") == "tool_results" and run.reply_fault.fault["turn"] == t):
+            return {"hold_until_killed": True, "log": log}
         if run.crash_due(t):
             return {"hold_until_killed": True, "on_hold": lambda: run.crash(t), "log": log}
         groups = self.plan(t)
@@ -228,10 +231,16 @@ class Scenario:
                           expect=c.get("expect") or {})
                 run.event(turn=t, event="tool_call", name=c["name"], session_prefix="T")
                 calls.append({"id": cid, "name": c["name"], "arguments": json.dumps(args)})
+            fault = next((f for f in self.cell["faults"] if f["kind"] == RF.KIND
+                          and f.get("at") == "tool_results" and f["turn"] == t), None)
+            if fault and st["phase"] == "A" and step == 0 and run.reply_fault is None and RF.KIND not in run.fired:
+                run.reply_fault = held = RF.HeldReply(run, fault, [c["id"] for c in calls])
+                extra.update(before_release=held.before_release, after_release=held.after_release,
+                             release_failed=held.release_failed)
             return {"tool_calls": calls, "log": log, **extra}
         text = reply_text(self.cell, "T", t)
         run.event(turn=t, event="emit", tag=f"T{t:02d}", text=text)
-        fault = next((f for f in self.cell["faults"] if f["kind"] == RF.KIND and f["turn"] == t), None)
+        fault = next((f for f in self.cell["faults"] if f["kind"] == RF.KIND and f["turn"] == t and not f.get("at")), None)
         if fault and st["phase"] == "A" and run.reply_fault is None and RF.KIND not in run.fired:
             run.reply_fault = held = RF.HeldReply(run, fault, text)
             extra.update(before_release=held.before_release, after_release=held.after_release,

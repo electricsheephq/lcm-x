@@ -71,7 +71,7 @@ def test_abandoned_rotation_child_2624_gate_scope(host, transport, failed, open_
     assert len(problems) == int(gates)
 
 
-HELD_TARGETS = ["reply-held-crash/" + name for name in ("rotation-turn", "plain-turn", "multi-hop")]
+HELD_TARGETS = ["reply-held-crash/" + name for name in ("rotation-turn", "plain-turn", "multi-hop", "tool-turn", "tool-loop")]
 HELD_CONTROLS = ["reply-held-crash/pre-rotation", "reply-held-crash/in-place"]
 CI_HOST_NAMES = list(json.loads(ci.CI_HOSTS.read_text())["hosts"])
 

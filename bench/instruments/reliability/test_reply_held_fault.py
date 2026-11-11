@@ -132,7 +132,8 @@ def test_exit_timeout_invalid_and_releases_reservation(tmp_path, monkeypatch, sh
     released(held)
 
 
-def test_blocked_writer_cannot_commit_before_confirmed_exit(tmp_path):
+@pytest.mark.parametrize('delayed', [False, True])
+def test_blocked_writer_cannot_commit_before_confirmed_exit(tmp_path, delayed):
     run, held, _ = fixture(tmp_path)
     held.before_release()
     script = ("import sqlite3, sys; con = sqlite3.connect(sys.argv[1], timeout=10); "
@@ -140,21 +141,35 @@ def test_blocked_writer_cannot_commit_before_confirmed_exit(tmp_path):
               "con.execute('INSERT INTO messages(content) VALUES (?)', (sys.argv[2],)); con.commit()")
     writer = subprocess.Popen([sys.executable, '-c', script, str(tmp_path / 'lcm.db'), held.text],
                               start_new_session=True, stdout=subprocess.PIPE, text=True)
-    run.proc = SimpleNamespace(pid=writer.pid, process=writer,
-                               kill=lambda: RF.os.killpg(writer.pid, 9))
+    landed = threading.Event()
+
+    def signal_writer():
+        try:
+            RF.os.killpg(writer.pid, 9)
+        except ProcessLookupError:
+            pass
+        finally:
+            landed.set()
+
+    timer = threading.Timer(0.1, signal_writer)
+    run.proc = SimpleNamespace(pid=writer.pid, process=writer, kill=timer.start if delayed else signal_writer)
     try:
         assert writer.stdout.readline().strip() == 'ready'
         assert writer.poll() is None
         insert(run, held.text)
         held.after_release()
         assert writer.poll() is not None and held.record['exit_confirmed_ms'] >= 0
-        assert held.record['valid'] and held.record['store_has_row'] is False
         with sqlite3.connect(tmp_path / 'lcm.db') as store:
             assert store.execute('SELECT COUNT(*) FROM messages').fetchone()[0] == 0
+        assert held.record['valid'] and held.record['store_has_row'] is False
+        assert landed.wait(5)
         released(held)
     finally:
         if writer.poll() is None:
-            run.proc.kill()
+            signal_writer()
+        if timer.ident is not None:
+            timer.join(5)
+            assert not timer.is_alive()
         writer.wait(timeout=5)
         writer.stdout.close()
         if not held.done.is_set():
@@ -410,18 +425,32 @@ def test_registry_unchanged_and_r1_rejects_early(tmp_path, monkeypatch):
     assert [c['id'] for c in old] == OLD_IDS
     assert hashlib.sha256(json.dumps(old, sort_keys=True, separators=(',', ':')).encode()).hexdigest() == OLD_SHA
     expected = [('rotation-turn', 12, 1, False, [2624]), ('plain-turn', 15, 1, False, [2624]),
-                ('multi-hop', 22, 2, False, [2624]), ('pre-rotation', 5, 0, False, []), ('in-place', 15, 0, True, [])]
-    assert len(new) == 5
+                ('multi-hop', 22, 2, False, [2624]), ('pre-rotation', 5, 0, False, []), ('in-place', 15, 0, True, []),
+                ('tool-turn', 15, 1, False, [2624]), ('tool-loop', 15, 1, False, [2624])]
+    assert len(new) == 7
     monkeypatch.setattr(RM, 'scratch_dir', Mock(side_effect=AssertionError('must reject before any probe')))
     for c, (name, turn, depth, ip, targets) in zip(new, expected):
         assert c['id'] == 'reply-held-crash/' + name
-        assert c['faults'] == [dict(kind=RF.KIND, turn=turn, depth=depth)]
+        assert c['faults'] == [dict(kind=RF.KIND, turn=turn, depth=depth,
+                                  **({'at': 'tool_results'} if name == 'tool-loop' else {}))]
         assert (c['in_place'], c['transport'], c['targets']) == (ip, 'acp', targets)
+        assert c['bars'] == list(cells.BARS)
+        if name.startswith('tool-'):
+            assert c['big_lines'] == 8 and c['user_text']['trailing_ws']
+            assert c['tool_plan'] == [{'turns': [15], 'calls': [
+                {'name': 'read_file', 'args': {'path': '{files}/small.txt'}},
+                {'name': 'read_file', 'args': {'path': '{files}/big.txt'}}]}]
         cells.validate(c)
         assert ci.in_gate_set(c['id']) and PC.unsupported(c, 'acp-process') is None
         result = RM.run_cell(c, 'stub', dict(sha='host', src='unused', python='unused'),
                              dict(sha='plugin', ref='stub'), tmp_path, 1, False, identity={'sha': 'host'})
         assert result['verdict'] == 'UNSUPPORTED' and result['reason'] == RF.R1_REASON
+    control_id = 'reply-held-crash-control/tool-loop-in-place'
+    assert control_id not in {c['id'] for c in all_cells}
+    assert control_id not in {c['id'] for c in cells.select('all', PC.R2_CELLS, PC.R2_PROBE_CELLS)}
+    [control] = cells.select(control_id, PC.R2_CELLS, PC.R2_PROBE_CELLS)
+    assert control['in_place'] and control['targets'] == []
+    assert control['faults'] == [dict(kind=RF.KIND, turn=15, depth=0, at='tool_results')]
 
 
 def test_scenario_arms_only_once_on_final_main_reply_in_phase_a(tmp_path):
@@ -437,6 +466,203 @@ def test_scenario_arms_only_once_on_final_main_reply_in_phase_a(tmp_path):
     reply = scenario.main([dict(role='user', content='[T05] user')])
     assert reply['content'] == held.text and callable(reply['before_release'])
     assert 'before_release' not in scenario.main([dict(role='user', content='[T05] user')])
+
+
+@pytest.mark.parametrize('name', ['tool-turn', 'tool-loop'])
+@pytest.mark.parametrize('phase,already_fired', [('A', False), ('B', False), ('A', True)])
+def test_tool_scenario_position_and_held_next_request(tmp_path, name, phase, already_fired):
+    run, _, _ = fixture(tmp_path)
+    run.cell = cells.held_tool_cell(name)
+    run.reply_fault, run.crash_due, run.files, run.text_tag = None, lambda _: False, tmp_path, 'T15'
+    if already_fired:
+        run.fired.add(RF.KIND)
+    scenario = PC.Scenario(run)
+    scenario.begin(15, 'normal', phase, 16)
+    messages = [dict(role='user', content='[T15] user')]
+    first = scenario.main(messages)
+    armed = phase == 'A' and not already_fired
+    assert ('before_release' in first) == (armed and name == 'tool-loop')
+    assert len(first['tool_calls']) == 2
+    messages += [dict(role='tool', tool_call_id=c['id'], content='synthetic result') for c in first['tool_calls']]
+    second = scenario.main(messages)
+    assert ('before_release' in second) == (armed and name == 'tool-turn')
+    if armed and name == 'tool-loop':
+        assert run.reply_fault.ids == [c['id'] for c in first['tool_calls']]
+        assert second == dict(hold_until_killed=True, log=dict(turn=15, kind='normal', step=1))
+        assert scenario.main(messages)['hold_until_killed']
+        assert not any(e['event'] == 'emit' for e in PC.read_jsonl(run.transcript))
+    else:
+        assert second['content'] == PC.reply_text(run.cell, 'T', 15)
+        assert 'before_release' not in scenario.main(messages)
+    assert len([e for e in PC.read_jsonl(run.transcript) if e['event'] == 'tool_seen']) == 2
+
+
+def tool_fixture(tmp_path, depth=1):
+    run, _, session = fixture(tmp_path, depth)
+    for db in ('state.db', 'lcm.db'):
+        with sqlite3.connect(tmp_path / db) as con:
+            con.execute('ALTER TABLE messages ADD COLUMN tool_calls TEXT')
+            con.execute('ALTER TABLE messages ADD COLUMN tool_call_id TEXT')
+    held = RF.HeldReply(run, dict(kind=RF.KIND, turn=5, depth=depth, at='tool_results'), ['call_a', 'call_b'], timeout=1)
+    run.reply_fault = held
+    return run, held, session
+
+
+def tool_row(run, session, *, cid=None, calls=None, db='state.db'):
+    with sqlite3.connect(run.home / db) as con:
+        con.execute('INSERT INTO messages(session_id, role, content, tool_calls, tool_call_id) VALUES (?,?,?,?,?)',
+                    (session, 'tool' if cid else 'assistant', 'synthetic result' if cid else '',
+                     json.dumps([{'id': i} for i in calls]) if calls else None, cid))
+
+
+def test_tool_loop_waits_for_every_result_then_validates_depth(tmp_path, monkeypatch):
+    run, held, session = tool_fixture(tmp_path, depth=2)
+    held.before_release()
+    tool_row(run, session, calls=held.ids)
+    tool_row(run, session, cid=held.ids[0])
+    original_sleep = RF.time.sleep
+
+    def next_result(_delay):
+        assert held.polls[-1][1] == 1
+        run.proc.kill.assert_not_called()
+        tool_row(run, session, cid=held.ids[1])
+
+    monkeypatch.setattr(RF.time, 'sleep', next_result)
+    held.after_release()
+    monkeypatch.setattr(RF.time, 'sleep', original_sleep)
+    released(held)
+    assert [n for _, n in held.polls] == [1, 2]
+    assert held.record['valid'] and held.record['depth'] == 2
+    assert held.record['position'] == 'tool_results' and held.record['witness_rows'] == 2
+    assert held.record['host_has_row'] and held.record['store_has_row'] is False
+    assert held.record['exit_confirmed_ms'] is not None
+    run.proc.kill.assert_called_once()
+    assert RF.KIND in run.fired
+    assert 'synthetic' not in json.dumps(held.record) and 'call_a' not in json.dumps(held.record)
+
+
+@pytest.mark.parametrize('shape,reason', [('sessions', 'witness rows in several sessions'),
+    ('missing-call', 'post-kill'), ('store-tool', 'post-kill'), ('store-call', 'post-kill')])
+def test_tool_loop_invalid_host_or_store(tmp_path, shape, reason):
+    run, held, session = tool_fixture(tmp_path)
+    if shape.startswith('store-'):
+        tool_row(run, session, db='lcm.db', **({'cid': held.ids[0]} if shape == 'store-tool' else {'calls': held.ids[:1]}))
+    held.before_release()
+    if shape != 'missing-call':
+        tool_row(run, session, calls=held.ids)
+    for i, cid in enumerate(held.ids):
+        tool_row(run, 'root' if shape == 'sessions' and i else session, cid=cid)
+    held.after_release()
+    released(held)
+    assert not held.record['valid'] and reason in held.record['invalid_reason']
+    if shape == 'missing-call':
+        assert held.record['host_has_row'] is False
+    rec = dict(verdict='PASS')
+    held.verdict(rec, 'done')
+    assert rec['verdict'] == 'ERROR'
+
+
+@pytest.mark.parametrize('shape', ['timeout', 'exception', 'busy'])
+def test_tool_loop_poll_failure_kills_without_firing_and_releases(tmp_path, monkeypatch, shape):
+    run, held, _ = tool_fixture(tmp_path)
+    held.before_release()
+    if shape != 'timeout':
+        held.host = SimpleNamespace(close=held.host.close, execute=Mock(side_effect=(
+            ValueError if shape == 'exception' else sqlite3.OperationalError)))
+    clock = [0.0]
+    monkeypatch.setattr(RF.time, 'monotonic', lambda: clock[0])
+    monkeypatch.setattr(RF.time, 'monotonic_ns', lambda: int(clock[0] * 1_000_000_000))
+    monkeypatch.setattr(RF.time, 'sleep', lambda _: clock.__setitem__(0, clock[0] + 1))
+    held.after_release()
+    run.proc.kill.assert_called_once()
+    assert not run.fired and held.record['valid'] is False
+    assert held.record['exit_confirmed_ms'] is not None
+    assert held.record['invalid_reason'].startswith('poll/validation' if shape == 'exception' else 'poll timeout')
+    released(held)
+
+
+@pytest.mark.parametrize('shape', ['once', 'missing', 'duplicate', 'host-lacks', 'no-fault', 'no-fault-missing'])
+def test_host_held_tool_rows_are_expected_only_for_held_faults(tmp_path, shape):
+    from tests import test_reliability_scorers as fx
+
+    ev, tools = fx.tool_turn(15)
+    user = fx.U.format(15, 15)
+    host_tools, stored_tools = list(tools), list(tools)
+    if shape in ('missing', 'no-fault-missing'):
+        stored_tools = tools[:-1]
+    elif shape == 'duplicate':
+        stored_tools += [tools[-1]]
+        host_tools += [tools[-1]]  # Host multiplicity never licenses a second stored copy.
+    elif shape == 'host-lacks':
+        host_tools = tools[:-1]
+    host = [('S0', r, c, *((rest + [None, None])[:2]), i)
+            for i, (r, c, *rest) in enumerate([('user', user)] + host_tools, 1)]
+    faults = [] if shape.startswith('no-fault') else [dict(kind=RF.KIND, turn=15)]
+    out = fx.make(tmp_path, rows=[('user', user)] + stored_tools,
+                  events=fx.turn_events(15)[:1] + ev, host_occurrences=host, faults=faults,
+                  tool_plan=[{'turns': [15], 'calls': []}], bars=['B1', 'B2', 'B6'])
+    numbers = out['numbers']['B2']
+    assert numbers['tool_missing_rows'] == int(shape == 'missing')
+    assert numbers['tool_surplus_rows'] == int(shape in ('duplicate', 'host-lacks'))
+    assert out['verdict'] == ('FAIL' if shape in ('missing', 'duplicate', 'host-lacks') else 'PASS')
+    if shape.startswith('no-fault'):
+        assert 'host_held_tool_rows' not in numbers
+    else:
+        receipt = numbers['host_held_tool_rows']
+        assert receipt['rows'] == (3 if shape == 'host-lacks' else 4)
+        assert all(set(r) == {'tag', 'session', 'id', 'kind', 'key'} and len(r['key']) == 12
+                   for r in receipt['records'])
+        assert {r['kind'] for r in receipt['records']} == {'call', 'tool'}
+
+
+@pytest.mark.parametrize('shape', ['missing-db', 'bad-db'])
+def test_unavailable_host_tool_rows_stay_loose(tmp_path, shape):
+    from bench.instruments.reliability.scorers import bars, tool_calls
+    from tests import test_reliability_scorers as fx
+
+    ev, _ = fx.tool_turn(15)
+    atts = bars.attempts(fx.turn_events(15)[:1] + ev)
+    bound = tool_calls.bind(atts)
+    loose = bound['loose'].copy()
+    state = tmp_path / 'absent.db'
+    if shape == 'bad-db':
+        state.write_text('not sqlite')
+    receipt = tool_calls.host_held(atts, bound, state, lambda _: 'chat', {15}, lambda _: 'chat')
+    assert receipt['unavailable'].startswith('state.db unreadable')
+    assert not bound['expected'] and bound['loose'] == loose
+
+
+@pytest.mark.parametrize('held,stored,missing_user', [(True, False, False), (True, False, True),
+                                                   (True, True, False), (False, False, False)])
+def test_b6_no_group_exception_is_only_for_held_tool_cells(tmp_path, held, stored, missing_user):
+    from tests import test_reliability_scorers as fx
+
+    ev, tools = fx.tool_turn(15)
+    user = fx.U.format(15, 15)
+    out = fx.make(tmp_path, rows=([] if missing_user else [('user', user)]) + (tools if stored else []),
+                  events=fx.turn_events(15)[:1] + ev, bars=['B1', 'B2', 'B6'],
+                  tool_plan=[{'turns': [15], 'calls': []}], faults=[dict(kind=RF.KIND, turn=15)] if held else [])
+    if held:
+        assert ('B6' in out['applicable_bars']) == stored
+        assert out['verdict'] == ('FAIL' if missing_user else 'PASS')
+        if not stored:
+            assert out['numbers']['B6']['not_applicable'] == 'no tool group stored'
+        else:
+            assert 'not_applicable' not in out['numbers']['B6']
+    else:
+        assert out['verdict'] == 'UNSUPPORTED' and 'B6: no tool-call group was stored' in out['reason']
+
+
+def test_held_tool_cell_still_fails_b6_for_a_stored_split_group(tmp_path):
+    from tests import test_reliability_scorers as fx
+
+    ev, tools = fx.tool_turn(15)
+    user = fx.U.format(15, 15)
+    out = fx.make(tmp_path, rows=[('user', user)] + tools, nodes=[[2]],
+                  events=fx.turn_events(15)[:1] + ev, bars=['B1', 'B2', 'B6'],
+                  tool_plan=[{'turns': [15], 'calls': []}], faults=[dict(kind=RF.KIND, turn=15)])
+    assert out['verdict'] == 'FAIL' and set(out['failed_bars']) == {'B6'}
+    assert out['numbers']['B6']['split_groups'] == 1
 
 
 @pytest.mark.parametrize('change', ['delete', 'role', 'content'])

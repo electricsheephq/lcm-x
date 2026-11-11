@@ -21,6 +21,7 @@ import sqlite3
 from collections import Counter
 from pathlib import Path
 
+from bench.instruments.reliability import reply_fault as RF
 from . import chronology, continuity, delegated, drain, externalized, host_parity, multiset, projections, summary, tool_calls, tool_groups, host_rewrite
 
 ALL_BARS = ("B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8", "B9")
@@ -208,7 +209,8 @@ def scenario_gaps(cell: dict, events: list[dict], atts: list[dict], tg: dict, bo
             want = sum(len(g["calls"]) for g in cell["tool_plan"] if isinstance(g["turns"], list) and a["turn"] in g["turns"])
             if want and len(a["tool_issues"]) != want:
                 gaps.append(f"{a['tag']}: {want} tool calls planned, {len(a['tool_issues'])} issued")
-        if "B6" in (cell.get("bars") or ALL_BARS) and not tg["groups"]:
+        if ("B6" in (cell.get("bars") or ALL_BARS) and not tg["groups"]
+                and not any(f["kind"] == RF.KIND for f in cell.get("faults", []))):
             gaps.append("B6: no tool-call group was stored, so the split check had nothing to check")
     if cell.get("native_recovery"):
         tried = sum(e.get("native_attempts", 0) for e in events if e["event"] == "turn_end") + \
@@ -456,6 +458,12 @@ def score(cell: dict, cell_dir: Path, db_dir: Path | None = None) -> dict:
         numbers["B2"]["host_held_inflight_replies"] = host_held
     bound = tool_calls.bind(atts, lambda a: attempt_group(a, group),  # no host_sha in the cell: no licence
                             license_wire_notices=cell.get("host_sha") in tool_calls.HOSTS_WITHOUT_POST_TOOL_REANCHOR)
+    held_turns = {f["turn"] for f in cell.get("faults", []) if f["kind"] == RF.KIND} if cell.get("tool_plan") else set()
+    if held_turns:
+        receipt = tool_calls.host_held(atts, bound, db_dir / "state.db", group, held_turns,
+                                      lambda a: attempt_group(a, group))
+        if receipt is not None:
+            numbers["B2"]["host_held_tool_rows"] = receipt
     # This emergency cell deliberately drops the active result before the next provider call. B2 still requires
     # its durably stored bytes to match the real HOST dispatch; the unseen-result failure remains a B6 diagnostic.
     recovery_turns = {f["turn"] for f in cell.get("faults", []) if f["kind"] == "forced_recovery"} & {
@@ -540,6 +548,9 @@ def score(cell: dict, cell_dir: Path, db_dir: Path | None = None) -> dict:
     numbers["B6"] = {"groups": tg["groups"], "split_groups": tg["split_groups"], "host_orphan_drops": orphans,
                      "tool_results": sum(1 for e in events if e["event"] == "tool_result")}
     numbers["B6"]["tool_execution_failures"] = len(bound["failures"])
+    if held_turns and not tg["groups"]:
+        applicable = [b for b in applicable if b != "B6"]
+        numbers["B6"]["not_applicable"] = "no tool group stored"
     if tg["split_groups"] or orphans or bound["failures"]:
         failed["B6"] = {**numbers["B6"], "splits": tg["splits"][:3], "tool_failures": bound["failures"][:5]}
     native = {"native_unusable": sum(p.get("log_counts", {}).get("native_unusable", 0) for p in phases),

@@ -348,7 +348,22 @@ def registry() -> list[dict]:
                    "Root-session crash control before rotation."),
                   ("in-place", True, [], {"kind": "crash_after_host_reply_before_store", "turn": 15, "depth": 0},
                    "Default in-place compaction crash control without a rotation child."))]
+    cells += [held_tool_cell("tool-turn"), held_tool_cell("tool-loop")]
     return cells
+
+
+def held_tool_cell(name, *, in_place=False):
+    loop = name == "tool-loop"
+    return cell("reply-held-crash-control/tool-loop-in-place" if in_place else "reply-held-crash/" + name,
+                [] if in_place else [2624], in_place=in_place, user={"trailing_ws": True}, big_lines=8,
+                faults=[dict(kind="crash_after_host_reply_before_store", turn=15, depth=0 if in_place else 1,
+                             **({"at": "tool_results"} if loop else {}))],
+                tool_plan=[{"turns": [15], "calls": [
+                    {"name": "read_file", "args": {"path": "{files}/small.txt"}},
+                    {"name": "read_file", "args": {"path": "{files}/big.txt"}}]}],
+                doc=("User row, call row and both results survive a mid-tool-loop crash (no final reply) and reload."
+                     if loop else "Whole tool turn (user, call row, two results, final reply) survives crash and reload.")
+                    + " Reservation holds the store; does not prove natural crash timing.")
 
 
 def validate(c: dict) -> None:
