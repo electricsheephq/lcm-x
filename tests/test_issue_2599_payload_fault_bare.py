@@ -172,7 +172,7 @@ _REPLAY_PINS = {  # (kind, redacted preview, stamps): (with #2584's keep, withou
     ("spillover", False, "all"): ((7, 1), (7, 1), (7, 1)),
     ("spillover", False, "none"): ((7, 1), (7, 1), (19, 3)),
     ("spillover", True, "all"): ((7, 1), (7, 1), (7, 1)),
-    ("spillover", True, "none"): ((12, 2), (12, 2), (19, 3)),
+    ("spillover", True, "none"): ((19, 3), (19, 3), (19, 3)),  # #2603 stores the redacted marker; as v0.29.2 (#2604)
     ("tempdir", False, "all"): ((7, 1), (7, 1), (9, 2)),
     ("tempdir", False, "none"): ((7, 1), (12, 2), (12, 2)),
     ("tempdir", True, "all"): ((7, 1), (7, 1), (9, 2)),
@@ -237,11 +237,14 @@ def test_cold_replays_of_a_store_written_under_a_payload_fault(tmp_path, monkeyp
 
 # Six cold replays after a fault at the first ingest (the payload folder blocked by a regular file; "lifted" unblocks it
 # before the first replay, "kept" keeps it), each by a new engine on the same store and each handing two more rows. The
-# "partial" shape re-sends from the call on and reuses the call id with the identical marker. Stamps are removed from
-# the replays per variant. Counts are pinned as measured, beside v0.29.2's on the same inputs. The one cell above
-# v0.29.2 is ('K1', 'F1lifted', 'all', 'partial'): two rows more from the third replay on, and no more after that (the
-# reused call id with an identical marker, stored once more, once). Stampless and partially stamped replays store the
-# replay again on every branch and in v0.29.2 alike; where this change differs from v0.29.2 there, it stores fewer.
+# "partial" shape re-sends from the call on and reuses the call id with the identical marker; "toolstart" re-sends from
+# the first tool result on. Stamps are removed from the replays per variant. Counts are pinned as measured, beside
+# v0.29.2's on the same inputs. Two cells are above v0.29.2, both with the fault lifted and every row stamped:
+# ('K1', 'F1lifted', 'all', 'partial') stores two rows more from the third replay on, and
+# ('K1', 'F1lifted', 'all', 'toolstart') one row more from the second replay on (#2599), with no growth after that in
+# either (the reused call id with an identical marker, stored once more, once). Stampless and partially stamped
+# replays store the replay again on every branch and in v0.29.2 alike; where this change differs from v0.29.2 there,
+# it stores fewer.
 _SIX_REPLAY_PINS = {  # cell: (stored rows after the ingest and each replay: with #2584's keep, without it, v0.29.2)
     ('K1', 'F1kept', 'all', 'full'): ((4, 6, 8, 10, 12, 14, 16), (4, 6, 8, 10, 12, 14, 16),
         (4, 6, 8, 10, 12, 14, 16)),
@@ -291,6 +294,30 @@ _SIX_REPLAY_PINS = {  # cell: (stored rows after the ingest and each replay: wit
         (4, 9, 15, 22, 30, 39, 49)),
     ('K2', 'F1lifted', 'user', 'partial'): ((4, 12, 14, 16, 18, 20, 22), (4, 12, 14, 16, 18, 20, 22),
         (4, 12, 14, 16, 18, 20, 22)),
+    ('K1', 'F1kept', 'all', 'toolstart'): ((4, 9, 11, 13, 15, 17, 19), (4, 9, 11, 13, 15, 17, 19),
+        (4, 9, 11, 13, 15, 17, 19)),
+    ('K1', 'F1kept', 'none', 'toolstart'): ((4, 11, 20, 31, 44, 59, 76), (4, 11, 20, 31, 44, 59, 76),
+        (4, 11, 20, 31, 44, 59, 76)),
+    ('K1', 'F1kept', 'user', 'toolstart'): ((4, 11, 19, 28, 38, 49, 61), (4, 11, 19, 28, 38, 49, 61),
+        (4, 11, 19, 28, 38, 49, 61)),
+    ('K1', 'F1lifted', 'all', 'toolstart'): ((4, 9, 12, 14, 16, 18, 20), (4, 9, 12, 14, 16, 18, 20),
+        (4, 9, 11, 13, 15, 17, 19)),
+    ('K1', 'F1lifted', 'none', 'toolstart'): ((4, 11, 13, 15, 17, 19, 21), (4, 11, 13, 15, 17, 19, 21),
+        (4, 11, 20, 31, 44, 59, 76)),
+    ('K1', 'F1lifted', 'user', 'toolstart'): ((4, 11, 13, 15, 17, 19, 21), (4, 11, 13, 15, 17, 19, 21),
+        (4, 11, 19, 28, 38, 49, 61)),
+    ('K2', 'F1kept', 'all', 'toolstart'): ((4, 9, 11, 13, 15, 17, 19), (4, 10, 15, 20, 25, 30, 35),
+        (4, 10, 15, 20, 25, 30, 35)),
+    ('K2', 'F1kept', 'none', 'toolstart'): ((4, 11, 20, 31, 44, 59, 76), (4, 11, 20, 31, 44, 59, 76),
+        (4, 11, 20, 31, 44, 59, 76)),
+    ('K2', 'F1kept', 'user', 'toolstart'): ((4, 11, 19, 28, 38, 49, 61), (4, 11, 19, 28, 38, 49, 61),
+        (4, 11, 19, 28, 38, 49, 61)),
+    ('K2', 'F1lifted', 'all', 'toolstart'): ((4, 9, 12, 14, 16, 18, 20), (4, 10, 12, 14, 16, 18, 20),
+        (4, 10, 12, 14, 16, 18, 20)),
+    ('K2', 'F1lifted', 'none', 'toolstart'): ((4, 11, 13, 15, 17, 19, 21), (4, 11, 13, 15, 17, 19, 21),
+        (4, 11, 13, 15, 17, 19, 21)),
+    ('K2', 'F1lifted', 'user', 'toolstart'): ((4, 11, 13, 15, 17, 19, 21), (4, 11, 13, 15, 17, 19, 21),
+        (4, 11, 13, 15, 17, 19, 21)),
 }
 _FULL = "SPILLOVER_RECOVERY_NEEDLE:\n" + ("é文abcdef\n" * 600)
 _T0 = 1762700000.0
@@ -310,7 +337,7 @@ def _six_replay_transcript(tool, shape):
     t += [row(5 + i, ("user", "assistant")[i % 2], f"next {i}") for i in range(2)]
     t += [dict(call), row(10, "tool", tool, tool_call_id=_RCALL), row(11, "assistant", "saved again")]
     t += [row(10 + i, ("user", "assistant")[i % 2], f"next {i}") for i in range(2, 12)]
-    return t, [(0, 4)] + [(1, 7 + 2 * k) for k in range(1, 7)]
+    return t, [(0, 4)] + [(2 if shape == "toolstart" else 1, 7 + 2 * k) for k in range(1, 7)]
 
 
 @pytest.mark.parametrize("kind,arm,stamps,shape", sorted(_SIX_REPLAY_PINS), ids=["-".join(c) for c in sorted(_SIX_REPLAY_PINS)])
