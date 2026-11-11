@@ -717,6 +717,59 @@ def test_host_held_tool_rows_are_expected_only_for_held_faults(tmp_path, shape):
         assert {r['kind'] for r in receipt['records']} == {'call', 'tool'}
 
 
+@pytest.mark.parametrize('held,shape', [(True, 'ok'), (True, 'failed'), (True, 'missing'),
+    (True, 'name'), (True, 'args'), (True, 'short'), (True, 'extra'), (True, 'idless'),
+    (True, 'reused'), (False, 'failed')])
+def test_unfinished_held_turn_validates_dispatches(tmp_path, held, shape):
+    from tests import test_reliability_scorers as fx
+
+    calls = [('read_file', {'path': path}) for path in ('small.txt', 'big.txt')]
+    ev, tools = fx.tool_turn(15, calls=calls)
+    dispatches = [e for e in ev if e['event'] == 'tool_dispatch']
+    first = dispatches[0]
+    failure = None
+    gap = 'T15: planned read_file (call_T15_0_0) was never dispatched by the host'
+    if shape == 'failed':
+        first.update(ok=False, detail='synthetic error')
+        failure = 'T15: read_file (call_T15_0_0) failed: synthetic error'
+    elif shape == 'missing':
+        ev.remove(first)
+    elif shape in ('name', 'args'):
+        first[shape] = 'other_tool' if shape == 'name' else {'path': 'other.txt'}
+        failure = f"T15: call_T15_0_0 planned read_file but the host ran {first['name']}"
+    elif shape == 'short':
+        ev[0]['expect'] = {'min_chars': first['chars'] + 1}
+        failure = 'T15: read_file result 2 chars < 3'
+    elif shape == 'extra':
+        ev.append({**first, 'id': 'unplanned'})
+        failure = 'T15: unplanned host dispatch of read_file'
+    elif shape == 'idless':
+        for e in dispatches:
+            e.pop('id')
+            e['args'] = json.dumps(e['args'])  # Canonical arguments bind id-less dispatches.
+    elif shape == 'reused':
+        ev.remove(dispatches[1])
+        first.pop('id')
+        ev[1]['args'] = ev[0]['args']
+        gap = 'T15: planned read_file (call_T15_0_1) was never dispatched by the host'
+    user = fx.U.format(15, 15)
+    host = [('S0', r, c, *((rest + [None, None])[:2]), i)
+            for i, (r, c, *rest) in enumerate([('user', user)] + tools, 1)]
+    out = fx.make(tmp_path, rows=[('user', user)] + tools, host_occurrences=host,
+                  events=fx.turn_events(15)[:1] + ev, bars=['B1', 'B2', 'B6'],
+                  tool_plan=[{'turns': [15], 'calls': []}],
+                  faults=[dict(kind=RF.KIND, turn=15)] if held else [])
+    assert out['numbers']['B2']['tool_missing_rows'] == out['numbers']['B2']['tool_surplus_rows'] == 0
+    if held and shape in ('missing', 'reused'):
+        assert out['verdict'] == 'UNSUPPORTED' and gap in out['reason']
+    elif held and failure:
+        assert out['verdict'] == 'FAIL' and set(out['failed_bars']) == {'B6'}
+        assert out['failed_bars']['B6']['tool_failures'] == [failure]
+    else:
+        assert out['verdict'] == 'PASS' and not out['failed_bars']
+    assert out['numbers']['B6']['tool_execution_failures'] == int(held and failure is not None)
+
+
 @pytest.mark.parametrize('shape', ['missing-db', 'bad-db', 'query-error'])
 @pytest.mark.parametrize('stored', [False, True])
 @pytest.mark.parametrize('missing_user', [False, True])

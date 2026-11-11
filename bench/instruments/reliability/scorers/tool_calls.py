@@ -52,6 +52,27 @@ HOSTS_WITHOUT_POST_TOOL_REANCHOR = frozenset({"345cd2b057a452236de401d3534b8502a
                                               "d337b736aa1e8ebecfab043842d13e4a2d2f48a3"})
 
 
+def _dispatches(a, gaps, failures):
+    """Validate each dispatch once; yield matched calls in issue order, then report extras."""
+    free = list(a.get("tool_dispatch", []))
+    for c in a.get("tool_issues", []):
+        name, args = underlying(c["name"], c["args"])
+        d = next((d for d in free if d.get("id") == c["id"]), None) or \
+            next((d for d in free if d.get("id") is None and d["name"] == name and canon(d["args"]) == canon(args)), None)
+        if d is None:
+            gaps.append(f"{a['tag']}: planned {c['name']} ({c['id']}) was never dispatched by the host")
+            continue
+        free.remove(d)
+        if d["name"] != name or canon(d["args"]) != canon(args):
+            failures.append(f"{a['tag']}: {c['id']} planned {c['name']} but the host ran {d['name']}")
+        elif not d.get("ok"):
+            failures.append(f"{a['tag']}: {c['name']} ({c['id']}) failed: {d.get('detail')}")
+        elif d.get("chars", 0) < (c.get("expect") or {}).get("min_chars", 0):
+            failures.append(f"{a['tag']}: {c['name']} result {d.get('chars')} chars < {c['expect']['min_chars']}")
+        yield c, d
+    failures += [f"{a['tag']}: unplanned host dispatch of {d['name']}" for d in free]
+
+
 def bind(atts: list[dict], lineage_of=lambda a: "chat", *, license_wire_notices: bool = False) -> dict:
     """Per completed attempt: gaps (dispatch never happened -> UNSUPPORTED), failures (wrong/failed/incomplete/unseen
     result, unplanned dispatch -> FAIL) and the expected keys. Calls of unfinished attempts may be stored at most once.
@@ -70,22 +91,8 @@ def bind(atts: list[dict], lineage_of=lambda a: "chat", *, license_wire_notices:
                 loose |= {(g, "call", c["id"], c["name"], canon(c["args"]))}
                 loose |= {k for k in [(g, "tool", c["id"], s["sha"]) for s in a.get("tool_seen", []) if s["id"] == c["id"]]}
             continue
-        free = [d for d in a.get("tool_dispatch", [])]
         seen = {s["id"]: s for s in a.get("tool_seen", [])}
-        for c in issues:
-            name, args = underlying(c["name"], c["args"])
-            d = next((d for d in free if d.get("id") == c["id"]), None) or \
-                next((d for d in free if d.get("id") is None and d["name"] == name and canon(d["args"]) == canon(args)), None)
-            if d is None:
-                gaps.append(f"{a['tag']}: planned {c['name']} ({c['id']}) was never dispatched by the host")
-                continue
-            free.remove(d)
-            if d["name"] != name or canon(d["args"]) != canon(args):
-                failures.append(f"{a['tag']}: {c['id']} planned {c['name']} but the host ran {d['name']}")
-            elif not d.get("ok"):
-                failures.append(f"{a['tag']}: {c['name']} ({c['id']}) failed: {d.get('detail')}")
-            elif d.get("chars", 0) < (c.get("expect") or {}).get("min_chars", 0):
-                failures.append(f"{a['tag']}: {c['name']} result {d.get('chars')} chars < {c['expect']['min_chars']}")
+        for c, d in _dispatches(a, gaps, failures):
             expected[(g, "call", c["id"], c["name"], canon(c["args"]))] += 1
             if license_wire_notices and c["id"] in seen and seen[c["id"]].get("host_wire_notice") \
                     and d.get("result_sha256"):
@@ -95,7 +102,6 @@ def bind(atts: list[dict], lineage_of=lambda a: "chat", *, license_wire_notices:
                 expected[(g, "tool", c["id"], seen[c["id"]]["sha"])] += 1
             else:
                 failures.append(f"{a['tag']}: the result of {c['id']} never reached the next provider request")
-        failures += [f"{a['tag']}: unplanned host dispatch of {d['name']}" for d in free]
     return {"gaps": gaps, "failures": failures, "expected": expected, "loose": loose, "wire_notices": wire_notices}
 
 
@@ -129,10 +135,13 @@ def stored_keys(rows, lineage=lambda sid: "chat", *, store_ids=None) -> Counter:
 
 
 def host_held(atts, bound, state, group, turns, lineage_of):
-    """Require host-held keys of interrupted held-fault tool turns, once per distinct key."""
+    """Validate dispatches and require host-held keys of interrupted held-fault tool turns, once per distinct key."""
     selected = [a for a in atts if a["prefix"] == "T" and not a["ended"] and a["turn"] in turns]
     if not selected:
         return None
+    for a in selected:
+        # Exhaust dispatch validation even when the host DB is unavailable.
+        list(_dispatches(a, bound["gaps"], bound["failures"]))
     try:
         con = sqlite3.connect(state.resolve().as_uri() + "?mode=ro", uri=True)
         try:
