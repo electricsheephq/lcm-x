@@ -76,6 +76,7 @@ def deliver_recall(
     read_snippet_windows: Callable[..., tuple[dict, str | None]] | None = None,
     extra_entries: int = 0,
     read_extra_entries: Callable[..., tuple[dict, str | None]] | None = None,
+    _fit_snippets: bool = True,
 ) -> str:
     """Deliver ranked entries without changing retrieval or host-read policy."""
     if session_delivery is not None:
@@ -84,6 +85,7 @@ def deliver_recall(
         options = dict(locals())
         options.pop("ordered")
         options.pop("session_delivery")
+        options["_fit_snippets"] = False
         options["delivery_order"] = "score"
         options["read_summary_event_time"] = None
         response = json.loads(_deliver_hits([], **options))
@@ -478,34 +480,48 @@ def deliver_recall(
         response["provenance"]["summary_event_time_unavailable"] = summary_event_time_unavailable
     if snippet_window_skipped is not None:
         response["snippet_window_skipped"] = snippet_window_skipped
-    elif detail == "snippets" and snippet_window_hits > 0:
-        if response_cap_truncated:
+    if detail == "snippets" and _fit_snippets and (
+        (snippet_window_hits > 0 and snippet_window_skipped is None)
+        or len(json.dumps(response)) > response_char_cap
+    ):
+        if response_cap_truncated and snippet_window_hits > 0:
             response["response_cap_truncated"] = True
-        # Include the envelope and optional time-order marker in the encoded
-        # budget. Keep the flag-off and skipped-read fitting paths unchanged.
-        def encoded_size() -> int:
-            if "session_floor" in response["provenance"]:
-                response["provenance"]["session_floor"]["delivered"] = _sessions(hits_out)
-            _refresh_later_statements(response)
+        # Every snippets path budgets the serialized envelope. Refresh receipts
+        # to a fixed point after each removal; optional markers never evict hits.
+        def encoded_size(payload=response) -> int:
+            survivors, provenance = payload["hits"], payload["provenance"]
+            if "session_floor" in provenance:
+                provenance["session_floor"]["delivered"] = _sessions(survivors)
+            _refresh_later_statements(payload)
             if adjacent_reply:
-                response["provenance"].pop("adjacent_reply", None)
-                receipts = _delivered_adjacent_receipts(hits_out, adjacent_reply)
+                provenance.pop("adjacent_reply", None)
+                receipts = _delivered_adjacent_receipts(survivors, adjacent_reply)
                 if receipts:
-                    response["provenance"]["adjacent_reply"] = receipts
-            if fts_anchor_info is not None and len(arm_order) > 1:
-                fts_anchor_info["delivered"] = (
-                    _fts_anchor_delivered(hits_out, arm_hits) if fts_anchor_info["fired"] else None
+                    provenance["adjacent_reply"] = receipts
+            if (anchor := provenance.get("fts_anchor")) is not None:
+                anchor["delivered"] = (
+                    _fts_anchor_delivered(survivors, arm_hits) if anchor["fired"] else None
                 )
-            if delivery_order == "time":
-                return len(json.dumps({**response, "provenance": {
-                    **response["provenance"], "delivery_order": "time",
-                }}))
-            return len(json.dumps(response))
+            return len(json.dumps(payload))
 
+        deferred_reason = None
+        if encoded_size() > response_char_cap:
+            _, deferred_reason = _fit_event_time(
+                response, response_char_cap=response_char_cap, ensure_ascii=True,
+            )
+            envelope = json.loads(json.dumps(response))
+            envelope.update(hits=[], total_results=0)
+            if encoded_size(envelope) > response_char_cap and len(query) > 4_096:
+                response.update(query=query[:4_096], query_truncated=True)
         while encoded_size() > response_char_cap and hits_out:
             hits_out.pop()
             response["total_results"] = len(hits_out)
             response["response_cap_truncated"] = True
+        if deferred_reason is not None:
+            response.update(event_time_unavailable=True, event_time_unavailable_reason=deferred_reason)
+            if encoded_size() > response_char_cap:
+                response.pop("event_time_unavailable")
+                response.pop("event_time_unavailable_reason")
     if detail == "answer_ready":
         expansion = {
             "expanded_hit_count": sum("content" in hit for hit in hits_out),
@@ -598,9 +614,11 @@ def deliver_recall(
     if delivery_order == "time":
         response["provenance"]["delivery_order"] = "time"
     marked = json.dumps(response, ensure_ascii=ensure_ascii)
-    # answer_ready caps the whole envelope; snippets budgets hits only.
-    if detail == "answer_ready" and len(marked) > response_char_cap:
-        return unmarked
+    if len(marked) > response_char_cap:
+        response["provenance"].pop("delivery_order", None)
+        marked = unmarked
+        if detail == "answer_ready":
+            return unmarked
     if (detail == "snippets" and extra_entries > 0 and len(hits_out) == limit
             and not response_cap_truncated and not response.get("response_cap_truncated")):
         seen = {hit["store_id"] for hit in hits_out if hit.get("store_id") is not None}
@@ -633,6 +651,8 @@ def deliver_recall(
                 skipped = "read_error"
             if skipped is not None:
                 response["extra_entries_skipped"] = skipped
+                if len(json.dumps(response)) > response_char_cap:
+                    response.pop("extra_entries_skipped")
             else:
                 hits_out.extend(extras)
                 while len(hits_out) > limit:
@@ -845,7 +865,9 @@ def _without_event_time(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _fit_event_time(response: dict[str, Any], *, response_char_cap: int) -> tuple[str, str | None]:
+def _fit_event_time(
+    response: dict[str, Any], *, response_char_cap: int, ensure_ascii: bool = False,
+) -> tuple[str, str | None]:
     """Strip hits' event-time fields, lowest rank first, until ``response`` fits.
 
     Runs before the cap touches anything else, so the optional fields never
@@ -859,7 +881,7 @@ def _fit_event_time(response: dict[str, Any], *, response_char_cap: int) -> tupl
     which the caller puts back if it fits once the cap has done the rest, and
     ``None`` otherwise (#995).
     """
-    encoded = json.dumps(response, ensure_ascii=False)
+    encoded = json.dumps(response, ensure_ascii=ensure_ascii)
     for hit in reversed(response["hits"]):
         if len(encoded) <= response_char_cap:
             return encoded, None
@@ -871,13 +893,13 @@ def _fit_event_time(response: dict[str, Any], *, response_char_cap: int) -> tupl
         if not response.get("event_time_unavailable"):
             response["event_time_unavailable"] = True
             response["event_time_unavailable_reason"] = "response_cap"
-        encoded = json.dumps(response, ensure_ascii=False)
+        encoded = json.dumps(response, ensure_ascii=ensure_ascii)
     if len(encoded) > response_char_cap and response.get(
         "event_time_unavailable"
     ):
         del response["event_time_unavailable"]
         deferred_reason = response.pop("event_time_unavailable_reason")
-        return json.dumps(response, ensure_ascii=False), deferred_reason
+        return json.dumps(response, ensure_ascii=ensure_ascii), deferred_reason
     return encoded, None
 
 

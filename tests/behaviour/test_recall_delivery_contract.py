@@ -115,10 +115,10 @@ def test_event_time(corpus, monkeypatch, mode):
     engine._store.connection.commit()
     set_arms(monkeypatch, chunk=hits)
     if mode == "cap":
-        # Item-only snippets cap: keep all seven hits, but strip optional fields
+        # Whole-envelope snippets cap: keep all seven hits, but strip optional fields
         # from the lowest ranked entries first.
         full = json.loads(recall(corpus, scope_bias=0))
-        size = sum(len(json.dumps(h, ensure_ascii=False)) for h in full["hits"])
+        size = len(json.dumps(full))
         monkeypatch.setattr(tools, "_LCM_RECALL_RESPONSE_CHAR_CAP", size - 1)
     if mode in {"read_error", "deadline"}:
         real_read = tools._lcm_recall_event_time_rows
@@ -257,9 +257,8 @@ def test_anchor_window_gaps(corpus, monkeypatch, case):
     check_golden(f"anchor-{case}", raw)
 
 
-@pytest.mark.parametrize("count", [0, 1, 3])
-@pytest.mark.parametrize("deficit", [0, 1])
-def test_event_time_item_cap_exact_edge(corpus, monkeypatch, count, deficit):
+@pytest.mark.parametrize("count,deficit", [(0, 0), (1, 0), (1, 1), (3, 0), (3, 1)])
+def test_event_time_envelope_cap_exact_edge(corpus, monkeypatch, count, deficit):
     engine, hits, _, _, _ = corpus
     engine._store.connection.execute(
         "UPDATE messages SET observed_at = ?, observed_at_source = ?",
@@ -274,8 +273,8 @@ def test_event_time_item_cap_exact_edge(corpus, monkeypatch, count, deficit):
     assert all("event_time" in hit for hit in baseline["hits"])
     if count:
         assert baseline["hits"][0]["arms"] == ["chunk", "fts"]
-    cap = sum(len(json.dumps(hit, ensure_ascii=False)) for hit in baseline["hits"])
-    monkeypatch.setattr(tools, "_LCM_RECALL_RESPONSE_CHAR_CAP", max(1, cap - deficit))
+    cap = len(json.dumps(baseline))
+    monkeypatch.setattr(tools, "_LCM_RECALL_RESPONSE_CHAR_CAP", cap - deficit)
     calls, fetched, snapshots = [], {}, {}
     real_read = tools._lcm_recall_event_time_rows
     real_fields = tools._lcm_recall_event_time
@@ -295,6 +294,7 @@ def test_event_time_item_cap_exact_edge(corpus, monkeypatch, count, deficit):
     monkeypatch.setattr(tools, "_lcm_recall_event_time_rows", read)
     monkeypatch.setattr(tools, "_lcm_recall_event_time", fields)
     raw = recall(corpus, scope_bias=0)
+    assert len(raw) <= cap - deficit
     expected = deepcopy(baseline)
     if count and deficit:
         expected["hits"][-1].pop("event_time")
@@ -308,7 +308,7 @@ def test_event_time_item_cap_exact_edge(corpus, monkeypatch, count, deficit):
     assert fetched == snapshots
 
 
-def test_event_time_item_cap_bare_oversized_hit(corpus, monkeypatch):
+def test_event_time_envelope_cap_bare_oversized_hit(corpus, monkeypatch):
     engine, hits, _, _, _ = corpus
     engine._store.connection.execute(
         "UPDATE messages SET observed_at = NULL, observed_at_source = NULL"
@@ -318,13 +318,17 @@ def test_event_time_item_cap_bare_oversized_hit(corpus, monkeypatch):
     baseline = recall(corpus, scope_bias=0)
     assert len(json.loads(baseline)["hits"]) == 1
     assert "event_time" not in json.loads(baseline)["hits"][0]
-    monkeypatch.setattr(tools, "_LCM_RECALL_RESPONSE_CHAR_CAP", 1)
-    # The first hit remains deliverable; stripping zero optional characters
-    # must not invent an unavailable marker or drop the hit.
-    assert recall(corpus, scope_bias=0) == baseline
+    cap = len(baseline) - 1
+    monkeypatch.setattr(tools, "_LCM_RECALL_RESPONSE_CHAR_CAP", cap)
+    # No optional fields to strip: drop the whole hit and report truncation.
+    raw = recall(corpus, scope_bias=0)
+    expected = json.loads(baseline)
+    expected.update(hits=[], total_results=0, response_cap_truncated=True)
+    assert raw == json.dumps(expected)
+    assert len(raw) <= cap
 
 
-def test_event_time_item_cap_skips_bare_tail(corpus, monkeypatch):
+def test_event_time_envelope_cap_skips_bare_tail(corpus, monkeypatch):
     engine, hits, _, _, _ = corpus
     engine._store.connection.execute(
         "UPDATE messages SET observed_at = ?, observed_at_source = ? WHERE store_id IN (?, ?)",
@@ -334,13 +338,15 @@ def test_event_time_item_cap_skips_bare_tail(corpus, monkeypatch):
     set_arms(monkeypatch, chunk=hits[:3])
     expected = json.loads(recall(corpus, scope_bias=0))
     assert ["event_time" in hit for hit in expected["hits"]] == [True, True, False]
-    cap = sum(len(json.dumps(hit, ensure_ascii=False)) for hit in expected["hits"])
+    cap = len(json.dumps(expected))
     monkeypatch.setattr(tools, "_LCM_RECALL_RESPONSE_CHAR_CAP", cap - 1)
     expected["hits"][1].pop("event_time")
     expected["hits"][1].pop("event_time_source")
     expected["event_time_unavailable"] = True
     expected["event_time_unavailable_reason"] = "response_cap"
-    assert recall(corpus, scope_bias=0) == json.dumps(expected)
+    raw = recall(corpus, scope_bias=0)
+    assert raw == json.dumps(expected)
+    assert len(raw) <= cap - 1
 
 
 @pytest.mark.parametrize("count", [0, 1, 3])

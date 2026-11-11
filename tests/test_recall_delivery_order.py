@@ -97,12 +97,7 @@ def test_response_cap_keeps_score_survivors(delivery, detail):
         score_raw = invoke(detail=detail, response_char_cap=cap)
         score = json.loads(score_raw)
         timed_raw = invoke(detail=detail, response_char_cap=cap, delivery_order="time")
-        # answer_ready caps the whole envelope; snippets budgets hits only, so
-        # there time mode is score mode plus the provenance marker exactly.
-        if detail == "answer_ready":
-            assert len(timed_raw) <= cap
-        else:
-            assert len(timed_raw) == len(score_raw) + len(', "delivery_order": "time"')
+        assert len(timed_raw) <= cap
         timed = json.loads(timed_raw)
         ids = [hit["store_id"] for hit in score["hits"]]
         assert 0 < len(ids) < 6
@@ -116,9 +111,10 @@ def test_stripped_dates_still_order_by_existing_rows(delivery):
     invoke, _ = delivery
     # All six hit bodies fit, but their optional dates exceed this cap.
     full = json.loads(invoke())
-    cap = sum(len(json.dumps({k: v for k, v in hit.items()
-                              if k not in {"event_time", "event_time_source", "time_uncertain"}}))
-              for hit in full["hits"])
+    for hit in full["hits"]:
+        for key in ("event_time", "event_time_source", "time_uncertain"):
+            hit.pop(key, None)
+    cap = len(json.dumps(full))
     payload = json.loads(invoke(response_char_cap=cap, delivery_order="time"))
     assert [h["store_id"] for h in payload["hits"]] == [3, 4, 5, 1, 2, 6]
     assert any("event_time" not in h for h in payload["hits"] if h["store_id"] in {1, 3, 4, 5})

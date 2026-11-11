@@ -2592,9 +2592,7 @@ def _without_event_time_marker(payload):
 def _event_time_cap_baseline(engine, monkeypatch, request):
     """Main's response for ``request`` (no event-time fields) and its exact fit.
 
-    The exact fit is the encoded length for answer_ready, whose final check
-    sizes the whole response, and the summed hit sizes for snippets, whose
-    only check is the per-hit one.
+    Both details size the whole serialized response, including its envelope.
     """
     with monkeypatch.context() as patch:
         patch.setattr(lcm_tools, "_lcm_recall_event_time", lambda _stored: {})
@@ -2602,9 +2600,7 @@ def _event_time_cap_baseline(engine, monkeypatch, request):
         main = json.loads(encoded)
         if request["detail"] == "answer_ready":
             assert not main["provenance"]["answer_ready"]["response_truncated"]
-            exact = len(encoded)
-        else:
-            exact = sum(len(json.dumps(hit, ensure_ascii=False)) for hit in main["hits"])
+        exact = len(encoded)
         # Sized to fit exactly, main still delivers every hit unchanged.
         patch.setattr(lcm_tools, "_LCM_RECALL_RESPONSE_CHAR_CAP", exact)
         refit_encoded = lcm_tools.lcm_recall(request, engine=engine)
@@ -2633,10 +2629,7 @@ def test_recall_event_time_never_evicts_a_hit_that_fits_exactly_on_main(
     # the optional fields give way, never a hit.
     assert _hit_order(payload) == _hit_order(main)
     assert _without_event_time_marker(payload) == main
-    if detail == "answer_ready":
-        assert len(encoded) <= exact
-    else:
-        assert payload["event_time_unavailable_reason"] == "response_cap"
+    assert len(encoded) <= exact
 
 
 def test_recall_event_time_evicts_only_what_main_evicts(recall_engine, monkeypatch):
@@ -2672,10 +2665,7 @@ def test_recall_event_time_over_the_cap_is_stripped_lowest_rank_first(
     full_encoded = lcm_tools.lcm_recall(request, engine=recall_engine)
     full = json.loads(full_encoded)
     assert "event_time_unavailable" not in full
-    if detail == "answer_ready":
-        full_size = len(full_encoded)
-    else:
-        full_size = sum(len(json.dumps(hit, ensure_ascii=False)) for hit in full["hits"])
+    full_size = len(full_encoded)
     assert full_size > exact
 
     monkeypatch.setattr(lcm_tools, "_LCM_RECALL_RESPONSE_CHAR_CAP", full_size - 1)
@@ -2684,8 +2674,7 @@ def test_recall_event_time_over_the_cap_is_stripped_lowest_rank_first(
     assert _hit_order(payload) == _hit_order(main)
     assert payload["event_time_unavailable"] is True
     assert payload["event_time_unavailable_reason"] == "response_cap"
-    if detail == "answer_ready":
-        assert len(encoded) <= full_size - 1
+    assert len(encoded) <= full_size - 1
     kept = [
         "event_time" in hit for hit in payload["hits"] if hit.get("store_id") in observed
     ]
