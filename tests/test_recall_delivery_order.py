@@ -99,6 +99,11 @@ def test_response_cap_keeps_score_survivors(delivery, detail):
         timed_raw = invoke(detail=detail, response_char_cap=cap, delivery_order="time")
         assert len(timed_raw) <= cap
         timed = json.loads(timed_raw)
+        if detail == "snippets":
+            if len(score_raw) + len(', "delivery_order": "time"') <= cap:
+                assert timed["provenance"]["delivery_order"] == "time"
+            else:
+                assert "delivery_order" not in timed["provenance"]
         ids = [hit["store_id"] for hit in score["hits"]]
         assert 0 < len(ids) < 6
         assert ids == list(range(1, len(ids) + 1))
@@ -116,6 +121,7 @@ def test_stripped_dates_still_order_by_existing_rows(delivery):
             hit.pop(key, None)
     cap = len(json.dumps(full))
     payload = json.loads(invoke(response_char_cap=cap, delivery_order="time"))
+    assert "delivery_order" not in payload["provenance"]
     assert [h["store_id"] for h in payload["hits"]] == [3, 4, 5, 1, 2, 6]
     assert any("event_time" not in h for h in payload["hits"] if h["store_id"] in {1, 3, 4, 5})
 

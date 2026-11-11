@@ -42,16 +42,33 @@ def test_fitting_responses_match_main_bytes(guidance, order, mode):
 @pytest.mark.parametrize("order", ["score", "time"])
 @pytest.mark.parametrize("character", ["q", "🌿"])
 def test_long_query_fits_all_snippets_paths(mode, order, character):
-    d = make_delivery((1300,) * 6)
+    d = make_delivery((1300,) * 12)
+    for row in d.rows.values():
+        row.update(observed_at=1_700_000_000, observed_at_source="host_message_timestamp")
+    kwargs = options(d, mode)
+    if mode in {"extras", "extra-error"}:
+        kwargs["extra_entries"] = 4
     query = character * 70_000
     original_entries, original_rows = deepcopy(d.entries), deepcopy(d.rows)
-    raw = d.invoke(query=query, limit=4, delivery_order=order, **options(d, mode))
+    raw = d.invoke(query=query, limit=8, delivery_order=order, **kwargs)
     result = json.loads(raw)
     assert len(raw) <= 64_000
     assert result["query"] == query[:4096]
     assert result["query_truncated"] is True
-    assert result["total_results"] == 4
-    assert [hit["store_id"] for hit in result["hits"][:4]] == [1, 2, 3, 4]
+    assert result["total_results"] == 8
+    assert [hit["store_id"] for hit in result["hits"][:8]] == list(range(1, 9))
+    assert all("event_time" in hit for hit in result["hits"][:8])
+    assert "event_time_unavailable" not in result
+    if order == "time":
+        assert result["provenance"]["delivery_order"] == "time"
+    else:
+        assert "delivery_order" not in result["provenance"]
+    if mode in {"extras", "extra-error"}:
+        kwargs["read_extra_entries"].assert_called_once()
+        assert kwargs["read_extra_entries"].call_args.kwargs["expanded_limit"] == 4
+    if mode == "extras":
+        assert len(result["hits"]) == 12
+        assert all(hit["extra"] for hit in result["hits"][8:])
     assert "response_cap_truncated" not in result
     assert d.entries == original_entries and d.rows == original_rows
 
@@ -122,7 +139,7 @@ def test_hit_bodies_just_below_production_cap_still_budget_the_envelope():
     assert result["query"] == "q" * 1000 and "query_truncated" not in result
 
 
-@pytest.mark.parametrize("mode", ["plain", "windows", "window-error", "extra-error"])
+@pytest.mark.parametrize("mode", ["plain", "window-error", "extra-error"])
 def test_optional_time_and_extra_markers_never_evict_a_hit(mode):
     d = make_delivery((1300,) * 6)
     kwargs = dict(limit=4, **options(d, mode))
@@ -170,3 +187,60 @@ def test_nonfinite_limit_uses_unparseable_default(recall_engine, monkeypatch, ra
     assert raw == baseline
     assert json.loads(raw)["limit"] == tools._LCM_RECALL_DEFAULT_LIMIT
     assert tools._parse_int_value(json.loads(raw_limit), 17) == 17
+
+
+@pytest.mark.parametrize("mode", ["plain", "windows", "window-deadline", "window-error"])
+@pytest.mark.parametrize("order", ["score", "time"])
+@pytest.mark.parametrize("slack", [0, 1, 31])
+@pytest.mark.parametrize("observed", [False, True])
+def test_no_hit_envelope_reserves_truncation_markers(mode, order, slack, observed):
+    d = make_delivery((1300,) * 3)
+    if observed:
+        for row in d.rows.values():
+            row.update(observed_at=1_700_000_000, observed_at_source="host_message_timestamp")
+    kwargs = dict(delivery_order=order, **options(d, mode))
+    envelope = json.loads(d.invoke(query="", **kwargs))
+    envelope.update(hits=[], total_results=0)
+    envelope["provenance"].pop("delivery_order", None)
+    query = "q" * (64_000 - slack - len(json.dumps(envelope)))
+    raw = d.invoke(query=query, **kwargs)
+    result = json.loads(raw)
+    assert len(raw) <= 64_000
+    assert result["query_truncated"] is True
+    assert result["query"] == query[:4096]
+    assert len(result["hits"]) == 3
+
+
+@pytest.mark.parametrize("case", ["time-marker", "event-time"])
+def test_windows_boundary_matches_main_bytes(case):
+    d = make_delivery((1300,) * 3)
+    if case == "event-time":
+        for row in d.rows.values():
+            row.update(observed_at=1_700_000_000, observed_at_source="host_message_timestamp")
+    kwargs = dict(snippet_window_hits=5, delivery_order="time" if case == "time-marker" else "score")
+    full = json.loads(d.invoke(**kwargs))
+    # Main budgets the time marker, then drops the ranked tail without an
+    # envelope-level event-time strip. Pin the complete resulting JSON bytes.
+    cap = len(json.dumps(full)) - 1
+    if case == "time-marker":
+        unmarked = deepcopy(full)
+        unmarked["provenance"].pop("delivery_order")
+        assert len(json.dumps(unmarked)) <= cap < len(json.dumps(full))
+    expected = deepcopy(full)
+    expected["hits"].pop()
+    expected.update(total_results=2, response_cap_truncated=True)
+    assert d.invoke(**kwargs, response_char_cap=cap) == json.dumps(expected)
+    if case == "event-time":
+        assert all("event_time" in hit for hit in expected["hits"])
+        assert "event_time_unavailable" not in expected
+
+
+def test_plain_item_loop_drop_reports_truncation():
+    d = make_delivery((1300,) * 2)
+    d.entries[1]["hit"]["expand_hint"] += "x" * 5000
+    cap = len(d.invoke(limit=1)) + len(', "response_cap_truncated": true')
+    raw = d.invoke(limit=2, response_char_cap=cap)
+    result = json.loads(raw)
+    assert len(raw) <= cap
+    assert [hit["store_id"] for hit in result["hits"]] == [1]
+    assert result["response_cap_truncated"] is True

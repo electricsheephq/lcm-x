@@ -480,14 +480,17 @@ def deliver_recall(
         response["provenance"]["summary_event_time_unavailable"] = summary_event_time_unavailable
     if snippet_window_skipped is not None:
         response["snippet_window_skipped"] = snippet_window_skipped
+    if detail == "snippets" and _fit_snippets and snippet_window_hits <= 0 and response_cap_truncated:
+        response["response_cap_truncated"] = True
     if detail == "snippets" and _fit_snippets and (
         (snippet_window_hits > 0 and snippet_window_skipped is None)
         or len(json.dumps(response)) > response_char_cap
     ):
         if response_cap_truncated and snippet_window_hits > 0:
             response["response_cap_truncated"] = True
+        window_fit = snippet_window_hits > 0 and snippet_window_skipped is None
         # Every snippets path budgets the serialized envelope. Refresh receipts
-        # to a fixed point after each removal; optional markers never evict hits.
+        # to a fixed point; windows retain main's time-marker budget and fit order.
         def encoded_size(payload=response) -> int:
             survivors, provenance = payload["hits"], payload["provenance"]
             if "session_floor" in provenance:
@@ -502,17 +505,27 @@ def deliver_recall(
                 anchor["delivered"] = (
                     _fts_anchor_delivered(survivors, arm_hits) if anchor["fired"] else None
                 )
+            if window_fit and delivery_order == "time":
+                return len(json.dumps({**payload, "provenance": {
+                    **provenance, "delivery_order": "time",
+                }}))
             return len(json.dumps(payload))
 
         deferred_reason = None
         if encoded_size() > response_char_cap:
-            _, deferred_reason = _fit_event_time(
-                response, response_char_cap=response_char_cap, ensure_ascii=True,
-            )
             envelope = json.loads(json.dumps(response))
             envelope.update(hits=[], total_results=0)
+            if hits_out:
+                envelope["response_cap_truncated"] = True
+            if not window_fit and any(any(k in hit for k in _EVENT_TIME_KEYS) for hit in hits_out):
+                envelope.setdefault("event_time_unavailable", True)
+                envelope.setdefault("event_time_unavailable_reason", "response_cap")
             if encoded_size(envelope) > response_char_cap and len(query) > 4_096:
                 response.update(query=query[:4_096], query_truncated=True)
+            if not window_fit:
+                _, deferred_reason = _fit_event_time(
+                    response, response_char_cap=response_char_cap, ensure_ascii=True,
+                )
         while encoded_size() > response_char_cap and hits_out:
             hits_out.pop()
             response["total_results"] = len(hits_out)

@@ -308,6 +308,20 @@ def test_event_time_envelope_cap_exact_edge(corpus, monkeypatch, count, deficit)
     assert fetched == snapshots
 
 
+@pytest.mark.parametrize("count", [0, 1, 3])
+def test_snippets_impossible_cap_returns_empty_envelope(corpus, monkeypatch, count):
+    _, hits, _, _, _ = corpus
+    set_arms(monkeypatch, chunk=hits[:count])
+    expected = json.loads(recall(corpus, scope_bias=0))
+    expected.update(hits=[], total_results=0)
+    if count:
+        expected["response_cap_truncated"] = True
+    monkeypatch.setattr(tools, "_LCM_RECALL_RESPONSE_CHAR_CAP", 1)
+    raw = recall(corpus, scope_bias=0)
+    assert raw == json.dumps(expected)
+    assert json.loads(raw)["hits"] == []
+
+
 def test_event_time_envelope_cap_bare_oversized_hit(corpus, monkeypatch):
     engine, hits, _, _, _ = corpus
     engine._store.connection.execute(

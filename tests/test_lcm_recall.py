@@ -2629,6 +2629,10 @@ def test_recall_event_time_never_evicts_a_hit_that_fits_exactly_on_main(
     # the optional fields give way, never a hit.
     assert _hit_order(payload) == _hit_order(main)
     assert _without_event_time_marker(payload) == main
+    if detail == "snippets":
+        # At this exact bare-envelope boundary no optional marker fits.
+        assert "event_time_unavailable" not in payload
+        assert "event_time_unavailable_reason" not in payload
     assert len(encoded) <= exact
 
 
