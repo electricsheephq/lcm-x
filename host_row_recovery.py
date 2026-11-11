@@ -14,7 +14,7 @@ from typing import Optional
 from .host_uid import _is_fork_child
 from .ingest_protection import protect_messages_for_ingest
 from .maintenance_scheduler import _HOST_ROW_RECOVERY_SCHEDULER
-from .message_analysis import _tool_result_names
+from .message_analysis import _tool_call_id, _tool_result_names
 from .reconcile import _commit_proof_identity_digest, _proof_user_identity
 from .tokens import count_message_tokens
 
@@ -25,7 +25,7 @@ _WARNED = set()
 _COUNTS = Counter(dict.fromkeys((
     "candidates", "recovered_candidates", "recovered_rows", "unproven", "reader_error",
     "handle_missing", "signature_mismatch", "suffix_rejected", "ignored_in_suffix", "raced",
-    "no_provenance", "walk_capped", "empty_suffix",
+    "no_provenance", "walk_capped", "empty_suffix", "on_tip_path",
 ), 0))
 _MAX_SESSIONS = 4096
 
@@ -76,22 +76,41 @@ def _handle_reason(handle):
     return None
 
 
+def _tip_path(path, bound, handle):
+    conn = sqlite3.connect(Path(path).resolve().as_uri() + "?mode=ro", uri=True, timeout=1.0)
+    try:
+        sid, seen = handle.get_compression_tip(bound), set()
+        while sid != bound:
+            if not sid or sid in seen or len(seen) >= _MAX_SESSIONS:
+                _count("walk_capped")
+                logger.warning("LCM host-row recovery tip walk unproven")
+                return None
+            seen.add(sid)
+            row = conn.execute("SELECT parent_session_id FROM sessions WHERE id=?", (sid,)).fetchone()
+            sid = row[0] if row else None
+        return seen | {bound}
+    finally:
+        conn.close()
+
+
+def _skip_on_tip_path(path, bound, handle, sid):
+    tip_path = _tip_path(path, bound, handle)
+    if tip_path is None:
+        return True
+    if sid in tip_path:
+        _count("on_tip_path")
+        logger.debug("LCM host-row recovery skipped on tip path")
+        return True
+    return False
+
+
 def _candidates(path, bound, handle, handle_reason):
+    excluded = {bound} if handle_reason else _tip_path(path, bound, handle)
+    if excluded is None:
+        return []
     conn = sqlite3.connect(Path(path).resolve().as_uri() + "?mode=ro", uri=True, timeout=1.0)
     conn.row_factory = sqlite3.Row
     try:
-        excluded = {bound}
-        if not handle_reason:
-            sid, seen = handle.get_compression_tip(bound), set()
-            while sid != bound:
-                if not sid or sid in seen or len(seen) >= _MAX_SESSIONS:
-                    _count("walk_capped")
-                    logger.warning("LCM host-row recovery tip walk unproven")
-                    return []
-                seen.add(sid)
-                row = conn.execute("SELECT parent_session_id FROM sessions WHERE id=?", (sid,)).fetchone()
-                sid = row[0] if row else None
-            excluded.update(seen)
         pending, visited, leaves = [bound], {bound}, []
         while pending:
             parent = pending.pop()
@@ -157,9 +176,13 @@ def _valid_suffix(messages, cursor):
             return False
         if role == "assistant" and "tool_calls" in row:
             tc = row["tool_calls"]
-            if not isinstance(tc, list) or any(not isinstance(c, dict) or not c.get("id") for c in tc):
+            if not isinstance(tc, list) or any(not isinstance(c, dict) or not _tool_call_id(c) for c in tc):
                 return False
-            calls.update(c["id"] for c in tc)
+            ids = [_tool_call_id(c) for c in tc]
+            if index >= cursor and (not ids or len(ids) != len(set(ids))):
+                return False
+            calls.update(ids)
+            answered.difference_update(ids)
         if role == "tool":
             cid = row.get("tool_call_id")
             if index >= cursor and (not cid or cid not in calls or cid in answered):
@@ -173,7 +196,7 @@ def _raw_proof(conn, sid):
     return row[0] if row else None
 
 
-def _recover_candidate(engine_cls, config, home, db_path, conv, sid, platform, window, handle, reason):
+def _recover_candidate(engine_cls, config, home, db_path, state_path, conv, bound, sid, platform, window, handle, reason):
     det = engine_cls(config=copy.deepcopy(config), hermes_home=home)
     try:
         store = det._store  # R2: open before installing ANY candidate scope
@@ -194,10 +217,14 @@ def _recover_candidate(engine_cls, config, home, db_path, conv, sid, platform, w
         _count("candidates")
         if reason:
             return _unproven(sid, reason, 0)
+        if _skip_on_tip_path(state_path, bound, handle, sid):
+            return
         try:
             messages = handle.get_messages_as_conversation(sid)
         except Exception:
             return _unproven(sid, "reader_error", 0)
+        if _skip_on_tip_path(state_path, bound, handle, sid):
+            return
         cursor = _strict_proof_cursor(det, messages)
         if cursor is None:
             return _unproven(sid, "proof", len(messages))
@@ -210,6 +237,11 @@ def _recover_candidate(engine_cls, config, home, db_path, conv, sid, platform, w
             return _unproven(sid, "suffix_rejected", len(messages))
         if any(det._matches_ignore_message_patterns(m) for m in suffix):
             return _unproven(sid, "ignored_in_suffix", len(messages))
+        uids = det._host_uid_capture(suffix, suffix, 0, 0, None, (), session_id=sid, store=store)
+        lineage = None
+        if uids is not None:
+            uids["conversation_id"] = conv
+            lineage = det._host_uid_lineage_key(sid, hermes_home=home, store=store)[0]
         with store.atomic(immediate=True):
             reset = conn.execute(
                 "SELECT last_reset_at FROM lcm_lifecycle_state WHERE conversation_id=?", (conv,),
@@ -226,16 +258,14 @@ def _recover_candidate(engine_cls, config, home, db_path, conv, sid, platform, w
                 tool_name_hints=[names.get(cursor + i, "") for i in range(len(suffix))],
                 context_window_tokens=window,
             )
-            uids = det._host_uid_capture(suffix, suffix, 0, 0, None, (), session_id=sid, store=store)
-            if uids is not None:
-                uids["conversation_id"] = conv
             ids = store._append_protected_batch(
                 sid, protected, [count_message_tokens(m) for m in protected], source=platform,
                 conversation_id=conv, metadata_messages=suffix,
                 metadata_factory=lambda msg, store_id: det._real_user_scaffold_metadata_rows(msg, store_id, bound=False)
                 + [(f"host_row_recovered:{store_id}", json.dumps({"version": 1, "issue": 2624}, sort_keys=True))],
             )
-            det._host_uid_shadow(uids, dict(enumerate(ids)), store=store, hermes_home=home)
+            if lineage is not None:
+                det._host_uid_shadow(uids, dict(enumerate(ids)), store=store, hermes_home=home)
         _count("recovered_candidates")
         _count("recovered_rows", len(ids))
         roles = Counter(m["role"] for m in suffix)
@@ -245,6 +275,7 @@ def _recover_candidate(engine_cls, config, home, db_path, conv, sid, platform, w
     except Exception:
         _unproven(sid, "worker_error", 0)
     finally:
+        det._discard_prepared_leaves = lambda: None
         det._close_storage()
 
 
@@ -252,7 +283,8 @@ def _recover(engine_cls, config, home, db_path, state_path, conv, bound, platfor
     try:
         reason = _handle_reason(handle)
         for sid in _candidates(state_path, bound, handle, reason):
-            _recover_candidate(engine_cls, config, home, db_path, conv, sid, platform, window, handle, reason)
+            _recover_candidate(engine_cls, config, home, db_path, state_path, conv, bound, sid,
+                               platform, window, handle, reason)
     except Exception:
         logger.debug("LCM host-row recovery unavailable")
 
@@ -278,7 +310,8 @@ class HostRowRecoveryMixin:
                 args = (type(self), config, self._hermes_home, db_path, str(self._state_db_path()),
                         self._conversation_id, self._session_id, self._session_platform,
                         self.context_length, self._host_session_db)
-                if _HOST_ROW_RECOVERY_SCHEDULER.schedule((key[0], key[3]), lambda: _recover(*args)):
+                scheduler_key = (key[0], "host-row-recovery:" + hashlib.sha256(key[3].encode()).hexdigest()[:16])
+                if _HOST_ROW_RECOVERY_SCHEDULER.schedule(scheduler_key, lambda: _recover(*args)):
                     _SEEN.add(key)
         except Exception:
             logger.debug("LCM host-row recovery enqueue unavailable")

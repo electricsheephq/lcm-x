@@ -89,13 +89,13 @@ def _make_case(tmp_path, monkeypatch, caplog, live_engines, recover=True):
         return live
 
     def run(job=None):
+        from tests.test_issue_2624_host_row_recovery_review import _run_in_recovery_thread
         caplog.clear()
         with caplog.at_level(logging.DEBUG):
-            (job or jobs[-1])()
+            _run_in_recovery_thread(job or jobs[-1])
         for text in [record.getMessage() for record in caplog.records if record.name.startswith("hermes_lcm")]:
             assert C not in text and all(m["content"] not in text for m in host.lists.get(C, []) if m.get("content"))
-        return [rec.getMessage() for rec in caplog.records
-                if rec.levelno == logging.WARNING and rec.name == recovery.__name__]
+        return [rec.getMessage() for rec in caplog.records if rec.levelno == logging.WARNING and rec.name == recovery.__name__]
 
     def control():  # R6-48: the same store and host on their own paths, recovery off
         return _make_case(tmp_path / "control", monkeypatch, caplog, live_engines, recover=False)
@@ -516,12 +516,13 @@ def test_auxiliary_binding_never_enqueues(case, caplog, foreground_first):
     assert len(case.jobs) == 1 and case.jobs[0].__closure__[0].cell_contents[6] == P
 
 def test_bound_default_proof_helpers_unchanged(case):
-    live = case.start(C, conversation=True)
-    before = (live._durable_commit_proof_payload(), live._cursor_from_durable_commit_proof(case.prefix))
-    assert before[0] and before[1] == len(case.prefix)
-    case.host.tip = C
+    live = case.live
+    messages = [live._store.to_openai_msg(m) for m in rows(case, P)]
+    before = (live._durable_commit_proof_payload(), live._cursor_from_durable_commit_proof(messages))
+    assert live._session_id == case.host.tip == P
     case.run(case.jobs[0])
-    assert (live._durable_commit_proof_payload(), live._cursor_from_durable_commit_proof(case.prefix)) == before
+    assert_suffix(case, pair())
+    assert (live._durable_commit_proof_payload(), live._cursor_from_durable_commit_proof(messages)) == before
 
 def test_log_hygiene_and_counter_receipt(case, caplog):
     before = recovery.host_row_recovery_counts()
@@ -671,13 +672,11 @@ def test_host_database_is_opened_readonly_and_handle_uses_defaults(case, monkeyp
         return original(path, *args, **kwargs)
     monkeypatch.setattr(sqlite3, 'connect', connect)
     case.run()
-    assert opened and case.state.read_bytes() == before and case.host.calls == [('tip', P), ('read', C)]
+    assert opened and case.state.read_bytes() == before and case.host.calls == [('tip', P), ('tip', P), ('read', C), ('tip', P)]
     assert_suffix(case, pair())
-
-_LOG_VIOLATIONS = set()
-
 @pytest.fixture(autouse=True)
 def audit_all_plugin_logs(caplog, tmp_path):
+    violations = set()
     class Audit(logging.Handler):
         def emit(self, record):
             if record.name != recovery.__name__ and record.threadName != 'lcm-host-row-recovery':
@@ -686,14 +685,16 @@ def audit_all_plugin_logs(caplog, tmp_path):
             if record.exc_info or any(value in text for value in (
                     C, 'leaf-two-2624', str(tmp_path), 'state.db', 'lcm.db', pair()[0]['content'],
                     pair()[1]['content'], 'tool payload 2624')):
-                _LOG_VIOLATIONS.add((record.name, record.funcName))
+                violations.add((record.name, record.funcName))
     logger = logging.getLogger('hermes_lcm')
     audit = Audit()
     caplog.set_level(logging.DEBUG, logger='hermes_lcm')
     logger.addHandler(audit)
-    yield
+    yield violations
     logger.removeHandler(audit)
+    assert not violations, sorted(violations)
 
-def test_all_file_plugin_debug_logs_are_private(case):
+def test_all_file_plugin_debug_logs_are_private(case, caplog, audit_all_plugin_logs):
     case.run()
-    assert not _LOG_VIOLATIONS, sorted(_LOG_VIOLATIONS)
+    assert any(r.threadName == 'lcm-host-row-recovery' and 'host-row recovery stored:' in r.getMessage() for r in caplog.records)
+    assert not audit_all_plugin_logs, sorted(audit_all_plugin_logs)
