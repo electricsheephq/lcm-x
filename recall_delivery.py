@@ -666,7 +666,7 @@ def _fit_answer_ready_response(
         refresh_response()
     encoded = json.dumps(response, ensure_ascii=False)
     event_time_marker_deferred: str | None = None
-    if len(encoded) > response_char_cap and refresh_response is None:
+    if len(encoded) > response_char_cap:
         encoded, event_time_marker_deferred = _fit_event_time(
             response, response_char_cap=response_char_cap
         )
@@ -717,7 +717,8 @@ def _fit_answer_ready_response(
     if delta_requested:
         novel_refs = [
             hit["exact_ref"]
-            for hit in response["hits"]
+            for hit in (sorted(response["hits"], key=lambda h: h["rank"])
+                        if refresh_response is not None else response["hits"])
             if hit.get("exact_ref")
         ]
         response["delta"].update(
@@ -798,13 +799,45 @@ def session_group_view(response: dict) -> Callable[[], None] | None:
 
 
 def group_session_response(encoded: str, *, response_char_cap: int,
-                           arm_hits: dict, ranked_hits: list) -> str:
+                           arm_hits: dict, ranked_hits: list, snippet_windows: bool = False) -> str:
     """Group the legacy response, then fit the added view without any reads."""
     response = json.loads(encoded)
     refresh = session_group_view(response)
     if refresh is None:
         return encoded
-    expansion = response["provenance"].get("answer_ready", {})
+    if "answer_ready" not in response["provenance"]:
+        while True:
+            refresh()
+            _refresh_later_statements(response)
+            hits = sorted(response["hits"], key=lambda h: h["rank"])
+            sizes = [len(json.dumps(_without_event_time(h), ensure_ascii="snippet_window" in h)) for h in hits]
+            time_chars = [len(json.dumps(h, ensure_ascii="snippet_window" in h)) - size
+                          for h, size in zip(hits, sizes)]
+            # Default snippets budget hits only; charge the added group fields too.
+            overhead = len(json.dumps({k: response[k] for k in ("session_groups", "sessions_covered")}))
+            overhead += len(json.dumps(dict(session_groups_dropped=response["provenance"]["session_groups_dropped"])))
+            unavailable, reason = _strip_hit_event_time(
+                response_chars=(len(json.dumps(response)) - sum(time_chars)
+                                if snippet_windows else sum(sizes) + overhead),
+                event_time_chars=time_chars,
+                hits_out=hits, response_char_cap=response_char_cap,
+                event_time_unavailable=response.get("event_time_unavailable", False),
+                event_time_unavailable_reason=response.get("event_time_unavailable_reason"),
+            )
+            if unavailable:
+                response.update(event_time_unavailable=True, event_time_unavailable_reason=reason)
+            size = len(json.dumps(response)) if snippet_windows else sum(sizes) + overhead
+            if size <= response_char_cap or len(hits) <= (0 if snippet_windows else 1):
+                return json.dumps(response)
+            response["hits"].remove(hits[-1])
+            response["response_cap_truncated"] = True
+            anchor = response["provenance"].get("fts_anchor")
+            if anchor and anchor.get("fired"):
+                anchor["delivered"] = _fts_anchor_delivered(response["hits"], arm_hits)
+            pairs = response["provenance"].pop("adjacent_reply", [])
+            if receipts := _delivered_adjacent_receipts(response["hits"], pairs):
+                response["provenance"]["adjacent_reply"] = receipts
+    expansion = response["provenance"]["answer_ready"]
     return _fit_answer_ready_response(
         response=response, response_char_cap=response_char_cap, expansion=expansion,
         delta_requested="delta" in response, arm_hits=arm_hits,
@@ -929,7 +962,7 @@ def _fit_event_time(response: dict[str, Any], *, response_char_cap: int) -> tupl
     ``None`` otherwise (#995).
     """
     encoded = json.dumps(response, ensure_ascii=False)
-    for hit in reversed(response["hits"]):
+    for hit in reversed(sorted(response["hits"], key=lambda h: h.get("rank", 0))):
         if len(encoded) <= response_char_cap:
             return encoded, None
         if not any(key in hit for key in _EVENT_TIME_KEYS):

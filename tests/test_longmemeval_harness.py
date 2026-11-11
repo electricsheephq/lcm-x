@@ -2719,8 +2719,9 @@ def test_production_recall_accounts_separate_summary_and_chunk_queries(
         "production_lcm_recall_queries",
     )
 
-    def fake_recall(args, *, engine, delivery_unit):
+    def fake_recall(args, *, engine, delivery_unit, group_by_session):
         assert delivery_unit == "hits"
+        assert group_by_session is False
         engine._lcm_embedding_provider_cache[1].embed_query(args["query"])
         engine._lcm_chunk_provider_cache[1].embed_query(args["query"])
         return json.dumps({"hits": [], "degraded": False})

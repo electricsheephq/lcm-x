@@ -107,7 +107,9 @@ def test_later_statement_keeps_own_group_and_links(statements, detail, monkeypat
     assert [{k: v for k, v in h.items() if k != "rank"} for h in on["hits"]] == off["hits"]
 
 
-@pytest.mark.parametrize("detail", ["snippets", "answer_ready"])
+# Whole-envelope cap: answer_ready only. Snippets keep main's hits-only budget; their grouped cap,
+# forced-drop and query-echo cases are in tests/test_recall_session_grouped_fix1.py.
+@pytest.mark.parametrize("detail", ["answer_ready"])
 @pytest.mark.parametrize("forced", [False, True])
 def test_cap_counts_drops_and_refreshes_groups(grouped_engine, monkeypatch, detail, forced):
     e = grouped_engine

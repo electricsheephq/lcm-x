@@ -126,6 +126,9 @@ def deliver_session(ordered, response, *, engine, deadline, excluded, allowed, s
                 delivery["summary_leads"].pop()
             elif hints := [s for s in delivery["sessions"] if "expand_hint" in s]:
                 hints[-1].pop("expand_hint")
+            elif refresh_grouping is not None and (hitless := [s for s in delivery["sessions"]
+                    if not any(g[0]["session_id"] == s["session_id"] for g in admitted)]):
+                delivery["sessions"].remove(hitless[-1])
             else:
                 return False
         return True
@@ -427,38 +430,42 @@ def deliver_session(ordered, response, *, engine, deadline, excluded, allowed, s
             not s["complete"] for s in delivery["sessions"])
         if delivery.get("stop_reason") == "deadline":
             refit()
-    while not fits():
-        # Metadata is budgeted too, even for K=100 bench seeds and no citable
-        # groups. Keep a bounded honest envelope rather than a first-item escape.
-        delivery["truncated"] = True
-        delivery["stop_reason"] = "budget"
-        if delivery.get("seed_leads"):
-            delivery["seed_leads"].pop()
-        elif delivery["summary_leads"]:
-            delivery["summary_leads"].pop()
-        elif delivery["sessions"]:
-            sid = delivery["sessions"][-1]["session_id"]
-            admitted[:] = [g for g in admitted if g[0]["session_id"] != sid]
-            delivery["sessions"].pop()
-        elif response["query"]:
-            response["query"] = response["query"][:len(response["query"]) // 2]
-        else:
-            # An inherited envelope can exceed the cap without any evidence.
-            # Return an explicit bounded failure, never silently overrun it.
-            delivery.update(sessions=[], summary_leads=[], truncated=True, stop_reason="budget")
-            delivery.pop("seed_leads", None)
-            response.clear()
-            response.update(error="session_base_envelope_over_budget", query="",
-                            provenance={"delivery": delivery})
-            break
+    def reconcile_metadata():
+        while not fits():
+            # Metadata is budgeted too, even for K=100 bench seeds and no citable
+            # groups. Keep a bounded honest envelope rather than a first-item escape.
+            delivery["truncated"] = True
+            delivery["stop_reason"] = "budget"
+            if delivery.get("seed_leads"):
+                delivery["seed_leads"].pop()
+            elif delivery["summary_leads"]:
+                delivery["summary_leads"].pop()
+            elif delivery["sessions"]:
+                sid = delivery["sessions"][-1]["session_id"]
+                admitted[:] = [g for g in admitted if g[0]["session_id"] != sid]
+                delivery["sessions"].pop()
+            elif response["query"]:
+                response["query"] = response["query"][:len(response["query"]) // 2]
+            else:
+                # An inherited envelope can exceed the cap without any evidence.
+                # Return an explicit bounded failure, never silently overrun it.
+                delivery.update(sessions=[], summary_leads=[], truncated=True, stop_reason="budget")
+                delivery.pop("seed_leads", None)
+                response.clear()
+                response.update(error="session_base_envelope_over_budget", query="",
+                                provenance={"delivery": delivery})
+                break
+    reconcile_metadata()
     if group_by_session:
         refresh_grouping = session_group_view(response)
         if refresh_grouping is not None:
             # Refit only already-admitted atomic groups; no retrieval or retries.
             refit()
             if not fits():
-                return json.dumps(dict(error="session_base_envelope_over_budget", hits=[], total_results=0,
-                    provenance={"session_groups_dropped": response["provenance"]["session_groups_dropped"]}))
+                refresh_grouping = None
+                response.pop("session_groups", None)
+                response.pop("sessions_covered", None)
+                reconcile_metadata()
     raw = encode()
     if raw is not None:
         return raw

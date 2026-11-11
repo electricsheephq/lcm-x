@@ -5493,6 +5493,9 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
         return recall_delivery.group_session_response(
             encoded, response_char_cap=_LCM_RECALL_RESPONSE_CHAR_CAP, arm_hits=arm_hits,
             ranked_hits=[e["hit"] for e in ordered],
+            snippet_windows=bool(_recall_snippet_window_hits(kwargs.get(
+                "snippet_window_hits", getattr(engine._config, "recall_snippet_window_hits", 0)))
+                and "snippet_window_skipped" not in json.loads(encoded)),
         )
     return encoded
 

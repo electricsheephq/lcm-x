@@ -350,7 +350,7 @@ class Bridge:
 
             payload = json.loads(
                 lcm_tools.lcm_recall({"query": query, "limit": limit}, engine=engine, delivery_order="score", adjacent_reply=False, later_statements=0,
-                                     summary_event_time=False)
+                                     summary_event_time=False, group_by_session=False)
             )
         finally:
             vector_store.close()

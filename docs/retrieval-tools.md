@@ -105,6 +105,8 @@ final group in rank order. Every hit gains its original 1-based `rank`;
 (including sessionless hits). Later-statement children keep their own session and
 `later_statement_of` link. Group fields count toward the final response character
 cap; `provenance.session_groups_dropped` reports any additional whole-hit removals.
+In session delivery, a response near its budget can lose whole session groups
+to the added fields; the removed hits count in `provenance.session_groups_dropped`.
 Selection and content stay the same when they fit. This view adds no reads or
 stored-row writes. Proactive recall, pre-answer baseline, evidence wrappers,
 requirements retrieval, grep and session loading keep their existing outputs.
