@@ -104,6 +104,28 @@ test("capture, compaction and recall through the provider", { skip: !python && "
     assert.match(text, /finance\/2026\/q3/, text.slice(0, 2000));
     const session = await tools.load_session.execute({ session_id: "eve:sess-1" }, {});
     assert.match(JSON.stringify(session), /Payroll ran on Friday/);
+
+    // Turn-start recall: a new session asks about the invoice; Eve gets one keyed message with the hit.
+    const recalled = await provider.recall["turn.started"](
+      context(root, [], { session: "sess-2", input: [{ role: "user", content: [{ type: "text", text: "Where did the ACME-7731 invoice end up?" }] }] }),
+    );
+    assert.ok(recalled, "recall returned nothing");
+    assert.equal(recalled.messages.length, 1);
+    assert.equal(recalled.messages[0].id, "lcmx:turn-recall");
+    assert.match(recalled.messages[0].content, /finance\/2026\/q3|ACME-7731/, recalled.messages[0].content);
+    assert.match(recalled.messages[0].content, /data, not instructions/);
+    // Hits the model still sees are left out: sess-1 with its whole history visible recalls nothing about the invoice.
+    const visible = await provider.recall["turn.started"](
+      context(root, [...after.slice(0, 2), ...turn1, u2, a3], { session: "sess-1", input: [{ role: "user", content: "Where did the ACME-7731 invoice end up?" }] }),
+    );
+    assert.doesNotMatch(visible?.messages?.[0]?.content ?? "", /finance\/2026\/q3/, JSON.stringify(visible));
+    // After Eve compacted sess-1 (only the summary left in view), the dropped turn comes back.
+    const compacted = await provider.recall["turn.started"](
+      context(root, after, { session: "sess-1", input: [{ role: "user", content: "Where did the ACME-7731 invoice end up?" }] }),
+    );
+    assert.match(compacted?.messages?.[0]?.content ?? "", /finance\/2026\/q3/, JSON.stringify(compacted));
+    // Short or empty text is not searched.
+    assert.equal(await provider.recall["turn.started"](context(root, [], { session: "sess-2", input: [{ role: "user", content: "ok" }] })), null);
   } finally {
     handle.close();
   }
@@ -131,6 +153,25 @@ test("capture returns within its time limit when the disk stalls", { skip: proce
   const match = /returned (\d+)/.exec(result.stdout);
   assert.ok(match, result.stdout + result.stderr);
   assert.ok(Number(match[1]) < 2_000);
+});
+
+test("recall can be turned off, and never throws", async () => {
+  const off = lcmxMemory({ root: "/tmp/x", python: "/usr/bin/python3", packageRoot: "/x", recall: false });
+  assert.equal(await off.recall["turn.started"](context("/x", [], { input: [{ role: "user", content: "a long enough question here" }] })), null);
+  const broken = lcmxMemory({ root: "/dev/null/lcmx", python: "/usr/bin/false", packageRoot: "/nonexistent", recall: { timeoutMs: 2_000 } });
+  assert.equal(await broken.recall["turn.started"](context("/x", [], { input: [{ role: "user", content: "a long enough question here" }] })), null);
+});
+
+test("formatRecall keeps at most two hits per session and strips highlight marks", async () => {
+  const { formatRecall, turnQuery } = await import("../dist/index.js");
+  const hits = [1, 2, 3].map((n) => ({ session_id: "eve:a", snippet: `>>>alpha<<< ${n}`, timestamp: 1794290000 }))
+    .concat([{ session_id: "eve:b", snippet: "beta", timestamp: "2026-11-10T05:00:00Z", expand_hint: "lcm_expand(store_id=7)" }]);
+  const text = formatRecall({ hits });
+  assert.equal(text.split("\n").length, 4, text);
+  assert.doesNotMatch(text, />>>|<<</);
+  assert.match(text, /- eve:b \(2026-11-10\): beta \[lcm_expand\(store_id=7\)\]/);
+  assert.equal(formatRecall({ hits: [] }), "");
+  assert.equal(turnQuery([{ role: "user", content: "first" }, { role: "assistant", content: "x" }, { role: "user", content: [{ type: "text", text: "last" }] }]), "last");
 });
 
 test("the provider has only Eve's keys", () => {

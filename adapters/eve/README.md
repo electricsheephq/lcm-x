@@ -14,7 +14,7 @@ drives it. Built for `eve@1.0.0-rc.6` exactly. Install: [INSTALL.md](INSTALL.md)
 | Tools: 13 by default, 3 behind flags | Same 13 as `lcmx__<name>`; the flags work the same (`LCM_*` env) |
 | Vector recall (FastEmbed local, or an API provider) | OpenAI embeddings by default (key for embeddings only), caught up between turns; FastEmbed optional |
 | LCM-X builds the model's context window (compaction, assembly) | **Not possible**: Eve rc.6 has no hook. Eve compacts its own window; LCM-X compacts its own view |
-| Proactive recall at `pre_llm_call` | Not yet (`recall["turn.started"]` returns nothing) |
+| Proactive recall at `pre_llm_call` | `recall["turn.started"]`: Eve calls it before every turn (also scheduled runs). The best hits for the turn's user text (at most 5, 2 per session; also earlier, compacted parts of the current session; text the model still sees is left out), one message replaced each turn |
 
 ## How it works
 
@@ -59,7 +59,8 @@ npm pack            # prepack builds dist/ and vendors core/
 
 ## Limits
 
-- LCM-X does not build Eve's context window (no Eve hook), and adds nothing at turn start yet.
+- LCM-X does not build Eve's context window (no Eve hook). At turn start it adds one recall message (Eve's memory-slot
+  recall; bounded to 8 s, never throws; option `recall: false` turns it off).
 - The bridge needs the Eve process: a timer drain stores messages but writes no summaries.
 - Not yet tested with a real `chatgpt()` subscription model (only with `mockModel` and the OpenAI API).
 - Subagent sessions are stored as their own sessions, without a parent link.
