@@ -146,10 +146,10 @@ async function importCommand(args: string[]): Promise<void> {
   const before = option(args, "--before");
   const skip = new Set((option(args, "--skip") ?? "").split(",").filter(Boolean));
   const sessions = eveSessionIds(workflowData!, before ? new Date(before) : undefined).filter((id) => !skip.has(id));
-  const reports = await importEveSessions({ root, baseUrl: url!, bearer: readFileSync(bearerFile!, "utf8").trim(), namespace: namespace!, sessions });
+  const { reports, retime } = await importEveSessions({ root, baseUrl: url!, bearer: readFileSync(bearerFile!, "utf8").trim(), namespace: namespace!, sessions });
   for (const report of reports) process.stdout.write(`${JSON.stringify(report)}\n`);
   const count = (status: string) => reports.filter((report) => report.status === status).length;
-  process.stdout.write(`${JSON.stringify({ sessions: reports.length, imported: count("imported"), empty: count("empty"), failed: count("failed"), messages: reports.reduce((sum, report) => sum + report.messages, 0) })}\n`);
+  process.stdout.write(`${JSON.stringify({ sessions: reports.length, imported: count("imported"), empty: count("empty"), failed: count("failed"), messages: reports.reduce((sum, report) => sum + report.messages, 0), retime })}\n`);
 }
 
 function main(): void {

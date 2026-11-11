@@ -65,7 +65,7 @@ npm pack            # prepack builds dist/ and vendors core/
 - Not yet tested with a real `chatgpt()` subscription model (only with `mockModel` and the OpenAI API).
 - Subagent sessions are stored as their own sessions, without a parent link.
 - Sessions from before the install: `lcmx-eve import` (INSTALL) copies only their text (no tool calls, reasoning
-  or attachments), and each imported message carries the import time, not its original time.
+  or attachments). A message with no matching Eve event takes the time of the message before it.
 - After `clear()`, an exact repeat of the last exchange that is not the new turn's input may be taken as carried.
 - `writer/lcmx_eve_writer.py` still has its own store mode (r1, Claude Code unit pattern); the package uses only
   its planning functions.

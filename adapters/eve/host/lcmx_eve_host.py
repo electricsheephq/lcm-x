@@ -587,12 +587,39 @@ def check() -> dict:
     return report
 
 
+def retime(home: Path, sessions: dict) -> dict:
+    """Give the rows of imported sessions (``import-<eve id>``) their original times, one time per message in order.
+
+    Only for sessions that ``lcmx-eve import`` made: each of their messages is one text row. A session whose row count
+    differs from its list of times is left as it is and reported. Only ``messages.timestamp`` changes; content, ids,
+    order and the ledger stay as they are."""
+    from datetime import datetime
+    report: dict[str, Any] = {"sessions": 0, "rows": 0, "skipped": {}}
+    with closing(sqlite3.connect(home / "lcm.db", timeout=30)) as store:
+        for session, times in sessions.items():
+            if not str(session).startswith("import-") or not isinstance(times, list):
+                report["skipped"][session] = "not an imported session"
+                continue
+            ids = [row[0] for row in store.execute(
+                "SELECT store_id FROM messages WHERE session_id = ? ORDER BY store_id", (planner.session_rows_id(session),))]
+            if len(ids) != len(times):
+                report["skipped"][session] = f"rows {len(ids)} != times {len(times)}"
+                continue
+            stamps = [datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp() for value in times]
+            with store:
+                store.executemany("UPDATE messages SET timestamp = ? WHERE store_id = ?", list(zip(stamps, ids)))
+            report["sessions"] += 1
+            report["rows"] += len(ids)
+    report["ok"] = True
+    return report
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     if sys.version_info < (3, 11):
         sys.stderr.write("lcmx-eve host needs Python 3.11 or newer\n")
         return 2
     parser = argparse.ArgumentParser(prog="lcmx_eve_host.py", description=__doc__.splitlines()[0])
-    parser.add_argument("command", choices=("serve", "drain", "audit", "check"))
+    parser.add_argument("command", choices=("serve", "drain", "audit", "check", "retime"))
     parser.add_argument("--home", default="", help="absolute store home (one Eve memory scope)")
     parser.add_argument("--core", default=os.environ.get("LCMX_PACKAGE_ROOT", ""), help="LCM-X core folder")
     parser.add_argument("--context-length", type=int, default=int(os.environ.get("LCMX_CONTEXT_LENGTH", "200000")),
@@ -615,6 +642,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     if options.command == "serve":
         return serve(home, context_length=options.context_length, model=options.model,
                      llm_bridge=options.llm_bridge)
+    if options.command == "retime":  # {"sessions": {"import-<id>": [ISO time per message]}} on stdin
+        result = retime(home, json.loads(sys.stdin.read() or "{}").get("sessions") or {})
+        sys.stdout.write(json.dumps(result, sort_keys=True) + "\n")
+        return 0
     result = (drain_once(home, context_length=options.context_length, model=options.model)
               if options.command == "drain" else audit(home))
     sys.stdout.write(json.dumps(result, sort_keys=True) + "\n")

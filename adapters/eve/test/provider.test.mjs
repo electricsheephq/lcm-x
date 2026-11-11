@@ -185,6 +185,42 @@ test("formatRecall shows the same text once, and the import computes Eve's scope
   }
 });
 
+test("import times: matched from Eve's events, stored per message, and set again by retime", { skip: !python && "LCMX_PYTHON is not set" }, async () => {
+  const { messageTimes, retimeStore, eveScopeKey } = await import("../dist/import.js");
+  const events = [
+    { type: "session.started", meta: { at: "2026-11-10T06:05:18.000Z" } },
+    { type: "delivery.consumed", data: { parts: [{ kind: "text", text: "When is the release handover?" }] }, meta: { at: "2026-11-10T06:05:19.000Z" } },
+    { type: "content.completed", data: { phase: "narration", kind: "reasoning", value: "think" }, meta: { at: "2026-11-10T06:05:20.000Z" } },
+    { type: "content.completed", data: { phase: "reply", kind: "text", value: "On 19 November." }, meta: { at: "2026-11-10T06:05:30.000Z" } },
+  ];
+  const messages = [{ role: "user", text: "When is the release handover?" }, { role: "assistant", text: "On 19 November." }, { role: "assistant", text: "unmatched" }];
+  assert.deepEqual(messageTimes(events, messages), ["2026-11-10T06:05:19.000Z", "2026-11-10T06:05:30.000Z", "2026-11-10T06:05:30.000Z"]);
+
+  const root = mkdtempSync(join(tmpdir(), "lcmx-eve-import-"));
+  execFileSync(process.execPath, [join(here, "..", "dist", "cli.js"), "setup", "--root", root, "--python", python], { encoding: "utf8" });
+  const handle = createLcmxMemory({ root, embeddings: "off", recall: false, startWriter: false });
+  const scope = { key: eveScopeKey("lcmx:test", "agent"), namespace: "lcmx:test", value: "agent" };
+  const history = messages.slice(0, 2).map((m) => ({ role: m.role, content: m.text }));
+  const stored = ["2026-11-11T05:00:00.000Z", "2026-11-11T05:00:00.000Z"]; // an earlier import: the import time
+  for (let count = 1; count <= 2; count += 1) {
+    await handle.provider.capture["turn.completed"]({ abortSignal: new AbortController().signal, messages: history.slice(0, count),
+      operationId: `import:x:${count}`, memory: { scope, slot: "lcmx" }, session: { id: "import-x" }, turn: null, recordedAt: stored[count - 1] });
+  }
+  handle.close();
+  execFileSync(process.execPath, [join(here, "..", "dist", "cli.js"), "drain", "--root", root], { encoding: "utf8" });
+  const home = homeOf(root);
+  const stamps = () => JSON.parse(execFileSync(python, ["-c",
+    "import sqlite3,json,sys;c=sqlite3.connect(sys.argv[1]);print(json.dumps([r[0] for r in c.execute(\"select timestamp from messages where session_id='eve:import-x' order by store_id\")]))",
+    join(home, "lcm.db")], { encoding: "utf8" }));
+  // The engine stores its own ingest time, whatever time the record names: retime is what sets the original times.
+  assert.equal(stamps().length, 2);
+  const report = retimeStore(root, scope.key, { "import-x": messageTimes(events, messages.slice(0, 2)), "import-other": ["2026-11-10T00:00:00Z"] });
+  assert.equal(report.rows, 2, JSON.stringify(report));
+  assert.match(report.skipped["import-other"], /rows 0 != times 1/);
+  assert.deepEqual(stamps(), [Date.parse("2026-11-10T06:05:19.000Z") / 1000, Date.parse("2026-11-10T06:05:30.000Z") / 1000]);
+  assert.equal(audit(home).ok, true);
+});
+
 test("the provider has only Eve's keys", () => {
   const provider = lcmxMemory({ root: "/tmp/x", python: "/usr/bin/python3", packageRoot: "/x" });
   assert.deepEqual(Object.keys(provider).sort(), ["capture", "recall", "tools"]);

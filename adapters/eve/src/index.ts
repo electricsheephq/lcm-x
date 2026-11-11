@@ -302,7 +302,8 @@ export function createLcmxMemory(options: LcmxMemoryOptions): LcmxMemoryHandle {
         api: API,
         op: context.operationId,
         phase,
-        at: new Date().toISOString(),
+        // lcmx-eve import passes the original time of the message it adds; Eve never sets this field.
+        at: (context as { recordedAt?: string }).recordedAt ?? new Date().toISOString(),
         session: { id: sessionId },
         turn,
         scope: { key: context.memory.scope.key, namespace: context.memory.scope.namespace, slot: context.memory.slot },

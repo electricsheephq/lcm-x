@@ -137,7 +137,7 @@ npx lcmx-eve import --root /srv/agents/scout/.lcm-x --eve-url http://127.0.0.1:<
 
 Each Eve session becomes its own LCM-X session `import-<eve session id>`: user messages and completed replies (no
 tool calls, reasoning or attachments). The running Eve's engine host stores them within seconds; when Eve is
-stopped, run `lcmx-eve drain`. A second run stores nothing new for a session that did not grow.
-
-Limit: an imported message carries the time of the import, not its original time (Eve's transcript gives the text
-only). Time filters such as `lcm_recent` therefore put the imported history at the import date.
+stopped, run `lcmx-eve drain`. A second run stores nothing new for a session that did not grow. After the spool is
+drained, the import sets each imported message's original time (Eve's event time of the delivery or the reply;
+`retime` in the last output line). The engine itself stores the ingest time. `retime` changes only the
+`timestamp` column of the rows of `import-*` sessions, and only when a session's row count matches its transcript.
