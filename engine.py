@@ -157,6 +157,7 @@ from .compaction_request import CompactionRequest
 from .compress_run import CompressRun
 from .identity_anchor import IdentityAnchorMixin, _ROTATION_LINEAGE_UNRECORDED, _raw_remainder
 from .host_uid import HostUidShadowMixin, _valid_uid
+from .host_row_recovery import HostRowRecoveryMixin
 from .host_uid_emit import carry_identity, identity_emit_enabled, record_absorbed_message, sync_cached_host_metadata
 from .store_complete import HiddenBacklog, StoreCompleteMixin
 from .survival_fit import SurvivalFitMixin, _carries_survival_notice, _host_estimate, survival_reserve_fraction
@@ -717,6 +718,7 @@ class LCMEngine(
     ReconcileMixin,
     IdentityAnchorMixin,
     HostUidShadowMixin,
+    HostRowRecoveryMixin,
     StoreCompleteMixin,
     SurvivalFitMixin,
     AuxiliarySessionMixin,
@@ -4594,9 +4596,10 @@ class LCMEngine(
         """Handle Hermes' reset-only switch after an end or an empty /new.
 
         CLI /new omits on_session_start, but reset_session_state supplies the
-        new id here. The host DB stays host-owned; only the explicit id is used.
+        new id here. The handle is kept only for read-only recovery (#2624).
         Detachment is unsupported: Hermes must keep review-fork compression off.
         """
+        self._host_session_db = session_db
         session_id = str(session_id or "")
         if not session_id:
             raise NotImplementedError(
@@ -4675,6 +4678,7 @@ class LCMEngine(
             if self._stable_use_closed:
                 raise RuntimeError("LCM engine is closed")
             self._on_session_start_unlocked(session_id, **kwargs)
+            self._enqueue_host_row_recovery(session_id, kwargs)
             binding = self._emission_binding()
             for name in ("_compress_commit_proof", "_last_emission_descriptors"):
                 if not self._emission_proof_matches_binding(getattr(self, name), binding):
