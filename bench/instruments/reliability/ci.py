@@ -21,7 +21,7 @@ CI_HOSTS = Path(__file__).with_name("hosts.ci.json")
 # G-REL-1 item 3 cell families; "crash-" covers every crash cell, gateway-second-restart the restart cells.
 G_REL_1 = ("baseline", "acp-trailing", "preflight-continue", "repeat-identical-replies", "long-80", "window-1m",
            "pressure-disagreement", "lcm-tool-mid-turn", "parallel-tool-group", "crash-", "gateway-second-restart",
-           "cancel-retry", "publication-failure")
+           "cancel-retry", "publication-failure", "reply-held-crash")
 # Data cells inside a gate family that never gate (still expected rows for completeness).
 NON_GATE = ("drain/hidden-backlog/in-place", "drain/hidden-backlog/rotation",
             "stop-after-tool/no-retry/in-place",

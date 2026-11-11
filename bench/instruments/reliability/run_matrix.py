@@ -171,9 +171,11 @@ def run_cell(cell: dict, host_name: str, host: dict, plugin: dict, out: Path, ti
         rec.update(verdict="ERROR", reason=f"host identity not verified: {(identity or {}).get('error')}")
         (d / "verdict.json").write_text(json.dumps(rec, indent=1, default=str))
         return rec
-    if cell.get("drain") or cell.get("delegate_plan"):  # decided before any probe: no host run, no DB to copy
+    held_reply = any(f["kind"] == "crash_after_host_reply_before_store" for f in cell["faults"])
+    if held_reply or cell.get("drain") or cell.get("delegate_plan"):  # decided before any probe: no host run, no DB to copy
         rec.update(verdict="UNSUPPORTED",
-                   reason="drain cells need the R2 observer's per-compaction counters (acp-process only)"
+                   reason="acp-process only: the held-reply crash needs a real host process" if held_reply else
+                   "drain cells need the R2 observer's per-compaction counters (acp-process only)"
                    if cell.get("drain") else "delegated-child cells run through a real host process (acp-process "
                    "only): the host builds each child with its own provider client (tools/delegate_tool.py "
                    "_build_child_agent), which the in-process probe's mocked client never reaches")

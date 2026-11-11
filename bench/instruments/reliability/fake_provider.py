@@ -244,10 +244,21 @@ class FakeProvider:
         usage = usage_for(messages, self.usage_scale)
         self.log(**rec, usage=usage, reply={k: reply[k] for k in ("content", "tool_calls") if k in reply})
         try:
+            if reply.get("before_release"):
+                reply["before_release"]()
             (self.sse if stream else self.json_reply)(h, api, body.get("model"), reply, usage,
                                                       bool((body.get("stream_options") or {}).get("include_usage")))
+            if reply.get("after_release"):
+                h.wfile.flush()
+                reply["after_release"]()
         except (BrokenPipeError, ConnectionResetError):
+            if reply.get("release_failed"):
+                reply["release_failed"]()
             self.log(**rec, phase="client_closed_during_reply")
+        except Exception:
+            if reply.get("release_failed"):
+                reply["release_failed"]()
+            raise
 
     @staticmethod
     def hold(h, seconds: float) -> bool:

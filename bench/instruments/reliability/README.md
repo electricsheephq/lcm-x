@@ -495,3 +495,28 @@ The nightly gate checks this pattern per host and transport, with B9 required in
 `controls.py` records the measured must-support pairs, where missing or UNSUPPORTED controls gate; other pairs
 may be UNSUPPORTED, but any PASS/FAIL must match.
 Disable wraps with `LCM_RELIABILITY_P8=off` or `--lcm-env LCM_RELIABILITY_P8=off`; faults stay.
+
+## Held-reply crash (#2624)
+
+`crash_after_host_reply_before_store` runs only under `acp-process`: reserve the
+plugin store with `BEGIN IMMEDIATE`, release the scripted MAIN reply, poll the
+read-only host DB every 2 ms for a new assistant row, then kill immediately.
+Validate the row's ACP root and compression depth, check that the host kept the
+reply and the store did not, release all connections, and restart the same ACP
+session. Phase B must finish `done`. Reservation failure, a five-second poll
+timeout, invalid lineage, failed post-kill checks, or failed restart yields ERROR
+with `reply-held fault INVALID`. Evidence records contain times and counts, not content.
+
+The five cells use provisional turn/depth pairs: `rotation-turn` (12/1),
+`plain-turn` (15/1), `multi-hop` (22/2), `pre-rotation` (5/0), and `in-place`
+(15/0). The first three target #2624; the controls gate every host. On main,
+upstream-main and upstream-uid should FAIL the first three with exactly B1 (one
+missing stored reply) and B2 (one missing assistant row), classified KNOWN under
+#2624. Both controls should PASS. All five should PASS on r34.10-0.21.5.
+Other exact known failures retain their existing classification; other failed bars
+remain findings. Depth validation decides validity, not the cell's name.
+
+This proves behavior while the reservation prevents a store commit. The
+reservation, rather than natural slowness, creates that window. It does not prove
+natural crash timing, real-model timing, or behavior on host versions other than
+the pins. No timed-crash variant is provided.
