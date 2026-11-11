@@ -23,6 +23,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO))
 from bench.instruments.reliability import cells as C, controls as CT, hosts as H, plugin_tree, report  # noqa: E402
+from bench.instruments.reliability.ci import edges  # noqa: E402
 from bench.instruments.reliability.scorers import bars, externalized  # noqa: E402
 
 PROBE = Path(__file__).with_name("probe.py")
@@ -331,7 +332,7 @@ def main(argv=None) -> int:
             sink.flush()
             print(f"{rec['verdict']:<11} {rec['host']:<16} {rec['plugin_ref']:<12} {rec['cell']}"
                   + (f"  {sorted(rec.get('failed_bars', {}))}" if rec.get("failed_bars") else "")
-                  + (f"  {str(rec.get('reason'))[:120]}" if rec.get("reason") else ""), flush=True)
+                  + (f"  {edges(str(rec.get('reason')))}" if rec.get("reason") else ""), flush=True)
     report.write(out, results, time.time() - started, lcm_env)
     if a.control:
         problems = CT.check(a.control, results, list(hosts))

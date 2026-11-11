@@ -54,6 +54,27 @@ def test_existing_gate_and_open_target_behavior_is_unchanged():
     assert ci.gate(rows, {7}) == []
 
 
+def test_error_reason_keeps_both_edges_without_changing_problem_counts():
+    cell = "baseline/in-place/acp"
+    rows = rows_for(cell, "ref-0.21.5", "in-process", ["B1"])
+    row = next(r for r in rows if r["cell"] == cell)
+    row["targets"] = [7]
+    assert len(ci.gate(rows, set())) == 1
+    assert ci.gate(rows, {7}) == []
+
+    start, end = "START-MARKER", "END-MARKER"
+    reason = start + "x" * (1000 - len(start) - len(end)) + end
+    row.update(verdict="ERROR", reason=reason)
+    problems = ci.gate(rows, {7})
+    assert len(problems) == 1
+    assert start in problems[0] and end in problems[0] and " … " in problems[0]
+    prefix = f"ERROR ref-0.21.5 {cell} (in-process): "
+    assert problems[0] == prefix + reason[:200] + " … " + reason[-400:]
+
+    row["reason"] = "s" * 150
+    assert ci.gate(rows, {7}) == [prefix + row["reason"]]
+
+
 @pytest.mark.parametrize("host,transport,failed,open_issues,gates", [
     ("upstream-main", "acp-process", ["B1", "B2"], {2624}, False),
     ("upstream-main", "acp-process", ["B1", "B2", "B5"], {2624}, True),
