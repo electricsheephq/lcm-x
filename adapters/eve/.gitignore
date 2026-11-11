@@ -1,0 +1,5 @@
+node_modules/
+dist/
+core/
+# the repo root ignores agent/ (Hermes); these are the Hermes host modules for the engine host
+!host/shim/agent/
