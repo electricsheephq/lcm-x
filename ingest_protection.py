@@ -831,7 +831,14 @@ def protect_message_for_ingest(
                     normalize_content_value(protected_content) or "",
                     _persisted_output_marker_identity_digest(raw_normalized_content),
                 )
-            if recovered_with_stat is not None and _is_hermes_persisted_output_marker(normalized_content):
+            # #2599: the generation line only at externalization off. With externalization on, a recovered marker kept
+            # inline here means its payload could not be written; it is stored as the host sent it, the form v0.29.2
+            # stores, which every later compare and replay route already reads.
+            if (
+                recovered_with_stat is not None
+                and not bool(getattr(config, "large_output_externalization_enabled", True))
+                and _is_hermes_persisted_output_marker(normalized_content)
+            ):
                 protected_content = _add_inline_persisted_output_generation_metadata(
                     normalize_content_value(protected_content) or "",
                     recovered_file_stat,
