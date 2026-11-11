@@ -17,6 +17,8 @@ import sys
 import tomllib
 from pathlib import Path
 
+from bench.instruments.reliability import report
+
 CI_HOSTS = Path(__file__).with_name("hosts.ci.json")
 # G-REL-1 item 3 cell families; "crash-" covers every crash cell, gateway-second-restart the restart cells.
 G_REL_1 = ("baseline", "acp-trailing", "preflight-continue", "repeat-identical-replies", "long-80", "window-1m",
@@ -87,10 +89,6 @@ def file_coverage(per_file: dict[str, list[dict]]) -> list[str]:
     return problems
 
 
-def edges(text: str, head: int = 200, tail: int = 400) -> str:
-    return text if len(text) <= head + tail else text[:head] + " … " + text[-tail:]
-
-
 def gate(results: list[dict], open_issues: set[int], per_file: dict[str, list[dict]] | None = None) -> list[str]:
     from bench.instruments.reliability import cells as C
     from bench.instruments.reliability import controls as CT
@@ -116,7 +114,7 @@ def gate(results: list[dict], open_issues: set[int], per_file: dict[str, list[di
     for r in results:
         where = f"{r['verdict']} {r['host']} {r['cell']} ({r.get('transport', 'in-process')})"
         if r["verdict"] == "ERROR":
-            problems.append(f"{where}: {edges(str(r.get('reason', '')))}")
+            problems.append(f"{where}: {report.edges(str(r.get('reason', '')))}")
         elif (r["verdict"] == "FAIL" or "B2S" in CELL_GATE.get(r["cell"], ("", ()))[1]) and in_gate_set(r["cell"]):
             targets = set(r.get("targets") or [])
             open_targets = targets & open_issues
