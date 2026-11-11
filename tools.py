@@ -317,7 +317,7 @@ def _coerce_query_arg(value: Any) -> str:
 def _parse_int_value(value: Any, default: int) -> int:
     try:
         return int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return default
 
 
