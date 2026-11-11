@@ -232,9 +232,10 @@ def scenario_gaps(cell: dict, events: list[dict], atts: list[dict], tg: dict, bo
     return gaps
 
 
-def expected_items(atts: list[dict], notices=()) -> list[tuple[str, str]]:
+def expected_items(atts: list[dict], notices=(), *, inflight=None) -> list[tuple[str, str]]:
     """Held user rows; exactly one scripted reply per completed non-cancel attempt (from the provider log, so a
-    reply the host dropped is a deficit); the host's cited failed-turn copy only on a verified interrupted attempt."""
+    reply the host dropped is a deficit); selected host-held in-flight replies; the host's cited failed-turn copy
+    only on a verified interrupted attempt. ``inflight`` does not change attempt fields or user folding."""
     items = []
     for i, a in enumerate(atts):
         text = a["held"] if a["held"] is not None else a["persist"]
@@ -250,9 +251,29 @@ def expected_items(atts: list[dict], notices=()) -> list[tuple[str, str]]:
             items.append(("user", text))
         if a["reply"]:
             items.append(("assistant", a["reply"]))
+        elif inflight and id(a) in inflight:
+            items.append(("assistant", inflight[id(a)]))
         if (a.get("end") or {}).get("interrupted"):
             items += [("assistant", x) for x in a["notices"] if x.strip() in notices]
     return items
+
+
+def host_held_replies(atts, items, assistants, g):
+    """Reserve ended-item capacity first, then host-held in-flight replies in transcript order."""
+    used = Counter(multiset.h(text) for role, text in items if role == "assistant")
+    replies, records = {}, []
+    for a in atts:
+        if (a["ended"] or not a["emitted"]
+                or (a["prefix"] != "T" and not (a["prefix"] == "D" and a.get("session")))):
+            continue
+        text = a["emitted"][-1]
+        key = multiset.h(text)
+        held = assistants.get(key, {})
+        if multiset.norm(text) and used[key] < held.get("n", 0):
+            used[key] += 1
+            replies[id(a)] = text
+            records.append({"tag": a["tag"], "session": g, "key": key[:12], "host_row_ids": held["ids"]})
+    return replies, records
 
 
 def source_ids(src) -> list:
@@ -357,7 +378,8 @@ def score(cell: dict, cell_dir: Path, db_dir: Path | None = None) -> dict:
     notices = {x for p in phases for x in p.get("failed_turn_notices") or []}
     plugin = cell.get("plugin") or (json.loads((cell_dir / "cell.json").read_text()).get("plugin")
                                     if (cell_dir / "cell.json").exists() else None) or {}
-    host, host_why = host_parity.load(db_dir / "state.db", group, plugin.get("tree"))
+    assistants = {}
+    host, host_why = host_parity.load(db_dir / "state.db", group, plugin.get("tree"), assistants=assistants)
     if host is None and host_why.startswith("host state.db unreadable"):
         host_read_failed(group, "state.db unreadable for host parity")
     b2_full, ext, ext_ids = externalized.resolve(full, db_dir.parent / "hermes-home")
@@ -367,6 +389,13 @@ def score(cell: dict, cell_dir: Path, db_dir: Path | None = None) -> dict:
     multiset.merge_witnesses(host, events, group)
     per = {g: (expected_items([a for a in atts if attempt_group(a, group) == g], notices),
                [r for r in b2_stored if group(r[1]) == g]) for g in groups}
+    delegated_per, host_held = per.copy(), []  # B10 retains the original expected items (#861).
+    for g, (items, rows) in per.items():
+        lineage_atts = [a for a in atts if attempt_group(a, group) == g]
+        replies, records = host_held_replies(lineage_atts, items, assistants.get(g, {}), g)
+        if replies:
+            per[g] = (expected_items(lineage_atts, notices, inflight=replies), rows)
+            host_held += records
     applicable = [b for b in cell.get("bars") or ALL_BARS
                   if (b != "B6" or cell.get("tool_plan") or cell.get("delegate_plan")) and (b != "B7" or cell.get("native_recovery"))
                   and (b != "B5" or cell.get("min_compactions", 5) > 0) and (b != "B10" or cell.get("delegate_plan"))]
@@ -423,6 +452,8 @@ def score(cell: dict, cell_dir: Path, db_dir: Path | None = None) -> dict:
     numbers["B2"]["per_session"] = {g: m["verdict"] for g, m in b2_parts.items()}
     numbers["B2"]["host_parity_licensed"] = host_parity.summary(
         [dict(r, session=g) for g, m in b2_parts.items() for r in m["host_parity_licensed"]], host_why)
+    if host_held:
+        numbers["B2"]["host_held_inflight_replies"] = host_held
     bound = tool_calls.bind(atts, lambda a: attempt_group(a, group),  # no host_sha in the cell: no licence
                             license_wire_notices=cell.get("host_sha") in tool_calls.HOSTS_WITHOUT_POST_TOOL_REANCHOR)
     # This emergency cell deliberately drops the active result before the next provider call. B2 still requires
@@ -547,7 +578,7 @@ def score(cell: dict, cell_dir: Path, db_dir: Path | None = None) -> dict:
                                                               if e["event"] == "compaction" and e.get("rejection")))
     gaps = scenario_gaps(cell, events, atts, tg, bound)
     if cell.get("delegate_plan"):  # B10 (#1931): admission, parent links and no cross-lineage copies
-        numbers["B10"], b10_failed, b10_gaps = delegated.score(cell, events, atts, per, full, db_dir, group)
+        numbers["B10"], b10_failed, b10_gaps = delegated.score(cell, events, atts, delegated_per, full, db_dir, group)
         gaps += b10_gaps
         if b10_failed and "B10" in applicable:
             failed["B10"] = b10_failed

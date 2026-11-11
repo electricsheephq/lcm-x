@@ -1444,3 +1444,173 @@ def test_b4_tail_observer_is_passive_and_fails_closed():
     del Engine._session_id  # observer failure must not change the real return
     assert engine._fresh_tail_boundary([]).start == 0
     assert engine._probe_tail_observations == [{"error": "unobserved"}]
+
+
+# #861: this block is also copied alone for the red-on-base proof.
+from tests import test_reliability_scorers as inflight_fixture  # noqa: E402
+from bench.instruments.reliability.scorers import bars as inflight_bars, multiset as inflight_multiset  # noqa: E402
+
+
+def inflight_cell(tmp_path, *, stored=1, host_count=1, active=1, host_sid="S1", emit=True,
+                  text=None, state=True, **kw):
+    f = inflight_fixture
+    text = f.R.format(4, 4) if text is None else text
+    events = f.clean_events() + f.turn_events(4)[:1]
+    if emit:
+        events.append(dict(f.turn_events(4)[1], text=text))
+    rows = f.clean_rows() + [("user", f.U.format(4, 4))] + [("assistant", text)] * stored
+    host = f.held() + [(host_sid, "assistant", text, active)] * host_count
+    evidence = dict(host=host, parents={"S0": None, "S1": "S0", "other": None}) if state else {}
+    return f.make(tmp_path, rows=rows, events=events, sids=["S0"] * 6 + ["S1" if state else "S0"] * (len(rows) - 6),
+                  plugin=f.TREE, **evidence, **kw)
+
+
+def inflight_records(out):
+    return out["numbers"]["B2"].get("host_held_inflight_replies", [])
+
+
+def inflight_mismatch(out, expected, stored, kind):
+    assert out["verdict"] == "FAIL"
+    assert out["failed_bars"]["B1"]["reply T04"] == {"expected": expected, "stored": stored}
+    assert out["failed_bars"]["B2"][kind][0]["role"] == "assistant"
+
+
+def test_inflight_861_01_host_and_store(tmp_path):
+    out = inflight_cell(tmp_path)
+    assert out["verdict"] == "PASS"
+    assert inflight_records(out) == [{"tag": "T04", "session": "chat", "host_row_ids": [7],
+                                      "key": inflight_multiset.h(inflight_fixture.R.format(4, 4))[:12]}]
+
+
+def test_inflight_861_02_neither(tmp_path):
+    out = inflight_cell(tmp_path, stored=0, host_count=0)
+    assert out["verdict"] == "PASS"
+    assert "host_held_inflight_replies" not in out["numbers"]["B2"]
+
+
+def test_inflight_861_03_store_only(tmp_path):
+    out = inflight_cell(tmp_path, host_count=0)
+    inflight_mismatch(out, 0, 1, "extra")
+    assert not inflight_records(out)
+
+
+def test_inflight_861_04_host_only(tmp_path):
+    out = inflight_cell(tmp_path, stored=0)
+    inflight_mismatch(out, 1, 0, "missing")
+
+
+def test_inflight_861_05_duplicate(tmp_path):
+    out = inflight_cell(tmp_path, stored=2)
+    assert out["verdict"] == "FAIL" and {"B1", "B2"} <= set(out["failed_bars"])
+    assert out["numbers"]["B2"]["surplus_rows"] >= 1
+    assert out["numbers"]["B2"]["host_parity_licensed"]["rows"] == 0
+
+
+def test_inflight_861_06_other_lineage(tmp_path):
+    out = inflight_cell(tmp_path, host_sid="other")
+    inflight_mismatch(out, 0, 1, "extra")
+    assert not inflight_records(out)
+
+
+def test_inflight_861_07_no_emit(tmp_path):
+    out = inflight_cell(tmp_path, emit=False)
+    inflight_mismatch(out, 0, 1, "extra")
+    assert not inflight_records(out)
+
+
+def test_inflight_861_08_no_state(tmp_path):
+    out = inflight_cell(tmp_path, state=False)
+    inflight_mismatch(out, 0, 1, "extra")
+    assert not inflight_records(out)
+    assert out["numbers"]["B2"]["host_parity_licensed"]["unavailable"] == "no host state.db in the cell"
+
+
+def test_inflight_861_09_ended_reply(tmp_path):
+    f = inflight_fixture
+    out = f.make(tmp_path, rows=f.clean_rows(), events=f.clean_events(), host=[], plugin=f.TREE)
+    assert out["verdict"] == "PASS" and not inflight_records(out)
+    assert out["numbers"]["B2"]["expected_items"] == 6
+
+
+def test_inflight_861_10_same_tag_multiplicity(tmp_path):
+    f = inflight_fixture
+    for count in (2, 1):
+        out = f.make(tmp_path / str(count), rows=f.clean_rows() + f.clean_rows()[4:],
+                     events=f.clean_events() + f.turn_events(3)[:2],
+                     host=f.held() + [("S0", "assistant", f.R.format(3, 3), 1)] * (count - 1), plugin=f.TREE)
+        if count == 2:
+            assert out["verdict"] == "PASS" and len(inflight_records(out)) == 1
+        else:
+            assert out["verdict"] == "FAIL" and {"B1", "B2"} <= set(out["failed_bars"])
+            assert not inflight_records(out)
+
+
+def test_inflight_861_11_inactive_host(tmp_path):
+    out = inflight_cell(tmp_path, active=0)
+    assert out["verdict"] == "PASS" and inflight_records(out)[0]["host_row_ids"] == [7]
+
+
+def test_inflight_861_12_empty_last_emit(tmp_path):
+    f = inflight_fixture
+    for i, text in enumerate(("", " \n\t")):
+        events = f.clean_events() + f.turn_events(4)[:2] + [dict(f.turn_events(4)[1], text=text)]
+        out = f.make(tmp_path / str(i), rows=f.clean_rows() + [("user", f.U.format(4, 4))], events=events,
+                     host=f.held() + [("S0", "assistant", f.R.format(4, 4), 1), ("S0", "assistant", text, 1)],
+                     plugin=f.TREE)
+        assert out["verdict"] == "PASS" and not inflight_records(out)
+
+
+def inflight_delegate(tmp_path, *, collision=False):
+    from bench.instruments.reliability import test_delegated_child as child
+
+    f = inflight_fixture
+    reply = f.R.format(4, 4)
+    child.make(tmp_path)
+    d = tmp_path / "cell"
+    events = [json.loads(line) for line in (d / "transcript.jsonl").read_text().splitlines()]
+    events += f.turn_events(4)[:2]
+    if collision:
+        events = [dict(e, text=reply) if e["event"] == "child_emit" else e for e in events]
+    (d / "transcript.jsonl").write_text("".join(json.dumps(e) + "\n" for e in events))
+    with sqlite3.connect(d / "db/lcm.db") as con:
+        con.execute("insert into messages values (11, 'S1', 'user', ?, NULL, NULL, 110)", (f.U.format(4, 4),))
+        con.execute("insert into messages values (12, 'S1', 'assistant', ?, NULL, NULL, 120)", (reply,))
+        if collision:
+            con.execute("update messages set content=? where store_id=10", (reply,))
+        else:
+            con.execute("insert into messages values (13, 'C1', 'assistant', ?, NULL, NULL, 130)", (reply,))
+    with sqlite3.connect(d / "db/state.db") as con:
+        con.execute("insert into sessions values ('S1', 'S0', 'acp')")
+        con.execute("create table messages (id integer primary key, session_id text, role text, content text, active integer)")
+        con.execute("insert into messages values (35, 'S1', 'assistant', ?, 1)", (reply,))
+    return inflight_bars.score({"bars": [*f.cells.BARS, *f.cells.CHILD_BARS], "plugin": f.TREE,
+                               "delegate_plan": [{"turns": [2]}], "min_compactions": 2}, d)
+
+
+def test_inflight_861_13_child_copy(tmp_path):
+    out = inflight_delegate(tmp_path)
+    assert out["verdict"] == "FAIL" and "B2" in out["failed_bars"]
+    assert out["numbers"]["B2"]["per_session"]["C1"] == "FAIL"
+    assert out["numbers"]["B10"] == {  # all numbers pinned to the base on this same fixture
+        "scripted": 1, "issued": 1, "host_children": 1,
+        "children": {"C1": {"host_parent": "S0", "stored_rows": 3, "link": ["S0", "subagent_start"]}},
+        "child_rows_outside_child_lineages": 0, "parent_rows_copied_into_children": 0}
+    assert "B10" not in out["failed_bars"]
+    if hasattr(inflight_bars, "host_held_replies"):  # Base control retains its B1/B2 failure in chat.
+        assert len(inflight_records(out)) == 1
+        assert out["numbers"]["B1"]["per_session"]["chat"] == 0
+        assert out["numbers"]["B2"]["per_session"]["chat"] == "PASS"
+        assert {e["session"] for e in out["failed_bars"]["B2"]["extra"]} == {"C1"}
+    else:
+        assert out["failed_bars"]["B1"]["reply T04"] == {"expected": 0, "stored": 1}
+        assert out["numbers"]["B2"]["per_session"]["chat"] == "FAIL"
+
+
+def test_inflight_861_14_child_own_reply_collision(tmp_path):
+    out = inflight_delegate(tmp_path, collision=True)
+    assert out["verdict"] == "PASS" and not out["failed_bars"]
+    assert out["numbers"]["B10"]["parent_rows_copied_into_children"] == 0
+    assert out["numbers"]["B1"]["per_session"]["chat"] == 0
+    assert out["numbers"]["B2"]["per_session"] == {"C1": "PASS", "chat": "PASS"}
+    assert inflight_records(out) == [{"tag": "T04", "session": "chat", "host_row_ids": [35],
+                                      "key": inflight_multiset.h(inflight_fixture.R.format(4, 4))[:12]}]

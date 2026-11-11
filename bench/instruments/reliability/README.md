@@ -81,7 +81,15 @@ B1 and B2 are scored per session lineage: the chat lineage is S0 and its compres
 The expected assistant rows come from the provider log, not the host result: exactly one scripted reply per
 completed non-cancel attempt (a reply the host dropped is a deficit), plus the host's own cited failed-turn copy
 (`agent/turn_failure_copy.py` `FAILED_TURN_NOTICE`/`PARTIAL_FAILED_TURN_NOTICE`, exact text) only on an attempt
-the host reported `interrupted`. Any other assistant row is surplus.
+the host reported `interrupted`. B1/B2 also expect host-held in-flight replies as follows. An attempt with an
+emit and no turn end contributes its nonempty last emit only when host assistant evidence in its lineage has
+capacity after already expected assistant items of the same `multiset.h` key: the first
+`max(0, host_count - ended_count)` such attempts in transcript order are expected once each. Host counts use the
+same per-session maximum active count and inactive floor of one as user parity, with the same carrier/recovery
+exclusions and fail-closed reasons; attempts needing an unknown session get no reply expectation. These are
+expectations in both directions, never surplus licences: a missing stored reply or an extra copy fails.
+`numbers.B2.host_held_inflight_replies` lists each selected tag, lineage, 12-character key and host row ids, and is
+absent when empty. Any other assistant row is surplus.
 - **B1** every `[Tnn]` user tag (`[A-Z]\d{2,3}`: T100-T103 on 100-turn cells) and `reply to Tnn` sits in
   exactly as many stored rows as expected,
   and every stored `continue` row has the reply of its own host occurrence.
@@ -164,10 +172,15 @@ the host reported `interrupted`. Any other assistant row is surplus.
   of a B2 key (or a B1 user tag) in lineage L is licensed only up to what the cell's own host state.db holds in L:
   `min(surplus, host_count - expected)`, floored at 0. host_count is what one host view holds: the most ACTIVE rows
   one session of L holds at once, else 1 if L holds it only on inactive rows; rotation copies, in-place generation
-  copies and H1's fresh-stamp re-issues never add up. Deficits, assistant and tool rows are never licensed. No
+  copies and H1's fresh-stamp re-issues never add up. Deficits, assistant and tool rows are never licensed as
+  surplus; the separate host-held in-flight expectation above uses assistant evidence. No
   readable state.db, no licence (`unavailable` records why). Every licence is reported: `host_parity_licensed`
   under `numbers.B1`/`numbers.B2` (count + up to 10 records: LCM store ids, host row ids, content sha256, tags), the
   MATRIX `host-dup` column and "PASS with host-parity licences" section, and the ISSUE-MAP licence list.
+B10's inputs are unchanged; a child's own reply with the same bytes as an ended parent reply is labelled by
+B10 today, a limit this change does not alter; no recorded cell holds such a collision (the scripted child reply
+differs from every parent reply).
+
 - **B3** zero `publication_invariant_conflict` log lines across phases.
 - **B8** zero `LCM survival fit applied` log lines across phases (#582): a survival fit keeps an over-window
   session alive, so on a normal cell it marks a compaction that did not bring the list under the window.
