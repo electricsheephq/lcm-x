@@ -255,7 +255,7 @@ def _answer_ready_baseline(active_engine, question: str, payload: dict):
             "include_occurrence_time": True,
         },
         delivery_unit="hits",
-        delivery_order="score", adjacent_reply=False, later_statements=0, session_hints=False, recall_guidance="v1",
+        delivery_order="score", adjacent_reply=False, later_statements=0, min_sessions=0, session_hints=False, recall_guidance="v1",
         summary_event_time=False,
     )
     recalled = json.loads(raw) if isinstance(raw, str) else raw
@@ -337,7 +337,7 @@ def _pre_llm_context(active_engine, payload: dict) -> dict | None:
                 baseline_refs=baseline_refs,
                 question_as_of=question_date,
                 retrieve=lambda recall_args: active_engine.handle_tool_call(
-                    "lcm_recall", recall_args, delivery_unit="hits", delivery_order="score", adjacent_reply=False, later_statements=0, session_hints=False, recall_guidance="v1",
+                    "lcm_recall", recall_args, delivery_unit="hits", delivery_order="score", adjacent_reply=False, later_statements=0, min_sessions=0, session_hints=False, recall_guidance="v1",
                     summary_event_time=False,
                 ),
                 enabled=True,

@@ -410,7 +410,7 @@ def test_guidance_selector_is_import_free_and_preserves_inputs():
     spec.loader.exec_module(module)
     before = json.dumps([schemas.LCM_RECALL, schemas.LCM_LOAD_SESSION])
     selected = module.recall_guidance_schemas([schemas.LCM_RECALL, schemas.LCM_LOAD_SESSION], 'v2')
-    assert 'min_sessions' not in json.dumps(selected)
+    assert selected[0]['parameters']['properties']['min_sessions']['maximum'] == 10
     assert 'anchor_store_id' in json.dumps(selected)
     assert json.dumps([schemas.LCM_RECALL, schemas.LCM_LOAD_SESSION]) == before
     assert not any(isinstance(n, (ast.Import, ast.ImportFrom))
@@ -451,6 +451,7 @@ def test_internal_evidence_ignores_guidance_and_hints(internal_recall, monkeypat
     assert len(json.loads(expected["context"])["hits"]) == 1
     e._config.recall_guidance = "v2"
     e._config.recall_session_hints = True
+    e._config.recall_min_sessions = 3
     assert invoke() == expected
     external = json.loads(e.handle_tool_call("lcm_recall", args))
     assert external["hits"][0]["session_hint"]
@@ -464,6 +465,7 @@ def test_proactive_and_baseline_disable_guidance(orchard, monkeypatch):
     e = orchard
     e._config.recall_guidance = 'v2'
     e._config.recall_session_hints = True
+    e._config.recall_min_sessions = 3
     e._config.proactive_recall_enabled = True
     e._config.embeddings_enabled = True
     captured = []
@@ -482,5 +484,5 @@ def test_proactive_and_baseline_disable_guidance(orchard, monkeypatch):
     e.handle_tool_call = lambda *a, **kw: LCMEngine.handle_tool_call(e, *a, **kw)
     plugin._answer_ready_baseline(e, 'orchard', {})
     assert len(captured) == 2
-    assert all(kw.get('session_hints') is False and kw.get('recall_guidance') == 'v1'
+    assert all(kw.get('min_sessions') == 0 and kw.get('session_hints') is False and kw.get('recall_guidance') == 'v1'
                for kw in captured)

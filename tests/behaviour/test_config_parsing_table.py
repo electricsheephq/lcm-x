@@ -65,6 +65,7 @@ CONFIG_ROWS = (
     ('recall_extra_entries', 'LCM_RECALL_EXTRA_ENTRIES', 'int', 0),
     ('recall_later_statements', 'LCM_RECALL_LATER_STATEMENTS', 'int', 0),
     ('recall_fts_anchor', 'LCM_RECALL_FTS_ANCHOR', 'bool', True),
+    ('recall_min_sessions', 'LCM_RECALL_MIN_SESSIONS', 'int', 0),
     ('recall_session_hints', 'LCM_RECALL_SESSION_HINTS', 'bool', False),
     ('recall_guidance', 'LCM_RECALL_GUIDANCE', 'str', 'v1'),
     ('recall_summary_event_time', 'LCM_RECALL_SUMMARY_EVENT_TIME', 'bool', False),
@@ -182,6 +183,7 @@ EXTRA_CONFIG_ROWS = (
 
 # from_env has validation after the primitive reader for these fields.
 SPECIAL = {
+    "recall_min_sessions": (D, D, D, D, 1, 0, D, D, D, D, D, D, D, 0, D, 10),
     "recall_snippet_window_hits": (D, D, D, D, 1, 0, D, D, D, D, D, D, D, D, D, 25),
     "recall_extra_entries": (D, D, D, D, 1, 0, D, D, D, D, D, D, D, D, D, 25),
     "recall_later_statements": (D, D, D, D, 1, 0, D, D, D, D, D, D, D, D, D, 5),

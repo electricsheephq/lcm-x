@@ -82,6 +82,18 @@ When `has_more` is true, continue with `after_store_id=next_cursor` without the 
 through the session. The handler accepts anchor arguments under either guidance
 version; `next_cursor` is null when `has_more` is false. Existing internal window callers retain their 12-row clamp per side.
 
+Set `recall_min_sessions: 3` (env `LCM_RECALL_MIN_SESSIONS=3`; default `0`,
+clamped to 0..10) to widen the candidate pool and promote missing sessions into
+the ranked window. The best candidate from each missing session replaces only a
+redundant-session or sessionless slot, keeping every candidate and score and
+protecting the FTS anchor. This runs before later-statement placement.
+Per-call `min_sessions` overrides the key in either guidance mode; null or
+unparseable values use the key. Guidance v2 exposes this argument; v1 schemas
+remain unchanged. `provenance.session_floor` records `requested`, `achieved`,
+`promoted` and `delivered`; the last counts distinct sessions in final hits after
+size fitting, so the floor is a ranking target rather than a delivery guarantee.
+Proactive recall, pre-answer retrieval and evidence wrappers keep the floor off.
+
 Set `recall_session_hints: true` (env `LCM_RECALL_SESSION_HINTS=true`; default
 `false`) to add `session_hint` to answer-ready hits and summary leads. It is a
 call string such as `lcm_load_session(session_id='session-a', anchor_store_id=42)`.
@@ -94,6 +106,7 @@ values override their `lcm.*` YAML keys. For example:
 lcm:
   recall_guidance: v2
   recall_session_hints: true
+  recall_min_sessions: 3
 ```
 
 Both settings leave internal recall consumers unchanged, including proactive
