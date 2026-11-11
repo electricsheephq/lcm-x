@@ -380,9 +380,9 @@ def validate(c: dict) -> None:
         assert g["turns"] == "restart" or all(1 <= t <= c["turns"] for t in g["turns"]), c["id"]
 
 
-def select(patterns: str, extra=(), opt_in=()) -> list[dict]:
-    """Default-window backtests and ``opt_in`` probes match explicit patterns only, never ``all``."""
-    opt_in = (*default_window_cells(), *opt_in)
+def select(patterns: str, extra=(), opt_in=(), controls=()) -> list[dict]:
+    """Default-window backtests, ``opt_in`` probes and ``controls`` match explicit patterns only, never ``all``."""
+    opt_in = (*default_window_cells(), *opt_in, *controls)
     cells = registry() + list(extra)  # extra: transport-only cells (R2 process_cell.R2_CELLS)
     for c in cells + list(opt_in):
         validate(c)

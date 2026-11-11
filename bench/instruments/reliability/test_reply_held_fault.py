@@ -447,8 +447,11 @@ def test_registry_unchanged_and_r1_rejects_early(tmp_path, monkeypatch):
         assert result['verdict'] == 'UNSUPPORTED' and result['reason'] == RF.R1_REASON
     control_id = 'reply-held-crash-control/tool-loop-in-place'
     assert control_id not in {c['id'] for c in all_cells}
-    assert control_id not in {c['id'] for c in cells.select('all', PC.R2_CELLS, PC.R2_PROBE_CELLS)}
-    [control] = cells.select(control_id, PC.R2_CELLS, PC.R2_PROBE_CELLS)
+    assert control_id not in {c['id'] for c in PC.R2_PROBE_CELLS}
+    assert control_id not in {c['id'] for c in cells.select('all', PC.R2_CELLS, PC.R2_PROBE_CELLS, PC.R2_CONTROL_CELLS)}
+    assert control_id not in ci.expected_cells('acp-process')
+    [control] = cells.select(control_id, PC.R2_CELLS, PC.R2_PROBE_CELLS, PC.R2_CONTROL_CELLS)
+    assert 'controls=process_cell.R2_CONTROL_CELLS if a.transport else ()' in Path(RM.__file__).read_text()
     assert control['in_place'] and control['targets'] == []
     assert control['faults'] == [dict(kind=RF.KIND, turn=15, depth=0, at='tool_results')]
 

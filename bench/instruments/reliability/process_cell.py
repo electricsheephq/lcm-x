@@ -48,7 +48,9 @@ R2_CELLS = [C.cell("stop-after-tool/no-retry/in-place", [1623], in_place=True, t
              "api": "anthropic"}] + C.continuity_cells()
 # #659 probes: selected by an explicit --cells pattern only (cells.select opt_in), so --cells all, the nightly matrix and
 # ci.expected_cells are unchanged.
-R2_PROBE_CELLS = C.probe_cells() + [C.held_tool_cell("tool-loop", in_place=True)]
+R2_PROBE_CELLS = C.probe_cells()
+# #2624: opt-in held-fault controls, selected the same way (explicit --cells pattern only).
+R2_CONTROL_CELLS = [C.held_tool_cell("tool-loop", in_place=True)]
 # #659: the only probe class with a declared bar (the host rebuilds its system prompt at every commit).
 PROBE_BARS = {"host-instruction": 1.0, "host-instruction-rebuild": 1.0}
 # gateway-process: why no local platform can drive an R1 gateway cell, cited per host at run time.
