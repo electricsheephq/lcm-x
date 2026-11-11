@@ -135,7 +135,8 @@ def stored_keys(rows, lineage=lambda sid: "chat", *, store_ids=None) -> Counter:
 
 
 def host_held(atts, bound, state, group, turns, lineage_of):
-    """Validate dispatches and require host-held keys of interrupted held-fault tool turns, once per distinct key."""
+    """Validate interrupted held-fault tool turns: host presence requires the issued call signature once;
+    result keys retain the host's content, once per distinct key."""
     selected = [a for a in atts if a["prefix"] == "T" and not a["ended"] and a["turn"] in turns]
     if not selected:
         return None
@@ -156,9 +157,10 @@ def host_held(atts, bound, state, group, turns, lineage_of):
         g = lineage_of(a)
         for c in a["tool_issues"]:
             bound["loose"] = {k for k in bound["loose"] if not (k[0] == g and k[2] == c["id"])}
-            for k in keys:
-                if k[:3] not in ((g, "call", c["id"]), (g, "tool", c["id"])):
-                    continue
+            issued = (g, "call", c["id"], c["name"], canon(c["args"]))
+            held_keys = dict.fromkeys(issued if k[1] == "call" else k for k in keys
+                                      if k[:3] in ((g, "call", c["id"]), (g, "tool", c["id"])))
+            for k in held_keys:
                 bound["expected"][k] = 1
                 records.append(dict(tag=a["tag"], session=g, id=c["id"], kind=k[1],
                                     key=hashlib.sha256(json.dumps(k[1:]).encode()).hexdigest()[:12]))

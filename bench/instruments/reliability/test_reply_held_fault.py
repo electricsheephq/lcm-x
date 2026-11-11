@@ -717,6 +717,62 @@ def test_host_held_tool_rows_are_expected_only_for_held_faults(tmp_path, shape):
         assert {r['kind'] for r in receipt['records']} == {'call', 'tool'}
 
 
+@pytest.mark.parametrize('signature', ['issued', 'name', 'args', 'both'])
+def test_host_held_call_expectation_uses_issued_signature(tmp_path, signature):
+    from tests import test_reliability_scorers as fx
+
+    ev, tools = fx.tool_turn(15)
+    entries = json.loads(tools[0][2])
+    issued = entries[0]
+    altered = json.loads(json.dumps(issued))
+    altered['function']['name' if signature == 'name' else 'arguments'] = (
+        'other_tool' if signature == 'name' else json.dumps({'path': 'other.txt'}))
+    host_tools, stored_tools = list(tools), list(tools)
+    if signature in ('name', 'args'):
+        host_tools[0] = stored_tools[0] = ('assistant', '', json.dumps([altered, entries[1]]))
+    elif signature == 'both':
+        host_tools += [('assistant', '', json.dumps([altered, issued]))]
+    user = fx.U.format(15, 15)
+    host = [('S0', r, c, *((rest + [None, None])[:2]), i)
+            for i, (r, c, *rest) in enumerate([('user', user)] + host_tools, 1)]
+    out = fx.make(tmp_path, rows=[('user', user)] + stored_tools, host_occurrences=host,
+                  events=fx.turn_events(15)[:1] + ev, bars=['B1', 'B2', 'B6'],
+                  tool_plan=[{'turns': [15], 'calls': []}], faults=[dict(kind=RF.KIND, turn=15)])
+    numbers = out['numbers']['B2']
+    mismatch = signature in ('name', 'args')
+    assert numbers['tool_missing_rows'] == numbers['tool_surplus_rows'] == int(mismatch)
+    assert out['verdict'] == ('FAIL' if mismatch else 'PASS')
+    assert ('B2' in out['failed_bars']) == mismatch
+    receipt = numbers['host_held_tool_rows']
+    assert receipt['rows'] == 4
+    call_records = [r for r in receipt['records'] if r['kind'] == 'call' and r['id'] == issued['id']]
+    issued_key = ('call', issued['id'], issued['function']['name'],
+                  json.dumps(json.loads(issued['function']['arguments']), sort_keys=True))
+    assert call_records == [dict(tag='T15', session='chat', id=issued['id'], kind='call',
+                                key=hashlib.sha256(json.dumps(issued_key).encode()).hexdigest()[:12])]
+
+
+@pytest.mark.parametrize('stored_call', [False, True])
+def test_host_absent_call_is_neither_expected_nor_loose(tmp_path, stored_call):
+    from tests import test_reliability_scorers as fx
+
+    ev, tools = fx.tool_turn(15)
+    host_tools = [('assistant', '', json.dumps(json.loads(tools[0][2])[1:]))] + tools[1:]
+    user = fx.U.format(15, 15)
+    host = [('S0', r, c, *((rest + [None, None])[:2]), i)
+            for i, (r, c, *rest) in enumerate([('user', user)] + host_tools, 1)]
+    out = fx.make(tmp_path, rows=[('user', user)] + (tools if stored_call else host_tools),
+                  host_occurrences=host, events=fx.turn_events(15)[:1] + ev, bars=['B1', 'B2', 'B6'],
+                  tool_plan=[{'turns': [15], 'calls': []}], faults=[dict(kind=RF.KIND, turn=15)])
+    numbers = out['numbers']['B2']
+    assert numbers['tool_missing_rows'] == 0
+    assert numbers['tool_surplus_rows'] == int(stored_call)
+    assert out['verdict'] == ('FAIL' if stored_call else 'PASS')
+    receipt = numbers['host_held_tool_rows']
+    assert receipt['rows'] == 3
+    assert not any(r['kind'] == 'call' and r['id'] == ev[0]['id'] for r in receipt['records'])
+
+
 @pytest.mark.parametrize('held,shape', [(True, 'ok'), (True, 'failed'), (True, 'missing'),
     (True, 'name'), (True, 'args'), (True, 'short'), (True, 'extra'), (True, 'idless'),
     (True, 'reused'), (False, 'failed')])
@@ -751,6 +807,9 @@ def test_unfinished_held_turn_validates_dispatches(tmp_path, held, shape):
         ev.remove(dispatches[1])
         first.pop('id')
         ev[1]['args'] = ev[0]['args']
+        entries = json.loads(tools[0][2])
+        entries[1]['function']['arguments'] = json.dumps(ev[1]['args'])
+        tools[0] = ('assistant', '', json.dumps(entries))  # Isolate dispatch reuse from call-signature drift.
         gap = 'T15: planned read_file (call_T15_0_1) was never dispatched by the host'
     user = fx.U.format(15, 15)
     host = [('S0', r, c, *((rest + [None, None])[:2]), i)
