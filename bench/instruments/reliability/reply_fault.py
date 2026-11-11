@@ -11,6 +11,12 @@ def readonly(path):
     return sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, isolation_level=None, timeout=0)
 
 
+def invalid_verdict(rec, reason):
+    earlier = rec.get("reason") if rec.get("verdict") == "ERROR" else None
+    rec.update(verdict="ERROR", reason="reply-held fault INVALID: " + reason +
+               ("; earlier: " + earlier[:300] if earlier else ""))
+
+
 class HeldReply:
     def __init__(self, run, fault, text, timeout=5.0):
         self.run, self.fault, self.text, self.timeout = run, fault, text, timeout
@@ -21,7 +27,7 @@ class HeldReply:
                            reservation_wall=None, reservation_result=None, release_wall=None,
                            first_poll_wall=None, seen_poll_wall=None, kill_wall=None, poll_count=0,
                            busy_poll_count=0, kill_offset_ms=None, host_has_row=None,
-                           store_has_row=None, restart_exit=None)
+                           store_has_row=None, restart_exit=None, polls=[])
 
     def invalid(self, reason):
         self.record.update(valid=False, invalid_reason=self.record["invalid_reason"] or reason)
@@ -83,6 +89,7 @@ class HeldReply:
                     r["busy_poll_count"] += 1
                     rows = []
                 r["poll_count"] += 1
+                r["polls"].append([round(wall, 4), self.polls[-1][1]])
                 if rows:
                     r["seen_poll_wall"], r["kill_wall"] = wall, time.time()
                     r["kill_monotonic_ns"] = time.monotonic_ns()
@@ -90,6 +97,7 @@ class HeldReply:
                     r["kill_offset_ms"] = (r["kill_wall"] - r["release_wall"]) * 1000
                     self.run.fire(KIND, self.fault["turn"], **{k: v for k, v in r.items() if k != "turn"})
                     self.release_reservation()
+                    self.witness_id = rows[0][0]  # In memory only; never part of the evidence record.
                     self.validate(rows[0][1])
                     break
                 time.sleep(0.002)
@@ -116,8 +124,8 @@ class HeldReply:
                 break
             current = row[0]
         r.update(root=current[:12], depth=len(seen) - 1)
-        r["host_has_row"] = bool(self.host.execute("SELECT 1 FROM messages WHERE role = 'assistant' "
-                                                  "AND content = ?", (self.text,)).fetchone())
+        r["host_has_row"] = bool(self.host.execute("SELECT 1 FROM messages WHERE id = ? AND role = 'assistant' "
+                                                  "AND content = ?", (self.witness_id, self.text)).fetchone())
         store = readonly(self.run.home / "lcm.db")
         try:
             r["store_has_row"] = bool(store.execute("SELECT 1 FROM messages WHERE content = ?", (self.text,)).fetchone())
@@ -138,4 +146,4 @@ class HeldReply:
             self.invalid("restart did not finish done")
         rec["reply_fault"] = self.record.copy()
         if not self.record["valid"]:
-            rec.update(verdict="ERROR", reason="reply-held fault INVALID: " + self.record["invalid_reason"])
+            invalid_verdict(rec, self.record["invalid_reason"])

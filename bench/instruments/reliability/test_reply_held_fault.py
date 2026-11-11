@@ -7,6 +7,7 @@ OLD_SHA = "16e364c39241264ce704a0f9d5a31a3e960cd97c476c33c7e37ec73b928772e6"
 import socket
 import sqlite3
 import threading
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -66,11 +67,15 @@ def test_valid_depth_and_crash_records(tmp_path, depth):
     event = PC.read_jsonl(run.transcript)[0]
     assert event['event'] == 'crash' and event['fault'] == RF.KIND and event['phase'] == 'A'
     assert event['kill_monotonic_ns'] == held.record['kill_monotonic_ns']
+    assert event['polls'] == [[round(wall, 4), result] for wall, result in held.polls]
+    assert len(event['polls']) == event['poll_count'] > 0
+    assert 'witness_id' not in json.dumps(event)
     assert 'reply to' not in json.dumps(held.record)
     assert PC.read_jsonl(tmp_path / 'faults-fired.jsonl')[0]['kind'] == RF.KIND
     rec = {'verdict': 'FAIL'}
     held.verdict(rec, 'done')
     assert rec['verdict'] == 'FAIL'
+    assert rec['reply_fault']['polls'] == event['polls']
     held.verdict(rec, 'error')
     assert rec['verdict'] == 'ERROR' and rec['reason'].startswith('reply-held fault INVALID: restart')
 
@@ -118,12 +123,14 @@ def test_cleanup_and_non_new_rows(tmp_path, shape):
     run.proc.kill.assert_not_called()
     if shape == 'busy':
         assert held.record['busy_poll_count'] == held.record['poll_count'] > 0
+        assert held.record['polls'] == [[round(wall, 4), 'busy'] for wall, _ in held.polls]
 
 
-@pytest.mark.parametrize('hooks,stream', [(True, False), (True, True), (False, False)])
+@pytest.mark.parametrize('hooks,stream', [(True, False), (True, True), (False, False), (False, True)])
 def test_provider_reserves_before_first_byte(tmp_path, hooks, stream, monkeypatch):
     run, held, _ = fixture(tmp_path)
     arrived, proceed, finished = threading.Event(), threading.Event(), threading.Event()
+    after_started, eof = threading.Event(), threading.Event()
     errors = []
 
     def before():
@@ -132,8 +139,13 @@ def test_provider_reserves_before_first_byte(tmp_path, hooks, stream, monkeypatc
         assert proceed.wait(2)
 
     def after():
-        held.release_failed()  # Ordering test only: no host to produce a row.
-        finished.set()
+        after_started.set()
+        try:
+            if stream:
+                assert eof.wait(2), 'client must receive EOF while after_release is running'
+        finally:
+            held.release_failed()  # Ordering test only: no host to produce a row.
+            finished.set()
 
     reply = {'content': 'normal reply'}
     if hooks:
@@ -163,8 +175,13 @@ def test_provider_reserves_before_first_byte(tmp_path, hooks, stream, monkeypatc
                 chunks = []
                 while data := sock.recv(65536):
                     chunks.append(data)
+                if hooks and stream:
+                    assert after_started.wait(2) and not finished.is_set()
+                    eof.set()
                 payload = b''.join(chunks).split(b'\r\n\r\n', 1)[1]
-                if not stream:
+                if stream:
+                    assert payload.endswith(b'data: [DONE]\n\n')
+                else:
                     expected = []
                     FP.FakeProvider.json_reply(SimpleNamespace(send_json=lambda status, data: expected.append(data)),
                                                'openai', 'rel/main', {'content': 'normal reply'}, 800, False)
@@ -180,6 +197,7 @@ def test_provider_reserves_before_first_byte(tmp_path, hooks, stream, monkeypatc
             released(held)
     finally:
         proceed.set()
+        eof.set()
         provider.stop()
 
 
@@ -234,6 +252,48 @@ def test_run_phase_waits_for_post_kill_completion(tmp_path, monkeypatch, complet
     released(held)
 
 
+def test_stream_eof_while_after_release_runs_over_socketpair():
+    """Exercise the real SSE writer and half-close without needing a listening port."""
+    sender, client = socket.socketpair()
+    client.settimeout(2)
+    started, eof, finished = threading.Event(), threading.Event(), threading.Event()
+    errors = []
+
+    def after():
+        started.set()
+        assert eof.wait(2)
+        finished.set()
+
+    provider = object.__new__(FP.FakeProvider)
+    provider.next_rid, provider.log = lambda: 1, Mock()
+    provider.continuity_context, provider.usage_scale = None, 1
+    provider.reply_for = lambda *_: dict(content='normal reply', after_release=after)
+    handler = SimpleNamespace(connection=sender, wfile=sender.makefile('wb'), path='/v1/chat/completions',
+                              send_response=Mock(), send_header=Mock(), end_headers=Mock())
+
+    def serve():
+        try:
+            provider.serve(handler, dict(model='rel/main', messages=[], stream=True), 'openai')
+        except BaseException as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=serve)
+    thread.start()
+    try:
+        chunks = []
+        while data := client.recv(65536):
+            chunks.append(data)
+        assert b''.join(chunks).endswith(b'data: [DONE]\n\n')
+        assert started.wait(2) and not finished.is_set()
+    finally:
+        eof.set()
+        thread.join(2)
+        handler.wfile.close()
+        sender.close()
+        client.close()
+    assert finished.is_set() and not thread.is_alive() and not errors
+
+
 def test_registry_unchanged_and_r1_rejects_early(tmp_path, monkeypatch):
     all_cells = cells.registry()
     new = [c for c in all_cells if c['id'].startswith('reply-held-crash/')]
@@ -268,3 +328,137 @@ def test_scenario_arms_only_once_on_final_main_reply_in_phase_a(tmp_path):
     reply = scenario.main([dict(role='user', content='[T05] user')])
     assert reply['content'] == held.text and callable(reply['before_release'])
     assert 'before_release' not in scenario.main([dict(role='user', content='[T05] user')])
+
+
+@pytest.mark.parametrize('change', ['delete', 'role', 'content'])
+def test_post_kill_check_requires_the_witnessed_row(tmp_path, change):
+    run, held, _ = fixture(tmp_path)
+    held.before_release()
+    insert(run, held.text)
+
+    def kill():
+        with sqlite3.connect(run.home / 'state.db') as con:
+            if change == 'delete':
+                con.execute('DELETE FROM messages WHERE id = 1')
+            else:
+                con.execute(f'UPDATE messages SET {change} = ? WHERE id = 1', ('changed',))
+            con.execute('INSERT INTO messages VALUES (100, ?, ?, ?)', ('root', 'assistant', held.text))
+
+    run.proc.kill.side_effect = kill
+    held.after_release()
+    released(held)
+    assert not held.record['host_has_row'] and not held.record['valid']
+    assert held.record['invalid_reason'] == 'post-kill host/store check'
+
+
+@pytest.mark.parametrize('verdict', ['PASS', 'FAIL', 'ERROR'])
+def test_invalid_overrides_scored_verdict_and_preserves_earlier_error(tmp_path, verdict):
+    _, held, _ = fixture(tmp_path)
+    held.invalid('test witness')
+    rec = dict(verdict=verdict, reason='earlier failure ' + 'x' * 330, failed_bars={'B1': {}})
+    old = rec['reason']
+    held.verdict(rec, 'done')
+    assert rec['verdict'] == 'ERROR' and rec['reply_fault']['valid'] is False
+    assert rec['reason'] == 'reply-held fault INVALID: test witness' + (
+        '; earlier: ' + old[:300] if verdict == 'ERROR' else '')
+
+
+@pytest.mark.parametrize('failure', ['phase-A death before turn 5', 'network STOP'])
+def test_never_armed_done_preserves_pre_arm_errors(tmp_path, monkeypatch, failure):
+    cell = next(c for c in cells.registry() if c['id'] == 'reply-held-crash/pre-rotation')
+    last = dict(exit='error', reason=failure) if failure != 'network STOP' else dict(exit='done')
+    run = SimpleNamespace(reply_fault=None, phase='A', sid='root', provider=Mock(), proxy=Mock(),
+                          scenario=SimpleNamespace(unexpected=[]), run_phase=Mock(return_value=last),
+                          phase_record=lambda *_: dict(citations={}, network_attempts=(
+                              [{'fixture': 'blocked'}] if failure == 'network STOP' else [])))
+    monkeypatch.setattr(PC, 'ProcessCell', lambda *_args, **_kwargs: run)
+    monkeypatch.setattr(PC, 'config_yaml', lambda *_: '')
+    monkeypatch.setattr(PC.P1, 'write_tool_files', lambda *_: None)
+    monkeypatch.setattr(PC.RM, 'copy_dbs', lambda *_: [])
+    monkeypatch.setattr(PC.RM, 'release_scratch', lambda *_: None)
+    monkeypatch.setattr(PC, 'accounting', lambda *_: dict(ok=True, unexpected_requests=[]))
+    monkeypatch.setattr(PC.continuity, 'score_dir', lambda *_: {})
+    monkeypatch.setattr(PC.RM, 'verdict_fields', Mock(side_effect=AssertionError('invalid run must not score')))
+    rec = PC.run_cell_process(cell, 'fixture', dict(sha='host', src='unused', python='unused'),
+                              dict(sha='plugin', ref='fixture', dir='fixture', tree=str(tmp_path)),
+                              tmp_path, 1, False, identity=dict(sha='host'), scratch_root=tmp_path)
+    expected = failure if failure != 'network STOP' else (
+        "STOP: host attempted non-localhost network access: [{'fixture': 'blocked'}]")
+    assert rec['verdict'] == 'ERROR' and rec['reply_fault']['valid'] is False
+    assert rec['reason'] == 'reply-held fault INVALID: trigger never armed; earlier: ' + expected
+    assert json.loads((Path(rec['dir']) / 'verdict.json').read_text()) == rec
+
+
+@pytest.mark.parametrize('verdict', ['PASS', 'FAIL', 'ERROR'])
+def test_offline_rescore_refuses_invalid_reply_fault(tmp_path, capsys, verdict):
+    from bench.instruments.reliability.scorers import cli
+    (tmp_path / 'cell.json').write_text('{}')
+    (tmp_path / 'verdict.json').write_text(json.dumps(dict(verdict=verdict, reply_fault=dict(valid=False))))
+    with pytest.raises(SystemExit) as exc:
+        cli.main(['--cell-dir', str(tmp_path)])
+    assert exc.value.code == 2
+    assert 'reply-held fault INVALID (reply_fault.valid is false)' in capsys.readouterr().err
+
+
+@pytest.mark.parametrize('outcome', ['kill', 'invalid', 'timeout'])
+def test_turn_waits_for_witness_before_advancing(tmp_path, monkeypatch, outcome):
+    run, held, _ = fixture(tmp_path)
+    run.phase_timeout, run.turn_timeout, run.last_turn = None, 1, 0
+    run.argv, run.env, run.work, run.files = lambda: [], lambda: {}, tmp_path, tmp_path
+    run.cell.update(final_compaction_check=False)
+    run.scenario = PC.Scenario(run)
+    prompted, waiting, allow_completion = threading.Event(), threading.Event(), threading.Event()
+    turns, results, errors = [], [], []
+    stub = SimpleNamespace(killed=False, initialize=lambda _: None, new_session=lambda *_: 'root', close=lambda: 0)
+    stub.kill = lambda: setattr(stub, 'killed', True)
+
+    def witness():
+        try:
+            assert allow_completion.wait(2)
+            if outcome == 'kill':
+                stub.kill()
+                run.fire(RF.KIND, 5)
+            else:
+                held.invalid('poll timeout')
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            held.done.set()
+
+    worker = threading.Thread(target=witness)
+
+    def prompt(_sid, text, _timeout):
+        turns.append(text)
+        if len(turns) == 1:
+            if outcome != 'timeout':
+                worker.start()
+            prompted.set()
+        return 'reply', 'end_turn'
+
+    stub.prompt = prompt
+    if outcome == 'timeout':
+        held.done = Mock(wraps=held.done)
+        held.done.wait.return_value = False
+    else:
+        original_wait = held.done.wait
+        held.done.wait = lambda timeout: (waiting.set(), original_wait(timeout))[1]
+    monkeypatch.setattr(PC.AD, 'AcpProcess', lambda *_: stub)
+    monkeypatch.setattr(PC.P1, 'extend_turns', lambda *_: [5, 6])
+    phase = threading.Thread(target=lambda: results.append(run.run_phase(5)))
+    phase.start()
+    try:
+        assert prompted.wait(2)
+        if outcome != 'timeout':
+            assert waiting.wait(2)
+            assert phase.is_alive() and not results and len(turns) == 1
+    finally:
+        allow_completion.set()
+        phase.join(2)
+        if worker.ident is not None:
+            worker.join(2)
+    assert not phase.is_alive() and not errors
+    if outcome == 'kill':
+        assert results == [dict(exit='crash', next_turn=6, turn=5)] and len(turns) == 1
+    else:
+        assert results[0]['exit'] == 'done' and len(turns) == 2
+        assert held.record['invalid_reason'] == ('completion timeout' if outcome == 'timeout' else 'poll timeout')

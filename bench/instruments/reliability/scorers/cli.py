@@ -81,6 +81,8 @@ def main(argv=None) -> int:
         def refuse(reason):
             ap.exit(2, f"cannot re-score: {reason}\n")
 
+        if (uploaded.get("reply_fault") or {}).get("valid") is False:
+            refuse("reply-held fault INVALID (reply_fault.valid is false)")
         if uploaded.get("verdict") == "ERROR":
             refuse("uploaded verdict is ERROR (a harness decision)")
         if cell.get("drain") and cell.get("transport") != "acp-process":

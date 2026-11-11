@@ -372,6 +372,12 @@ class ProcessCell:
             if killer:
                 killer.stop.set()
                 killer.join()
+            held = self.reply_fault
+            if held and self.phase == "A" and held.fault["turn"] == t:
+                if not held.done.wait(15):
+                    held.invalid("completion timeout")
+                if self.proc.killed and RF.KIND in self.fired:
+                    raise AD.ProcessGone("held-reply fault killed host")
         self.event(turn=t, event="acp_response", tag=f"T{t:02d}", stop_reason=stop, chars=len(answer))
         self.wait_for_child(t)
         return stop
@@ -627,8 +633,8 @@ def run_cell_process(cell: dict, host_name: str, host: dict, plugin: dict, out: 
                         path.write_text("".join(json.dumps({**row, **rec["reply_fault"]} if
                             row.get("fault", row.get("kind")) == RF.KIND else row) + "\n" for row in rows))
             else:
-                rec.update(verdict="ERROR", reason="reply-held fault INVALID: trigger never armed",
-                           reply_fault={"valid": False, "invalid_reason": "trigger never armed"})
+                RF.invalid_verdict(rec, "trigger never armed")
+                rec["reply_fault"] = {"valid": False, "invalid_reason": "trigger never armed"}
         (d / "verdict.json").write_text(json.dumps(rec, indent=1, default=str))
         return rec
     if not identity or "error" in identity:  # before anything reads or runs the host tree
@@ -704,9 +710,10 @@ def run_cell_process(cell: dict, host_name: str, host: dict, plugin: dict, out: 
             return done(verdict="ERROR", reason=f"provider request log does not account for the transcript: {acct}")
         if cell.get("stop_after_tool"):
             return done(**stop_turn.score(run, last))
+        if any(f["kind"] == RF.KIND for f in cell["faults"]) and last.get("exit") == "error":
+            return done(verdict="ERROR", reason=last.get("reason") or str(last))
         if run.reply_fault:
-            run.reply_fault.verdict(rec, last.get("exit") if run.phase == "B" else None)
-            if not run.reply_fault.record["valid"]:
+            if not run.reply_fault.record["valid"] or run.phase != "B" or last.get("exit") != "done":
                 return done()
         elif any(f["kind"] == RF.KIND for f in cell["faults"]):
             return done()

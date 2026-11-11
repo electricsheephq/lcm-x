@@ -17,6 +17,7 @@ ground truth of what the host actually sent.
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import re
@@ -250,6 +251,9 @@ class FakeProvider:
                                                       bool((body.get("stream_options") or {}).get("include_usage")))
             if reply.get("after_release"):
                 h.wfile.flush()
+                if stream:
+                    with contextlib.suppress(OSError):
+                        h.connection.shutdown(socket.SHUT_WR)
                 reply["after_release"]()
         except (BrokenPipeError, ConnectionResetError):
             if reply.get("release_failed"):
