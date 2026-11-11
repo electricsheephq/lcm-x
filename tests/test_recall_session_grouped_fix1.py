@@ -135,3 +135,15 @@ def test_grouping_release_note_and_session_budget_tradeoff_documented():
     docs = (root / "docs/retrieval-tools.md").read_text()
     assert "whole session groups" in docs
     assert "provenance.session_groups_dropped" in docs
+
+
+@pytest.mark.parametrize("detail", ["snippets", "answer_ready"])
+def test_floor_delivered_refreshed_when_grouping_drops_hits(grouped_engine, monkeypatch, detail):
+    full = json.loads(invoke(grouped_engine, detail, group_by_session=True, min_sessions=3))
+    cap = 2000 if detail == "snippets" else len(json.dumps(full, ensure_ascii=False)) - 900
+    monkeypatch.setattr(tools, "_LCM_RECALL_RESPONSE_CHAR_CAP", cap)
+    on = json.loads(invoke(grouped_engine, detail, group_by_session=True, min_sessions=3))
+    assert 0 < len(on["hits"]) < len(full["hits"])
+    sessions = {h["session_id"] for h in on["hits"] if not h.get("extra")} - {None, ""}
+    assert len(sessions) < full["provenance"]["session_floor"]["delivered"]
+    assert on["provenance"]["session_floor"]["delivered"] == len(sessions)

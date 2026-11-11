@@ -809,6 +809,9 @@ def group_session_response(encoded: str, *, response_char_cap: int,
         while True:
             refresh()
             _refresh_later_statements(response)
+            if "session_floor" in response["provenance"]:
+                response["provenance"]["session_floor"]["delivered"] = _sessions(
+                    [h for h in response["hits"] if not h.get("extra")])
             hits = sorted(response["hits"], key=lambda h: h["rank"])
             sizes = [len(json.dumps(_without_event_time(h), ensure_ascii="snippet_window" in h)) for h in hits]
             time_chars = [len(json.dumps(h, ensure_ascii="snippet_window" in h)) - size
