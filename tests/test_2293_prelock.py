@@ -217,7 +217,8 @@ def _run(root: Path, shape: str, *, prelock: bool, foreign: str | None = None, m
             monkeypatch.setattr(MessageStore, "_ingest_prelock_before_begin", seam)
         result = engine.ingest(view)
         if foreign is not None:
-            monkeypatch.undo()
+            # Restore only the seam: undo() would also drop the autouse salt pin.
+            monkeypatch.setattr(MessageStore, "_ingest_prelock_before_begin", original)
             assert fired, "the foreign commit never ran: no BEGIN reached the seam"
         state = dict(cursor=engine._frontier.cursor, needs_reconcile=engine._frontier.needs_reconcile,
                      failures=getattr(engine, "_consecutive_ingest_failures", 0),
@@ -315,7 +316,7 @@ def test_b_commit_during_classification_of_a_no_write_ingest(tmp_path, monkeypat
 
         monkeypatch.setattr(MessageStore, "get_session_tail", tail)
         result = engine.ingest(view)
-        monkeypatch.undo()
+        monkeypatch.setattr(MessageStore, "get_session_tail", original)
         counts = _counts(engine) - before
         state = dict(cursor=engine._frontier.cursor, needs_reconcile=engine._frontier.needs_reconcile,
                      failures=getattr(engine, "_consecutive_ingest_failures", 0),
@@ -400,7 +401,7 @@ def test_prelock_write_is_denied_and_reclassified_under_the_lock(tmp_path, monke
             monkeypatch.setattr(LCMEngine, "_ingest_filter_rows", filter_rows)
             before = _counts(engine)
             engine.ingest(view)
-            monkeypatch.undo()
+            monkeypatch.setattr(LCMEngine, "_ingest_filter_rows", original)
             results[mode] = (_counts(engine) - before, refused, _rows(engine))
         finally:
             engine.shutdown()

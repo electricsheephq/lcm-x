@@ -68,11 +68,18 @@ class TransactionOwner:
         return any(owner.owns(conn) and owner._owner_thread == threading.get_ident()
                    for owner in cls._active_owners.get())
 
+    @classmethod
+    def ingest_state_for(cls, conn):
+        """The foreground attempt in this thread, including its unbegun owner."""
+        return next((owner.ingest_state for owner in cls._active_owners.get()
+                     if owner.owns(conn) and owner._owner_thread == threading.get_ident()), None)
+
     def __init__(self, lock: AbstractContextManager[object]) -> None:
         self._lock = lock
         self._active_connection: sqlite3.Connection | None = None
         self._owner_thread: int | None = None
         self.rollback_failures = 0
+        self.ingest_state = None
 
     def owns(self, conn: sqlite3.Connection) -> bool:
         """Whether an enclosing atomic scope owns this connection, even before a write."""
@@ -87,7 +94,10 @@ class TransactionOwner:
     def atomic(self, conn: sqlite3.Connection, *, immediate: bool = False) -> Iterator[None]:
         with self._lock:
             if self._active_connection is conn:
-                if immediate and not conn.in_transaction:
+                state = self.ingest_state
+                if state is not None and state.phase == "prelock":
+                    state.acquire()
+                elif immediate and not conn.in_transaction:
                     # An empty enclosing scope has not reserved the database yet; reserve it here so a nested
                     # read-before-write keeps BEGIN IMMEDIATE semantics. The enclosing owner still commits.
                     conn.execute("BEGIN IMMEDIATE")

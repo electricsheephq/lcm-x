@@ -173,6 +173,7 @@ from .message_content import (
 )
 from .sqlite_util import (
     _SqliteSavepointError,
+    _IngestReclassify,
     _is_ingest_busy_error,
     _is_sqlite_locked_error,
     _sqlite_savepoint,
@@ -7409,9 +7410,12 @@ class LCMEngine(
                 ledger_digest_ms=0.0, ledger_ms=0.0)
             ledger_prepared = self._prepare_ingest_ledger(messages, attribution)
             admission_retry = busy_retried = False
-            # One busy retry, plus one #1815 evidence-fault retry that only the first attempt can take.
-            for attempt in range(3):
-                self._ingest_attempt_index = attempt
+            pending = missing = snapshots = receipts = after_commit = emission_claim = None
+            emission_committed = tail_registered = False
+            prepared, record, rollback_failures = {}, None, 0
+
+            def begin_iteration():
+                nonlocal pending, missing, snapshots, receipts, after_commit, emission_claim, emission_committed, prepared, tail_registered, record, rollback_failures
                 # Keep the published frontier untouched until COMMIT. Helpers read
                 # and write the attempt-local holder through the legacy properties.
                 pending = copy.copy(self._frontier)
@@ -7441,11 +7445,9 @@ class LCMEngine(
                 receipts = [(receipt, dict(receipt)) for receipt in getattr(self, "_identity_anchor_recoveries", ())]
                 after_commit = []
                 emission_claim, emission_committed = object(), False
-                prepared = {}
+                prepared = ({"view_only": prepared["view_only"]} if "view_only" in prepared else {})
                 tail_registered = self in maintenance_scheduler._PENDING_TAIL_ENGINES
-                held_at = None
                 record = self._ingest_telemetry(self._new_ingest_lock_record, messages, attempt + 1, no_view)
-                sample = None
                 rollback_failures = self._store._transaction_owner.rollback_failures
                 published_rollbacks = getattr(self, "_ledger_rollback_failures_published", 0)
                 if rollback_failures > published_rollbacks:
@@ -7453,51 +7455,97 @@ class LCMEngine(
                                         self._ledger_count("ledger.rollback_failed", amount=amount))
                 after_commit.append(lambda value=rollback_failures:
                                     setattr(self, "_ledger_rollback_failures_published", value))
+
+            def restore_iteration():
+                for name, value in snapshots.items():
+                    if value is missing:
+                        self.__dict__.pop(name, None)
+                    else:
+                        self.__dict__[name] = value
+                for receipt, previous in receipts:
+                    receipt.clear()
+                    receipt.update(previous)
+                if not tail_registered:
+                    maintenance_scheduler._PENDING_TAIL_ENGINES.discard(self)
+                attribution.update(rows_written=0, bytes_written=0)
+                self._ingest_ledger_attempt = None
+                if not emission_committed and ledger_prepared is not None:
+                    ingest_ledger.settle_pending_emissions(emission_claim)
+
+            # One busy retry, plus one #1815 evidence-fault retry that only the first attempt can take.
+            for attempt in range(3):
+                self._ingest_attempt_index = attempt
+                prepared = {}
+                begin_iteration()
+                held_at = sample = None
                 try:
                     prepared["view_only"] = self._precompute_ingest_view_only(messages)
                     if getattr(self, "_identity_anchor_recovery", None):
                         self._identity_anchor_observe_recovery()
-                    with self._store.ingest_atomic(admission_retry=admission_retry) as sample:
-                        held_at = _perf_counter()
-                        emission_attempt = self._ingest_ledger_attempt = (
-                            dict(ledger_prepared, stored={}, matched={}, remainders={}, observations=[])
-                            if ledger_prepared is not None else None)
-                        if self._ingest_ledger_attempt is not None and no_view:
-                            self._ingest_ledger_attempt["no_view"] = True
-                        if self._ingest_ledger_attempt is not None:
-                            emission_attempt["lineage"] = self._ledger_adopt(self._store, self._session_id,
-                                emission_attempt["resolved"], emission_attempt["salt"], after_commit) or emission_attempt["lineage"]
-                            emission_attempt["adopted"] = True
-                            self._retry_pending_emissions(self._ingest_ledger_attempt, after_commit, emission_claim)
-                        active, finish = self._ingest_messages_transaction(
-                            messages, after_commit, attribution,
-                            prepared=prepared, telemetry=record,
-                            allow_session_end_replay_proof=allow_session_end_replay_proof)
-                        if self._ingest_ledger_attempt is not None:
-                            self._write_ingest_ledger(self._ingest_ledger_attempt, after_commit, attribution)
-                        self._link_stored_todo_replays(messages, prepared.get("stored_at", {}))
+                    with self._store.ingest_atomic(admission_retry=admission_retry,
+                            prelock=retried_tail is None and not admission_retry) as sample:
+                        reclassified = False
+                        poisoned_before = self._store.ingest_prelock_counts["poisoned"]
+                        try:
+                            while True:
+                                try:
+                                    emission_attempt = self._ingest_ledger_attempt = (
+                                        dict(ledger_prepared, stored={}, matched={}, remainders={}, observations=[])
+                                        if ledger_prepared is not None else None)
+                                    if self._ingest_ledger_attempt is not None and no_view:
+                                        self._ingest_ledger_attempt["no_view"] = True
+                                    if self._ingest_ledger_attempt is not None:
+                                        emission_attempt["lineage"] = self._ledger_adopt(self._store, self._session_id,
+                                            emission_attempt["resolved"], emission_attempt["salt"], after_commit) or emission_attempt["lineage"]
+                                        emission_attempt["adopted"] = True
+                                        self._retry_pending_emissions(self._ingest_ledger_attempt, after_commit, emission_claim)
+                                    active, finish = self._ingest_messages_transaction(
+                                        messages, after_commit, attribution,
+                                        prepared=prepared, telemetry=record,
+                                        allow_session_end_replay_proof=allow_session_end_replay_proof)
+                                    if self._ingest_ledger_attempt is not None:
+                                        self._write_ingest_ledger(self._ingest_ledger_attempt, after_commit, attribution)
+                                    self._link_stored_todo_replays(messages, prepared.get("stored_at", {}))
+                                    self._store._finish_ingest_prelock()
+                                    break
+                                except BaseException as error:
+                                    state = self._store._ingest_prelock_state
+                                    if (isinstance(error, (KeyboardInterrupt, SystemExit)) or state is None
+                                            or state.begin_failed is not None
+                                            or not (isinstance(error, _IngestReclassify)
+                                                    or state.phase == "prelock" or state.poisoned)):
+                                        raise
+                                    if reclassified:
+                                        raise AssertionError("Ingest reclassified twice") from error
+                                    try:
+                                        self._store._acquire_ingest_prelock()
+                                    except _IngestReclassify:
+                                        pass
+                                    self._store._conn.execute("ROLLBACK TO lcm_ingest_attempt")
+                                    restore_iteration()
+                                    self._store._ingest_folded_tail_reads = {}
+                                    begin_iteration()
+                                    state.poisoned = state.reclassify_pending = False
+                                    self._store.ingest_prelock_counts["reclassified"] += 1
+                                    self._ledger_count("ingest.prelock.reclassified")
+                                    reclassified = True
+                        finally:
+                            held_at = sample.get("acquired_at")
+                            if self._store.ingest_prelock_counts["poisoned"] > poisoned_before:
+                                self._ledger_count("ingest.prelock.poisoned")
                     emission_committed = True
                     if ledger_prepared is not None:
                         ingest_ledger.settle_pending_emissions(
                             emission_claim, completed=emission_attempt["retried_emissions"])
-                    attribution["lock_hold_ms"] += (_perf_counter() - held_at) * 1000
+                    if held_at is not None:
+                        attribution["lock_hold_ms"] += (_perf_counter() - held_at) * 1000
                 except BaseException as exc:
                     self._ingest_telemetry(self._record_ingest_attempt, record, sample, attribution,
                                            None if emission_committed else exc)
                     self._ingest_ledger_attempt = None
                     if held_at is not None:
                         attribution["lock_hold_ms"] += (_perf_counter() - held_at) * 1000
-                    for name, value in snapshots.items():
-                        if value is missing:
-                            self.__dict__.pop(name, None)
-                        else:
-                            self.__dict__[name] = value
-                    for receipt, previous in receipts:
-                        receipt.clear()
-                        receipt.update(previous)
-                    if not tail_registered:
-                        maintenance_scheduler._PENDING_TAIL_ENGINES.discard(self)
-                    attribution.update(rows_written=0, bytes_written=0)
+                    restore_iteration()
                     rollback_ok = self._store._transaction_owner.rollback_failures == rollback_failures
                     if rollback_ok and attempt == 0 and isinstance(exc, _EvidenceFaultRetry):
                         continue  # #1815: nothing of the faulted attempt is kept; the retry classifies again
@@ -8287,6 +8335,7 @@ class LCMEngine(
         if store._transaction_owner.owns_connection(store._conn) and (
             isinstance(error, _SqliteSavepointError) or _is_ingest_busy_error(error, require_code=True)
             or isinstance(error, sqlite3.Error) and not store._conn.in_transaction
+            and not store._ingest_is_prelock()
         ):
             raise error
 
