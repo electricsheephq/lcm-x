@@ -170,6 +170,16 @@ def _foreign_commit(kind: str, root: Path, view: list) -> None:
                 conn.execute("INSERT INTO metadata(key, value) VALUES('test-2293-generation', '1') "
                              "ON CONFLICT(key) DO UPDATE SET value = excluded.value || 'x'")
         conn.close()
+    elif kind == "folded-tail-lineage":
+        # A foreign write to the folded-tail lineage key that reconcile reads (and caches per attempt).
+        import json as _json
+        conn = sqlite3.connect(db, timeout=5)
+        with conn:
+            conn.execute("INSERT INTO metadata(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = "
+                         "excluded.value", ("folded_tail_lineage:" + SESSION, _json.dumps(
+                             {"version": 1, "source_store_id": 1, "folded_identity_sha256": "0" * 64,
+                              "source_identity_sha256": "0" * 64})))
+        conn.close()
     elif kind == "two-commits":
         _foreign_commit("observed-at-backfill", root, view)
         _foreign_commit("other-session-rows", root, view)
@@ -259,7 +269,8 @@ def test_a_store_differential_eager_vs_prelock(shape, tmp_path):
 
 # -- (b) forced change between the pre-lock run and BEGIN -------------------------------------------------------------
 
-FOREIGN = ("same-session-rows", "other-session-rows", "observed-at-backfill", "alt-stamp-relation", "two-commits")
+FOREIGN = ("same-session-rows", "other-session-rows", "observed-at-backfill", "alt-stamp-relation",
+           "folded-tail-lineage", "two-commits")
 
 
 @pytest.mark.parametrize("foreign", FOREIGN)
@@ -432,6 +443,172 @@ def test_busy_at_lazy_begin_matches_eager(tmp_path):
         outcomes[mode] += (_dump(root / "lcm.db"),)
     assert outcomes[True][0] >= 1 and outcomes[True][1] == 0
     assert outcomes[True] == outcomes[False]
+
+
+def _judged(root, shape, prelock, monkeypatch, foreign=None, spies=()):
+    """Run a shape with optional foreign commit at the BEGIN seam and class-level spies; return the engine's
+    counts, the spies' records and the final dump."""
+    root.mkdir(parents=True, exist_ok=True)
+    setups, view = _shape(shape)
+    engine = _engine(root, prelock=prelock)
+    try:
+        for setup in setups:
+            engine.ingest(setup)
+        records = {name: [] for name, *_ in spies}
+        with monkeypatch.context() as patch:
+            for name, owner, attr, make in spies:
+                patch.setattr(owner, attr, make(getattr(owner, attr), records[name], engine))
+            if foreign is not None:
+                original, fired = MessageStore._ingest_prelock_before_begin, []
+
+                def seam(store):
+                    if store is engine._store and not fired:
+                        fired.append(True)
+                        _foreign_commit(foreign, root, view)
+                    return original(store)
+
+                patch.setattr(MessageStore, "_ingest_prelock_before_begin", seam)
+            before = _counts(engine)
+            engine.ingest(view)
+            counts = _counts(engine) - before
+        rows = _rows(engine)
+    finally:
+        engine.shutdown()
+    return counts, records, rows, _dump(root / "lcm.db")
+
+
+def _folded_reads(original, record, engine):
+    def read(store, key, *args, **kwargs):
+        if store is engine._store and str(key).startswith("folded_tail_lineage:"):
+            record.append(store._conn.in_transaction)
+        return original(store, key, *args, **kwargs)
+    return read
+
+
+def test_b_reclassify_rereads_the_folded_tail_cache(tmp_path, monkeypatch):
+    """The per-attempt folded-tail read cache (store._ingest_folded_tail_reads) is cleared for the reclassify: the
+    locked pass reads the key from SQL again and sees the foreign write."""
+    spies = [("folded", MessageStore, "read_metadata_json", _folded_reads)]
+    _, eager, eager_rows, eager_db = _judged(tmp_path / "eager", "warm-append", False, monkeypatch,
+                                             foreign="folded-tail-lineage", spies=spies)
+    counts, lazy, lazy_rows, lazy_db = _judged(tmp_path / "lazy", "warm-append", True, monkeypatch,
+                                               foreign="folded-tail-lineage", spies=spies)
+    assert eager["folded"], "the shape must read the folded-tail key for this test to mean anything"
+    assert counts["reclassified"] == 1
+    assert any(not locked for locked in lazy["folded"]) and any(lazy["folded"])  # read pre-lock, read again locked
+    assert lazy_rows == eager_rows and lazy_db == eager_db
+
+
+def _entry_cursors(original, record, engine):
+    def transaction(self, *args, **kwargs):
+        if self is engine:
+            record.append(self._ingest_cursor)
+        return original(self, *args, **kwargs)
+    return transaction
+
+
+def test_b_reclassify_restarts_from_the_attempts_original_cursor(tmp_path, monkeypatch):
+    """A pre-lock run that moves the cursor (a changed prefix rewinds it) must not leak that move into the locked pass."""
+    spies = [("cursor", LCMEngine, "_ingest_messages_transaction", _entry_cursors)]
+    _, eager, eager_rows, eager_db = _judged(tmp_path / "eager", "changed-prefix", False, monkeypatch,
+                                             foreign="other-session-rows", spies=spies)
+    counts, lazy, lazy_rows, lazy_db = _judged(tmp_path / "lazy", "changed-prefix", True, monkeypatch,
+                                               foreign="other-session-rows", spies=spies)
+    assert counts["reclassified"] == 1
+    assert len(eager["cursor"]) == 1 and lazy["cursor"] == eager["cursor"] * 2
+    assert lazy_rows == eager_rows and lazy_db == eager_db
+
+
+def _session_end(root, prelock, monkeypatch, *, poison=False, hold_lock=False):
+    root.mkdir(parents=True, exist_ok=True)
+    setups, view = _shape("warm-append")
+    engine = _engine(root, prelock=prelock)
+    passes, holder = [], None
+    try:
+        for setup in setups:
+            engine.ingest(setup)
+        with monkeypatch.context() as patch:
+            original = LCMEngine._identity_anchor_prematch
+
+            def prematch(self, *args, **kwargs):
+                if self is engine and poison:
+                    # A write reached during classification whose error is NOT swallowed here: it reaches the anchor
+                    # block's `except Exception: self._raise_ingest_busy(exc)` guard.
+                    self._store._conn.execute("INSERT INTO metadata(key, value) VALUES('test-2293-poison', '1') "
+                                              "ON CONFLICT(key) DO UPDATE SET value = value || '1'")
+                return original(self, *args, **kwargs)
+
+            patch.setattr(LCMEngine, "_identity_anchor_prematch", prematch)
+            transaction = LCMEngine._ingest_messages_transaction
+
+            def counted(self, *args, **kwargs):
+                if self is engine:
+                    passes.append(True)
+                return transaction(self, *args, **kwargs)
+
+            patch.setattr(LCMEngine, "_ingest_messages_transaction", counted)
+            if hold_lock:
+                holder = sqlite3.connect(root / "lcm.db", timeout=5, isolation_level=None)
+                holder.execute("BEGIN IMMEDIATE")
+            before = _counts(engine)
+            engine.on_session_end(SESSION, view)
+            counts = _counts(engine) - before
+            if holder is not None:
+                holder.execute("ROLLBACK")
+                holder.close()
+                holder = None
+        engine.shutdown()  # retries any frozen session-end tail
+        engine = None
+    finally:
+        if holder is not None:
+            holder.execute("ROLLBACK")
+            holder.close()
+        if engine is not None:
+            engine.shutdown()
+    return counts, len(passes), _dump(root / "lcm.db")
+
+
+def test_poisoned_write_under_the_busy_guard_at_session_end_matches_eager(tmp_path, monkeypatch):
+    eager_counts, _, eager_db = _session_end(tmp_path / "eager", False, monkeypatch, poison=True)
+    counts, _, lazy_db = _session_end(tmp_path / "lazy", True, monkeypatch, poison=True)
+    assert counts["poisoned"] >= 1 and counts["reclassified"] == 1
+    assert lazy_db == eager_db  # rows stored once; the classification-time write committed once, inside the lock
+
+
+def test_busy_at_lazy_begin_at_session_end_matches_eager(tmp_path, monkeypatch):
+    """A busy session end keeps today's admission retry and frozen tail; the admission retry runs eager, so the lazy
+    path classifies exactly once more than today (its discarded pre-lock pass)."""
+    _, eager_passes, eager_db = _session_end(tmp_path / "eager", False, monkeypatch, hold_lock=True)
+    counts, lazy_passes, lazy_db = _session_end(tmp_path / "lazy", True, monkeypatch, hold_lock=True)
+    assert counts["reclassified"] == 0
+    assert lazy_passes == eager_passes + 1
+    assert lazy_db == eager_db
+
+
+def test_cold_tail_retry_stays_eager(tmp_path, monkeypatch):
+    """A bound cold-tail retry (_ingest_messages with retried_tail) keeps BEGIN IMMEDIATE before its first read."""
+    seen = []
+    original = MessageStore.ingest_atomic
+
+    def record(store, *args, **kwargs):
+        seen.append(bool(kwargs.get("prelock", False)))
+        return original(store, *args, **kwargs)
+
+    monkeypatch.setattr(MessageStore, "ingest_atomic", record)
+    root = tmp_path / "tail"
+    root.mkdir()
+    engine = _engine(root, prelock=True)
+    try:
+        engine.ingest(_shape("warm-append")[1])
+        tail = {"kind": "cold", "view": _shape("warm-append")[1], "session_id": SESSION}
+        seen.clear()
+        try:
+            engine._ingest_messages(tail["view"], allow_session_end_replay_proof=False, no_view=True, retried_tail=tail)
+        except Exception:
+            pass  # only the BEGIN mode matters here
+    finally:
+        engine.shutdown()
+    assert seen and not any(seen)
 
 
 def test_switch_defaults_on_and_off_restores_eager_begin(tmp_path):
