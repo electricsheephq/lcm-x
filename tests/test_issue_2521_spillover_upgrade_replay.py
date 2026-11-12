@@ -267,13 +267,18 @@ def test_v0292_store_repeated_call_id_with_parts_is_stable_across_replays(tmp_pa
     history = _host_history(marker, _again([{"type": "text", "text": marker}] if second == "parts" else marker))
     if first == "parts":
         history[2]["content"] = [{"type": "text", "text": marker}]
-    counts = []
+    passes = []
     for _ in range(4):
         _run_phase(tmp_path, history)
-        rows = _read_store(tmp_path)
-        counts.append(len(rows))
-        assert rows[:len(original)] == original and _paired(rows), f"rows={len(rows)}"
-    assert counts[1:] == [counts[0]] * 3, counts
+        passes.append(_read_store(tmp_path))
+    rows = passes[0]
+    added = rows[len(original):]
+    assert rows[:len(original)] == original and _paired(rows), f"rows={len(rows)}"
+    # The added turn is stored once, whole and in order: both call occurrences and both result occurrences survive.
+    assert [row["role"] for row in added] == ["user", "assistant", "tool", "assistant"], [r["role"] for r in added]
+    assert added[0]["content"] == "Dump again." and added[3]["content"] == "Saved again.", added
+    assert _call_rows(rows) == {CALL: 2} and _tool_rows(rows) == {CALL: 2}, dict(_tool_rows(rows))
+    assert all(later == rows for later in passes[1:]), [len(p) for p in passes]
 
 
 @pytest.mark.parametrize("order", ["parts-first", "parts-second"])
@@ -284,15 +289,31 @@ def test_candidate_written_mixed_string_and_parts_is_stable(tmp_path, monkeypatc
     pair = _messages(marker)
     _candidate_written_bare_store(tmp_path, monkeypatch, pair)
     _run_phase(tmp_path, deepcopy(pair * 2), "spillover-upgrade", "spillover-conversation")
+    before = _read_store(tmp_path)
     history = deepcopy(pair * 2)
     history[1 if order == "parts-first" else 3]["content"] = [{"type": "text", "text": marker}]
-    counts = []
+    passes = []
     for _ in range(3):
         _run_phase(tmp_path, history, "spillover-upgrade", "spillover-conversation")
-        rows = _read_store(tmp_path)
-        counts.append(len(rows))
-        assert _paired(rows), f"rows={len(rows)}, tool={dict(_tool_rows(rows))}, call={dict(_call_rows(rows))}"
-    assert counts[1:] == [counts[0]] * 2, counts
+        passes.append(_read_store(tmp_path))
+    rows = passes[0]
+    # No earlier row is lost, every stored result keeps its call row (no orphan), and later passes add nothing.
+    assert rows[:len(before)] == before and _paired(rows), f"rows={len(rows)}, tool={dict(_tool_rows(rows))}"
+    assert all(later == rows for later in passes[1:]), [len(p) for p in passes]
+
+
+def test_v0292_store_parts_in_another_conversation_keep_the_old_path(tmp_path):
+    """Astra review (F1): the one-text-part reading binds only to a stored row of a conversation this one owns (it or
+    blank). The same session under another conversation keeps main's surplus path for parts: nothing lost."""
+    original, marker, _ = _v0292_store(tmp_path)
+
+    _run_phase(tmp_path, _parts_history(marker), conversation="other-conversation")
+
+    rows = _read_store(tmp_path)
+    counts = f"stored rows={len(rows)}, tool rows={dict(_tool_rows(rows))}"
+    assert rows[:len(original)] == original, counts
+    assert [row["content"] for row in rows[-2:]] == [content for _, content in NEW_TURN], counts
+    assert _tool_rows(rows)[CALL] == 2, counts
 
 
 def test_v0292_store_rebound_session_replay_loses_nothing(tmp_path):

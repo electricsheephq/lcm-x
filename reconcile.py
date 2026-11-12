@@ -1697,9 +1697,12 @@ class ReconcileMixin:
             if bare and len(stored_tail_rows) <= len(messages) and len(stored_tail) == len(stored_tail_rows):
                 pairs = list(zip(stored_tail_rows, messages))
                 # #2521 follow-up 1: a host tool result sent as one {type, text} part whose text is byte-equal to the
-                # stored bare row is compared as that string, here only, so it binds to that one stored occurrence.
+                # stored bare row of a conversation this one owns (it or blank) is compared as that string, here only,
+                # so it binds to that one stored occurrence.
+                owned = {str(getattr(self, "_conversation_id", None) or "").strip(), ""}
                 compared = {i: dict(msg, content=text) if (text := _single_text_part(msg.get("content"))) is not None
-                            and text == row.get("content") else msg for i, (row, msg) in enumerate(pairs) if i in bare}
+                            and text == row.get("content") and str(row.get("conversation_id") or "").strip() in owned
+                            else msg for i, (row, msg) in enumerate(pairs) if i in bare}
                 if (all(occurrence_identities.get(id(msg)) == stored_tail[k] for k, (_row, msg) in enumerate(pairs)
                         if k not in bare)
                         and all(tool_name(row) == tool_name(msg)
