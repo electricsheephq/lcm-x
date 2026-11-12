@@ -323,10 +323,14 @@ def test_detached_close_preserves_live_prepared_leaves(case, monkeypatch, fail_o
     assert discarded == [str(case.live._store.db_path)]
 
 
-@pytest.mark.parametrize("pattern,stored", [("C5*", False), ("Z*", True)], ids=["filtered", "unmatched"])
+@pytest.mark.parametrize("pattern,source,stored", [("C5*", "acp", False), ("cli:*", "cli", False),
+                                                   ("cli:*", "acp", True), ("Z*", "acp", True)],
+                         ids=["session-id", "child-platform", "other-platform", "unmatched"])
 @pytest.mark.parametrize("field", ["ignore_session_patterns", "stateless_session_patterns"])
-def test_operator_filtered_child_is_never_stored(case, field, pattern, stored):
-    setattr(case.live._config, field, [pattern])  # matches the child only, never the bound session
+def test_operator_filtered_child_is_never_stored(case, field, pattern, source, stored):
+    setattr(case.live._config, field, [pattern])  # never matches the bound session (bound platform acp)
+    with sqlite3.connect(case.state) as conn:
+        conn.execute("UPDATE sessions SET source=? WHERE id=?", (source, C))
     case.host.lists[C] = case.prefix + pair()
     recovery._SEEN.clear()
     case.live._enqueue_host_row_recovery(P, {})
@@ -335,7 +339,24 @@ def test_operator_filtered_child_is_never_stored(case, field, pattern, stored):
     if stored:
         assert_suffix(case, pair())
     else:
-        assert not rows(case) and recovery.host_row_recovery_counts()["session_filtered"] == before + 1
+        assert not rows(case) and ("read", C) not in case.host.calls
+        assert recovery.host_row_recovery_counts()["session_filtered"] == before + 1
+
+
+@pytest.mark.parametrize("field", ["ignore_session_patterns", "stateless_session_patterns"])
+def test_filtered_intermediate_prunes_its_subtree(case, field):
+    leaf = "D519"
+    with sqlite3.connect(case.state) as conn:
+        conn.execute("UPDATE sessions SET ended_at=2, end_reason='compression' WHERE id=?", (C,))
+        conn.execute("INSERT INTO sessions VALUES (?,?,?,?,?,?)", (leaf, C, None, None, None, "acp"))
+    case.host.lists[leaf] = case.prefix + pair()
+    setattr(case.live._config, field, ["C5*"])
+    recovery._SEEN.clear()
+    case.live._enqueue_host_row_recovery(P, {})
+    before = recovery.host_row_recovery_counts().get("session_filtered", 0)
+    assert not case.run()
+    assert not rows(case, leaf) and ("read", leaf) not in case.host.calls
+    assert recovery.host_row_recovery_counts()["session_filtered"] == before + 1
 
 
 def test_bind_without_handle_keeps_host_handle(case):

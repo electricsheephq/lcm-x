@@ -105,7 +105,7 @@ def _skip_on_tip_path(path, bound, handle, sid):
     return False
 
 
-def _candidates(path, bound, handle, handle_reason, filtered=lambda sid: False):
+def _candidates(path, bound, handle, handle_reason, filtered=lambda sid, source: False):
     excluded = {bound} if handle_reason else _tip_path(path, bound, handle)
     if excluded is None:
         return []
@@ -125,7 +125,7 @@ def _candidates(path, bound, handle, handle_reason, filtered=lambda sid: False):
                     logger.warning("LCM host-row recovery descendant walk capped")
                     return []
                 visited.add(sid)
-                if filtered(sid):  # an operator-ignored or stateless session, and all below it, stays unstored
+                if filtered(sid, row.get("source")):  # an operator-ignored or stateless session and its subtree
                     _count("session_filtered")
                     continue
                 if row["ended_at"] is None:
@@ -288,8 +288,9 @@ def _recover(engine_cls, config, home, db_path, state_path, conv, bound, platfor
         reason = _handle_reason(handle)
         patterns = [compile_session_patterns(config.ignore_session_patterns),
                     compile_session_patterns(config.stateless_session_patterns)]
-        def filtered(sid):
-            return any(matches_session_pattern(build_session_match_keys(sid, platform=platform), p) for p in patterns)
+        def filtered(sid, source):  # fail closed: the bound platform or the session's own host source
+            return any(matches_session_pattern(build_session_match_keys(sid, platform=pf), p)
+                       for pf in {platform, source or platform} for p in patterns)
         for sid in _candidates(state_path, bound, handle, reason, filtered):
             _recover_candidate(engine_cls, config, home, db_path, state_path, conv, bound, sid,
                                platform, window, handle, reason)
