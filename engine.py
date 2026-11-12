@@ -158,6 +158,7 @@ from .compress_run import CompressRun
 from .identity_anchor import IdentityAnchorMixin, _ROTATION_LINEAGE_UNRECORDED, _raw_remainder
 from .host_uid import HostUidShadowMixin, _valid_uid
 from .host_row_recovery import HostRowRecoveryMixin
+from .unended_catchup import UnendedCatchupMixin
 from .host_uid_emit import carry_identity, identity_emit_enabled, record_absorbed_message, sync_cached_host_metadata
 from .store_complete import HiddenBacklog, StoreCompleteMixin
 from .survival_fit import SurvivalFitMixin, _carries_survival_notice, _host_estimate, survival_reserve_fraction
@@ -719,6 +720,7 @@ class LCMEngine(
     IdentityAnchorMixin,
     HostUidShadowMixin,
     HostRowRecoveryMixin,
+    UnendedCatchupMixin,
     StoreCompleteMixin,
     SurvivalFitMixin,
     AuxiliarySessionMixin,
@@ -4681,6 +4683,7 @@ class LCMEngine(
                 raise RuntimeError("LCM engine is closed")
             self._on_session_start_unlocked(session_id, **kwargs)
             self._enqueue_host_row_recovery(session_id, kwargs)
+            self._enqueue_unended_catchup(session_id, kwargs)
             binding = self._emission_binding()
             for name in ("_compress_commit_proof", "_last_emission_descriptors"):
                 if not self._emission_proof_matches_binding(getattr(self, name), binding):
