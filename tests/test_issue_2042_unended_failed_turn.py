@@ -155,7 +155,7 @@ def test_stopped_first_turn_before_text_then_reap_user_row_is_stored(tmp_path, h
 
 @pytest.mark.xfail(
     strict=True,
-    reason="#2042 follow-up: a first turn stopped during a tool round (finalize path, no failed_turn boundary) is "
+    reason="#2653 (#2042 follow-up): a first turn stopped during a tool round (finalize path, no failed_turn boundary) is "
            "deferred by #1623 and never stored when no later turn completes",
 )
 def test_stopped_first_turn_during_tool_round_then_reap_user_row_is_stored(tmp_path, host, engines):
