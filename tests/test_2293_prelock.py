@@ -247,11 +247,11 @@ def _scenarios():
     return harness.SCENARIOS
 
 
-# Faults that lazy mode first meets inside its pre-lock pass (a held lock, or an error that escapes the pass). The
-# attempt discards that pass and continues exactly as eager does, so the lazy trace is the eager trace plus discarded
-# passes. Only for these faults, and only as insertions drawn from eager's own events: a repeated read, a store call
-# that raises, or a write whose implicit BEGIN met the held lock (P1). Every other scenario must match exactly.
-_DISCARDED_PASS_FAULTS = frozenset({"locked", "duplicate-tail", "prematch", "protect-path"})
+# Held-lock faults (RM ruling T1-18): lazy mode first meets the held lock inside its pre-lock pass, discards that
+# pass and continues exactly as eager does, so the lazy trace is the eager trace plus discarded passes. Only for these
+# faults, and only as insertions drawn from eager's own events: a repeated read, a store call that raises, or a write
+# whose implicit BEGIN met the held lock (P1). Every other scenario must match exactly.
+_DISCARDED_PASS_FAULTS = frozenset({"locked", "duplicate-tail"})
 
 
 def _discarded_passes_only(eager_n, lazy_n):

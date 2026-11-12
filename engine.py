@@ -7512,13 +7512,12 @@ class LCMEngine(
                                     break
                                 except BaseException as error:
                                     state = self._store._ingest_prelock_state
-                                    if (isinstance(error, (KeyboardInterrupt, SystemExit)) or state is None
+                                    # A crash-like exit (not an Exception) is never retried; the owner rolls back.
+                                    if (not isinstance(error, (Exception, _IngestReclassify)) or state is None
                                             or state.begin_failed is not None
                                             or not (isinstance(error, _IngestReclassify)
                                                     or state.phase == "prelock" or state.poisoned)):
                                         raise
-                                    if not isinstance(error, (Exception, _IngestReclassify)):
-                                        raise  # a crash-like exit is never retried; the owner rolls back
                                     if (not isinstance(error, _IngestReclassify) and state.phase == "prelock"
                                             and not state.poisoned and not state.implicit_begun
                                             and self._store._ingest_write_generation() == state.G0):

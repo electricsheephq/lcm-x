@@ -2141,10 +2141,8 @@ class MessageStore:
         conn.set_authorizer(None)
         if state.begin_failed is not None:
             raise state.begin_failed
-        if conn.in_transaction:
-            if not state.poisoned:
-                raise _SqliteSavepointError("Foreground ingest transaction lost before BEGIN")
-            conn.rollback()  # A denied cached DML may leave Python's implicit BEGIN behind.
+        if conn.in_transaction:  # sync and restart end every implicit transaction before this point
+            raise _SqliteSavepointError("Foreground ingest transaction lost before BEGIN")
         trace = getattr(conn, "_lcm_trace", None)
         if trace is not None:
             trace.ingest_admission = True
@@ -2263,9 +2261,6 @@ class MessageStore:
             if threading.get_ident() != thread:
                 return sqlite3.SQLITE_OK
             state = self._ingest_prelock_state
-            if (__debug__ and action in (sqlite3.SQLITE_INSERT, sqlite3.SQLITE_UPDATE, sqlite3.SQLITE_DELETE)
-                    and not self._write_lock._is_owned()):
-                logger.debug("Store write observed without _write_lock")
             if action == sqlite3.SQLITE_TRANSACTION and arg1 == "BEGIN":
                 state.implicit_begun = True
                 state.begin_seen_at = time.perf_counter()
@@ -2274,9 +2269,6 @@ class MessageStore:
                     scope["uncovered"] = True
             if (action in denied or action == sqlite3.SQLITE_PRAGMA and arg2 is not None
                     or action == sqlite3.SQLITE_TRANSACTION and arg1 in ("COMMIT", "ROLLBACK")):
-                # Diagnostic only; retain the existing lock discipline rather than enforce a new one.
-                if __debug__ and not self._write_lock._is_owned():
-                    logger.debug("Store write observed without _write_lock")
                 if not state.poisoned:
                     state.poisoned = True
                     self.ingest_prelock_counts["poisoned"] += 1
