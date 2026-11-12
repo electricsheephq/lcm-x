@@ -174,7 +174,7 @@ def test_v0292_users_only_stamped_store_upgrade_replay_stores_each_message_once(
     assert _call_rows(rows) == {CALL: 1}, counts
 
 
-# --- #2525 review follow-ups: shapes that miss guard (c) and keep the old duplicate path ----------------------------
+# --- #2525 review follow-ups: a parts-shaped tool result (follow-up 1) and a rebound session id (follow-up 2) ----
 
 def _parts_history(marker):
     """The same host transcript, with the tool result sent as content parts instead of a string (the shape Hermes
@@ -192,10 +192,15 @@ def _rebound_session_replay(tmp_path):
     return original, history, _read_store(tmp_path)
 
 
-def test_v0292_store_parts_shaped_tool_result_loses_nothing(tmp_path):
-    """Guard (c) compares the raw incoming content with the stored marker. A parts-shaped tool result misses it and
-    takes the old duplicate path: no row is lost, the call row's copy is linked, and the tool row's copy is stored
-    again, unlinked, with the marker text (a surplus row, not a loss)."""
+def _parts_variant_history(marker, parts):
+    history = _host_history(marker, NEW_TURN)
+    history[2]["content"] = parts
+    return history
+
+
+def test_v0292_store_parts_shaped_tool_result_stores_each_message_once(tmp_path):
+    """#2521 follow-up 1: a tool result sent as one text part whose text is byte-equal to the stored bare marker is
+    that stored row. The replay stores only the new turn: no copy of the tool row or its call row, nothing lost."""
     original, marker, _ = _v0292_store(tmp_path)
 
     _run_phase(tmp_path, _parts_history(marker))
@@ -203,27 +208,136 @@ def test_v0292_store_parts_shaped_tool_result_loses_nothing(tmp_path):
     rows = _read_store(tmp_path)
     counts = f"stored rows={len(rows)}, tool rows={dict(_tool_rows(rows))}"
     assert rows[:len(original)] == original, counts
+    assert len(rows) == len(original) + len(NEW_TURN), counts
     assert [row["content"] for row in rows[-2:]] == [content for _, content in NEW_TURN], counts
-    assert _tool_rows(rows) == {CALL: 2} and _call_rows(rows) == {CALL: 2}, counts
-    tool_copy = [row for row in rows[len(original):] if row["role"] == "tool"]
-    # The copy stores the parts as JSON; its text part is the marker.
-    assert len(tool_copy) == 1 and json.loads(tool_copy[0]["content"]) == [{"type": "text", "text": marker}], counts
-    with closing(sqlite3.connect(_home(tmp_path) / "lcm.db")) as connection:
-        links = connection.execute("SELECT store_id, kind FROM message_relations ORDER BY store_id").fetchall()
-    call_copy = [row["store_id"] for row in rows[len(original):] if row["role"] == "assistant" and row["tool_calls"]]
-    assert links == [(call_copy[0], "possible_replay_of")], links
+    assert _tool_rows(rows) == {CALL: 1} and _call_rows(rows) == {CALL: 1}, counts
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "#2525 review follow-up 1: guard (c) compares raw content, so a parts-shaped tool result re-stores the call "
-    "pair. Hermes sends a multimodal tool result as parts, so the comparison is a v0.30.1 design question."))
-def test_v0292_store_parts_shaped_tool_result_stores_each_message_once(tmp_path):
+def test_v0292_store_parts_shaped_second_replay_adds_nothing(tmp_path):
     original, marker, _ = _v0292_store(tmp_path)
+    _run_phase(tmp_path, _parts_history(marker))
+    upgraded = _read_store(tmp_path)
 
     _run_phase(tmp_path, _parts_history(marker))
 
+    assert _read_store(tmp_path) == upgraded
+
+
+@pytest.mark.parametrize("variant", ["one-byte-different", "extra-key", "two-parts", "not-text-type"])
+def test_v0292_store_parts_not_byte_equal_keep_the_old_duplicate_path(tmp_path, variant):
+    """Only one text part, exactly {type, text}, byte-equal to the stored marker reads as that row. Any other parts
+    shape keeps the old path: a surplus copy of the call pair, never a loss."""
+    original, marker, _ = _v0292_store(tmp_path)
+    parts = {
+        "one-byte-different": [{"type": "text", "text": marker + " "}],
+        "extra-key": [{"type": "text", "text": marker, "cache_control": {"type": "ephemeral"}}],
+        "two-parts": [{"type": "text", "text": marker}, {"type": "text", "text": "and more"}],
+        "not-text-type": [{"type": "output_text", "text": marker}],
+    }[variant]
+
+    _run_phase(tmp_path, _parts_variant_history(marker, parts))
+
     rows = _read_store(tmp_path)
-    assert len(rows) == len(original) + len(NEW_TURN), f"stored rows={len(rows)}"
+    counts = f"stored rows={len(rows)}, tool rows={dict(_tool_rows(rows))}"
+    assert rows[:len(original)] == original, counts
+    assert [row["content"] for row in rows[-2:]] == [content for _, content in NEW_TURN], counts
+    assert _tool_rows(rows) == {CALL: 2} and _call_rows(rows) == {CALL: 2}, counts
+    tool_copy = [row for row in rows[len(original):] if row["role"] == "tool"]
+    assert len(tool_copy) == 1 and json.loads(tool_copy[0]["content"]) == parts, counts
+
+
+def _again(content):
+    """A second turn reusing the call id, its tool result given as ``content``."""
+    return (("user", "Dump again."), ("assistant", "", {"tool_calls": [{"id": CALL, "type": "function",
+             "function": {"name": "dump", "arguments": "{}"}}]}), ("tool", content, {"tool_call_id": CALL}),
+            ("assistant", "Saved again."))
+
+
+def _paired(rows):
+    """Each stored tool row of CALL has a call row of CALL (no orphan result)."""
+    return _tool_rows(rows)[CALL] == _call_rows(rows)[CALL]
+
+
+@pytest.mark.parametrize("shape", ["parts-parts", "parts-string", "string-parts"])
+def test_v0292_store_repeated_call_id_with_parts_is_stable_across_replays(tmp_path, shape):
+    """Review round 1 (F1): the parts reading binds to one stored occurrence only. With the call id reused in a
+    later turn and either result sent as one text part, the same history replayed again adds nothing."""
+    original, marker, _ = _v0292_store(tmp_path)
+    first, second = shape.split("-")
+    history = _host_history(marker, _again([{"type": "text", "text": marker}] if second == "parts" else marker))
+    if first == "parts":
+        history[2]["content"] = [{"type": "text", "text": marker}]
+    passes = []
+    for _ in range(4):
+        _run_phase(tmp_path, history)
+        passes.append(_read_store(tmp_path))
+    rows = passes[0]
+    added = rows[len(original):]
+    assert rows[:len(original)] == original and _paired(rows), f"rows={len(rows)}"
+    # The added turn is stored once, whole and in order: both call occurrences and both result occurrences survive.
+    assert [row["role"] for row in added] == ["user", "assistant", "tool", "assistant"], [r["role"] for r in added]
+    assert added[0]["content"] == "Dump again." and added[3]["content"] == "Saved again.", added
+    assert _call_rows(rows) == {CALL: 2} and _tool_rows(rows) == {CALL: 2}, dict(_tool_rows(rows))
+    assert all(later == rows for later in passes[1:]), [len(p) for p in passes]
+
+
+@pytest.mark.parametrize("order", ["parts-first", "parts-second"])
+def test_candidate_written_mixed_string_and_parts_is_stable(tmp_path, monkeypatch, order):
+    """Review round 1 (F1): two stored copies of one call pair; a replay with one result as one text part and one
+    as a string adds nothing on later passes and never stores an orphan tool row."""
+    marker = _write_output(_home(tmp_path) / "cache" / "spillover" / "shared.txt")
+    pair = _messages(marker)
+    _candidate_written_bare_store(tmp_path, monkeypatch, pair)
+    _run_phase(tmp_path, deepcopy(pair * 2), "spillover-upgrade", "spillover-conversation")
+    before = _read_store(tmp_path)
+    history = deepcopy(pair * 2)
+    history[1 if order == "parts-first" else 3]["content"] = [{"type": "text", "text": marker}]
+    passes = []
+    for _ in range(3):
+        _run_phase(tmp_path, history, "spillover-upgrade", "spillover-conversation")
+        passes.append(_read_store(tmp_path))
+    rows = passes[0]
+    # No earlier row is lost, every stored result keeps its call row (no orphan), and later passes add nothing.
+    assert rows[:len(before)] == before and _paired(rows), f"rows={len(rows)}, tool={dict(_tool_rows(rows))}"
+    assert all(later == rows for later in passes[1:]), [len(p) for p in passes]
+
+
+def test_v0292_store_parts_in_another_conversation_keep_the_old_path(tmp_path):
+    """Astra review (F1): the one-text-part reading binds only to a stored row of a conversation this one owns (it or
+    blank). The same session under another conversation keeps main's surplus path for parts: nothing lost."""
+    original, marker, _ = _v0292_store(tmp_path)
+
+    _run_phase(tmp_path, _parts_history(marker), conversation="other-conversation")
+
+    rows = _read_store(tmp_path)
+    counts = f"stored rows={len(rows)}, tool rows={dict(_tool_rows(rows))}"
+    assert rows[:len(original)] == original, counts
+    assert [row["content"] for row in rows[-2:]] == [content for _, content in NEW_TURN], counts
+    assert _tool_rows(rows)[CALL] == 2, counts
+
+
+@pytest.mark.parametrize("shape", ["string", "parts"])
+def test_v0292_store_parts_keep_a_later_user_occurrence_on_full_replay(tmp_path, shape):
+    """Bot review (P1): the #1511 later-user-stamp guard sees the same parts reading as the bare binding. A full
+    replay of the stored history, with the marker as one text part and one UID-less user row re-sent with a later
+    stamp, keeps that user row as a new occurrence (the string control does the same). Nothing stored is lost."""
+    original, marker, _ = _v0292_store(tmp_path)
+    history = _host_history(marker)
+    if shape == "parts":
+        history[2]["content"] = [{"type": "text", "text": marker}]
+    history[0]["timestamp"] = T0 + 100.5
+
+    _run_phase(tmp_path, history)
+
+    rows = _read_store(tmp_path)
+    added = rows[len(original):]
+    counts = f"stored rows={len(rows)}, added={[row['role'] for row in added]}"
+    assert rows[:len(original)] == original, counts
+    assert added and added[0]["role"] == "user" and added[0]["content"] == history[0]["content"], counts
+    # The string reading adds only the user occurrence; the parts reading also keeps main's surplus call pair after it
+    # (the occurrence matcher below the guard reads the parts row as JSON, as on main): never a loss.
+    assert len(added) == (1 if shape == "string" else 3), counts
+    assert _tool_rows(rows)[CALL] == _call_rows(rows)[CALL], counts
 
 
 def test_v0292_store_rebound_session_replay_loses_nothing(tmp_path):

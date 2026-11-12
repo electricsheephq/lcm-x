@@ -410,7 +410,28 @@ def _strip_volatile_host_scaffolding(content: str) -> str:
     return content
 
 
+def _single_text_part(content):
+    """The text of a content list holding exactly one {"type": "text", "text": str} part, else None (#2521)."""
+    if (isinstance(content, list) and len(content) == 1 and isinstance(content[0], dict)
+            and set(content[0]) == {"type", "text"} and content[0]["type"] == "text"
+            and isinstance(content[0]["text"], str)):
+        return content[0]["text"]
+    return None
+
+
 class ReconcileMixin:
+    def _bare_part_reading(self, msg, row):
+        """#2521 follow-up 1: a host message whose content is one {type, text} part, text byte-equal to the paired stored
+        bare-marker tool row of a conversation this one owns (it or blank), read as that string; else the message.
+        The bare prefix binding and the #1511 later-user-stamp guard both use it, so they see the same reading."""
+        text = _single_text_part(msg.get("content"))
+        if (text is not None and row.get("role") == "tool" and text == row.get("content")
+                and _is_hermes_persisted_output_marker(text)
+                and str(row.get("conversation_id") or "").strip()
+                in {str(getattr(self, "_conversation_id", None) or "").strip(), ""}):
+            return dict(msg, content=text)
+        return msg
+
     @staticmethod
     def _canonicalize_tool_call_identity_value(value: Any) -> Any:
         if isinstance(value, dict):
@@ -1687,14 +1708,18 @@ class ReconcileMixin:
                     and _is_hermes_persisted_output_marker(row.get("content") or "")]
             if bare and len(stored_tail_rows) <= len(messages) and len(stored_tail) == len(stored_tail_rows):
                 pairs = list(zip(stored_tail_rows, messages))
+                # #2521 follow-up 1: a host tool result sent as one {type, text} part whose text is byte-equal to the
+                # stored bare row of a conversation this one owns (it or blank) is compared as that string, here only,
+                # so it binds to that one stored occurrence.
+                compared = {i: self._bare_part_reading(msg, row) for i, (row, msg) in enumerate(pairs) if i in bare}
                 if (all(occurrence_identities.get(id(msg)) == stored_tail[k] for k, (_row, msg) in enumerate(pairs)
                         if k not in bare)
                         and all(tool_name(row) == tool_name(msg)
                                 and self._session_end_rows_equal(row, msg, session_id=self._session_id)
                                 and (not msg.get("session_id") or msg["session_id"] == row["session_id"])
-                                for row, msg in (pairs[i] for i in bare))
+                                for row, msg in ((pairs[i][0], compared[i]) for i in bare))
                         and all(self._session_end_prefix_compare_value(pairs[i][0]["content"], session_id=self._session_id)
-                                == pairs[i][1].get("content") for i in bare)):
+                                == compared[i].get("content") for i in bare)):
                     occurrence_identities.update((id(pairs[i][1]), stored_tail[i]) for i in bare)
         except Exception:  # an injected fault in the bare compare: no binding, as on main
             logger.debug("LCM legacy bare-marker prefix binding skipped", exc_info=True)
@@ -3252,7 +3277,8 @@ class ReconcileMixin:
             # #1511: full literal replay proves position, not a later user occurrence.
             # Keep partial/adopted views and UID-bound occurrences on their existing proofs.
             if (identity_anchor_enabled() and cursor == len(messages) == len(stored_tail_rows)
-                    and stored_tail == [self._message_replay_identity(m) for m in messages]):
+                    and stored_tail == [self._message_replay_identity(self._bare_part_reading(m, row))
+                                        for m, row in zip(messages, stored_tail_rows)]):
                 stamps = [_normalize_observed_at(m.get("timestamp")) for m in messages]
                 changed = [i for i, (stamp, row) in enumerate(zip(stamps, stored_tail_rows))
                            if stamp is not None and row.get("observed_at") is not None
