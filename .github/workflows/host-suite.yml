@@ -117,7 +117,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p "$HERMES_HOME"
-          ulimit -n 1024
+          ulimit -n 4096
           "$LCM_REAL_HERMES_PYTHON" -m pytest tests -q -p no:xdist -p no:cacheprovider -ra \
             --junitxml="suite-$HOST.xml" 2>&1 | tee "$RUNNER_TEMP/suite-$HOST.log"
 
