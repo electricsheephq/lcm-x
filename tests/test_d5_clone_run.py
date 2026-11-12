@@ -187,6 +187,58 @@ def test_any_preflight_failure_stops_before_either_arm(setup, fail):
     assert host.armed == [] and not (run_dir / "rc").exists() and not (run_dir / "ga").exists()
 
 
+@pytest.mark.parametrize("fail", ["P3", "P4", "P6", "P7"])
+def test_without_the_informational_flag_every_recorded_preflight_still_gates_and_the_receipt_is_unchanged(setup, fail):
+    """(a) The default path: each recorded preflight still stops the run before either arm, and the D5 receipt has the
+    same shape and verdict whether the flag is left out or passed as False."""
+    _, config, run_dir = setup
+    stops = [r.run(FakeHost(config, run_dir / name, fail=fail), rc_id="rc-synthetic", **kw)
+             for name, kw in (("a", {}), ("b", {"informational": False}))]
+    for receipt in stops:
+        assert receipt["stopped_at"] == fail and receipt["schema"] == r.SCHEMA
+        assert "verdict" not in receipt and "instrument" not in receipt
+    assert [{k: v for k, v in x.items() if k != "wall_s"} for x in stops][0] == \
+        [{k: v for k, v in x.items() if k != "wall_s"} for x in stops][1]
+    hosts = [FakeHost(config, run_dir / name) for name in ("c", "d")]
+    full = [r.run(hosts[0], rc_id="rc-synthetic"), r.run(hosts[1], rc_id="rc-synthetic", informational=False)]
+    assert sorted(full[0]) == sorted(full[1]) and sorted(full[0]["bars"]) == [f"bar{i}" for i in range(1, 7)]
+    assert full[0]["verdict"] == full[1]["verdict"] and full[0]["verdict"]["raw"] == bars.PASS
+    assert [len(h.replays) for h in hosts] == [12, 12] and full[0]["schema"] == r.SCHEMA
+
+
+class RecordingHost(FakeHost):
+    def preflight(self, name, plan):
+        self.calls.append(("preflight", name))
+        return super().preflight(name, plan)
+
+    def capture(self, *args, **kwargs):
+        self.calls.append(("capture",))
+        return super().capture(*args, **kwargs)
+
+
+@pytest.mark.parametrize("fail", ["P4", "ga_once"])
+def test_the_informational_check_reads_no_recorded_preflight_makes_no_bind_and_is_never_d5(setup, fail):
+    """(b) With the flag: no recorded preflight is read or gated (P5 still runs live), no T0/H8 capture and no replay,
+    a failed GA check is recorded and not re-run, and the receipt has its own schema, bars 3 to 6 and no verdict."""
+    snap, config, run_dir = setup
+    before = inventory(snap)
+    host = RecordingHost(config, run_dir, fail=fail)
+    receipt = r.run(host, rc_id="rc-synthetic", informational=True)
+    assert inventory(snap) == before
+    assert receipt["schema"] == "informational, not D5" == r.INFORMATIONAL_SCHEMA
+    assert "verdict" not in receipt and "stopped_at" not in receipt and sorted(receipt["bars"]) == ["bar3", "bar4", "bar5", "bar6"]
+    assert {n: receipt["preflights"][n]["verdict"] for n in ("P3", "P4", "P6", "P7")} == dict.fromkeys(
+        ("P3", "P4", "P6", "P7"), r.NOT_RUN) and receipt["preflights"]["P5"]["verdict"] == "PASS"
+    assert [c for c in host.calls if c[0] == "preflight"] == [("preflight", "P5")]
+    assert not any(c[0] in ("capture", "configure_bar1") for c in host.calls)
+    assert host.replays == [] and receipt["binds"] == [] and not list((run_dir / "rc").glob("captures/*"))
+    assert host.armed == ["rc", "ga"] and receipt["ga_rerun"] is None  # ga_once: recorded, never re-run.
+    assert receipt["arms"]["ga"]["checks"]["by_kind_status"].get("schema:fail", 0) == (fail == "ga_once")
+    assert receipt["arms"]["rc"]["workload"]["turns_completed"] == 36
+    assert receipt["instrument"]["instrument_sha256"] == r.instrument_identity()["instrument_sha256"]
+    assert MARKER not in json.dumps(receipt)
+
+
 def test_rerun_rules(setup):
     _, config, run_dir = setup
     prior = {"rc": "rc-synthetic", "verdict": {"raw": bars.FAIL}}
