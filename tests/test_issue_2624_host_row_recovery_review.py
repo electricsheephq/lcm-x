@@ -353,10 +353,12 @@ def test_filtered_intermediate_prunes_its_subtree(case, field):
     setattr(case.live._config, field, ["C5*"])
     recovery._SEEN.clear()
     case.live._enqueue_host_row_recovery(P, {})
-    before = recovery.host_row_recovery_counts().get("session_filtered", 0)
+    before = recovery.host_row_recovery_counts()
     assert not case.run()
+    after = recovery.host_row_recovery_counts()
     assert not rows(case, leaf) and ("read", leaf) not in case.host.calls
-    assert recovery.host_row_recovery_counts()["session_filtered"] == before + 1
+    assert after["session_filtered"] == before["session_filtered"] + 1
+    assert after["candidates"] == before["candidates"] and after["no_provenance"] == before["no_provenance"]
 
 
 def test_bind_without_handle_keeps_host_handle(case):

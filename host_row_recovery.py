@@ -26,7 +26,7 @@ _WARNED = set()
 _COUNTS = Counter(dict.fromkeys((
     "candidates", "recovered_candidates", "recovered_rows", "unproven", "reader_error",
     "handle_missing", "signature_mismatch", "suffix_rejected", "ignored_in_suffix", "raced",
-    "no_provenance", "walk_capped", "empty_suffix", "on_tip_path",
+    "no_provenance", "walk_capped", "empty_suffix", "on_tip_path", "session_filtered",
 ), 0))
 _MAX_SESSIONS = 4096
 

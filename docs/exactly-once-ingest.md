@@ -362,7 +362,7 @@ A tail exists because the store hit SQLite busy at session end. The ledger is in
   middle of a turn leaves that turn's rows (the user row, any tool-call message and tool results written so far, and
   the reply if it was written) only in the abandoned child. At the next start of that conversation, LCM-X walks from
   the bound session through ended compression sessions to every unended leaf, skips branch, delegate, reset and tool
-  sessions, keeps only leaves under which its store holds this conversation's compaction proof or rows, and skips
+  sessions and any session matching an ignore or stateless session pattern (with everything below it), keeps only leaves under which its store holds this conversation's compaction proof or rows, and skips
   every session on the path to the host's own compression tip (a host that can still adopt a leaf is left to do so).
   It reads each leaf with the host's own reader, proves the leaf's prefix against that leaf's durable compaction
   proof on the strict path only (no native, scaffold-only, merged-row or replaced-tail outcome), and appends exactly
