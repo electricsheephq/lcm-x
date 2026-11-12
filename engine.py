@@ -4606,7 +4606,8 @@ class LCMEngine(
                 "keep compression off on this fork"
             )
         with self._exclusive_lifecycle("rebind"):
-            self._host_session_db = session_db
+            if session_db is not None:  # a call without a handle keeps the one already held
+                self._host_session_db = session_db
             if (
                 self._stable_use_closed
                 or not self._session_id

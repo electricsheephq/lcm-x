@@ -135,7 +135,8 @@ def test_real_full_scheduler_warning_hides_raw_session_id(case, monkeypatch, cap
             assert str(case.live._store.db_path.resolve()) not in warnings[0]
             db_digest = hashlib.sha256(case.live._store.db_identity.encode()).hexdigest()[:16]
             assert "host-row-recovery-db:" + db_digest in warnings[0]
-            assert "host-row-recovery:" + hashlib.sha256(P.encode()).hexdigest()[:16] in warnings[0]
+            scope = repr((case.live._hermes_home, case.live._conversation_id, P))
+            assert "host-row-recovery:" + hashlib.sha256(scope.encode()).hexdigest()[:16] in warnings[0]
             assert not recovery._SEEN
     finally:
         release.set()
@@ -320,3 +321,55 @@ def test_detached_close_preserves_live_prepared_leaves(case, monkeypatch, fail_o
     # Positive control: the same live engine's explicit cleanup still discards.
     case.live._discard_prepared_leaves()
     assert discarded == [str(case.live._store.db_path)]
+
+
+@pytest.mark.parametrize("pattern,stored", [("C5*", False), ("Z*", True)], ids=["filtered", "unmatched"])
+@pytest.mark.parametrize("field", ["ignore_session_patterns", "stateless_session_patterns"])
+def test_operator_filtered_child_is_never_stored(case, field, pattern, stored):
+    setattr(case.live._config, field, [pattern])  # matches the child only, never the bound session
+    case.host.lists[C] = case.prefix + pair()
+    recovery._SEEN.clear()
+    case.live._enqueue_host_row_recovery(P, {})
+    before = recovery.host_row_recovery_counts().get("session_filtered", 0)
+    assert not case.run()
+    if stored:
+        assert_suffix(case, pair())
+    else:
+        assert not rows(case) and recovery.host_row_recovery_counts()["session_filtered"] == before + 1
+
+
+def test_bind_without_handle_keeps_host_handle(case):
+    held = case.live._host_session_db
+    case.live.bind_session_state(None, P)
+    assert case.live._host_session_db is held
+
+
+def test_payload_protection_runs_outside_store_write_lock(case, monkeypatch):
+    original, probed = recovery.protect_messages_for_ingest, []
+
+    def probe(*args, **kwargs):
+        conn = sqlite3.connect(case.live._store.db_path, timeout=0)
+        try:
+            conn.execute("BEGIN IMMEDIATE")  # fails at once while recovery holds the write lock
+            conn.rollback()
+            probed.append(True)
+        finally:
+            conn.close()
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(recovery, "protect_messages_for_ingest", probe)
+    case.host.lists[C] = case.prefix + pair()
+    assert not case.run()
+    assert probed == [True]
+    assert_suffix(case, pair())
+
+
+def test_scheduler_key_separates_bindings_of_one_session(case, monkeypatch):
+    keys = []
+    monkeypatch.setattr(recovery._HOST_ROW_RECOVERY_SCHEDULER, "schedule", lambda key, job: keys.append(key) or True)
+    recovery._SEEN.clear()
+    case.live._enqueue_host_row_recovery(P, {})
+    monkeypatch.setattr(case.live, "_conversation_id", "another-conversation")
+    case.live._enqueue_host_row_recovery(P, {})
+    assert len(keys) == 2 and keys[0][0] == keys[1][0] and keys[0][1] != keys[1][1]
+    assert len(recovery._SEEN) == 2

@@ -8,7 +8,7 @@ import logging
 import sqlite3
 import threading
 from collections import Counter
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait
 from pathlib import Path
 
 import pytest
@@ -349,6 +349,12 @@ def test_foreground_during_recovery_both_commit_orders(case, monkeypatch, order)
             assert commit.wait(15)
         return ids
     monkeypatch.setattr(MessageStore, '_append_protected_batch', held)
+    store_atomic, entered = MessageStore.atomic, threading.Event()
+    def watched(store, *args, **kwargs):  # the foreground reaches the store's write entry
+        if store is case.live._store and attempted.is_set():
+            entered.set()
+        return store_atomic(store, *args, **kwargs)
+    monkeypatch.setattr(MessageStore, 'atomic', watched)
     foreground = [case.live._store.to_openai_msg(m) for m in rows(case, P)] + pair(stamps=False)
     before = len(rows(case, P))
     with ThreadPoolExecutor(max_workers=2) as pool:
@@ -363,7 +369,8 @@ def test_foreground_during_recovery_both_commit_orders(case, monkeypatch, order)
                 attempted.set()
                 case.live.ingest(foreground)
             concurrent = pool.submit(ingest_live)
-            assert attempted.wait(15)
+            assert entered.wait(15)
+            assert not wait([concurrent], timeout=0.5).done  # blocked behind the held recovery transaction
             commit.set()
         worker.result(timeout=20)
         if order == 'recovery_commits_first':

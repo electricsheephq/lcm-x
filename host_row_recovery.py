@@ -16,6 +16,7 @@ from .ingest_protection import protect_messages_for_ingest
 from .maintenance_scheduler import _HOST_ROW_RECOVERY_SCHEDULER
 from .message_analysis import _tool_call_id, _tool_result_names
 from .reconcile import _commit_proof_identity_digest, _proof_user_identity
+from .session_patterns import build_session_match_keys, compile_session_patterns, matches_session_pattern
 from .tokens import count_message_tokens
 
 logger = logging.getLogger(__name__)
@@ -104,7 +105,7 @@ def _skip_on_tip_path(path, bound, handle, sid):
     return False
 
 
-def _candidates(path, bound, handle, handle_reason):
+def _candidates(path, bound, handle, handle_reason, filtered=lambda sid: False):
     excluded = {bound} if handle_reason else _tip_path(path, bound, handle)
     if excluded is None:
         return []
@@ -124,6 +125,9 @@ def _candidates(path, bound, handle, handle_reason):
                     logger.warning("LCM host-row recovery descendant walk capped")
                     return []
                 visited.add(sid)
+                if filtered(sid):  # an operator-ignored or stateless session, and all below it, stays unstored
+                    _count("session_filtered")
+                    continue
                 if row["ended_at"] is None:
                     if sid not in excluded:
                         leaves.append(sid)
@@ -243,6 +247,12 @@ def _recover_candidate(engine_cls, config, home, db_path, state_path, conv, boun
         if uids is not None:
             uids["conversation_id"] = conv
             lineage = det._host_uid_lineage_key(sid, hermes_home=home, store=store)[0]
+        names = _tool_result_names(messages)  # file reads and payload writes stay outside the write lock
+        protected = protect_messages_for_ingest(
+            suffix, config=det._config, hermes_home=home, session_id=sid,
+            tool_name_hints=[names.get(cursor + i, "") for i in range(len(suffix))],
+            context_window_tokens=window,
+        )
         with store.atomic(immediate=True):
             reset = conn.execute(
                 "SELECT last_reset_at FROM lcm_lifecycle_state WHERE conversation_id=?", (conv,),
@@ -253,12 +263,6 @@ def _recover_candidate(engine_cls, config, home, db_path, state_path, conv, boun
             checked = _strict_proof_cursor(det, messages)
             if checked != cursor or len(messages[checked:]) != len(suffix):
                 return _unproven(sid, "raced", len(messages))
-            names = _tool_result_names(messages)
-            protected = protect_messages_for_ingest(
-                suffix, config=det._config, hermes_home=home, session_id=sid,
-                tool_name_hints=[names.get(cursor + i, "") for i in range(len(suffix))],
-                context_window_tokens=window,
-            )
             ids = store._append_protected_batch(
                 sid, protected, [count_message_tokens(m) for m in protected], source=platform,
                 conversation_id=conv, metadata_messages=suffix,
@@ -282,7 +286,11 @@ def _recover_candidate(engine_cls, config, home, db_path, state_path, conv, boun
 def _recover(engine_cls, config, home, db_path, state_path, conv, bound, platform, window, handle):
     try:
         reason = _handle_reason(handle)
-        for sid in _candidates(state_path, bound, handle, reason):
+        patterns = [compile_session_patterns(config.ignore_session_patterns),
+                    compile_session_patterns(config.stateless_session_patterns)]
+        def filtered(sid):
+            return any(matches_session_pattern(build_session_match_keys(sid, platform=platform), p) for p in patterns)
+        for sid in _candidates(state_path, bound, handle, reason, filtered):
             _recover_candidate(engine_cls, config, home, db_path, state_path, conv, bound, sid,
                                platform, window, handle, reason)
     except Exception:
@@ -312,7 +320,7 @@ class HostRowRecoveryMixin:
                         self.context_length, self._host_session_db)
                 scheduler_key = (
                     "host-row-recovery-db:" + hashlib.sha256(key[0].encode()).hexdigest()[:16],
-                    "host-row-recovery:" + hashlib.sha256(key[3].encode()).hexdigest()[:16],
+                    "host-row-recovery:" + hashlib.sha256(repr(key[1:]).encode()).hexdigest()[:16],
                 )
                 if _HOST_ROW_RECOVERY_SCHEDULER.schedule(scheduler_key, lambda: _recover(*args)):
                     _SEEN.add(key)
