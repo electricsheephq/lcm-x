@@ -98,7 +98,7 @@ def test_report_reason_keeps_both_edges(tmp_path):
     assert line == f"- ERROR `{row['cell']}` on fixture: " + reason[:200] + " ... " + reason[-400:]
 
 
-HELD_TARGETS = ["reply-held-crash/" + name for name in ("rotation-turn", "plain-turn", "multi-hop")]
+HELD_TARGETS = ["reply-held-crash/" + name for name in ("rotation-turn", "plain-turn", "multi-hop", "tool-turn", "tool-loop")]
 HELD_CONTROLS = ["reply-held-crash/pre-rotation", "reply-held-crash/in-place"]
 CI_HOST_NAMES = list(json.loads(ci.CI_HOSTS.read_text())["hosts"])
 
