@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 from collections import Counter
 
 
@@ -51,6 +52,27 @@ HOSTS_WITHOUT_POST_TOOL_REANCHOR = frozenset({"345cd2b057a452236de401d3534b8502a
                                               "d337b736aa1e8ebecfab043842d13e4a2d2f48a3"})
 
 
+def _dispatches(a, gaps, failures):
+    """Validate each dispatch once; yield matched calls in issue order, then report extras."""
+    free = list(a.get("tool_dispatch", []))
+    for c in a.get("tool_issues", []):
+        name, args = underlying(c["name"], c["args"])
+        d = next((d for d in free if d.get("id") == c["id"]), None) or \
+            next((d for d in free if d.get("id") is None and d["name"] == name and canon(d["args"]) == canon(args)), None)
+        if d is None:
+            gaps.append(f"{a['tag']}: planned {c['name']} ({c['id']}) was never dispatched by the host")
+            continue
+        free.remove(d)
+        if d["name"] != name or canon(d["args"]) != canon(args):
+            failures.append(f"{a['tag']}: {c['id']} planned {c['name']} but the host ran {d['name']}")
+        elif not d.get("ok"):
+            failures.append(f"{a['tag']}: {c['name']} ({c['id']}) failed: {d.get('detail')}")
+        elif d.get("chars", 0) < (c.get("expect") or {}).get("min_chars", 0):
+            failures.append(f"{a['tag']}: {c['name']} result {d.get('chars')} chars < {c['expect']['min_chars']}")
+        yield c, d
+    failures += [f"{a['tag']}: unplanned host dispatch of {d['name']}" for d in free]
+
+
 def bind(atts: list[dict], lineage_of=lambda a: "chat", *, license_wire_notices: bool = False) -> dict:
     """Per completed attempt: gaps (dispatch never happened -> UNSUPPORTED), failures (wrong/failed/incomplete/unseen
     result, unplanned dispatch -> FAIL) and the expected keys. Calls of unfinished attempts may be stored at most once.
@@ -69,22 +91,8 @@ def bind(atts: list[dict], lineage_of=lambda a: "chat", *, license_wire_notices:
                 loose |= {(g, "call", c["id"], c["name"], canon(c["args"]))}
                 loose |= {k for k in [(g, "tool", c["id"], s["sha"]) for s in a.get("tool_seen", []) if s["id"] == c["id"]]}
             continue
-        free = [d for d in a.get("tool_dispatch", [])]
         seen = {s["id"]: s for s in a.get("tool_seen", [])}
-        for c in issues:
-            name, args = underlying(c["name"], c["args"])
-            d = next((d for d in free if d.get("id") == c["id"]), None) or \
-                next((d for d in free if d.get("id") is None and d["name"] == name and canon(d["args"]) == canon(args)), None)
-            if d is None:
-                gaps.append(f"{a['tag']}: planned {c['name']} ({c['id']}) was never dispatched by the host")
-                continue
-            free.remove(d)
-            if d["name"] != name or canon(d["args"]) != canon(args):
-                failures.append(f"{a['tag']}: {c['id']} planned {c['name']} but the host ran {d['name']}")
-            elif not d.get("ok"):
-                failures.append(f"{a['tag']}: {c['name']} ({c['id']}) failed: {d.get('detail')}")
-            elif d.get("chars", 0) < (c.get("expect") or {}).get("min_chars", 0):
-                failures.append(f"{a['tag']}: {c['name']} result {d.get('chars')} chars < {c['expect']['min_chars']}")
+        for c, d in _dispatches(a, gaps, failures):
             expected[(g, "call", c["id"], c["name"], canon(c["args"]))] += 1
             if license_wire_notices and c["id"] in seen and seen[c["id"]].get("host_wire_notice") \
                     and d.get("result_sha256"):
@@ -94,7 +102,6 @@ def bind(atts: list[dict], lineage_of=lambda a: "chat", *, license_wire_notices:
                 expected[(g, "tool", c["id"], seen[c["id"]]["sha"])] += 1
             else:
                 failures.append(f"{a['tag']}: the result of {c['id']} never reached the next provider request")
-        failures += [f"{a['tag']}: unplanned host dispatch of {d['name']}" for d in free]
     return {"gaps": gaps, "failures": failures, "expected": expected, "loose": loose, "wire_notices": wire_notices}
 
 
@@ -125,6 +132,39 @@ def stored_keys(rows, lineage=lambda sid: "chat", *, store_ids=None) -> Counter:
                 fn = c.get("function") or {}
                 record((g, "call", c.get("id"), fn.get("name"), canon(fn.get("arguments") or "{}")), store_id)
     return keys
+
+
+def host_held(atts, bound, state, group, turns, lineage_of):
+    """Validate interrupted held-fault tool turns: host presence requires the issued call signature once;
+    result keys retain the host's content, once per distinct key."""
+    selected = [a for a in atts if a["prefix"] == "T" and not a["ended"] and a["turn"] in turns]
+    if not selected:
+        return None
+    for a in selected:
+        # Exhaust dispatch validation even when the host DB is unavailable.
+        list(_dispatches(a, bound["gaps"], bound["failures"]))
+    try:
+        con = sqlite3.connect(state.resolve().as_uri() + "?mode=ro", uri=True)
+        try:
+            rows = con.execute("SELECT id, session_id, role, content, tool_calls, tool_call_id FROM messages "
+                               "WHERE role = 'tool' OR (role = 'assistant' AND tool_calls IS NOT NULL)").fetchall()
+        finally:
+            con.close()
+    except sqlite3.Error as exc:
+        return {"unavailable": "state.db unreadable: " + type(exc).__name__}
+    keys, records = stored_keys(rows, group), []
+    for a in selected:
+        g = lineage_of(a)
+        for c in a["tool_issues"]:
+            bound["loose"] = {k for k in bound["loose"] if not (k[0] == g and k[2] == c["id"])}
+            issued = (g, "call", c["id"], c["name"], canon(c["args"]))
+            held_keys = dict.fromkeys(issued if k[1] == "call" else k for k in keys
+                                      if k[:3] in ((g, "call", c["id"]), (g, "tool", c["id"])))
+            for k in held_keys:
+                bound["expected"][k] = 1
+                records.append(dict(tag=a["tag"], session=g, id=c["id"], kind=k[1],
+                                    key=hashlib.sha256(json.dumps(k[1:]).encode()).hexdigest()[:12]))
+    return {"rows": len(records), "records": records}
 
 
 def compare(expected: Counter, loose: set, stored: Counter, *, store_ids=None, surplus_keys=None) -> dict:

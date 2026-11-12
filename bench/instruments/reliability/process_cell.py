@@ -49,6 +49,8 @@ R2_CELLS = [C.cell("stop-after-tool/no-retry/in-place", [1623], in_place=True, t
 # #659 probes: selected by an explicit --cells pattern only (cells.select opt_in), so --cells all, the nightly matrix and
 # ci.expected_cells are unchanged.
 R2_PROBE_CELLS = C.probe_cells()
+# #2624: opt-in held-fault controls, selected the same way (explicit --cells pattern only).
+R2_CONTROL_CELLS = [C.held_tool_cell("tool-loop", in_place=True)]
 # #659: the only probe class with a declared bar (the host rebuilds its system prompt at every commit).
 PROBE_BARS = {"host-instruction": 1.0, "host-instruction-rebuild": 1.0}
 # gateway-process: why no local platform can drive an R1 gateway cell, cited per host at run time.
@@ -213,6 +215,10 @@ class Scenario:
             return {"content": "ok", "log": {"unexpected": True}}
         step, st["step"] = st["step"], st["step"] + 1
         log = {"turn": t, "kind": st["kind"], "step": step}
+        if (st["phase"] == "A" and step >= 1 and getattr(run, "reply_fault", None) is not None
+                and run.reply_fault.fault.get("at") == "tool_results" and run.reply_fault.fault["turn"] == t):
+            run.event(turn=t, event="reply_fault_hold", tag=f"T{t:02d}", step=step, session_prefix="T")
+            return {"hold_until_killed": True, "log": log}
         if run.crash_due(t):
             return {"hold_until_killed": True, "on_hold": lambda: run.crash(t), "log": log}
         groups = self.plan(t)
@@ -228,10 +234,16 @@ class Scenario:
                           expect=c.get("expect") or {})
                 run.event(turn=t, event="tool_call", name=c["name"], session_prefix="T")
                 calls.append({"id": cid, "name": c["name"], "arguments": json.dumps(args)})
+            fault = next((f for f in self.cell["faults"] if f["kind"] == RF.KIND
+                          and f.get("at") == "tool_results" and f["turn"] == t), None)
+            if fault and st["phase"] == "A" and step == 0 and run.reply_fault is None and RF.KIND not in run.fired:
+                run.reply_fault = held = RF.HeldReply(run, fault, [c["id"] for c in calls])
+                extra.update(before_release=held.before_release, after_release=held.after_release,
+                             release_failed=held.release_failed)
             return {"tool_calls": calls, "log": log, **extra}
         text = reply_text(self.cell, "T", t)
         run.event(turn=t, event="emit", tag=f"T{t:02d}", text=text)
-        fault = next((f for f in self.cell["faults"] if f["kind"] == RF.KIND and f["turn"] == t), None)
+        fault = next((f for f in self.cell["faults"] if f["kind"] == RF.KIND and f["turn"] == t and not f.get("at")), None)
         if fault and st["phase"] == "A" and run.reply_fault is None and RF.KIND not in run.fired:
             run.reply_fault = held = RF.HeldReply(run, fault, text)
             extra.update(before_release=held.before_release, after_release=held.after_release,
@@ -525,7 +537,8 @@ RECEIVE_START_SLACK_NS = 1_000_000_000
 def accounting(d: Path, events: list[dict]) -> dict:
     """The provider log is the complete request set. Every distinct request is a model-role completion, a
     ``/models`` catalog read, or unexpected (an unrouted path/method or an unknown role: the cell ERRORs). Each main
-    request is exactly one scripted step (a reply, a tool-call step, a crash hold or an unexpected main request)."""
+    request is exactly one scripted step (a reply, a tool-call step, a crash/reply-fault hold or an unexpected main
+    request)."""
     reqs = read_jsonl(d / "provider-requests.jsonl")
     by_role, by_route, unexpected, truncated = {}, {}, [], []
     for r in {r["rid"]: r for r in reqs}.values():
@@ -541,6 +554,7 @@ def accounting(d: Path, events: list[dict]) -> dict:
     implied = {"emit": sum(1 for e in events if e["event"] == "emit"),
                "tool_steps": len({(e["phase"], e["id"].rsplit("_", 1)[0]) for e in events if e["event"] == "tool_issue"}),
                "crash_holds": sum(1 for e in events if e.get("fault") == "crash_after_compaction_before_reply"),
+               "reply_fault_holds": sum(1 for e in events if e["event"] == "reply_fault_hold"),
                "child_emit": sum(1 for e in events if e["event"] == "child_emit"),
                "unexpected": len({r["rid"] for r in reqs if r.get("unexpected")})}
     kills = sorted(e["kill_monotonic_ns"] for e in events

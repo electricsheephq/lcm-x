@@ -348,7 +348,23 @@ def registry() -> list[dict]:
                    "Root-session crash control before rotation."),
                   ("in-place", True, [], {"kind": "crash_after_host_reply_before_store", "turn": 15, "depth": 0},
                    "Default in-place compaction crash control without a rotation child."))]
+    cells += [held_tool_cell("tool-turn"), held_tool_cell("tool-loop")]
     return cells
+
+
+def held_tool_cell(name, *, in_place=False):
+    loop = name == "tool-loop"
+    return cell("reply-held-crash-control/tool-loop-in-place" if in_place else "reply-held-crash/" + name,
+                [] if in_place else [2624], in_place=in_place, user={"trailing_ws": True}, big_lines=8,
+                faults=[dict(kind="crash_after_host_reply_before_store", turn=15, depth=0 if in_place else 1,
+                             **({"at": "tool_results"} if loop else {}))],
+                tool_plan=[{"turns": [15], "calls": [
+                    {"name": "read_file", "args": {"path": "{files}/small.txt"}},
+                    {"name": "read_file", "args": {"path": "{files}/big.txt"}}]}],
+                doc=("User row, call row and both results survive a mid-tool-loop crash (no final reply) and reload."
+                     if loop else "Whole tool turn survives crash and reload; the final reply is held at the kill; "
+                                  "whether the tool rows were already stored is recorded as store_turn_tool_rows.")
+                    + " Reservation holds the store; does not prove natural crash timing.")
 
 
 def validate(c: dict) -> None:
@@ -364,9 +380,9 @@ def validate(c: dict) -> None:
         assert g["turns"] == "restart" or all(1 <= t <= c["turns"] for t in g["turns"]), c["id"]
 
 
-def select(patterns: str, extra=(), opt_in=()) -> list[dict]:
-    """Default-window backtests and ``opt_in`` probes match explicit patterns only, never ``all``."""
-    opt_in = (*default_window_cells(), *opt_in)
+def select(patterns: str, extra=(), opt_in=(), controls=()) -> list[dict]:
+    """Default-window backtests, ``opt_in`` probes and ``controls`` match explicit patterns only, never ``all``."""
+    opt_in = (*default_window_cells(), *opt_in, *controls)
     cells = registry() + list(extra)  # extra: transport-only cells (R2 process_cell.R2_CELLS)
     for c in cells + list(opt_in):
         validate(c)

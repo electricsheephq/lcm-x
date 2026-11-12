@@ -504,22 +504,46 @@ read-only host DB every 2 ms for a new assistant row, then kill immediately.
 Validate the row's ACP root and compression depth, check that the host kept the
 reply and the store did not, release all connections, and restart the same ACP
 session. Phase B must finish `done`. Reservation failure, a five-second poll
-timeout, invalid lineage, failed post-kill checks, or failed restart yields ERROR
+timeout, invalid lineage, host group did not exit, failed post-kill checks, or failed restart yields ERROR
 with `reply-held fault INVALID`. Evidence records contain times and counts, not content.
 
 The held-reply fault follows this order:
 
-| step | what happens | invariant it protects |
-|---|---|---|
-| reservation | `BEGIN IMMEDIATE` before release | Store writer is blocked |
-| release | Release turn N's reply | Reservation precedes response bytes |
-| poll | Read-only poll every 2 ms | Witness a new host reply |
-| kill | Signal on the poll that sees the row; no read in between | Close the witnessed window |
-| exit confirmed | Group gone and leader exited; bounded 5 s, else INVALID | No host writer can commit later |
-| validity read | Check new row, root, depth | Correct reply and lineage |
-| post-kill check | Host has the witnessed row; store has none | Confirm the held-reply window |
-| ROLLBACK | Last, on every path | Hold reservation through checks; release before restart |
-| restart | Phase B `session/load` must end `done` | Recovery completes in the same session |
+| step | what happens | invariant it protects | final when read? |
+|---|---|---|---|
+| reservation | `BEGIN IMMEDIATE` before release | Store writer is blocked | — |
+| release | Release turn N's reply | Reservation precedes response bytes | — |
+| poll | Read-only poll every 2 ms | Witness a new host reply | Yes, once written |
+| kill | Signal on the poll that sees the row; no read in between | Close the witnessed window | — |
+| exit confirmed | Group gone and leader exited; bounded 5 s, else INVALID | No writer in the host's process group can commit later | — |
+| validity read | Check new row, root, depth | Correct reply and lineage | Yes |
+| post-kill check | Host has the witnessed row; store has none | Confirm the held-reply window | Yes |
+| ROLLBACK | Last, on every path | Hold reservation through checks; release before restart | — |
+| restart | Phase B `session/load` must end `done` | Recovery completes in the same session | — |
+
+The `tool_results` position arms on step 0's tool-call response, before any tools run.
+It polls for every issued call id's tool result in the host DB. The next main request
+still records `tool_seen`, then is held until killed and never released: no final reply
+exists. Root/depth and the call row plus all results are checked after group exit;
+Reservation failure, response release failure, or a poll timeout or exception also
+kills and confirms exit, without firing the fault.
+
+| step | what happens | invariant it protects | final when read? |
+|---|---|---|---|
+| reservation | `BEGIN IMMEDIATE` before the tool-call response | Store writer is blocked | — |
+| release | Release the tool-call response | Reservation precedes response bytes | — |
+| host writes | Call row and both results | Host owns the tool turn | — |
+| poll | Wait until every result row of the step exists | Witness the whole step | Yes, once written |
+| next main request | Held, never released (may overlap the poll) | No final reply exists | — |
+| kill | Signal on the witnessing poll; no intervening read | Close the witnessed window | — |
+| exit confirmed | Group gone and leader exited; bounded 5 s | No writer in the host's process group can commit later | — |
+| validity read | One session, ACP root and expected depth | Correct tool turn and lineage | Yes |
+| post-kill check | Call row and every result in host; none in store | Confirm the held tool-loop window | Yes |
+| ROLLBACK | Last, on every path | Hold reservation through checks | — |
+| restart | Phase B `session/load` must end `done` | Recovery completes in the same session | — |
+
+In both orders, `fire()` reads the host-log commit count between kill and exit;
+that count is diagnostic only and is not final when read.
 
 The five cells use provisional turn/depth pairs: `rotation-turn` (12/1),
 `plain-turn` (15/1), `multi-hop` (22/2), `pre-rotation` (5/0), and `in-place`
@@ -532,6 +556,16 @@ only together with the reply; `plain-turn` lacks the T15 user row and reply
 (B1 `T15` and `reply T15`, B2 deficit 2); `multi-hop` lacks the T22 user row and
 reply (B1 `T22` and `reply T22`, B2 deficit 2). Both controls should PASS.
 All five should PASS on r34.10-0.21.5.
+The two additional cells use turn/depth 15/1 and two distinct `read_file` paths.
+On upstream-main and upstream-uid, KNOWN under #2624: `tool-turn` should FAIL B1
+(`T15`, `reply T15`), B2 deficit 2 and `tool_missing_rows` 4; `tool-loop` should
+FAIL B1 (`T15`), B2 deficit 1 and `tool_missing_rows` 4. Both should PASS on every
+other host. The opt-in `reply-held-crash-control/tool-loop-in-place` (15/0) should
+PASS on every host; it is excluded from `--cells all` and the nightly matrix.
+B6 is judged when a tool group is stored or a split, orphan drop, or tool execution
+failure is recorded. For these held tool cells alone, no stored group otherwise
+makes B6 not applicable when host tool rows are readable. Unavailable host tool rows
+keep B6 applicable and cap a passing B2 at INCONCLUSIVE.
 Other exact known failures retain their existing classification; other failed bars
 remain findings. Depth validation decides validity, not the cell's name.
 
