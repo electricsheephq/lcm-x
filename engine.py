@@ -1432,6 +1432,7 @@ class LCMEngine(
         if adaptive is not None:
             adaptive.clear()
         self._unregister_active_engine_binding()
+        self._host_session_db = None  # #2624: a host reader never crosses profile homes
         self._session_id = ""
         self._session_platform = ""
         self._foreground_session_id = ""

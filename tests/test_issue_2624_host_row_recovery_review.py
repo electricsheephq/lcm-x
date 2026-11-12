@@ -407,3 +407,11 @@ def test_every_skip_reason_is_counted(case, monkeypatch):
     after = recovery.host_row_recovery_counts()
     assert after["proof"] == before["proof"] + 1 and after["walk_error"] == before["walk_error"] + 1
 
+
+def test_profile_switch_drops_the_host_reader(case, tmp_path):
+    scheduled = len(case.jobs)
+    (other := tmp_path / "other-profile").mkdir()
+    case.live.on_session_start(P, platform="acp", context_length=200_000, hermes_home=str(other))
+    assert case.live._hermes_home == str(other) and case.live._host_session_db is None
+    assert len(case.jobs) == scheduled  # no job pairs this profile's store with the other profile's reader
+
