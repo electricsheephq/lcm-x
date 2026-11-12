@@ -4599,7 +4599,6 @@ class LCMEngine(
         new id here. The handle is kept only for read-only recovery (#2624).
         Detachment is unsupported: Hermes must keep review-fork compression off.
         """
-        self._host_session_db = session_db
         session_id = str(session_id or "")
         if not session_id:
             raise NotImplementedError(
@@ -4607,6 +4606,7 @@ class LCMEngine(
                 "keep compression off on this fork"
             )
         with self._exclusive_lifecycle("rebind"):
+            self._host_session_db = session_db
             if (
                 self._stable_use_closed
                 or not self._session_id

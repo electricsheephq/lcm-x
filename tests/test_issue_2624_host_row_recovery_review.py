@@ -131,6 +131,10 @@ def test_real_full_scheduler_warning_hides_raw_session_id(case, monkeypatch, cap
             warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
             assert len(warnings) == 1 and "queue is full" in warnings[0]
             assert P not in warnings[0] and C not in warnings[0]
+            assert str(case.live._store.db_path) not in warnings[0]
+            assert str(case.live._store.db_path.resolve()) not in warnings[0]
+            db_digest = hashlib.sha256(case.live._store.db_identity.encode()).hexdigest()[:16]
+            assert "host-row-recovery-db:" + db_digest in warnings[0]
             assert "host-row-recovery:" + hashlib.sha256(P.encode()).hexdigest()[:16] in warnings[0]
             assert not recovery._SEEN
     finally:
@@ -291,12 +295,27 @@ def test_spawned_processes_recover_suffix_exactly_once(case, tmp_path):
         results.join_thread()
 
 
-def test_detached_close_preserves_live_prepared_leaves(case, monkeypatch):
-    from hermes_lcm import leaf_prep
+@pytest.mark.parametrize("fail_open", [False, True], ids=["success", "storage-open-failure"])
+def test_detached_close_preserves_live_prepared_leaves(case, monkeypatch, fail_open):
+    from hermes_lcm import engine as engine_module, leaf_prep
     discarded = []
     monkeypatch.setattr(leaf_prep, "discard", lambda path: discarded.append(str(path)))
-    assert not case.run()
-    assert_suffix(case, pair())
+    failed_paths = []
+
+    def fail_dag(path):
+        failed_paths.append(str(path))
+        raise RuntimeError("injected detached storage open failure")
+
+    if fail_open:
+        monkeypatch.setattr(engine_module, "SummaryDAG", fail_dag)
+    warnings = case.run()
+    if fail_open:
+        assert failed_paths == [str(case.live._store.db_path)]
+        assert len(warnings) == 1 and "reason=worker_error" in warnings[0]
+        assert not rows(case)
+    else:
+        assert not warnings
+        assert_suffix(case, pair())
     assert not discarded
     # Positive control: the same live engine's explicit cleanup still discards.
     case.live._discard_prepared_leaves()

@@ -198,6 +198,7 @@ def _raw_proof(conn, sid):
 
 def _recover_candidate(engine_cls, config, home, db_path, state_path, conv, bound, sid, platform, window, handle, reason):
     det = engine_cls(config=copy.deepcopy(config), hermes_home=home)
+    det._discard_prepared_leaves = lambda: None
     try:
         store = det._store  # R2: open before installing ANY candidate scope
         if Path(store.db_path).resolve() != Path(db_path):
@@ -275,7 +276,6 @@ def _recover_candidate(engine_cls, config, home, db_path, state_path, conv, boun
     except Exception:
         _unproven(sid, "worker_error", 0)
     finally:
-        det._discard_prepared_leaves = lambda: None
         det._close_storage()
 
 
@@ -310,7 +310,10 @@ class HostRowRecoveryMixin:
                 args = (type(self), config, self._hermes_home, db_path, str(self._state_db_path()),
                         self._conversation_id, self._session_id, self._session_platform,
                         self.context_length, self._host_session_db)
-                scheduler_key = (key[0], "host-row-recovery:" + hashlib.sha256(key[3].encode()).hexdigest()[:16])
+                scheduler_key = (
+                    "host-row-recovery-db:" + hashlib.sha256(key[0].encode()).hexdigest()[:16],
+                    "host-row-recovery:" + hashlib.sha256(key[3].encode()).hexdigest()[:16],
+                )
                 if _HOST_ROW_RECOVERY_SCHEDULER.schedule(scheduler_key, lambda: _recover(*args)):
                     _SEEN.add(key)
         except Exception:
