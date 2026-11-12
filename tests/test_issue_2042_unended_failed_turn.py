@@ -153,11 +153,24 @@ def test_stopped_first_turn_before_text_then_reap_user_row_is_stored(tmp_path, h
     assert ("user", "synthetic request 2042 stopped early") in _contents(nxt, FAILED)
 
 
-@XFAIL
-def test_stopped_first_turn_after_text_then_reap_user_row_is_stored(tmp_path, host, engines):
+@pytest.mark.xfail(
+    strict=True,
+    reason="#2042 follow-up: a first turn stopped during a tool round (finalize path, no failed_turn boundary) is "
+           "deferred by #1623 and never stored when no later turn completes",
+)
+def test_stopped_first_turn_during_tool_round_then_reap_user_row_is_stored(tmp_path, host, engines):
+    # A stop after a tool ran reaches finalize_turn: on_turn_complete(interrupted=True) fires, post_llm_call does not,
+    # and the host closes the tail with its own interrupted assistant row (no failed_turn boundary).
     engine = _new_engine(tmp_path, host, FAILED)
     engines.append(engine)
-    rows = _rows(("user", "synthetic request 2042 stopped late"), ("assistant", "partial answer [interrupted]"))
+    rows = _rows(("user", "synthetic request 2042 stopped late"))
+    rows += [
+        {"role": "assistant", "content": "", "timestamp": 1_900_000_001, "tool_calls": [
+            {"id": "call-2042", "type": "function", "function": {"name": "read_file", "arguments": "{}"}}]},
+        {"role": "tool", "content": "synthetic tool result 2042", "tool_call_id": "call-2042",
+         "timestamp": 1_900_000_002},
+        {"role": "assistant", "content": "interrupted by user", "timestamp": 1_900_000_003},
+    ]
     host.write(FAILED, rows, started_at=1_900_000_000)
     engine.on_turn_complete(rows, interrupted=True, failed=False)  # first turn: the engine owns no rows yet
     _process_dies(engine)
