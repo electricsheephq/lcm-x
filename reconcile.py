@@ -410,6 +410,15 @@ def _strip_volatile_host_scaffolding(content: str) -> str:
     return content
 
 
+def _single_text_part(content):
+    """The text of a content list holding exactly one {"type": "text", "text": str} part, else None (#2521)."""
+    if (isinstance(content, list) and len(content) == 1 and isinstance(content[0], dict)
+            and set(content[0]) == {"type", "text"} and content[0]["type"] == "text"
+            and isinstance(content[0]["text"], str)):
+        return content[0]["text"]
+    return None
+
+
 class ReconcileMixin:
     @staticmethod
     def _canonicalize_tool_call_identity_value(value: Any) -> Any:
@@ -956,36 +965,12 @@ class ReconcileMixin:
         candidates = [row for row in candidates if row[3]] or candidates
         return candidates[0][2] if len({row[2] for row in candidates}) == 1 else None
 
-    def _single_text_part_as_stored_bare_marker(self, msg, *, store=None, session_id=None, conversation_id=None):
-        """#2521 follow-up 1: Hermes can send a tool result as one text part. That part is the stored bare marker's
-        row only when its text is byte-equal to a tool row this session stored for the same call (same conversation
-        and tool name); the row then reads as that string. No parsing, no placeholder restore; else unchanged."""
-        parts = msg.get("content")
-        if not (isinstance(parts, list) and len(parts) == 1 and isinstance(parts[0], dict)
-                and set(parts[0]) == {"type", "text"} and parts[0]["type"] == "text"
-                and isinstance(parts[0]["text"], str) and _is_hermes_persisted_output_marker(parts[0]["text"])):
-            return msg
-        text = parts[0]["text"]
-        try:
-            rows = (self._store if store is None else store).find_session_tool_rows(
-                str(msg.get("session_id") or (self._session_id if session_id is None else session_id) or ""),
-                str(msg.get("tool_call_id") or ""),
-                conversation_id=str((self._conversation_id if conversation_id is None else conversation_id) or ""),
-                tool_name=str(msg.get("tool_name") or msg.get("name") or ""),
-            )
-        except Exception:  # an unreadable store proves nothing: the row keeps its own identity
-            return msg
-        return dict(msg, content=text) if any(row.get("content") == text for row in rows) else msg
-
     def _message_replay_identity(
         self, msg: Dict[str, Any], *, stored_row: bool = False, with_host_rewrite: bool = False,
         strip_carrier: bool = True, allow_pruned_tool_alias: bool = True, store=None, hermes_home=None,
         session_id=None, conversation_id=None,
     ) -> tuple[str, str, str, str, str]:
         role = str(msg.get("role") or "unknown")
-        if role == "tool" and not stored_row:
-            msg = self._single_text_part_as_stored_bare_marker(msg, store=store, session_id=session_id,
-                                                               conversation_id=conversation_id)
         content = normalize_content_value(msg.get("content")) or ""
         source = None if stored_row else self._survival_projection_source(msg, role, content, **(dict(store=store) if store is not None else {}))
         if source is not None:  # #582: a survival-fit projection is its source row, never a new occurrence
@@ -1711,14 +1696,18 @@ class ReconcileMixin:
                     and _is_hermes_persisted_output_marker(row.get("content") or "")]
             if bare and len(stored_tail_rows) <= len(messages) and len(stored_tail) == len(stored_tail_rows):
                 pairs = list(zip(stored_tail_rows, messages))
+                # #2521 follow-up 1: a host tool result sent as one {type, text} part whose text is byte-equal to the
+                # stored bare row is compared as that string, here only, so it binds to that one stored occurrence.
+                compared = {i: dict(msg, content=text) if (text := _single_text_part(msg.get("content"))) is not None
+                            and text == row.get("content") else msg for i, (row, msg) in enumerate(pairs) if i in bare}
                 if (all(occurrence_identities.get(id(msg)) == stored_tail[k] for k, (_row, msg) in enumerate(pairs)
                         if k not in bare)
                         and all(tool_name(row) == tool_name(msg)
                                 and self._session_end_rows_equal(row, msg, session_id=self._session_id)
                                 and (not msg.get("session_id") or msg["session_id"] == row["session_id"])
-                                for row, msg in (pairs[i] for i in bare))
+                                for row, msg in ((pairs[i][0], compared[i]) for i in bare))
                         and all(self._session_end_prefix_compare_value(pairs[i][0]["content"], session_id=self._session_id)
-                                == pairs[i][1].get("content") for i in bare)):
+                                == compared[i].get("content") for i in bare)):
                     occurrence_identities.update((id(pairs[i][1]), stored_tail[i]) for i in bare)
         except Exception:  # an injected fault in the bare compare: no binding, as on main
             logger.debug("LCM legacy bare-marker prefix binding skipped", exc_info=True)

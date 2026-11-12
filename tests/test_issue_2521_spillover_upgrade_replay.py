@@ -246,6 +246,55 @@ def test_v0292_store_parts_not_byte_equal_keep_the_old_duplicate_path(tmp_path, 
     assert len(tool_copy) == 1 and json.loads(tool_copy[0]["content"]) == parts, counts
 
 
+def _again(content):
+    """A second turn reusing the call id, its tool result given as ``content``."""
+    return (("user", "Dump again."), ("assistant", "", {"tool_calls": [{"id": CALL, "type": "function",
+             "function": {"name": "dump", "arguments": "{}"}}]}), ("tool", content, {"tool_call_id": CALL}),
+            ("assistant", "Saved again."))
+
+
+def _paired(rows):
+    """Each stored tool row of CALL has a call row of CALL (no orphan result)."""
+    return _tool_rows(rows)[CALL] == _call_rows(rows)[CALL]
+
+
+@pytest.mark.parametrize("shape", ["parts-parts", "parts-string", "string-parts"])
+def test_v0292_store_repeated_call_id_with_parts_is_stable_across_replays(tmp_path, shape):
+    """Review round 1 (F1): the parts reading binds to one stored occurrence only. With the call id reused in a
+    later turn and either result sent as one text part, the same history replayed again adds nothing."""
+    original, marker, _ = _v0292_store(tmp_path)
+    first, second = shape.split("-")
+    history = _host_history(marker, _again([{"type": "text", "text": marker}] if second == "parts" else marker))
+    if first == "parts":
+        history[2]["content"] = [{"type": "text", "text": marker}]
+    counts = []
+    for _ in range(4):
+        _run_phase(tmp_path, history)
+        rows = _read_store(tmp_path)
+        counts.append(len(rows))
+        assert rows[:len(original)] == original and _paired(rows), f"rows={len(rows)}"
+    assert counts[1:] == [counts[0]] * 3, counts
+
+
+@pytest.mark.parametrize("order", ["parts-first", "parts-second"])
+def test_candidate_written_mixed_string_and_parts_is_stable(tmp_path, monkeypatch, order):
+    """Review round 1 (F1): two stored copies of one call pair; a replay with one result as one text part and one
+    as a string adds nothing on later passes and never stores an orphan tool row."""
+    marker = _write_output(_home(tmp_path) / "cache" / "spillover" / "shared.txt")
+    pair = _messages(marker)
+    _candidate_written_bare_store(tmp_path, monkeypatch, pair)
+    _run_phase(tmp_path, deepcopy(pair * 2), "spillover-upgrade", "spillover-conversation")
+    history = deepcopy(pair * 2)
+    history[1 if order == "parts-first" else 3]["content"] = [{"type": "text", "text": marker}]
+    counts = []
+    for _ in range(3):
+        _run_phase(tmp_path, history, "spillover-upgrade", "spillover-conversation")
+        rows = _read_store(tmp_path)
+        counts.append(len(rows))
+        assert _paired(rows), f"rows={len(rows)}, tool={dict(_tool_rows(rows))}, call={dict(_call_rows(rows))}"
+    assert counts[1:] == [counts[0]] * 2, counts
+
+
 def test_v0292_store_rebound_session_replay_loses_nothing(tmp_path):
     """The stored-row lookup is session-scoped, like the #773 matcher. A rebound session id takes the old duplicate
     path: the replayed history is stored once more under the new session id (the #1674 class), and nothing is
