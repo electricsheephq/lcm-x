@@ -157,6 +157,8 @@ def _sqlite_savepoint(conn: sqlite3.Connection, *, abort_on_cleanup_failure: boo
             if scope is not None:
                 state.sync()
                 if scope["uncovered"] and not isinstance(error, (KeyboardInterrupt, SystemExit)):
+                    if state.rollback_uncovered():
+                        raise  # every write since the implicit BEGIN was this scope's: eager's ROLLBACK TO
                     state.reclassify_pending = True
                     raise _IngestReclassify(full=True) from error
             if scope is not None and not scope["materialized"]:

@@ -480,6 +480,7 @@ def _database_identity(path: Path, store: object) -> str:
 class _IngestAttempt:
     acquire: Callable[[], None]
     sync: Callable[[], None]
+    rollback_uncovered: Callable[[], bool]
     G0: tuple
     timing: dict
     start_timer: Callable[..., None]
@@ -2111,6 +2112,12 @@ class MessageStore:
         """Commit a standalone helper; an enclosing atomic block owns its commit."""
         self._transaction_owner.commit(self._conn)
 
+    def _ingest_transaction_lost(self, conn=None):
+        """True when a required transaction is gone (SQLite aborted it). A lazy ingest attempt before its first
+        write has none by design (#2293)."""
+        conn = self._conn if conn is None else conn
+        return not conn.in_transaction and not (conn is self._conn and self._ingest_is_prelock())
+
     def _ingest_is_prelock(self):
         state = self._ingest_prelock_state
         return state is not None and state.phase == "prelock"
@@ -2205,6 +2212,24 @@ class MessageStore:
                 conn.execute("SAVEPOINT lcm_ingest")
                 scope["materialized"] = True
 
+    def _rollback_uncovered_ingest_prelock(self):
+        """An evidence scope open at the implicit BEGIN failed. Every write since that BEGIN happened inside it, so
+        discarding the whole transaction is exactly eager's ROLLBACK TO that scope; the attempt continues before the
+        lock. True when done; False sends the caller to the full reclassify."""
+        state, conn = self._ingest_prelock_state, self._conn
+        if (state.phase != "acquired" or not state.attempt_after_writes or state.poisoned
+                or not conn.in_transaction or any(scope["materialized"] for scope in state.scopes)):
+            return False
+        conn.rollback()  # releases the lock: G0 was validated at the BEGIN and nothing could commit since
+        state.phase = "prelock"
+        state.implicit_begun = state.attempt_after_writes = False
+        state.G0 = (conn.total_changes, *state.G0[1:])  # total_changes counts the discarded writes
+        for scope in state.scopes:
+            scope["uncovered"] = False
+        conn.set_authorizer(self._ingest_prelock_authorizer())
+        self.ingest_prelock_counts["scope_rollback"] += 1
+        return True
+
     def _restart_ingest_prelock(self):
         """Re-acquire explicitly when writes predate the attempt savepoint."""
         state, conn = self._ingest_prelock_state, self._conn
@@ -2295,6 +2320,7 @@ class MessageStore:
                 try:
                     if lazy:
                         state = _IngestAttempt(self._acquire_ingest_prelock, self._sync_ingest_prelock,
+                                               self._rollback_uncovered_ingest_prelock,
                                                self._ingest_write_generation(),
                                                timing, start_timer)
                         self._ingest_prelock_state = self._transaction_owner.ingest_state = state
@@ -2306,6 +2332,7 @@ class MessageStore:
                     self._finish_ingest_prelock()
                     if self._ingest_is_prelock():
                         self.ingest_prelock_counts["no_write"] += 1
+                        timing["hold_ms"] = 0.0  # read-only: no lock was held (None still means BEGIN failed)
                     else:
                         if not self._conn.in_transaction:
                             raise _SqliteSavepointError("Foreground ingest transaction lost before COMMIT")

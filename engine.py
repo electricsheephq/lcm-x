@@ -7517,6 +7517,8 @@ class LCMEngine(
                                             or not (isinstance(error, _IngestReclassify)
                                                     or state.phase == "prelock" or state.poisoned)):
                                         raise
+                                    if not isinstance(error, (Exception, _IngestReclassify)):
+                                        raise  # a crash-like exit is never retried; the owner rolls back
                                     if (not isinstance(error, _IngestReclassify) and state.phase == "prelock"
                                             and not state.poisoned and not state.implicit_begun
                                             and self._store._ingest_write_generation() == state.G0):
@@ -7916,7 +7918,7 @@ class LCMEngine(
                                      ("emission_recovered:" + lineage, str(seq)))
                     succeeded.append(entry)
                 except Exception as exc:
-                    if _is_ingest_busy_error(exc) or isinstance(exc, _SqliteSavepointError) or not conn.in_transaction:
+                    if _is_ingest_busy_error(exc) or isinstance(exc, _SqliteSavepointError) or store._ingest_transaction_lost(conn):
                         raise
                     ingest_ledger.settle_pending_emissions(token, release=[entry])
                     self._ledger_count("ledger.emission_retry_failed", exc)
@@ -7927,7 +7929,7 @@ class LCMEngine(
                     self._ledger_count("ledger.emission_recovered_provenance_only")
             after_commit.append(publish)
         except Exception as exc:
-            if _is_ingest_busy_error(exc) or isinstance(exc, _SqliteSavepointError) or not conn.in_transaction:
+            if _is_ingest_busy_error(exc) or isinstance(exc, _SqliteSavepointError) or store._ingest_transaction_lost(conn):
                 raise
             ingest_ledger.settle_pending_emissions(token)
             self._ledger_count("ledger.emission_retry_failed", exc)
@@ -8026,7 +8028,7 @@ class LCMEngine(
         except BaseException as exc:
             store._pending_relation_schema = flag
             if (not isinstance(exc, Exception) or _is_ingest_busy_error(exc)
-                    or isinstance(exc, _SqliteSavepointError) or not conn.in_transaction):
+                    or isinstance(exc, _SqliteSavepointError) or store._ingest_transaction_lost(conn)):
                 raise
             after_commit.append(lambda exc=exc: self._ledger_count("ledger.lineage_merge_failed", exc))
             return persisted or provisional
@@ -8174,7 +8176,7 @@ class LCMEngine(
                     except BaseException as exc:
                         store._pending_relation_schema = flag
                         if (not isinstance(exc, Exception) or _is_ingest_busy_error(exc)
-                                or isinstance(exc, _SqliteSavepointError) or not conn.in_transaction):
+                                or isinstance(exc, _SqliteSavepointError) or store._ingest_transaction_lost(conn)):
                             raise
                         delta["ledger.write_failed"] += 1
                 key = "session_lineage:" + str(self._session_id)
@@ -8319,7 +8321,7 @@ class LCMEngine(
                         except BaseException as exc:
                             store._pending_relation_schema = flag
                             if (not isinstance(exc, Exception) or _is_ingest_busy_error(exc)
-                                    or isinstance(exc, _SqliteSavepointError) or not conn.in_transaction):
+                                    or isinstance(exc, _SqliteSavepointError) or store._ingest_transaction_lost(conn)):
                                 raise
                             delta["ledger.rebind_failed"] += 1
                             rebind_ok = False
@@ -8335,7 +8337,7 @@ class LCMEngine(
         except BaseException as exc:
             store._pending_relation_schema = pending_relation_schema
             if (not isinstance(exc, Exception) or _is_ingest_busy_error(exc)
-                    or isinstance(exc, _SqliteSavepointError) or not conn.in_transaction):
+                    or isinstance(exc, _SqliteSavepointError) or store._ingest_transaction_lost(conn)):
                 raise
             self._ledger_count("ledger.write_failed", exc)
         finally:
@@ -12299,7 +12301,7 @@ class LCMEngine(
                 after_commit.append(lambda: self._ledger_count("ledger.respaced"))
         except BaseException as exc:
             if (not isinstance(exc, Exception) or _is_ingest_busy_error(exc)
-                    or isinstance(exc, _SqliteSavepointError) or not conn.in_transaction):
+                    or isinstance(exc, _SqliteSavepointError) or store._ingest_transaction_lost(conn)):
                 raise
             after_commit.append(lambda exc=exc: self._ledger_count("ledger.write_failed", exc))
 
