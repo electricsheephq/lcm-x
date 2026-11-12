@@ -956,12 +956,36 @@ class ReconcileMixin:
         candidates = [row for row in candidates if row[3]] or candidates
         return candidates[0][2] if len({row[2] for row in candidates}) == 1 else None
 
+    def _single_text_part_as_stored_bare_marker(self, msg, *, store=None, session_id=None, conversation_id=None):
+        """#2521 follow-up 1: Hermes can send a tool result as one text part. That part is the stored bare marker's
+        row only when its text is byte-equal to a tool row this session stored for the same call (same conversation
+        and tool name); the row then reads as that string. No parsing, no placeholder restore; else unchanged."""
+        parts = msg.get("content")
+        if not (isinstance(parts, list) and len(parts) == 1 and isinstance(parts[0], dict)
+                and set(parts[0]) == {"type", "text"} and parts[0]["type"] == "text"
+                and isinstance(parts[0]["text"], str) and _is_hermes_persisted_output_marker(parts[0]["text"])):
+            return msg
+        text = parts[0]["text"]
+        try:
+            rows = (self._store if store is None else store).find_session_tool_rows(
+                str(msg.get("session_id") or (self._session_id if session_id is None else session_id) or ""),
+                str(msg.get("tool_call_id") or ""),
+                conversation_id=str((self._conversation_id if conversation_id is None else conversation_id) or ""),
+                tool_name=str(msg.get("tool_name") or msg.get("name") or ""),
+            )
+        except Exception:  # an unreadable store proves nothing: the row keeps its own identity
+            return msg
+        return dict(msg, content=text) if any(row.get("content") == text for row in rows) else msg
+
     def _message_replay_identity(
         self, msg: Dict[str, Any], *, stored_row: bool = False, with_host_rewrite: bool = False,
         strip_carrier: bool = True, allow_pruned_tool_alias: bool = True, store=None, hermes_home=None,
         session_id=None, conversation_id=None,
     ) -> tuple[str, str, str, str, str]:
         role = str(msg.get("role") or "unknown")
+        if role == "tool" and not stored_row:
+            msg = self._single_text_part_as_stored_bare_marker(msg, store=store, session_id=session_id,
+                                                               conversation_id=conversation_id)
         content = normalize_content_value(msg.get("content")) or ""
         source = None if stored_row else self._survival_projection_source(msg, role, content, **(dict(store=store) if store is not None else {}))
         if source is not None:  # #582: a survival-fit projection is its source row, never a new occurrence
