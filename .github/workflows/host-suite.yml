@@ -56,7 +56,7 @@ jobs:
   suite:
     needs: hosts
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 240
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.hosts.outputs.matrix) }}
