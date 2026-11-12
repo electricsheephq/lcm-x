@@ -89,12 +89,16 @@ class TransactionOwner:
         """Flush standalone helper writes; an enclosing atomic block flushes itself."""
         if self._active_connection is None or self._active_connection is not conn:
             conn.commit()
+        elif self.ingest_state is not None:
+            self.ingest_state.sync()
 
     @contextmanager
     def atomic(self, conn: sqlite3.Connection, *, immediate: bool = False) -> Iterator[None]:
         with self._lock:
             if self._active_connection is conn:
                 state = self.ingest_state
+                if state is not None:
+                    state.sync()
                 if state is not None and state.phase == "prelock":
                     state.acquire()
                 elif immediate and not conn.in_transaction:

@@ -7517,11 +7517,17 @@ class LCMEngine(
                                         raise
                                     if reclassified:
                                         raise AssertionError("Ingest reclassified twice") from error
-                                    try:
-                                        self._store._acquire_ingest_prelock()
-                                    except _IngestReclassify:
-                                        pass
-                                    self._store._conn.execute("ROLLBACK TO lcm_ingest_attempt")
+                                    if (getattr(error, "full", False) or state.attempt_after_writes):
+                                        try:
+                                            self._store._restart_ingest_prelock()
+                                        except _IngestReclassify:
+                                            pass
+                                    else:
+                                        try:
+                                            self._store._acquire_ingest_prelock()
+                                        except _IngestReclassify:
+                                            pass
+                                        self._store._conn.execute("ROLLBACK TO lcm_ingest_attempt")
                                     restore_iteration()
                                     self._store._ingest_folded_tail_reads = {}
                                     begin_iteration()
@@ -8332,6 +8338,7 @@ class LCMEngine(
 
     def _raise_ingest_busy(self, error, *, store=None):
         store = self._store if store is None else store  # a detached cold tail's own store (#2210)
+        store._sync_ingest_prelock()
         if store._transaction_owner.owns_connection(store._conn) and (
             isinstance(error, _SqliteSavepointError) or _is_ingest_busy_error(error, require_code=True)
             or isinstance(error, sqlite3.Error) and not store._conn.in_transaction

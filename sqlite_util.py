@@ -118,6 +118,10 @@ class _SqliteSavepointError(RuntimeError):
 class _IngestReclassify(BaseException):
     """Discard optimistic ingest evidence and repeat under the held write lock."""
 
+    def __init__(self, *, full=False):
+        super().__init__()
+        self.full = full
+
 
 @contextmanager
 def _sqlite_savepoint(conn: sqlite3.Connection, *, abort_on_cleanup_failure: bool = False,
@@ -128,9 +132,11 @@ def _sqlite_savepoint(conn: sqlite3.Connection, *, abort_on_cleanup_failure: boo
     owner_active = owner_active and TransactionOwner.owns_connection(conn)
     name = "lcm_ingest" if owner_active else f"lcm_{uuid.uuid4().hex}"
     state = TransactionOwner.ingest_state_for(conn) if owner_active else None
+    if state is not None:
+        state.sync()
     scope = None
     if state is not None and state.phase == "prelock":
-        scope = {"materialized": False}
+        scope = {"materialized": False, "uncovered": False}
         state.scopes.append(scope)
     try:
         if scope is None and owner_active and not conn.in_transaction:
@@ -141,11 +147,18 @@ def _sqlite_savepoint(conn: sqlite3.Connection, *, abort_on_cleanup_failure: boo
             conn.execute(f"SAVEPOINT {name}")
         try:
             yield
+            if scope is not None:
+                state.sync()
             if scope is not None and not scope["materialized"]:
                 return
             if abort_on_cleanup_failure:
                 conn.execute(f"RELEASE SAVEPOINT {name}")
-        except BaseException:
+        except BaseException as error:
+            if scope is not None:
+                state.sync()
+                if scope["uncovered"] and not isinstance(error, (KeyboardInterrupt, SystemExit)):
+                    state.reclassify_pending = True
+                    raise _IngestReclassify(full=True) from error
             if scope is not None and not scope["materialized"]:
                 raise
             if abort_on_cleanup_failure and not conn.in_transaction:
