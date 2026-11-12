@@ -27,6 +27,7 @@ _COUNTS = Counter(dict.fromkeys((
     "candidates", "recovered_candidates", "recovered_rows", "unproven", "reader_error",
     "handle_missing", "signature_mismatch", "suffix_rejected", "ignored_in_suffix", "raced",
     "no_provenance", "walk_capped", "empty_suffix", "on_tip_path", "session_filtered",
+    "proof", "store_mismatch", "worker_error", "walk_error",
 ), 0))
 _MAX_SESSIONS = 4096
 
@@ -43,8 +44,7 @@ def _count(key, n=1):
 
 def _unproven(sid, reason, n):
     _count("unproven")
-    if reason in _COUNTS:
-        _count(reason)
+    _count(reason)
     with _LOCK:
         first = sid not in _WARNED
         _WARNED.add(sid)
@@ -294,7 +294,8 @@ def _recover(engine_cls, config, home, db_path, state_path, conv, bound, platfor
         for sid in _candidates(state_path, bound, handle, reason, filtered):
             _recover_candidate(engine_cls, config, home, db_path, state_path, conv, bound, sid,
                                platform, window, handle, reason)
-    except Exception:
+    except Exception:  # the host database was locked, missing or unreadable: counted, retried next process
+        _count("walk_error")
         logger.debug("LCM host-row recovery unavailable")
 
 

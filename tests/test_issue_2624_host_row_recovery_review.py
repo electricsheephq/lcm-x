@@ -396,3 +396,14 @@ def test_scheduler_key_separates_bindings_of_one_session(case, monkeypatch):
     case.live._enqueue_host_row_recovery(P, {})
     assert len(keys) == 2 and keys[0][0] == keys[1][0] and keys[0][1] != keys[1][1]
     assert len(recovery._SEEN) == 2
+
+
+def test_every_skip_reason_is_counted(case, monkeypatch):
+    before = recovery.host_row_recovery_counts()
+    case.host.lists[C] = [{"role": "user", "content": "no proof covers this"}] + pair()
+    assert len(case.run()) == 1  # the strict proof fails: one WARNING, and its own counter
+    monkeypatch.setattr(recovery, "_candidates", lambda *args: (_ for _ in ()).throw(sqlite3.OperationalError("locked")))
+    assert not case.run()
+    after = recovery.host_row_recovery_counts()
+    assert after["proof"] == before["proof"] + 1 and after["walk_error"] == before["walk_error"] + 1
+
