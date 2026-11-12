@@ -355,6 +355,35 @@ A tail exists because the store hit SQLite busy at session end. The ledger is in
 - Only a tail kept on the single unexplained user-conflict shape reports "stamp conflict" at exit; other pending tails retain the passed reason and whole-view count. The keep marker is cleared before each cold retry and set only at a qualifying keep, so a later busy retry cannot inherit the exclusion. The conflict count pages the session/conversation once and matches occurrences with Counters: stamped rows first by identity and stamp, then untimed rows by identity from the remaining stored copies. D2 stores the absent suffix before keeping the conflicting occurrence; stamps-on S3 still withholds that suffix. The exact count takes the tail store's write lock without waiting and checks the drain deadline before each page; a busy lock, expired deadline or read failure retains the passed reason and whole-view count (engine.py:11623-11674; maintenance_scheduler.py:425).
 - Recovery happens only through a host resume of that session; `/new` does not recover it.
 - Accepted and disclosed, with no sidecar journal. Every busy-at-end event and every drain failure is logged and counted. Outside the named undo-and-resend-after-a-busy-end exclusion above, any drain failure during the parity audit fails the gate; it is never relabelled as deferred (§5). A tail pending at such a hard exit is an M9 hit: the audit attributes it to #2253 by its warning's session id and the session's missing rows, and it fails the gate like any other M9 hit.
+- **M10. Rows the host kept in an abandoned compaction child (#2624, recovered from v0.30.1).** With the host's
+  rotating compaction (`compression.in_place: false`), Hermes v0.21.6 to v0.23.1 resume the conversation's first
+  session after an ACP restart and abandon the child chain (NousResearch/hermes-agent#148047). The host writes each
+  row of a turn to its own database as it happens and calls the per-turn hook once at the end, so a kill in the
+  middle of a turn leaves that turn's rows (the user row, any tool-call message and tool results written so far, and
+  the reply if it was written) only in the abandoned child. At the next start of that conversation, LCM-X walks from
+  the bound session through ended compression sessions to every unended leaf, skips branch, delegate, reset and tool
+  sessions and any session matching an ignore or stateless session pattern (with everything below it), keeps only leaves under which its store holds this conversation's compaction proof or rows, and skips
+  every session on the path to the host's own compression tip (a host that can still adopt a leaf is left to do so).
+  It reads each leaf with the host's own reader, proves the leaf's prefix against that leaf's durable compaction
+  proof on the strict path only (no native, scaffold-only, merged-row or replaced-tail outcome), and appends exactly
+  the rest, under the leaf's own session id and the conversation's id, in one store transaction that re-checks the
+  proof and the conversation's reset first. Recovered rows pass the normal ingest protection and carry one metadata
+  row each, `host_row_recovered:<store_id>`, which nothing in the product reads. The work runs on a background worker
+  once per process per bound session, never on a turn; `host_row_recovery_enabled = false`
+  (`LCM_HOST_ROW_RECOVERY_ENABLED=0`) turns it off and restores the earlier behaviour exactly. It does not bring
+  those turns back into the model's view (#2626). Named limits, each counted (`host_row_recovery_counts()`):
+  - a conversation that is never loaded again keeps those rows only in the host's database;
+  - rows the host's reader does not return (inactive rows, a background-review harness turn and the reply after it)
+    are not recovered; rows it rewrites are stored as it returns them (a bare `[tool]` marker is blanked, user and
+    assistant text loses edge whitespace);
+  - a leaf without a strict proof stores nothing, logs one WARNING per process (`LCM host-row recovery unproven`),
+    and is read again at each start; this includes a leaf whose last compaction the host never persisted as a
+    rotation (nothing of such a leaf is missing);
+  - a suffix with an ignored row, an orphaned tool result or a damaged tool group stores nothing for that leaf;
+  - a child bound later by its exact id without its conversation key (a CLI resume by the child's id, a TUI lazy
+    resume; not ACP or the gateway) is bound into a new conversation named after the child, and today's cold ingest
+    stores the child's whole list there, copies of rows already recovered included: surplus, never loss (#2630);
+  - a child that LCM-X never bound, and hosts and transports other than the tested ones.
 
 ### 3.6 Migration and rollback
 - **When:** every ready foreground ingest probes its own session for unbound rows above the store mark, including pre-ledger, failed-ledger and older-reader writes.

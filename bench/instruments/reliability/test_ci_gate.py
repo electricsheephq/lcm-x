@@ -98,54 +98,15 @@ def test_report_reason_keeps_both_edges(tmp_path):
     assert line == f"- ERROR `{row['cell']}` on fixture: " + reason[:200] + " ... " + reason[-400:]
 
 
-@pytest.mark.parametrize("host,transport,failed,open_issues,gates", [
-    ("upstream-main", "acp-process", ["B1", "B2"], {2624}, False),
-    ("upstream-main", "acp-process", ["B1", "B2", "B5"], {2624}, True),
-    ("r34.4-0.21.5", "acp-process", ["B1", "B2"], {2624}, True),
-    ("floor-0.21.3", "acp-process", ["B1", "B2"], {2624}, True),
-    ("upstream-main", "in-process", ["B1", "B2"], {2624}, True),
-    ("upstream-main", "acp-process", ["B1", "B2"], set(), True),
-    ("upstream-uid", "acp-process", ["B1", "B2"], {2624}, False),
-    ("upstream-uid", "acp-process", ["B1", "B2", "B5"], {2624}, True),
-    ("upstream-uid", "in-process", ["B1", "B2"], {2624}, True),
-    ("upstream-uid", "acp-process", ["B1", "B2"], set(), True),
-])
-def test_abandoned_rotation_child_2624_gate_scope(host, transport, failed, open_issues, gates):
-    problems = ci.gate(rows_for("crash-after-rotation/rotation", host, transport, failed), open_issues)
-    assert len(problems) == int(gates)
-
-
 HELD_TARGETS = ["reply-held-crash/" + name for name in ("rotation-turn", "plain-turn", "multi-hop", "tool-turn", "tool-loop")]
 HELD_CONTROLS = ["reply-held-crash/pre-rotation", "reply-held-crash/in-place"]
 CI_HOST_NAMES = list(json.loads(ci.CI_HOSTS.read_text())["hosts"])
 
 
-@pytest.mark.parametrize("cell", HELD_TARGETS)
-@pytest.mark.parametrize("host", ["upstream-main", "upstream-uid"])
-def test_held_reply_known_only_while_2624_open(cell, host):
-    rows = rows_for(cell, host, "acp-process", ["B1", "B2"])
-    assert ci.gate(rows, {2624}) == []
-    assert len(ci.gate(rows, set())) == 1
-
-
-@pytest.mark.parametrize("cell", HELD_TARGETS)
-@pytest.mark.parametrize("host", ["r34.10-0.21.5", "ref-0.21.5", "r34.15-0.21.5",
-                                  "floor-0.21.3", "r34.4-0.21.5"])
-def test_held_reply_known_entry_excludes_other_hosts(cell, host):
-    assert len(ci.gate(rows_for(cell, host, "acp-process", ["B1", "B2"]), {2624})) == 1
-
-
-@pytest.mark.parametrize("cell", HELD_TARGETS)
-@pytest.mark.parametrize("host", ["upstream-main", "upstream-uid"])
-@pytest.mark.parametrize("bar", ["B3", "B4", "B5"])
-def test_held_reply_uncovered_bar_gates(cell, host, bar):
-    problems = ci.gate(rows_for(cell, host, "acp-process", ["B1", "B2", bar]), {2624})
-    assert len(problems) == 1 and f"uncovered bars ['{bar}']" in problems[0]
-
-
-@pytest.mark.parametrize("cell", HELD_CONTROLS)
+@pytest.mark.parametrize("cell", ["crash-after-rotation/rotation", *HELD_TARGETS, *HELD_CONTROLS])
 @pytest.mark.parametrize("host", CI_HOST_NAMES)
-def test_held_reply_controls_gate_every_host(cell, host):
+def test_former_2624_cells_gate_every_host(cell, host):
+    # #2624's fix recovers the abandoned child's rows: no KNOWN licence is left, even while the issue is open.
     assert len(ci.gate(rows_for(cell, host, "acp-process", ["B1", "B2"]), {2624})) == 1
 
 
@@ -157,9 +118,9 @@ def test_held_reply_errors_gate_every_host(cell, host):
     assert len(ci.gate(rows, {2624})) == 1
 
 
-def test_2624_targets_are_exact():
-    assert sorted(c["id"] for c in cells.registry() if 2624 in c["targets"]) == sorted(
-        ["crash-after-rotation/rotation", *HELD_TARGETS])
+def test_no_cell_targets_2624():
+    assert not [c["id"] for c in cells.registry() if 2624 in c["targets"]]
+    assert 2624 not in cells.ISSUES and 2624 not in cells.ISSUE_HOSTS and 2624 not in cells.ISSUE_TRANSPORTS
 
 
 @pytest.mark.parametrize("host,gates_b9", [("upstream-uid", True), ("ref-0.21.5", False)])

@@ -2,7 +2,7 @@ import hashlib
 import json
 
 OLD_IDS = ['overflow-recovery-restart/in-place', 'baseline/in-place/acp', 'acp-trailing/in-place', 'repeat-identical-replies/in-place', 'crash-then-lcm-tool-in-merge-turn/in-place', 'gateway-second-restart/in-place', 'parallel-tool-group/in-place', 'lcm-tool-mid-turn/in-place', 'cancel-retry/in-place', 'long-80/in-place', 'multi-session-one-process/in-place', 'native-on-off/v0.23.3/in-place', 'native-on-off/v0.24.3/in-place', 'drain/hidden-backlog/in-place', 'drain/hidden-backlog-large/in-place', 'crash-after-compaction/in-place/acp-history', 'crash-after-compaction/in-place/gateway-reload', 'overflow-recovery-restart/rotation', 'baseline/rotation/acp', 'acp-trailing/rotation', 'repeat-identical-replies/rotation', 'crash-then-lcm-tool-in-merge-turn/rotation', 'gateway-second-restart/rotation', 'parallel-tool-group/rotation', 'lcm-tool-mid-turn/rotation', 'cancel-retry/rotation', 'long-80/rotation', 'multi-session-one-process/rotation', 'native-on-off/v0.23.3/rotation', 'native-on-off/v0.24.3/rotation', 'drain/hidden-backlog/rotation', 'drain/hidden-backlog-large/rotation', 'crash-after-compaction/rotation/acp-history', 'crash-after-compaction/rotation/gateway-reload', 'preflight-continue/in-place', 'publication-failure/rotation-child', 'publication-failure/rotation-child-persistent', 'publication-failure/pass-3-in-place', 'separator-heavy-retained/in-place', 'pressure-disagreement/in-place', 'window-1m/in-place', 'crash-after-rotation/rotation', 'upgrade-crash-after-rotation/rotation', 'crash-between-end-and-start/rotation', 'delegated-child/in-place', 'delegated-child/rotation', 'p8-control/archived', 'p8-control/other-active', 'p8-control/random-snapshot', 'p8-control/none']
-OLD_SHA = "16e364c39241264ce704a0f9d5a31a3e960cd97c476c33c7e37ec73b928772e6"
+OLD_SHA = "a035220cba28ad23b3d548db07a618906022edaf0a5fcf7e3719ca28732d7035"  # #2624: crash-after-rotation no longer targets 2624
 
 import socket
 import sqlite3
@@ -424,9 +424,9 @@ def test_registry_unchanged_and_r1_rejects_early(tmp_path, monkeypatch):
     old = [c for c in all_cells if c not in new]
     assert [c['id'] for c in old] == OLD_IDS
     assert hashlib.sha256(json.dumps(old, sort_keys=True, separators=(',', ':')).encode()).hexdigest() == OLD_SHA
-    expected = [('rotation-turn', 12, 1, False, [2624]), ('plain-turn', 15, 1, False, [2624]),
-                ('multi-hop', 22, 2, False, [2624]), ('pre-rotation', 5, 0, False, []), ('in-place', 15, 0, True, []),
-                ('tool-turn', 15, 1, False, [2624]), ('tool-loop', 15, 1, False, [2624])]
+    expected = [('rotation-turn', 12, 1, False, []), ('plain-turn', 15, 1, False, []),
+                ('multi-hop', 22, 2, False, []), ('pre-rotation', 5, 0, False, []), ('in-place', 15, 0, True, []),
+                ('tool-turn', 15, 1, False, []), ('tool-loop', 15, 1, False, [])]
     assert len(new) == 7
     monkeypatch.setattr(RM, 'scratch_dir', Mock(side_effect=AssertionError('must reject before any probe')))
     for c, (name, turn, depth, ip, targets) in zip(new, expected):
