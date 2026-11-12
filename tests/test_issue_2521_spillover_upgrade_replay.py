@@ -316,6 +316,30 @@ def test_v0292_store_parts_in_another_conversation_keep_the_old_path(tmp_path):
     assert _tool_rows(rows)[CALL] == 2, counts
 
 
+@pytest.mark.parametrize("shape", ["string", "parts"])
+def test_v0292_store_parts_keep_a_later_user_occurrence_on_full_replay(tmp_path, shape):
+    """Bot review (P1): the #1511 later-user-stamp guard sees the same parts reading as the bare binding. A full
+    replay of the stored history, with the marker as one text part and one UID-less user row re-sent with a later
+    stamp, keeps that user row as a new occurrence (the string control does the same). Nothing stored is lost."""
+    original, marker, _ = _v0292_store(tmp_path)
+    history = _host_history(marker)
+    if shape == "parts":
+        history[2]["content"] = [{"type": "text", "text": marker}]
+    history[0]["timestamp"] = T0 + 100.5
+
+    _run_phase(tmp_path, history)
+
+    rows = _read_store(tmp_path)
+    added = rows[len(original):]
+    counts = f"stored rows={len(rows)}, added={[row['role'] for row in added]}"
+    assert rows[:len(original)] == original, counts
+    assert added and added[0]["role"] == "user" and added[0]["content"] == history[0]["content"], counts
+    # The string reading adds only the user occurrence; the parts reading also keeps main's surplus call pair after it
+    # (the occurrence matcher below the guard reads the parts row as JSON, as on main): never a loss.
+    assert len(added) == (1 if shape == "string" else 3), counts
+    assert _tool_rows(rows)[CALL] == _call_rows(rows)[CALL], counts
+
+
 def test_v0292_store_rebound_session_replay_loses_nothing(tmp_path):
     """The stored-row lookup is session-scoped, like the #773 matcher. A rebound session id takes the old duplicate
     path: the replayed history is stored once more under the new session id (the #1674 class), and nothing is

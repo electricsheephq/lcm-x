@@ -420,6 +420,18 @@ def _single_text_part(content):
 
 
 class ReconcileMixin:
+    def _bare_part_reading(self, msg, row):
+        """#2521 follow-up 1: a host message whose content is one {type, text} part, text byte-equal to the paired stored
+        bare-marker tool row of a conversation this one owns (it or blank), read as that string; else the message.
+        The bare prefix binding and the #1511 later-user-stamp guard both use it, so they see the same reading."""
+        text = _single_text_part(msg.get("content"))
+        if (text is not None and row.get("role") == "tool" and text == row.get("content")
+                and _is_hermes_persisted_output_marker(text)
+                and str(row.get("conversation_id") or "").strip()
+                in {str(getattr(self, "_conversation_id", None) or "").strip(), ""}):
+            return dict(msg, content=text)
+        return msg
+
     @staticmethod
     def _canonicalize_tool_call_identity_value(value: Any) -> Any:
         if isinstance(value, dict):
@@ -1699,10 +1711,7 @@ class ReconcileMixin:
                 # #2521 follow-up 1: a host tool result sent as one {type, text} part whose text is byte-equal to the
                 # stored bare row of a conversation this one owns (it or blank) is compared as that string, here only,
                 # so it binds to that one stored occurrence.
-                owned = {str(getattr(self, "_conversation_id", None) or "").strip(), ""}
-                compared = {i: dict(msg, content=text) if (text := _single_text_part(msg.get("content"))) is not None
-                            and text == row.get("content") and str(row.get("conversation_id") or "").strip() in owned
-                            else msg for i, (row, msg) in enumerate(pairs) if i in bare}
+                compared = {i: self._bare_part_reading(msg, row) for i, (row, msg) in enumerate(pairs) if i in bare}
                 if (all(occurrence_identities.get(id(msg)) == stored_tail[k] for k, (_row, msg) in enumerate(pairs)
                         if k not in bare)
                         and all(tool_name(row) == tool_name(msg)
@@ -3268,7 +3277,8 @@ class ReconcileMixin:
             # #1511: full literal replay proves position, not a later user occurrence.
             # Keep partial/adopted views and UID-bound occurrences on their existing proofs.
             if (identity_anchor_enabled() and cursor == len(messages) == len(stored_tail_rows)
-                    and stored_tail == [self._message_replay_identity(m) for m in messages]):
+                    and stored_tail == [self._message_replay_identity(self._bare_part_reading(m, row))
+                                        for m, row in zip(messages, stored_tail_rows)]):
                 stamps = [_normalize_observed_at(m.get("timestamp")) for m in messages]
                 changed = [i for i, (stamp, row) in enumerate(zip(stamps, stored_tail_rows))
                            if stamp is not None and row.get("observed_at") is not None
