@@ -6,10 +6,14 @@ tokens verbatim, strings decoded, object pairs stably sorted by key (repeated ke
 dropped; argument text that does not lex is compared as text.
 
 Bars:
-- loss (hard, every seed): compare-equal implies reference-equal, unless main's own reader already calls the pair
-  equal (an inherited case; those are counted and limited to the literal-placeholder mutation).
-- copy (the issue's shapes): an unchanged host copy compares equal to its stored row, on every route's two entry
-  points. Main fails this bar for the inline shapes; the fix flips it.
+- loss (hard, every seed): compare-equal implies reference-equal, except (a) pairs main's own reader already calls
+  equal (inherited; limited to the literal-placeholder mutation) and (b) the one admitted residual, RM ruling T1-9:
+  a quote-escaped, non-JSON argument text and its JSON twin. Ingest already stored the JSON form at the first store, so
+  the stored row is content-equal to the twin and not storing it again loses nothing.
+- copy (round 2 scope, RM T1-8 and T1-12): an unchanged tool call whose arguments hold an inline payload compares equal
+  to its stored row in `_session_end_rows_equal`, when its arguments are numeral-free or hold nonzero integers only.
+  Main fails this bar; the fix flips it. List-form content and counted routes are named limits and stay out of it.
+- residual pin (T1-12): on ingest's re-dump route, arguments with a decimal or zero numeral keep main's answer.
 """
 
 import base64
@@ -170,9 +174,13 @@ def _wrapped(rng):
     return '\n'.join(long[i:i + 76] for i in range(0, len(long), 76))
 
 
-_NUMERALS = ['7', '1.5', '0.1', '-0', '1E0', '1e400', '12345678901234567890', '2.50']
+_SAFE_NUMERALS = ['7', '12345678901234567890']
+_RESIDUAL_NUMERALS = ['1.5', '0.1', '-0', '0', '1E0', '1e400', '2.50']
+_NUMERALS = _SAFE_NUMERALS + _RESIDUAL_NUMERALS
 SHAPES = ('args-wrapped', 'args-datauri-key', 'args-plain', 'list-wrapped', 'list-datauri', 'list-plain')
-INLINE_SHAPES = SHAPES[:2] + SHAPES[3:5]
+INLINE_ARGS_SHAPES = SHAPES[:2]
+# Route-crossing and reviewer-witness bases (round 2): each meets only its own mutations.
+SPECIAL_SHAPES = ('args-escaped', 'args-raw-nonjson', 'args-raw-datauri', 'args-nested', 'args-score')
 
 
 def _base(rng, shape, index):
@@ -196,6 +204,45 @@ def _base(rng, shape, index):
     else:
         parts = [{'type': 'text', 'text': f'plain {index}'}, {'type': 'text', 'text': 'second'}]
     return {'role': 'user', 'content': parts}
+
+
+def _special_base(rng, shape, index):
+    """Bases whose H_old takes a route other than the plain re-dump (route-crossing seeds, reviewer witnesses)."""
+    wrapped = _wrapped(rng)
+    if shape == 'args-escaped':  # T1-9: quote-escaped, not JSON; ingest's unescaped reading re-dumps it
+        text = json.dumps({'path': f'e{index}', 'content': 'hdr\n' + wrapped + '\nend'}).replace('"', '\\"')
+    elif shape == 'args-raw-nonjson':  # raw newlines inside a quoted value: not JSON; the raw route keeps the bytes
+        text = '{"path": "r%d", "content": "%s"}' % (index, wrapped)
+    elif shape == 'args-raw-datauri':  # non-canonical spacing, an unescaped data URI: the raw route
+        text = '{"u": "data:image/png;base64,%s", "k": %d}' % (_b64(rng, 1200), index + 1)
+    elif shape == 'args-nested':  # DR-1: JSON text in a value, holding a payload and a decimal one level down
+        inner = '{"n": 1.00, "img": "d\\u0061ta:image/png;base64,%s"}' % _b64(rng, 1200)
+        text = json.dumps({'meta': inner, 'content': 'hdr\n' + wrapped + '\nend'})
+    else:  # 'args-score' (DR-2): a float scalar outside the arguments string
+        text = json.dumps({'path': f's{index}', 'content': 'hdr\n' + wrapped + '\nend'})
+    row = {'role': 'assistant', 'content': '', 'tool_calls': [
+        {'id': f'x{index}', 'type': 'function', 'function': {'name': 'write_file', 'arguments': text}}]}
+    if shape == 'args-score':
+        row['tool_calls'][0]['score'] = -0.0
+    return row
+
+
+def _special_mutations(shape, row, stored, rng):
+    out = [('unchanged', copy.deepcopy(row))]
+    text = _args(row)
+    if shape == 'args-escaped':
+        out.append(('json-twin', _set_args(row, text.replace('\\"', '"'))))  # the admitted residual (T1-9)
+    elif shape == 'args-raw-nonjson':
+        out.append(('json-twin', _set_args(row, json.dumps(json.loads(text, strict=False)))))
+    elif shape == 'args-raw-datauri':
+        out.append(('literal-backslash', _set_args(row, text.replace('image/png', 'image\\\\/png', 1))))
+    elif shape == 'args-nested':
+        out.append(('nested-respell', _set_args(row, text.replace('1.00', '1.0', 1).replace('d\\\\u0061ta', 'data', 1))))
+    else:
+        zero = copy.deepcopy(row)
+        zero['tool_calls'][0]['score'] = 0.0
+        out.append(('score-zero', zero))
+    return out
 
 
 def _args(row):
@@ -236,6 +283,10 @@ def _mutations(row, stored, rng):
         out.append(('json-in-value-compact', _set_args(row, text[:-1] + ', "j": "{\\"y\\":1}"}')))
         out.append(('payload-edit', _set_args(row, _flip_char(text, rng))))
         out.append(('not-json', _set_args(row, text[:-1])))
+        if placeholder and '"content": ' in text:  # DR-4: a JSON-escaped literal placeholder (\u005b...)
+            escaped = json.dumps(placeholder.group(0)).replace('"[', '"\\u005b', 1)
+            out.append(('escaped-literal-placeholder', _set_args(row, re.sub(
+                r'"content": "(?:[^"\\]|\\.)*"', lambda m: '"content": ' + escaped, text, count=1))))
         if placeholder:
             out.append(('literal-placeholder', _set_args(row, re.sub(
                 r'"content": "(?:[^"\\]|\\.)*"|"data:(?:[^"\\]|\\.)*"',
@@ -291,6 +342,10 @@ def run(tmp_path_factory):
 def _drive(engine):
     rng = random.Random(SEED)
     bases = [_base(rng, SHAPES[i % len(SHAPES)], i) for i in range(BASES)]
+    shapes = [SHAPES[i % len(SHAPES)] for i in range(BASES)]
+    for k, shape in enumerate(SPECIAL_SHAPES * 2):
+        bases.append(_special_base(rng, shape, BASES + k))
+        shapes.append(shape)
     rows = []
     for i, row in enumerate(bases):
         rows += [{'role': 'user', 'content': f'turn {i}'}, row]
@@ -303,27 +358,68 @@ def _drive(engine):
     stored_rows = engine._store.get_session_messages('S')
     assert len(stored_rows) == len(rows)
     stored_of = {id(r): s for r, s in zip(rows, stored_rows)}
+    pairs = []
+    for base, shape in zip(bases, shapes):
+        stored = stored_of[id(base)]
+        made = (_special_mutations(shape, base, stored, rng) if shape in SPECIAL_SHAPES
+                else _mutations(base, stored, rng))
+        pairs += [(shape, name, base, stored, host) for name, host in made]
+    pairs += _literal_copy_pairs(engine, bases, shapes, stored_of, rng, len(rows))
     results = []
-    for i, base in enumerate(bases):
-        shape = SHAPES[i % len(SHAPES)]
-        stored = stored_of[id(next(r for r in rows if r is base))]
+    for shape, name, base, stored, host in pairs:
         stored_id = engine._session_end_prefix_compare_identity(stored, session_id='S', recover_markers=False)
-        for name, host in _mutations(base, stored, rng):
-            equal = engine._session_end_rows_equal(stored, host, session_id='S')
-            counted = engine._session_end_counted_identity(host, Counter([stored_id]), session_id='S') == stored_id
-            mains = stored_id == engine._session_end_prefix_compare_identity(host, session_id='S')
-            results.append({'shape': shape, 'mutation': name, 'equal': equal, 'counted': counted, 'mains': mains,
-                            'ref_equal': ref_row(host) == ref_row(base)})
+        equal = engine._session_end_rows_equal(stored, host, session_id='S')
+        counted = engine._session_end_counted_identity(host, Counter([stored_id]), session_id='S') == stored_id
+        mains = stored_id == engine._session_end_prefix_compare_identity(host, session_id='S')
+        number = re.search(r'"n": ([^,}\s]+)', _args(base)) if 'tool_calls' in base else None
+        results.append({'shape': shape, 'mutation': name, 'equal': equal, 'counted': counted, 'mains': mains,
+                        'ref_equal': ref_row(host) == ref_row(base), 'numeral': number.group(1) if number else None})
     return results
 
 
+def _literal_copy_pairs(engine, bases, shapes, stored_of, rng, already):
+    """Astra R2-1: H_old holds a literal copy of an earlier row's placeholder (same session, same field, the file
+    present) next to its own payload; H_new holds that payload's content instead. The pair must compare unequal."""
+    from hermes_lcm.ingest_integrity import restore_ingest_payload_placeholders
+    out, extra = [], []
+    for base, shape in zip(bases, shapes):
+        if shape != 'args-wrapped' or len(extra) >= 3:
+            continue
+        stored_args = _args(stored_of[id(base)])
+        found = re.search(r'\[Externalized LCM ingest payload:[^\]]*\]', stored_args)
+        payload = restore_ingest_payload_placeholders(found.group(0), config=engine._config,
+                                                      hermes_home=engine._hermes_home, session_id='S')
+        own = _wrapped(rng)
+        def call(content, k=len(extra)):
+            return {'role': 'assistant', 'content': '', 'tool_calls': [
+                {'id': f'lc{k}', 'type': 'function', 'function': {'name': 'write_file', 'arguments': json.dumps(
+                    {'path': f'lc{k}', 'content': 'hdr\n' + content + '\nend', 'd': 'hdr\n' + own + '\nend'})}}]}
+        extra.append((call(found.group(0)), call(payload)))
+    rows = []
+    for k, (old, _new) in enumerate(extra):
+        rows += [{'role': 'user', 'content': f'copy {k}'}, old,
+                 {'role': 'tool', 'tool_call_id': f'lc{k}', 'content': f'ok copy {k}'}]
+    for k, row in enumerate(rows):
+        row['timestamp'] = float(already + k + 1)
+    engine.ingest(copy.deepcopy(rows))
+    stored_rows = engine._store.get_session_messages('S')[already:]
+    for k, (old, new) in enumerate(extra):
+        out.append(('args-literal-copy', 'restored-literal', old, stored_rows[3 * k + 1], new))
+    return out
+
+
 def test_no_changed_row_compares_equal(run):
-    """The loss bar: every match is reference-equal, or one main's reader already makes (literal placeholders only)."""
-    bad = [r for r in run if (r['equal'] or r['counted']) and not r['ref_equal'] and not r['mains']]
+    """The loss bar: every match is reference-equal, or main's reader already makes it (literal placeholders only),
+    or it is the one admitted residual (T1-9: the quote-escaped argument text and its JSON twin)."""
+    admitted = {('args-escaped', 'json-twin')}
+    bad = [r for r in run if (r['equal'] or r['counted']) and not r['ref_equal'] and not r['mains']
+           and (r['shape'], r['mutation']) not in admitted]
     assert not bad, bad[:5]
-    inherited = Counter(r['mutation'] for r in run if (r['equal'] or r['counted']) and not r['ref_equal'])
+    inherited = Counter(r['mutation'] for r in run if (r['equal'] or r['counted']) and not r['ref_equal']
+                        and (r['shape'], r['mutation']) not in admitted)
     assert set(inherited) <= {'literal-placeholder'}, inherited
     assert len(run) > 10 * BASES
+    assert {r['shape'] for r in run} >= set(SHAPES) | set(SPECIAL_SHAPES) | {'args-literal-copy'}
 
 
 def test_plain_controls_compare_equal_unchanged(run):
@@ -331,12 +427,28 @@ def test_plain_controls_compare_equal_unchanged(run):
     assert plain and all(r['equal'] and r['counted'] for r in plain)
 
 
-@pytest.mark.xfail(strict=True, reason='#2559: an unchanged inline-payload row compares unequal to its stored copy')
+@pytest.mark.xfail(strict=True, reason='#2559: an unchanged inline-payload tool call compares unequal to its stored copy')
 def test_unchanged_inline_rows_compare_equal(run):
-    """The copy bar for the issue's shapes: host default spacing, unchanged row."""
-    inline = [r for r in run if r['mutation'] == 'unchanged' and r['shape'] in INLINE_SHAPES]
-    assert inline and all(r['equal'] and r['counted'] for r in inline), Counter(
-        (r['shape'], r['equal'], r['counted']) for r in inline)
+    """The copy bar (round 2 scope): unchanged tool calls with an inline payload in their arguments, numeral-free or
+    nonzero integers only, compare equal in `_session_end_rows_equal`. Counted routes are a named limit."""
+    inline = [r for r in run if r['mutation'] == 'unchanged' and r['shape'] in INLINE_ARGS_SHAPES
+              and r['numeral'] in _SAFE_NUMERALS]
+    assert len(inline) >= 4 and all(r['equal'] for r in inline), Counter((r['shape'], r['equal']) for r in inline)
+
+
+@pytest.mark.xfail(strict=True, reason='#2559 (T1-9): the admitted residual compares equal only with the fix')
+def test_the_admitted_residual_compares_equal(run):
+    """T1-9: the JSON twin of a quote-escaped argument text is content-equal to the row ingest stored (the JSON form)."""
+    cells = [r for r in run if (r['shape'], r['mutation']) == ('args-escaped', 'json-twin')]
+    assert cells and all(r['equal'] for r in cells), cells
+
+
+def test_redump_route_decimal_or_zero_numerals_keep_mains_copy(run):
+    """T1-12 residual pin: on ingest's re-dump route an argument text holding a decimal or zero numeral keeps main's
+    answer (an extra copy at the next handover, as on main): no origin evidence exists for a re-dumped numeral."""
+    cells = [r for r in run if r['mutation'] == 'unchanged' and r['shape'] in INLINE_ARGS_SHAPES
+             and r['numeral'] in _RESIDUAL_NUMERALS]
+    assert cells and not any(r['equal'] or r['mains'] for r in cells), Counter((r['numeral'], r['equal']) for r in cells)
 
 
 def test_the_loss_bar_catches_a_compare_that_merges_changed_rows(run):
@@ -345,6 +457,7 @@ def test_the_loss_bar_catches_a_compare_that_merges_changed_rows(run):
     caught = Counter(r['mutation'] for r in merged if r['equal'] and not r['ref_equal'] and not r['mains'])
     expected = {'numeral', 'escape-slash', 'duplicate-key', 'json-in-value', 'json-in-value-compact', 'payload-edit',
                 'not-json', 'call-id', 'call-name', 'call-extra-key', 'part-order', 'text-edit', 'extra-part',
-                'literal-placeholder'}
+                'literal-placeholder', 'escaped-literal-placeholder', 'json-twin', 'nested-respell', 'score-zero',
+                'restored-literal', 'literal-backslash'}
     assert expected <= set(caught), caught
     assert not {'unchanged', 'compact', 'respaced', 'key-order'} & set(caught), caught
