@@ -251,6 +251,36 @@ def engine_attributes(root: Path) -> tuple[set[str], set[str]]:
 
 class TraceConnection(sqlite3.Connection):
     failure_observer: Callable[[str, Any, Exception], None] | None = None
+    # Two authorizer slots (#2293): the product may install its own authorizer
+    # (the pre-lock ingest guard) while a harness fault is active. The harness
+    # verdict is consulted first; a harness DENY wins, otherwise the product
+    # authorizer decides. Without this the product would silently replace the
+    # injected fault. harness_denials is the positive control for fault scenarios.
+    _product_authorizer: Callable[..., int] | None = None
+    _harness_authorizer: Callable[..., int] | None = None
+    harness_denials = 0
+
+    def set_authorizer(self, authorizer: Callable[..., int] | None, /) -> None:
+        self._product_authorizer = authorizer
+        self._install_authorizers()
+
+    def set_harness_authorizer(self, authorizer: Callable[..., int] | None) -> None:
+        self._harness_authorizer = authorizer
+        self._install_authorizers()
+
+    def _install_authorizers(self) -> None:
+        harness, product = self._harness_authorizer, self._product_authorizer
+        if harness is None:
+            super().set_authorizer(product)
+            return
+
+        def combined(*args: Any) -> int:
+            verdict = harness(*args)
+            if verdict != sqlite3.SQLITE_OK:
+                self.harness_denials += 1
+                return verdict
+            return sqlite3.SQLITE_OK if product is None else product(*args)
+        super().set_authorizer(combined)
 
     def execute(self, sql: str, parameters: Any = (), /) -> sqlite3.Cursor:
         try:
@@ -742,6 +772,9 @@ def prepare(engine: Any, case: Scenario, root: Path, engines: ExitStack) -> tupl
     return engine, incoming
 
 
+AUTHORIZER_FAULTS = frozenset({"append", "metadata", "relation", "durable", "probe", "prematch"})
+
+
 @contextmanager
 def sqlite_fault(engine: Any, fault: str, events: Trace) -> Iterator[None]:
     """Fail real SQL, without mocking ingest phases or store implementations."""
@@ -791,11 +824,12 @@ def sqlite_fault(engine: Any, fault: str, events: Trace) -> Iterator[None]:
             return sqlite3.SQLITE_DENY
         return sqlite3.SQLITE_OK
 
-    conn.set_authorizer(authorize)
+    set_harness = getattr(conn, "set_harness_authorizer", conn.set_authorizer)
+    set_harness(authorize)
     try:
         yield
     finally:
-        conn.set_authorizer(None)
+        set_harness(None)
 
 
 def observe(case: Scenario, root: Path, *, payloads: list[str] | None = None) -> Trace:
@@ -934,8 +968,10 @@ def observe(case: Scenario, root: Path, *, payloads: list[str] | None = None) ->
                     scoped_failure = inject_faults and (
                         (case.fault == "probe" and name == "has_session_messages")
                         or (case.fault == "prematch" and name == "find_rows_by_observed_at"))
+                    scoped_conn = engine._store._conn
+                    set_harness = getattr(scoped_conn, "set_harness_authorizer", scoped_conn.set_authorizer)
                     if scoped_failure:
-                        engine._store._conn.set_authorizer(lambda action, table, *_:
+                        set_harness(lambda action, table, *_:
                             sqlite3.SQLITE_DENY if action == sqlite3.SQLITE_READ and table == "messages"
                             else sqlite3.SQLITE_OK)
                     try:
@@ -945,7 +981,7 @@ def observe(case: Scenario, root: Path, *, payloads: list[str] | None = None) ->
                         raise
                     finally:
                         if scoped_failure:
-                            engine._store._conn.set_authorizer(None)
+                            set_harness(None)
                     emit("store result " + name, result)
                     return result
                 return observed
@@ -988,6 +1024,8 @@ def observe(case: Scenario, root: Path, *, payloads: list[str] | None = None) ->
                         log.removeHandler(handler)
                         log.setLevel(old_level)
 
+            store_conn = engine._store._conn
+            denials_before = getattr(store_conn, "harness_denials", 0)
             with observing(inject_faults=True), sqlite_fault(engine, case.fault, events):
                 for attempt in range(2 if case.fault == "duplicate-tail" else 1):
                     try:
@@ -997,6 +1035,9 @@ def observe(case: Scenario, root: Path, *, payloads: list[str] | None = None) ->
                         emit(f"aliases-{attempt}", aliases(incoming, result))
                     except Exception as exc:
                         emit(f"raise-{attempt}", [type(exc).__name__, str(exc)])
+            if case.fault in AUTHORIZER_FAULTS and isinstance(store_conn, TraceConnection):
+                # Positive control: an authorizer fault that never fired tests nothing.
+                assert store_conn.harness_denials > denials_before, f"{case.name}: injected fault never fired"
             after = snapshot(engine, canonical)
             for name, value in after.items():
                 if before.get(name) != value:

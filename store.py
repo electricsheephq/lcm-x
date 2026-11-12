@@ -2170,8 +2170,13 @@ class MessageStore:
         if state is None or state.phase != "prelock":
             return
         if not state.implicit_begun:
-            if conn.total_changes != state.G0[0]:
-                raise _SqliteSavepointError("Foreground ingest wrote outside its transaction")
+            if conn.total_changes != state.G0[0] and not state.poisoned:
+                # A commit on this connection outside our transaction (for example
+                # another thread that skipped _write_lock): data_version cannot see
+                # it, total_changes does. Reclassify under the lock.
+                logger.warning("LCM foreground ingest saw a write outside its transaction; reclassifying")
+                self.ingest_prelock_counts["poisoned"] += 1
+                state.poisoned = True
             return
         if not conn.in_transaction:
             if not state.poisoned:

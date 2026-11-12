@@ -145,18 +145,23 @@ def _foreign_after_baseline(monkeypatch, log, *, prelock):
                               "ON CONFLICT(key) DO UPDATE SET value = value || 'x'")
             other.close()
 
-        read = MessageStore.read_metadata_json
         seam = MessageStore._ingest_prelock_before_begin
         transaction = LCMEngine._ingest_messages_transaction
         passes = []
 
-        def first_read(self, *args, **kwargs):
+        authorizer = MessageStore._ingest_prelock_authorizer
+
+        def after_baseline(self):
+            # Lazy entry builds the authorizer right after it records G0 and before
+            # the first pre-lock read or write: a foreign commit here always lands
+            # after the baseline, so every pre-lock write that follows must be
+            # discarded by the recheck.
             state = getattr(self, "_ingest_prelock_state", None)
             if (self is store and prelock and not fired and state is not None and state.phase == "prelock"
                     and not self._conn.in_transaction):
                 fired.append(True)
                 commit()
-            return read(self, *args, **kwargs)
+            return authorizer(self)
 
         def eager_seam(self):
             if self is store and not prelock and not fired:
@@ -180,14 +185,14 @@ def _foreign_after_baseline(monkeypatch, log, *, prelock):
                         other.close()
             return transaction(self, *args, **kwargs)
 
-        monkeypatch.setattr(MessageStore, "read_metadata_json", first_read)
+        monkeypatch.setattr(MessageStore, "_ingest_prelock_authorizer", after_baseline)
         monkeypatch.setattr(MessageStore, "_ingest_prelock_before_begin", eager_seam)
         monkeypatch.setattr(LCMEngine, "_ingest_messages_transaction", counted)
         before = dict(store.ingest_prelock_counts)
         try:
             yield
         finally:
-            monkeypatch.setattr(MessageStore, "read_metadata_json", read)
+            monkeypatch.setattr(MessageStore, "_ingest_prelock_authorizer", authorizer)
             monkeypatch.setattr(MessageStore, "_ingest_prelock_before_begin", seam)
             monkeypatch.setattr(LCMEngine, "_ingest_messages_transaction", transaction)
             after = store.ingest_prelock_counts

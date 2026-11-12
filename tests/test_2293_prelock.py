@@ -6,14 +6,16 @@ first read, it rolls back to its savepoint and classifies again under the held l
 
 Pinned tests:
   (a) differential: every ingest-trace scenario observes the same protocol eager and lazy, apart from where the
-      transaction-control statements fall;
+      transaction-control statements fall (and, for faults first met before the lock, discarded pre-lock passes);
   (b) forced change: a second connection commits a classification-relevant change between the pre-lock run and
       BEGIN; the lazy ingest reclassifies once and stores exactly what today's eager path stores;
   (c) no change: no reclassify, no poisoned attempt, and no lock held while classifying;
-  plus a pre-lock write is denied and forces an in-lock reclassify, and a busy BEGIN keeps today's retry behaviour.
+  plus a pre-lock write takes the lock at Python's implicit BEGIN and is rechecked there (RM ruling T1-11), and a
+  busy BEGIN, explicit or implicit, keeps today's retry behaviour.
 """
 from __future__ import annotations
 
+import difflib
 import re
 import sqlite3
 from collections import Counter
@@ -245,6 +247,34 @@ def _scenarios():
     return harness.SCENARIOS
 
 
+# Faults that lazy mode first meets inside its pre-lock pass (a held lock, or an error that escapes the pass). The
+# attempt discards that pass and continues exactly as eager does, so the lazy trace is the eager trace plus discarded
+# passes. Only for these faults, and only as insertions drawn from eager's own events: a repeated read, a store call
+# that raises, or a write whose implicit BEGIN met the held lock (P1). Every other scenario must match exactly.
+_DISCARDED_PASS_FAULTS = frozenset({"locked", "duplicate-tail", "prematch", "protect-path"})
+
+
+def _discarded_passes_only(eager_n, lazy_n):
+    """None when lazy_n is eager_n plus discarded pre-lock passes, else the first offending difference."""
+    seen = set(eager_n)
+    matcher = difflib.SequenceMatcher(a=eager_n, b=lazy_n, autojunk=False)
+    for tag, i1, _, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+        if tag != "insert":
+            return f"{tag} at eager event {i1}: {eager_n[i1:i1 + 2]}"
+        block = lazy_n[j1:j2]
+        for k, event in enumerate(block):
+            following = block[k + 1] if k + 1 < len(block) else ""
+            if event in seen or event.startswith("store raises "):
+                continue
+            if event.startswith("sql failed ") and following.startswith("store raises ") \
+                    and "database is locked" in following:
+                continue  # a write's implicit BEGIN met the held lock (P1); the attempt then admits as eager
+            return f"novel event in a discarded pass: {event[:160]}"
+    return None
+
+
 @pytest.mark.parametrize("case", _scenarios(), ids=lambda case: case.name)
 def test_a_trace_differential_eager_vs_prelock(case, tmp_path, monkeypatch):
     from tests.behaviour import ingest_trace_harness as harness
@@ -253,6 +283,10 @@ def test_a_trace_differential_eager_vs_prelock(case, tmp_path, monkeypatch):
     monkeypatch.setattr(MessageStore, "_ingest_prelock", True)
     lazy = harness.observe(case, tmp_path / "lazy")
     eager_n, lazy_n = _normalized(eager), _normalized(lazy)
+    if case.fault in _DISCARDED_PASS_FAULTS:
+        offending = _discarded_passes_only(eager_n, lazy_n)
+        assert offending is None, f"{case.name}: {offending}"
+        return
     if eager_n != lazy_n:
         first = next(i for i, (x, y) in enumerate(zip(eager_n + [None], lazy_n + [None])) if x != y)
         pytest.fail(f"{case.name}: first difference at event {first}:\n eager: {eager_n[first:first + 3]}\n"
@@ -373,9 +407,12 @@ def test_c_no_change_no_reclassify_and_no_lock_during_classification(shape, tmp_
         assert "_append_protected_batch" in triggers[0]
 
 
-# -- the safety net: a pre-lock write is denied, poisons the attempt, and the locked rerun commits it once -------------
+# -- a pre-lock write takes the lock at Python's implicit BEGIN; the recheck there promotes the attempt ----------------
 
-def test_prelock_write_is_denied_and_reclassified_under_the_lock(tmp_path, monkeypatch):
+def test_prelock_write_takes_the_lock_at_the_implicit_begin(tmp_path, monkeypatch):
+    """RM ruling T1-11: a write reached during classification runs, through Python's implicit BEGIN IMMEDIATE. The
+    attempt observes that BEGIN, rechecks G there (nothing changed), and continues under the lock: no reclassify, and
+    the write commits once, inside the attempt's transaction."""
     results = {}
     for mode in (False, True):
         root = tmp_path / ("lazy" if mode else "eager")
@@ -407,8 +444,9 @@ def test_prelock_write_is_denied_and_reclassified_under_the_lock(tmp_path, monke
             engine.shutdown()
         results[mode] += (_dump(root / "lcm.db"),)
     (lazy_counts, lazy_refused, lazy_rows, lazy_db), (_, eager_refused, eager_rows, eager_db) = results[True], results[False]
-    assert eager_refused == [] and len(lazy_refused) == 1
-    assert lazy_counts["poisoned"] == 1 and lazy_counts["reclassified"] == 1
+    assert eager_refused == [] and lazy_refused == []
+    assert lazy_counts["acquired"] == 1
+    assert lazy_counts["poisoned"] == 0 and lazy_counts["reclassified"] == 0
     assert lazy_rows == eager_rows
     assert lazy_db == eager_db  # the stray row is written once, inside the transaction
 
@@ -569,11 +607,23 @@ def _session_end(root, prelock, monkeypatch, *, poison=False, hold_lock=False):
     return counts, len(passes), _dump(root / "lcm.db")
 
 
-def test_poisoned_write_under_the_busy_guard_at_session_end_matches_eager(tmp_path, monkeypatch):
-    eager_counts, _, eager_db = _session_end(tmp_path / "eager", False, monkeypatch, poison=True)
+def test_classification_write_at_session_end_matches_eager(tmp_path, monkeypatch):
+    """A write during classification at session end takes the lock at its implicit BEGIN and commits once."""
+    _, _, eager_db = _session_end(tmp_path / "eager", False, monkeypatch, poison=True)
     counts, _, lazy_db = _session_end(tmp_path / "lazy", True, monkeypatch, poison=True)
-    assert counts["poisoned"] >= 1 and counts["reclassified"] == 1
+    assert counts["poisoned"] == 0 and counts["reclassified"] == 0
     assert lazy_db == eager_db  # rows stored once; the classification-time write committed once, inside the lock
+
+
+def test_busy_implicit_begin_under_the_busy_guard_at_session_end_matches_eager(tmp_path, monkeypatch):
+    """P1: the classification-time write meets a held lock at its implicit BEGIN. Its error reaches the anchor block's
+    `_raise_ingest_busy` guard; the attempt sees a BEGIN with no open transaction, poisons itself, and from there
+    follows today's busy admission (the eager admission retry and the frozen session-end tail)."""
+    _, eager_passes, eager_db = _session_end(tmp_path / "eager", False, monkeypatch, poison=True, hold_lock=True)
+    counts, lazy_passes, lazy_db = _session_end(tmp_path / "lazy", True, monkeypatch, poison=True, hold_lock=True)
+    assert counts["poisoned"] >= 1 and counts["reclassified"] == 0
+    assert lazy_passes == eager_passes + 1  # one discarded pre-lock pass, then today's eager admission
+    assert lazy_db == eager_db
 
 
 def test_busy_at_lazy_begin_at_session_end_matches_eager(tmp_path, monkeypatch):

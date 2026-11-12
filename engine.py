@@ -7478,12 +7478,14 @@ class LCMEngine(
                 prepared = {}
                 begin_iteration()
                 held_at = sample = None
+                prelock_genuine = False
                 try:
                     prepared["view_only"] = self._precompute_ingest_view_only(messages)
                     if getattr(self, "_identity_anchor_recovery", None):
                         self._identity_anchor_observe_recovery()
                     with self._store.ingest_atomic(admission_retry=admission_retry,
                             prelock=retried_tail is None and not admission_retry) as sample:
+                        entered_at = _perf_counter()
                         reclassified = False
                         poisoned_before = self._store.ingest_prelock_counts["poisoned"]
                         try:
@@ -7515,9 +7517,18 @@ class LCMEngine(
                                             or not (isinstance(error, _IngestReclassify)
                                                     or state.phase == "prelock" or state.poisoned)):
                                         raise
+                                    if (not isinstance(error, _IngestReclassify) and state.phase == "prelock"
+                                            and not state.poisoned and not state.implicit_begun
+                                            and self._store._ingest_write_generation() == state.G0):
+                                        # Nothing was written and nothing committed since G0: the pass saw what
+                                        # eager sees, so eager meets this same error. Raise it as eager would.
+                                        prelock_genuine = True
+                                        raise
                                     if reclassified:
                                         raise AssertionError("Ingest reclassified twice") from error
-                                    if (getattr(error, "full", False) or state.attempt_after_writes):
+                                    if (getattr(error, "full", False) or state.attempt_after_writes
+                                            or state.implicit_begun):
+                                        # Writes predate the attempt savepoint: only a full rollback discards them.
                                         try:
                                             self._store._restart_ingest_prelock()
                                         except _IngestReclassify:
@@ -7536,7 +7547,7 @@ class LCMEngine(
                                     self._ledger_count("ingest.prelock.reclassified")
                                     reclassified = True
                         finally:
-                            held_at = sample.get("acquired_at")
+                            held_at = sample.get("acquired_at") if isinstance(sample, dict) else entered_at
                             if self._store.ingest_prelock_counts["poisoned"] > poisoned_before:
                                 self._ledger_count("ingest.prelock.poisoned")
                     emission_committed = True
@@ -7556,10 +7567,11 @@ class LCMEngine(
                     if rollback_ok and attempt == 0 and isinstance(exc, _EvidenceFaultRetry):
                         continue  # #1815: nothing of the faulted attempt is kept; the retry classifies again
                     if rollback_ok and isinstance(exc, Exception) and not busy_retried and (_is_ingest_busy_error(exc)
-                                                                      or held_at is None and isinstance(exc, sqlite3.Error)):
+                                                                      or held_at is None and not prelock_genuine
+                                                                      and isinstance(exc, sqlite3.Error)):
                         busy_retried = True
                         attribution["busy_snapshot_retry"] = True
-                        admission_retry = held_at is None and _is_ingest_busy_error(exc)
+                        admission_retry = held_at is None and not prelock_genuine and _is_ingest_busy_error(exc)
                         continue
                     if rollback_ok and isinstance(exc, Exception) and self._session_end_flush_active and _is_ingest_busy_error(exc):
                         self._ingest_read_only = exc
