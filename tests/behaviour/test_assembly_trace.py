@@ -48,6 +48,9 @@ def test_public_context_manager_has_its_own_service_identity(tmp_path, monkeypat
 
 @pytest.mark.parametrize('case', SCENARIOS, ids=lambda case: case.name)
 def test_assembly_golden(case: Scenario, tmp_path: Path) -> None:
+    # #2293 M5: ingest's BEGIN IMMEDIATE moves to its first write and savepoints of scopes that close before it are
+    # never issued; with transaction control removed, every scenario is unchanged (compress-scaffold also
+    # records ingest_atomic's new prelock argument).
     expected = json.loads(GOLDEN.read_text())[case.name]
     actual = observe(case, tmp_path.resolve())
     difference = first_difference(expected, actual)
