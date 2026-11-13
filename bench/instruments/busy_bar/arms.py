@@ -188,15 +188,23 @@ class HoldRecorder:
                 # Match sqlite3's legacy implicit pre-script commit, then preserve
                 # complete SQL statements (including trigger bodies) individually.
                 self.commit()
+                isolation = self.isolation_level
                 statement = ""
                 cursor = self.cursor()
-                for char in script:
-                    statement += char
-                    if char == ";" and sqlite3.complete_statement(statement):
+                try:
+                    # Native executescript never adds an implicit DML transaction.
+                    self.isolation_level = None
+                    for char in script:
+                        statement += char
+                        if char == ";" and sqlite3.complete_statement(statement):
+                            cursor.execute(statement)
+                            statement = ""
+                    if statement.strip():
                         cursor.execute(statement)
-                        statement = ""
-                if statement.strip():
-                    cursor.execute(statement)
+                finally:
+                    # Assigning None commits even an explicit script transaction.
+                    if isolation is not None:
+                        self.isolation_level = isolation
                 return cursor
 
             def commit(self):
@@ -290,6 +298,8 @@ class StorageArms:
         self.seeding = False
         self.thread = None
         self.background_errors = []
+        self.embedding_errors = []
+        self.engines = []
 
     def __enter__(self):
         if not self.enabled:
@@ -330,7 +340,8 @@ class StorageArms:
                 def dispatch_when_ready(*args, _name=name, _original=original_dispatch, **kwargs):
                     if self.seeding or _name not in self.writers:
                         return True
-                    return _original(*args, **kwargs)
+                    with self.recorder.named(f"{_name}-claim"):
+                        return _original(*args, **kwargs)
 
                 self.stack.enter_context(patch.object(bootstrap, dispatch, dispatch_when_ready))
                 original_body = getattr(bootstrap, body)
@@ -360,6 +371,43 @@ class StorageArms:
             # engine imported the pass by name.
             engine = importlib.import_module("hermes_lcm.engine")
             self.stack.enter_context(patch.object(engine, "run_incremental_embedding_pass", embedding_pass))
+            original_retire = engine.LCMEngine._retire_embedding_maintenance
+
+            def retire(instance, wait):
+                self.gate.set()  # Also release a pass gated before a failed cell's first operation.
+                self.drain_embedding(instance)
+                try:
+                    return original_retire(instance, wait)
+                except Exception as exc:
+                    self.embedding_errors.append(f"embedding retire:{type(exc).__name__}:{exc}")
+                    raise
+
+            self.stack.enter_context(patch.object(engine.LCMEngine, "_retire_embedding_maintenance", retire))
+            scheduler = importlib.import_module("hermes_lcm.maintenance_scheduler")._EMBEDDING_MAINTENANCE_SCHEDULER
+            original_retire_owner = scheduler.retire_owner
+
+            def retire_owner(*args, **kwargs):
+                try:
+                    retired = original_retire_owner(*args, **kwargs)
+                except Exception as exc:
+                    self.embedding_errors.append(f"embedding retire:{type(exc).__name__}:{exc}")
+                    raise
+                if not retired:
+                    self.embedding_errors.append("embedding retire:timeout")
+                return retired
+
+            # The engine deliberately swallows retirement exceptions and False.
+            self.stack.enter_context(patch.object(scheduler, "retire_owner", retire_owner))
+            original_shutdown = engine.LCMEngine.shutdown
+
+            def shutdown(instance):
+                try:
+                    return original_shutdown(instance)
+                except Exception as exc:
+                    self.embedding_errors.append(f"embedding shutdown:{type(exc).__name__}:{exc}")
+                    raise
+
+            self.stack.enter_context(patch.object(engine.LCMEngine, "shutdown", shutdown))
             original_transaction = vectors.VectorStore._write_transaction
 
             @contextmanager
@@ -370,7 +418,19 @@ class StorageArms:
             self.stack.enter_context(patch.object(vectors.VectorStore, "_write_transaction", vector_transaction))
         return self
 
+    def drain_embedding(self, engine):
+        if "embedding" not in self.writers:
+            return
+        try:
+            if not engine.drain_embedding_maintenance(timeout=35):
+                self.embedding_errors.append("embedding drain:timeout")
+        except Exception as exc:
+            self.embedding_errors.append(f"embedding drain:{type(exc).__name__}:{exc}")
+
     def prepare(self, config, directory):
+        if self.embedding_errors:
+            raise RuntimeError("cannot start another run after failed embedding retirement")
+        self.engines.clear()
         self.directory = directory
         self.recorder.database = config.database_path
         self.schedule_start = None
@@ -454,9 +514,12 @@ class StorageArms:
             self.thread.start()
 
     def finish(self, output):
-        self.schedule_end = time.monotonic()
         self.stop.set()
         self.gate.set()
+        # The failed-before-first-operation path reaches finish before shutdown.
+        for engine in self.engines:
+            self.drain_embedding(engine)
+        self.schedule_end = time.monotonic()
         if self.thread:
             self.thread.join(35)
             if self.thread.is_alive():
@@ -477,10 +540,13 @@ class StorageArms:
             with (output / "checkpoints.jsonl").open("x") as stream:
                 for row in self.checkpoints:
                     stream.write(json.dumps(row) + "\n")
-        return {"wal_autocheckpoint": self.args.wal_autocheckpoint, "checkpointer": self.args.checkpointer,
+        details = {"wal_autocheckpoint": self.args.wal_autocheckpoint, "checkpointer": self.args.checkpointer,
                 "background_writers": self.args.background_writers, "stem_backlog": self.args.stem_backlog,
                 "record_holds": self.args.record_holds, "configured_connections": self.configured,
                 "schedule_start": self.schedule_start, "schedule_end": self.schedule_end}
+        if self.embedding_errors:
+            details["errors"] = self.embedding_errors.copy()
+        return details
 
     def __exit__(self, *exc):
         self.gate.set()

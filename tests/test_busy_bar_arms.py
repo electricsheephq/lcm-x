@@ -607,3 +607,215 @@ print(json.dumps(dict(counts)))
     (tmp_path / "default-writers.json").write_text(json.dumps({"stem": counts.get("stem", 0),
         "integrity": counts.get("integrity", 0), "integrity_calls": counts.get("integrity_calls", 0),
         "cells": list(driver.cells.CELLS)}))
+
+
+def test_stem_claim_holds_have_background_owner(tmp_path):
+    code = r'''
+import json, sys
+from pathlib import Path
+from unittest.mock import patch
+from bench.instruments.busy_bar import driver
+work, tree = Path(sys.argv[1]), Path(sys.argv[2])
+driver.isolated_environment(work)
+driver.load_tree(tree)
+from hermes_lcm import db_bootstrap as db
+original_dispatch = db.dispatch_background_stem_backfill
+original_enter = driver.arms.StorageArms.__enter__
+storage, claims = None, []
+def enter(self):
+    global storage
+    storage = self
+    return original_enter(self)
+def dispatch(*args, **kwargs):
+    before = len(storage.recorder.records)
+    result = original_dispatch(*args, **kwargs)
+    claims.extend(dict(row) for row in storage.recorder.records[before:] if row["start_basis"] == "acquired")
+    return result
+with patch.object(db, "dispatch_background_stem_backfill", dispatch), \
+     patch.object(driver.arms.StorageArms, "__enter__", enter):
+    sys.argv = ["driver", str(tree), "ingest", str(work / "claims.jsonl"), str(work / "work"),
+                "--runs", "2", "--k", "1", "--b-view-rows", "2", "--window-ms", "0",
+                "--background-writers", "stem", "--stem-backlog", "1001", "--record-holds"]
+    driver.main()
+print(json.dumps(claims))
+'''
+    completed = subprocess.run([sys.executable, "-B", "-c", code, str(tmp_path), str(TREE)],
+                               capture_output=True, text=True, timeout=30)
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    claims = json.loads(completed.stdout)
+    (tmp_path / "claim-probe.json").write_text(completed.stdout)
+    rows = gate.read(tmp_path / "claims.jsonl")
+    assert claims and {hold["writer"] for hold in claims} == {"stem-claim"}
+    for i, row in enumerate(rows):
+        holds = gate.read(tmp_path / f"claims-run-{i}" / "holds.jsonl")
+        own_claims = [hold for hold in claims if hold["database"] == str(tmp_path / "work" / f"run-{i}" / "lcm.db")]
+        assert own_claims
+        assert all(hold in holds and hold["start"] < row["storage_arms"]["schedule_start"] for hold in own_claims)
+
+
+@pytest.mark.parametrize("isolation", [None, "", "DEFERRED", "IMMEDIATE"])
+@pytest.mark.parametrize("fails", [False, True])
+def test_executescript_dml_matches_native(tmp_path, isolation, fails):
+    observations = []
+    script = "INSERT INTO t VALUES(1); INSERT INTO t VALUES(observe());"
+    if fails:
+        script += "INSERT INTO missing VALUES(3);"
+    recorder = arms.HoldRecorder(tmp_path / "recorded.db")
+    for name, factory in (("native", sqlite3.Connection), ("recorded", recorder.connection_class())):
+        path = tmp_path / f"{name}.db"
+        conn = sqlite3.connect(path, factory=factory, isolation_level=isolation)
+        observer = sqlite3.connect(path)
+        conn.execute("CREATE TABLE t(n)")
+        recorder.records.clear()
+        visible = []
+
+        def observe():
+            visible.append(observer.execute("SELECT n FROM t ORDER BY n").fetchall())
+            return 2
+
+        conn.create_function("observe", 0, observe)
+        if fails:
+            with pytest.raises(sqlite3.OperationalError, match="missing"):
+                conn.executescript(script)
+        else:
+            conn.executescript(script)
+        observations.append((visible, conn.in_transaction, conn.isolation_level))
+        conn.close()
+        assert observer.execute("SELECT n FROM t ORDER BY n").fetchall() == [(1,), (2,)]
+        observer.close()
+    assert observations == [([[(1,)]], False, isolation)] * 2
+    assert len(recorder.records) == 2
+    assert all(row["outcome"] == "commit" and row["hold_ms"] > 0 for row in recorder.records)
+
+    # A script's own BEGIN remains open; restoring None must not commit it.
+    for factory in (sqlite3.Connection, recorder.connection_class()):
+        conn = sqlite3.connect(tmp_path / "explicit.db", factory=factory, isolation_level=isolation)
+        conn.executescript("CREATE TABLE IF NOT EXISTS t(n); BEGIN IMMEDIATE; INSERT INTO t VALUES(3);")
+        assert conn.in_transaction
+        assert conn.isolation_level == isolation
+        conn.rollback()
+        conn.close()
+
+
+def embedding_retirement_probe(tmp_path, mode, cell="ingest"):
+    # Real scheduler/engine retirement in an isolated process; only the pass is controlled.
+    code = r'''
+import json, sqlite3, sys, threading, time
+from pathlib import Path
+from unittest.mock import patch
+from bench.instruments.busy_bar import driver
+work, tree, mode, cell = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3], sys.argv[4]
+driver.isolated_environment(work)
+config, engine = driver.load_tree(tree)
+driver.offline_setup(engine, embedding=True)
+from hermes_lcm import embedding_maintenance as maintenance, maintenance_scheduler
+started, retire_started, completed = threading.Event(), threading.Event(), threading.Event()
+active_at_finish, active_after_retirement = [], []
+original_shutdown = engine.LCMEngine.shutdown
+original_retire = engine.LCMEngine._retire_embedding_maintenance
+original_drain = engine.LCMEngine.drain_embedding_maintenance
+original_finish = driver.arms.StorageArms.finish
+original_pass = maintenance.run_incremental_embedding_pass
+scheduler = maintenance_scheduler._EMBEDDING_MAINTENANCE_SCHEDULER
+original_scheduler_retire = scheduler.retire_owner
+first_path = None
+
+def slow_pass(database, *args, **kwargs):
+    global first_path
+    if first_path is None:
+        first_path = str(database)
+        started.set()
+        assert retire_started.wait(10)
+        time.sleep(4.5)  # Exceeds both engines' native 2 s retirement waits.
+        with sqlite3.connect(database) as conn:
+            conn.execute("CREATE TABLE busy_bar_late_probe(n)")
+            conn.execute("INSERT INTO busy_bar_late_probe VALUES(1)")
+        result = original_pass(database, *args, **kwargs)
+        completed.set()
+        return result
+    return original_pass(database, *args, **kwargs)
+
+def retire(self, wait):
+    if mode == "slow":
+        assert started.wait(10)
+        retire_started.set()
+    result = original_retire(self, wait)
+    active_after_retirement.append(started.is_set() and not completed.is_set())
+    return result
+
+def shutdown(self):
+    result = original_shutdown(self)
+    if mode == "shutdown-raise":
+        raise RuntimeError("injected shutdown failure")
+    return result
+
+def finish(self, output):
+    active_at_finish.append(started.is_set() and not completed.is_set())
+    return original_finish(self, output)
+
+def drain(self, timeout=None):
+    if mode == "slow":
+        assert started.wait(10)
+        retire_started.set()
+        return original_drain(self, timeout=timeout)
+    if mode == "drain-raise":
+        raise RuntimeError("injected drain failure")
+    return False
+
+def retire_owner(owner, timeout):
+    result = original_scheduler_retire(owner, timeout)
+    if mode == "retire-raise":
+        raise RuntimeError("injected retirement failure")
+    return False if mode == "retire-false" else result
+
+with patch.object(maintenance, "run_incremental_embedding_pass", slow_pass if mode == "slow" else original_pass), \
+     patch.object(engine.LCMEngine, "_retire_embedding_maintenance", retire), \
+     patch.object(engine.LCMEngine, "shutdown", shutdown), \
+     patch.object(driver.arms.StorageArms, "finish", finish), \
+     patch.object(scheduler, "retire_owner", retire_owner):
+    if mode == "slow" or mode.startswith("drain-"):
+        engine.LCMEngine.drain_embedding_maintenance = drain
+    sys.argv = ["driver", str(tree), cell, str(work / "probe.jsonl"), str(work / "work"),
+                "--runs", "2", "--k", "1", "--b-view-rows", "2", "--window-ms", "0",
+                "--background-writers", "embedding", "--record-holds"]
+    status = 0
+    try:
+        driver.main()
+    except SystemExit as exc:
+        status = exc.code
+    if mode == "slow":
+        assert completed.wait(10)
+print(json.dumps({"status": status, "active_at_finish": active_at_finish, "first_path": first_path,
+                  "active_after_retirement": active_after_retirement}))
+'''
+    completed = subprocess.run([sys.executable, "-B", "-c", code, str(tmp_path), str(TREE), mode, cell],
+                               capture_output=True, text=True, timeout=60)
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    (tmp_path / "retirement-probe.json").write_text(completed.stdout)
+    return json.loads(completed.stdout), gate.read(tmp_path / "probe.jsonl")
+
+
+@pytest.mark.parametrize("cell", ["ingest", "restart", "session-end"])
+def test_embedding_pass_drained_before_retirement(tmp_path, cell):
+    proof, rows = embedding_retirement_probe(tmp_path, "slow", cell)
+    assert proof["status"] == 0
+    assert proof["active_after_retirement"] and not any(proof["active_after_retirement"])
+    assert proof["active_at_finish"] == [False, False]
+    assert len(rows) == 2 and all(not row["errors"] and not row["inconclusive"] for row in rows)
+    first = gate.read(tmp_path / "probe-run-0" / "holds.jsonl")
+    second = gate.read(tmp_path / "probe-run-1" / "holds.jsonl")
+    assert any(hold["writer"] == "embedding" and hold["database"] == proof["first_path"] for hold in first)
+    assert all(hold["database"] != proof["first_path"] for hold in second)
+    assert max(hold["end"] for hold in first) <= rows[0]["storage_arms"]["schedule_end"]
+
+
+@pytest.mark.parametrize("mode", ["drain-false", "drain-raise", "retire-false", "retire-raise", "shutdown-raise"])
+def test_embedding_retirement_failure_is_inconclusive(tmp_path, mode):
+    proof, rows = embedding_retirement_probe(tmp_path, mode)
+    assert proof["status"] == 2
+    assert len(rows) == 1  # Failed retirement must never reuse the recorder for another run.
+    assert rows[0]["inconclusive"]
+    errors = rows[0]["storage_arms"]["errors"]
+    assert errors and any(mode.split("-")[0] in error for error in errors)
+    assert gate.comparison(rows, rows)["verdict"] == "INCONCLUSIVE"
+    assert not (tmp_path / "probe-run-1").exists()

@@ -336,6 +336,8 @@ def run(cell: str, directory: Path, config_module: Any, engine_module: Any,
 
     def new_engine(owner: str) -> Any:
         engine = engine_module.LCMEngine(config=config, hermes_home=str(directory / "home"))
+        if storage_arms is not None:
+            storage_arms.engines.append(engine)
         cells.start(engine, owner)  # Opens the lazy store before contention.
         conn = engine._store._conn
         if busy_timeout_ms is not None:
@@ -437,6 +439,8 @@ def run(cell: str, directory: Path, config_module: Any, engine_module: Any,
             "logs": capture.records.copy()}
     if storage_arms is not None:
         result["storage_arms"] = storage_arms.finish(arm_output)
+        if result["storage_arms"].get("errors"):
+            result["inconclusive"] = True
     return result
 
 
@@ -482,6 +486,8 @@ def main() -> None:
                 output.write(json.dumps(result) + "\n")
                 output.flush()
                 failed |= bool(result["errors"]) or result["inconclusive"]
+                if result.get("storage_arms", {}).get("errors"):
+                    break  # A failed retirement cannot share a recorder with another run.
     finally:
         root.removeHandler(capture)
     if failed:
