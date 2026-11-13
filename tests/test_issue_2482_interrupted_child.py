@@ -8,9 +8,12 @@ interrupted shapes are the ones the v0.30.0 driven run (r7) lost; the guards pin
 normally stores the same rows exactly once, and that the parent's resume in a new process adds no copy.
 """
 
+import hashlib
+import sqlite3
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing as close_connection
 
 import pytest
 
@@ -973,3 +976,81 @@ def test_a_store_skipped_on_a_busy_lock_lands_once_the_lock_frees_without_anothe
         assert _contents(child_rows(parent)) == _contents(view(1))
     else:
         assert child_rows(parent) == []  # without a retry the list was dropped
+
+
+def test_stale_projection_receipt_cannot_suppress_later_real_user_row(host, monkeypatch):
+    load, clone, ctx, parent, child, engine = _setup(host, "own_engine", supports_unload=True)
+    raw = [
+        {"role": "user", "content": "initial real user message"},
+        {"role": "assistant", "content": "initial answer"},
+    ]
+    old_projection = {"role": "user", "content": "approved stop"}
+    new_projection = {"role": "user", "content": "projection for the second compacted view"}
+    monkeypatch.setattr(engine, "_compress_bypassed", lambda *args: [old_projection])
+    assert child.compress(engine, raw) == [old_projection]
+    connection = engine._store.connection
+    database = engine._store.db_path
+    key = "delegate_compaction_outputs:" + hashlib.sha256(child.session_id.encode()).hexdigest()
+    connection.execute(f"""
+        CREATE TEMP TRIGGER deny_projection_invalidation
+        BEFORE INSERT ON metadata WHEN NEW.key = '{key}'
+        BEGIN SELECT RAISE(ABORT, 'injected projection invalidation fault'); END
+    """)
+    connection.commit()
+    monkeypatch.setattr(engine, "_compress_bypassed", lambda *args: [new_projection])
+    assert child.compress(engine, raw) == [new_projection]
+    connection.execute("DROP TRIGGER deny_projection_invalidation")
+    connection.commit()
+    ctx.unload()
+
+    # Fresh module: no inherited in-memory hints. The older generated text
+    # now comes from a new user message after the second projection.
+    next_ctx, _ = load()
+    next_ctx.unload = next_ctx.offered._enable_plugin_unload()
+    next_parent = clone(next_ctx)
+    next_parent.on_session_start("parent", platform="cli", context_length=200_000)
+    child.spawn(next_ctx)
+    next_engine = clone(next_ctx)
+    child.start(next_engine)
+    answer = {"role": "assistant", "content": "stopped after user approval"}
+    child.turn(next_ctx, [new_projection, old_projection, answer], next_engine)
+
+    with close_connection(sqlite3.connect(database)) as reader:
+        recorded = reader.execute(
+            "SELECT role, content FROM messages WHERE session_id='child' ORDER BY store_id"
+        ).fetchall()
+    assert recorded[-1] == ("assistant", answer["content"])
+    assert ("user", old_projection["content"]) in recorded
+
+
+def test_fresh_projection_receipt_keeps_matching_user_row_after_its_prefix(host, monkeypatch):
+    load, clone, ctx, parent, child, engine = _setup(host, "own_engine", supports_unload=True)
+    raw = [
+        {"role": "user", "content": "initial real user message"},
+        {"role": "assistant", "content": "initial answer"},
+    ]
+    projection = {"role": "user", "content": "approved stop"}
+    monkeypatch.setattr(engine, "_compress_bypassed", lambda *args: [projection])
+    assert child.compress(engine, raw) == [projection]
+    database = engine._store.db_path
+    ctx.unload()
+
+    next_ctx, _ = load()
+    next_ctx.unload = next_ctx.offered._enable_plugin_unload()
+    next_parent = clone(next_ctx)
+    next_parent.on_session_start("parent", platform="cli", context_length=200_000)
+    child.spawn(next_ctx)
+    next_engine = clone(next_ctx)
+    child.start(next_engine)
+    new_user = {"role": "user", "content": projection["content"]}
+    new_assistant = {"role": "assistant", "content": "stopped after user approval"}
+    current_view = [projection, new_user, new_assistant]
+    child.turn(next_ctx, current_view, next_engine)
+    child.turn(next_ctx, current_view, next_engine)
+    child.end(next_engine, current_view)
+
+    with close_connection(sqlite3.connect(database)) as reader:
+        recorded = reader.execute(
+            "SELECT role, content FROM messages WHERE session_id='child' ORDER BY store_id"
+        ).fetchall()
+    assert recorded == [(row["role"], row["content"]) for row in [*raw, new_user, new_assistant]]

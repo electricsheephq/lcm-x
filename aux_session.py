@@ -1139,18 +1139,24 @@ class DelegateChildMixin:
         produced = Counter(identities(result)) - Counter(identities(messages))
         outputs = [self._delegate_child_boundary_digest(identity) for identity in produced.elements()]
         _DELEGATE_COMPACTION_OUTPUTS[self._delegate_child_key(session_id)] = outputs
-        self._save_delegate_child_outputs(session_id, outputs)
 
     @staticmethod
     def _delegate_child_outputs_key(session_id):
         return "delegate_compaction_outputs:" + hashlib.sha256(session_id.encode()).hexdigest()
 
-    def _save_delegate_child_outputs(self, session_id, outputs):
+    def _save_delegate_child_outputs(self, session_id, outputs, view):
         if getattr(self, "_unload_group", None) is not None:
-            self._store.write_metadata_json(
-                [self._delegate_child_outputs_key(session_id)],
-                json.dumps([output.hex() for output in outputs]), skip_unchanged=True,
-            )
+            try:
+                prefix = [self._delegate_child_boundary_digest(
+                    self._session_end_prefix_compare_identity(row, session_id=session_id, recover_markers=False),
+                ).hex() for row in view if isinstance(row, dict) and not self._matches_ignore_message_patterns(row)]
+                self._store.write_metadata_json(
+                    [self._delegate_child_outputs_key(session_id)],
+                    json.dumps({"prefix": prefix, "outputs": [output.hex() for output in outputs]}),
+                    skip_unchanged=True,
+                )
+            except Exception:
+                logger.warning("LCM could not preserve delegated compaction output proof", exc_info=True)
 
     def _compress_delegate_child_bypassed(self, messages, current_tokens, focus_topic, force):
         session_id = self._bypass_lcm_session_id()
@@ -1194,14 +1200,15 @@ class DelegateChildMixin:
         try:
             with _DELEGATE_STORE_LOCK:
                 # An earlier compaction's outputs never exempt a row once this one has replaced the view.
-                _DELEGATE_COMPACTION_OUTPUTS.pop(self._delegate_child_key(session_id), None)
-                self._save_delegate_child_outputs(session_id, [])
+                key = self._delegate_child_key(session_id)
+                _DELEGATE_COMPACTION_OUTPUTS.pop(key, None)
                 if self._delegate_child_link(session_id, platform=_DELEGATE_SOURCE, require_agent=True):
                     try:  # recorded apart from the boundary: it must survive a failed or dropped boundary
                         # Only over a covered input: a summary of a row that was never stored is that row's only
                         # trace, so it must be stored like any other row.
                         if covered:
                             self._remember_delegate_child_outputs(session_id, messages, result)
+                        self._save_delegate_child_outputs(session_id, _DELEGATE_COMPACTION_OUTPUTS.get(key, ()), result)
                     except Exception as exc:
                         self._note_delegate_child_fallback(session_id, f"compaction outputs not recorded: {exc}")
                     if stored_tail and self._store.get_session_tail(session_id, limit=1) == stored_tail:
@@ -1244,7 +1251,6 @@ class DelegateChildMixin:
                     _DELEGATE_RESUME_BOUNDARIES[new_key] = _DELEGATE_RESUME_BOUNDARIES[old_key]
                 if old_key in _DELEGATE_COMPACTION_OUTPUTS:
                     _DELEGATE_COMPACTION_OUTPUTS[new_key] = _DELEGATE_COMPACTION_OUTPUTS[old_key]
-                    self._save_delegate_child_outputs(new_session_id, _DELEGATE_COMPACTION_OUTPUTS[new_key])
                 self._store.record_session_lineage(new_session_id, old_session_id, source="compression")
                 try:
                     stored_link = self._stored_delegate_child_link(new_session_id)
@@ -1455,9 +1461,18 @@ class DelegateChildMixin:
             if start == 0 and len(self._delegate_child_store_sessions(session_id, store=store)) > 1:
                 start = None  # an empty continuation is not an empty logical child history
         outputs = _DELEGATE_COMPACTION_OUTPUTS.get(key)
+        receipt_prefix_length = None
         if outputs is None and (detached or getattr(self, "_unload_group", None) is not None):
-            receipt = store.read_metadata_json(self._delegate_child_outputs_key(session_id))
-            outputs = [bytes.fromhex(output) for output in receipt] if receipt else []
+            digests = [self._delegate_child_boundary_digest(identity).hex() for identity in identities]
+            sessions = self._delegate_child_store_sessions(session_id, store=store)
+            for sid in sessions:
+                receipt = store.read_metadata_json(self._delegate_child_outputs_key(sid))
+                if isinstance(receipt, dict):
+                    prefix = receipt.get("prefix") or []
+                    if prefix and digests[:len(prefix)] == prefix:
+                        outputs = [bytes.fromhex(output) for output in receipt.get("outputs", ())]
+                        receipt_prefix_length = len(prefix)
+                    break  # A successor's own proof supersedes its predecessor's.
         if start == 0 and outputs:
             start = None  # A proven compaction projection is not a first raw view.
         if start is None:
@@ -1485,7 +1500,9 @@ class DelegateChildMixin:
                 stored_ids = counted().copy()
                 counted_view = [self._session_end_counted_identity(msg, stored_ids, session_id=session_id) for msg in view[:end]]
                 stored_ids.subtract(counted_view[len(front):end])
-                return self._delegate_child_unaccounted(counted_view[:len(front)], stored_ids, outputs)
+                return self._delegate_child_unaccounted(
+                    counted_view[:len(front)], stored_ids, outputs, output_limit=receipt_prefix_length,
+                )
 
             start = self._delegate_child_anchor_end(session_id, view, stored_tail, unaccounted, rejected)
             anchored = start is not None or bool(rejected)
@@ -1501,11 +1518,14 @@ class DelegateChildMixin:
                 remaining = counted().copy()
                 identities = [self._session_end_counted_identity(msg, remaining, session_id=session_id) for msg in view]
                 suffix = []
-                for msg, identity in zip(view, identities):
-                    if remaining[identity] > 0:
+                for index, (msg, identity) in enumerate(zip(view, identities)):
+                    digest = self._delegate_child_boundary_digest(identity)
+                    if receipt_prefix_length is not None and index < receipt_prefix_length and outputs[digest] > 0:
+                        outputs[digest] -= 1
+                    elif remaining[identity] > 0:
                         remaining[identity] -= 1
-                    elif outputs[self._delegate_child_boundary_digest(identity)] > 0:  # a compacted head
-                        outputs[self._delegate_child_boundary_digest(identity)] -= 1
+                    elif receipt_prefix_length is None and outputs[digest] > 0:  # a live compacted head
+                        outputs[digest] -= 1
                     else:
                         suffix.append(msg)
             else:
@@ -1523,14 +1543,17 @@ class DelegateChildMixin:
         # A rejection stores rows out of view order and must mark the end.
         return len(stored), bool((boundary and anchored) or rejected)
 
-    def _delegate_child_unaccounted(self, front: list, stored: Counter, outputs: Counter) -> list[int]:
+    def _delegate_child_unaccounted(self, front: list, stored: Counter, outputs: Counter, *,
+                                    output_limit: int | None = None) -> list[int]:
         """Indexes of ``front`` rows that are neither stored nor a compaction output (one occurrence each)."""
         stored, outputs, missing = stored.copy(), outputs.copy(), []
         for index, identity in enumerate(front):
             digest = self._delegate_child_boundary_digest(identity)
-            if stored[identity] > 0:
+            if output_limit is not None and index < output_limit and outputs[digest] > 0:
+                outputs[digest] -= 1
+            elif stored[identity] > 0:
                 stored[identity] -= 1
-            elif outputs[digest] > 0:
+            elif output_limit is None and outputs[digest] > 0:
                 outputs[digest] -= 1
             else:
                 missing.append(index)
