@@ -7478,7 +7478,6 @@ class LCMEngine(
                 prepared = {}
                 begin_iteration()
                 held_at = sample = None
-                prelock_genuine = False
                 try:
                     prepared["view_only"] = self._precompute_ingest_view_only(messages)
                     if getattr(self, "_identity_anchor_recovery", None):
@@ -7519,12 +7518,16 @@ class LCMEngine(
                                                     or state.phase == "prelock" or state.poisoned)):
                                         raise
                                     if (not isinstance(error, _IngestReclassify) and state.phase == "prelock"
-                                            and not state.poisoned and not state.implicit_begun
-                                            and self._store._ingest_write_generation() == state.G0):
-                                        # Nothing was written and nothing committed since G0: the pass saw what
-                                        # eager sees, so eager meets this same error. Raise it as eager would.
-                                        prelock_genuine = True
-                                        raise
+                                            and not state.poisoned and not state.implicit_begun):
+                                        # Nothing was written. Eager meets this error only once its BEGIN succeeds:
+                                        # take the lock first (a busy BEGIN raises eager's busy error). With nothing
+                                        # committed since G0 the pass saw what eager sees: raise the same error.
+                                        try:
+                                            self._store._acquire_ingest_prelock()
+                                        except _IngestReclassify:
+                                            pass  # a commit landed since G0: reclassify below, under the lock
+                                        else:
+                                            raise error
                                     if reclassified:
                                         raise AssertionError("Ingest reclassified twice") from error
                                     if (getattr(error, "full", False) or state.attempt_after_writes
@@ -7568,11 +7571,10 @@ class LCMEngine(
                     if rollback_ok and attempt == 0 and isinstance(exc, _EvidenceFaultRetry):
                         continue  # #1815: nothing of the faulted attempt is kept; the retry classifies again
                     if rollback_ok and isinstance(exc, Exception) and not busy_retried and (_is_ingest_busy_error(exc)
-                                                                      or held_at is None and not prelock_genuine
-                                                                      and isinstance(exc, sqlite3.Error)):
+                                                                      or held_at is None and isinstance(exc, sqlite3.Error)):
                         busy_retried = True
                         attribution["busy_snapshot_retry"] = True
-                        admission_retry = held_at is None and not prelock_genuine and _is_ingest_busy_error(exc)
+                        admission_retry = held_at is None and _is_ingest_busy_error(exc)
                         continue
                     if rollback_ok and isinstance(exc, Exception) and self._session_end_flush_active and _is_ingest_busy_error(exc):
                         self._ingest_read_only = exc

@@ -254,6 +254,14 @@ def _scenarios():
 _DISCARDED_PASS_FAULTS = frozenset({"locked", "duplicate-tail"})
 
 
+_WRITE_SQL = re.compile(r'^sql \S+ "?\s*(?:INSERT|UPDATE|DELETE|REPLACE|WITH\b.*\b(?:INSERT|UPDATE|DELETE))', re.I | re.S)
+
+
+def _store_files(root):
+    """Every database the scenario wrote, by path relative to its root, for a durable comparison."""
+    return {path.relative_to(root): _dump(path) for path in sorted(root.rglob("*.db"))}
+
+
 def _discarded_passes_only(eager_n, lazy_n):
     """None when lazy_n is eager_n plus discarded pre-lock passes, else the first offending difference."""
     seen = set(eager_n)
@@ -266,6 +274,8 @@ def _discarded_passes_only(eager_n, lazy_n):
         block = lazy_n[j1:j2]
         for k, event in enumerate(block):
             following = block[k + 1] if k + 1 < len(block) else ""
+            if _WRITE_SQL.match(event):
+                return f"a write in a discarded pass: {event[:160]}"
             if event in seen or event.startswith("store raises "):
                 continue
             if event.startswith("sql failed ") and following.startswith("store raises ") \
@@ -278,11 +288,18 @@ def _discarded_passes_only(eager_n, lazy_n):
 @pytest.mark.parametrize("case", _scenarios(), ids=lambda case: case.name)
 def test_a_trace_differential_eager_vs_prelock(case, tmp_path, monkeypatch):
     from tests.behaviour import ingest_trace_harness as harness
+    # Both modes run at the same path (stored payload paths and digests over them must match), one after the other.
+    root = tmp_path / "run"
     monkeypatch.setattr(MessageStore, "_ingest_prelock", False)
-    eager = harness.observe(case, tmp_path / "eager")
+    eager = harness.observe(case, root)
+    eager_store = _store_files(root)
+    root.rename(tmp_path / "eager")
     monkeypatch.setattr(MessageStore, "_ingest_prelock", True)
-    lazy = harness.observe(case, tmp_path / "lazy")
+    lazy = harness.observe(case, root)
     eager_n, lazy_n = _normalized(eager), _normalized(lazy)
+    # Every table, ledger tables included (the trace's state snapshot leaves them out): a duplicated or lost write
+    # anywhere, including one hidden in a hashed SQL event, shows here.
+    assert _store_files(root) == eager_store, f"{case.name}: stores differ"
     if case.fault in _DISCARDED_PASS_FAULTS:
         offending = _discarded_passes_only(eager_n, lazy_n)
         assert offending is None, f"{case.name}: {offending}"

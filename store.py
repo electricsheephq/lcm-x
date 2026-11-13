@@ -493,6 +493,8 @@ class _IngestAttempt:
     begin_seen_at: float | None = None
     T_begin: int | None = None
     attempt_after_writes: bool = False
+    validated: bool = False
+    thread: int = field(default_factory=threading.get_ident)
 
 
 class MessageStore:
@@ -2120,7 +2122,7 @@ class MessageStore:
 
     def _ingest_is_prelock(self):
         state = self._ingest_prelock_state
-        return state is not None and state.phase == "prelock"
+        return state is not None and state.phase == "prelock" and state.thread == threading.get_ident()
 
     def _ingest_prelock_before_begin(self) -> None:
         """Test seam immediately before foreground admission, in either mode."""
@@ -2130,9 +2132,9 @@ class MessageStore:
 
     def _acquire_ingest_prelock(self):
         self._sync_ingest_prelock()
-        state = self._ingest_prelock_state
-        if state is None or state.phase != "prelock":
+        if not self._ingest_is_prelock():
             return
+        state = self._ingest_prelock_state
         self._begin_ingest_prelock(state)
 
     def _begin_ingest_prelock(self, state):
@@ -2172,7 +2174,7 @@ class MessageStore:
     def _sync_ingest_prelock(self):
         """Promote Python's implicit write transaction before any owner control."""
         state, conn = self._ingest_prelock_state, self._conn
-        if state is None or state.phase != "prelock":
+        if not self._ingest_is_prelock():  # only the attempt's own thread acts on it
             return
         if not state.implicit_begun:
             if conn.total_changes != state.G0[0] and not state.poisoned:
@@ -2222,6 +2224,7 @@ class MessageStore:
         state.phase = "prelock"
         state.implicit_begun = state.attempt_after_writes = False
         state.G0 = (conn.total_changes, *state.G0[1:])  # total_changes counts the discarded writes
+        state.timing["acquired_at"] = None  # no lock is held again until the next acquisition
         for scope in state.scopes:
             scope["uncovered"] = False
         conn.set_authorizer(self._ingest_prelock_authorizer())
@@ -2242,7 +2245,7 @@ class MessageStore:
         """Validate a read-only decision and surface swallowed acquisition signals."""
         self._sync_ingest_prelock()
         state = self._ingest_prelock_state
-        if state is None:
+        if state is None or state.validated:  # the engine validated it; a later commit cannot change that decision
             return
         if state.begin_failed is not None:
             raise state.begin_failed
@@ -2250,6 +2253,7 @@ class MessageStore:
             raise _IngestReclassify()
         if state.phase == "prelock" and (state.poisoned or self._ingest_write_generation() != state.G0):
             self._acquire_ingest_prelock()
+        state.validated = state.phase == "prelock"
 
     def _ingest_prelock_authorizer(self):
         thread = threading.get_ident()
@@ -2262,6 +2266,9 @@ class MessageStore:
                 return sqlite3.SQLITE_OK
             state = self._ingest_prelock_state
             if action == sqlite3.SQLITE_TRANSACTION and arg1 == "BEGIN":
+                if state.implicit_begun and not self._conn.in_transaction and not state.poisoned:
+                    state.poisoned = True  # an earlier implicit BEGIN failed: its write may have been skipped
+                    self.ingest_prelock_counts["poisoned"] += 1
                 state.implicit_begun = True
                 state.begin_seen_at = time.perf_counter()
                 state.T_begin = self._conn.total_changes

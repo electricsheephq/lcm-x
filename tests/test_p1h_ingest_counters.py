@@ -65,22 +65,36 @@ def test_busy_attempt_and_commit_are_separate(engines, monkeypatch, clock):
     assert engine._store.get_session_count("S") == 1
 
 
-def test_failed_begin_has_no_hold(engines, monkeypatch, clock):
+@pytest.mark.parametrize("prelock", [False, True], ids=["eager", "lazy"])
+def test_failed_begin_has_no_hold(engines, monkeypatch, clock, prelock):
     engine = engines()
-    original = engine._store.atomic
+    monkeypatch.setattr(engine._store, "_ingest_prelock", prelock)
     calls = []
+    if prelock:  # #2293: the lazy attempt's BEGIN IMMEDIATE runs at its first write, after this seam
+        seam = type(engine._store)._ingest_prelock_before_begin
 
-    @contextmanager
-    def begin(*, immediate=False):
-        calls.append(immediate)
-        if len(calls) == 1:
-            raise sqlite3.OperationalError("database is locked")
-        with original(immediate=immediate):
-            yield
+        def begin(store):
+            calls.append(True)
+            if len(calls) == 1:
+                raise sqlite3.OperationalError("database is locked")
+            return seam(store)
 
-    monkeypatch.setattr(engine._store, "atomic", begin)
+        monkeypatch.setattr(type(engine._store), "_ingest_prelock_before_begin", begin)
+    else:
+        original = engine._store.atomic
+
+        @contextmanager
+        def begin(*, immediate=False):
+            calls.append(immediate)
+            if len(calls) == 1:
+                raise sqlite3.OperationalError("database is locked")
+            with original(immediate=immediate):
+                yield
+
+        monkeypatch.setattr(engine._store, "atomic", begin)
     view = [_m("user", "after busy BEGIN", 1.)]
     assert engine._ingest_messages(view) == view
+    print("RECORDS", records(engine), "CALLS", calls)
     first, second = records(engine)
     assert (first["attempt"], first["outcome"], first["hold_ms"]) == (1, "busy", None)
     assert second["attempt"] == 2 and second["outcome"] == "commit" and second["hold_ms"] == 0
@@ -410,6 +424,9 @@ def test_r4_late_rollback_reports_no_durable_writes(engines, monkeypatch, busy):
 
 def test_r4_hold_starts_after_begin_succeeds(engines, monkeypatch, clock):
     engine = engines()
+    # #2293: pins the explicit BEGIN's timing, so it runs eager (the lazy attempt may begin through Python's
+    # implicit BEGIN, which this wrapper cannot delay; its hold then starts when that BEGIN is issued).
+    monkeypatch.setattr(engine._store, "_ingest_prelock", False)
     class DelayedBegin:
         def __init__(self, conn):
             self.conn, self.begins = conn, 0

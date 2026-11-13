@@ -347,3 +347,57 @@ def test_p4_prelock_writes_stay_inside_the_attempt_transaction(name, tmp_path, m
         assert not entry["leaked"], (name, entry)  # nothing the attempt wrote is visible before COMMIT
         if entry["held"]:
             assert not entry["lockable"], (name, entry)  # our write lock is held; a second writer waits
+
+
+# -- review findings (round 2) ---------------------------------------------------------------------------------------
+
+def test_foreign_commit_after_the_engine_validated_a_read_only_attempt_does_not_escape(tmp_path):
+    """Deep review F1: the engine validates a read-only attempt in its loop; _ingest_atomic's own finish must not
+    re-validate after the loop has exited (a commit landing between them would raise _IngestReclassify past
+    every handler)."""
+    from tests.test_2293_prelock import _engine, _shape
+    setups, view = _shape("warm-append")
+    engine = _engine(tmp_path, prelock=True)
+    try:
+        for setup in setups:
+            engine.ingest(setup)
+        engine.ingest(view)  # an identical re-ingest is now a read-only lazy attempt
+        calls, fired = [], []
+        original = MessageStore._finish_ingest_prelock
+
+        def finish(self):
+            if self is engine._store:
+                calls.append(self._ingest_is_prelock())
+                if len(calls) == 2 and calls[1] and not fired:
+                    fired.append(True)
+                    with sqlite3.connect(engine._config.database_path, timeout=5) as other:
+                        other.execute("INSERT INTO metadata(key, value) VALUES('probe-foreign', 'x') "
+                                      "ON CONFLICT(key) DO UPDATE SET value = value || 'x'")
+                    other.close()
+            return original(self)
+
+        before = engine._store.ingest_prelock_counts["no_write"]
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(MessageStore, "_finish_ingest_prelock", finish)
+            engine.ingest(view)  # must return; a BaseException would escape here
+        assert fired
+        assert engine._store.ingest_prelock_counts["no_write"] == before + 1
+    finally:
+        engine.shutdown()
+
+
+def test_discarded_pass_rule_is_exercised_both_ways():
+    """Astra F3: the held-lock rule accepts repeated reads and a P1 busy write, and rejects any write statement,
+    any event eager never emits, and any deletion."""
+    from tests.test_2293_prelock import _discarded_passes_only
+    eager = ['sql _store "SELECT value FROM metadata WHERE key=\'a\'"', "store result read_metadata_json null",
+             'sql failed _store ["BEGIN IMMEDIATE",[],"OperationalError","database is locked"]', "raise-0 x"]
+    reads = eager[:2]
+    assert _discarded_passes_only(eager, reads + eager) is None
+    busy_write = ["sql failed _store sha12/len=abc/301",
+                  'store raises write_metadata_json ["OperationalError","database is locked"]']
+    assert _discarded_passes_only(eager, reads + busy_write + eager) is None
+    write = ['sql _store "UPDATE ledger_meta SET value=CAST(value AS INTEGER)+1 WHERE key=\'view_seq\'"']
+    assert "write" in _discarded_passes_only(eager + write, write + eager + write)
+    assert "novel" in _discarded_passes_only(eager, ["log x WARNING something"] + eager)
+    assert _discarded_passes_only(eager, eager[1:]) is not None

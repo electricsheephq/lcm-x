@@ -136,7 +136,7 @@ def _sqlite_savepoint(conn: sqlite3.Connection, *, abort_on_cleanup_failure: boo
         state.sync()
     scope = None
     if state is not None and state.phase == "prelock":
-        scope = {"materialized": False, "uncovered": False}
+        scope = dict(materialized=False, uncovered=False)  # a virtual savepoint scope (not a policy scope)
         state.scopes.append(scope)
     try:
         if scope is None and owner_active and not conn.in_transaction:
@@ -154,6 +154,8 @@ def _sqlite_savepoint(conn: sqlite3.Connection, *, abort_on_cleanup_failure: boo
             if abort_on_cleanup_failure:
                 conn.execute(f"RELEASE SAVEPOINT {name}")
         except BaseException as error:
+            if scope is not None and isinstance(error, _IngestReclassify):
+                raise  # already restarted or acquired: the attempt's handler owns the rollback
             if scope is not None:
                 state.sync()
                 if scope["uncovered"] and not isinstance(error, (KeyboardInterrupt, SystemExit)):
