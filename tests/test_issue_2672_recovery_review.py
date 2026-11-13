@@ -1,4 +1,4 @@
-"""#2672 round 2: keep main's suffix selection when prefix selection is unsafe."""
+"""#2672 rounds 2/3: keep main's suffix selection when prefix selection is unsafe."""
 from collections import Counter
 
 import pytest
@@ -133,3 +133,132 @@ def test_selection_failure_keeps_main_result(stamped_case, monkeypatch, position
         assert not warnings
         assert_suffix(case, suffix)
         assert after["recovered_rows"] == before["recovered_rows"] + len(suffix)
+
+
+_CARRIED = {
+    "todo": dict(role="user", content=(
+        "[Your active task list was preserved across context compression]\n"
+        "- [>] 1. finish probe (in_progress)")),
+    "objective": dict(role="user", content=(
+        "[Current user objective preserved from compacted history]\nfinish probe")),
+    "note": dict(role="system", content=(
+        "[Note: This conversation uses Lossless Context Management (LCM). "
+        "Earlier turns have been compacted into hierarchical summaries below.]")),
+    "guard": dict(role="user", content="[T11]"),
+}
+_ANCHOR_VARIANTS = {
+    "ptodo@T10+u16": ("todo", 10, None, "last-user", False),
+    "ptodo@T12+u16": ("todo", 12, None, "last-user", False),
+    "ptodo@T10+a09": ("todo", 10, None, "first-assistant", False),
+    "pobjective@T10+u16": ("objective", 10, None, "last-user", False),
+    "pnote@T10+u16": ("note", 10, None, "last-user", False),
+    "todo@T10+u16": ("todo", None, "[T10]", "last-user", False),
+    "note@T10+u16": ("note", None, "[T10]", "last-user", False),
+    "todo@T10+a09": ("todo", None, "[T10]", "first-assistant", False),
+    "pguard@T10+u16": ("guard", 10, None, "last-user", False),
+    "base+u16": (None, None, None, "last-user", True),
+    "todo@end+u16": ("todo", None, "end", "last-user", True),
+    "todo@1+u16": ("todo", None, "lead", "last-user", True),
+}
+
+
+@pytest.fixture
+def carried_case(monkeypatch, request):
+    row_kind, after, _, _, _ = _ANCHOR_VARIANTS[request.node.callspec.params["variant"]]
+    _stamp_turns(monkeypatch)
+    if row_kind == "guard":
+        turn = rotation._turn
+
+        def unstamped_turn(index):
+            messages = list(turn(index))
+            if index == 11:
+                messages[0] = {k: v for k, v in messages[0].items() if k not in ("timestamp", "message_uid")}
+            return tuple(messages)
+
+        monkeypatch.setattr(rotation, "_turn", unstamped_turn)
+    elif after is not None:
+        ingest = LCMEngine.ingest
+        inserted = set()
+
+        def with_carried_row(engine, messages, *args, **kwargs):
+            result = ingest(engine, messages, *args, **kwargs)
+            if (engine._session_id == P and id(engine) not in inserted and messages
+                    and messages[-1].get("content", "").startswith(f"reply to T{after:02d}:")):
+                inserted.add(id(engine))
+                messages.append(dict(_CARRIED[row_kind]))
+                ingest(engine, messages)
+            return result
+
+        monkeypatch.setattr(LCMEngine, "ingest", with_carried_row)
+    return request.getfixturevalue("case")
+
+
+@pytest.mark.parametrize("arm", ["never-resumed", "resumed"])
+@pytest.mark.parametrize("variant", _ANCHOR_VARIANTS)
+@pytest.mark.parametrize("kind", ["timestamp", "message_uid"])
+@pytest.mark.parametrize("shape", ["pair", "reply"])
+def test_carried_anchor(carried_case, arm, variant, kind, shape, record_property):
+    case = carried_case
+    row_kind, after, before, position, positive = _ANCHOR_VARIANTS[variant]
+
+    def history_for(target):
+        history, _, suffix = _history(target, "none", kind, shape)
+        prefix = "reply to T09:" if position == "first-assistant" else "[T16]"
+        changed = [next(i for i, m in enumerate(history) if m["content"].startswith(prefix))]
+        if kind == "timestamp":
+            history[changed[0]]["timestamp"] += 10000
+        else:
+            history[changed[0]]["message_uid"] += "-resent"
+        if before is not None:
+            cursor = len(target.prefix)
+            at = cursor if before == "end" else (
+                next(i for i, m in enumerate(history[:cursor])
+                     if not target.live._is_replayed_context_scaffold_message(m)) if before == "lead" else
+                next(i for i, m in enumerate(history[:cursor]) if m["content"].startswith(before)))
+            history.insert(at, dict(_CARRIED[row_kind]))
+            changed = [i + (i >= at) for i in changed]
+            if before == "end":
+                suffix = [dict(_CARRIED[row_kind])] + suffix
+        if row_kind is not None:
+            row = next(m for m in history if m["content"].startswith(_CARRIED[row_kind]["content"]))
+            assert target.live._is_replayed_context_scaffold_message(row) == (row_kind != "guard")
+            assert not target.live._is_ignored_active_replay_placeholder(row, row["content"])
+            if row_kind == "guard":
+                key = target.live._identity_anchor_view_key(row)
+                assert key is not None and key[0] is None
+        return history, changed, suffix
+
+    history, changed, suffix = history_for(case)
+    case.host.lists[C] = history
+    parent = ident(rows(case, P))
+    assert not case.run()
+    recovered = ident(rows(case))
+    case.run()
+    assert ident(rows(case)) == recovered
+    assert ident(rows(case, P)) == parent
+    main_rows = [(C, P, m["role"], m["content"]) for m in suffix]
+    assert Counter(main_rows) <= Counter(recovered)
+    assert len(recovered) == len(set(recovered))
+    expected = ([history[i] for i in changed] if positive else []) + suffix
+    if arm == "never-resumed":
+        assert_suffix(case, expected)
+    final = control = None
+    if arm == "resumed":
+        final = _resume(case, history, lambda stage: None)
+        ctl = case.control()
+        control_history, _, _ = history_for(ctl)
+        control = _resume(ctl, control_history, lambda stage: None)
+        extra = list((Counter(final) - Counter(control)).elements())
+        missing = list((Counter(control) - Counter(final)).elements())
+        record_property("2672-r3", dict(variant=variant, arm=arm, kind=kind, shape=shape,
+                                       extra=extra, missing=missing, final=final, control=control))
+        assert not extra and not missing, f"extra={len(extra)} missing={len(missing)}"
+        assert len(final) == len(set(final))
+        if positive:
+            assert final == control
+        else:
+            # Main's suffix-first order is the accepted fallback, with the same rows.
+            assert final == main_rows + [row for row in control if row not in main_rows]
+            assert final != control
+
+    assert recovered == [(C, P, m["role"], m["content"]) for m in expected]

@@ -246,12 +246,27 @@ def _recover_candidate(engine_cls, config, home, db_path, state_path, conv, boun
             indexes = sorted(index for index, previous in metadata.items()
                              if det._host_occurrence_changed(messages[index], previous))
             # A changed prefix row breaks the proof's contiguous continuation
-            # on resume. Its fallback matcher can expose an ignored placeholder
-            # anywhere in the prefix, even before the first changed occurrence.
-            if indexes and (any(det._is_ignored_active_replay_placeholder(
-                    m, text_content_for_pattern_matching(m.get("content")) or "")
-                    for m in messages[:cursor]) or not _valid_suffix(messages, indexes[0])):
-                indexes = []
+            # on resume. Require the anchor matcher to explain every carried
+            # row after the leading scaffold run, not just the changed rows.
+            if indexes:
+                lead = next((i for i in range(cursor)
+                             if not det._is_replayed_context_scaffold_message(messages[i])), cursor)
+                plan = det._identity_anchor_prematch(messages, messages, lead)
+                _, occurrences = det._occurrence_replay_identities(messages, proof)
+                # Matched tool siblings were withheld until the whole group matched.
+                anchored = set(plan["replayed"]) | (plan["matched"].keys() - plan["remainders"].keys())
+                anchored.difference_update(indexes)
+                for index in indexes:
+                    key = det._identity_anchor_view_key(messages[index])
+                    # Recovery will store this exact stamped occurrence; the
+                    # same matcher key must identify it on the next ingest.
+                    if (key is not None and key[0] is not None and key[1] == occurrences[index]
+                            and not det._is_ignored_active_replay_placeholder(
+                                messages[index], text_content_for_pattern_matching(messages[index].get("content")) or "")):
+                        anchored.add(index)
+                det._identity_anchor_tool_segments(messages, lead, anchored, plan["matched"])
+                if not set(range(lead, cursor)) <= anchored or not _valid_suffix(messages, indexes[0]):
+                    indexes = []
         except Exception:
             indexes = []  # Metadata selection must retain main's suffix recovery.
         indexes.extend(range(cursor, len(messages)))
