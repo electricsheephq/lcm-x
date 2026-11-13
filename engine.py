@@ -12123,11 +12123,18 @@ class LCMEngine(
 
     def _queue_cold_session_tail(self, view, *, session_id, conversation_id, source, error, occurrence_resume=False):
         # occurrence_resume: only an off-current end that met the #2543 gate (not auxiliary-reused, no bypass evidence)
-        # may resume by occurrence on a retry; every other cold tail keeps main's retry.
+        # may resume by occurrence on a retry, and only while its conversation has no row newer than the store held at
+        # the end (a session that went on keeps main's retry). Every other cold tail keeps main's retry.
+        stored_through = None
+        if occurrence_resume:
+            try:
+                stored_through = self._store.max_store_id()
+            except Exception:  # unknown: main's retry
+                logger.debug("LCM session-end occurrence resume: store high-water read failed", exc_info=True)
         tail = dict(kind="cold", store=self._store, hermes_home=str(self._hermes_home or ""), session_id=session_id,
                     conversation_id=conversation_id, source=source, view=copy.deepcopy(view),
                     context_window_tokens=self._store.get_context_window_tokens(session_id),
-                    occurrence_resume=bool(occurrence_resume))
+                    occurrence_resume_through=stored_through)
         if not any(self._tail_key(old) == self._tail_key(tail) for old in self._pending_session_tails):
             self._pending_session_tails.append(tail)
             self._ledger_count("ledger.tail.queued.cold." + type(error).__name__)
@@ -12417,7 +12424,7 @@ class LCMEngine(
             return False
 
     def _session_end_occurrence_resume(self, view, *, session_id, conversation_id, store,
-                                       hermes_home, stamps, deadline=None) -> list[dict] | None:
+                                       hermes_home, stamps, deadline=None, stored_through=None) -> list[dict] | None:
         """Place each host occurrence once, retaining unknown rows in view order."""
         try:
             rows, start = [], 0
@@ -12428,6 +12435,8 @@ class LCMEngine(
                 rows.extend(row for row in page
                             if _normalize_conversation_id_value(row.get("conversation_id")) == conversation)
                 start = page[-1]["store_id"] + 1
+            if stored_through is not None and any(row["store_id"] > stored_through for row in rows):
+                return None  # the session went on after the end: main's retry (#2543 review CR-7)
             forms = self._session_end_host_forms(rows, store=store, session_id=session_id)
             view = self._cold_tail_ingest_view({"view": view})
             kwargs = dict(session_id=session_id, hermes_home=hermes_home)
@@ -12465,6 +12474,8 @@ class LCMEngine(
             consumed, matched = set(), set()
             for mode in ("same", "untimed", "any") if stamps else ("any",):
                 for i in range(k, len(view)):
+                    if deadline is not None and (i - k) % 1000 == 999 and time.monotonic() >= deadline:
+                        raise TimeoutError("session-end occurrence resume deadline expired")
                     if i in matched or (stamps and ((wanted[i] is None) != (mode == "any"))):
                         continue
                     def available(index):
@@ -12504,9 +12515,10 @@ class LCMEngine(
                 else:
                     stored = None
             if stored is None:
-                if (conflict is None and tail.get("occurrence_resume")
+                if (conflict is None and tail.get("occurrence_resume_through") is not None
                         and self._occurrence_resume_unproven(tail["store"], session)):
                     suffix = self._session_end_occurrence_resume(view, session_id=session, deadline=deadline,
+                        stored_through=tail["occurrence_resume_through"],
                         conversation_id=tail["conversation_id"], store=tail["store"],
                         hermes_home=tail["hermes_home"], stamps=stamps)
                     if suffix is not None:

@@ -563,3 +563,85 @@ def test_a_malformed_commit_proof_keeps_mains_answer(lanes, monkeypatch):
     before = lane.rows()
     engine.on_session_end("S1", copy.deepcopy(first + [FINAL]))
     assert lane.rows() == before and not lane.forms()
+
+
+def _busy_off_current_end(lane, monkeypatch, view):
+    engine = lane.engine
+    with monkeypatch.context() as patch:
+        patch.setattr(engine._store, "get_range", fail_end_read(engine))
+        engine.on_session_end("S1", copy.deepcopy(view))
+    return engine._pending_session_tails[0]
+
+
+def _start_while_locked(engine, db_path):
+    locker = sqlite3.connect(db_path, isolation_level=None)
+    locker.execute("BEGIN IMMEDIATE")
+    try:
+        engine.on_session_start("S1", platform="cli", context_length=200_000, conversation_id="conv1")
+    finally:
+        locker.rollback()
+        locker.close()
+
+
+@pytest.mark.parametrize("undo", [True, False])
+def test_a_resumable_tail_keeps_mains_retry_once_the_session_went_on(lanes, monkeypatch, undo):
+    """#2543 review CR-7: an off-current busy tail resumes by occurrence only while its conversation has no row newer
+    than the store held at the end. After the session rebinds and goes on (here undoing Q1 and Q2), the retry keeps
+    main's answer: the tail stays pending and the undone turns are not stored."""
+    lane = lanes()
+    first = history()
+    lane.seed(first)
+    engine = lane.engine
+    q = [{"role": "user", "content": "Q1"}, {"role": "assistant", "content": "Q2"}]
+    _busy_off_current_end(lane, monkeypatch, first + q)
+    _start_while_locked(engine, engine._store.db_path)
+    live = first + ([] if undo else q) + [{"role": "user", "content": "E"}]
+    engine.ingest(copy.deepcopy(live))
+    engine._retry_pending_session_tails(deadline=time.monotonic() + 60)
+    engine.ingest(copy.deepcopy(live + [{"role": "assistant", "content": "F"}]))
+    added = [r["content"] for r in lane.rows()[len(first):]]
+    assert (added, len(engine._pending_session_tails)) == ((["E", "F"], 1) if undo else (["Q1", "Q2", "E", "F"], 0))
+
+
+def test_a_sibling_retry_after_a_resumed_undo_keeps_mains_retry(lanes, monkeypatch):
+    """#2543 review CR-7: a resumed engine undoes the tail's turns and goes on; its sibling retry keeps main's answer."""
+    lane = lanes()
+    first = history()
+    lane.seed(first)
+    engine = lane.engine
+    _busy_off_current_end(lane, monkeypatch, first + [{"role": "user", "content": "Q1"},
+                                                      {"role": "assistant", "content": "Q2"}])
+    resumed = LCMEngine(config=engine._config, hermes_home=engine._hermes_home)
+    try:
+        _start_while_locked(resumed, engine._store.db_path)
+        live = first + [{"role": "user", "content": "E"}]
+        resumed.ingest(copy.deepcopy(live))
+        resumed._retry_session_end_tails(deadline=time.monotonic() + 60)
+        resumed.ingest(copy.deepcopy(live + [{"role": "assistant", "content": "F"}]))
+        assert [r["content"] for r in lane.rows()[len(first):]] == ["E", "F"]
+        assert len(engine._pending_session_tails) == 1
+    finally:
+        resumed.shutdown()
+
+
+def test_a_detached_tail_after_a_resumed_resend_keeps_mains_retry(lanes, monkeypatch):
+    """#2543 review CR-7: a resumed engine re-sends the tail's turns with new stamps; when the owning engine has moved
+    to another home, its detached retry adds no duplicate turn and keeps the tail pending, as main does."""
+    def m(role, content, ts):
+        return {"role": role, "content": content, "timestamp": ts}
+    lane = lanes()
+    first = [m(("user", "assistant")[i % 2], f"pad {i}", float(i + 1)) for i in range(4)]
+    lane.seed(first)
+    engine = lane.engine
+    tail = _busy_off_current_end(lane, monkeypatch, first + [m("user", "Q", 5.0), m("assistant", "R", 5.5)])
+    resumed = LCMEngine(config=engine._config, hermes_home=engine._hermes_home)
+    try:
+        _start_while_locked(resumed, engine._store.db_path)
+        resumed.ingest(copy.deepcopy(first + [m("user", "Q", 6.0), m("assistant", "R", 6.5)]))
+        before = lane.rows()
+        monkeypatch.setattr(engine, "_hermes_home", str(lane.root) + "-other")
+        assert not engine._cold_tail_is_bound(tail)
+        engine._retry_pending_session_tails(deadline=time.monotonic() + 60)
+        assert lane.rows() == before and len(engine._pending_session_tails) == 1
+    finally:
+        resumed.shutdown()
