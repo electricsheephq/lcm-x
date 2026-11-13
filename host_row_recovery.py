@@ -324,7 +324,15 @@ class HostRowRecoveryMixin:
                     "host-row-recovery-db:" + hashlib.sha256(key[0].encode()).hexdigest()[:16],
                     "host-row-recovery:" + hashlib.sha256(repr(key[1:]).encode()).hexdigest()[:16],
                 )
-                if _HOST_ROW_RECOVERY_SCHEDULER.schedule(scheduler_key, lambda: _recover(*args)):
+                owner = getattr(self, "_unload_group", None)
+                def job():
+                    _recover(*args)
+
+                scheduled = (
+                    owner.schedule_host_recovery(_HOST_ROW_RECOVERY_SCHEDULER, scheduler_key, job)
+                    if owner is not None else _HOST_ROW_RECOVERY_SCHEDULER.schedule(scheduler_key, job)
+                )
+                if scheduled:
                     _SEEN.add(key)
         except Exception:
             logger.debug("LCM host-row recovery enqueue unavailable")

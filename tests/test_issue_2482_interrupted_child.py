@@ -573,6 +573,38 @@ def test_plugin_unload_preserves_already_queued_child_rows(host, monkeypatch, bu
     assert _stored_after_close(aux, db_path, release) == _contents(view(1))
 
 
+def test_child_hook_reports_rows_refused_during_unload(host, caplog):
+    _, _, ctx, parent, child, engine = _setup(host, "own_engine", supports_unload=True)
+    child.api_call(ctx, view(0), 1)
+    assert _contents(child_rows(parent)) == _contents(view(0))
+    owner = engine._unload_group
+    owner.closing.set()
+    try:
+        child.api_call(ctx, view(1), 2)
+        assert "store refused during plugin unload" in caplog.text
+        assert "up to 3 handed-over row(s) not stored" in caplog.text
+    finally:
+        ctx.unload()
+
+
+def test_retained_child_end_keeps_tool_call_and_result(host, caplog):
+    import sqlite3
+    from contextlib import closing
+
+    _, _, ctx, parent, child, engine = _setup(host, "own_engine", supports_unload=True)
+    child.api_call(ctx, view(0), 1)
+    db = parent._store.db_path
+    ctx.unload()
+    child.end(engine, view(1))
+    child.end(engine, view(1))
+    with closing(sqlite3.connect(db)) as reader:
+        rows = reader.execute(
+            "SELECT role, content FROM messages WHERE session_id = ? ORDER BY store_id", ("child",),
+        ).fetchall()
+    assert rows == _contents(view(1)), caplog.text
+    db.unlink()
+
+
 def test_plugin_unload_retries_admitted_child_after_sqlite_busy(host, monkeypatch):
     import sqlite3
     from contextlib import closing

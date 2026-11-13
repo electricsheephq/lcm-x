@@ -220,6 +220,96 @@ def test_plugin_unload_closes_all_owned_engines(preflight):
             engine.shutdown()
 
 
+def _durable_messages(path, session):
+    with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)) as conn:
+        return conn.execute(
+            "SELECT role, content FROM messages WHERE session_id = ? ORDER BY store_id", (session,),
+        ).fetchall()
+
+
+@pytest.mark.parametrize("already_stored", [True, False])
+def test_late_session_end_after_unload_stores_suffix_once(preflight, already_stored):
+    prototype, old_ctx = preflight.register(supports_unload=True)
+    clone = prototype.clone_for_agent()
+    clone.on_session_start("late-end", platform="cli")
+    history = [{"role": "user", "content": "already stored"}]
+    if already_stored:
+        clone.ingest(history)
+    old_ctx.unload_callbacks[0]()
+    history.append({"role": "assistant", "content": "late answer"})
+    clone.on_session_end("late-end", history)
+    clone.on_session_end("late-end", history)
+    path = preflight.home / "lcm.db"
+    assert _durable_messages(path, "late-end") == [
+        ("user", "already stored"), ("assistant", "late answer"),
+    ]
+    path.unlink()
+    clone.on_session_end("late-end", history)
+    assert not path.exists()
+
+
+def test_retired_end_reconciles_the_current_writer(preflight, monkeypatch):
+    prototype, old_ctx = preflight.register(supports_unload=True)
+    retired = prototype.clone_for_agent()
+    retired.on_session_start("same-lane", platform="cli", conversation_id="original")
+    history = [
+        {"role": "user", "content": "first question"},
+        {"role": "assistant", "content": "first answer"},
+    ]
+    retired.ingest(history)
+    old_ctx.unload_callbacks[0]()
+    current, ctx = preflight.register(supports_unload=True)
+    plugin_api = ModuleType("hermes_cli.plugins")
+    plugin_api.get_plugin_manager = lambda: SimpleNamespace(_context_engine=current)
+    monkeypatch.setitem(sys.modules, "hermes_cli.plugins", plugin_api)
+    active = current.clone_for_agent()
+    active.on_session_start("same-lane", platform="cli", conversation_id="original")
+    history += [
+        {"role": "user", "content": "second question"},
+        {"role": "assistant", "content": "second answer"},
+    ]
+    active.ingest(history)
+    history.append({"role": "user", "content": "late tail"})
+    retired.on_session_end("same-lane", history)
+    retired.on_session_end("same-lane", history)
+    active.ingest(history)
+    db = preflight.home / "lcm.db"
+    try:
+        assert _durable_messages(db, "same-lane") == [(row["role"], row["content"]) for row in history]
+    finally:
+        ctx.unload_callbacks[0]()
+    db.unlink()
+
+
+def test_reloaded_hook_keeps_ingesting_for_two_retained_clones(preflight):
+    prototype, old_ctx = preflight.register(supports_unload=True)
+    clones = [prototype.clone_for_agent(), prototype.clone_for_agent()]
+    views = {}
+    for i, clone in enumerate(clones):
+        sid = f"cached-{i}"
+        clone.on_session_start(sid, platform="cli", conversation_id=f"conv-{i}")
+        views[sid] = [{"role": "user", "content": sid}]
+        clone.ingest(views[sid])
+    old_ctx.unload_callbacks[0]()
+    _, current_ctx = preflight.register(supports_unload=True)
+    db = preflight.home / "lcm.db"
+    try:
+        for turn in range(2):
+            for i, clone in enumerate(clones):
+                sid = f"cached-{i}"
+                views[sid].append({"role": "assistant", "content": f"answer {turn}"})
+                current_ctx.hooks["post_llm_call"](
+                    session_id=sid, conversation_id=f"conv-{i}", platform="cli",
+                    context_compressor=clone, conversation_history=views[sid],
+                )
+                assert _durable_messages(db, sid) == [
+                    (row["role"], row["content"]) for row in views[sid]
+                ]
+    finally:
+        current_ctx.unload_callbacks[0]()
+    db.unlink()
+
+
 def test_unload_refuses_clone_that_finishes_construction_after_unload(preflight, monkeypatch):
     prototype, ctx = preflight.register(supports_unload=True)
     constructing, release, unloading = threading.Event(), threading.Event(), threading.Event()
@@ -293,18 +383,73 @@ def test_unload_drains_timed_out_sqlite_worker(preflight, monkeypatch, caplog):
             assert prototype._lifecycle.get_by_conversation(conversation) == ended
             assert prototype._lifecycle.get_by_session("late-reset") is None
             active.on_session_end("active", [first, {"role": "assistant", "content": "late tail"}])
-            assert "LCM session end skipped during plugin unload" in caplog.text
-            assert "supplied_rows=2" in caplog.text
-            assert "late tail" not in caplog.text
+            assert "could not store a proven tail" not in caplog.text
             assert active.should_compress_preflight([first, {"role": "assistant", "content": "late turn"}]) is False
-            assert active._store.get_session_count("active") == 1
+            assert active._store.get_session_count("active") == 2
             assert active.carry_over_new_session_context("active", "late") == 0
             assert active._lifecycle.get_by_session("active").current_session_id == "active"
-            assert active._store.get_session_count("active") == 1
+            assert active._store.get_session_count("active") == 2
         finally:
             release.set()
         finish.result(timeout=5)
     assert closed.is_set()
+
+
+def test_unload_waits_for_direct_ingest(preflight, monkeypatch):
+    engine, ctx = preflight.register(supports_unload=True)
+    engine.on_session_start("direct", platform="cli")
+    enter, release = threading.Event(), threading.Event()
+    append = engine._store._append_protected_batch
+
+    def blocked_append(*args, **kwargs):
+        enter.set()
+        assert release.wait(5)
+        return append(*args, **kwargs)
+
+    monkeypatch.setattr(engine._store, "_append_protected_batch", blocked_append)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        write = executor.submit(engine.ingest, [{"role": "user", "content": "direct row"}])
+        try:
+            assert enter.wait(5)
+            finish = executor.submit(ctx.unload_callbacks[0])
+            assert engine._unload_group.closing.wait(5)
+            assert not finish.done()
+        finally:
+            release.set()
+        write.result(timeout=5)
+        finish.result(timeout=5)
+    db = preflight.home / "lcm.db"
+    assert _durable_messages(db, "direct") == [("user", "direct row")]
+    db.unlink()
+
+
+def test_unload_drains_owned_host_recovery(preflight):
+    from hermes_lcm.maintenance_scheduler import _HOST_ROW_RECOVERY_SCHEDULER as scheduler
+
+    engine, ctx = preflight.register(supports_unload=True)
+    engine.on_session_start("recovery", platform="cli")
+    db = preflight.home / "lcm.db"
+    opened, release = threading.Event(), threading.Event()
+
+    def recover():
+        with closing(sqlite3.connect(db)) as conn:
+            opened.set()
+            assert release.wait(5)
+            conn.execute("SELECT 1")
+
+    owner = engine._unload_group
+    assert owner.schedule_host_recovery(scheduler, ("database", "recovery"), recover)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        try:
+            assert opened.wait(5)
+            finish = executor.submit(ctx.unload_callbacks[0])
+            assert owner.closing.wait(5)
+            assert not finish.done()
+            assert not owner.schedule_host_recovery(scheduler, ("database", "late"), recover)
+        finally:
+            release.set()
+        finish.result(timeout=5)
+    db.unlink()
 
 
 def test_unload_waits_for_admitted_compaction_preflight(preflight, monkeypatch):

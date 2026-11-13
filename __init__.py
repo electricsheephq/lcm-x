@@ -15,6 +15,8 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from threading import Lock
+from weakref import WeakKeyDictionary
 
 logger = logging.getLogger(__name__)
 
@@ -703,6 +705,11 @@ def register(ctx):
                 platform = str(payload.get("platform") or "")
                 wait = aux_session._LIVE_CHILD_STORE_WAIT_S
                 owner = getattr(child_engine, "_unload_group", None)
+                if (owner is not None and owner.closing.is_set() and owner is not engine._unload_group
+                        and storage == aux_session.live_child_storage_identity(engine)):
+                    with engine._admit_plugin_operation() as admitted:
+                        if admitted and child_engine._flush_retired_delegate_child(session_id, history, platform):
+                            return None
 
                 outcome: dict = {}
 
@@ -855,6 +862,8 @@ def register(ctx):
     # receives conversation_history including the assistant response.  The
     # existing _ingest_messages cursor prevents duplicates if compress() runs
     # later the same turn.
+    reload_clones = WeakKeyDictionary()
+    reload_clones_lock = Lock()
     try:
         def _on_post_llm_call(**kwargs):
             if not active:
@@ -916,11 +925,45 @@ def register(ctx):
 
             try:
                 if host_engine is not None:
-                    result = use_lcm_engine(
-                        host_engine,
-                        _bind_and_ingest,
-                        timeout=None,
-                    )
+                    result = use_lcm_engine(host_engine, _bind_and_ingest, timeout=None)
+                    if (result.status is ActiveEngineUseStatus.CLOSED_ENGINE
+                            and getattr(host_engine, "_plugin_is_unloading", lambda: False)()
+                            and session_id and _engine_bound_session_id(host_engine) == session_id
+                            and host_engine._hermes_home == engine._hermes_home
+                            and host_engine._db_path == engine._db_path
+                            and (not conversation_id or conversation_id == host_engine._conversation_id)):
+                        with engine._admit_plugin_operation() as admitted:
+                            if admitted and host_engine._flush_retired_delegate_child(session_id, history, platform):
+                                return
+                        conversation_id = conversation_id or host_engine._conversation_id
+                        # Reuse the normal ingest path once a current engine
+                        # owns this lane. Never rebind an unrelated engine.
+                        def use_current(selected):
+                            if (selected._conversation_id == conversation_id
+                                    and selected._hermes_home == host_engine._hermes_home
+                                    and selected._db_path == host_engine._db_path):
+                                _ingest_and_note(selected)
+                                return True
+                            return False
+
+                        current = use_active_lcm_engine(
+                            use_current, session_id=session_id, conversation_id=conversation_id, timeout=None,
+                        )
+                        if current.used and current.value:
+                            return
+                        if current.status is ActiveEngineUseStatus.ENGINE_NOT_RESIDENT:
+                            # The old binding's proven prefix permits a write
+                            # without creating a new resident engine. A
+                            # compacted or first view needs normal ingest.
+                            with engine._admit_plugin_operation() as admitted:
+                                if admitted and host_engine._flush_retired_session_end(session_id, history, warn=False):
+                                    return
+                            with reload_clones_lock:
+                                replacement = reload_clones.get(host_engine)
+                                if replacement is None:
+                                    replacement = engine.clone_for_agent()
+                                    reload_clones[host_engine] = replacement
+                            result = use_lcm_engine(replacement, _bind_and_ingest, timeout=None)
                 else:
                     result = use_active_lcm_engine(
                         _ingest_and_note,

@@ -407,7 +407,10 @@ LCM-X uses `LCM_SHUTDOWN_COMPACTION_WAIT_S` as the wait budget for active work.
 If the deadline expires, the logs report which cleanup is still pending. An
 engine still in use is closed after its active operation finishes.
 An admitted delegated-child store retries SQLite contention for up to 30
-seconds before logging how many rows may be missing and letting cleanup finish.
+seconds before logging how many rows may be missing and letting cleanup finish
+(the busy-store limit tracked in #2482). A retained agent's late callback can
+finish an identifiable tail through an existing database. It closes its own
+connection before returning when no current engine owns the session.
 If the host lacks the callback or rejects registration, stop Hermes to release
 the files.
 

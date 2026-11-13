@@ -189,7 +189,15 @@ class UnendedCatchupMixin:
                 args = (type(self), config, home, db_path, str(self._state_db_path()), session_id,
                         self._session_platform, self.context_length, self._host_session_db, self._entity_profile_key(db_path), now)
                 scheduler_key = tuple('unended-catchup:' + hashlib.sha256(k.encode()).hexdigest()[:16] for k in key)
-                if _HOST_ROW_RECOVERY_SCHEDULER.schedule(scheduler_key, lambda: _catch_up(*args)):
+                owner = getattr(self, "_unload_group", None)
+                def job():
+                    _catch_up(*args)
+
+                scheduled = (
+                    owner.schedule_host_recovery(_HOST_ROW_RECOVERY_SCHEDULER, scheduler_key, job)
+                    if owner is not None else _HOST_ROW_RECOVERY_SCHEDULER.schedule(scheduler_key, job)
+                )
+                if scheduled:
                     _SEEN[key] = now
         except Exception:
             logger.debug('LCM unended catch-up enqueue unavailable')

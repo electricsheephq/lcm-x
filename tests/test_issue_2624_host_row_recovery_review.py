@@ -300,7 +300,7 @@ def test_spawned_processes_recover_suffix_exactly_once(case, tmp_path):
 def test_detached_close_preserves_live_prepared_leaves(case, monkeypatch, fail_open):
     from hermes_lcm import engine as engine_module, leaf_prep
     discarded = []
-    monkeypatch.setattr(leaf_prep, "discard", lambda path: discarded.append(str(path)))
+    monkeypatch.setattr(leaf_prep, "discard", lambda path, owner=None: discarded.append(str(path)))
     failed_paths = []
 
     def fail_dag(path):

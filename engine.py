@@ -19,7 +19,7 @@ import time
 import uuid
 from bisect import bisect_left, bisect_right
 from collections import Counter, defaultdict, deque
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from datetime import datetime
 from functools import lru_cache, partial
 from pathlib import Path
@@ -1317,6 +1317,7 @@ class LCMEngine(
             if self._plugin_is_unloading() and (
                 self._stable_use_closed or (
                     not self._storage_ready and self._stable_use_owner_thread != threading.get_ident()
+                    and not getattr(self._thread_context, "plugin_operation", False)
                 )
             ):
                 raise RuntimeError("LCM storage is closed for plugin unload")
@@ -2879,6 +2880,15 @@ class LCMEngine(
         compression runs later the same turn, already-ingested messages
         are skipped (no duplicates).
         """
+        # Hook and interrupted-turn callers already hold the stable lease.
+        # Direct callers must also remain admitted until their write finishes.
+        if self._stable_use_owner_thread == threading.get_ident():
+            return self._ingest_admitted(messages)
+        with self._admit_plugin_operation() as admitted:
+            if admitted:
+                return self._ingest_admitted(messages)
+
+    def _ingest_admitted(self, messages):
         if self._maybe_reclassify_current_session_as_auxiliary_before_message_ingest():
             self._log_bypassed_ingest()
             self._remember_lcm_bypass_message_prefix(self._bypass_lcm_session_id(), messages)
@@ -5112,11 +5122,8 @@ class LCMEngine(
         admission_started = time.perf_counter()
         with self._exclusive_lifecycle("end"):
             if self._plugin_is_unloading():
-                if messages:
-                    logger.warning(
-                        "LCM session end skipped during plugin unload; final messages may be absent "
-                        "from the plugin-local store supplied_rows=%d", len(messages),
-                    )
+                if not self._flush_retired_delegate_child(session_id, messages, self._session_platform):
+                    self._flush_retired_session_end(session_id, messages)
                 return
             if self._stable_use_closed:
                 return
@@ -5127,6 +5134,137 @@ class LCMEngine(
                     self._on_session_end_unlocked(session_id, messages)
                 finally:
                     self._session_end_flush_active = False
+
+    def _open_retired_store(self, store):
+        return closing(MessageStore(
+            store.db_identity, hermes_home=self._hermes_home,
+            ingest_protection_config=self._config,
+            existing_write_timeout_ms=_SESSION_END_BUSY_TIMEOUT_MS,
+        ))
+
+    def _append_retired_tail(self, store, old_store, session_id, conversation_id, messages, platform,
+                             *, allow_empty=False):
+        """Check and append a retired view inside the caller's write transaction."""
+        tail = dict(store=store, session_id=session_id, conversation_id=conversation_id,
+                    hermes_home=self._hermes_home, view=messages)
+        view = tail["view"] = self._cold_tail_ingest_view(tail)
+        covered = self._cold_tail_stored(tail, stamps=True)
+        if covered is None:
+            return None
+        if not covered:
+            if not allow_empty:
+                return None
+            # A zero-row binding is valid only while that durable lane is
+            # current and the session has no rows under any conversation.
+            current = store.connection.execute(
+                "SELECT current_session_id FROM lcm_lifecycle_state WHERE conversation_id = ?",
+                (conversation_id,),
+            ).fetchone()
+            if current is None or current[0] != session_id or store.get_session_count(session_id):
+                return None
+        suffix = view[covered:]
+        if any(self._is_context_summary_content(row.get("content")) for row in suffix):
+            return None  # A projected host view needs normal replay classification.
+        return self._append_off_current_session_end_suffix(
+            session_id, suffix, source=platform, conversation_id=conversation_id,
+            store=store, hermes_home=self._hermes_home,
+            context_window_tokens=old_store.get_context_window_tokens(session_id),
+            _log_outcome=False,
+        )
+
+    def _flush_retired_delegate_child(self, session_id, messages, platform):
+        """Persist late delegated rows only when the existing store proves its lineage."""
+        old_store = self.__dict__.get("_store")
+        if (not messages or old_store is None or str(old_store.db_path) == ":memory:"
+                or (platform != "subagent" and not _aux_session.explicit_subagent_lineage(session_id)
+                    and not self._has_lcm_bypass_lineage_session(session_id))
+                or self._session_id_matches_lcm_bypass_filters(session_id, platform=platform or "subagent")):
+            return False
+        try:
+            with self._open_retired_store(old_store) as store, store.ingest_atomic():
+                link = self._stored_delegate_child_link(session_id, store=store)
+                if (not link or not link["parent_session_id"] or link["source"] == "compression"
+                        or self._session_id_matches_lcm_bypass_filters(
+                            link["parent_session_id"], platform=self._host_session_parent(link["parent_session_id"])[1],
+                        )):
+                    return False
+                return self._append_retired_tail(
+                    store, old_store, session_id, session_id, messages, "subagent",
+                ) is not None
+        except Exception:
+            logger.debug("LCM retired delegated-child tail write failed", exc_info=True)
+            return False
+
+    def _flush_retired_session_end(self, session_id, messages, *, warn=True):
+        """Append only the proven suffix of a view from a retired binding."""
+        if not messages:
+            return True
+        old_store = self.__dict__.get("_store")
+        if (session_id == self._session_id and self._conversation_id
+                and not self._bypasses_lcm_context_management()
+                and not self._has_lcm_bypass_lineage_session(session_id)
+                and old_store is not None and str(old_store.db_path) != ":memory:"):
+            try:
+                def append(store):
+                    with store.ingest_atomic():
+                        return self._append_retired_tail(
+                            store, old_store, session_id, self._conversation_id, messages,
+                            self._session_platform, allow_empty=True,
+                        )
+
+                # Import the active plugin's entry point through the host.
+                # Relative imports from a retained clone can still refer to
+                # the pre-reload registry, where no successor is registered.
+                try:
+                    from hermes_cli.plugins import get_plugin_manager
+                except ImportError:
+                    current = None
+                else:
+                    # Reading the public engine getter discovers plugins; a
+                    # late callback must never cause rediscovery after unload.
+                    current = getattr(get_plugin_manager(), "_context_engine", None)
+                resume = getattr(current, "_write_retired_tail_on_live_binding", None)
+                handled, stored = resume(self, session_id, old_store.db_identity, append) if callable(resume) else (False, False)
+                if handled:
+                    if stored:
+                        return True
+                else:
+                    with self._open_retired_store(old_store) as store:
+                        if append(store) is not None:
+                            return True
+            except Exception:
+                logger.debug("LCM retired session-end tail write failed", exc_info=True)
+        if warn:
+            logger.warning(
+                "LCM session end could not store a proven tail for a retired engine; "
+                "final messages may be absent from the plugin-local store supplied_rows=%d", len(messages),
+            )
+        return False
+
+    def _write_retired_tail_on_live_binding(self, retired, session_id, db_identity, append):
+        """Serialize a retired callback with the current writer's cursor."""
+        active = resolve_active_lcm_engine(session_id, retired._conversation_id)
+        if (active is None or active is retired or active._plugin_is_unloading()
+                or active._conversation_id != retired._conversation_id
+                or active._hermes_home != retired._hermes_home
+                or active._db_path != retired._db_path):
+            return False, False
+
+        def write(selected):
+            if (selected._session_id != session_id or selected._conversation_id != retired._conversation_id
+                    or selected._hermes_home != retired._hermes_home
+                    or selected._bypasses_lcm_context_management()
+                    or selected._store.db_identity != db_identity):
+                return False
+            store = selected._store
+            with _temporary_sqlite_busy_timeout([store.connection], _SESSION_END_BUSY_TIMEOUT_MS):
+                ids = append(store)
+            if ids:
+                selected._ingest_cursor_needs_reconcile = True
+            return ids is not None
+
+        result = use_lcm_engine(active, write, timeout=_SESSION_END_BUSY_TIMEOUT_MS / 1000)
+        return True, result.used and result.value
 
     def _on_session_end_unlocked(
         self,

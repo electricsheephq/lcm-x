@@ -908,6 +908,13 @@ def run_live_child_store(session_id: str, operation, rows: int = 0, *, owner=Non
     """
     with _LIVE_CHILD_LOCK:
         if owner is not None and owner.closing.is_set():
+            _count("live_store_refused_on_unload")
+            logger.warning(
+                "LCM delegated-child store refused during plugin unload: child=%s has up to %d "
+                "handed-over row(s) not stored",
+                hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:12],
+                max(0, rows - _LIVE_CHILD_STORED_ROWS.get(session_id, 0)),
+            )
             return
         _LIVE_CHILD_HANDED_ROWS[session_id] = rows
         if session_id in _LIVE_CHILD_STORES_IN_FLIGHT:
@@ -1075,11 +1082,12 @@ class DelegateChildMixin:
                 _LIVE_DELEGATE_CHILD_ROOTS.setdefault(session_id, session_id)
                 _LIVE_DELEGATE_CHILD_ENGINES[session_id] = (weakref.ref(self), live_child_storage_identity(self))
 
-    def _stored_delegate_child_link(self, session_id: str) -> Dict[str, str]:
-        if not self._store._session_lineage_table_exists():
+    def _stored_delegate_child_link(self, session_id: str, *, store=None) -> Dict[str, str]:
+        store = self._store if store is None else store
+        if not store._session_lineage_table_exists():
             return {}
         columns = ("parent_session_id", "source", "child_subagent_id", "parent_subagent_id", "child_role")
-        row = self._store.connection.execute(
+        row = store.connection.execute(
             "SELECT parent_session_id, source, child_subagent_id, parent_subagent_id, child_role "
             "FROM session_lineage WHERE child_session_id = ?", (session_id,)).fetchone()
         return dict(zip(columns, (str(value or "") for value in row))) if row else {}

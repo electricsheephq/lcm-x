@@ -61,6 +61,12 @@ class EngineUnloadGroup:
             if scheduler.schedule(key, work, owner=owner):
                 self._rollup_owners.add(owner)
 
+    def schedule_host_recovery(self, scheduler, key, work) -> bool:
+        with self.lock:
+            if self.closing.is_set():
+                return False
+            return scheduler.schedule((key[0], f"{key[1]}:{id(self)}"), work, owner=self)
+
     def remember_embedding_retirement(self, scheduler, owner, *, drained: bool) -> None:
         with self.lock:
             prior_owners = tuple(self._retired_embedding_owners)
@@ -108,7 +114,11 @@ class EngineUnloadGroup:
         from .aux_session import drain_live_child_stores
         from .db_bootstrap import drain_background_database_workers
         from .engine import _shutdown_compaction_wait_s
-        from .maintenance_scheduler import _EMBEDDING_MAINTENANCE_SCHEDULER, _ROLLUP_MAINTENANCE_SCHEDULER
+        from .maintenance_scheduler import (
+            _EMBEDDING_MAINTENANCE_SCHEDULER,
+            _HOST_ROW_RECOVERY_SCHEDULER,
+            _ROLLUP_MAINTENANCE_SCHEDULER,
+        )
         from .retrieval_core import _retire_owned_vector_stores
 
         with self.lock:
@@ -147,6 +157,9 @@ class EngineUnloadGroup:
             drained = _EMBEDDING_MAINTENANCE_SCHEDULER.retire_owner(
                 owner, timeout=max(0.0, deadline - time.monotonic()),
             ) and drained
+        drained = _HOST_ROW_RECOVERY_SCHEDULER.drain_owner(
+            self, timeout=max(0.0, deadline - time.monotonic()),
+        ) and drained
         drained = leaf_prep.retire_owner(self, timeout=max(0.0, deadline - time.monotonic())) and drained
         with self.lock:
             databases = self.databases.copy()
