@@ -15,11 +15,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import shutil
 import signal
 import sqlite3
+import tempfile
 import time
 from pathlib import Path
 
@@ -719,7 +721,12 @@ def run_cell_process(cell: dict, host_name: str, host: dict, plugin: dict, out: 
         wall_s = round(time.time() - started, 1)
         host_delta = hoststat.delta(host_before, hoststat.snapshot())
         cell_path = d / "cell.json"
-        cell_path.write_text(json.dumps({**json.loads(cell_path.read_text()), "host_stats": host_delta}, indent=1))
+        try:
+            with tempfile.NamedTemporaryFile(mode="w", dir=d, prefix=".cell.json.", delete=False) as receipt:
+                receipt.write(json.dumps({**json.loads(cell_path.read_text()), "host_stats": host_delta}, indent=1))
+            os.replace(receipt.name, cell_path)
+        except OSError as exc:
+            logging.getLogger(__name__).warning("host_stats receipt rewrite failed: %s", exc)
         rec.update(phases=phases, wall_s=wall_s, host_stats=host_delta, acp_session=run.sid, accounting=acct,
                    citations=records[0]["citations"] if records else {}, sandbox=os.path.exists(SANDBOX_EXEC))
         rec["continuity"] = continuity.score_dir(cell, d)

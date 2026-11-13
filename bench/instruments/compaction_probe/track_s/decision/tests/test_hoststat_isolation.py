@@ -14,7 +14,7 @@ HOST_KEYS = {"elapsed_s", "load1m_before", "load1m_after", "host_load_peak1m",
 
 @pytest.mark.parametrize("bash", ["bash", "/bin/bash"])
 @pytest.mark.parametrize("status", [0, 3])
-@pytest.mark.parametrize("failure", ["before", "after", "delta", "none"])
+@pytest.mark.parametrize("failure", ["before", "after", "delta", "none", "rewrite-write", "rewrite-replace"])
 def test_host_failure_preserves_seed_flow_and_cell_status(tmp_path, bash, status, failure):
     # Isolate the host failure from unrelated git preflights; existing git fixtures stay real.
     bin_dir, kit, out = tmp_path / "bin", tmp_path / "kit", tmp_path / "out"
@@ -25,7 +25,7 @@ def test_host_failure_preserves_seed_flow_and_cell_status(tmp_path, bash, status
     git.write_text("#!/bin/sh\ncase \"$3\" in rev-parse) echo fixture;; status) :;; *) exit 99;; esac\n")
     git.chmod(0o755)
     wrapper = bin_dir / "python-wrapper"
-    wrapper.write_text(f"#!{sys.executable}\n" + '''import os, sys
+    wrapper.write_text(f"#!{sys.executable}\n" + '''import io, os, sys
 from pathlib import Path
 args = sys.argv[1:]
 if len(args) > 2 and Path(args[1]).name == 'hoststat.py':
@@ -34,6 +34,31 @@ if len(args) > 2 and Path(args[1]).name == 'hoststat.py':
     stage = 'delta' if mode == 'delta' else 'after' if marker.exists() else 'before'
     if mode == 'snapshot': marker.touch()
     if stage == os.environ['HOST_FAILURE']: sys.exit(91)
+if len(args) == 5 and args[1] == '-' and os.environ['HOST_FAILURE'].startswith('rewrite-'):
+    receipt = Path(args[2])
+    receipt.with_name('receipt-before.json').write_bytes(receipt.read_bytes())
+    def fail_replace(*args):
+        raise OSError('injected receipt replace failure')
+    if os.environ['HOST_FAILURE'] == 'rewrite-replace':
+        os.replace = fail_replace
+    else:
+        original_open = io.open
+        class FailingWrite:
+            def __init__(self, stream): self.stream = stream
+            def __getattr__(self, name): return getattr(self.stream, name)
+            def __enter__(self): return self
+            def __exit__(self, *args): return self.stream.__exit__(*args)
+            def write(self, text):
+                self.stream.write(text[:11])
+                self.stream.flush()
+                raise OSError('injected receipt write failure')
+        def failing_open(file, mode='r', *args, **kwargs):
+            stream = original_open(file, mode, *args, **kwargs)
+            return FailingWrite(stream) if mode == 'w' else stream
+        io.open = failing_open
+    sys.argv = ['-', *args[2:]]
+    exec(compile(sys.stdin.read(), '<record_host>', 'exec'))
+    sys.exit(0)
 os.execv(sys.executable, [sys.executable, *args])
 ''')
     wrapper.chmod(0o755)
@@ -60,6 +85,10 @@ seed = sys.argv[sys.argv.index('--seed') + 1]
     assert (out / "STOP").exists() == (status == 3)
     assert (out / "score_decision-ran").exists() == (status == 0)
     assert (out / "pmw_read-ran").exists() == (status == 0)
+    if failure.startswith("rewrite-"):
+        assert (out / "cell.json").read_bytes() == (out / "receipt-before.json").read_bytes()
+        assert "injected receipt" in result.stderr
+        return
     host = json.loads((out / "cell.json").read_text())["host"]
     if failure != "none":
         assert {key: host[key] for key in HOST_KEYS} == dict.fromkeys(HOST_KEYS)

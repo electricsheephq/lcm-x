@@ -135,13 +135,17 @@ record_host() {
   "$PY" -B "$HOSTSTAT" delta "$OUT/host-before$SUFFIX.json" "$OUT/host-after$SUFFIX.json" > "$OUT/host$SUFFIX.json" || HOST_REASON="${HOST_REASON:-hoststat delta failed}"
   "$PY" -B - "$OUT/cell$SUFFIX.json" "$OUT/host$SUFFIX.json" "$HOST_REASON" <<'PY'
 import json
+import os
 import sys
+import tempfile
 from pathlib import Path
 path, host = map(Path, sys.argv[1:3])
 reason = sys.argv[3]
 block = ({**dict.fromkeys(("elapsed_s", "load1m_before", "load1m_after", "host_load_peak1m",
                           "steal_pct", "iowait_pct", "busy_pct")), "reason": reason} if reason else json.loads(host.read_text()))
-path.write_text(json.dumps({**json.loads(path.read_text()), "host": block}, indent=1) + "\n")
+with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, prefix=f".{path.name}.", delete=False) as receipt:
+    receipt.write(json.dumps({**json.loads(path.read_text()), "host": block}, indent=1) + "\n")
+os.replace(receipt.name, path)
 PY
 }
 pids=()

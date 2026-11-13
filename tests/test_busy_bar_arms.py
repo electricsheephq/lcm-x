@@ -889,6 +889,14 @@ def test_embedding_failure_skips_later_drains(tmp_path, failure):
     assert storage.embedding_errors
 
 
+def test_gate_py_unchanged_from_base():
+    # gate.py must stay byte-identical to main 48081b7c; CI's depth-1 checkout lacks that commit,
+    # so the working file is pinned by its hash.
+    assert hashlib.sha256(Path(gate.__file__).read_bytes()).hexdigest() == BASE_GATE_SHA256, (
+        "gate.py is the busy-bar gate; a change to it re-baselines the busy-bar bar, "
+        "so update BASE_GATE_SHA256 only together with that decision.")
+
+
 @pytest.mark.parametrize("writer", ["embedding", "none"])
 def test_drain_records_leave_base_smoke_reason_and_text_identical(tmp_path, writer):
     from types import ModuleType
@@ -898,10 +906,7 @@ def test_drain_records_leave_base_smoke_reason_and_text_identical(tmp_path, writ
                          "--background-writers", writer)
     base = ModuleType("base_gate")
     base.__package__ = gate.__package__
-    # gate.py must stay byte-identical to main 48081b7c (ruling T1-88). CI checks out at depth 1 without that commit,
-    # so the base source is the working file, pinned by its 48081b7c hash.
     source = Path(gate.__file__).read_bytes()
-    assert hashlib.sha256(source).hexdigest() == BASE_GATE_SHA256
     exec(compile(source, "base_gate.py", "exec"), base.__dict__)
     roles = [stamp(ledger(0), driver.BASELINE_IDENTITY), stamp(ledger(0), CANDIDATE_IDENTITY),
              stamp(control(1), driver.BASELINE_IDENTITY), stamp(control(1), CANDIDATE_IDENTITY)]

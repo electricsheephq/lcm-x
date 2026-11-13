@@ -87,7 +87,9 @@ records with duration and skipped status. On `wait=False`, the engine's own
 waits only for active ones, outside the timed window. The embedding arm's
 background load at session end can therefore be lower than at the base, which
 forced a drain of up to 35 s inside the timed window. The arm follows the product's own
-path (ruling T1-88). Beside each output ledger,
+path: it measures what the product does at session end, including the engine's own
+`timeout=0` retirement. The base's drain inside the timed window measured a path the product does not take.
+Beside each output ledger,
 `<output-stem>-run-N/` holds `holds.jsonl` and/or `checkpoints.jsonl` when requested.
 Checkpoint records contain start, duration_ms, result (busy, log, checkpointed)
 and error. Hold records contain writer, connection_id, database (the main file's
