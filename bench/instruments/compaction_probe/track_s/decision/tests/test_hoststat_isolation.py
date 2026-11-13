@@ -34,6 +34,8 @@ if len(args) > 2 and Path(args[1]).name == 'hoststat.py':
     stage = 'delta' if mode == 'delta' else 'after' if marker.exists() else 'before'
     if mode == 'snapshot': marker.touch()
     if stage == os.environ['HOST_FAILURE']: sys.exit(91)
+if len(args) == 5 and args[1] == '-' and os.environ['HOST_FAILURE'] == 'none':
+    os.chmod(args[2], 0o640)  # a mode no default umask gives: the rewrite must keep it
 if len(args) == 5 and args[1] == '-' and os.environ['HOST_FAILURE'].startswith('rewrite-'):
     receipt = Path(args[2])
     receipt.with_name('receipt-before.json').write_bytes(receipt.read_bytes())
@@ -94,6 +96,7 @@ seed = sys.argv[sys.argv.index('--seed') + 1]
         assert {key: host[key] for key in HOST_KEYS} == dict.fromkeys(HOST_KEYS)
         assert host.get("reason") and failure in host["reason"]
     else:
+        assert (out / "cell.json").stat().st_mode & 0o777 == 0o640  # the receipt keeps its mode
         assert HOST_KEYS <= host.keys()
         assert host["elapsed_s"] > 0
         assert host["load1m_before"] is not None and host["load1m_after"] is not None

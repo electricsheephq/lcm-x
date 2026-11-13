@@ -724,6 +724,7 @@ def run_cell_process(cell: dict, host_name: str, host: dict, plugin: dict, out: 
         try:
             with tempfile.NamedTemporaryFile(mode="w", dir=d, prefix=".cell.json.", delete=False) as receipt:
                 receipt.write(json.dumps({**json.loads(cell_path.read_text()), "host_stats": host_delta}, indent=1))
+            os.chmod(receipt.name, cell_path.stat().st_mode & 0o7777)  # keep the receipt's mode (a temp file is 0600)
             os.replace(receipt.name, cell_path)
         except OSError as exc:
             logging.getLogger(__name__).warning("host_stats receipt rewrite failed: %s", exc)

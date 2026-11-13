@@ -145,6 +145,7 @@ block = ({**dict.fromkeys(("elapsed_s", "load1m_before", "load1m_after", "host_l
                           "steal_pct", "iowait_pct", "busy_pct")), "reason": reason} if reason else json.loads(host.read_text()))
 with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, prefix=f".{path.name}.", delete=False) as receipt:
     receipt.write(json.dumps({**json.loads(path.read_text()), "host": block}, indent=1) + "\n")
+os.chmod(receipt.name, path.stat().st_mode & 0o7777)  # keep the receipt's mode (a temp file is 0600)
 os.replace(receipt.name, path)
 PY
 }

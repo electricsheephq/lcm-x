@@ -63,6 +63,20 @@ def test_process_cell_host_receipts(host_receipt_run):
     assert rec["host_stats"]["elapsed_s"] == 3
 
 
+def test_process_cell_receipt_rewrite_keeps_mode(host_receipt_run, monkeypatch, tmp_path):
+    run, _, _ = host_receipt_run
+    snapshot = PC.hoststat.snapshot
+    def snapshot_after_phase():
+        for receipt in (tmp_path / "out").rglob("cell.json"):
+            receipt.chmod(0o640)  # a mode no default umask gives: the rewrite must keep it
+        return snapshot()
+    monkeypatch.setattr(PC.hoststat, "snapshot", snapshot_after_phase)
+    rec = run()
+    receipt = Path(rec["dir"]) / "cell.json"
+    assert "host_stats" in json.loads(receipt.read_text())
+    assert receipt.stat().st_mode & 0o777 == 0o640
+
+
 @pytest.mark.parametrize("failure", ["write", "replace"])
 @pytest.mark.parametrize("verdict", ["PASS", "FAIL"])
 def test_process_cell_receipt_rewrite_failure_preserves_receipt_and_status(host_receipt_run, monkeypatch, caplog,
