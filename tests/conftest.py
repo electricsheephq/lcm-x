@@ -184,3 +184,33 @@ def _drain_background_maintenance(monkeypatch, _isolate_embedding_process_state)
         if scheduler is not None and not _wait_scheduler_idle(scheduler, timeout=30.0):
             # Fail closed: a job still running here would call a later test's fakes.
             pytest.fail(f"{name} still had background work 30 s after the test ended")
+
+
+@pytest.fixture(autouse=True)
+def _message_store_callbacks(monkeypatch):
+    """D1 runs for every test, including tests using their own connection subclasses."""
+    from tests.message_store_callback_audit import CALLS, install
+    start = len(CALLS)
+    install(monkeypatch)
+    yield
+    assert not [call for call in CALLS[start:] if call[1]], CALLS[start:]
+
+
+@pytest.fixture(autouse=True)
+def _prelock_recording_oracle(monkeypatch, request):
+    if request.node.path.name not in {"test_2293_prelock.py", "test_2293_prelock_probes.py"}:
+        return
+    if request.node.name == "test_p3_same_connection_write_by_another_thread_is_caught":
+        return  # threaded by design; production detection is the oracle here
+    from contextlib import contextmanager
+    from hermes_lcm.store import MessageStore
+    from tests.prelock_instrument import install_oracle_hooks, recording_prelock
+    install_oracle_hooks(monkeypatch)
+    original = MessageStore.ingest_atomic
+
+    @contextmanager
+    def recorded(store, **kwargs):
+        with original(store, **kwargs) as timing:
+            with recording_prelock(store):
+                yield timing
+    monkeypatch.setattr(MessageStore, "ingest_atomic", recorded)

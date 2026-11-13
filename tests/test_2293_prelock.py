@@ -485,6 +485,8 @@ def test_busy_at_lazy_begin_matches_eager(tmp_path):
             holder = sqlite3.connect(root / "lcm.db", timeout=5, isolation_level=None)
             holder.execute("BEGIN IMMEDIATE")
             engine.ingest(view)  # ingest() records the failure; the rows are retried by the next ingest
+            non_commits = [r for r in engine._ingest_lock_records if r["outcome"] != "commit"]
+            assert non_commits and all(r["hold_ms"] is None for r in non_commits)
             failed = getattr(engine, "_consecutive_ingest_failures", 0)
             holder.execute("ROLLBACK")
             holder.close()
