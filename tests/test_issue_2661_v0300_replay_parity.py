@@ -50,3 +50,25 @@ def test_another_conversation_of_the_session_keeps_its_rows(tmp_path, which):
         assert rows[:len(original)] == original
         assert _counts(rows) == (2, 8), f"users, rows = {_counts(rows)}"
         assert _counts(rows, "other-conv") == (1, 4), f"other-conv users, rows = {_counts(rows, 'other-conv')}"
+
+
+@pytest.mark.parametrize("mode", ["off", "shadow"])
+@pytest.mark.parametrize("change,expected", [("two-users", (4, 12)), ("user-and-assistant", (3, 12)),
+                                             ("uid-later", (3, 11))])
+def test_later_stamps_or_an_unproven_uid_keep_user_occurrences(tmp_path, monkeypatch, mode, change, expected):
+    """#2661 review: with a reused call id, two changed stamps, a changed user and assistant stamp, or a fresh UID on
+    the later user row keep every user occurrence, as v0.30.0 does (measured: the same counts)."""
+    monkeypatch.setenv("LCM_HOST_MESSAGE_UID", mode)
+    _, marker, _ = _v0292_store(tmp_path)
+    history = _host_history(marker, _again(marker))
+    _run_phase(tmp_path, history)
+    assert len(_read_store(tmp_path)) == 8
+    history[0]["timestamp"] += 50.5
+    if change == "two-users":
+        history[4]["timestamp"] += 50.5
+    elif change == "user-and-assistant":
+        history[3]["timestamp"] += 50.5
+    else:
+        history[0]["message_uid"] = "fresh-user"
+    _run_phase(tmp_path, history)
+    assert _counts(_read_store(tmp_path)) == expected
