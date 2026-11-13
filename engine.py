@@ -157,6 +157,7 @@ from .compaction_request import CompactionRequest
 from .compress_run import CompressRun
 from .identity_anchor import IdentityAnchorMixin, _ROTATION_LINEAGE_UNRECORDED, _raw_remainder
 from .host_uid import HostUidShadowMixin, _valid_uid
+from .host_row_recovery import HostRowRecoveryMixin
 from .host_uid_emit import carry_identity, identity_emit_enabled, record_absorbed_message, sync_cached_host_metadata
 from .store_complete import HiddenBacklog, StoreCompleteMixin
 from .survival_fit import SurvivalFitMixin, _carries_survival_notice, _host_estimate, survival_reserve_fraction
@@ -717,6 +718,7 @@ class LCMEngine(
     ReconcileMixin,
     IdentityAnchorMixin,
     HostUidShadowMixin,
+    HostRowRecoveryMixin,
     StoreCompleteMixin,
     SurvivalFitMixin,
     AuxiliarySessionMixin,
@@ -1430,6 +1432,7 @@ class LCMEngine(
         if adaptive is not None:
             adaptive.clear()
         self._unregister_active_engine_binding()
+        self._host_session_db = None  # #2624: a host reader never crosses profile homes
         self._session_id = ""
         self._session_platform = ""
         self._foreground_session_id = ""
@@ -4594,7 +4597,7 @@ class LCMEngine(
         """Handle Hermes' reset-only switch after an end or an empty /new.
 
         CLI /new omits on_session_start, but reset_session_state supplies the
-        new id here. The host DB stays host-owned; only the explicit id is used.
+        new id here. The handle is kept only for read-only recovery (#2624).
         Detachment is unsupported: Hermes must keep review-fork compression off.
         """
         session_id = str(session_id or "")
@@ -4604,6 +4607,8 @@ class LCMEngine(
                 "keep compression off on this fork"
             )
         with self._exclusive_lifecycle("rebind"):
+            if session_db is not None:  # a call without a handle keeps the one already held
+                self._host_session_db = session_db
             if (
                 self._stable_use_closed
                 or not self._session_id
@@ -4675,6 +4680,7 @@ class LCMEngine(
             if self._stable_use_closed:
                 raise RuntimeError("LCM engine is closed")
             self._on_session_start_unlocked(session_id, **kwargs)
+            self._enqueue_host_row_recovery(session_id, kwargs)
             binding = self._emission_binding()
             for name in ("_compress_commit_proof", "_last_emission_descriptors"):
                 if not self._emission_proof_matches_binding(getattr(self, name), binding):
