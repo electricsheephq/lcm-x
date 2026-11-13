@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from copy import deepcopy
+import hashlib
 import json
 import os
 import re
@@ -19,6 +20,7 @@ from bench.instruments.busy_bar import arms, driver, gate, orchestrate
 
 TREE = Path(__file__).resolve().parents[1]
 BASE_SHA = "e0b6d0ae7be3795a84547d77aa55efe923ebb91f"
+BASE_GATE_SHA256 = "5dd2a2303cb9dd7bea2477c159ecffd6d6904c136e967e123dab7e84587c123d"  # gate.py at 48081b7c
 
 
 @pytest.fixture(autouse=True)
@@ -180,6 +182,7 @@ def normalize(rows):
     """Exclude timing values only; canonically rename OS IDs, retaining relationships."""
     rows = deepcopy(rows)
     for row in rows:
+        row.pop("host", None)  # Host readings are reported outside the original timing windows.
         threads, processes = {}, {}
         for op in row["operations"]:
             for key in ("begin", "end", "wall_ms"):
@@ -763,6 +766,12 @@ def drain(self, timeout=None):
     return False
 
 def retire_owner(owner, timeout):
+    if mode == "retire-swallowed" and timeout == 0:
+        class BrokenOwners(dict):
+            def pop(self, *args):
+                raise ValueError("injected inside real retire_owner")
+        with patch.object(scheduler, "_owned_keys", BrokenOwners()):
+            return original_scheduler_retire(owner, timeout)
     result = original_scheduler_retire(owner, timeout)
     if mode == "retire-raise":
         raise RuntimeError("injected retirement failure")
@@ -799,8 +808,18 @@ print(json.dumps({"status": status, "active_at_finish": active_at_finish, "first
 def test_embedding_pass_drained_before_retirement(tmp_path, cell):
     proof, rows = embedding_retirement_probe(tmp_path, "slow", cell)
     assert proof["status"] == 0
-    assert proof["active_after_retirement"] and not any(proof["active_after_retirement"])
-    assert proof["active_at_finish"] == [False, False]
+    assert proof["active_after_retirement"]
+    if cell == "session-end":
+        assert any(proof["active_after_retirement"])
+        # B may share the pass and drain it during its untimed shutdown.
+        assert proof["active_at_finish"][-1] is False
+        timed = next(r for r in rows[0]["operations"] if r["op"] == "session-end")
+        assert timed["wall_ms"] < 4000
+        assert any(d["deferred_owner"] and d["duration_ms"] > 0
+                   for d in rows[0]["storage_arm_drains"])
+    else:
+        assert not any(proof["active_after_retirement"])
+        assert proof["active_at_finish"] == [False, False]
     assert len(rows) == 2 and all(not row["errors"] and not row["inconclusive"] for row in rows)
     first = gate.read(tmp_path / "probe-run-0" / "holds.jsonl")
     second = gate.read(tmp_path / "probe-run-1" / "holds.jsonl")
@@ -817,5 +836,101 @@ def test_embedding_retirement_failure_is_inconclusive(tmp_path, mode):
     assert rows[0]["inconclusive"]
     errors = rows[0]["storage_arms"]["errors"]
     assert errors and any(mode.split("-")[0] in error for error in errors)
+    assert gate.comparison(rows, rows)["verdict"] == "INCONCLUSIVE"
+    assert not (tmp_path / "probe-run-1").exists()
+
+
+def test_nonwaiting_embedding_drain_outside_timed_session_end(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from hermes_lcm import engine, maintenance_scheduler
+
+    scheduler = maintenance_scheduler._EMBEDDING_MAINTENANCE_SCHEDULER
+    clock, retired = [10.0], []
+    old_owner = object()
+    def slow_drain(timeout):
+        clock[0] += 7
+        return True
+    def retire_owner(owner, timeout):
+        retired.append((owner, timeout))
+        return slow_drain(timeout) if timeout else False
+    def native_retire(instance, wait):
+        scheduler.retire_owner(instance._embedding_maintenance_owner, timeout=2 if wait else 0)
+    monkeypatch.setattr(scheduler, "retire_owner", retire_owner)
+    monkeypatch.setattr(engine.LCMEngine, "_retire_embedding_maintenance", native_retire)
+    monkeypatch.setattr(arms.time, "monotonic", lambda: clock[0])
+    instance = SimpleNamespace(_embedding_maintenance_owner=old_owner, drain_embedding_maintenance=slow_drain)
+    with arms.StorageArms(parse("--background-writers", "embedding")) as storage:
+        storage.schedule_start = clock[0]
+        operations = driver.Operations(driver.Capture(), False)
+        operations(instance, "A", "session-end", lambda: engine.LCMEngine._retire_embedding_maintenance(instance, False), 4)
+        instance._embedding_maintenance_owner = object()  # Public on_session_start rearms a new owner.
+        details = storage.finish(tmp_path / "arms")
+    assert operations.records[0]["wall_ms"] == 0
+    assert storage.embedding_drains == [{"deferred_owner": True, "skipped": False, "duration_ms": 7000}]
+    assert retired == [(old_owner, 0), (old_owner, 35)]
+    assert "errors" not in details
+
+
+@pytest.mark.parametrize("failure", ["timeout", "error"])
+def test_embedding_failure_skips_later_drains(tmp_path, failure):
+    from types import SimpleNamespace
+    storage = arms.StorageArms(parse("--background-writers", "embedding"))
+    calls = []
+    def drain(timeout):
+        calls.append(timeout)
+        if failure == "error":
+            raise ValueError("injected")
+        return False
+    fake = SimpleNamespace(drain_embedding_maintenance=drain)
+    storage.drain_embedding(fake)
+    storage.drain_embedding(fake)
+    assert calls == [35]
+    assert [row["skipped"] for row in storage.embedding_drains] == [False, True]
+    assert storage.embedding_errors
+
+
+@pytest.mark.parametrize("writer", ["embedding", "none"])
+def test_drain_records_leave_base_smoke_reason_and_text_identical(tmp_path, writer):
+    from types import ModuleType
+    from tests.test_busy_bar_instrument import ledger, control, stamp, CANDIDATE_IDENTITY
+
+    rows, _ = run_driver(Path(driver.__file__), TREE, tmp_path / "rows.jsonl", tmp_path / "work",
+                         "--background-writers", writer)
+    base = ModuleType("base_gate")
+    base.__package__ = gate.__package__
+    # gate.py must stay byte-identical to main 48081b7c (ruling T1-88). CI checks out at depth 1 without that commit,
+    # so the base source is the working file, pinned by its 48081b7c hash.
+    source = Path(gate.__file__).read_bytes()
+    assert hashlib.sha256(source).hexdigest() == BASE_GATE_SHA256
+    exec(compile(source, "base_gate.py", "exec"), base.__dict__)
+    roles = [stamp(ledger(0), driver.BASELINE_IDENTITY), stamp(ledger(0), CANDIDATE_IDENTITY),
+             stamp(control(1), driver.BASELINE_IDENTITY), stamp(control(1), CANDIDATE_IDENTITY)]
+    for group in roles:
+        for i, row in enumerate(group):
+            row.update({k: v for k, v in rows[i % len(rows)].items()
+                        if k in ("storage_arms", "storage_arm_drains")})
+    old_roles = deepcopy(roles)
+    for group in old_roles:
+        for row in group:
+            row.pop("storage_arm_drains", None)
+            row.get("storage_arms", {}).pop("embedding_drains", None)
+    for group, old_group in zip(roles, old_roles):
+        assert json.dumps(gate.nonstandard_workload("fixture", group)) == json.dumps(
+            base.nonstandard_workload("fixture", old_group))
+    before, after = base.evaluate(*old_roles), gate.evaluate(*roles)
+    assert before["verdict"] == after["verdict"] == "SMOKE PASS"
+    assert gate.report(after).encode() == base.report(before).encode()
+    if writer == "embedding":
+        assert all(row["storage_arm_drains"] for row in rows)
+        assert all("embedding_drains" not in row["storage_arms"] for row in rows)
+    else:
+        assert all("storage_arms" not in row and "storage_arm_drains" not in row for row in rows)
+
+
+def test_embedding_swallowed_retire_exception_is_inconclusive(tmp_path):
+    proof, rows = embedding_retirement_probe(tmp_path, "retire-swallowed", "session-end")
+    assert proof["status"] == 2
+    assert len(rows) == 1 and rows[0]["inconclusive"]
+    assert any("retire" in error for error in rows[0]["storage_arms"]["errors"])
     assert gate.comparison(rows, rows)["verdict"] == "INCONCLUSIVE"
     assert not (tmp_path / "probe-run-1").exists()

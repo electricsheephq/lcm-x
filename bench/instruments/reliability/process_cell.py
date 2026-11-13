@@ -27,6 +27,7 @@ from bench.instruments.reliability import acp_driver as AD, cells as C, fake_pro
 from bench.instruments.reliability import run_matrix as RM, stop_turn
 from bench.instruments.reliability import reply_fault as RF
 from bench.instruments.reliability.scorers import continuity
+from bench.tools import hoststat
 
 OBSERVER = Path(__file__).with_name("observer")
 SANDBOX_EXEC = "/usr/bin/sandbox-exec"
@@ -687,6 +688,7 @@ def run_cell_process(cell: dict, host_name: str, host: dict, plugin: dict, out: 
         (home / "config.yaml").write_text(config_yaml(cell, plugin, run.provider.base_url))
         (d / "cell.json").write_text(json.dumps({**cell, "plugin": plugin, "host": host_name, "host_src": host["src"],
                                                  "host_python": host["python"], "transport": transport}, indent=1))
+        host_before = hoststat.snapshot()
         started, first, last, phases = time.time(), 1, {}, []
         try:
             for phase in RM.PHASES:
@@ -714,7 +716,11 @@ def run_cell_process(cell: dict, host_name: str, host: dict, plugin: dict, out: 
         network = [n for r in records for n in r.get("network_attempts", [])] + read_jsonl(d / "proxy-attempts.jsonl")
         prov = [v for r in records for v in ((r.get("provenance") or {}).get("violations") or [])]
         observer = [n for r in records for n in r.get("observer_errors", [])]
-        rec.update(phases=phases, wall_s=round(time.time() - started, 1), acp_session=run.sid, accounting=acct,
+        wall_s = round(time.time() - started, 1)
+        host_delta = hoststat.delta(host_before, hoststat.snapshot())
+        cell_path = d / "cell.json"
+        cell_path.write_text(json.dumps({**json.loads(cell_path.read_text()), "host_stats": host_delta}, indent=1))
+        rec.update(phases=phases, wall_s=wall_s, host_stats=host_delta, acp_session=run.sid, accounting=acct,
                    citations=records[0]["citations"] if records else {}, sandbox=os.path.exists(SANDBOX_EXEC))
         rec["continuity"] = continuity.score_dir(cell, d)
         if network:  # stop condition: a host process tried to leave localhost

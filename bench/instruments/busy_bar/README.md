@@ -81,7 +81,13 @@ autocheckpoint setting. An H2 run (`--wal-autocheckpoint 0`) combined with these
 writers is therefore not autocheckpoint-free.
 
 Opt-in ledgers add `storage_arms`, including configured-connection PRAGMA
-readbacks and monotonic schedule boundaries. Beside each output ledger,
+readbacks and monotonic schedule boundaries, plus sibling `storage_arm_drains`
+records with duration and skipped status. On `wait=False`, the engine's own
+`timeout=0` retirement drops the old owner's queued, unshared passes; `finish()`
+waits only for active ones, outside the timed window. The embedding arm's
+background load at session end can therefore be lower than at the base, which
+forced a drain of up to 35 s inside the timed window. The arm follows the product's own
+path (ruling T1-88). Beside each output ledger,
 `<output-stem>-run-N/` holds `holds.jsonl` and/or `checkpoints.jsonl` when requested.
 Checkpoint records contain start, duration_ms, result (busy, log, checkpointed)
 and error. Hold records contain writer, connection_id, database (the main file's
@@ -90,6 +96,9 @@ outcome (commit, rollback or busy). Only the cell's main database is recorded;
 in-memory and other databases and preparation writes are excluded. Any ledger
 carrying `storage_arms` is diagnostic and can only receive a SMOKE verdict (exit
 3), or INCONCLUSIVE (exit 2), even with the standard workload and run count.
+
+Host percentages are report-only; a null percentage gets a `reason`.
+`host_load_peak1m` is the larger of the two endpoint readings, not a sampled peak.
 
 Explicit IMMEDIATE transaction timing starts after lock acquisition. The end is
 sampled before a separate release call (connection commit, rollback, close or

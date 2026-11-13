@@ -97,6 +97,7 @@ def probe(tree: Path, work: Path, rows: int, trace: bool = False) -> dict[str, A
         # Each all-new bounded view is distinct, but belongs to the same session.
         views = [("n", position + 1, cells.writer_view(position, rows)) for position in range(6)]
         views.append(("t", 1, views[-1][2] + cells.turn(6 * rows + 1, "B")))
+        host_before = driver.hoststat.snapshot()
         for shape, position, host_view in views:
             events.clear()
             stored_before = engine._store._conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
@@ -119,6 +120,7 @@ def probe(tree: Path, work: Path, rows: int, trace: bool = False) -> dict[str, A
                 call["trace"] = events.copy()
                 call["trace_windows"] = windows(events, begin / 1e9, end / 1e9)
             results.append(call)
+        host = driver.hoststat.delta(host_before, driver.hoststat.snapshot())
         # Ensure a post-call observation even for the last very short call.
         time.sleep(2 * monitor.POLL_NS / 1e9)
         observed = observer.stop()
@@ -132,7 +134,7 @@ def probe(tree: Path, work: Path, rows: int, trace: bool = False) -> dict[str, A
                                 "hold_ms": (end - start) / 1e6} for start, end in found]
             call["longest_ms"] = max(((end - start) / 1e6 for start, end in found), default=0)
             call["first_start_ms"] = (found[0][0] - call["begin_ns"]) / 1e6 if found else None
-        return {"tree": str(tree), "tree_identity": driver.tree_identity(tree), "run_id": uuid.uuid4().hex,
+        return {"host": host, "tree": str(tree), "tree_identity": driver.tree_identity(tree), "run_id": uuid.uuid4().hex,
                 "rows": rows, "journal_mode": journal,
                 "effective_defaults": driver.effective_defaults(config_module),
                 "trace_diagnostic": trace, "monitor": observed, "calls": results}
@@ -296,6 +298,7 @@ def main() -> None:
                 subprocess.run(command, env=env, stdout=log, stderr=log, check=True, timeout=120)
             collected[name].append(json.loads(output.read_text()))
     result = summarize(collected, args.baseline_identity_override)
+    result["host"] = driver.hoststat.maxima([run for runs in collected.values() for run in runs])
     (args.outdir / "summary.json").write_text(json.dumps(result, indent=2) + "\n")
     rendered = report(result)
     (args.outdir / "verdict.txt").write_text(rendered)

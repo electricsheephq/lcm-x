@@ -127,8 +127,25 @@ one() {
   return "$rc"
 }
 
+HOST_REASON=
+HOSTSTAT="$(dirname "${BASH_SOURCE[0]}")/../../../../tools/hoststat.py" || HOST_REASON="hoststat path failed"
+"$PY" -B "$HOSTSTAT" snapshot > "$OUT/host-before$SUFFIX.json" || HOST_REASON="hoststat before snapshot failed"
+record_host() {
+  "$PY" -B "$HOSTSTAT" snapshot > "$OUT/host-after$SUFFIX.json" || HOST_REASON="hoststat after snapshot failed"
+  "$PY" -B "$HOSTSTAT" delta "$OUT/host-before$SUFFIX.json" "$OUT/host-after$SUFFIX.json" > "$OUT/host$SUFFIX.json" || HOST_REASON="${HOST_REASON:-hoststat delta failed}"
+  "$PY" -B - "$OUT/cell$SUFFIX.json" "$OUT/host$SUFFIX.json" "$HOST_REASON" <<'PY'
+import json
+import sys
+from pathlib import Path
+path, host = map(Path, sys.argv[1:3])
+reason = sys.argv[3]
+block = ({**dict.fromkeys(("elapsed_s", "load1m_before", "load1m_after", "host_load_peak1m",
+                          "steal_pct", "iowait_pct", "busy_pct")), "reason": reason} if reason else json.loads(host.read_text()))
+path.write_text(json.dumps({**json.loads(path.read_text()), "host": block}, indent=1) + "\n")
+PY
+}
 pids=()
-trap 'for pid in "${pids[@]:-}"; do [ -z "$pid" ] || kill -TERM "$pid" 2>/dev/null || true; done' EXIT
+trap 'status=$?; set +e; for pid in "${pids[@]:-}"; do [ -z "$pid" ] || kill -TERM "$pid" 2>/dev/null || true; done; record_host; exit "$status"' EXIT
 i=0
 while [ "$i" -lt "${#seeds[@]}" ]; do
   pids=()

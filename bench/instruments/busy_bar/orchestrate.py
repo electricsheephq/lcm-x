@@ -106,6 +106,7 @@ def main() -> None:
                            args.baseline_identity_override)
     rendered = gate.report(result)
     (args.outdir / "verdict.txt").write_text(rendered)
+    result["host"] = driver.hoststat.maxima([row for group in (prod, control) for rows in group.values() for row in rows])
     (args.outdir / "verdict.json").write_text(json.dumps(result, indent=2) + "\n")
     (control_dir / "verdict.txt").write_text("POSITIVE CONTROL ONLY; never gating\n" +
                                              gate.report(result["control"]))

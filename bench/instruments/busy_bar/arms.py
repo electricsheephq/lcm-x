@@ -299,6 +299,8 @@ class StorageArms:
         self.thread = None
         self.background_errors = []
         self.embedding_errors = []
+        self.embedding_drains = []
+        self.embedding_owners = []
         self.engines = []
 
     def __enter__(self):
@@ -375,7 +377,10 @@ class StorageArms:
 
             def retire(instance, wait):
                 self.gate.set()  # Also release a pass gated before a failed cell's first operation.
-                self.drain_embedding(instance)
+                if wait:
+                    self.drain_embedding(instance)
+                else:
+                    self.embedding_owners.append(instance._embedding_maintenance_owner)
                 try:
                     return original_retire(instance, wait)
                 except Exception as exc:
@@ -383,8 +388,18 @@ class StorageArms:
                     raise
 
             self.stack.enter_context(patch.object(engine.LCMEngine, "_retire_embedding_maintenance", retire))
-            scheduler = importlib.import_module("hermes_lcm.maintenance_scheduler")._EMBEDDING_MAINTENANCE_SCHEDULER
+            scheduler_module = importlib.import_module("hermes_lcm.maintenance_scheduler")
+            scheduler = scheduler_module._EMBEDDING_MAINTENANCE_SCHEDULER
+            self.scheduler = scheduler
             original_retire_owner = scheduler.retire_owner
+            original_warning = scheduler_module.logger.warning
+
+            def warning(message, *args, **kwargs):
+                if message == "LCM could not retire %s maintenance owner" and args == (scheduler._kind,) and kwargs.get("exc_info"):
+                    self.embedding_errors.append(f"embedding retire:{sys.exc_info()[1]}")
+                return original_warning(message, *args, **kwargs)
+
+            self.stack.enter_context(patch.object(scheduler_module.logger, "warning", warning))
 
             def retire_owner(*args, **kwargs):
                 try:
@@ -392,7 +407,7 @@ class StorageArms:
                 except Exception as exc:
                     self.embedding_errors.append(f"embedding retire:{type(exc).__name__}:{exc}")
                     raise
-                if not retired:
+                if not retired and kwargs.get("timeout", 0) != 0:
                     self.embedding_errors.append("embedding retire:timeout")
                 return retired
 
@@ -418,19 +433,30 @@ class StorageArms:
             self.stack.enter_context(patch.object(vectors.VectorStore, "_write_transaction", vector_transaction))
         return self
 
-    def drain_embedding(self, engine):
+    def drain_embedding(self, engine, owner=None):
         if "embedding" not in self.writers:
             return
+        record = {"deferred_owner": owner is not None, "skipped": bool(self.embedding_errors), "duration_ms": 0.0}
+        self.embedding_drains.append(record)
+        if record["skipped"]:
+            return
+        started = time.monotonic()
         try:
-            if not engine.drain_embedding_maintenance(timeout=35):
+            drained = (self.scheduler.retire_owner(owner, timeout=35) if owner is not None
+                       else engine.drain_embedding_maintenance(timeout=35))
+            if not drained:
                 self.embedding_errors.append("embedding drain:timeout")
         except Exception as exc:
             self.embedding_errors.append(f"embedding drain:{type(exc).__name__}:{exc}")
+        finally:
+            record["duration_ms"] = (time.monotonic() - started) * 1000
 
     def prepare(self, config, directory):
         if self.embedding_errors:
             raise RuntimeError("cannot start another run after failed embedding retirement")
         self.engines.clear()
+        self.embedding_drains.clear()
+        self.embedding_owners.clear()
         self.directory = directory
         self.recorder.database = config.database_path
         self.schedule_start = None
@@ -516,6 +542,8 @@ class StorageArms:
     def finish(self, output):
         self.stop.set()
         self.gate.set()
+        for owner in self.embedding_owners:
+            self.drain_embedding(None, owner)
         # The failed-before-first-operation path reaches finish before shutdown.
         for engine in self.engines:
             self.drain_embedding(engine)
