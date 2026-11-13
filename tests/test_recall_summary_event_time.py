@@ -348,13 +348,10 @@ def test_response_cap_holds_with_fields_on(delivery, detail):
     full = invoke(detail=detail, read_summary_event_time=read)
     read.assert_called_with([1, 2, 3, 4, 5, 6], deadline=float("inf"))
     assert len(json.loads(full)["hits"]) == 6 and len(full) > len(off)
-    bare = [{k: v for k, v in h.items() if not k.startswith("event_time")} for h in json.loads(full)["hits"]]
-    # answer_ready caps the whole envelope; snippets budgets the hits only.
-    cap = len(off) + 300 if detail == "answer_ready" else sum(len(json.dumps(h)) for h in bare) + 300
+    cap = len(off) + 300
     raw = invoke(detail=detail, response_char_cap=cap, read_summary_event_time=read)
     payload = json.loads(raw)
-    if detail == "answer_ready":
-        assert len(raw) <= cap
+    assert len(raw) <= cap
     assert [h["node_id"] for h in payload["hits"]] == [1, 2, 3, 4, 5, 6]  # fields never evict a hit
     kept = [h for h in payload["hits"] if "event_time_start" in h]
     assert 0 < len(kept) < 6 and [h["node_id"] for h in kept] == list(range(1, len(kept) + 1))
