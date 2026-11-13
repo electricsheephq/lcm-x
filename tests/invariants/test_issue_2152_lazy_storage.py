@@ -317,6 +317,45 @@ def test_reloaded_hook_keeps_ingesting_for_two_retained_clones(preflight, passes
     db.unlink()
 
 
+def test_reloaded_hook_replays_compacted_second_lane(preflight, monkeypatch):
+    from hermes_lcm import escalation, tokens
+
+    monkeypatch.setenv("LCM_FRESH_TAIL_COUNT", "2")
+    monkeypatch.setenv("LCM_LEAF_CHUNK_TOKENS", "16")
+    monkeypatch.setattr(tokens, "_get_encoder", lambda: None)
+    monkeypatch.setattr(escalation, "_call_llm_for_summary", lambda *args, **kw: "Earlier turns retained.")
+    prototype, old_ctx = preflight.register(supports_unload=True)
+    first, second = prototype.clone_for_agent(), prototype.clone_for_agent()
+    first.on_session_start("first-cache", platform="cli", conversation_id="first-lane")
+    second.on_session_start("second-cache", platform="cli", conversation_id="second-lane", context_length=200_000)
+    first_view = [{"role": "user", "content": "First lane question"}, {"role": "assistant", "content": "First answer"}]
+    first.ingest(first_view)
+    second_view = [
+        {"role": role, "content": f"{label} {sentence} " * 40}
+        for label in ("one", "two") for role, sentence in (("user", "question"), ("assistant", "answer"))
+    ]
+    second.ingest(second_view)
+    projected = second.compress(second_view, current_tokens=second.threshold_tokens + 1, force=True)
+    assert second._last_compression_status == "compacted"
+    assert projected[0]["content"].startswith(("[Recent Summary (", "[Session Arc Summary ("))
+    old_ctx.unload_callbacks[0]()
+    _, ctx = preflight.register(supports_unload=True)
+    hook = ctx.hooks["post_llm_call"]
+    fresh = [{"role": "user", "content": "new question"}, {"role": "assistant", "content": "new answer"}]
+    try:
+        hook(session_id="first-cache", platform="cli", conversation_history=first_view + fresh)
+        hook(session_id="second-cache", platform="cli", conversation_history=projected + fresh)
+        db = preflight.home / "lcm.db"
+        with closing(sqlite3.connect(db)) as conn:
+            rows = conn.execute(
+                "SELECT role, content, conversation_id FROM messages WHERE session_id=? ORDER BY store_id",
+                ("second-cache",),
+            ).fetchall()
+        assert rows == [(row["role"], row["content"], "second-lane") for row in second_view + fresh]
+    finally:
+        ctx.unload_callbacks[0]()
+
+
 def test_unload_refuses_clone_that_finishes_construction_after_unload(preflight, monkeypatch):
     prototype, ctx = preflight.register(supports_unload=True)
     constructing, release, unloading = threading.Event(), threading.Event(), threading.Event()

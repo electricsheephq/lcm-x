@@ -5223,15 +5223,14 @@ class LCMEngine(
                     # Reading the public engine getter discovers plugins; a
                     # late callback must never cause rediscovery after unload.
                     current = getattr(get_plugin_manager(), "_context_engine", None)
-                resume = getattr(current, "_write_retired_tail_on_live_binding", None)
-                handled, stored = resume(self, session_id, old_store.db_identity, append) if callable(resume) else (False, False)
-                if handled:
-                    if stored:
-                        return True
-                else:
+                def detached():
                     with self._open_retired_store(old_store) as store:
-                        if append(store) is not None:
-                            return True
+                        return append(store) is not None
+
+                resume = getattr(current, "_write_retired_tail_on_live_binding", None)
+                stored = resume(self, session_id, old_store.db_identity, append, detached) if callable(resume) else detached()
+                if stored:
+                    return True
             except Exception:
                 logger.debug("LCM retired session-end tail write failed", exc_info=True)
         if warn:
@@ -5241,29 +5240,27 @@ class LCMEngine(
             )
         return False
 
-    def _ingest_unattached_reload_turn(self, session_id, conversation_id, messages, platform):
-        """Handle older host hooks with no compressor and an already durable lane."""
-        store = self._store
-        with _temporary_sqlite_busy_timeout([store.connection], _SESSION_END_BUSY_TIMEOUT_MS), store.ingest_atomic():
-            lanes = store.connection.execute(
-                "SELECT conversation_id FROM lcm_lifecycle_state WHERE current_session_id = ? LIMIT 2",
-                (session_id,),
-            ).fetchall()
-            if (len(lanes) != 1 or (conversation_id and conversation_id != lanes[0][0])
-                    or self._session_id_matches_lcm_bypass_filters(session_id, platform=platform)):
-                return False
-            return self._append_retired_tail(
-                store, store, session_id, lanes[0][0], messages, platform, allow_empty=True,
-            ) is not None
+    def _unattached_reload_lane(self, session_id, conversation_id, platform):
+        """Find one durable lane when an older host omits its compressor."""
+        if self._session_id_matches_lcm_bypass_filters(session_id, platform=platform):
+            return None
+        lanes = self._store.connection.execute(
+            "SELECT conversation_id FROM lcm_lifecycle_state WHERE current_session_id = ? LIMIT 2",
+            (session_id,),
+        ).fetchall()
+        if len(lanes) != 1 or (conversation_id and conversation_id != lanes[0][0]):
+            return None
+        return lanes[0][0]
 
-    def _write_retired_tail_on_live_binding(self, retired, session_id, db_identity, append):
-        """Serialize a retired callback with the current writer's cursor."""
-        active = resolve_active_lcm_engine(session_id, retired._conversation_id)
-        if (active is None or active is retired or active._plugin_is_unloading()
-                or active._conversation_id != retired._conversation_id
-                or active._hermes_home != retired._hermes_home
-                or active._db_path != retired._db_path):
-            return False, False
+    def _write_retired_tail_on_live_binding(self, retired, session_id, db_identity, append, detached):
+        """Serialize a retired callback with the current writer and cold binds."""
+        with _ACTIVE_ENGINE_COLD_START_LOCK:
+            active = resolve_active_lcm_engine(session_id, retired._conversation_id)
+            if (active is None or active is retired or active._plugin_is_unloading()
+                    or active._conversation_id != retired._conversation_id
+                    or active._hermes_home != retired._hermes_home
+                    or active._db_path != retired._db_path):
+                return detached()
 
         def write(selected):
             if (selected._session_id != session_id or selected._conversation_id != retired._conversation_id
@@ -5279,7 +5276,7 @@ class LCMEngine(
             return ids is not None
 
         result = use_lcm_engine(active, write, timeout=_SESSION_END_BUSY_TIMEOUT_MS / 1000)
-        return True, result.used and result.value
+        return result.used and result.value
 
     def _on_session_end_unlocked(
         self,

@@ -15,8 +15,6 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from threading import Lock
-from weakref import WeakKeyDictionary
 
 logger = logging.getLogger(__name__)
 
@@ -862,8 +860,6 @@ def register(ctx):
     # receives conversation_history including the assistant response.  The
     # existing _ingest_messages cursor prevents duplicates if compress() runs
     # later the same turn.
-    reload_clones = WeakKeyDictionary()
-    reload_clones_lock = Lock()
     try:
         def _on_post_llm_call(**kwargs):
             if not active:
@@ -958,12 +954,11 @@ def register(ctx):
                             with engine._admit_plugin_operation() as admitted:
                                 if admitted and host_engine._flush_retired_session_end(session_id, history, warn=False):
                                     return
-                            with reload_clones_lock:
-                                replacement = reload_clones.get(host_engine)
-                                if replacement is None:
-                                    replacement = engine.clone_for_agent()
-                                    reload_clones[host_engine] = replacement
-                            result = use_lcm_engine(replacement, _bind_and_ingest, timeout=None)
+                            replacement = engine.clone_for_agent()
+                            try:
+                                result = use_lcm_engine(replacement, _bind_and_ingest, timeout=None)
+                            finally:
+                                replacement.shutdown()
                 else:
                     result = use_active_lcm_engine(
                         _ingest_and_note,
@@ -981,15 +976,23 @@ def register(ctx):
                         )
                         if result.status is ActiveEngineUseStatus.RESIDENT_ENGINE_CONFLICT:
                             if engine._unload_group is not None and session_id:
-                                ingested = use_lcm_engine(
+                                lane = use_lcm_engine(
                                     engine,
-                                    lambda current: current._ingest_unattached_reload_turn(
-                                        session_id, conversation_id, history, platform,
-                                    ),
+                                    lambda current: current._unattached_reload_lane(session_id, conversation_id, platform),
                                     timeout=None,
                                 )
-                                if ingested.used and ingested.value:
-                                    return
+                                if lane.used and lane.value:
+                                    conversation_id = lane.value
+                                    # The hook cannot attach a replacement
+                                    # to the cached host agent. Close this
+                                    # scoped writer after normal replay.
+                                    replacement = engine.clone_for_agent()
+                                    try:
+                                        ingested = use_lcm_engine(replacement, _bind_and_ingest, timeout=None)
+                                        if ingested.used:
+                                            return
+                                    finally:
+                                        replacement.shutdown()
                             # No engine of the child's own: store its rows without binding one.
                             stored = use_lcm_engine(engine, _store_delegate_child, timeout=None)
                             if stored.used and stored.value:
