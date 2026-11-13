@@ -44,7 +44,8 @@ def test_exists_probes_preserve_rebind_and_ingest(tmp_path, monkeypatch, populat
         monkeypatch.setattr(engine, "_load_generated_ignored_placeholder_hash_counts", lambda: loads.append(1) or {})
         messages = ([{"role": "user", "content": "first"}] if populated else [])
         engine.ingest([*messages, {"role": "assistant", "content": "next"}])
-        assert probes == [("s", populated)]
+        # #2042 step 2: at cursor 0 the ingest guard probes once, before the empty-session check.
+        assert probes == ([("s", True)] if populated else [("s", False), ("s", False)])
         assert loads == ([] if populated else [1])
         assert engine._store.get_session_count("s") == (2 if populated else 1)
     finally:
