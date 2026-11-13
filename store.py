@@ -522,6 +522,18 @@ class MessageStore:
                 self.close()
                 raise
 
+    def existing_summary_node(self, node_id: int):
+        """Read summary proof without opening a separate DAG connection."""
+        from .dag import SummaryNode
+
+        row = self._conn.execute(
+            "SELECT node_id, session_id, depth, summary, expand_hint FROM summary_nodes WHERE node_id = ?",
+            (node_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return SummaryNode(node_id=row[0], session_id=row[1], depth=row[2], summary=row[3], expand_hint=row[4])
+
     def _init_db(self):
         # #1159: reserve the write lock before FTS5 can read during re-prepare.
         open_connection(ConnectionPolicy(

@@ -5163,12 +5163,13 @@ class LCMEngine(
             if current is None or current[0] != session_id or store.get_session_count(session_id):
                 return None
         suffix = view[covered:]
-        if any(self._is_context_summary_content(row.get("content")) or (
-                isinstance(row.get("content"), str) and row["content"].startswith(
-                    ("[Recent Summary (", "[Session Arc Summary ("),
-                )
-        ) for row in suffix):
-            return None  # A projected host view needs normal replay classification.
+        for row in suffix:
+            content = row.get("content")
+            if (row.get("role") in ("user", "assistant") and isinstance(content, str)
+                    and self._verified_lcm_summary_prefix(
+                        content, session_id=session_id, node_reader=store.existing_summary_node,
+                    )[0] is not None):
+                return None  # A proven projection needs normal replay classification.
         ids = self._append_off_current_session_end_suffix(
             session_id, suffix, source=platform, conversation_id=conversation_id,
             store=store, hermes_home=self._hermes_home,
@@ -6820,13 +6821,17 @@ class LCMEngine(
         against its DAG node; None when the content does not start with one."""
         return self._verified_lcm_summary_prefix(content)[0]
 
-    def _verified_lcm_summary_prefix(self, content: str) -> tuple[Optional[int], list[int]]:
+    def _verified_lcm_summary_prefix(self, content: str, *, session_id=None, node_reader=None) -> tuple[Optional[int], list[int]]:
         """(end offset, node ids) of the verified leading LCM summary parts, else (None, [])."""
         if not content.startswith("[") or "[Expand for details:" not in content:
             return None, []
-        dag = getattr(self, "_dag", None)
-        session_id = getattr(self, "_session_id", "")
-        if dag is None or not session_id:
+        if node_reader is None:
+            dag = getattr(self, "_dag", None)
+            if dag is None:
+                return None, []
+            node_reader = dag.get_node
+        session_id = self._session_id if session_id is None else session_id
+        if not session_id:
             return None, []
         pos = 0
         node_ids: list[int] = []
@@ -6835,7 +6840,7 @@ class LCMEngine(
             if header is None:
                 break
             try:
-                node = dag.get_node(int(header.group(2)))
+                node = node_reader(int(header.group(2)))
             except Exception:
                 return None, []
             # Only the bound session's own nodes: compress() renders them, and a

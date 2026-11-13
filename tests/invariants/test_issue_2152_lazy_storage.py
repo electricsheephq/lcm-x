@@ -236,12 +236,12 @@ def test_late_session_end_after_unload_stores_suffix_once(preflight, already_sto
     if already_stored:
         clone.ingest(history)
     old_ctx.unload_callbacks[0]()
-    history.append({"role": "assistant", "content": "late answer"})
+    history.append({"role": "assistant", "content": "[Recent Summary (literal text)"})
     clone.on_session_end("late-end", history)
     clone.on_session_end("late-end", history)
     path = preflight.home / "lcm.db"
     assert _durable_messages(path, "late-end") == [
-        ("user", "already stored"), ("assistant", "late answer"),
+        ("user", "already stored"), ("assistant", "[Recent Summary (literal text)"),
     ]
     path.unlink()
     clone.on_session_end("late-end", history)
