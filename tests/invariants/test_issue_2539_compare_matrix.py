@@ -687,7 +687,8 @@ def _run_case(case, host, tmp_path, monkeypatch, request, characterization=None)
             gaps.append('third replay adds rows')
         if limit and not gaps:
             request.node.add_marker(pytest.mark.xfail(strict=True, raises=NamedLimit,
-                reason='R4-8 named limit: a repeated marker of a stored bare row in a shifted host window'))
+                reason='R4-8 named limit: a repeated marker of a stored bare row in a shifted host window' if shifted
+                else '#2661 named copy (#2558): a repeated data-URI marker of a stored bare row in a full host window'))
             raise NamedLimit('second replay adds rows; no host row missing, third replay adds nothing, never above main')
         if gaps:
             request.node.add_marker(pytest.mark.xfail(strict=True, raises=MainGap,

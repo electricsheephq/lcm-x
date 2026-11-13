@@ -122,7 +122,7 @@ def test_repeated_call_upgrade_replay_consumes_each_row_once(shape, tmp_path, mo
         # twice is stored once more at the second replay, as in v0.30.0. No host row is missing (checked above), the
         # copy is the repeated call's rows only, and the third replay adds nothing.
         assert counts == [4, 7, 9, 9], f'{shape}: {counts}'
-        assert extras and all(row[1] in (CALL, '') for row in extras), extras
+        assert sorted(row[:2] for row in extras) == [('assistant', ''), ('tool', CALL)], extras
         assert snapshots[1] == snapshots[2]
         return
     assert counts == [4, 7, 7, 7], f'{shape}: later replay added rows: {counts}'
