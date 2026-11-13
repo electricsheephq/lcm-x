@@ -158,6 +158,7 @@ from .compress_run import CompressRun
 from .identity_anchor import IdentityAnchorMixin, _ROTATION_LINEAGE_UNRECORDED, _raw_remainder
 from .host_uid import HostUidShadowMixin, _valid_uid
 from .host_row_recovery import HostRowRecoveryMixin
+from .unended_catchup import UnendedCatchupMixin
 from .host_uid_emit import carry_identity, identity_emit_enabled, record_absorbed_message, sync_cached_host_metadata
 from .store_complete import HiddenBacklog, StoreCompleteMixin
 from .survival_fit import SurvivalFitMixin, _carries_survival_notice, _host_estimate, survival_reserve_fraction
@@ -719,6 +720,7 @@ class LCMEngine(
     IdentityAnchorMixin,
     HostUidShadowMixin,
     HostRowRecoveryMixin,
+    UnendedCatchupMixin,
     StoreCompleteMixin,
     SurvivalFitMixin,
     AuxiliarySessionMixin,
@@ -4681,6 +4683,7 @@ class LCMEngine(
                 raise RuntimeError("LCM engine is closed")
             self._on_session_start_unlocked(session_id, **kwargs)
             self._enqueue_host_row_recovery(session_id, kwargs)
+            self._enqueue_unended_catchup(session_id, kwargs)
             binding = self._emission_binding()
             for name in ("_compress_commit_proof", "_last_emission_descriptors"):
                 if not self._emission_proof_matches_binding(getattr(self, name), binding):
@@ -8406,6 +8409,14 @@ class LCMEngine(
         Store-dependent protection/token counts are part of lock_hold_ms, and
         would move out with classification under the design's section 5 fallback.
         """
+        # Another writer may have filled this session after its empty-store bind.
+        # The eager write lock keeps this probe and the ensuing writes serialized.
+        if self._ingest_cursor == 0 and not self._ingest_cursor_needs_reconcile:
+            try:
+                self._ingest_cursor_needs_reconcile = self._store.has_session_messages(self._session_id)
+            except Exception as exc:
+                logger.debug("LCM ingest cursor reconciliation probe failed: %s", exc)
+                self._ingest_cursor_needs_reconcile = True
         self._capture_host_rewrites(messages)
         n = len(messages)
         cursor = entry_cursor = min(max(self._ingest_cursor, 0), n)
