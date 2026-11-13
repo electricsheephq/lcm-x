@@ -1439,7 +1439,7 @@ def test_sealed_admission_refusals_write_nothing(tmp_path, monkeypatch, capsys, 
     monkeypatch.setattr(cli, "run_child", lambda *a, **k: pytest.fail("worker started before admission"))
     cache = sealed_fixture(tmp_path / "source")
     manifest = cache.with_suffix(".manifest.json")
-    argv = [*driver_args(tmp_path), "--sealed-cache", f"base={cache.parent}"]
+    argv = [*driver_args(tmp_path), *(sealed_receipt_args(cache) if not fault.startswith("receipt") else []), "--sealed-cache", f"base={cache.parent}"]
     cache.chmod(0o644)
     manifest.chmod(0o644)
     if fault in {"role", "syntax", "database_missing", "manifest_missing"}:
@@ -1522,7 +1522,7 @@ def test_sealed_proof_failures_stop_other_build_and_scoring(tmp_path, monkeypatc
     cli, launches = sealed_driver(monkeypatch, tmp_path, fault=fault)
     if fault == "payload":
         monkeypatch.setattr(cli, "verify_sample", lambda calls, workers: sorted(set(calls)))
-    argv = [*driver_args(tmp_path), "--build-workers", "2", "--sealed-cache", f"base={cache.parent}"]
+    argv = [*driver_args(tmp_path), "--build-workers", "2", "--sealed-cache", f"base={cache.parent}", *(sealed_receipt_args(cache) if fault != "fingerprint" else [])]
     if fault == "fingerprint":
         receipt = tmp_path / "source-receipt.json"
         receipt.write_text(json.dumps({"cache_manifests": {"base": cli.file_sha256(cache.with_suffix('.manifest.json'))},
@@ -1546,7 +1546,7 @@ def test_sealed_build_slots(tmp_path, monkeypatch, capsys, loaded):
         assert not launches and not (tmp_path / "out").exists()
         return
     cache = sealed_fixture(tmp_path / "source")
-    assert cli.main([*argv, "--sealed-cache", f"base={cache.parent}"]) == 0
+    assert cli.main([*argv, "--sealed-cache", f"base={cache.parent}", *sealed_receipt_args(cache, threads=1)]) == 0
     assert {(role, name) for role, name in launches if name.startswith("preembed-part-")} == {
         ("candidate", f"preembed-part-{i}") for i in range(8)}
     assert launches.count(("candidate", "preembed-plan")) == 1
@@ -1607,7 +1607,7 @@ def test_sealed_proof_guards_stop_run(tmp_path, monkeypatch, fault, reason):
         return result
 
     monkeypatch.setattr(cli, "run_child", injected)
-    assert cli.main([*driver_args(tmp_path), "--sealed-cache", f"base={cache.parent}", "--build-workers", "2"]) == 1
+    assert cli.main([*driver_args(tmp_path), "--sealed-cache", f"base={cache.parent}", *sealed_receipt_args(cache), "--build-workers", "2"]) == 1
     receipt = json.loads((tmp_path / "out/d1-receipt.json").read_text())
     assert receipt["sealed_roles"]["base"]["load_proof"]["failure"] == reason
     assert receipt["arms"] == [] and all(role == "base" for role, _ in launches)
@@ -1636,7 +1636,7 @@ def test_sealed_r2_manifest_database_refusal_writes_nothing(tmp_path, monkeypatc
     monkeypatch.setattr(cli, "pin", lambda _: "a" * 40)
     monkeypatch.setattr(cli, "run_child", lambda *a, **kw: pytest.fail("worker started before admission"))
     with pytest.raises(SystemExit) as exc:
-        cli.main([*driver_args(tmp_path), "--sealed-cache", f"base={cache.parent}"])
+        cli.main([*driver_args(tmp_path), "--sealed-cache", f"base={cache.parent}", *sealed_receipt_args(cache)])
     assert exc.value.code == 2 and "sealed manifest differs from database" in capsys.readouterr().err
     assert not (tmp_path / "out").exists() and not (tmp_path / "scratch").exists()
     assert before == {p: p.read_bytes() for p in before}
@@ -1672,7 +1672,7 @@ def test_sealed_r2_scoring_cache_failure(tmp_path, monkeypatch, workers, role, f
         return lookup(self, keys)
 
     monkeypatch.setattr(D1Cache, "_lookup", failing_lookup)
-    assert cli.main([*driver_args(tmp_path), "--build-workers", str(workers), "--sealed-cache", f"{role}={cache.parent}"]) == 1
+    assert cli.main([*driver_args(tmp_path), "--build-workers", str(workers), "--sealed-cache", f"{role}={cache.parent}", *sealed_receipt_args(cache, role)]) == 1
     receipt = json.loads((tmp_path / "out/d1-receipt.json").read_text())
     proof = receipt["sealed_roles"][role]["load_proof"]
     assert proof["failure"] == "sealed scoring cache miss or corruption"
@@ -1701,7 +1701,7 @@ def test_sealed_r2_one_scoring_arm_fails_role(tmp_path, monkeypatch, field, arm_
         return result
 
     monkeypatch.setattr(cli, "run_child", injected)
-    assert cli.main([*driver_args(tmp_path), "--sealed-cache", f"base={cache.parent}"]) == 1
+    assert cli.main([*driver_args(tmp_path), "--sealed-cache", f"base={cache.parent}", *sealed_receipt_args(cache)]) == 1
     receipt = json.loads((tmp_path / "out/d1-receipt.json").read_text())
     assert receipt["sealed_roles"]["base"]["load_proof"]["failure"] == "sealed scoring cache miss or corruption"
     assert sum(arm[f"cache_{field}"] for arm in receipt["arms"] if arm["role"] == "base") == 1
@@ -1737,7 +1737,7 @@ def test_sealed_r2_both_roles_build_threads_capped(tmp_path, monkeypatch, capsys
     cli, launches = sealed_driver(monkeypatch, tmp_path)
     argv = [*driver_args(tmp_path), "--build-workers", "2", "--build-threads", str(threads)]
     for role, cache in sources.items():
-        argv += ["--sealed-cache", f"{role}={cache.parent}"]
+        argv += ["--sealed-cache", f"{role}={cache.parent}", *sealed_receipt_args(cache, role, threads)]
     if threads > 8:
         with pytest.raises(SystemExit) as exc:
             cli.main(argv)
@@ -1766,7 +1766,7 @@ def test_sealed_r3_both_roles_effective_build_budget(tmp_path, monkeypatch, work
     monkeypatch.setattr(cli, "run_child", inflated)
     argv = [*driver_args(tmp_path), "--build-workers", str(workers), "--build-threads", "8"]
     for role, cache in sources.items():
-        argv += ["--sealed-cache", f"{role}={cache.parent}"]
+        argv += ["--sealed-cache", f"{role}={cache.parent}", *sealed_receipt_args(cache, role, 99)]
     code = cli.main(argv)
     receipt = json.loads((tmp_path / "out/d1-receipt.json").read_text())
     assert code == 1
@@ -1790,7 +1790,7 @@ def test_sealed_r3_scored_arm_without_cache_hits(tmp_path, monkeypatch, role, ar
         return result
 
     monkeypatch.setattr(cli, "run_child", blanked)
-    code = cli.main([*driver_args(tmp_path), "--sealed-cache", f"{role}={cache.parent}"])
+    code = cli.main([*driver_args(tmp_path), "--sealed-cache", f"{role}={cache.parent}", *sealed_receipt_args(cache, role)])
     receipt = json.loads((tmp_path / "out/d1-receipt.json").read_text())
     assert code == 1
     assert receipt["sealed_roles"][role]["load_proof"]["failure"] == "sealed scoring cache had no hits"
@@ -1810,7 +1810,7 @@ def test_sealed_r3_arm_before_scoring_keeps_worker_failure(tmp_path, monkeypatch
         return run(command, env=env, **kw)
 
     monkeypatch.setattr(cli, "run_child", failed_before_scoring)
-    assert cli.main([*driver_args(tmp_path), "--sealed-cache", f"base={cache.parent}"]) == 1
+    assert cli.main([*driver_args(tmp_path), "--sealed-cache", f"base={cache.parent}", *sealed_receipt_args(cache)]) == 1
     receipt = json.loads((tmp_path / "out/d1-receipt.json").read_text())
     assert receipt["sealed_roles"]["base"]["load_proof"]["failure"] is None
     arm = next(arm for arm in receipt["arms"] if (arm["role"], arm["arm"]) == ("base", "shard-0"))
@@ -1827,10 +1827,134 @@ def test_sealed_r3_scalar_identity_refused_without_writes(tmp_path, monkeypatch,
     cli = driver()
     monkeypatch.setattr(cli, "pin", lambda _: "a" * 40)
     monkeypatch.setattr(cli, "run_child", lambda *a, **kw: pytest.fail("worker started before admission"))
-    argv = [*driver_args(tmp_path), "--sealed-cache", f"base={cache.parent}"]
+    argv = [*driver_args(tmp_path), "--sealed-cache", f"base={cache.parent}", *sealed_receipt_args(cache)]
     before = {p: (p.read_bytes(), p.stat().st_mtime_ns, p.stat().st_mode) for p in tmp_path.rglob("*") if p.is_file()}
     with pytest.raises(SystemExit) as exc:
         cli.main(argv)
     assert exc.value.code == 2 and "sealed admission:" in capsys.readouterr().err
     assert not (tmp_path / "out").exists() and not (tmp_path / "scratch").exists()
     assert before == {p: (p.read_bytes(), p.stat().st_mtime_ns, p.stat().st_mode) for p in tmp_path.rglob("*") if p.is_file()}
+
+
+def sealed_receipt_args(cache, role="base", threads=2):
+    """Supply the matching source receipt required by sealed-role admission."""
+    cli = driver()
+    receipt = cache.parent.parent / f"{cache.parent.name}-{role}-receipt.json"
+    receipt.write_text(json.dumps({
+        "cache_manifests": {role: cli.file_sha256(cache.with_suffix(".manifest.json"))},
+        "embedding_path": {role: cli.embedding_path_fingerprint(
+            role, [{"effective_intra_op_threads": threads}], None)},
+    }))
+    return ["--sealed-receipt", f"{role}={receipt}"]
+
+
+@pytest.mark.parametrize("role", ["base", "candidate"])
+def test_sealed_r4_receipt_required_before_writes(tmp_path, monkeypatch, capsys, role):
+    cache = sealed_fixture(tmp_path / "source", role)
+    cli, launches = sealed_driver(monkeypatch, tmp_path)
+    with pytest.raises(SystemExit) as exc:
+        cli.main([*driver_args(tmp_path), "--sealed-cache", f"{role}={cache.parent}"])
+    assert exc.value.code == 2
+    assert f"sealed role {role} requires --sealed-receipt" in capsys.readouterr().err
+    assert not launches
+    assert not (tmp_path / "out").exists() and not (tmp_path / "scratch").exists()
+
+
+@pytest.mark.parametrize("fingerprint", ["missing_role", None, "", 7])
+@pytest.mark.parametrize("role", ["base", "candidate"])
+def test_sealed_r4_invalid_fingerprint_admission(tmp_path, monkeypatch, capsys, role, fingerprint):
+    cache = sealed_fixture(tmp_path / "source", role)
+    cli, launches = sealed_driver(monkeypatch, tmp_path)
+    receipt_args = sealed_receipt_args(cache, role)
+    receipt = Path(receipt_args[1].split("=", 1)[1])
+    data = json.loads(receipt.read_bytes())
+    data["embedding_path"] = {} if fingerprint == "missing_role" else {role: {"sha256": fingerprint}}
+    receipt.write_text(json.dumps(data))
+    with pytest.raises(SystemExit) as exc:
+        cli.main([*driver_args(tmp_path), "--sealed-cache", f"{role}={cache.parent}", *receipt_args])
+    assert exc.value.code == 2
+    assert f"sealed admission: sealed receipt fingerprint for {role} must be a non-empty string" in capsys.readouterr().err
+    assert not launches
+    assert not (tmp_path / "out").exists() and not (tmp_path / "scratch").exists()
+
+
+@pytest.mark.parametrize("rewrite_at", ["read", "worker"])
+def test_sealed_r4_proof_uses_admitted_receipt_bytes(tmp_path, monkeypatch, rewrite_at):
+    cache = sealed_fixture(tmp_path / "source")
+    cli, _ = sealed_driver(monkeypatch, tmp_path)
+    receipt_args = sealed_receipt_args(cache)
+    receipt = Path(receipt_args[1].split("=", 1)[1])
+    admitted = receipt.read_bytes()
+    data = json.loads(admitted)
+    expected = data["embedding_path"]["base"]["sha256"]
+    data["embedding_path"]["base"]["sha256"] = "replaced after admission"
+    replacement = json.dumps(data).encode()
+    reads = []
+    read_bytes, run = Path.read_bytes, cli.run_child
+
+    def tracked_read(path):
+        raw = read_bytes(path)
+        if path == receipt:
+            reads.append(raw)
+            if rewrite_at == "read":
+                receipt.write_bytes(replacement)
+        return raw
+
+    def rewrite(command, *, env, **kw):
+        if rewrite_at == "worker" and Path(env["TMPDIR"]).name == "preembed-lookup":
+            receipt.write_bytes(replacement)
+        return run(command, env=env, **kw)
+
+    monkeypatch.setattr(Path, "read_bytes", tracked_read)
+    monkeypatch.setattr(cli, "run_child", rewrite)
+    assert cli.main([*driver_args(tmp_path), "--sealed-cache", f"base={cache.parent}", *receipt_args]) == 0
+    result = json.loads((tmp_path / "out/d1-receipt.json").read_text())
+    record = result["sealed_roles"]["base"]
+    assert reads == [admitted]
+    assert record["receipt_sha256"] == hashlib.sha256(admitted).hexdigest()
+    assert record["expected_fingerprint"] == expected
+    assert record["load_proof"]["fingerprint"] == {"actual": expected, "expected": expected, "equal": True}
+    assert read_bytes(receipt) == replacement
+
+
+def test_sealed_r4_proof_failure_names_exception(tmp_path, monkeypatch):
+    cache = sealed_fixture(tmp_path / "source")
+    cli, launches = sealed_driver(monkeypatch, tmp_path)
+
+    def broken_sample(*args):
+        raise RuntimeError("injected sealed proof failure")
+
+    monkeypatch.setattr(cli, "verify_sample", broken_sample)
+    assert cli.main([*driver_args(tmp_path), "--sealed-cache", f"base={cache.parent}",
+                     *sealed_receipt_args(cache)]) == 1
+    result = json.loads((tmp_path / "out/d1-receipt.json").read_text())
+    assert result["sealed_roles"]["base"]["load_proof"]["failure"] == "RuntimeError: injected sealed proof failure"
+    assert result["arms"] == [] and all(role == "base" for role, _ in launches)
+
+
+@pytest.mark.parametrize("role", ["base", "candidate"])
+@pytest.mark.parametrize("arm_name", ["shard-0", "aa-Aprime"])
+def test_sealed_r4_abstention_only_arm_allows_zero_hits(tmp_path, monkeypatch, role, arm_name):
+    cache = sealed_fixture(tmp_path / "source", role)
+    cli, _ = sealed_driver(monkeypatch, tmp_path)
+    run = cli.run_child
+
+    def abstentions(command, *, env, **kw):
+        result = run(command, env=env, **kw)
+        if env["LCM_D1_ROLE"] == role and Path(env["TMPDIR"]).name == arm_name:
+            out = Path(command[command.index("--output") + 1])
+            (out / "per_question_checkpoint.jsonl").write_text(
+                '{"provider":"stub"}\n{"question_id":"q0","abstention":true}\n'
+                '{"question_id":"q1","abstention":true}\n')
+            (out / "embedding-metrics.jsonl").write_text(
+                '{"wall_ms":0,"hits":0,"misses":0,"corruptions":0}\n')
+        return result
+
+    monkeypatch.setattr(cli, "run_child", abstentions)
+    assert cli.main([*driver_args(tmp_path), "--sealed-cache", f"{role}={cache.parent}",
+                     *sealed_receipt_args(cache, role)]) == 0
+    result = json.loads((tmp_path / "out/d1-receipt.json").read_text())
+    assert result["sealed_roles"][role]["load_proof"]["failure"] is None
+    arm = next(arm for arm in result["arms"] if (arm["role"], arm["arm"]) == (role, arm_name))
+    assert arm["questions"] == 2 and arm["scored_questions"] == 0
+    assert arm["cache_hits"] == arm["cache_misses"] == arm["cache_corruptions"] == 0

@@ -107,9 +107,15 @@ def sealed_record(directory, role, pin, receipt=None):
     record = {"path": str(directory), "sha256": file_sha256(cache), "manifest_sha256": manifest_sha256, "entries": entries, "identity": identity}
     if receipt is not None:
         receipt = Path(receipt).resolve()
-        if json.loads(receipt.read_bytes()).get("cache_manifests", {}).get(role) != record["manifest_sha256"]:
+        raw_receipt = receipt.read_bytes()
+        receipt_data = json.loads(raw_receipt)
+        if receipt_data.get("cache_manifests", {}).get(role) != record["manifest_sha256"]:
             raise ValueError("sealed receipt manifest hash differs")
-        record.update(receipt_path=str(receipt), receipt_sha256=file_sha256(receipt))
+        expected = receipt_data.get("embedding_path", {}).get(role, {}).get("sha256")
+        if not isinstance(expected, str) or not expected:
+            raise ValueError(f"sealed receipt fingerprint for {role} must be a non-empty string")
+        record.update(receipt_path=str(receipt), receipt_sha256=hashlib.sha256(raw_receipt).hexdigest(),
+                      expected_fingerprint=expected)
     return record
 
 
@@ -263,6 +269,9 @@ def _main(argv, interrupt):
     loaded, receipts = bindings(args.sealed_cache, "cache"), bindings(args.sealed_receipt, "receipt")
     if receipts.keys() - loaded.keys():
         parser.error("sealed receipt requires a sealed cache role")
+    for role in loaded:
+        if role not in receipts:
+            parser.error(f"sealed role {role} requires --sealed-receipt")
     building = [role for role in products if role not in loaded]
     if args.build_workers < 1 or (args.build_workers > 1 and len(building) * args.build_workers * build_threads_requested > args.thread_budget):
         parser.error(f"require build-workers >= 1 and {len(building)} * build-workers * build-threads <= thread-budget for parallel builds")
@@ -394,13 +403,13 @@ def _main(argv, interrupt):
                 raise PartitionProofError("sealed A-prime pre-embed failed")
             role_threads[role] = json.loads((out / f"{role}-preembed-aa-threads.json").read_text())
             actual = embedding_path_fingerprint(products[role], build_threads[role], model_files_sha256(env))["sha256"]
-            expected = json.loads(Path(record["receipt_path"]).read_bytes())["embedding_path"][role]["sha256"] if role in receipts else None
-            proof["fingerprint"] = {"actual": actual, "expected": expected, "equal": actual == expected if role in receipts else None}
-            if role in receipts and (not actual or actual != expected):
+            expected = record["expected_fingerprint"]
+            proof["fingerprint"] = {"actual": actual, "expected": expected, "equal": actual == expected}
+            if not actual or actual != expected:
                 raise PartitionProofError("sealed embedding path fingerprint differs")
             manifests[role] = record["manifest_sha256"]
         except Exception as exc:
-            proof["failure"] = str(exc)
+            proof["failure"] = str(exc) if isinstance(exc, PartitionProofError) else f"{type(exc).__name__}: {exc}"
         finally:
             proof["file_unchanged"] = cache.is_file() and cache.with_suffix(".manifest.json").is_file() and file_sha256(cache) == record["sha256"] and file_sha256(cache.with_suffix(".manifest.json")) == record["manifest_sha256"]
             if not proof["file_unchanged"]:
@@ -537,6 +546,7 @@ def _main(argv, interrupt):
             metrics = [json.loads(line) for line in (out / "embedding-metrics.jsonl").read_text().splitlines()]
             hits, misses = (sum(row[field] for row in metrics) for field in ("hits", "misses"))
             status.update(questions=sum("question_id" in row for row in rows),
+                          scored_questions=sum("question_id" in row and row.get("abstention") is not True for row in rows),
                           embedding_wall_ms=sum(row["wall_ms"] for row in metrics),
                           cache_hits=hits, cache_misses=misses,
                           cache_hit_rate=hits / (hits + misses) if hits + misses else None,
@@ -558,8 +568,8 @@ def _main(argv, interrupt):
         if any(arm["role"] == role and (arm.get("cache_misses", 0) or arm.get("cache_corruptions", 0)) for arm in arms):
             record["load_proof"]["failure"] = "sealed scoring cache miss or corruption"
             load_ok = False
-        elif any(arm["role"] == role and arm.get("questions", 0) > 0 and arm.get("cache_hits") == 0 for arm in arms):
-            # A checkpointed question proves scoring ran; an unstarted arm has no question count.
+        elif any(arm["role"] == role and arm.get("scored_questions", 0) > 0 and arm.get("cache_hits") == 0 for arm in arms):
+            # A non-abstention checkpoint proves scoring ran; an unstarted arm has no question count.
             record["load_proof"]["failure"] = "sealed scoring cache had no hits"
             load_ok = False
     embedding_path = {}
