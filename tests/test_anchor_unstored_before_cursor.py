@@ -880,7 +880,8 @@ def test_presence_reads_pages_newest_first_and_finds_an_old_copy(tmp_path, monke
     engine = _engine(tmp_path)
     try:
         store = engine._store
-        store.append_batch(SESSION, [{"role": "assistant", "content": f"reply {i}"} for i in range(600)])
+        old = [_call("call_old", 1), _result("call_old", "old file text", 2)]
+        store.append_batch(SESSION, [*old, *[{"role": "assistant", "content": f"reply {i}"} for i in range(598)]])
         tail, through, pages = store.get_session_tail, store.get_session_rows_through, []
 
         def read_tail(source, *, limit):
@@ -895,7 +896,7 @@ def test_presence_reads_pages_newest_first_and_finds_an_old_copy(tmp_path, monke
 
         monkeypatch.setattr(store, "get_session_tail", read_tail)
         monkeypatch.setattr(store, "get_session_rows_through", read_through)
-        assert _presence(engine, [{"role": "assistant", "content": "reply 0"}]) == []
+        assert _presence(engine, old) == []
         assert list(map(len, pages)) == [256, 256, 88]
         assert pages[0][0] > pages[1][-1] > pages[2][-1]
         assert len({sid for page in pages for sid in page}) == 600
