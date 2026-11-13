@@ -6,6 +6,8 @@ LCM-X keeps a lossless record of everything an agent sees and does. Today it run
 
 **The objective:** everything the agent has seen is kept, used correctly when it matters, at shipped defaults, in any harness, without the user noticing.
 
+**The long horizon.** An agent that lives for months should wake up as itself and act on the right memories, across restarts, compactions, crashes, model swaps and long silences, inside the harness it really runs in. That is the question the [Bicentennial](https://github.com/electricsheephq/bicentennial) benchmark asks, and it is where the objective leads: continuity that outlives any one session, harness or machine. The project's reference agent proposed this framing on 2026-10-26.
+
 It is built on Lossless Context Management (the [LCM paper](https://papers.voltropy.com/LCM) by Ehrlich & Blackman, Voltropy PBC, 2026):
 - every message is kept in a durable store;
 - older turns are folded into a summary DAG;
@@ -34,7 +36,7 @@ This page states what we are building and how we will know it works. The [roadma
    - The same record runs the context window: a session can run for weeks and the model stays inside its window. Today the user waits for compaction (p90 about 55 s); compaction you don't notice removes that wait.
    - Anything compacted can be recovered exactly.
 5. **One memory, any harness.**
-   - Next (Claude Code preview by 2026-11-18): Claude Code sessions are kept in their own store and recalled over MCP. Grok Build follows, then a hosted store that recalls across harnesses, then Codex, OpenClaw and any MCP client.
+   - LCM-X for Claude Code (preview since 2026-11-07; GA after [its gate in the roadmap](ROADMAP.md#the-order-roadmap-v6)): Claude Code sessions are kept in their own store and recalled over MCP. Grok Build follows, then a hosted store that recalls across harnesses, then Codex, OpenClaw and any MCP client.
    - Each event keeps a stable identity across hosts, so the record stays lossless when several harnesses share it.
 6. **We measure it.** Claims about recall, continuity and speed come with a pinned commit, a configuration and a published number. From v0.29.0 our rows are read and judged by current frontier models; earlier rows name the judge they used.
 
@@ -56,6 +58,7 @@ This page states what we are building and how we will know it works. The [roadma
 ## Principles
 
 - **Lossless before clever.** A change that can lose or duplicate a stored row does not ship, however much it improves anything else.
+- **Improve what we depend on.** When the limit between users and the objective sits in something LCM-X depends on (the storage engine, a host, the models we measure with), working on that dependency itself is in scope, not only working around it inside LCM-X.
 - **Proven quality ships on.**
   - A feature becomes the default when it passes one pre-declared, paired measurement on held-out questions, read by a frontier model.
   - The measurement must show a significant gain in evidence or answer quality.
@@ -92,7 +95,9 @@ This page states what we are building and how we will know it works. The [roadma
 - **The objective scorecard.** From v0.29.1, each release reports one row against the objective, with six cells: kept in store, kept in view, used correctly, at shipped defaults, any harness, unnoticed.
    - Each cell is read from an existing gate where one exists, links its receipt and states its claim class. A cell with no gate, or no gate result, stays in the table, empty.
    - Kept in store: the lossless gates (0 lost and 0 duplicate rows). Used correctly: facts kept and the never-below-Hermes-built-in floor, per fact class ([#1595](https://github.com/electricsheephq/lcm-x/issues/1595)). At shipped defaults: the board targets, run with the default configuration ([#2018](https://github.com/electricsheephq/lcm-x/issues/2018)). Any harness: the cross-harness parity audit (from cloud step 2, one store with many harnesses). Unnoticed: compaction wait and tokens per turn. Kept in view has no gate yet, so its cell stays empty until one exists.
-- **Boards are targets, not gates.** Our own benchmark ([#1964](https://github.com/electricsheephq/lcm-x/issues/1964)) becomes a headline measure only after it validly scores LCM-X against Hermes built-in at shipped defaults.
+- **Boards are targets, not gates.**
+  - Future-facing boards come first: those that test long-lived, agentic and changing memory, such as Bicentennial, BEAM, HaluMem and MemoryArena. Older single-retrieval boards (LongMemEval, LoCoMo) stay as regression guards, not targets.
+  - Bicentennial ([#1964](https://github.com/electricsheephq/lcm-x/issues/1964)), the long-horizon benchmark maintained alongside LCM-X, becomes a headline measure only after it validly scores LCM-X against Hermes built-in at shipped defaults. It runs under a firewall: LCM-X's developers use it as any outside developer does, on public packs, and never see its held-out seeds or keys.
 - **Shared-reader boards.** We enter boards that run every system with the same models. Until local semantic recall becomes the default (v0.29.0), we enter the configuration we ship to the managed fleet, labelled as such; after that, the shipped default. We report where we place.
 - **Compaction parity.** Facts kept, instruction continuity and compaction wall time against other compaction systems, on the same material, three seeds.
 - **Lifecycle reliability.** Every release candidate runs a real-host gauntlet (install, upgrade, rollback, restart, rotation, long sessions). Only a candidate that passes the [release spec](bench/specs/RELEASE-READINESS-V1.md) becomes GA. v0.27.0 shipped with two disclosed exceptions; #1305 proposes a narrow spec clause for those two cases only.
