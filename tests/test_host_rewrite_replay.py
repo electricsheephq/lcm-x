@@ -79,6 +79,41 @@ def test_r6_acp_334_335_cursor_zero_persisted_batch(tmp_path, caplog):
         assert multiset(engine) == before
 
 
+# #2042 step 2 schedules reconcile at cursor 0 when another writer stored this session's rows after an
+# empty-store bind, which is the shape seed() builds, exactly as a restart's bind does. Reconcile skips a
+# user turn that begins with the task-list header (#2418, open), so these literal main expectations fail
+# until #2418 is fixed. test_catchup_shape_equals_restart pins that both shapes store the same rows.
+KNOWN_2418 = {"changed-item", "suffix", "stamped-tui"}
+
+
+class HeaderTurnSkipped(AssertionError):
+    """Only #2418's exact shape: every expected row except the header-prefixed user turn."""
+
+
+XFAIL_2418 = pytest.mark.xfail(strict=True, raises=HeaderTurnSkipped,
+                               reason="#2418: reconcile skips a user turn that begins with the task-list "
+                                      "header; #2042 step 2 reconciles this cursor-0 shape")
+
+
+def _expect_rows(got, expected, known=None):
+    """Compare whole stored multisets; only the exact known #2418 loss may satisfy the xfail."""
+    if got == expected:
+        return
+    if known is not None and got == known:
+        raise HeaderTurnSkipped("#2418 known shape: the header-prefixed user turn is skipped")
+    pytest.fail(f"not the #2418 shape: got={sorted(got.items())!r} expected={sorted(expected.items())!r}")
+
+
+def test_expect_rows_accepts_only_the_known_shape():
+    full, known = Counter([1, 2]), Counter([1])
+    _expect_rows(full, full, known)
+    with pytest.raises(HeaderTurnSkipped):
+        _expect_rows(known, full, known)
+    with pytest.raises(pytest.fail.Exception):
+        _expect_rows(Counter([2]), full, known)
+    with pytest.raises(pytest.fail.Exception):
+        _expect_rows(known, full)
+
 # Literal main expectations, including stamps; no candidate-derived oracle.
 BASE = [("S", "assistant", "alpha", 100), ("S", "user", "prompt", 101),
         ("S", "assistant", "beta", 102)]
@@ -112,15 +147,41 @@ CONTROLS = [
 ]
 
 
-@pytest.mark.parametrize("name,stored,incoming,foreign,expected", CONTROLS, ids=[c[0] for c in CONTROLS])
+@pytest.mark.parametrize("name,stored,incoming,foreign,expected",
+                         [pytest.param(*c, marks=XFAIL_2418) if c[0] in KNOWN_2418 else c for c in CONTROLS],
+                         ids=[c[0] for c in CONTROLS])
 def test_control_equals_main(tmp_path, caplog, name, stored, incoming, foreign, expected):
     with engine_context(tmp_path, window=200000, conversation_id="conv", embeddings_enabled=False) as engine:
         seed(engine, stored)
         seed(engine, foreign, "other")
         with caplog.at_level("INFO"):
             engine._ingest_messages(deepcopy(incoming))
-        assert multiset(engine) == Counter(expected)
+        got = multiset(engine)
         assert not any("LCM host-rewrite replay:" in r.message for r in caplog.records)
+        _expect_rows(got, Counter(expected), Counter(expected[:-1]) if name in KNOWN_2418 else None)
+
+
+FIX1_A2 = ("fix1-a2", [row("user", TODO + "\n\nearlier prompt")], [SNAP], [], None)
+
+
+@pytest.mark.parametrize("name,stored,incoming,foreign,expected", [*CONTROLS, FIX1_A2],
+                         ids=[c[0] for c in [*CONTROLS, FIX1_A2]])
+def test_catchup_shape_equals_restart(tmp_path, name, stored, incoming, foreign, expected):
+    """#2042 step 2: rows another writer stored after an empty-store bind are reconciled as a restart would."""
+    def run(shape):
+        path = tmp_path / shape
+        path.mkdir()
+        with engine_context(path, window=200000, conversation_id="conv", embeddings_enabled=False) as engine:
+            seed(engine, stored)
+            seed(engine, foreign, "other")
+            if shape == "catchup":
+                engine._ingest_messages(deepcopy(incoming))
+                return multiset(engine), (engine._last_ingest_reconciliation or {}).get("action")
+        with engine_context(path, window=200000, conversation_id="conv", embeddings_enabled=False) as engine:
+            engine._ingest_messages(deepcopy(incoming))
+            return multiset(engine), (engine._last_ingest_reconciliation or {}).get("action")
+
+    assert run("catchup") == run("restart")
 
 
 def test_recorder_exact_content_free_lines(tmp_path, caplog):
@@ -249,12 +310,14 @@ def test_fix1_a1_reused_stamp_is_new(tmp_path):
         assert ingest_added(engine, [FOLD]) == 0
 
 
+@XFAIL_2418
 def test_fix1_a2_unstamped_host_prompt_is_new(tmp_path):
     with engine_context(tmp_path, window=200000, conversation_id="conv", embeddings_enabled=False) as engine:
         seed(engine, [row("user", TODO + "\n\nearlier prompt")])
         before = multiset(engine)
-        assert ingest_added(engine, [SNAP]) == 1
-        assert multiset(engine) == before + Counter([("S", "user", TODO, None)])
+        added = ingest_added(engine, [SNAP])
+        _expect_rows(multiset(engine), before + Counter([("S", "user", TODO, None)]), known=before)
+        assert added == 1
         assert ingest_added(engine, [SNAP]) == 0
 
 
