@@ -21,6 +21,9 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, Callable
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+from bench.tools import hoststat
+
 if __package__:
     from . import arms, cells
 else:
@@ -395,6 +398,7 @@ def run(cell: str, directory: Path, config_module: Any, engine_module: Any,
             storage_arms.start(config)
         return contention(lambda: operations(*args))
 
+    host_before = hoststat.snapshot()
     try:
         if contention.error is not None:
             raise RuntimeError("B initialization failed")
@@ -418,6 +422,7 @@ def run(cell: str, directory: Path, config_module: Any, engine_module: Any,
             engine_a.shutdown()
         except Exception as exc:
             errors.append(f"A shutdown:{type(exc).__name__}")
+    host = hoststat.delta(host_before, hoststat.snapshot())
     records = sorted(operations.records, key=lambda record: record["begin"])
     totals = {owner: {"operations": sum(r["engine"] == owner for r in records),
                       "busy": sum(r["engine"] == owner and r["busy"] for r in records)}
@@ -427,7 +432,7 @@ def run(cell: str, directory: Path, config_module: Any, engine_module: Any,
     if (totals["A"]["operations"] != cells.A_OPERATIONS[cell]
             or totals["B"]["operations"] != k * cells.A_OPERATIONS[cell]):
         errors.append("fixed exposure violated: driver bug")
-    result = {"cell": cell, "k": k, "b_view_rows": b_view_rows,
+    result = {"host": host, "cell": cell, "k": k, "b_view_rows": b_view_rows,
             "busy_timeout_ms": busy_timeout_ms, "applied_timeouts": timeouts,
             "seed": seed, "window_ms": window_ms, "offsets_ms": contention.offsets,
             "candidate_counters": candidate, "b_batches": ticks,
@@ -439,6 +444,7 @@ def run(cell: str, directory: Path, config_module: Any, engine_module: Any,
             "logs": capture.records.copy()}
     if storage_arms is not None:
         result["storage_arms"] = storage_arms.finish(arm_output)
+        result["storage_arm_drains"] = storage_arms.embedding_drains.copy()
         if result["storage_arms"].get("errors"):
             result["inconclusive"] = True
     return result

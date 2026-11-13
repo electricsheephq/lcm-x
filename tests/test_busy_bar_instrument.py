@@ -259,6 +259,7 @@ def test_orchestrator_serial_interleaving(tmp_path: Path, monkeypatch: pytest.Mo
         row = next(row for row in (control(1) if "--busy-timeout-ms" in command else ledger(1))
                    if row["cell"] == cell)
         row["tree_identity"] = driver.BASELINE_IDENTITY if seen[-1] == "baseline" else CANDIDATE_IDENTITY
+        row["host"] = {"steal_pct": len(seen), "host_load_peak1m": 2 * len(seen)}
         output.write_text(json.dumps(row) + "\n")
         return SimpleNamespace(returncode=0)
 
@@ -272,6 +273,7 @@ def test_orchestrator_serial_interleaving(tmp_path: Path, monkeypatch: pytest.Mo
     assert seen == (["baseline", "candidate"] * 4 + ["candidate", "baseline"] * 4) * 2
     assert len(gate.read(out / "baseline.jsonl")) == 8
     assert len(gate.read(out / "candidate.jsonl")) == 8
+    assert json.loads((out / "verdict.json").read_text())["host"] == {"max_steal_pct": 32, "host_load_peak1m": 64}
 
 
 @pytest.mark.parametrize("cell", cells.CELLS)
@@ -289,6 +291,12 @@ def test_current_tree_smoke_totals_only(tmp_path: Path, cell: str) -> None:
     rows = gate.read(output)
     assert len(rows) == 1
     result = rows[0]
+    assert {"elapsed_s", "load1m_before", "load1m_after", "host_load_peak1m",
+            "steal_pct", "iowait_pct", "busy_pct"} <= result["host"].keys()
+    expected_a = {"ingest": ["ingest"] * 3, "compress": ["ingest"] * 13 + ["compress", "ingest"],
+                  "session-end": ["ingest", "session-end", "ingest"], "restart": ["ingest"] * 2}
+    assert [r["op"] for r in result["operations"] if r["engine"] == "A"] == expected_a[cell]
+    assert [r["op"] for r in result["operations"] if r["engine"] == "B"] == ["ingest"] * (2 * cells.A_OPERATIONS[cell])
     assert result["totals"]["A"]["operations"] == cells.A_OPERATIONS[cell]
     assert result["totals"]["B"]["operations"] == 2 * cells.A_OPERATIONS[cell]
     assert result["b_view_sizes"] == [2] * (2 * cells.A_OPERATIONS[cell])
@@ -1079,3 +1087,66 @@ def test_tree_identity_hashes_product_python_only(tmp_path: Path) -> None:
     assert driver.tree_identity(tree) == first
     (tree / "teams/store.py").write_text("B = 2\n")
     assert driver.tree_identity(tree)["product_sha256"] != first["product_sha256"]
+
+
+@pytest.mark.parametrize("busy", [0, 3])
+def test_host_fields_leave_gate_bytes_identical(busy):
+    roles = [gate_session(), gate_session(), busy_control(gate_session()), busy_control(gate_session())]
+    for row in roles[1]:
+        for record in row["operations"][:busy]:
+            record["busy"] = True
+    before = evaluate(*roles)
+    for rows in roles:
+        for row in rows:
+            row["host"] = {"steal_pct": 99, "iowait_pct": 99, "busy_pct": 99,
+                           "host_load_peak1m": 1000, "elapsed_s": 999}
+    after = evaluate(*roles)
+    assert json.dumps(before) == json.dumps(after)
+    assert gate.report(before).encode() == gate.report(after).encode()
+    assert gate.EXIT[before["verdict"]] == gate.EXIT[after["verdict"]]
+
+
+def test_run_host_snapshots_surround_all_operations(tmp_path, monkeypatch):
+    events = []
+    def snapshot():
+        events.append("snapshot")
+        return {"monotonic": len(events), "loadavg": None, "counters": None, "reason": "fixture"}
+    class Engine:
+        def __init__(self, **kwargs):
+            self._store = SimpleNamespace(_conn=sqlite3.connect(":memory:"))
+        def ingest(self, view):
+            events.append("ingest")
+        def shutdown(self):
+            self._store._conn.close()
+    monkeypatch.setattr(driver.hoststat, "snapshot", snapshot)
+    monkeypatch.setattr(cells, "start", lambda *a: None)
+    result = driver.run("ingest", tmp_path / "run", SimpleNamespace(LCMConfig=lambda **k: None),
+                        SimpleNamespace(LCMEngine=Engine), driver.Capture(), k=1, b_view_rows=2, window_ms=0)
+    assert events == ["snapshot"] + ["ingest"] * 6 + ["snapshot"]
+    assert result["host"]["elapsed_s"] == 7
+
+
+def test_holds_summary_reports_host_maxima(tmp_path, monkeypatch):
+    def child(command, **kwargs):
+        Path(command[5]).write_text(json.dumps({"host": {"steal_pct": 7, "host_load_peak1m": 9}}))
+    monkeypatch.setattr(holds.subprocess, "run", child)
+    monkeypatch.setattr(holds, "summarize", lambda *a: {"verdict": "INCONCLUSIVE"})
+    monkeypatch.setattr(holds, "report", lambda *a: "fixture\n")
+    output = tmp_path / "holds"
+    monkeypatch.setattr(sys, "argv", ["holds", "baseline", "candidate", str(output), "--runs", "1",
+                                     "--work-root", str(tmp_path / "scratch")])
+    with pytest.raises(SystemExit) as exc:
+        holds.main()
+    assert exc.value.code == 2
+    assert json.loads((output / "summary.json").read_text())["host"] == {"max_steal_pct": 7, "host_load_peak1m": 9}
+
+
+def test_hold_fixture_verdict_ignores_host():
+    collected = {"baseline": hold_runs(), "candidate": hold_runs()}
+    before = summarize(collected)
+    for runs in collected.values():
+        for run in runs:
+            run["host"] = {"steal_pct": 100, "host_load_peak1m": 1000}
+    after = summarize(collected)
+    assert json.dumps(before) == json.dumps(after)
+    assert holds.report(before).encode() == holds.report(after).encode()
