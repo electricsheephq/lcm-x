@@ -8409,6 +8409,14 @@ class LCMEngine(
         Store-dependent protection/token counts are part of lock_hold_ms, and
         would move out with classification under the design's section 5 fallback.
         """
+        # Another writer may have filled this session after its empty-store bind.
+        # The eager write lock keeps this probe and the ensuing writes serialized.
+        if self._ingest_cursor == 0 and not self._ingest_cursor_needs_reconcile:
+            try:
+                self._ingest_cursor_needs_reconcile = self._store.has_session_messages(self._session_id)
+            except Exception as exc:
+                logger.debug("LCM ingest cursor reconciliation probe failed: %s", exc)
+                self._ingest_cursor_needs_reconcile = True
         self._capture_host_rewrites(messages)
         n = len(messages)
         cursor = entry_cursor = min(max(self._ingest_cursor, 0), n)

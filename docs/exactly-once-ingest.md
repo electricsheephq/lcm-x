@@ -416,8 +416,6 @@ A tail exists because the store hit SQLite busy at session end. The ledger is in
     their slots for up to 7 days, so with more than 64 such sessions on one profile in that window the older ones are
     not read;
   - a candidate whose read or store raises is counted (`worker_error`) and skipped; the job continues with the next;
-  - until the ingest guard lands (#2042 step 2), a live engine in another process that bound the session at cursor 0
-    before the job ran can store an unstamped copy at its next completed turn; the release ships only with that guard.
 
 ### 3.6 Migration and rollback
 - **When:** every ready foreground ingest probes its own session for unbound rows above the store mark, including pre-ledger, failed-ledger and older-reader writes.

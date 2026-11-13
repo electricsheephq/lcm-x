@@ -496,11 +496,7 @@ def _spawn_live_engine(config, home, pipe):
         pipe.close()
 
 
-@pytest.mark.parametrize("stamped", [
-    pytest.param(True, id="stamped"),
-    pytest.param(False, id="unstamped", marks=pytest.mark.xfail(
-        strict=True, reason="#2042 step 2: ingest guard (after #2293)")),
-])
+@pytest.mark.parametrize("stamped", [True, False], ids=["stamped", "unstamped"])
 def test_step2_live_engine_in_another_process_bound_before_catchup(case, stamped):
     assert case.run() == {}  # The profile was activated before this failure.
     ctx = multiprocessing.get_context("spawn")
