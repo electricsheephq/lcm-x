@@ -396,7 +396,7 @@ that no candidate wrote.
 Amended 2026-11-13 (v0.30.1 only, adopted before the v0.30.1-rc1 tag and before any v0.30.1 rc data):
 for v0.30.1 the previous GA is v0.30.0, so every paired probe compares the candidate with v0.30.0, and
 the third exception changes as follows. The v0.30.1 smoke stage runs the probe cells of #2558 and (b),
-the write-fault replay cells and the redaction cells with v0.30.0 as the base arm, and "the counts
+the write-fault replay cells, the redaction cells and the #2550 cold-restart cells with v0.30.0 as the base arm, and "the counts
 v0.30.0 stores" below are that arm's counts in the same run. #2558 is fixed in v0.30.1 (#2584) and is
 no longer covered: a copy of its kind in its probe cells stops the candidate. #2599's bounded extra after
 a write fault clears is reachable only after an injected write fault, so the sentence that respins a
@@ -408,7 +408,12 @@ v0.30.2, and the v0.30.1 notes say that #2547's fix, which v0.30.0's notes plann
 The two replay shapes #2604 (redaction on) and #2605 (payload files cannot be written) stay covered at
 the counts v0.30.0 stores in the same paired probe cells: a cell that stores more rows than v0.30.0,
 or that keeps growing where v0.30.0 stops, stops the candidate. The accepted trade on stores that
-v0.30.0-rc1 to rc5 wrote with redaction on does not carry to v0.30.1. None of these is covered in the
+v0.30.0-rc1 to rc5 wrote with redaction on does not carry to v0.30.1. Added 2026-11-13, before the v0.30.1-rc1 tag
+and before any v0.30.1 rc data (v0.30.1 only): #2550's cold-restart copy, where a tool call whose arguments hold
+line-wrapped base64 of 4,096 characters or more, and its result, are stored once more at each cold restart (on a
+store written before v0.30.0, or after the host changed that call's arguments in place), stays covered at the count v0.30.0 stores in the same smoke-stage #2550 probe cells: a cell that stores more rows than
+v0.30.0, keeps growing where v0.30.0 stops, or loses a row stops the candidate. v0.30.0 ships the same copy, v0.30.1
+does not fix it, and the v0.30.1 notes list it under Known issues. None of these is covered in the
 driven audit, and no other duplicate is covered.
 From v0.29.2, what the reference-agent canary sees is judged only by the canary paragraph below
 and never triggers this sentence. A further exception to the respin rule: a duplicate-only shape reachable
