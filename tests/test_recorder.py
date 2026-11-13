@@ -3044,6 +3044,15 @@ def test_2269_r1_host_import_failure_restores_environment_and_path(lab, failure)
         (package / "__init__.py").write_text("raise RuntimeError('host import failed')\n")
     lab.mp.delitem(sys.modules, "agent", raising=False)
     lab.mp.setattr(sys, "path", [p for p in sys.path if not (Path(p) / "agent").exists()])
+    blocker = None
+    if failure == "missing":
+        class MissingAgent:
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname == "agent" or fullname.startswith("agent."):
+                    raise ModuleNotFoundError(f"No module named {fullname!r}", name=fullname)
+
+        blocker = MissingAgent()
+        sys.meta_path.insert(0, blocker)
     lab.mp.setenv("LCM_RECORDER_ENABLED", "original")
     lab.mp.setenv("LCM_IMPORT_CLEANUP_SENTINEL", "original")
     env, path = dict(os.environ), list(sys.path)
@@ -3057,6 +3066,8 @@ def test_2269_r1_host_import_failure_restores_environment_and_path(lab, failure)
         os.environ.clear()
         os.environ.update(env)
         sys.path[:] = path
+        if blocker is not None:
+            sys.meta_path.remove(blocker)
 
 
 @needs312
