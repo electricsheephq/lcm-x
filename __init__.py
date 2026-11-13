@@ -980,6 +980,16 @@ def register(ctx):
                             timeout=None,
                         )
                         if result.status is ActiveEngineUseStatus.RESIDENT_ENGINE_CONFLICT:
+                            if engine._unload_group is not None and session_id:
+                                ingested = use_lcm_engine(
+                                    engine,
+                                    lambda current: current._ingest_unattached_reload_turn(
+                                        session_id, conversation_id, history, platform,
+                                    ),
+                                    timeout=None,
+                                )
+                                if ingested.used and ingested.value:
+                                    return
                             # No engine of the child's own: store its rows without binding one.
                             stored = use_lcm_engine(engine, _store_delegate_child, timeout=None)
                             if stored.used and stored.value:

@@ -5241,6 +5241,21 @@ class LCMEngine(
             )
         return False
 
+    def _ingest_unattached_reload_turn(self, session_id, conversation_id, messages, platform):
+        """Handle older host hooks with no compressor and an already durable lane."""
+        store = self._store
+        with _temporary_sqlite_busy_timeout([store.connection], _SESSION_END_BUSY_TIMEOUT_MS), store.ingest_atomic():
+            lanes = store.connection.execute(
+                "SELECT conversation_id FROM lcm_lifecycle_state WHERE current_session_id = ? LIMIT 2",
+                (session_id,),
+            ).fetchall()
+            if (len(lanes) != 1 or (conversation_id and conversation_id != lanes[0][0])
+                    or self._session_id_matches_lcm_bypass_filters(session_id, platform=platform)):
+                return False
+            return self._append_retired_tail(
+                store, store, session_id, lanes[0][0], messages, platform, allow_empty=True,
+            ) is not None
+
     def _write_retired_tail_on_live_binding(self, retired, session_id, db_identity, append):
         """Serialize a retired callback with the current writer's cursor."""
         active = resolve_active_lcm_engine(session_id, retired._conversation_id)

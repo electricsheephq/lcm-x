@@ -281,14 +281,18 @@ def test_retired_end_reconciles_the_current_writer(preflight, monkeypatch):
     db.unlink()
 
 
-def test_reloaded_hook_keeps_ingesting_for_two_retained_clones(preflight):
+@pytest.mark.parametrize("passes_compressor", [True, False])
+def test_reloaded_hook_keeps_ingesting_for_two_retained_clones(preflight, passes_compressor):
     prototype, old_ctx = preflight.register(supports_unload=True)
     clones = [prototype.clone_for_agent(), prototype.clone_for_agent()]
     views = {}
     for i, clone in enumerate(clones):
         sid = f"cached-{i}"
         clone.on_session_start(sid, platform="cli", conversation_id=f"conv-{i}")
-        views[sid] = [{"role": "user", "content": sid}]
+        views[sid] = [
+            {"role": "user", "content": sid},
+            {"role": "assistant", "content": "original answer"},
+        ]
         clone.ingest(views[sid])
     old_ctx.unload_callbacks[0]()
     _, current_ctx = preflight.register(supports_unload=True)
@@ -297,10 +301,13 @@ def test_reloaded_hook_keeps_ingesting_for_two_retained_clones(preflight):
         for turn in range(2):
             for i, clone in enumerate(clones):
                 sid = f"cached-{i}"
-                views[sid].append({"role": "assistant", "content": f"answer {turn}"})
+                views[sid].extend([
+                    {"role": "user", "content": f"question {turn}"},
+                    {"role": "assistant", "content": f"answer {turn}"},
+                ])
+                extra = {"context_compressor": clone, "conversation_id": f"conv-{i}"} if passes_compressor else {}
                 current_ctx.hooks["post_llm_call"](
-                    session_id=sid, conversation_id=f"conv-{i}", platform="cli",
-                    context_compressor=clone, conversation_history=views[sid],
+                    session_id=sid, platform="cli", conversation_history=views[sid], **extra,
                 )
                 assert _durable_messages(db, sid) == [
                     (row["role"], row["content"]) for row in views[sid]
