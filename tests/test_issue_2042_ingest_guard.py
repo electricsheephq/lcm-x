@@ -153,6 +153,10 @@ def test_n4_stamped_store_and_unstamped_live_history(case):
     live.ingest(copy.deepcopy(history))
     stored = case.assert_rows(history)
     assert [r["store_id"] for r in stored[:2]] == [r["store_id"] for r in original]
+    # Review F1: reconcile keeps the stored copy's metadata on the prefix it adopts.
+    assert [(r["observed_at"], r["observed_at_source"]) for r in stored[:2]] == [
+        (r["observed_at"], r["observed_at_source"]) for r in original]
+    assert all(r["observed_at"] is not None for r in stored[:2])  # the stamped copy's times survive
     assert live._last_ingest_reconciliation["cursor"] == 2
     live.ingest(copy.deepcopy(history))
     case.assert_rows(history)
@@ -196,6 +200,9 @@ def test_probe_error_reconciles_stored_rows_in_same_attempt(case, monkeypatch):
     assert attempts == probes == scheduled == [True]
     stored = case.assert_rows(history)
     assert [r["store_id"] for r in stored[:2]] == [r["store_id"] for r in original]
+    # Review F1: reconcile keeps the stored copy's metadata on the prefix it adopts.
+    assert [(r["observed_at"], r["observed_at_source"]) for r in stored[:2]] == [
+        (r["observed_at"], r["observed_at_source"]) for r in original]
     assert live._last_ingest_reconciliation["cursor"] == 2
     assert live._ingest_cursor == len(history)
     assert not live._store.connection.in_transaction
