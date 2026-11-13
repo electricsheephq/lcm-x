@@ -5234,7 +5234,8 @@ class LCMEngine(
             if not off_current_cold_tail_eligible or not _is_ingest_busy_error(exc):
                 return False
             self._queue_cold_session_tail(messages, session_id=session_id,
-                conversation_id=off_current_normal_conversation_id, source=off_current_source, error=exc)
+                conversation_id=off_current_normal_conversation_id, source=off_current_source, error=exc,
+                occurrence_resume=not off_current_auxiliary_reused_normal and off_current_bypass_prefix_count <= 0)
             self._ledger_count("ledger.tail.busy_at_end")
             logger.warning(
                 "LCM session-end raw-message ingest skipped due to SQLite lock; retry pending at the next session start or "
@@ -5323,8 +5324,7 @@ class LCMEngine(
         if (off_current_cold_tail_eligible and not off_current_auxiliary_reused_normal
                 and off_current_bypass_prefix_count <= 0 and off_current_prefix_count is None):
             try:
-                if self._store.read_metadata_json(self._replay_snapshot_metadata_key(
-                        _COMPACTION_COMMIT_PROOF_METADATA_PREFIX, session_id)) is None:
+                if self._occurrence_resume_unproven(self._store, session_id):
                     occurrence_suffix = self._session_end_occurrence_resume(messages, session_id=session_id,
                         conversation_id=off_current_normal_conversation_id, store=self._store,
                         hermes_home=self._hermes_home, stamps=False)
@@ -5390,7 +5390,8 @@ class LCMEngine(
             or ended_lineage_bypasses
         ):
             if off_current_should_bypass:
-                self._log_session_ingest_outcome(session_id, reason="bypass_lineage_end", warning=bool(messages))
+                self._log_session_ingest_outcome(session_id, reason="bypass_lineage_end",
+                                                 warning=bool(messages) and off_current_cold_tail_eligible)
             self._end_host_fallback_compressor_for_session(
                 session_id,
                 messages,
@@ -12120,10 +12121,13 @@ class LCMEngine(
             message.get("observed_at") if stored else _normalize_observed_at(message.get("timestamp")),
         )
 
-    def _queue_cold_session_tail(self, view, *, session_id, conversation_id, source, error):
+    def _queue_cold_session_tail(self, view, *, session_id, conversation_id, source, error, occurrence_resume=False):
+        # occurrence_resume: only an off-current end that met the #2543 gate (not auxiliary-reused, no bypass evidence)
+        # may resume by occurrence on a retry; every other cold tail keeps main's retry.
         tail = dict(kind="cold", store=self._store, hermes_home=str(self._hermes_home or ""), session_id=session_id,
                     conversation_id=conversation_id, source=source, view=copy.deepcopy(view),
-                    context_window_tokens=self._store.get_context_window_tokens(session_id))
+                    context_window_tokens=self._store.get_context_window_tokens(session_id),
+                    occurrence_resume=bool(occurrence_resume))
         if not any(self._tail_key(old) == self._tail_key(tail) for old in self._pending_session_tails):
             self._pending_session_tails.append(tail)
             self._ledger_count("ledger.tail.queued.cold." + type(error).__name__)
@@ -12400,13 +12404,27 @@ class LCMEngine(
         if ids:
             self._log_session_ingest_outcome(session, rows=len(ids))
 
+    def _occurrence_resume_unproven(self, store, session_id) -> bool:
+        """#2543 r2.3 gate: no compaction commit proof for the session in this store. A busy read propagates; any other
+        failed read keeps main's answer."""
+        try:
+            return store.read_metadata_json(self._replay_snapshot_metadata_key(
+                _COMPACTION_COMMIT_PROOF_METADATA_PREFIX, session_id)) is None
+        except Exception as exc:
+            if _is_ingest_busy_error(exc):
+                raise
+            logger.debug("LCM session-end occurrence resume: commit proof read failed", exc_info=True)
+            return False
+
     def _session_end_occurrence_resume(self, view, *, session_id, conversation_id, store,
-                                       hermes_home, stamps) -> list[dict] | None:
+                                       hermes_home, stamps, deadline=None) -> list[dict] | None:
         """Place each host occurrence once, retaining unknown rows in view order."""
         try:
             rows, start = [], 0
             conversation = _normalize_conversation_id_value(conversation_id)
             while page := store.get_range(session_id, start_id=start, limit=1000, conversation_id=conversation):
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise TimeoutError("session-end occurrence resume deadline expired")
                 rows.extend(row for row in page
                             if _normalize_conversation_id_value(row.get("conversation_id")) == conversation)
                 start = page[-1]["store_id"] + 1
@@ -12414,19 +12432,30 @@ class LCMEngine(
             view = self._cold_tail_ingest_view({"view": view})
             kwargs = dict(session_id=session_id, hermes_home=hermes_home)
             host_forms = [self._session_end_host_form(message) for message in view]
+            # The current-session route treats equal replay identities as one occurrence; so does the ladder, or a later
+            # bind of this session would store the whole history again (#2543 review CR-3).
+            replay = dict(store=store, hermes_home=hermes_home, session_id=session_id, conversation_id=conversation)
+            host_replay = [self._message_replay_identity(message, **replay) for message in view]
+            stored_replay = {}
+
+            def stored_identity(index):
+                if index not in stored_replay:
+                    stored_replay[index] = self._message_replay_identity(rows[index], stored_row=True, **replay)
+                return stored_replay[index]
             seen = [_normalize_observed_at(row.get("observed_at")) for row in rows]
             wanted = [_normalize_observed_at(message.get("timestamp")) for message in view]
             k = 0
             while k < min(len(rows), len(view)):
                 if stamps and None not in (seen[k], wanted[k]) and seen[k] != wanted[k]:
                     break
-                if (forms.get(rows[k]["store_id"]) != host_forms[k]
+                if (forms.get(rows[k]["store_id"]) != host_forms[k] and stored_identity(k) != host_replay[k]
                         and not self._session_end_rows_equal(rows[k], view[k], **kwargs)):
                     break
                 k += 1
-            by_form, by_identity, by_call = defaultdict(list), defaultdict(list), defaultdict(list)
+            by_form, by_identity, by_call, by_replay = defaultdict(list), defaultdict(list), defaultdict(list), defaultdict(list)
             for index in range(k, len(rows)):
                 row = rows[index]
+                by_replay[stored_identity(index)].append(index)
                 if row["store_id"] in forms:
                     by_form[forms[row["store_id"]]].append(index)
                 by_identity[self._session_end_prefix_compare_identity(row, recover_markers=False, **kwargs)].append(index)
@@ -12442,10 +12471,11 @@ class LCMEngine(
                         return index not in consumed and (mode == "any" or
                             (seen[index] == wanted[i] if mode == "same" else seen[index] is None))
                     groups = (by_form.get(host_forms[i], ()), by_identity.get(identities[i - k], ()),
+                              by_replay.get(host_replay[i], ()),
                               by_call.get(view[i].get("tool_call_id"), ()) if view[i].get("role") == "tool" else ())
                     for rule, candidates in enumerate(groups):
                         found = next((index for index in candidates if available(index) and
-                            (rule != 2 or self._session_end_rows_equal(rows[index], view[i], **kwargs))), None)
+                            (rule != 3 or self._session_end_rows_equal(rows[index], view[i], **kwargs))), None)
                         if found is not None:
                             consumed.add(found)
                             matched.add(i)
@@ -12474,9 +12504,9 @@ class LCMEngine(
                 else:
                     stored = None
             if stored is None:
-                if conflict is None and tail["store"].read_metadata_json(self._replay_snapshot_metadata_key(
-                        _COMPACTION_COMMIT_PROOF_METADATA_PREFIX, session)) is None:
-                    suffix = self._session_end_occurrence_resume(view, session_id=session,
+                if (conflict is None and tail.get("occurrence_resume")
+                        and self._occurrence_resume_unproven(tail["store"], session)):
+                    suffix = self._session_end_occurrence_resume(view, session_id=session, deadline=deadline,
                         conversation_id=tail["conversation_id"], store=tail["store"],
                         hermes_home=tail["hermes_home"], stamps=stamps)
                     if suffix is not None:
@@ -12588,6 +12618,7 @@ class LCMEngine(
         session, home, start = tail["session_id"], tail["hermes_home"], 0
         conversation = _normalize_conversation_id_value(tail["conversation_id"])
         by_key, seen = defaultdict(list), []
+        replay = dict(store=tail["store"], hermes_home=home, session_id=session, conversation_id=conversation)
         while True:
             if deadline is not None and time.monotonic() >= deadline:
                 raise TimeoutError("session-end exit count deadline expired")
@@ -12604,6 +12635,7 @@ class LCMEngine(
                     hermes_home=home, recover_markers=False)].append(index)
                 if row["store_id"] in forms:
                     by_key["form", forms[row["store_id"]]].append(index)
+                by_key["replay", self._message_replay_identity(row, stored_row=True, **replay)].append(index)
             start = rows[-1]["store_id"] + 1
         consumed, missing = set(), 0
         view = self._cold_tail_ingest_view(tail)
@@ -12613,7 +12645,8 @@ class LCMEngine(
                 if (stamp is not None) != timed:
                     continue
                 keys = (("form", self._session_end_host_form(message)),
-                        self._session_end_counted_identity(message, by_key, session_id=session, hermes_home=home))
+                        self._session_end_counted_identity(message, by_key, session_id=session, hermes_home=home),
+                        ("replay", self._message_replay_identity(message, **replay)))
                 found = next((index for key in keys for index in by_key.get(key, ())
                               if index not in consumed and (not timed or seen[index] == stamp)), None)
                 if found is None:

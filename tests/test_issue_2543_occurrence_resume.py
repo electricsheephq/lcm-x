@@ -92,8 +92,12 @@ class Lane:
     def assert_present(self, view):
         rows, forms = self.rows(), self.forms()
         for message in view:
+            # Present: equal by the session-end compare, by the recorded host form, or by the replay identity the
+            # current-session route dedupes on (#2543 review CR-3).
+            identity = self.engine._message_replay_identity(message)
             assert any(self.engine._session_end_rows_equal(row, message, session_id="S1") or
-                       forms.get(row["store_id"]) == self.engine._session_end_host_form(message) for row in rows)
+                       forms.get(row["store_id"]) == self.engine._session_end_host_form(message) or
+                       self.engine._message_replay_identity(row, stored_row=True) == identity for row in rows)
 
 
 @pytest.fixture
@@ -125,10 +129,12 @@ def test_matrix_three_ends(lanes, monkeypatch, shape, busy, restart):
     n = len(first)
     view = first + [FINAL]
     lane.end(view, monkeypatch, busy)
-    copied = int(shape != "plain")
+    # T6i, T6ii and unwrapped T7 have the stored row's replay identity, so the ladder stores only FINAL (CR-3); a later
+    # bind of the session then finds its history in order.
+    copied = int(shape not in ("plain", "T6i", "T6ii", "T7-unwrapped"))
     assert len(lane.rows()) == n + 1 + copied
     lane.assert_present(view)
-    assert len(lane.forms()) == (2 if copied else 0)
+    assert len(lane.forms()) == (0 if shape == "plain" else 1 + copied)
     if restart:
         lane.restart()
     before = lane.rows()
@@ -306,8 +312,8 @@ def test_two_transforms_and_storage_longer_than_view(lanes, monkeypatch, busy):
     # Witness A: a current-route ambiguous re-store, using the ordinary append path with no forms.
     lane.engine._append_off_current_session_end_suffix("S1", [first[0]], source="cli", conversation_id="conv1")
     lane.end(first + [FINAL], monkeypatch, busy)
-    assert len(lane.rows()) == len(first) + 4
-    assert len(lane.forms()) == 3
+    assert len(lane.rows()) == len(first) + 3  # the re-stored first row, the T7 copy and FINAL; T6ii matches (CR-3)
+    assert len(lane.forms()) == 2
     # Witness B: the two ladder copies themselves make storage longer than the view.
     before = lane.rows()
     lane.end(first + [FINAL], monkeypatch, busy)
@@ -377,7 +383,7 @@ def test_gc_repeated_ends(lanes, monkeypatch):
     first[4]["content"] = shape_row("T6ii")["content"]
     lane.seed(first)
     lane.end(first + [FINAL], monkeypatch)
-    assert len(lane.rows()) == len(first) + 2
+    assert len(lane.rows()) == len(first) + 1  # T6ii matches its stored row by replay identity (CR-3)
     for _ in range(3):
         gc_copy(lane)
         lane.restart()
@@ -476,3 +482,62 @@ def test_2000_row_lock_and_transaction_timing(lanes, monkeypatch, record_propert
     record_property("transaction_seconds", json.dumps(transactions))
     print("2543 cold helper timing:", json.dumps(samples), "read states:", sorted(set(states)),
           "whole retry lock/transaction seconds:", transactions)
+
+
+@pytest.mark.parametrize("shape", SHAPES)
+def test_rebind_after_an_off_current_end_adds_only_the_new_turn(lanes, monkeypatch, shape):
+    """#2543 review CR-3: after an off-current end, the session's next bind stores only the new prompt where v0.30.0
+    does. T7-wrapped and T7K re-store the whole view at the next bind in v0.30.0 too (22 rows); there the end's FINAL
+    and copy stay beside that re-store (named limit L-6)."""
+    lane = lanes()
+    first = history(shape)
+    lane.seed(first)
+    view = first + [FINAL]
+    lane.engine.on_session_end("S1", copy.deepcopy(view))
+    after_end = len(lane.rows())
+    lane.engine.on_session_start("S1", platform="cli", context_length=200_000, conversation_id="conv1")
+    lane.engine.ingest(copy.deepcopy(view + [{"role": "user", "content": "new prompt after bind"}]))
+    expected = (12, 24) if shape in ("T7-wrapped", "T7K") else (11, 12)
+    assert (after_end, len(lane.rows())) == expected
+
+
+@pytest.mark.parametrize("busy", [False, True], ids=["direct", "busy"])
+def test_auxiliary_reused_session_never_resumes_by_occurrence(lanes, monkeypatch, busy):
+    """#2543 review CR-2 (L-4): an auxiliary session reused as a normal one keeps main's answer on both routes; its
+    busy tail stays pending as on main."""
+    lane = lanes()
+    first = history()
+    lane.seed(first)
+    engine = lane.engine
+    engine._auxiliary_foreground_reused_session_ids.add("S1")
+    calls = []
+    original = engine._session_end_occurrence_resume
+    monkeypatch.setattr(engine, "_session_end_occurrence_resume", lambda *a, **k: calls.append(1) or original(*a, **k))
+    foreign = [{"role": "user", "content": "Generate a short title for this chat"},
+               {"role": "assistant", "content": "Title: pads"}]
+    before = lane.rows()
+    if busy:
+        with monkeypatch.context() as patch:
+            patch.setattr(engine._store, "get_range", fail_end_read(engine))
+            engine.on_session_end("S1", copy.deepcopy(foreign))
+        engine._retry_pending_session_tails(deadline=time.monotonic() + 60)
+        assert len(engine._pending_session_tails) == 1
+    else:
+        engine.on_session_end("S1", copy.deepcopy(foreign))
+    assert lane.rows() == before and not calls
+
+
+def test_a_malformed_commit_proof_keeps_mains_answer(lanes, monkeypatch):
+    """#2543 review CR-5: an unreadable compaction commit proof never raises out of the session end; the session gets
+    main's answer (nothing new stored), as when a proof exists."""
+    lane = lanes()
+    first = history("T7-wrapped")
+    lane.seed(first)
+    engine = lane.engine
+    key = engine._replay_snapshot_metadata_key(engine_module._COMPACTION_COMMIT_PROOF_METADATA_PREFIX, "S1")
+    with engine._store._write_lock:
+        engine._store._conn.execute("INSERT OR REPLACE INTO metadata(key, value) VALUES (?, ?)", (key, "{not json"))
+        engine._store._conn.commit()
+    before = lane.rows()
+    engine.on_session_end("S1", copy.deepcopy(first + [FINAL]))
+    assert lane.rows() == before and not lane.forms()
