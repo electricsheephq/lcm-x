@@ -77,8 +77,11 @@ _PINNED_GROWTH_CELLS = frozenset(
     for form in ('v0292/data-uri/spillover', 'v0292-crlf/plain/hermes-results')
     for host in ('identical', 'present')) | frozenset(
     f'reconcile-replay/bare/{form}/present/occurrences-2/shifted'
-    for form in ('data-uri/spillover', 'data-uri/hermes-results', 'plain/hermes-results'))
-assert len(_PINNED_LEGACY_CELLS) == 11 and len(_PINNED_GROWTH_CELLS) == 7
+    for form in ('data-uri/spillover', 'data-uri/hermes-results', 'plain/hermes-results')) | frozenset(
+    # #2661 named copy (#2558): without the legacy bare-marker binding the full-window repeat is stored once more at
+    # the second replay, as in v0.30.0; the R4-8 data check still decides each cell.
+    f'reconcile-replay/v0292/data-uri/spillover/{host}/occurrences-2' for host in ('identical', 'present'))
+assert len(_PINNED_LEGACY_CELLS) == 11 and len(_PINNED_GROWTH_CELLS) == 9
 _HOST_RECOVERY_CELLS = set()
 
 _EXT = re.compile(r'\[Externalized (?:LCM ingest payload|tool output|payload):[^\]]*?;\s*ref=([^;\]\s]+)\]')
@@ -684,7 +687,8 @@ def _run_case(case, host, tmp_path, monkeypatch, request, characterization=None)
             gaps.append('third replay adds rows')
         if limit and not gaps:
             request.node.add_marker(pytest.mark.xfail(strict=True, raises=NamedLimit,
-                reason='R4-8 named limit: a repeated marker of a stored bare row in a shifted host window'))
+                reason='R4-8 named limit: a repeated marker of a stored bare row in a shifted host window' if shifted
+                else '#2661 named copy (#2558): a repeated data-URI marker of a stored bare row in a full host window'))
             raise NamedLimit('second replay adds rows; no host row missing, third replay adds nothing, never above main')
         if gaps:
             request.node.add_marker(pytest.mark.xfail(strict=True, raises=MainGap,

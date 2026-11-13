@@ -13,6 +13,7 @@ import time
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
@@ -722,9 +723,10 @@ def test_hold_position_and_rotating_longest_statistics() -> None:
 def test_isolation_and_shipped_default_readback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LCM_HOST_MESSAGE_UID", "off")
     monkeypatch.setenv("HERMES_TEST", "inherited")
-    driver.isolated_environment(tmp_path)
-    assert os.environ["HERMES_HOME"] == str(tmp_path / "isolated-home")
-    assert "LCM_HOST_MESSAGE_UID" not in os.environ and "HERMES_TEST" not in os.environ
+    with patch.dict(os.environ):
+        driver.isolated_environment(tmp_path)
+        assert os.environ["HERMES_HOME"] == str(tmp_path / "isolated-home")
+        assert "LCM_HOST_MESSAGE_UID" not in os.environ and "HERMES_TEST" not in os.environ
     values = driver.effective_defaults(SimpleNamespace(host_message_uid_mode=lambda: "shadow"))
     assert values == {"LCM_HOST_MESSAGE_UID": "shadow", "LCM_IDENTITY_ANCHOR": "absent", "LCM_INGEST_LEDGER": "absent"}
 

@@ -117,6 +117,14 @@ def test_repeated_call_upgrade_replay_consumes_each_row_once(shape, tmp_path, mo
         assert not missing, f'{shape}: missing host rows: {missing}'
         assert _tool_rows(rows)[CALL] >= 2 and _call_rows(rows)[CALL] >= 2
     print(f'REPEATED_CALL {shape} counts={counts}')
+    if shape == 'L2':
+        # #2661 named copy (#2558): without the legacy bare-marker binding, a data-URI marker whose call id occurs
+        # twice is stored once more at the second replay, as in v0.30.0. No host row is missing (checked above), the
+        # copy is the repeated call's rows only, and the third replay adds nothing.
+        assert counts == [4, 7, 9, 9], f'{shape}: {counts}'
+        assert sorted(row[:2] for row in extras) == [('assistant', ''), ('tool', CALL)], extras
+        assert snapshots[1] == snapshots[2]
+        return
     assert counts == [4, 7, 7, 7], f'{shape}: later replay added rows: {counts}'
     assert not extras
     assert snapshots[0] == snapshots[1] == snapshots[2]
