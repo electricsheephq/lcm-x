@@ -34,10 +34,15 @@ class PrelockRecorder:
         return sqlite3.SQLITE_OK
 
     def failed(self, exc):
-        if (isinstance(exc, sqlite3.Error) and not self.store._conn.in_transaction
-                and self.begins and not self.begins[-1]["checked"]):
+        if (isinstance(exc, sqlite3.Error) and self.store._ingest_is_prelock()
+                and not self.store._conn.in_transaction and self.begins
+                and self.begins[-1]["state"] is self.store._ingest_prelock_state
+                and not self.begins[-1]["checked"] and not self.begins[-1]["failed"]):
             entry = self.begins[-1]
             entry["failed"] = True
+            # A successful eager rerun clears the mutable attempt's poison flag.
+            # Judge the fail-open hook at the failed BEGIN, before that reset.
+            entry["poisoned_at_failure"] = entry["state"].poisoned
             self.failures.append(entry)
 
     def check(self):
@@ -46,7 +51,7 @@ class PrelockRecorder:
         for entry in self.begins:
             assert entry["T_begin"] == entry["T_clean"], entry
         for entry in self.failures:
-            assert entry["state"].poisoned, entry
+            assert entry["poisoned_at_failure"], entry
         assert all(production == oracle for production, oracle in self.verdicts), self.verdicts
 
 
@@ -55,6 +60,11 @@ def recording_prelock(store, *, unsafe_threaded_positive_control=False):
     if threading.active_count() > 1 and not unsafe_threaded_positive_control:
         raise RuntimeError("#2293 recording authorizer requires a single-threaded process")
     conn = store._conn
+    # Compaction temporarily wraps the same physical connection in a timing
+    # proxy whose __setattr__ forwards but whose __delattr__ does not.
+    from hermes_lcm.sqlite_util import _TimedConnection
+    while isinstance(conn, _TimedConnection):
+        conn = conn._lcm_real
     recorder = PrelockRecorder(store)
     setter = getattr(conn, "set_harness_authorizer", conn.set_authorizer)
     previous = getattr(conn, "_harness_authorizer", None)
@@ -92,33 +102,47 @@ def install_oracle_hooks(monkeypatch):
     def checked_sync(store):
         rec = getattr(store, "_prelock_test_recorder", None)
         state, conn = store._ingest_prelock_state, store._conn
+        oracle = None
         if rec and state and state.phase == "prelock" and conn.in_transaction:
             entries = [e for e in rec.begins if e["state"] is state and not e["checked"] and not e["failed"]]
             if entries:
                 entry = entries[-1]
                 versions = store._ingest_write_generation()[1:]
                 oracle = entry["T_begin"] == state.G0[0] and versions == state.G0[1:] and not state.poisoned
-                production = state.T_clean == state.G0[0] and versions == state.G0[1:] and not state.poisoned
-                rec.verdicts.append((production, oracle))
                 entry["checked"] = True
-        return sync(store)
-
-    def explicit_begin(store, state):
-        rec = getattr(store, "_prelock_test_recorder", None)
-        if rec:
-            rec.explicit = True
         try:
-            return begin(store, state)
-        finally:
+            result = sync(store)
+        except BaseException:
+            if oracle is not None:
+                rec.verdicts.append((False, oracle))
+            raise
+        if oracle is not None:
+            rec.verdicts.append((state.phase == "acquired" and not state.reclassify_pending, oracle))
+        return result
+
+    def controlled(method):
+        def owner_control(store, *args):
+            rec = getattr(store, "_prelock_test_recorder", None)
+            previous = rec.explicit if rec else False
             if rec:
-                rec.explicit = False
+                rec.explicit = True
+            try:
+                return method(store, *args)
+            finally:
+                if rec:
+                    rec.explicit = previous
+        return owner_control
 
     def write_failed(store, exc):
         rec = getattr(store, "_prelock_test_recorder", None)
+        result = failed(store, exc)
         if rec:
             rec.failed(exc)
-        return failed(store, exc)
+        return result
 
     monkeypatch.setattr(MessageStore, "_sync_ingest_prelock", checked_sync)
-    monkeypatch.setattr(MessageStore, "_begin_ingest_prelock", explicit_begin)
+    monkeypatch.setattr(MessageStore, "_begin_ingest_prelock", controlled(begin))
+    # A poisoned implicit attempt is rolled back by this owner control point,
+    # while its phase still says prelock. This is not pre-control-point SQL.
+    monkeypatch.setattr(MessageStore, "_restart_ingest_prelock", controlled(MessageStore._restart_ingest_prelock))
     monkeypatch.setattr(MessageStore, "_ingest_prelock_write_failed", write_failed)

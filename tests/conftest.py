@@ -211,6 +211,15 @@ def _prelock_recording_oracle(monkeypatch, request):
     @contextmanager
     def recorded(store, **kwargs):
         with original(store, **kwargs) as timing:
+            import threading
+            if threading.active_count() > 1:
+                # xdist workers have a receiver thread, and the full suite can
+                # have maintenance threads. Run their product assertions without
+                # callbacks; the two clean serial pinned runs supply the oracle.
+                if ("prelock_oracle", "threaded-no-callback") not in request.node.user_properties:
+                    request.node.user_properties.append(("prelock_oracle", "threaded-no-callback"))
+                yield timing
+                return
             with recording_prelock(store):
                 yield timing
     monkeypatch.setattr(MessageStore, "ingest_atomic", recorded)

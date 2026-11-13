@@ -692,8 +692,6 @@
 "sql #15 39ce7dce1eba/127",
 "sql #2 8415d69bd6c6/19",
 "sql #3 62474d48bd0f/21",
-"sql #2 8415d69bd6c6/19",
-"sql #3 62474d48bd0f/21",
 "log DEBUG LCM attribution phase=ingest lock_hold_ms=0.000 rows_written=0 bytes_written=0 busy_snapshot_retry=False",
 "log DEBUG Per-turn ingest OK: session=S msgs=4 cursor=4",
 "return null",

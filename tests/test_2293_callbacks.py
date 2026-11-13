@@ -11,13 +11,13 @@ import faulthandler
 import multiprocessing
 import os
 import threading
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 
 import pytest
 
 
 @pytest.mark.parametrize("method", ["set_authorizer", "set_trace_callback", "set_progress_handler", "create_function"])
-def test_d1_audit_detects_product_callbacks(method, tmp_path):
+def test_d1_audit_detects_product_callbacks(method):
     from tests.message_store_callback_audit import AuditedConnection, CALLS
     conn = AuditedConnection(":memory:")
     conn._message_store_connection = True
@@ -26,9 +26,8 @@ def test_d1_audit_detects_product_callbacks(method, tmp_path):
     start = len(CALLS)
     try:
         # Compile a product frame: a test ancestor must not exempt the call.
-        code = compile("conn." + method + "(*args)", str(tmp_path.parents[0] / "unused.py"), "exec")
         from tests.message_store_callback_audit import ROOT
-        code = compile(code.co_code.hex() and "conn." + method + "(*args)", str(ROOT / "store.py"), "exec")
+        code = compile("conn." + method + "(*args)", str(ROOT / "store.py"), "exec")
         exec(code, {"conn": conn, "args": args[method]})
         assert len(CALLS) == start + 1 and CALLS[-1][:2] == (method, True)
     finally:
@@ -39,8 +38,9 @@ def test_d1_audit_detects_product_callbacks(method, tmp_path):
 
 def test_instrument_refuses_threads_and_never_denies(tmp_path):
     import sqlite3
+    from types import SimpleNamespace
     from hermes_lcm.store import MessageStore
-    from tests.prelock_instrument import recording_prelock
+    from tests.prelock_instrument import PrelockRecorder, recording_prelock
     store = MessageStore(tmp_path / "record.db")
     stop = threading.Event()
     worker = threading.Thread(target=stop.wait)
@@ -52,10 +52,39 @@ def test_instrument_refuses_threads_and_never_denies(tmp_path):
     finally:
         stop.set()
         worker.join(10)
-    with recording_prelock(store) as recorder:
+    # The full suite may already have maintenance threads. Always check the
+    # recording verdict directly, installing it only in a single-threaded test.
+    context = recording_prelock(store) if threading.active_count() == 1 else nullcontext(PrelockRecorder(store))
+    with context as recorder:
+        store._ingest_prelock_state = SimpleNamespace(phase="prelock")
         for action in (sqlite3.SQLITE_TRANSACTION, sqlite3.SQLITE_SAVEPOINT, sqlite3.SQLITE_CREATE_TABLE):
             assert recorder.authorize(action, "COMMIT", None, "main", None) == sqlite3.SQLITE_OK
+        assert len(recorder.forbidden) == 3
+        with pytest.raises(AssertionError):
+            recorder.check()
+        recorder.forbidden.clear()  # simulated forbidden events were detected; no real SQL was issued
+        store._ingest_prelock_state = None
     store.close()
+
+
+def test_oracle_checks_poison_at_the_failed_begin():
+    import sqlite3
+    from types import SimpleNamespace
+    from tests.prelock_instrument import PrelockRecorder
+    state = SimpleNamespace(phase="prelock", T_clean=0, poisoned=False)
+    store = SimpleNamespace(_ingest_prelock_state=state, _ingest_is_prelock=lambda: True,
+                            _conn=SimpleNamespace(total_changes=0, in_transaction=False))
+    recorder = PrelockRecorder(store)
+    assert recorder.authorize(sqlite3.SQLITE_TRANSACTION, "BEGIN", None, "main", None) == sqlite3.SQLITE_OK
+    recorder.failed(sqlite3.OperationalError("database is locked"))
+    state.poisoned = True  # a later state change cannot excuse a missing failure hook
+    with pytest.raises(AssertionError):
+        recorder.check()
+    recorder = PrelockRecorder(store)
+    recorder.authorize(sqlite3.SQLITE_TRANSACTION, "BEGIN", None, "main", None)
+    recorder.failed(sqlite3.OperationalError("database is locked"))
+    state.poisoned = False  # a successful eager rerun may clear it
+    recorder.check()
 
 
 def _reader_worker(root, positive, result):
@@ -103,7 +132,9 @@ def _reader_worker(root, positive, result):
     threads = [threading.Thread(target=reader, daemon=True), threading.Thread(target=writer, daemon=True)]
     for thread in threads:
         thread.start()
-    for thread in threads:
+    # The reader exits only after the writer sets done. Await that producer
+    # first, then give the reader its join budget to observe the stop signal.
+    for thread in reversed(threads):
         thread.join(20)  # per-repetition thread timeout; no elapsed-time assertions
     if any(thread.is_alive() for thread in threads):
         result.put(("hang", errors))

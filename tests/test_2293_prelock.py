@@ -69,6 +69,8 @@ def _tool_pair(call_id, ts):
 
 def _engine(root: Path, session=SESSION, *, prelock: bool | None = None):
     engine = LCMEngine(config=LCMConfig(database_path=str(root / "lcm.db"),
+                                        embeddings_enabled=False, temporal_rollups_enabled=False,
+                                        empty_lifecycle_gc_enabled=False,
                                         large_output_externalization_enabled=False),
                        hermes_home=str(root / ("home-" + session)))
     if prelock is not None:
@@ -253,6 +255,12 @@ def _scenarios():
 # whose implicit BEGIN met the held lock (P1). Every other scenario must match exactly.
 _DISCARDED_PASS_FAULTS = frozenset({"locked", "duplicate-tail"})
 
+# T1-28: this fault plan denies metadata READs, including those made by the
+# placeholder fail-open writers before admission. One scoped injection permits
+# one poisoned pass, not an arbitrary subsequence or a scenario-name exemption.
+_POISON_RERUN_FAULTS = {"durable": 1}
+_DENIAL = re.compile(r"^(sqlite denied 20 metadata (?:value|key)) #(\d+)$")
+
 
 _WRITE_SQL = re.compile(r'^sql \S+ "?\s*(?:INSERT|UPDATE|DELETE|REPLACE|WITH\b.*\b(?:INSERT|UPDATE|DELETE))', re.I | re.S)
 
@@ -285,6 +293,66 @@ def _discarded_passes_only(eager_n, lazy_n):
     return None
 
 
+def _poison_rerun_only(case, eager, lazy):
+    """T1-28's fault-keyed class; keep the eager rerun and its entire suffix exact.
+
+    Use raw transaction boundaries, rather than SequenceMatcher's choice of
+    repeated reads, to locate the discarded pass. The discarded pass must be an
+    eager classification prefix containing the injected fail-open write error;
+    any writes in it must precede a full rollback. Only the harness's monotonically
+    numbered denial counter is rebased after removing that pass.
+    """
+    if case.fault not in _POISON_RERUN_FAULTS:
+        return "no injected pre-lock SQLite error in the fault plan"
+    reruns = [i for i, event in enumerate(lazy) if event == 'sql _store "ROLLBACK TO lcm_ingest_attempt"']
+    if len(reruns) != _POISON_RERUN_FAULTS[case.fault]:
+        return "expected one poison rerun per injected fault"
+    for trace in (eager, lazy):
+        ordinals = [int(m[2]) for event in trace if (m := _DENIAL.match(event))]
+        if ordinals != list(range(1, len(ordinals) + 1)):
+            return "unexpected injected-fault ordinals"
+
+    def rebase(events):
+        ordinal, out = 0, []
+        for event in events:
+            if match := _DENIAL.match(event):
+                ordinal += 1
+                event = f"{match[1]} #{ordinal}"
+            out.append(event)
+        return out
+
+    eager_begin = eager.index('sql _store "BEGIN IMMEDIATE"')
+    start = len(_normalized(eager[:eager_begin]))
+    end = len(_normalized(lazy[:reruns[0] + 1]))
+    eager_n, lazy_n = _normalized(eager), _normalized(lazy)
+    discarded = lazy_n[start:end]
+    if not discarded or rebase(discarded) != rebase(eager_n[start:start + len(discarded)]):
+        return "discarded pass is not an eager classification prefix"
+    failure = 'store raises write_metadata_json ["DatabaseError","access to metadata.value is prohibited"]'
+    if failure not in discarded or not any(_DENIAL.match(event) for event in discarded):
+        return "discarded pass lacks the injected fail-open SQLite error"
+    if 'sql _store "ROLLBACK"' not in lazy[eager_begin:reruns[0]]:
+        return "discarded writes lack a full rollback before the rerun"
+    rerun = rebase(lazy_n[:start] + lazy_n[end:])
+    if rerun != eager_n:
+        first = next(i for i, pair in enumerate(zip(eager_n + [None], rerun + [None])) if pair[0] != pair[1])
+        return f"trace from the eager rerun onward differs at {first}: {eager_n[first:first + 2]} != {rerun[first:first + 2]}"
+    return None
+
+
+def _trace_difference(case, eager, lazy):
+    eager_n, lazy_n = _normalized(eager), _normalized(lazy)
+    if eager_n == lazy_n:
+        return None
+    if case.fault in _DISCARDED_PASS_FAULTS:
+        return _discarded_passes_only(eager_n, lazy_n)
+    if case.fault in _POISON_RERUN_FAULTS:
+        return _poison_rerun_only(case, eager, lazy)
+    first = next(i for i, (x, y) in enumerate(zip(eager_n + [None], lazy_n + [None])) if x != y)
+    return (f"first difference at event {first}:\n eager: {eager_n[first:first + 3]}\n"
+            f" lazy:  {lazy_n[first:first + 3]}")
+
+
 @pytest.mark.parametrize("case", _scenarios(), ids=lambda case: case.name)
 def test_a_trace_differential_eager_vs_prelock(case, tmp_path, monkeypatch):
     from tests.behaviour import ingest_trace_harness as harness
@@ -296,18 +364,50 @@ def test_a_trace_differential_eager_vs_prelock(case, tmp_path, monkeypatch):
     root.rename(tmp_path / "eager")
     monkeypatch.setattr(MessageStore, "_ingest_prelock", True)
     lazy = harness.observe(case, root)
-    eager_n, lazy_n = _normalized(eager), _normalized(lazy)
     # Every table, ledger tables included (the trace's state snapshot leaves them out): a duplicated or lost write
     # anywhere, including one hidden in a hashed SQL event, shows here.
     assert _store_files(root) == eager_store, f"{case.name}: stores differ"
-    if case.fault in _DISCARDED_PASS_FAULTS:
-        offending = _discarded_passes_only(eager_n, lazy_n)
-        assert offending is None, f"{case.name}: {offending}"
-        return
-    if eager_n != lazy_n:
-        first = next(i for i, (x, y) in enumerate(zip(eager_n + [None], lazy_n + [None])) if x != y)
-        pytest.fail(f"{case.name}: first difference at event {first}:\n eager: {eager_n[first:first + 3]}\n"
-                    f" lazy:  {lazy_n[first:first + 3]}")
+    offending = _trace_difference(case, eager, lazy)
+    assert offending is None, f"{case.name}: {offending}"
+
+
+@pytest.mark.parametrize("injected", [True, False], ids=["injected-error-allowed", "spurious-poison-refused"])
+def test_t1_28_poison_rerun_requires_injected_error(injected, tmp_path, monkeypatch):
+    from dataclasses import replace
+    from tests.behaviour import ingest_trace_harness as harness
+    case = replace(next(c for c in _scenarios() if c.fault == "durable"),
+                   name="fault-plan-positive-control", fault="durable" if injected else "")
+    root = tmp_path / "run"
+    monkeypatch.setattr(MessageStore, "_ingest_prelock", False)
+    eager = harness.observe(case, root)
+    eager_store = _store_files(root)
+    root.rename(tmp_path / "eager")
+    monkeypatch.setattr(MessageStore, "_ingest_prelock", True)
+    poisoned = []
+    if not injected:
+        original = MessageStore._sync_ingest_prelock
+
+        def spurious_poison(store):
+            if store._ingest_is_prelock() and not poisoned:
+                poisoned.append(store._ingest_prelock_state)
+                store._ingest_prelock_state.poisoned = True
+            return original(store)
+
+        monkeypatch.setattr(MessageStore, "_sync_ingest_prelock", spurious_poison)
+    lazy = harness.observe(case, root)
+    assert _store_files(root) == eager_store
+    offending = _trace_difference(case, eager, lazy)
+    if injected:
+        assert _normalized(eager) != _normalized(lazy), "positive control did not rerun"
+        assert offending is None, offending
+        # Even with the right fault, reject a changed suffix or a second pass.
+        assert _poison_rerun_only(case, eager, lazy + ["novel suffix"]) is not None
+        assert _poison_rerun_only(case, eager, lazy + lazy) is not None
+        assert _poison_rerun_only(replace(case, fault=""), eager, lazy) is not None
+    else:
+        assert poisoned, "spurious hook never ran"
+        assert any(event == 'sql _store "ROLLBACK TO lcm_ingest_attempt"' for event in lazy)
+        assert offending is not None, "unfaulted scenario admitted a spurious poison rerun"
 
 
 @pytest.mark.parametrize("shape", SHAPES)
@@ -635,12 +735,12 @@ def test_classification_write_at_session_end_matches_eager(tmp_path, monkeypatch
 
 
 def test_busy_implicit_begin_under_the_busy_guard_at_session_end_matches_eager(tmp_path, monkeypatch):
-    """P1: the classification-time write meets a held lock at its implicit BEGIN. Its error reaches the anchor block's
-    `_raise_ingest_busy` guard; the attempt sees a BEGIN with no open transaction, poisons itself, and from there
-    follows today's busy admission (the eager admission retry and the frozen session-end tail)."""
+    """The synthetic write's SQLITE_BUSY escapes through _raise_ingest_busy, rather than a fail-open writer.
+    T1-24's genuine-error path acquires before re-raising; no swallowed error needs a poison hook here.
+    Admission retry and the frozen session-end tail still match eager."""
     _, eager_passes, eager_db = _session_end(tmp_path / "eager", False, monkeypatch, poison=True, hold_lock=True)
     counts, lazy_passes, lazy_db = _session_end(tmp_path / "lazy", True, monkeypatch, poison=True, hold_lock=True)
-    assert counts["poisoned"] >= 1 and counts["reclassified"] == 0
+    assert counts["poisoned"] == 0 and counts["reclassified"] == 0
     assert lazy_passes == eager_passes + 1  # one discarded pre-lock pass, then today's eager admission
     assert lazy_db == eager_db
 
