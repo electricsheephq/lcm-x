@@ -12,8 +12,9 @@ import uuid
 from pathlib import Path
 
 if __package__:
-    from . import cells, driver, gate
+    from . import arms, cells, driver, gate
 else:
+    import arms
     import cells
     import driver
     import gate
@@ -22,7 +23,8 @@ else:
 def collect(baseline_tree: Path, candidate_tree: Path, outdir: Path, runs: int,
             k: int, b_view_rows: int, seed: int, window_ms: float,
             busy_timeout_ms: int | None, work_root: Path,
-            selected_cells: tuple[str, ...] = cells.CELLS, start_run: int = 0) -> dict[str, list]:
+            selected_cells: tuple[str, ...] = cells.CELLS, start_run: int = 0,
+            arm_arguments: tuple[str, ...] | list[str] = ()) -> dict[str, list]:
     outdir.mkdir(parents=True, exist_ok=False)
     driver_path = Path(__file__).with_name("driver.py")
     collected: dict[str, list] = {"baseline": [], "candidate": []}
@@ -44,6 +46,7 @@ def collect(baseline_tree: Path, candidate_tree: Path, outdir: Path, runs: int,
                                "--seed", str(seed + number), "--window-ms", str(window_ms)]
                     if busy_timeout_ms is not None:
                         command.extend(["--busy-timeout-ms", str(busy_timeout_ms)])
+                    command.extend(arm_arguments)
                     with (outdir / f"{prefix}.log").open("x") as log:
                         completed = subprocess.run(command, env=env, stdout=log, stderr=log, timeout=300)
                     if completed.returncode not in (0, 2) or not output.exists():
@@ -73,6 +76,7 @@ def main() -> None:
     parser.add_argument("--b-view-rows", type=int, default=driver.DEFAULT_B_VIEW_ROWS)
     parser.add_argument("--seed", type=int, default=driver.DEFAULT_SEED)
     parser.add_argument("--window-ms", type=float, default=driver.DEFAULT_WINDOW_MS)
+    arms.add_arguments(parser)
     parser.add_argument("--baseline-identity-override", action="store_true",
                         help="accept a baseline other than v0.29.2 GA; the verdict is a smoke")
     args = parser.parse_args()
@@ -82,19 +86,22 @@ def main() -> None:
     if args.outdir.exists() or control_dir.exists() or args.work_root.exists():
         parser.error("output and scratch directories must be fresh")
     prod = collect(args.baseline_tree, args.candidate_tree, args.outdir, args.runs,
-                   args.k, args.b_view_rows, args.seed, args.window_ms, None, args.work_root / "production")
+                   args.k, args.b_view_rows, args.seed, args.window_ms, None, args.work_root / "production",
+                   arm_arguments=arms.arguments(args))
     extensions = gate.extension_cells(prod["baseline"], prod["candidate"]) if args.runs == 20 else []
     if extensions:
         extra = collect(args.baseline_tree, args.candidate_tree, args.outdir / "extension", 60,
                         args.k, args.b_view_rows, args.seed, args.window_ms, None,
-                        args.work_root / "extension", tuple(extensions), start_run=20)
+                        args.work_root / "extension", tuple(extensions), start_run=20,
+                        arm_arguments=arms.arguments(args))
         for name in prod:
             prod[name].extend(extra[name])
             with (args.outdir / f"{name}.jsonl").open("a") as output:
                 for row in extra[name]:
                     output.write(json.dumps(row) + "\n")
     control = collect(args.baseline_tree, args.candidate_tree, control_dir, args.runs,
-                      args.k, args.b_view_rows, args.seed, args.window_ms, 100, args.work_root / "control")
+                      args.k, args.b_view_rows, args.seed, args.window_ms, 100, args.work_root / "control",
+                      arm_arguments=arms.arguments(args))
     result = gate.evaluate(prod["baseline"], prod["candidate"], control["baseline"], control["candidate"],
                            args.baseline_identity_override)
     rendered = gate.report(result)
