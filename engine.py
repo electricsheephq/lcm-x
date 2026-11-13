@@ -7511,6 +7511,9 @@ class LCMEngine(
                                     break
                                 except BaseException as error:
                                     state = self._store._ingest_prelock_state
+                                    if (isinstance(error, _IngestReclassify) and state is not None
+                                            and state.begin_failed is not None):
+                                        raise state.begin_failed from error
                                     # A crash-like exit (not an Exception) is never retried; the owner rolls back.
                                     if (not isinstance(error, (Exception, _IngestReclassify)) or state is None
                                             or state.begin_failed is not None
@@ -7570,11 +7573,12 @@ class LCMEngine(
                     rollback_ok = self._store._transaction_owner.rollback_failures == rollback_failures
                     if rollback_ok and attempt == 0 and isinstance(exc, _EvidenceFaultRetry):
                         continue  # #1815: nothing of the faulted attempt is kept; the retry classifies again
+                    acquired_at = sample.get("acquired_at") if isinstance(sample, dict) else None
                     if rollback_ok and isinstance(exc, Exception) and not busy_retried and (_is_ingest_busy_error(exc)
-                                                                      or held_at is None and isinstance(exc, sqlite3.Error)):
+                                                                      or acquired_at is None and isinstance(exc, sqlite3.Error)):
                         busy_retried = True
                         attribution["busy_snapshot_retry"] = True
-                        admission_retry = held_at is None and _is_ingest_busy_error(exc)
+                        admission_retry = acquired_at is None and _is_ingest_busy_error(exc)
                         continue
                     if rollback_ok and isinstance(exc, Exception) and self._session_end_flush_active and _is_ingest_busy_error(exc):
                         self._ingest_read_only = exc

@@ -2227,6 +2227,7 @@ class MessageStore:
         """Re-acquire explicitly when writes predate the attempt savepoint."""
         state, conn = self._ingest_prelock_state, self._conn
         conn.rollback()
+        state.timing["acquired_at"] = None
         state.attempt_after_writes = False
         state.phase = "prelock"
         # total_changes includes rolled-back writes: recheck without sync's outside-write guard.
