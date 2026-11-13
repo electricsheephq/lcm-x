@@ -6,6 +6,42 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
+## v0.30.1 (nothing lost, part 2)
+
+- Fix: on Hermes v0.23.1, a Desktop session whose turn failed or was stopped before its reply finished, and that
+  never got a later completed turn or a session end, no longer leaves its rows out of LCM-X (#2042). At a later
+  session start on the same profile, a background job stores such a session from the host's own transcript when its
+  last row is the host's failed-turn notice, it is 10 minutes to 7 days old, and LCM-X holds none of its rows.
+  Forward only: sessions that failed before the upgrade are not stored (#2652). A first turn stopped during a tool
+  round is #2653. `LCM_HOST_ROW_RECOVERY_ENABLED=false` turns it off. Named limits: `docs/exactly-once-ingest.md`.
+- Changed: an engine that binds on an empty store after another writer stored the session's rows (the #2042
+  catch-up path) now reconciles them as a restart does, so the task-list case of the pasted scaffold-shaped user
+  turn loss (#2110, #2418) also reaches it, including a host composite that carries the user's question. Planned
+  fix: v0.30.2.
+- Fix: Link the reply copies a cold restart stores again after an edit-resend (`possible_replay_of`), so they are visible instead of silent; the durable ledger moving the cursor up from 0 no longer turns the #2305 linking off. Nothing is stored or skipped differently. The turn-local pairing of those replies is tracked for v0.30.2 (#2479, PR #2529; #2537).
+- Fix: After an upgrade from v0.29.2, the first replay no longer stores a tool call and its result a second time when v0.29.2 had stored the result as a bare saved-output marker in the host's temp results directory (including a file with CRLF line endings), or with a data URI in its preview replaced by a payload placeholder (#2558). For such rows the upgraded store keeps the marker v0.29.2 stored, not the saved file's body, as it already did for the plain case (#2521). The upgrade replay and the session-end compare now use one rule for a bare marker: the same row only when the host's marker text is byte-identical once placeholders are restored and redaction is applied on both sides, with no recovery from the saved file. The fix applies with sensitive-pattern redaction on or off.
+- Fix: on Hermes v0.21.6 to v0.23.1 with rotating compaction, a turn interrupted by a kill or restart no longer loses
+  the rows the host kept in the abandoned compaction child (#2624). At the next start of that conversation a
+  background worker reads that child with the host's own reader and stores the rows the store lacks, only when the
+  child's durable compaction proof covers everything before them. Those turns do not return to the model's view
+  (#2626). `LCM_HOST_ROW_RECOVERY_ENABLED=false` turns it off. Named limits: `docs/exactly-once-ingest.md` M10.
+- Changed: After an upgrade from v0.29.2, a tool call whose saved result (in Hermes's spillover folder) has a data-URI preview and whose call id occurs twice can be stored once more at the second replay; v0.30.0 stores the same copy at the first replay. Nothing is lost (#2558).
+- Fix: Enforce the 64,000-character cap on the whole snippets recall response,
+  including the envelope, provenance and optional markers, with windows off or on,
+  skipped reads and extras. Cut an oversized no-hit envelope's query echo to its
+  first 4,096 characters and report `query_truncated`; drop full hits from the
+  end in rank order with `response_cap_truncated`. Responses that already fit
+  and stored rows are unchanged (PR #2620).
+- Fix: Use the default integer argument value when conversion overflows,
+  including non-finite per-call recall limits (PR #2620).
+- Changed: the identity-anchor presence check returns before any read when it has nothing to check, which shortens
+  the write-lock hold on ingest (on the bench, the probe's median hold fell from 433 to 392 ms). This is one step of
+  #2293; the rest of it is not in this release (#2293, PR #2644).
+- Changed: tests only. Three tests that failed on real host builds in the v0.30.0-rc6 host-suite run are fixed, and a
+  test guard fails any test that changes an `LCM_REAL_*` variable (#2636, #2637, #2638, PR #2660).
+- Store: the schema version stays 5; one new setting, `LCM_HOST_ROW_RECOVERY_ENABLED` (default `true`), which turns
+  off both recovery paths above. Rollback target: v0.30.0.
+
 ## v0.30.0 (nothing lost)
 
 - Fix: At default settings, when the payload of a saved tool result cannot be written (the payload folder cannot be created, or the file write fails), the saved-output marker is now stored as the host sent it, as in v0.29.2. A session that ends while another is active (or while the store is busy) no longer loses the rows after it, usually the final reply, and a helper agent no longer stores the result again on each model call (#2599).

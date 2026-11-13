@@ -316,11 +316,11 @@ Expected signals:
 - ordinary skill discovery includes `hermes-lcm`; plugin-qualified explicit
   loading is `hermes-lcm-x:hermes-lcm` on hosts that support plugin skills
 
-On the `main` line, output with all three opt-in flags enabled is:
+On the `release/v0.30.x` line, output with all three opt-in flags enabled is:
 
 ```text
 Plugins (1):
-  ✓ hermes-lcm-x v0.30.0 (16 tools)
+  ✓ hermes-lcm-x v0.30.1 (16 tools)
 
 Provider Plugins:
   Context Engine: lcm-x
@@ -328,21 +328,26 @@ Provider Plugins:
 
 Older `v0.23.x` stable tags report `hermes-lcm v0.23.x (15 tools)` and
 engine `lcm`. Version text alone is not release proof; verify the loaded commit
-and tag. `0.30.0` is the forward identity of the next minor release: the `v0.30.0-rc1`
+and tag. `0.30.1` is the forward identity of the next patch release: the `v0.30.1-rc1`
 tag carries it first, the gauntlet runs at the last rc tag, and the GA tree must be
 that rc tree plus the GA release-notes file. The rollback target for this candidate
-is the latest stable release (`v0.29.2`); take a SQLite-safe backup and verify ordered messages and summary
+is `v0.30.0`; it adds no schema change. The current stable release is
+[v0.30.0](https://github.com/electricsheephq/lcm-x/releases/tag/v0.30.0)
+at `6260c31fbce11e4cd542878f1f6a37410d678ae8` (2026-11-12); see [project status](project-status.md).
+The rollback target for v0.30.0 is `v0.29.2`; take a SQLite-safe backup and verify ordered messages and summary
 provenance through rollback and re-upgrade. Rolling back loses no rows. One named case stores a
 copy: a tool result that Hermes saved to a file, which v0.30.0 stores in full, is stored once more
 with its tool call the first time v0.29.2 replays that history
-([#2552](https://github.com/electricsheephq/lcm-x/issues/2552)). The current stable release is
+([#2552](https://github.com/electricsheephq/lcm-x/issues/2552)).
+
+For the previous release,
 [v0.29.2](https://github.com/electricsheephq/lcm-x/releases/tag/v0.29.2)
-at `261d41ea928eec3dc5b8db13c70f044392adf124` (2026-11-09); see [project status](project-status.md).
-The rollback target for v0.29.2 is `v0.29.1`; it adds no schema change. Take a
+at `261d41ea928eec3dc5b8db13c70f044392adf124` (2026-11-09),
+the rollback target is `v0.29.1`; it adds no schema change. Take a
 SQLite-safe backup first, and compare ordered raw messages and summary provenance
 through upgrade, rollback and re-upgrade.
 
-For the previous release,
+For
 [v0.29.1](https://github.com/electricsheephq/lcm-x/releases/tag/v0.29.1)
 at `3a4a08ff501347a79669fab51444c471b09b551d` (2026-11-03),
 the rollback target is `v0.29.0`; it adds no schema change. Take a SQLite-safe backup first, and
