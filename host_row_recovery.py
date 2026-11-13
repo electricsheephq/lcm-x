@@ -230,15 +230,23 @@ def _recover_candidate(engine_cls, config, home, db_path, state_path, conv, boun
             return _unproven(sid, "reader_error", 0)
         if _skip_on_tip_path(state_path, bound, handle, sid):
             return
+        proof = det._durable_commit_proof_payload()
         cursor = _strict_proof_cursor(det, messages)
         if cursor is None:
             return _unproven(sid, "proof", len(messages))
-        suffix = messages[cursor:]
+        # Content proves the carried position, but a changed stamp/uid is a
+        # new occurrence. Recover only those rows, in host order, before the
+        # suffix; rewinding wholesale would duplicate unchanged carried rows.
+        metadata = det._remapped_output_metadata(messages, proof or {}, cursor)
+        indexes = sorted(index for index, previous in metadata.items()
+                         if det._host_occurrence_changed(messages[index], previous))
+        indexes.extend(range(cursor, len(messages)))
+        suffix = [messages[index] for index in indexes]
         if not suffix:
             _count("empty_suffix")
             logger.debug("LCM host-row recovery empty suffix")
             return
-        if not _valid_suffix(messages, cursor):
+        if not _valid_suffix(messages, indexes[0]):
             return _unproven(sid, "suffix_rejected", len(messages))
         if any(det._matches_ignore_message_patterns(m) for m in suffix):
             return _unproven(sid, "ignored_in_suffix", len(messages))
@@ -250,7 +258,7 @@ def _recover_candidate(engine_cls, config, home, db_path, state_path, conv, boun
         names = _tool_result_names(messages)  # file reads and payload writes stay outside the write lock
         protected = protect_messages_for_ingest(
             suffix, config=det._config, hermes_home=home, session_id=sid,
-            tool_name_hints=[names.get(cursor + i, "") for i in range(len(suffix))],
+            tool_name_hints=[names.get(index, "") for index in indexes],
             context_window_tokens=window,
         )
         with store.atomic(immediate=True):
@@ -261,7 +269,7 @@ def _recover_candidate(engine_cls, config, home, db_path, state_path, conv, boun
                     and reset[0] >= float(payload.get("created_at") or 0))):
                 return _unproven(sid, "raced", len(messages))
             checked = _strict_proof_cursor(det, messages)
-            if checked != cursor or len(messages[checked:]) != len(suffix):
+            if checked != cursor:
                 return _unproven(sid, "raced", len(messages))
             ids = store._append_protected_batch(
                 sid, protected, [count_message_tokens(m) for m in protected], source=platform,
