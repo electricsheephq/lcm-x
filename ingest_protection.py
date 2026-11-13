@@ -166,6 +166,7 @@ from .ingest_persisted import (
     _has_lossy_sensitive_redaction as _has_lossy_sensitive_redaction,
     _persisted_output_saved_path as _persisted_output_saved_path,
     _safe_temp_hermes_results_file as _safe_temp_hermes_results_file,
+    _safe_hermes_spillover_file as _safe_hermes_spillover_file,
     _is_hermes_persisted_output_marker as _is_hermes_persisted_output_marker,
     _stat_generation_metadata as _stat_generation_metadata,
     _read_regular_file_no_symlink as _read_regular_file_no_symlink,
@@ -759,6 +760,7 @@ def protect_message_for_ingest(
             parse_json_strings=False,
         )
         normalized_recovered_content = normalize_content_value(recovered_content)
+        preview_cut_by_redaction = False
         if normalized_recovered_content:
             persisted_output_source_path = _persisted_output_saved_path(raw_normalized_content)
             persisted_output_preview_sha256 = _persisted_output_preview_prefix_digest(raw_normalized_content)
@@ -774,6 +776,19 @@ def protect_message_for_ingest(
             }
             if persisted_output_preview_sha256:
                 persisted_output_metadata["persisted_output_preview_sha256"] = persisted_output_preview_sha256
+            # F3: a saved file from Hermes's spillover folder whose text no longer starts with the marker's preview
+            # once redacted keeps no recovered form: the marker is stored as the host sent it (below), the form
+            # v0.29.2 stores for this folder, which the session-end compare reads. Inert without redaction.
+            raw_preview = _persisted_output_preview_prefix(raw_normalized_content)
+            preview_cut_by_redaction = bool(
+                raw_preview
+                and recovered_content != recovered_persisted_output
+                and recovered_persisted_output.startswith(raw_preview)
+                and not normalized_recovered_content.startswith(raw_preview)
+                and persisted_output_source_path
+                and _safe_hermes_spillover_file(Path(persisted_output_source_path), hermes_home) is not None
+            )
+        if normalized_recovered_content and not preview_cut_by_redaction:
             recovered_externalized = maybe_externalize_payload(
                 normalized_recovered_content,
                 kind="tool_result",
@@ -831,7 +846,14 @@ def protect_message_for_ingest(
                     normalize_content_value(protected_content) or "",
                     _persisted_output_marker_identity_digest(raw_normalized_content),
                 )
-            if recovered_with_stat is not None and _is_hermes_persisted_output_marker(normalized_content):
+            # #2599: the generation line only at externalization off. With externalization on, a recovered marker kept
+            # inline here means its payload could not be written; it is stored as the host sent it, the form v0.29.2
+            # stores, which every later compare and replay route already reads.
+            if (
+                recovered_with_stat is not None
+                and not bool(getattr(config, "large_output_externalization_enabled", True))
+                and _is_hermes_persisted_output_marker(normalized_content)
+            ):
                 protected_content = _add_inline_persisted_output_generation_metadata(
                     normalize_content_value(protected_content) or "",
                     recovered_file_stat,

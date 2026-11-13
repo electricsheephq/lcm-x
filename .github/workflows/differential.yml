@@ -44,6 +44,7 @@ jobs:
             frontier_state.py
             fresh_tail.py
             host_rewrite.py
+            host_row_recovery.py
             host_uid.py
             host_uid_emit.py
             identity_anchor.py
@@ -86,6 +87,7 @@ jobs:
             tokens.py
             tool_pairs.py
             tool_registry.py
+            unended_catchup.py
         run: |
           relevant=true
           if [[ "$EVENT_NAME" == pull_request || "$EVENT_NAME" == merge_group ]]; then

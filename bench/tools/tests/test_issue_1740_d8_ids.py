@@ -95,10 +95,11 @@ def test_valid_overlay_replaces_malformed_report_verdict(tmp_path, capsys, side,
     path.parent.mkdir(exist_ok=True)
     path.write_text(json.dumps(overlay) + "\n")
     # The selected detail row replaces the report verdict, including invalid fields.
-    assert main([str(runs["candidate"]), str(runs["baseline"]), "--subset"]) == 0
+    # d8-count-margin-v1: exit 1 and `pass` false, as one-question subset categories never gate.
+    assert main([str(runs["candidate"]), str(runs["baseline"]), "--subset"]) == 1
     result = json.loads(capsys.readouterr().out)
     assert not result["INCOMPLETE"]
-    assert result["pass"]
+    assert all(category["count_pass"] for category in result["categories"].values())
     assert result["runs"][side].get("unscorable", 0) == 0
 
 

@@ -522,7 +522,7 @@ _SUPPORTED_LCM_CONFIG_YAML_KEYS = {
     "expansion_reasoning_effort",
     "embedding_query_prefix", "embedding_document_prefix",
     "recall_adjacent_reply",
-    "recall_guidance", "recall_session_hints",
+    "recall_guidance", "recall_session_hints", "recall_min_sessions",
     "recall_snippet_window_hits",
     "recall_extra_entries",
     "recall_later_statements",
@@ -976,6 +976,7 @@ ENV_FIELD_SPECS: tuple[_EnvFieldSpec, ...] = (
     _EnvFieldSpec("sensitive_patterns_enabled", "LCM_SENSITIVE_PATTERNS_ENABLED", bool),
     _EnvFieldSpec("embedding_privacy_enabled", "LCM_EMBEDDING_PRIVACY_ENABLED", bool),
     _EnvFieldSpec("large_output_externalization_enabled", "LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED", bool),
+    _EnvFieldSpec("host_row_recovery_enabled", "LCM_HOST_ROW_RECOVERY_ENABLED", bool),
     _EnvFieldSpec("large_output_externalization_threshold_chars", "LCM_LARGE_OUTPUT_EXTERNALIZATION_THRESHOLD_CHARS", int),
     _EnvFieldSpec("large_output_externalization_path", "LCM_LARGE_OUTPUT_EXTERNALIZATION_PATH", str),
     _EnvFieldSpec("large_output_active_replay_stubbing_enabled", "LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUBBING_ENABLED", bool),
@@ -1018,6 +1019,7 @@ ENV_FIELD_SPECS: tuple[_EnvFieldSpec, ...] = (
     _EnvFieldSpec("recall_snippet_window_hits", "LCM_RECALL_SNIPPET_WINDOW_HITS", int),
     _EnvFieldSpec("recall_extra_entries", "LCM_RECALL_EXTRA_ENTRIES", int),
     _EnvFieldSpec("recall_later_statements", "LCM_RECALL_LATER_STATEMENTS", int),
+    _EnvFieldSpec("recall_min_sessions", "LCM_RECALL_MIN_SESSIONS", int),
     _EnvFieldSpec("recall_session_hints", "LCM_RECALL_SESSION_HINTS", bool),
     _EnvFieldSpec("recall_guidance", "LCM_RECALL_GUIDANCE", str),
     _EnvFieldSpec("recall_fts_anchor", "LCM_RECALL_FTS_ANCHOR", bool),
@@ -1078,7 +1080,7 @@ _PARSER_BY_TYPE = {
 # Fields whose env reading needs provenance tracking or a computed default;
 # ``from_env`` handles these explicitly, so the uniform loop skips them.
 _SOURCE_TRACKED_ENV_FIELDS = frozenset({
-    "recall_guidance", "recall_session_hints",
+    "recall_guidance", "recall_session_hints", "recall_min_sessions",
     "recall_snippet_window_hits",
     "recall_extra_entries",
     "recall_later_statements",
@@ -1263,6 +1265,7 @@ class LCMConfig:
     # When enabled, oversized tool results are written to plugin-managed storage
     # and replaced with compact references in pre-compaction serializer input.
     large_output_externalization_enabled: bool = True
+    host_row_recovery_enabled: bool = True
     # Character threshold above which tool results are externalized.
     large_output_externalization_threshold_chars: int = 12_000
     # Explicit storage directory for externalized payloads (empty = auto under hermes home).
@@ -1414,6 +1417,7 @@ class LCMConfig:
     # Evidence (#950): frozen LongMemEval-M LOCAL replay, R@10 0.898 -> 0.905 (470 q).
     # FTS-only (embeddings-off) output is unchanged; False restores the previous order.
     recall_fts_anchor: bool = True
+    recall_min_sessions: int = 0
     recall_session_hints: bool = False
     recall_guidance: str = "v1"
     # -- Proactive memory injection (SPEC F, default-OFF) ---
@@ -1678,6 +1682,22 @@ class LCMConfig:
         )
         _record("recall_later_statements", window_source
                 if len(config_source_warnings) == warning_count else "default")
+
+        raw_floor = env.get("LCM_RECALL_MIN_SESSIONS", "").strip()
+        floor_value = raw_floor or (prefix_yaml.get("recall_min_sessions", 0)
+                                   if isinstance(prefix_yaml, dict) else 0)
+        floor_source = "env:LCM_RECALL_MIN_SESSIONS" if raw_floor else (
+            "config_yaml:lcm.recall_min_sessions" if isinstance(prefix_yaml, dict)
+            and "recall_min_sessions" in prefix_yaml else "default")
+        try:
+            if isinstance(floor_value, bool) or (
+                    isinstance(floor_value, float) and not floor_value.is_integer()):
+                raise ValueError
+            c.recall_min_sessions = max(0, min(10, int(floor_value)))
+        except (ValueError, TypeError, OverflowError):
+            _record("recall_min_sessions", "default", "invalid recall_min_sessions ignored; expected int")
+        else:
+            _record("recall_min_sessions", floor_source)
 
         c.ignored_config_yaml_lcm_keys = _ignored_lcm_config_yaml_keys(cfg_yaml, env=env)
 

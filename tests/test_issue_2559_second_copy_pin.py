@@ -2,7 +2,8 @@
 
 A delegated child's tool call whose arguments hold an inline encoded payload is stored once more at the next handover
 when the host re-sends it unchanged: the session-end compare reads the stored side with LCM-X's own escaping in place.
-This strict xfail pins today's second copy (the compare matrix's T7 line-wrapped shape, live hook); a fix flips it.
+This strict xfail pins today's second copy (the compare matrix's T7 line-wrapped shape, live hook): exactly one extra
+call row at the second handover and none at the third. Any other count fails the test; a fix flips it.
 """
 
 import base64
@@ -50,9 +51,20 @@ def test_an_identical_inline_payload_call_is_stored_once_across_handovers(host):
     rows = reader._store.get_session_messages('child')
     if sum(row.get('content') == 'FINAL' for row in rows) != 1:  # surplus, never loss: outside the xfail
         pytest.fail('setup: the second handover did not store FINAL once')
-    calls = [row for row in rows if row.get('tool_calls')]
-    if len(calls) != 1:
-        raise SecondCopyStored(f'{len(calls)} call rows')
+    second = len([row for row in rows if row.get('tool_calls')])
+    if second not in (1, 2):  # the documented shape is exactly one extra copy; any other count fails hard
+        pytest.fail(f'{second} call rows after the second handover')
+    later = view + [{'role': 'user', 'content': 'Thanks.', 'timestamp': 12.0}]
+    child.api_call(ctx, later, 3)
+    aux.drain_live_child_stores(60.0)
+    rows = reader._store.get_session_messages('child')
+    if sum(row.get('content') == 'Thanks.' for row in rows) != 1:
+        pytest.fail('setup: the third handover did not store its new row once')
+    third = len([row for row in rows if row.get('tool_calls')])
+    if third != second:  # the documented shape adds nothing after the second handover
+        pytest.fail(f'{third} call rows after the third handover, {second} after the second')
+    if second == 2:
+        raise SecondCopyStored(f'{second} call rows')
 
 
 def test_an_identical_plain_call_is_stored_once_across_handovers(host):  # noqa: F811

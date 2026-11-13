@@ -318,7 +318,7 @@ def _coerce_query_arg(value: Any) -> str:
 def _parse_int_value(value: Any, default: int) -> int:
     try:
         return int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return default
 
 
@@ -4854,6 +4854,42 @@ def _lcm_recall_session_hint(engine: "LCMEngine", hit: dict[str, Any]) -> str | 
         return None
 
 
+def _lcm_recall_session_floor(
+    ordered: list[dict[str, Any]], limit: int, requested: int,
+    *, protected_entry: dict[str, Any] | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Promote missing sessions; retain every entry and score (#1213)."""
+    result = list(ordered)
+    pool = {entry["hit"].get("session_id") for entry in ordered} - {None, ""}
+    target = min(requested, limit, len(pool))
+    promoted = 0
+    for candidate in ordered:
+        sessions = [entry["hit"].get("session_id") for entry in result[:limit]]
+        represented = set(sessions) - {None, ""}
+        if len(represented) >= target:
+            break
+        sid = candidate["hit"].get("session_id")
+        if not sid or sid in represented:
+            continue
+        seen = set()
+        cut = None
+        for i, session in enumerate(sessions):
+            if result[i] is not protected_entry and (not session or session in seen):
+                cut = i
+            seen.add(session)
+        if cut is None:
+            break
+        index = next(i for i, entry in enumerate(result) if entry is candidate)
+        result.pop(index)
+        displaced = result.pop(cut)
+        result.insert(limit - 1, candidate)
+        result.insert(limit, displaced)
+        promoted += 1
+    achieved = len({entry["hit"].get("session_id") for entry in result[:limit]} - {None, ""})
+    return result, {"requested": requested, "achieved": achieved,
+                    "promoted": promoted, "delivered": None}
+
+
 def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
     """Search the agent's entire memory (all conversations, all time) by meaning.
 
@@ -4883,6 +4919,15 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
         return json.dumps({"error": "limit must be a positive integer"})
     requested_limit = parsed_limit
     limit = min(requested_limit, _LCM_RECALL_LIMIT_CAP)
+
+    floor_default = max(0, min(10, _parse_int_value(getattr(engine._config, "recall_min_sessions", 0), 0)))
+    floor_arg = kwargs.get("min_sessions", args.get("min_sessions"))
+    try:
+        min_sessions = (floor_default if isinstance(floor_arg, bool) or (
+            isinstance(floor_arg, float) and not floor_arg.is_integer()) else
+                        max(0, min(10, _parse_int_value(floor_arg, floor_default))))
+    except OverflowError:
+        min_sessions = floor_default
 
     scope_bias, scope_bias_error = _parse_optional_float(args.get("scope_bias"), "scope_bias")
     if scope_bias_error:
@@ -4935,6 +4980,8 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
     )
 
     candidate_limit = min(_LCM_GREP_HYBRID_CANDIDATE_CAP, max(50, limit * 4))
+    if min_sessions:
+        candidate_limit = min(_LCM_GREP_HYBRID_CANDIDATE_CAP, max(100, limit * 8))
     rerank_window = min(50, max(1, limit * 4))
     rerank_window_limit = int(getattr(engine._config, "rerank_window_limit", 0))
     if rerank_window_limit > 0:
@@ -5359,12 +5406,20 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
             ordered, arm_hits, arm_order, limit, arm_weights=arm_weights
         )
     anchor_index = (fts_anchor_info["position"] - 1 if fts_anchor_info["fired"] else
-                    fts_anchor_index(ordered, arm_hits, arm_order, limit, arm_weights)) if later_n and fts_anchor_info is not None else None
+                    fts_anchor_index(ordered, arm_hits, arm_order, limit, arm_weights)) if (later_n or min_sessions) and fts_anchor_info is not None else None
+    protected_entry = ordered[anchor_index] if anchor_index is not None else None
+    session_floor_info = None
+    if min_sessions:
+        ordered, session_floor_info = _lcm_recall_session_floor(
+            ordered, limit, min_sessions, protected_entry=protected_entry)
+        if fts_anchor_info is not None and fts_anchor_info["fired"]:
+            fts_anchor_info["position"] = next(
+                i for i, entry in enumerate(ordered, 1) if entry is protected_entry)
     place_later = partial(
         _lcm_recall_later_statements, engine, identity_rows=identity_rows, n=min(later_n, limit),
         deadline=deadline, excluded=excluded_session_ids, allowed=candidate_session_ids,
         query=query, fts_arm_index=fts_arm_index,
-        fts_anchor_identity=_hit_identity(ordered[anchor_index]["hit"]) if anchor_index is not None else None,
+        fts_anchor_identity=_hit_identity(protected_entry["hit"]) if protected_entry is not None else None,
     ) if later_n and kwargs.get("delivery_unit", getattr(engine._config, "recall_delivery_unit", "hits")) != "session" else None
 
     _annotate_subagent_lineage(engine, [entry["hit"] for entry in ordered if isinstance(entry.get("hit"), dict)])
@@ -5410,6 +5465,7 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
         degraded_reasons=degraded_reasons,
         timed_out=timed_out,
         fts_anchor_info=fts_anchor_info,
+        session_floor_info=session_floor_info,
         fts_rerun=fts_rerun,
         summary_leads=summary_leads,
         session_hint=partial(_lcm_recall_session_hint, engine) if kwargs.get(

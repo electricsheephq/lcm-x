@@ -21,6 +21,7 @@ import sqlite3
 from collections import Counter
 from pathlib import Path
 
+from bench.instruments.reliability import reply_fault as RF
 from . import chronology, continuity, delegated, drain, externalized, host_parity, multiset, projections, summary, tool_calls, tool_groups, host_rewrite
 
 ALL_BARS = ("B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8", "B9")
@@ -197,7 +198,8 @@ def continue_occurrences(rows, state: Path, group, reply_pat: str, *, observed_a
     return out
 
 
-def scenario_gaps(cell: dict, events: list[dict], atts: list[dict], tg: dict, bound: dict) -> list[str]:
+def scenario_gaps(cell: dict, events: list[dict], atts: list[dict], tg: dict, bound: dict, *,
+                  held_tool_rows_proven: bool = False) -> list[str]:
     """What the cell was meant to exercise and did not: each gap makes the cell UNSUPPORTED."""
     gaps = [f"{a['tag']}: completed but the provider never returned its scripted reply" for a in atts
             if tool_calls.completed(a) and not a["emitted"]] + bound["gaps"]
@@ -208,7 +210,8 @@ def scenario_gaps(cell: dict, events: list[dict], atts: list[dict], tg: dict, bo
             want = sum(len(g["calls"]) for g in cell["tool_plan"] if isinstance(g["turns"], list) and a["turn"] in g["turns"])
             if want and len(a["tool_issues"]) != want:
                 gaps.append(f"{a['tag']}: {want} tool calls planned, {len(a['tool_issues'])} issued")
-        if "B6" in (cell.get("bars") or ALL_BARS) and not tg["groups"]:
+        if ("B6" in (cell.get("bars") or ALL_BARS) and not tg["groups"]
+                and not held_tool_rows_proven):
             gaps.append("B6: no tool-call group was stored, so the split check had nothing to check")
     if cell.get("native_recovery"):
         tried = sum(e.get("native_attempts", 0) for e in events if e["event"] == "turn_end") + \
@@ -232,9 +235,10 @@ def scenario_gaps(cell: dict, events: list[dict], atts: list[dict], tg: dict, bo
     return gaps
 
 
-def expected_items(atts: list[dict], notices=()) -> list[tuple[str, str]]:
+def expected_items(atts: list[dict], notices=(), *, inflight=None) -> list[tuple[str, str]]:
     """Held user rows; exactly one scripted reply per completed non-cancel attempt (from the provider log, so a
-    reply the host dropped is a deficit); the host's cited failed-turn copy only on a verified interrupted attempt."""
+    reply the host dropped is a deficit); selected host-held in-flight replies; the host's cited failed-turn copy
+    only on a verified interrupted attempt. ``inflight`` does not change attempt fields or user folding."""
     items = []
     for i, a in enumerate(atts):
         text = a["held"] if a["held"] is not None else a["persist"]
@@ -250,9 +254,29 @@ def expected_items(atts: list[dict], notices=()) -> list[tuple[str, str]]:
             items.append(("user", text))
         if a["reply"]:
             items.append(("assistant", a["reply"]))
+        elif inflight and id(a) in inflight:
+            items.append(("assistant", inflight[id(a)]))
         if (a.get("end") or {}).get("interrupted"):
             items += [("assistant", x) for x in a["notices"] if x.strip() in notices]
     return items
+
+
+def host_held_replies(atts, items, assistants, g):
+    """Reserve ended-item capacity first, then host-held in-flight replies in transcript order."""
+    used = Counter(multiset.h(text) for role, text in items if role == "assistant")
+    replies, records = {}, []
+    for a in atts:
+        if (a["ended"] or not a["emitted"]
+                or (a["prefix"] != "T" and not (a["prefix"] == "D" and a.get("session")))):
+            continue
+        text = a["emitted"][-1]
+        key = multiset.h(text)
+        held = assistants.get(key, {})
+        if multiset.norm(text) and used[key] < held.get("n", 0):
+            used[key] += 1
+            replies[id(a)] = text
+            records.append({"tag": a["tag"], "session": g, "key": key[:12], "host_row_ids": held["ids"]})
+    return replies, records
 
 
 def source_ids(src) -> list:
@@ -357,7 +381,8 @@ def score(cell: dict, cell_dir: Path, db_dir: Path | None = None) -> dict:
     notices = {x for p in phases for x in p.get("failed_turn_notices") or []}
     plugin = cell.get("plugin") or (json.loads((cell_dir / "cell.json").read_text()).get("plugin")
                                     if (cell_dir / "cell.json").exists() else None) or {}
-    host, host_why = host_parity.load(db_dir / "state.db", group, plugin.get("tree"))
+    assistants = {}
+    host, host_why = host_parity.load(db_dir / "state.db", group, plugin.get("tree"), assistants=assistants)
     if host is None and host_why.startswith("host state.db unreadable"):
         host_read_failed(group, "state.db unreadable for host parity")
     b2_full, ext, ext_ids = externalized.resolve(full, db_dir.parent / "hermes-home")
@@ -367,6 +392,13 @@ def score(cell: dict, cell_dir: Path, db_dir: Path | None = None) -> dict:
     multiset.merge_witnesses(host, events, group)
     per = {g: (expected_items([a for a in atts if attempt_group(a, group) == g], notices),
                [r for r in b2_stored if group(r[1]) == g]) for g in groups}
+    delegated_per, host_held = per.copy(), []  # B10 retains the original expected items (#861).
+    for g, (items, rows) in per.items():
+        lineage_atts = [a for a in atts if attempt_group(a, group) == g]
+        replies, records = host_held_replies(lineage_atts, items, assistants.get(g, {}), g)
+        if replies:
+            per[g] = (expected_items(lineage_atts, notices, inflight=replies), rows)
+            host_held += records
     applicable = [b for b in cell.get("bars") or ALL_BARS
                   if (b != "B6" or cell.get("tool_plan") or cell.get("delegate_plan")) and (b != "B7" or cell.get("native_recovery"))
                   and (b != "B5" or cell.get("min_compactions", 5) > 0) and (b != "B10" or cell.get("delegate_plan"))]
@@ -423,8 +455,20 @@ def score(cell: dict, cell_dir: Path, db_dir: Path | None = None) -> dict:
     numbers["B2"]["per_session"] = {g: m["verdict"] for g, m in b2_parts.items()}
     numbers["B2"]["host_parity_licensed"] = host_parity.summary(
         [dict(r, session=g) for g, m in b2_parts.items() for r in m["host_parity_licensed"]], host_why)
+    if host_held:
+        numbers["B2"]["host_held_inflight_replies"] = host_held
     bound = tool_calls.bind(atts, lambda a: attempt_group(a, group),  # no host_sha in the cell: no licence
                             license_wire_notices=cell.get("host_sha") in tool_calls.HOSTS_WITHOUT_POST_TOOL_REANCHOR)
+    held_turns = {f["turn"] for f in cell.get("faults", []) if f["kind"] == RF.KIND} if cell.get("tool_plan") else set()
+    held_tools_unavailable = None
+    held_tool_rows_proven = False
+    if held_turns:
+        receipt = tool_calls.host_held(atts, bound, db_dir / "state.db", group, held_turns,
+                                      lambda a: attempt_group(a, group))
+        if receipt is not None:
+            numbers["B2"]["host_held_tool_rows"] = receipt
+            held_tools_unavailable = receipt.get("unavailable")
+            held_tool_rows_proven = "unavailable" not in receipt and receipt.get("rows", 0) > 0
     # This emergency cell deliberately drops the active result before the next provider call. B2 still requires
     # its durably stored bytes to match the real HOST dispatch; the unseen-result failure remains a B6 diagnostic.
     recovery_turns = {f["turn"] for f in cell.get("faults", []) if f["kind"] == "forced_recovery"} & {
@@ -481,6 +525,8 @@ def score(cell: dict, cell_dir: Path, db_dir: Path | None = None) -> dict:
                and not any(a.get("conflicts") or a.get("exception") or a.get("engine_status") == "error"
                            for a in final.get("attempts", [])))
     inconclusive = {}
+    if held_tools_unavailable is not None and "B2" not in failed:
+        inconclusive["B2"] = "host tool rows unavailable: " + held_tools_unavailable
     outcome = (final or {}).get("outcome", "published" if (final or {}).get("published") else "failed")
     if failed_turns or (cell.get("final_compaction_check", True) and outcome == "failed"):
         failed["B4"] = numbers["B4"]
@@ -511,6 +557,9 @@ def score(cell: dict, cell_dir: Path, db_dir: Path | None = None) -> dict:
     numbers["B6"]["tool_execution_failures"] = len(bound["failures"])
     if tg["split_groups"] or orphans or bound["failures"]:
         failed["B6"] = {**numbers["B6"], "splits": tg["splits"][:3], "tool_failures": bound["failures"][:5]}
+    if held_tool_rows_proven and not tg["groups"] and "B6" not in failed:
+        applicable = [b for b in applicable if b != "B6"]
+        numbers["B6"]["not_applicable"] = "no tool group stored"
     native = {"native_unusable": sum(p.get("log_counts", {}).get("native_unusable", 0) for p in phases),
               "summary_generation_aborted": sum(p.get("log_counts", {}).get("summary_generation_aborted", 0) for p in phases),
               "max_native_attempts_per_turn": max((p.get("counters", {}).get("native_max", 0) for p in phases), default=0)}
@@ -545,9 +594,9 @@ def score(cell: dict, cell_dir: Path, db_dir: Path | None = None) -> dict:
     inconclusive = {b: v for b, v in inconclusive.items() if b in applicable}
     numbers["diagnostic"]["native_rejections"] = dict(Counter(e.get("rejection") for e in events
                                                               if e["event"] == "compaction" and e.get("rejection")))
-    gaps = scenario_gaps(cell, events, atts, tg, bound)
+    gaps = scenario_gaps(cell, events, atts, tg, bound, held_tool_rows_proven=held_tool_rows_proven)
     if cell.get("delegate_plan"):  # B10 (#1931): admission, parent links and no cross-lineage copies
-        numbers["B10"], b10_failed, b10_gaps = delegated.score(cell, events, atts, per, full, db_dir, group)
+        numbers["B10"], b10_failed, b10_gaps = delegated.score(cell, events, atts, delegated_per, full, db_dir, group)
         gaps += b10_gaps
         if b10_failed and "B10" in applicable:
             failed["B10"] = b10_failed

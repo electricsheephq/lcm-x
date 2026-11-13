@@ -187,6 +187,7 @@ The manifest continues to declare all 16 tools.
 ### Recall ranking
 
 - `LCM_RECALL_GUIDANCE` (default `v1`; YAML `lcm.recall_guidance`, environment takes precedence): `v2` adds guidance for questions spanning conversations on all three schema paths and advertises `lcm_load_session` anchor parameters. Pass `anchor_store_id` with its owning `session_id`; a foreign anchor returns an error without rows. `before` defaults to 6 and `after` to 12, each clamped to 0..40. Existing role and inclusive stored-write-time filters apply within the window. When `has_more` is true, continue using `after_store_id=next_cursor` without the anchor; otherwise the cursor is null. With `detail="answer_ready"`, hits delivery adds `provenance.answer_ready.sessions_delivered` and `sessions_in_pool` (distinct sessions in the ranked pool plus delivered later-statement children). Compare the counts; when fewer sessions were delivered than are in the pool, call again with `exclude_session_ids` set to the sessions already read. When a hit carries a `session_hint`, use it to read around that hit. Session delivery omits the hits-only provenance instruction. Values are stripped and lowercased; unknown values use `v1`; defaults keep existing output and schemas.
+- `LCM_RECALL_MIN_SESSIONS` (int, default `0`; YAML `lcm.recall_min_sessions`, environment wins), clamped 0..10: promote missing sessions into the ranked window without dropping candidates or displacing the FTS anchor. Per-call `min_sessions` overrides the key in either guidance mode; null or unparseable values fall back to it. Guidance v2 advertises the argument. `provenance.session_floor` reports requested, achieved, promoted and final delivered session counts; fitting may reduce delivery. Proactive recall, pre-answer and evidence retrieval pin it off.
 - `LCM_RECALL_SESSION_HINTS` (bool, default `false`; YAML `lcm.recall_session_hints`, environment takes precedence): adds `session_hint` to answer-ready hits and summary leads, for example `lcm_load_session(session_id='session-a', anchor_store_id=42)`. Uses the anchor row's own session ID, including summary source rows, so summary rollover does not break the call. Missing source rows or failed hint reads omit only the affected hint. Independent of guidance version. Both settings affect model-called recall only; proactive recall, pre-answer retrieval and evidence wrappers keep their existing behavior. Agentic FMP runs set these keys through `--recall-option`, because that bench constructs config explicitly and ignores the environment.
 
 - `LCM_RECALL_ARM_WEIGHTS` (default `fts=0.5,summary=1.0,chunk=1.0`): per-arm RRF weights for `lcm_recall`; see [docs/retrieval-tools.md](https://github.com/electricsheephq/lcm-x/blob/main/docs/retrieval-tools.md).
@@ -220,6 +221,7 @@ A 400 or 404 saying the route cannot serve its model (unknown model, model not f
 
 A published retained-occurrence escape logs one WARNING per pass naming the stored rows and the host/store order mismatch (#1162). The stop line adds `escaped=store_id:<id>,role:<role>,kind:<shown|mapped>,n:<count>` for published escapes only. The host copies stay live and the source rows stay stored; a failed summary emits neither this WARNING nor the token.
 
+- `LCM_HOST_ROW_RECOVERY_ENABLED` (default `true`): at a foreground session start, a background worker recovers interrupted-turn rows from abandoned compression children using the host reader and a strict durable proof; unproven children store nothing; the same flag gates the #2042 catch-up of recent unended sessions whose last row is the host's failed-turn notice; `false` disables both and their host reads;
 - `LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED` (default `true` from v0.27.0): a large tool result or inline media payload is stored as a payload file under the Hermes home and its row holds an `[Externalized payload: ...]` reference; `lcm_expand(externalized_ref=...)` returns the original bytes; `false` opts out;
 - `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUBBING_ENABLED` (default `true` from v0.27.0): ingest durably externalizes a large tool result, per the two thresholds below; below-threshold size-only host adoption waits for a real compression boundary; needs externalization on; `false` opts out;
 - `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUB_THRESHOLD_TOKENS` (default `10000`) and `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUB_AGED_THRESHOLD_TOKENS` (default `2000`; `0` = the first-sight value, never above it) (#671): with `LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED` and `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUBBING_ENABLED` both on (the default from v0.27.0), a new tool result over the first value is replaced by its externalized-ref stub at ingest, and at a compaction a tool result outside the fresh tail is stubbed from the aged value. The stub keeps the call row; `lcm_expand(externalized_ref=...)` returns the original. An automatic compaction at or over the threshold first tries these free cuts without a model call and returns them when the host-measured list is at or under min(threshold - leaf chunk, 0.95 x threshold): stop reason `stub_first_exit` (partial; `lcm_status` `last_stub_first_exit`, the doctor, the `LCM compaction stop:` line); the rows no leaf summarised stay stored as backlog.
@@ -295,6 +297,7 @@ without changing its behavior until removal.
 | `LCM_SENSITIVE_PATTERNS_ENABLED` | `bool` | `false` | — | — |
 | `LCM_EMBEDDING_PRIVACY_ENABLED` | `bool` | `null` | — | — |
 | `LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED` | `bool` | `true` | — | — |
+| `LCM_HOST_ROW_RECOVERY_ENABLED` | `bool` | `true` | — | — |
 | `LCM_LARGE_OUTPUT_EXTERNALIZATION_THRESHOLD_CHARS` | `int` | `12000` | — | — |
 | `LCM_LARGE_OUTPUT_EXTERNALIZATION_PATH` | `str` | `""` | — | — |
 | `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUBBING_ENABLED` | `bool` | `true` | — | — |
@@ -333,6 +336,7 @@ without changing its behavior until removal.
 | `LCM_RECALL_SNIPPET_WINDOW_HITS` | `int` | `0` | — | — |
 | `LCM_RECALL_EXTRA_ENTRIES` | `int` | `0` | — | — |
 | `LCM_RECALL_LATER_STATEMENTS` | `int` | `0` | — | — |
+| `LCM_RECALL_MIN_SESSIONS` | `int` | `0` | — | — |
 | `LCM_RECALL_SESSION_HINTS` | `bool` | `false` | — | — |
 | `LCM_RECALL_GUIDANCE` | `str` | `"v1"` | — | — |
 | `LCM_RECALL_FTS_ANCHOR` | `bool` | `true` | — | — |

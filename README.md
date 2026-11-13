@@ -3,6 +3,8 @@
 Lossless memory for Hermes Agent: every turn kept in a local store, not compacted away, and searchable by your agent.
 [Watch the demo](https://x.com/ElectricSheepIO/status/2119777119873925155)
 
+https://github.com/user-attachments/assets/c215bf7f-e8c8-428f-9510-ba1da3571f53
+
 [![CI](https://github.com/electricsheephq/lcm-x/actions/workflows/ci.yml/badge.svg)](https://github.com/electricsheephq/lcm-x/actions/workflows/ci.yml)
 [![Latest release](https://img.shields.io/github/v/release/electricsheephq/lcm-x)](https://github.com/electricsheephq/lcm-x/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -38,6 +40,19 @@ context:
 ```
 
 Restart Hermes after changing plugin or context-engine config.
+
+### Claude Code
+
+For Claude Code, use LCM-X for Claude Code, which we recommend for every Claude Code user on macOS
+and Linux. It captures your Claude Code sessions into their own local, lossless store and gives the
+agent the same five recall tools. Download the asset from the newest
+release titled
+[LCM-X for Claude Code](https://github.com/electricsheephq/lcm-x/releases?q=%22LCM-X+for+Claude+Code%22&expanded=true)
+(these releases are never marked Latest, which stays with the Hermes plugin), unpack it, and start Claude Code
+with `claude --plugin-dir <unpacked folder>`; the steps are in the release notes and in
+[its README](adapters/claude-code/README.md). The read-only server under
+[Use LCM-X memory from Claude Code](#use-lcm-x-memory-from-claude-code-read-only) is a different
+thing: it reads a Hermes profile's store from Claude Code.
 
 ## Try it
 
@@ -734,6 +749,7 @@ assistant even when doing so exceeds a configured bound.
 | `LCM_SENSITIVE_PATTERNS_ENABLED` | `false` | Opt in to durable deterministic redaction before LCM storage, FTS indexing, summarization, active replay, and externalized ingest payloads; it does not control cloud embedding privacy |
 | `LCM_EMBEDDING_PRIVACY_ENABLED` | unset (`auto`) | Protect provider-bound copies for known cloud embedding providers without rewriting durable data. Set `false` for an explicit raw-cloud opt-out (`privacy:off` vector revision); local providers remain unchanged |
 | `LCM_SENSITIVE_PATTERNS` | `api_key,bearer_token,password_assignment,private_key` | Comma-separated named sensitive pattern catalog entries to apply when redaction is enabled |
+| `LCM_HOST_ROW_RECOVERY_ENABLED` | `true` | At a foreground session start, recover the rows of an interrupted turn that the host kept in an abandoned compression child, on a background worker, only under a strict durable proof (#2624), and stores recent unended sessions whose turn failed (#2042). `false` disables both and their host reads. |
 | `LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED` | `true` | Store oversized ingest payloads, including tool results, media blocks, and generic raw content, in plugin-managed JSON files |
 | `LCM_LARGE_OUTPUT_EXTERNALIZATION_THRESHOLD_CHARS` | `12000` | Externalization threshold for normalized payload text |
 | `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUBBING_ENABLED` | `true` | Externalize token-heavy textual tool results at ingest; below-threshold size-only host adoption waits for a real compression boundary; historical assembly respects the protected fresh tail; requires large-output externalization |
@@ -1155,6 +1171,9 @@ carried-over current-session node recovers the original raw message sources even
 when those sources still belong to a previous session.
 
 ## Use LCM-X memory from Claude Code (read-only)
+
+To keep a memory of your Claude Code sessions themselves, use LCM-X for Claude Code
+([Install](#claude-code)). This section reads a Hermes profile's store from Claude Code.
 
 `scripts/lcm_x_mcp.py` is a stdio MCP server over one Hermes profile's LCM-X
 store. It serves `lcm_recall`, `lcm_grep`, `lcm_expand`, `lcm_load_session` and

@@ -379,6 +379,8 @@ def test_astra_distinct_bare_markers_store_four_rows(host, location, change):
     ("other-path-present", 0), ("other-path-missing", 1), ("nested-marker", 0),
 ])
 def test_marker_identity_through_live_handover(host, tmp_path, location, change, extra):
+    if change == "redaction" and location == "spillover":
+        extra = 0  # #2603: this spillover row is stored as its (redacted) marker, which matches the host's: no extra copy
     _, _, ctx, parent, child, engine = _setup(host, "own_engine")
     path = _path(engine._hermes_home, location)
     full = FULL_OUTPUT
@@ -395,7 +397,7 @@ def test_marker_identity_through_live_handover(host, tmp_path, location, change,
     stored = child_rows(parent)[-1]
     restored = engine._session_end_prefix_compare_value(stored["content"], session_id="child")
     if change not in ("bare-boilerplate", "nested-marker"):
-        assert restored != old  # Prove this exercises a recovered row.
+        assert restored != old  # Prove this exercises a recovered row (or, #2603, the redacted marker).
     new = old
     if change == "last-preview-character":
         preview = full[:30]
@@ -409,7 +411,7 @@ def test_marker_identity_through_live_handover(host, tmp_path, location, change,
         other = _path(engine._hermes_home, location, "other")
         new = _write_output(other, full) if change.endswith("present") else _marker(other, full)
     if change == "redaction":
-        assert not restored.startswith(full[:30])
+        assert not restored.startswith(full[:30])  # recovered and redacted, or (#2603, spillover) the redacted marker
         # With the file present the counted fallback recovers and redacts both sides.
         # Pruning leaves only the mismatched preview; that uncertainty stores one extra copy.
         path.rename(tmp_path / "pruned-redaction")

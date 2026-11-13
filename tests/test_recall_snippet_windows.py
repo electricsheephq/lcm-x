@@ -32,7 +32,7 @@ def make_delivery(lengths=(1300,) * 7):
     batch = Mock(side_effect=lambda ids: {i: rows[i] for i in ids if i in rows})
     engine = SimpleNamespace(_store=SimpleNamespace(get_batch=batch))
     hydrate = Mock(wraps=partial(tools._lcm_recall_answer_ready_content, engine))
-    read_time = Mock(return_value=({}, None))
+    read_time = Mock(return_value=(rows, None))
     read_windows = Mock(side_effect=lambda entries, deadline, **kw: (hydrate(entries, **kw), None))
     options = dict(
         query="ANSWER_TOKEN", limit=len(entries), requested_limit=len(entries), scope_bias=0.0,
@@ -82,6 +82,17 @@ def test_default_bytes_match_base():
     assert d.invoke() == BASELINE_JSON
     assert "snippet_window" not in d.invoke()
     d.hydrate.assert_not_called()
+
+
+def test_session_floor_delivered_refreshed_during_envelope_fitting():
+    d = make_delivery(lengths=(2150,) * 25)
+    raw = d.invoke(snippet_window_hits=25, session_floor_info=dict(
+        requested=10, achieved=25, promoted=0, delivered=None))
+    result = json.loads(raw)
+    assert result['response_cap_truncated'] is True
+    assert len({hit['session_id'] for hit in result['hits']}) == 24
+    assert result['provenance']['session_floor']['delivered'] == 24
+    assert len(raw) <= tools._LCM_RECALL_RESPONSE_CHAR_CAP
 
 
 def test_first_five_windows_and_one_batch():

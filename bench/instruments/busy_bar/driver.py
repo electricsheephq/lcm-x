@@ -21,9 +21,13 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, Callable
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+from bench.tools import hoststat
+
 if __package__:
-    from . import cells
+    from . import arms, cells
 else:
+    import arms
     import cells
 
 DEFAULT_K = 2
@@ -238,8 +242,10 @@ def load_tree(tree: Path) -> tuple[Any, Any]:
     return importlib.import_module("hermes_lcm.config"), importlib.import_module("hermes_lcm.engine")
 
 
-def offline_setup(engine_module: Any) -> None:
+def offline_setup(engine_module: Any, embedding: bool = False) -> None:
     for name in ("_schedule_rollup_maintenance", "_schedule_embedding_maintenance"):
+        if embedding and name == "_schedule_embedding_maintenance":
+            continue
         if hasattr(engine_module.LCMEngine, name):
             setattr(engine_module.LCMEngine, name, lambda *args, **kwargs: None)
     # Retain the real public compression pipeline, replacing only its model adapter.
@@ -309,7 +315,8 @@ class FixedContention:
 def run(cell: str, directory: Path, config_module: Any, engine_module: Any,
         capture: Capture, k: int = DEFAULT_K, b_view_rows: int = DEFAULT_B_VIEW_ROWS,
         busy_timeout_ms: int | None = DEFAULT_BUSY_TIMEOUT_MS,
-        seed: int = DEFAULT_SEED, window_ms: float = DEFAULT_WINDOW_MS) -> dict[str, Any]:
+        seed: int = DEFAULT_SEED, window_ms: float = DEFAULT_WINDOW_MS,
+        storage_arms: Any = None, arm_output: Path | None = None) -> dict[str, Any]:
     directory.mkdir(parents=True, exist_ok=False)
     capture.records.clear()
     config = config_module.LCMConfig(
@@ -318,6 +325,12 @@ def run(cell: str, directory: Path, config_module: Any, engine_module: Any,
         background_leaf_prep_enabled=False, fresh_tail_count=6, leaf_chunk_tokens=400,
         large_output_externalization_path=str(directory / "externalized"),
     )
+    if storage_arms is not None:
+        if "embedding" in storage_arms.writers:
+            config.embeddings_enabled = True
+            config.embedding_provider = arms.FakeEmbedder.provider_id
+            config.embedding_model = arms.FakeEmbedder.model_id
+        storage_arms.prepare(config, directory)
     candidate = hasattr(engine_module.LCMEngine, "_ledger_count")
     operations = Operations(capture, candidate)
     errors: list[str] = []
@@ -326,6 +339,8 @@ def run(cell: str, directory: Path, config_module: Any, engine_module: Any,
 
     def new_engine(owner: str) -> Any:
         engine = engine_module.LCMEngine(config=config, hermes_home=str(directory / "home"))
+        if storage_arms is not None:
+            storage_arms.engines.append(engine)
         cells.start(engine, owner)  # Opens the lazy store before contention.
         conn = engine._store._conn
         if busy_timeout_ms is not None:
@@ -379,13 +394,23 @@ def run(cell: str, directory: Path, config_module: Any, engine_module: Any,
         return engine_a
 
     def operation(*args: Any) -> Any:
+        if storage_arms is not None and not storage_arms.gate.is_set():
+            storage_arms.start(config)
         return contention(lambda: operations(*args))
 
+    host_before = hoststat.snapshot()
     try:
         if contention.error is not None:
             raise RuntimeError("B initialization failed")
         cells.sequence(cell, engine_a, restart, operation)
     except Exception as exc:
+        if storage_arms is not None and not storage_arms.gate.is_set():
+            # Release waiting workers even when the schedule never started,
+            # preserving the cell failure if teardown also fails.
+            try:
+                storage_arms.finish(arm_output)
+            finally:
+                raise exc
         errors.append(f"A:{type(exc).__name__}")
     finally:
         finish.set()
@@ -397,6 +422,7 @@ def run(cell: str, directory: Path, config_module: Any, engine_module: Any,
             engine_a.shutdown()
         except Exception as exc:
             errors.append(f"A shutdown:{type(exc).__name__}")
+    host = hoststat.delta(host_before, hoststat.snapshot())
     records = sorted(operations.records, key=lambda record: record["begin"])
     totals = {owner: {"operations": sum(r["engine"] == owner for r in records),
                       "busy": sum(r["engine"] == owner and r["busy"] for r in records)}
@@ -406,7 +432,7 @@ def run(cell: str, directory: Path, config_module: Any, engine_module: Any,
     if (totals["A"]["operations"] != cells.A_OPERATIONS[cell]
             or totals["B"]["operations"] != k * cells.A_OPERATIONS[cell]):
         errors.append("fixed exposure violated: driver bug")
-    return {"cell": cell, "k": k, "b_view_rows": b_view_rows,
+    result = {"host": host, "cell": cell, "k": k, "b_view_rows": b_view_rows,
             "busy_timeout_ms": busy_timeout_ms, "applied_timeouts": timeouts,
             "seed": seed, "window_ms": window_ms, "offsets_ms": contention.offsets,
             "candidate_counters": candidate, "b_batches": ticks,
@@ -416,6 +442,12 @@ def run(cell: str, directory: Path, config_module: Any, engine_module: Any,
             "inconclusive": any(record["inconclusive"] for record in records),
             "effective_defaults": effective_defaults(config_module),
             "logs": capture.records.copy()}
+    if storage_arms is not None:
+        result["storage_arms"] = storage_arms.finish(arm_output)
+        result["storage_arm_drains"] = storage_arms.embedding_drains.copy()
+        if result["storage_arms"].get("errors"):
+            result["inconclusive"] = True
+    return result
 
 
 def main() -> None:
@@ -430,6 +462,7 @@ def main() -> None:
     parser.add_argument("--busy-timeout-ms", type=int, default=DEFAULT_BUSY_TIMEOUT_MS)
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
     parser.add_argument("--window-ms", type=float, default=DEFAULT_WINDOW_MS)
+    arms.add_arguments(parser)
     args = parser.parse_args()
     if min(args.runs, args.k, args.b_view_rows) < 1 or args.window_ms < 0:
         parser.error("runs, k and b-view-rows must be positive; window-ms must be nonnegative")
@@ -441,22 +474,26 @@ def main() -> None:
     for method in ("ingest", "compress", "on_session_start", "on_session_end", "shutdown"):
         if not callable(getattr(engine_module.LCMEngine, method, None)):
             raise RuntimeError(f"needed public method missing: {method}")
-    offline_setup(engine_module)
+    offline_setup(engine_module, embedding=args.background_writers in ("embedding", "all"))
     identity = tree_identity(args.tree.resolve())
     capture = Capture()
     root = logging.getLogger()
     debug_capture(capture)
     failed = False
     try:
-        with args.output.open("x") as output:
+        with arms.StorageArms(args) as storage, args.output.open("x") as output:
             for number in range(args.runs):
                 result = run(args.cell, args.work / f"run-{number}", config_module,
                              engine_module, capture, args.k, args.b_view_rows, args.busy_timeout_ms,
-                             args.seed + number, args.window_ms)
+                             args.seed + number, args.window_ms,
+                             storage if storage.enabled else None,
+                             args.output.parent / f"{args.output.stem}-run-{number}")
                 result["run"], result["tree_identity"] = number, identity
                 output.write(json.dumps(result) + "\n")
                 output.flush()
                 failed |= bool(result["errors"]) or result["inconclusive"]
+                if result.get("storage_arms", {}).get("errors"):
+                    break  # A failed retirement cannot share a recorder with another run.
     finally:
         root.removeHandler(capture)
     if failed:

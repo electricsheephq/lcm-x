@@ -393,6 +393,9 @@ class _RollupMaintenanceScheduler:
 
 
 _ROLLUP_MAINTENANCE_SCHEDULER = _RollupMaintenanceScheduler()
+_HOST_ROW_RECOVERY_SCHEDULER = _RollupMaintenanceScheduler(
+    kind="host-row recovery", thread_name="lcm-host-row-recovery"
+)
 # #1014: incremental embedding passes get their own worker, so a slow local
 # model load never delays a rollup pass and draining one never waits on the other.
 _EMBEDDING_MAINTENANCE_SCHEDULER = _RollupMaintenanceScheduler(

@@ -15,7 +15,7 @@ CHILD_BARS = ("B10",)  # scorers/delegated.py: delegated children stored under t
 TRANSPORTS = ("acp", "gateway")
 FAULTS = {"crash_after_compaction_before_reply", "clean_exit_before_turn", "crash_mid_tool_call",
           "crash_after_rotation_before_child_row", "crash_between_session_end_and_start", "cancel_then_retry",
-          "publication_failure", "plugin_switch", "forced_recovery", "p8_inject", "forced_compaction_then_turn"}
+          "publication_failure", "plugin_switch", "forced_recovery", "p8_inject", "forced_compaction_then_turn", "crash_after_host_reply_before_store"}
 # issue -> (the bars that decide it, what an uncovered issue would need)
 ISSUES = {
     1623: (("B1", "B2"), "acp-process stopped-turn immediate persistence"),
@@ -45,8 +45,8 @@ ISSUES = {
     # session; LCM stores the parts only
     821: (("B1", "B2", "B3", "B4", "B5", "B8"), "r34.4/upstream-uid host: held composite vs durable parts after a crash on rotation"),
     871: (("B2",), "r34.4 rotation: crash between parent end and child start, the crash turn's user row unstored"),
-    # acp-process only in practice: the crash point races reply persistence (3 of 12 runs fail on either plugin ref);
-    # the same two shapes occur on ref, customer, r34.4 and upstream-uid (not seen on upstream-main)
+    # acp-process, crash after rotation: the scorer now expects an in-flight reply the host kept, so #861 covers only
+    # the crash turn's user row left unstored; a host-kept reply in an abandoned rotation child is recovered (#2624)
     861: (("B1", "B2"), "acp-process: intermittent around the crash after rotation"),
     916: (("F4",), "acp-process continuity: survival projection removes the current user tag"),
     1501: (("B1", "B2"), "rotation replay after a carried host stamp, including a previous-GA store"),
@@ -332,7 +332,36 @@ def registry() -> list[dict]:
                    faults=[] if v == "none" else [{"kind": "p8_inject", "variant": v}],
                    doc="P8 flush positive control; none is the negative control.")
               for v in ("archived", "other-active", "random-snapshot", "none")]
+    cells += [cell("reply-held-crash/" + name, targets, in_place=ip, user={"trailing_ws": True},
+                   faults=[fault], doc=proof + " Reservation holds the store; does not prove natural crash timing.")
+              for name, ip, targets, fault, proof in (
+                  ("rotation-turn", False, [], {"kind": "crash_after_host_reply_before_store", "turn": 12, "depth": 1},
+                   "First rotation child reply survives a crash and reload."),
+                  ("plain-turn", False, [], {"kind": "crash_after_host_reply_before_store", "turn": 15, "depth": 1},
+                   "A later reply in the first child survives a crash and reload."),
+                  ("multi-hop", False, [], {"kind": "crash_after_host_reply_before_store", "turn": 22, "depth": 2},
+                   "A reply two compression hops from the ACP root survives reload."),
+                  ("pre-rotation", False, [], {"kind": "crash_after_host_reply_before_store", "turn": 5, "depth": 0},
+                   "Root-session crash control before rotation."),
+                  ("in-place", True, [], {"kind": "crash_after_host_reply_before_store", "turn": 15, "depth": 0},
+                   "Default in-place compaction crash control without a rotation child."))]
+    cells += [held_tool_cell("tool-turn"), held_tool_cell("tool-loop")]
     return cells
+
+
+def held_tool_cell(name, *, in_place=False):
+    loop = name == "tool-loop"
+    return cell("reply-held-crash-control/tool-loop-in-place" if in_place else "reply-held-crash/" + name,
+                [], in_place=in_place, user={"trailing_ws": True}, big_lines=8,
+                faults=[dict(kind="crash_after_host_reply_before_store", turn=15, depth=0 if in_place else 1,
+                             **({"at": "tool_results"} if loop else {}))],
+                tool_plan=[{"turns": [15], "calls": [
+                    {"name": "read_file", "args": {"path": "{files}/small.txt"}},
+                    {"name": "read_file", "args": {"path": "{files}/big.txt"}}]}],
+                doc=("User row, call row and both results survive a mid-tool-loop crash (no final reply) and reload."
+                     if loop else "Whole tool turn survives crash and reload; the final reply is held at the kill; "
+                                  "whether the tool rows were already stored is recorded as store_turn_tool_rows.")
+                    + " Reservation holds the store; does not prove natural crash timing.")
 
 
 def validate(c: dict) -> None:
@@ -348,9 +377,9 @@ def validate(c: dict) -> None:
         assert g["turns"] == "restart" or all(1 <= t <= c["turns"] for t in g["turns"]), c["id"]
 
 
-def select(patterns: str, extra=(), opt_in=()) -> list[dict]:
-    """Default-window backtests and ``opt_in`` probes match explicit patterns only, never ``all``."""
-    opt_in = (*default_window_cells(), *opt_in)
+def select(patterns: str, extra=(), opt_in=(), controls=()) -> list[dict]:
+    """Default-window backtests, ``opt_in`` probes and ``controls`` match explicit patterns only, never ``all``."""
+    opt_in = (*default_window_cells(), *opt_in, *controls)
     cells = registry() + list(extra)  # extra: transport-only cells (R2 process_cell.R2_CELLS)
     for c in cells + list(opt_in):
         validate(c)

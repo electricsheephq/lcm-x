@@ -81,7 +81,18 @@ B1 and B2 are scored per session lineage: the chat lineage is S0 and its compres
 The expected assistant rows come from the provider log, not the host result: exactly one scripted reply per
 completed non-cancel attempt (a reply the host dropped is a deficit), plus the host's own cited failed-turn copy
 (`agent/turn_failure_copy.py` `FAILED_TURN_NOTICE`/`PARTIAL_FAILED_TURN_NOTICE`, exact text) only on an attempt
-the host reported `interrupted`. Any other assistant row is surplus.
+the host reported `interrupted`. B1/B2 also expect host-held in-flight replies as follows. An attempt with an
+emit and no turn end contributes its nonempty last emit only when host assistant evidence in its lineage has
+capacity after already expected assistant items of the same `multiset.h` key: the first
+`max(0, host_count - ended_count)` such attempts in transcript order are expected once each. Host counts use the
+same per-session maximum active count and inactive floor of one as user parity, with the same carrier/recovery
+exclusions and fail-closed reasons; attempts needing an unknown session get no reply expectation. These are
+expectations in both directions, never surplus licences: a missing stored reply or an extra copy fails.
+`numbers.B2.host_held_inflight_replies` lists each selected tag, lineage, 12-character key and host row ids, and is
+absent when empty. Any other assistant row is surplus.
+On the upstream-main and upstream-uid hosts a restart resumes the parent session and abandons the rotation child
+whose last row is the interrupted turn's reply, so the host keeps a reply the plugin is never shown again. Since
+#2624's fix the plugin recovers those rows from the abandoned child at the next start, and the scorer expects them.
 - **B1** every `[Tnn]` user tag (`[A-Z]\d{2,3}`: T100-T103 on 100-turn cells) and `reply to Tnn` sits in
   exactly as many stored rows as expected,
   and every stored `continue` row has the reply of its own host occurrence.
@@ -164,10 +175,15 @@ the host reported `interrupted`. Any other assistant row is surplus.
   of a B2 key (or a B1 user tag) in lineage L is licensed only up to what the cell's own host state.db holds in L:
   `min(surplus, host_count - expected)`, floored at 0. host_count is what one host view holds: the most ACTIVE rows
   one session of L holds at once, else 1 if L holds it only on inactive rows; rotation copies, in-place generation
-  copies and H1's fresh-stamp re-issues never add up. Deficits, assistant and tool rows are never licensed. No
+  copies and H1's fresh-stamp re-issues never add up. Deficits, assistant and tool rows are never licensed as
+  surplus; the separate host-held in-flight expectation above uses assistant evidence. No
   readable state.db, no licence (`unavailable` records why). Every licence is reported: `host_parity_licensed`
   under `numbers.B1`/`numbers.B2` (count + up to 10 records: LCM store ids, host row ids, content sha256, tags), the
   MATRIX `host-dup` column and "PASS with host-parity licences" section, and the ISSUE-MAP licence list.
+B10's inputs are unchanged; a child's own reply with the same bytes as an ended parent reply is labelled by
+B10 today, a limit this change does not alter; no recorded cell holds such a collision (the scripted child reply
+differs from every parent reply).
+
 - **B3** zero `publication_invariant_conflict` log lines across phases.
 - **B8** zero `LCM survival fit applied` log lines across phases (#582): a survival fit keeps an over-window
   session alive, so on a normal cell it marks a compaction that did not bring the list under the window.
@@ -479,3 +495,83 @@ The nightly gate checks this pattern per host and transport, with B9 required in
 `controls.py` records the measured must-support pairs, where missing or UNSUPPORTED controls gate; other pairs
 may be UNSUPPORTED, but any PASS/FAIL must match.
 Disable wraps with `LCM_RELIABILITY_P8=off` or `--lcm-env LCM_RELIABILITY_P8=off`; faults stay.
+
+## Held-reply crash (#2624)
+
+`crash_after_host_reply_before_store` runs only under `acp-process`: reserve the
+plugin store with `BEGIN IMMEDIATE`, release the scripted MAIN reply, poll the
+read-only host DB every 2 ms for a new assistant row, then kill immediately.
+Validate the row's ACP root and compression depth, check that the host kept the
+reply and the store did not, release all connections, and restart the same ACP
+session. Phase B must finish `done`. Reservation failure, a five-second poll
+timeout, invalid lineage, host group did not exit, failed post-kill checks, or failed restart yields ERROR
+with `reply-held fault INVALID`. Evidence records contain times and counts, not content.
+
+The held-reply fault follows this order:
+
+| step | what happens | invariant it protects | final when read? |
+|---|---|---|---|
+| reservation | `BEGIN IMMEDIATE` before release | Store writer is blocked | — |
+| release | Release turn N's reply | Reservation precedes response bytes | — |
+| poll | Read-only poll every 2 ms | Witness a new host reply | Yes, once written |
+| kill | Signal on the poll that sees the row; no read in between | Close the witnessed window | — |
+| exit confirmed | Group gone and leader exited; bounded 5 s, else INVALID | No writer in the host's process group can commit later | — |
+| validity read | Check new row, root, depth | Correct reply and lineage | Yes |
+| post-kill check | Host has the witnessed row; store has none | Confirm the held-reply window | Yes |
+| ROLLBACK | Last, on every path | Hold reservation through checks; release before restart | — |
+| restart | Phase B `session/load` must end `done` | Recovery completes in the same session | — |
+
+The `tool_results` position arms on step 0's tool-call response, before any tools run.
+It polls for every issued call id's tool result in the host DB. The next main request
+still records `tool_seen`, then is held until killed and never released: no final reply
+exists. Root/depth and the call row plus all results are checked after group exit;
+Reservation failure, response release failure, or a poll timeout or exception also
+kills and confirms exit, without firing the fault.
+
+| step | what happens | invariant it protects | final when read? |
+|---|---|---|---|
+| reservation | `BEGIN IMMEDIATE` before the tool-call response | Store writer is blocked | — |
+| release | Release the tool-call response | Reservation precedes response bytes | — |
+| host writes | Call row and both results | Host owns the tool turn | — |
+| poll | Wait until every result row of the step exists | Witness the whole step | Yes, once written |
+| next main request | Held, never released (may overlap the poll) | No final reply exists | — |
+| kill | Signal on the witnessing poll; no intervening read | Close the witnessed window | — |
+| exit confirmed | Group gone and leader exited; bounded 5 s | No writer in the host's process group can commit later | — |
+| validity read | One session, ACP root and expected depth | Correct tool turn and lineage | Yes |
+| post-kill check | Call row and every result in host; none in store | Confirm the held tool-loop window | Yes |
+| ROLLBACK | Last, on every path | Hold reservation through checks | — |
+| restart | Phase B `session/load` must end `done` | Recovery completes in the same session | — |
+
+In both orders, `fire()` reads the host-log commit count between kill and exit;
+that count is diagnostic only and is not final when read.
+
+The five cells use provisional turn/depth pairs: `rotation-turn` (12/1),
+`plain-turn` (15/1), `multi-hop` (22/2), `pre-rotation` (5/0), and `in-place`
+(15/0). All five gate every host. Before #2624's fix,
+upstream-main and upstream-uid failed the first three with B1/B2, classified
+KNOWN under #2624: `rotation-turn` lacked the T12 reply (B1 `reply T12`, B2 deficit
+1), and in some runs also the T12 user row (B1 `T12` and `reply T12`, B2 deficit
+2), because at a run's first rotation the plugin sometimes stores the user row
+only together with the reply; `plain-turn` lacked the T15 user row and reply
+(B1 `T15` and `reply T15`, B2 deficit 2); `multi-hop` lacked the T22 user row and
+reply (B1 `T22` and `reply T22`, B2 deficit 2). With the fix all five should PASS on
+every host.
+The two additional cells use turn/depth 15/1 and two distinct `read_file` paths.
+Before #2624's fix, upstream-main and upstream-uid failed them: `tool-turn` with B1
+(`T15`, `reply T15`), B2 deficit 2 and `tool_missing_rows` 4; `tool-loop` with B1
+(`T15`), B2 deficit 1 and `tool_missing_rows` 4. With the fix both should PASS on
+every host. The opt-in `reply-held-crash-control/tool-loop-in-place` (15/0) should
+PASS on every host; it is excluded from `--cells all` and the nightly matrix.
+B6 is judged when a tool group is stored or a split, orphan drop, or tool execution
+failure is recorded. For these held tool cells alone, no stored group otherwise
+makes B6 not applicable when host tool rows are readable. Unavailable host tool rows
+keep B6 applicable and cap a passing B2 at INCONCLUSIVE.
+Other exact known failures retain their existing classification; other failed bars
+remain findings. Depth validation decides validity, not the cell's name.
+
+The measured upstream-main store uses WAL journal mode. The reservation blocks
+every writer in either WAL or delete journal mode. This proves behavior while
+the reservation prevents a store commit. The
+reservation, rather than natural slowness, creates that window. It does not prove
+natural crash timing, real-model timing, or behavior on host versions other than
+the pins. No timed-crash variant is provided.

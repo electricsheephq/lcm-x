@@ -34,6 +34,10 @@ from . import bars, capture, gateway, pins, plan as planner, provider as prov, s
 from ..release_gauntlet import kit_evidence
 
 SCHEMA = "d5-clone-receipt/1"
+# An informational real-store check (release manager, 2026-11-12): never a D5 receipt, never judged as one.
+INFORMATIONAL_SCHEMA = "informational, not D5"
+NOT_RUN = "NOT RUN (informational)"
+RECORDED_PREFLIGHTS = ("P3", "P4", "P6", "P7")  # Read from recorded receipts; P5 runs live in every mode.
 _ISO_Z = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}(:[0-9]{2}(\.[0-9]+)?)?Z")  # The settings time, UTC.
 NEED_FREE = 40 * 10**9
 PREFLIGHTS = ("P3", "P4", "P5", "P6", "P7")
@@ -788,7 +792,7 @@ def _range_new_rows(out):
         return None
 
 
-def run_arm(host, name, home, plan, extras):
+def run_arm(host, name, home, plan, extras, no_binds=False):
     ctx = host.arm(name, home, plan)
     cron_paused = host.pause_cron(ctx)  # Before the first gateway start: no snapshot job fires in the run.
     flagged_start = _keyed(flagged_summary_nodes(_store_path(home), [c["session_id"] for c in plan["conversations"]]))
@@ -804,7 +808,7 @@ def run_arm(host, name, home, plan, extras):
             host.start(ctx)
             begun, cold = time.monotonic(), []
             for step in epoch["steps"]:
-                bind = name == "rc" and step["kind"] == "cold"
+                bind = not no_binds and name == "rc" and step["kind"] == "cold"  # No T0/H8 capture, no replay.
                 if bind:
                     t0_dir, t0 = host.capture(ctx, "T0", step, extras)
                 planned += 1
@@ -892,12 +896,17 @@ def inherited_flags(plan, arms, ga_rerun=None):
     return out
 
 
-def run(host, *, rc_id, prior=(), instrument_fix=None):
-    """The whole run; returns the receipt (counts, ids, sha256s and verdicts only)."""
+def run(host, *, rc_id, prior=(), instrument_fix=None, informational=False):
+    """The whole run; returns the receipt (counts, ids, sha256s and verdicts only). *informational* (opt-in, off by
+    default): P3, P4, P6 and P7 are not read or gated, no bind is captured or replayed, a failed GA check is recorded
+    and not re-run, and the receipt carries bars 3 to 6 only, no verdict, under its own schema: it is never D5."""
     started = time.monotonic()
     prior = [p for p in prior if p.get("rc") == rc_id and "verdict" in p]  # A stopped run is not an attempt.
     prior_verdicts = [p["verdict"]["raw"] for p in prior]
-    receipt = {"schema": SCHEMA, "rc": rc_id, "attempt": len(prior_verdicts) + 1, "instrument_fix": instrument_fix}
+    receipt = {"schema": INFORMATIONAL_SCHEMA if informational else SCHEMA, "rc": rc_id,
+               "attempt": len(prior_verdicts) + 1, "instrument_fix": instrument_fix}
+    if informational:
+        receipt["instrument"] = instrument_identity()  # The runner's exact commit and package hash, for readers.
     receipt["settings"] = {  # A disclosed fact, never judged (release manager, 2026-11-10); only a UTC time is written.
         "as_of": _utc_time(getattr(host, "c", {}).get("settings_as_of")),
         "note": "both arms run the declared reference-settings snapshot taken at as_of, assumed unchanged since"}
@@ -908,7 +917,8 @@ def run(host, *, rc_id, prior=(), instrument_fix=None):
         if steps["P1"].get("verdict") == "PASS" and any(
                 p.get("pins", {}).get("rules_sha256") != steps["P1"].get("rules_sha256") for p in prior):  # Spec: the rule code never changes on this rc.
             refusal = "the rule code changed since an earlier attempt on this rc; that applies from the next rc"
-    for name in ("P2", "plan", *PREFLIGHTS):
+    gated = [n for n in PREFLIGHTS if not (informational and n in RECORDED_PREFLIGHTS)]
+    for name in ("P2", "plan", *gated):
         if refusal or any(s.get("verdict") != "PASS" for s in steps.values()):
             break
         if name == "P2":
@@ -920,13 +930,14 @@ def run(host, *, rc_id, prior=(), instrument_fix=None):
         else:
             steps[name] = host.preflight(name, plan)
     stopped = refusal or next((k for k, s in steps.items() if s.get("verdict") != "PASS"), None)
-    if stopped or len(steps) != 4 + len(PREFLIGHTS):
+    if stopped or len(steps) != 4 + len(gated):
         return {**receipt, "stopped_at": stopped, "wall_s": {"total": round(time.monotonic() - started, 3)}}
+    steps.update({n: {"verdict": NOT_RUN} for n in PREFLIGHTS if n not in gated})
     rules, base = host.rules(), host.run_dir / "plan" / "home"
-    arms = {name: run_arm(host, name, host.clone(name), plan, {"RC3/store.db": base / "store.db"})
-            for name in ("rc", "ga")}
+    arms = {name: run_arm(host, name, host.clone(name), plan, {"RC3/store.db": base / "store.db"},
+                          no_binds=informational) for name in ("rc", "ga")}
     ga_rerun = None  # Bar 5: a failed check in the GA arm re-runs that arm once (release manager, 2026-11-07).
-    if bars.failed_checks(arms["ga"]["checks"]):
+    if not informational and bars.failed_checks(arms["ga"]["checks"]):
         ga_rerun = run_arm(host, "ga", host.clone("ga-rerun"), plan, {"RC3/store.db": base / "store.db"})
     snap = host.rows(base)
     unreadable = [a for a in arms if arms[a]["rows"] is None]
@@ -935,17 +946,19 @@ def run(host, *, rc_id, prior=(), instrument_fix=None):
     tops = {k: max((r[c] for r in snap[k]), default=0) for k, c in (("store", "store_id"), ("host", "id"))}
     new = {a: [r for r in arms[a]["rows"]["store"] if r["store_id"] > tops["store"]] for a in arms}
     binds, hosts = arms["rc"]["binds"], [r for r in arms["rc"]["rows"]["host"] if r["id"] > tops["host"]]
-    host.configure_bar1(rc_rows=new["rc"], host_rows=hosts, snapshot_store=base / "store.db",  # the plan clone's
-                        window_start=max((b["t0_at"] for b in binds), default=None),
-                        bind_receipts=[b["receipt"] for b in binds if isinstance(b["receipt"], dict)])
-    results = {
+    if not informational:  # Bars 1 and 2 judge binds and copies, which the informational check never makes.
+        host.configure_bar1(rc_rows=new["rc"], host_rows=hosts, snapshot_store=base / "store.db",  # plan clone's
+                            window_start=max((b["t0_at"] for b in binds), default=None),
+                            bind_receipts=[b["receipt"] for b in binds if isinstance(b["receipt"], dict)])
+    results = {} if informational else {
         # GA rows unreadable: GA's class-3 allowance is unknown, so it is set to the rc's own rows (never exceeded);
         # a lost or settled unassigned row still fails, and the class-3 judgment is left INCONCLUSIVE below.
         "bar1": bars.bar1(new["rc"], hosts, snap["store"] + snap["host"],
                           new["rc"] if "ga" in unreadable else new["ga"], binds,
                           {b["bind"]: b["bar2"]["verdict"] for b in binds}, rules["identity"], rules["credits"],
                           missing_receipts=[b["bind"] for b in binds if not isinstance(b["receipt"], dict)]),
-        "bar2": bars.bar2([b["bar2"] for b in binds]),
+        "bar2": bars.bar2([b["bar2"] for b in binds])}
+    results.update({
         "bar3": bars.bar3(snap["store"], arms["rc"]["rows"]["store"], rules["identity"]),
         "bar4": {**bars.bar4(arms["rc"]["logs"], arms["ga"]["logs"], arms["rc"]["roots"], arms["ga"]["roots"]),
                  "raw_counts_note": "the host writes each log line to two files (agent.log and gateway.log), so the raw"
@@ -957,17 +970,18 @@ def run(host, *, rc_id, prior=(), instrument_fix=None):
                  "flagged_summary_nodes": {  # Per driven session: at the start, and in each arm at its end (#2471).
                      "start": _keyed({c["session_id"]: c.get("flagged_summary_nodes") for c in plan["conversations"]}),
                      **{a: arms[a]["flagged_summary_nodes"] for a in arms}}},
-        "bar6": bars.bar6({a: arms[a]["workload"] for a in arms})}
+        "bar6": bars.bar6({a: arms[a]["workload"] for a in arms})})
     if "rc" in unreadable:  # Bars 1 and 3 judge the rc's rows: without them neither can pass or fail.
-        for bar in ("bar1", "bar3"):
+        for bar in ("bar3",) if informational else ("bar1", "bar3"):
             results[bar] = {"verdict": bars.INCONCLUSIVE, "rows_unreadable": unreadable}
-    elif unreadable:  # Only GA's rows: bar 3 never reads them, and an rc failure bar 1 finds without GA stands.
+    elif unreadable and not informational:  # Only GA's rows: bar 3 never reads them, and an rc failure bar 1 finds without GA stands.
         verdict = bars.FAIL if results["bar1"]["verdict"] == bars.FAIL else bars.INCONCLUSIVE
         results["bar1"] = {**results["bar1"], "verdict": verdict, "rows_unreadable": unreadable}
-    results["bar1"]["known_risk"] = (  # Release manager, 2026-11-07: recorded, not changed (the K6 rule is frozen).
-        "class 3's GA allowance matches rows by content identity across the arms; a tool output that names its arm's"
-        " home path differs between the arms there, so such a leftover can show as over GA (a false FAIL, never a"
-        " false PASS); the fix would be path parity in the runner")
+    if not informational:  # Release manager, 2026-11-07: recorded, not changed (the K6 rule is frozen).
+        results["bar1"]["known_risk"] = (
+            "class 3's GA allowance matches rows by content identity across the arms; a tool output that names its"
+            " arm's home path differs between the arms there, so such a leftover can show as over GA (a false FAIL,"
+            " never a false PASS); the fix would be path parity in the runner")
     private = {a: _private_arm(arms[a]["provider"], arms[a]["routing"]) for a in arms}
     receipt.update(
         arms={a: {**{k: arms[a][k] for k in ("workload", "egress", "doctor_not_exercised", "cron_paused")},
@@ -978,7 +992,7 @@ def run(host, *, rc_id, prior=(), instrument_fix=None):
                                "provider": _private_arm(ga_rerun["provider"])[0],
                                "checks": bars.check_counts(ga_rerun["checks"])},
         binds=[{k: v for k, v in b.items() if k not in ("dup_store_ids", "receipt")} for b in binds], bars=results,
-        verdict=bars.verdict(results, prior_verdicts),
+        **({} if informational else {"verdict": bars.verdict(results, prior_verdicts)}),
         wall_s={**{a: arms[a]["wall_s"] for a in arms}, "total": round(time.monotonic() - started, 3)})
     return receipt
 
@@ -991,12 +1005,19 @@ def main(argv=None):
     parser.add_argument("--rc-id", required=True, help="the rc under test (tag or commit)")
     parser.add_argument("--prior-receipt", action="append", default=[], help="an earlier receipt for this rc")
     parser.add_argument("--instrument-fix", help="the reviewed instrument fix, after an instrument defect")
+    parser.add_argument("--informational", action="store_true",
+                        help="an informational real-store check, never D5: no P3/P4/P6/P7 gate, no binds, bars 3-6 only")
     args = parser.parse_args(argv)
     config = {**json.loads(Path(args.config).read_text(encoding="utf-8")), "instrument_dir": args.instrument_dir}
     prior = [json.loads(Path(p).read_text(encoding="utf-8")) for p in args.prior_receipt]
-    receipt = run(LocalHost(config, outside_package(args.run_dir)), rc_id=args.rc_id, prior=prior, instrument_fix=args.instrument_fix)
-    with (Path(args.run_dir) / "d5-clone-receipt.json").open("x", encoding="utf-8") as out:
+    receipt = run(LocalHost(config, outside_package(args.run_dir)), rc_id=args.rc_id, prior=prior,
+                  instrument_fix=args.instrument_fix, informational=args.informational)
+    name = "informational-receipt.json" if args.informational else "d5-clone-receipt.json"
+    with (Path(args.run_dir) / name).open("x", encoding="utf-8") as out:
         json.dump(receipt, out, sort_keys=True, indent=2)
+    if args.informational:
+        print(json.dumps({"schema": receipt["schema"], "stopped_at": receipt.get("stopped_at")}))
+        return 2 if "stopped_at" in receipt else 0
     print(json.dumps({"verdict": receipt.get("verdict"), "stopped_at": receipt.get("stopped_at")}))
     return 0 if "verdict" in receipt else 2
 

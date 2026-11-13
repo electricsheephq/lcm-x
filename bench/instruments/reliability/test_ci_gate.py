@@ -1,4 +1,8 @@
 """#1588 exact-cell gate promotions; no host process or message payloads needed."""
+import json
+import subprocess
+import sys
+
 import pytest
 
 from bench.instruments.reliability import cells, ci, report
@@ -50,6 +54,73 @@ def test_existing_gate_and_open_target_behavior_is_unchanged():
     assert len(ci.gate(rows, set())) == 1
     next(r for r in rows if r["cell"] == cell)["targets"] = [7]
     assert ci.gate(rows, {7}) == []
+
+
+def test_error_reason_keeps_both_edges_without_changing_problem_counts():
+    cell = "baseline/in-place/acp"
+    rows = rows_for(cell, "ref-0.21.5", "in-process", ["B1"])
+    row = next(r for r in rows if r["cell"] == cell)
+    row["targets"] = [7]
+    assert len(ci.gate(rows, set())) == 1
+    assert ci.gate(rows, {7}) == []
+
+    start, end = "START-MARKER", "END-MARKER"
+    reason = start + "x" * (1000 - len(start) - len(end)) + end
+    row.update(verdict="ERROR", reason=reason)
+    problems = ci.gate(rows, {7})
+    assert len(problems) == 1
+    assert start in problems[0] and end in problems[0] and " ... " in problems[0]
+    prefix = f"ERROR ref-0.21.5 {cell} (in-process): "
+    assert problems[0] == prefix + reason[:200] + " ... " + reason[-400:]
+
+    row["reason"] = "s" * 150
+    assert ci.gate(rows, {7}) == [prefix + row["reason"]]
+
+
+def test_run_matrix_import_does_not_import_ci():
+    result = subprocess.run(
+        [sys.executable, "-c", "import sys; import bench.instruments.reliability.run_matrix; "
+         "assert 'bench.instruments.reliability.ci' not in sys.modules"],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_report_reason_keeps_both_edges(tmp_path):
+    start, end = "START-MARKER", "END-MARKER"
+    reason = start + "x" * (1000 - len(start) - len(end)) + end
+    row = {"cell": "baseline/in-place/acp", "host": "fixture", "host_sha": "fixture",
+           "plugin_ref": "fixture", "plugin_sha": "fixture", "verdict": "ERROR", "reason": reason}
+    report.write(tmp_path, [row], 0)
+    line = next(line for line in (tmp_path / "MATRIX.md").read_text().splitlines()
+                if line.startswith("- ERROR "))
+    assert start in line and end in line
+    assert line == f"- ERROR `{row['cell']}` on fixture: " + reason[:200] + " ... " + reason[-400:]
+
+
+HELD_TARGETS = ["reply-held-crash/" + name for name in ("rotation-turn", "plain-turn", "multi-hop", "tool-turn", "tool-loop")]
+HELD_CONTROLS = ["reply-held-crash/pre-rotation", "reply-held-crash/in-place"]
+CI_HOST_NAMES = list(json.loads(ci.CI_HOSTS.read_text())["hosts"])
+
+
+@pytest.mark.parametrize("cell", ["crash-after-rotation/rotation", *HELD_TARGETS, *HELD_CONTROLS])
+@pytest.mark.parametrize("host", CI_HOST_NAMES)
+def test_former_2624_cells_gate_every_host(cell, host):
+    # #2624's fix recovers the abandoned child's rows: no KNOWN licence is left, even while the issue is open.
+    assert len(ci.gate(rows_for(cell, host, "acp-process", ["B1", "B2"]), {2624})) == 1
+
+
+@pytest.mark.parametrize("cell", HELD_TARGETS + HELD_CONTROLS)
+@pytest.mark.parametrize("host", CI_HOST_NAMES)
+def test_held_reply_errors_gate_every_host(cell, host):
+    rows = rows_for(cell, host, "acp-process", ["B1", "B2"])
+    next(row for row in rows if row["cell"] == cell)["verdict"] = "ERROR"
+    assert len(ci.gate(rows, {2624})) == 1
+
+
+def test_no_cell_targets_2624():
+    assert not [c["id"] for c in cells.registry() if 2624 in c["targets"]]
+    assert 2624 not in cells.ISSUES and 2624 not in cells.ISSUE_HOSTS and 2624 not in cells.ISSUE_TRANSPORTS
 
 
 @pytest.mark.parametrize("host,gates_b9", [("upstream-uid", True), ("ref-0.21.5", False)])

@@ -66,6 +66,8 @@ def deliver_session(ordered, response, *, engine, deadline, excluded, allowed, s
         priority = {s["session_id"]: i for i, s in enumerate(delivery["sessions"])}
         hits.sort(key=lambda h: (priority[h["session_id"]], h["store_id"]))
         response["hits"], response["total_results"] = hits, len(hits)
+        if "session_floor" in response["provenance"]:
+            response["provenance"]["session_floor"]["delivered"] = len({h["session_id"] for h in hits})
         delivery.update(message_count=len(hits), session_count=len({h["session_id"] for h in hits}))
         for meta in delivery["sessions"]:
             ids = [h["store_id"] for h in hits if h["session_id"] == meta["session_id"]]

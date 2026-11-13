@@ -348,7 +348,10 @@ line with a note (`projected_entry_without_uuid`, `projection_error:<type>`), an
   searches this store's saved tool outputs (externalized payloads), newest first. `content_scope`
   `externalized` and `both` work with `session_scope` `all` and `session`. With `session_scope`
   `current` the default stays history-only, and an explicit `externalized` or `both` is an error,
-  because the reader has no active session.
+  because the reader has no active session. The default searches saved outputs in
+  `mode='full_text'` only. In `semantic` or `hybrid` it is history-only (adding the saved-output pass
+  there measured about +130 ms p90 on a store of 8,000 saved outputs; #2592), and an explicit
+  `content_scope` is served by full-text retrieval. Use `mode='full_text'` to include saved outputs.
   - A payload hit carries `type: externalized`, its `ref` and its `session_id`. A payload matches the
     query as typed, or all its terms in any order (quoted phrases kept, uppercase OR honoured); a
     `NOT` query, or one with emoji or CJK, matches only as typed.
@@ -643,7 +646,7 @@ The release rules (the gate, no rc tag, the draft release) are in
 `docs/process/claude-code-unit-release.md`.
 
 LCM-X for Claude Code is its own release unit, versioned by the plugin manifest
-(`adapters/claude-code/.claude-plugin/plugin.json`; `0.1.0` is the preview).
+(`adapters/claude-code/.claude-plugin/plugin.json`; `0.1.0` was the preview, `1.0.0` the first full release).
 - A release is an annotated tag `claude-code-v<version>` on a `main` commit. The Hermes release
   workflows trigger on `v*` tags, so they never fire on it.
 - `scripts/build_claude_code_unit.py <tag>` builds the release asset from the tag's tree alone

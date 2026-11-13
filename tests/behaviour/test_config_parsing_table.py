@@ -52,6 +52,7 @@ CONFIG_ROWS = (
     ('sensitive_patterns_enabled', 'LCM_SENSITIVE_PATTERNS_ENABLED', 'bool', False),
     ('embedding_privacy_enabled', 'LCM_EMBEDDING_PRIVACY_ENABLED', 'bool', None),
     ('large_output_externalization_enabled', 'LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED', 'bool', True),
+    ('host_row_recovery_enabled', 'LCM_HOST_ROW_RECOVERY_ENABLED', 'bool', True),
     ('large_output_active_replay_stubbing_enabled', 'LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUBBING_ENABLED', 'bool', True),
     ('large_output_transcript_gc_enabled', 'LCM_LARGE_OUTPUT_TRANSCRIPT_GC_ENABLED', 'bool', False),
     ('stub_first_exit_target_ratio', 'LCM_STUB_FIRST_EXIT_TARGET_RATIO', 'float', 0.0),
@@ -65,6 +66,7 @@ CONFIG_ROWS = (
     ('recall_extra_entries', 'LCM_RECALL_EXTRA_ENTRIES', 'int', 0),
     ('recall_later_statements', 'LCM_RECALL_LATER_STATEMENTS', 'int', 0),
     ('recall_fts_anchor', 'LCM_RECALL_FTS_ANCHOR', 'bool', True),
+    ('recall_min_sessions', 'LCM_RECALL_MIN_SESSIONS', 'int', 0),
     ('recall_session_hints', 'LCM_RECALL_SESSION_HINTS', 'bool', False),
     ('recall_guidance', 'LCM_RECALL_GUIDANCE', 'str', 'v1'),
     ('recall_summary_event_time', 'LCM_RECALL_SUMMARY_EVENT_TIME', 'bool', False),
@@ -182,6 +184,7 @@ EXTRA_CONFIG_ROWS = (
 
 # from_env has validation after the primitive reader for these fields.
 SPECIAL = {
+    "recall_min_sessions": (D, D, D, D, 1, 0, D, D, D, D, D, D, D, 0, D, 10),
     "recall_snippet_window_hits": (D, D, D, D, 1, 0, D, D, D, D, D, D, D, D, D, 25),
     "recall_extra_entries": (D, D, D, D, 1, 0, D, D, D, D, D, D, D, D, D, 25),
     "recall_later_statements": (D, D, D, D, 1, 0, D, D, D, D, D, D, D, D, D, 5),

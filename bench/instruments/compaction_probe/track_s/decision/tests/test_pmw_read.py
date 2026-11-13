@@ -244,6 +244,8 @@ def test_runner_sequence_and_limit(tmp_path, mode, expected, fault):
         assert not Path(env["OUT"]).exists()  # rejected before starting runs
         return
     receipt = json.loads((Path(env["OUT"]) / "cell.json").read_text())
+    assert {"elapsed_s", "load1m_before", "load1m_after", "host_load_peak1m",
+            "steal_pct", "iowait_pct", "busy_pct"} <= receipt.pop("host").keys()
     assert receipt == dict(product_sha=head, kit_sha=kit_sha, arm=env.get("ARM", "LCMX-fleet-rc3"),
                            seeds=[int(n) for n in env["SEEDS"].split()], facts_floor=0.772, fault=fault or None,
                            gating=mode not in ("short-seeds", "other-arm") and not fault)
@@ -312,3 +314,13 @@ def test_runner_requires_environment(missing):
     result = subprocess.run(["bash", str(DECISION / "run_pmw_cell.sh")], env=env, capture_output=True, text=True)
     assert result.returncode == 2
     assert missing in result.stderr
+
+
+def test_host_block_is_ignored(cell):
+    root, _ = cell
+    write(root / "cell.json", {"gating": True})
+    before = invoke(cell)
+    before_bytes = (root / "read.json").read_bytes()
+    write(root / "cell.json", {"gating": True, "host": {"steal_pct": 100, "host_load_peak1m": 1000}})
+    assert invoke(cell) == before
+    assert (root / "read.json").read_bytes() == before_bytes

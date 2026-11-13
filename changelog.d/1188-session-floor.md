@@ -1,0 +1,1 @@
+- New: Opt-in recall session breadth (`recall_min_sessions`, default 0; per-call `min_sessions`) ported from #1213 for #1188. Preserve candidates, scores and the FTS anchor; report final session delivery after size fitting. Guidance v2 advertises the argument; v1 schemas and default output stay unchanged. Internal retrieval pins the floor off.

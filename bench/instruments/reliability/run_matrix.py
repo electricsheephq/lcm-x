@@ -171,9 +171,11 @@ def run_cell(cell: dict, host_name: str, host: dict, plugin: dict, out: Path, ti
         rec.update(verdict="ERROR", reason=f"host identity not verified: {(identity or {}).get('error')}")
         (d / "verdict.json").write_text(json.dumps(rec, indent=1, default=str))
         return rec
-    if cell.get("drain") or cell.get("delegate_plan"):  # decided before any probe: no host run, no DB to copy
+    held_reply = any(f["kind"] == "crash_after_host_reply_before_store" for f in cell["faults"])
+    if held_reply or cell.get("drain") or cell.get("delegate_plan"):  # decided before any probe: no host run, no DB to copy
         rec.update(verdict="UNSUPPORTED",
-                   reason="drain cells need the R2 observer's per-compaction counters (acp-process only)"
+                   reason="acp-process only: the held-reply crash needs a real host process" if held_reply else
+                   "drain cells need the R2 observer's per-compaction counters (acp-process only)"
                    if cell.get("drain") else "delegated-child cells run through a real host process (acp-process "
                    "only): the host builds each child with its own provider client (tools/delegate_tool.py "
                    "_build_child_agent), which the in-process probe's mocked client never reaches")
@@ -295,7 +297,8 @@ def main(argv=None) -> int:
     if a.transport:  # R2 (process_cell.py); without --transport the R1 in-process path is unchanged
         from bench.instruments.reliability import process_cell
     selected = C.select(a.cells, extra=process_cell.R2_CELLS if a.transport else (),
-                        opt_in=process_cell.R2_PROBE_CELLS if a.transport else ())
+                        opt_in=process_cell.R2_PROBE_CELLS if a.transport else (),
+                        controls=process_cell.R2_CONTROL_CELLS if a.transport else ())
     plugins = [plugin_tree.export(Path(a.lcm_repo), ref.strip(), out / "plugins", out) for ref in a.plugin_ref.split(",")]
     for ref in sorted({c["from_ref"] for c in selected if c.get("from_ref")}):  # native-on-off starting refs
         old = plugin_tree.export(Path(a.lcm_repo), ref, out / "plugins", out)
@@ -329,7 +332,7 @@ def main(argv=None) -> int:
             sink.flush()
             print(f"{rec['verdict']:<11} {rec['host']:<16} {rec['plugin_ref']:<12} {rec['cell']}"
                   + (f"  {sorted(rec.get('failed_bars', {}))}" if rec.get("failed_bars") else "")
-                  + (f"  {str(rec.get('reason'))[:120]}" if rec.get("reason") else ""), flush=True)
+                  + (f"  {report.edges(str(rec.get('reason')))}" if rec.get("reason") else ""), flush=True)
     report.write(out, results, time.time() - started, lcm_env)
     if a.control:
         problems = CT.check(a.control, results, list(hosts))
