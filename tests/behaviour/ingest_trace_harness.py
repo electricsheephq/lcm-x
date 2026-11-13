@@ -251,11 +251,9 @@ def engine_attributes(root: Path) -> tuple[set[str], set[str]]:
 
 class TraceConnection(sqlite3.Connection):
     failure_observer: Callable[[str, Any, Exception], None] | None = None
-    # Two authorizer slots (#2293): the product may install its own authorizer
-    # (the pre-lock ingest guard) while a harness fault is active. The harness
-    # verdict is consulted first; a harness DENY wins, otherwise the product
-    # authorizer decides. Without this the product would silently replace the
-    # injected fault. harness_denials is the positive control for fault scenarios.
+    # Test instruments (tests/prelock_instrument.py) may install a recording
+    # authorizer while a harness fault is active. The harness verdict is consulted
+    # first; a DENY wins. harness_denials positively controls fault scenarios.
     _product_authorizer: Callable[..., int] | None = None
     _harness_authorizer: Callable[..., int] | None = None
     harness_denials = 0

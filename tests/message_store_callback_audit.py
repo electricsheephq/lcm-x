@@ -19,24 +19,47 @@ def install(monkeypatch):
     active = [True]
 
     def observed(frame, event, arg):
-        if event != 'c_call' or getattr(arg, '__name__', '') not in METHODS:
+        if event == 'call' and frame.f_code.co_name in METHODS:
+            method = frame.f_code.co_name
+            if id(frame.f_locals.get('self')) not in connections:
+                return
+            caller = frame.f_back
+        elif event == 'c_call' and getattr(arg, '__name__', '') in METHODS:
+            method = arg.__name__
+            connection = getattr(arg, '__self__', None)
+            if id(connection) not in connections:
+                return
+            # A Python connection override was attributed at entry. Its eventual
+            # C registration must not hide that caller or count it twice.
+            parent = frame
+            while parent is not None:
+                if parent.f_code.co_name == method and parent.f_locals.get('self') is connection:
+                    return
+                parent = parent.f_back
+            caller = frame
+        else:
             return
-        if id(getattr(arg, '__self__', None)) not in connections:
-            return
-        filename = frame.f_code.co_filename
+        filename = caller.f_code.co_filename
         prefix = str(ROOT) + '/'
         if filename.startswith(prefix) and not filename.startswith(prefix + 'tests/'):
-            CALLS.append((arg.__name__, True, filename[len(prefix):], frame.f_lineno))
+            CALLS.append((method, True, filename[len(prefix):], caller.f_lineno))
+
+    def restore_profile(previous, setter):
+        if previous is None or callable(previous):
+            setter(previous)
+        else:
+            # cProfile's hook is an opaque Profile, not a Python callback.
+            previous.enable()
 
     def compose(previous):
         if getattr(previous, '_d1_observer', False):
             return previous
         def profile(frame, event, arg):
             if not active[0]:
-                setprofile(previous)
+                restore_profile(previous, setprofile)
             else:
                 observed(frame, event, arg)
-            if previous:
+            if callable(previous):
                 previous(frame, event, arg)
         profile._d1_observer = True
         return profile
@@ -59,7 +82,7 @@ def install(monkeypatch):
     set_thread_profile(compose(thread_prior))
     def restore():
         active[0] = False
-        setprofile(prior)
-        set_thread_profile(thread_prior)
+        restore_profile(prior, setprofile)
+        restore_profile(thread_prior, set_thread_profile)
         connections.clear()
     return restore

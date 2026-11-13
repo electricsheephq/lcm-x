@@ -7549,6 +7549,8 @@ class LCMEngine(
                                     restore_iteration()
                                     self._store._ingest_folded_tail_reads = {}
                                     begin_iteration()
+                                    if getattr(self, "_identity_anchor_recovery", None):
+                                        self._identity_anchor_observe_recovery()
                                     state.poisoned = state.reclassify_pending = False
                                     self._store.ingest_prelock_counts["reclassified"] += 1
                                     self._ledger_count("ingest.prelock.reclassified")

@@ -295,13 +295,13 @@ def test_p3_same_connection_write_by_another_thread_is_caught(tmp_path, monkeypa
 
 # -- P4: raw-connection ledger writes join the attempt's transaction --------------------------------------------------
 
-def _visible_counts(path):
+def _visible_rows(path):
     other = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5)
     try:
         out = {}
         for table in LEDGER_TABLES:
             try:
-                out[table] = other.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
+                out[table] = other.execute(f'SELECT * FROM "{table}" ORDER BY 1').fetchall()
             except sqlite3.OperationalError:
                 out[table] = None
         return out
@@ -313,13 +313,13 @@ def _isolation_probe(monkeypatch, log):
     @contextmanager
     def around(engine):
         path = engine._config.database_path
-        start = _visible_counts(path)
+        start = _visible_rows(path)
         append = MessageStore._append_protected_batch
 
         def probed(self, *args, **kwargs):
             if self is engine._store:
                 held = self._conn.in_transaction
-                visible = _visible_counts(path)
+                visible = _visible_rows(path)
                 other = sqlite3.connect(path, timeout=0, isolation_level=None)
                 try:
                     other.execute("BEGIN IMMEDIATE")

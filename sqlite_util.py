@@ -156,9 +156,9 @@ def _sqlite_savepoint(conn: sqlite3.Connection, *, abort_on_cleanup_failure: boo
         except BaseException as error:
             if scope is not None and isinstance(error, _IngestReclassify):
                 raise  # already restarted or acquired: the attempt's handler owns the rollback
-            if scope is not None:
-                state.sync()
-                if scope["uncovered"] and not isinstance(error, (KeyboardInterrupt, SystemExit)):
+            if scope is not None and not isinstance(error, (KeyboardInterrupt, SystemExit)):
+                state.sync()  # cancellation must reach the owner without a replacement reclassify
+                if scope["uncovered"]:
                     if state.rollback_uncovered():
                         raise  # every write since the implicit BEGIN was this scope's: eager's ROLLBACK TO
                     state.reclassify_pending = True
@@ -182,7 +182,9 @@ def _sqlite_savepoint(conn: sqlite3.Connection, *, abort_on_cleanup_failure: boo
                 conn.execute(f"RELEASE SAVEPOINT {name}")
     finally:
         if scope is not None:
-            assert state.scopes.pop() is scope
+            popped = state.scopes.pop()
+            if popped is not scope:
+                raise _SqliteSavepointError("ingest scope stack out of order")
 
 
 @contextmanager
