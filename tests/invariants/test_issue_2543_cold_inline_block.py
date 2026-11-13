@@ -81,8 +81,6 @@ def _final_rows(tmp_path, monkeypatch, shape, route):
 
 @pytest.mark.parametrize("route", ["cold-pairwise", "cold-counted"])
 @pytest.mark.parametrize("shape", ["wrapped-base64", "data-uri-key"])
-@pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="#2543: a stored inline encoded block fails the busy end's retried compare")
 def test_a_busy_end_stores_the_final_reply_after_an_inline_block(tmp_path, monkeypatch, shape, route):
     finals, absent = _final_rows(tmp_path, monkeypatch, shape, route)
     # Today's counted result: the inline row and the reply read as absent (2). A fix changes it with the reply.
