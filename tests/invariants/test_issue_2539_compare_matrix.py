@@ -77,7 +77,10 @@ _PINNED_GROWTH_CELLS = frozenset(
     for form in ('v0292/data-uri/spillover', 'v0292-crlf/plain/hermes-results')
     for host in ('identical', 'present')) | frozenset(
     f'reconcile-replay/bare/{form}/present/occurrences-2/shifted'
-    for form in ('data-uri/spillover', 'data-uri/hermes-results', 'plain/hermes-results'))
+    for form in ('data-uri/spillover', 'data-uri/hermes-results', 'plain/hermes-results')) | frozenset(
+    # #2661 named copy (#2558): without the legacy bare-marker binding the full-window repeat is stored once more at
+    # the second replay, as in v0.30.0; the R4-8 data check still decides each cell.
+    f'reconcile-replay/v0292/data-uri/spillover/{host}/occurrences-2' for host in ('identical', 'present'))
 # #2543 L-1 (RM T1-21, T1-21a): one copy per unverifiable host occurrence. The host re-sends a stored result as a marker
 # whose file is gone; the product binds a marker only to a row that recorded that marker, so the occurrence ladder stores
 # the marker text once per host occurrence, beside the stored body, and nothing more on a repeat. Exact counts per window:
@@ -90,7 +93,7 @@ _PINNED_COPY_CELLS = frozenset(
     for preview, windows in (('plain', ('',)), ('data-uri', ('', '/occurrences-1/shifted', '/occurrences-2',
                                                             '/occurrences-2/shifted')))
     for window in windows)
-assert len(_PINNED_LEGACY_CELLS) == 11 and len(_PINNED_GROWTH_CELLS) == 7 and len(_PINNED_COPY_CELLS) == 60
+assert len(_PINNED_LEGACY_CELLS) == 11 and len(_PINNED_GROWTH_CELLS) == 9 and len(_PINNED_COPY_CELLS) == 60
 _HOST_RECOVERY_CELLS = set()
 _COPY_CELLS = set()
 
