@@ -341,7 +341,7 @@ def test_10_foreground_insert_respaces_exhausted_gap(engines):
 
 
 def test_11_off_sql_matches_pinned_part_a(engines, monkeypatch):
-    """Lock-in: with the ledger off, an ingest's SQL equals Part A's (783a8b824) for the same fixture.
+    """Lock-in: ledger-off SQL equals Part A's (783a8b824) plus the cursor-zero guard probe.
 
     The expected statements were captured once from the Part A engine, so the test needs no git history.
     """
@@ -357,6 +357,8 @@ def test_11_off_sql_matches_pinned_part_a(engines, monkeypatch):
     finally:
         candidate._store._conn.set_trace_callback(None)
     expected = json.loads((Path(__file__).parent / "fixtures" / "ingest_ledger_off_sql_part_a.json").read_text())
+    # #2042: exactly one indexed probe after BEGIN/attempt savepoint; preserve the historical fixture.
+    expected.insert(2, "SELECT EXISTS(SELECT 1 FROM messages WHERE session_id = 'S')")
 
     def product(sql):
         # Drop SQLite's own FTS5 statements, as the ingest trace harness does: they vary by SQLite version.

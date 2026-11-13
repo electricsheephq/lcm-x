@@ -87,6 +87,7 @@ jobs:
             tokens.py
             tool_pairs.py
             tool_registry.py
+            unended_catchup.py
         run: |
           relevant=true
           if [[ "$EVENT_NAME" == pull_request || "$EVENT_NAME" == merge_group ]]; then
