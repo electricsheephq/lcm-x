@@ -248,6 +248,21 @@ def test_late_session_end_after_unload_stores_suffix_once(preflight, already_sto
     assert not path.exists()
 
 
+def test_late_session_end_does_not_store_native_compaction_scaffold(preflight, caplog):
+    prototype, old_ctx = preflight.register(supports_unload=True)
+    clone = prototype.clone_for_agent()
+    clone.on_session_start("late-projected-end", platform="cli")
+    old_ctx.unload_callbacks[0]()
+    clone.on_session_end("late-projected-end", [
+        {"role": "user", "content": "[CONTEXT COMPACTION — REFERENCE ONLY]", "_compressed_summary": True},
+        {"role": "assistant", "content": "late answer"},
+    ])
+    path = preflight.home / "lcm.db"
+    assert _durable_messages(path, "late-projected-end") == []
+    assert "final messages may be absent from the plugin-local store supplied_rows=2" in caplog.text
+    path.unlink()
+
+
 def test_retired_end_reconciles_the_current_writer(preflight, monkeypatch):
     prototype, old_ctx = preflight.register(supports_unload=True)
     retired = prototype.clone_for_agent()

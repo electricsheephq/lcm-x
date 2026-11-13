@@ -5164,6 +5164,8 @@ class LCMEngine(
                 return None
         suffix = view[covered:]
         for row in suffix:
+            if row.get("_compressed_summary"):
+                return None  # Hermes marked the row as a compaction projection.
             content = row.get("content")
             if (row.get("role") in ("user", "assistant") and isinstance(content, str)
                     and self._verified_lcm_summary_prefix(
