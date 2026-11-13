@@ -484,21 +484,43 @@ def test_2000_row_lock_and_transaction_timing(lanes, monkeypatch, record_propert
           "whole retry lock/transaction seconds:", transactions)
 
 
-@pytest.mark.parametrize("shape", SHAPES)
+_REBIND_COUNTS = {  # (after the end, after the rebind ingest); main and v0.30.0 end at 12 / 22 / 22 / 22 / 23
+    "plain": (11, 12), "T6i": (11, 12), "T6ii": (11, 12), "T7-unwrapped": (11, 12),
+    "T7-wrapped": (12, 24), "T7K": (12, 24), "edit": (12, 24), "insert": (12, 25)}
+
+
+@pytest.mark.parametrize("shape", list(_REBIND_COUNTS))
 def test_rebind_after_an_off_current_end_adds_only_the_new_turn(lanes, monkeypatch, shape):
-    """#2543 review CR-3: after an off-current end, the session's next bind stores only the new prompt where v0.30.0
-    does. T7-wrapped and T7K re-store the whole view at the next bind in v0.30.0 too (22 rows); there the end's FINAL
-    and copy stay beside that re-store (named limit L-6)."""
+    """#2543 review CR-3 and named limit L-6 (RM T1-23). After an off-current end, the session's next bind stores only
+    the new prompt wherever v0.30.0 does. Where v0.30.0 itself stores the whole view again at the next bind (T7-wrapped,
+    T7K, a host edit, an insert: 10 -> 22 / 23), the rows the end stored stay beside that copy, so FINAL appears twice
+    (L-6). Either way a later turn adds one row, the next off-current end adds one, and a repeated end adds nothing."""
     lane = lanes()
-    first = history(shape)
+    first = history("plain" if shape in ("edit", "insert") else shape)
     lane.seed(first)
-    view = first + [FINAL]
+    view = copy.deepcopy(first)
+    if shape == "edit":
+        view[1]["content"] = "host edit"
+    elif shape == "insert":
+        view.insert(2, {"role": "user", "content": "inserted"})
+    view.append(FINAL)
     lane.engine.on_session_end("S1", copy.deepcopy(view))
     after_end = len(lane.rows())
-    lane.engine.on_session_start("S1", platform="cli", context_length=200_000, conversation_id="conv1")
-    lane.engine.ingest(copy.deepcopy(view + [{"role": "user", "content": "new prompt after bind"}]))
-    expected = (12, 24) if shape in ("T7-wrapped", "T7K") else (11, 12)
-    assert (after_end, len(lane.rows())) == expected
+    engine = lane.engine
+    engine.on_session_start("S1", platform="cli", context_length=200_000, conversation_id="conv1")
+    prompt, reply = {"role": "user", "content": "new prompt after bind"}, {"role": "assistant", "content": "reply"}
+    engine.ingest(copy.deepcopy(view + [prompt]))
+    assert (after_end, len(lane.rows())) == _REBIND_COUNTS[shape]
+    finals = sum(r["content"] == "FINAL" for r in lane.rows())
+    assert finals == (1 if _REBIND_COUNTS[shape][1] == 12 else 2)
+    engine.ingest(copy.deepcopy(view + [prompt, reply]))
+    assert len(lane.rows()) == _REBIND_COUNTS[shape][1] + 1
+    lane.foreground()
+    later = view + [prompt, reply, {"role": "user", "content": "bye"}]
+    lane.engine.on_session_end("S1", copy.deepcopy(later))
+    assert len(lane.rows()) == _REBIND_COUNTS[shape][1] + 2
+    lane.engine.on_session_end("S1", copy.deepcopy(later))
+    assert len(lane.rows()) == _REBIND_COUNTS[shape][1] + 2
 
 
 @pytest.mark.parametrize("busy", [False, True], ids=["direct", "busy"])
