@@ -1388,6 +1388,16 @@ class DelegateChildMixin:
             return None
 
     def _append_delegate_child_rows(self, session_id: str, messages: List[Dict[str, Any]], link: Dict[str, str]) -> int:
+        if getattr(self, "_unload_group", None) is not None:
+            # A retired callback in another plugin generation can append to
+            # this child. Compare and append under the same SQLite write lock.
+            with self._store.atomic(immediate=True):
+                return self._append_delegate_child_rows_unlocked(session_id, messages, link)
+        return self._append_delegate_child_rows_unlocked(session_id, messages, link)
+
+    def _append_delegate_child_rows_unlocked(
+        self, session_id: str, messages: List[Dict[str, Any]], link: Dict[str, str],
+    ) -> int:
         view = [msg for msg in messages if isinstance(msg, dict) and not self._matches_ignore_message_patterns(msg)]
         if not view:
             return 0

@@ -281,6 +281,32 @@ def test_retired_end_reconciles_the_current_writer(preflight, monkeypatch):
     db.unlink()
 
 
+def test_retired_tail_replay_after_current_writer_saw_only_prefix(preflight):
+    original, old_ctx = preflight.register(supports_unload=True)
+    old = original.clone_for_agent()
+    old.on_session_start("retired-prefix", platform="cli", conversation_id="prefix-lane")
+    prefix = [
+        {"role": "user", "content": "original question"},
+        {"role": "assistant", "content": "original answer"},
+    ]
+    old.ingest(prefix)
+    old_ctx.unload_callbacks[0]()
+    current, ctx = preflight.register(supports_unload=True)
+    new = current.clone_for_agent()
+    new.on_session_start("retired-prefix", platform="cli", conversation_id="prefix-lane")
+    tail = prefix + [{"role": "user", "content": "late row from retired writer"}]
+    try:
+        new.ingest(prefix)
+        old.on_session_end("retired-prefix", tail)
+        new.ingest(prefix)
+        new.ingest(tail)
+        assert _durable_messages(preflight.home / "lcm.db", "retired-prefix") == [
+            (row["role"], row["content"]) for row in tail
+        ]
+    finally:
+        ctx.unload_callbacks[0]()
+
+
 @pytest.mark.parametrize("passes_compressor", [True, False])
 def test_reloaded_hook_keeps_ingesting_for_two_retained_clones(preflight, passes_compressor):
     prototype, old_ctx = preflight.register(supports_unload=True)
@@ -352,6 +378,41 @@ def test_reloaded_hook_replays_compacted_second_lane(preflight, monkeypatch):
                 ("second-cache",),
             ).fetchall()
         assert rows == [(row["role"], row["content"], "second-lane") for row in second_view + fresh]
+    finally:
+        ctx.unload_callbacks[0]()
+
+
+def test_reloaded_hook_does_not_move_a_lane_back_after_rollover(preflight, monkeypatch):
+    old, old_ctx = preflight.register(supports_unload=True)
+    live = old.clone_for_agent()
+    retiring = old.clone_for_agent()
+    live.on_session_start("active", platform="cli")
+    retiring.on_session_start("before-rollover", platform="cli", conversation_id="moving-lane")
+    prompt = [{"role": "user", "content": "old row"}]
+    live.ingest(prompt)
+    retiring.ingest(prompt)
+    old_ctx.unload_callbacks[0]()
+    current, ctx = preflight.register(supports_unload=True)
+    callback = ctx.hooks["post_llm_call"]
+    callback(session_id="active", platform="cli", conversation_history=prompt)
+    spawn = current.clone_for_agent
+    successor = spawn()
+
+    def roll_before_scoped_writer():
+        successor.on_session_start("after-rollover", platform="cli", conversation_id="moving-lane")
+        successor.ingest([{"role": "user", "content": "new row"}])
+        return spawn()
+
+    monkeypatch.setattr(current, "clone_for_agent", roll_before_scoped_writer)
+    db = preflight.home / "lcm.db"
+    try:
+        callback(session_id="before-rollover", platform="cli", conversation_history=prompt + [
+            {"role": "assistant", "content": "stale answer"},
+        ])
+        state = successor._lifecycle.get_by_conversation("moving-lane")
+        assert state.current_session_id == "after-rollover"
+        assert _durable_messages(db, "before-rollover") == [("user", "old row")]
+        assert _durable_messages(db, "after-rollover") == [("user", "new row")]
     finally:
         ctx.unload_callbacks[0]()
 

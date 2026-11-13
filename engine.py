@@ -5163,14 +5163,47 @@ class LCMEngine(
             if current is None or current[0] != session_id or store.get_session_count(session_id):
                 return None
         suffix = view[covered:]
-        if any(self._is_context_summary_content(row.get("content")) for row in suffix):
+        if any(self._is_context_summary_content(row.get("content")) or (
+                isinstance(row.get("content"), str) and row["content"].startswith(
+                    ("[Recent Summary (", "[Session Arc Summary ("),
+                )
+        ) for row in suffix):
             return None  # A projected host view needs normal replay classification.
-        return self._append_off_current_session_end_suffix(
+        ids = self._append_off_current_session_end_suffix(
             session_id, suffix, source=platform, conversation_id=conversation_id,
             store=store, hermes_home=self._hermes_home,
             context_window_tokens=old_store.get_context_window_tokens(session_id),
             _log_outcome=False,
         )
+        if ids and allow_empty:
+            store.write_metadata_json([self._retired_tail_key(session_id, conversation_id)], json.dumps(ids[-1]))
+        return ids
+
+    @staticmethod
+    def _retired_tail_key(session_id, conversation_id):
+        lane = json.dumps([session_id, conversation_id]).encode()
+        return "retired_tail:" + hashlib.sha256(lane).hexdigest()
+
+    def _retired_tail_replay_prefix(self, messages, end_store_id):
+        """Return the verified host position and whether it covers the late write."""
+        store = self._store
+        stored = store.get_range(
+            self._session_id, limit=len(messages) + 1, conversation_id=self._conversation_id,
+        )
+        kept = [(idx, row) for idx, row in enumerate(messages) if not self._cold_tail_ingest_drops(row)]
+        for row, (_, message) in zip(stored, kept):
+            if not self._session_end_rows_equal(row, message, session_id=self._session_id):
+                return None
+            stamp = _normalize_observed_at(message.get("timestamp"))
+            saved_stamp = _normalize_observed_at(row.get("observed_at"))
+            if stamp is not None and saved_stamp is not None and stamp != saved_stamp:
+                return None
+        if len(stored) > len(kept):
+            return len(messages), False
+        if not stored or stored[-1]["store_id"] < end_store_id:
+            return None
+        cursor = kept[len(stored) - 1][0] + 1
+        return cursor, True
 
     def _flush_retired_delegate_child(self, session_id, messages, platform):
         """Persist late delegated rows only when the existing store proves its lineage."""
@@ -5212,25 +5245,9 @@ class LCMEngine(
                             self._session_platform, allow_empty=True,
                         )
 
-                # Import the active plugin's entry point through the host.
-                # Relative imports from a retained clone can still refer to
-                # the pre-reload registry, where no successor is registered.
-                try:
-                    from hermes_cli.plugins import get_plugin_manager
-                except ImportError:
-                    current = None
-                else:
-                    # Reading the public engine getter discovers plugins; a
-                    # late callback must never cause rediscovery after unload.
-                    current = getattr(get_plugin_manager(), "_context_engine", None)
-                def detached():
-                    with self._open_retired_store(old_store) as store:
-                        return append(store) is not None
-
-                resume = getattr(current, "_write_retired_tail_on_live_binding", None)
-                stored = resume(self, session_id, old_store.db_identity, append, detached) if callable(resume) else detached()
-                if stored:
-                    return True
+                with self._open_retired_store(old_store) as store:
+                    if append(store) is not None:
+                        return True
             except Exception:
                 logger.debug("LCM retired session-end tail write failed", exc_info=True)
         if warn:
@@ -5252,31 +5269,16 @@ class LCMEngine(
             return None
         return lanes[0][0]
 
-    def _write_retired_tail_on_live_binding(self, retired, session_id, db_identity, append, detached):
-        """Serialize a retired callback with the current writer and cold binds."""
-        with _ACTIVE_ENGINE_COLD_START_LOCK:
-            active = resolve_active_lcm_engine(session_id, retired._conversation_id)
-            if (active is None or active is retired or active._plugin_is_unloading()
-                    or active._conversation_id != retired._conversation_id
-                    or active._hermes_home != retired._hermes_home
-                    or active._db_path != retired._db_path):
-                return detached()
-
-        def write(selected):
-            if (selected._session_id != session_id or selected._conversation_id != retired._conversation_id
-                    or selected._hermes_home != retired._hermes_home
-                    or selected._bypasses_lcm_context_management()
-                    or selected._store.db_identity != db_identity):
-                return False
-            store = selected._store
-            with _temporary_sqlite_busy_timeout([store.connection], _SESSION_END_BUSY_TIMEOUT_MS):
-                ids = append(store)
-            if ids:
-                selected._ingest_cursor_needs_reconcile = True
-            return ids is not None
-
-        result = use_lcm_engine(active, write, timeout=_SESSION_END_BUSY_TIMEOUT_MS / 1000)
-        return result.used and result.value
+    def _ingest_reload_lane(self, session_id, conversation_id, messages, platform):
+        """Replay through a scoped clone without changing durable ownership."""
+        self._apply_session_start_metadata(session_id, {"platform": platform})
+        self._conversation_id = conversation_id
+        self._reload_lane_guard = True
+        self._schedule_ingest_cursor_reconciliation()
+        if self._bypasses_lcm_context_management():
+            return False
+        self._ingest_messages(messages)
+        return True
 
     def _on_session_end_unlocked(
         self,
@@ -7678,6 +7680,28 @@ class LCMEngine(
                         self._identity_anchor_observe_recovery()
                     with self._store.ingest_atomic(admission_retry=admission_retry) as sample:
                         held_at = _perf_counter()
+                        if getattr(self, "_reload_lane_guard", False):
+                            current = self._store.connection.execute(
+                                "SELECT current_session_id FROM lcm_lifecycle_state WHERE conversation_id = ?",
+                                (self._conversation_id,),
+                            ).fetchone()
+                            if current is None or current[0] != self._session_id:
+                                raise RuntimeError("LCM reload lane is no longer current")
+                        retired_key, retired_tail = None, None
+                        if self._unload_group is not None:
+                            retired_key = self._retired_tail_key(self._session_id, self._conversation_id)
+                            retired_tail = self._store.read_metadata_json(retired_key)
+                        reconcile_retired = type(retired_tail) is int and (
+                            getattr(self, "_seen_retired_tail", None) != (self._store, retired_key, retired_tail)
+                        )
+                        retired_prefix = (
+                            self._retired_tail_replay_prefix(messages, retired_tail) if reconcile_retired else None
+                        )
+                        if retired_prefix is not None:
+                            self._ingest_cursor, _ = retired_prefix
+                            self._ingest_cursor_needs_reconcile = False
+                        elif reconcile_retired:
+                            self._ingest_cursor_needs_reconcile = True
                         emission_attempt = self._ingest_ledger_attempt = (
                             dict(ledger_prepared, stored={}, matched={}, remainders={}, observations=[])
                             if ledger_prepared is not None else None)
@@ -7695,6 +7719,10 @@ class LCMEngine(
                         if self._ingest_ledger_attempt is not None:
                             self._write_ingest_ledger(self._ingest_ledger_attempt, after_commit, attribution)
                         self._link_stored_todo_replays(messages, prepared.get("stored_at", {}))
+                        if retired_prefix is not None and retired_prefix[1]:
+                            after_commit.append(lambda: setattr(
+                                self, "_seen_retired_tail", (self._store, retired_key, retired_tail),
+                            ))
                     emission_committed = True
                     if ledger_prepared is not None:
                         ingest_ledger.settle_pending_emissions(

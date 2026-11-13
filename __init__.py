@@ -919,6 +919,9 @@ def register(ctx):
                     )
                 _ingest_and_note(active_engine)
 
+            def _replay_existing_lane(active_engine):
+                return active_engine._ingest_reload_lane(session_id, conversation_id, history, platform)
+
             try:
                 if host_engine is not None:
                     result = use_lcm_engine(host_engine, _bind_and_ingest, timeout=None)
@@ -956,7 +959,7 @@ def register(ctx):
                                     return
                             replacement = engine.clone_for_agent()
                             try:
-                                result = use_lcm_engine(replacement, _bind_and_ingest, timeout=None)
+                                result = use_lcm_engine(replacement, _replay_existing_lane, timeout=None)
                             finally:
                                 replacement.shutdown()
                 else:
@@ -988,8 +991,8 @@ def register(ctx):
                                     # scoped writer after normal replay.
                                     replacement = engine.clone_for_agent()
                                     try:
-                                        ingested = use_lcm_engine(replacement, _bind_and_ingest, timeout=None)
-                                        if ingested.used:
+                                        ingested = use_lcm_engine(replacement, _replay_existing_lane, timeout=None)
+                                        if ingested.used and ingested.value:
                                             return
                                     finally:
                                         replacement.shutdown()
