@@ -15,6 +15,7 @@ from .host_uid import _is_fork_child
 from .ingest_protection import protect_messages_for_ingest
 from .maintenance_scheduler import _HOST_ROW_RECOVERY_SCHEDULER
 from .message_analysis import _tool_call_id, _tool_result_names
+from .message_content import text_content_for_pattern_matching
 from .reconcile import _commit_proof_identity_digest, _proof_user_identity
 from .session_patterns import build_session_match_keys, compile_session_patterns, matches_session_pattern
 from .tokens import count_message_tokens
@@ -230,16 +231,29 @@ def _recover_candidate(engine_cls, config, home, db_path, state_path, conv, boun
             return _unproven(sid, "reader_error", 0)
         if _skip_on_tip_path(state_path, bound, handle, sid):
             return
-        proof = det._durable_commit_proof_payload()
+        try:
+            proof = det._durable_commit_proof_payload()
+        except Exception:
+            return _unproven(sid, "proof", len(messages))
         cursor = _strict_proof_cursor(det, messages)
         if cursor is None:
             return _unproven(sid, "proof", len(messages))
         # Content proves the carried position, but a changed stamp/uid is a
         # new occurrence. Recover only those rows, in host order, before the
         # suffix; rewinding wholesale would duplicate unchanged carried rows.
-        metadata = det._remapped_output_metadata(messages, proof or {}, cursor)
-        indexes = sorted(index for index, previous in metadata.items()
-                         if det._host_occurrence_changed(messages[index], previous))
+        try:
+            metadata = det._remapped_output_metadata(messages, proof or {}, cursor)
+            indexes = sorted(index for index, previous in metadata.items()
+                             if det._host_occurrence_changed(messages[index], previous))
+            # A changed prefix row breaks the proof's contiguous continuation
+            # on resume. Its fallback matcher can expose an ignored placeholder
+            # anywhere in the prefix, even before the first changed occurrence.
+            if indexes and (any(det._is_ignored_active_replay_placeholder(
+                    m, text_content_for_pattern_matching(m.get("content")) or "")
+                    for m in messages[:cursor]) or not _valid_suffix(messages, indexes[0])):
+                indexes = []
+        except Exception:
+            indexes = []  # Metadata selection must retain main's suffix recovery.
         indexes.extend(range(cursor, len(messages)))
         suffix = [messages[index] for index in indexes]
         if not suffix:
