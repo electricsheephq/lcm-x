@@ -56,6 +56,59 @@ check and makes the verdict a smoke. Each busy run must also contain exactly the
 (`driver.prescribed_operations`, a dry run of `cells.sequence` with K B ingests per A operation); equally
 incomplete ledgers are INCONCLUSIVE, not a pass.
 
+## Opt-in storage arms
+
+Both driver and orchestrator accept these diagnostic flags. With none set,
+commands, inputs, scheduling, ledger fields and summaries retain their defaults.
+
+| Flag | Default | Effect |
+| --- | --- | --- |
+| `--wal-autocheckpoint N` | unset (product: 500) | Call the original connection configurator, then apply N to every configured connection, including imported aliases. Private unconfigured connections retain their SQLite defaults. |
+| `--checkpointer off\|passive:<ms>` | `off` | A daemon with its own configured connection runs PASSIVE checkpoints at the positive integer interval. Use with `--wal-autocheckpoint 0`. |
+| `--background-writers none\|stem\|integrity\|embedding\|all` | `none` | Seed due work, retain the selected real workers, and release them when the first scheduled operation begins. Nonselected background FTS dispatches are suppressed only in a writer arm. |
+| `--stem-backlog N` | 20000 | Positive number of synthetic messages left unindexed for the stem worker. |
+| `--record-holds` | off | Wrap SQLite transaction paths in this process and record foreground and background writes. |
+
+An integrity arm seeds 2,000 messages and expires its scan stamp. An embedding
+arm seeds 64 leaf summaries and registers a deterministic in-process fake
+provider, retaining the real scheduler, maintenance pass and VectorStore batch
+publication. It never needs a model or network. Preparation finishes before
+workers are released; synthetic messages belong to a separate seed session.
+
+`--wal-autocheckpoint` does not reach the background writers' private stem,
+integrity-scan, or integrity-claim connections. They keep SQLite's 1000-page
+autocheckpoint setting. An H2 run (`--wal-autocheckpoint 0`) combined with these
+writers is therefore not autocheckpoint-free.
+
+Opt-in ledgers add `storage_arms`, including configured-connection PRAGMA
+readbacks and monotonic schedule boundaries. Beside each output ledger,
+`<output-stem>-run-N/` holds `holds.jsonl` and/or `checkpoints.jsonl` when requested.
+Checkpoint records contain start, duration_ms, result (busy, log, checkpointed)
+and error. Hold records contain writer, connection_id, database (the main file's
+path as opened), start_basis (`acquired` or `call_entry`), start, end, hold_ms and
+outcome (commit, rollback or busy). Only the cell's main database is recorded;
+in-memory and other databases and preparation writes are excluded. Any ledger
+carrying `storage_arms` is diagnostic and can only receive a SMOKE verdict (exit
+3), or INCONCLUSIVE (exit 2), even with the standard workload and run count.
+
+Explicit IMMEDIATE transaction timing starts after lock acquisition. The end is
+sampled before a separate release call (connection commit, rollback, close or
+context exit; SQL COMMIT, END, ROLLBACK or RELEASE), so the recorded tenure is a
+lower bound. These records use
+`start_basis=acquired` and also include
+`acquired_at`, the successful BEGIN's return timestamp. Implicit first writes
+(including foreground stores' Python implicit BEGIN IMMEDIATE) and integrity
+INSERTs use `start_basis=call_entry`: their acquisition point is not observable
+through this wrapper, so they omit `acquired_at` and can include acquisition wait.
+Their ends also precede a separate release call. An autocommit write that opens
+and closes its own transaction instead ends after the write call: its nonempty
+`call_entry` span contains the call, including any time after lock release.
+Overlaps involving these spans are not evidence of simultaneous lock ownership.
+Integrity spans end at their savepoint rollback. Busy records describe failed
+acquisition attempts, use `call_entry`, and omit `acquired_at`. These
+wrappers add overhead; they are diagnostic instrument evidence, not native lock
+sampling or a release timing result. The product tree identity is unchanged.
+
 ## Workload and schedule
 
 `success_wall_ms` reports `n`, `p50`, `p95`, and `max` (milliseconds, nearest-rank

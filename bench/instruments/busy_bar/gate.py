@@ -22,11 +22,24 @@ else:
 def nonstandard_workload(name: str, runs: list[dict[str, Any]]) -> list[str]:
     """The README's gate workload: K writes, a B view of DEFAULT_B_VIEW_ROWS new rows, window W, seed 2055+i."""
     found = set()
+    arm_sets = set()
     for run in runs:
+        if "storage_arms" in run:
+            details = run["storage_arms"]
+            if isinstance(details, dict):
+                details = {key: value for key, value in details.items()
+                           if key not in {"schedule_start", "schedule_end", "configured_connections"}}
+            arm_sets.add(json.dumps(details, sort_keys=True))
         want = {"k": DEFAULT_K, "b_view_rows": DEFAULT_B_VIEW_ROWS, "window_ms": DEFAULT_WINDOW_MS,
                 "seed": DEFAULT_SEED + run["run"]}
         found.update(f"{name}: {key}={run.get(key)!r}, the gate workload is {value!r}"
                      for key, value in want.items() if run.get(key) != value)
+    if arm_sets:
+        if any("storage_arms" not in run for run in runs):
+            arm_sets.add('"unarmed"')
+        description = (next(iter(arm_sets)) if len(arm_sets) == 1 else
+                       "distinct arm sets [" + ", ".join(sorted(arm_sets)) + "]")
+        found.add(f"{name}: storage_arms={description}, diagnostic workload")
     return sorted(found)
 
 

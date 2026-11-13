@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import threading
@@ -913,6 +914,104 @@ def busy_control(rows: list[dict]) -> list[dict]:
         for record in row["operations"]:
             record["busy"] = True
     return rows
+
+
+@pytest.mark.parametrize("armed_role", range(4))
+@pytest.mark.parametrize("fails", [False, True])
+def test_storage_arms_never_gate(tmp_path, monkeypatch, capsys, armed_role, fails):
+    baseline, candidate = gate_session(), gate_session()
+    if fails:
+        # Baseline >=8 avoids an extension; candidate exceeds ceil(1.25 * 20) + 1.
+        for row in baseline:
+            row["operations"][0]["busy"] = True
+        for row in candidate:
+            for record in row["operations"]:
+                record["busy"] = True
+    roles = [stamp(baseline, driver.BASELINE_IDENTITY), stamp(candidate, CANDIDATE_IDENTITY),
+             stamp(busy_control(baseline), driver.BASELINE_IDENTITY),
+             stamp(busy_control(candidate), CANDIDATE_IDENTITY)]
+    unarmed = gate.evaluate(*roles)
+    assert unarmed["gate_session"]
+    assert unarmed["verdict"] == ("GATE FAIL" if fails else "GATE PASS")
+    assert gate.EXIT[unarmed["verdict"]] == (1 if fails else 0)
+    roles[armed_role][-1]["storage_arms"] = {"record_holds": True, "background_writers": "all"}
+    result = gate.evaluate(*roles)
+    assert result["verdict"] == ("SMOKE FAIL" if fails else "SMOKE PASS")
+    assert not result["gate_session"]
+    assert any('"background_writers": "all"' in reason and '"record_holds": true' in reason
+               for reason in result["reasons"])
+    paths = [tmp_path / f"role-{role}.jsonl" for role in range(4)]
+    for path, rows in zip(paths, roles):
+        path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    monkeypatch.setattr(sys, "argv", ["gate", str(paths[0]), str(paths[1]),
+                                     "--control-baseline", str(paths[2]), "--control-candidate", str(paths[3])])
+    with pytest.raises(SystemExit) as exc:
+        gate.main()
+    assert exc.value.code == 3
+    output = capsys.readouterr().out
+    assert result["verdict"] in output and "GATE PASS" not in output and "GATE FAIL" not in output
+
+
+@pytest.mark.parametrize("fails", [False, True])
+@pytest.mark.parametrize("mixed", [False, True])
+def test_storage_arms_reasons_per_ledger(tmp_path, monkeypatch, capsys, fails, mixed):
+    baseline, candidate = gate_session(), gate_session()
+    if fails:
+        for row in baseline:
+            row["operations"][0]["busy"] = True
+        for row in candidate:
+            for record in row["operations"]:
+                record["busy"] = True
+    roles = [stamp(baseline, driver.BASELINE_IDENTITY), stamp(candidate, CANDIDATE_IDENTITY),
+             stamp(busy_control(baseline), driver.BASELINE_IDENTITY),
+             stamp(busy_control(candidate), CANDIDATE_IDENTITY)]
+    paths = [tmp_path / f"role-{role}.jsonl" for role in range(4)]
+
+    def cli():
+        for path, rows in zip(paths, roles):
+            path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+        monkeypatch.setattr(sys, "argv", ["gate", str(paths[0]), str(paths[1]),
+                                         "--control-baseline", str(paths[2]), "--control-candidate", str(paths[3])])
+        with pytest.raises(SystemExit) as exc:
+            gate.main()
+        return capsys.readouterr().out, exc.value.code
+
+    unarmed, status = cli()
+    assert status == (1 if fails else 0)
+    # Byte-for-byte round-2 CLI report fingerprints, including tables and verdict.
+    expected = ("07fb3b928b9e531631bbd81d0bf26fdef6df32a8aec27e70305131976295f934" if fails else
+                "57dc0a9f7e42060adf275e03f597e4ae85b6c7474d277fb193b916ede523d375")
+    assert hashlib.sha256(unarmed.encode()).hexdigest() == expected
+    for rows in roles:
+        for i, row in enumerate(rows):
+            row["storage_arms"] = {"wal_autocheckpoint": 0, "checkpointer": "passive:10",
+                "background_writers": "stem" if mixed and i % 2 else "all", "stem_backlog": 1001,
+                "record_holds": True,
+                "configured_connections": [{"wal_autocheckpoint": 0, "synchronous": 2}] * (i % 3 + 1),
+                "schedule_start": 123456.125 + i, "schedule_end": 123456.625 + i}
+    output, status = cli()
+    (tmp_path / "verdict.txt").write_text(output)
+    assert status == 3
+    assert ("SMOKE FAIL" if fails else "SMOKE PASS") in output
+    assert "GATE PASS" not in output and "GATE FAIL" not in output
+    reasons = [line for line in output.splitlines() if "storage_arms=" in line]
+    assert len(reasons) == 4
+    for name in ("baseline", "candidate", "control baseline", "control candidate"):
+        reason, = [line for line in reasons if line.startswith(name + ":")]
+        assert '"background_writers": "all"' in reason and '"record_holds": true' in reason
+        assert ("distinct arm sets" in reason) == mixed
+        if mixed:
+            assert '"background_writers": "stem"' in reason
+    assert "schedule_start" not in output and "schedule_end" not in output
+    assert "123456." not in output and "configured_connections" not in output
+
+
+@pytest.mark.parametrize("value", [None, {}, {"checkpointer": "passive:10"}, {"wal_autocheckpoint": 0}])
+def test_storage_arms_presence_is_diagnostic(value):
+    rows = gate_session()
+    rows[-1]["storage_arms"] = value
+    result = evaluate(rows, rows, busy_control(rows), busy_control(rows))
+    assert result["verdict"] == "SMOKE PASS" and not result["gate_session"]
 
 
 @pytest.mark.parametrize("removed", [("B", "ingest"), ("A", "compress"), ("A", "session-end")])
