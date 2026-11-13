@@ -14,6 +14,10 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
   last row is the host's failed-turn notice, it is 10 minutes to 7 days old, and LCM-X holds none of its rows.
   Forward only: sessions that failed before the upgrade are not stored (#2652). A first turn stopped during a tool
   round is #2653. `LCM_HOST_ROW_RECOVERY_ENABLED=false` turns it off. Named limits: `docs/exactly-once-ingest.md`.
+- Changed: an engine that binds on an empty store after another writer stored the session's rows (the #2042
+  catch-up path) now reconciles them as a restart does, so the task-list case of the pasted scaffold-shaped user
+  turn loss (#2110, #2418) also reaches it, including a host composite that carries the user's question. Planned
+  fix: v0.30.2.
 - Fix: Link the reply copies a cold restart stores again after an edit-resend (`possible_replay_of`), so they are visible instead of silent; the durable ledger moving the cursor up from 0 no longer turns the #2305 linking off. Nothing is stored or skipped differently. The turn-local pairing of those replies is tracked for v0.30.2 (#2479, PR #2529; #2537).
 - Fix: After an upgrade from v0.29.2, the first replay no longer stores a tool call and its result a second time when v0.29.2 had stored the result as a bare saved-output marker in the host's temp results directory (including a file with CRLF line endings), or with a data URI in its preview replaced by a payload placeholder (#2558). For such rows the upgraded store keeps the marker v0.29.2 stored, not the saved file's body, as it already did for the plain case (#2521). The upgrade replay and the session-end compare now use one rule for a bare marker: the same row only when the host's marker text is byte-identical once placeholders are restored and redaction is applied on both sides, with no recovery from the saved file. The fix applies with sensitive-pattern redaction on or off.
 - Fix: on Hermes v0.21.6 to v0.23.1 with rotating compaction, a turn interrupted by a kill or restart no longer loses
