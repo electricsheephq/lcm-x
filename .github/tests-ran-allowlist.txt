@@ -12,3 +12,4 @@ tests/test_real_host_config_resolution.py  # Needs LCM_REAL_HERMES_PYTHON; all c
 tests/test_catalog_scanner_on.py  # Needs prepared LCM_REAL_HERMES_PYTHON; executed on both pinned catalog-scanner-on hosts in real-host.yml.
 tests/differential/test_differential_vs_ga.py  # Needs LCM_DIFFERENTIAL=1; executes under LCM_DIFFERENTIAL=1 in differential.yml (python -m pytest tests/differential).
 tests/test_p1h_store_identity.py  # Needs LCMX_P1H_BASE_TREE, an archived comparison tree; run by hand for #2293 store-identity proofs, with results in the PR.
+tests/test_issue_1160_session_end_flush_recovery.py  # Needs a real Hermes runtime (LCM_REAL_HERMES_PYTHON); its cases execute in the pinned-host full suite (host-suite.yml).
