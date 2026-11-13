@@ -1388,16 +1388,6 @@ class DelegateChildMixin:
             return None
 
     def _append_delegate_child_rows(self, session_id: str, messages: List[Dict[str, Any]], link: Dict[str, str]) -> int:
-        if getattr(self, "_unload_group", None) is not None:
-            # A retired callback in another plugin generation can append to
-            # this child. Compare and append under the same SQLite write lock.
-            with self._store.atomic(immediate=True):
-                return self._append_delegate_child_rows_unlocked(session_id, messages, link)
-        return self._append_delegate_child_rows_unlocked(session_id, messages, link)
-
-    def _append_delegate_child_rows_unlocked(
-        self, session_id: str, messages: List[Dict[str, Any]], link: Dict[str, str],
-    ) -> int:
         view = [msg for msg in messages if isinstance(msg, dict) and not self._matches_ignore_message_patterns(msg)]
         if not view:
             return 0
@@ -1417,6 +1407,14 @@ class DelegateChildMixin:
                     self._delegate_child_bind_parent_ids.pop(session_id, None)
         except Exception as exc:  # the rows still go in; they stay reachable by session id
             self._note_delegate_child_fallback(session_id, f"parent link not recorded: {type(exc).__name__}: {exc}")
+        if getattr(self, "_unload_group", None) is not None:
+            # The lineage helper above owns a separate transaction. Serialize
+            # row comparison and append with detached writes across reloads.
+            with self._store.atomic(immediate=True):
+                return self._append_delegate_child_view(session_id, view)
+        return self._append_delegate_child_view(session_id, view)
+
+    def _append_delegate_child_view(self, session_id: str, view: List[Dict[str, Any]]) -> int:
         key = self._delegate_child_key(session_id)
         boundary = _DELEGATE_RESUME_BOUNDARIES.get(key)
         identities = [self._session_end_prefix_compare_identity(msg, session_id=session_id, recover_markers=False) for msg in view]
@@ -1489,8 +1487,7 @@ class DelegateChildMixin:
         if (boundary and anchored) or rejected:  # a rejection stores rows out of view order: always mark the end
             self._remember_delegate_child_boundary(session_id, view)
         _count("rows_stored", len(stored))
-        logger.debug("LCM stored %d delegated-child rows: session=%s parent=%s",
-                     len(stored), session_id, link["parent_session_id"])
+        logger.debug("LCM stored %d delegated-child rows: session=%s", len(stored), session_id)
         return len(stored)
 
     def _delegate_child_unaccounted(self, front: list, stored: Counter, outputs: Counter) -> list[int]:
