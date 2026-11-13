@@ -22,7 +22,8 @@ import sqlite3
 
 import pytest
 
-from hermes_lcm import maintenance_scheduler
+from hermes_lcm import host_row_recovery, maintenance_scheduler, unended_catchup
+from tests.conftest import _wait_scheduler_idle
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
 
@@ -30,10 +31,6 @@ from hermes_lcm.engine import LCMEngine
 FAILED_TURN_NOTICE = "Your request was not processed. Send it again if you still want me to carry it out."
 FAILED = "desktop-2042-failed"
 NEXT = "desktop-2042-next"
-XFAIL = pytest.mark.xfail(
-    strict=True,
-    reason="#2042: an unended Desktop session's failed or stopped first turn is never stored",
-)
 
 
 class HostTranscript:
@@ -42,16 +39,27 @@ class HostTranscript:
     def __init__(self, home):
         self.path = home / "state.db"
         self.lists: dict[str, list[dict]] = {}
+        self.now = 1_899_999_900
         with sqlite3.connect(self.path) as conn:
             conn.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, parent_session_id TEXT, "
                          "started_at REAL, ended_at REAL, end_reason TEXT, message_count INTEGER, "
-                         "model_config TEXT)")
+                         "model_config TEXT, profile_name TEXT, transcript_revision INTEGER DEFAULT 0)")
+            conn.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, "
+                         "role TEXT, content TEXT, display_kind TEXT, active INTEGER DEFAULT 1, "
+                         "compacted INTEGER DEFAULT 0, timestamp REAL)")
 
     def write(self, session_id, rows, *, started_at):
         self.lists[session_id] = copy.deepcopy(rows)
+        for row in self.lists[session_id]:
+            if row["role"] == "assistant" and row["content"] == FAILED_TURN_NOTICE:
+                row["display_kind"] = "failed_turn"
         with sqlite3.connect(self.path) as conn:
-            conn.execute("INSERT OR REPLACE INTO sessions VALUES (?,?,?,?,?,?,?,?)",
-                         (session_id, "desktop", None, started_at, None, None, len(rows), None))
+            conn.execute("INSERT OR REPLACE INTO sessions VALUES (?,?,?,?,?,?,?,?,?,?)",
+                         (session_id, "desktop", None, started_at, None, None, len(rows), None, None, 0))
+            conn.execute("DELETE FROM messages WHERE session_id=?", (session_id,))
+            conn.executemany("INSERT INTO messages (session_id,role,content,display_kind,timestamp) VALUES (?,?,?,?,?)",
+                             [(session_id, row["role"], row["content"], row.get("display_kind"), row["timestamp"])
+                              for row in self.lists[session_id]])
 
     def reap(self, session_id, *, at):
         with sqlite3.connect(self.path) as conn:
@@ -86,17 +94,19 @@ def _new_engine(tmp_path, host, session_id):
 def _quiesce():
     for value in vars(maintenance_scheduler).values():
         if isinstance(value, maintenance_scheduler._RollupMaintenanceScheduler):
-            value.quiesce(timeout=10)
+            assert _wait_scheduler_idle(value, 10), "maintenance did not finish"
 
 
 def _process_dies(engine):
     """Backend exit without a session end: storage closes, no on_session_end, no shutdown flush of turns."""
     _quiesce()
+    engine._unregister_active_engine_binding()
     engine._close_storage()
 
 
 def _next_process_turn(tmp_path, host, rows):
     """The next process binds the profile's next Desktop session and completes one turn there."""
+    host.now = 1_900_001_000
     host.write(NEXT, rows, started_at=1_900_000_300)
     engine = _new_engine(tmp_path, host, NEXT)
     engine.ingest(rows)  # post_llm_call of a completed turn
@@ -109,9 +119,19 @@ def _contents(engine, session_id):
 
 
 @pytest.fixture
-def host(tmp_path):
+def host(tmp_path, monkeypatch):
     (tmp_path / "home").mkdir()
-    return HostTranscript(tmp_path / "home")
+    host = HostTranscript(tmp_path / "home")
+    monkeypatch.setattr(unended_catchup, "_now", lambda: host.now)
+    monkeypatch.setattr(unended_catchup, "_MARKERS", {})  # process caches are keyed by path
+    monkeypatch.setattr(unended_catchup, "_SEEN", {})
+    scheduler = maintenance_scheduler._RollupMaintenanceScheduler(
+        kind="host-row recovery", thread_name="lcm-host-row-recovery")
+    for module in (maintenance_scheduler, host_row_recovery, unended_catchup):
+        monkeypatch.setattr(module, "_HOST_ROW_RECOVERY_SCHEDULER", scheduler)
+    yield host
+    _quiesce()
+    assert scheduler.quiesce(10)
 
 
 @pytest.fixture
@@ -128,12 +148,12 @@ def engines():
 def _failed_first_turn(tmp_path, host, engines, text):
     engine = _new_engine(tmp_path, host, FAILED)
     engines.append(engine)
+    _quiesce()  # The activation marker predates the failure.
     # The host writes the accepted user row and the failed-turn boundary; the engine receives no hook.
     host.write(FAILED, _rows(("user", text), ("assistant", FAILED_TURN_NOTICE)), started_at=1_900_000_000)
     return engine
 
 
-@XFAIL
 def test_failed_first_turn_then_reap_user_row_is_stored(tmp_path, host, engines):
     _process_dies(_failed_first_turn(tmp_path, host, engines, "synthetic request 2042 failed"))
     host.reap(FAILED, at=1_900_000_200)
@@ -143,7 +163,6 @@ def test_failed_first_turn_then_reap_user_row_is_stored(tmp_path, host, engines)
                                       ("assistant", FAILED_TURN_NOTICE)]
 
 
-@XFAIL
 def test_stopped_first_turn_before_text_then_reap_user_row_is_stored(tmp_path, host, engines):
     # Interrupt before any assistant text: the same early-return path and boundary as a failure.
     _process_dies(_failed_first_turn(tmp_path, host, engines, "synthetic request 2042 stopped early"))

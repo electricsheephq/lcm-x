@@ -146,11 +146,11 @@ def _catch_up(engine_cls, config, home, db_path, state_path, bound, platform, wi
                     continue
                 f1 = _fingerprint(host, sid, archived, revision)
                 messages = handle.get_messages_as_conversation(sid)
-                if (f1 != _fingerprint(host, sid, archived, revision) or f1[3] or f1[2] != row['boundary_id']
+                if any(m.get('role') in ('session_meta', 'system') for m in messages):
+                    _count('non_turn_role')
+                elif (f1 != _fingerprint(host, sid, archived, revision) or f1[3] or f1[2] != row['boundary_id']
                         or len(messages) != f1[0] or not messages or messages[-1].get('display_kind') != 'failed_turn'):
                     _count('generation_changed')
-                elif any(m.get('role') in ('session_meta', 'system') for m in messages):
-                    _count('non_turn_role')
                 elif not _valid_suffix(messages, 0) or len(messages)>500 or messages[-1].get('role') != 'assistant':
                     _count('suffix_rejected')
                 elif not _complete_groups(messages):

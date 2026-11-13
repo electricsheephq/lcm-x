@@ -384,6 +384,35 @@ A tail exists because the store hit SQLite busy at session end. The ledger is in
     resume; not ACP or the gateway) is bound into a new conversation named after the child, and today's cold ingest
     stores the child's whole list there, copies of rows already recovered included: surplus, never loss (#2630);
   - a child that LCM-X never bound, and hosts and transports other than the tested ones.
+- **Unended sessions whose turn failed (#2042, recovered from v0.30.1).** On Hermes v0.23.1 a turn that fails (for
+  example, provider retries run out) or is stopped before or while its reply streams keeps the user row, appends the
+  host's failed-turn notice (an assistant row with `display_kind = 'failed_turn'`) and returns without the per-turn
+  hook. Desktop sessions never receive a session end; the next host start reaps them. If no later turn completes in
+  that session, LCM-X received none of its rows. At a later foreground session start on the same profile, a background
+  job (at most once per store and home every 10 minutes, never on a turn) reads the host's database read-only and
+  stores such a session when all of these hold:
+  - it is top-level, not a `subagent` source, not a compression ancestor, on the same profile, and not the binding
+    session;
+  - its last active row (ignoring `session_meta` and `system` rows) is the failed-turn notice, at least 10 minutes and
+    at most 7 days old, and no older than this home's activation marker (`unended_catchup_since:<home hash>`);
+  - LCM-X holds no row for it, it is not a fork child, not bound in this process and not matched by an ignore or
+    stateless session pattern;
+  - the host transcript is unchanged across the read (row counts, ids, the boundary and `transcript_revision`), has no
+    compacted or inactive rows, no `session_meta`/`system` rows and no ignored message, every tool call is answered
+    exactly once before the next turn row, and it has at most 500 rows.
+  It stores the rows through the same append path as #2624, under the session's own id, in one transaction that first
+  re-checks that the store still holds no row for it; each stored row carries `unended_turn_recovered:<store_id>`,
+  which nothing in the product reads. `host_row_recovery_enabled = false` also turns this off. Named limits, each
+  counted (`unended_catchup_counts()`):
+  - forward only: a session whose failure is older than the profile's first catch-up job is never stored (operator
+    repair: #2652);
+  - a first turn stopped during a tool round ends without the notice and stays deferred (#1623; #2653);
+  - a failed session with no later foreground session start on its profile within 7 days stays only in the host's
+    database;
+  - a session with a partial tool batch, a `session_meta`/`system` row, an ignored message or a host change during
+    the read is skipped (and read again at a later job);
+  - until the ingest guard lands (#2042 step 2), a live engine in another process that bound the session at cursor 0
+    before the job ran can store an unstamped copy at its next completed turn; the release ships only with that guard.
 
 ### 3.6 Migration and rollback
 - **When:** every ready foreground ingest probes its own session for unbound rows above the store mark, including pre-ledger, failed-ledger and older-reader writes.
