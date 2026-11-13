@@ -13,10 +13,10 @@ Set `context.engine: lcm-x` in your Hermes configuration, then restart Hermes.
 Local semantic recall needs the companion below; without it, recall uses full text.
 
 ```sh
-hermes plugins install electricsheephq/lcm-x/companions/hermes-lcm-x-local-embeddings --ref 6260c31fbce11e4cd542878f1f6a37410d678ae8
+hermes plugins install electricsheephq/lcm-x/companions/hermes-lcm-x-local-embeddings --ref d0175ed9a198ff71e9bc592895badad88258d9cc
 ```
 
-- [Setup and configuration](https://github.com/electricsheephq/lcm-x/blob/6260c31fbce11e4cd542878f1f6a37410d678ae8/README.md)
-- [Embedding setup](https://github.com/electricsheephq/lcm-x/blob/6260c31fbce11e4cd542878f1f6a37410d678ae8/docs/embeddings-setup.md)
-- [Catalog payload and provenance](https://github.com/electricsheephq/lcm-x/blob/6260c31fbce11e4cd542878f1f6a37410d678ae8/docs/operations/catalog-payload.md)
-- [License](https://github.com/electricsheephq/lcm-x/blob/6260c31fbce11e4cd542878f1f6a37410d678ae8/LICENSE)
+- [Setup and configuration](https://github.com/electricsheephq/lcm-x/blob/d0175ed9a198ff71e9bc592895badad88258d9cc/README.md)
+- [Embedding setup](https://github.com/electricsheephq/lcm-x/blob/d0175ed9a198ff71e9bc592895badad88258d9cc/docs/embeddings-setup.md)
+- [Catalog payload and provenance](https://github.com/electricsheephq/lcm-x/blob/d0175ed9a198ff71e9bc592895badad88258d9cc/docs/operations/catalog-payload.md)
+- [License](https://github.com/electricsheephq/lcm-x/blob/d0175ed9a198ff71e9bc592895badad88258d9cc/LICENSE)

@@ -671,7 +671,8 @@ class IdentityAnchorMixin:
         reused id keeps main's result. Text rows are not checked (#2116, v0.30.x). ``capped``, ``held`` and
         ``consumed`` are retained for callers but unused. Past the window, on a non-standard stored tool shape, or on a
         failed read, it returns None (a trip): the caller then keeps main's plan exactly, adding nothing beyond its own finds,
-        as on main. Unsure is accounted (the positional replay, as before): a call row whose ids cannot be read."""
+        as on main. Unsure is accounted (the positional replay, as before): a call row whose ids cannot be read.
+        With no candidates or eligible rewrites, skip reads because a trip gives the same caller plan (#2293)."""
         calls_memo: dict = {}  # view rows are read several times below
 
         def calls(msg, stored=False):
@@ -718,6 +719,9 @@ class IdentityAnchorMixin:
                           and not (self._identity_is_lcm_scaffold(identity_messages[idx])
                                    and identity_at(idx) is None)  # scaffold first: identity_at parses arguments
                           and not self._matches_ignore_message_patterns(messages[idx])}
+            if not candidates and not any(idx >= plan.get("accepted_prefix", 0) and idx not in plan["replayed"]
+                                          for idx in self._identity_anchor_rewritten(messages, cursor)):
+                return []
             session = str(self._session_id)
             chain = self._identity_anchor_chain()
             cached = getattr(self, "_identity_anchor_chain_cache", None)

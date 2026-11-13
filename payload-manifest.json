@@ -1,12 +1,12 @@
 {
-  "source_sha": "6260c31fbce11e4cd542878f1f6a37410d678ae8",
-  "tooling_sha": "6260c31fbce11e4cd542878f1f6a37410d678ae8",
+  "source_sha": "d0175ed9a198ff71e9bc592895badad88258d9cc",
+  "tooling_sha": "d0175ed9a198ff71e9bc592895badad88258d9cc",
   "allowlist_sha256": "83b8bf2418d229639abd5bd72bae468b6263549fa601bb763943864add830f07",
   "builder_version": 2,
   "tooling_dirty": false,
   "readme_omitted_links": [],
-  "file_count": 122,
-  "total_bytes": 4863303,
+  "file_count": 124,
+  "total_bytes": 4896580,
   "files": [
     {
       "path": "LICENSE",
@@ -16,7 +16,7 @@
     {
       "path": "README.md",
       "bytes": 1094,
-      "sha256": "c1181bcf868c44adeea3b962a993053091a2341405b9e7cd3091719bdee607d6"
+      "sha256": "09c9fa47186e30001d0f0578f9955e50ccfb5108cf8a1800c07f5a8d1d2c4e65"
     },
     {
       "path": "__init__.py",
@@ -125,8 +125,8 @@
     },
     {
       "path": "config.py",
-      "bytes": 91729,
-      "sha256": "ebd897b45ea98ec120da588d993881a62282f06db91df617b9b94c8c82f0b0cf"
+      "bytes": 91859,
+      "sha256": "0ce46b1b0f16c1b2ec991cd41be1dbbcaed980250240b54eb359eb36f2085f4d"
     },
     {
       "path": "cpu_capacity.py",
@@ -165,8 +165,8 @@
     },
     {
       "path": "engine.py",
-      "bytes": 676768,
-      "sha256": "0a1036421cd4e54e6767e886dd3eb4d312f7b2627647adb90e1eaec290ff21c2"
+      "bytes": 677839,
+      "sha256": "c9229e262161739e6e30d4a474b5794c85bc3c85d6657ac1918935f06140ebe4"
     },
     {
       "path": "engine_registry.py",
@@ -244,6 +244,11 @@
       "sha256": "41f7e7e80301edc57c46bcbbec717add3ae29ba2caf8aaaae0afeeefd463d8f8"
     },
     {
+      "path": "host_row_recovery.py",
+      "bytes": 14862,
+      "sha256": "7d8bbf71b98bca2542c7a68f46cfcebf76681569a660d4f4a951a8fe46e43531"
+    },
+    {
       "path": "host_uid.py",
       "bytes": 34286,
       "sha256": "9f9965fa07746b6278b7d37ba6119574ec4bdf97bfe8b3289d559f5fdaf72a0e"
@@ -255,8 +260,8 @@
     },
     {
       "path": "identity_anchor.py",
-      "bytes": 136257,
-      "sha256": "53bdc55afe59bad85b1a6fcbfbf6ea07030ccd3e338c1a575b7a49b7ff6ec437"
+      "bytes": 136611,
+      "sha256": "ba3926284833b07633127b7d6452a45642f9253c6cef1543a2430673bdbe86f4"
     },
     {
       "path": "inactive_record.py",
@@ -330,8 +335,8 @@
     },
     {
       "path": "maintenance_scheduler.py",
-      "bytes": 19463,
-      "sha256": "b763ebc3f0d5b3f4c02eb46cf952292ef63dc41f27b80162c5536787c2ac6f58"
+      "bytes": 19591,
+      "sha256": "335207710659b55d5051b97d096bada8c53a75c2db966285067855b52568b70f"
     },
     {
       "path": "memory_tools.py",
@@ -371,7 +376,7 @@
     {
       "path": "plugin.yaml",
       "bytes": 887,
-      "sha256": "eaa276636c8e394b79b5db15dc81e0c2e82840c4066e1e80a39569e749f3aba0"
+      "sha256": "b7ce1c043e280b6f1445f18b41e2e14111b15c13b16fc93c3de4645d41a6dd0b"
     },
     {
       "path": "plugin_identity.py",
@@ -380,8 +385,8 @@
     },
     {
       "path": "prefix_matching.py",
-      "bytes": 20041,
-      "sha256": "e5582f264b2e220976b5535fd4173479850123479ff2ef4b0c10030db50058ac"
+      "bytes": 20854,
+      "sha256": "35b0cd13b3a60b05a33b2781085db7c8c69840c957ef01ebabe32becdfae873a"
     },
     {
       "path": "presets.py",
@@ -400,8 +405,8 @@
     },
     {
       "path": "recall_delivery.py",
-      "bytes": 39024,
-      "sha256": "e5c46e0ecf8163450e79eeb2f37390aec83e900d621d0f47847b6438f6621ac4"
+      "bytes": 41040,
+      "sha256": "26e11568f45d742e3383d32e02074886dfd55468022e948eb7b3c8cd1104ebee"
     },
     {
       "path": "recall_session.py",
@@ -420,8 +425,8 @@
     },
     {
       "path": "reconcile.py",
-      "bytes": 227108,
-      "sha256": "343dbebd23097599d0a703eb991e34541ba157783c3a20ebafdec1243328b388"
+      "bytes": 228367,
+      "sha256": "55e21b45276e8aad81cd321fe2b09757c2b141fcf5b22a75bb9dc81007bea108"
     },
     {
       "path": "recorder.py",
@@ -520,8 +525,8 @@
     },
     {
       "path": "skills/hermes-lcm/references/configuration.md",
-      "bytes": 46953,
-      "sha256": "60a699c18444bbbd77189d45a2e8656f78528db14bd5aee0f8c7e454e61924f9"
+      "bytes": 47431,
+      "sha256": "d39142488d4f4fb65376b43a615b1d0e2006e7781b8e298a1cfe3077c5648480"
     },
     {
       "path": "skills/hermes-lcm/references/diagnostics.md",
@@ -535,8 +540,8 @@
     },
     {
       "path": "skills/hermes-lcm/references/recall-tools.md",
-      "bytes": 19230,
-      "sha256": "afc012cfca78d5c7ed71ced01b78737a3e735e6501ecdbf7b9f20d5b0479268f"
+      "bytes": 20540,
+      "sha256": "9f1b3a35a80e40a497340e9a4c05fe56c2936cf735b1ed1139e195945933c30d"
     },
     {
       "path": "skills/hermes-lcm/references/session-lifecycle.md",
@@ -605,13 +610,18 @@
     },
     {
       "path": "tools.py",
-      "bytes": 275213,
-      "sha256": "e8238b1a6c5c56fbddaea3c90422fb55008991d6eaf8d18923554ef68451ecc9"
+      "bytes": 275228,
+      "sha256": "65e2ba1109a47b3edfca07e60359bd5fa90bd0ef6e1285e65e5d921c2d00a7fd"
     },
     {
       "path": "trajectory_store.py",
       "bytes": 162898,
       "sha256": "6fdcf7fe20efa91acb7db5abeb00045a52c16f58d2f243fa31a241bbedbcf776"
+    },
+    {
+      "path": "unended_catchup.py",
+      "bytes": 10841,
+      "sha256": "dbec017fbea65112edcbe2e0a3077778e4c4b6a81561742376be6b2ec5c522e8"
     },
     {
       "path": "vector_store.py",

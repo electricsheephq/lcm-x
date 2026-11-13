@@ -157,6 +157,8 @@ from .compaction_request import CompactionRequest
 from .compress_run import CompressRun
 from .identity_anchor import IdentityAnchorMixin, _ROTATION_LINEAGE_UNRECORDED, _raw_remainder
 from .host_uid import HostUidShadowMixin, _valid_uid
+from .host_row_recovery import HostRowRecoveryMixin
+from .unended_catchup import UnendedCatchupMixin
 from .host_uid_emit import carry_identity, identity_emit_enabled, record_absorbed_message, sync_cached_host_metadata
 from .store_complete import HiddenBacklog, StoreCompleteMixin
 from .survival_fit import SurvivalFitMixin, _carries_survival_notice, _host_estimate, survival_reserve_fraction
@@ -717,6 +719,8 @@ class LCMEngine(
     ReconcileMixin,
     IdentityAnchorMixin,
     HostUidShadowMixin,
+    HostRowRecoveryMixin,
+    UnendedCatchupMixin,
     StoreCompleteMixin,
     SurvivalFitMixin,
     AuxiliarySessionMixin,
@@ -1430,6 +1434,7 @@ class LCMEngine(
         if adaptive is not None:
             adaptive.clear()
         self._unregister_active_engine_binding()
+        self._host_session_db = None  # #2624: a host reader never crosses profile homes
         self._session_id = ""
         self._session_platform = ""
         self._foreground_session_id = ""
@@ -4594,7 +4599,7 @@ class LCMEngine(
         """Handle Hermes' reset-only switch after an end or an empty /new.
 
         CLI /new omits on_session_start, but reset_session_state supplies the
-        new id here. The host DB stays host-owned; only the explicit id is used.
+        new id here. The handle is kept only for read-only recovery (#2624).
         Detachment is unsupported: Hermes must keep review-fork compression off.
         """
         session_id = str(session_id or "")
@@ -4604,6 +4609,8 @@ class LCMEngine(
                 "keep compression off on this fork"
             )
         with self._exclusive_lifecycle("rebind"):
+            if session_db is not None:  # a call without a handle keeps the one already held
+                self._host_session_db = session_db
             if (
                 self._stable_use_closed
                 or not self._session_id
@@ -4675,6 +4682,8 @@ class LCMEngine(
             if self._stable_use_closed:
                 raise RuntimeError("LCM engine is closed")
             self._on_session_start_unlocked(session_id, **kwargs)
+            self._enqueue_host_row_recovery(session_id, kwargs)
+            self._enqueue_unended_catchup(session_id, kwargs)
             binding = self._emission_binding()
             for name in ("_compress_commit_proof", "_last_emission_descriptors"):
                 if not self._emission_proof_matches_binding(getattr(self, name), binding):
@@ -8398,6 +8407,14 @@ class LCMEngine(
         Store-dependent protection/token counts are part of lock_hold_ms, and
         would move out with classification under the design's section 5 fallback.
         """
+        # Another writer may have filled this session after its empty-store bind.
+        # The eager write lock keeps this probe and the ensuing writes serialized.
+        if self._ingest_cursor == 0 and not self._ingest_cursor_needs_reconcile:
+            try:
+                self._ingest_cursor_needs_reconcile = self._store.has_session_messages(self._session_id)
+            except Exception as exc:
+                logger.debug("LCM ingest cursor reconciliation probe failed: %s", exc)
+                self._ingest_cursor_needs_reconcile = True
         self._capture_host_rewrites(messages)
         n = len(messages)
         cursor = entry_cursor = min(max(self._ingest_cursor, 0), n)
@@ -8763,10 +8780,10 @@ class LCMEngine(
                 self._ingest_ledger_attempt["recovery_probe"] = (
                     reconciled_existing_session and bool(bind_session_counts and bind_session_counts[0]))
                 cursor0_batch = (
-                    reconciled_existing_session and cursor == 0
+                    reconciled_existing_session and today == 0
                     and self._last_ingest_reconciliation.get("action") == "persisted batch"
                     and self._last_ingest_reconciliation.get("reason") == "persisted ambiguous delta"
-                    and self._last_ingest_reconciliation.get("cursor") == 0)
+                    or reconciled_existing_session and today == 0 and ledger_run["k"] > 0)
                 # #2029: a rotation child re-sent from cursor 0 without a commit proof (no reconciliation ran) stores
                 # its predecessors' rows again; annotate them against the recorded rotation chain.
                 # Only the unreconciled route gains the chain: #2305's reconciled route keeps its own-session targets.
