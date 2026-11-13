@@ -32,7 +32,7 @@ def make_delivery(lengths=(1300,) * 7):
     batch = Mock(side_effect=lambda ids: {i: rows[i] for i in ids if i in rows})
     engine = SimpleNamespace(_store=SimpleNamespace(get_batch=batch))
     hydrate = Mock(wraps=partial(tools._lcm_recall_answer_ready_content, engine))
-    read_time = Mock(return_value=({}, None))
+    read_time = Mock(return_value=(rows, None))
     read_windows = Mock(side_effect=lambda entries, deadline, **kw: (hydrate(entries, **kw), None))
     options = dict(
         query="ANSWER_TOKEN", limit=len(entries), requested_limit=len(entries), scope_bias=0.0,
