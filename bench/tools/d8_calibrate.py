@@ -53,7 +53,8 @@ def read_receipt(path, dataset):
                     and len(base) == {"longmemeval": 500, "locomo": 1986}[dataset]
                     and receipt.get("status") == "COMPLETE"
                     and all(side.get("status") == side.get("health_status") == "COMPLETE"
-                            and side.get("accounting", {}).get("failed_including_missing") == 0
+                            and isinstance(side.get("accounting"), dict)
+                            and side["accounting"].get("failed_including_missing") == 0
                             for side in (a, aprime)))
         margin = count_margin(n)
         count_pass = abs(b - c) < margin
@@ -91,7 +92,7 @@ def calibrate(pairs):
                 raise ValueError("dataset mismatch")
             if scored is not None and any(value != config for value in scored["recall_configs"].values()):
                 raise ValueError("configuration mismatch")
-        except (OSError, ValueError, TypeError, KeyError) as error:
+        except (OSError, ValueError, TypeError, KeyError, AttributeError) as error:
             item.update(status="UNREAD", reason=f"scorer input unreadable ({type(error).__name__})")
             scored = None
         else:

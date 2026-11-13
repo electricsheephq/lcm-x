@@ -130,7 +130,8 @@ def test_receipt_locomo_never_infers_category_from_totals(tmp_path):
     assert "locomo10.json" in row["reason"]
 
 
-@pytest.mark.parametrize("defect", ["missing candidate", "wrong total", "failed receipt", "missing health"])
+@pytest.mark.parametrize("defect", ["missing candidate", "wrong total", "failed receipt", "missing health",
+                                    "null accounting", "list accounting"])
 def test_receipt_completeness_is_not_fabricated(tmp_path, defect):
     pair = receipt_pair(tmp_path, 1, 1)
     data = json.loads(pair[3].read_text())
@@ -141,6 +142,10 @@ def test_receipt_completeness_is_not_fabricated(tmp_path, defect):
             del data[side]["outcomes"]["q499"]
     elif defect == "failed receipt":
         data["status"] = "INCOMPLETE"
+    elif defect == "null accounting":
+        data["aprime"]["accounting"] = None
+    elif defect == "list accounting":
+        data["arm"]["accounting"] = [0]
     else:
         del data["arm"]["health_status"]
     pair[3].write_text(json.dumps(data))
