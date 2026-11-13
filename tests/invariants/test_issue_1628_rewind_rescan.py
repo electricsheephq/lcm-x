@@ -196,16 +196,19 @@ def test_rescan_preserves_anchored_replay_and_reconcile_input(engine, monkeypatc
         assert active[scan_start:] == first[2][scan_start:]
 
 
-def test_faulted_prematch_does_not_rescan_and_retry_recovers(engine, monkeypatch):
+@pytest.mark.parametrize("prelock", [False, True], ids=["eager", "lazy"])
+def test_faulted_prematch_does_not_rescan_and_retry_recovers(engine, monkeypatch, prelock):
+    engine._store._ingest_prelock = prelock
     host = _first()
     engine.ingest(host)
     host[0]["content"] = "Revised migration prompt"
     host.append({"role": "assistant", "content": "Deploying.", "timestamp": 201.0})
     build = engine._build_ingest_replay
     calls = []
+    reclassified = engine._store.ingest_prelock_counts["reclassified"]
 
     def record_build(**kwargs):
-        calls.append(kwargs["cursor"])
+        calls.append((kwargs["cursor"], engine._store.connection.in_transaction))
         return build(**kwargs)
 
     def fail(*args, **kwargs):
@@ -216,8 +219,10 @@ def test_faulted_prematch_does_not_rescan_and_retry_recovers(engine, monkeypatch
         patch.setattr(engine, "_identity_anchor_prematch", fail)
         engine.ingest(host)
     # #1815: a first-attempt pre-match fault rolls back and classifies once more, so a fault that persists costs
-    # exactly one extra scan from the same cursor (never a rescan from 0), then the ordered-prefix path stands.
-    assert calls == [2, 2]
+    # exactly one extra held-lock scan. Lazy admission also repeats poisoned pre-lock passes under the lock.
+    assert all(cursor == 2 for cursor, _ in calls)
+    assert [cursor for cursor, held in calls if held] == [2, 2]
+    assert sum(not held for _, held in calls) == engine._store.ingest_prelock_counts["reclassified"] - reclassified
     assert "Revised migration prompt" not in _contents(engine)
     engine.ingest(host)
     assert _contents(engine).count("Revised migration prompt") == 1

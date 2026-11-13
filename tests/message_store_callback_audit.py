@@ -71,15 +71,16 @@ def install(monkeypatch):
             # Also cover connections opened by threads already alive at setup.
             if not getattr(sys.getprofile(), '_d1_observer', False):
                 setprofile(compose(sys.getprofile()))
+            set_thread_profile(compose(threading.getprofile()))
             if on_open:
                 on_open(conn)
         return open_connection(replace(policy, on_open=mark))
 
     monkeypatch.setattr(store, 'open_connection', opened)
-    monkeypatch.setattr(sys, 'setprofile', lambda callback: setprofile(compose(callback)))
-    monkeypatch.setattr(threading, 'setprofile', lambda callback: set_thread_profile(compose(callback)))
-    setprofile(compose(prior))
-    set_thread_profile(compose(thread_prior))
+    # Tests without a MessageStore need no profiler. Start at open, before on_open
+    # can register a callback, including when that open happens on an existing thread.
+    monkeypatch.setattr(sys, 'setprofile', lambda callback: setprofile(compose(callback) if connections else callback))
+    monkeypatch.setattr(threading, 'setprofile', lambda callback: set_thread_profile(compose(callback) if connections else callback))
     def restore():
         active[0] = False
         restore_profile(prior, setprofile)
