@@ -249,8 +249,9 @@ gh pr merge <PR> --merge --match-head-commit <HEAD_SHA>
   #2605 while payload files cannot be written), and the accepted trade on a store that rc1 to
   rc5 wrote with redaction on (#2604), each at its pinned counts. From the 2026-11-13
   amendment, and for v0.30.1 only, the third exception covers #2559 in its probe cells and
-  #2547's copy with payload externalization off, at their recorded shapes and counts, and #2604
-  and #2605 at the counts v0.30.0 stores in the same probe cells, none in the driven audit;
+  #2547's copy with payload externalization off, at their recorded shapes and counts, #2604
+  and #2605, and #2550's cold-restart copy (added the same day), at the counts v0.30.0 stores in the same
+  probe cells, none in the driven audit;
   #2599's extra after a write fault clears may stay at v0.30.0's count in the same write-fault
   replay cells (KNOWN under #2605);
   #2558 (fixed in v0.30.1) and the trade on rc-written stores are not covered. No other
