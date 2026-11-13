@@ -36,7 +36,7 @@ This page states what we are building and how we will know it works. The [roadma
    - The same record runs the context window: a session can run for weeks and the model stays inside its window. Today the user waits for compaction (p90 about 55 s); compaction you don't notice removes that wait.
    - Anything compacted can be recovered exactly.
 5. **One memory, any harness.**
-   - LCM-X for Claude Code (preview since 2026-11-07; GA after its real-session gate): Claude Code sessions are kept in their own store and recalled over MCP. Grok Build follows, then a hosted store that recalls across harnesses, then Codex, OpenClaw and any MCP client.
+   - LCM-X for Claude Code (preview since 2026-11-07; GA after [its gate in the roadmap](ROADMAP.md#the-order-roadmap-v6)): Claude Code sessions are kept in their own store and recalled over MCP. Grok Build follows, then a hosted store that recalls across harnesses, then Codex, OpenClaw and any MCP client.
    - Each event keeps a stable identity across hosts, so the record stays lossless when several harnesses share it.
 6. **We measure it.** Claims about recall, continuity and speed come with a pinned commit, a configuration and a published number. From v0.29.0 our rows are read and judged by current frontier models; earlier rows name the judge they used.
 
