@@ -191,22 +191,28 @@ def _message_store_callbacks(monkeypatch):
     """D1 runs for every test, including tests using their own connection subclasses."""
     from tests.message_store_callback_audit import CALLS, install
     start = len(CALLS)
-    install(monkeypatch)
-    yield
+    restore = install(monkeypatch)
+    try:
+        yield
+    finally:
+        restore()
     assert not [call for call in CALLS[start:] if call[1]], CALLS[start:]
 
 
 @pytest.fixture(autouse=True)
 def _prelock_recording_oracle(monkeypatch, request):
     if request.node.path.name not in {"test_2293_prelock.py", "test_2293_prelock_probes.py"}:
+        yield
         return
     if request.node.name == "test_p3_same_connection_write_by_another_thread_is_caught":
+        yield
         return  # threaded by design; production detection is the oracle here
     from contextlib import contextmanager
     from hermes_lcm.store import MessageStore
     from tests.prelock_instrument import install_oracle_hooks, recording_prelock
     install_oracle_hooks(monkeypatch)
     original = MessageStore.ingest_atomic
+    failures = []
 
     @contextmanager
     def recorded(store, **kwargs):
@@ -220,6 +226,12 @@ def _prelock_recording_oracle(monkeypatch, request):
                     request.node.user_properties.append(("prelock_oracle", "threaded-no-callback"))
                 yield timing
                 return
-            with recording_prelock(store):
-                yield timing
+            try:
+                with recording_prelock(store):
+                    yield timing
+            except AssertionError as exc:
+                failures.append(exc)  # ingest may swallow this; teardown must still gate
+                raise
     monkeypatch.setattr(MessageStore, "ingest_atomic", recorded)
+    yield
+    assert not failures, failures

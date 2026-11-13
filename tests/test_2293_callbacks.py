@@ -17,10 +17,11 @@ import pytest
 
 
 @pytest.mark.parametrize("method", ["set_authorizer", "set_trace_callback", "set_progress_handler", "create_function"])
-def test_d1_audit_detects_product_callbacks(method):
-    from tests.message_store_callback_audit import AuditedConnection, CALLS
-    conn = AuditedConnection(":memory:")
-    conn._message_store_connection = True
+def test_d1_audit_detects_product_callbacks(method, tmp_path):
+    from hermes_lcm.store import MessageStore
+    from tests.message_store_callback_audit import CALLS
+    store = MessageStore(tmp_path / "callbacks.db")
+    conn = store._conn
     args = {"set_authorizer": (lambda *_: 0,), "set_trace_callback": (lambda *_: None,),
             "set_progress_handler": (lambda: 0, 1), "create_function": ("probe", 0, lambda: 0)}
     start = len(CALLS)
@@ -33,7 +34,7 @@ def test_d1_audit_detects_product_callbacks(method):
     finally:
         # This positive control is deliberately outside the suite's product verdict.
         del CALLS[start:]
-        conn.close()
+        store.close()
 
 
 def test_instrument_refuses_threads_and_never_denies(tmp_path):

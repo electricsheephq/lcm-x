@@ -211,7 +211,8 @@ def test_p2_mismatch_after_prelock_writes_resets_state_and_matches_eager(name, t
     _assert_same(case, eager, lazy)
     entry = log[0]
     if entry["fired"] and (entry["counts"].get("acquired", 0) or entry["counts"].get("reclassified", 0)):
-        assert entry["counts"].get("reclassified", 0) == 1, entry
+        # The denied pre-match read poisons both #1815 outer attempts; each reruns once.
+        assert entry["counts"].get("reclassified", 0) == (2 if case.fault == "prematch" else 1), entry
         assert "committable" not in entry["rerun"], entry  # the second pass cannot mismatch
 
 

@@ -1,74 +1,65 @@
-"""D1: audit all MessageStore connection factories for the entire pytest suite."""
-import inspect
-import sqlite3
+"""D1: observe SQLite callback calls without replacing any connection type."""
+import sys
+import threading
+from dataclasses import replace
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).absolute().parents[1]
 CALLS = []
-
-
-class CallbackAudit:
-    _message_store_connection = False
-
-    def _record_callback(self, method, callback):
-        if not self._message_store_connection:
-            return
-        # The immediate caller outside this mixin is the registering code. A test
-        # wrapper may call product code: walking every ancestor would exempt it.
-        frame = inspect.currentframe().f_back.f_back
-        path = Path(frame.f_code.co_filename).resolve()
-        try:
-            relative = path.relative_to(ROOT)
-        except ValueError:
-            return
-        if relative.parts[0] == "tests":
-            return
-        CALLS.append((method, callback is not None, str(relative), frame.f_lineno))
-
-    def set_authorizer(self, authorizer, /):
-        self._record_callback("set_authorizer", authorizer)
-        return super().set_authorizer(authorizer)
-
-    def set_trace_callback(self, callback, /):
-        self._record_callback("set_trace_callback", callback)
-        return super().set_trace_callback(callback)
-
-    def set_progress_handler(self, callback, n, /):
-        self._record_callback("set_progress_handler", callback)
-        return super().set_progress_handler(callback, n)
-
-    def create_function(self, name, narg, func, **kwargs):
-        self._record_callback("create_function", func)
-        return super().create_function(name, narg, func, **kwargs)
-
-
-class AuditedConnection(CallbackAudit, sqlite3.Connection):
-    pass
+METHODS = frozenset({'set_authorizer', 'set_trace_callback', 'set_progress_handler', 'create_function',
+                     'create_aggregate', 'create_collation', 'create_window_function'})
 
 
 def install(monkeypatch):
-    from dataclasses import replace
     from hermes_lcm import store
-    connect, open_connection = sqlite3.connect, store.open_connection
-    factories = {}
+    open_connection = store.open_connection
+    connections = {}  # strong references prevent connection-id reuse during this test
+    setprofile, set_thread_profile = sys.setprofile, threading.setprofile
+    prior, thread_prior = sys.getprofile(), threading.getprofile()
+    active = [True]
 
-    def audited_connect(*args, **kwargs):
-        factory = kwargs.get("factory", sqlite3.Connection)
-        if isinstance(factory, type) and issubclass(factory, sqlite3.Connection):
-            if not issubclass(factory, CallbackAudit):
-                if factory not in factories:
-                    factories[factory] = type("Audited" + factory.__name__, (CallbackAudit, factory), {})
-                kwargs["factory"] = factories[factory]
-        return connect(*args, **kwargs)
+    def observed(frame, event, arg):
+        if event != 'c_call' or getattr(arg, '__name__', '') not in METHODS:
+            return
+        if id(getattr(arg, '__self__', None)) not in connections:
+            return
+        filename = frame.f_code.co_filename
+        prefix = str(ROOT) + '/'
+        if filename.startswith(prefix) and not filename.startswith(prefix + 'tests/'):
+            CALLS.append((arg.__name__, True, filename[len(prefix):], frame.f_lineno))
+
+    def compose(previous):
+        if getattr(previous, '_d1_observer', False):
+            return previous
+        def profile(frame, event, arg):
+            if not active[0]:
+                setprofile(previous)
+            else:
+                observed(frame, event, arg)
+            if previous:
+                previous(frame, event, arg)
+        profile._d1_observer = True
+        return profile
 
     def opened(policy):
         on_open = policy.on_open
-
         def mark(conn):
-            conn._message_store_connection = True
+            connections[id(conn)] = conn
+            # Also cover connections opened by threads already alive at setup.
+            if not getattr(sys.getprofile(), '_d1_observer', False):
+                setprofile(compose(sys.getprofile()))
             if on_open:
                 on_open(conn)
         return open_connection(replace(policy, on_open=mark))
 
-    monkeypatch.setattr(sqlite3, "connect", audited_connect)
-    monkeypatch.setattr(store, "open_connection", opened)
+    monkeypatch.setattr(store, 'open_connection', opened)
+    monkeypatch.setattr(sys, 'setprofile', lambda callback: setprofile(compose(callback)))
+    monkeypatch.setattr(threading, 'setprofile', lambda callback: set_thread_profile(compose(callback)))
+    setprofile(compose(prior))
+    set_thread_profile(compose(thread_prior))
+    def restore():
+        active[0] = False
+        setprofile(prior)
+        set_thread_profile(thread_prior)
+        connections.clear()
+    return restore

@@ -184,7 +184,9 @@ def _exercise_alt_stamp(engines, monkeypatch, bound, rollback):
         binding = next(b for b in sql_rows(engine, "occurrence_bindings") if b["store_id"] == row["store_id"])
         assert observations[0]["occ_id"] == binding["occ_id"]
     if rollback:
-        assert observed == [True]
+        # T1-28 class: the injected error poisons the lazy attempt (one discarded pre-lock pass);
+        # the rerun meets the same persistent error under the lock and fails open, as on main.
+        assert observed == [True, True]
         assert not engine._store.get_message_relations([row["store_id"]], "alt_stamp")
 
 

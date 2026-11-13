@@ -2183,6 +2183,10 @@ class MessageStore:
         # already open there lack a real savepoint covering those writes.
         for scope in state.scopes:
             scope["uncovered"] = True
+        # Even an invalid implicit transaction held the writer lock. Record it
+        # before validation can roll it back and restart the attempt.
+        state.start_timer(state.clean_at)
+        state.timing["acquired_at"] = state.clean_at
         valid = (state.T_clean == state.G0[0] and not state.poisoned
                  and self._ingest_write_generation()[1:] == state.G0[1:])
         if not valid:
@@ -2192,8 +2196,6 @@ class MessageStore:
             state.reclassify_pending = True
             raise _IngestReclassify()
         state.phase = "acquired"
-        state.start_timer(state.clean_at)
-        state.timing["acquired_at"] = state.clean_at
         conn.execute("SAVEPOINT lcm_ingest_attempt")
         state.attempt_after_writes = True
         self.ingest_prelock_counts["acquired"] += 1
@@ -2322,7 +2324,9 @@ class MessageStore:
         def start(at=None):
             nonlocal started
             try:
-                started = time.perf_counter() if at is None else at
+                acquired = time.perf_counter() if at is None else at
+                started = acquired if started is None else min(started, acquired)
+                timing["first_acquired_at"] = started  # survives rollback and re-acquisition
             except Exception as exc:
                 timing["telemetry_error"] = type(exc).__name__
         try:

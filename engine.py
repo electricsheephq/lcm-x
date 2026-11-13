@@ -7551,7 +7551,7 @@ class LCMEngine(
                                     self._ledger_count("ingest.prelock.reclassified")
                                     reclassified = True
                         finally:
-                            held_at = sample.get("acquired_at") if isinstance(sample, dict) else entered_at
+                            held_at = sample.get("first_acquired_at", sample.get("acquired_at")) if isinstance(sample, dict) else entered_at
                             if self._store.ingest_prelock_counts["poisoned"] > poisoned_before:
                                 self._ledger_count("ingest.prelock.poisoned")
                     emission_committed = True
@@ -8368,6 +8368,7 @@ class LCMEngine(
 
     def _raise_ingest_busy(self, error, *, store=None):
         store = self._store if store is None else store  # a detached cold tail's own store (#2210)
+        store._ingest_prelock_write_failed(error)
         store._sync_ingest_prelock()
         if store._transaction_owner.owns_connection(store._conn) and (
             isinstance(error, _SqliteSavepointError) or _is_ingest_busy_error(error, require_code=True)
