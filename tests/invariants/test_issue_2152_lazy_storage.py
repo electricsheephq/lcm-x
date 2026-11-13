@@ -358,6 +358,34 @@ def test_reloaded_hook_keeps_ingesting_for_two_retained_clones(preflight, passes
     db.unlink()
 
 
+@pytest.mark.parametrize("passes_compressor", [True, False])
+def test_reloaded_hook_stores_turn_while_old_engine_is_still_registered(preflight, monkeypatch, passes_compressor):
+    monkeypatch.setenv("LCM_SHUTDOWN_COMPACTION_WAIT_S", "0")
+    prototype, old_ctx = preflight.register(supports_unload=True)
+    old = prototype.clone_for_agent()
+    old.on_session_start("closing-cache", platform="cli", conversation_id="closing-lane")
+    initial = [{"role": "user", "content": "original prompt"}, {"role": "assistant", "content": "original answer"}]
+    old.ingest(initial)
+    history = initial + [{"role": "user", "content": "new prompt"}, {"role": "assistant", "content": "new answer"}]
+    _, replacement_ctx = preflight.register(supports_unload=True)
+    extra = {"context_compressor": old} if passes_compressor else {}
+    db = preflight.home / "lcm.db"
+    try:
+        with old._admit_plugin_operation():
+            old_ctx.unload_callbacks[0]()
+            assert not old._stable_use_closed
+            for _ in range(2):
+                replacement_ctx.hooks["post_llm_call"](
+                    session_id="closing-cache", platform="cli", conversation_history=history, **extra,
+                )
+            assert _durable_messages(db, "closing-cache") == [
+                (row["role"], row["content"]) for row in history
+            ]
+    finally:
+        replacement_ctx.unload_callbacks[0]()
+        old.shutdown()
+
+
 def test_reloaded_hook_replays_compacted_second_lane(preflight, monkeypatch):
     from hermes_lcm import escalation, tokens
 
@@ -515,6 +543,45 @@ def test_unload_drains_timed_out_sqlite_worker(preflight, monkeypatch, caplog):
             release.set()
         finish.result(timeout=5)
     assert closed.is_set()
+
+
+@pytest.mark.parametrize("stage", ["resolve", "embed"])
+def test_semantic_provider_worker_refuses_to_start_during_unload(preflight, monkeypatch, stage):
+    from hermes_lcm import tools
+    from hermes_lcm.engine_registry import EngineUnloadGroup
+
+    engine, ctx = preflight.register(supports_unload=True)
+    monkeypatch.setattr(engine._config, "embeddings_enabled", True)
+    calls = []
+
+    def embed(query):
+        calls.append("embed")
+        return [1.0]
+
+    def resolve(*args, **kwargs):
+        calls.append("resolve")
+        return SimpleNamespace(provider_id="local", embed_query=embed)
+
+    start_worker = EngineUnloadGroup.start_worker
+
+    def begin_closing(owner, worker):
+        target = "lcm-provider-resolution" if stage == "resolve" else "lcm-query-embed"
+        if worker.name == target:
+            owner.closing.set()
+        return start_worker(owner, worker)
+
+    monkeypatch.setattr(EngineUnloadGroup, "start_worker", begin_closing)
+    monkeypatch.setattr(tools, "_lcm_grep_resolve_provider", resolve)
+    monkeypatch.setattr(tools, "_resolve_semantic_conversation_scope", lambda *args, **kwargs: None)
+    try:
+        response = tools._lcm_grep_semantic(
+            {"query": "question"}, engine=engine, deadline=time.monotonic() + 5, allow_fallback=False,
+        )
+        assert calls == ([] if stage == "resolve" else ["resolve"])
+        assert response["degraded_to_fts"]
+        assert "LCM is unloading" in response["degraded_reason"]
+    finally:
+        ctx.unload_callbacks[0]()
 
 
 def test_unload_waits_for_direct_ingest(preflight, monkeypatch):

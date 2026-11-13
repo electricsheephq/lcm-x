@@ -1954,6 +1954,7 @@ def _run_within_deadline(
     name: str,
     worker_slots: threading.BoundedSemaphore | None = None,
     engine: "LCMEngine | None" = None,
+    read_only_continuation: bool = False,
 ):
     """Run ``fn`` in a bounded daemon worker, raising if the deadline lapses.
 
@@ -1982,8 +1983,14 @@ def _run_within_deadline(
         group = engine_unload_group(engine)
         if group is None:
             worker.start()
-        elif not group.start_worker(worker):
-            raise _WorkerCapacityError("LCM is unloading")
+        else:
+            continuing = read_only_continuation and (
+                getattr(engine, "_stable_use_owner_thread", None) == threading.get_ident()
+                or bool(getattr(getattr(engine, "_thread_context", None), "plugin_operation", False))
+            )
+            started = group.start_worker(worker, continuing=True) if continuing else group.start_worker(worker)
+            if not started:
+                raise _WorkerCapacityError("LCM is unloading")
     except BaseException:
         slots.release()
         raise
@@ -2103,6 +2110,7 @@ def _lcm_grep_full_text_with_deadline(
             name="lcm-full-text",
             worker_slots=_lcm_full_text_worker_slots,
             engine=engine,
+            read_only_continuation=True,
         )
     except (_WorkerCapacityError, TimeoutError):
         return _lcm_grep_deadline_error(
@@ -2216,7 +2224,7 @@ def _lcm_grep_embed_query(
         return provider.embed_query(outbound_query)
 
     vector = _run_within_deadline(
-        invoke, remaining_s=remaining_s, name="lcm-query-embed"
+        invoke, remaining_s=remaining_s, name="lcm-query-embed", engine=engine,
     )
     return [float(value) for value in vector]
 
@@ -2498,6 +2506,7 @@ def _lcm_grep_semantic(
             lambda: _lcm_grep_resolve_provider(engine, deadline=deadline),
             remaining_s=deadline - time.monotonic(),
             name="lcm-provider-resolution",
+            engine=engine,
         )
     except _WorkerCapacityError as exc:
         return degraded(f"semantic capacity exhausted: {exc}")
@@ -5172,6 +5181,7 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
                     ),
                     remaining_s=deadline - time.monotonic(),
                     name="lcm-provider-resolution",
+                    engine=engine,
                 )
                 if provider is None:
                     degraded_reasons.append("embedding provider is not configured")
@@ -5217,6 +5227,7 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
                         ),
                         remaining_s=deadline - time.monotonic(),
                         name="lcm-chunk-provider-resolution",
+                        engine=engine,
                     )
                     if chunk_provider is None:
                         degraded_reasons.append(

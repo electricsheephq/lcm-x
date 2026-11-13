@@ -604,6 +604,43 @@ def test_retained_child_end_keeps_tool_call_and_result(host, caplog):
     assert rows == _contents(view(1)), caplog.text
     db.unlink()
 
+@pytest.mark.parametrize("rotate", [False, True], ids=["same-id", "rotated-id"])
+def test_retained_compacted_child_end_keeps_its_answer_and_lineage(host, monkeypatch, rotate):
+    import sqlite3
+    from contextlib import closing
+
+    _, _, ctx, parent, child, engine = _setup(host, "own_engine", supports_unload=True)
+    original = [{"role": "user" if i % 2 == 0 else "assistant", "content": f"turn {i} " + "payload " * 400}
+                for i in range(12)]
+    monkeypatch.setattr(engine, "_get_host_fallback_compressor", lambda: None)
+    monkeypatch.setattr(engine, "_bypass_compaction_target_tokens", lambda **kwargs: 64)
+    compacted = child.compress(engine, original)
+    assert compacted != original and len(compacted) < 3
+    if rotate:
+        child.rotate(engine, "continued")
+    db = parent._store.db_path
+
+    ctx.unload()
+    late = {"role": "assistant", "content": "late compacted child answer"}
+    child.end(engine, [*compacted, late])
+    child.end(engine, [*compacted, late])
+
+    with closing(sqlite3.connect(db)) as reader:
+        rows = reader.execute(
+            "SELECT session_id, conversation_id, role, content FROM messages "
+            "WHERE session_id IN (?, ?) ORDER BY store_id", ("child", "continued"),
+        ).fetchall()
+        lineage = reader.execute(
+            "SELECT child_session_id, parent_session_id, source FROM session_lineage ORDER BY child_session_id",
+        ).fetchall()
+    assert rows == [
+        *[("child", "child", row["role"], row["content"]) for row in original],
+        (child.session_id, child.session_id, late["role"], late["content"]),
+    ]
+    assert ("child", "parent", "subagent_start") in lineage
+    if rotate:
+        assert ("continued", "child", "compression") in lineage
+
 
 def test_plugin_unload_retries_admitted_child_after_sqlite_busy(host, monkeypatch):
     import sqlite3

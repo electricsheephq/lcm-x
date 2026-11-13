@@ -18,6 +18,7 @@ import threading
 import time
 import uuid
 from contextlib import closing, contextmanager
+from pathlib import Path
 from typing import Iterable, Sequence
 
 from .config import _parse_bool_env, lcm_env_get, sqlite_mmap_size
@@ -2980,8 +2981,9 @@ def _run_background_integrity_scan(
     """
     key = (db_path, spec.table_name)
     timeout = SQLITE_BUSY_TIMEOUT_MS / 1000.0
+    database = Path(db_path).resolve().as_uri() + "?mode=rw"
     try:
-        scan_conn = sqlite3.connect(db_path, timeout=timeout, check_same_thread=False)
+        scan_conn = sqlite3.connect(database, uri=True, timeout=timeout, check_same_thread=False)
         try:
             scan_conn.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
             # Persist the scan-started stamp on this DB so a crash mid-scan is
@@ -2992,7 +2994,7 @@ def _run_background_integrity_scan(
         finally:
             scan_conn.close()
 
-        meta_conn = sqlite3.connect(db_path, timeout=timeout, check_same_thread=False)
+        meta_conn = sqlite3.connect(database, uri=True, timeout=timeout, check_same_thread=False)
         try:
             meta_conn.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
             status = result.get("status")
@@ -3043,7 +3045,7 @@ def _run_background_integrity_scan(
             "Background FTS integrity-check for '%s' failed", spec.table_name
         )
         try:
-            cleanup = sqlite3.connect(db_path, timeout=timeout, check_same_thread=False)
+            cleanup = sqlite3.connect(database, uri=True, timeout=timeout, check_same_thread=False)
             try:
                 _clear_scan_started(cleanup, spec, expected=started_at)
                 cleanup.commit()
@@ -3095,7 +3097,8 @@ def _dispatch_background_integrity_scan(
         # marker stays due and a later open runs it.
         try:
             claim_conn = sqlite3.connect(
-                db_path,
+                Path(db_path).resolve().as_uri() + "?mode=rw",
+                uri=True,
                 timeout=INTEGRITY_SCAN_CLAIM_BUSY_TIMEOUT_MS / 1000.0,
                 check_same_thread=False,
             )
@@ -3368,8 +3371,9 @@ _stem_lock = threading.Lock()
 
 
 def _run_stem_backfill(db_path: str, spec: ExternalContentFtsSpec, stamp: str) -> None:
+    database = Path(db_path).resolve().as_uri() + "?mode=rw"
     try:
-        with closing(sqlite3.connect(db_path, timeout=30)) as conn:
+        with closing(sqlite3.connect(database, uri=True, timeout=30)) as conn:
             def disk_available() -> bool:
                 if _check_disk_space(db_path):
                     return True
@@ -3421,7 +3425,7 @@ def _run_stem_backfill(db_path: str, spec: ExternalContentFtsSpec, stamp: str) -
         logger.exception("Background stem backfill failed; leaving state backfilling")
     finally:
         try:
-            with closing(sqlite3.connect(db_path, timeout=0.05)) as cleanup:
+            with closing(sqlite3.connect(database, uri=True, timeout=0.05)) as cleanup:
                 cleanup.execute("DELETE FROM metadata WHERE key='fts_stem_claim' AND value=?", (stamp,))
                 cleanup.commit()
         except sqlite3.Error:
@@ -3440,7 +3444,8 @@ def dispatch_background_stem_backfill(conn: sqlite3.Connection, spec: ExternalCo
             return
         stamp = str(time.time())
         try:
-            with closing(sqlite3.connect(db_path, timeout=INTEGRITY_SCAN_CLAIM_BUSY_TIMEOUT_MS / 1000)) as claim:
+            database = Path(db_path).resolve().as_uri() + "?mode=rw"
+            with closing(sqlite3.connect(database, uri=True, timeout=INTEGRITY_SCAN_CLAIM_BUSY_TIMEOUT_MS / 1000)) as claim:
                 claim.execute("BEGIN IMMEDIATE")
                 previous = _stem_metadata(claim, "fts_stem_claim")
                 if previous and float(stamp) - float(previous) < INTEGRITY_SCAN_STALE_SECONDS:

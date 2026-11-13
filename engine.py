@@ -3009,7 +3009,7 @@ class LCMEngine(
             spend_guard = self._rollup_spend_guard
 
             def maintain() -> None:
-                private_dag = SummaryDAG(database_path)
+                private_dag = SummaryDAG(database_path, existing_only=True)
                 try:
                     run_rollup_maintenance(
                         private_dag,
@@ -5212,21 +5212,28 @@ class LCMEngine(
         """Persist late delegated rows only when the existing store proves its lineage."""
         old_store = self.__dict__.get("_store")
         if (not messages or old_store is None or str(old_store.db_path) == ":memory:"
-                or (platform != "subagent" and not _aux_session.explicit_subagent_lineage(session_id)
-                    and not self._has_lcm_bypass_lineage_session(session_id))
                 or self._session_id_matches_lcm_bypass_filters(session_id, platform=platform or "subagent")):
             return False
         try:
-            with self._open_retired_store(old_store) as store, store.ingest_atomic():
+            with _aux_session._DELEGATE_STORE_LOCK, self._open_retired_store(old_store) as store, store.atomic(immediate=True):
+                sessions = self._delegate_child_store_sessions(session_id, store=store)
+                root = sessions[-1]
                 link = self._stored_delegate_child_link(session_id, store=store)
-                if (not link or not link["parent_session_id"] or link["source"] == "compression"
+                root_link = self._stored_delegate_child_link(root, store=store)
+                parent = root_link.get("parent_session_id")
+                if (not link or not parent or parent in sessions or root_link["source"] == "compression"
+                        or (str(store.db_path), session_id) in _aux_session._DELEGATE_AUXILIARY_IDS
                         or self._session_id_matches_lcm_bypass_filters(
-                            link["parent_session_id"], platform=self._host_session_parent(link["parent_session_id"])[1],
+                            parent, platform=self._host_session_parent(parent)[1],
                         )):
                     return False
-                return self._append_retired_tail(
-                    store, old_store, session_id, session_id, messages, "subagent",
-                ) is not None
+                view = [row for row in messages
+                        if isinstance(row, dict) and not self._matches_ignore_message_patterns(row)]
+                self._append_delegate_child_view(
+                    session_id, view, store=store,
+                    context_window_tokens=old_store.get_context_window_tokens(session_id),
+                )
+                return True
         except Exception:
             logger.debug("LCM retired delegated-child tail write failed", exc_info=True)
             return False

@@ -861,11 +861,26 @@ def register(ctx):
     # existing _ingest_messages cursor prevents duplicates if compress() runs
     # later the same turn.
     try:
-        def _on_post_llm_call(**kwargs):
+        def _forward_reloaded_post_llm_call(payload):
+            if not engine._plugin_is_unloading():
+                return False
+            replacement = getattr(getattr(ctx, "_manager", None), "_context_engine", None)
+            callback = getattr(replacement, "_lcm_registered_post_llm_call", None)
+            if (replacement is engine or not callable(callback)
+                    or replacement._plugin_is_unloading()
+                    or replacement._hermes_home != engine._hermes_home
+                    or replacement._db_path != engine._db_path):
+                return False
+            callback(_retained_dispatch=True, **payload)
+            return True
+
+        def _on_post_llm_call(*, _retained_dispatch=False, **kwargs):
             if not active:
                 return
             history = kwargs.get("conversation_history")
             if not history:
+                return
+            if _forward_reloaded_post_llm_call(kwargs):
                 return
             host_engine = kwargs.get("context_compressor")
             if not _identity.is_lcm_engine_name(getattr(host_engine, "name", None)):
@@ -922,18 +937,32 @@ def register(ctx):
             def _replay_existing_lane(active_engine):
                 return active_engine._ingest_reload_lane(session_id, conversation_id, history, platform)
 
+            def _replay_with_scoped_writer():
+                with engine._admit_plugin_operation() as admitted:
+                    if not admitted:
+                        return False
+                    replacement = engine.clone_for_agent()
+                    try:
+                        replay = use_lcm_engine(replacement, _replay_existing_lane, timeout=None)
+                        return replay.used and bool(replay.value)
+                    finally:
+                        replacement.shutdown()
+
             try:
                 if host_engine is not None:
                     result = use_lcm_engine(host_engine, _bind_and_ingest, timeout=None)
-                    if (result.status is ActiveEngineUseStatus.CLOSED_ENGINE
+                    if (result.status == ActiveEngineUseStatus.CLOSED_ENGINE
                             and getattr(host_engine, "_plugin_is_unloading", lambda: False)()
-                            and session_id and _engine_bound_session_id(host_engine) == session_id
+                            and session_id
                             and host_engine._hermes_home == engine._hermes_home
-                            and host_engine._db_path == engine._db_path
-                            and (not conversation_id or conversation_id == host_engine._conversation_id)):
+                            and host_engine._db_path == engine._db_path):
                         with engine._admit_plugin_operation() as admitted:
                             if admitted and host_engine._flush_retired_delegate_child(session_id, history, platform):
                                 return
+                        if (_engine_bound_session_id(host_engine) != session_id
+                                or (conversation_id and conversation_id != host_engine._conversation_id)):
+                            logger.warning("LCM post_llm_call skipped ingest: retired binding differs")
+                            return
                         conversation_id = conversation_id or host_engine._conversation_id
                         # Reuse the normal ingest path once a current engine
                         # owns this lane. Never rebind an unrelated engine.
@@ -950,18 +979,18 @@ def register(ctx):
                         )
                         if current.used and current.value:
                             return
-                        if current.status is ActiveEngineUseStatus.ENGINE_NOT_RESIDENT:
+                        if current.status in (ActiveEngineUseStatus.ENGINE_NOT_RESIDENT,
+                                              ActiveEngineUseStatus.CLOSED_ENGINE):
                             # The old binding's proven prefix permits a write
                             # without creating a new resident engine. A
                             # compacted or first view needs normal ingest.
                             with engine._admit_plugin_operation() as admitted:
+                                # The detached writer and pending-tail retry
+                                # both reconcile under BEGIN IMMEDIATE.
                                 if admitted and host_engine._flush_retired_session_end(session_id, history, warn=False):
                                     return
-                            replacement = engine.clone_for_agent()
-                            try:
-                                result = use_lcm_engine(replacement, _replay_existing_lane, timeout=None)
-                            finally:
-                                replacement.shutdown()
+                            if _replay_with_scoped_writer():
+                                return
                 else:
                     result = use_active_lcm_engine(
                         _ingest_and_note,
@@ -969,33 +998,27 @@ def register(ctx):
                         conversation_id=conversation_id,
                         timeout=None,
                     )
-                    if (
-                        result.status is ActiveEngineUseStatus.ENGINE_NOT_RESIDENT
-                    ):
+                    if result.status is ActiveEngineUseStatus.ENGINE_NOT_RESIDENT and not _retained_dispatch:
                         result = use_cold_lcm_engine(
                             engine,
                             _bind_and_ingest,
                             timeout=None,
                         )
-                        if result.status is ActiveEngineUseStatus.RESIDENT_ENGINE_CONFLICT:
-                            if engine._unload_group is not None and session_id:
-                                lane = use_lcm_engine(
-                                    engine,
-                                    lambda current: current._unattached_reload_lane(session_id, conversation_id, platform),
-                                    timeout=None,
-                                )
-                                if lane.used and lane.value:
-                                    conversation_id = lane.value
-                                    # The hook cannot attach a replacement
-                                    # to the cached host agent. Close this
-                                    # scoped writer after normal replay.
-                                    replacement = engine.clone_for_agent()
-                                    try:
-                                        ingested = use_lcm_engine(replacement, _replay_existing_lane, timeout=None)
-                                        if ingested.used and ingested.value:
-                                            return
-                                    finally:
-                                        replacement.shutdown()
+                    if result.status in (ActiveEngineUseStatus.RESIDENT_ENGINE_CONFLICT,
+                                         ActiveEngineUseStatus.CLOSED_ENGINE,
+                                         ActiveEngineUseStatus.ENGINE_NOT_RESIDENT):
+                        if engine._unload_group is not None and session_id:
+                            lane = use_lcm_engine(
+                                engine,
+                                lambda current: current._unattached_reload_lane(session_id, conversation_id, platform),
+                                timeout=None,
+                            )
+                            if lane.used and lane.value:
+                                conversation_id = lane.value
+                                if _replay_with_scoped_writer():
+                                    return
+                        if (result.status is ActiveEngineUseStatus.RESIDENT_ENGINE_CONFLICT
+                                or (_retained_dispatch and result.status is ActiveEngineUseStatus.ENGINE_NOT_RESIDENT)):
                             # No engine of the child's own: store its rows without binding one.
                             stored = use_lcm_engine(engine, _store_delegate_child, timeout=None)
                             if stored.used and stored.value:
@@ -1006,6 +1029,8 @@ def register(ctx):
                                 return
 
                 if not result.used:
+                    if _forward_reloaded_post_llm_call(kwargs):
+                        return
                     if result.status is ActiveEngineUseStatus.RESIDENT_ENGINE_CONFLICT:
                         engine._log_session_ingest_outcome(session_id, reason="resident_engine_conflict")
                     logger.warning(
@@ -1017,6 +1042,8 @@ def register(ctx):
 
         register_hook = getattr(ctx, "register_hook", None)
         if callable(register_hook):
+            if engine._unload_group is not None and active:
+                engine._lcm_registered_post_llm_call = _on_post_llm_call
             register_hook("post_llm_call", _on_post_llm_call)
             logger.debug("LCM registered post_llm_call hook for per-turn ingest")
             try:

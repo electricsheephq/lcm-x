@@ -41,9 +41,9 @@ class EngineUnloadGroup:
         self._retired_embedding_owners: set[object] = set()
         self._deferred = weakref.WeakSet()
 
-    def start_worker(self, worker: threading.Thread) -> bool:
+    def start_worker(self, worker: threading.Thread, *, continuing: bool = False) -> bool:
         with self.lock:
-            if self.closing.is_set():
+            if self.closing.is_set() and not continuing:
                 return False
             self._workers = {active for active in self._workers if active.is_alive()}
             worker.start()
@@ -58,7 +58,7 @@ class EngineUnloadGroup:
                 pending for pending in self._rollup_owners
                 if not scheduler.drain_owner(pending, timeout=0)
             }
-            if scheduler.schedule(key, work, owner=owner):
+            if scheduler.schedule(key, work, owner=owner, handoff=True):
                 self._rollup_owners.add(owner)
 
     def schedule_host_recovery(self, scheduler, key, work) -> bool:
@@ -127,6 +127,11 @@ class EngineUnloadGroup:
             workers = list(self._workers)
             rollup_owners = list(self._rollup_owners)
         deadline = time.monotonic() + _shutdown_compaction_wait_s()
+        # Remove queued maintenance before spending the budget on any drain.
+        # The scheduler retains ownership of active jobs until they return.
+        _HOST_ROW_RECOVERY_SCHEDULER.retire_owner(self, timeout=0)
+        for owner in rollup_owners:
+            _ROLLUP_MAINTENANCE_SCHEDULER.retire_owner(owner, timeout=0)
         children_drained = drain_live_child_stores(max(0.0, deadline - time.monotonic()), owner=self)
 
         # Abandoned deadline workers may still hold private database handles.
@@ -147,8 +152,15 @@ class EngineUnloadGroup:
             if not engine._stable_use_closed:
                 self._defer_shutdown(engine)
 
+        with self.lock:
+            continuations = self._workers.difference(workers)
+        for worker in continuations:
+            if worker is not threading.current_thread():
+                worker.join(max(0.0, deadline - time.monotonic()))
+            drained = not worker.is_alive() and drained
+
         for owner in rollup_owners:
-            drained = _ROLLUP_MAINTENANCE_SCHEDULER.drain_owner(
+            drained = _ROLLUP_MAINTENANCE_SCHEDULER.retire_owner(
                 owner, timeout=max(0.0, deadline - time.monotonic()),
             ) and drained
         with self.lock:
@@ -157,7 +169,7 @@ class EngineUnloadGroup:
             drained = _EMBEDDING_MAINTENANCE_SCHEDULER.retire_owner(
                 owner, timeout=max(0.0, deadline - time.monotonic()),
             ) and drained
-        drained = _HOST_ROW_RECOVERY_SCHEDULER.drain_owner(
+        drained = _HOST_ROW_RECOVERY_SCHEDULER.retire_owner(
             self, timeout=max(0.0, deadline - time.monotonic()),
         ) and drained
         drained = leaf_prep.retire_owner(self, timeout=max(0.0, deadline - time.monotonic())) and drained

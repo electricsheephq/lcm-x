@@ -17,6 +17,7 @@ from .ingest_protection import protect_messages_for_ingest
 from .maintenance_scheduler import _HOST_ROW_RECOVERY_SCHEDULER
 from .message_analysis import _tool_call_id, _tool_result_names
 from .session_patterns import build_session_match_keys, compile_session_patterns, matches_session_pattern
+from .store import MessageStore
 from .tokens import count_message_tokens
 
 logger = logging.getLogger(__name__)
@@ -63,7 +64,10 @@ def _store_candidate(engine_cls, config, home, db_path, row, messages, window):
     det = engine_cls(config=copy.deepcopy(config), hermes_home=home)
     det._discard_prepared_leaves = lambda: None
     try:
-        store = det._store
+        store = det._store = MessageStore(
+            db_path, ingest_protection_config=config, hermes_home=home, existing_write_timeout_ms=1000,
+        )
+        det._storage_ready = True
         if Path(store.db_path).resolve() != Path(db_path):
             return _count('store_mismatch')
         sid, conv = row['id'], row.get('session_key') or row['id']
@@ -99,7 +103,8 @@ def _store_candidate(engine_cls, config, home, db_path, row, messages, window):
 
 def _catch_up(engine_cls, config, home, db_path, state_path, bound, platform, window, handle, profile, bind_time):
     try:
-        with closing(sqlite3.connect(db_path, timeout=1.0)) as store, closing(sqlite3.connect(
+        database = Path(db_path).resolve().as_uri() + '?mode=rw'
+        with closing(sqlite3.connect(database, uri=True, timeout=1.0)) as store, closing(sqlite3.connect(
                 Path(state_path).resolve().as_uri() + '?mode=ro', uri=True, timeout=1.0)) as host:
             marker_key = 'unended_catchup_since:' + hashlib.sha256(home.encode()).hexdigest()[:16]
             key = (str(Path(db_path).resolve()), home)
@@ -181,6 +186,7 @@ class UnendedCatchupMixin:
                 return
             home, now = str(Path(self._hermes_home).resolve()), _now()
             key = (self._store.db_identity, home)
+            owner = getattr(self, "_unload_group", None)
             with _LOCK:
                 if now - _SEEN.get(key, float('-inf')) < 600:
                     return
@@ -189,15 +195,20 @@ class UnendedCatchupMixin:
                 args = (type(self), config, home, db_path, str(self._state_db_path()), session_id,
                         self._session_platform, self.context_length, self._host_session_db, self._entity_profile_key(db_path), now)
                 scheduler_key = tuple('unended-catchup:' + hashlib.sha256(k.encode()).hexdigest()[:16] for k in key)
-                owner = getattr(self, "_unload_group", None)
                 def job():
+                    if owner is not None:
+                        with _LOCK:
+                            started = _now()
+                            if started - _SEEN.get(key, float('-inf')) < 600:
+                                return
+                            _SEEN[key] = started
                     _catch_up(*args)
 
                 scheduled = (
                     owner.schedule_host_recovery(_HOST_ROW_RECOVERY_SCHEDULER, scheduler_key, job)
                     if owner is not None else _HOST_ROW_RECOVERY_SCHEDULER.schedule(scheduler_key, job)
                 )
-                if scheduled:
+                if scheduled and owner is None:
                     _SEEN[key] = now
         except Exception:
             logger.debug('LCM unended catch-up enqueue unavailable')

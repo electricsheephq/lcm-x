@@ -11,12 +11,15 @@ from collections import Counter
 from pathlib import Path
 from typing import Optional
 
+from .dag import SummaryDAG
 from .host_uid import _is_fork_child
 from .ingest_protection import protect_messages_for_ingest
+from .lifecycle_state import LifecycleStateStore
 from .maintenance_scheduler import _HOST_ROW_RECOVERY_SCHEDULER
 from .message_analysis import _tool_call_id, _tool_result_names
 from .reconcile import _commit_proof_identity_digest, _proof_user_identity
 from .session_patterns import build_session_match_keys, compile_session_patterns, matches_session_pattern
+from .store import MessageStore
 from .tokens import count_message_tokens
 
 logger = logging.getLogger(__name__)
@@ -204,7 +207,14 @@ def _recover_candidate(engine_cls, config, home, db_path, state_path, conv, boun
     det = engine_cls(config=copy.deepcopy(config), hermes_home=home)
     det._discard_prepared_leaves = lambda: None
     try:
-        store = det._store  # R2: open before installing ANY candidate scope
+        # Recovery can finish after an unload timeout. Its detached reader
+        # only works on the established database and never bootstraps a file.
+        store = det._store = MessageStore(
+            db_path, ingest_protection_config=config, hermes_home=home, existing_write_timeout_ms=1000,
+        )
+        det._dag = SummaryDAG(db_path, existing_only=True)
+        det._lifecycle = LifecycleStateStore(db_path, existing_only=True)
+        det._storage_ready = True
         if Path(store.db_path).resolve() != Path(db_path):
             return _unproven(sid, "store_mismatch", 0)
         det._session_id, det._conversation_id = sid, conv
@@ -326,13 +336,18 @@ class HostRowRecoveryMixin:
                 )
                 owner = getattr(self, "_unload_group", None)
                 def job():
+                    if owner is not None:
+                        with _LOCK:
+                            if key in _SEEN:
+                                return
+                            _SEEN.add(key)
                     _recover(*args)
 
                 scheduled = (
                     owner.schedule_host_recovery(_HOST_ROW_RECOVERY_SCHEDULER, scheduler_key, job)
                     if owner is not None else _HOST_ROW_RECOVERY_SCHEDULER.schedule(scheduler_key, job)
                 )
-                if scheduled:
+                if scheduled and owner is None:
                     _SEEN.add(key)
         except Exception:
             logger.debug("LCM host-row recovery enqueue unavailable")

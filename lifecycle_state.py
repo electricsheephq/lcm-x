@@ -97,30 +97,32 @@ class LifecycleState:
 
 
 class LifecycleStateStore:
-    def __init__(self, db_path: str | Path):
+    def __init__(self, db_path: str | Path, *, existing_only: bool = False):
         self.db_path = Path(db_path)
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        if not existing_only:
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn: Optional[sqlite3.Connection] = None
         # The connection is opened check_same_thread=False in autocommit mode
         # and is shared across the gateway thread, dispatcher, and sub-agents.
         # Serialize read-modify-write flows so concurrent binds/frontier
         # advances cannot interleave and regress the checkpoint.
         self._lock = threading.RLock()
-        self._init_db()
+        self._init_db(existing_only=existing_only)
 
-    def _init_db(self) -> None:
+    def _init_db(self, *, existing_only: bool = False) -> None:
         open_connection(ConnectionPolicy(
-            database=str(self.db_path),
+            database=self.db_path.resolve().as_uri() + "?mode=rw" if existing_only else str(self.db_path),
             connect_kwargs=(
-                ("timeout", 30.0), ("check_same_thread", False), ("isolation_level", None),
+                ("timeout", 30.0), ("check_same_thread", False), ("isolation_level", None), ("uri", existing_only),
             ),
             before_row_factory=(refuse_schema_version_too_new, configure_connection),
             row_factory=sqlite3.Row,
             on_open=lambda conn: setattr(self, "_conn", conn),
             on_setup_error=None,
         ))
-        run_versioned_migrations(self._conn)
-        self._conn.commit()
+        if not existing_only:
+            run_versioned_migrations(self._conn)
+            self._conn.commit()
 
     def close(self) -> None:
         conn = getattr(self, "_conn", None)

@@ -174,11 +174,11 @@ class SummaryDAG:
 
     DELETE_SESSION_SCOPE_TABLE = _DELETE_SESSION_SCOPE_TABLE
 
-    def __init__(self, db_path: str | Path):
+    def __init__(self, db_path: str | Path, *, existing_only: bool = False):
         self.db_path = Path(db_path)
         self._conn: Optional[sqlite3.Connection] = None
         self._db_lock = threading.RLock()
-        self._init_db()
+        self._init_db(existing_only=existing_only)
 
     @property
     def connection(self) -> Optional[sqlite3.Connection]:
@@ -192,12 +192,12 @@ class SummaryDAG:
         """
         return self._conn
 
-    def _init_db(self):
+    def _init_db(self, *, existing_only: bool = False):
         # #1159: reserve the write lock before FTS5 can read during re-prepare.
         open_connection(ConnectionPolicy(
-            database=str(self.db_path),
+            database=self.db_path.resolve().as_uri() + "?mode=rw" if existing_only else str(self.db_path),
             connect_kwargs=(
-                ("timeout", 5.0), ("check_same_thread", False), ("isolation_level", "IMMEDIATE"),
+                ("timeout", 5.0), ("check_same_thread", False), ("isolation_level", "IMMEDIATE"), ("uri", existing_only),
             ),
             before_row_factory=(refuse_schema_version_too_new, configure_connection),
             row_factory=None,
