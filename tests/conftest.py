@@ -4,6 +4,7 @@ Patches the plugin modules so they can be imported both as a package
 (relative imports during plugin loading) and directly during testing.
 """
 import hashlib
+import os
 import sys
 import importlib.util
 from pathlib import Path
@@ -68,6 +69,24 @@ def load_cli():
 
 
 import pytest  # noqa: E402
+
+
+def _real_host_environment_changes(before, after):
+    """Report host-control leaks without exposing environment values."""
+    return [
+        f"{key} {'added' if key not in before else 'removed' if key not in after else 'changed'}"
+        for key in sorted(before.keys() | after.keys())
+        if key.startswith("LCM_REAL_") and before.get(key) != after.get(key)
+    ]
+
+
+@pytest.fixture(autouse=True)
+def _check_real_host_environment(request):
+    before = dict(os.environ)
+    yield
+    changes = _real_host_environment_changes(before, dict(os.environ))
+    if changes:
+        pytest.fail(f"{request.node.nodeid} leaked host environment: {', '.join(changes)}")
 
 
 @pytest.fixture(params=[False, pytest.param(True, marks=pytest.mark.latency, id="latency")], ids=["correctness", "latency"])
