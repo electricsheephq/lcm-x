@@ -389,8 +389,8 @@ A tail exists because the store hit SQLite busy at session end. The ledger is in
   host's failed-turn notice (an assistant row with `display_kind = 'failed_turn'`) and returns without the per-turn
   hook. Desktop sessions never receive a session end; the next host start reaps them. If no later turn completes in
   that session, LCM-X received none of its rows. At a later foreground session start on the same profile, a background
-  job (at most once per store and home every 10 minutes, never on a turn) reads the host's database read-only and
-  stores such a session when all of these hold:
+  job (at most once per process, store and home every 10 minutes, never on a turn) reads the host's database
+  read-only and stores such a session when all of these hold:
   - it is top-level, not a `subagent` source, not a compression ancestor, on the same profile, and not the binding
     session;
   - its last active row (ignoring `session_meta` and `system` rows) is the failed-turn notice, at least 10 minutes and
