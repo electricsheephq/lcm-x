@@ -402,8 +402,9 @@ A tail exists because the store hit SQLite busy at session end. The ledger is in
     exactly once before the next turn row, and it has at most 500 rows.
   It stores the rows through the same append path as #2624, under the session's own id, in one transaction that first
   re-checks that the store still holds no row for it; each stored row carries `unended_turn_recovered:<store_id>`,
-  which nothing in the product reads. `host_row_recovery_enabled = false` also turns this off. Named limits, each
-  counted (`unended_catchup_counts()`):
+  which nothing in the product reads. `host_row_recovery_enabled = false` also turns this off. Named limits (skips of
+  a session the job reads are counted in `unended_catchup_counts()`; sessions the query excludes, such as a failure
+  older than the marker, and sessions no later start reaches are not):
   - forward only: a session whose failure is older than the profile's first catch-up job is never stored (operator
     repair: #2652);
   - a first turn stopped during a tool round ends without the notice and stays deferred (#1623; #2653);
@@ -411,6 +412,10 @@ A tail exists because the store hit SQLite busy at session end. The ledger is in
     database;
   - a session with a partial tool batch, a `session_meta`/`system` row, an ignored message or a host change during
     the read is skipped (and read again at a later job);
+  - each job reads at most the 64 newest eligible sessions; recovered sessions and sessions skipped every time keep
+    their slots for up to 7 days, so with more than 64 such sessions on one profile in that window the older ones are
+    not read;
+  - a candidate whose read or store raises is counted (`worker_error`) and skipped; the job continues with the next;
   - until the ingest guard lands (#2042 step 2), a live engine in another process that bound the session at cursor 0
     before the job ran can store an unstamped copy at its next completed turn; the release ships only with that guard.
 

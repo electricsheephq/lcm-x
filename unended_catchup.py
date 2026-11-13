@@ -104,11 +104,13 @@ def _catch_up(engine_cls, config, home, db_path, state_path, bound, platform, wi
             marker_key = 'unended_catchup_since:' + hashlib.sha256(home.encode()).hexdigest()[:16]
             key = (str(Path(db_path).resolve()), home)
             with _LOCK:
-                if key not in _MARKERS:
-                    store.execute('INSERT OR IGNORE INTO metadata(key,value) VALUES (?,?)', (marker_key, str(bind_time)))
-                    store.commit()
-                    _MARKERS[key] = float(store.execute('SELECT value FROM metadata WHERE key=?', (marker_key,)).fetchone()[0])
-                since = _MARKERS[key]
+                since = _MARKERS.get(key)
+            if since is None:  # idempotent write and read outside _LOCK, which the session-start enqueue also takes
+                store.execute('INSERT OR IGNORE INTO metadata(key,value) VALUES (?,?)', (marker_key, str(bind_time)))
+                store.commit()
+                value = float(store.execute('SELECT value FROM metadata WHERE key=?', (marker_key,)).fetchone()[0])
+                with _LOCK:
+                    since = _MARKERS.setdefault(key, value)
             sc = {r[1] for r in host.execute('PRAGMA table_info(sessions)')}
             mc = {r[1] for r in host.execute('PRAGMA table_info(messages)')}
             if not {'id', 'source', 'parent_session_id', 'started_at', 'ended_at', 'end_reason', 'model_config'} <= sc or not {
@@ -129,36 +131,40 @@ def _catch_up(engine_cls, config, home, db_path, state_path, bound, platform, wi
             patterns = [compile_session_patterns(config.ignore_session_patterns), compile_session_patterns(config.stateless_session_patterns)]
             stored = 0
             for raw in candidates:
-                row, reason = dict(raw), None
-                sid = row['id']
-                _count('candidates')
-                if store.execute('SELECT 1 FROM messages WHERE session_id=? LIMIT 1', (sid,)).fetchone():
-                    reason = 'existing_rows'
-                elif _is_fork_child(row):
-                    reason = 'fork_child'
-                elif any(matches_session_pattern(build_session_match_keys(sid, platform=pf), p)
-                         for pf in {platform, row.get('source') or platform} for p in patterns):
-                    reason = 'session_filtered'
-                elif sid in live_bound_session_ids():
-                    reason = 'live_bound'
-                if reason:
-                    _count(reason)
-                    continue
-                f1 = _fingerprint(host, sid, archived, revision)
-                messages = handle.get_messages_as_conversation(sid)
-                if any(m.get('role') in ('session_meta', 'system') for m in messages):
-                    _count('non_turn_role')
-                elif (f1 != _fingerprint(host, sid, archived, revision) or f1[3] or f1[2] != row['boundary_id']
-                        or len(messages) != f1[0] or not messages or messages[-1].get('display_kind') != 'failed_turn'):
-                    _count('generation_changed')
-                elif not _valid_suffix(messages, 0) or len(messages)>500 or messages[-1].get('role') != 'assistant':
-                    _count('suffix_rejected')
-                elif not _complete_groups(messages):
-                    _count('incomplete_tool_group')
-                else:
-                    stored += bool(_store_candidate(engine_cls, config, home, db_path, row, messages, window))
-                    if stored >= 16:
-                        break
+                try:  # one candidate's failure is counted and never stops the job
+                    row, reason = dict(raw), None
+                    sid = row['id']
+                    _count('candidates')
+                    if store.execute('SELECT 1 FROM messages WHERE session_id=? LIMIT 1', (sid,)).fetchone():
+                        reason = 'existing_rows'
+                    elif _is_fork_child(row):
+                        reason = 'fork_child'
+                    elif any(matches_session_pattern(build_session_match_keys(sid, platform=pf), p)
+                             for pf in {platform, row.get('source') or platform} for p in patterns):
+                        reason = 'session_filtered'
+                    elif sid in live_bound_session_ids():
+                        reason = 'live_bound'
+                    if reason:
+                        _count(reason)
+                        continue
+                    f1 = _fingerprint(host, sid, archived, revision)
+                    messages = handle.get_messages_as_conversation(sid)
+                    if any(m.get('role') in ('session_meta', 'system') for m in messages):
+                        _count('non_turn_role')
+                    elif (f1 != _fingerprint(host, sid, archived, revision) or f1[3] or f1[2] != row['boundary_id']
+                            or len(messages) != f1[0] or not messages or messages[-1].get('display_kind') != 'failed_turn'):
+                        _count('generation_changed')
+                    elif not _valid_suffix(messages, 0) or len(messages)>500 or messages[-1].get('role') != 'assistant':
+                        _count('suffix_rejected')
+                    elif not _complete_groups(messages):
+                        _count('incomplete_tool_group')
+                    else:
+                        stored += bool(_store_candidate(engine_cls, config, home, db_path, row, messages, window))
+                        if stored >= 16:
+                            break
+                except Exception:
+                    _count('worker_error')
+                    logger.debug('LCM unended catch-up candidate failed', exc_info=True)
     except Exception:
         _count('worker_error')
         logger.debug('LCM unended catch-up unavailable', exc_info=True)

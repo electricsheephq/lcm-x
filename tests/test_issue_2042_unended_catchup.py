@@ -323,6 +323,26 @@ def test_row_limit(case, nrows):
         assert case.rows() == []
 
 
+def test_one_failing_candidate_is_counted_and_the_job_continues(case, monkeypatch):
+    case.host.write("older-2042", boundary=BOUNDARY)
+    case.host.write("newer-2042", boundary=BOUNDARY + 1)
+    read = case.host.get_messages_as_conversation
+
+    def reader(session_id, **kwargs):
+        if session_id == "newer-2042":
+            raise RuntimeError("synthetic reader failure 2042")
+        return read(session_id, **kwargs)
+
+    monkeypatch.setattr(case.host, "get_messages_as_conversation", reader)
+    before = Counter(catchup.unended_catchup_counts())
+    catchup._catch_up(LCMEngine, case.config, str(case.home.resolve()), case.db_path, str(case.host.path),
+                      "next-2042", "desktop", 128000, case.host, case.engine._entity_profile_key(case.db_path), MARKER)
+    assert Counter(catchup.unended_catchup_counts()) - before == Counter(
+        {"candidates": 2, "worker_error": 1, "recovered_candidates": 1, "recovered_rows": 2})
+    assert case.rows("newer-2042") == []
+    case.assert_rows(failed_rows(), "older-2042")
+
+
 def test_job_stores_at_most_sixteen_and_query_reads_newest_sixty_four(case):
     for i in range(70):
         case.host.write(f"candidate-{i:02}", boundary=BOUNDARY + i)
