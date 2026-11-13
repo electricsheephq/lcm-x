@@ -12135,9 +12135,12 @@ class LCMEngine(
                     conversation_id=conversation_id, source=source, view=copy.deepcopy(view),
                     context_window_tokens=self._store.get_context_window_tokens(session_id),
                     occurrence_resume_through=stored_through)
-        if not any(self._tail_key(old) == self._tail_key(tail) for old in self._pending_session_tails):
+        old = next((old for old in self._pending_session_tails if self._tail_key(old) == self._tail_key(tail)), None)
+        if old is None:
             self._pending_session_tails.append(tail)
             self._ledger_count("ledger.tail.queued.cold." + type(error).__name__)
+        elif old.get("occurrence_resume_through") is None and stored_through is not None:
+            old["occurrence_resume_through"] = stored_through  # merge newly verified eligibility; keep an older bound
         logger.warning("LCM session-end cold tail retry pending (%s)", type(error).__name__)
         maintenance_scheduler._PENDING_TAIL_ENGINES.add(self)
 
@@ -12427,6 +12430,12 @@ class LCMEngine(
                                        hermes_home, stamps, deadline=None, stored_through=None) -> list[dict] | None:
         """Place each host occurrence once, retaining unknown rows in view order."""
         try:
+            def bounded(items):
+                for index, item in enumerate(items):
+                    if deadline is not None and index % 1000 == 0 and time.monotonic() >= deadline:
+                        raise TimeoutError("session-end occurrence resume deadline expired")
+                    yield item
+
             rows, start = [], 0
             conversation = _normalize_conversation_id_value(conversation_id)
             while page := store.get_range(session_id, start_id=start, limit=1000, conversation_id=conversation):
@@ -12440,58 +12449,65 @@ class LCMEngine(
             forms = self._session_end_host_forms(rows, store=store, session_id=session_id)
             view = self._cold_tail_ingest_view({"view": view})
             kwargs = dict(session_id=session_id, hermes_home=hermes_home)
-            host_forms = [self._session_end_host_form(message) for message in view]
+            host_forms = [self._session_end_host_form(message) for message in bounded(view)]
             # The current-session route treats equal replay identities as one occurrence; so does the ladder, or a later
             # bind of this session would store the whole history again (#2543 review CR-3).
-            replay = dict(store=store, hermes_home=hermes_home, session_id=session_id, conversation_id=conversation)
-            host_replay = [self._message_replay_identity(message, **replay) for message in view]
+            replay = dict(store=store, hermes_home=hermes_home, session_id=session_id, conversation_id=conversation,
+                          strip_carrier=False)
+            host_replay = [self._message_replay_identity(message, **replay) for message in bounded(view)]
             stored_replay = {}
 
             def stored_identity(index):
                 if index not in stored_replay:
                     stored_replay[index] = self._message_replay_identity(rows[index], stored_row=True, **replay)
                 return stored_replay[index]
-            seen = [_normalize_observed_at(row.get("observed_at")) for row in rows]
-            wanted = [_normalize_observed_at(message.get("timestamp")) for message in view]
+            seen = [_normalize_observed_at(row.get("observed_at")) for row in bounded(rows)]
+            wanted = [_normalize_observed_at(message.get("timestamp")) for message in bounded(view)]
             k = 0
-            while k < min(len(rows), len(view)):
+            for k in bounded(range(min(len(rows), len(view)))):
                 if stamps and None not in (seen[k], wanted[k]) and seen[k] != wanted[k]:
                     break
                 if (forms.get(rows[k]["store_id"]) != host_forms[k] and stored_identity(k) != host_replay[k]
                         and not self._session_end_rows_equal(rows[k], view[k], **kwargs)):
                     break
-                k += 1
-            by_form, by_identity, by_call, by_replay = defaultdict(list), defaultdict(list), defaultdict(list), defaultdict(list)
-            for index in range(k, len(rows)):
+            else:
+                k = min(len(rows), len(view))
+            by_form, by_identity, by_call, by_replay = defaultdict(dict), defaultdict(dict), defaultdict(dict), defaultdict(dict)
+            memberships = defaultdict(list)
+
+            def add(group, key, index):
+                group[key][index] = None
+                memberships[index].append(group[key])
+
+            for index in bounded(range(k, len(rows))):
                 row = rows[index]
-                by_replay[stored_identity(index)].append(index)
+                add(by_replay, stored_identity(index), index)
                 if row["store_id"] in forms:
-                    by_form[forms[row["store_id"]]].append(index)
-                by_identity[self._session_end_prefix_compare_identity(row, recover_markers=False, **kwargs)].append(index)
+                    add(by_form, forms[row["store_id"]], index)
+                add(by_identity, self._session_end_prefix_compare_identity(row, recover_markers=False, **kwargs), index)
                 if row.get("role") == "tool":
-                    by_call[row.get("tool_call_id")].append(index)
-            identities = [self._session_end_counted_identity(message, by_identity, **kwargs) for message in view[k:]]
-            consumed, matched = set(), set()
+                    add(by_call, row.get("tool_call_id"), index)
+            identities = [self._session_end_counted_identity(message, by_identity, **kwargs) for message in bounded(view[k:])]
+            matched = set()
             for mode in ("same", "untimed", "any") if stamps else ("any",):
-                for i in range(k, len(view)):
-                    if deadline is not None and (i - k) % 1000 == 999 and time.monotonic() >= deadline:
-                        raise TimeoutError("session-end occurrence resume deadline expired")
+                for i in bounded(range(k, len(view))):
                     if i in matched or (stamps and ((wanted[i] is None) != (mode == "any"))):
                         continue
                     def available(index):
-                        return index not in consumed and (mode == "any" or
+                        return (mode == "any" or
                             (seen[index] == wanted[i] if mode == "same" else seen[index] is None))
                     groups = (by_form.get(host_forms[i], ()), by_identity.get(identities[i - k], ()),
                               by_replay.get(host_replay[i], ()),
                               by_call.get(view[i].get("tool_call_id"), ()) if view[i].get("role") == "tool" else ())
                     for rule, candidates in enumerate(groups):
-                        found = next((index for index in candidates if available(index) and
+                        found = next((index for index in bounded(candidates) if available(index) and
                             (rule != 3 or self._session_end_rows_equal(rows[index], view[i], **kwargs))), None)
                         if found is not None:
-                            consumed.add(found)
+                            for group in memberships.pop(found):
+                                del group[found]  # consume this occurrence across every key without rescanning it
                             matched.add(i)
                             break
-            return [message for i, message in enumerate(view) if i >= k and i not in matched]
+            return [message for i, message in bounded(enumerate(view)) if i >= k and i not in matched]
         except Exception as exc:
             if _is_ingest_busy_error(exc):
                 raise
