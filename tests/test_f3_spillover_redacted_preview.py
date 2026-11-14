@@ -120,13 +120,9 @@ def test_without_redaction_nothing_changes(tmp_path, kind):
     assert (form, final, rows) == ("externalized", 1, n + 1)
 
 
-_TEMPDIR_REASON = ("#2604, known in v0.30.0: a temp-folder saved output whose preview redaction changes loses the rows after "
-                   "it at an off-current end; v0.29.2 loses them too (with or without redaction)")
-
-
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=_TEMPDIR_REASON)
 @REDACTION
 def test_a_temp_folder_marker_whose_preview_redaction_changes_keeps_the_final_reply(tmp_path, body):
+    """#2604 (known in v0.30.0) is closed by #2543's occurrence resume: the final reply is stored, with no copy."""
     form, final, rows, n = _offcurrent_end(tmp_path / "hermes", "tempdir", body)
     assert form == "externalized"  # not changed by this fix
     assert (final, rows) == (1, n + 1)

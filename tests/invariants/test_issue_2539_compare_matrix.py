@@ -81,8 +81,21 @@ _PINNED_GROWTH_CELLS = frozenset(
     # #2661 named copy (#2558): without the legacy bare-marker binding the full-window repeat is stored once more at
     # the second replay, as in v0.30.0; the R4-8 data check still decides each cell.
     f'reconcile-replay/v0292/data-uri/spillover/{host}/occurrences-2' for host in ('identical', 'present'))
-assert len(_PINNED_LEGACY_CELLS) == 11 and len(_PINNED_GROWTH_CELLS) == 9
+# #2543 L-1 (RM T1-21, T1-21a): one copy per unverifiable host occurrence. The host re-sends a stored result as a marker
+# whose file is gone; the product binds a marker only to a row that recorded that marker, so the occurrence ladder stores
+# the marker text once per host occurrence, beside the stored body, and nothing more on a repeat. Exact counts per window:
+_PINNED_COPY_COUNTS = {'': [10, 12, 12, 14], '/occurrences-1/shifted': [208, 209, 209, 209, 211],
+                       '/occurrences-2': [10, 15, 15, 15, 17], '/occurrences-2/shifted': [208, 211, 211, 211, 213]}
+# Only a stored body without a marker of its own (small, inline); every data-uri window of those cells.
+_PINNED_COPY_CELLS = frozenset(
+    f'{route}/{size}/{preview}/{storage}/missing{window}' for route in ('offcurrent-end', 'cold-counted', 'cold-pairwise')
+    for size in ('small', 'inline') for storage in ('spillover', 'hermes-results')
+    for preview, windows in (('plain', ('',)), ('data-uri', ('', '/occurrences-1/shifted', '/occurrences-2',
+                                                            '/occurrences-2/shifted')))
+    for window in windows)
+assert len(_PINNED_LEGACY_CELLS) == 11 and len(_PINNED_GROWTH_CELLS) == 9 and len(_PINNED_COPY_CELLS) == 60
 _HOST_RECOVERY_CELLS = set()
+_COPY_CELLS = set()
 
 _EXT = re.compile(r'\[Externalized (?:LCM ingest payload|tool output|payload):[^\]]*?;\s*ref=([^;\]\s]+)\]')
 
@@ -196,6 +209,17 @@ def _unmatched_extras(main, candidate, host_rows, produced=frozenset()):
     return unmatched
 
 
+def _named_marker_copies(unmatched, handed, candidate, home, temp):
+    """#2543 L-1: every surplus row is call c1's exact host marker text; per text, neither the surplus nor the stored
+    copies exceed the host's occurrences of it (one copy per unverifiable host occurrence)."""
+    markers = Counter((m['role'], m.get('tool_call_id') or '',
+                       _sha((m.get('content') or '').replace(str(home), '@HOME@').replace(str(temp), '@TEMP@')))
+                      for m in handed if isinstance(m.get('content'), str) and _marker_fields(m['content']))
+    surplus = Counter(unmatched)
+    return (bool(unmatched) and {row[1] for row in surplus} == {'c1'}
+            and all(markers[row] and n <= markers[row] and candidate[row] <= markers[row] for row, n in surplus.items()))
+
+
 def _lost_contents(baseline, current, markers, bodies):
     current = {(r, c, d) for r, c, digests in current for d in digests}
     missing, exceptions = [], 0
@@ -227,11 +251,13 @@ def _print_exception_cells(request, tmp_path_factory):
     # root for session-end aggregation by the evidence runner (also on xfail).
     (tmp_path_factory.getbasetemp() / 'matrix-exceptions.json').write_text(json.dumps({
         'marker': sorted(_EXCEPTION_CELLS), 'legacy': sorted(_LEGACY_EXCEPTION_CELLS),
-        'growth': sorted(_GROWTH_EXCEPTION_CELLS), 'host_recovery': sorted(_HOST_RECOVERY_CELLS)}))
+        'growth': sorted(_GROWTH_EXCEPTION_CELLS), 'host_recovery': sorted(_HOST_RECOVERY_CELLS),
+        'marker_copy': sorted(_COPY_CELLS)}))
     reporter = request.config.pluginmanager.getplugin('terminalreporter')
     if reporter:
         reporter.write_line(f'#2539 corrected bar (ii): {len(_EXCEPTION_CELLS)} cells used the marker exception')
         reporter.write_line(f'#2539 corrected bar (iii): {len(_HOST_RECOVERY_CELLS)} cells where the candidate keeps rows main loses (#2543)')
+        reporter.write_line(f'#2543 bar (iii) L-1 marker copy: {len(_COPY_CELLS)} cells')
         for name, cells in (('bar (ii) stored-marker', _LEGACY_EXCEPTION_CELLS), ('bar (iv) R4-8 growth', _GROWTH_EXCEPTION_CELLS)):
             reporter.write_line(f'#2558 {name} exception: {len(cells)} cells')
             for cell in sorted(cells):
@@ -353,6 +379,19 @@ def test_synthetic_orphan_characterization(case, expected, host, tmp_path, monke
     _run_case(case, host, tmp_path, monkeypatch, request, characterization=expected)
 
 
+_L1_OCCURRENCE_CHARACTERIZATION = {
+    (route, 'small', 'data-uri', 'spillover', 'missing', 'occurrences-3', 'shifted'): None
+    for route in ('offcurrent-end', 'cold-counted', 'cold-pairwise')}
+
+
+@pytest.mark.parametrize('case', list(_L1_OCCURRENCE_CHARACTERIZATION), ids=_cell_id)
+def test_l1_marker_copy_per_host_occurrence(case, host, tmp_path, monkeypatch, request):
+    """#2543 L-1 (RM T1-21a): one copy per unverifiable host occurrence. The host re-sends a stored body three times
+    as a marker whose file is gone: the marker text is stored exactly three times (one per host occurrence), and a
+    repeated end, the identical replay and the restart-free retry add nothing."""
+    _run_case(case, host, tmp_path, monkeypatch, request, characterization=[208, 214, 214, 214, 216])
+
+
 @pytest.mark.parametrize('preview', ['plain', 'data-uri'], ids=['path-temp-lf', 'path-temp-data-uri'])
 def test_recovered_temp_different_path_characterization(preview, host, tmp_path, monkeypatch, request):
     """Known divergence (#2553): reconcile adds one extra pair; no host row is lost."""
@@ -362,7 +401,8 @@ def test_recovered_temp_different_path_characterization(preview, host, tmp_path,
 
 def _run_case(case, host, tmp_path, monkeypatch, request, characterization=None):
     route, stored_form, preview, location, host_form = case[:5]
-    repeated = 'occurrences-2' in case
+    repeats = int(next((part.split('-')[1] for part in case[5:] if part.startswith('occurrences-')), '1')) - 1
+    repeated = repeats > 0
     shifted = 'shifted' in case
     legacy = stored_form.startswith('v0292')
     temp = tmp_path / 'host-temp'
@@ -580,7 +620,7 @@ def _run_case(case, host, tmp_path, monkeypatch, request, characterization=None)
                 engine.on_session_end(session, handed)
             record_step(handed)
 
-        if repeated:
+        for _ in range(repeats):
             second_call = copy.deepcopy(next(m for m in first if m.get('tool_calls')))
             second_tool = copy.deepcopy(tool)
             # S2 hands back a cleared first result; the second occurrence is the
@@ -622,6 +662,10 @@ def _run_case(case, host, tmp_path, monkeypatch, request, characterization=None)
             result['third_replay_growth'] = counts[3] - counts[2]
             print(f'OCCURRENCES {_cell_id(case)} counts={counts} third_growth={result["third_replay_growth"]}')
         if characterization is not None:
+            if case in _L1_OCCURRENCE_CHARACTERIZATION:
+                copies = sum(r['role'] == 'tool' and (r.get('content') or '') == replay_content for r in rows)
+                print(f'L1_OCCURRENCES {_cell_id(case)} counts={counts} copies={copies}')
+                assert not missing and copies == repeats + 1, (missing, copies)
             assert counts == characterization
             if host_form == 'path':
                 assert not missing, 'characterized surplus must lose no host row'
@@ -642,13 +686,20 @@ def _run_case(case, host, tmp_path, monkeypatch, request, characterization=None)
             main = Counter({(r, c, d): n for r, c, d, n in fixture['multisets'][main_index]})
             candidate = Counter({(r, c, d): n for r, c, d, n in current})
             extras |= bool(candidate - main)
-            unmatched.extend(_unmatched_extras(main, candidate, host_rows, produced))
+            step_unmatched = _unmatched_extras(main, candidate, host_rows, produced)
+            if _cell_id(case) in _PINNED_COPY_CELLS and _named_marker_copies(step_unmatched, handed, candidate, home, temp):
+                _COPY_CELLS.add(_cell_id(case))
+            else:
+                unmatched.extend(step_unmatched)
             permitted = _legacy_marker_losses(row_steps[0], step_rows, handed, main, candidate, storage, home, temp)
             # Bar (ii) concerns what main ends with; retain the last step's
             # proof, including its no-candidate-only-row condition.
             legacy_losses = permitted
         assert not unmatched, (
             f'STOP bar iii {_cell_id(case)}: main={baseline["counts"]} candidate={counts} extra={unmatched}')
+        if _cell_id(case) in _PINNED_COPY_CELLS:
+            assert _cell_id(case) in _COPY_CELLS and counts == _PINNED_COPY_COUNTS[_cell_id(case).split('/missing')[1]], (
+                f'#2543 L-1 {_cell_id(case)}: counts={counts}')
         if extras:
             _HOST_RECOVERY_CELLS.add(_cell_id(case))
         baseline_contents = fixture['content_sets'][baseline['contents']]

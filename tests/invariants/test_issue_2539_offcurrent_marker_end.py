@@ -228,7 +228,6 @@ def test_rule_b_changed_marker_text_compares_unequal(engines, monkeypatch, tmp_p
     assert not engine._session_end_rows_equal(stored, view[4], session_id="S1")
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=_ROUTE_2543)
 @pytest.mark.parametrize("location", ["spillover", "hermes-results"])
 def test_offcurrent_busy_cold_tail_changed_marker_text_keeps_new_result_and_final(
         engines, monkeypatch, tmp_path, location):  # noqa: F811
@@ -244,7 +243,6 @@ def test_offcurrent_busy_cold_tail_changed_marker_text_keeps_new_result_and_fina
     assert sum(r["role"] == "tool" for r in rows) == 2 and _final_count(engine) == 1 and len(rows) == n + 2
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=_ROUTE_2543)
 @pytest.mark.parametrize("location", ["spillover", "hermes-results"])
 def test_offcurrent_changed_marker_text_keeps_new_result_and_final(engines, monkeypatch, tmp_path, location):  # noqa: F811
     kind = "spillover" if location == "spillover" else "tempdir"

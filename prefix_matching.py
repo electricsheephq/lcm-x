@@ -403,7 +403,7 @@ class PrefixMatchingMixin:
         *,
         source: str,
         conversation_id: str,
-        store=None, hermes_home=None, context_window_tokens=None,
+        store=None, hermes_home=None, context_window_tokens=None, record_host_forms=False,
     ) -> list[int]:
         if not session_id or not suffix:
             return []
@@ -440,9 +440,25 @@ class PrefixMatchingMixin:
             [count_message_tokens(msg) for msg in protected_messages],
             source=source,
             conversation_id=conversation_id,
-            metadata_factory=lambda msg, store_id: self._real_user_scaffold_metadata_rows(msg, store_id, bound=hermes_home is None),
+            metadata_factory=lambda msg, store_id: self._real_user_scaffold_metadata_rows(msg, store_id, bound=hermes_home is None) + (
+                [(f"session_end_host_form:{store_id}", json.dumps({"version": 1, "form": self._session_end_host_form(msg),
+                  "session_id": session_id, "role": str(msg.get("role") or ""),
+                  "tool_call_id": str(msg.get("tool_call_id") or "")}, sort_keys=True))] if record_host_forms else []),
             metadata_messages=kept,
         )
         self._host_uid_shadow(host_uids, dict(enumerate(store_ids)),
                               **(dict(store=store, hermes_home=hermes_home) if hermes_home is not None else {}))  # stored-new under that session's lineage
         return store_ids
+
+    def _session_end_host_form(self, msg) -> str:
+        return hashlib.sha256(json.dumps([self._lcm_bypass_message_fingerprint(msg),
+                                         str(msg.get("tool_name") or "")]).encode()).hexdigest()
+
+    def _session_end_host_forms(self, rows, *, store, session_id) -> dict[int, str]:
+        records = store.read_metadata_json_many([f"session_end_host_form:{row['store_id']}" for row in rows])
+        return {row["store_id"]: record["form"] for row in rows
+                if isinstance(record := records.get(f"session_end_host_form:{row['store_id']}"), dict)
+                and record.get("version") == 1 and record.get("session_id") == session_id
+                and record.get("role") == str(row.get("role") or "")
+                and record.get("tool_call_id") == str(row.get("tool_call_id") or "")
+                and isinstance(record.get("form"), str)}
