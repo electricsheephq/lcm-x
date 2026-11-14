@@ -7407,8 +7407,23 @@ class LCMEngine(
                 return self._redact_active_replay_messages(messages)
 
             sender_capture.try_update(self)
+            host_messages = messages
             (messages, merged_aliases, merged_new_occurrences,
              merged_original_messages, merged_cache) = sender_capture.merged_user_projection(self, messages)
+            # A fallback may carry only freshness proven by today's unchanged
+            # prefix/cache alignment on the original host view, before canonicalisation.
+            fallback_new_occurrences = set()
+            cached_sources = getattr(self, "_last_active_replay_source_identities", None)
+            cursor = min(max(self._ingest_cursor, 0), len(host_messages))
+            if (merged_new_occurrences and not self._ingest_cursor_needs_reconcile and cursor > 0
+                    and cached_sources is not None and len(cached_sources) >= cursor
+                    and self._ingest_cursor == len(cached_sources)):
+                cached = getattr(self, "_last_active_replay_messages", ())
+                for index, previous in enumerate(cached[:cursor]):
+                    if self._message_replay_identity(host_messages[index], strip_carrier=False) != cached_sources[index]:
+                        break
+                    if index in merged_new_occurrences and self._host_occurrence_changed(host_messages[index], previous):
+                        fallback_new_occurrences.add(index)
             attribution = self._last_ingest_attribution = dict(
                 lock_hold_ms=0.0, rows_written=0, bytes_written=0, busy_snapshot_retry=False,
                 ledger_digest_ms=0.0, ledger_ms=0.0)
@@ -7518,6 +7533,7 @@ class LCMEngine(
                                        type(exc).__name__)
                         sender_capture.retire_merged_users(self, merged_aliases)
                         messages, merged_aliases = merged_original_messages, {}
+                        merged_new_occurrences = fallback_new_occurrences
                         evidence_start = attempt + 1
                         ledger_prepared = self._prepare_ingest_ledger(messages, attribution)
                         continue

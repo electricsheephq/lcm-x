@@ -79,18 +79,22 @@ def merged_user_projection(engine, messages):
             return messages, {}, set(), messages, None
         with _LOCK:
             captures = tuple(_MERGED_USERS.get(engine, ()))
+            watched = {id(obj) for _sid, entry in _watch(engine) for obj in entry[2]} if captures else set()
+            if watched:
+                # A stored head cannot become a queued group after watch eviction.
+                captures = tuple(c for c in captures if id(c.head) not in watched)
+                _MERGED_USERS[engine] = list(captures)
         known = {sid: payload for sid, payload in getattr(engine, "_host_rewrite_overrides", {}).items()
                  if isinstance(payload, dict) and "stripped" not in payload}
         if not captures and not known:
             return messages, {}, set(), messages, None
         present, projected, aliases = {id(row) for row in messages}, list(messages), {}
-        watched = {id(obj) for _sid, entry in _watch(engine) for obj in entry[2]} if captures else set()
         for capture in captures:
             head = capture.head
             if (time.monotonic() - capture.created >= _TTL
                     or capture.session != str(engine._session_id)
                     or capture.conversation != str(engine._conversation_id or "")
-                    or id(head) not in present or id(head) in watched or id(capture.newest) in present
+                    or id(head) not in present or id(capture.newest) in present
                     or "_merged_turn_prefix" in head or "_absorbed_message_uids" in head
                     or head.get("role") != "user" or head.get("content") != capture.user_message):
                 continue
@@ -99,7 +103,7 @@ def merged_user_projection(engine, messages):
             projected[index] = {**head, "content": joined, "timestamp": capture.timestamp}
             aliases[index] = head
         # A recreated engine can cache the newest-only form at the gateway's
-        # event time. Canonicalise only hash-verified #2707 aliases at one of
+        # event time. Canonicalise only replays of hash-verified #2707 aliases at one of
         # their proven stamps, before BOTH the warm-cache and anchor checks.
         rows = engine._store.get_batch(list(known)) if known else {}
         stamps = {sid: {row.get("observed_at")} for sid, row in rows.items()}
@@ -129,7 +133,7 @@ def merged_user_projection(engine, messages):
                         if (_valid_uid(uid) and _valid_uid(old_uid) and uid != old_uid and sid in forms.get(
                                 engine._message_replay_identity(cached[index], strip_carrier=False), ())):
                             fresh.add(index)  # Content aliases never erase a known new UID.
-                    if stamp != rows[sid].get("observed_at"):
+                    if index not in fresh and stamp != rows[sid].get("observed_at"):
                         result[index] = {**message, "timestamp": rows[sid]["observed_at"]}
             return result
 
