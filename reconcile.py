@@ -1128,7 +1128,84 @@ class ReconcileMixin:
                                     and any(row["content"] == msg.get("content") for row in rows))
 
                     legacy_spillover = durable_content is None and legacy_keep()
-                    if not legacy_spillover:
+
+                    def legacy_recovered_keep():
+                        # #2703: some v0.29.2 temp markers were stored as their
+                        # recovered output. Prove raw placeholder provenance and
+                        # content before checking its effect on replay identity.
+                        try:
+                            # An embedded reference can alias a distinct body to stored text.
+                            # Keep the marker identity rather than expand that body.
+                            if extract_externalized_ref(recovered_identity_content):
+                                return False
+                            if _has_lossy_sensitive_redaction(recovered_identity_content):
+                                return False
+                            bound_store = self._store if store is None else store
+                            generation = bound_store.write_generation()
+                            if (getattr(self, "_legacy_recovered_source_store", None) is not bound_store
+                                    or getattr(self, "_legacy_recovered_source_generation", None) != generation):
+                                self._legacy_recovered_source_store = bound_store
+                                self._legacy_recovered_source_generation = generation
+                                self._legacy_recovered_source_identities = {}
+                            known = self._legacy_recovered_source_identities
+                            key = (
+                                str(msg.get("session_id") or (self._session_id if session_id is None else session_id) or ""),
+                                str((self._conversation_id if conversation_id is None else conversation_id) or ""),
+                                str(msg.get("tool_call_id") or ""),
+                                str(msg.get("tool_name") or msg.get("name") or ""),
+                            )
+                            target = {} if store is None else dict(
+                                store=store, hermes_home=hermes_home,
+                                session_id=session_id, conversation_id=conversation_id,
+                            )
+                            if key not in known:
+                                from .externalize import is_externalized_placeholder
+
+                                entries = []
+                                home = self._hermes_home if hermes_home is None else hermes_home
+                                for row in legacy_tool_rows():
+                                    raw = normalize_content_value(row.get("content")) or ""
+                                    ref = extract_externalized_ref(raw)
+                                    if (not is_externalized_placeholder(raw) or not ref
+                                            or _has_lossy_sensitive_redaction(raw)):
+                                        continue
+                                    payload = load_externalized_payload(ref, config=self._config, hermes_home=home)
+                                    if (not isinstance(payload, dict) or payload.get("kind") != "tool_result"
+                                            or not isinstance(payload.get("content"), str)):
+                                        continue
+                                    call = row.get("tool_call_id")
+                                    session = row.get("session_id")
+                                    tool = row.get("tool_name") or row.get("name") or key[3]
+                                    if (not call or not session or not key[2]
+                                            or payload.get("tool_call_id") != call or call != key[2]
+                                            or payload.get("session_id") != session
+                                            or (tool and payload.get("tool_name") != tool)
+                                            or _has_lossy_sensitive_redaction(payload["content"])):
+                                        continue
+                                    # A whole placeholder expands once at the END of stored identity.
+                                    # Refuse scaffolding inside its metadata; it could change that path.
+                                    if (_strip_volatile_host_scaffolding(raw) != raw
+                                            or _OOB_MESSAGE_BLOCK_MARKER in raw
+                                            or "[Externalized LCM ingest payload:" in raw):
+                                        continue
+                                    metadata = self._message_replay_identity(
+                                        {**row, "content": ""}, stored_row=True, **target)
+                                    identity = (metadata[0], payload["content"], *metadata[2:])
+                                    entries.append((payload["content"], identity))
+                                known[key] = tuple(entries)
+                                if len(known) > _HOST_REWRITE_OVERRIDE_CACHE_CAP:  # FIFO-bounded
+                                    del known[next(iter(known))]
+                            recovered_identity = self._message_replay_identity(
+                                {**msg, "content": recovered_identity_content}, **target)
+                            # Plain tool payloads preserve whitespace (strip_payload is False).
+                            return any(payload_content == recovered_identity_content and identity == recovered_identity
+                                       for payload_content, identity in known[key])
+                        except Exception:
+                            return False
+
+                    if not legacy_spillover and legacy_recovered_keep():
+                        content = recovered_identity_content
+                    elif not legacy_spillover:
                         content = _add_inline_persisted_output_generation_metadata(
                             _add_inline_persisted_output_identity_metadata(
                                 content,
