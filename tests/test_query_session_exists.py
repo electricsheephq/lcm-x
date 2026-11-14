@@ -18,10 +18,11 @@ def test_has_session_messages(tmp_path):
         store.close()
 
 
+@pytest.mark.parametrize("recovery", [False, True], ids=["default", "recovery-on"])
 @pytest.mark.parametrize("populated", [False, True])
-def test_exists_probes_preserve_rebind_and_ingest(tmp_path, monkeypatch, populated):
+def test_exists_probes_preserve_rebind_and_ingest(tmp_path, monkeypatch, populated, recovery):
     engine = LCMEngine(config=LCMConfig(database_path=str(tmp_path / "synthetic.db"),
-                                      temporal_rollups_enabled=False))
+                                      temporal_rollups_enabled=False, host_row_recovery_enabled=recovery))
     try:
         engine.on_session_start("s", platform="cli", context_length=200_000)
         if populated:
@@ -44,8 +45,11 @@ def test_exists_probes_preserve_rebind_and_ingest(tmp_path, monkeypatch, populat
         monkeypatch.setattr(engine, "_load_generated_ignored_placeholder_hash_counts", lambda: loads.append(1) or {})
         messages = ([{"role": "user", "content": "first"}] if populated else [])
         engine.ingest([*messages, {"role": "assistant", "content": "next"}])
-        # #2042 step 2: at cursor 0 the ingest guard probes once, before the empty-session check.
-        assert probes == ([("s", True)] if populated else [("s", False), ("s", False)])
+        if recovery:
+            # #2042 step 2, opt-in: at cursor 0 the ingest guard probes once, before the empty-session check.
+            assert probes == ([("s", True)] if populated else [("s", False), ("s", False)])
+        else:
+            assert probes == [("s", populated)]
         assert loads == ([] if populated else [1])
         assert engine._store.get_session_count("s") == (2 if populated else 1)
     finally:
