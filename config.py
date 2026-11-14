@@ -74,7 +74,7 @@ def _callback_profile_home(manager) -> str | None:
             logger.debug("LCM could not read the Hermes turn profile", exc_info=True)
             return None
     # Current Hermes delivers each callback through its profile's manager.
-    home = override or getattr(manager, "home_path", None)
+    home = os.path.expanduser(os.path.expandvars(override)) if override else getattr(manager, "home_path", None)
     return _resolved_profile_home(str(home)) if home else None
 
 

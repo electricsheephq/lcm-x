@@ -480,7 +480,15 @@ def test_first_reloaded_hook_cannot_restore_a_finalized_binding(preflight):
         ctx.unload_callbacks[0]()
 
 
-def test_profile_scoped_hook_ignores_same_session_id_bound_in_another_home(preflight, tmp_path):
+@pytest.mark.parametrize("uses_home_override", [False, True], ids=["manager-home", "aliased-turn-home"])
+def test_profile_scoped_hook_ignores_same_session_id_bound_in_another_home(
+    preflight, tmp_path, monkeypatch, uses_home_override,
+):
+    if uses_home_override:
+        import hermes_constants
+
+        monkeypatch.setenv("LCM_TEST_PROFILE_HOME", str(preflight.home))
+        monkeypatch.setattr(hermes_constants, "get_hermes_home_override", lambda: "$LCM_TEST_PROFILE_HOME")
     prototype, ctx = preflight.register(supports_unload=True)
     local, foreign = prototype.clone_for_agent(), prototype.clone_for_agent()
     foreign_home = tmp_path / "other-profile"
