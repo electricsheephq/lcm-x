@@ -1172,3 +1172,110 @@ def test_the_run_entry_point_refuses_a_run_dir_inside_the_package(tmp_path):
         r.main(["--config", str(tmp_path / "decl.json"), "--run-dir", str(inside), "--instrument-dir", str(tmp_path),
                 "--rc-id", "rc-synthetic"])
     assert not inside.exists()
+
+
+@pytest.mark.parametrize("fail", ["free_space", "P1", "P2", "P5"])
+def test_2647_stopped_informational_runs_list_all_skipped_preflights(setup, fail):
+    _, config, run_dir = setup
+    host = FakeHost(config, run_dir, fail=fail)
+    if fail == "P2":
+        host.snapshot = lambda: {"verdict": "FAIL"}
+    receipt = r.run(host, rc_id="rc-synthetic", informational=True)
+    assert receipt["stopped_at"] == fail
+    assert {name: receipt["preflights"][name]["verdict"] for name in r.RECORDED_PREFLIGHTS} == dict.fromkeys(
+        r.RECORDED_PREFLIGHTS, r.NOT_RUN)
+    assert "attempt" not in receipt
+
+
+@pytest.mark.parametrize("raw", [bars.PASS, bars.FAIL, bars.INCONCLUSIVE])
+def test_2647_informational_runs_ignore_d5_attempt_gates(setup, monkeypatch, raw):
+    _, config, run_dir = setup
+    prior = [{"rc": "rc-synthetic", "verdict": {"raw": raw}, "pins": {"rules_sha256": "old"}}] * 2
+    receipt = r.run(FakeHost(config, run_dir / "prior"), rc_id="rc-synthetic", prior=prior, informational=True)
+    assert "stopped_at" not in receipt and "attempt" not in receipt
+    assert receipt["arms"]["rc"]["workload"]["turns_completed"] == 36
+
+    def forbidden(*args):
+        pytest.fail("informational mode must never call bars.may_run")
+
+    monkeypatch.setattr(bars, "may_run", forbidden)
+    second = r.run(FakeHost(config, run_dir / "no-gate"), rc_id="rc-synthetic", informational=True)
+    assert "attempt" not in second
+
+
+@pytest.mark.parametrize("fail, exit_code", [(None, 0), ("ga_once", 0), ("P1", 2)])
+def test_2647_informational_cli_names_its_receipt_and_exit_code(setup, monkeypatch, capsys, fail, exit_code):
+    _, config, run_dir = setup
+    declaration = run_dir.parent / "decl.json"
+    declaration.write_text(json.dumps(config))
+    monkeypatch.setattr(r, "LocalHost", lambda c, d: FakeHost(c, d, fail=fail))
+    # A real LocalHost normally creates its run dir; a P1 stop in this fake needs it pre-created.
+    run_dir.mkdir()
+    code = r.main(["--config", str(declaration), "--run-dir", str(run_dir), "--instrument-dir", str(run_dir.parent),
+                   "--rc-id", "rc-synthetic", "--informational"])
+    assert code == exit_code
+    receipt = json.loads((run_dir / "informational-receipt.json").read_text())
+    assert not (run_dir / "d5-clone-receipt.json").exists()
+    assert receipt["schema"] == r.INFORMATIONAL_SCHEMA and "verdict" not in receipt and "attempt" not in receipt
+    assert json.loads(capsys.readouterr().out)["schema"] == r.INFORMATIONAL_SCHEMA
+    if fail == "P1":
+        assert receipt["preflights"]["P6"]["verdict"] == r.NOT_RUN
+    elif fail == "ga_once":
+        assert receipt["bars"]["bar5"]["verdict"] == bars.INCONCLUSIVE  # Exit 0 means it did not stop.
+        assert receipt["bars"]["bar5"]["ga_rerun_needed"] is True
+        assert receipt["bars"]["bar5"]["ga_rerun_note"] == "informational mode records GA failures without re-running"
+
+
+def test_2647_bar4_note_counts_each_sink_without_a_fixed_multiplier(setup):
+    _, config, run_dir = setup
+    receipt = r.run(FakeHost(config, run_dir), rc_id="rc-synthetic")
+    assert receipt["bars"]["bar4"]["raw_counts_note"] == (
+        "raw counts include each occurrence in each sink read (agent log, error log and gateway console); "
+        "an event copied to multiple sinks is counted in each sink, with no fixed multiplier; "
+        "the verdict compares the arms")
+
+
+def test_2647_each_bind_keeps_its_own_replay_diagnostics(setup):
+    class DiagnosticHost(FakeHost):
+        def replay(self, ctx, step, t0, h8):
+            ctx["replay_diagnostics"] = {"constants": {"exit_code": len(self.replays), "exception_type": None,
+                                                     "frame_file": None, "frame_function": None}, "replay": None}
+            return super().replay(ctx, step, t0, h8)
+
+    _, config, run_dir = setup
+    receipt = r.run(DiagnosticHost(config, run_dir), rc_id="rc-synthetic")
+    assert [bind["replay_diagnostics"]["constants"]["exit_code"] for bind in receipt["binds"]] == list(range(12))
+
+
+@pytest.mark.parametrize("failed_step, crash", [("constants", True), ("replay", True), ("constants", False)])
+def test_2647_replay_records_both_process_outcomes_without_output(tmp_path, monkeypatch, failed_step, crash):
+    import subprocess
+
+    seen = []
+
+    def fake_run(argv, **kwargs):
+        step = argv[-1]
+        seen.append(step)
+        (Path(kwargs["cwd"]) / "constants.json").write_text('{"range_new_rows": 3}')
+        stderr = (f'Traceback (most recent call last):\n  File "/private/old.py", line 1, in outer\n'
+                  f'ValueError: {MARKER}\n\nDuring handling of the above exception, another exception occurred:\n\n'
+                  f'Traceback (most recent call last):\n  File "/private/subprocess.py", line 9, in run\n'
+                  f'subprocess.CalledProcessError: {MARKER}\n').encode() if crash and step == failed_step else b""
+        return subprocess.CompletedProcess(argv, int(step == failed_step), MARKER.encode(), stderr)
+
+    monkeypatch.setattr(r.subprocess, "run", fake_run)
+    monkeypatch.setattr(r.sandbox, "wrap", lambda argv, **kw: argv)
+    config = {"interpreter": "python3", "instrument_dir": "kit", "rc": {"lcm_tree": "rc"}, "ga": {"lcm_tree": "ga"},
+              "constants_argv": ["constants"], "replay_argv": ["replay"]}
+    ctx = {"name": "rc", "port": 1, "sessions": {"L": "s"}}
+    result = r.LocalHost(config, tmp_path / "run").replay(ctx, {"id": "cold", "conversation": "L"}, "T0", "H8")
+    assert result == (None, True, 3)
+    diag = ctx["replay_diagnostics"]
+    assert diag[failed_step] == {"exit_code": 1, "exception_type": "subprocess.CalledProcessError" if crash else None,
+                                 "frame_file": "subprocess.py" if crash else None, "frame_function": "run" if crash else None}
+    if failed_step == "replay":
+        assert diag["constants"] == {"exit_code": 0, "exception_type": None, "frame_file": None, "frame_function": None}
+    else:
+        assert diag["replay"] is None
+    assert seen == (["constants", "replay"] if failed_step == "replay" else ["constants"])
+    assert MARKER not in json.dumps(diag) and "/private/" not in json.dumps(diag)

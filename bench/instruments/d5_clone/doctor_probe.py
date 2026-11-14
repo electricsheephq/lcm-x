@@ -27,6 +27,20 @@ def _connect(db):
     return sqlite3.connect(Path(db).resolve().as_uri() + "?mode=ro", uri=True)
 
 
+def captured_host_version(home):
+    """Only the snapshot's recorded schema number; never open a database or fall back to the pinned host."""
+    try:
+        record = json.loads((Path(home) / "capture.json").read_text(encoding="utf-8"))
+        for section, key in (("p2", "host_schema_version"), ("host-0.db", "schema_version")):
+            part = record.get(section)
+            value = part.get(key) if isinstance(part, dict) else None
+            if type(value) is int:
+                return value
+    except (OSError, ValueError, AttributeError):
+        pass
+    return None
+
+
 def schema(home, boot, host_sql, host_version):
     """{db name: {version, expected, missing_tables, error}} for the LCM-X store and the host store."""
     out = {}
@@ -86,7 +100,7 @@ def main(tree, home, out, sessions="[]"):
     except ImportError:  # An older host keeps its schema in hermes_state.
         host = importlib.import_module("hermes_state")
     boot = importlib.import_module("hermes_lcm_x.db_bootstrap")
-    (out / "schema.json").write_text(json.dumps(schema(home, boot, host.SCHEMA_SQL, host.SCHEMA_VERSION)))
+    (out / "schema.json").write_text(json.dumps(schema(home, boot, host.SCHEMA_SQL, captured_host_version(home))))
     store, dag = (importlib.import_module(f"hermes_lcm_x.{name}") for name in ("store", "dag"))
     (out / "fts-pre-open.json").write_text(json.dumps(fts_pre_open(home, boot, store, dag)))
     config, engine = (importlib.import_module(f"hermes_lcm_x.{name}") for name in ("config", "engine"))

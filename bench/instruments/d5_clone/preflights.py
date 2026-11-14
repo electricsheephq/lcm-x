@@ -174,7 +174,8 @@ def p4(host, plan):
         f = facts[tree] = {
             "rows": [len(hosts), len(lcms)], "refs": len(refs), "files": host.facts(ctx)["payload_files_created"],
             "stub_masked_sha256": [_sha(_home_paths(run.EXTERNALIZED_REF.sub(
-                lambda m: m[0].replace(m[1], "<ref>"), t or ""), ctx["home"])) for t in hosts + lcms],
+                lambda m: re.sub(r"(;\s*(?:chars|bytes)=)[0-9]+(?=;)", r"\1<size>",
+                                 m[0].replace(m[1], "<ref>")), t or ""), ctx["home"])) for t in hosts + lcms],
             "content_sha256": _sha(payload.get("content")),
             "content_masked_sha256": _sha(_home_paths(payload["content"], ctx["home"]))
             if isinstance(payload.get("content"), str) else None, "content_chars": _count(payload.get("content_chars")),
@@ -186,8 +187,9 @@ def p4(host, plan):
                                                                    for k in ("content_chars", "content_bytes"))),
                             (f"{tree}: the reference's digest is not its own content's hash",  # LCM-X names the
                              f["digest12"] != [f["content_sha256"][:12]])])  # payload by the content it holds.
-    return reasons + [f"{k} differs between the trees" for k in ("stub_masked_sha256", "content_masked_sha256",
-                      "content_chars", "content_bytes") if facts["rc"][k] != facts["ga"][k]], [], facts
+    # Equal masked hashes also imply equal masked character/UTF-8 lengths. Raw sizes remain receipt facts only.
+    return reasons + [f"{k} differs between the trees" for k in ("stub_masked_sha256", "content_masked_sha256")
+                      if facts["rc"][k] != facts["ga"][k]], [], facts
 
 
 def _find(value, key):
@@ -250,7 +252,8 @@ def p6(host, plan):
          "warm_rows": [new("lcm.db", "store_id", mid["store"]), new("state.db", "id", mid["host"])],
          "host_rows": [new("state.db", "id", before["host"], False), new("state.db", "id", before["host"])],
          "live_conversation_sha256": sorted(map(_sha, live)), "receipt_conversation_sha256": sorted(map(_sha, replayed)),
-         "cold_ingest_durable": durable, "cold_ingest_wait_s": waited, "hygiene_lines": hygiene}
+         "cold_ingest_durable": durable, "cold_ingest_wait_s": waited, "hygiene_lines": hygiene,
+         "replay_diagnostics": ctx.get("replay_diagnostics") if durable else None}
     fails = _failed([
         ("bind validity is not PASS", not error and bind["validity"] != "PASS"),
         ("range_new_rows is not 0", not error and range_new != 0),
@@ -261,7 +264,7 @@ def p6(host, plan):
         ("new host rows outside L's session", len(set(f["host_rows"])) != 1 or f["host_rows"][0] < 2),
         ("the live and replayed conversation_id differ", replayed and live and live != replayed)])
     unsure = _failed([("the cold turn's ingest was not durable within the wait (no H8, no replay)", not durable),
-                 ("the edition replay errored (no receipt to judge)", durable and error),
+                 (run.replay_error(f["replay_diagnostics"]), durable and error),
                  ("neither the T0 session row nor the edition receipt gives a conversation_id to compare", not replayed),
                  ("the cold bind's LCM-X rows carry no conversation_id to compare", not live)])
     if hygiene:  # The host's own compression rewrote L during the bind: what P6 saw is not the turn's own bind.

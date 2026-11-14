@@ -517,3 +517,48 @@ def test_a_store_the_read_only_open_refuses_is_never_read_as_empty(tmp_path):
     Path(str(db) + "-wal").write_bytes(b"")
     with pytest.raises(r.capture.CaptureError):
         r._rows(db, "SELECT max(store_id) FROM messages")
+
+
+@pytest.mark.parametrize("record, version, verdict", [
+    ({"p2": {"host_schema_version": 6}}, 6, bars.PASS),  # Ahead of the pinned host's constant (5).
+    ({"host-0.db": {"schema_version": 6}}, 6, bars.PASS),
+    ({"p2": {"host_schema_version": 7}}, 6, bars.FAIL),
+    ({}, 5, bars.INCONCLUSIVE),  # Even matching the pin is not evidence without the capture record.
+    (None, 5, bars.INCONCLUSIVE),
+    ({"p2": {"host_schema_version": True}}, 5, bars.INCONCLUSIVE),
+])
+def test_2647_host_schema_uses_only_the_capture_record(tmp_path, monkeypatch, record, version, verdict):
+    from types import SimpleNamespace
+    from bench.instruments.d5_clone import doctor_probe as probe
+
+    home, out = stores(tmp_path / "home"), tmp_path / "out"
+    out.mkdir()
+    if record is not None:
+        (home / "capture.json").write_text(json.dumps({**record, "private": "never emitted"}))
+    with closing(sqlite3.connect(home / "state.db")) as db, db:
+        db.execute("CREATE TABLE schema_version (version INTEGER)")
+        db.execute("INSERT INTO schema_version VALUES (?)", (version,))
+    boot = SimpleNamespace(SCHEMA_VERSION=5, inspect_lcm_schema_health=lambda db: {},
+                           read_existing_schema_version=lambda db: 5)
+    host = SimpleNamespace(SCHEMA_SQL="CREATE TABLE IF NOT EXISTS messages (id);", SCHEMA_VERSION=5)
+    engine = SimpleNamespace(LCMEngine=lambda **kw: SimpleNamespace(handle_tool_call=lambda *a: json.dumps(doctor("pass"))))
+    modules = {"hermes_state_common": host, "hermes_lcm_x.db_bootstrap": boot,
+               "hermes_lcm_x.store": None, "hermes_lcm_x.dag": None,
+               "hermes_lcm_x.config": SimpleNamespace(LCMConfig=SimpleNamespace(from_env=lambda: None)),
+               "hermes_lcm_x.engine": engine}
+    monkeypatch.setattr(probe, "_package", lambda tree: None)
+    monkeypatch.setattr(probe.importlib, "import_module", modules.__getitem__)
+    monkeypatch.setattr(probe, "fts_pre_open", lambda *args: PRE_OPEN_OK)
+    probe.main(tmp_path, home, out)
+    schema = json.loads((out / "schema.json").read_text())
+    checks, skipped = r.probe_checks(out, [])
+    sqlite = [{"kind": k, "check": "lcm.db", "status": "ok"} for k in ("quick_check", "integrity")]
+    assert bars.bar5(sqlite + checks, sqlite + checks)["verdict"] == verdict
+    if verdict == bars.INCONCLUSIVE:
+        assert schema["state.db"]["expected"] is None
+        assert {s["reason"] for s in skipped} == {"snapshot capture.json has no recorded host schema version"}
+    else:
+        expected = record.get("p2", {}).get("host_schema_version", record.get("host-0.db", {}).get("schema_version"))
+        assert schema["state.db"]["expected"] == expected
+        assert bars.failed_checks(checks) == (["state.db"] if verdict == bars.FAIL else [])
+    assert "never emitted" not in json.dumps({"schema": schema, "checks": checks, "skipped": skipped})

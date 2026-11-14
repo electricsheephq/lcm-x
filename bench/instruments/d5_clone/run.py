@@ -12,6 +12,9 @@ P1) provides ``identity(row)``, ``credits`` (the two host-rewrite credits, each 
 ``{t0}``, ``{h8}``, ``{out}``, ``{instrument_dir}``, ``{rc_tree}``, ``{ga_tree}`` and ``{session_h12}``):
 ``constants_argv`` must leave the generator's report, with ``range_new_rows``, at ``{out}/constants.json``, and
 ``replay_argv`` writes the edition's receipt, named by ``replay_receipt`` (default ``receipt.json``), in ``{out}``.
+
+Any merged instrument change changes ``instrument_sha256``. Earlier preflight receipts then read as MISSING;
+the next real D5 run must re-record every preflight on the merged instrument.
 """
 
 import argparse
@@ -149,7 +152,9 @@ def outside_package(run_dir):
 
 def instrument_identity(root=None):
     """This instrument's identity (ruling R5-5): the sha256 over every file of this package by relative name, which a
-    preflight receipt must match, and the repo commit it runs from ("" outside a checkout), recorded for readers."""
+    preflight receipt must match, and the repo commit it runs from ("" outside a checkout), recorded for readers.
+    Any merged instrument change changes instrument_sha256: earlier receipts read as MISSING, and the next real
+    D5 run re-records every preflight on the merged instrument."""
     root, h = Path(root).resolve() if root else PACKAGE, hashlib.sha256()
     for path in sorted(p for p in root.rglob("*") if p.is_file() and "__pycache__" not in p.parts and p.suffix != ".pyc"):
         h.update(path.relative_to(root).as_posix().encode() + b"\0" + hashlib.sha256(path.read_bytes()).digest())
@@ -456,10 +461,47 @@ def probe_checks(out, sessions):
             found = []  # A plan session, or the store's FTS before the engine opened it, not looked at: never a PASS.
     schema = _json((out / "schema.json").read_text(encoding="utf-8")) if (out / "schema.json").is_file() else None
     if isinstance(schema, dict) and set(schema) == {"lcm.db", "state.db"}:
-        found += [{"kind": "schema", "check": name, "status": "ok" if isinstance(s, dict) and s.get("error") is False
-                   and s.get("missing_tables") == [] and type(s.get("version")) is int and s["version"] == s.get("expected")
-                   else "fail"} for name, s in sorted(schema.items())]
+        rows, missing_record = [], False
+        for name, s in sorted(schema.items()):
+            intact = (isinstance(s, dict) and s.get("error") is False and s.get("missing_tables") == []
+                      and type(s.get("version")) is int)
+            if name == "state.db" and isinstance(s, dict) and type(s.get("expected")) is not int:
+                missing_record = True
+                skipped.append({"check": name, "reason": "snapshot capture.json has no recorded host schema version"})
+                if intact:
+                    continue
+            rows.append({"kind": "schema", "check": name,
+                         "status": "ok" if intact and s["version"] == s.get("expected") else "fail"})
+        # A partially observed schema must not supply an 'ok' schema kind to bar 5. Known failures still count.
+        found += [r for r in rows if not missing_record or r["status"] != "ok"]
     return found, sorted(skipped, key=lambda item: item["check"])
+
+
+def _replay_process_facts(done):
+    """Keep only exit code, exception type and the innermost traceback's file/function names, never its text."""
+    facts = {"exit_code": done.returncode, "exception_type": None, "frame_file": None, "frame_function": None}
+    stderr = getattr(done, "stderr", b"") or b""
+    lines = (stderr.decode("utf-8", errors="replace") if isinstance(stderr, bytes) else stderr).splitlines()
+    tracing = False
+    for line in lines:
+        if line == "Traceback (most recent call last):":
+            tracing = True
+            facts.update(exception_type=None, frame_file=None, frame_function=None)
+        elif tracing and (frame := re.fullmatch(r'  File "([^"\r\n]+)", line [0-9]+, in ([A-Za-z_<>][A-Za-z0-9_<>]*)', line)):
+            facts.update(frame_file=frame[1].replace("\\", "/").rsplit("/", 1)[-1], frame_function=frame[2])
+        elif tracing and (kind := re.match(r"^([A-Za-z_][A-Za-z0-9_.]*)(?::|$)", line)):
+            facts["exception_type"] = kind[1]
+            tracing = False
+    return facts
+
+
+def replay_error(diagnostics):
+    """A content-free reason, including which subprocess failed when its diagnostics are available."""
+    for step, facts in (diagnostics or {}).items():
+        if facts and facts["exit_code"]:
+            cause = facts["exception_type"] or "without an exception"
+            return f"the edition {step} step exited {facts['exit_code']} ({cause}; no receipt to judge)"
+    return "the edition replay errored (no receipt to judge)"
 
 
 class LocalHost:
@@ -677,7 +719,8 @@ class LocalHost:
         return files
 
     def replay(self, ctx, step, t0, h8):
-        """The edition on both trees, under the sandbox: (receipt, error, range_new_rows)."""
+        """The edition on both trees: (receipt, error, range_new_rows), with safe subprocess facts on ctx."""
+        ctx["replay_diagnostics"] = {"constants": None, "replay": None}
         out = self._dir(ctx["name"], "replays", step["id"])
         python = self.c["interpreter"]
         values = {"python": os.path.abspath(python) if os.sep in python else python, "t0": t0, "h8": h8, "out": out,
@@ -691,8 +734,9 @@ class LocalHost:
             argv = sandbox.wrap([a.format(**values) for a in self.c[key]], ports=[ctx["port"]], socket_roots=[out],
                                 deny_paths=sandbox.live_homes())  # The live agent's home is never read.
             env = {"PATH": "/usr/bin:/bin", "HOME": str(out), "PYTHONDONTWRITEBYTECODE": "1"}
-            code = subprocess.run(["/usr/bin/nice", "-n", "19", *argv], cwd=out, env=env, capture_output=True).returncode
-            if code:  # An error, or (constants exit 1) a NOT SHOWN bind: no replay runs after it. Either way the
+            done = subprocess.run(["/usr/bin/nice", "-n", "19", *argv], cwd=out, env=env, capture_output=True)
+            ctx["replay_diagnostics"][key.removesuffix("_argv")] = _replay_process_facts(done)
+            if done.returncode:  # An error, or (constants exit 1) a NOT SHOWN bind: no replay runs after it. Either way the
                 return None, True, _range_new_rows(out)  # report's range_new_rows is kept when it was written.
         try:
             return (json.loads((out / receipt_name).read_text(encoding="utf-8")), False, _range_new_rows(out))
@@ -834,6 +878,7 @@ def run_arm(host, name, home, plan, extras, no_binds=False):
                                           else "cold turn not completed")
                     binds.append({"bind": step["id"], "session_id": sid[step["conversation"]],
                                   "cold_ingest_wait_s": waited,
+                                  "replay_diagnostics": ctx.get("replay_diagnostics") if durable else None,
                                   "t0_max": t0["store_max_store_id"], "h8_max": h8["store_max_store_id"],
                                   "dup_store_ids": bars.dup_store_ids(receipt), "receipt": receipt,
                                   "t0_at": datetime.fromisoformat(t0["captured_at"]).timestamp(),
@@ -899,22 +944,25 @@ def inherited_flags(plan, arms, ga_rerun=None):
 def run(host, *, rc_id, prior=(), instrument_fix=None, informational=False):
     """The whole run; returns the receipt (counts, ids, sha256s and verdicts only). *informational* (opt-in, off by
     default): P3, P4, P6 and P7 are not read or gated, no bind is captured or replayed, a failed GA check is recorded
-    and not re-run, and the receipt carries bars 3 to 6 only, no verdict, under its own schema: it is never D5."""
+    and not re-run, and the receipt carries bars 3 to 6 only, no verdict, under its own schema: it is never D5.
+    Informational CLI exit 0 means the run did not stop; readers must still read the bars."""
     started = time.monotonic()
-    prior = [p for p in prior if p.get("rc") == rc_id and "verdict" in p]  # A stopped run is not an attempt.
+    prior = [] if informational else [p for p in prior if p.get("rc") == rc_id and "verdict" in p]  # A stopped run is not an attempt.
     prior_verdicts = [p["verdict"]["raw"] for p in prior]
     receipt = {"schema": INFORMATIONAL_SCHEMA if informational else SCHEMA, "rc": rc_id,
-               "attempt": len(prior_verdicts) + 1, "instrument_fix": instrument_fix}
+               "instrument_fix": instrument_fix}
     if informational:
         receipt["instrument"] = instrument_identity()  # The runner's exact commit and package hash, for readers.
+    else:
+        receipt["attempt"] = len(prior_verdicts) + 1
     receipt["settings"] = {  # A disclosed fact, never judged (release manager, 2026-11-10); only a UTC time is written.
         "as_of": _utc_time(getattr(host, "c", {}).get("settings_as_of")),
         "note": "both arms run the declared reference-settings snapshot taken at as_of, assumed unchanged since"}
-    refusal = bars.may_run(prior_verdicts, instrument_fix)
+    refusal = None if informational else bars.may_run(prior_verdicts, instrument_fix)
     receipt["preflights"] = steps = {"free_space": {"verdict": "PASS" if host.free_bytes() >= NEED_FREE else "FAIL"}}
     if refusal is None and steps["free_space"]["verdict"] == "PASS":
         steps["P1"] = receipt["pins"] = host.pins()
-        if steps["P1"].get("verdict") == "PASS" and any(
+        if not informational and steps["P1"].get("verdict") == "PASS" and any(
                 p.get("pins", {}).get("rules_sha256") != steps["P1"].get("rules_sha256") for p in prior):  # Spec: the rule code never changes on this rc.
             refusal = "the rule code changed since an earlier attempt on this rc; that applies from the next rc"
     gated = [n for n in PREFLIGHTS if not (informational and n in RECORDED_PREFLIGHTS)]
@@ -930,9 +978,10 @@ def run(host, *, rc_id, prior=(), instrument_fix=None, informational=False):
         else:
             steps[name] = host.preflight(name, plan)
     stopped = refusal or next((k for k, s in steps.items() if s.get("verdict") != "PASS"), None)
-    if stopped or len(steps) != 4 + len(gated):
-        return {**receipt, "stopped_at": stopped, "wall_s": {"total": round(time.monotonic() - started, 3)}}
+    ready = len(steps) == 4 + len(gated)
     steps.update({n: {"verdict": NOT_RUN} for n in PREFLIGHTS if n not in gated})
+    if stopped or not ready:
+        return {**receipt, "stopped_at": stopped, "wall_s": {"total": round(time.monotonic() - started, 3)}}
     rules, base = host.rules(), host.run_dir / "plan" / "home"
     arms = {name: run_arm(host, name, host.clone(name), plan, {"RC3/store.db": base / "store.db"},
                           no_binds=informational) for name in ("rc", "ga")}
@@ -961,12 +1010,14 @@ def run(host, *, rc_id, prior=(), instrument_fix=None, informational=False):
     results.update({
         "bar3": bars.bar3(snap["store"], arms["rc"]["rows"]["store"], rules["identity"]),
         "bar4": {**bars.bar4(arms["rc"]["logs"], arms["ga"]["logs"], arms["rc"]["roots"], arms["ga"]["roots"]),
-                 "raw_counts_note": "the host writes each log line to two files (agent.log and gateway.log), so the raw"
-                                    " counts are 2x on both arms; the verdict compares the arms and is unaffected"},
+                 "raw_counts_note": "raw counts include each occurrence in each sink read (agent log, error log and gateway console); "
+                                    "an event copied to multiple sinks is counted in each sink, with no fixed multiplier; "
+                                    "the verdict compares the arms"},
         "bar5": {**bars.bar5(arms["rc"]["checks"], arms["ga"]["checks"], ga_rerun and ga_rerun["checks"],
                              bool(ga_rerun) and bars.workload_items(ga_rerun["workload"])["turns_completed"],
                              inherited=inherited_flags(plan, arms, ga_rerun),
                              ga_turns_complete=bars.workload_items(arms["ga"]["workload"])["turns_completed"]),
+                 **({"ga_rerun_note": "informational mode records GA failures without re-running"} if informational else {}),
                  "flagged_summary_nodes": {  # Per driven session: at the start, and in each arm at its end (#2471).
                      "start": _keyed({c["session_id"]: c.get("flagged_summary_nodes") for c in plan["conversations"]}),
                      **{a: arms[a]["flagged_summary_nodes"] for a in arms}}},
