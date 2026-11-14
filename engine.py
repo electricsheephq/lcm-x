@@ -7407,13 +7407,15 @@ class LCMEngine(
                 return self._redact_active_replay_messages(messages)
 
             sender_capture.try_update(self)
+            merged_original_messages = messages
+            messages, merged_aliases, merged_new_occurrences = sender_capture.merged_user_projection(self, messages)
             attribution = self._last_ingest_attribution = dict(
                 lock_hold_ms=0.0, rows_written=0, bytes_written=0, busy_snapshot_retry=False,
                 ledger_digest_ms=0.0, ledger_ms=0.0)
             ledger_prepared = self._prepare_ingest_ledger(messages, attribution)
             admission_retry = busy_retried = False
             # One busy retry, plus one #1815 evidence-fault retry that only the first attempt can take.
-            for attempt in range(3):
+            for attempt in range(4 if merged_aliases else 3):
                 self._ingest_attempt_index = attempt
                 # Keep the published frontier untouched until COMMIT. Helpers read
                 # and write the attempt-local holder through the legacy properties.
@@ -7475,7 +7477,10 @@ class LCMEngine(
                         active, finish = self._ingest_messages_transaction(
                             messages, after_commit, attribution,
                             prepared=prepared, telemetry=record,
+                            merged_new_occurrences=merged_new_occurrences,
                             allow_session_end_replay_proof=allow_session_end_replay_proof)
+                        if merged_aliases:
+                            self._store_merged_user_aliases(merged_aliases, prepared)
                         if self._ingest_ledger_attempt is not None:
                             self._write_ingest_ledger(self._ingest_ledger_attempt, after_commit, attribution)
                         self._link_stored_todo_replays(messages, prepared.get("stored_at", {}))
@@ -7502,6 +7507,15 @@ class LCMEngine(
                         maintenance_scheduler._PENDING_TAIL_ENGINES.discard(self)
                     attribution.update(rows_written=0, bytes_written=0)
                     rollback_ok = self._store._transaction_owner.rollback_failures == rollback_failures
+                    if rollback_ok and isinstance(exc, Exception) and merged_aliases:
+                        # #2707 is optional preservation. Roll back its entire
+                        # attempt (row AND alias), then run today's input path.
+                        logger.warning("LCM queued-user preservation failed (%s); original ingest only",
+                                       type(exc).__name__)
+                        messages, merged_aliases = merged_original_messages, {}
+                        merged_new_occurrences = set()
+                        ledger_prepared = self._prepare_ingest_ledger(messages, attribution)
+                        continue
                     if rollback_ok and attempt == 0 and isinstance(exc, _EvidenceFaultRetry):
                         continue  # #1815: nothing of the faulted attempt is kept; the retry classifies again
                     if rollback_ok and isinstance(exc, Exception) and not busy_retried and (_is_ingest_busy_error(exc)
@@ -7602,6 +7616,31 @@ class LCMEngine(
                     self._record_ingest_failure("post-commit replay cache", exc)
                     return active
             raise AssertionError("unreachable ingest retry state")
+
+    def _store_merged_user_aliases(self, aliases, prepared):
+        """#2707: one joined slot and its newest-only alias commit together."""
+        stored_at = prepared.get("stored_at", {})
+        rows = self._store.get_batch([stored_at[i] for i in aliases if i in stored_at])
+        for index, live in aliases.items():
+            store_id = stored_at.get(index)
+            if not store_id:
+                continue
+            stored = rows[store_id]["content"]
+            protected = protect_messages_for_ingest(
+                [live], session_id=self._session_id, config=self._config, hermes_home=self._hermes_home,
+                context_window_tokens=self._publish_ingest_context_window())[0]
+            content = normalize_content_value(protected.get("content")) or ""
+            if _has_lossy_sensitive_redaction(stored) or _has_lossy_sensitive_redaction(content):
+                raise ValueError("queued-user alias lacks lossless identity")
+            self._write_host_rewrite_identity(store_id, {
+                "version": 1, "content": content,
+                "stored_sha256": hashlib.sha256(stored.encode()).hexdigest(),
+            })
+            # Gateway persistence stamps the live head at the newest event time;
+            # reload restores the durable head time. Both name this proven slot.
+            stamp = _normalize_observed_at(live.get("timestamp"))
+            if stamp is not None and stamp != rows[store_id].get("observed_at"):
+                self._store.add_message_relations([[(store_id, "alt_stamp", None, None, stamp)]])
 
     @staticmethod
     def _log_ingest_route(session, route, cursor, reason, ids, pairs=(0, 0)):
@@ -8403,7 +8442,8 @@ class LCMEngine(
                 self._ingest_ledger_observations = collector
 
     def _ingest_messages_transaction(self, messages, after_commit, attribution, *,
-                                     allow_session_end_replay_proof=False, prepared=None, telemetry=None):
+                                     allow_session_end_replay_proof=False, prepared=None, telemetry=None,
+                                     merged_new_occurrences=()):
         """Today's classifier and evidence; caller owns COMMIT and retry.
 
         Store-dependent protection/token counts are part of lock_hold_ms, and
@@ -8517,6 +8557,7 @@ class LCMEngine(
                 else:
                     self._ingest_cursor_needs_reconcile = True
         cached_source_identities = getattr(self, "_last_active_replay_source_identities", None)
+        new_prefix_occurrences.update(merged_new_occurrences)
         current_prefix_identities = (
             [self._message_replay_identity(message, strip_carrier=False) for message in messages[:cursor]]
             if cursor > 0 and cached_source_identities is not None and len(cached_source_identities) >= cursor

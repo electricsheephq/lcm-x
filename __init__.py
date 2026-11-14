@@ -726,7 +726,7 @@ def register(ctx):
         # persists hook context as user-attributed ``api_content``.
         try:
             def _on_pre_llm_call(**payload):
-                from .sender_capture import create_pending
+                from .sender_capture import capture_merged_users, create_pending
 
                 _on_live_delegate_child_list(**payload)  # #2482; returns None, never raises
                 session_id = str(payload.get("session_id") or "")
@@ -736,6 +736,7 @@ def register(ctx):
                     or ""
                 )
                 def prepare(active_engine):
+                    capture_merged_users(active_engine, payload)
                     create_pending(active_engine, payload)
                     return _pre_llm_context(active_engine, payload)
 

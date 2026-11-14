@@ -871,9 +871,14 @@ class ReconcileMixin:
         digest = hashlib.sha256(stored.encode()).hexdigest()
         payload = {"version": 1, "content": content, "stripped": edges, "stored_sha256": digest}
         payload.update({"strip_payload": True} if reuse else {})
+        self._write_host_rewrite_identity(store_id, payload)
+        del watch[store_id]  # only once the override is durable: a failed write retries next ingest
+
+    def _write_host_rewrite_identity(self, store_id, payload) -> None:
+        """The existing hash-bound alias wire format, shared with #2707."""
+        overrides = self._host_rewrite_state()[1]
         key = f"{_HOST_REWRITE_IDENTITY_METADATA_PREFIX}:{store_id}"
         self._store.write_metadata_json([key], json.dumps(payload, sort_keys=True), skip_unchanged=True)
-        del watch[store_id]  # only once the override is durable: a failed write retries next ingest
         overrides[store_id] = payload
         self._bound_host_rewrite_overrides({store_id})
 
@@ -2752,9 +2757,9 @@ class ReconcileMixin:
                         messages[index], stored_row=index + 1 == composite,
                         allow_pruned_tool_alias=index not in recent_tools)
                     if _has_lossy_redacted_identity(identity) or not any(
-                        identity == proof_identity(row, stored_row=True, with_host_rewrite=True,
+                        identity == proof_identity(row, stored_row=True, with_host_rewrite=rewrite,
                                                    allow_pruned_tool_alias=alias)
-                        for alias in (False, True)
+                        for alias in (False, True) for rewrite in (False, True)
                     ):
                         return None
                     index += 1
@@ -2803,27 +2808,50 @@ class ReconcileMixin:
             self._raise_ingest_busy(exc)
             logger.debug("LCM carry-range rewrite failed", exc_info=True)
 
-    def _cursor_from_host_rewrite_head(self, messages, session_count: int) -> Optional[int]:
+    def _cursor_from_host_rewrite_head(self, messages, session_count: int, *, equal_rows=()) -> Optional[int]:
         """Head-anchored replay (#498): stored row i vs incoming i from the session start,
         with overrides, for a list extending past the session (transcript + new turn)."""
-        if not 0 < session_count < len(messages):
+        equal = session_count == len(messages)
+        if equal:
+            # #2707: the anchor's fault fallback also needs the complete alias
+            # prefix. Reuse the already-read tail; unrelated equal-size binds
+            # retain their original reads and decisions.
+            if not (identity_anchor_enabled() and len(equal_rows) == session_count and any(
+                    row.get("role") == message.get("role") == "user"
+                    and isinstance(row.get("content"), str) and isinstance(message.get("content"), str)
+                    and row["content"] != message["content"]
+                    and row["content"].endswith("\n\n" + message["content"])
+                    for row, message in zip(equal_rows, messages))):
+                return None
+        elif not 0 < session_count < len(messages):
             return None
-        rows = self._store.get_session_messages(self._session_id, limit=session_count)
+        rows = equal_rows if equal else self._store.get_session_messages(self._session_id, limit=session_count)
         self._load_host_rewrite_overrides(rows)
         if len(rows) != session_count:
             return None
+        if equal and not any(
+                isinstance(payload := self._host_rewrite_state()[1].get(row["store_id"]), dict)
+                and "stripped" not in payload and self._host_rewrite_override_content(row) is not None
+                for row in rows):
+            return None  # Existing whitespace aliases keep their previous bind policy.
         rewritten = any(self._host_rewrite_override_content(r) is not None for r in rows)
         recent_tools = _hermes_salvage_protected_positions(messages)
         for i, (row, message) in enumerate(zip(rows, messages)):
             identity = self._message_replay_identity(
                 message, strip_carrier=False, allow_pruned_tool_alias=i not in recent_tools)
             stored = {self._message_replay_identity(
-                row, stored_row=True, with_host_rewrite=True, allow_pruned_tool_alias=alias)
-                for alias in (False, True)}
+                row, stored_row=True, with_host_rewrite=rewrite, allow_pruned_tool_alias=alias)
+                for alias in (False, True) for rewrite in (False, True)}
             if _has_lossy_redacted_identity(identity) or not any(
                 _proof_user_identity(identity) == _proof_user_identity(form) for form in stored
             ):
                 return None
+            if equal:
+                stamp = _normalize_observed_at(message.get("timestamp"))
+                if stamp is not None and row.get("observed_at") is not None and stamp != row["observed_at"]:
+                    if not any(rel.get("observed_at") == stamp for rel in
+                               self._store.get_message_relations([row["store_id"]], "alt_stamp")):
+                        return None
             rewritten = rewritten or identity not in stored
         return session_count if rewritten else None
 
@@ -3170,7 +3198,7 @@ class ReconcileMixin:
             raw_session_count=session_count,
             allow_session_end_replay_proof=allow_session_end_replay_proof,
         )
-        head_cursor = self._cursor_from_host_rewrite_head(messages, session_count)
+        head_cursor = self._cursor_from_host_rewrite_head(messages, session_count, equal_rows=stored_tail_rows)
         if head_cursor is not None and head_cursor > (cursor or 0):
             cursor = head_cursor  # the greatest independently proven cursor wins
         proof_cursor = self._cursor_from_durable_commit_proof(messages)

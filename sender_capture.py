@@ -6,6 +6,7 @@ import re
 import threading
 import time
 import unicodedata
+from weakref import WeakKeyDictionary
 
 from . import config
 from .host_uid import _valid_uid
@@ -17,6 +18,126 @@ _PENDING = {}
 _RETIRED = OrderedDict()
 _EXCLUDED = OrderedDict()
 _TTL, _CAP, _RETIRED_CAP = 900, 256, 1024
+_MERGED_USERS = WeakKeyDictionary()
+
+
+@dataclass(frozen=True)
+class MergedUsers:
+    head: dict
+    timestamp: object
+    earlier: tuple[str, ...]
+    newest: dict
+    user_message: str
+    session: str
+    conversation: str
+    created: float
+
+
+def capture_merged_users(engine, payload):
+    """#2707: observe the host's merge group before it mutates; never ingest here."""
+    try:
+        if not config.identity_anchor_enabled() or payload.get("session_id") != engine._session_id:
+            return
+        history, text = payload.get("conversation_history"), payload.get("user_message")
+        if not isinstance(history, list) or len(history) < 2 or not isinstance(text, str):
+            return
+        from .engine import _host_will_merge_user_rows
+
+        # Walk forward: a steer/carrier can be absorbed as a follower but cannot
+        # head the next merge, exactly as the host's retained-object loop does.
+        run = []
+        for row in history:
+            if run and _host_will_merge_user_rows(run[0], row):
+                run.append(row)
+            else:
+                run = [row] if isinstance(row, dict) else []
+        if (len(run) < 2 or run[0].get("role") != "user"
+                or len({id(row) for row in run}) != len(run)):
+            return
+        now = time.monotonic()
+        captured = MergedUsers(run[0], run[0].get("timestamp"),
+                               tuple(row.get("content", "") for row in run[:-1]),
+                               run[-1], text, str(engine._session_id),
+                               str(engine._conversation_id or ""), now)
+        with _LOCK:
+            previous = [c for c in _MERGED_USERS.get(engine, ()) if now - c.created < _TTL
+                        and c.head is not captured.head]
+            _MERGED_USERS[engine] = [*previous[-7:], captured]
+    except Exception:
+        logger.debug("merged_users:capture_error", exc_info=True)
+
+
+def merged_user_projection(engine, messages):
+    """Return joined copies only with proof of the whole-content overwrite.
+
+    Capture is process-local and bounded. Copies keep the host objects untouched;
+    both the replay cache and the anchor see the durable head time.
+    """
+    try:
+        if not config.identity_anchor_enabled():
+            return messages, {}, set()
+        with _LOCK:
+            captures = tuple(_MERGED_USERS.get(engine, ()))
+        known = {sid: payload for sid, payload in getattr(engine, "_host_rewrite_overrides", {}).items()
+                 if isinstance(payload, dict) and "stripped" not in payload}
+        if not captures and not known:
+            return messages, {}, set()
+        present, projected, aliases = {id(row) for row in messages}, list(messages), {}
+        for capture in captures:
+            head = capture.head
+            if (time.monotonic() - capture.created >= _TTL
+                    or capture.session != str(engine._session_id)
+                    or capture.conversation != str(engine._conversation_id or "")
+                    or id(head) not in present or id(capture.newest) in present
+                    or "_merged_turn_prefix" in head or "_absorbed_message_uids" in head
+                    or head.get("role") != "user" or head.get("content") != capture.user_message):
+                continue
+            index = next(i for i, row in enumerate(messages) if row is head)
+            joined = "\n\n".join((*capture.earlier, capture.user_message))
+            projected[index] = {**head, "content": joined, "timestamp": capture.timestamp}
+            aliases[index] = head
+        # A recreated engine can cache the newest-only form at the gateway's
+        # event time. Canonicalise only hash-verified #2707 aliases at one of
+        # their proven stamps, before BOTH the warm-cache and anchor checks.
+        rows = engine._store.get_batch(list(known)) if known else {}
+        stamps = {sid: {row.get("observed_at")} for sid, row in rows.items()}
+        for rel in engine._store.get_message_relations(list(rows), "alt_stamp") if rows else ():
+            stamps[rel["store_id"]].add(rel.get("observed_at"))
+        forms = {}
+        for sid, row in rows.items():
+            if (row.get("session_id") == engine._session_id
+                    and str(row.get("conversation_id") or "") == str(engine._conversation_id or "")
+                    and engine._host_rewrite_override_content(row) is not None):
+                for identity in engine._stored_row_forms(row):
+                    forms.setdefault(identity, []).append(sid)
+        cached = getattr(engine, "_last_active_replay_messages", None)
+        fresh = set()
+
+        def canonical_times(values, *, observe=False):
+            result, used = list(values), set()
+            for index, message in enumerate(values):
+                stamp = engine._host_occurrence_metadata(message)["timestamp"]
+                matches = [sid for sid in forms.get(engine._message_replay_identity(message, strip_carrier=False), ())
+                           if sid not in used and stamp is not None and stamp in stamps[sid]]
+                if len(matches) == 1:
+                    sid = matches[0]
+                    used.add(sid)
+                    if observe and cached is not None and index < len(cached):
+                        uid, old_uid = message.get("message_uid"), cached[index].get("message_uid")
+                        if (_valid_uid(uid) and _valid_uid(old_uid) and uid != old_uid and sid in forms.get(
+                                engine._message_replay_identity(cached[index], strip_carrier=False), ())):
+                            fresh.add(index)  # Content aliases never erase a known new UID.
+                    if stamp != rows[sid].get("observed_at"):
+                        result[index] = {**message, "timestamp": rows[sid]["observed_at"]}
+            return result
+
+        projected = canonical_times(projected, observe=True)
+        if forms and cached is not None:
+            engine._last_active_replay_messages = canonical_times(cached)
+        return projected, aliases, fresh
+    except Exception:
+        logger.debug("merged_users:projection_error", exc_info=True)
+        return messages, {}, set()
 
 
 @dataclass
