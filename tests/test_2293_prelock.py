@@ -110,6 +110,49 @@ def _counts(engine) -> Counter:
     return Counter(getattr(engine._store, "ingest_prelock_counts", Counter()))
 
 
+def test_transient_prelock_prematch_fault_stores_each_host_occurrence_once(tmp_path, monkeypatch):
+    """A code-less first-pass lock fault clears before the lazy in-lock reclassification."""
+    monkeypatch.setenv("LCM_IDENTITY_ANCHOR", "1")
+    results = {}
+    for fault in (False, True):
+        engine = _engine(tmp_path / str(fault), prelock=True)
+        try:
+            initial = [_a("Q", 1), _u("R", 10), _a("A", 21), _u("R", 30), _a("B", 41)]
+            engine.ingest(initial)
+            engine.ingest(initial)
+            engine.shutdown()
+            engine = _engine(tmp_path / str(fault), prelock=True)  # Recreated reader, as in seed 2707447.
+            incoming = [_a("summary", 1), initial[3], initial[4]]
+            passes = []
+            original = engine._identity_anchor_prematch
+            before = _counts(engine)
+
+            def prematch(*args, **kwargs):
+                passes.append((engine._ingest_attempt_index, engine._store._conn.in_transaction))
+                if len(passes) == 1:
+                    error = sqlite3.OperationalError("database is locked")
+                    assert getattr(error, "sqlite_errorcode", None) is None
+                    raise error
+                return original(*args, **kwargs)
+
+            with monkeypatch.context() as patch:
+                if fault:
+                    patch.setattr(engine, "_identity_anchor_prematch", prematch)
+                engine.ingest(incoming)
+            results[fault] = [(r["role"], r["content"], r["observed_at"])
+                              for r in engine._store.get_session_messages(SESSION)]
+            if fault:
+                assert passes == [(0, False), (0, True)], passes
+                assert (_counts(engine) - before)["reclassified"] == 1
+            assert engine._ingest_failure_count == 0
+        finally:
+            engine.shutdown()
+    assert results[True] == results[False], "transient pre-lock fault duplicated host occurrences"
+    expected = [(r["role"], r["content"], r["timestamp"]) for r in [*initial, incoming[0]]]
+    assert results[True] == expected
+    assert all(count == 1 for count in Counter(results[True]).values())
+
+
 # -- shapes: (setup views ingested first, the judged view) ------------------------------------------------------------
 
 def _shape(name):

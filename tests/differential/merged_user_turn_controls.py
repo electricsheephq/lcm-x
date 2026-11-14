@@ -9,6 +9,8 @@ import json
 import sqlite3
 import sys
 
+import pytest
+
 from tests.differential.paired import compare_stages as _compare_round2, normalise_rows
 from tests.differential.session import _capture, _identities, _open, _row, _rows, audit_fault
 
@@ -276,7 +278,7 @@ def test_round2_fallback_has_own_evidence_retry(tmp_path, monkeypatch, versions,
                        _row('U2', 3.), _row('A2', 4., 'assistant')]
             engine.ingest(initial)
             live = _capture(ctx, [*initial[:3], _row('I', 3.5), initial[3]])
-            fallen_back, calls = [], []
+            fallen_back, calls, fault_attempt = [], [], []
             present = hasattr(engine, '_store_merged_user_aliases')
             audit = audit_fault(engine, 'persistent', present)
             if present and not audit.stubbed:
@@ -291,11 +293,17 @@ def test_round2_fallback_has_own_evidence_retry(tmp_path, monkeypatch, versions,
             original = engine._identity_anchor_prematch
 
             def prematch(*args, **kwargs):
-                if (name == 'main' or not hasattr(engine, '_store_merged_user_aliases') or fallen_back) and not calls:
-                    evidence.called += 1
-                    if not evidence.stubbed:
-                        calls.append(1)
-                        evidence.raised += 1
+                if name == 'main' or not hasattr(engine, '_store_merged_user_aliases') or fallen_back:
+                    attempt = engine.__dict__.get('_ingest_attempt_index')
+                    if attempt is None:
+                        pytest.fail("setup: _ingest_attempt_index missing")
+                    if not fault_attempt:
+                        fault_attempt.append(attempt)
+                    if attempt == fault_attempt[0] and not evidence.stubbed:
+                        if not calls:
+                            calls.append(1)
+                            evidence.called += 1
+                            evidence.raised += 1  # Counts faulted cases, not raises.
                         raise RuntimeError('one-shot fallback pre-match failure')
                 return original(*args, **kwargs)
 

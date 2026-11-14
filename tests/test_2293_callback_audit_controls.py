@@ -6,6 +6,26 @@ from pathlib import Path
 import pytest
 
 
+def test_symlinked_in_repository_test_is_audited(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from tests.conftest import _message_store_callbacks
+    from tests import message_store_callback_audit as audit
+
+    linked_tests = tmp_path / 'linked-tests'
+    linked_tests.symlink_to(Path(__file__).resolve().parent, target_is_directory=True)
+    request = SimpleNamespace(node=SimpleNamespace(path=linked_tests / Path(__file__).name))
+    installed = []
+    monkeypatch.setenv('LCM_D1_AUDIT', 'scoped')
+    monkeypatch.setattr(audit, 'install', lambda _patch: installed.append(True) or (lambda: None))
+    fixture = _message_store_callbacks.__wrapped__(monkeypatch, request)
+    next(fixture)
+    try:
+        assert installed == [True], 'symlinked in-repository test skipped D1 audit'
+    finally:
+        with pytest.raises(StopIteration):
+            next(fixture)
+
+
 @pytest.mark.parametrize('trace', [False, True])
 @pytest.mark.parametrize('threaded', [False, True])
 @pytest.mark.parametrize('profiled', [False, True])
