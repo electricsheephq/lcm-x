@@ -5500,7 +5500,19 @@ class LCMEngine(
         self._register_active_engine_binding()
         return True
 
-    def _retained_successor(self):
+    def _run_retained_preflight(self, operation):
+        preflight = None
+
+        def adopted(engine):
+            nonlocal preflight
+            preflight = engine._retained_binding_is_current() and operation(engine)
+
+        successor = self._retained_successor(on_adopt=adopted)
+        if preflight is not None or successor is None:
+            return preflight
+        return successor._use_retained_binding(operation, timeout=None).value
+
+    def _retained_successor(self, *, on_adopt=None):
         """Resolve the current registration's clone for this retired foreground."""
         owner = self._unload_group
         if owner is None or owner.current_prototype is None or not self._stable_use_closed:
@@ -5550,6 +5562,8 @@ class LCMEngine(
                         child_id, metadata = boundary
                         metadata = {key: value for key, value in metadata.items() if key != "hermes_home"}
                         clone._start_bound_session(child_id, metadata)
+                    if on_adopt is not None:
+                        on_adopt(clone)
                     return True
 
                 result = use_lcm_engine(successor, adopt)

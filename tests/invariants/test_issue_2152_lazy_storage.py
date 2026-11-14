@@ -375,6 +375,7 @@ def test_unload_drains_retained_binding_adoption(preflight, monkeypatch):
     retained.on_session_start("retained", platform="cli")
     history = [{"role": "user", "content": "stored turn"}]
     retained.ingest(history)
+    history.append({"role": "assistant", "content": "new row handed to preflight"})
     old_ctx.unload_callbacks[0]()
     current, ctx = preflight.register(supports_unload=True, manager=old_ctx._manager)
     db = preflight.home / "lcm.db"
@@ -400,6 +401,7 @@ def test_unload_drains_retained_binding_adoption(preflight, monkeypatch):
             release.set()
         assert preflight_call.result(timeout=5) is False
         unload.result(timeout=5)
+    assert _durable_messages(db, "retained") == [(row["role"], row["content"]) for row in history]
     db.unlink()
     retained.should_compress_preflight(history)
     assert not db.exists()

@@ -85,7 +85,7 @@ def _counted_compaction(*, return_messages: bool):
     def decorate(operation):
         @wraps(operation)
         def counted(self, messages, *args, **kwargs):
-            if self._plugin_is_unloading() and (successor := self._retained_successor()) is not None:
+            if self._plugin_is_unloading():
                 def invoke(engine):
                     result = getattr(engine, operation.__name__)(messages, *args, **kwargs)
                     self._last_compression_status = engine.last_compression_status
@@ -93,9 +93,21 @@ def _counted_compaction(*, return_messages: bool):
                     self.compression_count = engine.compression_count
                     return result
 
-                result = successor._use_retained_binding(invoke)
-                if result.used and result.value is not None:
-                    return result.value
+                if return_messages:
+                    successor = self._retained_successor()
+                    result = successor._use_retained_binding(invoke).value if successor is not None else None
+                    return messages if result is None else result
+
+                def preflight(engine):
+                    # A stable-use lease covers this operation, including when
+                    # it was acquired for adoption before the gate closed.
+                    with engine._fresh_tail_pressure_yield_invocation():
+                        result = engine._should_compress_preflight_impl(messages)
+                    self._last_compression_status = engine.last_compression_status
+                    self._last_compression_noop_reason = engine.last_compression_noop_reason
+                    return result
+
+                return bool(self._run_retained_preflight(preflight))
             with self._compaction_gate:
                 if self._compaction_closing or self._plugin_is_unloading():
                     return messages if return_messages else False
