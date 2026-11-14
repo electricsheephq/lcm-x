@@ -1128,7 +1128,51 @@ class ReconcileMixin:
                                     and any(row["content"] == msg.get("content") for row in rows))
 
                     legacy_spillover = durable_content is None and legacy_keep()
-                    if not legacy_spillover:
+
+                    def legacy_recovered_keep():
+                        # #2703: some v0.29.2 temp markers were stored as their
+                        # recovered output. Only an exact durable identity proves
+                        # this alias; a failed read keeps today's tagged identity.
+                        try:
+                            if _has_lossy_sensitive_redaction(recovered_identity_content):
+                                return False
+                            bound_store = self._store if store is None else store
+                            generation = bound_store.write_generation()
+                            if (getattr(self, "_legacy_recovered_source_store", None) is not bound_store
+                                    or getattr(self, "_legacy_recovered_source_generation", None) != generation):
+                                self._legacy_recovered_source_store = bound_store
+                                self._legacy_recovered_source_generation = generation
+                                self._legacy_recovered_source_identities = {}
+                            known = self._legacy_recovered_source_identities
+                            key = (
+                                str(msg.get("session_id") or (self._session_id if session_id is None else session_id) or ""),
+                                str((self._conversation_id if conversation_id is None else conversation_id) or ""),
+                                str(msg.get("tool_call_id") or ""),
+                                str(msg.get("tool_name") or msg.get("name") or ""),
+                            )
+                            target = {} if store is None else dict(
+                                store=store, hermes_home=hermes_home,
+                                session_id=session_id, conversation_id=conversation_id,
+                            )
+                            if key not in known:
+                                identities = []
+                                for row in legacy_tool_rows():
+                                    identity = self._message_replay_identity(row, stored_row=True, **target)
+                                    if (not _has_lossy_sensitive_redaction(row.get("content") or "")
+                                            and not _has_lossy_sensitive_redaction(identity[1])):
+                                        identities.append(identity)
+                                known[key] = tuple(identities)
+                                if len(known) > _HOST_REWRITE_OVERRIDE_CACHE_CAP:  # FIFO-bounded
+                                    del known[next(iter(known))]
+                            recovered_identity = self._message_replay_identity(
+                                {**msg, "content": recovered_identity_content}, **target)
+                            return recovered_identity in known[key]
+                        except Exception:
+                            return False
+
+                    if not legacy_spillover and legacy_recovered_keep():
+                        content = recovered_identity_content
+                    elif not legacy_spillover:
                         content = _add_inline_persisted_output_generation_metadata(
                             _add_inline_persisted_output_identity_metadata(
                                 content,
