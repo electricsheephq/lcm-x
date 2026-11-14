@@ -52,7 +52,7 @@ CONFIG_ROWS = (
     ('sensitive_patterns_enabled', 'LCM_SENSITIVE_PATTERNS_ENABLED', 'bool', False),
     ('embedding_privacy_enabled', 'LCM_EMBEDDING_PRIVACY_ENABLED', 'bool', None),
     ('large_output_externalization_enabled', 'LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED', 'bool', True),
-    ('host_row_recovery_enabled', 'LCM_HOST_ROW_RECOVERY_ENABLED', 'bool', True),
+    ('host_row_recovery_enabled', 'LCM_HOST_ROW_RECOVERY_ENABLED', 'bool', False),
     ('large_output_active_replay_stubbing_enabled', 'LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUBBING_ENABLED', 'bool', True),
     ('large_output_transcript_gc_enabled', 'LCM_LARGE_OUTPUT_TRANSCRIPT_GC_ENABLED', 'bool', False),
     ('stub_first_exit_target_ratio', 'LCM_STUB_FIRST_EXIT_TARGET_RATIO', 'float', 0.0),
