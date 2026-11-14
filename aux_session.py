@@ -1165,6 +1165,7 @@ class DelegateChildMixin:
     def _compress_delegate_child_bypassed(self, messages, current_tokens, focus_topic, force):
         session_id = self._bypass_lcm_session_id()
         stored_tail, covered = None, False
+        unload_capable = getattr(self, "_unload_group", None) is not None
         with _DELEGATE_STORE_LOCK:
             # Closing may have begun while this pass waited for the child-store lock.
             if self._compaction_is_closing():
@@ -1198,11 +1199,18 @@ class DelegateChildMixin:
                         self._note_delegate_child_fallback(
                             session_id, "compression boundary not recorded: input not stored")
             except Exception as exc:
+                if unload_capable and not store_outcome.get("linked"):
+                    self._note_delegate_child_fallback(
+                        session_id, f"compaction skipped: child binding unavailable: {exc}",
+                    )
+                    state = self._bypass_compress_state()
+                    state["_last_compression_status"] = "noop"
+                    state["_last_compression_noop_reason"] = "compaction skipped: child binding unavailable"
+                    return messages
                 self._note_delegate_child_fallback(session_id, f"compression boundary not recorded: {exc}")
         result = self._compress_bypassed(messages, current_tokens, focus_topic, force)
         if self._compaction_is_closing():
             return messages
-        unload_capable = getattr(self, "_unload_group", None) is not None
         if unload_capable and (result is messages or not store_outcome.get("linked")):
             return result
         needs_proof = unload_capable

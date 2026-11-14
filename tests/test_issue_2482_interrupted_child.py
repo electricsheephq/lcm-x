@@ -979,7 +979,7 @@ def test_a_store_skipped_on_a_busy_lock_lands_once_the_lock_frees_without_anothe
 
 
 @pytest.mark.parametrize("same_projection", [False, True], ids=["changed-prefix", "identical-prefix"])
-@pytest.mark.parametrize("fault_phase", ["insert", "commit"])
+@pytest.mark.parametrize("fault_phase", ["lineage", "insert", "commit"])
 def test_stale_projection_receipt_cannot_suppress_later_real_user_row(host, monkeypatch, same_projection, fault_phase):
     load, clone, ctx, parent, child, engine = _setup(host, "own_engine", supports_unload=True)
     raw = [
@@ -1006,6 +1006,12 @@ def test_stale_projection_receipt_cannot_suppress_later_real_user_row(host, monk
             return sqlite3.SQLITE_DENY
         return sqlite3.SQLITE_OK
 
+    def reject_lineage(action, table, *_):
+        if action == sqlite3.SQLITE_READ and table == "session_lineage":
+            faults.append(table)
+            return sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK
+
     def compact_then_arm_fault(*_):
         if fault_phase == "commit":
             connection.set_authorizer(reject_commit)
@@ -1019,6 +1025,8 @@ def test_stale_projection_receipt_cannot_suppress_later_real_user_row(host, monk
         """)
         connection.commit()
     monkeypatch.setattr(engine, "_compress_bypassed", compact_then_arm_fault)
+    if fault_phase == "lineage":
+        connection.set_authorizer(reject_lineage)
     try:
         retained = child.compress(engine, previous_view)
         assert retained is previous_view
@@ -1030,6 +1038,8 @@ def test_stale_projection_receipt_cannot_suppress_later_real_user_row(host, monk
             connection.commit()
     if fault_phase == "commit":
         assert faults == ["COMMIT"]
+    elif fault_phase == "lineage":
+        assert faults
     ctx.unload()
 
     # A fresh module sees the retained view and the earlier, still-valid receipt.
