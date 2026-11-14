@@ -72,8 +72,9 @@ def _make_case(tmp_path, monkeypatch, caplog, live_engines, recover=True):
     live_engines.append(r.engine)
     r.engine._config.host_row_recovery_enabled = recover
     if recover:
+        # The #2042 catch-up shares this scheduler; these tests capture #2624 jobs only.
         monkeypatch.setattr(recovery._HOST_ROW_RECOVERY_SCHEDULER, "schedule",
-                            lambda key, job: jobs.append(job) or True)
+                            lambda key, job: key[0].startswith("unended-catchup:") or jobs.append(job) or True)
         monkeypatch.setattr(recovery, "_SEEN", set())
         monkeypatch.setattr(recovery, "_WARNED", set())
     prefix = r.restored()

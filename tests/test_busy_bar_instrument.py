@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import threading
@@ -258,6 +259,7 @@ def test_orchestrator_serial_interleaving(tmp_path: Path, monkeypatch: pytest.Mo
         row = next(row for row in (control(1) if "--busy-timeout-ms" in command else ledger(1))
                    if row["cell"] == cell)
         row["tree_identity"] = driver.BASELINE_IDENTITY if seen[-1] == "baseline" else CANDIDATE_IDENTITY
+        row["host"] = {"steal_pct": len(seen), "host_load_peak1m": 2 * len(seen)}
         output.write_text(json.dumps(row) + "\n")
         return SimpleNamespace(returncode=0)
 
@@ -271,6 +273,7 @@ def test_orchestrator_serial_interleaving(tmp_path: Path, monkeypatch: pytest.Mo
     assert seen == (["baseline", "candidate"] * 4 + ["candidate", "baseline"] * 4) * 2
     assert len(gate.read(out / "baseline.jsonl")) == 8
     assert len(gate.read(out / "candidate.jsonl")) == 8
+    assert json.loads((out / "verdict.json").read_text())["host"] == {"max_steal_pct": 32, "host_load_peak1m": 64}
 
 
 @pytest.mark.parametrize("cell", cells.CELLS)
@@ -288,6 +291,12 @@ def test_current_tree_smoke_totals_only(tmp_path: Path, cell: str) -> None:
     rows = gate.read(output)
     assert len(rows) == 1
     result = rows[0]
+    assert {"elapsed_s", "load1m_before", "load1m_after", "host_load_peak1m",
+            "steal_pct", "iowait_pct", "busy_pct"} <= result["host"].keys()
+    expected_a = {"ingest": ["ingest"] * 3, "compress": ["ingest"] * 13 + ["compress", "ingest"],
+                  "session-end": ["ingest", "session-end", "ingest"], "restart": ["ingest"] * 2}
+    assert [r["op"] for r in result["operations"] if r["engine"] == "A"] == expected_a[cell]
+    assert [r["op"] for r in result["operations"] if r["engine"] == "B"] == ["ingest"] * (2 * cells.A_OPERATIONS[cell])
     assert result["totals"]["A"]["operations"] == cells.A_OPERATIONS[cell]
     assert result["totals"]["B"]["operations"] == 2 * cells.A_OPERATIONS[cell]
     assert result["b_view_sizes"] == [2] * (2 * cells.A_OPERATIONS[cell])
@@ -915,6 +924,104 @@ def busy_control(rows: list[dict]) -> list[dict]:
     return rows
 
 
+@pytest.mark.parametrize("armed_role", range(4))
+@pytest.mark.parametrize("fails", [False, True])
+def test_storage_arms_never_gate(tmp_path, monkeypatch, capsys, armed_role, fails):
+    baseline, candidate = gate_session(), gate_session()
+    if fails:
+        # Baseline >=8 avoids an extension; candidate exceeds ceil(1.25 * 20) + 1.
+        for row in baseline:
+            row["operations"][0]["busy"] = True
+        for row in candidate:
+            for record in row["operations"]:
+                record["busy"] = True
+    roles = [stamp(baseline, driver.BASELINE_IDENTITY), stamp(candidate, CANDIDATE_IDENTITY),
+             stamp(busy_control(baseline), driver.BASELINE_IDENTITY),
+             stamp(busy_control(candidate), CANDIDATE_IDENTITY)]
+    unarmed = gate.evaluate(*roles)
+    assert unarmed["gate_session"]
+    assert unarmed["verdict"] == ("GATE FAIL" if fails else "GATE PASS")
+    assert gate.EXIT[unarmed["verdict"]] == (1 if fails else 0)
+    roles[armed_role][-1]["storage_arms"] = {"record_holds": True, "background_writers": "all"}
+    result = gate.evaluate(*roles)
+    assert result["verdict"] == ("SMOKE FAIL" if fails else "SMOKE PASS")
+    assert not result["gate_session"]
+    assert any('"background_writers": "all"' in reason and '"record_holds": true' in reason
+               for reason in result["reasons"])
+    paths = [tmp_path / f"role-{role}.jsonl" for role in range(4)]
+    for path, rows in zip(paths, roles):
+        path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    monkeypatch.setattr(sys, "argv", ["gate", str(paths[0]), str(paths[1]),
+                                     "--control-baseline", str(paths[2]), "--control-candidate", str(paths[3])])
+    with pytest.raises(SystemExit) as exc:
+        gate.main()
+    assert exc.value.code == 3
+    output = capsys.readouterr().out
+    assert result["verdict"] in output and "GATE PASS" not in output and "GATE FAIL" not in output
+
+
+@pytest.mark.parametrize("fails", [False, True])
+@pytest.mark.parametrize("mixed", [False, True])
+def test_storage_arms_reasons_per_ledger(tmp_path, monkeypatch, capsys, fails, mixed):
+    baseline, candidate = gate_session(), gate_session()
+    if fails:
+        for row in baseline:
+            row["operations"][0]["busy"] = True
+        for row in candidate:
+            for record in row["operations"]:
+                record["busy"] = True
+    roles = [stamp(baseline, driver.BASELINE_IDENTITY), stamp(candidate, CANDIDATE_IDENTITY),
+             stamp(busy_control(baseline), driver.BASELINE_IDENTITY),
+             stamp(busy_control(candidate), CANDIDATE_IDENTITY)]
+    paths = [tmp_path / f"role-{role}.jsonl" for role in range(4)]
+
+    def cli():
+        for path, rows in zip(paths, roles):
+            path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+        monkeypatch.setattr(sys, "argv", ["gate", str(paths[0]), str(paths[1]),
+                                         "--control-baseline", str(paths[2]), "--control-candidate", str(paths[3])])
+        with pytest.raises(SystemExit) as exc:
+            gate.main()
+        return capsys.readouterr().out, exc.value.code
+
+    unarmed, status = cli()
+    assert status == (1 if fails else 0)
+    # Byte-for-byte round-2 CLI report fingerprints, including tables and verdict.
+    expected = ("07fb3b928b9e531631bbd81d0bf26fdef6df32a8aec27e70305131976295f934" if fails else
+                "57dc0a9f7e42060adf275e03f597e4ae85b6c7474d277fb193b916ede523d375")
+    assert hashlib.sha256(unarmed.encode()).hexdigest() == expected
+    for rows in roles:
+        for i, row in enumerate(rows):
+            row["storage_arms"] = {"wal_autocheckpoint": 0, "checkpointer": "passive:10",
+                "background_writers": "stem" if mixed and i % 2 else "all", "stem_backlog": 1001,
+                "record_holds": True,
+                "configured_connections": [{"wal_autocheckpoint": 0, "synchronous": 2}] * (i % 3 + 1),
+                "schedule_start": 123456.125 + i, "schedule_end": 123456.625 + i}
+    output, status = cli()
+    (tmp_path / "verdict.txt").write_text(output)
+    assert status == 3
+    assert ("SMOKE FAIL" if fails else "SMOKE PASS") in output
+    assert "GATE PASS" not in output and "GATE FAIL" not in output
+    reasons = [line for line in output.splitlines() if "storage_arms=" in line]
+    assert len(reasons) == 4
+    for name in ("baseline", "candidate", "control baseline", "control candidate"):
+        reason, = [line for line in reasons if line.startswith(name + ":")]
+        assert '"background_writers": "all"' in reason and '"record_holds": true' in reason
+        assert ("distinct arm sets" in reason) == mixed
+        if mixed:
+            assert '"background_writers": "stem"' in reason
+    assert "schedule_start" not in output and "schedule_end" not in output
+    assert "123456." not in output and "configured_connections" not in output
+
+
+@pytest.mark.parametrize("value", [None, {}, {"checkpointer": "passive:10"}, {"wal_autocheckpoint": 0}])
+def test_storage_arms_presence_is_diagnostic(value):
+    rows = gate_session()
+    rows[-1]["storage_arms"] = value
+    result = evaluate(rows, rows, busy_control(rows), busy_control(rows))
+    assert result["verdict"] == "SMOKE PASS" and not result["gate_session"]
+
+
 @pytest.mark.parametrize("removed", [("B", "ingest"), ("A", "compress"), ("A", "session-end")])
 def test_equally_incomplete_workloads_never_pass(removed: tuple) -> None:
     full = gate_session()
@@ -980,3 +1087,66 @@ def test_tree_identity_hashes_product_python_only(tmp_path: Path) -> None:
     assert driver.tree_identity(tree) == first
     (tree / "teams/store.py").write_text("B = 2\n")
     assert driver.tree_identity(tree)["product_sha256"] != first["product_sha256"]
+
+
+@pytest.mark.parametrize("busy", [0, 3])
+def test_host_fields_leave_gate_bytes_identical(busy):
+    roles = [gate_session(), gate_session(), busy_control(gate_session()), busy_control(gate_session())]
+    for row in roles[1]:
+        for record in row["operations"][:busy]:
+            record["busy"] = True
+    before = evaluate(*roles)
+    for rows in roles:
+        for row in rows:
+            row["host"] = {"steal_pct": 99, "iowait_pct": 99, "busy_pct": 99,
+                           "host_load_peak1m": 1000, "elapsed_s": 999}
+    after = evaluate(*roles)
+    assert json.dumps(before) == json.dumps(after)
+    assert gate.report(before).encode() == gate.report(after).encode()
+    assert gate.EXIT[before["verdict"]] == gate.EXIT[after["verdict"]]
+
+
+def test_run_host_snapshots_surround_all_operations(tmp_path, monkeypatch):
+    events = []
+    def snapshot():
+        events.append("snapshot")
+        return {"monotonic": len(events), "loadavg": None, "counters": None, "reason": "fixture"}
+    class Engine:
+        def __init__(self, **kwargs):
+            self._store = SimpleNamespace(_conn=sqlite3.connect(":memory:"))
+        def ingest(self, view):
+            events.append("ingest")
+        def shutdown(self):
+            self._store._conn.close()
+    monkeypatch.setattr(driver.hoststat, "snapshot", snapshot)
+    monkeypatch.setattr(cells, "start", lambda *a: None)
+    result = driver.run("ingest", tmp_path / "run", SimpleNamespace(LCMConfig=lambda **k: None),
+                        SimpleNamespace(LCMEngine=Engine), driver.Capture(), k=1, b_view_rows=2, window_ms=0)
+    assert events == ["snapshot"] + ["ingest"] * 6 + ["snapshot"]
+    assert result["host"]["elapsed_s"] == 7
+
+
+def test_holds_summary_reports_host_maxima(tmp_path, monkeypatch):
+    def child(command, **kwargs):
+        Path(command[5]).write_text(json.dumps({"host": {"steal_pct": 7, "host_load_peak1m": 9}}))
+    monkeypatch.setattr(holds.subprocess, "run", child)
+    monkeypatch.setattr(holds, "summarize", lambda *a: {"verdict": "INCONCLUSIVE"})
+    monkeypatch.setattr(holds, "report", lambda *a: "fixture\n")
+    output = tmp_path / "holds"
+    monkeypatch.setattr(sys, "argv", ["holds", "baseline", "candidate", str(output), "--runs", "1",
+                                     "--work-root", str(tmp_path / "scratch")])
+    with pytest.raises(SystemExit) as exc:
+        holds.main()
+    assert exc.value.code == 2
+    assert json.loads((output / "summary.json").read_text())["host"] == {"max_steal_pct": 7, "host_load_peak1m": 9}
+
+
+def test_hold_fixture_verdict_ignores_host():
+    collected = {"baseline": hold_runs(), "candidate": hold_runs()}
+    before = summarize(collected)
+    for runs in collected.values():
+        for run in runs:
+            run["host"] = {"steal_pct": 100, "host_load_peak1m": 1000}
+    after = summarize(collected)
+    assert json.dumps(before) == json.dumps(after)
+    assert holds.report(before).encode() == holds.report(after).encode()
