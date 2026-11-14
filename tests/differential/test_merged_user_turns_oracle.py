@@ -3,7 +3,8 @@ import pytest
 from types import SimpleNamespace
 
 from .paired import normalise_rows
-from .session import FaultRun, Trace, assert_faults, audit_fault, duplicate_rows, fault_counts, freeze, missing_messages
+from .session import (FaultRun, Trace, assert_faults, audit_fault, duplicate_rows, fault_counts, freeze,
+                      label_missing, missing_messages)
 
 
 def stored(text, bindings=(), **fields):
@@ -102,6 +103,23 @@ def test_only_user_history_suppresses_user_message(role, expected):
     trace = Trace()
     trace.observe([dict(host('R', 10), role=role)], user_message='R')
     assert len(trace.views[0]['rows']) == expected
+
+
+@pytest.mark.parametrize('shortened_before', [True, False])
+def test_1525_requires_shortening_before_first_ingest_showing(shortened_before):
+    trace = Trace()
+    filler = dict(host('reply', 1), role='assistant')
+    lists = [[filler, filler], [filler], [filler, host('lost', 10)]] if shortened_before else [
+        [filler, host('lost', 10)], [filler], [filler, filler]]
+    for rows in lists:
+        trace.observe(rows, ingest=True)
+    violation = dict(stage=3, kind='missing', value='lost', view=2 if shortened_before else 0, count=1)
+    assert missing_messages(trace.views, []) == {(violation['view'], 'lost'): 1}
+    if shortened_before:
+        assert label_missing('synthetic', trace.views, violation) == '#1525'
+    else:
+        with pytest.raises(AssertionError, match='unlabelled violation'):
+            label_missing('synthetic', trace.views, violation)
 
 
 def fault_trace(present=True, called=0, raised=0, stubbed=False):

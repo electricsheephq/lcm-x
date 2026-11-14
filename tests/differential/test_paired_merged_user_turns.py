@@ -17,7 +17,7 @@ if os.environ.get("LCM_DIFFERENTIAL") != "1":
 from tests.differential import merged_user_turn_controls as base
 from tests.differential import paired
 from tests.differential.paired import versions  # noqa: F401
-from tests.differential.session import FaultRun, Trace, assert_faults, audit_fault, fault_counts, freeze
+from tests.differential.session import FaultRun, Trace, assert_faults, audit_fault, fault_counts, freeze, label_missing
 from tests.phase0_hygiene import product_env_keys
 
 
@@ -308,15 +308,7 @@ def _label_violations(case, trace, stubbed):
         stage, kind, value, count = (violation[k] for k in ('stage', 'kind', 'value', 'count'))
         views = trace.ingests[stage - 1]['views']
         if kind == 'missing':
-            ingest_shown = any(row['role'] == 'user' and row['content'] == value
-                               for view in views if view['kind'] == 'ingest' for row in view['rows'])
-            if not ingest_shown:
-                capture = views[violation['view']]['capture']
-                assert capture in ('proven', 'watched'), (case, violation, views)
-                label = '#2707 ' + capture
-            else:
-                assert _shortened_after_text(views, value), (case, violation, views)
-                label = '#1525'
+            label = label_missing(case, views, violation)
         else:
             remaining = clean.get((stage, kind, value), 0)
             if remaining:
@@ -343,14 +335,6 @@ def _label_violations(case, trace, stubbed):
                 label = '#1815 fall-open, ' + faults[-1] + ' fault'
         entries.append((stage, kind, value, violation.get('view'), count, label))
     return entries
-
-
-def _shortened_after_text(views, text):
-    ingests = [view['rows'] for view in views if view['kind'] == 'ingest']
-    first = next((index for index, rows in enumerate(ingests)
-                  if any(row['role'] == 'user' and row['content'] == text for row in rows)), None)
-    return first is not None and any(len(ingests[index]) < len(ingests[index - 1])
-                                      for index in range(first + 1, len(ingests)))
 
 
 @pytest.fixture(scope='module')

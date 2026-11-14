@@ -89,6 +89,21 @@ def missing_messages(views, rows):
     return missing
 
 
+def label_missing(case, views, violation):
+    """#1525's stale cursor predates the lost text's first ingest showing."""
+    text = violation['value']
+    ingests = [view['rows'] for view in views if view['kind'] == 'ingest']
+    first = next((index for index, rows in enumerate(ingests)
+                  if any(row['role'] == 'user' and row['content'] == text for row in rows)), None)
+    if first is None:
+        capture = views[violation['view']]['capture']
+        assert capture in ('proven', 'watched'), (case, violation, views)
+        return '#2707 ' + capture
+    assert any(len(ingests[index]) < len(ingests[index - 1])
+               for index in range(1, first)), (case, 'unlabelled violation', violation, views)
+    return '#1525'
+
+
 @dataclass
 class FaultAudit:
     kind: str
