@@ -80,15 +80,21 @@ finally:
 '''
 
 
-def upgrade(path, identity):
+def upgrade(path, identity, *, legacy_writer=True):
     with sqlite3.connect(path) as conn:
         before = list(conn.execute("SELECT * FROM messages ORDER BY store_id"))
         ensure_chunk_tables(conn)
         triggers = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='trigger'")}
         assert {"lcm_chunk_gapfill_delete", "lcm_chunk_gapfill_update", "lcm_chunk_gapfill_message"} <= triggers
-        assert not conn.execute("SELECT 1 FROM metadata WHERE key IN (?,?)",
-                                (f"chunk_gapfill_scan:{identity}", f"chunk_policy_revision_through:{identity}")).fetchall()
-        conn.execute("INSERT INTO metadata VALUES(?, 'current')", (f"chunk_gapfill_scan:{identity}",))
+        proofs = dict(conn.execute("SELECT key,value FROM metadata WHERE key IN (?,?)",
+                                   (f"chunk_gapfill_scan:{identity}", f"chunk_policy_revision_through:{identity}")))
+        # v0.29.0 already observes mutations: reopening must retain its proofs.
+        # Only a pre-walk schema needs one-time invalidation on upgrade.
+        assert proofs == ({} if legacy_writer else {
+            f"chunk_gapfill_scan:{identity}": "legacy",
+            f"chunk_policy_revision_through:{identity}": "40",
+        })
+        conn.execute("INSERT OR REPLACE INTO metadata VALUES(?, 'current')", (f"chunk_gapfill_scan:{identity}",))
         conn.commit()
         ensure_chunk_tables(conn)
         assert conn.execute("SELECT value FROM metadata WHERE key=?",
@@ -102,12 +108,13 @@ def test_gapwalk_forward(tmp_path, old_tree, host_root):
     upgrade(tmp_path / "lcm.db", report["identity"])
 
 
-@pytest.mark.parametrize("reader", ["gapwalk-base", "v0.28.0", PREVIOUS_GA])
+@pytest.mark.parametrize("reader", ["gapwalk-base", "v0.28.0", "v0.28.1", PREVIOUS_GA])
 @pytest.mark.parametrize("trigger", ["normal", "abort", "noop"])
 def test_gapwalk_rollback(tmp_path, old_tree, host_root, reader, trigger):
     old = old_tree(reader, {**READERS, "gapwalk-base": BASE})
     original = run_old(old, tmp_path, host_root, OLD_CHUNKS, mode="write")
-    upgrade(tmp_path / "lcm.db", original["identity"])
+    upgrade(tmp_path / "lcm.db", original["identity"],
+            legacy_writer=reader in {"gapwalk-base", "v0.28.0", "v0.28.1"})
     if trigger != "normal":
         with sqlite3.connect(tmp_path / "lcm.db") as conn:
             conn.execute("DROP TRIGGER lcm_chunk_gapfill_message")

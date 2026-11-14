@@ -13,7 +13,7 @@ from tests.compat.helpers import CASES, GOLDEN, READERS, emit_case, open_engine,
 # The pinned readers start at v0.25.0-rc1. The operator guide's v0.24.5
 # plugin-only rollback floor is not exercised here (follow-up on #1271).
 SHORT_READER_FLOOR = "v0.27.0"
-READER_ORDER = ("v0.25.0-rc1", "v0.25.1", "v0.26.2", "v0.27.0", "v0.28.0", "v0.28.1")
+READER_ORDER = ("v0.25.0-rc1", "v0.25.1", "v0.26.2", "v0.27.0", "v0.28.0", "v0.28.1", "v0.29.0")
 EXPECTED = {
     "mark_only": "supported",
     "head_mark": "documented_short_boundary",

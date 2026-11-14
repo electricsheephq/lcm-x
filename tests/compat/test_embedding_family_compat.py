@@ -201,7 +201,9 @@ print(json.dumps(True))
 
 @pytest.mark.parametrize("binary", (False, True), ids=("empty-binary", "populated-binary"))
 def test_embedding_rollback_prefix_revision(binary, tmp_path, old_tree, host_root):
-    test_embedding_rollback(PREVIOUS_GA, binary, tmp_path, old_tree, host_root,
+    # #1942's pre-prefix reader must remain blind to the new task namespace.
+    # Current-GA prefix safety is exercised by test_prefix_rollback_1942.
+    test_embedding_rollback("v0.28.1", binary, tmp_path, old_tree, host_root,
                             prefix_revision="+prefix:0123456789ab")
 
 

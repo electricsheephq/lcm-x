@@ -1,4 +1,4 @@
-"""Real previous-GA rollback: no unprefixed read/write of a prefixed corpus."""
+"""Legacy and current-GA rollback: no unprefixed read/write of a prefixed corpus."""
 
 from pathlib import Path
 
@@ -7,6 +7,8 @@ import pytest
 from tests.compat.helpers import PREVIOUS_GA, run_old
 
 BASE = "849da257b52fc9833955928816dd1585184988b1"
+# #1942's regression specifically needs the reader that predates prefix isolation.
+LEGACY_READER = "v0.28.1"
 QUERY = "query: "
 DOCUMENT = "document: "
 
@@ -68,8 +70,11 @@ else:
         excluded_session_ids=set(), deadline=__import__('time').monotonic() + 5)
     provider = ep.resolve_provider(config)
     query = provider.embed_query('find summary')
-    resolution['knn'] = store.knn(query, model='prefix-test', provider='ollama').coverage
-    resolution['knn-chunks'] = store.knn_chunks(query, model='prefix-test', provider='ollama').coverage
+    # Prefix-aware retrieval passes the provider's identity suffix (retrieval_core).
+    # The v0.28.1 API predates this argument and must keep its original probe.
+    knn_options = {'revision_suffix': provider.identity_revision_suffix} if data == 'prefix-aware-reader' else {}
+    resolution['knn'] = store.knn(query, model='prefix-test', provider='ollama', **knn_options).coverage
+    resolution['knn-chunks'] = store.knn_chunks(query, model='prefix-test', provider='ollama', **knn_options).coverage
     store.close()
     outcome = maintenance.run_incremental_embedding_pass(db, config)
 with sqlite3.connect(db) as conn:
@@ -84,17 +89,18 @@ print(json.dumps(dict(calls=calls, profiles=profiles, vectors=vectors, meta=meta
 '''
 
 
-def cycle(tree, old, directory, host_root, prefix):
+def cycle(tree, old, directory, host_root, prefix, *, prefix_aware_reader=False):
     directory.mkdir()
     initial = run_old(tree, directory, host_root, SCENARIO, 'initial', prefix)
-    rollback = run_old(old, directory, host_root, SCENARIO, 'rollback', '')
+    rollback = run_old(old, directory, host_root, SCENARIO, 'rollback',
+                       'prefix-aware-reader' if prefix_aware_reader else '')
     upgraded = run_old(tree, directory, host_root, SCENARIO, 'upgrade', prefix)
     return initial, rollback, upgraded
 
 
-def test_prefixed_identity_survives_previous_ga_rollback(tmp_path, old_tree, host_root):
+def test_prefixed_identity_survives_legacy_ga_rollback(tmp_path, old_tree, host_root):
     tree = Path(__file__).resolve().parents[2]
-    first, old, final = cycle(tree, old_tree(PREVIOUS_GA), tmp_path / 'prefix', host_root, 'prefix')
+    first, old, final = cycle(tree, old_tree(LEGACY_READER), tmp_path / 'prefix', host_root, 'prefix')
     prefixed = {row['identity_hash'] for row in first['profiles']}
     assert first['calls'] == [QUERY + 'warmup', DOCUMENT + 'first summary']
     # Check all old resolvers before maintenance, including provider-less and reporting paths.
@@ -110,6 +116,29 @@ def test_prefixed_identity_survives_previous_ga_rollback(tmp_path, old_tree, hos
     assert len(final['vectors']) == 2
     assert all(row['identity_hash'] in prefixed and row['vec'] == '0000803F00000000'
                for row in final['vectors']), 'every prefixed vector must encode prefixed text'
+
+
+def test_prefixed_identity_survives_previous_ga_rollback(tmp_path, old_tree, host_root):
+    tree = Path(__file__).resolve().parents[2]
+    first, old, final = cycle(tree, old_tree(PREVIOUS_GA), tmp_path / 'prefix', host_root, 'prefix',
+                             prefix_aware_reader=True)
+    # Prefix-aware readers can inspect the profile; the unprefixed query and
+    # maintenance paths must still refuse to use or contaminate its vectors.
+    assert first['calls'] == [QUERY + 'warmup', DOCUMENT + 'first summary']
+    assert old['calls'] == ['find summary']
+    assert old['resolution']['knn'] == old['resolution']['knn-chunks'] == 'none'
+    assert old['resolution']['usable-report'] is False
+    assert old['vectors'] == first['vectors']
+    assert old['meta'] == first['meta']
+    assert old['summaries'][:len(first['summaries'])] == first['summaries']
+    assert len(old['summaries']) == len(first['summaries']) + 1
+    assert final['summaries'] == old['summaries']
+    assert final['calls'] == [QUERY + 'warmup', DOCUMENT + 'new summary']
+    prefixed = {row['identity_hash'] for row in first['profiles']}
+    assert {row['identity_hash'] for row in final['profiles']} == prefixed
+    assert len(final['vectors']) == 2
+    assert all(row['identity_hash'] in prefixed and row['vec'] == '0000803F00000000'
+               for row in final['vectors'])
 
 
 def test_previous_ga_base_only_control(tmp_path, old_tree, host_root):
@@ -134,7 +163,7 @@ def test_prefix_unset_rows_and_hashes_identical_to_main(tmp_path, old_tree, host
 
 def test_rc1_mixed_profile_is_quarantined_and_reembedded(tmp_path, old_tree, host_root):
     baseline = old_tree('rc1-encoding', {'rc1-encoding': BASE})
-    old = old_tree(PREVIOUS_GA)
+    old = old_tree(LEGACY_READER)
     first = run_old(baseline, tmp_path, host_root, SCENARIO, 'initial', 'prefix')
     mixed = run_old(old, tmp_path, host_root, SCENARIO, 'rollback', '')
     assert mixed['calls'] == ['find summary', 'new summary']
@@ -187,4 +216,4 @@ for task in ('summary', 'chunk'):
 store.close()
 print(json.dumps(True))
 '''
-    assert run_old(old_tree(PREVIOUS_GA), tmp_path, host_root, script, provider)
+    assert run_old(old_tree(LEGACY_READER), tmp_path, host_root, script, provider)
