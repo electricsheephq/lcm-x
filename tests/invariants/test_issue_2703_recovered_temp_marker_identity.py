@@ -58,7 +58,10 @@ def _seed_shape(db, home, temp, host, shape):
     storage = home / 'externalized'
     storage.mkdir()
     for payload in (fixtures / f'v0292_{name}_payloads').glob('*.json'):
-        (storage / payload.name).write_text(sub(payload.read_text()))
+        seeded = json.loads(sub(payload.read_text()))
+        # Row 3 is rewritten to the host call below; its payload must agree.
+        seeded['tool_call_id'] = host[2]['tool_call_id']
+        (storage / payload.name).write_text(json.dumps(seeded))
     with sqlite3.connect(db) as conn:
         stored_marker = conn.execute('SELECT content FROM messages WHERE store_id=3').fetchone()[0]
         for i, row in enumerate(host, 1):
@@ -113,6 +116,7 @@ def replay_setup(tmp_path, monkeypatch):
             fresh_tail_count=8, fresh_tail_max_tokens=0, fresh_tail_pressure_yield_enabled=False,
             leaf_chunk_tokens=400, dynamic_leaf_chunk_max=400, context_threshold=0.001,
             threshold_full_sweep_enabled=False, temporal_rollups_enabled=False,
+            embeddings_enabled=False,  # Replay/count probes own every store write.
         ), hermes_home=str(home))
         engines.append(engine)
         for _ in range(2):
@@ -194,7 +198,7 @@ def test_recovered_temp_marker_stored_once(shape, variant, nofile, replay_setup)
 
 
 def test_payload_load_fault_keeps_main_counts(replay_setup, monkeypatch):
-    setup = replay_setup('temp_plain_lf', 'V1')
+    setup = _keep_setup(replay_setup)
     engine = setup[0]
     original = reconcile_module.load_externalized_payload
     faults = []
@@ -216,20 +220,28 @@ def test_payload_load_fault_keeps_main_counts(replay_setup, monkeypatch):
 
 
 def test_candidate_payload_loaded_once_per_pass(replay_setup, monkeypatch):
-    engine, host, storage, marker, body = replay_setup('temp_plain_lf', 'V1')
+    engine, host, storage, marker, body = _keep_setup(replay_setup)
     original = reconcile_module.load_externalized_payload
     loads = Counter()
 
     def counted(ref, **kwargs):
-        loads[ref] += 1
+        loads[(engine._store.write_generation(), ref)] += 1
         return original(ref, **kwargs)
 
+    # Background embeddings are disabled in this fixture. Reproduce a foreign
+    # commit halfway through the reads instead of relying on worker timing.
+    assert engine.drain_embedding_maintenance(timeout=10)
     monkeypatch.setattr(reconcile_module, 'load_externalized_payload', counted)
-    for _ in range(40):
+    for read in range(40):
+        if read == 20:
+            with sqlite3.connect(engine._config.database_path) as writer:
+                writer.execute("INSERT INTO metadata(key,value) VALUES ('issue2703_count_probe','1')")
         identity = engine._message_replay_identity(host[2])
         assert identity[1] == body
-    assert list(loads.values()) == [1], loads
-    print(f'CANDIDATE_PAYLOAD_LOADS {dict(loads)} over 40 identity reads')
+    assert loads and max(loads.values()) == 1, loads
+    assert len({generation for generation, _ in loads}) == 2, loads
+    assert len({ref for _, ref in loads}) == 1, loads
+    print(f'CANDIDATE_PAYLOAD_LOADS {dict(loads)} over 40 identity reads; one foreign commit')
 
     # A full replay makes writes between passes. Within each store generation,
     # the new check must read each candidate payload at most once, however often
@@ -297,7 +309,7 @@ def test_distinct_recovered_body_with_literal_reference(replay_setup):
 
 
 def test_stored_body_with_literal_reference(replay_setup):
-    setup = replay_setup('temp_plain_lf', 'V1')
+    setup = _keep_setup(replay_setup)
     engine, _, _, _, body = setup
     stored = engine._store.get_session_messages(SESSION, limit=100_000)[2]
     ref = EXT.fullmatch(stored['content'])[1]
@@ -360,3 +372,164 @@ def test_distinct_recovered_body_with_literal_reference_load_fault(replay_setup,
           f'inspected_host_frames={len(inspected_roles)}')
     assert [count for count, _, _ in records] == [9, 11, 13, 15, 18, 21, 23, 25], records
     assert not faults, 'the post-keep literal-reference load must be unreachable'
+
+
+def _keep_setup(replay_setup):
+    engine, host, storage, _, body = replay_setup('temp_plain_lf', 'V1')
+    # A different live path has no persisted-marker provenance in the payload.
+    # This reaches the keep even now that the seeded row/payload call ids agree.
+    path = Path(tempfile.tempdir) / 'hermes-results/call_alias.txt'
+    path.write_text(body)
+    marker = _marker(path, body, preview=body[:30])
+    host[2]['content'] = marker
+    return engine, host, storage, marker, body
+
+
+def _rewrite_candidate(setup, *, content=None, payload_changes=None, missing_provenance=False,
+                       append_pruned=False):
+    engine, _, storage, _, _ = setup
+    stored = engine._store.get_session_messages(SESSION, limit=100_000)[2]
+    ref = EXT.fullmatch(stored['content'])[1]
+    if payload_changes is not None or missing_provenance:
+        path = storage / ref
+        payload = json.loads(path.read_text())
+        payload.update(payload_changes or {})
+        if missing_provenance:
+            for field in ('tool_call_id', 'session_id', 'tool_name'):
+                payload.pop(field, None)
+        path.write_text(json.dumps(payload))
+    if content is not None or append_pruned:
+        with sqlite3.connect(engine._config.database_path) as conn:
+            if content is not None:
+                conn.execute('UPDATE messages SET content=? WHERE store_id=?',
+                             (content, stored['store_id']))
+            if append_pruned:
+                conn.execute("""INSERT INTO messages
+                    (role,content,tool_call_id,tool_name,timestamp,observed_at,
+                     session_id,conversation_id,source,observed_at_source)
+                    VALUES ('tool',?,'c1','dump',1762700006,1762700006,?,?,'cli','host_message_timestamp')""",
+                    (reconcile_module._HERMES_PRUNED_TOOL_PLACEHOLDER, SESSION, CONVERSATION))
+            for table in ('messages_fts', 'messages_fts_stem'):
+                conn.execute(f"INSERT INTO {table}({table}) VALUES('rebuild')")
+    return ref
+
+
+def test_pruned_stored_alias_cannot_admit_recovered_body(replay_setup):
+    setup = _keep_setup(replay_setup)
+    stored = setup[0]._store.get_session_messages(SESSION, limit=100_000)[2]
+    ref = EXT.fullmatch(stored['content'])[1]
+    content = 'DISTINCT_EARLIER_C ' * 20 + f'[Externalized tool output: tool=dump; ref={ref}]'
+    assert len(content) > 200
+    _rewrite_candidate(setup, content=content, append_pruned=True)
+    records = _replay_literal_reference(setup)
+    print(f'A1_PRUNED_ALIAS records={records}')
+    assert [count for count, _, _ in records] == MAIN_A1_COUNTS, records
+
+
+@pytest.mark.parametrize('provenance', ['another-call', 'absent'])
+def test_whole_placeholder_requires_payload_provenance(replay_setup, provenance):
+    setup = _keep_setup(replay_setup)
+    _rewrite_candidate(setup, payload_changes={'tool_call_id': 'another-call'},
+                       missing_provenance=provenance == 'absent')
+    records = _replay_literal_reference(setup)
+    print(f'A2_WHOLE_PLACEHOLDER {provenance} records={records}')
+    assert [count for count, _, _ in records] == MAIN_A2_COUNTS, records
+
+
+@pytest.mark.parametrize('field', ['tool_call_id', 'session_id', 'tool_name', 'content'])
+def test_candidate_provenance_and_content_negatives(replay_setup, field):
+    setup = _keep_setup(replay_setup)
+    value = setup[4][:-1] + 'X' if field == 'content' else 'another-' + field
+    _rewrite_candidate(setup, payload_changes={field: value})
+    records = _replay_literal_reference(setup)
+    print(f'PROVENANCE_NEGATIVE {field} records={records}')
+    assert [count for count, _, _ in records] == MAIN_NEGATIVE_COUNTS[field], records
+
+
+@pytest.mark.parametrize('stored_tool', [None, ''], ids=['null-tool', 'empty-tool'])
+def test_unnamed_candidate_requires_host_tool_provenance(replay_setup, stored_tool):
+    setup = _keep_setup(replay_setup)
+    engine, host, _, _, body = setup
+    _rewrite_candidate(setup, payload_changes={'tool_name': 'another-tool'})
+    with sqlite3.connect(engine._config.database_path) as conn:
+        conn.execute('UPDATE messages SET tool_name=? WHERE store_id=3', (stored_tool,))
+    assert host[2]['tool_name'] == 'dump'
+    assert engine._message_replay_identity(host[2])[1] != body
+    records = _replay_literal_reference(setup)
+    print(f'UNNAMED_TOOL_PROVENANCE {stored_tool!r} records={records}')
+    # Main 7828784f, round-5c main-negative.log, with no stored tool name.
+    assert [count for count, _, _ in records] == [9, 11, 13, 15, 17, 20, 22, 24], records
+
+
+def test_unnamed_candidate_requires_equal_content(replay_setup):
+    setup = _keep_setup(replay_setup)
+    engine, host, _, _, body = setup
+    _rewrite_candidate(setup, payload_changes={'content': body[:-1] + 'X'})
+    with sqlite3.connect(engine._config.database_path) as conn:
+        conn.execute('UPDATE messages SET tool_name=NULL WHERE store_id=3')
+    host[2].pop('tool_name')
+    assert not host[2].get('name')
+    assert engine._message_replay_identity(host[2])[1] != body
+    records = _replay_literal_reference(setup)
+    print(f'UNNAMED_CONTENT_MISMATCH records={records}')
+    assert [count for count, _, _ in records] == [9, 11, 13, 15, 17, 20, 22, 24], records
+
+
+# Eight-turn engine replay on main 7828784f, main-2703-r5b-4.log.
+MAIN_A1_COUNTS = [10, 12, 14, 16, 19, 22, 24, 26]
+MAIN_A2_COUNTS = [9, 11, 13, 15, 18, 21, 23, 25]
+MAIN_NEGATIVE_COUNTS = {
+    'tool_call_id': MAIN_A2_COUNTS,
+    'session_id': MAIN_A2_COUNTS,
+    'tool_name': MAIN_A2_COUNTS,
+    'content': [9, 11, 13, 15, 17, 20, 22, 24],
+}
+
+
+@pytest.mark.parametrize('warm', [False, True], ids=['cold-cache', 'warm-cache'])
+def test_rolled_back_candidate_cannot_keep_host_row(replay_setup, monkeypatch, warm):
+    setup = _keep_setup(replay_setup)
+    engine, host, _, _, body = setup
+    stored = engine._store.get_session_messages(SESSION, limit=100_000)[2]
+    _rewrite_candidate(setup, content='DISTINCT_DURABLE_C ' * 20)
+    assert engine.drain_embedding_maintenance(timeout=10)
+    names = ('_legacy_recovered_source_generation', '_legacy_recovered_source_identities',
+             '_legacy_recovered_source_store')
+    if warm:
+        assert engine._message_replay_identity(host[2])[1] != body
+    before = {name: deepcopy(getattr(engine, name)) if name.endswith('_identities')
+              else getattr(engine, name) for name in names if hasattr(engine, name)}
+    inside_generation = []
+
+    def rolled_back(*args, **kwargs):
+        assert engine._store._conn.in_transaction
+        engine._store._conn.execute("""INSERT INTO messages
+            (role,content,tool_call_id,tool_name,timestamp,observed_at,
+             session_id,conversation_id,source,observed_at_source)
+            VALUES ('tool',?,'c1','dump',1762700006,1762700006,?,?,'cli','host_message_timestamp')""",
+            (stored['content'], SESSION, CONVERSATION))
+        assert engine._message_replay_identity(host[2])[1] == body
+        assert engine._legacy_recovered_source_identities
+        inside_generation.append(engine._store.write_generation())
+        raise OSError('injected ingest rollback after candidate cached')
+
+    with monkeypatch.context() as patch:
+        patch.setattr(engine, '_ingest_messages_transaction', rolled_back)
+        failures = engine._ingest_failure_count
+        engine.ingest(deepcopy(host))
+        assert engine._ingest_failure_count == failures + 1
+        assert 'injected ingest rollback' in engine._last_ingest_error
+    # SQLite total_changes includes rolled-back writes: generation alone cannot
+    # invalidate this cache. The engine transaction must restore it explicitly.
+    assert inside_generation == [engine._store.write_generation()]
+    for name in names:
+        if name in before:
+            assert getattr(engine, name) == before[name]
+        else:
+            assert not hasattr(engine, name), name
+    assert engine._store.get_session_messages(SESSION, limit=100_000)[2]['content'] != stored['content']
+    assert len(engine._store.get_session_messages(SESSION, limit=100_000)) == 5
+    assert engine._message_replay_identity(host[2])[1] != body
+    records = _replay_literal_reference(setup)
+    assert [count for count, _, _ in records] == MAIN_NEGATIVE_COUNTS['content'], records
+    print(f'ROLLBACK warm={warm} records={records}')

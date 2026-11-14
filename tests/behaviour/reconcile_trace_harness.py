@@ -65,6 +65,7 @@ OBSERVED_ATTRIBUTES = frozenset({
     "_generated_ignored_active_replay_placeholder_hash_ordinals",
     "_out_of_band_durable_rows", "_pending_ingest_frontier",
     "_foreground_budget", "_ingest_cursor", "_consecutive_ingest_failures",
+    "_legacy_recovered_source_generation", "_legacy_recovered_source_identities", "_legacy_recovered_source_store",
     "_pruned_tool_source_generation", "_pruned_tool_source_identities", "_pruned_tool_source_store",
 })
 Trace = list[str]

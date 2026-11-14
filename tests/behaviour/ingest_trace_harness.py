@@ -78,6 +78,7 @@ OBSERVED_ATTRIBUTES = frozenset({
     "_generated_ignored_active_replay_placeholder_hash_counts", "_generated_ignored_active_replay_placeholder_hash_ordinals",
     "_session_end_flush_active", "_pending_session_tails", "_out_of_band_durable_rows", "_foreground_budget",
     "_consecutive_ingest_failures", "_ingest_failure_count", "_last_ingest_error", "_last_ingest_error_time",
+    "_legacy_recovered_source_generation", "_legacy_recovered_source_identities", "_legacy_recovered_source_store",
     "_pruned_tool_source_generation", "_pruned_tool_source_identities",
     "_pruned_tool_source_store", "_LCM_SUMMARY_PART_HEADER_RE", "context_length",
     "_current_compress_placeholder_identity_counts", "_emitted_carriers_retired", "_emitted_carriers_seen",

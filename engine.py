@@ -7428,6 +7428,7 @@ class LCMEngine(
                     "_identity_anchor_versions", "_identity_anchor_text_memo", "_host_uid_counters",
                     "_host_uid_error_logged", "_retired_durable_proof", "_last_ingest_reconciliation",
                     "_pruned_tool_source_generation", "_pruned_tool_source_identities",
+                    "_legacy_recovered_source_generation", "_legacy_recovered_source_identities",
                     "_compression_boundary_active_placeholder_digest_budget", "_ignored_message_count",
                     "_ignore_pattern_dropped_count", "_no_progress_public_rows",
                     "_generated_ignored_active_replay_placeholder_message_ids",
@@ -7439,7 +7440,7 @@ class LCMEngine(
                     "_pending_session_tails",
                 )}
                 # Stores and host objects are identity-bearing; never deepcopy them.
-                for name in ("_host_rewrite_store", "_pruned_tool_source_store"):
+                for name in ("_host_rewrite_store", "_pruned_tool_source_store", "_legacy_recovered_source_store"):
                     snapshots[name] = self.__dict__.get(name, missing)
                 receipts = [(receipt, dict(receipt)) for receipt in getattr(self, "_identity_anchor_recoveries", ())]
                 after_commit = []
@@ -7521,7 +7522,7 @@ class LCMEngine(
                         try:
                             for name, value in snapshots.items():
                                 if value is not missing:
-                                    self.__dict__[name] = (value if name in ("_host_rewrite_store", "_pruned_tool_source_store")
+                                    self.__dict__[name] = (value if name in ("_host_rewrite_store", "_pruned_tool_source_store", "_legacy_recovered_source_store")
                                                            else copy.copy(value))
                             self._pending_ingest_frontier = copy.deepcopy(self._frontier)
                             self._identity_anchor_observe_recovery()

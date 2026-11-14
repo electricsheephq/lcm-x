@@ -1131,8 +1131,8 @@ class ReconcileMixin:
 
                     def legacy_recovered_keep():
                         # #2703: some v0.29.2 temp markers were stored as their
-                        # recovered output. Only an exact durable identity proves
-                        # this alias; a failed read keeps today's tagged identity.
+                        # recovered output. Prove raw placeholder provenance and
+                        # content before checking its effect on replay identity.
                         try:
                             # An embedded reference can alias a distinct body to stored text.
                             # Keep the marker identity rather than expand that body.
@@ -1161,27 +1161,45 @@ class ReconcileMixin:
                             if key not in known:
                                 from .externalize import is_externalized_placeholder
 
-                                identities = []
+                                entries = []
+                                home = self._hermes_home if hermes_home is None else hermes_home
                                 for row in legacy_tool_rows():
-                                    candidate_content = self._restore_ingest_payload_placeholders_in_content_identity(
-                                        normalize_content_value(row.get("content")) or "",
-                                        session_id=str(row.get("session_id") or key[0]),
-                                        **(dict(hermes_home=hermes_home) if hermes_home is not None else {}),
-                                    )
-                                    # A quoted reference must not stand for the whole stored row.
-                                    if (extract_externalized_ref(candidate_content)
-                                            and not is_externalized_placeholder(candidate_content)):
+                                    raw = normalize_content_value(row.get("content")) or ""
+                                    ref = extract_externalized_ref(raw)
+                                    if (not is_externalized_placeholder(raw) or not ref
+                                            or _has_lossy_sensitive_redaction(raw)):
                                         continue
-                                    identity = self._message_replay_identity(row, stored_row=True, **target)
-                                    if (not _has_lossy_sensitive_redaction(row.get("content") or "")
-                                            and not _has_lossy_sensitive_redaction(identity[1])):
-                                        identities.append(identity)
-                                known[key] = tuple(identities)
+                                    payload = load_externalized_payload(ref, config=self._config, hermes_home=home)
+                                    if (not isinstance(payload, dict) or payload.get("kind") != "tool_result"
+                                            or not isinstance(payload.get("content"), str)):
+                                        continue
+                                    call = row.get("tool_call_id")
+                                    session = row.get("session_id")
+                                    tool = row.get("tool_name") or row.get("name") or key[3]
+                                    if (not call or not session or not key[2]
+                                            or payload.get("tool_call_id") != call or call != key[2]
+                                            or payload.get("session_id") != session
+                                            or (tool and payload.get("tool_name") != tool)
+                                            or _has_lossy_sensitive_redaction(payload["content"])):
+                                        continue
+                                    # A whole placeholder expands once at the END of stored identity.
+                                    # Refuse scaffolding inside its metadata; it could change that path.
+                                    if (_strip_volatile_host_scaffolding(raw) != raw
+                                            or _OOB_MESSAGE_BLOCK_MARKER in raw
+                                            or "[Externalized LCM ingest payload:" in raw):
+                                        continue
+                                    metadata = self._message_replay_identity(
+                                        {**row, "content": ""}, stored_row=True, **target)
+                                    identity = (metadata[0], payload["content"], *metadata[2:])
+                                    entries.append((payload["content"], identity))
+                                known[key] = tuple(entries)
                                 if len(known) > _HOST_REWRITE_OVERRIDE_CACHE_CAP:  # FIFO-bounded
                                     del known[next(iter(known))]
                             recovered_identity = self._message_replay_identity(
                                 {**msg, "content": recovered_identity_content}, **target)
-                            return recovered_identity in known[key]
+                            # Plain tool payloads preserve whitespace (strip_payload is False).
+                            return any(payload_content == recovered_identity_content and identity == recovered_identity
+                                       for payload_content, identity in known[key])
                         except Exception:
                             return False
 
