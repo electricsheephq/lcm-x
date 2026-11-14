@@ -15,7 +15,8 @@ def request(provider, path, data=None, raw=False, method=None):
     url = provider.url.removesuffix("/v1") + path
     body = json.dumps(data).encode() if data is not None else None
     req = Request(url, data=body, headers={"Content-Type": "application/json"}, method=method)
-    with build_opener(ProxyHandler({})).open(req, timeout=3) as response:
+    # Socket timeout is a dead-server backstop, not a reply latency budget on shared runners.
+    with build_opener(ProxyHandler({})).open(req, timeout=30) as response:
         content = response.read()
     return content if raw else json.loads(content)
 
