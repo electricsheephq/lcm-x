@@ -61,6 +61,23 @@ def _resolved_profile_home(raw_home: str) -> str:
     return str(Path(raw_home).resolve())
 
 
+def _callback_profile_home(manager) -> str | None:
+    """Identify the host's turn scope without inferring it from the launch home."""
+    try:
+        from hermes_constants import get_hermes_home_override
+    except ImportError:
+        override = None
+    else:
+        try:
+            override = get_hermes_home_override()
+        except Exception:
+            logger.debug("LCM could not read the Hermes turn profile", exc_info=True)
+            return None
+    # Current Hermes delivers each callback through its profile's manager.
+    home = override or getattr(manager, "home_path", None)
+    return _resolved_profile_home(str(home)) if home else None
+
+
 def lcm_env():
     """Resolve the home before consulting its registration pin.
 

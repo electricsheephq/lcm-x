@@ -5269,7 +5269,9 @@ class LCMEngine(
 
     def _unattached_reload_lane(self, session_id, conversation_id, platform):
         """Find one durable lane when an older host omits its compressor."""
-        if self._session_id_matches_lcm_bypass_filters(session_id, platform=platform):
+        if (not self._storage_ready and not self._db_path.is_file()) or self._session_id_matches_lcm_bypass_filters(
+            session_id, platform=platform,
+        ):
             return None
         lanes = self._store.connection.execute(
             "SELECT conversation_id FROM lcm_lifecycle_state WHERE current_session_id = ? LIMIT 2",

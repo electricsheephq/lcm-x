@@ -547,9 +547,10 @@ def _engine_took_slot(ctx, engine, hermes_home: str) -> bool:
 def register(ctx):
     """Plugin entry point — register the LCM context engine and tools."""
     from . import engine_registry
-    from .config import LCMConfig
+    from .config import LCMConfig, _callback_profile_home, _resolved_profile_home
     from .engine import LCMEngine
     from .engine_registry import (
+        ActiveEngineUseResult,
         ActiveEngineUseStatus,
         resolve_active_lcm_engine,
         use_active_lcm_engine,
@@ -992,13 +993,35 @@ def register(ctx):
                             if _replay_with_scoped_writer():
                                 return
                 else:
+                    unload_capable = engine._unload_group is not None
+                    if unload_capable:
+                        dispatch_home = _callback_profile_home(getattr(ctx, "_manager", None))
+                        if dispatch_home != _resolved_profile_home(engine._hermes_home):
+                            logger.warning(
+                                "LCM post_llm_call could not establish the session's storage binding; "
+                                "completed messages may be absent from the plugin-local store",
+                            )
+                            return
+
+                    def _ingest_bound_engine(selected):
+                        if unload_capable and (
+                            _resolved_profile_home(selected._hermes_home) != _resolved_profile_home(engine._hermes_home)
+                            or selected._db_path != engine._db_path
+                        ):
+                            return False
+                        _ingest_and_note(selected)
+                        return True
+
                     result = use_active_lcm_engine(
-                        _ingest_and_note,
+                        _ingest_bound_engine,
                         session_id=session_id,
                         conversation_id=conversation_id,
                         timeout=None,
                     )
-                    if result.status is ActiveEngineUseStatus.ENGINE_NOT_RESIDENT and not _retained_dispatch:
+                    if result.used and not result.value:
+                        result = ActiveEngineUseResult(ActiveEngineUseStatus.RESIDENT_ENGINE_CONFLICT)
+                    if (result.status is ActiveEngineUseStatus.ENGINE_NOT_RESIDENT
+                            and not unload_capable and not _retained_dispatch):
                         result = use_cold_lcm_engine(
                             engine,
                             _bind_and_ingest,
@@ -1007,7 +1030,7 @@ def register(ctx):
                     if result.status in (ActiveEngineUseStatus.RESIDENT_ENGINE_CONFLICT,
                                          ActiveEngineUseStatus.CLOSED_ENGINE,
                                          ActiveEngineUseStatus.ENGINE_NOT_RESIDENT):
-                        if engine._unload_group is not None and session_id:
+                        if unload_capable and session_id:
                             lane = use_lcm_engine(
                                 engine,
                                 lambda current: current._unattached_reload_lane(session_id, conversation_id, platform),
@@ -1017,8 +1040,13 @@ def register(ctx):
                                 conversation_id = lane.value
                                 if _replay_with_scoped_writer():
                                     return
-                        if (result.status is ActiveEngineUseStatus.RESIDENT_ENGINE_CONFLICT
-                                or (_retained_dispatch and result.status is ActiveEngineUseStatus.ENGINE_NOT_RESIDENT)):
+                        child_fallback = result.status is ActiveEngineUseStatus.RESIDENT_ENGINE_CONFLICT
+                        if unload_capable:
+                            child_fallback = (
+                                (child_fallback or result.status is ActiveEngineUseStatus.ENGINE_NOT_RESIDENT)
+                                and (engine._storage_ready or engine._db_path.is_file())
+                            )
+                        if child_fallback:
                             # No engine of the child's own: store its rows without binding one.
                             stored = use_lcm_engine(engine, _store_delegate_child, timeout=None)
                             if stored.used and stored.value:
