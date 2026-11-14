@@ -74,5 +74,5 @@ finally:
     profiler.disable()
 """
     result = subprocess.run([sys.executable, '-c', code, str(tmp_path / 'cprofile.db')],
-                            capture_output=True, text=True)
+                            cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
