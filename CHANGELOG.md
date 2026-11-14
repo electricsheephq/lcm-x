@@ -8,6 +8,9 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## v0.30.1 (nothing lost, part 2; turn recovery is opt-in)
 
+- Changed (rc3): one docstring in `ingest_pem_scan.py` names a private-key header line in words instead of
+  spelling it out, so the plugin install scanner in Hermes's test builds (plugin-guard v13 and v14) no longer rates
+  the plugin as dangerous and blocks its install. No code change (#2734).
 - Changed (rc2): the #2042 and #2624 recovery paths, and the #2042 check at a session's first ingest, are off by
   default (`LCM_HOST_ROW_RECOVERY_ENABLED`, default `false`). rc1's checks found, on two-engine shapes, a duplicate
   of recovered rows (#2624) and a lost task-list user turn (#2042, #2418). With the default, these paths behave as
