@@ -264,7 +264,7 @@ def test_prompt_section_does_not_wait_for_stable_use_lock(plugin):
     caller = threading.Thread(target=render)
     holder.start()
     try:
-        assert locked.wait(1), "lock holder did not start"
+        assert locked.wait(60), "lock holder did not start"
         caller.start()
         assert rendered.wait(60), "prompt section waited on the stable-use lock"
         assert results == [module.LCM_SYSTEM_PROMPT_NOTE]
