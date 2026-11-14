@@ -121,7 +121,8 @@ def test_round2_fallback_then_again_matches_main(tmp_path, monkeypatch, versions
             engine.shutdown()
     record_property('preservation_attempts', len(attempts))
     _compare_round2(results, record_property)
-    assert len(attempts) == (1 if hasattr(engine, '_store_merged_user_aliases') else 0)
+    if not audit.stubbed:
+        assert len(attempts) == (1 if hasattr(engine, '_store_merged_user_aliases') else 0)
 
 
 def test_round3_watched_capture_stays_retired_after_eviction(tmp_path, monkeypatch, versions, record_property):
@@ -171,7 +172,7 @@ def _fail_round3_preservation_once(engine, monkeypatch):
     present = hasattr(engine, '_store_merged_user_aliases')
     audit = audit_fault(engine, 'preservation-once', present)
     if audit.stubbed or not present:
-        return calls
+        return calls, audit.stubbed
     original = engine._store_merged_user_aliases
 
     def once(*args, **kwargs):
@@ -183,7 +184,7 @@ def _fail_round3_preservation_once(engine, monkeypatch):
         return original(*args, **kwargs)
 
     monkeypatch.setattr(engine, '_store_merged_user_aliases', once)
-    return calls
+    return calls, audit.stubbed
 
 
 def test_round3_rewritten_prefix_drops_false_fallback_marks(tmp_path, monkeypatch, versions, record_property):
@@ -208,10 +209,10 @@ def test_round3_rewritten_prefix_drops_false_fallback_marks(tmp_path, monkeypatc
                     dict(initial[3], content='R', timestamp=40.), initial[4]]
             engine.ingest(live)
             incoming = _capture(ctx, [_row('summary', 1., 'assistant'), live[3], live[4]])
-            calls = _fail_round3_preservation_once(engine, monkeypatch)
+            calls, stubbed = _fail_round3_preservation_once(engine, monkeypatch)
             engine.ingest(incoming)
             results[name] = [_identities(engine)]
-            if name == 'candidate' and hasattr(engine, '_store_merged_user_aliases'):
+            if name == 'candidate' and hasattr(engine, '_store_merged_user_aliases') and not stubbed:
                 assert len(calls) == 1
             assert engine._ingest_failure_count == 0
         finally:
@@ -243,11 +244,11 @@ def test_round3_new_uid_keeps_host_time_through_fallback(tmp_path, monkeypatch, 
                 sender = sys.modules[engine.__module__.rsplit('.', 1)[0] + '.sender_capture']
                 projection = sender.merged_user_projection(engine, incoming)
                 projected_stamps[name], fallback_stamps[name] = projection[0][0]['timestamp'], projection[3][0]['timestamp']
-            calls = _fail_round3_preservation_once(engine, monkeypatch)
+            calls, stubbed = _fail_round3_preservation_once(engine, monkeypatch)
             engine.ingest(incoming)
             results[name] = [_identities(engine)]
             cache_stamps[name] = engine._last_active_replay_messages[0]['timestamp']
-            if name == 'candidate' and hasattr(engine, '_store_merged_user_aliases'):
+            if name == 'candidate' and hasattr(engine, '_store_merged_user_aliases') and not stubbed:
                 assert len(calls) == 1
             assert incoming[0]['timestamp'] == 20.
             assert engine._ingest_failure_count == 0

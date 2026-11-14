@@ -5,8 +5,10 @@ archived positive control. Missing history fails in CI and skips locally.
 """
 from collections import Counter
 import importlib.util
+import json
 import os
 from pathlib import Path
+import re
 import sys
 
 import pytest
@@ -15,6 +17,19 @@ from .trees import PrerequisiteUnavailable, materialize, resolve, skip_or_fail
 
 BASELINE_REF = "7d614f5fe22eb7cf7d8955230c51619916a1fed3"
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def write_diagnostics(case, test, properties):
+    """Keep every property, including repeated names, in the CI upload tree."""
+    output = os.environ.get('LCM_DIFFERENTIAL_OUT')
+    if not output:
+        return
+    directory = Path(output) / 'paired'
+    directory.mkdir(parents=True, exist_ok=True)
+    stem = '--'.join(re.sub(r'[^A-Za-z0-9_-]', '_', str(part)) for part in (case, test))
+    path = directory / (stem + '.json')
+    path.write_text(json.dumps(dict(case=case, test=test, properties=properties), indent=2) + '\n', encoding='utf-8')
+    return path
 
 
 def _load(tree, name):

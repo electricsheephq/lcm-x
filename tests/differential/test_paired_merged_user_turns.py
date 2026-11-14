@@ -337,6 +337,15 @@ def _label_violations(case, trace, stubbed):
     return entries
 
 
+def test_stubbed_control_with_preservation_seam(tmp_path, tmp_path_factory, versions):  # noqa: F811
+    tree = paired.materialize('20362c42be7f74697a4db9c66d1be193462579f7',
+                              tmp_path_factory.getbasetemp() / 'stubbed-control-tree')
+    candidate = paired._load(tree, '_stubbed_control_candidate')
+    _, traces = _execute_case(2707102, tmp_path, dict(main=versions['main'], candidate=candidate), stub_faults=True)
+    faults = [fault for fault in traces['candidate'].faults if fault.kind == 'preservation-once']
+    assert faults and all(fault.present and fault.stubbed and not fault.called and not fault.raised for fault in faults)
+
+
 @pytest.fixture(scope='module')
 def fault_run(request, record_testsuite_property):
     run = FaultRun()
@@ -346,6 +355,10 @@ def fault_run(request, record_testsuite_property):
     yield run
     result = run.finish(CASES, selected)
     record_testsuite_property('merged_user_turn_fault_floor', json.dumps(result))
+    for item in request.session.items:
+        if item.module is request.module and hasattr(item, 'callspec') and 'sequence' in item.callspec.params:
+            paired.write_diagnostics(item.callspec.params['sequence'], item.originalname,
+                                     [*item.user_properties, ('merged_user_turn_fault_floor', json.dumps(result))])
     assert not result['errors'], result['errors']
 
 
@@ -395,7 +408,7 @@ class TestMergedUserTurns:
 
     def test_absolute(self, sequence, record_property):
         from collections import Counter
-        from .merged_user_turns_expected import BASELINE_REF, EXPECTED
+        from .merged_user_turns_expected import EXPECTED
 
         case, properties, traces = sequence
         violations = {name: trace.violations() for name, trace in traces.items()}
@@ -416,13 +429,14 @@ class TestMergedUserTurns:
                              for stage, kind, value, view, count, label in classified for _ in range(count))
         pinned = Counter((stage, kind, freeze(value), view, label) for stage, kind, value, view, count, label
                          in EXPECTED.get(case, ()) for _ in range(count))
-        effective = paired.resolve(os.environ.get('LCMX_DIFF_BASELINE_REF', BASELINE_REF))
+        effective = paired.resolve(os.environ.get('LCMX_DIFF_BASELINE_REF', paired.BASELINE_REF))
         matches = actual_pin == pinned
         record_property('baseline_pin', json.dumps(dict(ref=effective, matches=matches,
-                        skipped=None if effective == BASELINE_REF else 'baseline override')))
+                        skipped=None if effective == paired.BASELINE_REF else 'baseline override')))
         subset = not (counters['candidate'] - counters['main'])
         record_property('candidate_violation_subset', json.dumps(subset))
         assert_faults(case, traces)
-        if effective == BASELINE_REF:
-            assert matches, f'{case}: baseline pin mismatch: {violations["main"]}'
+        if effective == paired.BASELINE_REF:
+            assert matches, (f'{case}: baseline pin mismatch at {paired.BASELINE_REF}; '
+                             f'pins must be regenerated for it: {violations["main"]}')
         assert subset, f'{case}: added candidate violations: {counters["candidate"] - counters["main"]}'

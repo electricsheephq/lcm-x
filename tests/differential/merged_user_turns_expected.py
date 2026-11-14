@@ -6,8 +6,6 @@ exempt a candidate: it may only remove occurrences at the same ingest stage.
 #1525 requires a shortened ingest list before the text's first ingest showing.
 No main binding rows were written; lineage determinism has nothing to compare.
 """
-BASELINE_REF = "7d614f5fe22eb7cf7d8955230c51619916a1fed3"
-
 DUPLICATE_IDENTITIES = ((('bindings', ()), ('content', 'R'), ('conversation_id', 'conv'), ('observed_at', 10.0),
   ('observed_at_source', 'host_message_timestamp'), ('pinned', 0), ('role', 'user'), ('sender_id', None),
   ('sender_source', None), ('session_id', 'parent'), ('source', 'cli'), ('tool_call_id', None),
