@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 from collections import Counter
 from pathlib import Path
+import subprocess
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -59,23 +60,35 @@ def _gate_paths(name: str = "TURN_PATH_FILES") -> set[str]:
     return ast.literal_eval(values[0])
 
 
-def _module_path(root: Path, parts: tuple[str, ...]) -> str | None:
+def _tracked_python_files(root: Path) -> set[str]:
+    """Repository modules are tracked files. CI writes an untracked agent/ host
+    stub at the root (ci.yml), which must not count as an engine module."""
+    listed = subprocess.run(["git", "-C", str(root), "ls-files", "-z", "--", "*.py"],
+                            capture_output=True, check=True).stdout.decode("utf-8")
+    return {path for path in listed.split("\0") if path}
+
+
+def _module_path(root: Path, parts: tuple[str, ...], tracked: set[str] | None) -> str | None:
     """Resolve only repository modules, including the installed plugin name."""
     if parts[:1] == ("hermes_lcm",):
         parts = parts[1:]
+
+    def known(relative: Path) -> bool:
+        return (root / relative).is_file() and (tracked is None or relative.as_posix() in tracked)
+
     for end in range(1, len(parts)):
-        if not root.joinpath(*parts[:end], "__init__.py").is_file():
+        if not known(Path(*parts[:end], "__init__.py")):
             return None
-    base = root.joinpath(*parts)
-    if (base / "__init__.py").is_file():
-        return (base / "__init__.py").relative_to(root).as_posix()
-    if parts and base.with_suffix(".py").is_file():
-        return base.with_suffix(".py").relative_to(root).as_posix()
+    base = Path(*parts)
+    if known(base / "__init__.py"):
+        return (base / "__init__.py").as_posix()
+    if parts and known(base.with_suffix(".py")):
+        return base.with_suffix(".py").as_posix()
     return None
 
 
 def _import_closure(
-    root: Path, computed: dict[tuple[str, str], str],
+    root: Path, computed: dict[tuple[str, str], str], tracked: set[str] | None = None,
 ) -> tuple[set[str], Counter[tuple[str, str]]]:
     pending = ["engine.py"]
     reached: set[str] = set()
@@ -89,7 +102,7 @@ def _import_closure(
         # Loading a member executes every enclosing package initializer too.
         for directory in (Path(), *reversed(path.parent.parents), path.parent):
             initializer = directory / "__init__.py"
-            if (root / initializer).is_file():
+            if (root / initializer).is_file() and (tracked is None or initializer.as_posix() in tracked):
                 pending.append(initializer.as_posix())
         tree = ast.parse((root / current).read_text(encoding="utf-8"), filename=current)
         importlib_names = {"importlib"}
@@ -158,11 +171,11 @@ def _import_closure(
             for parts in targets:
                 # import pkg.child executes pkg/__init__.py as well as child.
                 for end in range(1, len(parts) + 1):
-                    resolved = _module_path(root, parts[:end])
+                    resolved = _module_path(root, parts[:end], tracked)
                     if resolved is not None:
                         pending.append(resolved)
                 if not parts:
-                    resolved = _module_path(root, ())
+                    resolved = _module_path(root, (), tracked)
                     if resolved is not None:
                         pending.append(resolved)
     return reached, unresolved
@@ -180,7 +193,7 @@ def test_differential_paths_exist() -> None:
 
 
 def test_engine_import_closure_is_listed_or_documented_excluded() -> None:
-    closure, unresolved = _import_closure(ROOT, COMPUTED_IMPORTS)
+    closure, unresolved = _import_closure(ROOT, COMPUTED_IMPORTS, _tracked_python_files(ROOT))
     assert unresolved == Counter(COMPUTED_IMPORTS.keys()), (
         f"Computed import inventory needs an audit: {dict(unresolved)!r}"
     )
@@ -227,3 +240,21 @@ def test_computed_imports_are_inventoried_without_guessing(tmp_path: Path) -> No
     assert unresolved == Counter({key: 1})
     closure, _ = _import_closure(tmp_path, {key: "target.py"})
     assert closure == {"engine.py", "target.py"}
+
+
+def test_untracked_host_stub_is_not_a_repository_module(tmp_path: Path) -> None:
+    # The CI test job writes an untracked agent/ stub of the Hermes host at the root.
+    sources = {
+        "engine.py": "from agent.context_engine import ContextEngine\nfrom . import store\n",
+        "store.py": "",
+        "agent/__init__.py": "",
+        "agent/context_engine.py": "",
+    }
+    for name, source in sources.items():
+        file = tmp_path / name
+        file.parent.mkdir(parents=True, exist_ok=True)
+        file.write_text(source, encoding="utf-8")
+    closure, _ = _import_closure(tmp_path, {}, {"engine.py", "store.py"})
+    assert closure == {"engine.py", "store.py"}
+    closure, _ = _import_closure(tmp_path, {})  # Without a tracked set the stub would count.
+    assert {"agent/__init__.py", "agent/context_engine.py"} <= closure
