@@ -7,6 +7,8 @@ from collections import Counter
 from pathlib import Path
 import subprocess
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 # Computed imports resolved by hand, keyed by file and import expression (not by
@@ -21,24 +23,22 @@ COMPUTED_IMPORTS = {
 # __init__.py:68 also loads the explicitly named config.py with
 # spec_from_file_location (exec_module at :77). Ordinary imports already reach it.
 
-
-def _workflow_paths() -> list[str]:
-    lines = (ROOT / ".github/workflows/differential.yml").read_text(encoding="utf-8").splitlines()
-    keys = [index for index, line in enumerate(lines)
-            if line.strip() == "TURN_PATH_FILES: |-"]
-    assert len(keys) == 1, "Expected one TURN_PATH_FILES block"
-    start = keys[0]
-    indentation = len(lines[start]) - len(lines[start].lstrip())
-    paths = []
-    for line in lines[start + 1:]:
-        if not line.strip():
-            continue
-        if len(line) - len(line.lstrip()) <= indentation:
-            break
-        paths.append(line.strip())
-    assert paths, "Empty TURN_PATH_FILES block"
-    assert len(paths) == len(set(paths)), "Duplicate differential relevance paths"
-    return paths
+# Engine-reached NON_TURN_PATH_FILES exclusions, reviewed with this PR on 2026-11-14.
+# Newly reached exclusions need their written reason re-audited before adding them;
+# remove exclusions that are no longer reached.
+ENGINE_REACHED_EXCLUSIONS = frozenset({
+    "adaptive_retrieval.py", "answer_contract.py", "assertion_extraction.py",
+    "assertion_rebuild.py", "assertion_state.py", "assertion_store.py", "chunking.py",
+    "command.py", "command_auth.py", "command_doctor.py", "command_router.py", "command_status.py",
+    "cpu_capacity.py", "embedding_maintenance.py", "embedding_provider.py", "entity_store.py",
+    "evidence_compiler.py", "evidence_pack.py", "evidence_tools.py", "expand_query_tools.py",
+    "expand_tools.py", "expansion_evidence.py", "guidance.py", "inactive_record.py", "inspect_tools.py",
+    "level3_repair.py", "maintenance.py", "memory_tools.py", "occurrence_time.py", "presets.py",
+    "query_view_store.py", "reasoning.py", "recall_delivery.py", "recall_session.py", "recent.py",
+    "recorder.py", "requirements_compiler.py", "retrieval_context.py", "retrieval_core.py",
+    "runtime_identity.py", "schema_families.py", "search_query.py", "selective_compiler.py",
+    "selective_recall.py", "sqlite_session.py", "tools.py", "trajectory_store.py", "vector_store.py",
+})
 
 
 def _gate_paths(name: str = "TURN_PATH_FILES") -> set[str]:
@@ -76,8 +76,17 @@ def _module_path(root: Path, parts: tuple[str, ...], tracked: set[str] | None) -
     def known(relative: Path) -> bool:
         return (root / relative).is_file() and (tracked is None or relative.as_posix() in tracked)
 
+    def package(directory: Path) -> bool:
+        if known(directory / "__init__.py"):
+            return True
+        if tracked is not None:
+            prefix = directory.as_posix() + "/"
+            return any(file.startswith(prefix) and file.endswith(".py") and (root / file).is_file()
+                       for file in tracked)
+        return any(file.is_file() for file in (root / directory).rglob("*.py"))
+
     for end in range(1, len(parts)):
-        if not known(Path(*parts[:end], "__init__.py")):
+        if not package(Path(*parts[:end])):
             return None
     base = Path(*parts)
     if known(base / "__init__.py"):
@@ -143,7 +152,35 @@ def _import_closure(
                 name = node.args[0] if node.args else next(
                     (keyword.value for keyword in node.keywords if keyword.arg == "name"), None,
                 )
-                if isinstance(name, ast.Constant) and isinstance(name.value, str):
+                if isinstance(function, ast.Name) and function.id == "__import__":
+                    fromlist = node.args[3] if len(node.args) > 3 else next(
+                        (item.value for item in node.keywords if item.arg == "fromlist"), None,
+                    )
+                    level = node.args[4] if len(node.args) > 4 else next(
+                        (item.value for item in node.keywords if item.arg == "level"), ast.Constant(0),
+                    )
+                    static_fromlist = isinstance(fromlist, (ast.List, ast.Tuple)) and all(
+                        isinstance(item, ast.Constant) and isinstance(item.value, str)
+                        for item in fromlist.elts
+                    )
+                    supported = len(node.args) + len(node.keywords) == 1 or (
+                        static_fromlist and isinstance(level, ast.Constant)
+                        and type(level.value) is int and level.value == 0
+                        and len(node.args) <= 5 and all(item.arg in {
+                            "name", "globals", "locals", "fromlist", "level",
+                        } for item in node.keywords)
+                    )
+                    if isinstance(name, ast.Constant) and isinstance(name.value, str) and supported:
+                        target = tuple(name.value.split("."))
+                        targets = [target] + [target + (item.value,) for item in
+                                              (fromlist.elts if static_fromlist else [])
+                                              if item.value != "*"]
+                    else:
+                        key = (current, ast.unparse(node))
+                        unresolved[key] += 1
+                        if key in computed:
+                            pending.append(computed[key])
+                elif isinstance(name, ast.Constant) and isinstance(name.value, str):
                     module = name.value
                     if module.startswith("."):
                         # Relative import_module names are relative to its package
@@ -155,7 +192,10 @@ def _import_closure(
                         if isinstance(package_arg, ast.Constant) and isinstance(package_arg.value, str):
                             package = tuple(package_arg.value.split("."))
                         elif not (isinstance(package_arg, ast.Name) and package_arg.id == "__package__"):
-                            unresolved[current, ast.unparse(node)] += 1
+                            key = (current, ast.unparse(node))
+                            unresolved[key] += 1
+                            if key in computed:
+                                pending.append(computed[key])
                             continue
                         level = len(module) - len(module.lstrip("."))
                         assert level <= len(package), f"Invalid relative import: {current}:{node.lineno}"
@@ -181,15 +221,11 @@ def _import_closure(
     return reached, unresolved
 
 
-def test_differential_and_maintainer_paths_match() -> None:
-    assert set(_workflow_paths()) == _gate_paths()
-    assert not _gate_paths() & _gate_paths("NON_TURN_PATH_FILES"), "Listed paths cannot also be excluded"
-
-
-def test_differential_paths_exist() -> None:
-    paths = set(_workflow_paths()) | _gate_paths() | _gate_paths("NON_TURN_PATH_FILES")
-    missing = sorted(path for path in paths if not (ROOT / path).is_file())
-    assert not missing, "Nonexistent differential relevance paths:\n" + "\n".join(missing)
+def _reached_exclusion_changes(
+    closure: set[str], excluded: set[str], pinned: frozenset[str],
+) -> tuple[set[str], set[str]]:
+    reached = closure & excluded
+    return reached - pinned, pinned - reached
 
 
 def test_engine_import_closure_is_listed_or_documented_excluded() -> None:
@@ -197,10 +233,26 @@ def test_engine_import_closure_is_listed_or_documented_excluded() -> None:
     assert unresolved == Counter(COMPUTED_IMPORTS.keys()), (
         f"Computed import inventory needs an audit: {dict(unresolved)!r}"
     )
-    missing = sorted(closure - set(_workflow_paths()) - _gate_paths("NON_TURN_PATH_FILES"))
+    excluded = _gate_paths("NON_TURN_PATH_FILES")
+    newly_reached, no_longer_reached = _reached_exclusion_changes(
+        closure, excluded, ENGINE_REACHED_EXCLUSIONS,
+    )
+    assert not newly_reached, (
+        "Newly reached exclusions: re-audit their written reason in scripts/maintainer_gate.py, "
+        "then add them to ENGINE_REACHED_EXCLUSIONS:\n" + "\n".join(sorted(newly_reached))
+    )
+    assert not no_longer_reached, (
+        "No longer reached: remove from ENGINE_REACHED_EXCLUSIONS:\n"
+        + "\n".join(sorted(no_longer_reached))
+    )
+    missing = sorted(closure - _gate_paths() - excluded)
+    hint = ("\nBoth lists hold top-level modules only "
+            "(tests/test_maintainer_gate.py::test_top_level_modules_are_classified). "
+            "A reached subpackage module needs path support in both lists and in the relevance "
+            "step of .github/workflows/differential.yml." if any("/" in path for path in missing) else "")
     assert not missing, (
         "Engine import modules neither in TURN_PATH_FILES nor documented as excluded:\n"
-        + "\n".join(missing)
+        + "\n".join(missing) + hint
     )
 
 
@@ -231,15 +283,67 @@ def test_static_closure_follows_packages_and_deferred_imports(tmp_path: Path) ->
     assert not unresolved
 
 
-def test_computed_imports_are_inventoried_without_guessing(tmp_path: Path) -> None:
-    (tmp_path / "engine.py").write_text('import importlib\nimportlib.import_module(package + ".target")\n')
+@pytest.mark.parametrize(("call", "expression"), [
+    ("loader.import_module(package + '.target')", "package + '.target'"),
+    ("loader.import_module('.target', package=package)", None),
+])
+def test_computed_imports_are_inventoried_without_guessing(
+    tmp_path: Path, call: str, expression: str | None,
+) -> None:
+    (tmp_path / "engine.py").write_text(f"import importlib as loader\n{call}\n")
     (tmp_path / "target.py").write_text("")
-    key = ("engine.py", "package + '.target'")
+    key = ("engine.py", expression or ast.unparse(ast.parse(call).body[0].value))
     closure, unresolved = _import_closure(tmp_path, {})
     assert closure == {"engine.py"}
     assert unresolved == Counter({key: 1})
     closure, _ = _import_closure(tmp_path, {key: "target.py"})
     assert closure == {"engine.py", "target.py"}
+
+
+def test_namespace_package_respects_tracked_files(tmp_path: Path) -> None:
+    (tmp_path / "engine.py").write_text("from .features import handler\n")
+    (tmp_path / "features").mkdir()
+    (tmp_path / "features/handler.py").write_text("")
+    for tracked in (None, {"engine.py", "features/handler.py"}, {"engine.py"}):
+        closure, unresolved = _import_closure(tmp_path, {}, tracked)
+        assert closure == ({"engine.py"} if tracked == {"engine.py"}
+                           else {"engine.py", "features/handler.py"})
+        assert not unresolved
+
+
+@pytest.mark.parametrize(("call", "expected"), [
+    ("__import__('pkg.member')", {"pkg/__init__.py", "pkg/member.py"}),
+    ("__import__('pkg', fromlist=['member'])", {"pkg/__init__.py", "pkg/member.py"}),
+    ("__import__('pkg', None, None, ['member'])", {"pkg/__init__.py", "pkg/member.py"}),
+    ("__import__('pkg', globals=g, locals=l, fromlist=('member', '*'), level=0)",
+     {"pkg/__init__.py", "pkg/member.py"}),
+    ("__import__('pkg', fromlist=[])", {"pkg/__init__.py"}),
+    ("__import__('x', level=1)", None),
+    ("__import__(name)", None),
+    ("__import__('pkg', fromlist=members)", None),
+    ("__import__('pkg', fromlist=['member'], level=1)", None),
+])
+def test_builtin_imports(tmp_path: Path, call: str, expected: set[str] | None) -> None:
+    (tmp_path / "engine.py").write_text(call + "\n")
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg/__init__.py").write_text("")
+    (tmp_path / "pkg/member.py").write_text("")
+    closure, unresolved = _import_closure(tmp_path, {})
+    assert closure == {"engine.py"} | (expected or set())
+    key = ("engine.py", ast.unparse(ast.parse(call).body[0].value))
+    assert unresolved == (Counter({key: 1}) if expected is None else Counter())
+    if expected is None:
+        closure, unresolved = _import_closure(tmp_path, {key: "pkg/member.py"})
+        assert closure == {"engine.py", "pkg/__init__.py", "pkg/member.py"}
+        assert unresolved == Counter({key: 1})
+
+
+def test_reached_exclusion_changes() -> None:
+    assert _reached_exclusion_changes(
+        {"new.py", "kept.py", "listed.py"}, {"new.py", "kept.py", "old.py"},
+        frozenset({"kept.py", "old.py"}),
+    ) == ({"new.py"}, {"old.py"})
+    assert _reached_exclusion_changes({"kept.py"}, {"kept.py"}, frozenset({"kept.py"})) == (set(), set())
 
 
 def test_untracked_host_stub_is_not_a_repository_module(tmp_path: Path) -> None:
