@@ -4715,9 +4715,14 @@ class LCMEngine(
                         and not self._thread_context_stateless()
                         and not self._thread_context_has_auxiliary_session(session_id)):
                     if previous := getattr(self, "_retired_session_start", None):
+                        if previous == session_id and starts.get(previous) is self:
+                            return
                         if starts.get(previous) is self:
                             starts.pop(previous, None)
                     self._retired_session_start = session_id
+                    self._retired_cli_reset_confirmed = None
+                    rows = self._retired_cli_reset_rows(retired._session_id, session_id)
+                    self._retired_cli_reset_target_was_absent = rows == (None, None)
                     starts[session_id] = self
                 return
             if session_db is not None:  # a call without a handle keeps the one already held
@@ -5437,23 +5442,64 @@ class LCMEngine(
             return None
         return lanes[0][0]
 
-    def _confirms_retired_cli_reset(self, session_id, platform):
-        retired = self._reload_successor if self._reload_successor is not None else self
-        if platform != "cli" or retired._session_platform != "cli":
-            return False
+    def _retired_cli_reset_rows(self, old_id, new_id):
         try:
             path = self._state_db_path().resolve()
             with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=0.05)) as conn:
-                return conn.execute(
-                    """SELECT 1 FROM sessions AS old JOIN sessions AS new ON new.id = ?
-                    WHERE old.id = ? AND old.end_reason = 'new_session'
-                      AND new.source = 'cli' AND new.parent_session_id IS NULL
-                      AND new.started_at >= old.ended_at""",
-                    (session_id, retired._session_id),
-                ).fetchone() is not None
+                rows = dict((sid, (source, parent, started, ended, reason)) for sid, source, parent, started, ended, reason
+                            in conn.execute(
+                                "SELECT id, source, parent_session_id, started_at, ended_at, end_reason "
+                                "FROM sessions WHERE id IN (?, ?)", (old_id, new_id),
+                            ))
+                return rows.get(old_id), rows.get(new_id)
         except sqlite3.Error:
             logger.debug("LCM could not verify the retired engine's CLI reset", exc_info=True)
+            return None
+
+    def _confirm_empty_retired_cli_reset(self, session_id):
+        with self._storage_lock:
+            if (getattr(self, "_retired_session_start", None) != session_id
+                    or not getattr(self, "_retired_cli_reset_target_was_absent", False)):
+                return
+            retired = self._reload_successor or self
+            if self._empty_cli_reset_is_proven(retired, session_id):
+                self._retired_cli_reset_confirmed = (retired._session_id, session_id)
+
+    def _empty_cli_reset_is_proven(self, retired, session_id):
+        rows = self._retired_cli_reset_rows(retired._session_id, session_id)
+        if retired._session_platform != "cli" or not rows:
             return False
+        old, new = rows
+        if old is not None or new is None or new["parent_session_id"] is not None or new["ended_at"] is not None:
+            return False
+        try:
+            with closing(sqlite3.connect(retired._db_path.resolve().as_uri() + "?mode=ro", uri=True, timeout=0.05)) as conn:
+                return conn.execute(
+                    """SELECT 1 FROM lcm_lifecycle_state
+                    WHERE conversation_id = ? AND current_session_id = ?
+                      AND current_frontier_store_id = 0 AND last_finalized_session_id IS NULL
+                      AND NOT EXISTS (SELECT 1 FROM messages WHERE session_id = ? OR conversation_id = ?)
+                      AND NOT EXISTS (SELECT 1 FROM summary_nodes WHERE session_id IN (?, ?))""",
+                    (retired._conversation_id, retired._session_id, retired._session_id,
+                     retired._conversation_id, retired._session_id, retired._conversation_id),
+                ).fetchone() is not None
+        except sqlite3.Error:
+            logger.debug("LCM could not verify the old CLI binding was empty", exc_info=True)
+            return False
+
+    def _confirms_retired_cli_reset(self, session_id, platform):
+        retired = self._reload_successor or self
+        if platform != "cli" or retired._session_platform != "cli":
+            return False
+        if getattr(self, "_retired_cli_reset_confirmed", None) == (retired._session_id, session_id):
+            return self._empty_cli_reset_is_proven(retired, session_id)
+        rows = self._retired_cli_reset_rows(retired._session_id, session_id)
+        if not rows or not all(rows):
+            return False
+        old, new = rows
+        return (old["end_reason"] == "new_session" and old["ended_at"] is not None
+                and new["source"] == old["source"] and new["parent_session_id"] is None
+                and new["ended_at"] is None and new["started_at"] >= old["ended_at"])
 
     def _ingest_reload_lane(self, session_id, conversation_id, messages, platform):
         """Replay through a scoped clone without changing durable ownership."""
@@ -5473,7 +5519,8 @@ class LCMEngine(
             session_id, conversation_id, platform = reset_session_id, reset_session_id, "cli"
         # Profile and database identity were checked before cloning. Keep the
         # original spelling used by durable replay proofs on Windows.
-        self._rebind_storage_for_home(retired._hermes_home)
+        self._hermes_home = retired._hermes_home
+        self._db_path = retired._db_path
         # This read is inside the successor's unload lease. Avoid opening the
         # engine's writable helpers for a removed database or a stale lane.
         with closing(sqlite3.connect(self._db_path.resolve().as_uri() + "?mode=ro", uri=True, timeout=0.05)) as conn:

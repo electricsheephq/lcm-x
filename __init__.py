@@ -1154,6 +1154,22 @@ def register(ctx):
         if callable(register_hook):
             if engine._unload_group is not None and active:
                 engine._lcm_registered_post_llm_call = _on_post_llm_call
+                def _on_cli_reset(*, session_id=None, platform=None, reason=None, **_):
+                    if (engine._plugin_is_unloading() or platform != "cli" or reason != "new_session"
+                            or _callback_profile_home(getattr(ctx, "_manager", None))
+                            != _resolved_profile_home(engine._hermes_home)):
+                        return
+                    starts = engine._unload_group.retired_session_starts
+                    retired = starts.get(session_id) if starts is not None else None
+                    if (retired is not None and retired._db_path == engine._db_path
+                            and _resolved_profile_home(retired._hermes_home)
+                            == _resolved_profile_home(engine._hermes_home)):
+                        retired._confirm_empty_retired_cli_reset(session_id)
+
+                try:
+                    register_hook("on_session_reset", _on_cli_reset)
+                except Exception:
+                    logger.debug("LCM could not register the CLI reset proof hook", exc_info=True)
             register_hook("post_llm_call", _on_post_llm_call)
             logger.debug("LCM registered post_llm_call hook for per-turn ingest")
             try:

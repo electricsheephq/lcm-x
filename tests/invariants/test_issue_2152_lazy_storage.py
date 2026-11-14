@@ -326,6 +326,65 @@ def test_retained_cli_reset_starts_a_new_lane_in_the_current_registration(prefli
     db.unlink()
 
 
+@pytest.mark.parametrize(
+    "source, parent_id, reset_event, stores_replacement",
+    [
+        pytest.param("cli", None, {}, True, id="empty-cli"),
+        pytest.param("desktop", None, {}, True, id="source-override"),
+        pytest.param("cli", None, None, False, id="missing-hook"),
+        pytest.param("cli", None, {"session_id": "unrelated"}, False, id="wrong-session"),
+        pytest.param("cli", None, {"platform": "desktop"}, False, id="wrong-platform"),
+        pytest.param("cli", None, {"reason": "resume"}, False, id="wrong-reason"),
+        pytest.param("cli", "unrelated", {}, False, id="child"),
+    ],
+)
+def test_retained_empty_cli_reset_requires_exact_host_confirmation(
+    preflight, source, parent_id, reset_event, stores_replacement,
+):
+    prototype, old_ctx = preflight.register(supports_unload=True)
+    retained = prototype.clone_for_agent()
+    retained.on_session_start("empty", platform="cli")
+    host_path = preflight.home / "state.db"
+    with closing(sqlite3.connect(host_path)) as native:
+        native.executescript("""
+            CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, parent_session_id TEXT,
+                started_at REAL, ended_at REAL, end_reason TEXT);
+            INSERT INTO sessions VALUES ('empty', 'cli', NULL, 1, NULL, NULL);
+            INSERT INTO sessions VALUES ('unrelated', 'cli', NULL, 2, NULL, NULL);
+        """)
+        old_ctx.unload_callbacks[0]()
+        _, ctx = preflight.register(supports_unload=True, manager=old_ctx._manager)
+        try:
+            # An empty CLI /new ends and discards the old row, calls the engine reset and
+            # bind methods, creates the new row, then emits the native reset hook.
+            with native:
+                native.execute("DELETE FROM sessions WHERE id = 'empty'")
+            retained.on_session_reset()
+            retained.bind_session_state(SimpleNamespace(db_path=host_path), "fresh")
+            with native:
+                native.execute(
+                    "INSERT INTO sessions VALUES ('fresh', ?, ?, ?, NULL, NULL)",
+                    (source, parent_id, 3),
+                )
+            db = preflight.home / "lcm.db"
+            fresh = [{"role": "user", "content": "after /new"}, {"role": "assistant", "content": "fresh answer"}]
+            post_llm = ctx.hooks["post_llm_call"]
+            post_llm(session_id="fresh", platform="cli", conversation_history=fresh)
+            assert _durable_messages(db, "fresh") == []
+            on_reset = ctx.hooks.get("on_session_reset")
+            if reset_event is not None and on_reset is not None:
+                event = {"session_id": "fresh", "platform": "cli", "reason": "new_session"}
+                on_reset(**(event | reset_event))
+            for _ in range(2):
+                post_llm(session_id="fresh", platform="cli", conversation_history=fresh)
+            expected = [(row["role"], row["content"]) for row in fresh] if stores_replacement else []
+            assert _durable_messages(db, "fresh") == expected
+            assert _durable_messages(db, "empty") == _durable_messages(db, "unrelated") == []
+        finally:
+            ctx.unload_callbacks[0]()
+    db.unlink()
+
+
 def test_retained_engine_uses_new_registration_for_preflight_compaction_and_tools(preflight, monkeypatch):
     from hermes_lcm import escalation, tokens
 
