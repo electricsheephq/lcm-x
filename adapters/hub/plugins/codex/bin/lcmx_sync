@@ -1,0 +1,315 @@
+#!/usr/bin/env python3
+"""lcmx_sync: copy this node's Claude Code and Codex transcripts to the LCM-X hub (only the new bytes).
+
+Runs from the plugins' hooks (``--background``: returns at once) and from a timer every 5 minutes. Stdlib only,
+Python 3.9+. Settings: ``~/.config/lcmx-hub/node.env`` (``LCMX_HUB_HOST``, ``LCMX_HUB_USER`` default ``lcmx``,
+``LCMX_HUB_KEY`` the node's own SSH key, optional ``LCMX_HUB_PORT``). The hub's SSH entry point accepts only
+``state``, ``push``, ``recall`` and ``context`` for this node's key. ``LCMX_HUB_EXCLUDE``: comma-separated globs on the
+relative path (``claude/projects/<project>/...``, ``codex/sessions/...``) that are never sent. ``--dry-run`` prints
+what the next sync would send.
+
+For each file: missing on the hub -> send it whole; the hub's copy is a prefix (same first bytes) -> send the new
+bytes; anything else -> send it whole again (the hub reads by entry key, so nothing is stored twice).
+
+Only turns from now on: the first run writes ``~/.cache/lcmx-hub/baseline-v2.json`` with the size of every
+file that exists at that moment. The hub never gets those bytes; it gets only what a file grows after it (a session that
+continues sends its new turns), and every new file whole. Each file's copy on the hub starts at its baseline offset.
+A version 1 baseline (``baseline.json``, a list of sessions, written by older node scripts) is converted once into the new file: a file of a
+listed session starts at its first line written after the baseline time. ``baseline.json`` stays unchanged, so an older
+script that still runs keeps reading its session list (it must never read the new format: it would send everything). ``LCMX_HUB_HISTORY=all`` sends all history.
+"""
+import fcntl
+import fnmatch
+import hashlib
+import json
+import os
+from datetime import datetime, timezone
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+CHUNK = 8 * 1024 * 1024
+HOME = Path.home()
+CONFIG = Path(os.environ.get("LCMX_HUB_CONFIG", str(HOME / ".config" / "lcmx-hub" / "node.env")))
+STATE_DIR = HOME / ".cache" / "lcmx-hub"
+BASELINE = STATE_DIR / "baseline-v2.json"
+BASELINE_V1 = STATE_DIR / "baseline.json"  # older scripts read only this file; never rewrite it (an older timer may still run)
+
+
+def settings():
+    values = {}
+    if CONFIG.is_file():
+        for line in CONFIG.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                key, value = line.split("=", 1)
+                values[key.strip()] = value.strip().strip('"').strip("'")
+    for key in ("LCMX_HUB_HOST", "LCMX_HUB_USER", "LCMX_HUB_KEY", "LCMX_HUB_PORT", "LCMX_HUB_EXCLUDE"):
+        if os.environ.get(key):
+            values[key] = os.environ[key]
+    return values
+
+
+def last_json(text):
+    """The hub's answer is its last JSON line; a host may print a login banner before it."""
+    for line in reversed((text or "").splitlines()):
+        line = line.strip()
+        if line.startswith("{"):
+            return json.loads(line)
+    return {}
+
+
+def ssh_command(values, verb):
+    host = values.get("LCMX_HUB_HOST")
+    if not host:
+        raise SystemExit("lcmx_sync: LCMX_HUB_HOST is not set (" + str(CONFIG) + ")")
+    command = ["ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10"]
+    if values.get("LCMX_HUB_KEY"):
+        command += ["-i", os.path.expanduser(values["LCMX_HUB_KEY"]), "-o", "IdentitiesOnly=yes"]
+    if values.get("LCMX_HUB_PORT"):
+        command += ["-p", values["LCMX_HUB_PORT"]]
+    return command + [values.get("LCMX_HUB_USER", "lcmx") + "@" + host, verb]
+
+
+def local_files():
+    """(relative path on the hub, local path) for every transcript and saved tool output."""
+    claude = Path(os.environ.get("CLAUDE_CONFIG_DIR") or str(HOME / ".claude")).expanduser() / "projects"
+    codex = Path(os.environ.get("CODEX_HOME") or str(HOME / ".codex")).expanduser() / "sessions"
+    if claude.is_dir():
+        for path in claude.rglob("*"):
+            if path.is_file() and not path.is_symlink():
+                rel = path.relative_to(claude).as_posix()
+                if rel.endswith(".jsonl") or "/tool-results/" in "/" + rel:
+                    yield "claude/projects/" + rel, path
+    if codex.is_dir():
+        for path in codex.rglob("rollout-*.jsonl"):
+            if path.is_file() and not path.is_symlink():
+                yield "codex/sessions/" + path.relative_to(codex).as_posix(), path
+
+
+def session_of(rel):
+    """The session a file belongs to: a Claude Code transcript, its subagents and saved outputs share one; a Codex
+    rollout file is its own."""
+    parts = rel.split("/")
+    if rel.startswith("claude/projects/") and len(parts) >= 4:
+        return "/".join(parts[:3] + [parts[3][:-6] if parts[3].endswith(".jsonl") else parts[3]])
+    return rel
+
+
+def line_floor(path, size):
+    """The offset just after the last line end at or before ``size`` (0 when there is none)."""
+    with open(str(path), "rb") as handle:
+        position = size
+        while position > 0:
+            start = max(0, position - 65536)
+            handle.seek(start)
+            block = handle.read(position - start)
+            index = block.rfind(b"\n")
+            if index >= 0:
+                return start + index + 1
+            position = start
+    return 0
+
+
+def parse_time(value):
+    """An ISO 8601 time as epoch seconds (``Z``, offsets and up to 9 fraction digits), or None."""
+    if not isinstance(value, str) or len(value) < 19:
+        return None
+    text = value.strip().replace("Z", "+00:00")
+    if "." in text[19:]:
+        head, rest = text[:19], text[20:]
+        count = 0
+        while count < len(rest) and rest[count].isdigit():
+            count += 1
+        digits, zone = rest[:count], rest[count:]
+        text = head + "." + (digits[:6] or "0").ljust(6, "0") + zone
+    try:
+        moment = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.timestamp()
+
+
+def first_line_after(path, created):
+    """The offset of the first complete line whose own ``timestamp`` is at or after ``created``; the end of the last
+    complete line when there is none."""
+    offset = 0
+    with open(str(path), "rb") as handle:
+        for line in handle:
+            if not line.endswith(b"\n"):
+                break
+            try:
+                moment = parse_time(json.loads(line).get("timestamp"))
+            except (ValueError, AttributeError):
+                moment = None
+            if moment is not None and moment >= created:
+                return offset
+            offset += len(line)
+    return offset
+
+
+def baseline_offset(rel, path):
+    size = path.stat().st_size
+    return line_floor(path, size) if rel.endswith(".jsonl") else size
+
+
+def baseline():
+    """``{rel: offset}`` for the files that existed before this node joined the hub (the hub gets only their bytes
+    after that offset), or None when all history is sent."""
+    if os.environ.get("LCMX_HUB_HISTORY") == "all":
+        return None
+    if BASELINE.is_file():
+        data = json.loads(BASELINE.read_text(encoding="utf-8"))
+        return {rel: int(offset) for rel, offset in data.get("files", {}).items()}
+    data = json.loads(BASELINE_V1.read_text(encoding="utf-8")) if BASELINE_V1.is_file() else None
+    files = {}
+    if data is None:
+        created = time.time()
+        for rel, path in local_files():
+            files[rel] = baseline_offset(rel, path)
+    else:  # version 1: sessions that are never sent; keep their history back, send their new turns
+        created = float(data.get("created") or 0)
+        old = set(data.get("sessions", []))
+        for rel, path in local_files():
+            if session_of(rel) not in old:
+                continue
+            if rel.endswith(".jsonl"):
+                files[rel] = first_line_after(path, created)
+            elif path.stat().st_mtime < created:
+                files[rel] = path.stat().st_size
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    record = {"version": 2, "created": created, "files": files}
+    if data is not None:
+        record["converted_from_version_1_at"] = time.time()
+    temporary = BASELINE.with_suffix(".tmp")
+    temporary.write_text(json.dumps(record), encoding="utf-8")
+    os.replace(str(temporary), str(BASELINE))
+    return files
+
+
+def head(path, start, length):
+    with open(str(path), "rb") as handle:
+        handle.seek(start)
+        return hashlib.sha256(handle.read(length)).hexdigest()
+
+
+def excluded(rel, patterns):
+    """True when ``rel`` (for example ``claude/projects/-Users-mia-agents-x-work/s.jsonl``) matches a pattern of
+    ``LCMX_HUB_EXCLUDE`` (comma-separated globs on that path; ``*`` also matches ``/``)."""
+    return any(fnmatch.fnmatchcase(rel, pattern) for pattern in patterns)
+
+
+def exclude_patterns(values):
+    return [item.strip() for item in (values.get("LCMX_HUB_EXCLUDE") or "").split(",") if item.strip()]
+
+
+def plan(remote, bases=None, exclude=()):
+    """(rel, path, base, offset, replace) for every file the hub lacks or has only in part. The hub's copy of a file is
+    its bytes from ``base`` on (the baseline offset); ``offset`` counts from there. Files matching ``exclude`` are
+    never sent (for example agent workspaces that are not dev sessions)."""
+    for rel, path in local_files():
+        if exclude and excluded(rel, exclude):
+            continue
+        base = (bases or {}).get(rel, 0)
+        size = path.stat().st_size
+        if size < base:
+            continue  # rewritten below the baseline: never send the old history
+        view = size - base
+        have = remote.get(rel)
+        if have is None:
+            if view:
+                yield rel, path, base, 0, True
+        elif have["size"] == view and have["head"] == head(path, base, min(view, 4096)):
+            continue
+        elif have["size"] < view and have["head"] == head(path, base, min(have["size"], 4096)):
+            yield rel, path, base, have["size"], False
+        else:
+            yield rel, path, base, 0, True
+
+
+def push_frames(todo, report=None):
+    """The push protocol: per chunk a JSON header line and its bytes (the done frame is the caller's)."""
+    for rel, path, base, offset, replace in todo:
+        with open(str(path), "rb") as handle:
+            handle.seek(base + offset)
+            first = True
+            while True:
+                data = handle.read(CHUNK)
+                if not data and not first:
+                    break
+                frame = {"path": rel, "offset": offset, "length": len(data), "replace": replace and first}
+                if report is not None:
+                    report["bytes"] += len(data)
+                yield json.dumps(frame).encode() + b"\n" + data
+                offset += len(data)
+                first = False
+                if len(data) < CHUNK:
+                    break
+
+
+def sync(quiet=False):
+    values = settings()
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    lock = open(str(STATE_DIR / "sync.lock"), "a")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return {"skipped": "another sync runs"}
+    state = subprocess.run(ssh_command(values, "state"), capture_output=True, text=True, timeout=120)
+    if state.returncode != 0:
+        raise SystemExit("lcmx_sync: hub state failed: " + state.stderr.strip()[-300:])
+    remote = last_json(state.stdout)
+    todo = list(plan(remote, baseline(), exclude_patterns(values)))
+    report = {"files": len(todo), "bytes": 0}
+    if todo:
+        push = subprocess.Popen(ssh_command(values, "push"), stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        for frame in push_frames(todo, report):
+            push.stdin.write(frame)
+        push.stdin.write(b'{"done": true}\n')
+        push.stdin.close()
+        out = push.stdout.read()
+        if push.wait(timeout=600) != 0:
+            raise SystemExit("lcmx_sync: hub push failed")
+        report["hub"] = last_json(out.decode("utf-8", "replace"))
+    (STATE_DIR / "last-sync.json").write_text(json.dumps({"at": time.time(), **report}), encoding="utf-8")
+    if not quiet:
+        print(json.dumps(report))
+    return report
+
+
+def dry_run():
+    """What the next sync would send, without sending (``--dry-run``): needs the hub's state only."""
+    values = settings()
+    state = subprocess.run(ssh_command(values, "state"), capture_output=True, text=True, timeout=120)
+    if state.returncode != 0:
+        raise SystemExit("lcmx_sync: hub state failed: " + state.stderr.strip()[-300:])
+    todo = list(plan(last_json(state.stdout), baseline(), exclude_patterns(values)))
+    for rel, path, base, offset, _replace in todo:
+        print(json.dumps({"path": rel, "bytes": path.stat().st_size - base - offset}))
+    print(json.dumps({"files": len(todo)}))
+    return 0
+
+
+def main(argv):
+    if "--dry-run" in argv:
+        return dry_run()
+    if "--background" in argv:
+        # From a hook: start a detached copy and return at once, so the session never waits.
+        subprocess.Popen([sys.executable, os.path.abspath(__file__), "--quiet"], stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        return 0
+    try:
+        sync(quiet="--quiet" in argv)
+    except SystemExit as error:
+        if "--quiet" not in argv:
+            raise
+        (STATE_DIR / "last-error.txt").write_text(str(error), encoding="utf-8")
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

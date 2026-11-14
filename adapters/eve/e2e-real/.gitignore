@@ -1,0 +1,5 @@
+node_modules/
+.eve/
+.lcmx-root/
+# the repo root ignores agent/ (Hermes); this is the Eve test agent
+!agent/

@@ -1,0 +1,49 @@
+{
+  "name": "lcmx-eve",
+  "version": "0.1.0",
+  "private": true,
+  "description": "LCM-X for Eve agents: the LCM-X engine (lossless store, summary DAG, all default lcm_* tools) behind an Eve memory slot, driven as Hermes drives it.",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "core",
+    "host/lcmx_eve_host.py",
+    "host/shim",
+    "host/requirements-fastembed.txt",
+    "writer/lcmx_eve_writer.py",
+    "README.md",
+    "INSTALL.md",
+    "!**/__pycache__",
+    "!**/*.pyc"
+  ],
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "vendor": "node scripts/vendor-core.mjs",
+    "prepack": "npm run build && node scripts/vendor-core.mjs",
+    "test": "npm run build && node --test test/*.test.mjs"
+  },
+  "peerDependencies": {
+    "eve": "1.0.0-rc.6",
+    "ai": "^7.0.137"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "eve": "1.0.0-rc.6",
+    "ai": "7.0.166",
+    "typescript": "7.0.2"
+  },
+  "bin": {
+    "lcmx-eve": "./dist/cli.js"
+  }
+}

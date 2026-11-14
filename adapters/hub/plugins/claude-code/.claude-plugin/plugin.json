@@ -1,0 +1,14 @@
+{
+  "name": "lcmx-hub",
+  "version": "0.1.0",
+  "description": "Shared LCM-X memory for coding agents: copies this node's sessions to the LCM-X hub, gives the agent the hub's recall tools (all nodes, all sessions), and adds LCM-X context at session start, after a compaction and (opt-in) for each prompt.",
+  "author": {
+    "name": "LCM-X contributors"
+  },
+  "license": "MIT",
+  "keywords": [
+    "memory",
+    "recall",
+    "lcm-x"
+  ]
+}

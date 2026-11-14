@@ -1,0 +1,13 @@
+{
+  "name": "lcm-x-hub",
+  "owner": {
+    "name": "LCM-X contributors"
+  },
+  "plugins": [
+    {
+      "name": "lcmx-hub",
+      "source": "./plugins/claude-code",
+      "description": "Shared LCM-X memory for coding agents"
+    }
+  ]
+}
