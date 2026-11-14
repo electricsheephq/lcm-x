@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Optional
 
 from .dag import SummaryDAG
+from .db_bootstrap import SQLITE_BUSY_TIMEOUT_MS
 from .host_uid import _is_fork_child
 from .ingest_protection import protect_messages_for_ingest
 from .lifecycle_state import LifecycleStateStore
@@ -19,6 +20,7 @@ from .maintenance_scheduler import _HOST_ROW_RECOVERY_SCHEDULER
 from .message_analysis import _tool_call_id, _tool_result_names
 from .reconcile import _commit_proof_identity_digest, _proof_user_identity
 from .session_patterns import build_session_match_keys, compile_session_patterns, matches_session_pattern
+from .sqlite_util import _is_ingest_busy_error
 from .store import MessageStore
 from .tokens import count_message_tokens
 
@@ -210,7 +212,8 @@ def _recover_candidate(engine_cls, config, home, db_path, state_path, conv, boun
         # Recovery can finish after an unload timeout. Its detached reader
         # only works on the established database and never bootstraps a file.
         store = det._store = MessageStore(
-            db_path, ingest_protection_config=config, hermes_home=home, existing_write_timeout_ms=1000,
+            db_path, ingest_protection_config=config, hermes_home=home,
+            existing_write_timeout_ms=SQLITE_BUSY_TIMEOUT_MS,
         )
         det._dag = SummaryDAG(db_path, existing_only=True)
         det._lifecycle = LifecycleStateStore(db_path, existing_only=True)
@@ -287,13 +290,16 @@ def _recover_candidate(engine_cls, config, home, db_path, state_path, conv, boun
         logger.info("LCM host-row recovery stored: candidate=%s rows=%d roles=%s",
                     hashlib.sha256(sid.encode()).hexdigest()[:12], len(ids),
                     " ".join(f"{r}={n}" for r, n in sorted(roles.items())))
-    except Exception:
+    except Exception as exc:
+        if _is_ingest_busy_error(exc):
+            raise
         _unproven(sid, "worker_error", 0)
     finally:
         det._close_storage()
 
 
 def _recover(engine_cls, config, home, db_path, state_path, conv, bound, platform, window, handle):
+    busy = False
     try:
         reason = _handle_reason(handle)
         patterns = [compile_session_patterns(config.ignore_session_patterns),
@@ -302,11 +308,18 @@ def _recover(engine_cls, config, home, db_path, state_path, conv, bound, platfor
             return any(matches_session_pattern(build_session_match_keys(sid, platform=pf), p)
                        for pf in {platform, source or platform} for p in patterns)
         for sid in _candidates(state_path, bound, handle, reason, filtered):
-            _recover_candidate(engine_cls, config, home, db_path, state_path, conv, bound, sid,
-                               platform, window, handle, reason)
-    except Exception:  # the host database was locked, missing or unreadable: counted, retried next process
+            try:
+                _recover_candidate(engine_cls, config, home, db_path, state_path, conv, bound, sid,
+                                   platform, window, handle, reason)
+            except sqlite3.Error as exc:
+                if not _is_ingest_busy_error(exc):
+                    raise
+                busy = True
+    except Exception as exc:
+        busy = busy or _is_ingest_busy_error(exc)
         _count("walk_error")
         logger.debug("LCM host-row recovery unavailable")
+    return busy
 
 
 class HostRowRecoveryMixin:
@@ -341,7 +354,9 @@ class HostRowRecoveryMixin:
                             if key in _SEEN:
                                 return
                             _SEEN.add(key)
-                    _recover(*args)
+                    if _recover(*args):
+                        with _LOCK:
+                            _SEEN.discard(key)
 
                 scheduled = (
                     owner.schedule_host_recovery(_HOST_ROW_RECOVERY_SCHEDULER, scheduler_key, job)

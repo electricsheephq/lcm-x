@@ -50,6 +50,7 @@ from .engine_registry import (
     ActiveEngineUseStatus,
     EngineUnloadGroup,
     EngineUnloadInProgress,
+    engine_unload_group,
     live_bound_session_ids,
     resolve_active_lcm_engine,  # noqa: F401  (re-exported: hosts import it from .engine)
     use_lcm_engine,
@@ -4663,11 +4664,25 @@ class LCMEngine(
                 "keep compression off on this fork"
             )
         with self._exclusive_lifecycle("rebind"):
+            if self._plugin_is_unloading():
+                starts = self._unload_group.retired_session_starts
+                native_path = getattr(session_db, "db_path", None)
+                if (starts is not None and native_path is not None
+                        and Path(native_path).resolve() == self._state_db_path().resolve()
+                        and self._session_id and self._session_id == self._foreground_session_id
+                        and session_id != self._session_id
+                        and not self._thread_context_stateless()
+                        and not self._thread_context_has_auxiliary_session(session_id)):
+                    if previous := getattr(self, "_retired_session_start", None):
+                        if starts.get(previous) is self:
+                            starts.pop(previous, None)
+                    self._retired_session_start = session_id
+                    starts[session_id] = self
+                return
             if session_db is not None:  # a call without a handle keeps the one already held
                 self._host_session_db = session_db
             if (
                 self._stable_use_closed
-                or self._plugin_is_unloading()
                 or not self._session_id
                 or session_id == self._session_id
                 or (
@@ -5149,6 +5164,13 @@ class LCMEngine(
         tail = dict(store=store, session_id=session_id, conversation_id=conversation_id,
                     hermes_home=self._hermes_home, view=messages)
         view = tail["view"] = self._cold_tail_ingest_view(tail)
+        if (view and not view[0].get("_compressed_summary")
+                and any(row.get("_compressed_summary") for row in view)):
+            first = dict(tail, view=view[:1])
+            if self._cold_tail_stored(first, stamps=True):
+                view = tail["view"] = [
+                    message for _, message in self._unwrap_retired_native_summaries(list(enumerate(view)))
+                ]
         covered = self._cold_tail_stored(tail, stamps=True)
         if covered is None:
             return None
@@ -5184,6 +5206,20 @@ class LCMEngine(
         return ids
 
     @staticmethod
+    def _unwrap_retired_native_summaries(rows):
+        if not any(message.get("_compressed_summary") for _, message in rows):
+            return rows
+        try:
+            from agent.context_compressor import ContextCompressor
+        except ImportError:
+            return rows
+        unwrap = getattr(ContextCompressor, "_strip_context_summary_handoff_message", None)
+        if not callable(unwrap):
+            return rows
+        return [(index, normalized) for index, message in rows if
+                (normalized := unwrap(message) if message.get("_compressed_summary") else message) is not None]
+
+    @staticmethod
     def _retired_tail_key(session_id, conversation_id):
         lane = json.dumps([session_id, conversation_id]).encode()
         return "retired_tail:" + hashlib.sha256(lane).hexdigest()
@@ -5195,6 +5231,10 @@ class LCMEngine(
             self._session_id, limit=len(messages) + 1, conversation_id=self._conversation_id,
         )
         kept = [(idx, row) for idx, row in enumerate(messages) if not self._cold_tail_ingest_drops(row)]
+        if stored and kept and not kept[0][1].get("_compressed_summary") and self._session_end_rows_equal(
+            stored[0], kept[0][1], session_id=self._session_id,
+        ):
+            kept = self._unwrap_retired_native_summaries(kept)
         for row, (_, message) in zip(stored, kept):
             if not self._session_end_rows_equal(row, message, session_id=self._session_id):
                 return None
@@ -5209,7 +5249,7 @@ class LCMEngine(
         cursor = kept[len(stored) - 1][0] + 1
         return cursor, True
 
-    def _flush_retired_delegate_child(self, session_id, messages, platform):
+    def _flush_retired_delegate_child(self, session_id, messages, platform, *, retry_busy=False):
         """Persist late delegated rows only when the existing store proves its lineage."""
         old_store = self.__dict__.get("_store")
         if (not messages or old_store is None or str(old_store.db_path) == ":memory:"
@@ -5239,7 +5279,9 @@ class LCMEngine(
                 if stored:
                     _aux_session._DELEGATE_RESUME_BOUNDARIES.pop(key, None)
                 return True
-        except Exception:
+        except Exception as exc:
+            if retry_busy and _is_ingest_busy_error(exc):
+                return _aux_session.LIVE_STORE_RETRY
             logger.debug("LCM retired delegated-child tail write failed", exc_info=True)
             return False
 
@@ -5263,6 +5305,8 @@ class LCMEngine(
                 with self._open_retired_store(old_store) as store:
                     if append(store) is not None:
                         return True
+                    if self._replay_retired_projection(store, session_id, messages):
+                        return True
             except Exception:
                 logger.debug("LCM retired session-end tail write failed", exc_info=True)
         if warn:
@@ -5271,6 +5315,28 @@ class LCMEngine(
                 "final messages may be absent from the plugin-local store supplied_rows=%d", len(messages),
             )
         return False
+
+    def _replay_retired_projection(self, store, session_id, messages):
+        """Replay a proven compacted view using temporary, existing-only connections."""
+        if store.read_metadata_json("compaction_commit_proof:" + session_id) is None:
+            return False
+        writer = self._clone_for_agent()
+        writer._discard_prepared_leaves = lambda: None
+        try:
+            writer._dag = SummaryDAG(store.db_path, existing_only=True)
+            writer._lifecycle = LifecycleStateStore(store.db_path, existing_only=True)
+            writer._store = store
+            writer._storage_ready = True
+            writer._apply_session_start_metadata(session_id, {"platform": self._session_platform})
+            writer._conversation_id = self._conversation_id
+            writer._reload_lane_guard = True
+            writer._ingest_cursor_needs_reconcile = True
+            writer._ingest_messages(messages, no_view=True, retired_projection=True)
+            return True
+        finally:
+            # The enclosing retired-store context owns this connection.
+            writer.__dict__.pop("_store", None)
+            writer._close_storage()
 
     def _unattached_reload_lane(self, session_id, conversation_id, platform):
         """Find one durable lane when an older host omits its compressor."""
@@ -5286,6 +5352,23 @@ class LCMEngine(
             return None
         return lanes[0][0]
 
+    def _confirms_retired_cli_reset(self, session_id, platform):
+        if platform != "cli" or self._session_platform != "cli":
+            return False
+        try:
+            path = self._state_db_path().resolve()
+            with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=0.05)) as conn:
+                return conn.execute(
+                    """SELECT 1 FROM sessions AS old JOIN sessions AS new ON new.id = ?
+                    WHERE old.id = ? AND old.end_reason = 'new_session'
+                      AND new.source = 'cli' AND new.parent_session_id IS NULL
+                      AND new.started_at >= old.ended_at""",
+                    (session_id, self._session_id),
+                ).fetchone() is not None
+        except sqlite3.Error:
+            logger.debug("LCM could not verify the retired engine's CLI reset", exc_info=True)
+            return False
+
     def _ingest_reload_lane(self, session_id, conversation_id, messages, platform):
         """Replay through a scoped clone without changing durable ownership."""
         self._apply_session_start_metadata(session_id, {"platform": platform})
@@ -5296,6 +5379,25 @@ class LCMEngine(
             return False
         self._ingest_messages(messages)
         return True
+
+    def _reload_singleton_cursor(self, messages):
+        # Only the reload hook supplies a full view and a verified current
+        # lane. Delta ingest must still preserve an ambiguous singleton.
+        first_kept = next(((idx, message) for idx, message in enumerate(messages)
+                           if not self._cold_tail_ingest_drops(message)), None)
+        if first_kept is None:
+            return None
+        idx, first = first_kept
+        occurrence = self._host_occurrence_metadata(first)
+        if first.get("_compressed_summary") or any(value is not None for value in occurrence.values()):
+            return None
+        rows = self._store.get_range(self._session_id, limit=2)
+        if len(rows) != 1 or rows[0]["conversation_id"] != self._conversation_id:
+            return None
+        saved = rows[0]
+        if _has_lossy_redacted_identity(self._message_replay_identity(saved, stored_row=True)):
+            return None
+        return idx + 1 if self._session_end_rows_equal(saved, first, session_id=self._session_id) else None
 
     def _on_session_end_unlocked(
         self,
@@ -6047,6 +6149,8 @@ class LCMEngine(
         return _disabled_tool_names()
 
     def handle_tool_call(self, name: str, args: Dict[str, Any], **kwargs) -> str:
+        if engine_unload_group(self) is None:
+            return LCMEngine._handle_tool_call(self, name, args, **kwargs)
         # Registered hooks that already hold a stable lease are already admitted.
         if self._stable_use_owner_thread == threading.get_ident():
             return self._handle_tool_call(name, args, **kwargs)
@@ -7605,6 +7709,7 @@ class LCMEngine(
         allow_session_end_replay_proof: bool = False,
         no_view: bool = False,
         retried_tail: Dict[str, Any] | None = None,
+        retired_projection: bool = False,
     ) -> List[Dict[str, Any]]:
         """Persist new messages to the store.
 
@@ -7708,6 +7813,16 @@ class LCMEngine(
                             ).fetchone()
                             if current is None or current[0] != self._session_id:
                                 raise RuntimeError("LCM reload lane is no longer current")
+                            if retired_projection:
+                                mixed_lanes = self._store.connection.execute(
+                                    "SELECT 1 FROM messages WHERE session_id = ? AND conversation_id IS NOT ? LIMIT 1",
+                                    (self._session_id, self._conversation_id),
+                                ).fetchone()
+                                if mixed_lanes or self._cursor_from_durable_commit_proof(messages) is None:
+                                    raise RuntimeError("LCM retired view no longer matches its durable projection")
+                            elif (singleton := self._reload_singleton_cursor(messages)) is not None:
+                                self._ingest_cursor = singleton
+                                self._ingest_cursor_needs_reconcile = False
                         retired_key, retired_tail = None, None
                         if self._unload_group is not None:
                             retired_key = self._retired_tail_key(self._session_id, self._conversation_id)
@@ -7740,6 +7855,9 @@ class LCMEngine(
                         if self._ingest_ledger_attempt is not None:
                             self._write_ingest_ledger(self._ingest_ledger_attempt, after_commit, attribution)
                         self._link_stored_todo_replays(messages, prepared.get("stored_at", {}))
+                        if retired_projection and (stored := prepared.get("stored_at")):
+                            key = self._retired_tail_key(self._session_id, self._conversation_id)
+                            self._store.write_metadata_json([key], json.dumps(max(stored.values())))
                         if retired_prefix is not None and retired_prefix[1]:
                             after_commit.append(lambda: setattr(
                                 self, "_seen_retired_tail", (self._store, retired_key, retired_tail),

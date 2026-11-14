@@ -10,6 +10,7 @@ from collections import Counter
 from contextlib import closing
 from pathlib import Path
 
+from .db_bootstrap import SQLITE_BUSY_TIMEOUT_MS
 from .engine_registry import live_bound_session_ids
 from .host_row_recovery import _valid_suffix
 from .host_uid import _is_fork_child
@@ -17,6 +18,7 @@ from .ingest_protection import protect_messages_for_ingest
 from .maintenance_scheduler import _HOST_ROW_RECOVERY_SCHEDULER
 from .message_analysis import _tool_call_id, _tool_result_names
 from .session_patterns import build_session_match_keys, compile_session_patterns, matches_session_pattern
+from .sqlite_util import _is_ingest_busy_error
 from .store import MessageStore
 from .tokens import count_message_tokens
 
@@ -65,7 +67,8 @@ def _store_candidate(engine_cls, config, home, db_path, row, messages, window):
     det._discard_prepared_leaves = lambda: None
     try:
         store = det._store = MessageStore(
-            db_path, ingest_protection_config=config, hermes_home=home, existing_write_timeout_ms=1000,
+            db_path, ingest_protection_config=config, hermes_home=home,
+            existing_write_timeout_ms=SQLITE_BUSY_TIMEOUT_MS,
         )
         det._storage_ready = True
         if Path(store.db_path).resolve() != Path(db_path):
@@ -102,9 +105,10 @@ def _store_candidate(engine_cls, config, home, db_path, row, messages, window):
 
 
 def _catch_up(engine_cls, config, home, db_path, state_path, bound, platform, window, handle, profile, bind_time):
+    busy = False
     try:
         database = Path(db_path).resolve().as_uri() + '?mode=rw'
-        with closing(sqlite3.connect(database, uri=True, timeout=1.0)) as store, closing(sqlite3.connect(
+        with closing(sqlite3.connect(database, uri=True, timeout=SQLITE_BUSY_TIMEOUT_MS / 1000)) as store, closing(sqlite3.connect(
                 Path(state_path).resolve().as_uri() + '?mode=ro', uri=True, timeout=1.0)) as host:
             marker_key = 'unended_catchup_since:' + hashlib.sha256(home.encode()).hexdigest()[:16]
             key = (str(Path(db_path).resolve()), home)
@@ -167,12 +171,15 @@ def _catch_up(engine_cls, config, home, db_path, state_path, bound, platform, wi
                         stored += bool(_store_candidate(engine_cls, config, home, db_path, row, messages, window))
                         if stored >= 16:
                             break
-                except Exception:
+                except Exception as exc:
+                    busy = busy or _is_ingest_busy_error(exc)
                     _count('worker_error')
                     logger.debug('LCM unended catch-up candidate failed', exc_info=True)
-    except Exception:
+    except Exception as exc:
+        busy = busy or _is_ingest_busy_error(exc)
         _count('worker_error')
         logger.debug('LCM unended catch-up unavailable', exc_info=True)
+    return busy
 
 
 class UnendedCatchupMixin:
@@ -196,13 +203,17 @@ class UnendedCatchupMixin:
                         self._session_platform, self.context_length, self._host_session_db, self._entity_profile_key(db_path), now)
                 scheduler_key = tuple('unended-catchup:' + hashlib.sha256(k.encode()).hexdigest()[:16] for k in key)
                 def job():
+                    started = now
                     if owner is not None:
                         with _LOCK:
                             started = _now()
                             if started - _SEEN.get(key, float('-inf')) < 600:
                                 return
                             _SEEN[key] = started
-                    _catch_up(*args)
+                    if _catch_up(*args):
+                        with _LOCK:
+                            if _SEEN.get(key) == started:
+                                _SEEN.pop(key)
 
                 scheduled = (
                     owner.schedule_host_recovery(_HOST_ROW_RECOVERY_SCHEDULER, scheduler_key, job)

@@ -26,6 +26,7 @@ from functools import wraps
 from typing import Any, Callable, Dict, List, Literal, Optional
 
 from .dag import SummaryNode
+from .engine_registry import engine_unload_group
 from .escalation import (
     _THRESHOLD_FULL_SWEEP_MIN_CALL_SECONDS,
     ForegroundBudget,
@@ -1614,7 +1615,7 @@ class CompactionMixin:
             return None
         db_path, conversation_id = str(self._store.db_path), self._conversation_id
         state = self._lifecycle.get_by_conversation(conversation_id)
-        chain = leaf_prep.ready_chain(db_path, conversation_id, int(getattr(state, "current_frontier_store_id", 0) or 0), self._unload_group)
+        chain = leaf_prep.ready_chain(db_path, conversation_id, int(getattr(state, "current_frontier_store_id", 0) or 0), engine_unload_group(self))
         bounds = leaf_prep.levels(self.threshold_tokens, self.context_length,
                                   self._working_leaf_chunk_tokens(raw_tokens_outside_tail))
         if not chain or bounds is None or estimated_active_tokens <= bounds[1]:
@@ -1685,8 +1686,9 @@ class CompactionMixin:
     def _reject_prepared_chain(self, leaf, reason: str) -> None:
         """#787: the first rejection ends the chain from ``leaf`` on, each leaf counted under ``reason``."""
         db_path, conversation_id = str(self._store.db_path), str(self._conversation_id or "")
-        chain = leaf_prep.ready_chain(db_path, conversation_id, leaf.start_frontier, self._unload_group) or [leaf]
-        leaf_prep.reject(db_path, conversation_id, chain, reason, self._unload_group)
+        owner = engine_unload_group(self)
+        chain = leaf_prep.ready_chain(db_path, conversation_id, leaf.start_frontier, owner) or [leaf]
+        leaf_prep.reject(db_path, conversation_id, chain, reason, owner)
         logger.info("LCM prepared leaf promotion rejected: reason=%s leaves=%d", reason, len(chain))
 
     def _prepared_leaf_summary(self, leaf):
@@ -3222,7 +3224,7 @@ class CompactionMixin:
         self._clear_persisted_no_progress_hold()
         state.leaf_passes += 1
         if leaf.prepared is not None:  # #787: a promoted pass spends no summariser pass
-            leaf_prep.promoted(str(self._store.db_path), self._conversation_id, leaf.prepared, self._unload_group)
+            leaf_prep.promoted(str(self._store.db_path), self._conversation_id, leaf.prepared, engine_unload_group(self))
             state.promoted_leaves, state.max_leaf_passes = state.promoted_leaves + 1, state.max_leaf_passes + 1
             state.prep_freed += count_messages_tokens(leaf.source_lookup_chunk) - count_tokens(leaf.summary_text)
         state.level3_leaves += leaf.level == 3

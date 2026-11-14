@@ -197,13 +197,15 @@ class SummaryDAG:
         open_connection(ConnectionPolicy(
             database=self.db_path.resolve().as_uri() + "?mode=rw" if existing_only else str(self.db_path),
             connect_kwargs=(
-                ("timeout", 5.0), ("check_same_thread", False), ("isolation_level", "IMMEDIATE"), ("uri", existing_only),
-            ),
+                ("timeout", 5.0), ("check_same_thread", False), ("isolation_level", "IMMEDIATE"),
+            ) + ((("uri", True),) if existing_only else ()),
             before_row_factory=(refuse_schema_version_too_new, configure_connection),
             row_factory=None,
             on_open=lambda conn: setattr(self, "_conn", conn),
             on_setup_error=None,
         ))
+        if existing_only:
+            return
         self._conn.executescript("""
             CREATE TABLE IF NOT EXISTS summary_nodes (
                 node_id INTEGER PRIMARY KEY AUTOINCREMENT,

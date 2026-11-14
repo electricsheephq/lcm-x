@@ -113,8 +113,8 @@ class LifecycleStateStore:
         open_connection(ConnectionPolicy(
             database=self.db_path.resolve().as_uri() + "?mode=rw" if existing_only else str(self.db_path),
             connect_kwargs=(
-                ("timeout", 30.0), ("check_same_thread", False), ("isolation_level", None), ("uri", existing_only),
-            ),
+                ("timeout", 30.0), ("check_same_thread", False), ("isolation_level", None),
+            ) + ((("uri", True),) if existing_only else ()),
             before_row_factory=(refuse_schema_version_too_new, configure_connection),
             row_factory=sqlite3.Row,
             on_open=lambda conn: setattr(self, "_conn", conn),

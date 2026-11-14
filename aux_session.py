@@ -900,7 +900,7 @@ def warn_live_child_moved(session_id: str) -> None:
     )
 
 
-def run_live_child_store(session_id: str, operation, rows: int = 0, *, owner=None) -> None:
+def run_live_child_store(session_id: str, operation, rows: int = 0, *, owner=None, retired_operation=None) -> None:
     """Run ``operation`` on a worker thread and wait at most ``_LIVE_CHILD_STORE_JOIN_S`` (#2482); never raises.
 
     A host hook must stay far below its own timeout, and a store can wait on SQLite past the lock bounds. One store
@@ -909,14 +909,10 @@ def run_live_child_store(session_id: str, operation, rows: int = 0, *, owner=Non
     """
     with _LIVE_CHILD_LOCK:
         if owner is not None and owner.closing.is_set():
-            _count("live_store_refused_on_unload")
-            logger.warning(
-                "LCM delegated-child store refused during plugin unload: child=%s has up to %d "
-                "handed-over row(s) not stored",
-                hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:12],
-                max(0, rows - _LIVE_CHILD_STORED_ROWS.get(session_id, 0)),
-            )
-            return
+            if retired_operation is None:
+                _warn_live_child_unstored(session_id, rows, "refused during plugin unload")
+                return
+            operation = retired_operation
         _LIVE_CHILD_HANDED_ROWS[session_id] = rows
         if session_id in _LIVE_CHILD_STORES_IN_FLIGHT:
             _LIVE_CHILD_PENDING[session_id] = (operation, rows, owner)
@@ -955,6 +951,9 @@ def run_live_child_store(session_id: str, operation, rows: int = 0, *, owner=Non
                         superseded = session_id in _LIVE_CHILD_PENDING
                     closing = current[2] is not None and current[2].closing.is_set()
                     if stored != LIVE_STORE_RETRY or superseded:
+                        if closing and not superseded:
+                            with _LIVE_CHILD_LOCK:
+                                _warn_live_child_unstored(session_id, current[1], "could not verify retired lineage")
                         break
                     if not closing and attempt >= _LIVE_CHILD_STORE_RETRIES:
                         break
@@ -1000,6 +999,14 @@ def run_live_child_store(session_id: str, operation, rows: int = 0, *, owner=Non
         logger.debug("LCM live delegated-child store not started: %s", exc)
         return
     worker.join(_LIVE_CHILD_STORE_JOIN_S)
+
+
+def _warn_live_child_unstored(session_id, rows, reason):
+    logger.warning(
+        "LCM delegated-child store %s: child=%s has up to %d handed-over row(s) not stored",
+        reason, hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:12],
+        max(0, rows - _LIVE_CHILD_STORED_ROWS.get(session_id, 0)),
+    )
 
 
 def drain_live_child_stores(timeout: float | None, *, owner=None) -> bool:

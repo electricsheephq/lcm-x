@@ -44,6 +44,7 @@ class EngineUnloadGroup:
         self._rollup_owners: set[object] = set()
         self._retired_embedding_owners: set[object] = set()
         self._deferred = weakref.WeakSet()
+        self.retired_session_starts: weakref.WeakValueDictionary | None = None
 
     def start_worker(self, worker: threading.Thread, *, continuing: bool = False) -> bool:
         with self.lock:

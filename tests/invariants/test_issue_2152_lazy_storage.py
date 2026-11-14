@@ -56,15 +56,14 @@ def preflight(tmp_path, monkeypatch):
     monkeypatch.setattr(LCMEngine, "_bind_storage", bind_spy)
 
     def register(*, inactive=False, abandoned=False, supports_unload=False, profile_scoped=True,
-                 on_publish=None, on_unload=None):
+                 on_publish=None, on_unload=None, manager=None):
         ctx = SimpleNamespace(
-            _manager=SimpleNamespace(_context_engine=object() if inactive else None),
+            _manager=manager if manager is not None else SimpleNamespace(_context_engine=object() if inactive else None),
             _load_abandoned=abandoned,
             context_engine_tool_handlers_receive_messages=True,
             hooks={}, tools={}, commands={},
         )
-        if profile_scoped:
-            ctx._manager.home_path = home
+        ctx._manager.home_path = home if profile_scoped else None
 
         def take_slot(engine):
             engines.append(engine)
@@ -230,6 +229,75 @@ def _durable_messages(path, session):
         ).fetchall()
 
 
+def test_first_profile_scoped_callback_can_bind_a_cold_unload_capable_registration(preflight):
+    _, ctx = preflight.register(supports_unload=True)
+    hook = ctx.hooks["post_llm_call"]
+    view = []
+    try:
+        for turn in range(3):
+            view.extend([{"role": "user", "content": f"question {turn}"},
+                         {"role": "assistant", "content": f"answer {turn}"}])
+            hook(session_id="first-turn", platform="cli", conversation_history=list(view))
+            assert _durable_messages(preflight.home / "lcm.db", "first-turn") == [
+                (row["role"], row["content"]) for row in view
+            ]
+    finally:
+        ctx.unload_callbacks[0]()
+
+
+def test_reloaded_callback_with_timestamp_free_single_row_prefix_is_idempotent(preflight):
+    prototype, old_ctx = preflight.register(supports_unload=True)
+    clone = prototype.clone_for_agent()
+    session = "small-reload"
+    clone.on_session_start(session, platform="cli")
+    prefix = [{"role": "user", "content": "one original question"}]
+    clone.ingest(prefix)
+    old_ctx.unload_callbacks[0]()
+    _, ctx = preflight.register(supports_unload=True, manager=old_ctx._manager)
+    view = prefix + [{"role": "assistant", "content": "one answer"}]
+    try:
+        for _ in range(3):
+            ctx.hooks["post_llm_call"](session_id=session, platform="cli", conversation_history=view)
+            assert _durable_messages(preflight.home / "lcm.db", session) == [
+                (row["role"], row["content"]) for row in view
+            ]
+    finally:
+        ctx.unload_callbacks[0]()
+
+
+def test_retained_cli_reset_starts_a_new_lane_in_the_current_registration(preflight):
+    prototype, old_ctx = preflight.register(supports_unload=True)
+    retained = prototype.clone_for_agent()
+    retained.on_session_start("original", platform="cli")
+    first = [{"role": "user", "content": "before /new"}, {"role": "assistant", "content": "first answer"}]
+    retained.ingest(first)
+    old_ctx.unload_callbacks[0]()
+    _, ctx = preflight.register(supports_unload=True, manager=old_ctx._manager)
+    host_path = preflight.home / "state.db"
+    with closing(sqlite3.connect(host_path)) as conn:
+        conn.executescript("""
+            CREATE TABLE sessions (id TEXT, source TEXT, parent_session_id TEXT,
+                started_at REAL, ended_at REAL, end_reason TEXT);
+            INSERT INTO sessions VALUES ('original', 'cli', NULL, 1, 2, 'new_session');
+            INSERT INTO sessions VALUES ('fresh', 'cli', NULL, 3, NULL, NULL);
+            INSERT INTO sessions VALUES ('unrelated', 'cli', NULL, 4, NULL, NULL);
+        """)
+    retained.bind_session_state(SimpleNamespace(db_path=host_path), "fresh")
+    hook = ctx.hooks["post_llm_call"]
+    fresh = [{"role": "user", "content": "after /new"}, {"role": "assistant", "content": "fresh answer"}]
+    db = preflight.home / "lcm.db"
+    try:
+        hook(session_id="unrelated", platform="cli", conversation_history=fresh)
+        for _ in range(2):
+            hook(session_id="fresh", platform="cli", conversation_history=fresh)
+        assert _durable_messages(db, "unrelated") == []
+        assert _durable_messages(db, "original") == [(row["role"], row["content"]) for row in first]
+        assert _durable_messages(db, "fresh") == [(row["role"], row["content"]) for row in fresh]
+    finally:
+        ctx.unload_callbacks[0]()
+    db.unlink()
+
+
 @pytest.mark.parametrize("already_stored", [True, False])
 def test_late_session_end_after_unload_stores_suffix_once(preflight, already_stored):
     prototype, old_ctx = preflight.register(supports_unload=True)
@@ -339,7 +407,7 @@ def test_reloaded_hook_keeps_ingesting_for_two_retained_clones(preflight, passes
         ]
         clone.ingest(views[sid])
     old_ctx.unload_callbacks[0]()
-    _, current_ctx = preflight.register(supports_unload=True)
+    _, current_ctx = preflight.register(supports_unload=True, manager=old_ctx._manager)
     db = preflight.home / "lcm.db"
     try:
         for turn in range(2):
@@ -370,7 +438,7 @@ def test_reloaded_hook_stores_turn_while_old_engine_is_still_registered(prefligh
     initial = [{"role": "user", "content": "original prompt"}, {"role": "assistant", "content": "original answer"}]
     old.ingest(initial)
     history = initial + [{"role": "user", "content": "new prompt"}, {"role": "assistant", "content": "new answer"}]
-    _, replacement_ctx = preflight.register(supports_unload=True)
+    _, replacement_ctx = preflight.register(supports_unload=True, manager=old_ctx._manager)
     extra = {"context_compressor": old} if passes_compressor else {}
     db = preflight.home / "lcm.db"
     try:
@@ -411,7 +479,7 @@ def test_reloaded_hook_replays_compacted_second_lane(preflight, monkeypatch):
     assert second._last_compression_status == "compacted"
     assert projected[0]["content"].startswith(("[Recent Summary (", "[Session Arc Summary ("))
     old_ctx.unload_callbacks[0]()
-    _, ctx = preflight.register(supports_unload=True)
+    _, ctx = preflight.register(supports_unload=True, manager=old_ctx._manager)
     hook = ctx.hooks["post_llm_call"]
     fresh = [{"role": "user", "content": "new question"}, {"role": "assistant", "content": "new answer"}]
     try:
@@ -428,6 +496,41 @@ def test_reloaded_hook_replays_compacted_second_lane(preflight, monkeypatch):
         ctx.unload_callbacks[0]()
 
 
+def test_retired_projected_session_end_reconciles_current_writer(preflight, monkeypatch):
+    from hermes_lcm import escalation, tokens
+
+    monkeypatch.setenv("LCM_FRESH_TAIL_COUNT", "2")
+    monkeypatch.setenv("LCM_LEAF_CHUNK_TOKENS", "16")
+    monkeypatch.setattr(tokens, "_get_encoder", lambda: None)
+    monkeypatch.setattr(escalation, "_call_llm_for_summary", lambda *args, **kw: "Earlier turns retained.")
+    old, old_ctx = preflight.register(supports_unload=True)
+    retained = old.clone_for_agent()
+    session = "projected"
+    retained.on_session_start(session, platform="cli", context_length=200_000)
+    original = [
+        {"role": role, "content": f"{label} {message} " * 40}
+        for label in ("one", "two") for role, message in (("user", "question"), ("assistant", "answer"))
+    ]
+    retained.ingest(original)
+    projection = retained.compress(original, current_tokens=retained.threshold_tokens + 1, force=True)
+    assert retained._last_compression_status == "compacted"
+    old_ctx.unload_callbacks[0]()
+    current, ctx = preflight.register(supports_unload=True, manager=old_ctx._manager)
+    live = current.clone_for_agent()
+    live.on_session_start(session, platform="cli")
+    live.ingest(projection)
+    fresh = [{"role": "user", "content": "late question"}, {"role": "assistant", "content": "late answer"}]
+    db = preflight.home / "lcm.db"
+    try:
+        for _ in range(2):
+            retained.on_session_end(session, projection + fresh)
+        live.ingest(projection + fresh)
+        assert _durable_messages(db, session) == [(row["role"], row["content"]) for row in original + fresh]
+    finally:
+        ctx.unload_callbacks[0]()
+    db.unlink()
+
+
 @pytest.mark.parametrize("scoped_manager", [False, True], ids=["unscoped", "default-profile"])
 def test_reloaded_hook_cannot_cold_bind_a_foreign_session(preflight, tmp_path, caplog, scoped_manager):
     original, old_ctx = preflight.register(supports_unload=True)
@@ -439,7 +542,7 @@ def test_reloaded_hook_cannot_cold_bind_a_foreign_session(preflight, tmp_path, c
               {"role": "assistant", "content": "foreign answer"}]
     old.ingest(prefix)
     old_ctx.unload_callbacks[0]()
-    _, ctx = preflight.register(supports_unload=True, profile_scoped=scoped_manager)
+    _, ctx = preflight.register(supports_unload=True, profile_scoped=scoped_manager, manager=old_ctx._manager)
     history = prefix + [{"role": "user", "content": "next question"},
                         {"role": "assistant", "content": "next answer"}]
     ctx.hooks["post_llm_call"](session_id="foreign-session", conversation_id="foreign-lane",
@@ -468,7 +571,7 @@ def test_first_reloaded_hook_cannot_restore_a_finalized_binding(preflight):
     successor.on_session_start("current", platform="cli", conversation_id="moving-lane")
     successor.ingest([{"role": "user", "content": "current row"}])
     old_ctx.unload_callbacks[0]()
-    current, ctx = preflight.register(supports_unload=True)
+    current, ctx = preflight.register(supports_unload=True, manager=old_ctx._manager)
     try:
         ctx.hooks["post_llm_call"](
             session_id="previous", conversation_id="moving-lane", platform="cli",
@@ -485,10 +588,12 @@ def test_profile_scoped_hook_ignores_same_session_id_bound_in_another_home(
     preflight, tmp_path, monkeypatch, uses_home_override,
 ):
     if uses_home_override:
-        import hermes_constants
-
         monkeypatch.setenv("LCM_TEST_PROFILE_HOME", str(preflight.home))
-        monkeypatch.setattr(hermes_constants, "get_hermes_home_override", lambda: "$LCM_TEST_PROFILE_HOME")
+        hermes_constants = sys.modules.get("hermes_constants")
+        if hermes_constants is None:
+            hermes_constants = ModuleType("hermes_constants")
+            monkeypatch.setitem(sys.modules, "hermes_constants", hermes_constants)
+        monkeypatch.setattr(hermes_constants, "get_hermes_home_override", lambda: "$LCM_TEST_PROFILE_HOME", raising=False)
     prototype, ctx = preflight.register(supports_unload=True)
     local, foreign = prototype.clone_for_agent(), prototype.clone_for_agent()
     foreign_home = tmp_path / "other-profile"
@@ -523,7 +628,7 @@ def test_reloaded_hook_does_not_move_a_lane_back_after_rollover(preflight, monke
     live.ingest(prompt)
     retiring.ingest(prompt)
     old_ctx.unload_callbacks[0]()
-    current, ctx = preflight.register(supports_unload=True)
+    current, ctx = preflight.register(supports_unload=True, manager=old_ctx._manager)
     callback = ctx.hooks["post_llm_call"]
     callback(session_id="active", platform="cli", conversation_history=prompt)
     spawn = current.clone_for_agent
@@ -556,7 +661,7 @@ def test_scoped_replay_forwards_when_its_registration_unloads_before_clone(prefl
     prefix = [{"role": "user", "content": "first prompt"}, {"role": "assistant", "content": "first answer"}]
     old.ingest(prefix)
     original_ctx.unload_callbacks[0]()
-    interim, interim_ctx = preflight.register(supports_unload=True)
+    interim, interim_ctx = preflight.register(supports_unload=True, manager=original_ctx._manager)
     final, final_ctx = preflight.register(supports_unload=True)
     clone = interim.clone_for_agent
     transitions = []

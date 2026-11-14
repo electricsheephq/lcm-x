@@ -59,6 +59,9 @@ DIAGNOSTIC_ATTRIBUTES = frozenset({
     "_auxiliary_lineage_session_ids", "_auxiliary_session_ids", "_auxiliary_session_lock",
     "_diagnostic_engine_token", "_lcm_current_start_allows_bypass_lineage",
     "_session_diagnostic_logs", "_thread_context",
+    # Reload-only lifecycle state is verified by the separate pinned reload
+    # regressions. This trace records the resulting SQL and durable rows.
+    "_reload_lane_guard", "_seen_retired_tail", "_unload_group",
 })
 # FROZEN inventory, never generated from _ingest_messages at observation time.
 OBSERVED_ATTRIBUTES = frozenset({

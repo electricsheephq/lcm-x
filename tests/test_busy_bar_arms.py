@@ -738,16 +738,16 @@ def slow_pass(database, *args, **kwargs):
         return result
     return original_pass(database, *args, **kwargs)
 
-def retire(self, wait):
+def retire(self, wait, **kwargs):
     if mode == "slow":
         assert started.wait(10)
         retire_started.set()
-    result = original_retire(self, wait)
+    result = original_retire(self, wait, **kwargs)
     active_after_retirement.append(started.is_set() and not completed.is_set())
     return result
 
-def shutdown(self):
-    result = original_shutdown(self)
+def shutdown(self, **kwargs):
+    result = original_shutdown(self, **kwargs)
     if mode == "shutdown-raise":
         raise RuntimeError("injected shutdown failure")
     return result

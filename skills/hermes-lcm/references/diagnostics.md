@@ -27,7 +27,7 @@ When `/lcm` runs with session context, it compares the task-local session profil
 
 ## SQLite connections and file descriptors
 
-After a plugin reload, a completed-turn callback without a compressor needs a profile-scoped Hermes dispatch and an existing LCM session binding. If LCM cannot establish ownership, it warns and leaves the other profile's database alone. That turn can be absent from LCM even when Hermes still has it in its own session history.
+After a plugin reload, a completed-turn callback without a compressor needs a profile-scoped Hermes dispatch and an existing LCM session binding or a CLI `/new` that Hermes recorded for the retained agent. If LCM cannot establish ownership, it warns. That turn can be absent from LCM even when Hermes still has it in its own session history.
 
 If a delegated child's compaction proof cannot be committed, LCM keeps the child's input history and logs `could not preserve delegated compaction output proof`. This avoids replaying a new compacted view with older proof after reload.
 
