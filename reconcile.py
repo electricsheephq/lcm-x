@@ -1159,8 +1159,19 @@ class ReconcileMixin:
                                 session_id=session_id, conversation_id=conversation_id,
                             )
                             if key not in known:
+                                from .externalize import is_externalized_placeholder
+
                                 identities = []
                                 for row in legacy_tool_rows():
+                                    candidate_content = self._restore_ingest_payload_placeholders_in_content_identity(
+                                        normalize_content_value(row.get("content")) or "",
+                                        session_id=str(row.get("session_id") or key[0]),
+                                        **(dict(hermes_home=hermes_home) if hermes_home is not None else {}),
+                                    )
+                                    # A quoted reference must not stand for the whole stored row.
+                                    if (extract_externalized_ref(candidate_content)
+                                            and not is_externalized_placeholder(candidate_content)):
+                                        continue
                                     identity = self._message_replay_identity(row, stored_row=True, **target)
                                     if (not _has_lossy_sensitive_redaction(row.get("content") or "")
                                             and not _has_lossy_sensitive_redaction(identity[1])):

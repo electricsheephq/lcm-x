@@ -296,16 +296,47 @@ def test_distinct_recovered_body_with_literal_reference(replay_setup):
     assert [count for count, _, _ in records] == [9, 11, 13, 15, 18, 21, 23, 25], records
 
 
+def test_stored_body_with_literal_reference(replay_setup):
+    setup = replay_setup('temp_plain_lf', 'V1')
+    engine, _, _, _, body = setup
+    stored = engine._store.get_session_messages(SESSION, limit=100_000)[2]
+    ref = EXT.fullmatch(stored['content'])[1]
+    payload = reconcile_module.load_externalized_payload(
+        ref, config=engine._config, hermes_home=engine._hermes_home)
+    assert payload['content'] == body
+    assert not EXT.search(body)
+    content = f'DISTINCT_STORED_C\n[Externalized tool output: tool=dump; ref={ref}]'
+    with sqlite3.connect(engine._config.database_path) as conn:
+        conn.execute('UPDATE messages SET content=? WHERE store_id=?',
+                     (content, stored['store_id']))
+        for table in ('messages_fts', 'messages_fts_stem'):
+            conn.execute(f"INSERT INTO {table}({table}) VALUES('rebuild')")
+    records = _replay_literal_reference(setup)
+    print(f'STORED_LITERAL_REFERENCE records={records}')
+    # Main 7828784f, round-4 main-2703-r4-2.log, turns 1 through 8.
+    assert [count for count, _, _ in records] == [9, 11, 13, 15, 18, 21, 23, 25], records
+
+
 def test_distinct_recovered_body_with_literal_reference_load_fault(replay_setup, monkeypatch):
     setup = _literal_reference_setup(replay_setup)
     original = reconcile_module.load_externalized_payload
     faults = []
+    inspected_roles = []
 
     def fail_load(ref, **kwargs):
         # Fault the post-keep load of B's literal ref, leaving main's existing
         # durable-content loads and the recursive candidate comparison readable.
         caller = inspect.currentframe().f_back
         state = caller.f_locals
+        required = {'stored_row', 'msg', 'content', 'durable_content', 'stale_durable_content'}
+        if (caller.f_code.co_name == '_message_replay_identity'
+                and required <= state.keys()
+                and state['stored_row'] is False
+                and state['msg'].get('role') == 'tool'
+                and isinstance(state['content'], str)
+                and state['durable_content'] is None
+                and state['stale_durable_content'] is None):
+            inspected_roles.append(ref)
         host_body = (not state.get('stored_row', True)
                      and state.get('msg', {}).get('content') == setup[3]
                      and state.get('content') == setup[4]
@@ -318,7 +349,14 @@ def test_distinct_recovered_body_with_literal_reference_load_fault(replay_setup,
         return original(ref, **kwargs)
 
     monkeypatch.setattr(reconcile_module, 'load_externalized_payload', fail_load)
+    # Exercise the predicate against a real host marker frame. A reference in
+    # the marker itself reaches the existing load without the guarded keep.
+    path = Path(tempfile.tempdir) / 'hermes-results/call_distinct.txt'
+    control_marker = _marker(path, setup[4], preview=setup[4])
+    setup[0]._message_replay_identity({**setup[1][2], 'content': control_marker})
+    assert inspected_roles, 'fault predicate never inspected the expected host identity locals'
     records = _replay_literal_reference(setup)
-    print(f'LITERAL_REFERENCE_FAULT records={records} injected={len(faults)}')
+    print(f'LITERAL_REFERENCE_FAULT records={records} injected={len(faults)} '
+          f'inspected_host_frames={len(inspected_roles)}')
     assert [count for count, _, _ in records] == [9, 11, 13, 15, 18, 21, 23, 25], records
     assert not faults, 'the post-keep literal-reference load must be unreachable'
