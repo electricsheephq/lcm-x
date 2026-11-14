@@ -15,6 +15,7 @@ from .host_uid import _is_fork_child
 from .ingest_protection import protect_messages_for_ingest
 from .maintenance_scheduler import _HOST_ROW_RECOVERY_SCHEDULER
 from .message_analysis import _tool_call_id, _tool_result_names
+from .message_content import text_content_for_pattern_matching
 from .reconcile import _commit_proof_identity_digest, _proof_user_identity
 from .session_patterns import build_session_match_keys, compile_session_patterns, matches_session_pattern
 from .tokens import count_message_tokens
@@ -230,15 +231,51 @@ def _recover_candidate(engine_cls, config, home, db_path, state_path, conv, boun
             return _unproven(sid, "reader_error", 0)
         if _skip_on_tip_path(state_path, bound, handle, sid):
             return
+        try:
+            proof = det._durable_commit_proof_payload()
+        except Exception:
+            return _unproven(sid, "proof", len(messages))
         cursor = _strict_proof_cursor(det, messages)
         if cursor is None:
             return _unproven(sid, "proof", len(messages))
-        suffix = messages[cursor:]
+        # Content proves the carried position, but a changed stamp/uid is a
+        # new occurrence. Recover only those rows, in host order, before the
+        # suffix; rewinding wholesale would duplicate unchanged carried rows.
+        try:
+            metadata = det._remapped_output_metadata(messages, proof or {}, cursor)
+            indexes = sorted(index for index, previous in metadata.items()
+                             if det._host_occurrence_changed(messages[index], previous))
+            # A changed prefix row breaks the proof's contiguous continuation
+            # on resume. Require the anchor matcher to explain every carried
+            # row after the leading scaffold run, not just the changed rows.
+            if indexes:
+                lead = next((i for i in range(cursor)
+                             if not det._is_replayed_context_scaffold_message(messages[i])), cursor)
+                plan = det._identity_anchor_prematch(messages, messages, lead)
+                _, occurrences = det._occurrence_replay_identities(messages, proof)
+                # Matched tool siblings were withheld until the whole group matched.
+                anchored = set(plan["replayed"]) | (plan["matched"].keys() - plan["remainders"].keys())
+                anchored.difference_update(indexes)
+                for index in indexes:
+                    key = det._identity_anchor_view_key(messages[index])
+                    # Recovery will store this exact stamped occurrence; the
+                    # same matcher key must identify it on the next ingest.
+                    if (key is not None and key[0] is not None and key[1] == occurrences[index]
+                            and not det._is_ignored_active_replay_placeholder(
+                                messages[index], text_content_for_pattern_matching(messages[index].get("content")) or "")):
+                        anchored.add(index)
+                det._identity_anchor_tool_segments(messages, lead, anchored, plan["matched"])
+                if not set(range(lead, cursor)) <= anchored or not _valid_suffix(messages, indexes[0]):
+                    indexes = []
+        except Exception:
+            indexes = []  # Metadata selection must retain main's suffix recovery.
+        indexes.extend(range(cursor, len(messages)))
+        suffix = [messages[index] for index in indexes]
         if not suffix:
             _count("empty_suffix")
             logger.debug("LCM host-row recovery empty suffix")
             return
-        if not _valid_suffix(messages, cursor):
+        if not _valid_suffix(messages, indexes[0]):
             return _unproven(sid, "suffix_rejected", len(messages))
         if any(det._matches_ignore_message_patterns(m) for m in suffix):
             return _unproven(sid, "ignored_in_suffix", len(messages))
@@ -250,7 +287,7 @@ def _recover_candidate(engine_cls, config, home, db_path, state_path, conv, boun
         names = _tool_result_names(messages)  # file reads and payload writes stay outside the write lock
         protected = protect_messages_for_ingest(
             suffix, config=det._config, hermes_home=home, session_id=sid,
-            tool_name_hints=[names.get(cursor + i, "") for i in range(len(suffix))],
+            tool_name_hints=[names.get(index, "") for index in indexes],
             context_window_tokens=window,
         )
         with store.atomic(immediate=True):
@@ -261,7 +298,7 @@ def _recover_candidate(engine_cls, config, home, db_path, state_path, conv, boun
                     and reset[0] >= float(payload.get("created_at") or 0))):
                 return _unproven(sid, "raced", len(messages))
             checked = _strict_proof_cursor(det, messages)
-            if checked != cursor or len(messages[checked:]) != len(suffix):
+            if checked != cursor:
                 return _unproven(sid, "raced", len(messages))
             ids = store._append_protected_batch(
                 sid, protected, [count_message_tokens(m) for m in protected], source=platform,
