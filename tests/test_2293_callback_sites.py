@@ -4,6 +4,8 @@ import os
 from collections import Counter
 from pathlib import Path
 
+import pytest
+
 from tests.message_store_callback_audit import METHODS, ROOT
 
 # Each occurrence is pinned, including callback clearing and getattr strings.
@@ -82,14 +84,25 @@ class _Sites(ast.NodeVisitor):
     def add(self, method):
         self.sites[(self.path, '.'.join(self.names), method)] += 1
 
-    def visit_Call(self, node):
-        if isinstance(node.func, ast.Attribute) and node.func.attr in METHODS:
-            self.add(node.func.attr)
+    def visit_Attribute(self, node):
+        if node.attr in METHODS:
+            self.add(node.attr)
         self.generic_visit(node)
 
     def visit_Constant(self, node):
         if isinstance(node.value, str) and node.value in METHODS:
             self.add(node.value)
+
+
+@pytest.mark.parametrize('source,method', [
+    ('_h = conn.set_progress_handler; _h(None, 1000)', 'set_progress_handler'),
+    ('functools.partial(conn.set_trace_callback, None)', 'set_trace_callback'),
+    ('handlers = [conn.set_authorizer]', 'set_authorizer'),
+])
+def test_scanner_counts_bound_callback_setters(source, method):
+    actual = Counter()
+    _Sites('synthetic.py', actual).visit(ast.parse(source))
+    assert actual == Counter({('synthetic.py', '', method): 1})
 
 
 def test_callback_sites_match_allowlist():

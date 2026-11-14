@@ -215,7 +215,10 @@ D1_MODULES = ("test_2293_*.py", "invariants/test_2293_*.py", "test_issue_2042_*.
 @pytest.fixture(autouse=True)
 def _message_store_callbacks(monkeypatch, request):
     """D1 scopes admission coverage; all restores the full-suite audit."""
-    module = request.node.path.relative_to(plugin_dir / "tests").as_posix()
+    try:
+        module = request.node.path.relative_to(plugin_dir / "tests").as_posix()
+    except ValueError:
+        module = ""  # External tests never belong to a D1 module.
     if os.environ.get("LCM_D1_AUDIT", "scoped") != "all" and not any(
             fnmatch.fnmatchcase(module, pattern) for pattern in D1_MODULES):
         yield

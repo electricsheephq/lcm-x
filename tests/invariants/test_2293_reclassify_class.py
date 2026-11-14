@@ -171,14 +171,12 @@ def _run(case, root, *, lazy, target=None):
                     assert fired, (case.name, target, points)
                     classifications.append(delta)
                     read_only = delta['no_write'] > 0 and delta['acquired'] == 0
-                    baseline = injection.get('g0_data_version_boundary')
-                    pre_baseline = baseline is not None and injection['sql_ordinal'] < baseline
                     facts = dict(scenario=case.name, mode='lazy' if lazy else 'eager', ordinal=target,
                                  counts=delta, injection=injection, point=fired[0],
-                                 exemption='read-only' if read_only else 'pre-baseline' if pre_baseline else None)
+                                 exemption='read-only' if read_only else None)
                     _evidence(facts)
                     if lazy:
-                        assert reclassified >= 1 or read_only or pre_baseline, facts
+                        assert reclassified >= 1 or read_only, facts
                     else:
                         assert reclassified == 0, facts
 
