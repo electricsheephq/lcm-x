@@ -69,7 +69,6 @@ jobs:
             placeholder_ledger.py
             plugin_identity.py
             prefix_matching.py
-            recall_session.py
             recognition_matching.py
             reconcile.py
             reset_state.py

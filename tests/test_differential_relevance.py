@@ -9,6 +9,8 @@ import subprocess
 
 import pytest
 
+from tests.test_differential_workflow import DIFFERENTIAL_ONLY_FILES
+
 
 ROOT = Path(__file__).resolve().parents[1]
 # Computed imports resolved by hand, keyed by file and import expression (not by
@@ -37,6 +39,7 @@ ENGINE_REACHED_EXCLUSIONS = frozenset({
     "expansion_evidence.py", "guidance.py", "inactive_record.py", "inspect_tools.py",
     "level3_repair.py", "maintenance.py", "memory_tools.py", "occurrence_time.py", "presets.py",
     "query_view_store.py", "reasoning.py", "recall_delivery.py", "recent.py",
+    "recall_session.py",  # Static import only; the contract never selects session delivery.
     "recorder.py", "requirements_compiler.py", "retrieval_context.py",
     "runtime_identity.py", "schema_families.py", "selective_compiler.py",
     "selective_recall.py", "sqlite_session.py", "trajectory_store.py", "vector_store.py",
@@ -60,12 +63,9 @@ def _gate_paths(name: str = "TURN_PATH_FILES") -> set[str]:
                         if not lines[node.end_lineno - 1].partition("#")[2].strip()]
         assert not undocumented, "Exclusions need written reasons:\n" + "\n".join(sorted(undocumented))
     # Differential additionally judges retrieval; the maintainer gate keeps its own scope.
-    workflow = (ROOT / '.github/workflows/differential.yml').read_text()
-    listed = {line.strip() for line in workflow.split('TURN_PATH_FILES: |-\n', 1)[1].split('        run:', 1)[0].splitlines()}
     paths = ast.literal_eval(values[0])
-    if name == 'TURN_PATH_FILES':
-        assert paths <= listed, 'Differential omits maintainer turn paths'
-    return paths - listed if name == 'NON_TURN_PATH_FILES' else paths | listed
+    return (paths - DIFFERENTIAL_ONLY_FILES if name == 'NON_TURN_PATH_FILES'
+            else paths | DIFFERENTIAL_ONLY_FILES)
 
 
 def _tracked_python_files(root: Path) -> set[str]:

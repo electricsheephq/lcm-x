@@ -12,7 +12,7 @@ Only observe()'s tool-call adapters may change, keeping the same observations.
 Observation rows have role, content and kind: canonical has store_id; record has
 owner_store_id and ordinal. Search hits also have reference={tool, args} and an
 expanded normalized row. Observations include pages, hits, reload_witness and
-summary_sources, baseline_summary_sources and baseline_canonical_ids for equality.
+summary_sources, baseline_summary_sources and baseline_canonical_rows for equality.
 """
 from collections import Counter
 import json
@@ -163,7 +163,8 @@ def observe(engine, tools):
 def judge(observations, entries):
     """Frozen semantic contract; candidate PRs must not change this function."""
     pages, failures = observations['pages'], []
-    assert [r['store_id'] for r in pages if r['kind'] == 'canonical'] == observations['baseline_canonical_ids'], \
+    assert [(r['store_id'], r['role'], r['content']) for r in pages if r['kind'] == 'canonical'] \
+        == observations['baseline_canonical_rows'], \
         'canonical listing changed'
     assert observations['summary_sources'] == observations['baseline_summary_sources'], 'summary sources changed'
     witness = observations.get('reload_witness', {})

@@ -353,8 +353,11 @@ def _open(module, directory, monkeypatch, trace=None, fake=False):
                 from .paired import BASELINE_REF
                 baseline = getattr(trace, 'baseline_stages', trace.ingests)[:len(trace.ingests)]
                 entries = declarations(trace.case, baseline, BASELINE_REF)
+                # Report stored corruption before its downstream listing symptom.
+                assert trace.ingests[-1]['canonical'] == baseline[-1]['canonical'], 'canonical row changed'
                 observation = observe(engine, tools)
-                observation['baseline_canonical_ids'] = [dict(r)['store_id'] for r in baseline[-1]['canonical']]
+                observation['baseline_canonical_rows'] = [
+                    tuple(dict(r)[key] for key in ('store_id', 'role', 'content')) for r in baseline[-1]['canonical']]
                 observation['baseline_summary_sources'] = (baseline[-1]['summary_sources']
                     if hasattr(trace, 'baseline_stages') else observation['summary_sources'])
                 trace.ingests[-1]['summary_sources'] = observation['summary_sources']
