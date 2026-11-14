@@ -197,19 +197,32 @@ def _drain_background_maintenance(monkeypatch, _isolate_embedding_process_state)
     otherwise it runs during a later test and calls that test's monkeypatched provider.
     """
     yield
-    schedulers = sys.modules.get("hermes_lcm.maintenance_scheduler")
-    for name in _MAINTENANCE_SCHEDULERS:
-        scheduler = getattr(schedulers, name, None)
-        if scheduler is not None and not _wait_scheduler_idle(scheduler, timeout=30.0):
-            # Fail closed: a job still running here would call a later test's fakes.
-            pytest.fail(f"{name} still had background work 30 s after the test ended")
-    # FTS workers also reopen their pinned database path. Drain before tmp_path
-    # teardown deletes it: pytest can give the same truncated path to the next cell.
+    try:
+        schedulers = sys.modules.get("hermes_lcm.maintenance_scheduler")
+        for name in _MAINTENANCE_SCHEDULERS:
+            scheduler = getattr(schedulers, name, None)
+            if scheduler is not None and not _wait_scheduler_idle(scheduler, timeout=30.0):
+                # Fail closed: a job still running here would call a later test's fakes.
+                pytest.fail(f"{name} still had background work 30 s after the test ended")
+    finally:
+        _drain_fts_workers()
+
+
+def _drain_fts_workers():
+    """#2711: FTS workers reopen their pinned database path. Drain them before tmp_path
+    teardown deletes it, because pytest can give the same truncated path to the next cell.
+    Join only live workers: some tests patch Thread.join to police their own code."""
     bootstrap = sys.modules.get("hermes_lcm.db_bootstrap")
-    if bootstrap is not None:
-        bootstrap.join_background_integrity_scans(timeout=30.0)
-        for lock, registry in ((bootstrap._integrity_scan_lock, bootstrap._integrity_scan_threads),
-                               (bootstrap._stem_lock, bootstrap._stem_threads)):
-            with lock:
-                if any(thread.is_alive() for thread in registry.values()):
-                    pytest.fail("FTS background work outlived its test after a 30 s drain")
+    if bootstrap is None:
+        return
+    registries = ((bootstrap._integrity_scan_lock, bootstrap._integrity_scan_threads),
+                  (bootstrap._stem_lock, bootstrap._stem_threads))
+    for lock, registry in registries:
+        with lock:
+            live = [thread for thread in registry.values() if thread.is_alive()]
+        for thread in live:
+            thread.join(30.0)
+    for lock, registry in registries:
+        with lock:
+            if any(thread.is_alive() for thread in registry.values()):
+                pytest.fail("FTS background work outlived its test after a 30 s drain")

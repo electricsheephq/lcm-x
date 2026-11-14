@@ -1,5 +1,6 @@
 """#2711: drain FTS workers before pytest deletes and reuses a test's tmp_path."""
 
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -76,5 +77,7 @@ def test_fixture_load_after_previous_test_scan(tmp_path, loader):
          "-p", "no:cacheprovider", "-p", "no:randomly", "-c", str(root / "pytest.ini"),
          "-o", "tmp_path_retention_policy=failed", "--basetemp", str(tmp_path / "inner-bt"), str(probe)],
         cwd=root, capture_output=True, text=True, timeout=60,
+        # The child options are explicit above; an outer -k filter would deselect its probe.
+        env={key: value for key, value in os.environ.items() if key != "PYTEST_ADDOPTS"},
     )
     assert result.returncode == 0, result.stdout + result.stderr
