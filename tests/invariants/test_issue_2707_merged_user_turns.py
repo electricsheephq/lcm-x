@@ -9,6 +9,7 @@ import importlib.util
 import io
 import json
 from pathlib import Path
+import sqlite3
 import subprocess
 import sys
 import tarfile
@@ -495,3 +496,315 @@ def test_clean_payload_text_and_sender_capture_disabled(tmp_path, monkeypatch, v
                                       ('assistant', 'reply', 21., 'parent', 'conv')]
     finally:
         engine.shutdown()
+
+
+def _capture(ctx, history, earlier='P2', newest='R2', head_stamp=40., event_stamp=50.):
+    head, tail = _row(earlier, head_stamp), _row(newest, event_stamp)
+    ctx.hooks['pre_llm_call'](session_id='parent', conversation_id='conv', user_message=newest,
+                              conversation_history=[*history, head, tail])
+    head.update(content=newest, timestamp=event_stamp)
+    return [*history, head, _row('B', event_stamp + 1, 'assistant')]
+
+
+def _compare_round2(results, record_property):
+    record_property('row_counts', json.dumps({name: [len(rows) for rows in stages]
+                                             for name, stages in results.items()}))
+    assert results['candidate'] == results['main'], results
+
+
+@pytest.mark.parametrize('seed_alias', [False, True], ids=['recreate-transient', 'stored-alternate'])
+def test_round2_existing_alias_fallback_matches_main(tmp_path, monkeypatch, versions,
+                                                   record_property, seed_alias):
+    """Both reviewers' old-alias/cache shapes, followed by one transient alias failure."""
+    monkeypatch.setenv('LCM_IDENTITY_ANCHOR', '1')
+    monkeypatch.setenv('LCM_INGEST_LEDGER', 'shadow')
+    results = {}
+    for name in ('main', 'candidate'):
+        directory = tmp_path / name
+        ctx = _open(versions[name], directory, monkeypatch)
+        engine = ctx.engine
+        q, reply = _row('Q', 9., 'assistant'), _row('A', 21., 'assistant')
+        try:
+            if seed_alias:
+                engine.ingest([q, _row('P1\n\nR', 10.), reply])
+                sid = _rows(engine)[1]['store_id']
+                engine._store.write_metadata_json([f'host_rewrite_identity:{sid}'], json.dumps({
+                    'version': 1, 'content': 'R',
+                    'stored_sha256': hashlib.sha256(b'P1\n\nR').hexdigest()}))
+                engine._store.add_message_relations([[(sid, 'alt_stamp', None, None, 20.)]])
+                live = [q, _row('R', 20.), reply]
+            else:
+                engine.ingest([q])
+                live = _capture(ctx, [q], 'P1', 'R', 10., 20.)
+                live[-1] = reply
+                engine.ingest(live)
+        finally:
+            engine.shutdown()
+        ctx = _open(versions[name], directory, monkeypatch)
+        engine = ctx.engine
+        try:
+            live = deepcopy(live)
+            engine.ingest(live)
+            if not seed_alias:
+                engine.ingest(live)  # Claude's second warm replay after recreation.
+            previous = _identities(engine)
+            live = _capture(ctx, live)
+            calls = []
+            if name == 'candidate':
+                original = engine._store_merged_user_aliases
+
+                def once(*args, **kwargs):
+                    calls.append(1)
+                    if len(calls) == 1:
+                        raise sqlite3.OperationalError('database is locked')
+                    return original(*args, **kwargs)
+
+                monkeypatch.setattr(engine, '_store_merged_user_aliases', once)
+            engine.ingest(live)
+            stored = _identities(engine)
+            assert stored[:len(previous)] == previous
+            assert engine._ingest_failure_count == 0
+            # The successful first turn intentionally preserved P1 only on the
+            # candidate. Compare that existing slot in main's host form; the
+            # failed turn and every additional row must be identical to main.
+            if not seed_alias:
+                stored = [(role, 'R', 20., session, conv) if text == 'P1\n\nR'
+                          else (role, text, stamp, session, conv)
+                          for role, text, stamp, session, conv in stored]
+            results[name] = [stored]
+        finally:
+            engine.shutdown()
+    _compare_round2(results, record_property)
+
+
+@pytest.mark.parametrize('failure', ['transient', 'persistent', 'redaction'])
+def test_round2_fallback_then_again_matches_main(tmp_path, monkeypatch, versions,
+                                               record_property, failure):
+    monkeypatch.setenv('LCM_IDENTITY_ANCHOR', '1')
+    results, attempts = {}, []
+    for name in ('main', 'candidate'):
+        ctx = _open(versions[name], tmp_path / name, monkeypatch)
+        engine = ctx.engine
+        try:
+            if failure == 'redaction':
+                engine._config.sensitive_patterns_enabled = True
+                engine._config.sensitive_patterns = ['password_assignment']
+            q = _row('Q', 9., 'assistant')
+            engine.ingest([q])
+            live = _capture(ctx, [q], 'password=fake-test-value' if failure == 'redaction' else 'P1',
+                            'R', 10., 20.)
+            if name == 'candidate':
+                original = engine._store_merged_user_aliases
+
+                def fail(*args, **kwargs):
+                    attempts.append(1)
+                    if failure == 'persistent' or failure == 'transient' and len(attempts) == 1:
+                        raise sqlite3.OperationalError('database is locked')
+                    return original(*args, **kwargs)
+
+                monkeypatch.setattr(engine, '_store_merged_user_aliases', fail)
+            stages = []
+            engine.ingest(live)
+            stages.append(_identities(engine))
+            assert any(obj is live[1] for entry in engine._host_rewrite_state()[0].values() for obj in entry[2])
+            engine.ingest(live)
+            stages.append(_identities(engine))
+            engine.ingest([*live, _row('N', 60.), _row('C', 61., 'assistant')])
+            stages.append(_identities(engine))
+            results[name] = stages
+        finally:
+            engine.shutdown()
+    record_property('preservation_attempts', len(attempts))
+    _compare_round2(results, record_property)
+    assert len(attempts) == 1
+
+
+@pytest.mark.parametrize('stamp', [False, True], ids=['head-time', 'gateway-time'])
+def test_round2_previously_stored_head_matches_main(tmp_path, monkeypatch, versions, record_property, stamp):
+    monkeypatch.setenv('LCM_IDENTITY_ANCHOR', '1')
+    results = {}
+    for name in ('main', 'candidate'):
+        ctx = _open(versions[name], tmp_path / name, monkeypatch)
+        engine = ctx.engine
+        try:
+            q, first, newest = _row('Q', 9., 'assistant'), _row('P1', 10.), _row('R', 20.)
+            engine.ingest([q, first])
+            ctx.hooks['pre_llm_call'](session_id='parent', conversation_id='conv', user_message='R',
+                                      conversation_history=[q, first, newest])
+            first['content'] = 'R'
+            if stamp:
+                first['timestamp'] = 20.
+            live = [q, first, _row('A', 21., 'assistant')]
+            engine.ingest(live)
+            first_run = _identities(engine)
+            engine.ingest(live)
+            results[name] = [first_run, _identities(engine)]
+        finally:
+            engine.shutdown()
+    _compare_round2(results, record_property)
+    assert next(r[2] for r in results['candidate'][0] if r[1] == 'R') is not None
+
+
+def test_round2_fallback_has_own_evidence_retry(tmp_path, monkeypatch, versions, record_property):
+    monkeypatch.setenv('LCM_IDENTITY_ANCHOR', '1')
+    monkeypatch.setenv('LCM_INGEST_LEDGER', 'shadow')
+    results, faults = {}, {}
+    for name in ('main', 'candidate'):
+        ctx = _open(versions[name], tmp_path / name, monkeypatch)
+        engine = ctx.engine
+        try:
+            initial = [_row('U1', 1.), _row('A1', 2., 'assistant'),
+                       _row('U2', 3.), _row('A2', 4., 'assistant')]
+            engine.ingest(initial)
+            live = _capture(ctx, [*initial[:3], _row('I', 3.5), initial[3]])
+            fallen_back, calls = [], []
+            if name == 'candidate':
+                def fail_alias(*_args, **_kwargs):
+                    fallen_back.append(1)
+                    raise ValueError('injected preservation failure')
+
+                monkeypatch.setattr(engine, '_store_merged_user_aliases', fail_alias)
+            original = engine._identity_anchor_prematch
+
+            def prematch(*args, **kwargs):
+                if (name == 'main' or fallen_back) and not calls:
+                    calls.append(1)
+                    raise RuntimeError('one-shot fallback pre-match failure')
+                return original(*args, **kwargs)
+
+            monkeypatch.setattr(engine, '_identity_anchor_prematch', prematch)
+            engine.ingest(live)
+            first_run = _identities(engine)
+            engine.ingest(live)
+            results[name] = [first_run, _identities(engine)]
+            faults[name] = len(calls)
+        finally:
+            engine.shutdown()
+    assert faults == {'main': 1, 'candidate': 1}
+    _compare_round2(results, record_property)
+    assert [r[1] for r in results['candidate'][0]].count('I') == 1
+    assert [r[1] for r in results['candidate'][0]].count('A2') == 1
+
+
+@pytest.mark.parametrize('capture', [False, True], ids=['no-capture', 'with-capture'])
+def test_round2_abandoned_ingest_restores_cache(tmp_path, monkeypatch, versions, record_property, capture):
+    """Canonicalisation is attempt state even if no preservation is requested."""
+    monkeypatch.setenv('LCM_IDENTITY_ANCHOR', '1')
+    results = {}
+    for name in ('main', 'candidate'):
+        directory = tmp_path / name
+        engine = _open(versions[name], directory, monkeypatch).engine
+        try:
+            engine.ingest([_row('P1\n\nR', 10.), _row('A', 21., 'assistant')])
+            sid = _rows(engine)[0]['store_id']
+            engine._store.write_metadata_json([f'host_rewrite_identity:{sid}'], json.dumps({
+                'version': 1, 'content': 'R', 'stored_sha256': hashlib.sha256(b'P1\n\nR').hexdigest()}))
+            engine._store.add_message_relations([[(sid, 'alt_stamp', None, None, 20.)]])
+        finally:
+            engine.shutdown()
+        ctx = _open(versions[name], directory, monkeypatch)
+        engine = ctx.engine
+        try:
+            live = [_row('R', 20.), _row('A', 21., 'assistant')]
+            engine.ingest(live)
+            cache = deepcopy(engine._last_active_replay_messages)
+            before = _identities(engine)
+            if capture:
+                live = _capture(ctx, live)
+
+            def interrupt(*_args, **_kwargs):
+                raise KeyboardInterrupt('injected abandoned ingest')
+
+            original = engine._ingest_messages_transaction
+            monkeypatch.setattr(engine, '_ingest_messages_transaction', interrupt)
+            with pytest.raises(KeyboardInterrupt):
+                engine._ingest_messages(live)
+            unchanged = engine._last_active_replay_messages == cache
+            monkeypatch.setattr(engine, '_ingest_messages_transaction', original)
+            # The capture survives this uncommitted interruption, unlike a fallback.
+            engine.ingest(live)
+            results[name] = [before]
+            record_property(name + '_cache_restored', unchanged)
+            assert unchanged, (name, cache, engine._last_active_replay_messages)
+        finally:
+            engine.shutdown()
+    _compare_round2(results, record_property)
+
+
+def test_round2_read_only_retry_canonicalises_both_lists(tmp_path, monkeypatch, versions, record_property):
+    """Session-end classification after busy rollback obeys the same timestamp rule."""
+    monkeypatch.setenv('LCM_IDENTITY_ANCHOR', '1')
+    results, observations, restored = {}, {}, {}
+    for name in ('main', 'candidate'):
+        directory = tmp_path / name
+        engine = _open(versions[name], directory, monkeypatch).engine
+        try:
+            engine.ingest([_row('P1\n\nR', 10.), _row('A', 21., 'assistant')])
+            sid = _rows(engine)[0]['store_id']
+            engine._store.write_metadata_json([f'host_rewrite_identity:{sid}'], json.dumps({
+                'version': 1, 'content': 'R', 'stored_sha256': hashlib.sha256(b'P1\n\nR').hexdigest()}))
+            engine._store.add_message_relations([[(sid, 'alt_stamp', None, None, 20.)]])
+        finally:
+            engine.shutdown()
+        engine = _open(versions[name], directory, monkeypatch).engine
+        try:
+            live = [_row('R', 20.), _row('A', 21., 'assistant')]
+            engine.ingest(live)
+            cache = deepcopy(engine._last_active_replay_messages)
+            before = _identities(engine)
+            original = engine._ingest_messages_transaction
+
+            def busy(messages, *args, **kwargs):
+                if getattr(engine, '_ingest_read_only', None) is not None:
+                    observations[name] = (messages[0]['timestamp'], engine._last_active_replay_messages[0]['timestamp'])
+                    return original(messages, *args, **kwargs)
+                raise sqlite3.OperationalError('database is locked')
+
+            monkeypatch.setattr(engine, '_ingest_messages_transaction', busy)
+            engine._session_end_flush_active = True
+            engine._ingest_messages(live)
+            engine._session_end_flush_active = False
+            restored[name] = engine._last_active_replay_messages == cache
+            assert _identities(engine) == before
+            results[name] = [_identities(engine)]
+        finally:
+            engine._session_end_flush_active = False
+            engine.shutdown()
+    _compare_round2(results, record_property)
+    assert all(incoming == cached for incoming, cached in observations.values()), observations
+    assert restored == {'main': True, 'candidate': True}, restored
+
+
+def test_round2_committed_capture_is_used_once(tmp_path, monkeypatch, versions, record_property):
+    monkeypatch.setenv('LCM_IDENTITY_ANCHOR', '1')
+    results, attempts = {}, []
+    for name in ('main', 'candidate'):
+        ctx = _open(versions[name], tmp_path / name, monkeypatch)
+        engine = ctx.engine
+        try:
+            q = _row('Q', 9., 'assistant')
+            engine.ingest([q])
+            live = _capture(ctx, [q], 'P1', 'R', 10., 20.)
+            if name == 'candidate':
+                original = engine._store_merged_user_aliases
+
+                def count(*args, **kwargs):
+                    attempts.append(1)
+                    return original(*args, **kwargs)
+
+                monkeypatch.setattr(engine, '_store_merged_user_aliases', count)
+            stages = []
+            for _ in range(3):
+                engine.ingest(live)
+                rows = _identities(engine)
+                if name == 'candidate':
+                    assert _ordered_coverage(rows, ['Q', 'P1', 'R', 'B'])
+                stages.append([(role, 'R', 20., session, conv) if text == 'P1\n\nR'
+                               else (role, text, stamp, session, conv)
+                               for role, text, stamp, session, conv in rows])
+            results[name] = stages
+        finally:
+            engine.shutdown()
+    record_property('preservation_attempts', len(attempts))
+    _compare_round2(results, record_property)
+    assert len(attempts) == 1

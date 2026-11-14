@@ -7407,16 +7407,17 @@ class LCMEngine(
                 return self._redact_active_replay_messages(messages)
 
             sender_capture.try_update(self)
-            merged_original_messages = messages
-            messages, merged_aliases, merged_new_occurrences = sender_capture.merged_user_projection(self, messages)
+            (messages, merged_aliases, merged_new_occurrences,
+             merged_original_messages, merged_cache) = sender_capture.merged_user_projection(self, messages)
             attribution = self._last_ingest_attribution = dict(
                 lock_hold_ms=0.0, rows_written=0, bytes_written=0, busy_snapshot_retry=False,
                 ledger_digest_ms=0.0, ledger_ms=0.0)
             ledger_prepared = self._prepare_ingest_ledger(messages, attribution)
             admission_retry = busy_retried = False
-            # One busy retry, plus one #1815 evidence-fault retry that only the first attempt can take.
+            evidence_start = 0
+            # Fallback starts a new input run with its own first-attempt #1815 retry.
             for attempt in range(4 if merged_aliases else 3):
-                self._ingest_attempt_index = attempt
+                self._ingest_attempt_index = attempt - evidence_start
                 # Keep the published frontier untouched until COMMIT. Helpers read
                 # and write the attempt-local holder through the legacy properties.
                 pending = copy.copy(self._frontier)
@@ -7438,7 +7439,7 @@ class LCMEngine(
                     "_generated_ignored_active_replay_placeholder_hash_counts",
                     "_generated_ignored_active_replay_placeholder_hash_ordinals",
                     "_out_of_band_durable_rows", "_emitted_carriers_seen", "_emitted_carriers_retired",
-                    "_pending_session_tails",
+                    "_pending_session_tails", "_last_active_replay_messages",
                 )}
                 # Stores and host objects are identity-bearing; never deepcopy them.
                 for name in ("_host_rewrite_store", "_pruned_tool_source_store"):
@@ -7459,6 +7460,8 @@ class LCMEngine(
                 after_commit.append(lambda value=rollback_failures:
                                     setattr(self, "_ledger_rollback_failures_published", value))
                 try:
+                    if merged_cache is not None:
+                        self._last_active_replay_messages = merged_cache
                     prepared["view_only"] = self._precompute_ingest_view_only(messages)
                     if getattr(self, "_identity_anchor_recovery", None):
                         self._identity_anchor_observe_recovery()
@@ -7485,6 +7488,7 @@ class LCMEngine(
                             self._write_ingest_ledger(self._ingest_ledger_attempt, after_commit, attribution)
                         self._link_stored_todo_replays(messages, prepared.get("stored_at", {}))
                     emission_committed = True
+                    sender_capture.retire_merged_users(self, merged_aliases)
                     if ledger_prepared is not None:
                         ingest_ledger.settle_pending_emissions(
                             emission_claim, completed=emission_attempt["retried_emissions"])
@@ -7512,11 +7516,12 @@ class LCMEngine(
                         # attempt (row AND alias), then run today's input path.
                         logger.warning("LCM queued-user preservation failed (%s); original ingest only",
                                        type(exc).__name__)
+                        sender_capture.retire_merged_users(self, merged_aliases)
                         messages, merged_aliases = merged_original_messages, {}
-                        merged_new_occurrences = set()
+                        evidence_start = attempt + 1
                         ledger_prepared = self._prepare_ingest_ledger(messages, attribution)
                         continue
-                    if rollback_ok and attempt == 0 and isinstance(exc, _EvidenceFaultRetry):
+                    if rollback_ok and attempt == evidence_start and isinstance(exc, _EvidenceFaultRetry):
                         continue  # #1815: nothing of the faulted attempt is kept; the retry classifies again
                     if rollback_ok and isinstance(exc, Exception) and not busy_retried and (_is_ingest_busy_error(exc)
                                                                       or held_at is None and isinstance(exc, sqlite3.Error)):
@@ -7537,6 +7542,8 @@ class LCMEngine(
                                 if value is not missing:
                                     self.__dict__[name] = (value if name in ("_host_rewrite_store", "_pruned_tool_source_store")
                                                            else copy.copy(value))
+                            if merged_cache is not None:
+                                self._last_active_replay_messages = merged_cache
                             self._pending_ingest_frontier = copy.deepcopy(self._frontier)
                             self._identity_anchor_observe_recovery()
                             self._frozen_ledger_prepared = ledger_prepared

@@ -70,25 +70,27 @@ def capture_merged_users(engine, payload):
 def merged_user_projection(engine, messages):
     """Return joined copies only with proof of the whole-content overwrite.
 
-    Capture is process-local and bounded. Copies keep the host objects untouched;
-    both the replay cache and the anchor see the durable head time.
+    Return projected rows, aliases, new occurrences, fallback rows and cache.
+    Copies keep host objects untouched. The caller applies the canonical cache
+    inside its attempt snapshot; fallback rows retain the same canonical times.
     """
     try:
         if not config.identity_anchor_enabled():
-            return messages, {}, set()
+            return messages, {}, set(), messages, None
         with _LOCK:
             captures = tuple(_MERGED_USERS.get(engine, ()))
         known = {sid: payload for sid, payload in getattr(engine, "_host_rewrite_overrides", {}).items()
                  if isinstance(payload, dict) and "stripped" not in payload}
         if not captures and not known:
-            return messages, {}, set()
+            return messages, {}, set(), messages, None
         present, projected, aliases = {id(row) for row in messages}, list(messages), {}
+        watched = {id(obj) for _sid, entry in _watch(engine) for obj in entry[2]} if captures else set()
         for capture in captures:
             head = capture.head
             if (time.monotonic() - capture.created >= _TTL
                     or capture.session != str(engine._session_id)
                     or capture.conversation != str(engine._conversation_id or "")
-                    or id(head) not in present or id(capture.newest) in present
+                    or id(head) not in present or id(head) in watched or id(capture.newest) in present
                     or "_merged_turn_prefix" in head or "_absorbed_message_uids" in head
                     or head.get("role") != "user" or head.get("content") != capture.user_message):
                 continue
@@ -132,12 +134,21 @@ def merged_user_projection(engine, messages):
             return result
 
         projected = canonical_times(projected, observe=True)
-        if forms and cached is not None:
-            engine._last_active_replay_messages = canonical_times(cached)
-        return projected, aliases, fresh
+        original = canonical_times(messages, observe=True)
+        canonical_cache = canonical_times(cached) if forms and cached is not None else None
+        return projected, aliases, fresh, original, canonical_cache
     except Exception:
         logger.debug("merged_users:projection_error", exc_info=True)
-        return messages, {}, set()
+        return messages, {}, set(), messages, None
+
+
+def retire_merged_users(engine, aliases):
+    """Consume only captures used by a committed attempt or its fallback."""
+    if not aliases:
+        return
+    heads = {id(head) for head in aliases.values()}
+    with _LOCK:
+        _MERGED_USERS[engine] = [c for c in _MERGED_USERS.get(engine, ()) if id(c.head) not in heads]
 
 
 @dataclass
