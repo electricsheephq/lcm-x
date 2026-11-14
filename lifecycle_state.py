@@ -97,30 +97,32 @@ class LifecycleState:
 
 
 class LifecycleStateStore:
-    def __init__(self, db_path: str | Path):
+    def __init__(self, db_path: str | Path, *, existing_only: bool = False):
         self.db_path = Path(db_path)
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        if not existing_only:
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn: Optional[sqlite3.Connection] = None
         # The connection is opened check_same_thread=False in autocommit mode
         # and is shared across the gateway thread, dispatcher, and sub-agents.
         # Serialize read-modify-write flows so concurrent binds/frontier
         # advances cannot interleave and regress the checkpoint.
         self._lock = threading.RLock()
-        self._init_db()
+        self._init_db(existing_only=existing_only)
 
-    def _init_db(self) -> None:
+    def _init_db(self, *, existing_only: bool = False) -> None:
         open_connection(ConnectionPolicy(
-            database=str(self.db_path),
+            database=self.db_path.resolve().as_uri() + "?mode=rw" if existing_only else str(self.db_path),
             connect_kwargs=(
                 ("timeout", 30.0), ("check_same_thread", False), ("isolation_level", None),
-            ),
+            ) + ((("uri", True),) if existing_only else ()),
             before_row_factory=(refuse_schema_version_too_new, configure_connection),
             row_factory=sqlite3.Row,
             on_open=lambda conn: setattr(self, "_conn", conn),
             on_setup_error=None,
         ))
-        run_versioned_migrations(self._conn)
-        self._conn.commit()
+        if not existing_only:
+            run_versioned_migrations(self._conn)
+            self._conn.commit()
 
     def close(self) -> None:
         conn = getattr(self, "_conn", None)
@@ -218,6 +220,25 @@ class LifecycleStateStore:
                 assert state is not None
                 return state
         return self._bind_session_in_write_transaction(session_id, resolved)
+
+    @_synchronized
+    def claim_new_hook_binding(self, session_id: str, conversation_id: str) -> bool:
+        """Atomically claim an unused lane for a compressor-less reload callback."""
+        now = time.time()
+        cursor = self._conn.execute(
+            """
+            INSERT INTO lcm_lifecycle_state (conversation_id, current_session_id, current_bound_at, updated_at)
+            SELECT ?, ?, ?, ?
+            WHERE NOT EXISTS (SELECT 1 FROM lcm_lifecycle_state
+                              WHERE current_session_id = ? OR last_finalized_session_id = ?)
+              AND NOT EXISTS (SELECT 1 FROM messages WHERE session_id = ? OR conversation_id = ?)
+              AND NOT EXISTS (SELECT 1 FROM summary_nodes WHERE session_id IN (?, ?))
+            ON CONFLICT(conversation_id) DO NOTHING
+            """,
+            (conversation_id, session_id, now, now, session_id, session_id,
+             session_id, conversation_id, session_id, conversation_id),
+        )
+        return cursor.rowcount == 1
 
     @staticmethod
     def _bind_plan(
@@ -755,14 +776,19 @@ class LifecycleStateStore:
         return self.get_by_conversation(conversation_id)
 
     @_synchronized
-    def record_reset(self, conversation_id: str | None) -> LifecycleState | None:
+    def record_reset(self, conversation_id: str | None, *, expected_session_id: str | None = None) -> LifecycleState | None:
         if not conversation_id:
             return None
         state = self.get_by_conversation(conversation_id)
         if state is None:
             return None
         now = time.time()
-        self._conn.execute(
+        binding = ""
+        params = (now, now, now, conversation_id)
+        if expected_session_id is not None:
+            binding = " AND (current_session_id = ? OR (current_session_id IS NULL AND last_finalized_session_id = ?))"
+            params += (expected_session_id, expected_session_id)
+        cursor = self._conn.execute(
             """
             UPDATE lcm_lifecycle_state
             SET last_reset_at = ?,
@@ -771,11 +797,11 @@ class LifecycleStateStore:
                 debt_updated_at = ?,
                 updated_at = ?
             WHERE conversation_id = ?
-            """,
-            (now, now, now, conversation_id),
+            """ + binding,
+            params,
         )
         self._conn.commit()
-        return self.get_by_conversation(conversation_id)
+        return self.get_by_conversation(conversation_id) if cursor.rowcount else None
 
     @_synchronized
     def prune_empty_sessions(

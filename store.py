@@ -476,9 +476,11 @@ def _database_identity(path: Path, store: object) -> str:
 class MessageStore:
     """SQLite-backed immutable message store."""
 
-    def __init__(self, db_path: str | Path, *, ingest_protection_config=None, hermes_home: str = ""):
+    def __init__(self, db_path: str | Path, *, ingest_protection_config=None, hermes_home: str = "",
+                 existing_write_timeout_ms: int | None = None):
         self.db_path = Path(db_path)
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        if existing_write_timeout_ms is None:
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.db_identity = _database_identity(self.db_path, self)  # fixed at open: a later cwd or symlink change cannot move it
         self._ingest_protection_config = ingest_protection_config or LCMConfig(database_path=str(self.db_path))
         self._hermes_home = hermes_home or str(self.db_path.parent)
@@ -504,7 +506,33 @@ class MessageStore:
         self._write_lock = threading.RLock()
         self._transaction_owner = TransactionOwner(self._write_lock)
         self._manual_chunk_backlog_pending = False
-        self._init_db()
+        if existing_write_timeout_ms is None:
+            self._init_db()
+        else:
+            # A retired engine may finish a proven tail. Never recreate a
+            # removed file or start schema/bootstrap work from that callback.
+            self._conn = sqlite3.connect(
+                self.db_path.resolve().as_uri() + "?mode=rw", uri=True,
+                timeout=existing_write_timeout_ms / 1000, isolation_level="IMMEDIATE",
+            )
+            try:
+                refuse_schema_version_too_new(self._conn)
+                self._conn.execute("PRAGMA synchronous=FULL")
+            except BaseException:
+                self.close()
+                raise
+
+    def existing_summary_node(self, node_id: int):
+        """Read summary proof without opening a separate DAG connection."""
+        from .dag import SummaryNode
+
+        row = self._conn.execute(
+            "SELECT node_id, session_id, depth, summary, expand_hint FROM summary_nodes WHERE node_id = ?",
+            (node_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return SummaryNode(node_id=row[0], session_id=row[1], depth=row[2], summary=row[3], expand_hint=row[4])
 
     def _init_db(self):
         # #1159: reserve the write lock before FTS5 can read during re-prepare.

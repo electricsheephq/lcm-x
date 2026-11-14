@@ -12,6 +12,7 @@ import os
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -878,6 +879,62 @@ def test_shutdown_and_rebind_clear_the_cache_and_discard_a_late_job(
     assert status["cached_leaves"] == 0 and status["queued_jobs"] == 0
     if ending == "rebind":
         engine.shutdown()
+
+
+def test_leaf_preparation_resumes_after_owner_scoped_rebind(tmp_path, engine, provider, _isolated):
+    unload = engine._enable_plugin_unload()
+    try:
+        view = _crossing_view(engine)
+        _turn_end(engine, view)
+        before = len(provider.calls)
+        assert before > 0 and _isolated.status()["cached_leaves"] > 0
+        path = engine._store.db_path
+        engine.on_session_start(
+            "S2", platform="telegram", context_length=WINDOW,
+            conversation_id="conv2", hermes_home=str(tmp_path / "home2"),
+        )
+        assert engine._store.db_path == path
+        assert _isolated.status()["cached_leaves"] == 0
+        _turn_end(engine, view)
+        assert len(provider.calls) > before
+        assert _isolated.status()["cached_leaves"] > 0
+    finally:
+        unload()
+
+
+def test_plugin_unload_drains_leaf_preparation(engine, provider, _isolated, monkeypatch):
+    unload = engine._enable_plugin_unload()
+    owner = engine._unload_group
+    view = _crossing_view(engine)
+    started, release, waiting = threading.Event(), threading.Event(), threading.Event()
+    wait = _isolated._condition.wait
+
+    def observe_wait(timeout=None):
+        if owner.closing.is_set() and _isolated._running_owner is owner:
+            waiting.set()
+        return wait(timeout)
+
+    monkeypatch.setattr(_isolated._condition, "wait", observe_wait)
+
+    def hold_worker():
+        started.set()
+        assert release.wait(10)
+
+    provider.hook = hold_worker
+    engine.ingest(view)
+    engine.last_prompt_tokens = tokens.count_messages_tokens(view)
+    engine._prepare_leaves_after_turn(view)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        try:
+            assert started.wait(5)
+            finished = executor.submit(unload)
+            assert waiting.wait(5)
+            assert not finished.done()
+        finally:
+            release.set()
+        finished.result(timeout=5)
+    assert _isolated.wait_idle(0)
+    assert _isolated.status()["cached_leaves"] == 0
 
 
 # 9. levels -------------------------------------------------------------------------------------------------------

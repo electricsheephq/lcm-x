@@ -80,6 +80,7 @@ from . import expand_tools as _expand_tools
 from .presets import preset_status_payload
 from . import recent as _recent
 from .retrieval_context import RetrievalContext
+from .engine_registry import engine_unload_group
 from .retrieval_core import (
     _hit_identity,
     _lcm_recall_excerpt_expand_hint,
@@ -1952,6 +1953,8 @@ def _run_within_deadline(
     remaining_s: float,
     name: str,
     worker_slots: threading.BoundedSemaphore | None = None,
+    engine: "LCMEngine | None" = None,
+    read_only_continuation: bool = False,
 ):
     """Run ``fn`` in a bounded daemon worker, raising if the deadline lapses.
 
@@ -1977,7 +1980,17 @@ def _run_within_deadline(
 
     worker = threading.Thread(target=profile_bound(invoke), name=name, daemon=True)
     try:
-        worker.start()
+        group = engine_unload_group(engine)
+        if group is None:
+            worker.start()
+        else:
+            continuing = read_only_continuation and (
+                getattr(engine, "_stable_use_owner_thread", None) == threading.get_ident()
+                or bool(getattr(getattr(engine, "_thread_context", None), "plugin_operation", False))
+            )
+            started = group.start_worker(worker, continuing=True) if continuing else group.start_worker(worker)
+            if not started:
+                raise _WorkerCapacityError("LCM is unloading")
     except BaseException:
         slots.release()
         raise
@@ -2096,6 +2109,8 @@ def _lcm_grep_full_text_with_deadline(
             remaining_s=remaining,
             name="lcm-full-text",
             worker_slots=_lcm_full_text_worker_slots,
+            engine=engine,
+            read_only_continuation=True,
         )
     except (_WorkerCapacityError, TimeoutError):
         return _lcm_grep_deadline_error(
@@ -2209,7 +2224,7 @@ def _lcm_grep_embed_query(
         return provider.embed_query(outbound_query)
 
     vector = _run_within_deadline(
-        invoke, remaining_s=remaining_s, name="lcm-query-embed"
+        invoke, remaining_s=remaining_s, name="lcm-query-embed", engine=engine,
     )
     return [float(value) for value in vector]
 
@@ -2491,6 +2506,7 @@ def _lcm_grep_semantic(
             lambda: _lcm_grep_resolve_provider(engine, deadline=deadline),
             remaining_s=deadline - time.monotonic(),
             name="lcm-provider-resolution",
+            engine=engine,
         )
     except _WorkerCapacityError as exc:
         return degraded(f"semantic capacity exhausted: {exc}")
@@ -2545,6 +2561,7 @@ def _lcm_grep_semantic(
             _run_knn,
             remaining_s=deadline - time.monotonic(),
             name="lcm-knn",
+            engine=engine,
         )
         coverage = knn_results.coverage
         ranked_rows = list(knn_results)
@@ -2570,6 +2587,7 @@ def _lcm_grep_semantic(
             ),
             remaining_s=deadline - time.monotonic(),
             name="lcm-result-hydration",
+            engine=engine,
         )
     except _WorkerCapacityError as exc:
         return degraded(f"semantic capacity exhausted: {exc}")
@@ -4142,6 +4160,7 @@ def _lcm_recall_summary_arm(
         ),
         remaining_s=deadline - time.monotonic(),
         name="lcm-recall-summary-knn",
+        engine=engine,
     )
     coverage = knn_results.coverage
     ranked_rows = list(knn_results)
@@ -4156,6 +4175,7 @@ def _lcm_recall_summary_arm(
         ),
         remaining_s=deadline - time.monotonic(),
         name="lcm-recall-summary-hydrate",
+        engine=engine,
     )
     current = engine.current_session_id
     if reference_strict:
@@ -4216,6 +4236,7 @@ def _lcm_recall_chunk_arm(
         ),
         remaining_s=deadline - time.monotonic(),
         name="lcm-recall-chunk-knn",
+        engine=engine,
     )
     coverage = knn_results.coverage
     ranked_rows = list(knn_results)
@@ -4231,6 +4252,7 @@ def _lcm_recall_chunk_arm(
         ),
         remaining_s=deadline - time.monotonic(),
         name="lcm-recall-chunk-hydrate",
+        engine=engine,
     )
     current = engine.current_session_id
     hits: list[dict[str, Any]] = []
@@ -5159,6 +5181,7 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
                     ),
                     remaining_s=deadline - time.monotonic(),
                     name="lcm-provider-resolution",
+                    engine=engine,
                 )
                 if provider is None:
                     degraded_reasons.append("embedding provider is not configured")
@@ -5204,6 +5227,7 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
                         ),
                         remaining_s=deadline - time.monotonic(),
                         name="lcm-chunk-provider-resolution",
+                        engine=engine,
                     )
                     if chunk_provider is None:
                         degraded_reasons.append(
