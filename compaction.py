@@ -85,6 +85,17 @@ def _counted_compaction(*, return_messages: bool):
     def decorate(operation):
         @wraps(operation)
         def counted(self, messages, *args, **kwargs):
+            if self._plugin_is_unloading() and (successor := self._retained_successor()) is not None:
+                def invoke(engine):
+                    result = getattr(engine, operation.__name__)(messages, *args, **kwargs)
+                    self._last_compression_status = engine.last_compression_status
+                    self._last_compression_noop_reason = engine.last_compression_noop_reason
+                    self.compression_count = engine.compression_count
+                    return result
+
+                result = successor._use_retained_binding(invoke)
+                if result.used and result.value is not None:
+                    return result.value
             with self._compaction_gate:
                 if self._compaction_closing or self._plugin_is_unloading():
                     return messages if return_messages else False
@@ -239,6 +250,11 @@ class CompactionMixin:
             maybe_reclassify()
 
     def should_compress(self, prompt_tokens: int = None) -> bool:
+        if self._plugin_is_unloading():
+            successor = self._retained_successor()
+            return successor is not None and bool(successor._use_retained_binding(
+                lambda engine: engine.should_compress(prompt_tokens),
+            ).value)
         if self._bypasses_lcm_context_management():
             if self._compression_boundary_cooldown_active():
                 return False

@@ -17,7 +17,7 @@ import time
 import weakref
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any
+from typing import Any, Callable
 
 from .plugin_identity import is_lcm_engine_name
 
@@ -45,6 +45,7 @@ class EngineUnloadGroup:
         self._retired_embedding_owners: set[object] = set()
         self._deferred = weakref.WeakSet()
         self.retired_session_starts: weakref.WeakValueDictionary | None = None
+        self.current_prototype: Callable[[], Any] | None = None
 
     def start_worker(self, worker: threading.Thread, *, continuing: bool = False) -> bool:
         with self.lock:

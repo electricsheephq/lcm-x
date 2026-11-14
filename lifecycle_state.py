@@ -757,14 +757,19 @@ class LifecycleStateStore:
         return self.get_by_conversation(conversation_id)
 
     @_synchronized
-    def record_reset(self, conversation_id: str | None) -> LifecycleState | None:
+    def record_reset(self, conversation_id: str | None, *, expected_session_id: str | None = None) -> LifecycleState | None:
         if not conversation_id:
             return None
         state = self.get_by_conversation(conversation_id)
         if state is None:
             return None
         now = time.time()
-        self._conn.execute(
+        binding = ""
+        params = (now, now, now, conversation_id)
+        if expected_session_id is not None:
+            binding = " AND (current_session_id = ? OR (current_session_id IS NULL AND last_finalized_session_id = ?))"
+            params += (expected_session_id, expected_session_id)
+        cursor = self._conn.execute(
             """
             UPDATE lcm_lifecycle_state
             SET last_reset_at = ?,
@@ -773,11 +778,11 @@ class LifecycleStateStore:
                 debt_updated_at = ?,
                 updated_at = ?
             WHERE conversation_id = ?
-            """,
-            (now, now, now, conversation_id),
+            """ + binding,
+            params,
         )
         self._conn.commit()
-        return self.get_by_conversation(conversation_id)
+        return self.get_by_conversation(conversation_id) if cursor.rowcount else None
 
     @_synchronized
     def prune_empty_sessions(

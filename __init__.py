@@ -616,6 +616,7 @@ def register(ctx):
             if not hasattr(manager, "_lcm_x_retired_session_starts"):
                 manager._lcm_x_retired_session_starts = WeakValueDictionary()
             engine._unload_group.retired_session_starts = manager._lcm_x_retired_session_starts
+            engine._unload_group.current_prototype = lambda: getattr(manager, "_context_engine", None)
 
         def retire_registration():
             # Hermes keeps its profile manager when it reloads directory plugins.
@@ -967,6 +968,10 @@ def register(ctx):
             def _replay_existing_lane(active_engine):
                 return active_engine._ingest_reload_lane(session_id, conversation_id, history, platform)
 
+            def _ingest_retained(active_engine):
+                _ingest_and_note(active_engine)
+                return True
+
             def _bind_reset_session(active_engine):
                 # Concurrent callbacks for the same reset must reconcile
                 # through the durable lane after the first writer binds it.
@@ -1002,6 +1007,19 @@ def register(ctx):
 
             try:
                 if host_engine is not None:
+                    if (getattr(host_engine, "_reload_successor", None) is not None
+                            or getattr(host_engine, "_reload_compression_boundary", None) is not None):
+                        attached = host_engine._retained_successor()
+                        if (attached is not None and attached._session_id == session_id
+                                and conversation_id in ("", attached._conversation_id)
+                                and attached._db_path == engine._db_path
+                                and _callback_profile_home(getattr(ctx, "_manager", None))
+                                == _resolved_profile_home(attached._hermes_home)):
+                            result = attached._use_retained_binding(_ingest_retained, timeout=None)
+                            if result.used and result.value:
+                                return
+                        if _forward_reloaded_post_llm_call(kwargs):
+                            return
                     result = use_lcm_engine(host_engine, _bind_and_ingest, timeout=None)
                     if (result.status == ActiveEngineUseStatus.CLOSED_ENGINE
                             and getattr(host_engine, "_plugin_is_unloading", lambda: False)()

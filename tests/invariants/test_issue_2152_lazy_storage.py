@@ -293,9 +293,116 @@ def test_retained_cli_reset_starts_a_new_lane_in_the_current_registration(prefli
         assert _durable_messages(db, "unrelated") == []
         assert _durable_messages(db, "original") == [(row["role"], row["content"]) for row in first]
         assert _durable_messages(db, "fresh") == [(row["role"], row["content"]) for row in fresh]
+        hits = json.loads(retained.handle_tool_call(
+            "lcm_grep", {"query": "fresh answer", "mode": "full_text", "session_scope": "current"},
+        ))
+        assert hits["results"]
     finally:
         ctx.unload_callbacks[0]()
     db.unlink()
+
+
+def test_retained_engine_uses_new_registration_for_preflight_compaction_and_tools(preflight, monkeypatch):
+    from hermes_lcm import escalation, tokens
+
+    monkeypatch.setenv("LCM_FRESH_TAIL_COUNT", "2")
+    monkeypatch.setenv("LCM_LEAF_CHUNK_TOKENS", "16")
+    monkeypatch.setattr(tokens, "_get_encoder", lambda: None)
+    monkeypatch.setattr(escalation, "_call_llm_for_summary", lambda *args, **kw: "Earlier turns retained.")
+    original, old_ctx = preflight.register(supports_unload=True)
+    retained = original.clone_for_agent()
+    session = "retained"
+    retained.on_session_start(session, platform="cli", context_length=200_000)
+    history = [
+        {"role": role, "content": f"handoff {label} {message} " * 40}
+        for label in ("one", "two") for role, message in (("user", "question"), ("assistant", "answer"))
+    ]
+    retained.ingest(history[:2])
+    old_ctx.unload_callbacks[0]()
+    _, ctx = preflight.register(supports_unload=True, manager=old_ctx._manager)
+    db = preflight.home / "lcm.db"
+    try:
+        retained.should_compress_preflight(history)
+        expected = [(row["role"], row["content"]) for row in history]
+        assert _durable_messages(db, session) == expected
+        compacted = retained.compress(history, current_tokens=retained.threshold_tokens + 1, force=True)
+        assert retained.last_compression_status == "compacted"
+        assert len(compacted) < len(history)
+        response = json.loads(retained.handle_tool_call(
+            "lcm_grep", {"query": "handoff", "mode": "full_text", "session_scope": "current"},
+            messages=compacted,
+        ))
+        assert response["results"]
+        assert _durable_messages(db, session) == expected
+    finally:
+        ctx.unload_callbacks[0]()
+    db.unlink()
+    retained.should_compress_preflight(history)
+    assert not db.exists()
+
+
+def test_retained_engine_cannot_use_a_lane_that_has_advanced(preflight):
+    original, old_ctx = preflight.register(supports_unload=True)
+    retained = original.clone_for_agent()
+    retained.on_session_start("old-id", platform="cli", conversation_id="rotated")
+    original_row = {"role": "user", "content": "original lane"}
+    retained.ingest([original_row])
+    old_ctx.unload_callbacks[0]()
+    current, ctx = preflight.register(supports_unload=True, manager=old_ctx._manager)
+    db = preflight.home / "lcm.db"
+    tool_args = {"query": "original", "mode": "full_text", "session_scope": "current"}
+    try:
+        assert json.loads(retained.handle_tool_call("lcm_grep", tool_args))["results"]
+        new = current.clone_for_agent()
+        new.on_session_start("new-id", platform="cli", conversation_id="rotated")
+        new.ingest([{"role": "user", "content": "next generation"}])
+        stale = [original_row, {"role": "assistant", "content": "stale answer"}]
+        assert retained.should_compress_preflight(stale) is False
+        assert retained.compress(stale, force=True) is stale
+        assert "error" in json.loads(retained.handle_tool_call("lcm_grep", tool_args, messages=stale))
+        retained.on_session_reset()
+        assert new._lifecycle.get_by_conversation("rotated").last_reset_at is None
+        assert _durable_messages(db, "old-id") == [("user", "original lane")]
+        assert _durable_messages(db, "new-id") == [("user", "next generation")]
+    finally:
+        ctx.unload_callbacks[0]()
+    db.unlink()
+
+
+def test_unload_drains_retained_binding_adoption(preflight, monkeypatch):
+    original, old_ctx = preflight.register(supports_unload=True)
+    retained = original.clone_for_agent()
+    retained.on_session_start("retained", platform="cli")
+    history = [{"role": "user", "content": "stored turn"}]
+    retained.ingest(history)
+    old_ctx.unload_callbacks[0]()
+    current, ctx = preflight.register(supports_unload=True, manager=old_ctx._manager)
+    db = preflight.home / "lcm.db"
+    opened, release = threading.Event(), threading.Event()
+    connect = sqlite3.connect
+
+    def pause_after_open(path, *args, **kwargs):
+        connection = connect(path, *args, **kwargs)
+        if str(path) == db.as_uri() + "?mode=ro":
+            opened.set()
+            assert release.wait(5)
+        return connection
+
+    monkeypatch.setattr(sqlite3, "connect", pause_after_open)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        preflight_call = executor.submit(retained.should_compress_preflight, history)
+        try:
+            assert opened.wait(5)
+            unload = executor.submit(ctx.unload_callbacks[0])
+            assert current._unload_group.closing.wait(5)
+            assert not unload.done()
+        finally:
+            release.set()
+        assert preflight_call.result(timeout=5) is False
+        unload.result(timeout=5)
+    db.unlink()
+    retained.should_compress_preflight(history)
+    assert not db.exists()
 
 
 @pytest.mark.parametrize("already_stored", [True, False])
