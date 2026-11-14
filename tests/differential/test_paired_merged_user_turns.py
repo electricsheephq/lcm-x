@@ -37,7 +37,7 @@ CONTROL_SEEDS = {
 
 
 def _normalise(rows, preserved, reference_rows=()):
-    return paired.normalise_rows(rows, preserved, reference_rows)
+    return list(rows) if paired.CANDIDATE_CONTRACT == 'records-v1' else paired.normalise_rows(rows, preserved, reference_rows)
 
 
 def _shifted_replay(tmp_path, monkeypatch, trees, record_property, capture):
@@ -238,7 +238,7 @@ def _run_sequence(module, name, directory, monkeypatch, seed, plan, references=(
                 calls = _faults(engine, name, step['fault'], patch)
                 ingest()
                 faults.append(list(calls))
-            stages.append(paired.normalise_rows(base._identities(engine), preserved,
+            stages.append(_normalise(base._identities(engine), preserved,
                                                references[len(stages)] if references else ()))
     finally:
         engine.shutdown()
@@ -315,10 +315,12 @@ CASES = [*RANDOM_SEEDS, *CONTROL_SEEDS, *RELOAD_SEEDS, 'shifted-replay', 'captur
 
 
 def _execute_case(case, directory, versions, stub_faults=False, fake=False):  # noqa: F811
+    if os.environ.get('LCMX_DIFF_FAKE_RECORDS') is not None and any(k in os.environ for k in ('CI', 'GITHUB_ACTIONS')):
+        pytest.fail('LCMX_DIFF_FAKE_RECORDS is forbidden in CI')
     fake = fake or os.environ.get('LCMX_DIFF_FAKE_RECORDS') == '1'
     if fake:
         versions = dict(versions, candidate=SimpleNamespace(register=versions['main'].register))
-    traces, properties = {}, []
+    traces, properties = {}, [('fake_candidate', 'fake_records.install')] if fake else []
 
     def record(name, value):
         properties.append((name, value))
@@ -391,13 +393,17 @@ def _label_violations(case, trace, stubbed):
 
 
 @pytest.mark.parametrize('case', [2707102, 2707202, 2707203])
-def test_stubbed_control_with_preservation_seam(case, tmp_path, versions):  # noqa: F811
+def test_stubbed_control_with_preservation_seam(case, tmp_path, versions, monkeypatch):  # noqa: F811
     from .trees import check_host, PrerequisiteUnavailable, skip_or_fail
     try:
         check_host()
     except PrerequisiteUnavailable as exc:
         skip_or_fail(str(exc))
+    monkeypatch.setattr(paired, 'CANDIDATE_CONTRACT', 'records-v1')
     _, traces = _execute_case(case, tmp_path, versions, stub_faults=True, fake=True)
+    if case == 2707203:
+        assert [dict(r)['observed_at'] for r in traces['candidate'].ingests[-1]['records']
+                if dict(r)['content'] == 'P2'] == [40.]
     faults = [fault for fault in traces['candidate'].faults if fault.kind == 'preservation-once']
     assert faults and all(fault.present and fault.stubbed and not fault.called and not fault.raised for fault in faults)
 
@@ -405,6 +411,8 @@ def test_stubbed_control_with_preservation_seam(case, tmp_path, versions):  # no
 @pytest.fixture(scope='module', autouse=True)
 def fake_record_contract_switch():
     with pytest.MonkeyPatch.context() as patch:
+        if 'LCMX_DIFF_FAKE_RECORDS' in os.environ and any(k in os.environ for k in ('CI', 'GITHUB_ACTIONS')):
+            pytest.fail('LCMX_DIFF_FAKE_RECORDS is forbidden in CI')
         if os.environ.get('LCMX_DIFF_FAKE_RECORDS') == '1':
             patch.setattr(paired, 'CANDIDATE_CONTRACT', 'records-v1')
         yield
@@ -412,6 +420,9 @@ def fake_record_contract_switch():
 
 @pytest.fixture(scope='module')
 def fault_run(request, record_testsuite_property):
+    if paired.CANDIDATE_CONTRACT == 'records-v1' and 'LCMX_DIFF_BASELINE_REF' in os.environ:
+        from .trees import skip_or_fail
+        skip_or_fail('records-v1 requires pinned declarations; baseline override')
     run = FaultRun()
     selected = {item.callspec.params['sequence'] for item in request.session.items
                 if item.module is request.module and hasattr(item, 'callspec')
@@ -495,7 +506,7 @@ class TestMergedUserTurns:
         # controls additionally check setup and warm ingests, which the source
         # compared only at selected checkpoints.
         if case in CONTROL_SEEDS or isinstance(case, str):
-            stages = {name: [paired.normalise_rows(stage['rows'], stage['preserved'],
+            stages = {name: [_normalise(stage['rows'], stage['preserved'],
                                                    traces['main'].ingests[index]['rows'])
                              for index, stage in enumerate(trace.ingests)] for name, trace in traces.items()}
             assert not paired.compare_stages(stages, record_property), case
@@ -540,7 +551,8 @@ class TestMergedUserTurns:
 
 
 @pytest.mark.parametrize('mutation,message', [
-    ('correct', None), ('missing', 'declared record multiset'), ('extra', 'declared record multiset'),
+    ('correct', None), ('per-owner', None), ('retry', None),
+    ('listing', 'canonical listing changed'), ('missing', 'declared record multiset'), ('extra', 'declared record multiset'),
     ('text', 'declared record multiset'), ('time', 'declared record multiset'), ('duplicate', 'declared record multiset'),
     ('hidden', 'retrieval-missing'), ('superseded', 'superseded without occurrence witness'),
     ('inert', 'declared fault preservation-once never fired'), ('skipped', 'floor skipped'),
@@ -554,7 +566,7 @@ def test_fake_record_contract(mutation, message, tmp_path, versions, monkeypatch
     from tests.differential.record_contract import active, check_stage, mandatory_floor
     install = fake_records.install
     def modified(engine, entries, patch):
-        install(engine, entries, patch)
+        tools = install(engine, entries, patch)
         writer = engine._store_queued_user_rows
         def write(rows):
             rows = [dict(row) for row in rows]
@@ -588,21 +600,35 @@ def test_fake_record_contract(mutation, message, tmp_path, versions, monkeypatch
                 return result
             patch.setattr(engine, 'ingest', defective)
         if mutation == 'error':
-            patch.setattr(engine._contract_tools, 'lcm_load_session',
+            patch.setattr(tools, 'lcm_load_session',
                           lambda *_a, **_k: json.dumps(dict(error='injected tool error')))
         if mutation == 'hidden':
-            patch.setattr(engine._contract_tools, 'lcm_grep', lambda *_a, **_k: json.dumps(dict(results=[])))
+            patch.setattr(tools, 'lcm_grep', lambda *_a, **_k: json.dumps(dict(results=[])))
+        if mutation == 'listing':
+            load = tools.lcm_load_session
+            def drop(args, **kwargs):
+                reply = json.loads(load(args, **kwargs))
+                reply['messages'] = [r for r in reply['messages'] if r.get('store_id') != 1]
+                return json.dumps(reply)
+            patch.setattr(tools, 'lcm_load_session', drop)
+        return tools
     monkeypatch.setattr(fake_records, 'install', modified)
     monkeypatch.setattr(paired, 'CANDIDATE_CONTRACT', 'records-v1')
+    monkeypatch.setattr(fake_records, 'WRITE_STYLE', mutation)
     def verify():
         if mutation in ('inert', 'skipped'):
             return mandatory_floor(dict(evaluated=mutation != 'skipped'), {})
-        case = 2707102 if mutation == 'early' else 2707802 if mutation == 'unsuperseded' else 2707800
+        case = 2707480 if mutation in ('per-owner', 'retry') else 2707102 if mutation == 'early' else 2707802 if mutation == 'unsuperseded' else 2707800
         _, traces = _execute_case(case, tmp_path, versions, fake=True)
+        if mutation in ('per-owner', 'retry'):
+            assert any(f.called > 1 and f.raised == f.called for f in traces['candidate'].faults)
         for stage, (main, candidate) in enumerate(zip(traces['main'].ingests, traces['candidate'].ingests, strict=True), 1):
             try:
                 check_stage(candidate, main, active(DECLARED[case], stage))
-                assert not candidate['retrieval_missing'], 'retrieval-missing'
+                missing = [(e['capture_view'], e['predecessor_ordinal'], e['expected']['content'])
+                           for e in DECLARED[case] if e['stage'] <= stage and
+                           (e['due_stage'] is None or e['due_stage'] > stage)]
+                assert candidate['retrieval_missing'] == missing, 'retrieval-missing'
             except AssertionError as exc:
                 raise AssertionError(f'{case}: {exc}') from exc
     if message:
@@ -632,6 +658,9 @@ def test_record_declaration_completeness():
     from collections import Counter
     from tests.differential.merged_user_turns_expected import EXPECTED
     from tests.differential.merged_user_turns_extras import DISPOSITIONS
+    from tests.differential.merged_user_turns_extras import FAULT_ABSENT
+    assert Counter(r[3] for rows in FAULT_ABSENT.values() for r in rows) == {
+        'injected persistent writer fault': 23, 'once writer fault at final ingest': 19}
     for case in DISPOSITIONS:
         assert Counter(tuple(row[:5]) for row in DISPOSITIONS[case]) == Counter(
             (stage, kind, value, view, count) for stage, kind, value, view, count, label in EXPECTED.get(case, ())

@@ -1,19 +1,21 @@
 """Independent #2707 record eligibility, occurrence projection and recall contract.
 
-Writer faults count and raise only on calls carrying at least one record. Empty
-calls pass through uncounted. Once raises on the first counted call after install;
-persistent raises on every counted call while installed.
+Writer faults are ingest-scoped and never inspect arguments: every writer entry
+in the first faulted ingest raises for once; every ingest raises for persistent.
+Entries are counted per ingest regardless of batching, retries or call shape.
 
-Only observe(engine), the tool/locator adapter, may be adapted by a candidate PR.
-judge(observations, entries) contains frozen semantics and must not be changed.
+Frozen in the product PR's diff: check_stage, active, expected_record, projection,
+mandatory_floor, judge(), the records-v1 block in test_paired_merged_user_turns.py,
+and the snapshot shape (session.py: canonical_rows, queued_rows, Trace.stored,
+RECORD_COLUMNS, zero-based ordinal and host_message_timestamp provenance).
+Only observe()'s tool-call adapters may change, keeping the same observations.
 Observation rows have role, content and kind: canonical has store_id; record has
 owner_store_id and ordinal. Search hits also have reference={tool, args} and an
 expanded normalized row. Observations include pages, hits, reload_witness and
-summary_sources; record references are compared with summary source locators.
+summary_sources, baseline_summary_sources and baseline_canonical_ids for equality.
 """
 from collections import Counter
 import json
-import sys
 
 from .session import freeze
 
@@ -37,7 +39,7 @@ def writer_fault_stages(case):
 
 
 def writer_fault(engine, kind, patch, calls):
-    """Install the counted-call rule on the declared writer seam."""
+    """Install the ingest-scoped rule on the declared writer seam."""
     from .session import audit_fault
     present = hasattr(engine, '_store_queued_user_rows')
     audit = audit_fault(engine, kind, present)
@@ -46,14 +48,14 @@ def writer_fault(engine, kind, patch, calls):
     original = engine._store_queued_user_rows
     plan = writer_fault_stages(engine._paired_trace.case)
     assert plan.get(audit.stage) == kind, 'writer fault differs from frozen plan'
-    def wrapped(rows, *args, **kwargs):
-        if rows:
-            calls.append(1)
+    def wrapped(*args, **kwargs):
+        stage = len(engine._paired_trace.ingests) + 1
+        if kind == 'persistent' or stage == audit.stage:
+            calls.append(stage)
             audit.called += 1
-            if kind == 'persistent' or len(calls) == 1:
-                audit.raised += 1
-                raise ValueError('injected writer failure')
-        return original(rows, *args, **kwargs)
+            audit.raised += 1
+            raise ValueError('injected writer failure')
+        return original(*args, **kwargs)
     patch.setattr(engine, '_store_queued_user_rows', wrapped)
     return False
 
@@ -121,9 +123,8 @@ def check_stage(snapshot, baseline, entries):
         dict(row)['superseded_by'] is None for row in snapshot['records']), 'record owner absent'
 
 
-def observe(engine):
+def observe(engine, tools):
     """Tool calls and locator translation only; candidate PRs may adapt this adapter."""
-    tools = getattr(engine, '_contract_tools', sys.modules[engine.__module__.rsplit('.', 1)[0] + '.tools'])
     def call(name, args):
         reply = json.loads(getattr(tools, name)(args, engine=engine))
         assert 'error' not in reply, f'{name}: {reply.get("error")}'
@@ -162,6 +163,9 @@ def observe(engine):
 def judge(observations, entries):
     """Frozen semantic contract; candidate PRs must not change this function."""
     pages, failures = observations['pages'], []
+    assert [r['store_id'] for r in pages if r['kind'] == 'canonical'] == observations['baseline_canonical_ids'], \
+        'canonical listing changed'
+    assert observations['summary_sources'] == observations['baseline_summary_sources'], 'summary sources changed'
     witness = observations.get('reload_witness', {})
     for entry in entries:
         expected = expected_record(entry)
@@ -183,9 +187,6 @@ def judge(observations, entries):
             preceding = next((r for r in reversed(pages[:index]) if r['kind'] == 'canonical'), {})
             assert following.get('store_id') == row['owner_store_id'] \
                 and preceding.get('store_id', -1) < row['owner_store_id'], 'record owner placement'
-    locators = [hit['reference']['args'] for hit in observations['hits'] if hit['kind'] == 'record']
-    assert not any(freeze(source) in {freeze(ref), *(freeze(v) for v in ref.values())}
-                   for source in observations['summary_sources'] for ref in locators), 'record summary source'
     return failures
 
 

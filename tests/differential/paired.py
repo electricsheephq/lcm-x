@@ -61,8 +61,6 @@ def versions(tmp_path_factory):
 
 def normalise_rows(rows, preserved=None, reference_rows=()):
     """Replace only explicitly proven exact tuples; never remove a row."""
-    if CANDIDATE_CONTRACT == 'records-v1':
-        return list(rows)
     preserved = preserved or {}
     result = []
     for row in rows:

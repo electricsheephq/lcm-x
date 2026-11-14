@@ -7,6 +7,9 @@ from .record_contract import expected_record, projection, writer_fault_stages
 from .session import RECORD_COLUMNS, canonical_rows, queued_rows
 
 
+WRITE_STYLE = 'batch'
+
+
 def install(engine, entries, patch):
     conn = engine._store._conn
     conn.execute('CREATE TABLE IF NOT EXISTS queued_user_rows (' + ', '.join(RECORD_COLUMNS) + ')')
@@ -26,12 +29,16 @@ def install(engine, entries, patch):
         stored = {(dict(r)['owner_store_id'], dict(r)['ordinal']) for r in queued_rows(engine)}
         pending[:] = [expected_record(e) for e in entries if e['stage'] <= stage
                       and (e['owner_store_id'], e['predecessor_ordinal']) not in stored]
-        try:
-            engine._store_queued_user_rows(pending)
-        except (ValueError, RuntimeError, sqlite3.Error):
-            assert stage in writer_fault_stages(engine._paired_trace.case)
-        else:
-            pending.clear()
+        batches = [[r for r in pending if r['owner_store_id'] == owner]
+                   for owner in sorted({r['owner_store_id'] for r in pending})] if WRITE_STYLE == 'per-owner' else [pending]
+        for batch in batches:
+            for _ in range(2 if WRITE_STYLE == 'retry' else 1):
+                try:
+                    engine._store_queued_user_rows(rows=batch)
+                except (ValueError, RuntimeError, sqlite3.Error):
+                    assert stage in writer_fault_stages(engine._paired_trace.case)
+                else:
+                    break
         witness = engine._paired_trace.baseline_stages[stage - 1]['reload_witness']
         for owner, sid in witness.items():
             conn.execute('UPDATE queued_user_rows SET superseded_by=? WHERE owner_store_id=?', (sid, owner))
@@ -53,5 +60,4 @@ def install(engine, entries, patch):
         start = args.get('record_cursor', 0)
         data = rows()
         return json.dumps(dict(messages=data[start:start + 1], next_cursor={'record_cursor': start + 1} if start + 1 < len(data) else None))
-    patch.setattr(engine, '_contract_tools', SimpleNamespace(lcm_grep=grep, lcm_expand=expand, lcm_load_session=load),
-                  raising=False)
+    return SimpleNamespace(lcm_grep=grep, lcm_expand=expand, lcm_load_session=load)

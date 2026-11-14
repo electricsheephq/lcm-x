@@ -324,10 +324,11 @@ def _open(module, directory, monkeypatch, trace=None, fake=False):
             trace.capture(kwargs.get('conversation_history', []), kwargs.get('user_message'))
             return hook(*args, **kwargs)
 
+        tools = sys.modules[engine.__module__.rsplit('.', 1)[0] + '.tools']
         if fake:
             from .fake_records import install
             from .merged_user_turns_extras import DECLARED
-            install(engine, DECLARED[trace.case], monkeypatch)
+            tools = install(engine, DECLARED[trace.case], monkeypatch)
         ingest = engine.ingest
         transaction = engine._ingest_messages_transaction
         prepared = []
@@ -352,7 +353,11 @@ def _open(module, directory, monkeypatch, trace=None, fake=False):
                 from .paired import BASELINE_REF
                 baseline = getattr(trace, 'baseline_stages', trace.ingests)[:len(trace.ingests)]
                 entries = declarations(trace.case, baseline, BASELINE_REF)
-                observation = observe(engine) if entries else dict(pages=[], hits=[], summary_sources=[])
+                observation = observe(engine, tools)
+                observation['baseline_canonical_ids'] = [dict(r)['store_id'] for r in baseline[-1]['canonical']]
+                observation['baseline_summary_sources'] = (baseline[-1]['summary_sources']
+                    if hasattr(trace, 'baseline_stages') else observation['summary_sources'])
+                trace.ingests[-1]['summary_sources'] = observation['summary_sources']
                 observation['reload_witness'] = baseline[-1]['reload_witness']
                 trace.ingests[-1]['retrieval_missing'] = judge(observation, entries)
             return result

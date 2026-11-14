@@ -6,6 +6,7 @@ host, committed-owner, storage, fault and protection evidence used by eligibilit
 """
 from dataclasses import asdict
 import json
+import os
 from pathlib import Path
 import pprint
 import sys
@@ -13,11 +14,12 @@ import sys
 import tests.conftest  # noqa: F401 - standalone package aliases
 from . import paired
 from .merged_user_turns_expected import EXPECTED
-from .record_contract import declaration_stages, declarations
+from .record_contract import declaration_stages, declarations, writer_fault_stages
 from .test_paired_merged_user_turns import CASES, _execute_case
 
 
 def generate(directory):
+    assert 'LCMX_DIFF_FAKE_RECORDS' not in os.environ, 'generator refuses LCMX_DIFF_FAKE_RECORDS'
     tree = paired.materialize(paired.BASELINE_REF, directory / 'baseline')
     versions = {name: paired._load(tree, '_extras_baseline_' + name) for name in ('main', 'candidate')}
     evidence, declared, dispositions, retrieval, absent = {}, {}, {}, {}, {}
@@ -27,7 +29,8 @@ def generate(directory):
         stages = declaration_stages(trace)
         declared[case] = declarations(case, stages, paired.BASELINE_REF)
         absent[case] = [(e['capture_view'], e['predecessor_ordinal'], e['expected']['content'],
-                         'injected persistent writer fault') for e in declared[case] if e['due_stage'] is None]
+                         'injected persistent writer fault' if writer_fault_stages(case)[len(stages)] == 'persistent'
+                         else 'once writer fault at final ingest') for e in declared[case] if e['due_stage'] is None]
         retrieval[case] = dict(kind='retrieval-missing', label='#2707 proven',
                                values=[s['retrieval_missing'] for s in stages])
         evidence[case] = dict(stages=stages, faults=[asdict(f) for f in trace.faults])

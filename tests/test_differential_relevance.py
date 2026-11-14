@@ -34,12 +34,12 @@ ENGINE_REACHED_EXCLUSIONS = frozenset({
     "command.py", "command_auth.py", "command_doctor.py", "command_router.py", "command_status.py",
     "cpu_capacity.py", "embedding_maintenance.py", "embedding_provider.py", "entity_store.py",
     "evidence_compiler.py", "evidence_pack.py", "evidence_tools.py", "expand_query_tools.py",
-    "expand_tools.py", "expansion_evidence.py", "guidance.py", "inactive_record.py", "inspect_tools.py",
+    "expansion_evidence.py", "guidance.py", "inactive_record.py", "inspect_tools.py",
     "level3_repair.py", "maintenance.py", "memory_tools.py", "occurrence_time.py", "presets.py",
-    "query_view_store.py", "reasoning.py", "recall_delivery.py", "recall_session.py", "recent.py",
-    "recorder.py", "requirements_compiler.py", "retrieval_context.py", "retrieval_core.py",
-    "runtime_identity.py", "schema_families.py", "search_query.py", "selective_compiler.py",
-    "selective_recall.py", "sqlite_session.py", "tools.py", "trajectory_store.py", "vector_store.py",
+    "query_view_store.py", "reasoning.py", "recall_delivery.py", "recent.py",
+    "recorder.py", "requirements_compiler.py", "retrieval_context.py",
+    "runtime_identity.py", "schema_families.py", "selective_compiler.py",
+    "selective_recall.py", "sqlite_session.py", "trajectory_store.py", "vector_store.py",
 })
 
 
@@ -59,7 +59,13 @@ def _gate_paths(name: str = "TURN_PATH_FILES") -> set[str]:
         undocumented = [ast.literal_eval(node) for node in values[0].elts
                         if not lines[node.end_lineno - 1].partition("#")[2].strip()]
         assert not undocumented, "Exclusions need written reasons:\n" + "\n".join(sorted(undocumented))
-    return ast.literal_eval(values[0])
+    # Differential additionally judges retrieval; the maintainer gate keeps its own scope.
+    workflow = (ROOT / '.github/workflows/differential.yml').read_text()
+    listed = {line.strip() for line in workflow.split('TURN_PATH_FILES: |-\n', 1)[1].split('        run:', 1)[0].splitlines()}
+    paths = ast.literal_eval(values[0])
+    if name == 'TURN_PATH_FILES':
+        assert paths <= listed, 'Differential omits maintainer turn paths'
+    return paths - listed if name == 'NON_TURN_PATH_FILES' else paths | listed
 
 
 def _tracked_python_files(root: Path) -> set[str]:
