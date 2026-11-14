@@ -355,7 +355,7 @@ def test_synthetic_orphan_characterization(case, expected, host, tmp_path, monke
 
 @pytest.mark.parametrize('preview', ['plain', 'data-uri'], ids=['path-temp-lf', 'path-temp-data-uri'])
 def test_recovered_temp_different_path_characterization(preview, host, tmp_path, monkeypatch, request):
-    """Known divergence (#2553): reconcile adds one extra pair; no host row is lost."""
+    """#2703 resolved the extra pair in #2553; no host row is lost."""
     # #2703 keeps the stored identity when the recovered content is equal, so a changed path stores two fewer copies;
     # no host row missing
     _run_case(('reconcile-replay', 'v0292', preview, 'hermes-results', 'path'),

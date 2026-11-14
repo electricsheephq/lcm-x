@@ -133,8 +133,11 @@ def replay_setup(tmp_path, monkeypatch):
         engine.shutdown()
 
 
-def _replay(setup):
+def _replay(setup, *, logical=None, check_rows=None):
     engine, host, storage, marker, body = setup
+    if logical is None:
+        def logical(row):
+            return _logical(row, storage, marker, body)
 
     def summary_carrier():
         parts = [engine_module._summary_part_text(n) for n in engine._summary_frontier_nodes()]
@@ -154,12 +157,14 @@ def _replay(setup):
             engine._store_complete_backlog(view, engine._leading_anchor_count(view))
         engine.compress(view, current_tokens=10_000, force=True)
         rows = engine._store.get_session_messages(SESSION, limit=100_000)
-        actual = Counter(_logical(row, storage, marker, body) for row in rows)
-        expected = Counter(_logical(row, storage, marker, body) for row in host)
+        actual = Counter(logical(row) for row in rows)
+        expected = Counter(logical(row) for row in host)
         missing, extra = expected - actual, actual - expected
         records.append((len(rows), sum(missing.values()), sum(extra.values())))
         # Each turn must preserve all host rows, even on the best-effort fault path.
         assert not missing, (turn, records)
+        if check_rows is not None:
+            check_rows(rows)
         carrier = summary_carrier()
         engine.note_turn_complete()
     return records
@@ -241,3 +246,79 @@ def test_candidate_payload_loaded_once_per_pass(replay_setup, monkeypatch):
     assert [extra for _, _, extra in records] == [0] * 8
     assert loads and max(loads.values()) == 1, loads
     print(f'REPLAY_CANDIDATE_PAYLOAD_LOADS generations={len(loads)} max={max(loads.values())}')
+
+
+def _literal_reference_setup(replay_setup):
+    engine, host, storage, _, stored_body = replay_setup('temp_plain_lf', 'V1')
+    stored = engine._store.get_session_messages(SESSION, limit=100_000)[2]
+    ref = EXT.fullmatch(stored['content'])[1]
+    payload = reconcile_module.load_externalized_payload(
+        ref, config=engine._config, hermes_home=engine._hermes_home)
+    assert payload['content'] == stored_body
+    body = stored_body + f'\nDISTINCT_BODY_B\n[Externalized tool output: tool=dump; ref={ref}]'
+    path = Path(tempfile.tempdir) / 'hermes-results/call_distinct.txt'
+    path.write_text(body)
+    marker = _marker(path, body)
+    assert str(path) not in stored['content'] and body != stored_body
+    host[2]['content'] = marker
+    return engine, host, storage, marker, body
+
+
+def _replay_literal_reference(setup):
+    _, _, storage, marker, body = setup
+
+    def content_of(row):
+        content = row.get('content') or ''
+        # Expand only the store's whole placeholder once. B's embedded reference
+        # is literal text, so recursively expanding it would hide the lost row.
+        match = EXT.fullmatch(content)
+        return json.loads((storage / match[1]).read_text())['content'] if match else content
+
+    def logical(row):
+        calls = row.get('tool_calls') or []
+        if isinstance(calls, str):
+            calls = json.loads(calls)
+        content = body if row.get('content') == marker else content_of(row)
+        return (row['role'], content, row.get('tool_call_id') or '',
+                json.dumps(calls, sort_keys=True),
+                (row.get('tool_name') or row.get('name') or '') if row['role'] == 'tool' else '')
+
+    def check_rows(rows):
+        assert any(row['role'] == 'tool' and content_of(row) == body for row in rows), 'B missing'
+
+    return _replay(setup, logical=logical, check_rows=check_rows)
+
+
+def test_distinct_recovered_body_with_literal_reference(replay_setup):
+    records = _replay_literal_reference(_literal_reference_setup(replay_setup))
+    print(f'LITERAL_REFERENCE records={records}')
+    # Main 7828784f, round-3 main-2703-r3-3.log, turns 1 through 8.
+    assert [count for count, _, _ in records] == [9, 11, 13, 15, 18, 21, 23, 25], records
+
+
+def test_distinct_recovered_body_with_literal_reference_load_fault(replay_setup, monkeypatch):
+    setup = _literal_reference_setup(replay_setup)
+    original = reconcile_module.load_externalized_payload
+    faults = []
+
+    def fail_load(ref, **kwargs):
+        # Fault the post-keep load of B's literal ref, leaving main's existing
+        # durable-content loads and the recursive candidate comparison readable.
+        caller = inspect.currentframe().f_back
+        state = caller.f_locals
+        host_body = (not state.get('stored_row', True)
+                     and state.get('msg', {}).get('content') == setup[3]
+                     and state.get('content') == setup[4]
+                     and state.get('durable_content') is None
+                     and state.get('stale_durable_content') is None)
+        del caller
+        if host_body:
+            faults.append(ref)
+            raise OSError('injected literal-reference payload read failure')
+        return original(ref, **kwargs)
+
+    monkeypatch.setattr(reconcile_module, 'load_externalized_payload', fail_load)
+    records = _replay_literal_reference(setup)
+    print(f'LITERAL_REFERENCE_FAULT records={records} injected={len(faults)}')
+    assert [count for count, _, _ in records] == [9, 11, 13, 15, 18, 21, 23, 25], records
+    assert not faults, 'the post-keep literal-reference load must be unreachable'

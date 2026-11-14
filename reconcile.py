@@ -1134,6 +1134,10 @@ class ReconcileMixin:
                         # recovered output. Only an exact durable identity proves
                         # this alias; a failed read keeps today's tagged identity.
                         try:
+                            # An embedded reference can alias a distinct body to stored text.
+                            # Keep the marker identity rather than expand that body.
+                            if extract_externalized_ref(recovered_identity_content):
+                                return False
                             if _has_lossy_sensitive_redaction(recovered_identity_content):
                                 return False
                             bound_store = self._store if store is None else store
