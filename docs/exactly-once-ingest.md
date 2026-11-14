@@ -355,7 +355,7 @@ A tail exists because the store hit SQLite busy at session end. The ledger is in
 - Only a tail kept on the single unexplained user-conflict shape reports "stamp conflict" at exit; other pending tails retain the passed reason and whole-view count. The keep marker is cleared before each cold retry and set only at a qualifying keep, so a later busy retry cannot inherit the exclusion. The conflict count pages the session/conversation once and matches occurrences with Counters: stamped rows first by identity and stamp, then untimed rows by identity from the remaining stored copies. D2 stores the absent suffix before keeping the conflicting occurrence; stamps-on S3 still withholds that suffix. The exact count takes the tail store's write lock without waiting and checks the drain deadline before each page; a busy lock, expired deadline or read failure retains the passed reason and whole-view count (engine.py:11623-11674; maintenance_scheduler.py:425).
 - Recovery happens only through a host resume of that session; `/new` does not recover it.
 - Accepted and disclosed, with no sidecar journal. Every busy-at-end event and every drain failure is logged and counted. Outside the named undo-and-resend-after-a-busy-end exclusion above, any drain failure during the parity audit fails the gate; it is never relabelled as deferred (§5). A tail pending at such a hard exit is an M9 hit: the audit attributes it to #2253 by its warning's session id and the session's missing rows, and it fails the gate like any other M9 hit.
-- **M10. Rows the host kept in an abandoned compaction child (#2624, recovered from v0.30.1).** With the host's
+- **M10. Rows the host kept in an abandoned compaction child (#2624; recovery is opt-in from v0.30.1, off by default).** With the host's
   rotating compaction (`compression.in_place: false`), Hermes v0.21.6 to v0.23.1 resume the conversation's first
   session after an ACP restart and abandon the child chain (NousResearch/hermes-agent#148047). The host writes each
   row of a turn to its own database as it happens and calls the per-turn hook once at the end, so a kill in the
@@ -369,8 +369,8 @@ A tail exists because the store hit SQLite busy at session end. The ledger is in
   the rest, under the leaf's own session id and the conversation's id, in one store transaction that re-checks the
   proof and the conversation's reset first. Recovered rows pass the normal ingest protection and carry one metadata
   row each, `host_row_recovered:<store_id>`, which nothing in the product reads. The work runs on a background worker
-  once per process per bound session, never on a turn; `host_row_recovery_enabled = false`
-  (`LCM_HOST_ROW_RECOVERY_ENABLED=0`) turns it off and restores the earlier behaviour exactly. It does not bring
+  once per process per bound session, never on a turn; it is off by default because of known issues in #2624 and #2042.
+  `host_row_recovery_enabled = true` (`LCM_HOST_ROW_RECOVERY_ENABLED=1`) enables recovery, catch-up and the ingest guard together. It does not bring
   those turns back into the model's view (#2626). Named limits, each counted (`host_row_recovery_counts()`):
   - a conversation that is never loaded again keeps those rows only in the host's database;
   - rows the host's reader does not return (inactive rows, a background-review harness turn and the reply after it)
@@ -384,7 +384,7 @@ A tail exists because the store hit SQLite busy at session end. The ledger is in
     resume; not ACP or the gateway) is bound into a new conversation named after the child, and today's cold ingest
     stores the child's whole list there, copies of rows already recovered included: surplus, never loss (#2630);
   - a child that LCM-X never bound, and hosts and transports other than the tested ones.
-- **Unended sessions whose turn failed (#2042, recovered from v0.30.1).** On Hermes v0.23.1 a turn that fails (for
+- **Unended sessions whose turn failed (#2042; catch-up is opt-in from v0.30.1, off by default).** On Hermes v0.23.1 a turn that fails (for
   example, provider retries run out) or is stopped before or while its reply streams keeps the user row, appends the
   host's failed-turn notice (an assistant row with `display_kind = 'failed_turn'`) and returns without the per-turn
   hook. Desktop sessions never receive a session end; the next host start reaps them. If no later turn completes in
@@ -402,7 +402,7 @@ A tail exists because the store hit SQLite busy at session end. The ledger is in
     exactly once before the next turn row, and it has at most 500 rows.
   It stores the rows through the same append path as #2624, under the session's own id, in one transaction that first
   re-checks that the store still holds no row for it; each stored row carries `unended_turn_recovered:<store_id>`,
-  which nothing in the product reads. `host_row_recovery_enabled = false` also turns this off. Named limits (skips of
+  which nothing in the product reads. This is off by default; `host_row_recovery_enabled = true` (`LCM_HOST_ROW_RECOVERY_ENABLED=1`) enables it and the ingest guard. Named limits (skips of
   a session the job reads are counted in `unended_catchup_counts()`; sessions the query excludes, such as a failure
   older than the marker, and sessions no later start reaches are not):
   - forward only: a session whose failure is older than the profile's first catch-up job is never stored (operator

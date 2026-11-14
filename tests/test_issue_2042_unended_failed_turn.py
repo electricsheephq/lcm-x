@@ -83,7 +83,7 @@ def _new_engine(tmp_path, host, session_id):
     home = tmp_path / "home"
     engine = LCMEngine(
         config=LCMConfig(database_path=str(home / "lcm.db"), embeddings_enabled=False,
-                         temporal_rollups_enabled=False),
+                         temporal_rollups_enabled=False, host_row_recovery_enabled=True),
         hermes_home=str(home),
     )
     engine.bind_session_state(session_db=host, session_id=session_id)
