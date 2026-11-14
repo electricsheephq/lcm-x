@@ -45,6 +45,8 @@ MEMORY_MIGRATION_FILES = {
 # the two opt-in modules below, which store turn rows when turned on.
 # Default model-facing tool schemas count as context; persistence plumbing alone
 # does not qualify, but row-content policy and compaction commit ownership do.
+# tests/test_differential_relevance.py requires every static engine import
+# in this list or NON_TURN_PATH_FILES with a written exclusion reason.
 TURN_PATH_FILES = {
     "host_row_recovery.py",  # Off by default; when on, recovery stores turn content under its original session/conversation.
     "unended_catchup.py",  # Off by default; when on, the #2042 catch-up stores failed-turn sessions' content under their own ids.
