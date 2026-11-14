@@ -158,6 +158,10 @@ def _replay(setup):
             engine._store_complete_backlog(view, engine._leading_anchor_count(view))
         engine.compress(view, current_tokens=10_000, force=True)
         rows = engine._store.get_session_messages(SESSION, limit=100_000)
+        # The oracle treats the bare marker and the recovered body as one slot, so check the body itself:
+        # the seeded v0.29.2 result (store id 3) must still restore to its complete recovered body.
+        seeded = [row for row in rows if row['store_id'] == 3]
+        assert len(seeded) == 1 and _restore(seeded[0]['content'], storage) == body, (turn, records)
         actual = Counter(logical(row) for row in rows)
         expected = Counter(logical(row) for row in host)
         missing, extra = expected - actual, actual - expected
