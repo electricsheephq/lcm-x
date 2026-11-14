@@ -120,9 +120,14 @@ def test_control_same_session_resume_recovers_tail_exactly_once(engines, monkeyp
     assert _contents(resumed) == [m["content"] for m in MESSAGES]
 
 
-def test_control_same_process_next_start_does_not_drain(engines, monkeypatch):
-    """CONTROL (observation): the same engine's next session start has nothing to retry."""
+def test_control_next_start_keeps_stored_rows_once(engines, monkeypatch):
+    """CONTROL: after the interrupted end, the same engine's next session start keeps the two stored rows once.
+
+    A fix may add the final rows here; it must not drop or duplicate the rows already stored.
+    """
     engine = engines()
     _interrupted_end(engine, monkeypatch)
     engine.on_session_start("S2", platform="cli")
-    assert _contents(engine, "S") == ["stored question", "stored answer"]
+    rows = _contents(engine, "S")
+    assert rows[:2] == ["stored question", "stored answer"], rows
+    assert len(rows) == len(set(rows)), rows

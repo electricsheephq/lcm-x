@@ -35,7 +35,11 @@ def contents(engine, sid="S1"):
 
 def setup(engines):
     engine = engines(sessions=[("S1", None, None), ("S2", None, None)])
-    view = off_current_end(engine)  # S1 normal on cli/conv1 with A,B stored; S2 now current
+    try:
+        view = off_current_end(engine)  # S1 normal on cli/conv1 with A,B stored; S2 now current
+    except AssertionError as exc:  # the shared helper's own setup check: never let a strict xfail absorb it
+        pytest.fail(f"setup: off_current_end: {exc!r}")
+    _require(contents(engine) == ["A", "B"], "S1 stored A and B before its end")
     engine._mark_lcm_bypass_lineage_session("S1", platform="cron")  # S1 also ran bypassed (stateless/ignored) once
     _require(engine._has_lcm_bypass_lineage_session("S1"), "S1 carries bypass lineage")
     return engine, view
