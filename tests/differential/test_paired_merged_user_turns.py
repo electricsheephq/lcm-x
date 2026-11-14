@@ -175,10 +175,14 @@ def _faults(engine, name, kind, monkeypatch):
         original = engine._identity_anchor_prematch
 
         def prematch(*args, **kwargs):
-            calls.append(kind)
-            if len(calls) == 1:
-                audit.called += 1
-                audit.raised += 1
+            # The fault belongs to the first ingest attempt, not to the first call: a lazy attempt that
+            # reclassifies under the lock re-runs its classification inside the same attempt, as eager's one pass.
+            attempt = engine.__dict__.get('_ingest_attempt_index')
+            calls.append((kind, attempt))
+            if attempt == calls[0][1]:
+                if len(calls) == 1:
+                    audit.called += 1
+                    audit.raised += 1
                 if kind == 'busy':
                     raise sqlite3.OperationalError('database is locked')
                 raise RuntimeError('seeded evidence fault')
