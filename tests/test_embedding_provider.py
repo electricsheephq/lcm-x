@@ -1218,12 +1218,46 @@ def test_fastembed_normal_operation_is_deadline_bounded(monkeypatch, tmp_path, l
 
     monkeypatch.setattr(provider_mod, "_load_fastembed", lambda: SlowFastembedModel)
     provider = FastembedProvider("local", cache_dir=tmp_path, timeout=0.01)
-    with deadline_block(monkeypatch, "lcm-fastembed-embedding", 0.01, latency_check) as block:
-        started = time.monotonic() if latency_check else None
+    if not latency_check:
+        with deadline_block(monkeypatch, "lcm-fastembed-embedding", 0.01, False) as block:
+            with pytest.raises(EmbeddingProviderError, match="deadline exceeded"):
+                provider.embed_query("slow")
+        return
+
+    release = threading.Event()
+    workers = []
+    joins = []
+    original_join = threading.Thread.join
+
+    def block():
+        assert release.wait(10), "deadline worker was never released"
+
+    def join(worker, timeout=None):
+        if worker.name == "lcm-fastembed-embedding":
+            workers.append(worker)
+            # Slot acquisition and thread start may already have spent the entire 10 ms budget. Zero is
+            # then the correct production timeout; waiting for the encoder to start would add test-only delay.
+            assert timeout is not None and 0 <= timeout <= provider.timeout, "join must use the remaining request budget"
+            joins.append((time.monotonic(), timeout))
+        return original_join(worker, timeout=timeout)
+
+    monkeypatch.setattr(threading.Thread, "join", join)
+    try:
         with pytest.raises(EmbeddingProviderError, match="deadline exceeded"):
             provider.embed_query("slow")
-        if latency_check:
-            assert time.monotonic() - started < 0.04
+        returned = time.monotonic()
+        assert len(joins) == 1, "the deadline join was not exercised"
+        started, remaining = joins[0]
+        elapsed = returned - started
+        print(f"\nFASTEMBED join budget={remaining * 1000:.1f} ms return={elapsed * 1000:.1f} ms")
+        # Measure the real join and caller return, excluding startup scheduling. Keep the original 30 ms
+        # scheduling slack beyond the remaining deadline; the worker stays blocked until after this assertion.
+        assert elapsed < remaining + 0.03, f"{elapsed * 1000:.1f} ms for {remaining * 1000:.1f} ms remaining"
+    finally:
+        release.set()
+        for worker in workers:
+            original_join(worker, timeout=10)
+            assert not worker.is_alive(), "deadline worker did not exit after release"
 
 
 def test_fastembed_timeout_capacity_is_bounded_until_worker_exits(monkeypatch, tmp_path):
