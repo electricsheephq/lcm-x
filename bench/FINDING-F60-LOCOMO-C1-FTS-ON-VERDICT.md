@@ -15,11 +15,13 @@ to answer-quality gains at this configuration.
 ## 2. Full resolution (A / A′ vs F48 §3-CORRECTION; floor = −4.0pt)
 | category | F48 | C1-A | C1-A′ | Δ(A) | floor check |
 |---|---|---|---|---|---|
-| adversarial | 28.7 | 30.3 | 30.5 | +1.6 | ✓ |
+| adversarial | 32.7 | 30.3 | 30.5 | −2.4 | ✓ |
 | multi-hop | 64.8 | 65.7 | 66.7 | +0.9 | ✓ |
 | single-hop | 37.2 | 35.8 | 35.8 | −1.4 | ✓ |
 | temporal | 41.7 | 42.7 | 43.8 | +1.0 | ✓ |
 | world-knowledge | 69.7 | 69.6 | 69.8 | −0.1 | ✓ |
+**Correction (2026-10-28):** this table first gave F48's adversarial baseline as 28.7. That is the category floor (32.7 − 4.0), not F48's banked 32.7 (F48 §3; RUN-SHEET-LOCOMO-C2-B3A). Against 32.7 the change is −2.4 (A) and −2.2 (A′): inside the −4.0 floor, so the verdict and the floor check are unchanged.
+
 A/A′: spread 0.35pt aggregate; per-question discordance 71/1986 (3.58%) — consistent with the
 F48-era churn class (3.47%). Provenance both arms: frozen codex-cli 0.148.0, gpt-5.6-sol
 answer(medium)/judge(low), modelExplicit, isolated; 1,986/1,986 rows each, zero missing.
