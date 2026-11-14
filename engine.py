@@ -5382,11 +5382,7 @@ class LCMEngine(
             )
             return
         if session_id != self._session_id:
-            logger.warning(
-                "LCM ignored unverified stale session-end callback for %s while bound to %s",
-                session_id,
-                self._session_id,
-            )
+            self._fallback_off_current_session_end(session_id, messages)
             return
         # Only this path ends the foreground binding. Same-id bypass callbacks
         # above can leave it serving, so session-id equality alone is insufficient.
@@ -5395,6 +5391,124 @@ class LCMEngine(
         finally:
             with self._attribution_span("retire"):
                 self._retire_embedding_maintenance(wait=False)
+
+    def _warn_off_current_fallback(self, session_id, reason):
+        logger.warning(
+            "LCM ignored unverified stale session-end callback for %s while bound to %s; %s",
+            session_id, self._session_id, reason,
+        )
+
+    def _off_current_fallback_owner(self, tail):
+        store, session = tail["store"], tail["session_id"]
+        if ingest_ledger_mode() == "off" or store.ingest_ledger_state() != "ready":
+            return None, "gate 1: ledger off or not ready"
+        lineage = ingest_ledger.persisted_lineage(store._conn, session, None)
+        if not lineage or lineage.startswith("provisional:"):
+            return None, "gate 1: missing or provisional lineage"
+        path = self._state_db_path(hermes_home=tail["hermes_home"], db_path=store.db_path)
+        home_tag = hashlib.sha256(str(path.resolve()).encode()).hexdigest()[:16]
+        if lineage.split(":", 1)[0] != home_tag:
+            return None, "gate 1: foreign home"
+        if tail.get("fallback_lineage", lineage) != lineage:
+            return None, "gate 1: changed lineage"
+        return lineage, None
+
+    def _off_current_fallback_prefix(self, tail, rows, lineage):
+        """Prove the entire session, never a conversation-filtered fragment of it."""
+        view, session, store = tail["view"], tail["session_id"], tail["store"]
+        conversations = {row.get("conversation_id") for row in rows}
+        if len(conversations) != 1 or not str(next(iter(conversations), "") or "").strip():
+            return None, "gate 2: no single nonblank conversation"
+        conversation = next(iter(conversations))
+        if tail.get("conversation_id", conversation) != conversation:
+            return None, "gate 2: changed conversation"
+        tail["conversation_id"] = conversation
+        if len(rows) > len(view):
+            return None, "gate 3: stored sequence advanced past end view"
+        # Known stamps and UID sets veto equal content. Read only bindings for
+        # these session-indexed rows; a missing binding supplies no new proof.
+        conn, bindings, uids = store._conn, {}, {}
+        records = ingest_ledger._rows(conn.execute(
+            "SELECT b.* FROM occurrence_bindings b INDEXED BY idx_occ_store WHERE b.lineage=? "
+            "AND b.store_id IN (SELECT value FROM json_each(?))",
+            (lineage, json.dumps([row["store_id"] for row in rows]))))
+        for record in records:
+            bindings.setdefault(record["store_id"], []).append(record)
+        seqs = sorted({b["view_seq"] for b in records if b["view_seq"] is not None})
+        for seq, entries in conn.execute(
+                "SELECT view_seq,entries FROM ingest_views WHERE lineage=? AND kind='ingest' "
+                "AND view_seq IN (SELECT value FROM json_each(?))", (lineage, json.dumps(seqs))):
+            for entry in ingest_ledger.decode_entries(entries) if entries else ():
+                uids[(seq, entry.ref)] = entry.uidset_digest
+        salt = store.ingest_ledger_salt()
+        for row, message in zip(rows, view):
+            if not self._session_end_rows_equal(row, message, session_id=session, hermes_home=tail["hermes_home"]):
+                return None, "gate 3: stored sequence mismatch"
+            stamp, seen = _normalize_observed_at(message.get("timestamp")), _normalize_observed_at(row.get("observed_at"))
+            if None not in (stamp, seen) and stamp != seen:
+                return None, "gate 3: occurrence stamp mismatch"
+            absorbed = message.get("_absorbed_message_uids")
+            absorbed = [uid for uid in absorbed if _valid_uid(uid)] if isinstance(absorbed, (list, tuple)) else []
+            incoming = ingest_ledger.uidset_digest(salt, message["message_uid"], absorbed) if (
+                salt is not None and _valid_uid(message.get("message_uid"))) else None
+            for binding in bindings.get(row["store_id"], ()):
+                known = uids.get((binding["view_seq"], binding["occ_id"]))
+                bound_stamp = _normalize_observed_at(binding["stamp"])
+                if None not in (stamp, bound_stamp) and stamp != bound_stamp:
+                    return None, "gate 3: occurrence binding stamp mismatch"
+                if known is not None and incoming is not None and known != incoming:
+                    return None, "gate 3: occurrence UID mismatch"
+        return len(rows), None
+
+    def _retry_off_current_fallback(self, tail):
+        """Revalidate under BEGIN IMMEDIATE; do not finalize or retire any binding."""
+        store, session, ids = tail["store"], tail["session_id"], []
+        with store.ingest_atomic():
+            lineage, reason = self._off_current_fallback_owner(tail)
+            if reason is None:
+                rows = store.get_range(session, limit=len(tail["view"]) + 1)
+                count, reason = self._off_current_fallback_prefix(tail, rows, lineage)
+            if reason is None and count < len(tail["view"]):
+                ids = self._append_off_current_session_end_suffix(session, tail["view"][count:],
+                    source=tail["source"], conversation_id=tail["conversation_id"], store=store,
+                    hermes_home=tail["hermes_home"], _log_outcome=False,
+                    context_window_tokens=tail.get("context_window_tokens"))
+        if reason:
+            self._warn_off_current_fallback(session, reason)
+        elif ids:
+            self._log_session_ingest_outcome(session, rows=len(ids))
+            logger.info("LCM durable off-current session-end fallback stored session=%s rows=%d", session, len(ids))
+        return True  # A refused retry is terminal; uncertain evidence never authorizes a write.
+
+    def _fallback_off_current_session_end(self, session_id, messages):
+        tail = dict(store=self._store, hermes_home=str(self._hermes_home or ""),
+                    session_id=session_id, view=messages, source=self._session_platform)
+        owned = False
+        try:
+            # Discover the bounded conversation before declaring ownership proven,
+            # so any queued tail can carry an exact conversation as well as home.
+            rows = tail["store"].get_range(session_id, limit=len(messages) + 1)
+            lineage, reason = self._off_current_fallback_owner(tail)
+            if reason is None:
+                tail["fallback_lineage"] = lineage
+                owned = True
+                count, reason = self._off_current_fallback_prefix(tail, rows, lineage)
+            if reason:
+                self._warn_off_current_fallback(session_id, reason)
+                return False
+            if count == len(messages):
+                return True
+            return self._retry_off_current_fallback(tail)
+        except Exception as exc:
+            if owned and _is_ingest_busy_error(exc):
+                self._queue_cold_session_tail(messages, session_id=session_id,
+                    conversation_id=tail["conversation_id"], source=tail["source"], error=exc,
+                    fallback_lineage=tail["fallback_lineage"])
+                return True
+            self._warn_off_current_fallback(session_id,
+                "gate 4: atomic revalidation failed" if owned else "gate 1: ownership proof unavailable")
+            logger.debug("LCM durable session-end fallback refused", exc_info=True)
+            return False
 
     def _finalize_foreground_session_end_unlocked(
         self,
@@ -12111,10 +12225,12 @@ class LCMEngine(
             message.get("observed_at") if stored else _normalize_observed_at(message.get("timestamp")),
         )
 
-    def _queue_cold_session_tail(self, view, *, session_id, conversation_id, source, error):
+    def _queue_cold_session_tail(self, view, *, session_id, conversation_id, source, error, fallback_lineage=None):
         tail = dict(kind="cold", store=self._store, hermes_home=str(self._hermes_home or ""), session_id=session_id,
                     conversation_id=conversation_id, source=source, view=copy.deepcopy(view),
                     context_window_tokens=self._store.get_context_window_tokens(session_id))
+        if fallback_lineage is not None:
+            tail["fallback_lineage"] = fallback_lineage
         if not any(self._tail_key(old) == self._tail_key(tail) for old in self._pending_session_tails):
             self._pending_session_tails.append(tail)
             self._ledger_count("ledger.tail.queued.cold." + type(error).__name__)
@@ -12124,7 +12240,8 @@ class LCMEngine(
     @staticmethod
     def _tail_key(tail):
         if tail.get("kind") == "cold":
-            return ("cold", tail["store"].db_path, tail["hermes_home"], tail["session_id"], tail["conversation_id"], tail["view"])
+            return ("cold", tail["store"].db_path, tail["hermes_home"], tail["session_id"], tail["conversation_id"],
+                    tail["view"], tail.get("fallback_lineage"))
         return (tail.get("kind", "warm"), tail["store"].db_path, *(tail[key] for key in (
             "session_id", "conversation_id", "after_store_id", "messages", "metadata_messages")))
 
@@ -12252,6 +12369,8 @@ class LCMEngine(
 
     def _retry_cold_tail(self, tail, *, sibling, deadline=None):
         tail.pop("kept_on_conflict", None)
+        if "fallback_lineage" in tail:
+            return self._retry_off_current_fallback(tail)
         if not self._cold_tail_is_bound(tail):
             if tail["store"]._conn is None:
                 self._ledger_count("ledger.tail.cold_store_unbound")
