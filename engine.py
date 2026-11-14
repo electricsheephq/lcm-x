@@ -12137,21 +12137,22 @@ class LCMEngine(
         # may resume by occurrence on a retry, and only while its conversation has no row newer than the store held at
         # the end (a session that went on keeps main's retry). Every other cold tail keeps main's retry.
         stored_through = None
-        if occurrence_resume:
-            try:
-                stored_through = self._store.max_store_id()
-            except Exception:  # unknown: main's retry
-                logger.debug("LCM session-end occurrence resume: store high-water read failed", exc_info=True)
+        try:
+            stored_through = self._store.max_store_id()
+        except Exception:  # unknown at enqueue: main's retry, even if eligibility is verified later
+            logger.debug("LCM session-end occurrence resume: store high-water read failed", exc_info=True)
         tail = dict(kind="cold", store=self._store, hermes_home=str(self._hermes_home or ""), session_id=session_id,
                     conversation_id=conversation_id, source=source, view=copy.deepcopy(view),
                     context_window_tokens=self._store.get_context_window_tokens(session_id),
-                    occurrence_resume_through=stored_through)
+                    queued_through=stored_through,
+                    occurrence_resume_through=stored_through if occurrence_resume else None)
         old = next((old for old in self._pending_session_tails if self._tail_key(old) == self._tail_key(tail)), None)
         if old is None:
             self._pending_session_tails.append(tail)
             self._ledger_count("ledger.tail.queued.cold." + type(error).__name__)
-        elif old.get("occurrence_resume_through") is None and stored_through is not None:
-            old["occurrence_resume_through"] = stored_through  # merge newly verified eligibility; keep an older bound
+        elif old.get("occurrence_resume_through") is None and occurrence_resume:
+            # Eligibility may improve; its bound is always the immutable enqueue high-water, even when unknown.
+            old["occurrence_resume_through"] = old["queued_through"]
         logger.warning("LCM session-end cold tail retry pending (%s)", type(error).__name__)
         maintenance_scheduler._PENDING_TAIL_ENGINES.add(self)
 

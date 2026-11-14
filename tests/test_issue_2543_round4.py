@@ -72,6 +72,43 @@ def test_A2_dedupe_promotes_later_verified_eligibility(lanes, monkeypatch):
     assert [row["content"] for row in engine._store.get_session_messages("S")] == contents
 
 
+
+def test_F1_dedupe_promotion_keeps_enqueue_high_water(lanes, monkeypatch):
+    """An identical late end cannot append omitted Q1/Q2 after a resumed session's E/F (I2)."""
+    lane = lanes()
+    engine = lane.engine
+    engine.on_session_start("S", platform="cli", context_length=200_000, conversation_id="conv")
+    first = history()
+    view = first + [{"role": "user", "content": "Q1"}, {"role": "assistant", "content": "Q2"}]
+    tail = queue_cold(engine, monkeypatch, view=view, stored=first)
+    assert tail["occurrence_resume_through"] is None
+    locker = sqlite3.connect(engine._store.db_path, isolation_level=None)
+    locker.execute("BEGIN IMMEDIATE")
+    try:
+        engine.on_session_start("S", platform="cli", context_length=200_000, conversation_id="conv")
+    finally:
+        locker.rollback()
+        locker.close()
+    engine.ingest(copy.deepcopy(first + [{"role": "user", "content": "E"},
+                                       {"role": "assistant", "content": "F"}]))
+    read = engine._store.get_range
+
+    def blocked(session, *args, **kwargs):
+        if session == "S":
+            raise sqlite3.OperationalError("database is locked")
+        return read(session, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(engine._store, "get_range", blocked)
+        lane.foreground()
+        engine.on_session_end("S", copy.deepcopy(view))
+    assert len(engine._pending_session_tails) == 1
+    engine._retry_pending_session_tails(deadline=time.monotonic() + 60)
+    added = [row["content"] for row in engine._store.get_session_messages("S")][len(first):]
+    pending = len(engine._pending_session_tails)
+    assert (added, pending) == (["E", "F"], 1)
+
+
 def repeated_witness(lane, n):
     first = [{"role": "user", "content": "ok"} for _ in range(n)]
     engine = lane.engine
