@@ -67,9 +67,9 @@ class EntityBridgeMachine(RuleBasedStateMachine):
         except self.api.EntityOpRefused:
             return None
 
-    @rule(key=st.sampled_from(KEYS))
-    def publish_key(self, key):
-        self.sources.append((key, publish(self.bridge, key)))
+    @rule(key=st.sampled_from(KEYS), scope=st.sampled_from(("P1", "P2", None)))
+    def publish_key(self, key, scope="P1"):
+        self.sources.append((key, publish(self.bridge, key, scope=scope)))
 
     @rule(outcomes=GATES)
     def rebuild(self, outcomes):
@@ -98,6 +98,53 @@ class EntityBridgeMachine(RuleBasedStateMachine):
         events = self.undo_candidates()
         if events:
             self.attempt(lambda: self.ops.undo(events[choice % len(events)]["event_id"]))
+
+    @rule(member=st.integers(0, 3), kind=st.sampled_from(("person", "org", "other", "topic")))
+    def change_kind(self, member, kind):
+        self.attempt(lambda: self.ops.change_kind((*self.pins, *self.targets)[member], kind))
+
+    @rule(choice=CHOICE)
+    def undo_kind_change(self, choice):
+        events = [e for e in self.undo_candidates() if e["op"] == "change_kind"]
+        if events:
+            self.attempt(lambda: self.ops.undo(events[choice % len(events)]["event_id"]))
+
+    @rule(access_scope=st.sampled_from(("P1", "P2")), principal_is_owner=st.booleans())
+    def read_scope(self, access_scope, principal_is_owner):
+        self.check_rebuild_oracle(access_scope=access_scope, principal_is_owner=principal_is_owner)
+
+    @precondition(lambda self: bool(self.sources))
+    @rule(member=st.integers(0, 5), choice=CHOICE)
+    def cited_alias(self, member, choice):
+        """Make generated principal reads exercise visible owners and targets too."""
+        source = self.sources[choice % len(self.sources)][1]
+        entity = (*self.owners, *self.targets, *self.pins)[member]
+        self.attempt(lambda: self.ops.add_alias(entity, "visible identity", source_store_ids=[source]))
+        if member in (2, 3):
+            self.attempt(lambda: self.ops.add_alias(entity, "my sister", "relation_phrase",
+                owner_entity_id=self.owners[member - 2], source_store_ids=[source]))
+
+    @rule(owner=st.integers(0, 1), member=st.integers(0, 1),
+          restore=st.sampled_from(("person", "other", "topic", "undo")))
+    def recompatible_override_cycle(self, owner, member, restore):
+        """Generate kind restoration across a rebuild, including undo, in PR CI."""
+        self.publish_key("person:sister")
+        source = self.sources[-1][1]
+        self.gates[source] = (self.owners[owner], True, True)
+        self.change_kind(member, "person")
+        self.rebuild_current_gates()
+        before = len(self.store.events_after())
+        self.override("person:sister", owner + 1, member, False)
+        if len(self.store.events_after()) == before:
+            return  # A generated ambiguous slot remains a typed refusal.
+        self.change_kind(member, "org")
+        self.rebuild_current_gates()
+        if restore == "undo":
+            self.undo_kind_change(0)
+        else:
+            self.change_kind(member, restore)
+        self.fresh_rebuild_oracle()
+        self.rebuild_current_gates()
 
     def undo_candidates(self):
         events = self.store.events_after()
@@ -160,9 +207,10 @@ class EntityBridgeMachine(RuleBasedStateMachine):
         if aliases:
             self.attempt(lambda: self.ops.split(self.targets[member], [aliases[0]["alias_id"]], [], "split sister"))
 
-    def answer(self, store, key, source, owner):
+    def answer(self, store, key, source, owner, access_scope=None, principal_is_owner=False):
         try:
-            return self.api.resolve_key(store, key, source, owner_entity_id=owner)
+            return self.api.resolve_key(store, key, source, owner_entity_id=owner,
+                access_scope=access_scope, principal_is_owner=principal_is_owner)
         except self.api.EntityOpRefused as error:
             assert error.reason == "not_found"
             return None
@@ -184,9 +232,9 @@ class EntityBridgeMachine(RuleBasedStateMachine):
     def fresh_rebuild_oracle(self):
         self.check_rebuild_oracle()
 
-    def check_rebuild_oracle(self, record_rebuild=False):
+    def check_rebuild_oracle(self, record_rebuild=False, access_scope=None, principal_is_owner=False):
         stamp = self.oracle_inputs()
-        if not record_rebuild and stamp == self.oracle_stamp:
+        if access_scope is None and not record_rebuild and stamp == self.oracle_stamp:
             return  # Every fixture writer and sender/source input is unchanged.
         events = self.store.events_after()
         undone = {e["target_event_id"] for e in events if e["op"] == "undo"}
@@ -194,7 +242,7 @@ class EntityBridgeMachine(RuleBasedStateMachine):
                       if e["op"] == "override_key" and e["event_id"] not in undone
                       for p in [json.loads(e["payload_json"])["override"]]}
         resolved = set()
-        observed = {(key, source, owner): self.answer(self.store, key, source, owner)
+        observed = {(key, source, owner): self.answer(self.store, key, source, owner, access_scope, principal_is_owner)
                     for key, source in self.sources for owner in (None, *self.owners)}
         for label, reference in (("copied", self.reference), ("empty-index", self.independent)):
             # Only disposable reference copies lose derived rows. Curated entities,
@@ -208,7 +256,7 @@ class EntityBridgeMachine(RuleBasedStateMachine):
             for key, source in self.sources:
                 for owner in (None, *self.owners):
                     answer = observed[key, source, owner]
-                    expected = self.answer(reference, key, source, owner)
+                    expected = self.answer(reference, key, source, owner, access_scope, principal_is_owner)
                     detail = (label, key, source, owner, answer, expected, self.gates)
                     assert answer is None or answer == expected, ("safety", detail)
                     if record_rebuild and expected is not None and (
@@ -217,12 +265,13 @@ class EntityBridgeMachine(RuleBasedStateMachine):
                         resolved.add((key, owner))
                     # R5-Q: ambiguity at the last rebuild admits no sender fact.
                     # Safety remains strict even for those unadmitted slots.
-                    if (key, owner) not in overridden and expected is not None and (
+                    if access_scope is None and (key, owner) not in overridden and expected is not None and (
                             record_rebuild or (key, owner) in self.resolved_at_rebuild):
                         assert answer == expected, ("liveness", detail)
         if record_rebuild:
             self.resolved_at_rebuild = resolved
-        self.oracle_stamp = self.oracle_inputs()
+        if access_scope is None:
+            self.oracle_stamp = self.oracle_inputs()
 
     def oracle_inputs(self):
         return (tuple(s.connection.total_changes for s in (self.store, self.messages, self.assertions)),
@@ -324,5 +373,37 @@ def test_r5q_scoped_override_does_not_admit_an_ambiguous_slot(tmp_path):
         machine.rebuild_current_gates()
         assert machine.answer(machine.store, key, source, owner) == machine.targets[0]
         machine.retained_rows_and_default_off_bytes()
+    finally:
+        machine.teardown()
+
+
+@pytest.mark.parametrize("restore", ["person", "other", "topic", "undo"])
+def test_forced_recompatible_override_cycle(tmp_path, restore):
+    """The generated R2 cycle must reach the same R5-Q safety oracle as F1."""
+    machine = EntityBridgeMachine(tmp_path / "recompatible")
+    try:
+        machine.recompatible_override_cycle(0, 0, restore)
+        machine.retained_rows_and_default_off_bytes()
+    finally:
+        machine.teardown()
+
+
+@pytest.mark.parametrize("visible_pin", [False, True])
+@pytest.mark.parametrize("principal_is_owner", [False, True])
+def test_forced_scoped_recompatible_reads(tmp_path, visible_pin, principal_is_owner):
+    """Exercise the scoped oracle with visible/hidden targets and source rows."""
+    machine = EntityBridgeMachine(tmp_path / "scoped-recompatible")
+    try:
+        machine.recompatible_override_cycle(0, 0, "undo")
+        machine.cited_alias(0, 0)  # The owner is visible through the P1 source.
+        machine.cited_alias(2, 0)  # So is the relation alias used by the fallback.
+        if visible_pin:
+            machine.cited_alias(4, 0)
+        machine.read_scope("P1", principal_is_owner)
+        machine.read_scope("P2", principal_is_owner)
+        key, source = machine.sources[0]
+        expected = machine.pins[0] if visible_pin or principal_is_owner else machine.targets[0]
+        assert machine.answer(machine.store, key, source, machine.owners[0], "P1", principal_is_owner) == expected
+        assert machine.answer(machine.store, key, source, machine.owners[0], "P2", principal_is_owner) is None
     finally:
         machine.teardown()

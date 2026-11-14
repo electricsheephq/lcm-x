@@ -2,6 +2,7 @@
 
 import ast
 from contextlib import closing
+import os
 from pathlib import Path
 
 import pytest
@@ -27,21 +28,29 @@ def test_flag_off_schema_and_turn_path(tmp_path):
 
 def assert_no_production_imports(root):
     """Recursively reject every static/dynamic production import of the dark API."""
-    for path in root.rglob("*.py"):
-        if "tests" in path.relative_to(root).parts:
-            continue
-        tree = ast.parse(path.read_text())
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom):
-                assert "entity_ops" not in (node.module or "").split("."), path
-                assert not any(n.name == "entity_ops" for n in node.names), path
-            elif isinstance(node, ast.Import):
-                assert not any("entity_ops" in n.name.split(".") for n in node.names), path
-            elif isinstance(node, ast.Call) and (getattr(node.func, "attr", None) == "import_module"
-                                                or getattr(node.func, "id", None) == "import_module"):
-                assert not any(isinstance(arg, ast.Constant) and isinstance(arg.value, str)
-                               and "entity_ops" in arg.value.split(".")
-                               for arg in node.args + [keyword.value for keyword in node.keywords]), path
+    excluded = {"tests", "venv", "build", "dist", "site-packages", "node_modules", "__pycache__"}
+    for directory, subdirs, files in os.walk(root):
+        subdirs[:] = [name for name in subdirs if not name.startswith(".") and name not in excluded]
+        for name in files:
+            if not name.endswith(".py") or name.startswith("."):
+                continue
+            path = Path(directory) / name
+            tree = ast.parse(path.read_text())
+            _assert_no_import_nodes(tree, path)
+
+
+def _assert_no_import_nodes(tree, path):
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            assert "entity_ops" not in (node.module or "").split("."), path
+            assert not any(n.name == "entity_ops" for n in node.names), path
+        elif isinstance(node, ast.Import):
+            assert not any("entity_ops" in n.name.split(".") for n in node.names), path
+        elif isinstance(node, ast.Call) and (getattr(node.func, "attr", None) == "import_module"
+                                            or getattr(node.func, "id", None) == "import_module"):
+            assert not any(isinstance(arg, ast.Constant) and isinstance(arg.value, str)
+                           and "entity_ops" in arg.value.split(".")
+                           for arg in node.args + [keyword.value for keyword in node.keywords]), path
 
 
 @pytest.mark.parametrize("form", [
