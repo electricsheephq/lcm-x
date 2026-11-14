@@ -1,8 +1,9 @@
 """Ungated absolute-oracle regressions; no engine or baseline is needed."""
 import pytest
+from types import SimpleNamespace
 
 from .paired import normalise_rows
-from .session import Trace, duplicate_rows, freeze, missing_messages
+from .session import FaultRun, Trace, assert_faults, audit_fault, duplicate_rows, fault_counts, freeze, missing_messages
 
 
 def stored(text, bindings=(), **fields):
@@ -94,3 +95,74 @@ def test_short_preservation_requires_matching_full_reference_identity():
     assert normalise_rows([old], proof, [new]) == [new]
     changed = freeze(dict(dict(old), source='other'))
     assert normalise_rows([changed], proof, [new]) == [changed]
+
+
+@pytest.mark.parametrize('role,expected', [('user', 1), ('assistant', 2)])
+def test_only_user_history_suppresses_user_message(role, expected):
+    trace = Trace()
+    trace.observe([dict(host('R', 10), role=role)], user_message='R')
+    assert len(trace.views[0]['rows']) == expected
+
+
+def fault_trace(present=True, called=0, raised=0, stubbed=False):
+    trace = Trace(stub_faults=stubbed)
+    fault = audit_fault(SimpleNamespace(_paired_trace=trace), 'evidence', present)
+    fault.called, fault.raised = called, raised
+    return trace
+
+
+@pytest.mark.parametrize('present,expected', [(False, 'inert'), (True, 'unreached')])
+def test_fault_absent_or_unreached_passes_case(present, expected):
+    trace = fault_trace(present)
+    assert_faults(123, {'main': trace})
+    counts = fault_counts(trace.faults)['evidence']
+    assert counts == dict(requested=1, inert=int(not present), unreached=int(present), called=0, raised=0)
+    assert counts[expected] == 1
+
+
+def test_fault_called_without_raise_fails_its_registration():
+    trace = fault_trace(called=1, raised=1)
+    # A firing of the same kind at another stage must not hide the misfire.
+    trace.ingests.append({})
+    fault = audit_fault(SimpleNamespace(_paired_trace=trace), 'evidence', True)
+    fault.called = 1
+    with pytest.raises(AssertionError, match='123: candidate evidence stage 2: fault called but never raised'):
+        assert_faults(123, {'candidate': trace})
+
+
+def test_full_fault_run_fails_floor_for_unreached_present_kind():
+    run = FaultRun()
+    run.record(1, {'main': fault_trace()})
+    result = run.finish([1], [1])
+    assert result['evaluated'] and result['reason'] is None
+    assert result['errors'] == ['main: evidence present but never raised across full case set']
+
+
+def test_partial_fault_run_skips_floor_with_reason():
+    run = FaultRun()
+    run.record(1, {'main': fault_trace()})
+    result = run.finish([1, 2], [1])
+    assert not result['evaluated'] and not result['errors']
+    assert result['reason'] == 'partial case set selected (1/2); floor skipped'
+
+
+@pytest.mark.parametrize('order', [(1, 2), (2, 1), (1, 2, 1)])
+def test_floor_is_per_tree_order_independent_and_does_not_double_count(order):
+    run = FaultRun()
+    for case in order:
+        run.record(case, {'main': fault_trace(called=int(case == 2), raised=int(case == 2)),
+                          'candidate': fault_trace()})
+    result = run.finish([1, 2], [1, 2])
+    assert result['errors'] == ['candidate: evidence present but never raised across full case set']
+    assert result['totals']['main']['evidence']['requested'] == 2
+    assert result['totals']['main']['evidence']['raised'] == 1
+
+
+def test_stubbed_faults_are_excluded_from_case_rule_and_floor():
+    trace = fault_trace(called=1, stubbed=True)
+    assert_faults(1, {'main': trace})
+    run = FaultRun()
+    run.record(1, {'main': trace})
+    result = run.finish([1], [1])
+    assert result['evaluated'] and not result['errors']
+    assert result['totals'] == {}

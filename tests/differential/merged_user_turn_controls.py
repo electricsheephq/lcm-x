@@ -51,13 +51,15 @@ def test_round2_existing_alias_fallback_matches_main(tmp_path, monkeypatch, vers
             live = _capture(ctx, live)
             calls = []
             present = hasattr(engine, '_store_merged_user_aliases')
-            stub = audit_fault(engine, 'preservation-once', calls, present)
-            if present and not stub:
+            audit = audit_fault(engine, 'preservation-once', present)
+            if present and not audit.stubbed:
                 original = engine._store_merged_user_aliases
 
                 def once(*args, **kwargs):
                     calls.append(1)
                     if len(calls) == 1:
+                        audit.called += 1
+                        audit.raised += 1
                         raise sqlite3.OperationalError('database is locked')
                     return original(*args, **kwargs)
 
@@ -94,13 +96,15 @@ def test_round2_fallback_then_again_matches_main(tmp_path, monkeypatch, versions
             live = _capture(ctx, [q], 'password=fake-test-value' if failure == 'redaction' else 'P1',
                             'R', 10., 20.)
             present = hasattr(engine, '_store_merged_user_aliases')
-            stub = audit_fault(engine, 'preservation-once', attempts, present)
-            if present and not stub:
+            audit = audit_fault(engine, 'preservation-once', present)
+            if present and not audit.stubbed:
                 original = engine._store_merged_user_aliases
 
                 def fail(*args, **kwargs):
                     attempts.append(1)
                     if failure == 'persistent' or failure == 'transient' and len(attempts) == 1:
+                        audit.called += 1
+                        audit.raised += 1
                         raise sqlite3.OperationalError('database is locked')
                     return original(*args, **kwargs)
 
@@ -165,13 +169,16 @@ def _seed_round3_aliases(engine):
 def _fail_round3_preservation_once(engine, monkeypatch):
     calls = []
     present = hasattr(engine, '_store_merged_user_aliases')
-    if audit_fault(engine, 'preservation-once', calls, present) or not present:
+    audit = audit_fault(engine, 'preservation-once', present)
+    if audit.stubbed or not present:
         return calls
     original = engine._store_merged_user_aliases
 
     def once(*args, **kwargs):
         calls.append(1)
         if len(calls) == 1:
+            audit.called += 1
+            audit.raised += 1
             raise ValueError('one-shot preservation failure')
         return original(*args, **kwargs)
 
@@ -270,20 +277,25 @@ def test_round2_fallback_has_own_evidence_retry(tmp_path, monkeypatch, versions,
             live = _capture(ctx, [*initial[:3], _row('I', 3.5), initial[3]])
             fallen_back, calls = [], []
             present = hasattr(engine, '_store_merged_user_aliases')
-            stub = audit_fault(engine, 'persistent', fallen_back, present)
-            if present and not stub:
+            audit = audit_fault(engine, 'persistent', present)
+            if present and not audit.stubbed:
                 def fail_alias(*_args, **_kwargs):
                     fallen_back.append(1)
+                    audit.called += 1
+                    audit.raised += 1
                     raise ValueError('injected preservation failure')
 
                 monkeypatch.setattr(engine, '_store_merged_user_aliases', fail_alias)
-            audit_fault(engine, 'evidence', calls, hasattr(engine, '_identity_anchor_prematch'))
+            evidence = audit_fault(engine, 'evidence', hasattr(engine, '_identity_anchor_prematch'))
             original = engine._identity_anchor_prematch
 
             def prematch(*args, **kwargs):
                 if (name == 'main' or not hasattr(engine, '_store_merged_user_aliases') or fallen_back) and not calls:
-                    calls.append(1)
-                    raise RuntimeError('one-shot fallback pre-match failure')
+                    evidence.called += 1
+                    if not evidence.stubbed:
+                        calls.append(1)
+                        evidence.raised += 1
+                        raise RuntimeError('one-shot fallback pre-match failure')
                 return original(*args, **kwargs)
 
             monkeypatch.setattr(engine, '_identity_anchor_prematch', prematch)
@@ -294,7 +306,7 @@ def test_round2_fallback_has_own_evidence_retry(tmp_path, monkeypatch, versions,
             faults[name] = len(calls)
         finally:
             engine.shutdown()
-    assert faults == {'main': 1, 'candidate': 1}
+    assert faults == {'main': 0, 'candidate': 0} if evidence.stubbed else faults == {'main': 1, 'candidate': 1}
     _compare_round2(results, record_property)
     assert [dict(r)['content'] for r in results['candidate'][0]].count('I') == 1
     assert [dict(r)['content'] for r in results['candidate'][0]].count('A2') == 1

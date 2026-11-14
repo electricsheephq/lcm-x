@@ -17,7 +17,7 @@ if os.environ.get("LCM_DIFFERENTIAL") != "1":
 from tests.differential import merged_user_turn_controls as base
 from tests.differential import paired
 from tests.differential.paired import versions  # noqa: F401
-from tests.differential.session import Trace, audit_fault, freeze
+from tests.differential.session import FaultRun, Trace, assert_faults, audit_fault, fault_counts, freeze
 from tests.phase0_hygiene import product_env_keys
 
 
@@ -156,7 +156,8 @@ def _faults(engine, name, kind, monkeypatch):
         return calls
     target = '_store_merged_user_aliases' if kind in ('preservation-once', 'persistent') else '_identity_anchor_prematch'
     present = hasattr(engine, target)
-    if audit_fault(engine, kind, calls, present) or not present:
+    audit = audit_fault(engine, kind, present)
+    if audit.stubbed or not present:
         return calls
     if kind in ('preservation-once', 'persistent'):
         original = engine._store_merged_user_aliases
@@ -164,6 +165,8 @@ def _faults(engine, name, kind, monkeypatch):
         def preserve(*args, **kwargs):
             calls.append('preservation')
             if kind == 'persistent' or len(calls) == 1:
+                audit.called += 1
+                audit.raised += 1
                 raise ValueError('seeded preservation failure')
             return original(*args, **kwargs)
 
@@ -174,6 +177,8 @@ def _faults(engine, name, kind, monkeypatch):
         def prematch(*args, **kwargs):
             calls.append(kind)
             if len(calls) == 1:
+                audit.called += 1
+                audit.raised += 1
                 if kind == 'busy':
                     raise sqlite3.OperationalError('database is locked')
                 raise RuntimeError('seeded evidence fault')
@@ -293,16 +298,6 @@ def _execute_case(case, directory, versions, stub_faults=False):  # noqa: F811
     return properties, traces
 
 
-def _fault_counts(trace):
-    result = {}
-    for fault in trace.faults:
-        item = result.setdefault(fault['kind'], dict(requested=0, fired=0, inert=0))
-        item['requested'] += 1
-        item['fired'] += len(fault['calls'])
-        item['inert'] += not fault['present']
-    return result
-
-
 def _label_violations(case, trace, stubbed):
     """Classify by host evidence and an actual fault-free counterfactual."""
     entries = []
@@ -320,8 +315,7 @@ def _label_violations(case, trace, stubbed):
                 assert capture in ('proven', 'watched'), (case, violation, views)
                 label = '#2707 ' + capture
             else:
-                ingests = [view['rows'] for view in views if view['kind'] == 'ingest']
-                assert any(len(b) < len(a) for a, b in zip(ingests, ingests[1:])), (case, violation, views)
+                assert _shortened_after_text(views, value), (case, violation, views)
                 label = '#1525'
         else:
             remaining = clean.get((stage, kind, value), 0)
@@ -335,7 +329,7 @@ def _label_violations(case, trace, stubbed):
                 changed = any(a != b for a in uid_views for b in uid_views)
                 assert fields['role'] == 'user' and changed, (case, violation, uid_views)
                 assert remaining <= count, (case, violation, remaining)
-                entries.append((stage, kind, value, remaining, '#2720 uid change'))
+                entries.append((stage, kind, value, None, remaining, '#2720 uid change'))
                 count -= remaining
                 if not count:
                     continue
@@ -343,21 +337,42 @@ def _label_violations(case, trace, stubbed):
                 first = next(v['stage'] for v in violations
                              if v['kind'] == 'duplicate' and v['value'] == value
                              and v['count'] > clean.get((v['stage'], 'duplicate', value), 0))
-                faults = [f['kind'] for f in trace.faults
-                          if f['stage'] <= first and f['calls'] and f['kind'] in ('busy', 'evidence')]
+                faults = [f.kind for f in trace.faults
+                          if f.stage <= first and f.raised and f.kind in ('busy', 'evidence')]
                 assert faults, (case, violation, trace.faults)
                 label = '#1815 fall-open, ' + faults[-1] + ' fault'
-        entries.append((stage, kind, value, count, label))
+        entries.append((stage, kind, value, violation.get('view'), count, label))
     return entries
 
 
+def _shortened_after_text(views, text):
+    ingests = [view['rows'] for view in views if view['kind'] == 'ingest']
+    first = next((index for index, rows in enumerate(ingests)
+                  if any(row['role'] == 'user' and row['content'] == text for row in rows)), None)
+    return first is not None and any(len(ingests[index]) < len(ingests[index - 1])
+                                      for index in range(first + 1, len(ingests)))
+
+
+@pytest.fixture(scope='module')
+def fault_run(request, record_testsuite_property):
+    run = FaultRun()
+    selected = {item.callspec.params['sequence'] for item in request.session.items
+                if item.module is request.module and hasattr(item, 'callspec')
+                and 'sequence' in item.callspec.params}
+    yield run
+    result = run.finish(CASES, selected)
+    record_testsuite_property('merged_user_turn_fault_floor', json.dumps(result))
+    assert not result['errors'], result['errors']
+
+
 @pytest.fixture(scope='class')
-def sequence(request, tmp_path_factory, versions):  # noqa: F811 - imported fixture
+def sequence(request, tmp_path_factory, versions, fault_run):  # noqa: F811 - imported fixture
     case = request.param
     directory = tmp_path_factory.mktemp(f'merged-{case}')
     properties, traces = _execute_case(case, directory, versions)
+    fault_run.record(case, traces)
     for name, trace in traces.items():
-        counts = _fault_counts(trace)
+        counts = fault_counts(trace.faults)
         properties.append((name + '_fault_counts', json.dumps(counts)))
     stubbed = None
     if any(v['kind'] == 'duplicate' for v in traces['main'].violations()):
@@ -382,10 +397,7 @@ class TestMergedUserTurns:
         record_property('all_stored_rows', json.dumps({
             name: [stage['rows'] for stage in trace.ingests] for name, trace in traces.items()}))
         assert hosts['main'] == hosts['candidate'], 'Differential host inputs must be identical'
-        unfired = [(name, kind, counts) for name, value in properties if name.endswith('_fault_counts')
-                   for kind, counts in json.loads(value).items()
-                   if counts['requested'] > counts['inert'] and not counts['fired']]
-        assert not unfired, f'{case}: requested fault targets did not fire: {unfired}'
+        assert_faults(case, traces)
         differences = [json.loads(value) for name, value in properties if name == 'differences']
         assert differences and not any(differences), f'{case}: {differences}'
         # The source scenarios retain their own exact substitutions. Historical
@@ -416,16 +428,17 @@ class TestMergedUserTurns:
                                  for v in rows for _ in range(v['count']))
                     for name, rows in violations.items()}
         classified = next(json.loads(value) for name, value in properties if name == 'classified_baseline')
-        actual_pin = Counter((stage, kind, freeze(value), label)
-                             for stage, kind, value, count, label in classified for _ in range(count))
-        pinned = Counter((stage, kind, freeze(value), label) for stage, kind, value, count, label
+        actual_pin = Counter((stage, kind, freeze(value), view, label)
+                             for stage, kind, value, view, count, label in classified for _ in range(count))
+        pinned = Counter((stage, kind, freeze(value), view, label) for stage, kind, value, view, count, label
                          in EXPECTED.get(case, ()) for _ in range(count))
-        effective = os.environ.get('LCMX_DIFF_BASELINE_REF', BASELINE_REF)
+        effective = paired.resolve(os.environ.get('LCMX_DIFF_BASELINE_REF', BASELINE_REF))
         matches = actual_pin == pinned
         record_property('baseline_pin', json.dumps(dict(ref=effective, matches=matches,
                         skipped=None if effective == BASELINE_REF else 'baseline override')))
         subset = not (counters['candidate'] - counters['main'])
         record_property('candidate_violation_subset', json.dumps(subset))
+        assert_faults(case, traces)
         if effective == BASELINE_REF:
             assert matches, f'{case}: baseline pin mismatch: {violations["main"]}'
         assert subset, f'{case}: added candidate violations: {counters["candidate"] - counters["main"]}'

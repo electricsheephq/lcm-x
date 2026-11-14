@@ -3,6 +3,13 @@
 Two ingest-shown rows stored as one joined row are not an absolute violation:
 the content is kept. The differential half judges row structure against main;
 #2707's design review decides that structure.
+
+A loss can hide behind another view when same-text messages never share a
+view; only the differential half can catch it. A host text may also match
+across adjacent stored rows: content is kept, and the differential half judges
+row structure. The store normalises blank source to 'unknown'; the absolute
+loss check does not compare conversation_id. Neither can hide lost content
+(the differential stored identity still includes conversation_id).
 """
 from collections import Counter, defaultdict
 from copy import deepcopy
@@ -39,9 +46,12 @@ def _identities(engine):
     bindings = defaultdict(list)
     for sid, uid, kind, lineage, *_ in _bindings(engine):
         bindings[sid].append((uid, kind, lineage))
+    senders = {sid: (sender, source) for sid, sender, source in engine._store._conn.execute(
+        'SELECT store_id, sender_id, sender_source FROM messages')}
     ignored = {'store_id', 'timestamp', 'ingested_at', 'token_estimate'}
     return [freeze(dict({k: v for k, v in r.items() if k not in ignored},
-                        bindings=tuple(sorted(bindings[r['store_id']])))) for r in _rows(engine)]
+                        bindings=tuple(sorted(bindings[r['store_id']])),
+                        sender_id=senders[r['store_id']][0], sender_source=senders[r['store_id']][1])) for r in _rows(engine)]
 
 
 def duplicate_rows(rows, views=()):
@@ -79,12 +89,77 @@ def missing_messages(views, rows):
     return missing
 
 
-def audit_fault(engine, kind, calls, present):
-    """Register the firing list even when this tree has no target seam."""
+@dataclass
+class FaultAudit:
+    kind: str
+    present: bool
+    stage: int
+    stubbed: bool = False
+    called: int = 0
+    raised: int = 0
+
+
+def audit_fault(engine, kind, present):
+    """One registration per requested wrapper, including absent targets.
+
+    Wrappers count condition-held entries separately from their actual raises.
+    Unreached targets pass per case; a full primary run must reach every
+    present kind and raise at least once. Fault-free reruns are excluded.
+    """
     trace = getattr(engine, '_paired_trace', None)
+    audit = FaultAudit(kind, present, len(trace.ingests) + 1 if trace else 0,
+                       bool(trace and trace.stub_faults))
     if trace is not None:
-        trace.faults.append(dict(kind=kind, calls=calls, present=present, stage=len(trace.ingests) + 1))
-    return bool(trace and trace.stub_faults)
+        trace.faults.append(audit)
+    return audit
+
+
+def fault_counts(faults):
+    result = {}
+    for fault in faults:
+        if fault.stubbed:
+            continue
+        item = result.setdefault(fault.kind, dict(requested=0, inert=0, unreached=0, called=0, raised=0))
+        item['requested'] += 1
+        item['inert'] += not fault.present
+        item['unreached'] += fault.present and not fault.called
+        item['called'] += fault.called
+        item['raised'] += fault.raised
+    return result
+
+
+def assert_faults(case, traces):
+    for tree, trace in traces.items():
+        for fault in trace.faults:
+            if not fault.stubbed and fault.present and fault.called and not fault.raised:
+                raise AssertionError(f'{case}: {tree} {fault.kind} stage {fault.stage}: '
+                                     'fault called but never raised')
+
+
+@dataclass
+class FaultRun:
+    # Key by case rather than fixture order; randomly may recreate a case fixture.
+    cases: dict = field(default_factory=dict)
+
+    def record(self, case, traces):
+        self.cases[case] = {tree: fault_counts(trace.faults) for tree, trace in traces.items()}
+
+    def finish(self, expected, selected):
+        totals = {}
+        for trees in self.cases.values():
+            for tree, kinds in trees.items():
+                for kind, counts in kinds.items():
+                    item = totals.setdefault(tree, {}).setdefault(kind, Counter())
+                    item.update(counts)
+        reason = None
+        if set(selected) != set(expected):
+            reason = f'partial case set selected ({len(set(selected))}/{len(set(expected))}); floor skipped'
+        elif set(self.cases) != set(expected):
+            reason = f'primary case set incomplete ({len(self.cases)}/{len(set(expected))}); floor skipped'
+        errors = [] if reason else [f'{tree}: {kind} present but never raised across full case set'
+                                   for tree, kinds in totals.items() for kind, counts in kinds.items()
+                                   if counts['requested'] > counts['inert'] and not counts['raised']]
+        return dict(evaluated=reason is None, reason=reason, errors=errors, totals=totals)
 
 
 def _capture(ctx, history, earlier='P2', newest='R2', head_stamp=40., event_stamp=50.):
@@ -109,7 +184,8 @@ class Trace:
 
     def observe(self, messages, ingest=False, user_message=None):
         rows = deepcopy(messages)
-        if isinstance(user_message, str) and not any(row['content'] == user_message for row in rows):
+        if isinstance(user_message, str) and not any(row['role'] == 'user' and row['content'] == user_message
+                                                    for row in rows):
             rows.append(_row(user_message, None))
         self.views.append(dict(kind='ingest' if ingest else 'hook', rows=rows,
                                capture=None if ingest else self.capture_kind))
