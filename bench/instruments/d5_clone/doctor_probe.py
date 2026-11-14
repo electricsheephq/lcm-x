@@ -1,7 +1,8 @@
 """Doctor and schema facts for a clone of one stopped arm home, run by that arm's host interpreter.
 
 argv: <lcm_tree> <home> <out_dir> <session ids, JSON>. It writes ``schema.json`` (both stores' schema version and
-required tables, read before anything opens the store), then ``fts-pre-open.json`` (the doctor's two FTS
+required tables, read before anything opens the store; only lcm.db includes an expected version, while the runner
+owns state.db's expectation), then ``fts-pre-open.json`` (the doctor's two FTS
 integrity checks, before the engine opens the store and rebuilds a damaged index), then ``doctor.json`` (the ``lcm_doctor`` tool's result,
 through the engine, as the release gauntlet runs it), then, per session, ``doctor-<sha256 12>.json`` with the engine
 bound to that session by its public ``on_session_start``, and ``sessions.json`` ({sha256 12: bound}). Opening the engine may write to the store it opens, so the runner points this at a
@@ -27,27 +28,8 @@ def _connect(db):
     return sqlite3.connect(Path(db).resolve().as_uri() + "?mode=ro", uri=True)
 
 
-def captured_host_schema(home):
-    """The snapshot's schema number and any conflict reason; never open a database or fall back to the pin."""
-    try:
-        record = json.loads((Path(home) / "capture.json").read_text(encoding="utf-8"))
-        versions = []
-        for section, key in (("p2", "host_schema_version"), ("host-0.db", "schema_version")):
-            part = record.get(section)
-            value = part.get(key) if isinstance(part, dict) else None
-            if type(value) is int:
-                versions.append(value)
-        if len(set(versions)) > 1:
-            return None, "snapshot capture.json host schema records disagree: p2.host_schema_version and host-0.db.schema_version"
-        if versions:
-            return versions[0], None
-    except (OSError, ValueError, AttributeError):
-        pass
-    return None, None
-
-
-def schema(home, boot, host_sql, host_version, host_record_reason=None):
-    """{db name: {version, expected, missing_tables, error}} for the LCM-X store and the host store."""
+def schema(home, boot, host_sql):
+    """Observed version, missing tables and error for both stores; only LCM-X supplies its expected version."""
     out = {}
     with closing(_connect(home / "lcm.db")) as conn:
         health = boot.inspect_lcm_schema_health(conn)
@@ -57,10 +39,8 @@ def schema(home, boot, host_sql, host_version, host_record_reason=None):
         tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         rows = conn.execute("SELECT version FROM schema_version").fetchall() if "schema_version" in tables else []
         required = re.findall(r"CREATE TABLE IF NOT EXISTS (\w+)", host_sql)
-        out["state.db"] = {"version": rows[0][0] if len(rows) == 1 else None, "expected": host_version,
+        out["state.db"] = {"version": rows[0][0] if len(rows) == 1 else None,
                            "missing_tables": [t for t in required if t not in tables], "error": not required}
-        if host_record_reason:
-            out["state.db"]["expected_reason"] = host_record_reason
     return out
 
 
@@ -107,8 +87,7 @@ def main(tree, home, out, sessions="[]"):
     except ImportError:  # An older host keeps its schema in hermes_state.
         host = importlib.import_module("hermes_state")
     boot = importlib.import_module("hermes_lcm_x.db_bootstrap")
-    version, reason = captured_host_schema(home)
-    (out / "schema.json").write_text(json.dumps(schema(home, boot, host.SCHEMA_SQL, version, reason)))
+    (out / "schema.json").write_text(json.dumps(schema(home, boot, host.SCHEMA_SQL)))
     store, dag = (importlib.import_module(f"hermes_lcm_x.{name}") for name in ("store", "dag"))
     (out / "fts-pre-open.json").write_text(json.dumps(fts_pre_open(home, boot, store, dag)))
     config, engine = (importlib.import_module(f"hermes_lcm_x.{name}") for name in ("config", "engine"))

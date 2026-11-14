@@ -5,6 +5,8 @@ the rc arm then the GA arm on APFS clones of the verified snapshot, T0/H8 captur
 that bind's replay right after its H8 (then its captures are removed), the bars, then the receipt. Every external
 effect is a LocalHost method, so a test can run the whole flow with a fake host and a fake edition. The runner never
 opens the pinned snapshot itself, only its clones; P2 hashes its files and checks SQLite on scratch clones.
+The runner reads the capture record beside snapshot_pin after P2 passes, bound by its pin_sha256; snapshot_dir
+is the pinned tree only. The host schema expectation stays with the runner, outside the arms and their probes.
 
 The rules module (``rules_module`` in the run config, a pinned file in the instrument directory, imported only after
 P1) provides ``identity(row)``, ``credits`` (the two host-rewrite credits, each ``(row, host_row) -> bool``) and
@@ -40,6 +42,7 @@ SCHEMA = "d5-clone-receipt/1"
 # An informational real-store check (release manager, 2026-11-12): never a D5 receipt, never judged as one.
 INFORMATIONAL_SCHEMA = "informational, not D5"
 NOT_RUN = "NOT RUN (informational)"
+NO_HOST_SCHEMA = (None, "no capture record beside the snapshot pin")
 RECORDED_PREFLIGHTS = ("P3", "P4", "P6", "P7")  # Read from recorded receipts; P5 runs live in every mode.
 _ISO_Z = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}(:[0-9]{2}(\.[0-9]+)?)?Z")  # The settings time, UTC.
 NEED_FREE = 40 * 10**9
@@ -113,8 +116,8 @@ TREE_BOUND_PREFLIGHTS = ("P4",)  # The spec's preflight that both trees store on
 # instrument change, and the preflights run again). Only what differs by stage by design, or is bound elsewhere, is
 # left out: the preflights stage's P3, P6 and P7 receipts must count in the dry run and the run.
 RECEIPT_UNBOUND = {  # Whole declaration fields.
-    "snapshot_dir": "the snapshot pin is bound by its own sha256",
-    "snapshot_pin": "the snapshot pin is bound by its own sha256",
+    "snapshot_dir": "the pinned tree; the capture record beside the pin is bound by pin_sha256",
+    "snapshot_pin": "bound by its own sha256; the capture record beside it must match pin_sha256",
     "preflights": "the receipts' own paths, which differ by stage",
     "replay_receipt": "a file name that differs by stage; a wrong one makes the replay, and so P6, fail closed",
     "settings_as_of": "a disclosed time, never judged",
@@ -422,11 +425,33 @@ def _clone(src, dest):
         shutil.copy2(src, dest)
 
 
-def probe_checks(out, sessions):
+def snapshot_host_schema(pin_path, pin_sha256):
+    """Read only the host schema records beside the pin, bound to the sha256 P2 verified; no store or host import."""
+    try:
+        record = _json(Path(pin_path).with_name("capture.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        record = None
+    if record is None:
+        return NO_HOST_SCHEMA
+    if not record.get("pin_sha256") or record["pin_sha256"] != pin_sha256:
+        return None, "the capture record beside the snapshot pin belongs to another pin"
+    versions = []
+    for section, key in (("p2", "host_schema_version"), ("host-0.db", "schema_version")):
+        part = record.get(section)
+        value = part.get(key) if isinstance(part, dict) else None
+        if type(value) is int:
+            versions.append(value)
+    if len(set(versions)) > 1:
+        return None, "snapshot capture.json host schema records disagree: p2.host_schema_version and host-0.db.schema_version"
+    return (versions[0], None) if versions else (None, "snapshot capture.json has no recorded host schema version")
+
+
+def probe_checks(out, sessions, host_schema=NO_HOST_SCHEMA):
     """(bar-5 rows, not exercised) from the probe's files in *out*; *sessions* are the plan sessions' sha256 12 keys.
     A kind the probe did not produce is left out, so bar 5 reads it as not shown. Store-wide doctor checks come from
     the unbound run, per-session ones from each session's run as ``<check>@<key>``; a check the probe cannot exercise
-    is never a row, only {check, reason}."""
+    is never a row, only {check, reason}. The runner's *host_schema* pair supplies state.db's expectation and reason;
+    any expectation in the probe's state.db output is ignored."""
     found, skipped = [], []
     if out is None:
         return found, skipped
@@ -465,14 +490,14 @@ def probe_checks(out, sessions):
         for name, s in sorted(schema.items()):
             intact = (isinstance(s, dict) and s.get("error") is False and s.get("missing_tables") == []
                       and type(s.get("version")) is int)
-            if name == "state.db" and isinstance(s, dict) and type(s.get("expected")) is not int:
+            expected = host_schema[0] if name == "state.db" else s.get("expected") if isinstance(s, dict) else None
+            if name == "state.db" and type(expected) is not int:
                 missing_record = True
-                skipped.append({"check": name, "reason": s.get("expected_reason") or
-                                "snapshot capture.json has no recorded host schema version"})
+                skipped.append({"check": name, "reason": host_schema[1]})
                 if intact:
                     continue
             rows.append({"kind": "schema", "check": name,
-                         "status": "ok" if intact and s["version"] == s.get("expected") else "fail"})
+                         "status": "ok" if intact and s["version"] == expected else "fail"})
         # A partially observed schema must not supply an 'ok' schema kind to bar 5. Known failures still count.
         found += [r for r in rows if not missing_record or r["status"] != "ok"]
     return found, sorted(skipped, key=lambda item: item["check"])
@@ -512,6 +537,7 @@ class LocalHost:
 
     def __init__(self, config, run_dir):
         self.c, self.run_dir, self._rules = config, Path(os.path.abspath(run_dir)), None  # Subprocesses run elsewhere.
+        self.host_schema = NO_HOST_SCHEMA
 
     def _dir(self, *parts):
         path = self.run_dir.joinpath(*parts)
@@ -815,7 +841,8 @@ class LocalHost:
                 except (sqlite3.DatabaseError, capture.CaptureError):
                     ok = False  # A store too damaged, or in a state, to open read-only is a failed check, never a crash.
                 out.append({"kind": kind, "check": name, "status": "ok" if ok else "fail"})
-        rows, ctx["doctor_not_exercised"] = probe_checks(self.probe(ctx), [_sha(s)[:12] for s in ctx["session_ids"]])
+        rows, ctx["doctor_not_exercised"] = probe_checks(self.probe(ctx), [_sha(s)[:12] for s in ctx["session_ids"]],
+                                                        self.host_schema)
         return out + rows
 
     def facts(self, ctx):
@@ -957,6 +984,7 @@ def run(host, *, rc_id, prior=(), instrument_fix=None, informational=False):
     and not re-run, and the receipt carries bars 3 to 6 only, no verdict, under its own schema: it is never D5.
     Informational CLI exit 0 means the run did not stop; readers must still read the bars."""
     started = time.monotonic()
+    host.host_schema = NO_HOST_SCHEMA  # No stage may inherit an expectation without its own P2 PASS.
     prior = [] if informational else [p for p in prior if p.get("rc") == rc_id and "verdict" in p]  # A stopped run is not an attempt.
     prior_verdicts = [p["verdict"]["raw"] for p in prior]
     receipt = {"schema": INFORMATIONAL_SCHEMA if informational else SCHEMA, "rc": rc_id,
@@ -981,6 +1009,8 @@ def run(host, *, rc_id, prior=(), instrument_fix=None, informational=False):
             break
         if name == "P2":
             steps["P2"] = receipt["snapshot"] = host.snapshot()
+            if steps["P2"].get("verdict") == "PASS":
+                host.host_schema = snapshot_host_schema(host.c["snapshot_pin"], receipt["snapshot"]["pin_sha256"])
         elif name == "plan":
             plan = host.plan(host.clone("plan"))
             receipt["plan"] = {"sha256": planner.plan_sha256(plan), "declaration": planner.declaration(plan)}

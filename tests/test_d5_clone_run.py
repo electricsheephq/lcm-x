@@ -15,7 +15,7 @@ from bench.instruments.d5_clone import bars, capture, plan as planner, run as r
 MARKER = "synthetic-marker-7f3a9c"
 
 
-def make_snapshot(root, flagged=()):
+def make_snapshot(root, flagged=(), host_schema=5):
     """*flagged*: sessions given one summary node the doctor's summary_quality check flags (#2471)."""
     root.mkdir()
     (root / "lcm-large-outputs").mkdir()
@@ -26,6 +26,8 @@ def make_snapshot(root, flagged=()):
                     " observed_at REAL)")
         host.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, end_reason TEXT)")
         host.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, content TEXT)")
+        host.execute("CREATE TABLE schema_version (version INTEGER)")
+        host.execute("INSERT INTO schema_version VALUES (?)", (host_schema,))
         lcm.execute("CREATE TABLE summary_nodes (node_id INTEGER PRIMARY KEY, session_id TEXT, token_count INTEGER,"
                     " source_token_count INTEGER)")
         lcm.executemany("INSERT INTO summary_nodes (session_id, token_count, source_token_count) VALUES (?, ?, ?)",
@@ -42,6 +44,9 @@ def make_snapshot(root, flagged=()):
         {"name": p.relative_to(root).as_posix(), "size": p.stat().st_size,
          "sha256": hashlib.sha256(p.read_bytes()).hexdigest()} for p in files]}
     (root.parent / "snapshot-pin.json").write_text(json.dumps(pin))
+    (root.parent / "capture.json").write_text(json.dumps({
+        "pin_sha256": capture._sha256(root.parent / "snapshot-pin.json"),
+        "p2": {"host_schema_version": host_schema}, "host-0.db": {"schema_version": host_schema}}))
     return root.parent / "snapshot-pin.json"
 
 
@@ -1315,3 +1320,118 @@ def test_2647_r2_exit_one_requires_positive_not_shown_report(tmp_path, monkeypat
         assert "bind_verdict" not in diagnostics["constants"]
     assert diagnostics["replay"] is None
     assert MARKER not in json.dumps(diagnostics) + reason
+
+
+class SchemaProbeHost(FakeHost):
+    """The runner's real schema judgment over cloned stores, with synthetic probe and doctor output."""
+
+    checks = r.LocalHost.checks
+
+    def __init__(self, config, run_dir, version=6, spoof=False):
+        super().__init__(config, run_dir)
+        self.version, self.spoof = version, spoof
+
+    def arm(self, name, home, plan):
+        ctx = super().arm(name, home, plan)
+        assert not (home / "capture.json").exists()  # The capture record is outside the pinned tree.
+        with closing(sqlite3.connect(home / "state.db")) as db, db:
+            db.execute("UPDATE schema_version SET version = ?", (self.version,))
+        if self.spoof:
+            (home / "capture.json").write_text(json.dumps({"p2": {"host_schema_version": self.version}}))
+        return {**ctx, "session_ids": []}
+
+    def probe(self, ctx):
+        from tests.test_d5_clone_observe import OK_SCHEMA, doctor, probe_out
+
+        version = r._rows(ctx["home"] / "state.db", "SELECT version FROM schema_version")[0][0]
+        state = {"version": version, "missing_tables": [], "error": False,
+                 "expected_reason": "probe-controlled reason"}
+        if self.spoof:  # A legacy or malicious probe can supply an expectation; it is never an oracle.
+            state["expected"] = version
+        return probe_out(ctx["home"].parent / "probe", doctor("pass"), {"lcm.db": OK_SCHEMA, "state.db": state})
+
+
+@pytest.mark.parametrize("case, version, verdict, reason", [
+    ("match", 6, bars.PASS, None),
+    ("mismatch", 7, bars.FAIL, None),
+    ("missing", 6, bars.INCONCLUSIVE, "no capture record beside the snapshot pin"),
+    ("wrong-pin", 6, bars.INCONCLUSIVE, "the capture record beside the snapshot pin belongs to another pin"),
+    ("missing-pin", 6, bars.INCONCLUSIVE, "the capture record beside the snapshot pin belongs to another pin"),
+    ("disagree", 6, bars.INCONCLUSIVE,
+     "snapshot capture.json host schema records disagree: p2.host_schema_version and host-0.db.schema_version"),
+    ("spoof", 7, bars.FAIL, None),
+], ids=["match", "mismatch", "missing", "wrong-pin", "missing-pin", "disagree", "spoof"])
+def test_2647_r3_real_layout_runner(tmp_path, case, version, verdict, reason):
+    snap = tmp_path / "snapshot"
+    pin = make_snapshot(snap, host_schema=6)
+    record_path = pin.with_name("capture.json")
+    record = json.loads(record_path.read_text())
+    if case == "missing":
+        record_path.unlink()
+    else:
+        if case == "wrong-pin":
+            record["pin_sha256"] = "0" * 64
+        elif case == "missing-pin":
+            del record["pin_sha256"]
+        elif case == "disagree":
+            record["host-0.db"]["schema_version"] = 7
+        record_path.write_text(json.dumps(record))
+    before = inventory(snap)
+    host = SchemaProbeHost({"snapshot_dir": str(snap), "snapshot_pin": str(pin), "nonce": "synthetic"}, tmp_path / "run", version,
+                           spoof=case == "spoof")
+    receipt = r.run(host, rc_id="rc-synthetic")
+    assert receipt["snapshot"]["verdict"] == "PASS"
+    assert receipt["snapshot"]["extra_on_disk"] == {"names": [], "payload": 0}
+    assert receipt["snapshot"]["pin_sha256"] == capture._sha256(pin)
+    assert inventory(snap) == before
+    assert receipt["bars"]["bar5"]["verdict"] == verdict
+    for arm in [*receipt["arms"].values(), *([receipt["ga_rerun"]] if receipt["ga_rerun"] else [])]:
+        counts = arm["checks"]["by_kind_status"]
+        assert counts.get("schema:ok", 0) == (0 if reason else 2 if verdict == bars.PASS else 1)
+        assert counts.get("schema:fail", 0) == (verdict == bars.FAIL)
+        assert arm["doctor_not_exercised"] == ([{"check": "state.db", "reason": reason}] if reason else [])
+
+
+@pytest.mark.parametrize("informational", [False, True], ids=["d5", "informational"])
+def test_2647_r3_runner_reads_record_once_after_p2_before_arms(tmp_path, monkeypatch, informational):
+    snap = tmp_path / "snapshot"
+    pin = make_snapshot(snap, host_schema=6)
+    host = SchemaProbeHost({"snapshot_dir": str(snap), "snapshot_pin": str(pin), "nonce": "synthetic"}, tmp_path / "run", version=7)
+    read, original = [], r.snapshot_host_schema
+    verified = host.snapshot
+
+    def p2():
+        result = verified()
+        # Distinguish P2's returned hash from any later rehash of the pin.
+        pin.write_text("changed after P2 returned")
+        return result
+
+    def record(path, sha):
+        assert host.armed == [] and sha != capture._sha256(path)
+        read.append((path, sha))
+        return original(path, sha)
+
+    monkeypatch.setattr(host, "snapshot", p2)
+    monkeypatch.setattr(r, "snapshot_host_schema", record)
+    receipt = r.run(host, rc_id="rc-synthetic", informational=informational)
+    assert read == [(str(pin), receipt["snapshot"]["pin_sha256"])]
+    assert host.host_schema == (6, None)
+    assert host.armed == (["rc", "ga"] if informational else ["rc", "ga", "ga"])  # Includes the GA rerun.
+    assert receipt["bars"]["bar5"]["verdict"] == bars.FAIL
+
+
+@pytest.mark.parametrize("verdict", ["FAIL", "INCONCLUSIVE"])
+def test_2647_r3_no_record_without_p2_pass(setup, monkeypatch, verdict):
+    _, config, run_dir = setup
+    host = FakeHost(config, run_dir)
+    host.host_schema = (99, None)  # A stage must not reuse a stale record.
+    monkeypatch.setattr(host, "snapshot", lambda: {"verdict": verdict})
+    monkeypatch.setattr(r, "snapshot_host_schema", lambda *a: pytest.fail("P2 did not pass"))
+    receipt = r.run(host, rc_id="rc-synthetic")
+    assert receipt["stopped_at"] == "P2" and host.armed == []
+    assert host.host_schema == (None, "no capture record beside the snapshot pin")
+    from tests.test_d5_clone_observe import OK_SCHEMA, probe_out
+
+    checks, skipped = r.probe_checks(probe_out(run_dir / "probe", schema={"lcm.db": OK_SCHEMA, "state.db": OK_SCHEMA}), [])
+    assert "schema" in bars.kinds_missing(checks)
+    assert skipped == [{"check": "state.db", "reason": "no capture record beside the snapshot pin"}]

@@ -122,7 +122,7 @@ def per_session(out, key=KEY, *statuses, bound=True):
 
 def test_doctor_checks_map_to_bar5_statuses(tmp_path):
     out = probe_out(tmp_path, doctor("pass", "warn"), {"lcm.db": OK_SCHEMA, "state.db": OK_SCHEMA})
-    checks, skipped = r.probe_checks(out, [])
+    checks, skipped = r.probe_checks(out, [], (5, None))
     assert [c for c in checks if c["kind"] == "doctor"] == [{"kind": "doctor", "check": "database_integrity", "status": "ok"},
                                                             {"kind": "doctor", "check": "payload_storage", "status": "warn"},
                                                             *({"kind": "doctor", "check": c, "status": "ok"} for c in r.DOCTOR_PRE_OPEN)]
@@ -133,9 +133,9 @@ def test_doctor_checks_map_to_bar5_statuses(tmp_path):
 @pytest.mark.parametrize("status", ["fail", "FAIL", "degraded"])
 def test_a_doctor_fail_or_an_unknown_status_is_a_failed_check(tmp_path, status):
     out = probe_out(tmp_path, doctor("pass", status))
-    assert bars.failed_checks(r.probe_checks(out, [])[0]) == ["payload_storage"]
+    assert bars.failed_checks(r.probe_checks(out, [], (5, None))[0]) == ["payload_storage"]
     per_session(out, KEY, "pass", status, "pass")
-    assert bars.failed_checks(r.probe_checks(out, [KEY])[0]) == [f"orphaned_dag_nodes@{KEY}", "payload_storage"]
+    assert bars.failed_checks(r.probe_checks(out, [KEY], (5, None))[0]) == [f"orphaned_dag_nodes@{KEY}", "payload_storage"]
 
 
 def test_checks_the_probe_cannot_exercise_are_reported_never_rows(tmp_path):
@@ -143,7 +143,7 @@ def test_checks_the_probe_cannot_exercise_are_reported_never_rows(tmp_path):
              *r.DOCTOR_PER_SESSION)
     out = probe_out(tmp_path, doctor(*["pass"] * len(names), names=names))
     per_session(out, KEY, "pass", "warn", "pass")
-    checks, skipped = r.probe_checks(out, [KEY])
+    checks, skipped = r.probe_checks(out, [KEY], (5, None))
     assert [c["check"] for c in checks] == ["database_integrity", *r.DOCTOR_PRE_OPEN,
                                             *(f"{c}@{KEY}" for c in r.DOCTOR_PER_SESSION)]
     assert checks[4]["status"] == "warn"  # The bound session's own result.
@@ -160,7 +160,7 @@ def test_checks_the_probe_cannot_exercise_are_reported_never_rows(tmp_path):
 def test_a_failing_unclassified_check_fails_bar5(tmp_path):
     names = ("database_integrity", "messages_fts_integrity_background_flag", "another_new_check", "identity_migration")
     out = probe_out(tmp_path, doctor("pass", "fail", "pass", "fail", names=names))
-    checks, skipped = r.probe_checks(out, [])
+    checks, skipped = r.probe_checks(out, [], (5, None))
     assert bars.failed_checks(checks) == ["messages_fts_integrity_background_flag"]
     assert {s["check"] for s in skipped} == {"another_new_check", "identity_migration"}  # Ruled not exercised.
 
@@ -183,18 +183,18 @@ def test_an_unclassified_check_that_warns_is_a_row_judged_against_ga(tmp_path):
                                        zip(r.DOCTOR_PRE_OPEN, ("fail", "pass"))]}, bars.FAIL)])
 def test_fts_damage_the_engine_would_repair_is_still_seen(tmp_path, pre_open, verdict):
     out = probe_out(tmp_path, doctor("pass", "pass"), {"lcm.db": OK_SCHEMA, "state.db": OK_SCHEMA}, pre_open=pre_open)
-    checks, _ = r.probe_checks(out, [])  # The doctor's own run saw the index after the engine rebuilt it: all pass.
+    checks, _ = r.probe_checks(out, [], (5, None))  # The doctor's own run saw the index after the engine rebuilt it: all pass.
     sqlite = [{"kind": k, "check": "lcm.db", "status": "ok"} for k in ("quick_check", "integrity")]
     assert bars.bar5(sqlite + checks, sqlite + checks)["verdict"] == verdict
 
 def test_an_unbound_plan_session_leaves_the_doctor_unshown_but_a_fail_still_fails(tmp_path):
     out = probe_out(tmp_path, doctor("pass", "warn"), {"lcm.db": OK_SCHEMA, "state.db": OK_SCHEMA})
     per_session(out, KEY, "pass", "pass", "pass", bound=False)
-    checks, _ = r.probe_checks(out, [KEY])
+    checks, _ = r.probe_checks(out, [KEY], (5, None))
     assert [c["kind"] for c in checks] == ["schema", "schema"] and "doctor" in bars.kinds_missing(checks)
     out = probe_out(tmp_path / "f", doctor("pass", "fail"))
     per_session(out, KEY, "pass", "pass", "pass", bound=False)
-    assert bars.failed_checks(r.probe_checks(out, [KEY])[0]) == ["payload_storage"]
+    assert bars.failed_checks(r.probe_checks(out, [KEY], (5, None))[0]) == ["payload_storage"]
 
 
 
@@ -202,11 +202,11 @@ def test_a_bound_session_missing_a_per_session_check_is_not_looked_at(tmp_path):
     out = probe_out(tmp_path, doctor("pass", "warn"))
     (out / f"doctor-{KEY}.json").write_text(json.dumps(doctor("pass", "pass", names=r.DOCTOR_PER_SESSION[:2])))
     (out / "sessions.json").write_text(json.dumps({KEY: True}))
-    checks, skipped = r.probe_checks(out, [KEY])
+    checks, skipped = r.probe_checks(out, [KEY], (5, None))
     assert checks == [] and "doctor" in bars.kinds_missing(checks)
     assert {s["check"] for s in skipped} == {f"{r.DOCTOR_PER_SESSION[2]}@{KEY}"}
     (out / f"doctor-{KEY}.json").write_text(json.dumps(doctor("fail", "pass", names=r.DOCTOR_PER_SESSION[:2])))
-    checks, _ = r.probe_checks(out, [KEY])  # An incomplete report that fails a check still fails it.
+    checks, _ = r.probe_checks(out, [KEY], (5, None))  # An incomplete report that fails a check still fails it.
     assert bars.failed_checks(checks) == [f"{r.DOCTOR_PER_SESSION[0]}@{KEY}"]
     sqlite = [{"kind": k, "check": "lcm.db", "status": "ok"} for k in ("quick_check", "integrity", "schema")]
     ok = [{"kind": "doctor", "check": "database_integrity", "status": "ok"}]
@@ -214,8 +214,8 @@ def test_a_bound_session_missing_a_per_session_check_is_not_looked_at(tmp_path):
 
 
 def test_a_ga_arm_whose_doctor_did_not_run_leaves_bar5_unjudged(tmp_path):
-    rc = r.probe_checks(probe_out(tmp_path / "rc", doctor("pass", "warn"), {"lcm.db": OK_SCHEMA, "state.db": OK_SCHEMA}), [])[0]
-    ga = r.probe_checks(probe_out(tmp_path / "ga", None, {"lcm.db": OK_SCHEMA, "state.db": OK_SCHEMA}), [])[0]
+    rc = r.probe_checks(probe_out(tmp_path / "rc", doctor("pass", "warn"), {"lcm.db": OK_SCHEMA, "state.db": OK_SCHEMA}), [], (5, None))[0]
+    ga = r.probe_checks(probe_out(tmp_path / "ga", None, {"lcm.db": OK_SCHEMA, "state.db": OK_SCHEMA}), [], (5, None))[0]
     sqlite = [{"kind": k, "check": "lcm.db", "status": "ok"} for k in ("quick_check", "integrity")]
     result = bars.bar5(sqlite + rc, sqlite + ga)  # The GA probe crashed or timed out: no doctor rows in that arm.
     assert result["verdict"] == bars.INCONCLUSIVE and result["ga_kinds_missing"] == ["doctor"]
@@ -225,7 +225,7 @@ def test_a_doctor_that_did_not_run_leaves_the_kind_missing(tmp_path, value):
     out = probe_out(tmp_path)
     if value is not None:
         (out / "doctor.json").write_text(value if isinstance(value, str) else json.dumps(value))
-    assert "doctor" in bars.kinds_missing(r.probe_checks(out, [KEY])[0])
+    assert "doctor" in bars.kinds_missing(r.probe_checks(out, [KEY], (5, None))[0])
     assert r.probe_checks(None, [KEY]) == ([], [])
 
 
@@ -238,7 +238,7 @@ def test_a_pre_open_fts_failure_counts_when_the_doctor_did_not_report(tmp_path, 
     out = probe_out(tmp_path, None, {"lcm.db": OK_SCHEMA, "state.db": OK_SCHEMA}, pre_open=pre_open)
     if value is not None:
         (out / "doctor.json").write_text(value if isinstance(value, str) else json.dumps(value))
-    checks, _ = r.probe_checks(out, [KEY])
+    checks, _ = r.probe_checks(out, [KEY], (5, None))
     sqlite = [{"kind": k, "check": "lcm.db", "status": "ok"} for k in ("quick_check", "integrity")]
     assert bars.bar5(sqlite + checks, sqlite + checks)["verdict"] == verdict
     assert bars.failed_checks(checks) == ([r.DOCTOR_PRE_OPEN[0]] if verdict == bars.FAIL else [])
@@ -246,7 +246,7 @@ def test_a_pre_open_fts_failure_counts_when_the_doctor_did_not_report(tmp_path, 
 
 @pytest.mark.parametrize("bad", [{"version": 4}, {"missing_tables": ["messages"]}, {"error": True}, {"version": None}])
 def test_a_schema_mismatch_fails_that_db(tmp_path, bad):
-    checks, _ = r.probe_checks(probe_out(tmp_path, schema={"lcm.db": {**OK_SCHEMA, **bad}, "state.db": OK_SCHEMA}), [])
+    checks, _ = r.probe_checks(probe_out(tmp_path, schema={"lcm.db": {**OK_SCHEMA, **bad}, "state.db": OK_SCHEMA}), [], (5, None))
     assert bars.failed_checks(checks) == ["lcm.db"]
 
 
@@ -484,7 +484,7 @@ def test_the_real_probe_runs_the_doctor_on_a_clone_and_never_writes_the_arm_home
     ctx = {"home": home, "gateway": type("G", (), {"env": env})(), "session_ids": ["S"],
            "tree": {"host_bin": os.environ["D5_HOST_BIN"], "lcm_tree": str(tree)}}
     out = r.LocalHost({}, tmp_path).probe(ctx)
-    checks, skipped = r.probe_checks(out, [KEY])
+    checks, skipped = r.probe_checks(out, [KEY], (5, None))
     assert {p.relative_to(home): p.stat().st_mtime_ns for p in home.rglob("*") if p.is_file()} == before
     assert {c["kind"] for c in checks} == {"doctor", "schema"} and bars.failed_checks(checks) == []
     names = {c["check"] for c in checks}
@@ -499,7 +499,7 @@ def test_the_real_probe_runs_the_doctor_on_a_clone_and_never_writes_the_arm_home
     with closing(sqlite3.connect(damaged / "lcm.db")) as db:
         db.execute("INSERT INTO messages_fts(messages_fts) VALUES('delete-all')")
         db.commit()
-    checks, _ = r.probe_checks(r.LocalHost({}, tmp_path).probe({**ctx, "home": damaged}), [KEY])
+    checks, _ = r.probe_checks(r.LocalHost({}, tmp_path).probe({**ctx, "home": damaged}), [KEY], (5, None))
     assert bars.failed_checks(checks) == ["messages_fts_integrity@pre_open"]
     (home / "lcm-large-outputs").mkdir(exist_ok=True)  # An arm home made from a snapshot always has it.
     t0, _ = r.LocalHost({}, tmp_path / "t0").capture({**ctx, "name": "rc"}, "T0", {"id": "s1"})  # The real doctor text.
@@ -519,28 +519,21 @@ def test_a_store_the_read_only_open_refuses_is_never_read_as_empty(tmp_path):
         r._rows(db, "SELECT max(store_id) FROM messages")
 
 
-@pytest.mark.parametrize("record, version, verdict", [
-    ({"p2": {"host_schema_version": 6}}, 6, bars.PASS),  # Ahead of the pinned host's constant (5).
-    ({"host-0.db": {"schema_version": 6}}, 6, bars.PASS),
-    pytest.param({"p2": {"host_schema_version": 6}, "host-0.db": {"schema_version": 6}}, 6, bars.PASS,
-                 id="r2-records-agree"),
-    pytest.param({"p2": {"host_schema_version": 6}, "host-0.db": {"schema_version": 7}}, 6, bars.INCONCLUSIVE,
-                 id="r2-records-disagree-p2-matches"),
-    pytest.param({"p2": {"host_schema_version": 7}, "host-0.db": {"schema_version": 6}}, 6, bars.INCONCLUSIVE,
-                 id="r2-records-disagree-db-matches"),
-    ({"p2": {"host_schema_version": 7}}, 6, bars.FAIL),
-    ({}, 5, bars.INCONCLUSIVE),  # Even matching the pin is not evidence without the capture record.
-    (None, 5, bars.INCONCLUSIVE),
-    ({"p2": {"host_schema_version": True}}, 5, bars.INCONCLUSIVE),
-])
-def test_2647_host_schema_uses_only_the_capture_record(tmp_path, monkeypatch, record, version, verdict):
+@pytest.mark.parametrize("version", [5, 6, 7])
+def test_2647_r3_probe_reports_observation_only(tmp_path, monkeypatch, version):
     from types import SimpleNamespace
     from bench.instruments.d5_clone import doctor_probe as probe
 
     home, out = stores(tmp_path / "home"), tmp_path / "out"
     out.mkdir()
-    if record is not None:
-        (home / "capture.json").write_text(json.dumps({**record, "private": "never emitted"}))
+    (home / "capture.json").write_text('{"p2": {"host_schema_version": 999}}')
+    read_text = Path.read_text
+
+    def read(path, *args, **kwargs):
+        assert path.name != "capture.json", "the probe must not read an oracle from its home"
+        return read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read)
     with closing(sqlite3.connect(home / "state.db")) as db, db:
         db.execute("CREATE TABLE schema_version (version INTEGER)")
         db.execute("INSERT INTO schema_version VALUES (?)", (version,))
@@ -557,17 +550,70 @@ def test_2647_host_schema_uses_only_the_capture_record(tmp_path, monkeypatch, re
     monkeypatch.setattr(probe, "fts_pre_open", lambda *args: PRE_OPEN_OK)
     probe.main(tmp_path, home, out)
     schema = json.loads((out / "schema.json").read_text())
-    checks, skipped = r.probe_checks(out, [])
-    sqlite = [{"kind": k, "check": "lcm.db", "status": "ok"} for k in ("quick_check", "integrity")]
-    assert bars.bar5(sqlite + checks, sqlite + checks)["verdict"] == verdict
-    if verdict == bars.INCONCLUSIVE:
-        assert schema["state.db"]["expected"] is None
-        conflict = record and "p2" in record and "host-0.db" in record
-        assert {s["reason"] for s in skipped} == {
-            "snapshot capture.json host schema records disagree: p2.host_schema_version and host-0.db.schema_version"
-            if conflict else "snapshot capture.json has no recorded host schema version"}
-    else:
-        expected = record.get("p2", {}).get("host_schema_version", record.get("host-0.db", {}).get("schema_version"))
-        assert schema["state.db"]["expected"] == expected
-        assert bars.failed_checks(checks) == (["state.db"] if verdict == bars.FAIL else [])
-    assert "never emitted" not in json.dumps({"schema": schema, "checks": checks, "skipped": skipped})
+    assert schema["state.db"] == {"version": version, "missing_tables": [], "error": False}
+    assert schema["lcm.db"] == OK_SCHEMA
+
+
+@pytest.mark.parametrize("case, versions, expected", [
+    ("missing", {}, (None, "no capture record beside the snapshot pin")),
+    ("unreadable", {}, (None, "no capture record beside the snapshot pin")),
+    ("not-object", [], (None, "no capture record beside the snapshot pin")),
+    ("invalid-json", "{", (None, "no capture record beside the snapshot pin")),
+    ("invalid-utf8", {}, (None, "no capture record beside the snapshot pin")),
+    ("wrong-pin", {}, (None, "the capture record beside the snapshot pin belongs to another pin")),
+    ("missing-pin", {}, (None, "the capture record beside the snapshot pin belongs to another pin")),
+    ("no-version", {}, (None, "snapshot capture.json has no recorded host schema version")),
+    ("bool", {"p2": {"host_schema_version": True}},
+     (None, "snapshot capture.json has no recorded host schema version")),
+    ("string", {"host-0.db": {"schema_version": "6"}},
+     (None, "snapshot capture.json has no recorded host schema version")),
+    ("float", {"p2": {"host_schema_version": 6.0}},
+     (None, "snapshot capture.json has no recorded host schema version")),
+    ("bad-sections", {"p2": [], "host-0.db": None},
+     (None, "snapshot capture.json has no recorded host schema version")),
+    ("p2-only", {"p2": {"host_schema_version": 6}}, (6, None)),
+    ("db-only", {"host-0.db": {"schema_version": 6}}, (6, None)),
+    ("ignore-bool", {"p2": {"host_schema_version": True}, "host-0.db": {"schema_version": 6}}, (6, None)),
+    ("agree", {"p2": {"host_schema_version": 6}, "host-0.db": {"schema_version": 6}}, (6, None)),
+    ("disagree-p2", {"p2": {"host_schema_version": 6}, "host-0.db": {"schema_version": 7}},
+     (None, "snapshot capture.json host schema records disagree: p2.host_schema_version and host-0.db.schema_version")),
+    ("disagree-db", {"p2": {"host_schema_version": 7}, "host-0.db": {"schema_version": 6}},
+     (None, "snapshot capture.json host schema records disagree: p2.host_schema_version and host-0.db.schema_version")),
+], ids=["missing", "unreadable", "not-object", "invalid-json", "invalid-utf8", "wrong-pin", "missing-pin", "no-version",
+        "bool", "string", "float", "bad-sections", "p2-only", "db-only", "ignore-bool", "agree", "disagree-p2", "disagree-db"])
+def test_2647_r3_runner_record(tmp_path, monkeypatch, case, versions, expected):
+    pin = tmp_path / "snapshot-pin.json"
+    pin.write_text("synthetic pin")
+    sha = r.capture._sha256(pin)
+    record_path = pin.with_name("capture.json")
+    if case == "unreadable":
+        read_text = Path.read_text
+
+        def read(path, *args, **kwargs):
+            if path == record_path:
+                raise PermissionError("synthetic unreadable record")
+            return read_text(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", read)
+    elif case == "invalid-utf8":
+        record_path.write_bytes(b"\xff")
+    elif case != "missing":
+        record = {"pin_sha256": sha, "private": "never emitted", **versions} if isinstance(versions, dict) else versions
+        if case == "wrong-pin":
+            record["pin_sha256"] = "0" * 64
+        elif case == "missing-pin":
+            del record["pin_sha256"]
+        record_path.write_text(record if case == "invalid-json" else json.dumps(record))
+    assert r.snapshot_host_schema(pin, sha) == expected
+
+
+@pytest.mark.parametrize("bad, failures", [({}, []), ({"error": True}, ["state.db"]),
+                                           ({"missing_tables": ["messages"]}, ["state.db"]),
+                                           ({"version": None}, ["state.db"])],
+                         ids=["intact", "error", "missing-tables", "missing-version"])
+def test_2647_r3_partial_schema_keeps_only_failures(tmp_path, bad, failures):
+    out = probe_out(tmp_path, schema={"lcm.db": OK_SCHEMA, "state.db": {**OK_SCHEMA, **bad}})
+    checks, skipped = r.probe_checks(out, [], (None, "runner-owned reason"))
+    assert not any(c["kind"] == "schema" and c["status"] == "ok" for c in checks)
+    assert bars.failed_checks(checks) == failures
+    assert skipped == [{"check": "state.db", "reason": "runner-owned reason"}]
