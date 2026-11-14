@@ -8,6 +8,7 @@ import json
 import os
 import random
 import sqlite3
+from types import SimpleNamespace
 
 import pytest
 
@@ -22,6 +23,7 @@ from tests.phase0_hygiene import product_env_keys
 
 
 RANDOM_SEEDS = tuple(range(2707400, 2707720))
+RELOAD_SEEDS = tuple(range(2707800, 2707900))
 CONTROL_SEEDS = {
     2707101: 'r1-A-alias-fallback',
     2707102: 'r1-B-fallback-replay',
@@ -154,23 +156,15 @@ def _faults(engine, name, kind, monkeypatch):
     calls = []
     if kind == 'none':
         return calls
-    target = '_store_merged_user_aliases' if kind in ('preservation-once', 'persistent') else '_identity_anchor_prematch'
+    target = '_store_queued_user_rows' if kind in ('preservation-once', 'persistent') else '_identity_anchor_prematch'
     present = hasattr(engine, target)
     audit = audit_fault(engine, kind, present)
     if audit.stubbed or not present:
         return calls
     if kind in ('preservation-once', 'persistent'):
-        original = engine._store_merged_user_aliases
-
-        def preserve(*args, **kwargs):
-            calls.append('preservation')
-            if kind == 'persistent' or len(calls) == 1:
-                audit.called += 1
-                audit.raised += 1
-                raise ValueError('seeded preservation failure')
-            return original(*args, **kwargs)
-
-        monkeypatch.setattr(engine, '_store_merged_user_aliases', preserve)
+        from .record_contract import writer_fault
+        engine._paired_trace.faults.remove(audit)
+        writer_fault(engine, kind, monkeypatch, calls)
     elif kind in ('busy', 'evidence'):
         original = engine._identity_anchor_prematch
 
@@ -267,10 +261,63 @@ def _seeded(seed, tmp_path, monkeypatch, differential_versions, record_property)
     base._compare_round2(results, record_property)
 
 
-CASES = [*RANDOM_SEEDS, *CONTROL_SEEDS, 'shifted-replay', 'capture-without-fault']
+def _gateway_reload(transcript):
+    # floor 345cd2b: gateway/run_turn.py:1921 reloads EACH turn;
+    # gateway/session_transcript.py:496-510 requests repair_alternation=True;
+    # hermes_state_messages.py:955-978,995-997 restores copies, strips text,
+    # stamps _DB_PERSISTED_MARKER, then agent_runtime_helpers.py:523-552 joins
+    # plain user rows into the first dict. Fixtures exclude steer/summary rows.
+    history = []
+    for row in transcript:
+        row = dict(row, content=row['content'].strip(), _db_persisted=True)
+        if history and history[-1]['role'] == row['role'] == 'user':
+            old, new = history[-1]['content'], row['content']
+            history[-1]['content'] = old + '\n\n' + new if old and new else old or new
+        else:
+            history.append(row)
+    return history
 
 
-def _execute_case(case, directory, versions, stub_faults=False):  # noqa: F811
+def _reload_case(seed, directory, patch, trees, record):
+    rng = random.Random(seed)
+    patch.setenv('LCM_IDENTITY_ANCHOR', str(rng.randrange(2)))
+    # A durable pending-user transcript is the reload input. It is separate
+    # from the overwritten live objects: repair never rewrites durable rows.
+    pending = [base._row(f'P-{seed}-{i}', 10. + i) for i in range(rng.randint(1, 2))]
+    pending.append(base._row(f'R-{seed}', 20.))
+    for name in ('main', 'candidate'):
+        ctx = base._open(trees[name], directory / name, patch)
+        engine = ctx.engine
+        q, reply = base._row('Q', 1., 'assistant'), base._row('A', 21., 'assistant')
+        try:
+            engine.ingest([q])
+            live = [dict(row) for row in pending]
+            ctx.hooks['pre_llm_call'](session_id='parent', conversation_id='conv',
+                                      user_message=live[-1]['content'], conversation_history=[q, *live])
+            live[0].update(content=live[-1]['content'], timestamp=live[-1]['timestamp'])
+            engine.ingest([q, live[0], reply])
+            history = _gateway_reload([q, *pending, reply])
+            if hasattr(engine, '_paired_trace'):
+                trace = engine._paired_trace
+                trace.reloads = [(trace.record_captures[-1]['ids'][0], history[1], '\n\n'.join(r['content'] for r in pending))]
+            engine.ingest([*history, base._row(f'N-{seed}', 30.), base._row('B', 31., 'assistant')])
+            joined = history[1]['content']
+            rows = base._rows(engine)
+            record(name + '_reload', json.dumps(dict(seed=seed,
+                   stores_joined=any(row['role'] == 'user' and row['content'] == joined for row in rows),
+                   predecessor_spans=sum(row['role'] == 'user' and row['content'] == joined
+                                         for row in rows) * (len(pending) - 1))))
+        finally:
+            engine.shutdown()
+
+
+CASES = [*RANDOM_SEEDS, *CONTROL_SEEDS, *RELOAD_SEEDS, 'shifted-replay', 'capture-without-fault']
+
+
+def _execute_case(case, directory, versions, stub_faults=False, fake=False):  # noqa: F811
+    fake = fake or os.environ.get('LCMX_DIFF_FAKE_RECORDS') == '1'
+    if fake:
+        versions = dict(versions, candidate=SimpleNamespace(register=versions['main'].register))
     traces, properties = {}, []
 
     def record(name, value):
@@ -284,7 +331,10 @@ def _execute_case(case, directory, versions, stub_faults=False):  # noqa: F811
         def opened(module, path, monkeypatch):
             key = 'main' if module is versions['main'] else 'candidate'
             trace = traces.setdefault(key, Trace(stub_faults=stub_faults))
-            return original(module, path, monkeypatch, trace=trace)
+            trace.case = case
+            if key == 'candidate':
+                trace.baseline_stages = traces['main'].ingests
+            return original(module, path, monkeypatch, trace=trace, fake=fake and key == 'candidate')
 
         patch.setattr(base, '_open', opened)
         if case == 'shifted-replay':
@@ -293,6 +343,8 @@ def _execute_case(case, directory, versions, stub_faults=False):  # noqa: F811
             _named_capture(directory, patch, versions, record)
         elif case in CONTROL_SEEDS:
             _historical(case, directory, patch, versions, record)
+        elif case in RELOAD_SEEDS:
+            _reload_case(case, directory, patch, versions, record)
         else:
             _seeded(case, directory, patch, versions, record)
     return properties, traces
@@ -308,7 +360,8 @@ def _label_violations(case, trace, stubbed):
         stage, kind, value, count = (violation[k] for k in ('stage', 'kind', 'value', 'count'))
         views = trace.ingests[stage - 1]['views']
         if kind == 'missing':
-            label = label_missing(case, views, violation)
+            label = ('#2707 reload' if case in RELOAD_SEEDS and views[violation['view']]['kind'] == 'ingest'
+                     else label_missing(case, views, violation))
         else:
             remaining = clean.get((stage, kind, value), 0)
             if remaining:
@@ -337,13 +390,24 @@ def _label_violations(case, trace, stubbed):
     return entries
 
 
-def test_stubbed_control_with_preservation_seam(tmp_path, tmp_path_factory, versions):  # noqa: F811
-    tree = paired.materialize('20362c42be7f74697a4db9c66d1be193462579f7',
-                              tmp_path_factory.getbasetemp() / 'stubbed-control-tree')
-    candidate = paired._load(tree, '_stubbed_control_candidate')
-    _, traces = _execute_case(2707102, tmp_path, dict(main=versions['main'], candidate=candidate), stub_faults=True)
+@pytest.mark.parametrize('case', [2707102, 2707202, 2707203])
+def test_stubbed_control_with_preservation_seam(case, tmp_path, versions):  # noqa: F811
+    from .trees import check_host, PrerequisiteUnavailable, skip_or_fail
+    try:
+        check_host()
+    except PrerequisiteUnavailable as exc:
+        skip_or_fail(str(exc))
+    _, traces = _execute_case(case, tmp_path, versions, stub_faults=True, fake=True)
     faults = [fault for fault in traces['candidate'].faults if fault.kind == 'preservation-once']
     assert faults and all(fault.present and fault.stubbed and not fault.called and not fault.raised for fault in faults)
+
+
+@pytest.fixture(scope='module', autouse=True)
+def fake_record_contract_switch():
+    with pytest.MonkeyPatch.context() as patch:
+        if os.environ.get('LCMX_DIFF_FAKE_RECORDS') == '1':
+            patch.setattr(paired, 'CANDIDATE_CONTRACT', 'records-v1')
+        yield
 
 
 @pytest.fixture(scope='module')
@@ -354,12 +418,17 @@ def fault_run(request, record_testsuite_property):
                 and 'sequence' in item.callspec.params}
     yield run
     result = run.finish(CASES, selected)
-    record_testsuite_property('merged_user_turn_fault_floor', json.dumps(result))
-    for item in request.session.items:
-        if item.module is request.module and hasattr(item, 'callspec') and 'sequence' in item.callspec.params:
-            paired.write_diagnostics(item.callspec.params['sequence'], item.originalname,
-                                     [*item.user_properties, ('merged_user_turn_fault_floor', json.dumps(result))])
-    assert not result['errors'], result['errors']
+    try:
+        record_testsuite_property('merged_user_turn_fault_floor', json.dumps(result))
+        for item in request.session.items:
+            if item.module is request.module and hasattr(item, 'callspec') and 'sequence' in item.callspec.params:
+                paired.write_diagnostics(item.callspec.params['sequence'], item.originalname,
+                                         [*item.user_properties, ('merged_user_turn_fault_floor', json.dumps(result))])
+    finally:
+        if paired.CANDIDATE_CONTRACT == 'records-v1':
+            from tests.differential.record_contract import mandatory_floor
+            mandatory_floor(result, run.cases)
+        assert not result['errors'], result['errors']
 
 
 @pytest.fixture(scope='class')
@@ -367,6 +436,13 @@ def sequence(request, tmp_path_factory, versions, fault_run):  # noqa: F811 - im
     case = request.param
     directory = tmp_path_factory.mktemp(f'merged-{case}')
     properties, traces = _execute_case(case, directory, versions)
+    from tests.differential.merged_user_turns_extras import DECLARED
+    from tests.differential.record_contract import declaration_stages, declarations
+    if paired.resolve(os.environ.get('LCMX_DIFF_BASELINE_REF', paired.BASELINE_REF)) == paired.BASELINE_REF:
+        assert declarations(case, declaration_stages(traces['main']), paired.BASELINE_REF) == DECLARED[case], \
+            f'{case}: live baseline declarations differ'
+    else:
+        properties.append(('live_declarations', 'baseline override'))
     fault_run.record(case, traces)
     for name, trace in traces.items():
         counts = fault_counts(trace.faults)
@@ -394,9 +470,27 @@ class TestMergedUserTurns:
         record_property('all_stored_rows', json.dumps({
             name: [stage['rows'] for stage in trace.ingests] for name, trace in traces.items()}))
         assert hosts['main'] == hosts['candidate'], 'Differential host inputs must be identical'
+        assert paired.CANDIDATE_CONTRACT in ('main', 'records-v1')
+        for stage, (main, candidate) in enumerate(zip(traces['main'].ingests, traces['candidate'].ingests, strict=True), 1):
+            assert main['canonical'] == candidate['canonical'], f'{case}: canonical row changed'
+            assert not main['records'], f'{case}: main stored queued records'
+            if paired.CANDIDATE_CONTRACT == 'main':
+                assert not candidate['records'], f'{case}: main contract stored queued records'
+            else:
+                from tests.differential.record_contract import active, check_stage
+                from tests.differential.merged_user_turns_extras import DECLARED
+                check_stage(candidate, main, active(DECLARED[case], stage))
+                from tests.differential.merged_user_turns_extras import FAULT_ABSENT
+                missing = {(e['capture_view'], e['predecessor_ordinal'], e['expected']['content'])
+                           for e in DECLARED[case] if e['stage'] <= stage and
+                           (e['due_stage'] is None or e['due_stage'] > stage)}
+                assert set(candidate['retrieval_missing']) == missing, f'{case}: retrieval-missing'
+                assert {tuple(row[:3]) for row in FAULT_ABSENT[case]} == {
+                    (e['capture_view'], e['predecessor_ordinal'], e['expected']['content'])
+                    for e in DECLARED[case] if e['due_stage'] is None}
         assert_faults(case, traces)
         differences = [json.loads(value) for name, value in properties if name == 'differences']
-        assert differences and not any(differences), f'{case}: {differences}'
+        assert (differences or case in RELOAD_SEEDS) and not any(differences), f'{case}: {differences}'
         # The source scenarios retain their own exact substitutions. Historical
         # controls additionally check setup and warm ingests, which the source
         # compared only at selected checkpoints.
@@ -439,4 +533,126 @@ class TestMergedUserTurns:
         if effective == paired.BASELINE_REF:
             assert matches, (f'{case}: baseline pin mismatch at {paired.BASELINE_REF}; '
                              f'pins must be regenerated for it: {violations["main"]}')
+        from tests.differential.merged_user_turns_extras import RETRIEVAL_MISSING
+        if effective == paired.BASELINE_REF:
+            assert [s['retrieval_missing'] for s in traces['main'].ingests] == RETRIEVAL_MISSING[case]['values']
         assert subset, f'{case}: added candidate violations: {counters["candidate"] - counters["main"]}'
+
+
+@pytest.mark.parametrize('mutation,message', [
+    ('correct', None), ('missing', 'declared record multiset'), ('extra', 'declared record multiset'),
+    ('text', 'declared record multiset'), ('time', 'declared record multiset'), ('duplicate', 'declared record multiset'),
+    ('hidden', 'retrieval-missing'), ('superseded', 'superseded without occurrence witness'),
+    ('inert', 'declared fault preservation-once never fired'), ('skipped', 'floor skipped'),
+    ('canonical', 'canonical row changed'),
+    ('early', '2707102: declared record multiset'), ('unsuperseded', '2707802: retrieval-missing'),
+    ('error', 'lcm_load_session: injected tool error'),
+])
+def test_fake_record_contract(mutation, message, tmp_path, versions, monkeypatch):  # noqa: F811
+    from tests.differential import fake_records
+    from tests.differential.merged_user_turns_extras import DECLARED
+    from tests.differential.record_contract import active, check_stage, mandatory_floor
+    install = fake_records.install
+    def modified(engine, entries, patch):
+        install(engine, entries, patch)
+        writer = engine._store_queued_user_rows
+        def write(rows):
+            rows = [dict(row) for row in rows]
+            if rows:
+                if mutation == 'missing':
+                    rows = rows[1:]
+                if mutation in ('extra', 'duplicate'):
+                    rows.append(dict(rows[0], ordinal=999) if mutation == 'extra' else rows[0])
+                if mutation == 'text':
+                    rows[0]['content'] = 'wrong text'
+                if mutation == 'time':
+                    rows[0]['observed_at'] = -1.
+                if mutation == 'superseded':
+                    rows[0]['superseded_by'] = rows[0]['owner_store_id']
+            writer(rows)
+            if mutation == 'duplicate' and rows:
+                engine._store._conn.execute('INSERT INTO queued_user_rows SELECT * FROM queued_user_rows LIMIT 1')
+            if mutation == 'canonical':
+                engine._store._conn.execute("UPDATE messages SET content='changed'")
+        patch.setattr(engine, '_store_queued_user_rows', write)
+        if mutation in ('early', 'unsuperseded'):
+            ingest = engine.ingest
+            def defective(*args, **kwargs):
+                result = ingest(*args, **kwargs)
+                if mutation == 'early':
+                    from .record_contract import expected_record
+                    writer([expected_record(e) for e in entries
+                            if e['stage'] <= len(engine._paired_trace.ingests) + 1])
+                else:
+                    engine._store._conn.execute('UPDATE queued_user_rows SET superseded_by=NULL')
+                return result
+            patch.setattr(engine, 'ingest', defective)
+        if mutation == 'error':
+            patch.setattr(engine._contract_tools, 'lcm_load_session',
+                          lambda *_a, **_k: json.dumps(dict(error='injected tool error')))
+        if mutation == 'hidden':
+            patch.setattr(engine._contract_tools, 'lcm_grep', lambda *_a, **_k: json.dumps(dict(results=[])))
+    monkeypatch.setattr(fake_records, 'install', modified)
+    monkeypatch.setattr(paired, 'CANDIDATE_CONTRACT', 'records-v1')
+    def verify():
+        if mutation in ('inert', 'skipped'):
+            return mandatory_floor(dict(evaluated=mutation != 'skipped'), {})
+        case = 2707102 if mutation == 'early' else 2707802 if mutation == 'unsuperseded' else 2707800
+        _, traces = _execute_case(case, tmp_path, versions, fake=True)
+        for stage, (main, candidate) in enumerate(zip(traces['main'].ingests, traces['candidate'].ingests, strict=True), 1):
+            try:
+                check_stage(candidate, main, active(DECLARED[case], stage))
+                assert not candidate['retrieval_missing'], 'retrieval-missing'
+            except AssertionError as exc:
+                raise AssertionError(f'{case}: {exc}') from exc
+    if message:
+        with pytest.raises(AssertionError, match=message):
+            verify()
+    else:
+        verify()
+
+
+@pytest.mark.parametrize('case', [2707102, 2707202, 2707203, 2707405, 2707407])
+def test_record_fault_floor_and_frozen_retry(case, tmp_path, versions, monkeypatch):  # noqa: F811
+    from tests.differential.record_contract import FAULT_CONTROLS
+    monkeypatch.setattr(paired, 'CANDIDATE_CONTRACT', 'records-v1')
+    _, traces = _execute_case(case, tmp_path, versions, fake=True)
+    counts = fault_counts(traces['candidate'].faults)
+    for kind in FAULT_CONTROLS[case]:
+        assert counts[kind]['requested'] and not counts[kind]['inert'] and counts[kind]['called'] and counts[kind]['raised']
+    assert all(a['canonical'] == b['canonical'] for a, b in zip(traces['main'].ingests, traces['candidate'].ingests, strict=True))
+    if case == 2707102:
+        from tests.differential.merged_user_turns_extras import DECLARED
+        from tests.differential.record_contract import expected_record
+        assert not traces['candidate'].ingests[1]['records']
+        assert traces['candidate'].ingests[-1]['records'] == [freeze(expected_record(e)) for e in DECLARED[case]]
+
+
+def test_record_declaration_completeness():
+    from collections import Counter
+    from tests.differential.merged_user_turns_expected import EXPECTED
+    from tests.differential.merged_user_turns_extras import DISPOSITIONS
+    for case in DISPOSITIONS:
+        assert Counter(tuple(row[:5]) for row in DISPOSITIONS[case]) == Counter(
+            (stage, kind, value, view, count) for stage, kind, value, view, count, label in EXPECTED.get(case, ())
+            if label == '#2707 proven')
+
+
+def test_equal_text_supersession_needs_occurrence_witness():
+    from tests.differential.merged_user_turns_extras import DECLARED
+    from tests.differential.record_contract import check_stage, expected_record
+    record = expected_record(DECLARED[2707800][0])
+    canonical = [freeze(dict(record, store_id=record['owner_store_id'])), freeze(dict(record, store_id=999))]
+    with pytest.raises(AssertionError, match='superseded without occurrence witness'):
+        check_stage(dict(canonical=canonical, records=[freeze(dict(record, superseded_by=999))]),
+                    dict(canonical=canonical), [DECLARED[2707800][0]])
+
+
+def test_equal_text_supersession_accepts_occurrence_witness():
+    from .merged_user_turns_extras import DECLARED
+    from .record_contract import check_stage, expected_record
+    entry = DECLARED[2707802][0]
+    record = expected_record(entry)
+    canonical = [freeze(dict(record, store_id=record['owner_store_id'])), freeze(dict(record, store_id=999))]
+    check_stage(dict(canonical=canonical, records=[freeze(dict(record, superseded_by=999))]),
+                dict(canonical=canonical, reload_witness={record['owner_store_id']: 999}), [entry])

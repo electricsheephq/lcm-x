@@ -54,6 +54,28 @@ def _identities(engine):
                         sender_id=senders[r['store_id']][0], sender_source=senders[r['store_id']][1])) for r in _rows(engine)]
 
 
+# These wall-clock values describe the test run, rather than stored semantics.
+CANONICAL_CLOCK_FIELDS = {'timestamp', 'ingested_at'}
+RECORD_COLUMNS = ('owner_store_id', 'ordinal', 'role', 'content', 'observed_at', 'observed_at_source',
+                  'session_id', 'conversation_id', 'captured_uid', 'superseded_by')
+
+
+def canonical_rows(engine):
+    identities = _identities(engine)
+    return [freeze(dict({k: v for k, v in row.items() if k not in CANONICAL_CLOCK_FIELDS},
+                        **dict(identity))) for row, identity in zip(_rows(engine), identities)]
+
+
+def queued_rows(engine):
+    conn = engine._store._conn
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='queued_user_rows' AND type='table'").fetchone():
+        return []
+    columns = {row[1] for row in conn.execute('PRAGMA table_info(queued_user_rows)')}
+    assert set(RECORD_COLUMNS) <= columns, f'queued_user_rows missing columns: {set(RECORD_COLUMNS) - columns}'
+    return [freeze(dict(zip(RECORD_COLUMNS, row))) for row in conn.execute(
+        'SELECT ' + ', '.join(RECORD_COLUMNS) + ' FROM queued_user_rows ORDER BY owner_store_id, ordinal')]
+
+
 def duplicate_rows(rows, views=()):
     """Full stored identity, with excess above the largest host-view count."""
     result = []
@@ -144,6 +166,12 @@ def fault_counts(faults):
 
 
 def assert_faults(case, traces):
+    if 'main' in traces and 'candidate' in traces:
+        for fault in traces['main'].faults:
+            from .record_contract import FAULT_EXEMPTIONS
+            if fault.raised and not fault.stubbed and (case, fault.kind) not in FAULT_EXEMPTIONS:
+                assert any(f.kind == fault.kind and f.present and f.raised for f in traces['candidate'].faults), \
+                    f'{case}: main fault {fault.kind} inert on candidate'
     for tree, trace in traces.items():
         for fault in trace.faults:
             if not fault.stubbed and fault.present and fault.called and not fault.raised:
@@ -196,6 +224,16 @@ class Trace:
     faults: list = field(default_factory=list)
     stub_faults: bool = False
     capture_kind: str = 'proven'
+    occurrences: list = field(default_factory=list)
+    record_captures: list = field(default_factory=list)
+    committed: dict = field(default_factory=dict)
+
+    def occurrence(self, row):
+        for index, old in enumerate(self.occurrences):
+            if old is row:
+                return index
+        self.occurrences.append(row)
+        return len(self.occurrences) - 1
 
     def observe(self, messages, ingest=False, user_message=None):
         rows = deepcopy(messages)
@@ -215,10 +253,26 @@ class Trace:
         if len(trailing) < 2 or any(trailing[0] is old for old in self.host_objects):
             return
         head, newest = trailing[0], trailing[-1]
+        self.record_captures.append(dict(view=len(self.views) - 1, kind=self.capture_kind,
+                                    rows=deepcopy(trailing), ids=[self.occurrence(row) for row in trailing],
+                                    clean=user_message, head=head, newest=newest))
         self.captures.append((head, '\n\n'.join(row['content'] for row in trailing),
                               head['timestamp'], newest['content'], newest['timestamp']))
 
-    def stored(self, engine, messages, originals):
+    def stored(self, engine, messages, originals, prepared=()):
+        committed_before = dict(self.committed)
+        stored_at = {index: sid for attempt in prepared[-1:] for index, sid in attempt.get('stored_at', {}).items()
+                     if engine._store.get(sid) is not None}
+        for index, sid in stored_at.items():
+            self.committed[self.occurrence(originals[index])] = sid
+        captures = []
+        for capture in self.record_captures:
+            head, newest = capture['head'], capture['newest']
+            captures.append(dict({k: deepcopy(v) for k, v in capture.items() if k not in ('head', 'newest')},
+                                 head_present=any(head is row for row in originals),
+                                 newest_present=any(newest is row for row in originals),
+                                 overwritten=head.get('content') == capture['clean'],
+                                 prefix=bool(head.get('_merged_turn_prefix') or head.get('_absorbed_message_uids'))))
         self.host_objects.extend(originals)
         for head, joined, stamp, newest, event_stamp in self.captures:
             if (any(head is row for row in originals) and head['content'] == newest
@@ -227,19 +281,29 @@ class Trace:
                     'user', newest, event_stamp, 'parent', 'conv')
         self.ingests.append(dict(host=deepcopy(messages), views=deepcopy(self.views),
                                  rows=_identities(engine), preserved=dict(self.preserved),
+                                 canonical=canonical_rows(engine), records=queued_rows(engine),
+                                 captures=captures, committed=dict(self.committed), committed_before=committed_before,
+                                 reload_witness={self.committed[occ]: self.committed[self.occurrence(row)]
+                                     for occ, row, joined in getattr(self, 'reloads', ()) if occ in self.committed
+                                     and self.occurrence(row) in self.committed and row['role'] == 'user'
+                                     and row['content'] == joined and self.committed[self.occurrence(row)] > self.committed[occ]},
+                                 protection=dict(sensitive_patterns_enabled=engine._config.sensitive_patterns_enabled,
+                                                 sensitive_patterns=engine._config.sensitive_patterns),
                                  binding_diagnostics=_bindings(engine)))
 
     def violations(self):
         result = []
+        from .record_contract import projection
         for index, stage in enumerate(self.ingests, 1):
-            for (view, text), count in sorted(missing_messages(stage['views'], stage['rows']).items()):
+            rows = projection(stage) if stage.get('records') else stage['rows']
+            for (view, text), count in sorted(missing_messages(stage['views'], rows).items()):
                 result.append(dict(stage=index, kind='missing', value=text, view=view, count=count))
             for identity, count in duplicate_rows(stage['rows'], stage['views']):
                 result.append(dict(stage=index, kind='duplicate', value=identity, count=count))
         return result
 
 
-def _open(module, directory, monkeypatch, trace=None):
+def _open(module, directory, monkeypatch, trace=None, fake=False):
     monkeypatch.setenv('HERMES_HOME', str(directory / 'home'))
     monkeypatch.setenv('LCM_DATABASE_PATH', str(directory / 'lcm.db'))
     monkeypatch.setenv('LCM_EMBEDDINGS_ENABLED', '0')
@@ -260,13 +324,37 @@ def _open(module, directory, monkeypatch, trace=None):
             trace.capture(kwargs.get('conversation_history', []), kwargs.get('user_message'))
             return hook(*args, **kwargs)
 
+        if fake:
+            from .fake_records import install
+            from .merged_user_turns_extras import DECLARED
+            install(engine, DECLARED[trace.case], monkeypatch)
         ingest = engine.ingest
+        transaction = engine._ingest_messages_transaction
+        prepared = []
+
+        def committing(*args, **kwargs):
+            result = transaction(*args, **kwargs)
+            item = kwargs.get('prepared', next((arg for arg in args if isinstance(arg, dict) and 'stored_at' in arg), None))
+            if isinstance(item, dict):
+                prepared.append(item)
+            return result
+
+        monkeypatch.setattr(engine, '_ingest_messages_transaction', committing)
 
         def observe(messages, *args, **kwargs):
             host = deepcopy(messages)
             trace.observe(host, ingest=True)
+            prepared.clear()
             result = ingest(messages, *args, **kwargs)
-            trace.stored(engine, host, messages)
+            trace.stored(engine, host, messages, prepared)
+            if hasattr(trace, 'case'):
+                from .record_contract import declarations, observe, judge
+                from .paired import BASELINE_REF
+                baseline = getattr(trace, 'baseline_stages', trace.ingests)[:len(trace.ingests)]
+                entries = declarations(trace.case, baseline, BASELINE_REF)
+                observation = observe(engine) if entries else dict(pages=[], hits=[], summary_sources=[])
+                observation['reload_witness'] = baseline[-1]['reload_witness']
+                trace.ingests[-1]['retrieval_missing'] = judge(observation, entries)
             return result
 
         ctx.hooks['pre_llm_call'] = capture

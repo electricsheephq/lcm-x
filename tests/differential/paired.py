@@ -16,6 +16,7 @@ import pytest
 from .trees import PrerequisiteUnavailable, materialize, resolve, skip_or_fail
 
 BASELINE_REF = "7d614f5fe22eb7cf7d8955230c51619916a1fed3"
+CANDIDATE_CONTRACT = 'main'  # Only the product PR may select 'records-v1'.
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -60,6 +61,8 @@ def versions(tmp_path_factory):
 
 def normalise_rows(rows, preserved=None, reference_rows=()):
     """Replace only explicitly proven exact tuples; never remove a row."""
+    if CANDIDATE_CONTRACT == 'records-v1':
+        return list(rows)
     preserved = preserved or {}
     result = []
     for row in rows:
