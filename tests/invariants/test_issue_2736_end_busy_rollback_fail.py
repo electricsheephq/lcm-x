@@ -32,15 +32,14 @@ def _require(condition, what):
 class RollbackProxy:
     """Runs the real ROLLBACK, then raises: the transaction is gone, but Python saw a failure."""
 
-    def __init__(self, conn, *, really_rollback=True):
-        self.conn, self.really_rollback = conn, really_rollback
+    def __init__(self, conn):
+        self.conn = conn
 
     def __getattr__(self, name):
         return getattr(self.conn, name)
 
     def rollback(self):
-        if self.really_rollback:
-            self.conn.rollback()
+        self.conn.rollback()
         raise RuntimeError("rollback sentinel")
 
 
@@ -65,7 +64,7 @@ def disk_contents(engine, path):
         return [r[0] for r in conn.execute("SELECT content FROM messages WHERE session_id='S' ORDER BY store_id")]
 
 
-def end_with_busy(engine, monkeypatch, *, rollback_fails, really_rollback=True):
+def end_with_busy(engine, monkeypatch, *, rollback_fails):
     view = history()
     engine.ingest(copy.deepcopy(view[:2]))
     _require(contents(engine) == ["A", "B"], "the first ingest stored A and B")
@@ -73,7 +72,7 @@ def end_with_busy(engine, monkeypatch, *, rollback_fails, really_rollback=True):
     with monkeypatch.context() as patch:
         busy_append(engine, patch)
         if rollback_fails:
-            engine._store._conn = RollbackProxy(conn, really_rollback=really_rollback)
+            engine._store._conn = RollbackProxy(conn)
         try:
             engine.on_session_end("S", copy.deepcopy(view))
         finally:
@@ -123,7 +122,8 @@ def test_later_paths_after_failed_rollback_end(engines, monkeypatch, later):
     elif later == "shutdown":
         engine.shutdown()
         stored = disk_contents(engine, path)
-        assert all(r in stored or r in tail_contents(engine) for r in ["C", "D"]), stored
+        # After shutdown only the rows on disk survive; a tail still held in memory dies with the process.
+        assert all(r in stored for r in ["C", "D"]), stored
         return
     elif later == "resume_replay":
         engine.on_session_start("S", platform="cli", context_length=200_000, conversation_id="conv")

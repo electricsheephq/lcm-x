@@ -116,16 +116,12 @@ def test_recovery_rebind_S1_without_resend(engines, monkeypatch):
 def test_recovery_shutdown_drain(engines, monkeypatch):
     engine, view = setup(engines)
     busy_end(engine, view, monkeypatch)
-    for name in ("shutdown", "close"):
-        fn = getattr(engine, name, None)
-        if callable(fn):
-            try:
-                fn()
-            except Exception:
-                pass
-            break
+    engine.shutdown()  # a crash here fails the test instead of being absorbed by the strict xfail
     store = MessageStore(engine._store.db_path)
-    rows = [r["content"] for r in store.get_session_messages("S1")]
+    try:
+        rows = [r["content"] for r in store.get_session_messages("S1")]
+    finally:
+        store.close()
     assert rows == ["A", "B", "C", "D"], f"after shutdown drain: {rows}"
 
 
@@ -147,9 +143,17 @@ def test_resume_and_reingest_full_history_stores(engines, monkeypatch):
 
 
 @_PIN
-def test_real_writer_lock_at_end_rows_stored_queued_or_counted(engines):
-    """No monkeypatch: another connection holds the write lock during the end."""
+def test_real_writer_lock_at_end_rows_stored_queued_or_counted(engines, monkeypatch):
+    """No injected fault: another connection holds the write lock during the end."""
     engine, view = setup(engines)
+    reached = []
+    real_append = engine._append_off_current_session_end_suffix
+
+    def spy(*args, **kwargs):  # records the call and runs the real append
+        reached.append(1)
+        return real_append(*args, **kwargs)
+
+    monkeypatch.setattr(engine, "_append_off_current_session_end_suffix", spy)
     locker = sqlite3.connect(engine._store.db_path, isolation_level=None)
     locker.execute("BEGIN IMMEDIATE")
     raised = None
@@ -161,6 +165,7 @@ def test_real_writer_lock_at_end_rows_stored_queued_or_counted(engines):
     finally:
         locker.rollback()
         locker.close()
+    _require(reached, "the real lock must hit the suffix append, not an earlier write")
     stored, queued, counters = accounted(engine, view)
     assert stored or queued, (
         f"C,D lost at end: raised={raised!r} rows={contents(engine)} "
