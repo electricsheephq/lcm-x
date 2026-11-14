@@ -49,10 +49,10 @@ jobs:
         run: python -m bench.instruments.reliability.ci prep --host "${{ matrix.host }}" --root "$RUNNER_TEMP/hosts" --out "$RUNNER_TEMP/hosts.json"
 
       - name: R1 in-process, all cells
-        run: python bench/instruments/reliability/run_matrix.py --hosts-file "$RUNNER_TEMP/hosts.json" --hosts "${{ matrix.host }}" --plugin-ref HEAD --cells all --jobs 4 --out "$OUT/r1" --keep-dbs fail
+        run: python bench/instruments/reliability/run_matrix.py --hosts-file "$RUNNER_TEMP/hosts.json" --hosts "${{ matrix.host }}" --plugin-ref HEAD --cells all --jobs 4 --out "$OUT/r1" --keep-dbs all
 
       - name: R2 acp-process, all cells
-        run: python bench/instruments/reliability/run_matrix.py --transport acp-process --hosts-file "$RUNNER_TEMP/hosts.json" --hosts "${{ matrix.host }}" --plugin-ref HEAD --cells all --jobs 4 --out "$OUT/r2" --keep-dbs fail
+        run: python bench/instruments/reliability/run_matrix.py --transport acp-process --hosts-file "$RUNNER_TEMP/hosts.json" --hosts "${{ matrix.host }}" --plugin-ref HEAD --cells all --jobs 4 --out "$OUT/r2" --keep-dbs all
 
       - name: Gate (ERROR, or a G-REL-1 FAIL without an open targeted issue)
         env:
@@ -67,7 +67,7 @@ jobs:
         if: ${{ !cancelled() }}
         continue-on-error: ${{ env.DEFAULT_WINDOW_REPORT_ONLY == 'true' }}
         timeout-minutes: 30
-        run: python bench/instruments/reliability/run_matrix.py --hosts-file "$RUNNER_TEMP/hosts.json" --hosts "${{ matrix.host }}" --plugin-ref HEAD --cells 'default-window/*' --jobs 4 --out "$OUT/default-window-r1" --keep-dbs fail
+        run: python bench/instruments/reliability/run_matrix.py --hosts-file "$RUNNER_TEMP/hosts.json" --hosts "${{ matrix.host }}" --plugin-ref HEAD --cells 'default-window/*' --jobs 4 --out "$OUT/default-window-r1" --keep-dbs all
 
       - name: Job summary
         if: always()
