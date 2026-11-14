@@ -21,6 +21,8 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
           # Keep identical to scripts/maintainer_gate.py's TURN_PATH_FILES.
+          # tests/test_differential_relevance.py checks static engine imports
+          # against this list and the gate's documented exclusions.
           TURN_PATH_FILES: |-
             __init__.py
             assembly_plan.py

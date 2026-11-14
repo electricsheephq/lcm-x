@@ -8502,9 +8502,9 @@ class LCMEngine(
         Store-dependent protection/token counts are part of lock_hold_ms, and
         would move out with classification under the design's section 5 fallback.
         """
-        # Another writer may have filled this session after its empty-store bind.
-        # The eager write lock keeps this probe and the ensuing writes serialized.
-        if self._ingest_cursor == 0 and not self._ingest_cursor_needs_reconcile:
+        # This guard belongs to #2042's catch-up and runs only when host_row_recovery_enabled is on.
+        # The eager write lock serializes the probe and writes if another writer filled an empty-store bind.
+        if getattr(getattr(self, "_config", None), "host_row_recovery_enabled", False) and self._ingest_cursor == 0 and not self._ingest_cursor_needs_reconcile:
             try:
                 self._ingest_cursor_needs_reconcile = self._store.has_session_messages(self._session_id)
             except Exception as exc:

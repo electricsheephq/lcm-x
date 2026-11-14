@@ -20,6 +20,14 @@ def write_run(root, **metadata):
     return root
 
 
+def count_clean(result):
+    """Complete, with every category inside its count margin (d8-count-margin-v1).
+
+    One-question subset categories never gate, so `pass` is false here by rule.
+    """
+    return not result["INCOMPLETE"] and all(c["count_pass"] for c in result["categories"].values())
+
+
 def update_report(root, change):
     path = root / "report.json"
     report = json.loads(path.read_text())
@@ -62,7 +70,7 @@ def test_missing_both_is_disclosed_and_matching_identities_pass(tmp_path):
     baseline = write_run(tmp_path / "b", answeringModel="reader")
     candidate = write_run(tmp_path / "c", answeringModel="reader")
     result = compare_runs(candidate, baseline, subset=True)
-    assert result["pass"]
+    assert count_clean(result)  # d8-count-margin-v1: was `pass`
     assert "datasetSha256" in result["identities_missing_both"]
     assert "answeringModel" not in result["identities_missing_both"]
 
@@ -167,7 +175,7 @@ def test_recall_configs_compare_only_for_placebo_and_stay_consistent_within_run(
 
     update_report(candidate, local_health)
     result = compare_runs(candidate, baseline, subset=True)
-    assert result["pass"]
+    assert count_clean(result)  # d8-count-margin-v1: was `pass`
     assert not result["INCOMPLETE"]
     assert result["recall_configs"] == {"candidate": "LOCAL", "baseline": "OFF"}
     assert all(run["degraded"] == 0 for run in result["runs"].values())
@@ -217,7 +225,8 @@ def test_matching_ordinary_writer_identity_passes(tmp_path, placebo):
                 for role in ("answererProvenance", "judgeProvenance")}
     baseline = write_run(tmp_path / "b", **metadata)
     candidate = write_run(tmp_path / "c", **metadata)
-    assert compare_runs(candidate, baseline, subset=True, placebo=placebo)["pass"]
+    # d8-count-margin-v1: was `pass`
+    assert count_clean(compare_runs(candidate, baseline, subset=True, placebo=placebo))
 
 
 @pytest.mark.parametrize("field", ["score", "correct"])
@@ -250,7 +259,7 @@ def test_blank_identity_values_are_missing(tmp_path, field, left, right):
     candidate = write_run(tmp_path / "c", **metadata(right))
     result = compare_runs(candidate, baseline, subset=True)
     if not left.strip() and not right.strip():
-        assert result["pass"]
+        assert count_clean(result)  # d8-count-margin-v1: was `pass`
         assert field in result["identities_missing_both"]
     else:
         assert result["INCOMPLETE"]
@@ -272,7 +281,7 @@ def test_presentation_mode_is_placebo_only_but_consistent_within_run(tmp_path):
     baseline = write_run(tmp_path / "b", answerPresentationMode="raw")
     candidate = write_run(tmp_path / "c", answerPresentationMode="default")
     result = compare_runs(candidate, baseline, subset=True)
-    assert result["pass"]
+    assert count_clean(result)  # d8-count-margin-v1: was `pass`
     assert result["answer_presentation_modes"] == {"candidate": "default", "baseline": "raw"}
     placebo = compare_runs(candidate, baseline, subset=True, placebo=True)
     assert placebo["INCOMPLETE"]
@@ -320,7 +329,7 @@ WRITER_FIXTURES = Path(__file__).parent / "fixtures" / "d8_writer_pair"
 
 def test_writer_generated_matching_identities_are_present():
     result = compare_runs(WRITER_FIXTURES / "a", WRITER_FIXTURES / "c", subset=True)
-    assert result["pass"]
+    assert count_clean(result)  # d8-count-margin-v1: was `pass`
     assert not result["INCOMPLETE"]
     for field in ("datasetSha256", "datasetPath", "promptVersion", "scoringPath"):
         assert field not in result["identities_missing_both"]
@@ -367,12 +376,11 @@ def edit_writer_run(root, field, value):
 def test_writer_identity_mismatch_is_incomplete(tmp_path, field):
     baseline = copy_writer_run(tmp_path, "a", "baseline")
     candidate = copy_writer_run(tmp_path, "c", "candidate")
-    assert compare_runs(candidate, baseline, subset=True)["pass"]
+    assert count_clean(compare_runs(candidate, baseline, subset=True))  # d8-count-margin-v1: was `pass`
     edit_writer_run(candidate, field, "changed-" + field)
     result = compare_runs(candidate, baseline, subset=True)
     if field == "questionSetSha256":
-        assert not result["INCOMPLETE"]
-        assert result["pass"]
+        assert count_clean(result)  # d8-count-margin-v1: was `pass`
         assert result["identity_differences"] == {field: {
             "candidate": "changed-" + field,
             "baseline": json.loads((baseline / "report.json").read_text())[field]}}

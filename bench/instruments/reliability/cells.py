@@ -46,8 +46,9 @@ ISSUES = {
     821: (("B1", "B2", "B3", "B4", "B5", "B8"), "r34.4/upstream-uid host: held composite vs durable parts after a crash on rotation"),
     871: (("B2",), "r34.4 rotation: crash between parent end and child start, the crash turn's user row unstored"),
     # acp-process, crash after rotation: the scorer now expects an in-flight reply the host kept, so #861 covers only
-    # the crash turn's user row left unstored; a host-kept reply in an abandoned rotation child is recovered (#2624)
+    # the crash turn's user row left unstored; a host-kept reply in an abandoned rotation child is #2624
     861: (("B1", "B2"), "acp-process: intermittent around the crash after rotation"),
+    2624: (("B1", "B2"), "upstream-main and upstream-uid acp-process: the restart resumes the parent and abandons the rotation child, so the interrupted turn's host-kept reply is never shown to the plugin"),
     916: (("F4",), "acp-process continuity: survival projection removes the current user tag"),
     1501: (("B1", "B2"), "rotation replay after a carried host stamp, including a previous-GA store"),
     1505: (("B1", "B2"), "forced-recovery user turn stored twice after the crash and cold restart (since #1328)"),
@@ -57,10 +58,12 @@ ISSUES = {
 }
 # issue -> host-name prefixes on which its bars are declared (absent: every host); ci.gate reads it
 ISSUE_HOSTS = {534: ("ref-", "floor-", "upstream-main"), 1501: ("ref-", "floor-", "upstream-main"),
+               2624: ("upstream-main", "upstream-uid"),
                1797: ("r34.4-", "r34.10-", "r34.15-"), 1799: ("floor-",), 821: ("r34.4-", "upstream-uid"), 861: ("ref-", "customer-", "r34.4-", "r34.10-", "r34.15-", "upstream-uid"),
                871: ("r34.4-", "r34.10-", "r34.15-"), 1506: ("ref-", "floor-", "upstream-main"), 1508: ("ref-", "floor-", "upstream-main")}
 # issue -> transports on which its bars are declared (absent: every transport); ci.gate reads it
 ISSUE_TRANSPORTS = {1797: ("in-process",), 1798: ("acp-process",), 1799: ("acp-process",), 861: ("acp-process",),
+                    2624: ("acp-process",),
                     1931: ("acp-process",)}
 
 
@@ -304,7 +307,7 @@ def registry() -> list[dict]:
         cell("window-1m/in-place", [], in_place=True, window=1000000, turns=60,
              doc="1M window through engine.update_model; tight tuning and text volume scaled x15.6 from the 64k probes, "
                  "so LCM's threshold math runs at 1M (threshold 500k tokens, ~36k tokens per turn)."),
-        cell("crash-after-rotation/rotation", [519, 549, 821, 861], in_place=False, user={"trailing_ws": True},
+        cell("crash-after-rotation/rotation", [519, 549, 821, 861, 2624], in_place=False, user={"trailing_ws": True},
              faults=[{"kind": "crash_after_rotation_before_child_row"}],
              doc="os._exit right after the engine's rotation on_session_start, before any child row (#519/#549)."),
         cell("upgrade-crash-after-rotation/rotation", [1501, 1506], in_place=False, user={"trailing_ws": True},
@@ -335,11 +338,11 @@ def registry() -> list[dict]:
     cells += [cell("reply-held-crash/" + name, targets, in_place=ip, user={"trailing_ws": True},
                    faults=[fault], doc=proof + " Reservation holds the store; does not prove natural crash timing.")
               for name, ip, targets, fault, proof in (
-                  ("rotation-turn", False, [], {"kind": "crash_after_host_reply_before_store", "turn": 12, "depth": 1},
+                  ("rotation-turn", False, [2624], {"kind": "crash_after_host_reply_before_store", "turn": 12, "depth": 1},
                    "First rotation child reply survives a crash and reload."),
-                  ("plain-turn", False, [], {"kind": "crash_after_host_reply_before_store", "turn": 15, "depth": 1},
+                  ("plain-turn", False, [2624], {"kind": "crash_after_host_reply_before_store", "turn": 15, "depth": 1},
                    "A later reply in the first child survives a crash and reload."),
-                  ("multi-hop", False, [], {"kind": "crash_after_host_reply_before_store", "turn": 22, "depth": 2},
+                  ("multi-hop", False, [2624], {"kind": "crash_after_host_reply_before_store", "turn": 22, "depth": 2},
                    "A reply two compression hops from the ACP root survives reload."),
                   ("pre-rotation", False, [], {"kind": "crash_after_host_reply_before_store", "turn": 5, "depth": 0},
                    "Root-session crash control before rotation."),
@@ -352,7 +355,7 @@ def registry() -> list[dict]:
 def held_tool_cell(name, *, in_place=False):
     loop = name == "tool-loop"
     return cell("reply-held-crash-control/tool-loop-in-place" if in_place else "reply-held-crash/" + name,
-                [], in_place=in_place, user={"trailing_ws": True}, big_lines=8,
+                [] if in_place else [2624], in_place=in_place, user={"trailing_ws": True}, big_lines=8,
                 faults=[dict(kind="crash_after_host_reply_before_store", turn=15, depth=0 if in_place else 1,
                              **({"at": "tool_results"} if loop else {}))],
                 tool_plan=[{"turns": [15], "calls": [

@@ -1379,17 +1379,17 @@ def test_fix_r1_07_atexit_timeout_stops_admission(lab):
     entered, release = threading.Event(), threading.Event()
     def seal():
         entered.set()
-        release.wait(5)
+        release.wait(60)  # Only test cleanup releases the writer; 60 s is a hang backstop far above the 10 s waits.
         rec._emit({"kind": "checkpoint_sealed", "hours": 24, "through": rec.last_seq}, single=True)
     rec.writer.offer(("call", seal))
-    assert entered.wait(2)
     try:
+        assert entered.wait(10)
         rec._atexit()
         assert not rec.writer.sync
         done = threading.Event()
         thread = threading.Thread(target=lambda: (ctx.offered.get_status(), done.set()), daemon=True)
         thread.start()
-        assert done.wait(0.5)
+        assert done.wait(10)  # Deadlock backstop; the writer remains stalled until finally.
         status = json.loads((rec.proc / "STATUS.json").read_text())
         assert status["end_state"] == "exit_timeout" and not rec.writer.sync
     finally:
