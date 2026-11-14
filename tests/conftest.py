@@ -216,7 +216,9 @@ D1_MODULES = ("test_2293_*.py", "invariants/test_2293_*.py", "test_issue_2042_*.
 def _message_store_callbacks(monkeypatch, request):
     """D1 scopes admission coverage; all restores the full-suite audit."""
     try:
-        module = Path(os.path.realpath(request.node.path)).relative_to(plugin_dir / "tests").as_posix()
+        # Resolve the directory, not the file, so a symlinked test file keeps its own name.
+        module = Path(os.path.realpath(request.node.path.parent), request.node.path.name).relative_to(
+            plugin_dir / "tests").as_posix()
     except ValueError:
         module = ""  # External tests never belong to a D1 module.
     if os.environ.get("LCM_D1_AUDIT", "scoped") != "all" and not any(

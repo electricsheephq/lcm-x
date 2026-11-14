@@ -310,6 +310,8 @@ def test_round2_fallback_has_own_evidence_retry(tmp_path, monkeypatch, versions,
             monkeypatch.setattr(engine, '_identity_anchor_prematch', prematch)
             engine.ingest(live)
             first_run = _identities(engine)
+            # The rerun is the fault-free idempotence check: the fault belongs to the first ingest only.
+            monkeypatch.setattr(engine, '_identity_anchor_prematch', original)
             engine.ingest(live)
             results[name] = [first_run, _identities(engine)]
             faults[name] = len(calls)
