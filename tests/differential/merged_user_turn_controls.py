@@ -9,7 +9,7 @@ import json
 import sqlite3
 import sys
 
-from tests.differential.paired import compare_stages as _compare_round2
+from tests.differential.paired import compare_stages as _compare_round2, normalise_rows
 from tests.differential.session import _capture, _identities, _open, _row, _rows
 
 
@@ -68,9 +68,8 @@ def test_round2_existing_alias_fallback_matches_main(tmp_path, monkeypatch, vers
             # candidate. Compare that existing slot in main's host form; the
             # failed turn and every additional row must be identical to main.
             if not seed_alias:
-                stored = [(role, 'R', 20., session, conv) if text == 'P1\n\nR'
-                          else (role, text, stamp, session, conv)
-                          for role, text, stamp, session, conv in stored]
+                stored = normalise_rows(stored, {('user', 'P1\n\nR', 10., 'parent', 'conv'):
+                                                  ('user', 'R', 20., 'parent', 'conv')})
             results[name] = [stored]
         finally:
             engine.shutdown()
@@ -242,7 +241,7 @@ def test_round3_new_uid_keeps_host_time_through_fallback(tmp_path, monkeypatch, 
     record_property('cache_stamps', json.dumps(cache_stamps))
     _compare_round2(results, record_property)
     assert len(results['candidate'][0]) == 5
-    assert [row[2] for row in results['candidate'][0] if row[1] == 'R'] == [20.]
+    assert [dict(row)['observed_at'] for row in results['candidate'][0] if dict(row)['content'] == 'R'] == [20.]
     expected = {'candidate': 20.} if hasattr(engine, '_store_merged_user_aliases') else {}
     assert projected_stamps == fallback_stamps == expected
     assert cache_stamps == {'main': 20., 'candidate': 20.}
@@ -285,5 +284,5 @@ def test_round2_fallback_has_own_evidence_retry(tmp_path, monkeypatch, versions,
             engine.shutdown()
     assert faults == {'main': 1, 'candidate': 1}
     _compare_round2(results, record_property)
-    assert [r[1] for r in results['candidate'][0]].count('I') == 1
-    assert [r[1] for r in results['candidate'][0]].count('A2') == 1
+    assert [dict(r)['content'] for r in results['candidate'][0]].count('I') == 1
+    assert [dict(r)['content'] for r in results['candidate'][0]].count('A2') == 1

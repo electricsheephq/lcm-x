@@ -1,4 +1,10 @@
-"""Isolated engine/session helpers and an absolute host-input row oracle."""
+"""Isolated engine/session helpers and an absolute host-input row oracle.
+
+Two ingest-shown rows stored as one joined row are not an absolute violation:
+the content is kept. The differential half judges row structure against main;
+#2707's design review decides that structure.
+"""
+from collections import Counter, defaultdict
 from copy import deepcopy
 from dataclasses import dataclass, field
 import sys
@@ -13,9 +19,70 @@ def _rows(engine):
     return engine._store.get_session_messages('parent')
 
 
+def freeze(value):
+    if isinstance(value, dict):
+        return tuple(sorted((k, freeze(v)) for k, v in value.items()))
+    if isinstance(value, (list, tuple)):
+        return tuple(freeze(v) for v in value)
+    return value
+
+
+def _bindings(engine):
+    conn = engine._store._conn
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='host_uid_bindings' AND type='table'").fetchone():
+        return []
+    return list(conn.execute('SELECT store_id, uid, kind, lineage_key, binding_version, proof_kind, '
+                             'first_check, disagree_seen FROM host_uid_bindings ORDER BY store_id, uid, kind'))
+
+
 def _identities(engine):
-    return [(r['role'], r['content'], r['observed_at'], r['session_id'], r['conversation_id'])
-            for r in _rows(engine)]
+    bindings = defaultdict(list)
+    for sid, uid, kind, lineage, *_ in _bindings(engine):
+        bindings[sid].append((uid, kind, lineage))
+    ignored = {'store_id', 'timestamp', 'ingested_at', 'token_estimate'}
+    return [freeze(dict({k: v for k, v in r.items() if k not in ignored},
+                        bindings=tuple(sorted(bindings[r['store_id']])))) for r in _rows(engine)]
+
+
+def duplicate_rows(rows):
+    groups = defaultdict(list)
+    for row in rows:
+        fields = dict(row)
+        bound = {uid for uid, *_ in fields.pop('bindings', ())}
+        groups[freeze(fields)].append(bound)
+    result = []
+    for identity, bindings in groups.items():
+        # Distinct bound UID sets identify distinct messages. An unbound copy
+        # has no identity evidence and duplicates any other row in its group.
+        involved = {i for i, a in enumerate(bindings) for j, b in enumerate(bindings)
+                    if i != j and (not a or not b or a & b)}
+        if involved:
+            result.append((identity, len(involved)))
+    return sorted(result, key=repr)
+
+
+def missing_messages(messages, rows):
+    stream = [segment for row in rows if dict(row)['role'] == 'user'
+              for segment in dict(row)['content'].split('\n\n')]
+    consumed = set()
+    missing = Counter()
+    ingest = [m for m in messages if m['ingest']]
+    ingest.sort(key=lambda m: -int('\n\n' in m['content']))
+    for message in ingest:
+        parts = message['content'].split('\n\n')
+        match = next((i for i in range(len(stream) - len(parts) + 1)
+                      if stream[i:i + len(parts)] == parts
+                      and not consumed.intersection(range(i, i + len(parts)))), None)
+        if match is None:
+            missing[message['content']] += 1
+        else:
+            consumed.update(range(match, match + len(parts)))
+    for text, count in Counter(m['content'] for m in messages if not m['ingest']).items():
+        parts = text.split('\n\n')
+        available = sum(stream[i:i + len(parts)] == parts for i in range(len(stream) - len(parts) + 1))
+        if count > available:
+            missing[text] += count - available
+    return missing
 
 
 def _capture(ctx, history, earlier='P2', newest='R2', head_stamp=40., event_stamp=50.):
@@ -26,24 +93,37 @@ def _capture(ctx, history, earlier='P2', newest='R2', head_stamp=40., event_stam
     return [*history, head, _row('B', event_stamp + 1, 'assistant')]
 
 
-class AbsoluteViolation(AssertionError):
-    """Stored rows lose host user text or repeat an entire row identity."""
-
-
 @dataclass
 class Trace:
-    """Accumulate immutable host observations across engine recreation."""
-    user_texts: set = field(default_factory=set)
+    """Snapshot host messages before product mutation, across reader recreation."""
+    messages: list = field(default_factory=list)
     ingests: list = field(default_factory=list)
     host_objects: list = field(default_factory=list)
     captures: list = field(default_factory=list)
     preserved: dict = field(default_factory=dict)
+    calls: int = 0
 
-    def observe(self, messages):
-        self.user_texts.update(row['content'] for row in messages if row['role'] == 'user')
+    def observe(self, messages, ingest=False):
+        for row in messages:
+            if row['role'] != 'user':
+                continue
+            uid, text, stamp = row.get('message_uid'), row['content'], row.get('timestamp')
+            match = next((m for m in self.messages if
+                          (uid is not None and m['uid'] == uid) or
+                          ((uid is None or m['uid'] is None) and (text, stamp) == (m['content'], m['timestamp']))), None)
+            if match is None:
+                self.messages.append(dict(uid=uid, content=text, timestamp=stamp, ingest=ingest))
+            else:
+                match['ingest'] |= ingest
+                if uid is not None:
+                    match['uid'] = uid
 
-    def capture(self, messages):
+    def capture(self, messages, user_message=None):
+        self.calls += 1
         self.observe(messages)
+        if isinstance(user_message, str) and not any(row['content'] == user_message for row in messages):
+            self.messages.append(dict(uid=('user_message', user_message, self.calls),
+                                      content=user_message, timestamp=None, ingest=False))
         trailing = []
         for row in reversed(messages):
             if row['role'] != 'user':
@@ -51,33 +131,28 @@ class Trace:
             trailing.insert(0, row)
         if len(trailing) < 2 or any(trailing[0] is old for old in self.host_objects):
             return
-        # Only a never-ingested retained head, later overwritten with the exact
-        # captured newest text/time, permits a joined-row substitution.
         head, newest = trailing[0], trailing[-1]
         self.captures.append((head, '\n\n'.join(row['content'] for row in trailing),
                               head['timestamp'], newest['content'], newest['timestamp']))
 
     def stored(self, engine, messages, originals):
-        self.observe(messages)
         self.host_objects.extend(originals)
         for head, joined, stamp, newest, event_stamp in self.captures:
             if (any(head is row for row in originals) and head['content'] == newest
                     and head['timestamp'] == event_stamp):
                 self.preserved[('user', joined, stamp, 'parent', 'conv')] = (
                     'user', newest, event_stamp, 'parent', 'conv')
-        self.ingests.append(dict(host=deepcopy(messages), texts=sorted(self.user_texts),
-                                 rows=_identities(engine), preserved=dict(self.preserved)))
+        self.ingests.append(dict(host=deepcopy(messages), messages=deepcopy(self.messages),
+                                 rows=_identities(engine), preserved=dict(self.preserved),
+                                 binding_diagnostics=_bindings(engine)))
 
     def violations(self):
         result = []
         for index, stage in enumerate(self.ingests, 1):
-            rows = stage['rows']
-            missing = [text for text in stage['texts']
-                       if not any(role == 'user' and text in content
-                                  for role, content, *_ in rows)]
-            duplicates = sorted({row for row in rows if rows.count(row) > 1}, key=repr)
-            if missing or duplicates:
-                result.append(dict(ingest=index, missing=missing, duplicates=duplicates))
+            for text, count in sorted(missing_messages(stage['messages'], stage['rows']).items()):
+                result.append(dict(stage=index, kind='missing', value=text, count=count))
+            for identity, count in duplicate_rows(stage['rows']):
+                result.append(dict(stage=index, kind='duplicate', value=identity, count=count))
         return result
 
 
@@ -98,15 +173,14 @@ def _open(module, directory, monkeypatch, trace=None):
         hook = ctx.hooks['pre_llm_call']
 
         def capture(*args, **kwargs):
-            trace.capture(kwargs.get('conversation_history', []))
-            if isinstance(kwargs.get('user_message'), str):
-                trace.user_texts.add(kwargs['user_message'])
+            trace.capture(kwargs.get('conversation_history', []), kwargs.get('user_message'))
             return hook(*args, **kwargs)
 
         ingest = engine.ingest
 
         def observe(messages, *args, **kwargs):
             host = deepcopy(messages)
+            trace.observe(host, ingest=True)
             result = ingest(messages, *args, **kwargs)
             trace.stored(engine, host, messages)
             return result

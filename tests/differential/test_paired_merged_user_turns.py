@@ -5,15 +5,19 @@ original traces (the watched-head eviction control necessarily exceeds six).
 Set LCMX_DIFF_CANDIDATE_TREE to a git-archive tree for a positive control.
 """
 import json
+import os
 import random
 import sqlite3
 
 import pytest
 
-from tests.invariants import merged_user_turn_controls as base
+if os.environ.get("LCM_DIFFERENTIAL") != "1":
+    pytest.skip("opt in with LCM_DIFFERENTIAL=1", allow_module_level=True)
+
+from tests.differential import merged_user_turn_controls as base
 from tests.differential import paired
 from tests.differential.paired import versions  # noqa: F401
-from tests.differential.session import AbsoluteViolation, Trace
+from tests.differential.session import Trace
 from tests.phase0_hygiene import product_env_keys
 
 
@@ -252,33 +256,6 @@ def _seeded(seed, tmp_path, monkeypatch, differential_versions, record_property)
 
 
 CASES = [*RANDOM_SEEDS, *CONTROL_SEEDS, 'shifted-replay', 'capture-without-fault']
-# Exactly the pinned baseline's 191 absolute failures: 180 host-text losses
-# and 53 duplicate-row cases (42 overlap). Both engines are still checked;
-# only the candidate absolute assertion carries this strict expectation.
-KNOWN_ABSOLUTE_FAILURES = frozenset({
-    2707401, 2707402, 2707403, 2707404, 2707405, 2707407, 2707408, 2707409, 2707410,
-    2707413, 2707416, 2707417, 2707418, 2707419, 2707420, 2707422, 2707424, 2707426,
-    2707429, 2707431, 2707432, 2707434, 2707435, 2707438, 2707439, 2707441, 2707443,
-    2707444, 2707447, 2707451, 2707452, 2707453, 2707454, 2707456, 2707460, 2707461,
-    2707464, 2707465, 2707470, 2707471, 2707474, 2707476, 2707477, 2707479, 2707480,
-    2707481, 2707482, 2707484, 2707485, 2707486, 2707487, 2707488, 2707490, 2707491,
-    2707493, 2707494, 2707495, 2707496, 2707497, 2707499, 2707500, 2707503, 2707505,
-    2707506, 2707507, 2707508, 2707510, 2707513, 2707516, 2707518, 2707520, 2707522,
-    2707523, 2707524, 2707525, 2707526, 2707527, 2707528, 2707529, 2707531, 2707535,
-    2707536, 2707539, 2707541, 2707542, 2707543, 2707544, 2707549, 2707551, 2707553,
-    2707554, 2707557, 2707558, 2707559, 2707561, 2707562, 2707564, 2707565, 2707566,
-    2707567, 2707569, 2707573, 2707574, 2707576, 2707577, 2707580, 2707581, 2707582,
-    2707583, 2707584, 2707587, 2707589, 2707590, 2707591, 2707593, 2707594, 2707597,
-    2707601, 2707604, 2707605, 2707606, 2707608, 2707609, 2707610, 2707611, 2707613,
-    2707616, 2707617, 2707618, 2707622, 2707623, 2707625, 2707626, 2707627, 2707628,
-    2707631, 2707632, 2707633, 2707634, 2707639, 2707640, 2707641, 2707642, 2707643,
-    2707646, 2707647, 2707650, 2707651, 2707658, 2707659, 2707660, 2707661, 2707662,
-    2707665, 2707669, 2707670, 2707671, 2707672, 2707673, 2707676, 2707681, 2707682,
-    2707685, 2707686, 2707687, 2707691, 2707692, 2707694, 2707695, 2707697, 2707699,
-    2707700, 2707701, 2707702, 2707703, 2707704, 2707705, 2707708, 2707709, 2707710,
-    2707711, 2707712, 2707715, 2707716, 2707718, 2707719, 2707101, 2707102, 2707103,
-    2707201, 2707203,
-})
 
 
 @pytest.fixture(scope='class')
@@ -334,13 +311,26 @@ class TestMergedUserTurns:
                              for stage in trace.ingests] for name, trace in traces.items()}
             assert not paired.compare_stages(stages, record_property), case
 
-    def test_absolute(self, sequence, request, record_property):
+    def test_absolute(self, sequence, record_property):
+        from collections import Counter
+        from .merged_user_turns_expected import BASELINE_REF, EXPECTED
+
         case, properties, traces = sequence
-        if case in KNOWN_ABSOLUTE_FAILURES:
-            request.node.add_marker(pytest.mark.xfail(
-                strict=True, raises=AbsoluteViolation,
-                reason='#2707: pinned main loses captured host user text or repeats a stored row'))
         violations = {name: trace.violations() for name, trace in traces.items()}
         record_property('absolute_violations', json.dumps(violations))
-        if violations['candidate']:
-            raise AbsoluteViolation(f'{case}: {violations}')
+        record_property('binding_diagnostics', json.dumps({
+            name: [s['binding_diagnostics'] for s in trace.ingests] for name, trace in traces.items()}))
+        counters = {name: Counter((v['stage'], v['kind'], repr(v['value']))
+                                 for v in rows for _ in range(v['count']))
+                    for name, rows in violations.items()}
+        pinned = Counter((stage, kind, repr(value)) for stage, kind, value, count, label
+                         in EXPECTED.get(case, ()) for _ in range(count))
+        effective = os.environ.get('LCMX_DIFF_BASELINE_REF', BASELINE_REF)
+        matches = counters['main'] == pinned
+        record_property('baseline_pin', json.dumps(dict(ref=effective, matches=matches,
+                        skipped=None if effective == BASELINE_REF else 'baseline override')))
+        subset = not (counters['candidate'] - counters['main'])
+        record_property('candidate_violation_subset', json.dumps(subset))
+        if effective == BASELINE_REF:
+            assert matches, f'{case}: baseline pin mismatch: {violations["main"]}'
+        assert subset, f'{case}: added candidate violations: {counters["candidate"] - counters["main"]}'

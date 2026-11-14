@@ -1,24 +1,26 @@
 """Offline, pinned baseline versus working-tree engine comparisons.
 
 LCMX_DIFF_BASELINE_REF overrides the pin; LCMX_DIFF_CANDIDATE_TREE selects an
-archived positive control. Missing git/history is an explicit pytest skip.
+archived positive control. Missing history fails in CI and skips locally.
 """
 from collections import Counter
 import importlib.util
-import io
 import os
 from pathlib import Path
-import subprocess
 import sys
-import tarfile
 
 import pytest
+
+from .trees import PrerequisiteUnavailable, materialize, resolve, skip_or_fail
 
 BASELINE_REF = "7d614f5fe22eb7cf7d8955230c51619916a1fed3"
 ROOT = Path(__file__).resolve().parents[2]
 
 
 def _load(tree, name):
+    for key in list(sys.modules):
+        if key == name or key.startswith(name + "."):
+            del sys.modules[key]
     spec = importlib.util.spec_from_file_location(
         name, Path(tree) / '__init__.py', submodule_search_locations=[str(tree)])
     module = importlib.util.module_from_spec(spec)
@@ -27,24 +29,13 @@ def _load(tree, name):
     return module
 
 
-def archive(ref, destination):
-    """Use local history only; neither fetching nor a checkout is needed."""
-    try:
-        packed = subprocess.run(['git', 'archive', ref], cwd=ROOT,
-                                check=True, capture_output=True).stdout
-    except (OSError, subprocess.CalledProcessError) as exc:
-        detail = exc.stderr.decode(errors='replace').strip() if isinstance(
-            exc, subprocess.CalledProcessError) else str(exc)
-        pytest.skip(f'differential baseline {ref!r} unavailable: {detail}')
-    with tarfile.open(fileobj=io.BytesIO(packed)) as source:
-        source.extractall(destination, filter='data')
-    return destination
-
-
 @pytest.fixture(scope='module')
 def versions(tmp_path_factory):
     ref = os.environ.get('LCMX_DIFF_BASELINE_REF', BASELINE_REF)
-    tree = archive(ref, tmp_path_factory.mktemp('paired-baseline'))
+    try:
+        tree = materialize(resolve(ref), tmp_path_factory.mktemp('paired-baseline'))
+    except PrerequisiteUnavailable as exc:
+        skip_or_fail(str(exc))
     return {
         'main': _load(tree, '_paired_baseline'),
         'candidate': _load(Path(os.environ.get('LCMX_DIFF_CANDIDATE_TREE', ROOT)),
@@ -55,7 +46,31 @@ def versions(tmp_path_factory):
 def normalise_rows(rows, preserved=None):
     """Replace only explicitly proven exact tuples; never remove a row."""
     preserved = preserved or {}
-    return [preserved.get(tuple(row), tuple(row)) for row in rows]
+    result = []
+    for row in rows:
+        row = tuple(row)
+        if row and isinstance(row[0], tuple):
+            fields = dict(row)
+            short = tuple(fields[key] for key in ('role', 'content', 'observed_at', 'session_id', 'conversation_id'))
+            target = preserved.get(row, preserved.get(short))
+            if target is not None:
+                if target and isinstance(target[0], tuple):
+                    target = dict(target)
+                    if {k: v for k, v in fields.items() if k not in ('content', 'observed_at')} != {
+                            k: v for k, v in target.items() if k not in ('content', 'observed_at')}:
+                        result.append(row)
+                        continue
+                    fields.update(content=target['content'], observed_at=target['observed_at'])
+                else:
+                    assert (short[0], *short[3:]) == (target[0], *target[3:])
+                    fields.update(content=target[1], observed_at=target[2])
+                row = tuple(sorted(fields.items()))
+        else:
+            target = preserved.get(row, row)
+            if (row[0], *row[3:]) == (target[0], *target[3:]):
+                row = target
+        result.append(row)
+    return result
 
 
 def compare_rows(baseline, candidate):
