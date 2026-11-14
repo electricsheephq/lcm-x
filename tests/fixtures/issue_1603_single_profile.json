@@ -242,7 +242,7 @@
     "large_output_active_replay_stub_threshold_tokens": 10000,
     "large_output_active_replay_stubbing_enabled": true,
     "large_output_externalization_enabled": true,
-    "host_row_recovery_enabled": true,
+    "host_row_recovery_enabled": false,
     "large_output_externalization_path": "",
     "large_output_externalization_threshold_chars": 12000,
     "large_output_transcript_gc_enabled": false,
