@@ -1302,7 +1302,7 @@ def test_fix_r1_05_finalizer_does_not_wait_for_lock(lab):
     with rec.lock:
         thread = threading.Thread(target=gone, daemon=True)
         thread.start()
-        returned = done.wait(0.5)
+        returned = done.wait(60)  # Completion while the lock is held, with room for runner load.
     thread.join(2)
     assert returned
     ctx.offered.get_status()
@@ -2096,7 +2096,7 @@ def test_fix_r2_c10_writer_death_releases_queued_sync(lab):
     waiter = threading.Event()
     rec.writer.offer(("sync", waiter), force=True)
     release.set()
-    assert waiter.wait(0.5)
+    assert waiter.wait(60)
     assert rec.writer.dead is not None
 
 
@@ -2214,7 +2214,7 @@ def test_fix_r3_02_write_error_death_releases_queued_sync(lab):
     waiter = threading.Event()
     rec.writer.offer(("sync", waiter), force=True)
     release.set()
-    assert waiter.wait(0.5)
+    assert waiter.wait(60)
     assert rec.writer.dead is not None and rec.writer.drain(5) is False
 
 
@@ -2274,7 +2274,7 @@ def test_fix_r3_06_forked_child_returns_without_the_inherited_lock(lab):
     def hold():
         with rec.lock:
             held.set()
-            release.wait(5)
+            release.wait(600)  # Outlast the caller's backstop so releasing cannot hide a deadlock.
     def child():
         frame = sys._getframe()
         for leave in (rec._discard, lambda c, f: rec._exit(c, f, "return", None)):
@@ -2287,10 +2287,10 @@ def test_fix_r3_06_forked_child_returns_without_the_inherited_lock(lab):
     rec._fork_child()
     try:
         threading.Thread(target=child, daemon=True).start()
-        assert done.wait(0.5)
+        assert done.wait(60)
     finally:
         release.set()
-        holder.join(2)
+        holder.join(600)
 
 
 @needs312

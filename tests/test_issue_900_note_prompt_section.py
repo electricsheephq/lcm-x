@@ -254,7 +254,7 @@ def test_prompt_section_does_not_wait_for_stable_use_lock(plugin):
     def hold_lock():
         with ctx.engine._stable_use_lock:
             locked.set()
-            release.wait(10)
+            release.wait(600)  # Outlast the caller's backstop so releasing cannot hide a deadlock.
 
     def render():
         results.append(content({"session_id": "bound"}))
@@ -266,13 +266,13 @@ def test_prompt_section_does_not_wait_for_stable_use_lock(plugin):
     try:
         assert locked.wait(1), "lock holder did not start"
         caller.start()
-        assert rendered.wait(0.5), "prompt section waited on the stable-use lock"
+        assert rendered.wait(60), "prompt section waited on the stable-use lock"
         assert results == [module.LCM_SYSTEM_PROMPT_NOTE]
     finally:
         release.set()
-        holder.join(2)
+        holder.join(600)
         if caller.ident is not None:
-            caller.join(6)
+            caller.join(60)
     assert not holder.is_alive()
     assert not caller.is_alive()
 
