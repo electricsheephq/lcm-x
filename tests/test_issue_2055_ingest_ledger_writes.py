@@ -184,7 +184,9 @@ def _exercise_alt_stamp(engines, monkeypatch, bound, rollback):
         binding = next(b for b in sql_rows(engine, "occurrence_bindings") if b["store_id"] == row["store_id"])
         assert observations[0]["occ_id"] == binding["occ_id"]
     if rollback:
-        assert observed == [True]
+        # T1-28 class: the injected error poisons the lazy attempt (one discarded pre-lock pass);
+        # the rerun meets the same persistent error under the lock and fails open, as on main.
+        assert observed == [True, True]
         assert not engine._store.get_message_relations([row["store_id"]], "alt_stamp")
 
 
@@ -367,7 +369,18 @@ def test_11_off_sql_matches_pinned_part_a(engines, monkeypatch, recovery):
         # Drop SQLite's own FTS5 statements, as the ingest trace harness does: they vary by SQLite version.
         return [s for s in sql if not s.lstrip().startswith("--") and not re.search(r"(['\"])(main|temp)\1\s*\.", s)]
 
-    assert product(statements) == product(expected)
+    # #2293 M5: BEGIN IMMEDIATE moves to the first write, savepoints of scopes that close before it are never issued,
+    # and the attempt reads its write generation; every other statement, in order, is Part A's. One BEGIN IMMEDIATE
+    # and one COMMIT, as in Part A.
+    control = re.compile(r"^(BEGIN( IMMEDIATE)?|COMMIT|ROLLBACK|SAVEPOINT \w+|RELEASE( SAVEPOINT)? \w+"
+                         r"|ROLLBACK TO( SAVEPOINT)? \w+|PRAGMA (data_version|schema_version))$")
+
+    def split(sql):
+        sql = product(sql)
+        return ([s for s in sql if not control.match(s.strip())],
+                [s.strip() for s in sql if s.strip() in ("BEGIN IMMEDIATE", "COMMIT")])
+
+    assert split(statements) == split(expected)
 
 
 def test_12_absorbed_uid_change_updates_foreground_vector(engines):

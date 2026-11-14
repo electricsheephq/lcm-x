@@ -115,6 +115,14 @@ class _SqliteSavepointError(RuntimeError):
     """The failed writer could not be isolated; its enclosing owner must abort."""
 
 
+class _IngestReclassify(BaseException):
+    """Discard optimistic ingest evidence and repeat under the held write lock."""
+
+    def __init__(self, *, full=False):
+        super().__init__()
+        self.full = full
+
+
 @contextmanager
 def _sqlite_savepoint(conn: sqlite3.Connection, *, abort_on_cleanup_failure: bool = False,
                       owner_active: bool = False, foreground_ingest: bool = False) -> Iterator[None]:
@@ -123,31 +131,60 @@ def _sqlite_savepoint(conn: sqlite3.Connection, *, abort_on_cleanup_failure: boo
     # keep diagnostic observers from changing the ordered write trace.
     owner_active = owner_active and TransactionOwner.owns_connection(conn)
     name = "lcm_ingest" if owner_active else f"lcm_{uuid.uuid4().hex}"
-    if owner_active and not conn.in_transaction:
-        if foreground_ingest:
-            raise _SqliteSavepointError("Foreground ingest transaction lost before SAVEPOINT")
-        conn.execute("BEGIN IMMEDIATE")  # RELEASE must never commit an empty owner's transaction.
-    conn.execute(f"SAVEPOINT {name}")
+    state = TransactionOwner.ingest_state_for(conn) if owner_active else None
+    if state is not None:
+        state.sync()
+    scope = None
+    if state is not None and state.phase == "prelock":
+        scope = dict(materialized=False, uncovered=False)  # a virtual savepoint scope (not a policy scope)
+        state.scopes.append(scope)
     try:
-        yield
-        if abort_on_cleanup_failure:
-            conn.execute(f"RELEASE SAVEPOINT {name}")
-    except BaseException:
-        if abort_on_cleanup_failure and not conn.in_transaction:
-            raise  # SQLite already aborted the owner; preserve the original error.
+        if scope is None and owner_active and not conn.in_transaction:
+            if foreground_ingest:
+                raise _SqliteSavepointError("Foreground ingest transaction lost before SAVEPOINT")
+            conn.execute("BEGIN IMMEDIATE")  # RELEASE must never commit an empty owner's transaction.
+        if scope is None:
+            conn.execute(f"SAVEPOINT {name}")
         try:
-            try:
-                conn.execute(f"ROLLBACK TO SAVEPOINT {name}")
-            finally:
-                conn.execute(f"RELEASE SAVEPOINT {name}")
-        except Exception as exc:
+            yield
+            if scope is not None:
+                state.sync()
+            if scope is not None and not scope["materialized"]:
+                return
             if abort_on_cleanup_failure:
-                raise _SqliteSavepointError("Could not roll back writer savepoint") from exc
+                conn.execute(f"RELEASE SAVEPOINT {name}")
+        except BaseException as error:
+            if scope is not None and isinstance(error, _IngestReclassify):
+                raise  # already restarted or acquired: the attempt's handler owns the rollback
+            if scope is not None and not isinstance(error, (KeyboardInterrupt, SystemExit)):
+                state.sync()  # cancellation must reach the owner without a replacement reclassify
+                if scope["uncovered"]:
+                    if state.rollback_uncovered():
+                        raise  # every write since the implicit BEGIN was this scope's: eager's ROLLBACK TO
+                    state.reclassify_pending = True
+                    raise _IngestReclassify(full=True) from error
+            if scope is not None and not scope["materialized"]:
+                raise
+            if abort_on_cleanup_failure and not conn.in_transaction:
+                raise  # SQLite already aborted the owner; preserve the original error.
+            try:
+                try:
+                    conn.execute(f"ROLLBACK TO SAVEPOINT {name}")
+                finally:
+                    conn.execute(f"RELEASE SAVEPOINT {name}")
+            except Exception as exc:
+                if abort_on_cleanup_failure:
+                    raise _SqliteSavepointError("Could not roll back writer savepoint") from exc
+                raise
             raise
-        raise
-    else:
-        if not abort_on_cleanup_failure:
-            conn.execute(f"RELEASE SAVEPOINT {name}")
+        else:
+            if not abort_on_cleanup_failure:
+                conn.execute(f"RELEASE SAVEPOINT {name}")
+    finally:
+        if scope is not None:
+            popped = state.scopes.pop()
+            if popped is not scope:
+                raise _SqliteSavepointError("ingest scope stack out of order")
 
 
 @contextmanager

@@ -17,6 +17,8 @@ import secrets
 import sqlite3
 import threading
 import time
+from collections import Counter
+from dataclasses import dataclass, field
 from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
@@ -59,6 +61,7 @@ from .message_content import normalize_content_value as _normalize_content_value
 from .sqlite_session import ConnectionPolicy, TransactionOwner, open_connection
 from .sqlite_util import (
     _SqliteSavepointError,
+    _IngestReclassify,
     _is_ingest_busy_error,
     _run_sqlite_write_with_snapshot_retry,
     _sqlite_savepoint,
@@ -473,10 +476,34 @@ def _database_identity(path: Path, store: object) -> str:
         return str(path)
 
 
+@dataclass
+class _IngestAttempt:
+    acquire: Callable[[], None]
+    sync: Callable[[], None]
+    rollback_uncovered: Callable[[], bool]
+    G0: tuple
+    timing: dict
+    start_timer: Callable[..., None]
+    phase: str = "prelock"
+    poisoned: bool = False
+    begin_failed: BaseException | None = None
+    reclassify_pending: bool = False
+    scopes: list = field(default_factory=list)
+    T_clean: int = 0
+    clean_at: float = field(default_factory=time.perf_counter)
+    attempt_after_writes: bool = False
+    validated: bool = False
+    thread: int = field(default_factory=threading.get_ident)
+
+
 class MessageStore:
     """SQLite-backed immutable message store."""
 
+    _ingest_prelock = True
+
     def __init__(self, db_path: str | Path, *, ingest_protection_config=None, hermes_home: str = ""):
+        self.ingest_prelock_counts = Counter()
+        self._ingest_prelock_state = None
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.db_identity = _database_identity(self.db_path, self)  # fixed at open: a later cwd or symlink change cannot move it
@@ -653,6 +680,7 @@ class MessageStore:
             if self._transaction_owner.owns_connection(self._conn) and (
                 isinstance(exc, _SqliteSavepointError) or _is_ingest_busy_error(exc)
                 or isinstance(exc, sqlite3.Error) and not self._conn.in_transaction
+                and not self._ingest_is_prelock()
             ):
                 raise
             if not was_in_transaction and self._conn.in_transaction:
@@ -833,6 +861,7 @@ class MessageStore:
             return ids
 
         with self._write_lock:
+            self._acquire_ingest_prelock()
             if (getattr(self, "_foreground_ingest_owner", False)
                     and self._transaction_owner.owns_connection(conn) and not conn.in_transaction):
                 raise _SqliteSavepointError("Foreground ingest transaction lost before INSERT")
@@ -1310,6 +1339,7 @@ class MessageStore:
     def _ensure_identity_anchor_schema(self) -> None:
         """Additive, created on first anchored use: one non-unique index and ``message_relations``
         (no UNIQUE constraint beyond its primary key)."""
+        self._sync_ingest_prelock()
         if getattr(self, "_read_only_ingest_thread", None) == threading.get_ident():
             return  # Session-end fallback may read existing schema, never create it.
         if getattr(self, "_identity_anchor_schema_ready", False):
@@ -1333,6 +1363,7 @@ class MessageStore:
                 CREATE INDEX IF NOT EXISTS idx_msg_relations_observed ON message_relations(kind, observed_at);
             """
             if self._transaction_owner.owns_connection(self._conn):
+                self._acquire_ingest_prelock()
                 # executescript commits an open transaction before running DDL.
                 # Same schema, same owner; do not cache uncommitted creation.
                 for statement in schema.split(";"):
@@ -1463,12 +1494,13 @@ class MessageStore:
             exists = bool(self._conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='host_uid_bindings'").fetchone())
             # A re-entrant read can see DDL that a failed commit will roll back.
-            if not self._conn.in_transaction:
+            if not self._conn.in_transaction and not self._ingest_is_prelock():
                 self._host_uid_schema_ready = exists
             return exists
 
     def _ensure_host_uid_schema(self) -> None:
         """On the first binding, NAMED step ``host_uid_bindings_v1``: no SCHEMA_VERSION bump, ``messages`` untouched."""
+        self._sync_ingest_prelock()
         if getattr(self, "_host_uid_schema_ready", False):
             return
         if getattr(self, "_pending_host_uid_schema", False) and self._transaction_owner.owns_connection(self._conn):
@@ -2081,13 +2113,156 @@ class MessageStore:
         """Commit a standalone helper; an enclosing atomic block owns its commit."""
         self._transaction_owner.commit(self._conn)
 
-    def ingest_atomic(self, *, admission_retry=False):
+    def _ingest_transaction_lost(self, conn=None):
+        """True when a required transaction is gone (SQLite aborted it). A lazy ingest attempt before its first
+        write has none by design (#2293)."""
+        conn = self._conn if conn is None else conn
+        return not conn.in_transaction and not (conn is self._conn and self._ingest_is_prelock())
+
+    def _ingest_is_prelock(self):
+        state = self._ingest_prelock_state
+        return state is not None and state.phase == "prelock" and state.thread == threading.get_ident()
+
+    def _ingest_prelock_before_begin(self) -> None:
+        """Test seam immediately before foreground admission, in either mode."""
+
+    def _ingest_write_generation(self):
+        return (*self.write_generation(), self._conn.execute("PRAGMA schema_version").fetchone()[0])
+
+    def _acquire_ingest_prelock(self):
+        self._sync_ingest_prelock()
+        if not self._ingest_is_prelock():
+            return
+        state = self._ingest_prelock_state
+        self._begin_ingest_prelock(state)
+
+    def _begin_ingest_prelock(self, state):
+        """Explicit admission, also used after discarding implicit writes."""
+        conn = self._conn
+        if state.begin_failed is not None:
+            raise state.begin_failed
+        if conn.in_transaction:  # sync and restart end every implicit transaction before this point
+            raise _SqliteSavepointError("Foreground ingest transaction lost before BEGIN")
+        trace = getattr(conn, "_lcm_trace", None)
+        if trace is not None:
+            trace.ingest_admission = True
+        try:
+            type(self)._ingest_prelock_before_begin(self)
+            conn.execute("BEGIN IMMEDIATE")
+        except BaseException as exc:
+            state.begin_failed = exc
+            raise
+        finally:
+            if trace is not None:
+                trace.ingest_admission = False
+        state.start_timer()
+        state.timing["acquired_at"] = time.perf_counter()
+        conn.execute("SAVEPOINT lcm_ingest_attempt")
+        state.phase = "acquired"
+        self.ingest_prelock_counts["acquired"] += 1
+        if self._ingest_write_generation() != state.G0 or state.poisoned:
+            state.reclassify_pending = True
+            raise _IngestReclassify()
+        for scope in state.scopes:
+            if not scope["uncovered"]:
+                conn.execute("SAVEPOINT lcm_ingest")
+                scope["materialized"] = True
+
+    def _sync_ingest_prelock(self):
+        """Promote Python's implicit write transaction before any owner control."""
+        state, conn = self._ingest_prelock_state, self._conn
+        if not self._ingest_is_prelock():  # only the attempt's own thread acts on it
+            return
+        if not conn.in_transaction:
+            state.T_clean, state.clean_at = conn.total_changes, time.perf_counter()
+            if state.T_clean != state.G0[0] and not state.poisoned:
+                logger.warning("LCM foreground ingest saw a write outside its transaction; reclassifying")
+                self._ingest_prelock_write_failed(sqlite3.DatabaseError("write outside ingest transaction"))
+            return
+        # Python began before DML since the last clean control point. All scopes
+        # already open there lack a real savepoint covering those writes.
+        for scope in state.scopes:
+            scope["uncovered"] = True
+        # Even an invalid implicit transaction held the writer lock. Record it
+        # before validation can roll it back and restart the attempt.
+        state.start_timer(state.clean_at)
+        state.timing["acquired_at"] = state.clean_at
+        valid = (state.T_clean == state.G0[0] and not state.poisoned
+                 and self._ingest_write_generation()[1:] == state.G0[1:])
+        if not valid:
+            # Implicit writes precede our attempt savepoint. Discard them before
+            # explicit acquisition and reclassification (the implicit-path D3 exception).
+            self._restart_ingest_prelock()
+            state.reclassify_pending = True
+            raise _IngestReclassify()
+        state.phase = "acquired"
+        conn.execute("SAVEPOINT lcm_ingest_attempt")
+        state.attempt_after_writes = True
+        self.ingest_prelock_counts["acquired"] += 1
+        for scope in state.scopes:
+            if not scope["uncovered"]:
+                conn.execute("SAVEPOINT lcm_ingest")
+                scope["materialized"] = True
+
+    def _rollback_uncovered_ingest_prelock(self):
+        """An evidence scope open at the implicit BEGIN failed. Every write since that BEGIN happened inside it, so
+        discarding the whole transaction is exactly eager's ROLLBACK TO that scope; the attempt continues before the
+        lock. True when done; False sends the caller to the full reclassify."""
+        state, conn = self._ingest_prelock_state, self._conn
+        if (state.phase != "acquired" or not state.attempt_after_writes or state.poisoned
+                or not conn.in_transaction or any(scope["materialized"] for scope in state.scopes)):
+            return False
+        conn.rollback()  # releases the lock: G0 was validated at the BEGIN and nothing could commit since
+        state.phase = "prelock"
+        state.attempt_after_writes = False
+        state.G0 = (conn.total_changes, *state.G0[1:])  # total_changes counts the discarded writes
+        state.timing["acquired_at"] = None  # no lock is held again until the next acquisition
+        for scope in state.scopes:
+            scope["uncovered"] = False
+        state.T_clean, state.clean_at = conn.total_changes, time.perf_counter()
+        self.ingest_prelock_counts["scope_rollback"] += 1
+        return True
+
+    def _restart_ingest_prelock(self):
+        """Re-acquire explicitly when writes predate the attempt savepoint."""
+        state, conn = self._ingest_prelock_state, self._conn
+        conn.rollback()
+        state.timing["acquired_at"] = None
+        state.attempt_after_writes = False
+        state.phase = "prelock"
+        # total_changes includes rolled-back writes: recheck without sync's outside-write guard.
+        self._begin_ingest_prelock(state)
+
+    def _finish_ingest_prelock(self):
+        """Validate a read-only decision and surface swallowed acquisition signals."""
+        self._sync_ingest_prelock()
+        state = self._ingest_prelock_state
+        if state is None or state.validated:  # the engine validated it; a later commit cannot change that decision
+            return
+        if state.begin_failed is not None:
+            raise state.begin_failed
+        if state.reclassify_pending:
+            raise _IngestReclassify()
+        if state.phase == "prelock" and (state.poisoned or self._ingest_write_generation() != state.G0):
+            self._acquire_ingest_prelock()
+        state.validated = state.phase == "prelock"
+
+    def _ingest_prelock_write_failed(self, exc):
+        """A fail-open SQLite error may hide a failed implicit BEGIN: rerun eager."""
+        if self._ingest_is_prelock() and isinstance(exc, sqlite3.Error):
+            state = self._ingest_prelock_state
+            if not state.poisoned:
+                self.ingest_prelock_counts["poisoned"] += 1
+            state.poisoned = True
+
+    def ingest_atomic(self, *, admission_retry=False, prelock=False):
         """End only an unowned dangling transaction before reserving foreground ingest."""
-        return self._ingest_atomic(admission_retry=admission_retry)
+        return self._ingest_atomic(admission_retry=admission_retry, prelock=prelock)
 
     @contextmanager
-    def _ingest_atomic(self, *, admission_retry=False):
+    def _ingest_atomic(self, *, admission_retry=False, prelock=False):
         timing = {"hold_ms": None}
+        lazy = prelock and self._ingest_prelock
         with self._write_lock:
             if self._transaction_owner.owns(self._conn):
                 raise _SqliteSavepointError("Foreground ingest cannot join an enclosing transaction")
@@ -2095,16 +2270,18 @@ class MessageStore:
                 self._conn.commit()  # Preserve standalone writes, and end stale read snapshots.
                 logger.debug("LCM ingest committed an unowned transaction before BEGIN IMMEDIATE")
             with ExitStack() as owner:
-                # An ordinary BEGIN wait already spent the configured budget.
-                # Its retry is an immediate recheck, not another full timeout.
                 trace = getattr(self._conn, "_lcm_trace", None)
                 if trace is not None:
                     trace.ingest_admission = True
                 try:
                     with (_temporary_sqlite_busy_timeout([self._conn], 0) if admission_retry else nullcontext()):
                         start_timer = self._start_lock_timer(timing, owner)
-                        owner.enter_context(self.atomic(immediate=True))
-                        start_timer()
+                        if not lazy:
+                            type(self)._ingest_prelock_before_begin(self)
+                        owner.enter_context(self.atomic(immediate=not lazy))
+                        if not lazy:
+                            start_timer()
+                            timing["acquired_at"] = time.perf_counter()
                 finally:
                     if trace is not None:
                         trace.ingest_admission = False
@@ -2112,29 +2289,45 @@ class MessageStore:
                 self._foreground_ingest_owner = True
                 self._ingest_folded_tail_reads = {}
                 try:
-                    # #2345: a foreign COMMIT or ROLLBACK on this shared connection drops this savepoint.
-                    # Python then opens a new transaction implicitly, which in_transaction cannot tell apart.
-                    self._conn.execute("SAVEPOINT lcm_ingest_attempt")
+                    if lazy:
+                        state = _IngestAttempt(self._acquire_ingest_prelock, self._sync_ingest_prelock,
+                                               self._rollback_uncovered_ingest_prelock,
+                                               self._ingest_write_generation(),
+                                               timing, start_timer)
+                        self._ingest_prelock_state = self._transaction_owner.ingest_state = state
+                        state.T_clean = state.G0[0]
+                        self.ingest_prelock_counts["lazy"] += 1
+                    else:
+                        self._conn.execute("SAVEPOINT lcm_ingest_attempt")
                     yield timing
-                    if not self._conn.in_transaction:
-                        raise _SqliteSavepointError("Foreground ingest transaction lost before COMMIT")
-                    try:
-                        self._conn.execute("RELEASE lcm_ingest_attempt")
-                    except sqlite3.OperationalError as exc:  # no such savepoint: rows were lost or half-committed
-                        raise _SqliteSavepointError("Foreground ingest transaction lost before COMMIT") from exc
+                    self._finish_ingest_prelock()
+                    if self._ingest_is_prelock():
+                        self.ingest_prelock_counts["no_write"] += 1
+                        timing["hold_ms"] = 0.0  # read-only: no lock was held (None still means BEGIN failed)
+                    else:
+                        if not self._conn.in_transaction:
+                            raise _SqliteSavepointError("Foreground ingest transaction lost before COMMIT")
+                        try:
+                            self._conn.execute("RELEASE lcm_ingest_attempt")
+                        except sqlite3.OperationalError as exc:
+                            raise _SqliteSavepointError("Foreground ingest transaction lost before COMMIT") from exc
                 finally:
+                    if lazy:
+                        self._ingest_prelock_state = self._transaction_owner.ingest_state = None
                     self._ingest_folded_tail_reads = None
                     self._foreground_ingest_owner = previous
 
     @staticmethod
     def _start_lock_timer(timing, timer):
         if timing is None:
-            return lambda: None
+            return lambda at=None: None
         started = None
-        def start():
+        def start(at=None):
             nonlocal started
             try:
-                started = time.perf_counter()
+                acquired = time.perf_counter() if at is None else at
+                started = acquired if started is None else min(started, acquired)
+                timing["first_acquired_at"] = started  # survives rollback and re-acquisition
             except Exception as exc:
                 timing["telemetry_error"] = type(exc).__name__
         try:
