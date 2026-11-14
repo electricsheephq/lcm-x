@@ -196,3 +196,21 @@ def test_saved_file_removed_preserves_every_row(shape, variant, replay_setup):
 def test_saved_file_removed_stores_each_row_once(shape, variant, replay_setup):
     records = _replay(replay_setup(shape, variant, nofile=True))
     assert [extra for _, _, extra in records] == [0] * 8, records
+
+
+# Today's shape of the #2703 duplicate, pinned so that a growth in extra rows is caught while the strict xfail
+# above stays an xfail. Each list is the per-turn extra-row count (equal on v0.30.0 and v0.30.1-rc2); the fix for
+# #2703 turns every list into zeros, and then this test and the xfail above change together.
+REMOVED_EXTRA_TODAY = {
+    ('temp_plain_lf', 'V1'): [2, 2, 2, 2, 2, 3, 3, 3],
+    ('temp_data_uri', 'V1'): [2, 2, 2, 2, 2, 3, 4, 4],
+    ('temp_plain_lf', 'V2'): [2, 2, 3, 3, 4, 4, 4, 4],
+    ('temp_data_uri', 'V2'): [2, 2, 3, 3, 3, 3, 3, 3],
+}
+
+
+@pytest.mark.parametrize('shape', ['temp_plain_lf', 'temp_data_uri'])
+@pytest.mark.parametrize('variant', ['V1', 'V2'])
+def test_saved_file_removed_extra_rows_keep_todays_shape(shape, variant, replay_setup):
+    records = _replay(replay_setup(shape, variant, nofile=True))
+    assert [extra for _, _, extra in records] == REMOVED_EXTRA_TODAY[(shape, variant)], records
