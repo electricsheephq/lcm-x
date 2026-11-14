@@ -4,6 +4,7 @@ Patches the plugin modules so they can be imported both as a package
 (relative imports during plugin loading) and directly during testing.
 """
 import hashlib
+import fnmatch
 import os
 import sys
 import importlib.util
@@ -103,6 +104,8 @@ def pytest_report_header(config):
 
 
 def pytest_sessionstart(session):
+    if os.environ.get("LCM_D1_AUDIT", "scoped") not in {"scoped", "all"}:
+        raise pytest.UsageError("LCM_D1_AUDIT must be scoped or all")
     unexpected = [
         name for name, exc in _IMPORT_FAILURES.items()
         if not (
@@ -205,9 +208,18 @@ def _drain_background_maintenance(monkeypatch, _isolate_embedding_process_state)
             pytest.fail(f"{name} still had background work 30 s after the test ended")
 
 
+D1_MODULES = ("test_2293_*.py", "invariants/test_2293_*.py", "test_issue_2042_*.py",
+              "invariants/test_issue_1628_rewind_rescan.py")
+
+
 @pytest.fixture(autouse=True)
-def _message_store_callbacks(monkeypatch):
-    """D1 runs for every test, including tests using their own connection subclasses."""
+def _message_store_callbacks(monkeypatch, request):
+    """D1 scopes admission coverage; all restores the full-suite audit."""
+    module = request.node.path.relative_to(plugin_dir / "tests").as_posix()
+    if os.environ.get("LCM_D1_AUDIT", "scoped") != "all" and not any(
+            fnmatch.fnmatchcase(module, pattern) for pattern in D1_MODULES):
+        yield
+        return
     from tests.message_store_callback_audit import CALLS, install
     start = len(CALLS)
     restore = install(monkeypatch)
