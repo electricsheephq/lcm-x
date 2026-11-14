@@ -203,3 +203,13 @@ def _drain_background_maintenance(monkeypatch, _isolate_embedding_process_state)
         if scheduler is not None and not _wait_scheduler_idle(scheduler, timeout=30.0):
             # Fail closed: a job still running here would call a later test's fakes.
             pytest.fail(f"{name} still had background work 30 s after the test ended")
+    # FTS workers also reopen their pinned database path. Drain before tmp_path
+    # teardown deletes it: pytest can give the same truncated path to the next cell.
+    bootstrap = sys.modules.get("hermes_lcm.db_bootstrap")
+    if bootstrap is not None:
+        bootstrap.join_background_integrity_scans(timeout=30.0)
+        for lock, registry in ((bootstrap._integrity_scan_lock, bootstrap._integrity_scan_threads),
+                               (bootstrap._stem_lock, bootstrap._stem_threads)):
+            with lock:
+                if any(thread.is_alive() for thread in registry.values()):
+                    pytest.fail("FTS background work outlived its test after a 30 s drain")
