@@ -615,13 +615,12 @@ def register(ctx):
         if manager is not None:
             if not hasattr(manager, "_lcm_x_retired_session_starts"):
                 manager._lcm_x_retired_session_starts = WeakValueDictionary()
+                manager._lcm_x_known_sessions = set()
             engine._unload_group.retired_session_starts = manager._lcm_x_retired_session_starts
+            engine._unload_group.bound_sessions = manager._lcm_x_known_sessions
             engine._unload_group.current_prototype = lambda: getattr(manager, "_context_engine", None)
 
         def retire_registration():
-            # Hermes keeps its profile manager when it reloads directory plugins.
-            # The new module cannot otherwise distinguish a first turn from a
-            # delayed callback for a clone from the old registration.
             if manager is not None:
                 manager._lcm_x_has_unloaded = True
             shutdown()
@@ -1084,6 +1083,10 @@ def register(ctx):
                             or selected._db_path != engine._db_path
                         ):
                             return False
+                        if (getattr(selected, "_fresh_reload_hook_binding", None)
+                                == (session_id, selected._conversation_id)
+                                and not selected._proves_local_hook_turn(session_id, history)):
+                            return False
                         _ingest_and_note(selected)
                         return True
 
@@ -1095,8 +1098,9 @@ def register(ctx):
                     )
                     if result.used and not result.value:
                         result = ActiveEngineUseResult(ActiveEngineUseStatus.RESIDENT_ENGINE_CONFLICT)
+                    reloaded = unload_capable and getattr(manager, "_lcm_x_has_unloaded", False)
                     if (result.status is ActiveEngineUseStatus.ENGINE_NOT_RESIDENT and not _retained_dispatch
-                            and (not unload_capable or not getattr(manager, "_lcm_x_has_unloaded", False))):
+                            and not reloaded):
                         result = use_cold_lcm_engine(
                             engine,
                             _bind_and_ingest,
@@ -1122,6 +1126,23 @@ def register(ctx):
                                     and retired is not None
                                     and _replay_cli_reset(retired)):
                                 return
+                            if (result.status is ActiveEngineUseStatus.ENGINE_NOT_RESIDENT
+                                    and reloaded and not _retained_dispatch and retired is None
+                                    and session_id not in owner.bound_sessions
+                                    and engine._proves_local_hook_turn(session_id, history)):
+                                # Require local Hermes ownership when the
+                                # current registration sees a previously
+                                # unattached session. Older hosts emit the
+                                # same post payload for another profile.
+                                def _ingest_fresh_lane(selected):
+                                    if not selected._start_fresh_reload_lane(session_id, conversation_id, platform):
+                                        return False
+                                    _ingest_and_note(selected)
+                                    return True
+
+                                cold = use_cold_lcm_engine(engine, _ingest_fresh_lane, timeout=None)
+                                if cold.used and cold.value:
+                                    return
                         child_fallback = result.status is ActiveEngineUseStatus.RESIDENT_ENGINE_CONFLICT
                         if unload_capable:
                             child_fallback = (

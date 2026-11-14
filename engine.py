@@ -3280,6 +3280,10 @@ class LCMEngine(
         if not session_id:
             return
         with _ACTIVE_ENGINE_COLD_START_LOCK:
+            owner = self._unload_group
+            if owner is not None:
+                with owner.lock:
+                    owner.bound_sessions.add(session_id)
             with _ACTIVE_ENGINE_REGISTRY_LOCK:
                 _remove_registry_entries_for_engine(
                     self,
@@ -5442,15 +5446,68 @@ class LCMEngine(
             return None
         return lanes[0][0]
 
+    def _proves_local_hook_turn(self, session_id, messages):
+        # Hermes persists the final assistant row before post_llm_call. A
+        # session id by itself can also name a different profile's session.
+        reply = messages[-1]
+        if reply.get("role") != "assistant" or reply.get("tool_calls"):
+            return False
+        identity = self._host_occurrence_metadata(reply)
+        stamp, uid = identity["timestamp"], identity["message_uid"]
+        if stamp is None and uid is None:
+            return False
+        try:
+            with closing(sqlite3.connect(self._state_db_path().resolve().as_uri() + "?mode=ro",
+                                         uri=True, timeout=0.05)) as conn:
+                if uid is not None and any(row[1] == "message_uid" for row in conn.execute("PRAGMA table_info(messages)")):
+                    saved = conn.execute(
+                        """SELECT m.content FROM sessions AS s JOIN messages AS m ON m.session_id = s.id
+                        WHERE s.id = ? AND s.parent_session_id IS NULL AND s.ended_at IS NULL
+                          AND m.role = 'assistant' AND m.message_uid = ?""",
+                        (session_id, uid),
+                    ).fetchone()
+                    return saved is not None and (
+                        not isinstance(reply.get("content"), str) or saved[0] == reply["content"]
+                    )
+                if stamp is None or not isinstance(reply.get("content"), str):
+                    return False
+                return conn.execute(
+                    """SELECT 1 FROM sessions AS s JOIN messages AS m ON m.session_id = s.id
+                    WHERE s.id = ? AND s.parent_session_id IS NULL AND s.ended_at IS NULL
+                      AND m.role = 'assistant' AND m.timestamp = ? AND m.content = ?""",
+                    (session_id, stamp, reply["content"]),
+                ).fetchone() is not None
+        except sqlite3.Error:
+            return False
+
+    def _start_fresh_reload_lane(self, session_id, conversation_id, platform):
+        if (self._session_id_matches_lcm_bypass_filters(session_id, platform=platform)
+                or self._plugin_is_unloading()):
+            return False
+        lane = conversation_id or session_id
+        if not self._lifecycle.claim_new_hook_binding(session_id, lane):
+            return False
+        # Reuse the normal ingest/reconciliation path but never allow this
+        # callback to proceed if the lane moves between claim and ingest.
+        self._apply_session_start_metadata(session_id, {"platform": platform})
+        self._conversation_id = self._foreground_conversation_id = lane
+        self._lcm_session_last_conversation_id[session_id] = lane
+        self._lcm_session_last_normal_conversation_id[session_id] = lane
+        self._fresh_reload_hook_binding = (session_id, lane)
+        self._reload_lane_guard = True
+        self._schedule_ingest_cursor_reconciliation()
+        self._register_active_engine_binding()
+        return True
+
     def _retired_cli_reset_rows(self, old_id, new_id):
         try:
             path = self._state_db_path().resolve()
             with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=0.05)) as conn:
-                rows = dict((sid, (source, parent, started, ended, reason)) for sid, source, parent, started, ended, reason
-                            in conn.execute(
-                                "SELECT id, source, parent_session_id, started_at, ended_at, end_reason "
-                                "FROM sessions WHERE id IN (?, ?)", (old_id, new_id),
-                            ))
+                conn.row_factory = sqlite3.Row
+                rows = {row["id"]: row for row in conn.execute(
+                    "SELECT id, source, parent_session_id, started_at, ended_at, end_reason "
+                    "FROM sessions WHERE id IN (?, ?)", (old_id, new_id),
+                )}
                 return rows.get(old_id), rows.get(new_id)
         except sqlite3.Error:
             logger.debug("LCM could not verify the retired engine's CLI reset", exc_info=True)

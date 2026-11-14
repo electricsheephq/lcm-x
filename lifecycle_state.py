@@ -221,6 +221,25 @@ class LifecycleStateStore:
                 return state
         return self._bind_session_in_write_transaction(session_id, resolved)
 
+    @_synchronized
+    def claim_new_hook_binding(self, session_id: str, conversation_id: str) -> bool:
+        """Atomically claim an unused lane for a compressor-less reload callback."""
+        now = time.time()
+        cursor = self._conn.execute(
+            """
+            INSERT INTO lcm_lifecycle_state (conversation_id, current_session_id, current_bound_at, updated_at)
+            SELECT ?, ?, ?, ?
+            WHERE NOT EXISTS (SELECT 1 FROM lcm_lifecycle_state
+                              WHERE current_session_id = ? OR last_finalized_session_id = ?)
+              AND NOT EXISTS (SELECT 1 FROM messages WHERE session_id = ? OR conversation_id = ?)
+              AND NOT EXISTS (SELECT 1 FROM summary_nodes WHERE session_id IN (?, ?))
+            ON CONFLICT(conversation_id) DO NOTHING
+            """,
+            (conversation_id, session_id, now, now, session_id, session_id,
+             session_id, conversation_id, session_id, conversation_id),
+        )
+        return cursor.rowcount == 1
+
     @staticmethod
     def _bind_plan(
         existing: LifecycleState | None, session_id: str, conversation_id: str, now: float,

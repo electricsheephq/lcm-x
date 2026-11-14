@@ -229,18 +229,60 @@ def _durable_messages(path, session):
         ).fetchall()
 
 
-def test_first_profile_scoped_callback_can_bind_a_cold_unload_capable_registration(preflight):
+@pytest.mark.parametrize("reload_plugin", [False, True], ids=["first-load", "after-reload"])
+def test_profile_scoped_callback_can_bind_a_cold_unload_capable_registration(preflight, reload_plugin):
     _, ctx = preflight.register(supports_unload=True)
+    if reload_plugin:
+        ctx.unload_callbacks[0]()
+        _, ctx = preflight.register(supports_unload=True, manager=ctx._manager)
+        preflight.home.mkdir(parents=True, exist_ok=True)
+        with closing(sqlite3.connect(preflight.home / "state.db")) as conn:
+            conn.executescript("""
+                CREATE TABLE sessions (id TEXT, parent_session_id TEXT, ended_at REAL);
+                CREATE TABLE messages (session_id TEXT, role TEXT, content TEXT, timestamp REAL);
+                INSERT INTO sessions VALUES ('first-turn', NULL, NULL);
+            """)
     hook = ctx.hooks["post_llm_call"]
     view = []
     try:
         for turn in range(3):
             view.extend([{"role": "user", "content": f"question {turn}"},
-                         {"role": "assistant", "content": f"answer {turn}"}])
+                         {"role": "assistant", "content": f"answer {turn}", "timestamp": turn + 1}])
+            if reload_plugin:
+                with closing(sqlite3.connect(preflight.home / "state.db")) as conn:
+                    conn.execute("INSERT INTO messages VALUES (?, 'assistant', ?, ?)",
+                                 ("first-turn", f"answer {turn}", turn + 1))
+                    conn.commit()
             hook(session_id="first-turn", platform="cli", conversation_history=list(view))
             assert _durable_messages(preflight.home / "lcm.db", "first-turn") == [
                 (row["role"], row["content"]) for row in view
             ]
+    finally:
+        ctx.unload_callbacks[0]()
+
+
+@pytest.mark.parametrize("same_session_id", [False, True])
+def test_reload_callback_needs_a_turn_in_its_profile_database(preflight, same_session_id):
+    _, old_ctx = preflight.register(supports_unload=True)
+    old_ctx.unload_callbacks[0]()
+    _, ctx = preflight.register(supports_unload=True, manager=old_ctx._manager)
+    if same_session_id:
+        preflight.home.mkdir(parents=True, exist_ok=True)
+        with closing(sqlite3.connect(preflight.home / "state.db")) as conn:
+            conn.executescript("""
+                CREATE TABLE sessions (id TEXT, parent_session_id TEXT, ended_at REAL);
+                CREATE TABLE messages (session_id TEXT, role TEXT, content TEXT, timestamp REAL);
+                INSERT INTO sessions VALUES ('foreign-turn', NULL, NULL);
+                INSERT INTO messages VALUES ('foreign-turn', 'assistant', 'response from this profile', 2);
+            """)
+    view = [
+        {"role": "user", "content": "question from another profile"},
+        {"role": "assistant", "content": "answer from another profile", "timestamp": 2},
+    ]
+    try:
+        ctx.hooks["post_llm_call"](session_id="foreign-turn", turn_id="pending",
+                                   platform="cli", conversation_history=view)
+        assert not (preflight.home / "lcm.db").exists()
     finally:
         ctx.unload_callbacks[0]()
 
@@ -311,7 +353,7 @@ def test_retained_cli_reset_starts_a_new_lane_in_the_current_registration(prefli
     fresh = [{"role": "user", "content": "after /new"}, {"role": "assistant", "content": "fresh answer"}]
     db = preflight.home / "lcm.db"
     try:
-        hook(session_id="unrelated", platform="cli", conversation_history=fresh)
+        hook(session_id="unrelated", conversation_id="original", platform="cli", conversation_history=fresh)
         for _ in range(2):
             hook(session_id="fresh", platform="cli", conversation_history=fresh)
         assert _durable_messages(db, "unrelated") == []

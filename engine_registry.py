@@ -45,6 +45,9 @@ class EngineUnloadGroup:
         self._retired_embedding_owners: set[object] = set()
         self._deferred = weakref.WeakSet()
         self.retired_session_starts: weakref.WeakValueDictionary | None = None
+        # Only ids, never engines or storage handles. A manager may share this
+        # set across module re-imports to recognize a late compressor-less turn.
+        self.bound_sessions: set[str] = set()
         self.current_prototype: Callable[[], Any] | None = None
 
     def start_worker(self, worker: threading.Thread, *, continuing: bool = False) -> bool:
