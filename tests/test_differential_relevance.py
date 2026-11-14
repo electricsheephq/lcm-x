@@ -12,7 +12,9 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 # Computed imports resolved by hand, keyed by file and import expression (not by
-# line, so unrelated edits above a site do not move it). Do not infer the target
+# line, so unrelated edits above a site do not move it). The expression is the
+# name argument for import_module with a computed name, and the whole call for
+# __import__ or a relative name with a computed package. Do not infer the target
 # of any other computed import: inventory it here after an audit.
 COMPUTED_IMPORTS = {
     # recorder.py: importlib.import_module(package + ".escalation")
@@ -172,7 +174,8 @@ def _import_closure(
                     )
                     if isinstance(name, ast.Constant) and isinstance(name.value, str) and supported:
                         target = tuple(name.value.split("."))
-                        targets = [target] + [target + (item.value,) for item in
+                        # A dotted fromlist entry names a nested submodule (CPython _handle_fromlist).
+                        targets = [target] + [target + tuple(item.value.split(".")) for item in
                                               (fromlist.elts if static_fromlist else [])
                                               if item.value != "*"]
                     else:
@@ -242,7 +245,8 @@ def test_engine_import_closure_is_listed_or_documented_excluded() -> None:
         "then add them to ENGINE_REACHED_EXCLUSIONS:\n" + "\n".join(sorted(newly_reached))
     )
     assert not no_longer_reached, (
-        "No longer reached: remove from ENGINE_REACHED_EXCLUSIONS:\n"
+        "No longer a reached exclusion (not reached, or no longer excluded): "
+        "remove from ENGINE_REACHED_EXCLUSIONS:\n"
         + "\n".join(sorted(no_longer_reached))
     )
     missing = sorted(closure - _gate_paths() - excluded)
@@ -318,16 +322,22 @@ def test_namespace_package_respects_tracked_files(tmp_path: Path) -> None:
     ("__import__('pkg', globals=g, locals=l, fromlist=('member', '*'), level=0)",
      {"pkg/__init__.py", "pkg/member.py"}),
     ("__import__('pkg', fromlist=[])", {"pkg/__init__.py"}),
+    ("__import__('pkg', fromlist=['sub.leaf'])", {"pkg/__init__.py", "pkg/sub/__init__.py", "pkg/sub/leaf.py"}),
     ("__import__('x', level=1)", None),
     ("__import__(name)", None),
     ("__import__('pkg', fromlist=members)", None),
     ("__import__('pkg', fromlist=['member'], level=1)", None),
+    ("__import__('pkg', fromlist=['member'], **options)", None),
+    ("__import__(*args)", None),
 ])
 def test_builtin_imports(tmp_path: Path, call: str, expected: set[str] | None) -> None:
     (tmp_path / "engine.py").write_text(call + "\n")
     (tmp_path / "pkg").mkdir()
     (tmp_path / "pkg/__init__.py").write_text("")
     (tmp_path / "pkg/member.py").write_text("")
+    (tmp_path / "pkg/sub").mkdir()
+    (tmp_path / "pkg/sub/__init__.py").write_text("")
+    (tmp_path / "pkg/sub/leaf.py").write_text("")
     closure, unresolved = _import_closure(tmp_path, {})
     assert closure == {"engine.py"} | (expected or set())
     key = ("engine.py", ast.unparse(ast.parse(call).body[0].value))
