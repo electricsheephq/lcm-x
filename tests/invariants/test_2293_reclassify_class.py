@@ -100,10 +100,26 @@ def _run(case, root, *, lazy, target=None):
                 execute = harness.TraceConnection.execute
                 executemany = harness.TraceConnection.executemany
                 seam = MessageStore._ingest_prelock_before_begin
-                ordinal = 0
+                ordinal = sql_ordinal = 0
+                generation = MessageStore._ingest_write_generation
+                capturing_g0 = False
+                g0_data_version_boundary = None
+                injection = {}
+
+                def observed_generation(self):
+                    nonlocal capturing_g0
+                    capturing_g0 = self is store and self._ingest_prelock_state is None
+                    try:
+                        return generation(self)
+                    finally:
+                        capturing_g0 = False
 
                 def boundary(connection, sql):
-                    nonlocal ordinal
+                    nonlocal ordinal, sql_ordinal, g0_data_version_boundary
+                    if connection is conn:
+                        sql_ordinal += 1
+                        if capturing_g0 and sql.strip().upper() == 'PRAGMA DATA_VERSION':
+                            g0_data_version_boundary = sql_ordinal
                     if connection is not conn or fired:
                         return
                     state = TransactionOwner.ingest_state_for(conn)
@@ -120,6 +136,8 @@ def _run(case, root, *, lazy, target=None):
                     if target == ordinal:
                         _foreign(store.db_path)
                         fired.append(point)
+                        injection.update(sql_ordinal=sql_ordinal,
+                                         g0_data_version_boundary=g0_data_version_boundary)
                     ordinal += 1
 
                 def observed(connection, sql, parameters=(), /):
@@ -141,12 +159,28 @@ def _run(case, root, *, lazy, target=None):
                     instrument.setattr(harness.TraceConnection, 'executemany', observed_many)
                 elif target is not None:
                     instrument.setattr(MessageStore, '_ingest_prelock_before_begin', eager_begin)
-                before = store.ingest_prelock_counts['reclassified']
+                instrument.setattr(MessageStore, '_ingest_write_generation', observed_generation)
+                before = store.ingest_prelock_counts.copy()
                 yield
-                reclassified = store.ingest_prelock_counts['reclassified'] - before
+                after = store.ingest_prelock_counts
+                keys = before.keys() | after.keys() | {'reclassified', 'acquired', 'no_write', 'lazy',
+                                                       'poisoned', 'scope_rollback'}
+                delta = {key: after[key] - before[key] for key in sorted(keys)}
+                reclassified = delta['reclassified']
                 if target is not None:
                     assert fired, (case.name, target, points)
-                    classifications.append(reclassified)
+                    classifications.append(delta)
+                    read_only = delta['no_write'] > 0 and delta['acquired'] == 0
+                    baseline = injection.get('g0_data_version_boundary')
+                    pre_baseline = baseline is not None and injection['sql_ordinal'] < baseline
+                    facts = dict(scenario=case.name, mode='lazy' if lazy else 'eager', ordinal=target,
+                                 counts=delta, injection=injection, point=fired[0],
+                                 exemption='read-only' if read_only else 'pre-baseline' if pre_baseline else None)
+                    _evidence(facts)
+                    if lazy:
+                        assert reclassified >= 1 or read_only or pre_baseline, facts
+                    else:
+                        assert reclassified == 0, facts
 
         patch.setattr(harness, 'sqlite_fault', around)
         harness.observe(case, root, payloads=payloads)
