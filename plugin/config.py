@@ -1249,7 +1249,7 @@ class LCMConfig:
     # When enabled, oversized tool results are written to plugin-managed storage
     # and replaced with compact references in pre-compaction serializer input.
     large_output_externalization_enabled: bool = True
-    host_row_recovery_enabled: bool = True
+    host_row_recovery_enabled: bool = False
     # Character threshold above which tool results are externalized.
     large_output_externalization_threshold_chars: int = 12_000
     # Explicit storage directory for externalized payloads (empty = auto under hermes home).

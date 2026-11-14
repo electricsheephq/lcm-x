@@ -1,12 +1,12 @@
 {
-  "source_sha": "d0175ed9a198ff71e9bc592895badad88258d9cc",
-  "tooling_sha": "d0175ed9a198ff71e9bc592895badad88258d9cc",
+  "source_sha": "b728d883926c8070e30dc039151382cc82b792e9",
+  "tooling_sha": "b728d883926c8070e30dc039151382cc82b792e9",
   "allowlist_sha256": "83b8bf2418d229639abd5bd72bae468b6263549fa601bb763943864add830f07",
   "builder_version": 2,
   "tooling_dirty": false,
   "readme_omitted_links": [],
   "file_count": 124,
-  "total_bytes": 4896580,
+  "total_bytes": 4896674,
   "files": [
     {
       "path": "LICENSE",
@@ -16,7 +16,7 @@
     {
       "path": "README.md",
       "bytes": 1094,
-      "sha256": "09c9fa47186e30001d0f0578f9955e50ccfb5108cf8a1800c07f5a8d1d2c4e65"
+      "sha256": "4ea98aa810ba2be227bb56baff3a1b389cc34c35ee4a6418e2f303aca7aa14ed"
     },
     {
       "path": "__init__.py",
@@ -125,8 +125,8 @@
     },
     {
       "path": "config.py",
-      "bytes": 91859,
-      "sha256": "0ce46b1b0f16c1b2ec991cd41be1dbbcaed980250240b54eb359eb36f2085f4d"
+      "bytes": 91860,
+      "sha256": "a92f7df148e53c277513326a5492188f8f216fe1ef0f90e6290a82173bfcc097"
     },
     {
       "path": "cpu_capacity.py",
@@ -165,8 +165,8 @@
     },
     {
       "path": "engine.py",
-      "bytes": 677839,
-      "sha256": "c9229e262161739e6e30d4a474b5794c85bc3c85d6657ac1918935f06140ebe4"
+      "bytes": 677964,
+      "sha256": "1c6c53f1a30ec349b044a6f31cccccd858162c56a7f1cffd2a26e5c190aac148"
     },
     {
       "path": "engine_registry.py",
@@ -525,8 +525,8 @@
     },
     {
       "path": "skills/hermes-lcm/references/configuration.md",
-      "bytes": 47431,
-      "sha256": "d39142488d4f4fb65376b43a615b1d0e2006e7781b8e298a1cfe3077c5648480"
+      "bytes": 47399,
+      "sha256": "385811d8811a8cbc0849325c33eb52012ee13c9437ebdcb4139894f0c9ce6602"
     },
     {
       "path": "skills/hermes-lcm/references/diagnostics.md",
