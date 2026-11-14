@@ -265,6 +265,30 @@ def test_reloaded_callback_with_timestamp_free_single_row_prefix_is_idempotent(p
         ctx.unload_callbacks[0]()
 
 
+@pytest.mark.parametrize("warm_successor", [False, True])
+def test_interrupted_turn_after_reload_saves_answer_without_a_later_callback(preflight, warm_successor):
+    original, old_ctx = preflight.register(supports_unload=True)
+    retained = original.clone_for_agent()
+    retained.on_session_start("interrupted", platform="cli")
+    prompt = {"role": "user", "content": "already stored"}
+    retained.ingest([prompt])
+    old_ctx.unload_callbacks[0]()
+    _, ctx = preflight.register(supports_unload=True, manager=old_ctx._manager)
+    db = preflight.home / "lcm.db"
+    try:
+        if warm_successor:
+            retained.should_compress(prompt_tokens=1)
+        retained.on_turn_complete([prompt, {"role": "user", "content": "still mutable"}], interrupted=True)
+        assert _durable_messages(db, "interrupted") == [("user", "already stored")]
+        answer = {"role": "assistant", "content": "interrupted answer"}
+        for _ in range(2):
+            retained.on_turn_complete([prompt, answer], interrupted=True)
+        assert _durable_messages(db, "interrupted") == [("user", "already stored"), ("assistant", "interrupted answer")]
+    finally:
+        ctx.unload_callbacks[0]()
+    db.unlink()
+
+
 def test_retained_cli_reset_starts_a_new_lane_in_the_current_registration(preflight):
     prototype, old_ctx = preflight.register(supports_unload=True)
     retained = prototype.clone_for_agent()

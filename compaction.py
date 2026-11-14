@@ -107,7 +107,7 @@ def _counted_compaction(*, return_messages: bool):
                     self._last_compression_noop_reason = engine.last_compression_noop_reason
                     return result
 
-                return bool(self._run_retained_preflight(preflight))
+                return bool(self._run_retained_operation(preflight))
             with self._compaction_gate:
                 if self._compaction_closing or self._plugin_is_unloading():
                     return messages if return_messages else False

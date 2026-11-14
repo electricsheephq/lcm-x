@@ -2859,11 +2859,12 @@ class LCMEngine(
     def on_turn_complete(self, messages: List[Dict[str, Any]], usage=None, **meta) -> None:
         """Persist stopped turns on the already-bound engine (#1623)."""
         try:
-            if self._plugin_is_unloading() and self._reload_successor is not None:
-                successor = self._retained_successor()
-                if successor is not None:
-                    successor.on_turn_complete(messages, usage=usage, **meta)
-                    return
+            if self._plugin_is_unloading():
+                if meta.get("interrupted") and messages and messages[-1].get("role") != "user":
+                    self._run_retained_operation(
+                        lambda successor: successor._save_retained_interruption(messages),
+                    )
+                return
             base = getattr(super(), "on_turn_complete", None)
             if callable(base):
                 base(messages, usage=usage, **meta)
@@ -5243,7 +5244,7 @@ class LCMEngine(
         ))
 
     def _append_retired_tail(self, store, old_store, session_id, conversation_id, messages, platform,
-                             *, allow_empty=False):
+                             *, allow_empty=False, require_current=False):
         """Check and append a retired view inside the caller's write transaction."""
         tail = dict(store=store, session_id=session_id, conversation_id=conversation_id,
                     hermes_home=self._hermes_home, view=messages)
@@ -5258,16 +5259,16 @@ class LCMEngine(
         covered = self._cold_tail_stored(tail, stamps=True)
         if covered is None:
             return None
-        if not covered:
-            if not allow_empty:
-                return None
-            # A zero-row binding is valid only while that durable lane is
-            # current and the session has no rows under any conversation.
+        if not covered and not allow_empty:
+            return None
+        if require_current or not covered:
+            # Interrupted turns require a current lane. A zero-row binding
+            # also needs proof that no other conversation owns its rows.
             current = store.connection.execute(
                 "SELECT current_session_id FROM lcm_lifecycle_state WHERE conversation_id = ?",
                 (conversation_id,),
             ).fetchone()
-            if current is None or current[0] != session_id or store.get_session_count(session_id):
+            if current is None or current[0] != session_id or (not covered and store.get_session_count(session_id)):
                 return None
         suffix = view[covered:]
         for row in suffix:
@@ -5369,7 +5370,7 @@ class LCMEngine(
             logger.debug("LCM retired delegated-child tail write failed", exc_info=True)
             return False
 
-    def _flush_retired_session_end(self, session_id, messages, *, warn=True):
+    def _flush_retired_session_end(self, session_id, messages, *, warn=True, require_current=False):
         """Append only the proven suffix of a view from a retired binding."""
         if not messages:
             return True
@@ -5383,7 +5384,7 @@ class LCMEngine(
                     with store.ingest_atomic():
                         return self._append_retired_tail(
                             store, old_store, session_id, self._conversation_id, messages,
-                            self._session_platform, allow_empty=True,
+                            self._session_platform, allow_empty=not require_current, require_current=require_current,
                         )
 
                 with self._open_retired_store(old_store) as store:
@@ -5470,6 +5471,9 @@ class LCMEngine(
         session_id, conversation_id, platform = retired._session_id, retired._conversation_id, retired._session_platform
         if reset_session_id:
             session_id, conversation_id, platform = reset_session_id, reset_session_id, "cli"
+        # Profile and database identity were checked before cloning. Keep the
+        # original spelling used by durable replay proofs on Windows.
+        self._rebind_storage_for_home(retired._hermes_home)
         # This read is inside the successor's unload lease. Avoid opening the
         # engine's writable helpers for a removed database or a stale lane.
         with closing(sqlite3.connect(self._db_path.resolve().as_uri() + "?mode=ro", uri=True, timeout=0.05)) as conn:
@@ -5500,16 +5504,21 @@ class LCMEngine(
         self._register_active_engine_binding()
         return True
 
-    def _run_retained_preflight(self, operation):
-        preflight = None
+    def _save_retained_interruption(self, messages):
+        if self._pending_reset_session_id or self._bypasses_lcm_context_management():
+            return False
+        return self._flush_retired_session_end(self._session_id, messages, warn=False, require_current=True)
+
+    def _run_retained_operation(self, operation):
+        result = None
 
         def adopted(engine):
-            nonlocal preflight
-            preflight = engine._retained_binding_is_current() and operation(engine)
+            nonlocal result
+            result = engine._retained_binding_is_current() and operation(engine)
 
         successor = self._retained_successor(on_adopt=adopted)
-        if preflight is not None or successor is None:
-            return preflight
+        if result is not None or successor is None:
+            return result
         return successor._use_retained_binding(operation, timeout=None).value
 
     def _retained_successor(self, *, on_adopt=None):
