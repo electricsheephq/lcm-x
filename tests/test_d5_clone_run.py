@@ -15,7 +15,7 @@ from bench.instruments.d5_clone import bars, capture, plan as planner, run as r
 MARKER = "synthetic-marker-7f3a9c"
 
 
-def make_snapshot(root, flagged=()):
+def make_snapshot(root, flagged=(), host_schema=5):
     """*flagged*: sessions given one summary node the doctor's summary_quality check flags (#2471)."""
     root.mkdir()
     (root / "lcm-large-outputs").mkdir()
@@ -26,6 +26,8 @@ def make_snapshot(root, flagged=()):
                     " observed_at REAL)")
         host.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, end_reason TEXT)")
         host.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, content TEXT)")
+        host.execute("CREATE TABLE schema_version (version INTEGER)")
+        host.execute("INSERT INTO schema_version VALUES (?)", (host_schema,))
         lcm.execute("CREATE TABLE summary_nodes (node_id INTEGER PRIMARY KEY, session_id TEXT, token_count INTEGER,"
                     " source_token_count INTEGER)")
         lcm.executemany("INSERT INTO summary_nodes (session_id, token_count, source_token_count) VALUES (?, ?, ?)",
@@ -42,6 +44,9 @@ def make_snapshot(root, flagged=()):
         {"name": p.relative_to(root).as_posix(), "size": p.stat().st_size,
          "sha256": hashlib.sha256(p.read_bytes()).hexdigest()} for p in files]}
     (root.parent / "snapshot-pin.json").write_text(json.dumps(pin))
+    (root.parent / "capture.json").write_text(json.dumps({
+        "pin_sha256": capture._sha256(root.parent / "snapshot-pin.json"),
+        "p2": {"host_schema_version": host_schema}, "host-0.db": {"schema_version": host_schema}}))
     return root.parent / "snapshot-pin.json"
 
 
@@ -1172,3 +1177,261 @@ def test_the_run_entry_point_refuses_a_run_dir_inside_the_package(tmp_path):
         r.main(["--config", str(tmp_path / "decl.json"), "--run-dir", str(inside), "--instrument-dir", str(tmp_path),
                 "--rc-id", "rc-synthetic"])
     assert not inside.exists()
+
+
+@pytest.mark.parametrize("fail", ["free_space", "P1", "P2", "P5"])
+def test_2647_stopped_informational_runs_list_all_skipped_preflights(setup, fail):
+    _, config, run_dir = setup
+    host = FakeHost(config, run_dir, fail=fail)
+    if fail == "P2":
+        host.snapshot = lambda: {"verdict": "FAIL"}
+    receipt = r.run(host, rc_id="rc-synthetic", informational=True)
+    assert receipt["stopped_at"] == fail
+    assert {name: receipt["preflights"][name]["verdict"] for name in r.RECORDED_PREFLIGHTS} == dict.fromkeys(
+        r.RECORDED_PREFLIGHTS, r.NOT_RUN)
+    assert "attempt" not in receipt
+
+
+@pytest.mark.parametrize("raw", [bars.PASS, bars.FAIL, bars.INCONCLUSIVE])
+def test_2647_informational_runs_ignore_d5_attempt_gates(setup, monkeypatch, raw):
+    _, config, run_dir = setup
+    prior = [{"rc": "rc-synthetic", "verdict": {"raw": raw}, "pins": {"rules_sha256": "old"}}] * 2
+    receipt = r.run(FakeHost(config, run_dir / "prior"), rc_id="rc-synthetic", prior=prior, informational=True)
+    assert "stopped_at" not in receipt and "attempt" not in receipt
+    assert receipt["arms"]["rc"]["workload"]["turns_completed"] == 36
+
+    def forbidden(*args):
+        pytest.fail("informational mode must never call bars.may_run")
+
+    monkeypatch.setattr(bars, "may_run", forbidden)
+    second = r.run(FakeHost(config, run_dir / "no-gate"), rc_id="rc-synthetic", informational=True)
+    assert "attempt" not in second
+
+
+@pytest.mark.parametrize("fail, exit_code", [(None, 0), ("ga_once", 0), ("P1", 2)])
+def test_2647_informational_cli_names_its_receipt_and_exit_code(setup, monkeypatch, capsys, fail, exit_code):
+    _, config, run_dir = setup
+    declaration = run_dir.parent / "decl.json"
+    declaration.write_text(json.dumps(config))
+    monkeypatch.setattr(r, "LocalHost", lambda c, d: FakeHost(c, d, fail=fail))
+    # A real LocalHost normally creates its run dir; a P1 stop in this fake needs it pre-created.
+    run_dir.mkdir()
+    code = r.main(["--config", str(declaration), "--run-dir", str(run_dir), "--instrument-dir", str(run_dir.parent),
+                   "--rc-id", "rc-synthetic", "--informational"])
+    assert code == exit_code
+    receipt = json.loads((run_dir / "informational-receipt.json").read_text())
+    assert not (run_dir / "d5-clone-receipt.json").exists()
+    assert receipt["schema"] == r.INFORMATIONAL_SCHEMA and "verdict" not in receipt and "attempt" not in receipt
+    assert json.loads(capsys.readouterr().out)["schema"] == r.INFORMATIONAL_SCHEMA
+    if fail == "P1":
+        assert receipt["preflights"]["P6"]["verdict"] == r.NOT_RUN
+    elif fail == "ga_once":
+        assert receipt["bars"]["bar5"]["verdict"] == bars.INCONCLUSIVE  # Exit 0 means it did not stop.
+        assert receipt["bars"]["bar5"]["ga_rerun_needed"] is True
+        assert receipt["bars"]["bar5"]["ga_rerun_note"] == "informational mode records GA failures without re-running"
+
+
+def test_2647_bar4_note_counts_each_sink_without_a_fixed_multiplier(setup):
+    _, config, run_dir = setup
+    receipt = r.run(FakeHost(config, run_dir), rc_id="rc-synthetic")
+    assert receipt["bars"]["bar4"]["raw_counts_note"] == (
+        "raw counts include each occurrence in each sink the runner read; "
+        "an event copied to multiple sinks is counted in each sink, with no fixed multiplier; "
+        "the verdict compares the arms")
+
+
+def test_2647_each_bind_keeps_its_own_replay_diagnostics(setup):
+    class DiagnosticHost(FakeHost):
+        def replay(self, ctx, step, t0, h8):
+            ctx["replay_diagnostics"] = {"constants": {"exit_code": len(self.replays), "exception_type": None,
+                                                     "frame_file": None, "frame_function": None}, "replay": None}
+            return super().replay(ctx, step, t0, h8)
+
+    _, config, run_dir = setup
+    receipt = r.run(DiagnosticHost(config, run_dir), rc_id="rc-synthetic")
+    assert [bind["replay_diagnostics"]["constants"]["exit_code"] for bind in receipt["binds"]] == list(range(12))
+
+
+@pytest.mark.parametrize("failed_step, crash", [("constants", True), ("replay", True), ("constants", False)])
+def test_2647_replay_records_both_process_outcomes_without_output(tmp_path, monkeypatch, failed_step, crash):
+    import subprocess
+
+    seen = []
+
+    def fake_run(argv, **kwargs):
+        step = argv[-1]
+        seen.append(step)
+        (Path(kwargs["cwd"]) / "constants.json").write_text('{"range_new_rows": 3}')
+        stderr = (f'Traceback (most recent call last):\n  File "/private/old.py", line 1, in outer\n'
+                  f'ValueError: {MARKER}\n\nDuring handling of the above exception, another exception occurred:\n\n'
+                  f'Traceback (most recent call last):\n  File "/private/subprocess.py", line 9, in run\n'
+                  f'subprocess.CalledProcessError: {MARKER}\n').encode() if crash and step == failed_step else b""
+        return subprocess.CompletedProcess(argv, int(step == failed_step), MARKER.encode(), stderr)
+
+    monkeypatch.setattr(r.subprocess, "run", fake_run)
+    monkeypatch.setattr(r.sandbox, "wrap", lambda argv, **kw: argv)
+    config = {"interpreter": "python3", "instrument_dir": "kit", "rc": {"lcm_tree": "rc"}, "ga": {"lcm_tree": "ga"},
+              "constants_argv": ["constants"], "replay_argv": ["replay"]}
+    ctx = {"name": "rc", "port": 1, "sessions": {"L": "s"}}
+    result = r.LocalHost(config, tmp_path / "run").replay(ctx, {"id": "cold", "conversation": "L"}, "T0", "H8")
+    assert result == (None, True, 3)
+    diag = ctx["replay_diagnostics"]
+    assert diag[failed_step] == {"exit_code": 1, "exception_type": "subprocess.CalledProcessError" if crash else None,
+                                 "frame_file": "subprocess.py" if crash else None, "frame_function": "run" if crash else None}
+    if failed_step == "replay":
+        assert diag["constants"] == {"exit_code": 0, "exception_type": None, "frame_file": None, "frame_function": None}
+    else:
+        assert diag["replay"] is None
+    assert seen == (["constants", "replay"] if failed_step == "replay" else ["constants"])
+    assert MARKER not in json.dumps(diag) and "/private/" not in json.dumps(diag)
+
+
+@pytest.mark.parametrize("verdict, not_shown", [
+    pytest.param("NOT SHOWN", True, id="reported-not-shown"),
+    pytest.param(None, False, id="missing-verdict-error"),
+    pytest.param("OK", False, id="ok-verdict-error"),
+    pytest.param(MARKER, False, id="private-verdict-error"),
+])
+def test_2647_r2_exit_one_requires_positive_not_shown_report(tmp_path, monkeypatch, verdict, not_shown):
+    from types import SimpleNamespace
+
+    def fake_run(argv, **kwargs):
+        assert argv[-1] == "constants"  # The replay must not run after any constants failure.
+        report = {"range_new_rows": 3}
+        if verdict is not None:
+            report["bind_verdict"] = verdict
+        (Path(kwargs["cwd"]) / "constants.json").write_text(json.dumps(report))
+        return SimpleNamespace(returncode=1, stderr=b"", stdout=MARKER.encode())
+
+    monkeypatch.setattr(r.subprocess, "run", fake_run)
+    monkeypatch.setattr(r.sandbox, "wrap", lambda argv, **kw: argv)
+    config = {"interpreter": "python3", "instrument_dir": "kit", "rc": {"lcm_tree": "rc"}, "ga": {"lcm_tree": "ga"},
+              "constants_argv": ["constants"], "replay_argv": ["replay"]}
+    ctx = {"name": "rc", "port": 1, "sessions": {"L": "s"}}
+    assert r.LocalHost(config, tmp_path / "run").replay(ctx, {"id": "cold", "conversation": "L"}, "T0", "H8") == (
+        None, True, 3)
+    diagnostics = ctx["replay_diagnostics"]
+    reason = r.replay_error(diagnostics)
+    assert ("NOT SHOWN" in reason) is not_shown
+    if not_shown:
+        assert diagnostics["constants"]["bind_verdict"] == "NOT SHOWN"
+    else:
+        assert reason == "the edition constants step exited 1 (without an exception; no receipt to judge)"
+        assert "bind_verdict" not in diagnostics["constants"]
+    assert diagnostics["replay"] is None
+    assert MARKER not in json.dumps(diagnostics) + reason
+
+
+class SchemaProbeHost(FakeHost):
+    """The runner's real schema judgment over cloned stores, with synthetic probe and doctor output."""
+
+    checks = r.LocalHost.checks
+
+    def __init__(self, config, run_dir, version=6, spoof=False):
+        super().__init__(config, run_dir)
+        self.version, self.spoof = version, spoof
+
+    def arm(self, name, home, plan):
+        ctx = super().arm(name, home, plan)
+        assert not (home / "capture.json").exists()  # The capture record is outside the pinned tree.
+        with closing(sqlite3.connect(home / "state.db")) as db, db:
+            db.execute("UPDATE schema_version SET version = ?", (self.version,))
+        if self.spoof:
+            (home / "capture.json").write_text(json.dumps({"p2": {"host_schema_version": self.version}}))
+        return {**ctx, "session_ids": []}
+
+    def probe(self, ctx):
+        from tests.test_d5_clone_observe import OK_SCHEMA, doctor, probe_out
+
+        version = r._rows(ctx["home"] / "state.db", "SELECT version FROM schema_version")[0][0]
+        state = {"version": version, "missing_tables": [], "error": False,
+                 "expected_reason": "probe-controlled reason"}
+        if self.spoof:  # A legacy or malicious probe can supply an expectation; it is never an oracle.
+            state["expected"] = version
+        return probe_out(ctx["home"].parent / "probe", doctor("pass"), {"lcm.db": OK_SCHEMA, "state.db": state})
+
+
+@pytest.mark.parametrize("case, version, verdict, reason", [
+    ("match", 6, bars.PASS, None),
+    ("mismatch", 7, bars.FAIL, None),
+    ("missing", 6, bars.INCONCLUSIVE, "no capture record beside the snapshot pin"),
+    ("wrong-pin", 6, bars.INCONCLUSIVE, "the capture record beside the snapshot pin belongs to another pin"),
+    ("missing-pin", 6, bars.INCONCLUSIVE, "the capture record beside the snapshot pin belongs to another pin"),
+    ("disagree", 6, bars.INCONCLUSIVE,
+     "snapshot capture.json host schema records disagree: p2.host_schema_version and host-0.db.schema_version"),
+    ("spoof", 7, bars.FAIL, None),
+], ids=["match", "mismatch", "missing", "wrong-pin", "missing-pin", "disagree", "spoof"])
+def test_2647_r3_real_layout_runner(tmp_path, case, version, verdict, reason):
+    snap = tmp_path / "snapshot"
+    pin = make_snapshot(snap, host_schema=6)
+    record_path = pin.with_name("capture.json")
+    record = json.loads(record_path.read_text())
+    if case == "missing":
+        record_path.unlink()
+    else:
+        if case == "wrong-pin":
+            record["pin_sha256"] = "0" * 64
+        elif case == "missing-pin":
+            del record["pin_sha256"]
+        elif case == "disagree":
+            record["host-0.db"]["schema_version"] = 7
+        record_path.write_text(json.dumps(record))
+    before = inventory(snap)
+    host = SchemaProbeHost({"snapshot_dir": str(snap), "snapshot_pin": str(pin), "nonce": "synthetic"}, tmp_path / "run", version,
+                           spoof=case == "spoof")
+    receipt = r.run(host, rc_id="rc-synthetic")
+    assert receipt["snapshot"]["verdict"] == "PASS"
+    assert receipt["snapshot"]["extra_on_disk"] == {"names": [], "payload": 0}
+    assert receipt["snapshot"]["pin_sha256"] == capture._sha256(pin)
+    assert inventory(snap) == before
+    assert receipt["bars"]["bar5"]["verdict"] == verdict
+    for arm in [*receipt["arms"].values(), *([receipt["ga_rerun"]] if receipt["ga_rerun"] else [])]:
+        counts = arm["checks"]["by_kind_status"]
+        assert counts.get("schema:ok", 0) == (0 if reason else 2 if verdict == bars.PASS else 1)
+        assert counts.get("schema:fail", 0) == (verdict == bars.FAIL)
+        assert arm["doctor_not_exercised"] == ([{"check": "state.db", "reason": reason}] if reason else [])
+
+
+@pytest.mark.parametrize("informational", [False, True], ids=["d5", "informational"])
+def test_2647_r3_runner_reads_record_once_after_p2_before_arms(tmp_path, monkeypatch, informational):
+    snap = tmp_path / "snapshot"
+    pin = make_snapshot(snap, host_schema=6)
+    host = SchemaProbeHost({"snapshot_dir": str(snap), "snapshot_pin": str(pin), "nonce": "synthetic"}, tmp_path / "run", version=7)
+    read, original = [], r.snapshot_host_schema
+    verified = host.snapshot
+
+    def p2():
+        result = verified()
+        # Distinguish P2's returned hash from any later rehash of the pin.
+        pin.write_text("changed after P2 returned")
+        return result
+
+    def record(path, sha):
+        assert host.armed == [] and sha != capture._sha256(path)
+        read.append((path, sha))
+        return original(path, sha)
+
+    monkeypatch.setattr(host, "snapshot", p2)
+    monkeypatch.setattr(r, "snapshot_host_schema", record)
+    receipt = r.run(host, rc_id="rc-synthetic", informational=informational)
+    assert read == [(str(pin), receipt["snapshot"]["pin_sha256"])]
+    assert host.host_schema == (6, None)
+    assert host.armed == (["rc", "ga"] if informational else ["rc", "ga", "ga"])  # Includes the GA rerun.
+    assert receipt["bars"]["bar5"]["verdict"] == bars.FAIL
+
+
+@pytest.mark.parametrize("verdict", ["FAIL", "INCONCLUSIVE"])
+def test_2647_r3_no_record_without_p2_pass(setup, monkeypatch, verdict):
+    _, config, run_dir = setup
+    host = FakeHost(config, run_dir)
+    host.host_schema = (99, None)  # A stage must not reuse a stale record.
+    monkeypatch.setattr(host, "snapshot", lambda: {"verdict": verdict})
+    monkeypatch.setattr(r, "snapshot_host_schema", lambda *a: pytest.fail("P2 did not pass"))
+    receipt = r.run(host, rc_id="rc-synthetic")
+    assert receipt["stopped_at"] == "P2" and host.armed == []
+    assert host.host_schema == (None, "no capture record beside the snapshot pin")
+    from tests.test_d5_clone_observe import OK_SCHEMA, probe_out
+
+    checks, skipped = r.probe_checks(probe_out(run_dir / "probe", schema={"lcm.db": OK_SCHEMA, "state.db": OK_SCHEMA}), [])
+    assert "schema" in bars.kinds_missing(checks)
+    assert skipped == [{"check": "state.db", "reason": "no capture record beside the snapshot pin"}]

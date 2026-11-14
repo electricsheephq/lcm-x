@@ -79,8 +79,10 @@ class FakeHost:
             digest = "b" * 12 if self.fault == "wrong-digest" else hashlib.sha256(content.encode()).hexdigest()[:12]
             name, call = f"20261107_000000_t_{digest}_{self.files:x}.json", entries[0]["tool_calls"][0]["id"]
             (home / "lcm-large-outputs" / name).write_text(json.dumps(
-                {} if self.fault == "empty-payload" else {"content": content, "content_chars": 1, "content_bytes": 1}))
-            host.append(("tool", f"[Externalized tool output: {MARKER}; ref={name}]", call))
+                {} if self.fault == "empty-payload" else {"content": content, "content_chars": len(content),
+                                                        "content_bytes": len(content.encode("utf-8"))}))
+            host.append(("tool", f"[Externalized tool output: {MARKER}; chars={len(content)}; "
+                         f"bytes={len(content.encode('utf-8'))}; ref={name}]", call))
             lcm.append(("tool", content, call))
             ctx["facts"]["payload_swaps"] += 1
         with closing(sqlite3.connect(home / "lcm.db")) as db, db:
@@ -296,12 +298,16 @@ CASES = [
           ["rc: step calls != planned entries"], "P3-off-script"),
     _case("P4", lambda h, c, s: _rc(c) and (c["home"] / "lcm-large-outputs" / "extra.json").write_text("{}"), "FAIL",
           [f"rc: {P4_ROWS}"], "P4-second-file"),
-    _case("P4", lambda h, c, s: _payload(c, content_chars=0), "FAIL", [f"rc: {P4_EMPTY}", f"ga: {P4_EMPTY}"],
-          "P4-zero-chars"),  # Both trees: one tree alone would also differ from the other.
+    _case("P4", lambda h, c, s: _payload(c, content_chars=0), "FAIL",
+          [reason for tree in ("rc", "ga") for reason in (f"{tree}: {P4_EMPTY}",
+           f"{tree}: content_chars does not match its own content", f"{tree}: stub chars does not match payload content_chars")],
+          "P4-zero-chars"),  # Raw sizes must remain positive, though they are not compared between trees.
     _case("P4", _noop, "FAIL", [f"rc: {P4_DIGEST}", f"ga: {P4_DIGEST}"], "P4-wrong-digest", fault="wrong-digest"),
-    _case("P4", lambda h, c, s: _rc(c) and _payload(c, content_chars=2), "FAIL", ["content_chars differs between the trees"],
+    _case("P4", lambda h, c, s: _rc(c) and _payload(c, content_chars=2), "FAIL",
+          ["rc: content_chars does not match its own content", "rc: stub chars does not match payload content_chars"],
           "P4-chars-differ"),
-    _case("P4", lambda h, c, s: _rc(c) and _payload(c, content_bytes=2), "FAIL", ["content_bytes differs between the trees"],
+    _case("P4", lambda h, c, s: _rc(c) and _payload(c, content_bytes=2), "FAIL",
+          ["rc: content_bytes does not match its own content", "rc: stub bytes does not match payload content_bytes"],
           "P4-bytes-differ"),
     _case("P4", lambda h, c, s: _rc(c) and _sql(c, "state.db", "UPDATE messages SET content ="
                                                  " replace(content, 'output: ', 'output: other ')"),
@@ -504,3 +510,112 @@ def test_p3_p6_p7_run_the_previous_ga_configuration_in_both_arms(tmp_path, monke
     ga_tree, rc_tree = host.c["ga"]["lcm_tree"], host.c["rc"]["lcm_tree"]
     assert {path for name, _, path in seen if name != "pf-P4"} == {ga_tree}
     assert {(tree, path) for name, tree, path in seen if name == "pf-P4"} == {("rc", rc_tree), ("ga", ga_tree)}
+
+
+def test_2647_p4_compares_unequal_spill_path_widths_after_masking(tmp_path):
+    class SpillHost(FakeHost):
+        def turn(self, ctx, step):
+            super().turn(ctx, step)
+            home = ctx["home"]
+            (payload_path,) = (home / "lcm-large-outputs").iterdir()
+            spill = "out-1-2-ab.log" if ctx["name"] == "rc" else "out-1762556000-42422-abcdef.log"
+            content = json.dumps({"output": MARKER + "é", "full_output_path": f"{home}/tool_output/{spill}"}, ensure_ascii=False)
+            if self.fault == "content" and ctx["name"] == "ga":
+                content += "changed"
+            digest = hashlib.sha256(content.encode()).hexdigest()[:12]
+            name = f"20261107_000000_t_{digest}_1.json"
+            payload_path.unlink()
+            (home / "lcm-large-outputs" / name).write_text(json.dumps({
+                "content": content, "content_chars": len(content), "content_bytes": len(content.encode())}))
+            stub = (f'[Externalized tool output: tool=terminal; chars={len(content)}; bytes={len(content.encode())}; '
+                    f'read it with lcm_expand(externalized_ref="{name}"); ref={name}]')
+            if ctx["name"] == "ga":
+                if self.fault == "stub-kind":
+                    stub = stub.replace("Externalized", "GC'd externalized")
+                elif self.fault == "stub-metadata":
+                    stub = stub.replace("tool=terminal", "tool=other")
+            for db, text in (("state.db", stub), ("lcm.db", content)):
+                with closing(sqlite3.connect(home / db)) as conn, conn:
+                    conn.execute("UPDATE messages SET content=? WHERE role='tool'", (text,))
+            return True
+
+    for fault in (None, "content", "stub-kind", "stub-metadata"):
+        root = tmp_path / str(fault)
+        root.mkdir()
+        host = SpillHost(root, fault)
+        fails, unsure, facts = pf.p4(host, host.plan(None))
+        assert not unsure
+        if fault is None:
+            assert not fails
+            for key in ("content_chars", "content_bytes", "content_sha256"):
+                assert facts["rc"][key] != facts["ga"][key]  # Raw facts survive, without being compared.
+            assert facts["rc"]["content_masked_sha256"] == facts["ga"]["content_masked_sha256"]
+            assert facts["rc"]["stub_masked_sha256"] == facts["ga"]["stub_masked_sha256"]
+        else:
+            assert ("content_masked_sha256 differs between the trees" if fault == "content"
+                    else "stub_masked_sha256 differs between the trees") in fails
+
+
+@pytest.mark.parametrize("step, crash", [("constants", True), ("replay", True), ("constants", False)])
+def test_2647_p6_records_the_failed_step_and_private_cause(tmp_path, monkeypatch, step, crash):
+    monkeypatch.setitem(sys.modules, "yaml", types.SimpleNamespace(safe_load=json.loads))
+    monkeypatch.setattr(pf.run.sandbox, "wrap", lambda argv, **kw: argv)
+    seen = []
+
+    def fake_run(argv, **kwargs):
+        current = "constants" if argv[-1] == "gen" else "replay"
+        seen.append(current)
+        out = Path(kwargs["cwd"])
+        if current == "constants":
+            (out / "constants.json").write_text(json.dumps({"range_new_rows": 0,
+                                                           "bind_verdict": "OK" if crash else "NOT SHOWN"}))
+        failed = current == step
+        stderr = (f'Traceback (most recent call last):\n  File "/private/secret/driver.py", line 8, in main\n'
+                  f'    secret({MARKER!r})\n  File "/private/secret/subprocess.py", line 9, in run\n'
+                  f'    secret({MARKER!r})\nsubprocess.CalledProcessError: {MARKER}\n').encode() if failed and crash else b""
+        return types.SimpleNamespace(returncode=int(failed), stderr=stderr, stdout=MARKER.encode())
+
+    monkeypatch.setattr(pf.run.subprocess, "run", fake_run)
+    host = FakeHost(tmp_path)
+    config = {**host.c, "interpreter": "python3", "instrument_dir": "kit", "constants_argv": ["gen"],
+              "replay_argv": ["replay"]}
+    local = pf.run.LocalHost(config, tmp_path)
+    host.replay = lambda ctx, s, t0, h8: local.replay(ctx, s, t0, h8)  # Same ctx carries only safe diagnostics.
+    arm = host.arm
+    host.arm = lambda *args: {**arm(*args), "port": 1}
+    fails, unsure, facts = pf.p6(host, host.plan(None))
+    assert not fails
+    diag = facts["replay_diagnostics"]
+    expected = {"exit_code": 1, "exception_type": "subprocess.CalledProcessError" if crash else None,
+                "frame_file": "subprocess.py" if crash else None, "frame_function": "run" if crash else None}
+    if not crash:
+        expected["bind_verdict"] = "NOT SHOWN"
+    assert diag[step] == expected
+    if step == "constants":
+        assert diag["replay"] is None
+    else:
+        assert diag["constants"]["exit_code"] == 0
+    assert seen == (["constants"] if step == "constants" else ["constants", "replay"])
+    assert any(step in reason and ("CalledProcessError" if crash else "NOT SHOWN") in reason for reason in unsure)
+    text = json.dumps({"facts": facts, "reasons": unsure})
+    assert MARKER not in text and "/private/secret" not in text
+
+
+@pytest.mark.parametrize("tree", ["rc", "ga"])
+@pytest.mark.parametrize("field", ["content_chars", "content_bytes", "chars", "bytes"])
+def test_2647_r2_p4_checks_each_trees_own_sizes(tmp_path, tree, field):
+    def corrupt(host, ctx, step):
+        if ctx["name"] != tree:
+            return
+        if field.startswith("content_"):
+            _payload(ctx, **{field: 2})
+        else:
+            _sql(ctx, "state.db", "UPDATE messages SET content = replace(content, ?, ?)",
+                 f"{field}={len(MARKER)};", f"{field}=2;")
+
+    host = Tweaked(tmp_path, corrupt)
+    fails, unsure, _ = pf.p4(host, host.plan(None))
+    assert not unsure
+    reason = (f"{field} does not match its own content" if field.startswith("content_") else
+              f"stub {field} does not match payload content_{field}")
+    assert f"{tree}: {reason}" in fails
