@@ -27,21 +27,26 @@ def _connect(db):
     return sqlite3.connect(Path(db).resolve().as_uri() + "?mode=ro", uri=True)
 
 
-def captured_host_version(home):
-    """Only the snapshot's recorded schema number; never open a database or fall back to the pinned host."""
+def captured_host_schema(home):
+    """The snapshot's schema number and any conflict reason; never open a database or fall back to the pin."""
     try:
         record = json.loads((Path(home) / "capture.json").read_text(encoding="utf-8"))
+        versions = []
         for section, key in (("p2", "host_schema_version"), ("host-0.db", "schema_version")):
             part = record.get(section)
             value = part.get(key) if isinstance(part, dict) else None
             if type(value) is int:
-                return value
+                versions.append(value)
+        if len(set(versions)) > 1:
+            return None, "snapshot capture.json host schema records disagree: p2.host_schema_version and host-0.db.schema_version"
+        if versions:
+            return versions[0], None
     except (OSError, ValueError, AttributeError):
         pass
-    return None
+    return None, None
 
 
-def schema(home, boot, host_sql, host_version):
+def schema(home, boot, host_sql, host_version, host_record_reason=None):
     """{db name: {version, expected, missing_tables, error}} for the LCM-X store and the host store."""
     out = {}
     with closing(_connect(home / "lcm.db")) as conn:
@@ -54,6 +59,8 @@ def schema(home, boot, host_sql, host_version):
         required = re.findall(r"CREATE TABLE IF NOT EXISTS (\w+)", host_sql)
         out["state.db"] = {"version": rows[0][0] if len(rows) == 1 else None, "expected": host_version,
                            "missing_tables": [t for t in required if t not in tables], "error": not required}
+        if host_record_reason:
+            out["state.db"]["expected_reason"] = host_record_reason
     return out
 
 
@@ -100,7 +107,8 @@ def main(tree, home, out, sessions="[]"):
     except ImportError:  # An older host keeps its schema in hermes_state.
         host = importlib.import_module("hermes_state")
     boot = importlib.import_module("hermes_lcm_x.db_bootstrap")
-    (out / "schema.json").write_text(json.dumps(schema(home, boot, host.SCHEMA_SQL, captured_host_version(home))))
+    version, reason = captured_host_schema(home)
+    (out / "schema.json").write_text(json.dumps(schema(home, boot, host.SCHEMA_SQL, version, reason)))
     store, dag = (importlib.import_module(f"hermes_lcm_x.{name}") for name in ("store", "dag"))
     (out / "fts-pre-open.json").write_text(json.dumps(fts_pre_open(home, boot, store, dag)))
     config, engine = (importlib.import_module(f"hermes_lcm_x.{name}") for name in ("config", "engine"))

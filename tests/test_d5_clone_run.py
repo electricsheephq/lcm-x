@@ -1230,7 +1230,7 @@ def test_2647_bar4_note_counts_each_sink_without_a_fixed_multiplier(setup):
     _, config, run_dir = setup
     receipt = r.run(FakeHost(config, run_dir), rc_id="rc-synthetic")
     assert receipt["bars"]["bar4"]["raw_counts_note"] == (
-        "raw counts include each occurrence in each sink read (agent log, error log and gateway console); "
+        "raw counts include each occurrence in each sink the runner read; "
         "an event copied to multiple sinks is counted in each sink, with no fixed multiplier; "
         "the verdict compares the arms")
 
@@ -1279,3 +1279,39 @@ def test_2647_replay_records_both_process_outcomes_without_output(tmp_path, monk
         assert diag["replay"] is None
     assert seen == (["constants", "replay"] if failed_step == "replay" else ["constants"])
     assert MARKER not in json.dumps(diag) and "/private/" not in json.dumps(diag)
+
+
+@pytest.mark.parametrize("verdict, not_shown", [
+    pytest.param("NOT SHOWN", True, id="reported-not-shown"),
+    pytest.param(None, False, id="missing-verdict-error"),
+    pytest.param("OK", False, id="ok-verdict-error"),
+    pytest.param(MARKER, False, id="private-verdict-error"),
+])
+def test_2647_r2_exit_one_requires_positive_not_shown_report(tmp_path, monkeypatch, verdict, not_shown):
+    from types import SimpleNamespace
+
+    def fake_run(argv, **kwargs):
+        assert argv[-1] == "constants"  # The replay must not run after any constants failure.
+        report = {"range_new_rows": 3}
+        if verdict is not None:
+            report["bind_verdict"] = verdict
+        (Path(kwargs["cwd"]) / "constants.json").write_text(json.dumps(report))
+        return SimpleNamespace(returncode=1, stderr=b"", stdout=MARKER.encode())
+
+    monkeypatch.setattr(r.subprocess, "run", fake_run)
+    monkeypatch.setattr(r.sandbox, "wrap", lambda argv, **kw: argv)
+    config = {"interpreter": "python3", "instrument_dir": "kit", "rc": {"lcm_tree": "rc"}, "ga": {"lcm_tree": "ga"},
+              "constants_argv": ["constants"], "replay_argv": ["replay"]}
+    ctx = {"name": "rc", "port": 1, "sessions": {"L": "s"}}
+    assert r.LocalHost(config, tmp_path / "run").replay(ctx, {"id": "cold", "conversation": "L"}, "T0", "H8") == (
+        None, True, 3)
+    diagnostics = ctx["replay_diagnostics"]
+    reason = r.replay_error(diagnostics)
+    assert ("NOT SHOWN" in reason) is not_shown
+    if not_shown:
+        assert diagnostics["constants"]["bind_verdict"] == "NOT SHOWN"
+    else:
+        assert reason == "the edition constants step exited 1 (without an exception; no receipt to judge)"
+        assert "bind_verdict" not in diagnostics["constants"]
+    assert diagnostics["replay"] is None
+    assert MARKER not in json.dumps(diagnostics) + reason

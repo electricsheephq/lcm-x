@@ -522,6 +522,12 @@ def test_a_store_the_read_only_open_refuses_is_never_read_as_empty(tmp_path):
 @pytest.mark.parametrize("record, version, verdict", [
     ({"p2": {"host_schema_version": 6}}, 6, bars.PASS),  # Ahead of the pinned host's constant (5).
     ({"host-0.db": {"schema_version": 6}}, 6, bars.PASS),
+    pytest.param({"p2": {"host_schema_version": 6}, "host-0.db": {"schema_version": 6}}, 6, bars.PASS,
+                 id="r2-records-agree"),
+    pytest.param({"p2": {"host_schema_version": 6}, "host-0.db": {"schema_version": 7}}, 6, bars.INCONCLUSIVE,
+                 id="r2-records-disagree-p2-matches"),
+    pytest.param({"p2": {"host_schema_version": 7}, "host-0.db": {"schema_version": 6}}, 6, bars.INCONCLUSIVE,
+                 id="r2-records-disagree-db-matches"),
     ({"p2": {"host_schema_version": 7}}, 6, bars.FAIL),
     ({}, 5, bars.INCONCLUSIVE),  # Even matching the pin is not evidence without the capture record.
     (None, 5, bars.INCONCLUSIVE),
@@ -556,7 +562,10 @@ def test_2647_host_schema_uses_only_the_capture_record(tmp_path, monkeypatch, re
     assert bars.bar5(sqlite + checks, sqlite + checks)["verdict"] == verdict
     if verdict == bars.INCONCLUSIVE:
         assert schema["state.db"]["expected"] is None
-        assert {s["reason"] for s in skipped} == {"snapshot capture.json has no recorded host schema version"}
+        conflict = record and "p2" in record and "host-0.db" in record
+        assert {s["reason"] for s in skipped} == {
+            "snapshot capture.json host schema records disagree: p2.host_schema_version and host-0.db.schema_version"
+            if conflict else "snapshot capture.json has no recorded host schema version"}
     else:
         expected = record.get("p2", {}).get("host_schema_version", record.get("host-0.db", {}).get("schema_version"))
         assert schema["state.db"]["expected"] == expected

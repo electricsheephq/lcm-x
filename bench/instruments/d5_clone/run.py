@@ -467,7 +467,8 @@ def probe_checks(out, sessions):
                       and type(s.get("version")) is int)
             if name == "state.db" and isinstance(s, dict) and type(s.get("expected")) is not int:
                 missing_record = True
-                skipped.append({"check": name, "reason": "snapshot capture.json has no recorded host schema version"})
+                skipped.append({"check": name, "reason": s.get("expected_reason") or
+                                "snapshot capture.json has no recorded host schema version"})
                 if intact:
                     continue
             rows.append({"kind": "schema", "check": name,
@@ -499,6 +500,8 @@ def replay_error(diagnostics):
     """A content-free reason, including which subprocess failed when its diagnostics are available."""
     for step, facts in (diagnostics or {}).items():
         if facts and facts["exit_code"]:
+            if step == "constants" and facts.get("bind_verdict") == "NOT SHOWN":
+                return "the edition constants step exited 1 (bind_verdict: NOT SHOWN; no receipt to judge)"
             cause = facts["exception_type"] or "without an exception"
             return f"the edition {step} step exited {facts['exit_code']} ({cause}; no receipt to judge)"
     return "the edition replay errored (no receipt to judge)"
@@ -736,6 +739,8 @@ class LocalHost:
             env = {"PATH": "/usr/bin:/bin", "HOME": str(out), "PYTHONDONTWRITEBYTECODE": "1"}
             done = subprocess.run(["/usr/bin/nice", "-n", "19", *argv], cwd=out, env=env, capture_output=True)
             ctx["replay_diagnostics"][key.removesuffix("_argv")] = _replay_process_facts(done)
+            if key == "constants_argv" and done.returncode == 1 and _constants_report(out).get("bind_verdict") == "NOT SHOWN":
+                ctx["replay_diagnostics"]["constants"]["bind_verdict"] = "NOT SHOWN"
             if done.returncode:  # An error, or (constants exit 1) a NOT SHOWN bind: no replay runs after it. Either way the
                 return None, True, _range_new_rows(out)  # report's range_new_rows is kept when it was written.
         try:
@@ -829,11 +834,16 @@ class LocalHost:
         ctx["provider"].stop()
 
 
-def _range_new_rows(out):
+def _constants_report(out):
     try:
-        return json.loads((Path(out) / "constants.json").read_text(encoding="utf-8")).get("range_new_rows")
-    except (OSError, ValueError, AttributeError):
-        return None
+        report = json.loads((Path(out) / "constants.json").read_text(encoding="utf-8"))
+        return report if isinstance(report, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _range_new_rows(out):
+    return _constants_report(out).get("range_new_rows")
 
 
 def run_arm(host, name, home, plan, extras, no_binds=False):
@@ -1010,7 +1020,7 @@ def run(host, *, rc_id, prior=(), instrument_fix=None, informational=False):
     results.update({
         "bar3": bars.bar3(snap["store"], arms["rc"]["rows"]["store"], rules["identity"]),
         "bar4": {**bars.bar4(arms["rc"]["logs"], arms["ga"]["logs"], arms["rc"]["roots"], arms["ga"]["roots"]),
-                 "raw_counts_note": "raw counts include each occurrence in each sink read (agent log, error log and gateway console); "
+                 "raw_counts_note": "raw counts include each occurrence in each sink the runner read; "
                                     "an event copied to multiple sinks is counted in each sink, with no fixed multiplier; "
                                     "the verdict compares the arms"},
         "bar5": {**bars.bar5(arms["rc"]["checks"], arms["ga"]["checks"], ga_rerun and ga_rerun["checks"],

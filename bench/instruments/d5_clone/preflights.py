@@ -171,6 +171,7 @@ def p4(host, plan):
         refs = [m[1] for t in hosts + lcms for m in run.EXTERNALIZED_REF.finditer(t or "")]
         path = Path(ctx["home"]) / "lcm-large-outputs" / (refs[0] if refs else "-")
         payload = json.loads(path.read_bytes()) if refs and path.is_file() else {}
+        content = payload.get("content")
         f = facts[tree] = {
             "rows": [len(hosts), len(lcms)], "refs": len(refs), "files": host.facts(ctx)["payload_files_created"],
             "stub_masked_sha256": [_sha(_home_paths(run.EXTERNALIZED_REF.sub(
@@ -187,7 +188,17 @@ def p4(host, plan):
                                                                    for k in ("content_chars", "content_bytes"))),
                             (f"{tree}: the reference's digest is not its own content's hash",  # LCM-X names the
                              f["digest12"] != [f["content_sha256"][:12]])])  # payload by the content it holds.
-    # Equal masked hashes also imply equal masked character/UTF-8 lengths. Raw sizes remain receipt facts only.
+        for field, actual in (("content_chars", len(content) if isinstance(content, str) else None),
+                              ("content_bytes", len(content.encode("utf-8")) if isinstance(content, str) else None)):
+            if actual is None or f[field] != actual:
+                reasons.append(f"{tree}: {field} does not match its own content")
+        for text in hosts + lcms:
+            for stub in run.EXTERNALIZED_REF.finditer(text or ""):
+                for field in ("chars", "bytes"):
+                    sizes = re.findall(r";\s*" + field + r"=([^;]*)(?=;)", stub[0])
+                    if sizes != [str(f[f"content_{field}"])]:
+                        reasons.append(f"{tree}: stub {field} does not match payload content_{field}")
+    # Equal masked hashes imply equal masked character/UTF-8 lengths. Raw sizes are validated within each tree only.
     return reasons + [f"{k} differs between the trees" for k in ("stub_masked_sha256", "content_masked_sha256")
                       if facts["rc"][k] != facts["ga"][k]], [], facts
 
