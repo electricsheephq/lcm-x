@@ -978,33 +978,61 @@ def test_a_store_skipped_on_a_busy_lock_lands_once_the_lock_frees_without_anothe
         assert child_rows(parent) == []  # without a retry the list was dropped
 
 
-def test_stale_projection_receipt_cannot_suppress_later_real_user_row(host, monkeypatch):
+@pytest.mark.parametrize("same_projection", [False, True], ids=["changed-prefix", "identical-prefix"])
+@pytest.mark.parametrize("fault_phase", ["insert", "commit"])
+def test_stale_projection_receipt_cannot_suppress_later_real_user_row(host, monkeypatch, same_projection, fault_phase):
     load, clone, ctx, parent, child, engine = _setup(host, "own_engine", supports_unload=True)
     raw = [
         {"role": "user", "content": "initial real user message"},
         {"role": "assistant", "content": "initial answer"},
     ]
     old_projection = {"role": "user", "content": "approved stop"}
-    new_projection = {"role": "user", "content": "projection for the second compacted view"}
+    new_projection = (old_projection if same_projection else
+                      {"role": "user", "content": "projection for the second compacted view"})
     monkeypatch.setattr(engine, "_compress_bypassed", lambda *args: [old_projection])
     assert child.compress(engine, raw) == [old_projection]
+    repeated = {"role": "user", "content": old_projection["content"]}
+    earlier_answer = {"role": "assistant", "content": "answer to the first real approval"}
+    previous_view = [old_projection, repeated, earlier_answer]
+    child.turn(ctx, previous_view, engine)
     connection = engine._store.connection
     database = engine._store.db_path
     key = "delegate_compaction_outputs:" + hashlib.sha256(child.session_id.encode()).hexdigest()
-    connection.execute(f"""
-        CREATE TEMP TRIGGER deny_projection_invalidation
-        BEFORE INSERT ON metadata WHEN NEW.key = '{key}'
-        BEGIN SELECT RAISE(ABORT, 'injected projection invalidation fault'); END
-    """)
-    connection.commit()
-    monkeypatch.setattr(engine, "_compress_bypassed", lambda *args: [new_projection])
-    assert child.compress(engine, raw) == [new_projection]
-    connection.execute("DROP TRIGGER deny_projection_invalidation")
-    connection.commit()
+    faults = []
+
+    def reject_commit(action, arg, *_):
+        if action == sqlite3.SQLITE_TRANSACTION and arg == "COMMIT":
+            faults.append(arg)
+            return sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK
+
+    def compact_then_arm_fault(*_):
+        if fault_phase == "commit":
+            connection.set_authorizer(reject_commit)
+        return [new_projection]
+
+    if fault_phase == "insert":
+        connection.execute(f"""
+            CREATE TEMP TRIGGER reject_projection_receipt
+            BEFORE INSERT ON metadata WHEN NEW.key = '{key}'
+            BEGIN SELECT RAISE(ABORT, 'injected projection receipt fault'); END
+        """)
+        connection.commit()
+    monkeypatch.setattr(engine, "_compress_bypassed", compact_then_arm_fault)
+    try:
+        retained = child.compress(engine, previous_view)
+        assert retained is previous_view
+        assert not connection.in_transaction
+    finally:
+        connection.set_authorizer(None)
+        if fault_phase == "insert":
+            connection.execute("DROP TRIGGER reject_projection_receipt")
+            connection.commit()
+    if fault_phase == "commit":
+        assert faults == ["COMMIT"]
     ctx.unload()
 
-    # Fresh module: no inherited in-memory hints. The older generated text
-    # now comes from a new user message after the second projection.
+    # A fresh module sees the retained view and the earlier, still-valid receipt.
     next_ctx, _ = load()
     next_ctx.unload = next_ctx.offered._enable_plugin_unload()
     next_parent = clone(next_ctx)
@@ -1013,14 +1041,39 @@ def test_stale_projection_receipt_cannot_suppress_later_real_user_row(host, monk
     next_engine = clone(next_ctx)
     child.start(next_engine)
     answer = {"role": "assistant", "content": "stopped after user approval"}
-    child.turn(next_ctx, [new_projection, old_projection, answer], next_engine)
+    continued = [*retained, dict(repeated), answer]
+    child.turn(next_ctx, continued, next_engine)
+    child.end(next_engine, continued)
 
     with close_connection(sqlite3.connect(database)) as reader:
         recorded = reader.execute(
             "SELECT role, content FROM messages WHERE session_id='child' ORDER BY store_id"
         ).fetchall()
-    assert recorded[-1] == ("assistant", answer["content"])
-    assert ("user", old_projection["content"]) in recorded
+    assert recorded == [(row["role"], row["content"]) for row in [*raw, repeated, earlier_answer, repeated, answer]]
+
+
+def test_detached_child_commit_invalidates_the_same_module_resume_boundary(host, monkeypatch):
+    _, _, ctx, parent, child, old = _setup(host, "own_engine", supports_unload=True)
+    initial = [{"role": "user", "content": "original question"}, {"role": "assistant", "content": "original answer"}]
+    projected = {"role": "user", "content": "condensed history"}
+    monkeypatch.setattr(old, "_compress_bypassed", lambda *args: [projected])
+    assert child.compress(old, initial) == [projected]
+    database = parent._store.db_path
+    live = type(old)(config=old._config, hermes_home=str(old._hermes_home))
+    live._enable_plugin_unload()
+    child.start(live)
+    ctx.unload()
+    late = {"role": "assistant", "content": "retired callback's answer"}
+    fresh = {"role": "user", "content": "new user turn"}
+    try:
+        child.end(old, [projected, late])
+        child.end(live, [projected, late, fresh])
+        with close_connection(sqlite3.connect(database)) as reader:
+            rows = reader.execute("SELECT role, content FROM messages WHERE session_id=? ORDER BY store_id",
+                                  (child.session_id,)).fetchall()
+        assert rows == [(row["role"], row["content"]) for row in [*initial, late, fresh]]
+    finally:
+        live.shutdown()
 
 
 def test_fresh_projection_receipt_keeps_matching_user_row_after_its_prefix(host, monkeypatch):

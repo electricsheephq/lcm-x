@@ -29,6 +29,8 @@ When `/lcm` runs with session context, it compares the task-local session profil
 
 After a plugin reload, a completed-turn callback without a compressor needs a profile-scoped Hermes dispatch and an existing LCM session binding. If LCM cannot establish ownership, it warns and leaves the other profile's database alone. That turn can be absent from LCM even when Hermes still has it in its own session history.
 
+If a delegated child's compaction proof cannot be committed, LCM keeps the child's input history and logs `could not preserve delegated compaction output proof`. This avoids replaying a new compacted view with older proof after reload.
+
 In `engine.py`, `_ensure_storage` opens storage lazily;
 `_bind_storage` creates the message, DAG and lifecycle stores (three core
 connections per bound engine). `clone_for_agent` creates a separate runtime engine,

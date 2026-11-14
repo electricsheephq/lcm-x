@@ -28,6 +28,10 @@ _ACTIVE_ENGINES_BY_CONVERSATION_ID = weakref.WeakValueDictionary()
 logger = logging.getLogger(__name__)
 
 
+class EngineUnloadInProgress(RuntimeError):
+    """A registration closed before it could publish a new clone."""
+
+
 class EngineUnloadGroup:
     """One plugin registration owns its prototype, clones and SQLite work."""
 

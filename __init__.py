@@ -552,6 +552,7 @@ def register(ctx):
     from .engine_registry import (
         ActiveEngineUseResult,
         ActiveEngineUseStatus,
+        EngineUnloadInProgress,
         resolve_active_lcm_engine,
         use_active_lcm_engine,
         use_cold_lcm_engine,
@@ -942,7 +943,10 @@ def register(ctx):
                 with engine._admit_plugin_operation() as admitted:
                     if not admitted:
                         return False
-                    replacement = engine.clone_for_agent()
+                    try:
+                        replacement = engine.clone_for_agent()
+                    except EngineUnloadInProgress:
+                        return False  # Let the callback retry through the current registration.
                     try:
                         replay = use_lcm_engine(replacement, _replay_existing_lane, timeout=None)
                         return replay.used and bool(replay.value)

@@ -1133,30 +1133,34 @@ class DelegateChildMixin:
             self._delegate_child_boundary_digest(identity) for identity in boundary]
 
     def _remember_delegate_child_outputs(self, session_id: str, messages, result) -> None:
+        _DELEGATE_COMPACTION_OUTPUTS[self._delegate_child_key(session_id)] = self._delegate_child_output_digests(
+            session_id, messages, result,
+        )
+
+    def _delegate_child_output_digests(self, session_id: str, messages, result) -> list[bytes]:
         def identities(rows):
             return [self._session_end_prefix_compare_identity(msg, session_id=session_id, recover_markers=False) for msg in rows
                     if isinstance(msg, dict) and not self._matches_ignore_message_patterns(msg)]
         produced = Counter(identities(result)) - Counter(identities(messages))
-        outputs = [self._delegate_child_boundary_digest(identity) for identity in produced.elements()]
-        _DELEGATE_COMPACTION_OUTPUTS[self._delegate_child_key(session_id)] = outputs
+        return [self._delegate_child_boundary_digest(identity) for identity in produced.elements()]
 
     @staticmethod
     def _delegate_child_outputs_key(session_id):
         return "delegate_compaction_outputs:" + hashlib.sha256(session_id.encode()).hexdigest()
 
     def _save_delegate_child_outputs(self, session_id, outputs, view):
-        if getattr(self, "_unload_group", None) is not None:
-            try:
-                prefix = [self._delegate_child_boundary_digest(
-                    self._session_end_prefix_compare_identity(row, session_id=session_id, recover_markers=False),
-                ).hex() for row in view if isinstance(row, dict) and not self._matches_ignore_message_patterns(row)]
-                self._store.write_metadata_json(
-                    [self._delegate_child_outputs_key(session_id)],
-                    json.dumps({"prefix": prefix, "outputs": [output.hex() for output in outputs]}),
-                    skip_unchanged=True,
-                )
-            except Exception:
-                logger.warning("LCM could not preserve delegated compaction output proof", exc_info=True)
+        prefix = [self._delegate_child_boundary_digest(
+            self._session_end_prefix_compare_identity(row, session_id=session_id, recover_markers=False),
+        ).hex() for row in view if isinstance(row, dict) and not self._matches_ignore_message_patterns(row)]
+        store = self._store
+        if store._transaction_owner.owns_connection(store.connection):
+            raise RuntimeError("Delegated output proof needs an independent commit")
+        with store.atomic(immediate=True):
+            store.write_metadata_json(
+                [self._delegate_child_outputs_key(session_id)],
+                json.dumps({"prefix": prefix, "outputs": [output.hex() for output in outputs]}),
+                skip_unchanged=True,
+            )
 
     def _compress_delegate_child_bypassed(self, messages, current_tokens, focus_topic, force):
         session_id = self._bypass_lcm_session_id()
@@ -1179,6 +1183,7 @@ class DelegateChildMixin:
                 return messages
             try:
                 if self._delegate_child_link(session_id, platform=_DELEGATE_SOURCE, require_agent=True):
+                    store_outcome["linked"] = True
                     tail = self._store.get_session_tail(session_id, limit=1)
                     view = [msg for msg in messages
                             if isinstance(msg, dict) and not self._matches_ignore_message_patterns(msg)]
@@ -1197,26 +1202,45 @@ class DelegateChildMixin:
         result = self._compress_bypassed(messages, current_tokens, focus_topic, force)
         if self._compaction_is_closing():
             return messages
+        unload_capable = getattr(self, "_unload_group", None) is not None
+        if unload_capable and (result is messages or not store_outcome.get("linked")):
+            return result
+        needs_proof = unload_capable
         try:
             with _DELEGATE_STORE_LOCK:
+                if self._compaction_is_closing():
+                    return messages
                 # An earlier compaction's outputs never exempt a row once this one has replaced the view.
                 key = self._delegate_child_key(session_id)
-                _DELEGATE_COMPACTION_OUTPUTS.pop(key, None)
-                if self._delegate_child_link(session_id, platform=_DELEGATE_SOURCE, require_agent=True):
-                    try:  # recorded apart from the boundary: it must survive a failed or dropped boundary
-                        # Only over a covered input: a summary of a row that was never stored is that row's only
-                        # trace, so it must be stored like any other row.
-                        if covered:
+                if unload_capable:
+                    # Unstored input can only be recovered from its output, so exempt none of its rows.
+                    outputs = self._delegate_child_output_digests(session_id, messages, result) if covered else []
+                    self._save_delegate_child_outputs(session_id, outputs, result)
+                    needs_proof = False
+                    _DELEGATE_COMPACTION_OUTPUTS[key] = outputs
+                    _DELEGATE_RESUME_BOUNDARIES.pop(key, None)
+                else:
+                    _DELEGATE_COMPACTION_OUTPUTS.pop(key, None)
+                    if not self._delegate_child_link(session_id, platform=_DELEGATE_SOURCE, require_agent=True):
+                        return result
+                    if covered:
+                        try:
                             self._remember_delegate_child_outputs(session_id, messages, result)
-                        self._save_delegate_child_outputs(session_id, _DELEGATE_COMPACTION_OUTPUTS.get(key, ()), result)
-                    except Exception as exc:
-                        self._note_delegate_child_fallback(session_id, f"compaction outputs not recorded: {exc}")
-                    if stored_tail and self._store.get_session_tail(session_id, limit=1) == stored_tail:
-                        self._remember_delegate_child_boundary(session_id, result)
-                    else:
-                        # A concurrent store advanced the tail: its rows must not be replayed from an older boundary.
-                        _DELEGATE_RESUME_BOUNDARIES.pop(self._delegate_child_key(session_id), None)
+                        except Exception as exc:
+                            self._note_delegate_child_fallback(session_id, f"compaction outputs not recorded: {exc}")
+                if stored_tail and self._store.get_session_tail(session_id, limit=1) == stored_tail:
+                    self._remember_delegate_child_boundary(session_id, result)
+                else:
+                    # A concurrent store advanced the tail: its rows must not be replayed from an older boundary.
+                    _DELEGATE_RESUME_BOUNDARIES.pop(key, None)
         except Exception as exc:
+            if needs_proof:
+                logger.warning("LCM could not preserve delegated compaction output proof", exc_info=True)
+                state = self._bypass_compress_state()
+                self._clear_host_fallback_state(state)
+                state["_last_compression_status"] = "noop"
+                state["_last_compression_noop_reason"] = "compaction skipped: output proof not stored"
+                return messages
             self._note_delegate_child_fallback(session_id, f"compression boundary not recorded: {exc}")
         return result
 

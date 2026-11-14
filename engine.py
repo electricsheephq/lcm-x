@@ -49,6 +49,7 @@ from .engine_registry import (
     ActiveEngineUseResult,
     ActiveEngineUseStatus,
     EngineUnloadGroup,
+    EngineUnloadInProgress,
     live_bound_session_ids,
     resolve_active_lcm_engine,  # noqa: F401  (re-exported: hosts import it from .engine)
     use_lcm_engine,
@@ -1224,13 +1225,13 @@ class LCMEngine(
         if group is None:
             return self._clone_for_agent()
         if group.closing.is_set():
-            raise RuntimeError("Cannot clone LCM engine during plugin unload")
+            raise EngineUnloadInProgress("Cannot clone LCM engine during plugin unload")
         # Construction opens no database. Only publish the clone under the
         # group lock so a stalled constructor cannot delay the unload gate.
         clone = self._clone_for_agent()
         with group.lock:
             if group.closing.is_set():
-                raise RuntimeError("Cannot clone LCM engine during plugin unload")
+                raise EngineUnloadInProgress("Cannot clone LCM engine during plugin unload")
             clone._unload_group = group
             group.engines.add(clone)
             return clone
@@ -5215,24 +5216,28 @@ class LCMEngine(
                 or self._session_id_matches_lcm_bypass_filters(session_id, platform=platform or "subagent")):
             return False
         try:
-            with _aux_session._DELEGATE_STORE_LOCK, self._open_retired_store(old_store) as store, store.atomic(immediate=True):
-                sessions = self._delegate_child_store_sessions(session_id, store=store)
-                root = sessions[-1]
-                link = self._stored_delegate_child_link(session_id, store=store)
-                root_link = self._stored_delegate_child_link(root, store=store)
-                parent = root_link.get("parent_session_id")
-                if (not link or not parent or parent in sessions or root_link["source"] == "compression"
-                        or (str(store.db_path), session_id) in _aux_session._DELEGATE_AUXILIARY_IDS
-                        or self._session_id_matches_lcm_bypass_filters(
-                            parent, platform=self._host_session_parent(parent)[1],
-                        )):
-                    return False
-                view = [row for row in messages
-                        if isinstance(row, dict) and not self._matches_ignore_message_patterns(row)]
-                self._append_delegate_child_view(
-                    session_id, view, store=store,
-                    context_window_tokens=old_store.get_context_window_tokens(session_id),
-                )
+            with _aux_session._DELEGATE_STORE_LOCK, self._open_retired_store(old_store) as store:
+                with store.atomic(immediate=True):
+                    sessions = self._delegate_child_store_sessions(session_id, store=store)
+                    root = sessions[-1]
+                    link = self._stored_delegate_child_link(session_id, store=store)
+                    root_link = self._stored_delegate_child_link(root, store=store)
+                    parent = root_link.get("parent_session_id")
+                    key = (str(store.db_path), session_id)
+                    if (not link or not parent or parent in sessions or root_link["source"] == "compression"
+                            or key in _aux_session._DELEGATE_AUXILIARY_IDS
+                            or self._session_id_matches_lcm_bypass_filters(
+                                parent, platform=self._host_session_parent(parent)[1],
+                            )):
+                        return False
+                    view = [row for row in messages
+                            if isinstance(row, dict) and not self._matches_ignore_message_patterns(row)]
+                    stored, _ = self._append_delegate_child_view(
+                        session_id, view, store=store,
+                        context_window_tokens=old_store.get_context_window_tokens(session_id),
+                    )
+                if stored:
+                    _aux_session._DELEGATE_RESUME_BOUNDARIES.pop(key, None)
                 return True
         except Exception:
             logger.debug("LCM retired delegated-child tail write failed", exc_info=True)

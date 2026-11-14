@@ -548,6 +548,38 @@ def test_reloaded_hook_does_not_move_a_lane_back_after_rollover(preflight, monke
         ctx.unload_callbacks[0]()
 
 
+def test_scoped_replay_forwards_when_its_registration_unloads_before_clone(preflight, monkeypatch):
+    monkeypatch.setenv("LCM_SHUTDOWN_COMPACTION_WAIT_S", "0")
+    original, original_ctx = preflight.register(supports_unload=True)
+    old = original.clone_for_agent()
+    old.on_session_start("replayed", platform="cli", conversation_id="continuing")
+    prefix = [{"role": "user", "content": "first prompt"}, {"role": "assistant", "content": "first answer"}]
+    old.ingest(prefix)
+    original_ctx.unload_callbacks[0]()
+    interim, interim_ctx = preflight.register(supports_unload=True)
+    final, final_ctx = preflight.register(supports_unload=True)
+    clone = interim.clone_for_agent
+    transitions = []
+
+    def unload_before_clone():
+        interim_ctx.unload_callbacks[0]()
+        interim_ctx._manager._context_engine = final
+        transitions.append("unloaded")
+        return clone()
+
+    monkeypatch.setattr(interim, "clone_for_agent", unload_before_clone)
+    view = prefix + [{"role": "user", "content": "next prompt"}, {"role": "assistant", "content": "next answer"}]
+    try:
+        interim_ctx.hooks["post_llm_call"](session_id="replayed", platform="cli", conversation_history=view)
+        assert transitions == ["unloaded"]
+        assert _durable_messages(preflight.home / "lcm.db", "replayed") == [
+            (row["role"], row["content"]) for row in view
+        ]
+    finally:
+        final_ctx.unload_callbacks[0]()
+        interim.shutdown()
+
+
 def test_unload_refuses_clone_that_finishes_construction_after_unload(preflight, monkeypatch):
     prototype, ctx = preflight.register(supports_unload=True)
     constructing, release, unloading = threading.Event(), threading.Event(), threading.Event()
