@@ -17,7 +17,7 @@ if os.environ.get("LCM_DIFFERENTIAL") != "1":
 from tests.differential import merged_user_turn_controls as base
 from tests.differential import paired
 from tests.differential.paired import versions  # noqa: F401
-from tests.differential.session import Trace
+from tests.differential.session import Trace, audit_fault, freeze
 from tests.phase0_hygiene import product_env_keys
 
 
@@ -34,8 +34,8 @@ CONTROL_SEEDS = {
 }
 
 
-def _normalise(rows, preserved):
-    return paired.normalise_rows(rows, preserved)
+def _normalise(rows, preserved, reference_rows=()):
+    return paired.normalise_rows(rows, preserved, reference_rows)
 
 
 def _shifted_replay(tmp_path, monkeypatch, trees, record_property, capture):
@@ -67,7 +67,7 @@ def _shifted_replay(tmp_path, monkeypatch, trees, record_property, capture):
             raw[name] = base._identities(engine)
             results[name] = [_normalise(raw[name], {
                 ('user', 'P2\n\nR2', 40., 'parent', 'conv'):
-                ('user', 'R2', 50., 'parent', 'conv')})] if capture else [raw[name]]
+                ('user', 'R2', 50., 'parent', 'conv')}, raw.get('main', ()))] if capture else [raw[name]]
         finally:
             engine.shutdown()
     record_property('stored_rows', json.dumps(raw))
@@ -121,6 +121,8 @@ def _capture_step(ctx, live, step, seed, turn, preserved):
     """Mutate retained host objects identically, independent of product state."""
     if step['capture'] == 'none':
         return live
+    if hasattr(ctx.engine, '_paired_trace'):
+        ctx.engine._paired_trace.capture_kind = step['capture']
     newest, earlier = f'R-{seed}-{turn}', f'P-{seed}-{turn}'
     stamp = float(100 + turn * 10)
     if step['capture'] == 'watched':
@@ -150,9 +152,13 @@ def _capture_step(ctx, live, step, seed, turn, preserved):
 
 def _faults(engine, name, kind, monkeypatch):
     calls = []
+    if kind == 'none':
+        return calls
+    target = '_store_merged_user_aliases' if kind in ('preservation-once', 'persistent') else '_identity_anchor_prematch'
+    present = hasattr(engine, target)
+    if audit_fault(engine, kind, calls, present) or not present:
+        return calls
     if kind in ('preservation-once', 'persistent'):
-        if name != 'candidate' or not hasattr(engine, '_store_merged_user_aliases'):
-            return calls
         original = engine._store_merged_user_aliases
 
         def preserve(*args, **kwargs):
@@ -166,8 +172,8 @@ def _faults(engine, name, kind, monkeypatch):
         original = engine._identity_anchor_prematch
 
         def prematch(*args, **kwargs):
-            if not calls:
-                calls.append(kind)
+            calls.append(kind)
+            if len(calls) == 1:
                 if kind == 'busy':
                     raise sqlite3.OperationalError('database is locked')
                 raise RuntimeError('seeded evidence fault')
@@ -177,7 +183,7 @@ def _faults(engine, name, kind, monkeypatch):
     return calls
 
 
-def _run_sequence(module, name, directory, monkeypatch, seed, plan):
+def _run_sequence(module, name, directory, monkeypatch, seed, plan, references=()):
     ctx = base._open(module, directory, monkeypatch)
     engine = ctx.engine
     live = [base._row('Q', 1., 'assistant'),
@@ -233,7 +239,8 @@ def _run_sequence(module, name, directory, monkeypatch, seed, plan):
                 calls = _faults(engine, name, step['fault'], patch)
                 ingest()
                 faults.append(list(calls))
-            stages.append(_normalise(base._identities(engine), preserved))
+            stages.append(paired.normalise_rows(base._identities(engine), preserved,
+                                               references[len(stages)] if references else ()))
     finally:
         engine.shutdown()
     return stages, faults, host_views, raw_stages
@@ -247,7 +254,7 @@ def _seeded(seed, tmp_path, monkeypatch, differential_versions, record_property)
     results, inputs, raw = {}, {}, {}
     for name in ('main', 'candidate'):
         results[name], faults, inputs[name], raw[name] = _run_sequence(differential_versions[name], name, tmp_path / name,
-                                              monkeypatch, seed, plan)
+                                              monkeypatch, seed, plan, raw.get('main', ()))
         record_property(name + '_faults', json.dumps(faults))
     record_property('host_views', json.dumps(inputs))
     record_property('stored_rows', json.dumps(raw))
@@ -258,24 +265,20 @@ def _seeded(seed, tmp_path, monkeypatch, differential_versions, record_property)
 CASES = [*RANDOM_SEEDS, *CONTROL_SEEDS, 'shifted-replay', 'capture-without-fault']
 
 
-@pytest.fixture(scope='class')
-def sequence(request, tmp_path_factory, versions):  # noqa: F811 - imported fixture
-    case = request.param
-    directory = tmp_path_factory.mktemp(f'merged-{case}')
+def _execute_case(case, directory, versions, stub_faults=False):  # noqa: F811
     traces, properties = {}, []
 
     def record(name, value):
         properties.append((name, value))
 
     with pytest.MonkeyPatch.context() as patch:
-        # Class fixtures run before the repository's per-test environment reset.
         for key in product_env_keys(paired.ROOT):
             patch.delenv(key, raising=False)
         original = base._open
 
         def opened(module, path, monkeypatch):
             key = 'main' if module is versions['main'] else 'candidate'
-            trace = traces.setdefault(key, Trace())
+            trace = traces.setdefault(key, Trace(stub_faults=stub_faults))
             return original(module, path, monkeypatch, trace=trace)
 
         patch.setattr(base, '_open', opened)
@@ -287,6 +290,84 @@ def sequence(request, tmp_path_factory, versions):  # noqa: F811 - imported fixt
             _historical(case, directory, patch, versions, record)
         else:
             _seeded(case, directory, patch, versions, record)
+    return properties, traces
+
+
+def _fault_counts(trace):
+    result = {}
+    for fault in trace.faults:
+        item = result.setdefault(fault['kind'], dict(requested=0, fired=0, inert=0))
+        item['requested'] += 1
+        item['fired'] += len(fault['calls'])
+        item['inert'] += not fault['present']
+    return result
+
+
+def _label_violations(case, trace, stubbed):
+    """Classify by host evidence and an actual fault-free counterfactual."""
+    entries = []
+    violations = trace.violations()
+    clean = {(v['stage'], v['kind'], v['value']): v['count']
+             for v in stubbed.violations()} if stubbed else {}
+    for violation in violations:
+        stage, kind, value, count = (violation[k] for k in ('stage', 'kind', 'value', 'count'))
+        views = trace.ingests[stage - 1]['views']
+        if kind == 'missing':
+            ingest_shown = any(row['role'] == 'user' and row['content'] == value
+                               for view in views if view['kind'] == 'ingest' for row in view['rows'])
+            if not ingest_shown:
+                capture = views[violation['view']]['capture']
+                assert capture in ('proven', 'watched'), (case, violation, views)
+                label = '#2707 ' + capture
+            else:
+                ingests = [view['rows'] for view in views if view['kind'] == 'ingest']
+                assert any(len(b) < len(a) for a, b in zip(ingests, ingests[1:])), (case, violation, views)
+                label = '#1525'
+        else:
+            remaining = clean.get((stage, kind, value), 0)
+            if remaining:
+                fields = dict(value)
+                uid_views = [{row['message_uid'] for row in view['rows']
+                              if row['role'] == 'user' and row['content'] == fields['content']
+                              and row.get('timestamp') == fields['observed_at'] and row.get('message_uid')}
+                             for view in views]
+                uid_views = [uids for uids in uid_views if uids]
+                changed = any(a != b for a in uid_views for b in uid_views)
+                assert fields['role'] == 'user' and changed, (case, violation, uid_views)
+                assert remaining <= count, (case, violation, remaining)
+                entries.append((stage, kind, value, remaining, '#2720 uid change'))
+                count -= remaining
+                if not count:
+                    continue
+            if count:
+                first = next(v['stage'] for v in violations
+                             if v['kind'] == 'duplicate' and v['value'] == value
+                             and v['count'] > clean.get((v['stage'], 'duplicate', value), 0))
+                faults = [f['kind'] for f in trace.faults
+                          if f['stage'] <= first and f['calls'] and f['kind'] in ('busy', 'evidence')]
+                assert faults, (case, violation, trace.faults)
+                label = '#1815 fall-open, ' + faults[-1] + ' fault'
+        entries.append((stage, kind, value, count, label))
+    return entries
+
+
+@pytest.fixture(scope='class')
+def sequence(request, tmp_path_factory, versions):  # noqa: F811 - imported fixture
+    case = request.param
+    directory = tmp_path_factory.mktemp(f'merged-{case}')
+    properties, traces = _execute_case(case, directory, versions)
+    for name, trace in traces.items():
+        counts = _fault_counts(trace)
+        properties.append((name + '_fault_counts', json.dumps(counts)))
+    stubbed = None
+    if any(v['kind'] == 'duplicate' for v in traces['main'].violations()):
+        # Rerun the identical host plan with all fault wrappers disabled.
+        _, clean = _execute_case(case, directory / 'fault-free',
+                                 dict(main=versions['main'], candidate=versions['candidate']), stub_faults=True)
+        stubbed = clean['main']
+        properties.append(('fault_free_violations', json.dumps(stubbed.violations())))
+    labels = _label_violations(case, traces['main'], stubbed)
+    properties.append(('classified_baseline', json.dumps(labels)))
     return case, properties, traces
 
 
@@ -296,19 +377,24 @@ class TestMergedUserTurns:
         case, properties, traces = sequence
         for name, value in properties:
             record_property(name, value)
-        hosts = {name: [stage['host'] for stage in trace.ingests] for name, trace in traces.items()}
+        hosts = {name: [stage['views'] for stage in trace.ingests] for name, trace in traces.items()}
         record_property('all_host_views', json.dumps(hosts))
         record_property('all_stored_rows', json.dumps({
             name: [stage['rows'] for stage in trace.ingests] for name, trace in traces.items()}))
         assert hosts['main'] == hosts['candidate'], 'Differential host inputs must be identical'
+        unfired = [(name, kind, counts) for name, value in properties if name.endswith('_fault_counts')
+                   for kind, counts in json.loads(value).items()
+                   if counts['requested'] > counts['inert'] and not counts['fired']]
+        assert not unfired, f'{case}: requested fault targets did not fire: {unfired}'
         differences = [json.loads(value) for name, value in properties if name == 'differences']
         assert differences and not any(differences), f'{case}: {differences}'
         # The source scenarios retain their own exact substitutions. Historical
         # controls additionally check setup and warm ingests, which the source
         # compared only at selected checkpoints.
         if case in CONTROL_SEEDS or isinstance(case, str):
-            stages = {name: [paired.normalise_rows(stage['rows'], stage['preserved'])
-                             for stage in trace.ingests] for name, trace in traces.items()}
+            stages = {name: [paired.normalise_rows(stage['rows'], stage['preserved'],
+                                                   traces['main'].ingests[index]['rows'])
+                             for index, stage in enumerate(trace.ingests)] for name, trace in traces.items()}
             assert not paired.compare_stages(stages, record_property), case
 
     def test_absolute(self, sequence, record_property):
@@ -317,16 +403,25 @@ class TestMergedUserTurns:
 
         case, properties, traces = sequence
         violations = {name: trace.violations() for name, trace in traces.items()}
+        for name, value in properties:
+            record_property(name, value)
+        record_property('all_host_views', json.dumps({
+            name: [s['views'] for s in trace.ingests] for name, trace in traces.items()}))
+        record_property('all_stored_rows', json.dumps({
+            name: [s['rows'] for s in trace.ingests] for name, trace in traces.items()}))
         record_property('absolute_violations', json.dumps(violations))
         record_property('binding_diagnostics', json.dumps({
             name: [s['binding_diagnostics'] for s in trace.ingests] for name, trace in traces.items()}))
-        counters = {name: Counter((v['stage'], v['kind'], repr(v['value']))
+        counters = {name: Counter((v['stage'], v['kind'], freeze(v['value']), v.get('view'))
                                  for v in rows for _ in range(v['count']))
                     for name, rows in violations.items()}
-        pinned = Counter((stage, kind, repr(value)) for stage, kind, value, count, label
+        classified = next(json.loads(value) for name, value in properties if name == 'classified_baseline')
+        actual_pin = Counter((stage, kind, freeze(value), label)
+                             for stage, kind, value, count, label in classified for _ in range(count))
+        pinned = Counter((stage, kind, freeze(value), label) for stage, kind, value, count, label
                          in EXPECTED.get(case, ()) for _ in range(count))
         effective = os.environ.get('LCMX_DIFF_BASELINE_REF', BASELINE_REF)
-        matches = counters['main'] == pinned
+        matches = actual_pin == pinned
         record_property('baseline_pin', json.dumps(dict(ref=effective, matches=matches,
                         skipped=None if effective == BASELINE_REF else 'baseline override')))
         subset = not (counters['candidate'] - counters['main'])

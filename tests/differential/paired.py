@@ -43,7 +43,7 @@ def versions(tmp_path_factory):
     }
 
 
-def normalise_rows(rows, preserved=None):
+def normalise_rows(rows, preserved=None, reference_rows=()):
     """Replace only explicitly proven exact tuples; never remove a row."""
     preserved = preserved or {}
     result = []
@@ -62,8 +62,13 @@ def normalise_rows(rows, preserved=None):
                         continue
                     fields.update(content=target['content'], observed_at=target['observed_at'])
                 else:
+                    proposed = dict(fields, content=target[1], observed_at=target[2])
+                    exact = tuple(sorted(proposed.items()))
+                    if exact not in reference_rows:
+                        result.append(row)
+                        continue
                     assert (short[0], *short[3:]) == (target[0], *target[3:])
-                    fields.update(content=target[1], observed_at=target[2])
+                    fields = proposed
                 row = tuple(sorted(fields.items()))
         else:
             target = preserved.get(row, row)

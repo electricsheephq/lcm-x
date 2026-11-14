@@ -10,7 +10,7 @@ import sqlite3
 import sys
 
 from tests.differential.paired import compare_stages as _compare_round2, normalise_rows
-from tests.differential.session import _capture, _identities, _open, _row, _rows
+from tests.differential.session import _capture, _identities, _open, _row, _rows, audit_fault
 
 
 def test_round2_existing_alias_fallback_matches_main(tmp_path, monkeypatch, versions,
@@ -50,7 +50,9 @@ def test_round2_existing_alias_fallback_matches_main(tmp_path, monkeypatch, vers
             previous = _identities(engine)
             live = _capture(ctx, live)
             calls = []
-            if name == 'candidate' and hasattr(engine, '_store_merged_user_aliases'):
+            present = hasattr(engine, '_store_merged_user_aliases')
+            stub = audit_fault(engine, 'preservation-once', calls, present)
+            if present and not stub:
                 original = engine._store_merged_user_aliases
 
                 def once(*args, **kwargs):
@@ -69,7 +71,7 @@ def test_round2_existing_alias_fallback_matches_main(tmp_path, monkeypatch, vers
             # failed turn and every additional row must be identical to main.
             if not seed_alias:
                 stored = normalise_rows(stored, {('user', 'P1\n\nR', 10., 'parent', 'conv'):
-                                                  ('user', 'R', 20., 'parent', 'conv')})
+                                                  ('user', 'R', 20., 'parent', 'conv')}, results.get('main', [[]])[-1])
             results[name] = [stored]
         finally:
             engine.shutdown()
@@ -91,7 +93,9 @@ def test_round2_fallback_then_again_matches_main(tmp_path, monkeypatch, versions
             engine.ingest([q])
             live = _capture(ctx, [q], 'password=fake-test-value' if failure == 'redaction' else 'P1',
                             'R', 10., 20.)
-            if name == 'candidate' and hasattr(engine, '_store_merged_user_aliases'):
+            present = hasattr(engine, '_store_merged_user_aliases')
+            stub = audit_fault(engine, 'preservation-once', attempts, present)
+            if present and not stub:
                 original = engine._store_merged_user_aliases
 
                 def fail(*args, **kwargs):
@@ -126,6 +130,8 @@ def test_round3_watched_capture_stays_retired_after_eviction(tmp_path, monkeypat
         try:
             q, head = _row('Q', 9., 'assistant'), _row('P1', 10.)
             engine.ingest([q, head])
+            if hasattr(engine, '_paired_trace'):
+                engine._paired_trace.capture_kind = 'watched'
             ctx.hooks['pre_llm_call'](session_id='parent', conversation_id='conv', user_message='R',
                                       conversation_history=[q, head, _row('P2', 15.), _row('R', 20.)])
             head.update(content='R', timestamp=20.)
@@ -157,7 +163,11 @@ def _seed_round3_aliases(engine):
 
 
 def _fail_round3_preservation_once(engine, monkeypatch):
-    calls, original = [], engine._store_merged_user_aliases
+    calls = []
+    present = hasattr(engine, '_store_merged_user_aliases')
+    if audit_fault(engine, 'preservation-once', calls, present) or not present:
+        return calls
+    original = engine._store_merged_user_aliases
 
     def once(*args, **kwargs):
         calls.append(1)
@@ -191,8 +201,7 @@ def test_round3_rewritten_prefix_drops_false_fallback_marks(tmp_path, monkeypatc
                     dict(initial[3], content='R', timestamp=40.), initial[4]]
             engine.ingest(live)
             incoming = _capture(ctx, [_row('summary', 1., 'assistant'), live[3], live[4]])
-            if name == 'candidate' and hasattr(engine, '_store_merged_user_aliases'):
-                calls = _fail_round3_preservation_once(engine, monkeypatch)
+            calls = _fail_round3_preservation_once(engine, monkeypatch)
             engine.ingest(incoming)
             results[name] = [_identities(engine)]
             if name == 'candidate' and hasattr(engine, '_store_merged_user_aliases'):
@@ -227,7 +236,7 @@ def test_round3_new_uid_keeps_host_time_through_fallback(tmp_path, monkeypatch, 
                 sender = sys.modules[engine.__module__.rsplit('.', 1)[0] + '.sender_capture']
                 projection = sender.merged_user_projection(engine, incoming)
                 projected_stamps[name], fallback_stamps[name] = projection[0][0]['timestamp'], projection[3][0]['timestamp']
-                calls = _fail_round3_preservation_once(engine, monkeypatch)
+            calls = _fail_round3_preservation_once(engine, monkeypatch)
             engine.ingest(incoming)
             results[name] = [_identities(engine)]
             cache_stamps[name] = engine._last_active_replay_messages[0]['timestamp']
@@ -260,12 +269,15 @@ def test_round2_fallback_has_own_evidence_retry(tmp_path, monkeypatch, versions,
             engine.ingest(initial)
             live = _capture(ctx, [*initial[:3], _row('I', 3.5), initial[3]])
             fallen_back, calls = [], []
-            if name == 'candidate' and hasattr(engine, '_store_merged_user_aliases'):
+            present = hasattr(engine, '_store_merged_user_aliases')
+            stub = audit_fault(engine, 'persistent', fallen_back, present)
+            if present and not stub:
                 def fail_alias(*_args, **_kwargs):
                     fallen_back.append(1)
                     raise ValueError('injected preservation failure')
 
                 monkeypatch.setattr(engine, '_store_merged_user_aliases', fail_alias)
+            audit_fault(engine, 'evidence', calls, hasattr(engine, '_identity_anchor_prematch'))
             original = engine._identity_anchor_prematch
 
             def prematch(*args, **kwargs):
