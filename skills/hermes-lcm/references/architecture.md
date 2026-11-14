@@ -42,7 +42,9 @@ requires a nonempty recognized `LCM_SENSITIVE_PATTERNS` catalog; canonicalizes e
 placeholders; replaces matches with pattern-only placeholders; scans for residual matches;
 and fails closed before transport on any invalid state. `LCM_EMBEDDING_PRIVACY_ENABLED=false`
 is an explicit opt-out that dispatches raw input under the `privacy:off` revision. Optional
-Voyage reranking is covered by the same resolution. A privacy-policy error on the
+Voyage reranking is covered by the same resolution. If plugin unload closes worker
+admission before reranking starts, `lcm_recall` keeps the existing hit order without
+dispatching to Voyage. A privacy-policy error on the
 `lcm_recall` path (an invalid catalog, a residual match, dispatch-time drift) raises; it is
 never a silent degrade to full-text. A stale vector identity is different: when no active
 cloud profile matches, or the stored vectors carry an older privacy revision, `lcm_recall`

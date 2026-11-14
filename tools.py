@@ -1961,6 +1961,8 @@ def _run_within_deadline(
     ``remaining_s`` is the time left in the operation's single absolute
     deadline. On timeout the worker is abandoned but keeps its slot until it
     finishes, so stuck workers cannot accumulate without bound.
+    Retrieval callers must pass their engine so unload can gate the worker's
+    access to storage and provider dispatch. Legacy engines have no unload group.
     """
     remaining_s = float(remaining_s)
     if remaining_s <= 0:
@@ -4270,7 +4272,7 @@ def _lcm_recall_rerank(
     *,
     window: int,
     deadline: float,
-    config: Any,
+    engine: "LCMEngine",
 ) -> tuple[list[dict[str, Any]], str, list[list[Any]]]:
     """Optionally REORDER the top ``window`` fused candidates in ONE API call.
 
@@ -4286,6 +4288,7 @@ def _lcm_recall_rerank(
     order with a ``skipped: <reason>`` status. Privacy-policy failures remain
     loud, matching the cloud query-embedding path.
     """
+    config = engine._config
     if not bool(getattr(config, "rerank_enabled", False)):
         return ordered, "disabled", []
     if (
@@ -4336,6 +4339,7 @@ def _lcm_recall_rerank(
             invoke,
             remaining_s=deadline - time.monotonic(),
             name="lcm-recall-rerank",
+            engine=engine,
         )
     except EmbeddingPrivacyPolicyError:
         raise
@@ -5391,7 +5395,7 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
     # -- Optional rerank stage (default OFF): a pure rank-REORDER within the top
     #    window of the post-prior order (no score splicing onto the RRF scale). --
     ordered, rerank_status, rerank_scores = _lcm_recall_rerank(
-        provider, query, ordered, window=rerank_window, deadline=deadline, config=engine._config
+        provider, query, ordered, window=rerank_window, deadline=deadline, engine=engine,
     )
 
     # -- FTS anchor slot (#950), after rerank so rerank cannot undo it. Inert
