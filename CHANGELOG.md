@@ -6,7 +6,7 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
-## v0.30.1 (nothing lost, part 2)
+## v0.30.1 (nothing lost, part 2; turn recovery is opt-in)
 
 - Changed (rc2): the #2042 and #2624 recovery paths, and the #2042 check at a session's first ingest, are off by
   default (`LCM_HOST_ROW_RECOVERY_ENABLED`, default `false`). rc1's checks found, on two-engine shapes, a duplicate
