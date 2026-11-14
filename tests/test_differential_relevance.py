@@ -248,7 +248,10 @@ def test_engine_import_closure_is_listed_or_documented_excluded() -> None:
     )
     assert not newly_reached, (
         "Newly reached exclusions: re-audit their written reason in scripts/maintainer_gate.py, "
-        "then add them to ENGINE_REACHED_EXCLUSIONS:\n" + "\n".join(sorted(newly_reached))
+        "then add them to ENGINE_REACHED_EXCLUSIONS. If observe() in "
+        "tests/differential/record_contract.py reaches one at runtime, also add it to "
+        "DIFFERENTIAL_ONLY_FILES in tests/test_differential_workflow.py:\n"
+        + "\n".join(sorted(newly_reached))
     )
     assert not no_longer_reached, (
         "No longer a reached exclusion (not reached, or no longer excluded): "
