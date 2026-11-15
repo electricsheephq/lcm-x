@@ -15,6 +15,7 @@ from tests.test_issue_2055_ingest_ledger_writes import engines as engines
 from tests.invariants.test_issue_2543_cold_inline_block import _call
 from tests.invariants.test_issue_2539_offcurrent_marker_end import _setup, _changed_marker_view
 from tests.invariants.test_p1e_cold_tails import fail_end_read, committed_rows
+from tests.invariants.test_issue_2736_end_busy_rollback_fail import end_with_busy, tail_contents
 from tests.test_issue_2729_fallback_gates import cold as cold  # noqa: F401  (fixture)
 from tests.test_issue_2729_fallback_gates import HISTORY, STALE, VIEW, busy as busy_atomic
 from tests.test_issue_2729_offcurrent_end_after_restart import _start
@@ -24,6 +25,76 @@ CELLS = [(shape, route) for shape in ("wrapped-base64", "data-uri-key")
          for route in ("cold-pairwise", "cold-counted")]
 CELLS += [(location, route) for location in ("spillover", "hermes-results")
           for route in ("direct", "busy")]
+
+
+@pytest.mark.parametrize("change", ["stamp", "uid", "unchanged"])
+@pytest.mark.parametrize("failure", ["stores", "append-interrupt", "busy"])
+def test_occurrence_change_below_cursor_warns(engines, monkeypatch, caplog, record_property, change, failure):
+    engine = engines()
+    history = _precision_history()[:4]
+    for i, row in enumerate(history):
+        row["message_uid"] = f"u-{i + 1}"
+    engine.ingest(copy.deepcopy(history))
+    before = engine._store.get_session_messages("S")
+    assert engine._ingest_cursor == 4 and not engine._ingest_cursor_needs_reconcile
+    end = copy.deepcopy(history)
+    if change == "stamp":
+        end[-1]["timestamp"] = 9.0
+    elif change == "uid":
+        end[-1]["message_uid"] = "u-9"
+    assert [engine._message_replay_identity(m, strip_carrier=False) for m in end] == (
+        engine._last_active_replay_source_identities)
+    append_calls = []
+
+    def interrupt(batch):
+        append_calls.append(len(batch["messages"]))
+        raise KeyboardInterrupt
+
+    def busy(*args, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    caplog.clear()
+    with monkeypatch.context() as patch:
+        if failure == "append-interrupt":
+            patch.setattr(engine, "_append_ingest_batch", interrupt)
+        elif failure == "busy":
+            patch.setattr(engine, "_ingest_messages", busy)
+        assert engine.on_session_end("S", copy.deepcopy(end)) is None
+    changed = change != "unchanged"
+    if failure == "stores":
+        expected = [m["content"] for m in history] + ([end[-1]["content"]] if changed else [])
+        assert _record_precision_rows(engine, record_property) == expected
+        assert not _warnings(caplog)
+    else:
+        reason = "foreground_ingest_interrupted" if failure == "append-interrupt" else "foreground_ingest_busy_unqueued"
+        expected = [f"LCM session-end rows not stored: session=S reason={reason} view_rows=4"] if changed else []
+        assert _warnings(caplog) == expected, f"occurrence={change}: {reason} view_rows=4 expected={expected}"
+        assert engine._store.get_session_messages("S") == before
+        assert not engine._pending_session_tails
+        if failure == "append-interrupt":
+            assert append_calls == ([1] if changed else [])
+        _record_precision_rows(engine, record_property)
+
+
+@pytest.mark.parametrize("rollback_fails", [True, False])
+def test_frozen_tail_requires_pending_warm_tail(engines, monkeypatch, caplog, record_property, rollback_fails):
+    engine = engines()
+    caplog.clear()
+    # The #2736 helper uses the real RollbackProxy: rollback runs, then raises.
+    end_with_busy(engine, monkeypatch, rollback_fails=rollback_fails)
+    assert engine.__dict__.get("_frozen_tail_reached")
+    assert _record_precision_rows(engine, record_property) == ["A", "B"]
+    if rollback_fails:
+        assert not engine._pending_session_tails and not tail_contents(engine)
+        assert "SQLite rollback failed" in caplog.text
+        expected = ["LCM session-end rows not stored: session=S "
+                    "reason=foreground_ingest_busy_unqueued view_rows=4"]
+        assert _warnings(caplog) == expected, "failed rollback: foreground_ingest_busy_unqueued view_rows=4 required"
+    else:
+        assert any(t["kind"] == "warm" and t["session_id"] == "S" and t["store"] is engine._store
+                   for t in engine._pending_session_tails)
+        assert tail_contents(engine) == ["C", "D"]
+        assert not _warnings(caplog)
 
 
 def _precision_history():

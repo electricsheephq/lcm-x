@@ -5745,12 +5745,15 @@ class LCMEngine(
         unflushed = "unknown" if self._ingest_cursor_needs_reconcile else max(0, len(messages) - self._ingest_cursor)
         last_identities = getattr(self, "_last_active_replay_source_identities", None)
         last_identities = list(last_identities) if unflushed == 0 and last_identities is not None else None
+        last_replay = list(getattr(self, "_last_active_replay_messages", None) or ()) if last_identities is not None else None
 
         def fully_stored():
             # The cursor is only a length; a host can rewrite a row below it.
             try:
-                return unflushed == 0 and [self._message_replay_identity(m, strip_carrier=False)
-                                           for m in messages] == last_identities
+                return (unflushed == 0 and [self._message_replay_identity(m, strip_carrier=False)
+                                            for m in messages] == last_identities
+                        and len(last_replay) == len(messages)
+                        and not any(self._host_occurrence_changed(m, p) for m, p in zip(messages, last_replay)))
             except Exception:
                 return False
 
@@ -5792,8 +5795,9 @@ class LCMEngine(
                     return
                 except Exception as exc:
                     if _is_ingest_busy_error(exc):
-                        if not fully_stored() and len(self._pending_session_tails) == pending_before and not self.__dict__.get(
-                                "_frozen_tail_reached") and not any(
+                        if not fully_stored() and len(self._pending_session_tails) == pending_before and not (self.__dict__.get(
+                                "_frozen_tail_reached") and any(t.get("kind") == "warm" and t.get("session_id") == session_id
+                                and t.get("store") is self._store for t in self._pending_session_tails)) and not any(
                                 t.get("session_id") == session_id
                                 and t.get("store") is self._store
                                 and t.get("conversation_id") == self._conversation_id
