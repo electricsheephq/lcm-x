@@ -8,6 +8,9 @@ Frozen in the product PR's diff: check_stage, active, expected_record, projectio
 mandatory_floor, judge(), the records-v1 block in test_paired_merged_user_turns.py,
 and the snapshot shape (session.py: canonical_rows, queued_rows, Trace.stored,
 RECORD_COLUMNS, zero-based ordinal and host_message_timestamp provenance).
+The frozen listing_projection input uses that stage's projection in records-v1
+and no records in main; judge requires exact record content, multiplicity and
+positions. check_stage independently validates the stored projection's records.
 Only observe()'s tool-call adapters may change, keeping the same observations.
 Observation rows have role, content and kind: canonical has store_id; record has
 owner_store_id and ordinal. Search hits also have reference={tool, args} and an
@@ -188,6 +191,11 @@ def judge(observations, entries):
             preceding = next((r for r in reversed(pages[:index]) if r['kind'] == 'canonical'), {})
             assert following.get('store_id') == row['owner_store_id'] \
                 and preceding.get('store_id', -1) < row['owner_store_id'], 'record owner placement'
+    def listed_records(rows):
+        return [(index, row['owner_store_id'], row['ordinal'], row['role'], row['content'])
+                for index, row in enumerate(rows) if 'owner_store_id' in row]
+    assert listed_records(pages) == listed_records(observations['listing_projection']), \
+        'listing shows an undeclared record'
     return failures
 
 

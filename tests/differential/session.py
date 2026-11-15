@@ -349,8 +349,8 @@ def _open(module, directory, monkeypatch, trace=None, fake=False):
             result = ingest(messages, *args, **kwargs)
             trace.stored(engine, host, messages, prepared)
             if hasattr(trace, 'case'):
-                from .record_contract import declarations, observe, judge
-                from .paired import BASELINE_REF
+                from .record_contract import declarations, observe, judge, projection
+                from .paired import BASELINE_REF, CANDIDATE_CONTRACT
                 baseline = getattr(trace, 'baseline_stages', trace.ingests)[:len(trace.ingests)]
                 entries = declarations(trace.case, baseline, BASELINE_REF)
                 # Report stored corruption before its downstream listing symptom.
@@ -362,6 +362,9 @@ def _open(module, directory, monkeypatch, trace=None, fake=False):
                     if hasattr(trace, 'baseline_stages') else observation['summary_sources'])
                 trace.ingests[-1]['summary_sources'] = observation['summary_sources']
                 observation['reload_witness'] = baseline[-1]['reload_witness']
+                listing = trace.ingests[-1] if hasattr(trace, 'baseline_stages') \
+                    and CANDIDATE_CONTRACT == 'records-v1' else dict(canonical=baseline[-1]['canonical'], records=[])
+                observation['listing_projection'] = [dict(row) for row in projection(listing)]
                 trace.ingests[-1]['retrieval_missing'] = judge(observation, entries)
             return result
 

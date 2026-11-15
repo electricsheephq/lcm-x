@@ -554,6 +554,7 @@ class TestMergedUserTurns:
     ('correct', None), ('per-owner', None), ('retry', None),
     ('listing', 'canonical listing changed'), ('missing', 'declared record multiset'), ('extra', 'declared record multiset'),
     ('listing-content', 'canonical listing changed'),
+    ('listing-extra', 'listing shows an undeclared record'),
     ('text', 'declared record multiset'), ('time', 'declared record multiset'), ('duplicate', 'declared record multiset'),
     ('hidden', 'retrieval-missing'), ('superseded', 'superseded without occurrence witness'),
     ('inert', 'declared fault preservation-once never fired'), ('skipped', 'floor skipped'),
@@ -605,16 +606,22 @@ def test_fake_record_contract(mutation, message, tmp_path, versions, monkeypatch
                           lambda *_a, **_k: json.dumps(dict(error='injected tool error')))
         if mutation == 'hidden':
             patch.setattr(tools, 'lcm_grep', lambda *_a, **_k: json.dumps(dict(results=[])))
-        if mutation in ('listing', 'listing-content'):
+        if mutation in ('listing', 'listing-content', 'listing-extra'):
             load = tools.lcm_load_session
             def drop(args, **kwargs):
                 reply = json.loads(load(args, **kwargs))
                 if mutation == 'listing':
                     reply['messages'] = [r for r in reply['messages'] if r.get('store_id') != 1]
-                else:
+                elif mutation == 'listing-content':
                     for row in reply['messages']:
                         if row.get('store_id') == 1 and 'owner_store_id' not in row:
                             row['content'] = ''
+                else:
+                    for index, row in enumerate(reply['messages']):
+                        if row.get('store_id') == 1 and 'owner_store_id' not in row:
+                            reply['messages'].insert(index, dict(owner_store_id=1, ordinal=999,
+                                                                role='user', content='invented queued message'))
+                            break
                 return json.dumps(reply)
             patch.setattr(tools, 'lcm_load_session', drop)
         return tools
