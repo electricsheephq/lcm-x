@@ -1,5 +1,5 @@
 # Dependabot keeps the commit-pinned GitHub Actions current.
-# One grouped pull request a month. A new action release waits 7 days before Dependabot proposes it
+# Checked monthly. A new action release waits 7 days before Dependabot proposes it
 # (the cool-down applies to version updates, not security updates).
 # Python dependencies get security updates only, from the repository's Dependabot security-updates
 # setting: requirements-semantic.txt must keep the companion plugin's range (regression-tested), so
