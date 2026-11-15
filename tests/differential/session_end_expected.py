@@ -1,4 +1,4 @@
-"""Pinned a42baa75 outcomes. Loss labels grant no parity waiver.
+"""Pinned 5866a853 outcomes. Loss labels grant no parity waiver.
 
 A fix PR lists (case, mode or '*', stage, key, issue) in INTENDED_DIFFERENCES.
 Each entry must differ; the next PR moves BASELINE to that merge commit and
@@ -14,7 +14,7 @@ The PR fixing #2736, #2737 or #2738 also deletes its CONTROL_LOSSES label.
 LCMX_DIFF_SESSION_END_BASELINE overrides the pin locally;
 CI keeps the pinned SHA.
 """
-BASELINE = 'a42baa75e39a0085685b2b368e234fc631bac995'
+BASELINE = '5866a853debbf342923ddf2df24a543e67c4f3e2'
 INTENDED_DIFFERENCES = []
 SHRINKING_TABLES = {'ingest_views': 'ingest_ledger.py _prune_views keeps only the last two views per kind.',
                     'lineage_marks': 'ingest_ledger.merge_provisional deletes the provisional lineage mark.'}
