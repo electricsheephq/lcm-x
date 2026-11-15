@@ -1186,7 +1186,7 @@ def register(ctx):
                     if (retired is not None and retired._db_path == engine._db_path
                             and _resolved_profile_home(retired._hermes_home)
                             == _resolved_profile_home(engine._hermes_home)):
-                        retired._confirm_empty_retired_cli_reset(session_id)
+                        retired._note_retired_cli_reset_hook(session_id)
 
                 try:
                     register_hook("on_session_reset", _on_cli_reset)

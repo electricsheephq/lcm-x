@@ -372,19 +372,26 @@ def test_retained_cli_reset_starts_a_new_lane_in_the_current_registration(prefli
 
 
 @pytest.mark.parametrize(
-    "source, parent_id, reset_event, stores_replacement",
+    "source, parent_id, reset_event, native_timing, stores_replacement",
     [
-        pytest.param("cli", None, {}, True, id="empty-cli"),
-        pytest.param("desktop", None, {}, True, id="source-override"),
-        pytest.param("cli", None, None, False, id="missing-hook"),
-        pytest.param("cli", None, {"session_id": "unrelated"}, False, id="wrong-session"),
-        pytest.param("cli", None, {"platform": "desktop"}, False, id="wrong-platform"),
-        pytest.param("cli", None, {"reason": "resume"}, False, id="wrong-reason"),
-        pytest.param("cli", "unrelated", {}, False, id="child"),
+        pytest.param("cli", None, {}, "normal", True, id="empty-cli"),
+        pytest.param("desktop", None, {}, "normal", True, id="source-override"),
+        pytest.param("cli", None, None, "delayed", False, id="missing-hook"),
+        pytest.param("cli", None, {"session_id": "unrelated"}, "delayed", False, id="wrong-session"),
+        pytest.param("cli", None, {"platform": "desktop"}, "normal", False, id="wrong-platform"),
+        pytest.param("cli", None, {"reason": "resume"}, "normal", False, id="wrong-reason"),
+        pytest.param("cli", "unrelated", {}, "delayed", False, id="child"),
+        pytest.param("cli", None, {}, "delayed", True, id="late-create"),
+        pytest.param("cli", None, {}, "busy-at-bind", True, id="busy-at-bind"),
+        pytest.param("cli", None, {}, "busy-at-hook", True, id="busy-at-hook"),
+        pytest.param("cli", None, {}, "preexisting", False, id="preexisting-target"),
+        pytest.param("cli", None, {}, "busy-preexisting", False, id="unknown-preexisting-target"),
+        pytest.param("cli", None, {}, "foreign-hook", False, id="wrong-profile"),
+        pytest.param("cli", None, {}, "superseded", False, id="superseded-target"),
     ],
 )
 def test_retained_empty_cli_reset_requires_exact_host_confirmation(
-    preflight, source, parent_id, reset_event, stores_replacement,
+    preflight, monkeypatch, source, parent_id, reset_event, native_timing, stores_replacement,
 ):
     prototype, old_ctx = preflight.register(supports_unload=True)
     retained = prototype.clone_for_agent()
@@ -400,29 +407,58 @@ def test_retained_empty_cli_reset_requires_exact_host_confirmation(
         old_ctx.unload_callbacks[0]()
         _, ctx = preflight.register(supports_unload=True, manager=old_ctx._manager)
         try:
-            # An empty CLI /new ends and discards the old row, calls the engine reset and
-            # bind methods, creates the new row, then emits the native reset hook.
+            # Hermes CLISessionMixin.new_session discards the empty row, calls the
+            # engine reset and bind methods, and emits the reset hook even if its
+            # first create_session call fails. The agent retries on the next turn.
+            def create_replacement(started_at):
+                with native:
+                    native.execute(
+                        "INSERT INTO sessions VALUES ('fresh', ?, ?, ?, NULL, NULL)",
+                        (source, parent_id, started_at),
+                    )
+
             with native:
                 native.execute("DELETE FROM sessions WHERE id = 'empty'")
+            preexisting = native_timing in ("preexisting", "busy-preexisting")
+            if preexisting:
+                create_replacement(time.time() - 60)
             retained.on_session_reset()
-            retained.bind_session_state(SimpleNamespace(db_path=host_path), "fresh")
             with native:
-                native.execute(
-                    "INSERT INTO sessions VALUES ('fresh', ?, ?, ?, NULL, NULL)",
-                    (source, parent_id, 3),
-                )
+                if native_timing in ("busy-at-bind", "busy-preexisting"):
+                    native.execute("BEGIN EXCLUSIVE")
+                retained.bind_session_state(SimpleNamespace(db_path=host_path), "fresh")
+            if not preexisting and native_timing != "delayed":
+                create_replacement(time.time())
             db = preflight.home / "lcm.db"
             fresh = [{"role": "user", "content": "after /new"}, {"role": "assistant", "content": "fresh answer"}]
             post_llm = ctx.hooks["post_llm_call"]
             post_llm(session_id="fresh", platform="cli", conversation_history=fresh)
             assert _durable_messages(db, "fresh") == []
+            if native_timing == "superseded":
+                retained.bind_session_state(SimpleNamespace(db_path=host_path), "newer")
             on_reset = ctx.hooks.get("on_session_reset")
             if reset_event is not None and on_reset is not None:
                 event = {"session_id": "fresh", "platform": "cli", "reason": "new_session"}
-                on_reset(**(event | reset_event))
-            for _ in range(2):
+                with native, monkeypatch.context() as patch:
+                    if native_timing == "busy-at-hook":
+                        native.execute("BEGIN EXCLUSIVE")
+                    if native_timing == "foreign-hook":
+                        patch.setattr(ctx._manager, "home_path", preflight.home.parent / "another-profile")
+                    on_reset(**(event | reset_event))
+            if native_timing == "delayed":
                 post_llm(session_id="fresh", platform="cli", conversation_history=fresh)
-            expected = [(row["role"], row["content"]) for row in fresh] if stores_replacement else []
+                assert _durable_messages(db, "fresh") == []
+                create_replacement(time.time())
+            for index in range(3):
+                post_llm(session_id="fresh", platform="cli", conversation_history=fresh)
+                expected = [(row["role"], row["content"]) for row in fresh] if stores_replacement else []
+                assert _durable_messages(db, "fresh") == expected
+                if index != 2:
+                    fresh.extend([{"role": "user", "content": f"next question {index}"},
+                                  {"role": "assistant", "content": f"next answer {index}"}])
+            post_llm(session_id="fresh", platform="cli", conversation_history=fresh)
+            if stores_replacement:
+                retained.on_session_end("fresh", fresh)
             assert _durable_messages(db, "fresh") == expected
             assert _durable_messages(db, "empty") == _durable_messages(db, "unrelated") == []
         finally:

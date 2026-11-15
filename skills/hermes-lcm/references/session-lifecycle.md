@@ -65,6 +65,12 @@ cannot use this path to replace the foreground or reset its ingest position.
 Initially ignored or stateless sessions can pass the same empty-reset proof;
 the target session filters are applied at the new bind.
 
+After plugin reload, an empty CLI `/new` also needs Hermes to emit
+`on_session_reset` with `reason="new_session"` for the nominated replacement
+in the same profile. LCM-X remembers that event and retries the native row
+check on a later callback if `state.db` was busy or Hermes creates the row
+on the next turn.
+
 An empty, missing or `None` id is a detach request and raises
 `NotImplementedError` without changing the binding. Hosts with
 `agent/background_review.py::_detach_fork_compression` catch this refusal and

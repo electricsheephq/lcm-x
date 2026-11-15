@@ -4720,16 +4720,18 @@ class LCMEngine(
                         and session_id != retired._session_id
                         and not self._thread_context_stateless()
                         and not self._thread_context_has_auxiliary_session(session_id)):
-                    if previous := getattr(self, "_retired_session_start", None):
-                        if previous == session_id and starts.get(previous) is self:
-                            return
-                        if starts.get(previous) is self:
-                            starts.pop(previous, None)
-                    self._retired_session_start = session_id
-                    self._retired_cli_reset_confirmed = None
-                    rows = self._retired_cli_reset_rows(retired._session_id, session_id)
-                    self._retired_cli_reset_target_was_absent = rows == (None, None)
-                    starts[session_id] = self
+                    with self._storage_lock:
+                        if previous := getattr(self, "_retired_session_start", None):
+                            if previous == session_id and starts.get(previous) is self:
+                                return
+                            if starts.get(previous) is self:
+                                starts.pop(previous, None)
+                        self._retired_session_start = session_id
+                        self._retired_cli_reset_hook = None
+                        self._retired_cli_reset_nominated_at = time.time()
+                        rows = self._retired_cli_reset_rows(retired._session_id, session_id)
+                        self._retired_cli_reset_target_was_absent = None if rows is None else rows == (None, None)
+                        starts[session_id] = self
                 return
             if session_db is not None:  # a call without a handle keeps the one already held
                 self._host_session_db = session_db
@@ -5515,22 +5517,13 @@ class LCMEngine(
             logger.debug("LCM could not verify the retired engine's CLI reset", exc_info=True)
             return None
 
-    def _confirm_empty_retired_cli_reset(self, session_id):
+    def _note_retired_cli_reset_hook(self, session_id):
         with self._storage_lock:
-            if (getattr(self, "_retired_session_start", None) != session_id
-                    or not getattr(self, "_retired_cli_reset_target_was_absent", False)):
-                return
-            retired = self._reload_successor or self
-            if self._empty_cli_reset_is_proven(retired, session_id):
-                self._retired_cli_reset_confirmed = (retired._session_id, session_id)
+            if getattr(self, "_retired_session_start", None) == session_id:
+                retired = self._reload_successor or self
+                self._retired_cli_reset_hook = (retired._session_id, session_id)
 
-    def _empty_cli_reset_is_proven(self, retired, session_id):
-        rows = self._retired_cli_reset_rows(retired._session_id, session_id)
-        if retired._session_platform != "cli" or not rows:
-            return False
-        old, new = rows
-        if old is not None or new is None or new["parent_session_id"] is not None or new["ended_at"] is not None:
-            return False
+    def _empty_retired_cli_binding_is_proven(self, retired):
         try:
             with closing(sqlite3.connect(retired._db_path.resolve().as_uri() + "?mode=ro", uri=True, timeout=0.05)) as conn:
                 return conn.execute(
@@ -5547,18 +5540,31 @@ class LCMEngine(
             return False
 
     def _confirms_retired_cli_reset(self, session_id, platform):
-        retired = self._reload_successor or self
-        if platform != "cli" or retired._session_platform != "cli":
-            return False
-        if getattr(self, "_retired_cli_reset_confirmed", None) == (retired._session_id, session_id):
-            return self._empty_cli_reset_is_proven(retired, session_id)
-        rows = self._retired_cli_reset_rows(retired._session_id, session_id)
-        if not rows or not all(rows):
-            return False
-        old, new = rows
-        return (old["end_reason"] == "new_session" and old["ended_at"] is not None
-                and new["source"] == old["source"] and new["parent_session_id"] is None
-                and new["ended_at"] is None and new["started_at"] >= old["ended_at"])
+        with self._storage_lock:
+            retired = self._reload_successor or self
+            if (platform != "cli" or retired._session_platform != "cli"
+                    or getattr(self, "_retired_session_start", None) != session_id):
+                return False
+            rows = self._retired_cli_reset_rows(retired._session_id, session_id)
+            if rows is None:
+                return False
+            old, new = rows
+            if new is None or new["parent_session_id"] is not None or new["ended_at"] is not None:
+                return False
+            if old is not None:
+                return (old["end_reason"] == "new_session" and old["ended_at"] is not None
+                        and new["source"] == old["source"] and new["started_at"] >= old["ended_at"])
+            if self._retired_cli_reset_hook != (retired._session_id, session_id):
+                return False
+            was_absent = self._retired_cli_reset_target_was_absent
+            if was_absent is None:
+                # Hermes stamps started_at when it inserts the row. If the
+                # bind read was busy, only a row created after nomination can
+                # establish that this was not a preexisting session.
+                started_at = new["started_at"]
+                was_absent = (isinstance(started_at, (int, float))
+                              and started_at >= self._retired_cli_reset_nominated_at)
+            return was_absent and self._empty_retired_cli_binding_is_proven(retired)
 
     def _ingest_reload_lane(self, session_id, conversation_id, messages, platform):
         """Replay through a scoped clone without changing durable ownership."""
