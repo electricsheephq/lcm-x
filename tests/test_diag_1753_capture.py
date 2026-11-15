@@ -25,14 +25,15 @@ def inject(request, monkeypatch):
         turn(history, text + "SYNTHETIC_1753_CONTENT_SENTINEL" if text == "before-one" else text)
     monkeypatch.setattr(module, "turn", planted)
     original = MessageStore._append_protected_batch
-    count = 0
     def append(self, *args, **kwargs):
-        nonlocal count
-        count += 1
-        if count == 5 and MODE == "empty":
+        messages = args[1] if len(args) > 1 else kwargs["messages"]
+        # The target's last ingest (gamma) has no later ingest that could store it again. A reclassify
+        # or busy retry re-enters here with the same rows (#2756), so match the content, not a call count.
+        last = [m.get("content") for m in messages] == ["gamma", "answer gamma"]
+        if last and MODE == "empty":
             return []
         ids = original(self, *args, **kwargs)
-        if count == 5 and MODE == "missing":
+        if last and MODE == "missing":
             with self.connection:
                 self.connection.executemany("DELETE FROM messages WHERE store_id = ?", [(i,) for i in ids])
         return ids
@@ -68,10 +69,12 @@ def inject(request, monkeypatch):
         assert not any(key in raw for key in ('"content"', '"sql"', '"parameters"', '"exception"'))
         if mode in {"empty", "missing"}:
             final = [e for e in events if e["kind"] == "append_return"][-1]
-            assert final["returned_ids"] == ([] if mode == "empty" else [9, 10])
+            # A retry after the probe's own commit can return later ids than 9 and 10 (#2756).
+            assert (final["returned_ids"] == []) if mode == "empty" else bool(final["returned_ids"])
             for kind in ("same_reader", "fresh_reader"):
                 rows = next(e["rows"] for e in events if e["kind"] == kind)
                 assert [r[0] for r in rows] == list(range(1, 9))
+                assert not set(final["returned_ids"]) & {r[0] for r in rows}
 
 
 def test_ring_is_bounded():
