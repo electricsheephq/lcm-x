@@ -1,4 +1,4 @@
-"""#2550 stays open on two more paths: a turn-0 tool call with inline-argument content, and its result, are stored again.
+"""#2550 regressions on two paths: a turn-0 tool call with inline-argument content, and its result, are stored again.
 
 Both paths need an inline-argument shape in turn 0's tool call (line-wrapped base64 in a file body, or a JSON-escaped
 `data:` URI key), and both store the unchanged call and its unchanged result a second time.
@@ -15,7 +15,7 @@ again. The stamp breaks the ledger's contiguous proof at row 0, reconcile falls 
 rule (#2191) drops the recognised result because the call is unrecognised, so both are stored again. Later
 presentations do not remove the second copy.
 
-These strict xfails pin both duplicates; a fix flips them. The controls, which pass today, run the same events with
+These cases pin both duplicates (strict xfails before the repair). The controls, which pass today, run the same events with
 plain tool arguments, without the stamp, without the busy fault, or without the binding cut. The re-stamped user row
 may be stored as a new occurrence by design (#1179, #2720), so it is never asserted. Only real entry points are used
 (ingest, on_session_end, on_session_start, shutdown and the exit flush hook), plus storage calls monkeypatched to raise
@@ -34,16 +34,6 @@ from hermes_lcm import maintenance_scheduler
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
 from tests.harness.engine import make_engine
-
-_PIN_BUSY = pytest.mark.xfail(
-    strict=True, raises=AssertionError,
-    reason="#2550: a busy end's frozen read-only re-run skips the ledger, so the inline-argument call and result "
-           "are stored again",
-)
-_PIN_RESTAMP = pytest.mark.xfail(
-    strict=True, raises=AssertionError,
-    reason="#2550: a re-stamped first user row plus a binding cut stores the inline-argument call and result again",
-)
 
 
 def _require(condition, what):
@@ -251,7 +241,7 @@ BUSY_CONTROLS = [
 
 
 @pytest.mark.parametrize("env", ENVS, indirect=True)
-@pytest.mark.parametrize("scenario,shape,stamp", [pytest.param(*case, marks=_PIN_BUSY) for case in BUSY_CASES])
+@pytest.mark.parametrize("scenario,shape,stamp", [pytest.param(*case) for case in BUSY_CASES])
 def test_inline_call_stored_once_after_busy_end(env, tmp_path, monkeypatch, scenario, shape, stamp):
     """Correct engine: the turn-0 tool call and its result are each stored once."""
     results, calls, summary = _run_busy(tmp_path, monkeypatch, scenario, shape, stamp)
@@ -382,7 +372,7 @@ RESTAMP_CONTROLS = [
 
 @pytest.mark.parametrize("uid_mode", UID_MODES)
 @pytest.mark.parametrize("shape,stamp,cut,present",
-                         [pytest.param(*c, marks=_PIN_RESTAMP, id="-".join(map(str, c))) for c in RESTAMP_CASES])
+                         [pytest.param(*c, id="-".join(map(str, c))) for c in RESTAMP_CASES])
 def test_restamp_cut_call_and_result_stored_once(tmp_path, monkeypatch, shape, stamp, cut, present, uid_mode):
     """Correct engine: the reply, the unchanged call and the unchanged result are each stored once."""
     rows, recon = _run_restamp(tmp_path, monkeypatch, shape=shape, stamp=stamp, cut=cut, present=present,
@@ -400,7 +390,6 @@ def test_control_restamp_cut_call_and_result_stored_once(tmp_path, monkeypatch, 
     _assert_once(rows, recon)
 
 
-@_PIN_RESTAMP
 @pytest.mark.parametrize("repeat_stamp", [False, True], ids=["plain-followups", "second-stamp-and-cut"])
 def test_restamp_cut_later_presentations_store_call_and_result_once(tmp_path, monkeypatch, repeat_stamp):
     """After the forcing sequence, later real presentations (ingest, an optional second stamp and cut, a restart and

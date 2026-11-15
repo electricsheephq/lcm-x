@@ -12516,23 +12516,27 @@ class LCMEngine(
             "session_id", "conversation_id", "after_store_id", "messages", "metadata_messages")))
 
     @staticmethod
-    def _slice_tail(tail, n):
+    def _select_tail(tail, indexes):
         result = dict(tail)
         for key in ("messages", "estimates", "metadata_messages", "senders"):
             if key in tail:
-                result[key] = tail[key][n:]
+                result[key] = [tail[key][i] for i in indexes]
         if "ledger" in tail:
-            result["ledger"] = {**tail["ledger"], **{key: tail["ledger"][key][n:]
+            result["ledger"] = {**tail["ledger"], **{key: [tail["ledger"][key][i] for i in indexes]
                                 for key in ("entries", "stamps", "remainder")}}
         return result
 
+    @staticmethod
+    def _slice_tail(tail, n):
+        return LCMEngine._select_tail(tail, range(n, len(tail["messages"])))
+
     def _match_pending_tail(self, tail):
-        """Pure committed-prefix proof in store space; resolve the head after any respacing."""
+        """Proven prefix plus independent occurrences, recomputed on the frozen store each time."""
         store, frozen = tail["store"], tail.get("ledger")
         conversation_id = _normalize_conversation_id_value(tail["conversation_id"])
         rows = store.get_range(
             tail["session_id"], start_id=tail["after_store_id"] + 1,
-            conversation_id=conversation_id, limit=len(tail["messages"]),
+            conversation_id=conversation_id, limit=-1,
         )
         bound, last, candidates, uids = {}, None, set(), {}
         conn = store._conn
@@ -12576,11 +12580,41 @@ class LCMEngine(
                 raise
             # The ledger is advisory here, as for the cold cursor: an unreadable one keeps today's rule.
             rule, bound, last, candidates, uids = "read_failed", {}, None, set(), {}
-        covered, last_id, stop = 0, tail["after_store_id"], "end"
-        for i, (message, row) in enumerate(zip(tail["messages"], rows)):
+        head = last
+        occurrence_metadata = {}
+
+        def conflicting(i, row):
+            # Inserted tails intentionally have no frozen ledger, but durable UID/stamp evidence
+            # can still veto a gap match. Read the row's own receipts, never the active engine's view.
+            if i not in occurrence_metadata:
+                salt = store.ingest_ledger_salt() if store.ingest_ledger_state() == "ready" else None
+                message = tail["metadata_messages"][i]
+                uid, absorbed = message.get("message_uid"), message.get("_absorbed_message_uids")
+                absorbed = [u for u in absorbed if _valid_uid(u)] if isinstance(absorbed, (list, tuple)) else []
+                occurrence_metadata[i] = (salt, ingest_ledger.uidset_digest(salt, uid, absorbed)
+                                           if salt is not None and _valid_uid(uid) else None)
+            salt, incoming = occurrence_metadata[i]
+            if salt is None:
+                return False
+            stamp = ingest_ledger.stamp_text(_normalize_observed_at(tail["messages"][i].get("timestamp")))
+            for occ, bound_stamp, blob in conn.execute(
+                    "SELECT b.occ_id,b.stamp,v.entries FROM occurrence_bindings b "
+                    "LEFT JOIN ingest_views v ON v.lineage=b.lineage AND v.view_seq=b.view_seq AND v.kind='ingest' "
+                    "WHERE b.store_id=?", (row["store_id"],)):
+                observed = conn.execute("SELECT 1 FROM stamp_observations WHERE occ_id=? AND stamp=?",
+                                        (occ, stamp)).fetchone()
+                if stamp is not None and bound_stamp is not None and stamp != bound_stamp and not observed:
+                    return True
+                for entry in ingest_ledger.decode_entries(blob) if blob else ():
+                    if (entry.ref == occ and incoming is not None and entry.uidset_digest is not None
+                            and incoming != entry.uidset_digest):
+                        return True
+            return False
+
+        def matches_at(i, row, *, independent=False):
+            message = tail["messages"][i]
             if row["conversation_id"] != conversation_id:
-                stop = "conversation"
-                break
+                return False
             bindings = list(bound.get(row["store_id"], {}).values())
             if rule == "digest" and len(bindings) == 1:
                 b, entry, remainder = bindings[0], frozen["entries"][i], frozen["remainder"][i]
@@ -12594,29 +12628,97 @@ class LCMEngine(
                     and (ingest_ledger.stamp_digest(salt, b["stamp"]) == ingest_ledger.stamp_digest(salt, stamp)
                          or stamp is not None and stamp in b["observations"])
                     and not (uid is not None and entry.uidset_digest is not None and uid != entry.uidset_digest))
-                if matches:
-                    last = b["ordinal"] if last is None else max(last, b["ordinal"])
+                if independent and (b["disposition"] == "ambiguous" or
+                        stamp is None and entry.ref != b["occ_id"] and
+                        not (uid is not None and uid == entry.uidset_digest)):
+                    matches = False
             else:
                 matches = self._pending_row_identity(message) == self._pending_row_identity(row, stored=True)
-            if not matches:
+            uid = tail["metadata_messages"][i].get("message_uid")
+            if matches and _valid_uid(uid) and store._host_uid_table_exists():
+                known = {r[0] for r in conn.execute(
+                    "SELECT uid FROM host_uid_bindings WHERE store_id=? AND kind='canonical'", (row["store_id"],))}
+                if known and uid not in known:
+                    matches = False
+            if matches and rule in ("digest", "no_ledger") and conflicting(i, row):
+                matches = False
+            if independent and len(bindings) > 1:
+                matches = False
+            if independent and not bindings and _normalize_observed_at(message.get("timestamp")) is None:
+                matches = False  # Unstamped, unbound twins retain the positional rule.
+            return matches
+
+        matched, used = {}, set()
+        covered, last_id, stop = 0, tail["after_store_id"], "end"
+        for i, row in enumerate(rows[:len(tail["messages"])]):
+            if not matches_at(i, row):
                 stop = "identity"
                 break
+            matched[i] = row
+            used.add(row["store_id"])
             covered += 1
             last_id = row["store_id"]
+            bindings = list(bound.get(row["store_id"], {}).values())
+            if rule == "digest" and len(bindings) == 1:
+                ordinal = bindings[0]["ordinal"]
+                last = ordinal if last is None else max(last, ordinal)
+        for i in range(covered, len(tail["messages"])):
+            for row in rows:
+                if row["store_id"] not in used and matches_at(i, row, independent=True):
+                    matched[i] = row
+                    used.add(row["store_id"])
+                    break
+        # A partial replay must not orphan either half of an assistant/tool group.
+        groups, owners = {}, {}
+        for i, message in enumerate(tail["messages"]):
+            if message.get("role") == "assistant" and message.get("tool_calls"):
+                groups[i] = [i]
+                owners.update((str(c.get("id")), i) for c in message["tool_calls"] if isinstance(c, dict))
+            elif message.get("role") == "tool" and str(message.get("tool_call_id")) in owners:
+                groups[owners[str(message["tool_call_id"])]].append(i)
+        for group in groups.values():
+            if not all(i in matched for i in group):
+                for i in group:
+                    matched.pop(i, None)
+        # Gap matches never extend the positional prefix: their physical IDs can be reversed.
+        covered = min(covered, next((i for i in range(covered) if i not in matched), covered))
+        # Only a contiguous prefix moves the frozen boundary; a later match cannot hide a hole.
+        last_id = matched[covered - 1]["store_id"] if covered else tail["after_store_id"]
+        last = head
+        for i in range(covered):
+            bindings = list(bound.get(matched[i]["store_id"], {}).values())
+            if rule == "digest" and len(bindings) == 1:
+                ordinal = bindings[0]["ordinal"]
+                last = ordinal if last is None else max(last, ordinal)
         n_candidates = sum((r if r is not None else e.identity_digest) in candidates
-                           for e, r in zip(frozen["entries"][covered:], frozen["remainder"][covered:])) if rule == "digest" else 0
-        return covered, last_id, last, rule, stop, n_candidates
+                           for i, (e, r) in enumerate(zip(frozen["entries"], frozen["remainder"]))
+                           if i not in matched) if rule == "digest" else 0
+        return covered, last_id, last, rule, stop, n_candidates, matched
 
-    def _write_tail_bindings(self, tail, ids, left, after_commit):
+    def _write_tail_bindings(self, tail, ids, left, after_commit, matched, indexes):
         store, frozen = tail["store"], tail["ledger"]
         conn = store._conn
         try:
             with _sqlite_savepoint(conn, abort_on_cleanup_failure=True, owner_active=True, foreground_ingest=True):
                 lineage = ingest_ledger.persisted_lineage(conn, tail["session_id"], frozen["lineage"])
-                right = conn.execute("SELECT min(ordinal) FROM occurrence_bindings WHERE lineage=? AND ordinal>? "
-                    "AND disposition IN ('stored','migrated','ambiguous')", (lineage, left)).fetchone()[0]
-                ordinals, respace = ingest_ledger.plan_ordinals(ingest_ledger.lineage_ordinals(conn, lineage),
-                    [ingest_ledger.Placement(left, right)] * len(ids))
+                neighbours = {}
+                for i, row in matched.items():
+                    found = conn.execute("SELECT ordinal FROM occurrence_bindings WHERE lineage=? AND store_id=? "
+                                         "AND disposition IN ('stored','migrated')", (lineage, row["store_id"])).fetchall()
+                    if len(found) == 1:
+                        neighbours[i] = found[0][0]
+                existing = ingest_ledger.lineage_ordinals(conn, lineage)
+                placements = []
+                for i in indexes:
+                    lower = next((neighbours[j] for j in sorted(neighbours, reverse=True) if j < i), left)
+                    upper = next((neighbours[j] for j in sorted(neighbours) if j > i), None)
+                    if upper is not None and lower is not None and lower >= upper:
+                        lower = max((o for o in existing if o < upper), default=None)
+                    if upper is None:
+                        upper = min((o for o in existing if lower is not None and o > lower), default=None)
+                    placements.append(ingest_ledger.Placement(lower, upper))
+                ordinals, respace = ingest_ledger.plan_ordinals(existing, placements)
+                frozen = self._select_tail(tail, indexes)["ledger"]
                 store._sync_ingest_prelock()
                 ingest_ledger.apply_respace(conn, lineage, respace)
                 seq = ingest_ledger.next_view_seq(conn)
@@ -12840,24 +12942,33 @@ class LCMEngine(
                         if time.monotonic() >= deadline:
                             break
                         continue
-                    covered, last_id, left, rule, _stop, candidates = self._match_pending_tail(tail)
+                    covered, last_id, left, rule, _stop, candidates, *_extra = self._match_pending_tail(tail)
                     # This prefix is already committed, even if admission below fails.
                     tail.update(self._slice_tail(tail, covered), after_store_id=last_id)
                     self._ledger_count("ledger.tail.retry.replay_rows", amount=covered)
                     after_commit, ids = [], []
                     if tail["messages"]:
-                        with store.ingest_atomic():
+                        # Scanning is complete before absence can authorize an append. Its time
+                        # belongs to the shared budget too; expired admission is non-waiting.
+                        with _temporary_sqlite_busy_timeout(
+                                [store._conn], max(0, int((deadline - time.monotonic()) * 1000))), store.ingest_atomic():
                             adopted_tail = tail
                             if (frozen := tail.get("ledger")) is not None:
                                 lineage = self._ledger_adopt(store, tail["session_id"], frozen["resolved"], frozen["salt"], after_commit)
                                 adopted_tail = {**tail, "ledger": {**frozen, "lineage": lineage or frozen["lineage"]}}
-                            covered, last_id, left, rule, _stop, candidates = self._match_pending_tail(adopted_tail)
-                            batch = self._slice_tail(adopted_tail, covered)
+                            covered, last_id, left, rule, _stop, candidates, *extra = self._match_pending_tail(adopted_tail)
+                            matched = extra[0] if extra else {}
+                            indexes = [i for i in range(len(adopted_tail["messages"])) if i not in matched]
+                            batch = self._select_tail(adopted_tail, indexes)
                             ids = self._append_ingest_batch(batch) if batch["messages"] else []
                             if ids and rule == "digest":
-                                self._write_tail_bindings(batch, ids, left, after_commit)
+                                self._write_tail_bindings(adopted_tail, ids, left, after_commit, matched, indexes)
                         committed = True
-                        after_commit.append(lambda n=covered: self._ledger_count("ledger.tail.retry.replay_rows", amount=n))
+                        if ids and store is self.__dict__.get("_store") and tail["session_id"] == self._session_id:
+                            # #2751: the retry committed a new occurrence (#1179) exactly once. An old
+                            # prefix stub must not later present its pre-restamp metadata as the last view.
+                            self._last_active_replay_messages = []
+                        after_commit.append(lambda n=len(matched): self._ledger_count("ledger.tail.retry.replay_rows", amount=n))
                     committed = True
                     after_commit.extend([
                         lambda n=len(ids): self._ledger_count("ledger.tail.retry.stored_rows", amount=n),

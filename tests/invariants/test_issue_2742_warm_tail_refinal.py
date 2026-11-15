@@ -1,4 +1,4 @@
-"""#2742 stays open: a busy session end's warm-tail retry stores the end's final reply a second time.
+"""#2742 regression: a busy session end's warm-tail retry stores the end's final reply a second time.
 
 A session end on the current binding that hits SQLITE_BUSY freezes the rows it selected as new into a warm pending
 tail, after the session's last stored row. When a later ordinary write stores the final reply (FINAL) first, and the
@@ -6,7 +6,7 @@ tail's first row is one that write treated differently (a first user row the hos
 timestamp, or a tool call whose arguments carry an inline encoded block after a profile rebind), the retry's
 positional proof (`_match_pending_tail`) fails at row 0 and appends the whole tail: FINAL is stored twice, with no
 relation linking the copies. The retry runs at a later session end, at shutdown plus a new engine on the same store,
-or at a sibling engine's start. These strict xfails pin that duplicate; a fix flips them.
+or at a sibling engine's start. These cases pin that duplicate (strict xfails before the repair).
 
 Controls, which pass today: the same events without the re-stamp, with plain tool arguments, and the Hermes /retry
 shape (#1179's host input), which this defect does not reach. Only real entry points are used (ingest,
@@ -24,11 +24,6 @@ import pytest
 from hermes_lcm import engine as engine_module
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
-
-_PIN = pytest.mark.xfail(
-    strict=True, raises=AssertionError,
-    reason="#2742: a busy end's warm-tail retry fails its positional proof at row 0 and stores the final reply again",
-)
 
 
 def _require(condition, what):
@@ -134,7 +129,7 @@ UID_MODES = [pytest.param(None, id="defaults"), pytest.param("off", id="uid-off"
 @pytest.mark.parametrize("uids", [True, False], ids=["uids", "no-uids"])
 @pytest.mark.parametrize("noop", [True, False], ids=["noop", "no-noop"])
 @pytest.mark.parametrize("drain", ["end", "shutdown"])
-@pytest.mark.parametrize("restamp", [pytest.param(True, id="restamp", marks=_PIN),
+@pytest.mark.parametrize("restamp", [pytest.param(True, id="restamp"),
                                      pytest.param(False, id="control")])
 def test_stamp_only_final_stored_once(tmp_path, monkeypatch, uid_mode, uids, noop, drain, restamp):
     """Ingest; the host re-stamps the first user row; a busy warm end adds FINAL; next turn; drain the tail.
@@ -167,7 +162,7 @@ def test_stamp_only_final_stored_once(tmp_path, monkeypatch, uid_mode, uids, noo
 
 
 @pytest.mark.parametrize("uid_mode", UID_MODES)
-@pytest.mark.parametrize("tool", [pytest.param("data-uri-key", id="inline", marks=_PIN),
+@pytest.mark.parametrize("tool", [pytest.param("data-uri-key", id="inline"),
                                   pytest.param("plain", id="control")])
 def test_inline_args_final_stored_once(tmp_path, monkeypatch, uid_mode, tool):
     """Ingest with a tool call; profile rebind and back; a busy warm end adds FINAL; next turn; drain through a

@@ -303,7 +303,8 @@ class IdentityAnchorMixin:
                      and not messages[i].get("tool_calls") and isinstance(messages[i].get("content"), str)
                      and messages[i]["content"].startswith(header)
                      and _todo_annotation_span(messages[i]["content"], 0) == len(messages[i]["content"])}
-        if not wanted and start >= cursor and not snapshots:
+        receipt_calls = any(m.get("tool_calls") for m in messages[start:])
+        if not wanted and start >= cursor and not snapshots and not receipt_calls:
             return plan
         # #633: nothing stamped from ``start`` on still leaves a changed prefix to audit (an unstamped row).
         chain = self._identity_anchor_chain()
@@ -496,6 +497,11 @@ class IdentityAnchorMixin:
                 self._note_identity_anchor_version(None, message)
                 logger.info("LCM host-rewrite replay: arm=%s parts=%s consumed=%s session=%s",
                             match.arm, match.k, list(match.consumed), self._session_id)
+        try:
+            self._identity_anchor_receipts(messages, start, consumed, matched, plan)
+        except Exception as exc:
+            self._raise_ingest_busy(exc)
+            logger.warning("LCM original-ingest receipt read failed; keeping ordinary matches")
         self._identity_anchor_tool_segments(messages, plan["cursor"], plan["replayed"], matched, plan.get("positional", ()))
         for idx in list(plan["remainders"]):
             if idx in plan["replayed"]:
@@ -515,6 +521,66 @@ class IdentityAnchorMixin:
         plan["matched"] = {idx: rows for idx, rows in {**plan.get("matched", {}), **matched}.items()
                            if idx not in ledger_pairs}
         return plan
+
+    def _identity_anchor_receipts(self, messages, start, consumed, matched, plan):
+        """Original-ingest receipts supplement ordinary matches; never alias another host row.
+
+        Read on every classification attempt, including the frozen read-only rerun. #2681's
+        generation recheck discards this local result with the rest of a stale classification.
+        No lineage adoption, engine receipt cache, or protected-message digest is evidence here.
+        """
+        from . import ingest_ledger
+        from .config import ingest_ledger_mode
+
+        indexes = [i for i in range(start, len(messages)) if messages[i].get("tool_calls") and i not in matched]
+        store, conn = self._store, self._store._conn
+        if not indexes or ingest_ledger_mode() == "off" or store.ingest_ledger_state() != "ready":
+            return
+        salt = store.ingest_ledger_salt()
+        if salt is None:
+            return
+        resolved, _problem = self._host_uid_lineage_key(self._session_id, require_complete=True)
+        lineage = ingest_ledger.persisted_lineage(conn, self._session_id,
+                                                ingest_ledger.lineage_key(resolved, self._session_id))
+        if resolved is not None and lineage != resolved:
+            return
+        entries, stamps = self._ledger_view_entries(salt, messages)
+        views = {}
+        for i in indexes:
+            entry, stamp = entries[i], stamps[i]
+            records = ingest_ledger._rows(conn.execute(
+                "SELECT b.*,m.* FROM occurrence_bindings b JOIN messages m USING(store_id) "
+                "WHERE b.lineage=? AND b.identity_digest=? AND b.disposition='stored' "
+                "AND m.session_id=? AND m.conversation_id=? ORDER BY b.ordinal,b.store_id",
+                (lineage, entry.identity_digest, self._session_id, str(self._conversation_id or "").strip())))
+            for row in records:
+                if (int(row["store_id"]) in consumed or
+                        "Externalized LCM ingest payload:" not in str(row.get("tool_calls") or "")):
+                    continue
+                if entry.uidset_digest is not None and store._host_uid_table_exists():
+                    known = {r[0] for r in conn.execute(
+                        "SELECT uid FROM host_uid_bindings WHERE store_id=? AND kind='canonical'", (row["store_id"],))}
+                    if known and messages[i].get("message_uid") not in known:
+                        continue  # Canonical UID evidence can outlive its retained ingest vector.
+                seq = row["view_seq"]
+                if seq not in views:
+                    view = conn.execute("SELECT entries FROM ingest_views WHERE lineage=? AND view_seq=? "
+                                        "AND kind='ingest'", (lineage, seq)).fetchone()
+                    views[seq] = {e.ref: e for e in ingest_ledger.decode_entries(view[0])} if view else {}
+                bound = views[seq].get(row["occ_id"])
+                uid = bound.uidset_digest if bound is not None else None
+                if uid is not None and entry.uidset_digest is not None and uid != entry.uidset_digest:
+                    continue
+                observed = ingest_ledger.stamp_text(row.get("observed_at"))
+                observations = {r[0] for r in conn.execute(
+                    "SELECT stamp FROM stamp_observations WHERE occ_id=?", (row["occ_id"],))}
+                if stamp is not None:
+                    if stamp not in observations and (row["stamp"] != stamp or observed not in (None, stamp)):
+                        continue
+                elif row["stamp"] is not None or observed is not None or uid is None or uid != entry.uidset_digest:
+                    continue  # No stamp: require this binding's own UID occurrence evidence.
+                self._identity_anchor_take(i, [row], consumed, matched, plan)
+                break
 
     def _identity_anchor_audit(self, messages, identity_messages, cursor, start, stamps, identity_at, consumed, plan,
                                matched, *, excluded=()) -> None:
