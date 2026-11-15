@@ -365,10 +365,10 @@ def _wide_reload_case(seed, directory, patch, trees, record):
 CASES = [*RANDOM_SEEDS, *CONTROL_SEEDS, *RELOAD_SEEDS, 'shifted-replay', 'capture-without-fault']
 
 
-def _execute_case(case, directory, versions, stub_faults=False, fake=False):  # noqa: F811
+def _execute_case(case, directory, versions, stub_faults=False, fake=None):  # noqa: F811
     if os.environ.get('LCMX_DIFF_FAKE_RECORDS') is not None and any(k in os.environ for k in ('CI', 'GITHUB_ACTIONS')):
         pytest.fail('LCMX_DIFF_FAKE_RECORDS is forbidden in CI')
-    fake = fake or os.environ.get('LCMX_DIFF_FAKE_RECORDS') == '1'
+    fake = os.environ.get('LCMX_DIFF_FAKE_RECORDS') == '1' if fake is None else fake
     if fake:
         versions = dict(versions, candidate=SimpleNamespace(register=versions['main'].register))
     traces, properties = {}, [('fake_candidate', 'fake_records.install')] if fake else []
@@ -422,6 +422,15 @@ def _label_violations(case, trace, stubbed):
             else:
                 label = ('#2707 reload' if case in RELOAD_SEEDS and views[violation['view']]['kind'] == 'ingest'
                          else label_missing(case, views, violation))
+        elif case in WIDE_RELOAD_SEEDS:
+            # A widened reload can append the already stored newest user/reply.
+            # Pin this baseline shape separately from injected-fault duplicates.
+            fields = dict(value)
+            assert stage == 3 and not trace.faults and count == 1, violation
+            assert value in trace.ingests[stage - 2]['rows'], violation
+            assert (fields['role'], fields['content'], fields['observed_at']) in (
+                ('assistant', 'A', 21.), ('user', f'R-{case}', 20.)), violation
+            label = '#2707 reload duplicate'
         else:
             remaining = clean.get((stage, kind, value), 0)
             if remaining:
@@ -520,7 +529,8 @@ def sequence(request, tmp_path_factory, versions, fault_run):  # noqa: F811 - im
     if any(v['kind'] == 'duplicate' for v in traces['main'].violations()):
         # Rerun the identical host plan with all fault wrappers disabled.
         _, clean = _execute_case(case, directory / 'fault-free',
-                                 dict(main=versions['main'], candidate=versions['candidate']), stub_faults=True)
+                                 dict(main=versions['main'], candidate=versions['candidate']),
+                                 stub_faults=True, fake=False)
         stubbed = clean['main']
         properties.append(('fault_free_violations', json.dumps(stubbed.violations())))
     labels = _label_violations(case, traces['main'], stubbed)
@@ -773,7 +783,7 @@ def test_equal_text_supersession_accepts_occurrence_witness():
     ('latch', 'latched visibility: withheld locator missing'),
 ])
 def test_fake_withheld_pages_and_latch(mutation, message, tmp_path, versions, monkeypatch, record_property):  # noqa: F811
-    from . import fake_records
+    from tests.differential import fake_records
     monkeypatch.setattr(paired, 'CANDIDATE_CONTRACT', 'records-v1')
     install, scan = fake_records.install, fake_records.withholding
     visible_before = []
