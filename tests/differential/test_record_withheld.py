@@ -245,6 +245,49 @@ def test_record_hit_expanding_to_witness():
     assert judge(observed, entries) == []
 
 
+@pytest.mark.parametrize('case,expected', [
+    ('a-exact-records', []),
+    ('b-records-plus-witness', []),
+    ('c-two-witness-hits', []),
+    ('d-inexact-witness-record', [(0, 0, 'needle')]),
+    ('e-undeclared-ordinal', [(0, 0, 'needle'), (0, 1, 'hay')]),
+])
+def test_declared_sibling_witness_hits(case, expected):
+    observed, template = observation([row(2, 'needle\n\nhay')], witness=True)
+    entries = [dict(template[0], predecessor_ordinal=i, expected=dict(template[0]['expected'], content=text))
+               for i, text in enumerate(['needle', 'hay'])]
+    records = [dict(expected_record(entry), kind='record', superseded_by=2) for entry in entries]
+    record_hits = [dict(record, reference=dict(tool='lcm_expand', args=dict(queued_user_ref=[1, i])),
+                        expanded=record) for i, record in enumerate(records)]
+    witness_hits = [dict(row(2, 'needle\n\nhay'), kind='canonical', reference=hit['reference'],
+                         expanded=hit['expanded']) for hit in record_hits]
+    observed['hits'] = record_hits
+    if case == 'b-records-plus-witness':
+        observed['hits'] = [*record_hits, witness_hits[0]]
+    elif case == 'c-two-witness-hits':
+        observed['hits'] = witness_hits
+    elif case in ('d-inexact-witness-record', 'e-undeclared-ordinal'):
+        changes = dict(content='wrong') if case == 'd-inexact-witness-record' else dict(ordinal=5)
+        observed['hits'] = [*record_hits, dict(witness_hits[0], expanded=dict(records[0], **changes))]
+    assert judge(observed, entries) == expected
+
+
+@pytest.mark.parametrize('conversation', ['unchanged', 'other', 'removed'])
+def test_witness_expansion_preserves_conversation(conversation):
+    observed, entries = observation([row(2, 'needle\n\nreply')], witness=True)
+    witness = dict(row(2, 'needle\n\nreply'), kind='canonical')
+    expanded = dict(witness)
+    if conversation == 'other':
+        expanded['conversation_id'] = 'other'
+    elif conversation == 'removed':
+        expanded.pop('conversation_id')
+    observed['hits'] = [dict(witness, reference=dict(tool='lcm_expand', args=dict(store_id=2)), expanded=expanded)]
+    if conversation == 'unchanged':
+        assert judge(observed, entries) == []
+    else:
+        assert judge(observed, entries) == [(0, 0, 'needle')]
+
+
 @pytest.mark.parametrize('witness_first', [False, True])
 @pytest.mark.parametrize('expansion', ['owner', 'sibling'])
 def test_snippet_record_hit_wrong_expansion_fails_beside_correct_witness(expansion, witness_first):

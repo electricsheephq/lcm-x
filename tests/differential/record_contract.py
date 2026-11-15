@@ -234,6 +234,7 @@ def judge(observations, entries):
     eligible = {(e['owner_store_id'], e['predecessor_ordinal']) for e in entries
                 if e['due_stage'] is not None and e['owner_store_id'] not in witness}
     assert set(withheld) <= eligible, 'withheld locator not active or superseded'
+    declared = {(r['owner_store_id'], r['ordinal']) for r in map(expected_record, entries)}
     for entry in entries:
         expected = expected_record(entry)
         key = (expected['owner_store_id'], expected['ordinal'])
@@ -268,8 +269,11 @@ def judge(observations, entries):
             baseline = next((dict(r) for r in observations['baseline_canonical']
                              if dict(r)['store_id'] == witness.get(key[0])), {})
             return matches(row, span=True) and all(row.get(field) == baseline.get(field)
-                for field in ('store_id', 'session_id', 'role', 'content'))
-        found = [row for row in observations['hits'] if matches(row, span=True)]
+                for field in ('store_id', 'session_id', 'conversation_id', 'role', 'content'))
+        found = [row for row in observations['hits'] if matches(row, span=True) and not (
+            row.get('store_id') == witness.get(key[0]) and row['expanded']['kind'] == 'record'
+            and row['expanded'].get('owner_store_id') == key[0] and row['expanded'].get('ordinal') != key[1]
+            and (key[0], row['expanded'].get('ordinal')) in declared)]
         record_hits = [hit for hit in observations['hits']
                        if any(row['kind'] == 'record'
                               and (row.get('owner_store_id'), row.get('ordinal')) == key
