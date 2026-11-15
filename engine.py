@@ -5497,11 +5497,17 @@ class LCMEngine(
             "AND (view_seq IN (SELECT value FROM json_each(?)) OR view_seq IN (SELECT view_seq FROM ingest_views "
             "WHERE lineage=? AND kind='ingest' ORDER BY view_seq DESC LIMIT 2)) ORDER BY view_seq",
             (lineage, json.dumps(seqs), lineage)))
+        host_uids = list(conn.execute(
+            "SELECT store_id,uid FROM host_uid_bindings INDEXED BY idx_host_uid_store "
+            "WHERE store_id IN (SELECT value FROM json_each(?)) AND kind IN ('canonical','version') "
+            "ORDER BY store_id,uid", (json.dumps([row["store_id"] for row in rows]),)
+        )) if tail["store"]._host_uid_table_exists() else []
         return (rows, lineage, records, views, tail["store"].ingest_ledger_salt(),
-                copy.deepcopy(vars(self._config)), external, copy.deepcopy(tail["view"]))
+                copy.deepcopy(vars(self._config)), external, copy.deepcopy(tail["view"]), host_uids)
 
-    def _off_current_fallback_uid(self, incoming, index, view, salt, positional, identities, agreement, known=()):
-        """Apply the positional or binding UID veto, preserving lazy agreement checks."""
+    def _off_current_fallback_uid(self, incoming, index, view, salt, positional, identities, agreement,
+                                  known=(), host_uids=()):
+        """Apply positional, binding and durable host UID vetoes in that order."""
         if incoming is not None:
             for position, entries in enumerate(positional):
                 if index >= len(entries) or entries[index].uidset_digest in (None, incoming):
@@ -5518,6 +5524,12 @@ class LCMEngine(
                     return "gate 3: occurrence UID mismatch"
         if incoming is not None and any(uid is not None and uid != incoming for uid in known):
             return "gate 3: occurrence UID mismatch"
+        message = view[index]
+        if host_uids and _valid_uid(message.get("message_uid")):
+            absorbed = message.get("_absorbed_message_uids")
+            absorbed = [uid for uid in absorbed if _valid_uid(uid)] if isinstance(absorbed, (list, tuple)) else []
+            if set(host_uids).isdisjoint([message["message_uid"], *absorbed]):
+                return "gate 3: occurrence UID mismatch"
         return None
 
     def _off_current_fallback_prefix(self, tail, rows, lineage):
@@ -5537,6 +5549,9 @@ class LCMEngine(
         bindings, uids = {}, {}
         snapshot = tail.pop("fallback_inputs", None) or self._off_current_fallback_inputs(tail, rows, lineage)
         records, views, salt = snapshot[2:5]
+        host_uids = {}
+        for store_id, uid in snapshot[-1]:
+            host_uids.setdefault(store_id, set()).add(uid)
         for record in records:
             bindings.setdefault(record["store_id"], []).append(record)
         # Retained positions still carry UID vetoes after a binding's own view is pruned.
@@ -5568,12 +5583,20 @@ class LCMEngine(
                 reason = self._off_current_fallback_uid(incoming, index, view, salt, (), identities, agreement, (known,))
                 if reason:
                     return None, reason
+            reason = self._off_current_fallback_uid(incoming, index, view, salt, (), identities, agreement,
+                host_uids=host_uids.get(row["store_id"], ()))
+            if reason:
+                return None, reason
         tail["fallback_snapshot"] = snapshot
         return len(rows), None
 
     def _retry_off_current_fallback(self, tail):
         """Revalidate under BEGIN IMMEDIATE; do not finalize or retire any binding."""
         store, session, ids = tail["store"], tail["session_id"], []
+        if any(matches_session_pattern(build_session_match_keys(session, platform=tail["source"]), patterns)
+               for patterns in (self._compiled_ignore_session_patterns, self._compiled_stateless_session_patterns)):
+            self._warn_off_current_fallback(session, "gate 1: session excluded from storage")
+            return True
         with store.ingest_atomic():
             lineage, reason = self._off_current_fallback_owner(tail)
             if reason is None:
@@ -5589,6 +5612,9 @@ class LCMEngine(
                     uids = {(seq, entry.ref): entry.uidset_digest for (seq, _), entries in zip(inputs[3], positional)
                             for entry in entries}
                     bindings, identities, agreement = {}, {}, {}
+                    host_uids = {}
+                    for store_id, uid in inputs[-1]:
+                        host_uids.setdefault(store_id, set()).add(uid)
                     for record in inputs[2]:
                         bindings.setdefault(record["store_id"], []).append(uids.get((record["view_seq"], record["occ_id"])))
                     for index, (row, message) in enumerate(zip(rows, tail["view"])):
@@ -5597,7 +5623,8 @@ class LCMEngine(
                         incoming = ingest_ledger.uidset_digest(inputs[4], message["message_uid"], absorbed) if (
                             inputs[4] is not None and _valid_uid(message.get("message_uid"))) else None
                         reason = self._off_current_fallback_uid(incoming, index, tail["view"], inputs[4],
-                            positional, identities, agreement, bindings.get(row["store_id"], ()))
+                            positional, identities, agreement, bindings.get(row["store_id"], ()),
+                            host_uids.get(row["store_id"], ()))
                         if reason:
                             break
                     if reason is None:
@@ -5632,8 +5659,12 @@ class LCMEngine(
                 tail["fallback_lineage"] = lineage
                 rows = self._off_current_fallback_rows(tail)
                 tail["source"] = next((r["source"] for r in reversed(rows) if str(r.get("source") or "").strip()), "")
-                stage = "gate 3: compare failed"
-                count, reason = self._off_current_fallback_prefix(tail, rows, lineage)
+                if any(matches_session_pattern(build_session_match_keys(session_id, platform=tail["source"]), patterns)
+                       for patterns in (self._compiled_ignore_session_patterns, self._compiled_stateless_session_patterns)):
+                    reason = "gate 1: session excluded from storage"
+                else:
+                    stage = "gate 3: compare failed"
+                    count, reason = self._off_current_fallback_prefix(tail, rows, lineage)
             if reason:
                 self._warn_off_current_fallback(session_id, reason)
                 return False

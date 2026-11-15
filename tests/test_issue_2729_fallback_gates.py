@@ -1080,3 +1080,136 @@ def test_views_only_branch_keeps_binding_uid_veto(cold, monkeypatch, tamper):
         assert reasons == []
         assert fallback_counts(engine) == {'stored': 1}
         assert contents == ['question', 'reply', 'FINAL']
+
+
+@pytest.mark.parametrize('kind', ['ignore', 'stateless', None])
+@pytest.mark.parametrize('queued', [False, True], ids=['restart', 'retry'])
+def test_storage_filters_use_ended_sessions_source(engines, monkeypatch, caplog, kind, queued):
+    """T9: platform-qualified filters apply after restart and before a queued retry reads the store."""
+    from hermes_lcm.session_patterns import compile_session_patterns
+    from tests.harness import make_engine
+
+    first = engines(sessions=[('S1', None, None), ('S2', None, None)])
+    _start(first, 'S2')
+    first.ingest(copy.deepcopy(HISTORY))
+    home = Path(first._hermes_home)
+    first.shutdown()
+    options = {f'{kind}_session_patterns': ['cli:*']} if kind and not queued else {}
+    engine = make_engine(home, fresh_tail_count=2, leaf_chunk_tokens=1, **options)
+    engine._hermes_home = engine._store._hermes_home = str(home)
+    _start(engine, 'S1')
+    before = lifecycle(engine)
+    rows = engine._store.get_session_messages('S2')
+    try:
+        with monkeypatch.context() as patch:
+            if queued:
+                patch.setattr(engine._store, 'ingest_atomic', busy)
+            engine.on_session_end('S2', copy.deepcopy(VIEW))
+        if queued:
+            assert len(engine._pending_session_tails) == 1
+            assert engine._pending_session_tails[0]['source'] == 'cli'
+            if kind:
+                setattr(engine._config, f'{kind}_session_patterns', ['cli:*'])
+                setattr(engine, f'_compiled_{kind}_session_patterns', compile_session_patterns(['cli:*']))
+            def unread(*args, **kwargs):
+                pytest.fail('excluded retry must refuse before reading or starting a transaction')
+            with monkeypatch.context() as patch:
+                if kind:
+                    patch.setattr(engine, '_off_current_fallback_owner', unread)
+                    patch.setattr(engine._store, 'ingest_atomic', unread)
+                engine._retry_pending_session_tails()
+        else:
+            engine.on_session_end('S2', copy.deepcopy(VIEW))
+        assert not engine._pending_session_tails
+        assert_rows(engine, HISTORY if kind else VIEW, before)
+        if kind:
+            assert engine._store.get_session_messages('S2') == rows
+            assert 'gate 1: session excluded from storage' in caplog.text
+        else:
+            assert 'session excluded from storage' not in caplog.text
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize('mode,foreign', [('shadow', True), ('shadow', False), pytest.param(
+    'off', True, marks=pytest.mark.xfail(strict=True, raises=AssertionError,
+                                       reason='#2750: no durable UID evidence'))])
+def test_later_end_cannot_replace_fallback_appended_uid(cold, monkeypatch, caplog, mode, foreign):
+    """T10: unstamped FINAL has a host binding, but no occurrence binding or ingest view."""
+    monkeypatch.setenv('LCM_HOST_MESSAGE_UID', mode)
+    engine = cold()
+    view = copy.deepcopy(VIEW)
+    view[-1].pop('timestamp')
+    engine.on_session_end('S2', copy.deepcopy(view))
+    store, conn = engine._store, engine._store._conn
+    rows = store.get_session_messages('S2')
+    assert [r['content'] for r in rows] == ['question', 'reply', 'FINAL']
+    sid = rows[-1]['store_id']
+    assert conn.execute('SELECT count(*) FROM occurrence_bindings WHERE store_id=?', (sid,)).fetchone() == (0,)
+    if mode == 'shadow':
+        assert conn.execute("SELECT uid FROM host_uid_bindings WHERE store_id=? AND kind='canonical'",
+                            (sid,)).fetchall() == [('u3',)]
+    else:
+        assert not store._host_uid_table_exists()
+    before = lifecycle(engine)
+    view[-1]['message_uid'] = 'foreign-final' if foreign else 'u3'
+    view.append(dict(role='assistant', content='EXTRA', message_uid='u4'))
+    engine.on_session_end('S2', copy.deepcopy(view))
+    if foreign:
+        assert store.get_session_messages('S2') == rows, 'a changed FINAL UID must not authorize EXTRA'
+        assert 'gate 3: occurrence UID mismatch' in caplog.text
+    else:
+        engine.on_session_end('S2', copy.deepcopy(view))
+        assert_rows(engine, view, before)
+        assert fallback_counts(engine) == {'stored': 2, 'noop': 1}
+    assert lifecycle(engine) == before
+
+
+@pytest.mark.parametrize('representation', [False, True], ids=['T11-pruned-parent', 'CR-raw-to-marker'])
+def test_durable_uid_veto_survives_child_pruning(engines, monkeypatch, caplog, representation):
+    """T11/CR: two real child ingests prune every view that recorded the parent's bindings."""
+    from tests.test_issue_10_persisted_output_spillover import FULL_OUTPUT, _write_output
+
+    monkeypatch.setenv('LCM_HOST_MESSAGE_UID', 'shadow')
+    first = engines(sessions=[('S1', None, None), ('S2', None, 'compression'), ('S3', 'S2', None)])
+    _start(first, 'S2')
+    history = copy.deepcopy(HISTORY)
+    if representation:
+        history = [dict(role='assistant', content='', message_uid='u1', tool_calls=[dict(
+            id='call', type='function', function=dict(name='dump', arguments='{}'))]),
+            dict(role='tool', content=FULL_OUTPUT, tool_call_id='call', message_uid='u2')]
+    first.ingest(copy.deepcopy(history))
+    home = Path(first._hermes_home)
+    marker = _write_output(home / 'cache/spillover/call.txt') if representation else None
+    first.shutdown()
+    child = _engine(home, session='S3', conversation='conv-S3')
+    try:
+        for i in range(2):
+            child.ingest([dict(role='user', content=f'child {i}', message_uid=f'c{i}')])
+    finally:
+        child.shutdown()
+    engine = _engine(home, session='S1', conversation='conv-S1')
+    try:
+        conn = engine._store._conn
+        lineage = ingest_ledger.persisted_lineage(conn, 'S2', None)
+        assert lineage == ingest_ledger.persisted_lineage(conn, 'S3', None)
+        assert conn.execute("SELECT count(*) FROM occurrence_bindings b JOIN ingest_views v "
+                            "ON b.lineage=v.lineage AND b.view_seq=v.view_seq JOIN messages m ON m.store_id=b.store_id "
+                            "WHERE m.session_id='S2'").fetchone() == (0,)
+        rows = engine._store.get_session_messages('S2')
+        before = lifecycle(engine)
+        view = copy.deepcopy(history)
+        view[1]['message_uid'] = 'foreign-parent'
+        if representation:
+            view[1]['content'] = marker
+            assert ingest_ledger.identity_digest(engine._store.ingest_ledger_salt(), view[1]) != (
+                ingest_ledger.identity_digest(engine._store.ingest_ledger_salt(), history[1]))
+        view.append(dict(role='assistant', content='FINAL', message_uid='u3'))
+        assert all(engine._session_end_rows_equal(r, m, session_id='S2') for r, m in zip(rows, view))
+        engine.on_session_end('S2', view)
+        assert engine._store.get_session_messages('S2') == rows
+        assert 'gate 3: occurrence UID mismatch' in caplog.text
+        assert lifecycle(engine) == before
+        assert not engine._pending_session_tails
+    finally:
+        engine.shutdown()
