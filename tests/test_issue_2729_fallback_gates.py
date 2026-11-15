@@ -8,6 +8,7 @@ import logging
 import os
 import sqlite3
 import threading
+import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -199,6 +200,88 @@ def test_two_connections_race_after_prefix_read(cold, monkeypatch):
 def busy(**kwargs):
     raise sqlite3.OperationalError('database is locked')
     yield  # pragma: no cover
+
+
+@pytest.mark.parametrize('error', [UnicodeDecodeError('utf-8', b'\xff', 0, 1, 'invalid payload'), KeyboardInterrupt()])
+@pytest.mark.parametrize('matching', [False, True])
+def test_failed_fallback_proof_cannot_authorize_retry(cold, monkeypatch, caplog, error, matching):
+    engine = cold()
+    before = lifecycle(engine)
+    with monkeypatch.context() as patch:
+        patch.setattr(engine._store, 'ingest_atomic', busy)
+        engine.on_session_end('S2', copy.deepcopy(VIEW))
+    assert len(engine._pending_session_tails) == 1
+    tail = engine._pending_session_tails[0]
+    if not matching:
+        tail['view'][0]['content'] = 'different history'
+    compare, calls = engine._session_end_rows_equal, []
+    def raises_once(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            raise error
+        return compare(*args, **kwargs)
+    monkeypatch.setattr(engine, '_session_end_rows_equal', raises_once)
+    engine._retry_pending_session_tails()
+    assert engine._pending_session_tails == [tail]
+    assert_rows(engine, HISTORY, before)
+    engine._retry_pending_session_tails()
+    assert_rows(engine, VIEW if matching else HISTORY, before)
+    assert not engine._pending_session_tails
+    assert len(calls) > 1
+    if not matching:
+        assert 'gate 3: stored sequence mismatch' in caplog.text
+    engine._retry_pending_session_tails()
+    assert_rows(engine, VIEW if matching else HISTORY, before)
+
+
+def test_direct_fallback_begin_uses_session_end_busy_timeout(cold):
+    engine = cold()
+    conn, observed = engine._store._conn, []
+    previous = conn.execute('PRAGMA busy_timeout').fetchone()[0]
+    def trace(sql):
+        if sql.upper() == 'BEGIN IMMEDIATE':
+            observed.append(conn.execute('PRAGMA busy_timeout').fetchone()[0])
+    before = lifecycle(engine)
+    conn.set_trace_callback(trace)
+    try:
+        engine.on_session_end('S2', copy.deepcopy(VIEW))
+    finally:
+        conn.set_trace_callback(None)
+    assert observed == [50]
+    assert conn.execute('PRAGMA busy_timeout').fetchone()[0] == previous
+    assert_rows(engine, VIEW, before)
+
+
+def test_direct_fallback_busy_queues_lineage_then_drains_once(cold, latency_check):
+    engine = cold()
+    store = engine._store
+    lineage = ingest_ledger.persisted_lineage(store._conn, 'S2', None)
+    previous = store._conn.execute('PRAGMA busy_timeout').fetchone()[0]
+    before = lifecycle(engine)
+    locker = sqlite3.connect(store.db_path)
+    try:
+        locker.execute('BEGIN IMMEDIATE')
+        started = time.monotonic()
+        engine.on_session_end('S2', copy.deepcopy(VIEW))
+        elapsed = time.monotonic() - started
+        if latency_check:
+            assert elapsed < 1.0
+        assert_rows(engine, HISTORY, before)
+        assert len(engine._pending_session_tails) == 1
+        tail = engine._pending_session_tails[0]
+        assert tail['kind'] == 'cold'
+        assert tail['store'] is store
+        assert (tail['session_id'], tail['conversation_id'], tail['fallback_lineage']) == ('S2', 'conv-S2', lineage)
+        assert tail['view'] == VIEW
+        assert store._conn.execute('PRAGMA busy_timeout').fetchone()[0] == previous
+    finally:
+        locker.rollback()
+        locker.close()
+    engine._retry_pending_session_tails()
+    assert not engine._pending_session_tails
+    assert_rows(engine, VIEW, before)
+    engine._retry_pending_session_tails()
+    assert_rows(engine, VIEW, before)
 
 
 @pytest.mark.parametrize('foreground', [False, True])

@@ -5383,7 +5383,10 @@ class LCMEngine(
             )
             return
         if session_id != self._session_id:
-            self._fallback_off_current_session_end(session_id, messages)
+            with _temporary_sqlite_busy_timeout(
+                [getattr(self._store, "_conn", None)], _SESSION_END_BUSY_TIMEOUT_MS
+            ):
+                self._fallback_off_current_session_end(session_id, messages)
             return
         # Only this path ends the foreground binding. Same-id bypass callbacks
         # above can leave it serving, so session-id equality alone is insufficient.
@@ -5511,7 +5514,6 @@ class LCMEngine(
         # these session-indexed rows; a missing binding supplies no new proof.
         bindings, uids = {}, {}
         snapshot = tail.pop("fallback_inputs", None) or self._off_current_fallback_inputs(tail, rows, lineage)
-        tail["fallback_snapshot"] = snapshot
         records, views, salt = snapshot[2:5]
         for record in records:
             bindings.setdefault(record["store_id"], []).append(record)
@@ -5535,6 +5537,7 @@ class LCMEngine(
                     return None, "gate 3: occurrence binding stamp mismatch"
                 if known is not None and incoming is not None and known != incoming:
                     return None, "gate 3: occurrence UID mismatch"
+        tail["fallback_snapshot"] = snapshot
         return len(rows), None
 
     def _retry_off_current_fallback(self, tail):
