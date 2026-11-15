@@ -266,7 +266,8 @@ def judge(observations, entries):
                 and row.get('role') == 'user' and row.get('content') == expected['content']
         found = [row for row in observations['hits'] if matches(row, span=True)]
         retrieved = (any(exact(r['expanded']) for r in pages if matches(r) and 'expanded' in r)
-                     if not expected['content'].strip() else any(matches(r['expanded']) for r in found))
+                     if not expected['content'].strip() else any(
+                         exact(r['expanded']) if r['kind'] == 'record' else matches(r['expanded']) for r in found))
         listing_exact = all(exact(r['expanded']) for r in pages if matches(r))
         if sum(matches(row, span=True) for row in pages) != 1 or not retrieved or not listing_exact:
             failures.append((entry['capture_view'], entry['predecessor_ordinal'], expected['content']))

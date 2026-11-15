@@ -121,6 +121,15 @@ def test_listing_reference_is_exact(text, field, value):
     assert judge(observed, entries) == [(0, 0, text)]
 
 
+@pytest.mark.parametrize('field,value', [('observed_at', -1.), ('session_id', 'wrong')])
+def test_search_reference_is_exact(field, value):
+    observed, entries = observation([])
+    assert judge(observed, entries) == []
+    hit = observed['hits'][0]
+    observed['hits'] = [dict(hit, expanded=dict(hit['expanded'], **{field: value}))]
+    assert judge(observed, entries) == [(0, 0, 'needle')]
+
+
 def test_witness_precedes_overlap():
     observed, entries = observation([row(2, 'needle\n\nreply')], witness=True)
     assert judge(observed, entries) == []
