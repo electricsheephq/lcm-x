@@ -5494,7 +5494,9 @@ class LCMEngine(
             (lineage, json.dumps([row["store_id"] for row in rows]))))
         seqs = sorted({b["view_seq"] for b in records if b["view_seq"] is not None})
         views = list(conn.execute("SELECT view_seq,entries FROM ingest_views WHERE lineage=? AND kind='ingest' "
-            "AND view_seq IN (SELECT value FROM json_each(?)) ORDER BY view_seq", (lineage, json.dumps(seqs))))
+            "AND (view_seq IN (SELECT value FROM json_each(?)) OR view_seq IN (SELECT view_seq FROM ingest_views "
+            "WHERE lineage=? AND kind='ingest' ORDER BY view_seq DESC LIMIT 2)) ORDER BY view_seq",
+            (lineage, json.dumps(seqs), lineage)))
         return (rows, lineage, records, views, tail["store"].ingest_ledger_salt(),
                 copy.deepcopy(vars(self._config)), external, copy.deepcopy(tail["view"]))
 
@@ -5517,10 +5519,14 @@ class LCMEngine(
         records, views, salt = snapshot[2:5]
         for record in records:
             bindings.setdefault(record["store_id"], []).append(record)
+        # Retained positions still carry UID vetoes after a binding's own view is pruned.
+        positional = []
         for seq, entries in views:
-            for entry in ingest_ledger.decode_entries(entries) if entries else ():
+            decoded = ingest_ledger.decode_entries(entries) if entries else []
+            positional.append(decoded)
+            for entry in decoded:
                 uids[(seq, entry.ref)] = entry.uidset_digest
-        for row, message in zip(rows, view):
+        for index, (row, message) in enumerate(zip(rows, view)):
             if not self._session_end_rows_equal(row, message, session_id=session, hermes_home=tail["hermes_home"]):
                 return None, "gate 3: stored sequence mismatch"
             stamp, seen = _normalize_observed_at(message.get("timestamp")), _normalize_observed_at(row.get("observed_at"))
@@ -5530,6 +5536,11 @@ class LCMEngine(
             absorbed = [uid for uid in absorbed if _valid_uid(uid)] if isinstance(absorbed, (list, tuple)) else []
             incoming = ingest_ledger.uidset_digest(salt, message["message_uid"], absorbed) if (
                 salt is not None and _valid_uid(message.get("message_uid"))) else None
+            if incoming is not None:
+                identity = ingest_ledger.identity_digest(salt, message)
+                if any(index < len(entries) and entries[index].identity_digest == identity
+                        and entries[index].uidset_digest not in (None, incoming) for entries in positional):
+                    return None, "gate 3: occurrence UID mismatch"
             for binding in bindings.get(row["store_id"], ()):
                 known = uids.get((binding["view_seq"], binding["occ_id"]))
                 bound_stamp = _normalize_observed_at(binding["stamp"])
@@ -12462,12 +12473,12 @@ class LCMEngine(
 
     def _retry_cold_tail(self, tail, *, sibling, deadline=None):
         tail.pop("kept_on_conflict", None)
+        if tail["store"]._conn is None:
+            self._ledger_count("ledger.tail.cold_store_unbound")
+            return False
         if "fallback_lineage" in tail:
             return self._retry_off_current_fallback(tail)
         if not self._cold_tail_is_bound(tail):
-            if tail["store"]._conn is None:
-                self._ledger_count("ledger.tail.cold_store_unbound")
-                return False
             return self._retry_cold_tail_s3(tail, stamps=True, hermes_home=tail["hermes_home"], deadline=deadline)
         same = (not sibling and tail["session_id"] == self._session_id
                 and _normalize_conversation_id_value(tail["conversation_id"]) ==

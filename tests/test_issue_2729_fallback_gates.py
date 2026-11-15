@@ -19,6 +19,7 @@ import pytest
 
 from hermes_lcm import ingest_ledger, maintenance_scheduler
 from hermes_lcm.externalize import get_large_output_storage_dir
+from hermes_lcm.store import MessageStore
 from tests.test_host_uid_shadow import _engine
 from tests.test_issue_2055_ingest_ledger_writes import engines as engines
 from tests.test_issue_2729_offcurrent_end_after_restart import _start
@@ -164,6 +165,78 @@ def test_repeated_end_and_restart_store_suffix_once(cold, caplog):
         assert_rows(replacement, VIEW, before)
     finally:
         replacement.shutdown()
+
+
+@pytest.mark.parametrize('ingests', [(4,), (1, 2, 3, 4)], ids=['single', 'growing'])
+@pytest.mark.parametrize('matching', [False, True], ids=['foreign-uid', 'matching-uid'])
+@pytest.mark.parametrize('stamped', [True, False], ids=['same-stamp', 'absent-stamp'])
+def test_retained_view_uid_veto_after_restart(engines, caplog, ingests, matching, stamped):
+    history = HISTORY + [dict(role='user', content='more', timestamp=3., message_uid='u3'),
+                         dict(role='assistant', content='answer', timestamp=4., message_uid='u4')]
+    engine = engines(sessions=[('S1', None, None), ('S2', None, None)])
+    _start(engine, 'S2')
+    for count in ingests:
+        engine.ingest(copy.deepcopy(history[:count]))
+    _start(engine, 'S1')
+    home = Path(engine._hermes_home)
+    engine.shutdown()
+    replacement = _engine(home, session='S1', conversation='conv-S1')
+    try:
+        conn = replacement._store._conn
+        lineage = ingest_ledger.persisted_lineage(conn, 'S2', None)
+        retained = list(conn.execute("SELECT view_seq,entries FROM ingest_views WHERE lineage=? AND kind='ingest'",
+                                     (lineage,)))
+        assert len(retained) == min(2, len(ingests))
+        if len(ingests) > 1:
+            first = replacement._store.get_session_messages('S2')[0]['store_id']
+            seq, occ = conn.execute('SELECT view_seq,occ_id FROM occurrence_bindings WHERE lineage=? AND store_id=?',
+                                    (lineage, first)).fetchone()
+            assert seq not in {seq for seq, _ in retained}
+            assert all(ingest_ledger.decode_entries(blob)[0].ref != occ for _, blob in retained)
+        view = copy.deepcopy(history) + [dict(role='assistant', content='FINAL', timestamp=5., message_uid='u5')]
+        if not matching:
+            view[0]['message_uid'] = 'foreign-uid'
+        if not stamped:
+            del view[0]['timestamp']
+        before = lifecycle(replacement)
+        rows_before = replacement._store.get_session_messages('S2')
+        for _ in range(2):
+            replacement.on_session_end('S2', copy.deepcopy(view))
+        assert_rows(replacement, view if matching else history, before)
+        assert replacement._store.get_session_messages('S2')[:len(history)] == rows_before
+        assert not replacement._pending_session_tails
+        assert fallback_counts(replacement) == ({'stored': 1, 'noop': 1} if matching else {'refused.gate3': 2})
+        if not matching:
+            assert 'gate 3: occurrence UID mismatch' in caplog.text
+    finally:
+        replacement.shutdown()
+
+
+def test_closed_fallback_store_counts_unbound_then_drains_once(cold, monkeypatch):
+    engine = cold()
+    before = lifecycle(engine)
+    with monkeypatch.context() as patch:
+        patch.setattr(engine._store, 'ingest_atomic', busy)
+        engine.on_session_end('S2', copy.deepcopy(VIEW))
+    assert len(engine._pending_session_tails) == 1
+    tail = engine._pending_session_tails[0]
+    assert 'fallback_lineage' in tail
+    closed = MessageStore(engine._store.db_path)
+    closed.close()
+    tail['store'] = closed
+    counters = engine._ingest_ledger_counters
+    unbound, failed = (counters.get(key, 0) for key in ('ledger.tail.cold_store_unbound', 'ledger.tail.retry_failed'))
+    for attempt in range(1, 3):
+        engine._retry_pending_session_tails()
+        assert counters.get('ledger.tail.cold_store_unbound', 0) == unbound + attempt
+        assert counters.get('ledger.tail.retry_failed', 0) == failed
+        assert engine._pending_session_tails == [tail]
+        assert_rows(engine, HISTORY, before)
+    tail['store'] = engine._store
+    for _ in range(2):
+        engine._retry_pending_session_tails()
+        assert not engine._pending_session_tails
+        assert_rows(engine, VIEW, before)
 
 
 def test_two_connections_race_after_prefix_read(cold, monkeypatch):
