@@ -34,6 +34,10 @@ def test_warm_retry_restamped_user_stored_once(tmp_path, monkeypatch, restamp, b
         assert stamps == ([1.0, 1001.0] if restamp else [1.0]), stamps
         assert [r['role'] for r in rows[:4]] == ['user', 'assistant', 'assistant', 'tool']
         assert sum(r['content'] == 'FINAL' for r in rows) == int(final)
+        # Every row exactly once: a duplicated reply, call or result row fails here too.
+        expected = [('user', 1.0), ('assistant', 2.0), ('assistant', 3.0), ('tool', 4.0)]
+        expected += [('user', 1001.0)] * restamp + [('assistant', 1006.0)] * final
+        assert sorted((r['role'], r['observed_at']) for r in rows) == sorted(expected)
     finally:
         engine.shutdown()
 
