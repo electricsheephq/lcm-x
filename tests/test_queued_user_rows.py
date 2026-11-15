@@ -191,12 +191,15 @@ def test_drain_lock_isolation_and_purge_revalidation(tmp_path, monkeypatch):
             raise sqlite3.OperationalError('busy')
         monkeypatch.setattr(e, '_store_queued_user_rows', writer)
         folded(e)
-        assert calls and e._queued_entries and not sm.records_path(e._store).exists()
+        assert calls, 'drain inside canonical write lock'
+        assert e._queued_entries and not sm.records_path(e._store).exists()
         e._store.delete_session_messages('S')
         monkeypatch.setattr(e, '_store_queued_user_rows', original)
         q.drain(e)
+        with sm.records_read_cut(e._store) as cut:
+            attached, unattached = sm.read_records(cut, 'queued_user_rows')
+            assert not attached and unattached == 0, 'purge resurrection'
         assert len(e._queued_entries) == 1
-        assert not records(e), 'purge resurrection'
         q.drain(e, exiting=True)
         assert e._queued_counts['exit_kept'] == 1
 
@@ -330,3 +333,27 @@ def test_current_main_canonical_control(tmp_path, monkeypatch, shape):
         finally:
             e.shutdown()
     assert outputs[0] == outputs[1], 'canonical row changed'
+
+
+@pytest.mark.parametrize('roles', [None, ['user'], ['assistant']])
+def test_limit_one_listing_matches_unpaged(tmp_path, roles):
+    with engine_context(tmp_path, window=128000, conversation_id='conv', embeddings_enabled=False) as e:
+        e._store.append('S', user('before', 1.))
+        folded(e, ('first', 'second', 'newest'))
+        e._store.append('S', user('after', 60.))
+        args = dict(session_id='S', include_exact_ref=True)
+        if roles:
+            args['roles'] = roles
+        expected = json.loads(tools.lcm_load_session(dict(args, limit=100), engine=e))['messages']
+        actual, cursor, seen = [], {}, set()
+        while True:
+            page = json.loads(tools.lcm_load_session(dict(args, limit=1, **cursor), engine=e))
+            actual.extend(page['messages'])
+            assert not page['has_more'] or page['next_cursor'] is not None, 'more rows without cursor'
+            if page['next_cursor'] is None:
+                break
+            cursor = page['next_cursor']
+            key = tuple(cursor['record_cursor'])
+            assert key not in seen, 'pagination stalled'
+            seen.add(key)
+        assert actual == expected

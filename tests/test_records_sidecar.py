@@ -1246,3 +1246,18 @@ def test_interrupted_after_canonical_replace_keeps_new_pair(pair, tmp_path, monk
         assert canonical.execute("SELECT count(*) FROM messages WHERE session_id='T'").fetchone()[0] == 1
         assert side.execute("SELECT count(*) FROM test_records WHERE payload='new record'").fetchone()[0] == 1, \
             'interrupted replace paired old records with new canonical'
+
+
+def test_purge_preflight_recovers_hot_journal_before_read(pair, monkeypatch):
+    store, writer, _ = pair
+    crash_records_writer(writer.path)
+    checked = []
+    original = sm._check_records_tables
+    def check(side):
+        assert not Path(str(writer.path) + '-journal').exists(), 'preflight read before journal recovery'
+        checked.append(True)
+        return original(side)
+    monkeypatch.setattr(sm, '_check_records_tables', check)
+    store.delete_session_messages('S')
+    assert checked and store.get_session_messages('S') == []
+    assert counts(writer) == (0, 0)

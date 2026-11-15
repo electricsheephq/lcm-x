@@ -4,7 +4,8 @@ Writer faults are ingest-scoped and never inspect arguments: every writer entry
 in the first faulted ingest raises for once; every ingest raises for persistent.
 Entries are counted per ingest regardless of batching, retries or call shape.
 
-Frozen in the product PR's diff: check_stage, active, expected_record, projection,
+Frozen except the accepted round-3 refusal and canonical-expansion amendments:
+check_stage, active, expected_record, projection,
 mandatory_floor, judge(), overlap(), FLOOR_USER_ROWS=64, FLOOR_BYTES=1048576,
 the records-v1 block in test_paired_merged_user_turns.py,
 and the snapshot shape (session.py: canonical_rows, queued_rows, Trace.stored,
@@ -131,6 +132,15 @@ def projection(snapshot):
         dict(row))]
 
 
+def earlier_spans(record, canonical):
+    """Exact substring evidence, independent of the product's overlap predicate."""
+    rows = [dict(row) for row in canonical]
+    owner = next((row for row in rows if row['store_id'] == record['owner_store_id']), None)
+    return [row for row in rows if owner is not None and row['store_id'] < owner['store_id']
+            and row['session_id'] == owner['session_id'] and row['role'] == 'user'
+            and record['content'] in row['content']]
+
+
 def check_stage(snapshot, baseline, entries):
     assert snapshot['canonical'] == baseline['canonical'], 'canonical row changed'
     # Supersession needs a same-turn reload witness, not equal bytes from another turn.
@@ -141,7 +151,12 @@ def check_stage(snapshot, baseline, entries):
         if row['superseded_by'] is not None:
             assert witness.get(row['owner_store_id']) == row['superseded_by'], 'superseded without occurrence witness'
             row['superseded_by'] = None
-    assert Counter(map(freeze, records)) == Counter(freeze(expected_record(e)) for e in entries), 'declared record multiset'
+    # The judge separately requires counted refusal and retrieval for these spans.
+    stored_keys = {(r['owner_store_id'], r['ordinal']) for r in records}
+    required = [expected_record(e) for e in entries if
+                (e['owner_store_id'], e['predecessor_ordinal']) in stored_keys
+                or not earlier_spans(expected_record(e), snapshot['canonical'])]
+    assert Counter(map(freeze, records)) == Counter(map(freeze, required)), 'declared record multiset'
     assert len(projection(snapshot)) == len(snapshot['canonical']) + sum(
         dict(row)['superseded_by'] is None for row in snapshot['records']), 'record owner absent'
 
@@ -213,11 +228,27 @@ def observe(engine, tools):
                              reference=reference, expanded=result))
     sources = [sid for (raw,) in engine._dag._conn.execute('SELECT source_ids FROM summary_nodes')
                for sid in json.loads(raw)]
-    return dict(pages=pages, hits=hits, summary_sources=sources, withheld=withheld, withheld_counts=counts)
+    result = dict(pages=pages, hits=hits, summary_sources=sources, withheld=withheld, withheld_counts=counts)
+    if hasattr(engine._paired_trace, 'baseline_stages'):
+        current = dict(getattr(engine, '_queued_counts', {}))
+        previous = getattr(engine, '_contract_refusal_previous', {})
+        by_capture = engine._paired_trace.__dict__.setdefault('_contract_refusals', {})
+        stage = engine._paired_trace.ingests[-1]
+        fresh = [c for c in stage['captures'] if c['head_present'] and c['overwritten']
+                 and not c['newest_present'] and c['ids'][0] in stage['committed']
+                 and c['ids'][0] not in stage['committed_before']]
+        delta = current.get('backward_overlap', 0) - previous.get('backward_overlap', 0)
+        if fresh:
+            assert len(fresh) == 1 or delta == 0, 'ambiguous refusal capture'
+            for capture in fresh:
+                by_capture[capture['view']] = dict(backward_overlap=delta)
+        engine._contract_refusal_previous = current
+        result['refused_captures'] = dict(by_capture)
+    return result
 
 
 def judge(observations, entries):
-    """Frozen semantic contract; candidate PRs must not change this function."""
+    """Semantic contract, including the accepted round-3 refusal amendment."""
     pages, failures = observations['pages'], []
     assert [(r['store_id'], r['role'], r['content']) for r in pages if r['kind'] == 'canonical'] \
         == observations['baseline_canonical_rows'], \
@@ -240,11 +271,33 @@ def judge(observations, entries):
                 if e['due_stage'] is not None and e['owner_store_id'] not in witness}
     assert set(withheld) <= eligible, 'withheld locator not active or superseded'
     declared = {(r['owner_store_id'], r['ordinal']) for r in map(expected_record, entries)}
+    refused = {}
+    if 'refused_captures' in observations:
+        stored = {(r.get('owner_store_id'), r.get('ordinal')) for r in observations['listing_projection']}
+        refused = {(e['owner_store_id'], e['predecessor_ordinal']): earlier_spans(
+            expected_record(e), observations['baseline_canonical']) for e in entries
+            if e['due_stage'] is not None and (e['owner_store_id'], e['predecessor_ordinal']) not in stored
+            and earlier_spans(expected_record(e), observations['baseline_canonical'])}
+        checked_views = {e['capture_view'] for e in entries
+                         if (e['owner_store_id'], e['predecessor_ordinal']) in stored
+                         or (e['owner_store_id'], e['predecessor_ordinal']) in refused}
+        for view in checked_views:
+            expected_count = int(any(e['capture_view'] == view and
+                (e['owner_store_id'], e['predecessor_ordinal']) in refused for e in entries))
+            assert observations['refused_captures'].get(view, {}).get('backward_overlap', 0) == expected_count, \
+                'backward_overlap refusal count differs'
     for entry in entries:
         expected = expected_record(entry)
         key = (expected['owner_store_id'], expected['ordinal'])
         def exact(row, **overrides):
             return all(k in row and row[k] == value for k, value in dict(expected, **overrides).items())
+        if key in refused:
+            fields = ('store_id', 'session_id', 'conversation_id', 'role', 'content')
+            expansions = ([hit['expanded'] for hit in observations['hits']] if expected['content'].strip()
+                          else [row for row in pages if row['kind'] == 'canonical'])
+            assert any(all(expanded.get(f) == prior.get(f) for f in fields)
+                       for prior in refused[key] for expanded in expansions), 'refused text not retrievable'
+            continue
         locator = withheld.get(key)
         # Main's empty physical projection retains its historical recall misses.
         if key in eligible and any((r.get('owner_store_id'), r.get('ordinal')) == key
@@ -283,6 +336,10 @@ def judge(observations, entries):
                        if any(row['kind'] == 'record'
                               and (row.get('owner_store_id'), row.get('ordinal')) == key
                               for row in (hit, hit['expanded']))]
+        canonical_hits = [hit for hit in observations['hits']
+                          if witness.get(key[0]) is not None and hit.get('store_id') == witness[key[0]]
+                          and hit['expanded']['kind'] == 'canonical']
+        found.extend(hit for hit in canonical_hits if hit not in found and witness_matches(hit['expanded']))
         retrieved = (any(exact(r['expanded']) for r in pages if matches(r) and 'expanded' in r)
                      if not expected['content'].strip() else bool(found) and all(
                          exact(r['expanded'], superseded_by=witness.get(key[0]))
@@ -291,6 +348,7 @@ def judge(observations, entries):
             (r['expanded'].get('owner_store_id'), r['expanded'].get('ordinal')) == key
             and exact(r['expanded'], superseded_by=witness.get(key[0]))
             if r['expanded']['kind'] == 'record' else witness_matches(r['expanded']) for r in record_hits)
+        retrieved = retrieved and all(witness_matches(hit['expanded']) for hit in canonical_hits)
         listing_exact = all(exact(r['expanded']) for r in pages if matches(r))
         if sum(matches(row, span=True) for row in pages) != 1 or not retrieved or not listing_exact:
             failures.append((entry['capture_view'], entry['predecessor_ordinal'], expected['content']))

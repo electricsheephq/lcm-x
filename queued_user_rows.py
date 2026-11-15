@@ -321,7 +321,7 @@ def listing(cut, args, engine, response, original):
         return response
     if not isinstance(cursor, list) or len(cursor) != 2 or any(type(v) is not int or v < 0 for v in cursor):
         return dict(error='record_cursor must be [owner_store_id, ordinal] or null')
-    base_args = dict(args, after_store_id=max(0, cursor[0] - 1))
+    base_args = dict(args, after_store_id=cursor[0] if cursor[1] == 2147483647 else max(0, cursor[0] - 1))
     base_args.pop('record_cursor', None)
     canonical_page = json.loads(original(base_args, engine=engine))
     if 'error' in canonical_page:

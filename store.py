@@ -785,6 +785,7 @@ def _purge_records(conn, sessions_sql, args):
     if path is None:
         return
     if path.exists():
+        _recover_records_journal(path)
         with closing(_records_ro(path)) as probe:
             _check_records_write_format(probe)
             _check_records_tables(probe)  # Refuse before ensure can stamp any bytes.

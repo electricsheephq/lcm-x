@@ -432,3 +432,75 @@ def test_broken_withheld_judgments(mutation, message, record_property):
     with pytest.raises(AssertionError, match=message) as caught:
         judge(observed, entries)
     record_property('mutation_failure', str(caught.value))
+
+
+@pytest.mark.parametrize('companion', ['alone', 'record', 'witness'])
+@pytest.mark.parametrize('correct', [False, True])
+def test_canonical_expansion_checked_beside_correct_hit(companion, correct):
+    observed, entries = observation([row(2, 'needle\n\nreply')], witness=True)
+    record_hit = observed['hits'][0]
+    witness = dict(row(2, 'needle\n\nreply'), kind='canonical')
+    hit = dict(witness, reference=dict(tool='lcm_expand', args=dict(store_id=2)), expanded=witness)
+    # The snippet itself need not include the declared segment.
+    checked = dict(hit, content='reply snippet',
+                   expanded=witness if correct else dict(witness, content='WRONG'))
+    companions = dict(alone=[], record=[record_hit], witness=[hit])
+    observed['hits'] = [checked, *companions[companion]]
+    assert judge(observed, entries) == ([] if correct else [(0, 0, 'needle')])
+
+
+def refusal_observation(*, present=True, counted=True, stored=False):
+    observed, entries = observation([], text='P2')
+    entries[0]['owner_store_id'] = 7
+    prior = row(4, 'P2\n\nR' if present else 'absent')
+    owner = row(7, 'R2')
+    canonical = [prior, owner]
+    record = dict(expected_record(entries[0]), kind='record')
+    visible = dict(record, expanded=record)
+    observed.update(baseline_canonical=list(map(freeze, canonical)),
+        baseline_canonical_rows=[(r['store_id'], r['role'], r['content']) for r in canonical],
+        pages=[dict(prior, kind='canonical'), *([visible] if stored else []), dict(owner, kind='canonical')],
+        listing_projection=[dict(prior, kind='canonical'), *([record] if stored else []), dict(owner, kind='canonical')],
+        hits=[dict(prior, kind='canonical', expanded=dict(prior, kind='canonical'))] + ([visible] if stored else []),
+        refused_captures={0: dict(backward_overlap=int(counted))})
+    return observed, entries
+
+
+def test_backward_refusal_retrievable_from_row_four():
+    observed, entries = refusal_observation()
+    assert judge(observed, entries) == []
+    snapshot = dict(canonical=observed['baseline_canonical'], records=[])
+    check_stage(snapshot, snapshot, entries)
+
+
+def test_backward_refusal_without_earlier_text_fails():
+    observed, entries = refusal_observation(present=False)
+    assert judge(observed, entries) == [(0, 0, 'P2')]
+    snapshot = dict(canonical=observed['baseline_canonical'], records=[])
+    with pytest.raises(AssertionError, match='declared record multiset'):
+        check_stage(snapshot, snapshot, entries)
+
+
+def test_backward_refusal_must_be_counted():
+    observed, entries = refusal_observation(counted=False)
+    with pytest.raises(AssertionError, match='backward_overlap refusal count differs'):
+        judge(observed, entries)
+
+
+def test_stored_record_cannot_also_count_as_refused():
+    observed, entries = refusal_observation(stored=True)
+    with pytest.raises(AssertionError, match='backward_overlap refusal count differs'):
+        judge(observed, entries)
+
+
+def test_backward_refusal_expansion_must_preserve_earlier_row():
+    observed, entries = refusal_observation()
+    observed['hits'][0]['expanded']['content'] = 'wrong'
+    with pytest.raises(AssertionError, match='refused text not retrievable'):
+        judge(observed, entries)
+
+
+def test_unrelated_capture_refusal_is_not_charged_to_declared_record():
+    observed, entries = refusal_observation()
+    observed['refused_captures'][999] = dict(backward_overlap=1)
+    assert judge(observed, entries) == []
