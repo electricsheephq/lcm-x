@@ -6,6 +6,7 @@ view; :12252-12300 selects detached, went-on and current retries; :12398-12429
 compares/appends; :12431-12506 shares the retry budget; :12619-12679 drains
 then closes. maintenance_scheduler.py:421-430 is the at-exit drain.
 """
+import base64
 from collections import Counter
 from copy import deepcopy
 import hashlib
@@ -18,7 +19,75 @@ import time
 from types import SimpleNamespace
 
 from .session import assert_faults, audit_fault, freeze
-from .session_end_expected import FAULTS, ROUTES
+from .session_end_expected import FAULTS, INTENDED_DIFFERENCES, ROUTES
+
+# Local copies keep this gate independent of the historical pin modules.
+FULL_OUTPUT = "SPILLOVER_RECOVERY_NEEDLE:\n" + ("é文abcdef\n" * 600)
+
+
+def _b64(n):
+    return base64.b64encode(bytes((i * 37 + 11) % 256 for i in range(n))).decode("ascii")
+
+
+def _call(shape):
+    if shape == "wrapped-base64":
+        long = _b64(3420)
+        wrapped = "\n".join(long[i:i + 76] for i in range(0, len(long), 76))
+        arguments = json.dumps({"path": "a.b64", "content": "hdr\n" + wrapped + "\nend"})
+    elif shape == "data-uri-key":
+        arguments = json.dumps({"data:image\\/png;base64," + _b64(1200): "v", "b": "x"})
+    else:  # plain control
+        arguments = json.dumps({"path": "a.txt", "content": "hdr\nplain body\nend"})
+    return {"role": "assistant", "content": "", "tool_calls": [
+        {"id": "m1", "type": "function", "function": {"name": "write_file", "arguments": arguments}}]}
+
+
+def _history(tool_content):
+    rows = [("user", "A"), ("assistant", "B"), ("user", "C")]
+    msgs = [{"role": r, "content": t, "timestamp": float(i + 1)} for i, (r, t) in enumerate(rows)]
+    msgs.append({"role": "assistant", "content": "", "timestamp": 4.0, "tool_calls": [
+        {"id": "m1", "type": "function", "function": {"name": "terminal", "arguments": "{}"}}]})
+    msgs.append({"role": "tool", "tool_call_id": "m1", "content": tool_content, "timestamp": 5.0})
+    for i, (r, t) in enumerate((("assistant", "D"), ("user", "E"), ("assistant", "F"), ("user", "G"),
+                                ("assistant", "H"))):
+        msgs.append({"role": r, "content": t, "timestamp": float(6 + i)})
+    return msgs
+
+
+def _state_db(tmp_path, sessions) -> None:
+    """Host state.db next to lcm.db: (id, parent_session_id, end_reason, source, model_config)."""
+    conn = sqlite3.connect(tmp_path / "state.db")
+    conn.execute("CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, parent_session_id TEXT, "
+                 "end_reason TEXT, source TEXT, model_config TEXT)")
+    conn.executemany("INSERT OR REPLACE INTO sessions VALUES (?, ?, ?, ?, ?)",
+                     [tuple(row) + (None,) * (5 - len(row)) for row in sessions])
+    conn.commit()
+    conn.close()
+
+
+def _marker(path, full=FULL_OUTPUT, *, count=None, preview=None):
+    """Hermes f42f579c tools/tool_result_storage.py::_build_persisted_message shape."""
+    count = len(full) if count is None else count
+    preview = full[:30] if preview is None else preview
+    return (
+        "<persisted-output>\n"
+        f"This tool result was too large ({count:,} characters, {count / 1024:.1f} KB).\n"
+        f"Full output saved to: {path}\n"
+        "Use the read_file tool with offset and limit to access specific sections of this output.\n"
+        "Recovery: page through the saved file with read_file (offset/limit) or "
+        "process it with execute_code — do NOT re-request the same data from the "
+        "remote API; the full result is already on disk.\n\n"
+        f"Preview (first {len(preview)} chars):\n"
+        f"{preview}\n...\n"
+        "</persisted-output>"
+    )
+
+
+def _write_output(path, full=FULL_OUTPUT):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(full.encode("utf-8"))
+    return _marker(path, full)
+
 
 # Excluded by column NAME only. observed_at and host stamps remain semantic.
 CLOCK_COLUMNS = frozenset(('timestamp', 'ingested_at', 'created_at', 'updated_at', 'completed_at',
@@ -164,13 +233,21 @@ def snapshot(engines, root, paths):
     return dict(canonical=canonical, schema=schemas, tables=tables, payload=payloads(root / 'payloads'),
         pending=[freeze(value(e._pending_session_tails)) for e in engines],
         ledger=[dict(e.__dict__.get('_ingest_ledger_counters', {})) for e in engines],
+        # Empty by construction at a42baa75; lifecycle state is covered by tables.
         lifecycle=[{k: value(v) for k, v in e.__dict__.items() if k.startswith('_lifecycle_') and not callable(v)}
                    for e in engines])
 
 
-def judge(main, candidate, stage):
+def judge(main, candidate, stage, *, case=None, mode=None, seen=None):
     for key in ('canonical', 'schema', 'tables', 'payload', 'pending', 'ledger', 'lifecycle'):
-        assert candidate[key] == main[key], f'{stage}: {key} changed'
+        entries = [entry for entry in INTENDED_DIFFERENCES
+                   if entry[0] == case and entry[1] in ('*', mode) and entry[2:4] == (stage, key)]
+        if entries:
+            assert candidate[key] != main[key], f'{case}/{mode}/{stage}: stale intended difference {key}'
+            if seen is not None:
+                seen.update(entries)
+        else:
+            assert candidate[key] == main[key], f'{stage}: {key} changed'
 
 
 class Proof:

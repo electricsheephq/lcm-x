@@ -16,16 +16,16 @@ if os.environ.get('LCM_DIFFERENTIAL') != '1':
 
 from .paired import ROOT, _load
 from .session import Trace
-from .session_end_contract import Clock, Proof, fault, floor, judge, slow_seam, snapshot
-from .session_end_expected import BASELINE, CELLS, CONTROL_LOSSES, FAULTS
+from .session_end_contract import (FULL_OUTPUT, Clock, Proof, _call, _history, _state_db, _write_output,
+                                   fault, floor, judge, slow_seam, snapshot)
+from .session_end_expected import BASELINE, CELLS, CONTROL_LOSSES, FAULTS, INTENDED_DIFFERENCES
 from .trees import materialize, resolve
-from tests.invariants.test_issue_2543_cold_inline_block import _call
-from tests.invariants.test_issue_2539_offcurrent_marker_end import _history
-from tests.test_host_uid_shadow import _state_db
-from tests.test_issue_10_persisted_output_spillover import FULL_OUTPUT, _write_output
 
 MODES = ('instant', 'busy-timeout', 'slow-cold')
-CASES = (*CELLS, 'plain-direct', 'plain-busy', 'append', 'commit', 'repeated-retry',
+CASES = ('wrapped-base64-cold-pairwise', 'wrapped-base64-cold-counted',
+         'data-uri-key-cold-pairwise', 'data-uri-key-cold-counted',
+         'changed-spillover-direct', 'changed-spillover-busy',
+         'changed-hermes-results-direct', 'changed-hermes-results-busy', 'plain-direct', 'plain-busy', 'append', 'commit', 'repeated-retry',
          'rollback', 'interrupt', 'bypass', 'warm-busy', 'shutdown-deadline', 'missing-payload',
          'restart-between-commits', 'detached', 'newer', 'ledger-off', 'before-ledger', 'failed-ledger-write',
          '2543384-before', '2543384-between', '2543384-after', '2543487-before', '2543487-between', '2543487-after')
@@ -33,13 +33,14 @@ CASES = (*CELLS, 'plain-direct', 'plain-busy', 'append', 'commit', 'repeated-ret
 
 @pytest.fixture(scope='module')
 def end_versions(tmp_path_factory):
-    return {'main': _load(materialize(resolve(BASELINE), tmp_path_factory.mktemp('end-main')), '_end_main'),
+    baseline = os.environ.get('LCMX_DIFF_SESSION_END_BASELINE', BASELINE)
+    return {'main': _load(materialize(resolve(baseline), tmp_path_factory.mktemp('end-main')), '_end_main'),
             'candidate': _load(Path(os.environ.get('LCMX_DIFF_CANDIDATE_TREE', ROOT)), '_end_candidate')}
 
 
 @pytest.fixture(scope='module')
 def receipts(request):
-    data = {'traces': [], 'routes': {}, 'stages': {}}
+    data = {'traces': [], 'routes': {}, 'stages': {}, 'differences': set()}
     yield data
     # A partial invocation cannot advertise that it exercised the mandatory floor.
     selected = {item.callspec.params['case'] for item in request.session.items
@@ -47,6 +48,7 @@ def receipts(request):
     assert selected == set(CASES), 'floor skipped: partial session-end case set'
     assert len(data['traces']) == len(CASES) * len(MODES), 'floor skipped: incomplete primary set'
     floor(data['traces'])
+    assert data['differences'] == set(INTENDED_DIFFERENCES), 'stale intended difference: unmatched entry'
     output = os.environ.get('LCM_DIFFERENTIAL_OUT')
     if output:
         directory = Path(output)
@@ -300,11 +302,15 @@ def scenario(run, case):
         run.engine = engine = run.open(run.root)
     run.retry('retry-1')
     run.retry('retry-2')
-    if case in CELLS:
+    if case in CASES[:8]:
         rows = engine._store.get_session_messages('S1')
-        assert len(rows) == 10 and not any(r['content'] == 'FINAL' for r in rows), CELLS[case]
-        if case.endswith('cold-counted'):
-            assert engine._cold_tail_absent_count(engine._pending_session_tails[0]) == 2, CELLS[case]
+        if case in CELLS:
+            if run.check_proof:  # Pin main's loss; judge compares the candidate at every stage.
+                assert len(rows) == 10 and not any(r['content'] == 'FINAL' for r in rows), CELLS[case]
+                if case.endswith('cold-counted'):
+                    assert engine._cold_tail_absent_count(engine._pending_session_tails[0]) == 2, CELLS[case]
+        else:
+            assert sum(r['content'] == 'FINAL' for r in rows) == 1, f'{case}: FINAL must be stored exactly once'
     run.end(view)
     run.snap('repeated-end')
     # Next ordinary canonical ingest after every injected fault.
@@ -348,7 +354,8 @@ def test_session_end(tmp_path, monkeypatch, end_versions, receipts, case, mode):
         (tmp_path / 'live').rename(tmp_path / ('saved-' + tree))
     assert results['main'].keys() == results['candidate'].keys(), 'stage set changed'
     for stage in results['main']:
-        judge(results['main'][stage], results['candidate'][stage], stage)
+        judge(results['main'][stage], results['candidate'][stage], stage,
+              case=case, mode=mode, seen=receipts['differences'])
     receipts['traces'].append(traces)
     receipts['stages'][case + '/' + mode] = list(results['main'])
 
