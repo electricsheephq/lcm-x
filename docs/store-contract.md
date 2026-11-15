@@ -6,7 +6,7 @@ Digest: sha256:76644a990e50b9613697704dcb05b349a952d44ea22187bd768b0eab9a9badc9
 ## What a consumer may read
 
 Use plain SQL over a read-only (`mode=ro`) connection. These are the contracted tables and columns; feature tables may be absent until their named migration first runs. Probe presence before reading them. JSON stored in TEXT remains JSON, not a separate SQL type.
-Column entries below give name, declared type, nullability, default SQL and primary-key position. Index names are sorted; this digest does not describe index expressions, triggers or CHECK constraints.
+Column entries below give name, declared type, nullability, default SQL and primary-key position. Index names are sorted. The digest covers only what these tables show. It does not describe which columns an index covers, whether an index is unique, index expressions, triggers, CHECK constraints or foreign keys. For callables it covers parameter names, kinds and defaults, not behaviour or return values. Column order is a fresh store's: a store migrated from an older release can list the same columns in another order, so read columns by name.
 
 <!-- Generated from a fresh store with all contracted named features enabled. -->
 | Table | Columns (name: type; nullability; default; primary key position) | Index names |
@@ -82,7 +82,7 @@ These existing private dependencies are not promoted in version 1. Locations ref
 
 ## Invariants
 
-Preserve one stored row per message per lineage (I1, subject to its named exceptions), stable message ids across hosts, session ownership and chronology, source coverage (I2), summary provenance (I14), complete tool-call/result groups (I8/I9), real user turns and the active fresh tail (I4/I9). Order message rows by `store_id` within their session, not pointer arrival or diagnostic time; forks retain their own lineage. This contract adds no writer-sharing protocol or migration.
+Preserve one stored row per host occurrence per lineage ([I1](invariants.md), with its named exceptions); no stored row deleted or altered ([I2](invariants.md)); summary nodes, provenance and frontier committed together ([I14](invariants.md)); every emitted tool result after its call ([I8](invariants.md)), with assistant/tool groups never split by the fresh tail or a leaf cut ([I9](invariants.md)); the newest user turn reaching the model ([I4](invariants.md)); stable message ids across hosts; and session ownership and chronology. Order message rows by `store_id` within their session, not pointer arrival or diagnostic time; forks retain their own lineage. This contract adds no writer-sharing protocol or migration.
 The SHA-256 covers UTF-8 canonical JSON (`sort_keys=True`, compact separators, `ensure_ascii=False`): sorted tables with their ordered PRAGMA table_info rows and sorted index names, callables keyed by sorted module-qualified name with annotation-free signatures, and SCHEMA_VERSION. A fresh isolated store enables the contracted named features before inspection; no stored user content is hashed.
 Run `tests/compat/test_store_contract.py`. For a surface change, raise the contract version by exactly one, refresh the digest and add a dated changelog row with that digest and a one-line reason. An unchanged digest keeps the same version. `scripts/store_contract_gate.py --base-ref <ref>` checks that discipline against the PR base; introduction without a base doc requires version 1.
 

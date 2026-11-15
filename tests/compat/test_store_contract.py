@@ -54,3 +54,27 @@ def test_store_surface_digest(tmp_path):
 
 def test_store_contract_changelog():
     contract((Path(__file__).resolve().parents[2] / DOC).read_text(encoding="utf-8"))
+
+
+def _rendered_rows(found):
+    rows = set()
+    for name, table in found["tables"].items():
+        columns = "; ".join(f"{c[1]}: {c[2]}; {'NOT NULL' if c[3] else 'nullable'}; "
+                            f"{'no default' if c[4] is None else c[4]}; pk={c[5]}" for c in table["columns"])
+        rows.add(f"| `{name}` | {columns} | {', '.join(table['indexes'])} |")
+    rows.update(f"| `{name}` | `{signature}` |" for name, signature in found["callables"].items())
+    return rows
+
+
+def test_store_contract_doc_tables_match_surface(tmp_path):
+    """The doc's generated tables state exactly the hashed surface: no row missing, none stale."""
+    sections, heading = {}, ""
+    for line in (Path(__file__).resolve().parents[2] / DOC).read_text(encoding="utf-8").splitlines():
+        if line.startswith("## "):
+            heading = line
+        elif line.startswith("| `"):
+            sections.setdefault(heading, set()).add(line)
+    documented = sections.get("## What a consumer may read", set()) | sections.get("## How a consumer may write", set())
+    rendered = _rendered_rows(surface(tmp_path))
+    assert sorted(rendered - documented) == [], "surface rows missing from docs/store-contract.md"
+    assert sorted(documented - rendered) == [], "docs/store-contract.md lists rows the surface no longer has"
