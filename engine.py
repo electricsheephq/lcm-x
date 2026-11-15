@@ -5430,6 +5430,8 @@ class LCMEngine(
         compared = tail.setdefault("fallback_reference_discovery", {})
         directory = get_large_output_storage_dir(self._config, hermes_home=tail["hermes_home"], create=False)
         def file_generation(path):
+            # Coarse timestamps can miss same-size in-place rewrites within one tick;
+            # LCM-X's own writers always change st_ino.
             try:
                 stat = path.stat()
                 return (stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_ino)
@@ -5472,7 +5474,10 @@ class LCMEngine(
                             file_generation(Path(path)) != stamp for path, stamp in cached[1].items())):
                         text = self._session_end_prefix_compare_value(value, session_id=tail["session_id"],
                             hermes_home=tail["hermes_home"])
-                        compared[value] = (str(directory), dict(external), text)
+                        # text only finds persisted-output paths; recursion records nested files
+                        # in external, so a nested change still forces the full comparison.
+                        compared[value] = (str(directory),
+                            {str(directory / ref): external.get(str(directory / ref)) for ref in refs}, text)
                     else:
                         text = cached[2]
                 if _is_hermes_persisted_output_marker(text):

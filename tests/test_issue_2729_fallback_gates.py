@@ -1,6 +1,8 @@
 """#2729: durable ownership, whole-prefix admission and atomic late-end retries."""
 
+import base64
 import copy
+import hashlib
 import json
 import logging
 import os
@@ -649,4 +651,42 @@ def test_snapshot_reuses_repeated_embedded_reference_discovery(cold, monkeypatch
     nested.write_text(json.dumps(dict(content='changed nested payload')))
     os.utime(nested, ns=(old.st_atime_ns, old.st_mtime_ns + 1_000_000_000))
     assert engine._off_current_fallback_inputs(tail, [], lineage) != first
-    assert calls == [embedded, embedded]
+    assert calls == [embedded]
+
+
+def test_embedded_reference_in_lock_stats_scale_linearly(cold, monkeypatch, record_property):
+    counts = {}
+    for n in (100, 1000):
+        history = []
+        for i in range(n):
+            blob = base64.b64encode(hashlib.sha256(str(i).encode()).digest() * 40).decode()
+            history.append(dict(role='user' if i % 2 == 0 else 'assistant',
+                content=f'shot {i} data:image/png;base64,{blob} end', timestamp=float(i + 1)))
+        engine = cold(history=history, name=f'embedded-{n}')
+        store = engine._store
+        before = store.get_session_messages('S2')
+        assert len(before) == n
+        assert all(' [Externalized LCM ingest payload:' in row['content'] for row in before)
+        snapshot, stat = engine._off_current_fallback_inputs, Path.stat
+        counts[n] = 0
+        def counted_stat(path, *args, **kwargs):
+            counts[n] += 1
+            return stat(path, *args, **kwargs)
+        def counted_snapshot(*args):
+            if not store._conn.in_transaction:
+                return snapshot(*args)
+            with monkeypatch.context() as patch:
+                patch.setattr(Path, 'stat', counted_stat)
+                return snapshot(*args)
+        with monkeypatch.context() as patch:
+            patch.setattr(engine, '_off_current_fallback_inputs', counted_snapshot)
+            engine.on_session_end('S2', copy.deepcopy(history) + [
+                dict(role='assistant', content='FINAL', timestamp=float(n + 1))])
+        after = store.get_session_messages('S2')
+        assert after[:-1] == before
+        assert after[-1]['content'] == 'FINAL'
+        assert fallback_counts(engine) == {'stored': 1}
+        assert counts[n] > 0
+        record_property(f'in_lock_stat_calls_{n}', counts[n])
+    assert counts[1000] <= 3 * 1000
+    assert counts[1000] <= 12 * counts[100]
