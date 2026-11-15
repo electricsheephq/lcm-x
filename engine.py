@@ -166,7 +166,7 @@ from .unended_catchup import UnendedCatchupMixin
 from .host_uid_emit import carry_identity, identity_emit_enabled, record_absorbed_message, sync_cached_host_metadata
 from .store_complete import HiddenBacklog, StoreCompleteMixin
 from .survival_fit import SurvivalFitMixin, _carries_survival_notice, _host_estimate, survival_reserve_fraction
-from .db_bootstrap import refresh_legacy_conversation_ids
+from .db_bootstrap import SQLITE_BUSY_TIMEOUT_MS, refresh_legacy_conversation_ids
 from .reset_state import ResetStateMixin
 from .bypass import BypassMixin
 from .prefix_matching import PrefixMatchingMixin
@@ -2863,9 +2863,7 @@ class LCMEngine(
         try:
             if self._plugin_is_unloading():
                 if meta.get("interrupted") and messages and messages[-1].get("role") != "user":
-                    self._run_retained_operation(
-                        lambda successor: successor._save_retained_interruption(messages),
-                    )
+                    self._persist_retained_interruption(messages)
                 return
             base = getattr(super(), "on_turn_complete", None)
             if callable(base):
@@ -5249,11 +5247,11 @@ class LCMEngine(
             finally:
                 self._session_end_flush_active = False
 
-    def _open_retired_store(self, store):
+    def _open_retired_store(self, store, *, busy_timeout_ms=_SESSION_END_BUSY_TIMEOUT_MS):
         return closing(MessageStore(
             store.db_identity, hermes_home=self._hermes_home,
             ingest_protection_config=self._config,
-            existing_write_timeout_ms=_SESSION_END_BUSY_TIMEOUT_MS,
+            existing_write_timeout_ms=busy_timeout_ms,
         ))
 
     def _append_retired_tail(self, store, old_store, session_id, conversation_id, messages, platform,
@@ -5299,7 +5297,8 @@ class LCMEngine(
             context_window_tokens=old_store.get_context_window_tokens(session_id),
             _log_outcome=False,
         )
-        if ids and allow_empty:
+        if ids:
+            # A resident successor can still hold the cursor from before this append.
             store.write_metadata_json([self._retired_tail_key(session_id, conversation_id)], json.dumps(ids[-1]))
         return ids
 
@@ -5383,7 +5382,10 @@ class LCMEngine(
             logger.debug("LCM retired delegated-child tail write failed", exc_info=True)
             return False
 
-    def _flush_retired_session_end(self, session_id, messages, *, warn=True, require_current=False):
+    def _flush_retired_session_end(
+        self, session_id, messages, *, warn=True, require_current=False,
+        busy_timeout_ms=_SESSION_END_BUSY_TIMEOUT_MS,
+    ):
         """Append only the proven suffix of a view from a retired binding."""
         if not messages:
             return True
@@ -5400,7 +5402,7 @@ class LCMEngine(
                             self._session_platform, allow_empty=not require_current, require_current=require_current,
                         )
 
-                with self._open_retired_store(old_store) as store:
+                with self._open_retired_store(old_store, busy_timeout_ms=busy_timeout_ms) as store:
                     if append(store) is not None:
                         return True
                     if self._replay_retired_projection(store, session_id, messages):
@@ -5616,10 +5618,35 @@ class LCMEngine(
         self._register_active_engine_binding()
         return True
 
+    def _persist_retained_interruption(self, messages):
+        result = self._run_retained_operation(
+            lambda successor: successor._save_retained_interruption(messages),
+        )
+        if result is not None:
+            return
+        owner = self._unload_group
+        if (owner is None or owner.current_prototype is None
+                or getattr(self, "_retired_session_start", None)
+                or getattr(self, "_reload_compression_boundary", None)):
+            return
+        current = owner.current_prototype()
+        if current is not None and not getattr(current, "_plugin_is_unloading", lambda: False)():
+            return
+        # There is no admitted registration in this gap. The last binding
+        # may still prove and append the closed tail in its existing database.
+        retired = self._reload_successor or self
+        if (retired._stable_use_closed and retired._foreground_session_id == retired._session_id
+                and not retired._thread_context_has_auxiliary_session(retired._session_id)
+                and not retired._in_process_parent_session_id({})):
+            retired._save_retained_interruption(messages)
+
     def _save_retained_interruption(self, messages):
         if self._pending_reset_session_id or self._bypasses_lcm_context_management():
             return False
-        return self._flush_retired_session_end(self._session_id, messages, warn=False, require_current=True)
+        return self._flush_retired_session_end(
+            self._session_id, messages, warn=False, require_current=True,
+            busy_timeout_ms=SQLITE_BUSY_TIMEOUT_MS,
+        )
 
     def _run_retained_operation(self, operation):
         result = None

@@ -334,6 +334,137 @@ def test_interrupted_turn_after_reload_saves_answer_without_a_later_callback(pre
     db.unlink()
 
 
+@pytest.mark.parametrize("replay", ["session-end", "preflight", "post-llm", "reload"])
+def test_retained_stop_reconciles_preflight_cursor(preflight, replay):
+    original, ctx = preflight.register(supports_unload=True)
+    retained = original.clone_for_agent()
+    session = "retained-stop-replay"
+    retained.on_session_start(session, platform="cli")
+    prefix = [
+        {"role": "user", "content": "first question"},
+        {"role": "assistant", "content": "first answer"},
+    ]
+    retained.ingest(prefix)
+    ctx.unload_callbacks[0]()
+    _, ctx = preflight.register(supports_unload=True, manager=ctx._manager)
+    db = preflight.home / "lcm.db"
+    pending = prefix + [{"role": "user", "content": "stopped question"}]
+    stopped = pending + [{"role": "assistant", "content": "stopped answer"}]
+    try:
+        retained.should_compress_preflight(pending)
+        assert _durable_messages(db, session) == [(row["role"], row["content"]) for row in pending]
+        retained.on_turn_complete(stopped, interrupted=True)
+        expected = [(row["role"], row["content"]) for row in stopped]
+        assert _durable_messages(db, session) == expected
+        if replay == "preflight":
+            retained.should_compress_preflight(pending)
+            retained.should_compress_preflight(stopped)
+        elif replay == "post-llm":
+            stopped += [
+                {"role": "user", "content": "next question"},
+                {"role": "assistant", "content": "next answer"},
+            ]
+            expected = [(row["role"], row["content"]) for row in stopped]
+            ctx.hooks["post_llm_call"](
+                session_id=session, platform="cli", conversation_history=stopped,
+                context_compressor=retained,
+            )
+        elif replay == "reload":
+            for _ in range(2):
+                ctx.unload_callbacks[0]()
+                _, ctx = preflight.register(supports_unload=True, manager=ctx._manager)
+                retained.should_compress_preflight(stopped)
+                assert _durable_messages(db, session) == expected
+        retained.on_session_end(session, stopped)
+        assert _durable_messages(db, session) == expected
+    finally:
+        ctx.unload_callbacks[0]()
+    db.unlink()
+
+
+@pytest.mark.parametrize("after_reload", [False, True])
+def test_retained_stop_between_registrations_uses_only_existing_database(preflight, after_reload):
+    original, ctx = preflight.register(supports_unload=True)
+    retained = original.clone_for_agent()
+    session = "stop-between-registrations"
+    retained.on_session_start(session, platform="cli")
+    prompt = {"role": "user", "content": "stopped question"}
+    retained.ingest([prompt])
+    ctx.unload_callbacks[0]()
+    if after_reload:
+        _, ctx = preflight.register(supports_unload=True, manager=ctx._manager)
+        retained.should_compress_preflight([prompt])
+        ctx.unload_callbacks[0]()
+    ctx._manager._context_engine = None
+    db = preflight.home / "lcm.db"
+
+    retained.on_turn_complete([prompt, {"role": "user", "content": "still mutable"}], interrupted=True)
+    retained.on_turn_complete([
+        {"role": "user", "content": "different question"},
+        {"role": "assistant", "content": "unproven answer"},
+    ], interrupted=True)
+    assert _durable_messages(db, session) == [("user", "stopped question")]
+    stopped = [prompt, {"role": "assistant", "content": "stopped answer"}]
+    for _ in range(2):
+        retained.on_turn_complete(stopped, interrupted=True)
+    assert _durable_messages(db, session) == [("user", "stopped question"), ("assistant", "stopped answer")]
+    db.unlink()
+    retained.on_turn_complete(stopped, interrupted=True)
+    assert not db.exists()
+
+
+@pytest.mark.parametrize("interrupted", [True, False], ids=["stopped-turn", "retired-exit"])
+def test_retained_stop_and_exit_use_distinct_busy_budgets(preflight, monkeypatch, interrupted):
+    original, ctx = preflight.register(supports_unload=True)
+    retained = original.clone_for_agent()
+    session = "retained-stop-busy"
+    retained.on_session_start(session, platform="cli")
+    prompt = {"role": "user", "content": "stopped question"}
+    retained.ingest([prompt])
+    ctx.unload_callbacks[0]()
+    if interrupted:
+        _, ctx = preflight.register(supports_unload=True, manager=ctx._manager)
+        retained.should_compress_preflight([prompt])
+    db = preflight.home / "lcm.db"
+
+    attempting = threading.Event()
+    connect = sqlite3.connect
+
+    def trace_retired_writer(path, *args, **kwargs):
+        conn = connect(path, *args, **kwargs)
+        if str(path).endswith("?mode=rw"):
+            conn.set_trace_callback(
+                lambda statement: attempting.set() if statement == "BEGIN IMMEDIATE" else None,
+            )
+        return conn
+
+    monkeypatch.setattr(sqlite3, "connect", trace_retired_writer)
+    stopped = [prompt, {"role": "assistant", "content": "stopped answer"}]
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor, closing(connect(db)) as writer:
+            writer.execute("BEGIN IMMEDIATE")
+            if interrupted:
+                future = executor.submit(retained.on_turn_complete, stopped, interrupted=True)
+            else:
+                future = executor.submit(retained.on_session_end, session, stopped)
+            assert attempting.wait(5)
+            if interrupted:
+                # The incumbent releases after the exit flush's 50 ms limit.
+                time.sleep(0.15)
+            else:
+                # A retired exit returns while another connection owns the lock.
+                future.result(timeout=2)
+            writer.commit()
+            future.result(timeout=5)
+        if not interrupted:
+            assert _durable_messages(db, session) == [("user", "stopped question")]
+            retained.on_session_end(session, stopped)
+        assert _durable_messages(db, session) == [("user", "stopped question"), ("assistant", "stopped answer")]
+    finally:
+        ctx.unload_callbacks[0]()
+    db.unlink()
+
+
 def test_retained_cli_reset_starts_a_new_lane_in_the_current_registration(preflight):
     prototype, old_ctx = preflight.register(supports_unload=True)
     retained = prototype.clone_for_agent()

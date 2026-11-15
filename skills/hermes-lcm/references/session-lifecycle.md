@@ -20,6 +20,14 @@ Errors log only their class and do not escape host finalization; no leaves are
 prepared here. A host failed-turn boundary appended after the callback is stored
 once by the next completed turn or a session-end flush supplied that final history.
 
+During plugin reload, a retained agent can save a closed interrupted tail when
+the existing database proves its session is current and the stored prefix
+matches the supplied history. This also works between registrations. The
+callback opens the existing database only, with the normal SQLite write timeout.
+The tail and its replay marker commit together so that later preflight,
+completed-turn and session-end callbacks can recognize rows already saved.
+Session-end flushes still use the shorter SQLite busy timeout.
+
 ## Interrupted delegated children
 
 A delegated child (sub-agent) is stored at its turn end, its session end, and
