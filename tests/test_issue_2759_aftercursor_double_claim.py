@@ -107,6 +107,7 @@ def test_aftercursor_copy_cannot_also_back_receipt(tmp_path, monkeypatch, varian
         _bind(engine)
         engine.ingest(copy.deepcopy(view))
         actual = _counts(engine)
+        scans = list(seen)
         engine.shutdown()
         clean_dir = tmp_path / "clean"
         clean_dir.mkdir()
@@ -122,6 +123,8 @@ def test_aftercursor_copy_cannot_also_back_receipt(tmp_path, monkeypatch, varian
         # Known limit, equal to main (main keeps 3 here too): a later restart re-appends the escaped twin,
         # because the receipts cover only the first stored copy. Update this pin when that is fixed.
         assert (actual[call], actual[result]) == (3, 3)
+        # The scan reported the stored rows behind the rows it suppressed; the bridge must skip those rows.
+        assert any(scan["backing"] for scan in scans)
         assert actual[("assistant", "NEW")] == 1
         assert actual[("user", "q2")] == 1
     finally:

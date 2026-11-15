@@ -48,8 +48,8 @@ def test_cold_restart_pair_occurrence(build, monkeypatch, capsys, case):
     replayed = []
     helper = engine._replayed_tool_segment_indexes_after_cursor
 
-    def observe(messages, cursor):
-        selected = helper(messages, cursor)
+    def observe(messages, cursor, **kwargs):
+        selected = helper(messages, cursor, **kwargs)
         replayed.append({"cursor": cursor, "pair_selected": [
             pair_index + i in selected for i in range(2)]})
         return selected

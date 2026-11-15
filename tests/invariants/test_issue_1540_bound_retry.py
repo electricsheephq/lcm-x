@@ -134,9 +134,9 @@ def test_replay_segment_helper_only_runs_on_reconcile_ingest(build: Build, monke
     original = ReconcileMixin._replayed_tool_segment_indexes_after_cursor
     calls = []
 
-    def counted(self, messages, cursor):
+    def counted(self, messages, cursor, **kwargs):
         calls.append(cursor)
-        return original(self, messages, cursor)
+        return original(self, messages, cursor, **kwargs)
 
     monkeypatch.setattr(ReconcileMixin, "_replayed_tool_segment_indexes_after_cursor", counted)
     engine = build()
@@ -630,7 +630,7 @@ def test_replay_proof_failure_matches_base(build, monkeypatch, fault):
         faults.append("remap")
         raise RuntimeError("synthetic remap failure")
 
-    def faulted(messages, cursor):
+    def faulted(messages, cursor, **kwargs):
         calls.append(cursor)
         # Fault the helper's own read, after the other readers have reconciled.
         with monkeypatch.context() as patch:
@@ -638,7 +638,7 @@ def test_replay_proof_failure_matches_base(build, monkeypatch, fault):
                 patch.setattr(engine._store, "read_metadata_json", corrupt_read)
             else:
                 patch.setattr(engine, "_remapped_output_metadata", broken_remap)
-            replayed = helper(messages, cursor)
+            replayed = helper(messages, cursor, **kwargs)
         return replayed
 
     monkeypatch.setattr(engine, "_replayed_tool_segment_indexes_after_cursor", faulted)

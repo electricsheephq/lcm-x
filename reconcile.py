@@ -3326,7 +3326,7 @@ class ReconcileMixin:
         replay: a fresh same-id call can genuinely return the placeholder text.
         Prefer a duplicate ambiguous salvage pair over losing a fresh pair.
         ``backing``, when supplied, maps every returned host index to the stored
-        row spent for it, without changing the replay decision.
+        row allocated for it, without changing the replay decision.
 
         #1540 exception: a borrowed pair bound to a unique stamped user occurrence,
         with proven UIDs, can be suppressed.

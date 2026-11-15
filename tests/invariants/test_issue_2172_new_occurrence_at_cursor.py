@@ -27,8 +27,8 @@ def test_cold_compaction_cursor_keeps_changed_result_timestamp(build, monkeypatc
     scans = []
     helper = engine._replayed_tool_segment_indexes_after_cursor
 
-    def observe(messages, cursor):
-        selected = helper(messages, cursor)
+    def observe(messages, cursor, **kwargs):
+        selected = helper(messages, cursor, **kwargs)
         scans.append((cursor, selected))
         return selected
 
@@ -67,8 +67,8 @@ def test_cold_compaction_cursor_keeps_changed_segment_timestamps(build, monkeypa
     scans = []
     helper = engine._replayed_tool_segment_indexes_after_cursor
 
-    def observe(messages, cursor):
-        selected = helper(messages, cursor)
+    def observe(messages, cursor, **kwargs):
+        selected = helper(messages, cursor, **kwargs)
         scans.append((cursor, selected.copy()))
         return selected
 
