@@ -21,10 +21,6 @@ import pytest
 from tests.test_host_uid_shadow import _engine
 from tests.test_issue_2055_ingest_ledger_writes import engines as engines
 
-_PIN = pytest.mark.xfail(
-    strict=True, raises=AssertionError,
-    reason="#2729: after a restart or profile rebind an off-current session end is ignored as stale; its rows are lost",
-)
 _STALE = "LCM ignored unverified stale session-end callback for S2 while bound to S1"
 
 
@@ -41,7 +37,7 @@ def _start(engine, sid, **kwargs):
     )
 
 
-@pytest.mark.parametrize("cut", ["none", pytest.param("restart", marks=_PIN), pytest.param("profile-rebind", marks=_PIN)])
+@pytest.mark.parametrize("cut", ["none", "restart", "profile-rebind"])
 @pytest.mark.parametrize("shape", ["end-only-final", "busy-post-turn"])
 def test_offcurrent_end_stores_unstored_rows(engines, monkeypatch, tmp_path, caplog, cut, shape):
     engine = engines(sessions=[("S1", None, None), ("S2", None, None)])

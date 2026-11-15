@@ -421,6 +421,7 @@ def write_view(conn, salt, lineage, kind, state, entries, *, view_seq=None, prec
 
 
 def _prune_views(conn, lineage, kind):
+    # UID checks can read only the last two retained views of each kind.
     conn.execute("DELETE FROM ingest_views WHERE lineage=? AND kind=? AND view_seq NOT IN "
                  "(SELECT view_seq FROM ingest_views WHERE lineage=? AND kind=? ORDER BY view_seq DESC LIMIT 2)",
                  (lineage, kind, lineage, kind))

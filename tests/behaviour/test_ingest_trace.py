@@ -21,9 +21,13 @@ from tests.harness import engine_context, pin_char_counter
 
 @pytest.mark.parametrize("case", SCENARIOS, ids=lambda case: case.name)
 def test_ingest_golden(case: Any, tmp_path: Path) -> None:
+    # #2293 M5: BEGIN moves to the first write; evidence savepoints are issued only once the lock is held.
+    # T1-18 admits six held-lock discarded passes; T1-28 admits fault-keyed poison reruns (durable: one; prematch: two outer attempts).
     # #2293 step 1, M2: remove repeated folded-tail reads within an ingest attempt; protected events stay identical.
     # #2293 N1: the identity-anchor presence check is skipped when it has no call or result row and no rewrite to
     # check, so its predecessor, sizing and tail reads leave three scenarios; every other event is unchanged.
+    # #2293 R3l: after an implicit BEGIN already spent the busy budget, admission rechecks the lock with busy_timeout 0
+    # and restores it, so the two lock scenarios gain three PRAGMA busy_timeout events; every other event is unchanged.
     # P1b-1 regeneration moves BEGIN before classification, collapses evidence
     # commits into one, and moves cache observations after COMMIT. Fail-open
     # faults roll back their savepoint; escaping faults roll back the ingest.
