@@ -24,8 +24,9 @@ Witnesses take precedence. overlap() uses the owner's canonical session, strippe
 nonempty record segments, later user rows and the longest prefix inside both
 floors. judge applies Revision 3d's outcome table; projection itself is unchanged.
 The witness is the captured texts joined oldest first with "\n\n", with no
-per-text strip and empty texts kept. A turn with a whitespace-only member has
-no witness (Revision 3f).
+per-text strip and empty texts kept. A turn with a member whose text differs
+from its stripped form, a whitespace-only one included, has no witness
+(Revision 3f).
 """
 from collections import Counter
 import json
