@@ -19,6 +19,7 @@ def install(monkeypatch):
     all_threads = getattr(threading, 'setprofile_all_threads', None)  # Python 3.12+
     prior, thread_prior = sys.getprofile(), threading.getprofile()
     active = [True]
+    used_all = [False]  # set_all hooked every running thread (Python 3.12+)
 
     def observed(frame, event, arg):
         if event == 'call' and frame.f_code.co_name in METHODS:
@@ -75,6 +76,7 @@ def install(monkeypatch):
             if first and all_threads is not None:
                 # Any running thread may register on this connection, not only the opener.
                 # Another thread's own profiler cannot be read, so it is replaced, not chained.
+                used_all[0] = True
                 all_threads(compose(None))
             elif first:
                 # Python 3.11 can profile only the calling thread and threads started later:
@@ -95,7 +97,14 @@ def install(monkeypatch):
     monkeypatch.setattr(threading, 'setprofile', lambda callback: set_thread_profile(compose(callback) if connections else callback))
     def restore():
         active[0] = False
-        restore_profile(prior, setprofile)
-        restore_profile(thread_prior, set_thread_profile)
         connections.clear()
+        try:
+            if used_all[0]:
+                # A thread blocked in C (pytest-xdist's execnet IO thread) never runs the
+                # self-removing hook, and on 3.12+ one hook left on any thread keeps
+                # profiling on for the whole interpreter (about 4x slower afterwards).
+                all_threads(None)
+        finally:
+            restore_profile(prior, setprofile)
+            restore_profile(thread_prior, set_thread_profile)
     return restore

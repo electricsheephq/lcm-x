@@ -98,6 +98,37 @@ finally:
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+@pytest.mark.skipif(not hasattr(threading, 'setprofile_all_threads'), reason='Python 3.12+ only')
+def test_restore_clears_the_hook_it_set_on_every_thread(tmp_path):
+    """A thread blocked in C keeps an all-threads hook, and on 3.12+ one such hook slows every thread."""
+    import subprocess
+    code = """
+import sys
+import threading
+from pathlib import Path
+import pytest
+import tests.conftest
+from tests.message_store_callback_audit import install
+from hermes_lcm.store import MessageStore
+real, calls = threading.setprofile_all_threads, []
+def recorder(func):
+    calls.append(func)
+    real(func)
+threading.setprofile_all_threads = recorder
+with pytest.MonkeyPatch.context() as patch:
+    restore = install(patch)
+    try:
+        MessageStore(Path(sys.argv[1])).close()
+    finally:
+        restore()
+assert len(calls) == 2 and getattr(calls[0], '_d1_observer', False), calls
+assert calls[-1] is None, calls
+"""
+    result = subprocess.run([sys.executable, '-c', code, str(tmp_path / 'all-threads.db')],
+                            cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 def test_main_thread_callback_on_a_worker_opened_store_is_detected(tmp_path):
     from hermes_lcm.store import MessageStore
     from tests import message_store_callback_audit as audit
