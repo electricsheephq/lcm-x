@@ -702,6 +702,97 @@ def test_unload_drains_retained_binding_adoption(preflight, monkeypatch):
     assert not db.exists()
 
 
+@pytest.mark.parametrize("unload_at", ["adoption", "before-gate", "before-ingest", "after-ingest", None])
+def test_first_retained_compress_preserves_rows_during_reload(preflight, monkeypatch, unload_at):
+    from hermes_lcm import escalation, tokens
+
+    monkeypatch.setenv("LCM_FRESH_TAIL_COUNT", "2")
+    monkeypatch.setenv("LCM_LEAF_CHUNK_TOKENS", "16")
+    monkeypatch.setattr(tokens, "_get_encoder", lambda: None)
+    prototype, original = preflight.register(supports_unload=True)
+    retained = prototype.clone_for_agent()
+    session = "compress-first"
+    retained.on_session_start(session, platform="cli", context_length=200_000)
+    history = [
+        {"role": role, "content": f"handoff {label} {message} " * 40}
+        for label in ("one", "two") for role, message in (("user", "question"), ("assistant", "answer"))
+    ]
+    retained.ingest(history[:2])
+    original.unload_callbacks[0]()
+    current, replacement = preflight.register(supports_unload=True, manager=original._manager)
+    path = preflight.home / "lcm.db"
+    expected = [(row["role"], row["content"]) for row in history]
+    assert _durable_messages(path, session) == expected[:2]
+
+    reached, release = threading.Event(), threading.Event()
+
+    def pause():
+        reached.set()
+        assert release.wait(5)
+
+    monkeypatch.setattr(escalation, "_call_llm_for_summary", lambda *args, **kw: "Earlier turns retained.")
+    if unload_at == "adoption":
+        connect = sqlite3.connect
+
+        def pause_after_open(db_path, *args, **kwargs):
+            connection = connect(db_path, *args, **kwargs)
+            if str(db_path) == path.as_uri() + "?mode=ro":
+                pause()
+            return connection
+
+        monkeypatch.setattr(sqlite3, "connect", pause_after_open)
+    elif unload_at == "before-gate":
+        public_compress = LCMEngine.compress
+
+        def pause_before_gate(engine, *args, **kwargs):
+            if engine._unload_group is current._unload_group:
+                pause()
+            return public_compress(engine, *args, **kwargs)
+
+        monkeypatch.setattr(LCMEngine, "compress", pause_before_gate)
+    elif unload_at in {"before-ingest", "after-ingest"}:
+        ingest_view = LCMEngine._ingest_compression_view
+
+        def pause_at_ingest(engine, *args, **kwargs):
+            if unload_at == "before-ingest":
+                pause()
+            result = ingest_view(engine, *args, **kwargs)
+            if unload_at == "after-ingest":
+                pause()
+            return result
+
+        monkeypatch.setattr(LCMEngine, "_ingest_compression_view", pause_at_ingest)
+
+    def compress():
+        return retained.compress(history, current_tokens=retained.threshold_tokens + 1, force=True)
+
+    if unload_at is None:
+        try:
+            assert len(compress()) < len(history)
+            assert retained.last_compression_status == "compacted"
+        finally:
+            replacement.unload_callbacks[0]()
+    else:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            compressed = executor.submit(compress)
+            try:
+                assert reached.wait(5)
+                if unload_at == "after-ingest":
+                    assert _durable_messages(path, session) == expected
+                unloaded = executor.submit(replacement.unload_callbacks[0])
+                assert current._unload_group.closing.wait(5)
+                assert not unloaded.done()
+            finally:
+                release.set()
+            assert compressed.result(timeout=5) is history
+            unloaded.result(timeout=5)
+
+    assert _durable_messages(path, session) == expected
+    path.unlink()
+    assert compress() is history
+    assert not path.exists()
+
+
 @pytest.mark.parametrize("already_stored", [True, False])
 def test_late_session_end_after_unload_stores_suffix_once(preflight, already_stored):
     prototype, old_ctx = preflight.register(supports_unload=True)

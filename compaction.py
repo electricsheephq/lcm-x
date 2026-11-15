@@ -87,16 +87,32 @@ def _counted_compaction(*, return_messages: bool):
         def counted(self, messages, *args, **kwargs):
             if self._plugin_is_unloading():
                 def invoke(engine):
-                    result = getattr(engine, operation.__name__)(messages, *args, **kwargs)
+                    # The successor's stable lease already covers this call and
+                    # keeps storage live if the unload gate closes mid-pass.
+                    result = messages
+                    if not engine._compaction_is_closing():
+                        try:
+                            result = engine.compress(messages, *args, **kwargs)
+                        except Exception as exc:
+                            # Let the host handle a compression failure after
+                            # the lease exits, as it does for a live engine.
+                            return exc
+                    if result is messages and engine._compaction_is_closing():
+                        # Compaction can stop before it reaches ingest. Persist
+                        # the original view under the existing lease.
+                        if engine._retained_binding_is_current():
+                            engine.ingest(messages)
+                        engine._stop_pass_for_shutdown()
                     self._last_compression_status = engine.last_compression_status
                     self._last_compression_noop_reason = engine.last_compression_noop_reason
                     self.compression_count = engine.compression_count
                     return result
 
                 if return_messages:
-                    successor = self._retained_successor()
-                    result = successor._use_retained_binding(invoke).value if successor is not None else None
-                    return messages if result is None else result
+                    result = self._run_retained_operation(invoke)
+                    if isinstance(result, Exception):
+                        raise result
+                    return result if isinstance(result, list) else messages
 
                 def preflight(engine):
                     # A stable-use lease covers this operation, including when

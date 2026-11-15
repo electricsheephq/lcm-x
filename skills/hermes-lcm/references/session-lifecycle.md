@@ -92,6 +92,11 @@ to its parent session.
 
 Hermes commits a compaction by calling the session-end hook with the list it compressed, then the compression-start hook. LCM-X treats that call as a commit, not a session end. It does not re-store those rows. The session keeps its identity, published frontier and ingest position across the boundary, both when Hermes keeps the session id (in place) and when it rotates to a new one. A genuine session end (exit, `/new`, or an end after a cancelled compaction) still finalizes the session. It also pauses this engine's background embedding maintenance: queued passes are dropped and nothing new is scheduled until the next live bind re-arms it (a compaction commit leaves maintenance running; see `architecture.md` for the shutdown and process-exit waits). A session that resumes later continues from the frontier it finalized itself, never another session's.
 
+When a retained agent calls `compress` after a plugin reload, the replacement
+engine holds the admitted session binding through the call. If unload cancels
+compaction, LCM-X returns the original messages and saves eligible rows while the
+binding is still open.
+
 At process exit, scheduler work and orphaned local encoder workers share one deadline.
 A timed-out encoder holds its worker slot until it finishes. Exit waits for that slot
 only within the remaining deadline; it does not guarantee that native inference stops.
