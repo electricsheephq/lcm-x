@@ -91,8 +91,8 @@ expectations in both directions, never surplus licences: a missing stored reply 
 `numbers.B2.host_held_inflight_replies` lists each selected tag, lineage, 12-character key and host row ids, and is
 absent when empty. Any other assistant row is surplus.
 On the upstream-main and upstream-uid hosts a restart resumes the parent session and abandons the rotation child
-whose last row is the interrupted turn's reply, so the host keeps a reply the plugin is never shown again. Since
-#2624's fix the plugin recovers those rows from the abandoned child at the next start, and the scorer expects them.
+whose last row is the interrupted turn's reply, so the host keeps a reply the plugin is never shown again; the
+scorer fails that run on B1 and B2, tracked in #2624.
 - **B1** every `[Tnn]` user tag (`[A-Z]\d{2,3}`: T100-T103 on 100-turn cells) and `reply to Tnn` sits in
   exactly as many stored rows as expected,
   and every stored `continue` row has the reply of its own host occurrence.
@@ -547,20 +547,20 @@ that count is diagnostic only and is not final when read.
 
 The five cells use provisional turn/depth pairs: `rotation-turn` (12/1),
 `plain-turn` (15/1), `multi-hop` (22/2), `pre-rotation` (5/0), and `in-place`
-(15/0). All five gate every host. Before #2624's fix,
-upstream-main and upstream-uid failed the first three with B1/B2, classified
-KNOWN under #2624: `rotation-turn` lacked the T12 reply (B1 `reply T12`, B2 deficit
+(15/0). The first three target #2624; the controls gate every host. On main,
+upstream-main and upstream-uid should FAIL the first three with B1/B2, classified
+KNOWN under #2624: `rotation-turn` lacks the T12 reply (B1 `reply T12`, B2 deficit
 1), and in some runs also the T12 user row (B1 `T12` and `reply T12`, B2 deficit
 2), because at a run's first rotation the plugin sometimes stores the user row
-only together with the reply; `plain-turn` lacked the T15 user row and reply
-(B1 `T15` and `reply T15`, B2 deficit 2); `multi-hop` lacked the T22 user row and
-reply (B1 `T22` and `reply T22`, B2 deficit 2). With the fix all five should PASS on
-every host.
+only together with the reply; `plain-turn` lacks the T15 user row and reply
+(B1 `T15` and `reply T15`, B2 deficit 2); `multi-hop` lacks the T22 user row and
+reply (B1 `T22` and `reply T22`, B2 deficit 2). Both controls should PASS.
+All five should PASS on r34.10-0.21.5.
 The two additional cells use turn/depth 15/1 and two distinct `read_file` paths.
-Before #2624's fix, upstream-main and upstream-uid failed them: `tool-turn` with B1
-(`T15`, `reply T15`), B2 deficit 2 and `tool_missing_rows` 4; `tool-loop` with B1
-(`T15`), B2 deficit 1 and `tool_missing_rows` 4. With the fix both should PASS on
-every host. The opt-in `reply-held-crash-control/tool-loop-in-place` (15/0) should
+On upstream-main and upstream-uid, KNOWN under #2624: `tool-turn` should FAIL B1
+(`T15`, `reply T15`), B2 deficit 2 and `tool_missing_rows` 4; `tool-loop` should
+FAIL B1 (`T15`), B2 deficit 1 and `tool_missing_rows` 4. Both should PASS on every
+other host. The opt-in `reply-held-crash-control/tool-loop-in-place` (15/0) should
 PASS on every host; it is excluded from `--cells all` and the nightly matrix.
 B6 is judged when a tool group is stored or a split, orphan drop, or tool execution
 failure is recorded. For these held tool cells alone, no stored group otherwise

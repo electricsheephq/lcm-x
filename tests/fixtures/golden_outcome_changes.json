@@ -445,8 +445,8 @@
       "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "proof-consumed-zero": {
-      "outcome_sha": "2b0b4c4aea63a275e6b65df5e50fd9b266d38e21f0a2d010555eee6c79a9f941",
-      "reason": "#2042 step 2: at cursor 0 with stored rows the ingest guard schedules reconcile instead of identity-anchor recognition; stored rows, search and cold state are identical, only _last_ingest_reconciliation is set"
+      "outcome_sha": "8687a9b62bc6d4db21f07048102f6441f845f7386277c02da753511f82cbbcf9",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "proof-native-consulted": {
       "outcome_sha": "2d4df9926f7884d0974eea87c0934f656515f9e6016fa6803249cdb877174d11",
@@ -509,8 +509,8 @@
       "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "proof-native-zero": {
-      "outcome_sha": "6f4ddc59b6aed7ccec40f64d0eb5ead61af85bf2a4a129f537db688e7498d680",
-      "reason": "#2042 step 2: at cursor 0 with stored rows the ingest guard schedules reconcile instead of identity-anchor recognition; stored rows, search and cold state are identical, only _last_ingest_reconciliation is set"
+      "outcome_sha": "25bb80cfffa596d31211ac40cfa632b0b2687651eaeea53083e4dd07a88a7019",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "proof-output-consulted": {
       "outcome_sha": "f1a5b2d99b8db10526b1358dc2ad5ae599867fe623a9aa4db534eb9c2d769891",
@@ -561,8 +561,8 @@
       "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "proof-output-zero": {
-      "outcome_sha": "4a83d3c713081c02a8bf4ea5e22a634a164ad32b95dade797ac61644531c904d",
-      "reason": "#2042 step 2: at cursor 0 with stored rows the ingest guard schedules reconcile instead of identity-anchor recognition; stored rows, search and cold state are identical, only _last_ingest_reconciliation is set"
+      "outcome_sha": "d3073f8408dacb76e144da81703ad375d6a440ce9d02ecafa22d98b860836971",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "protect-after-filter-copy": {
       "outcome_sha": "c8ce01f5d6cdcfd3f531d7342d51f702a1630f237e36f97f90180ad38d9e3192",

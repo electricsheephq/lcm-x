@@ -1527,7 +1527,9 @@ def test_cold_conflict_scan_cap_keeps_counts_and_warns(engines, monkeypatch, cap
     assert engine._pending_session_tails == [tail] and tail.get("kept_on_conflict")
     assert count(engine, "tail.cold_scan_capped") == count(engine, "tail.cold_unmatched") == 1
     warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
-    assert warnings == ["LCM session-end cold tail conflict scan capped; retry pending"]
+    # #2543: the text keeps its prefix (log scrapers match it) and gains the reason and view size.
+    assert len(warnings) == 1 and warnings[0].startswith("LCM session-end cold tail conflict scan capped; retry pending")
+    assert warnings[0].endswith(f" reason=cold_tail_scan_capped view_rows={len(queued)}")
     assert committed_rows(tail["store"].db_path, "S") == before and tail["view"] == queued
     engine._retry_pending_session_tails(sibling=sibling)
     assert count(engine, "tail.cold_scan_capped") == count(engine, "tail.cold_unmatched") == 2

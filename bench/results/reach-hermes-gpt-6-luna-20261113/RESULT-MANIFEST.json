@@ -1,0 +1,80 @@
+{
+  "schema": "result-manifest/1",
+  "run_id": "returning-work-reach-hermes-kit7-gpt-6-luna-20261113-public-summary",
+  "project": "lcm-x",
+  "kind": "research",
+  "status": "settled",
+  "owner_lane": "returning-work-reach-study",
+  "claim_class": "advisory",
+  "created": "2026-11-14T11:47:23Z",
+  "settled": "2026-11-14T11:47:23Z",
+  "code": {
+    "repo": "electricsheephq/lcm-x",
+    "sha": "1fc6112e38a11e99080ccc0a9288b93aea396cd7",
+    "dirty": false,
+    "diff_sha256": null
+  },
+  "env": {
+    "command": "python3 -I -B analyze_kit7.py --trials trials.jsonl --report-json report.json --items items.json --bars BARS-kit7.md --model gpt-6-luna --out-dir OUT (retained raw rows; this directory is the public summary)",
+    "models": {
+      "answering": "gpt-6-luna"
+    },
+    "dataset": {
+      "name": "Continual-ARC public run records (arXiv 2611.14505)"
+    },
+    "seed": null
+  },
+  "headline": [
+    {
+      "benchmark": "returning-work-reach",
+      "metric": "reach_at_shipped_defaults_of_25",
+      "value": 7,
+      "n": 25,
+      "baseline_run": null,
+      "source": "SUMMARY.json"
+    }
+  ],
+  "results": [
+    {
+      "path": "RESULT.md",
+      "role": "headline",
+      "sha256": "6c32c4e81ac5cf67300a362aa598d228c55500c3d065d82d4eb236d828523a04",
+      "bytes": 4142
+    },
+    {
+      "path": "SUMMARY.json",
+      "role": "headline",
+      "sha256": "16080caaf99949b847e889bf0d97ab4fb97b62c14b23fc995d9b33da6704b88d",
+      "bytes": 6282
+    }
+  ],
+  "rescore": {
+    "command": null,
+    "inputs": [],
+    "external_inputs": [
+      {
+        "name": "trials.jsonl",
+        "sha256": "8854be616849e4410b9106b5fce6cb29ad951a433c82c8df83b0969f8dccdefd"
+      },
+      {
+        "name": "report.json",
+        "sha256": "bd397333f494ad099bb754aadf58907890bdceae45770886e5ccbd46a11aa9be"
+      },
+      {
+        "name": "analysis-hermes-kit7-gpt-6-luna.json",
+        "sha256": "5a0ed2a81f2195c2ab96d01fd94080fd163ea45098ad4215d584ba0f7d3779f1"
+      }
+    ]
+  },
+  "bulk": [],
+  "published": [],
+  "links": [
+    "https://github.com/electricsheephq/lcm-x/issues/2654"
+  ],
+  "keep": [
+    "RESULT.md",
+    "RESULT-MANIFEST.json",
+    "SUMMARY.json"
+  ],
+  "publication_boundary": "Public summary only; raw trial rows hold model replies and are retained privately; T2 unpublished."
+}

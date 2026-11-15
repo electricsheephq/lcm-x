@@ -131,6 +131,8 @@ class OtherMixin:
 
 @pytest.mark.parametrize("case", SCENARIOS, ids=lambda case: case.name)
 def test_compress_golden(case: Scenario, tmp_path: Path) -> None:
+    # #2293 M5: ingest's BEGIN IMMEDIATE moves to its first write and savepoints of scopes that close before it are
+    # never issued; with transaction control removed, every scenario is unchanged.
     expected = json.loads(GOLDEN.read_text())[case.name]
     assert len(json.dumps(expected, indent=0).encode()) <= 40000, (
         f"{case.name}: trace exceeds 40000 bytes; review the trace size bound.\n" + TRACE_GUIDANCE)

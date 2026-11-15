@@ -6,7 +6,9 @@ store, so main's result is a trip (the audit returns None and the caller keeps m
 from __future__ import annotations
 
 import json
+import math
 import os
+import statistics
 import time
 
 import pytest
@@ -136,33 +138,75 @@ def test_a_trip_costs_sql_only(tmp_path, where, latency_check):
 
 
 def test_one_stored_row_with_many_parallel_calls_is_checked_in_linear_time(tmp_path, latency_check):
-    """#2466 terminal review nit: the admission check reads each entry from the entry itself, so one stored row with
-    many parallel calls is checked in linear time: four times the entries costs well under eight times as long (a
-    lookup from the row's root per entry was quadratic, about sixteen times), and 9,999 calls stay under the bar."""
-    def best_of(width):
-        engine = _engine(tmp_path / f"w{width}")
-        try:
+    """Compare growth with local linear/quadratic references; retain the real-time wide-row latency bar."""
+    wide = identity_anchor._PRESENCE_WINDOW_CALL_IDS - 1
+    widths = (wide // 4, wide)
+    engines = [_engine(tmp_path / f"w{width}") for width in widths]
+    # Both references visit every stored entry and check the same two fields. The first reads each entry
+    # directly; the second walks from the row root to entry k on every lookup, doing quadratic work.
+    queries = {
+        "linear": "json_type(e.value, '$.id') = 'text' "
+                  "AND json_type(e.value, '$.function.arguments') = 'text'",
+        "quadratic": "json_type(tool_calls, '$[' || e.key || '].id') = 'text' "
+                     "AND json_type(tool_calls, '$[' || e.key || '].function.arguments') = 'text'",
+    }
+    queries = {kind: "SELECT count(*) FROM messages, json_each(tool_calls) AS e "
+                     "WHERE session_id=? AND e.type = 'object' AND " + fields
+               for kind, fields in queries.items()}
+    # The references only calibrate the latency verdict, so a correctness run measures the product alone.
+    kinds = ("product", "linear", "quadratic") if latency_check else ("product",)
+    samples = {kind: [[], []] for kind in kinds}
+    ratios = {kind: [] for kind in kinds}
+    wall_samples = [[], []]
+    try:
+        for engine, width in zip(engines, widths):
             engine._store.append_batch(SESSION, [{"role": "assistant", "content": "", "tool_calls": [
                 _entry(f"w{k}", '{"path": "a"}') for k in range(width)]}])
-            best = None
-            for _ in range(3):
-                start = time.perf_counter()
-                out = _presence(engine, [_call("brand_new", 1)])
-                took = time.perf_counter() - start
-                best = took if best is None or took < best else best
-            assert out == [0]
-            return best
-        finally:
+        # Interleave all three checks, rotating their order and alternating the width order. Thread CPU
+        # time excludes scheduler stalls and other threads; local references calibrate SQLite/platform cost.
+        # The independent absolute bar below still uses wall time, as it measures the caller's wait.
+        for pair in range(7):
+            offset = pair % len(kinds)
+            for kind in kinds[offset:] + kinds[:offset]:
+                took = {}
+                for index in ((0, 1) if pair % 2 == 0 else (1, 0)):
+                    wall_start = time.perf_counter()
+                    cpu_start = time.thread_time()
+                    if kind == "product":
+                        out = _presence(engines[index], [_call("brand_new", 1)])
+                    else:
+                        out = engines[index]._store._conn.execute(queries[kind], (SESSION,)).fetchone()[0]
+                    took[index] = time.thread_time() - cpu_start
+                    wall_elapsed = time.perf_counter() - wall_start
+                    assert out == ([0] if kind == "product" else widths[index])
+                    samples[kind][index].append(took[index])
+                    if kind == "product":
+                        wall_samples[index].append(wall_elapsed)
+                ratios[kind].append(took[1] / took[0])
+        growth = {kind: statistics.median(values) for kind, values in ratios.items()}
+        midpoint = math.sqrt(growth["linear"] * growth["quadratic"]) if latency_check else None
+        small, large = (statistics.median(sample) for sample in wall_samples)
+        best = min(wall_samples[1])
+        print(f"\nWIDE-ROW wall median {widths[0]}:{small * 1000:.1f} ms {wide}:{large * 1000:.1f} ms "
+              f"best {wide}:{best * 1000:.1f} ms load1={os.getloadavg()[0]:.1f}")
+        for kind in kinds:
+            cpu_small, cpu_large = (statistics.median(sample) for sample in samples[kind])
+            print(f"  {kind} CPU {cpu_small * 1000:.1f}/{cpu_large * 1000:.1f} ms paired x{growth[kind]:.2f}"
+                  + (f"; log-midpoint x{midpoint:.2f}" if midpoint is not None else ""))
+        # The references only calibrate the latency verdict, so a platform where they fail to separate fails the
+        # latency cell, never the correctness run.
+        assert not latency_check or growth["linear"] < growth["quadratic"], (
+            "reference queries must separate linear and quadratic work")
+        # A geometric midpoint is the midpoint of the log growth ratios: the product must grow more like
+        # the linear reference. No fixed wall-time ratio can distinguish these shapes under runner load (#2706).
+        assert not latency_check or growth["product"] < midpoint, (
+            f"product x{growth['product']:.2f}, linear x{growth['linear']:.2f}, "
+            f"quadratic x{growth['quadratic']:.2f}, log-midpoint x{midpoint:.2f}")
+        # The absolute bar asks whether the caller can ever wait this little, so it reads the best sample.
+        assert not latency_check or best < BAR, f"{best * 1000:.0f} ms"
+    finally:
+        for engine in engines:
             engine.shutdown()
-
-    wide = identity_anchor._PRESENCE_WINDOW_CALL_IDS - 1
-    small, large = best_of(wide // 4), best_of(wide)
-    print(f"\nWIDE-ROW {wide // 4}:{small * 1000:.1f} ms {wide}:{large * 1000:.1f} ms x{large / small:.1f} "
-          f"load1={os.getloadavg()[0]:.1f}")
-    # The ratio is wall time, so it runs only in the nightly latency cell, like the bar: on a loaded CI runner the
-    # correctness run measured x8.8 against this x8 bound with linear code (the quadratic form was about x16).
-    assert not latency_check or large < 8 * small, f"x{large / small:.1f}"
-    assert not latency_check or large < BAR, f"{large * 1000:.0f} ms"
 
 
 def test_one_stored_row_over_the_call_id_window_trips_before_any_entry_is_checked(tmp_path, monkeypatch, latency_check):

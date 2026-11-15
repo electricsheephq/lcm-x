@@ -184,7 +184,9 @@ def _exercise_alt_stamp(engines, monkeypatch, bound, rollback):
         binding = next(b for b in sql_rows(engine, "occurrence_bindings") if b["store_id"] == row["store_id"])
         assert observations[0]["occ_id"] == binding["occ_id"]
     if rollback:
-        assert observed == [True]
+        # T1-28 class: the injected error poisons the lazy attempt (one discarded pre-lock pass);
+        # the rerun meets the same persistent error under the lock and fails open, as on main.
+        assert observed == [True, True]
         assert not engine._store.get_message_relations([row["store_id"]], "alt_stamp")
 
 
@@ -338,8 +340,11 @@ def test_10_foreground_insert_respaces_exhausted_gap(engines):
     assert count(engine, "respaced") == 1
 
 
-def test_11_off_sql_matches_pinned_part_a(engines, monkeypatch):
-    """Lock-in: ledger-off SQL equals Part A's (783a8b824) plus the cursor-zero guard probe.
+@pytest.mark.parametrize("recovery", [False, True], ids=["default", "recovery-on"])
+def test_11_off_sql_matches_pinned_part_a(engines, monkeypatch, recovery):
+    """Lock-in: with the ledger off, an ingest's SQL equals Part A's (783a8b824) for the same fixture.
+
+    With host-row recovery on (opt-in), it also holds #2042's cursor-zero guard probe.
 
     The expected statements were captured once from the Part A engine, so the test needs no git history.
     """
@@ -347,6 +352,7 @@ def test_11_off_sql_matches_pinned_part_a(engines, monkeypatch):
     from tests.behaviour.reconcile_trace_harness import install_clock
     install_clock(monkeypatch)
     candidate = engines(mode="off", initialized=False)
+    candidate._config.host_row_recovery_enabled = recovery  # the guard reads the flag at each ingest
     view = [_m("user", "same input", 10.), _m("assistant", "same answer", 11.)]
     statements = []
     candidate._store._conn.set_trace_callback(statements.append)
@@ -355,14 +361,26 @@ def test_11_off_sql_matches_pinned_part_a(engines, monkeypatch):
     finally:
         candidate._store._conn.set_trace_callback(None)
     expected = json.loads((Path(__file__).parent / "fixtures" / "ingest_ledger_off_sql_part_a.json").read_text())
-    # #2042: exactly one indexed probe after BEGIN/attempt savepoint; preserve the historical fixture.
-    expected.insert(2, "SELECT EXISTS(SELECT 1 FROM messages WHERE session_id = 'S')")
+    if recovery:
+        # #2042, opt-in: exactly one indexed probe after BEGIN/attempt savepoint; preserve the historical fixture.
+        expected.insert(2, "SELECT EXISTS(SELECT 1 FROM messages WHERE session_id = 'S')")
 
     def product(sql):
         # Drop SQLite's own FTS5 statements, as the ingest trace harness does: they vary by SQLite version.
         return [s for s in sql if not s.lstrip().startswith("--") and not re.search(r"(['\"])(main|temp)\1\s*\.", s)]
 
-    assert product(statements) == product(expected)
+    # #2293 M5: BEGIN IMMEDIATE moves to the first write, savepoints of scopes that close before it are never issued,
+    # and the attempt reads its write generation; every other statement, in order, is Part A's. One BEGIN IMMEDIATE
+    # and one COMMIT, as in Part A.
+    control = re.compile(r"^(BEGIN( IMMEDIATE)?|COMMIT|ROLLBACK|SAVEPOINT \w+|RELEASE( SAVEPOINT)? \w+"
+                         r"|ROLLBACK TO( SAVEPOINT)? \w+|PRAGMA (data_version|schema_version))$")
+
+    def split(sql):
+        sql = product(sql)
+        return ([s for s in sql if not control.match(s.strip())],
+                [s.strip() for s in sql if s.strip() in ("BEGIN IMMEDIATE", "COMMIT")])
+
+    assert split(statements) == split(expected)
 
 
 def test_12_absorbed_uid_change_updates_foreground_vector(engines):

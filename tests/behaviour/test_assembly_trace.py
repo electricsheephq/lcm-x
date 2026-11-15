@@ -48,6 +48,9 @@ def test_public_context_manager_has_its_own_service_identity(tmp_path, monkeypat
 
 @pytest.mark.parametrize('case', SCENARIOS, ids=lambda case: case.name)
 def test_assembly_golden(case: Scenario, tmp_path: Path) -> None:
+    # #2293 M5: ingest's BEGIN IMMEDIATE moves to its first write and savepoints of scopes that close before it are
+    # never issued; compress-scaffold also records prelock=True, atomic(immediate=False), and two
+    # write_generation call/return pairs. The other 84 scenarios match after SQL control normalization.
     expected = json.loads(GOLDEN.read_text())[case.name]
     actual = observe(case, tmp_path.resolve())
     difference = first_difference(expected, actual)

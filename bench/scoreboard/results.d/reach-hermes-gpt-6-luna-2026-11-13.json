@@ -1,0 +1,33 @@
+{
+  "id": "reach-hermes-gpt-6-luna-2026-11-13",
+  "run_id": "returning-work-reach-hermes-kit7-gpt-6-luna-20261113",
+  "benchmark": "returning-work-reach",
+  "metric": "reach_at_shipped_defaults_of_25",
+  "value": 7,
+  "display": "7/25 returning ids reached with the id (unchanged plugin)",
+  "tier": "F",
+  "date": "2026-11-13",
+  "system_commit": "LCM-X 0.30.0 runtime payload from 1fc6112e38a11e99080ccc0a9288b93aea396cd7 (unchanged in the headline design); host Hermes v0.23.1 3b421578588243f920886e6fe79a6faa87ea026e. The instruction designs add one line to the plugin's instructions and are not shipped.",
+  "harness_commit": "Study kit build 7 (manifest sha256 3e44bc40d295cacbaf339656731177ec1ad77ac70eeb6078737464c749678fe4), kept outside this repository; frozen analysis script sha256 6e66c9bf4be4130905f32e6e419304eaef1cd3744a0a41c5cf2be30206416531.",
+  "judge": "No model judge; deterministic scoring of first replies against stored answers by the kit, recounted by the frozen analysis script.",
+  "reader": "gpt-6-luna in Hermes v0.23.1 through the Codex subscription route; effort medium, tier priority as sent",
+  "retrieval_config": "Seeded LCM-X store (sha256 2d301b849af73185c554ccaa2082d3835a2dbc76b53defe542acd76cdda08696), embeddings off, plugin defaults; one-shot first replies; designs: unchanged plugin; instruction, exact search; instruction, recall; card prepared by the kit; card with the second miss-line wording.",
+  "dataset_exposure": "Ids, stored sessions and puzzles derive from public Continual-ARC run records (arXiv 2611.14505, Apache-2.0); no customer data.",
+  "breakdown": "Real ids (reached with the id / right at once / wrong at once): unchanged plugin 7/0/1 of 25; instruction, exact search 24/2/11 of 25; instruction, recall 24/2/9 of 25; card 6/8/7 of 25. Made-up ids (reached with the id / wrong at once): unchanged plugin 6/0 of 25; instruction, exact search 25/0 of 25; instruction, recall 24/0 of 25; card 8/0 of 25; card with the second miss-line wording 8/0 of 25. Per-cell table: https://github.com/electricsheephq/lcm-x/blob/dc72d213de83356822b80a94c714bc59ecb124d6/bench/results/reach-hermes-gpt-6-luna-20261113/SUMMARY.json",
+  "variance": "One run; n=25 per cell; no repeats. Reach under an instruction: instruction, exact search 24/25 (95% interval 0.796483 to 0.998988), instruction, recall 24/25 (95% interval 0.796483 to 0.998988).",
+  "failclose": "225 of 225 rows final; 0 infrastructure failures; 0 rows left out; 0 trials with no reply within the limit, counted and never scored right or wrong.",
+  "evidence": [
+    "https://github.com/electricsheephq/lcm-x/blob/dc72d213de83356822b80a94c714bc59ecb124d6/bench/results/reach-hermes-gpt-6-luna-20261113/RESULT.md",
+    "https://github.com/electricsheephq/lcm-x/blob/dc72d213de83356822b80a94c714bc59ecb124d6/bench/results/reach-hermes-gpt-6-luna-20261113/RESULT-MANIFEST.json",
+    "https://github.com/electricsheephq/lcm-x/blob/dc72d213de83356822b80a94c714bc59ecb124d6/bench/results/reach-hermes-gpt-6-luna-20261113/SUMMARY.json"
+  ],
+  "caveats": [
+    "Claim class: advisory.",
+    "One run of 25 ids per design; no repeats.",
+    "The card design uses cards the kit prepared, not built by the product, so it is an upper bound.",
+    "Cells ran in a fixed order, not interleaved.",
+    "Token figures are not included.",
+    "Fault-finding yield: at shipped defaults the agent reached its earlier work with the id on 7 of 25 returning ids.",
+    "Puzzles of one public benchmark, not customer work. Discussion: https://github.com/electricsheephq/lcm-x/issues/2654"
+  ]
+}

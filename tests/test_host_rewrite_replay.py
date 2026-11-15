@@ -79,10 +79,9 @@ def test_r6_acp_334_335_cursor_zero_persisted_batch(tmp_path, caplog):
         assert multiset(engine) == before
 
 
-# #2042 step 2 schedules reconcile at cursor 0 when another writer stored this session's rows after an
-# empty-store bind, which is the shape seed() builds, exactly as a restart's bind does. Reconcile skips a
-# user turn that begins with the task-list header (#2418, open), so these literal main expectations fail
-# until #2418 is fixed. test_catchup_shape_equals_restart pins that both shapes store the same rows.
+# Opting into #2042 schedules reconcile after another writer fills an empty-store bind.
+# Reconcile skips a task-list-prefixed user turn (#2418); only flag-on twins xfail.
+# At defaults the literal main expectations hold without reconciliation.
 KNOWN_2418 = {"changed-item", "suffix", "stamped-tui"}
 
 
@@ -147,11 +146,13 @@ CONTROLS = [
 ]
 
 
-@pytest.mark.parametrize("name,stored,incoming,foreign,expected",
-                         [pytest.param(*c, marks=XFAIL_2418) if c[0] in KNOWN_2418 else c for c in CONTROLS],
-                         ids=[c[0] for c in CONTROLS])
-def test_control_equals_main(tmp_path, caplog, name, stored, incoming, foreign, expected):
-    with engine_context(tmp_path, window=200000, conversation_id="conv", embeddings_enabled=False) as engine:
+@pytest.mark.parametrize("flag_on,name,stored,incoming,foreign,expected",
+                         [pytest.param(flag, *c, marks=XFAIL_2418 if flag and c[0] in KNOWN_2418 else ())
+                          for flag in (False, True) for c in CONTROLS],
+                         ids=[f"{'on' if flag else 'default'}-{c[0]}" for flag in (False, True) for c in CONTROLS])
+def test_control_equals_main(tmp_path, caplog, flag_on, name, stored, incoming, foreign, expected):
+    with engine_context(tmp_path, window=200000, conversation_id="conv", embeddings_enabled=False,
+                        **({"host_row_recovery_enabled": True} if flag_on else {})) as engine:
         seed(engine, stored)
         seed(engine, foreign, "other")
         with caplog.at_level("INFO"):
@@ -171,13 +172,15 @@ def test_catchup_shape_equals_restart(tmp_path, name, stored, incoming, foreign,
     def run(shape):
         path = tmp_path / shape
         path.mkdir()
-        with engine_context(path, window=200000, conversation_id="conv", embeddings_enabled=False) as engine:
+        with engine_context(path, window=200000, conversation_id="conv", embeddings_enabled=False,
+                            host_row_recovery_enabled=True) as engine:
             seed(engine, stored)
             seed(engine, foreign, "other")
             if shape == "catchup":
                 engine._ingest_messages(deepcopy(incoming))
                 return multiset(engine), (engine._last_ingest_reconciliation or {}).get("action")
-        with engine_context(path, window=200000, conversation_id="conv", embeddings_enabled=False) as engine:
+        with engine_context(path, window=200000, conversation_id="conv", embeddings_enabled=False,
+                            host_row_recovery_enabled=True) as engine:
             engine._ingest_messages(deepcopy(incoming))
             return multiset(engine), (engine._last_ingest_reconciliation or {}).get("action")
 
@@ -310,9 +313,10 @@ def test_fix1_a1_reused_stamp_is_new(tmp_path):
         assert ingest_added(engine, [FOLD]) == 0
 
 
-@XFAIL_2418
-def test_fix1_a2_unstamped_host_prompt_is_new(tmp_path):
-    with engine_context(tmp_path, window=200000, conversation_id="conv", embeddings_enabled=False) as engine:
+@pytest.mark.parametrize("flag_on", [False, pytest.param(True, marks=XFAIL_2418)], ids=["default", "on"])
+def test_fix1_a2_unstamped_host_prompt_is_new(tmp_path, flag_on):
+    with engine_context(tmp_path, window=200000, conversation_id="conv", embeddings_enabled=False,
+                        **({"host_row_recovery_enabled": True} if flag_on else {})) as engine:
         seed(engine, [row("user", TODO + "\n\nearlier prompt")])
         before = multiset(engine)
         added = ingest_added(engine, [SNAP])

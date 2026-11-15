@@ -459,6 +459,8 @@ settings do not update LCM-X's threshold.
 
 ### Session-end warning says `final messages may be absent` or `retry pending`
 
+The WARNING `LCM session-end rows not stored` (or a cold-tail `retry pending` WARNING with `reason=` and `view_rows=`) means the session-end view contains rows that are not stored; `view_rows` is the view size, not the missing-row count (#2543); `reason=off_current_suffix_append_failed` marks a busy suffix append at an off-current end of a bypass-lineage session that was re-raised unstored (#2738); `reason=unverified_stale_end` means the off-current fallback refused an end because it could not show the view's rows are stored (some may already be) (#2747), and the fallback skips this WARNING only for a session it can show is excluded from storage by design; `reason=off_current_fallback_interrupted` marks an interrupt during the off-current fallback, and rows may not be stored; `reason=off_current_suffix_append_interrupted` marks an interrupt during that bypass-lineage suffix append.
+
 The interrupted or SQLite-lock raw-flush warning includes `unflushed=N`: a cursor-based estimate
 before the final ingest attempt, not a durability count, without message content. While the ingest
 cursor awaits reconciliation (after a rebind, a lossy proof or a tail recovery), it reports
@@ -574,7 +576,7 @@ Useful environment variables:
 | `LCM_SENSITIVE_PATTERNS_ENABLED` | `false` | Opt in to durable deterministic redaction before LCM storage, FTS indexing, summarization, active replay, and externalized ingest payloads; it does not control cloud embedding privacy |
 | `LCM_EMBEDDING_PRIVACY_ENABLED` | unset (`auto`) | Protect provider-bound copies for known cloud embedding providers without rewriting durable data. Set `false` for an explicit raw-cloud opt-out (`privacy:off` vector revision); local providers remain unchanged |
 | `LCM_SENSITIVE_PATTERNS` | `api_key,bearer_token,password_assignment,private_key` | Comma-separated named sensitive pattern catalog entries to apply when redaction is enabled |
-| `LCM_HOST_ROW_RECOVERY_ENABLED` | `true` | At a foreground session start, recover the rows of an interrupted turn that the host kept in an abandoned compression child, on a background worker, only under a strict durable proof (#2624), and stores recent unended sessions whose turn failed (#2042). `false` disables both and their host reads. |
+| `LCM_HOST_ROW_RECOVERY_ENABLED` | `false` | Off by default because of two known issues: live-child recovery duplicates (#2624) and task-list user-row loss during catch-up reconciliation (#2042). `true` enables host-row recovery, recent unended failed-turn catch-up, and the ingest guard together; recovery uses background host reads and a strict durable proof. |
 | `LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED` | `true` | Store oversized ingest payloads, including tool results, media blocks, and generic raw content, in plugin-managed JSON files |
 | `LCM_LARGE_OUTPUT_EXTERNALIZATION_THRESHOLD_CHARS` | `12000` | Externalization threshold for normalized payload text |
 | `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUBBING_ENABLED` | `true` | Replace token-heavy textual tool results with recoverable externalized refs in active replay; current-turn ingest is immediate and historical assembly respects the protected fresh tail; requires large-output externalization |

@@ -511,12 +511,14 @@ class HostUidShadowMixin:
                 # update_metadata_json must never issue a nested BEGIN here.
                 with self._ingest_evidence(**target):
                     value = merged(store.read_metadata_json(HOST_UID_COUNTER_KEY))
+                    store._sync_ingest_prelock()
                     store.write_metadata_json([HOST_UID_COUNTER_KEY], json.dumps(value, sort_keys=True))
             elif getattr(store._conn, "in_transaction", False):
                 raise sqlite3.OperationalError("host-uid tally skipped: the connection is in a transaction")
             else:
                 store.update_metadata_json(HOST_UID_COUNTER_KEY, merged)
         except Exception as exc:
+            store._ingest_prelock_write_failed(exc)
             self._raise_ingest_busy(exc, **target)
             counts["errors"] += 1
             logger.debug("LCM host-uid counter write failed (%s)", type(exc).__name__)

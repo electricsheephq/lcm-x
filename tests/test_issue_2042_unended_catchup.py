@@ -78,7 +78,8 @@ class Case:
         self.home.mkdir(parents=True)
         self.host = Host(self.home, create=True, archive_columns=archive_columns)
         self.db_path = str((db_path or self.home / "lcm.db").resolve())
-        self.config = LCMConfig(database_path=self.db_path, embeddings_enabled=False, temporal_rollups_enabled=False)
+        self.config = LCMConfig(database_path=self.db_path, embeddings_enabled=False, temporal_rollups_enabled=False,
+                                host_row_recovery_enabled=True)
         self.engines = []
         self.engine = self.new_engine()
         self.engine._store  # Create the LCM schema without binding or activating catch-up.
