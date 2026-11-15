@@ -1077,6 +1077,7 @@ class LCMEngine(
         self._compress_run = CompressRun()
         self._current_compress_placeholder_identity_counts: dict[tuple[str, str, str, str], int] = {}
         self._active_replay_cache_generation = 0
+        self._deferred_active_replay_cache_generation = None
         self._last_active_replay_source_identities: list[tuple[Any, ...]] = []
         self._last_active_replay_messages: list[Dict[str, Any]] = []
         self._generated_ignored_active_replay_placeholder_message_ids: set[int] = set()
@@ -9059,13 +9060,15 @@ class LCMEngine(
             proven_cursor = self._cursor_from_durable_commit_proof(reconcile_messages) if durable else None
             if proven_cursor is not None:
                 metadata = self._remapped_output_metadata(messages, durable, min(cursor, proven_cursor))
-                new_prefix_occurrences |= {
+                durable_new_prefix_occurrences = {
                     idx for idx, previous in metadata.items()
                     if self._host_occurrence_changed(messages[idx], previous)
                 }
-                restamp_metadata.update({idx: (self._session_id, metadata[idx]) for idx in new_prefix_occurrences})
+                restamp_metadata.update({idx: (self._session_id, metadata[idx])
+                                         for idx in durable_new_prefix_occurrences})
+                new_prefix_occurrences |= durable_new_prefix_occurrences
                 if new_prefix_occurrences:
-                    unchanged_prefix_occurrences = {
+                    unchanged_prefix_occurrences |= {
                         idx for idx, previous in metadata.items()
                         if self._host_occurrence_metadata(messages[idx]) == self._host_occurrence_metadata(previous)
                     }

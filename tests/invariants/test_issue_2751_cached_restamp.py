@@ -42,6 +42,53 @@ def test_warm_retry_restamped_user_stored_once(tmp_path, monkeypatch, restamp, b
         engine.shutdown()
 
 
+@pytest.mark.parametrize('proof_metadata', ['empty', 'full'])
+def test_cached_restamp_forced_durable_proof(tmp_path, monkeypatch, proof_metadata, record_property):
+    """A durable proof must preserve cached evidence, including unchanged siblings."""
+    def occurrences(engine):
+        return sorted((row['role'], row['content'], row['observed_at'])
+                      for row in engine._store.get_session_messages('parent'))
+
+    clean_root = tmp_path / 'clean'
+    clean_root.mkdir()
+    with monkeypatch.context() as patch:
+        clean = _open(clean_root, patch, None)
+        try:
+            view = _turn(0, 'plain')
+            clean.ingest(copy.deepcopy(view))
+            for stamp in (1001., 2001.):
+                view[0]['timestamp'] = stamp
+                clean.on_session_end('parent', copy.deepcopy(view))
+            expected = occurrences(clean)
+        finally:
+            clean.shutdown()
+
+    engine = _open(tmp_path, monkeypatch, None)
+    try:
+        view = _turn(0, 'plain')
+        engine.ingest(copy.deepcopy(view))
+        view[0]['timestamp'] = 1001.
+        with monkeypatch.context() as patch:
+            _Probe(monkeypatch).busy_end(patch, engine, 'warm', view)
+        assert any(t['kind'] == 'warm' for t in engine._pending_session_tails)
+        proof = {'output_metadata': []}
+        if proof_metadata == 'full':
+            engine._prepare_compress_commit_proof(proof, copy.deepcopy(view))
+            assert proof['output_metadata'][0]['timestamp'] == 1001.
+            assert proof['output_metadata'][0]['identity_sha256']
+        monkeypatch.setattr(engine, '_durable_commit_proof_payload', lambda *a, **k: proof)
+        monkeypatch.setattr(engine, '_cursor_from_durable_commit_proof', lambda *a, **k: 4)
+        view[0]['timestamp'] = 2001.
+        record_property('before', repr(occurrences(engine)))
+        engine.on_session_end('parent', copy.deepcopy(view))
+        actual = occurrences(engine)
+        record_property('occurrences', repr(actual))
+        record_property('clean_occurrences', repr(expected))
+        assert actual == expected, {'stored': actual, 'clean': expected}
+    finally:
+        engine.shutdown()
+
+
 @pytest.mark.parametrize('clean_ends', [1, 2])
 @pytest.mark.parametrize('route', ['end', 'ingest'])
 @pytest.mark.parametrize('which', [0, 1])
