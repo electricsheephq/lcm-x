@@ -993,6 +993,7 @@ def _candidate_matches_existing_source_key(candidate: ImportCandidate, existing_
 
 
 def _backup_target(target_db: Path) -> str | None:
+    # This import backup copies lcm.db only; it does not carry a records file.
     if not target_db.exists():
         return None
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")

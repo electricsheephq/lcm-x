@@ -9,15 +9,18 @@ formatting, and the store/dag/lifecycle connection handling lives in one place.
 
 from __future__ import annotations
 
-from contextlib import nullcontext
+from contextlib import closing, contextmanager, nullcontext, suppress
 from datetime import datetime
 from pathlib import Path
+import errno
+import logging
 import os
 import sqlite3
 from typing import Any
 
 
 from .externalize import get_large_output_storage_dir
+from .store import RecordsFormatError
 
 
 def externalized_payload_inventory(engine) -> dict:
@@ -90,12 +93,8 @@ def backup_database(engine) -> dict[str, Any]:
         backup_dir.mkdir(parents=True, exist_ok=True)
         flush_engine_connections(engine)
 
-        dest = sqlite3.connect(str(backup_path))
-        try:
-            engine._store.backup(dest)
-        finally:
-            dest.close()
-    except (OSError, sqlite3.Error) as exc:
+        _backup_pair(engine._store, backup_path)
+    except (OSError, sqlite3.Error, RecordsFormatError) as exc:
         return {
             "ok": False,
             "db_path": db_path,
@@ -114,7 +113,7 @@ def backup_database(engine) -> dict[str, Any]:
 def rotate_backup_database(engine) -> dict[str, Any]:
     """Write a rolling rotate-latest SQLite snapshot of the LCM store.
 
-    Atomic via tmp-then-rename so the slot is never half-written. Unlike
+    Both SQLite copies finish before replacing the previous pair. Unlike
     ``backup_database`` which produces timestamped files, this overwrites a
     single rolling slot so disk usage stays bounded across repeated rotates.
     """
@@ -128,28 +127,11 @@ def rotate_backup_database(engine) -> dict[str, Any]:
 
     backup_path = engine.rotate_backup_path()
     backup_dir = backup_path.parent
-    tmp_path = backup_path.with_name(backup_path.name + ".tmp")
-
     try:
         backup_dir.mkdir(parents=True, exist_ok=True)
         flush_engine_connections(engine)
-
-        if tmp_path.exists():
-            tmp_path.unlink()
-        dest = sqlite3.connect(str(tmp_path))
-        try:
-            engine._store.backup(dest)
-        finally:
-            dest.close()
-        # Atomic replace so the rolling slot is never half-written.
-        tmp_path.replace(backup_path)
-    except (OSError, sqlite3.Error) as exc:
-        # Best-effort cleanup of the tmp file if something failed midway.
-        try:
-            if tmp_path.exists():
-                tmp_path.unlink()
-        except OSError:
-            pass
+        _backup_pair(engine._store, backup_path)
+    except (OSError, sqlite3.Error, RecordsFormatError) as exc:
         return {
             "ok": False,
             "db_path": db_path,
@@ -164,3 +146,83 @@ def rotate_backup_database(engine) -> dict[str, Any]:
         "backup_path": backup_path,
         "backup_size": backup_size,
     }
+
+
+@contextmanager
+def _backup_folder_lock(folder):
+    with os.fdopen(os.open(folder / ".lcm-backup.lock", os.O_CREAT | os.O_RDWR, 0o600), "r+b") as lock:
+        try:
+            import fcntl
+        except ImportError:
+            logging.getLogger(__name__).warning("Backup locks unavailable; continuing unlocked")
+        else:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as exc:
+                if exc.errno in (errno.EWOULDBLOCK, errno.EAGAIN):
+                    raise OSError("another LCM-X backup in this folder is running") from exc
+                logging.getLogger(__name__).warning("Backup lock failed; continuing unlocked: %s", exc)
+        yield
+
+
+def _backup_pair(store, destination):
+    with _backup_folder_lock(destination.parent):
+        _backup_pair_locked(store, destination)
+
+
+def _backup_pair_locked(store, destination):
+    """Publish records first, then atomically replace the complete canonical slot."""
+    staging = destination.with_name(destination.name + ".tmp")
+    staged_records = Path(str(staging) + ".records")
+    target_records = Path(str(destination) + ".records")
+    previous_records = Path(str(target_records) + ".previous")
+    previous_tmp = Path(str(previous_records) + ".tmp")
+    # Crash states: during staging or previous.tmp copying, the old pair remains.
+    # After previous is linked/copied, the old pair also has a recovery records file.
+    # After records publish (or unlink for a records-free copy), old lcm.db remains;
+    # staging + previous identify its recoverable records until canonical replace.
+    # After canonical replace, staging is absent: the new pair is complete and
+    # previous is stale. Crashes during cleanup leave that same complete pair.
+    # A crash during restart restoration leaves either the recovery file or the
+    # restored old pair; clearing other leftovers can then safely be retried.
+    # A failed exception-path restore keeps staging + previous for restart recovery.
+    if staging.exists() and previous_records.exists():
+        previous_records.replace(target_records)
+    leftovers = (staging, staged_records, Path(str(staged_records) + ".tmp"),
+                 previous_records, previous_tmp)
+    for path in leftovers:
+        path.unlink(missing_ok=True)
+    published_records = False
+    keep_recovery = False
+    try:
+        with closing(sqlite3.connect(str(staging))) as dest:
+            store.backup(dest)
+        if target_records.exists():
+            try:
+                previous_records.hardlink_to(target_records)
+            except OSError:
+                import shutil
+                shutil.copyfile(target_records, previous_tmp)
+                os.replace(previous_tmp, previous_records)
+        if staged_records.exists():
+            staged_records.replace(target_records)
+            published_records = True
+        else:
+            target_records.unlink(missing_ok=True)
+        staging.replace(destination)
+    except BaseException as original:
+        try:
+            if previous_records.exists():
+                previous_records.replace(target_records)
+            elif published_records:
+                target_records.unlink(missing_ok=True)
+        except OSError as restore_error:
+            keep_recovery = True
+            original.add_note(f"Backup restore failed: {restore_error}; recovery files kept at {staging} and {previous_records}")
+        raise
+    finally:
+        for path in leftovers:
+            if keep_recovery and path in (staging, previous_records):
+                continue
+            with suppress(OSError):
+                path.unlink(missing_ok=True)

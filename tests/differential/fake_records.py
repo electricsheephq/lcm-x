@@ -13,6 +13,11 @@ WRITE_STYLE = 'batch'
 def install(engine, entries, patch):
     conn = engine._store._conn
     conn.execute('CREATE TABLE IF NOT EXISTS queued_user_rows (' + ', '.join(RECORD_COLUMNS) + ')')
+    from .session import freeze
+    def fake_rows():
+        return [freeze(dict(zip(RECORD_COLUMNS, row))) for row in conn.execute(
+            'SELECT ' + ', '.join(RECORD_COLUMNS) + ' FROM queued_user_rows ORDER BY owner_store_id, ordinal')]
+    patch.setattr(engine, '_fake_queued_rows', fake_rows, raising=False)
     def write(rows):
         existing = {tuple(row) for row in conn.execute('SELECT * FROM queued_user_rows')}
         for row in rows:

@@ -79,6 +79,9 @@ class TransactionOwner:
         self._active_connection: sqlite3.Connection | None = None
         self._owner_thread: int | None = None
         self.rollback_failures = 0
+        self.callback_failures = 0
+        self.on_commit: list[Callable[[], None]] = []
+        self.on_rollback: list[Callable[[], None]] = []
         self.ingest_state = None
 
     def owns(self, conn: sqlite3.Connection) -> bool:
@@ -112,12 +115,16 @@ class TransactionOwner:
             self._active_connection = conn
             self._owner_thread = threading.get_ident()
             token = self._active_owners.set((*self._active_owners.get(), self))
+            self.on_commit, self.on_rollback = [], []
+            committed = rolled_back = False
             try:
                 yield
                 conn.commit()
+                committed = True
             except BaseException as exc:
                 try:
                     conn.rollback()
+                    rolled_back = True
                 except Exception:
                     self.rollback_failures += 1
                     logging.getLogger(__name__).warning("SQLite rollback failed; preserving original exception", exc_info=True)
@@ -129,3 +136,11 @@ class TransactionOwner:
                     self._active_owners.reset(token)
                 except ValueError:
                     pass
+                callbacks = self.on_commit if committed else self.on_rollback if rolled_back else ()
+                self.on_commit, self.on_rollback = [], []
+                for callback in callbacks:
+                    try:
+                        callback()
+                    except Exception:
+                        self.callback_failures += 1
+                        logging.getLogger(__name__).warning("SQLite completion callback failed", exc_info=True)
