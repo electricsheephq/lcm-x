@@ -10,8 +10,10 @@ from __future__ import annotations
 import argparse
 from collections import Counter, defaultdict
 from contextlib import closing
+import hashlib
 import json
 from pathlib import Path
+import re
 import sqlite3
 
 
@@ -30,9 +32,9 @@ def project(entry):
         return []
     if not isinstance(uid, str) or not uid:
         raise ValueError("missing_uid")
-    content = message.get("content") or []
+    content = message.get("content", [])
     parts = [{"type": "text", "text": content}] if isinstance(content, str) else [
-        p for p in content if isinstance(p, dict)]
+        p for p in content or [] if isinstance(p, dict)]
     rows = []
     if entry["type"] == "assistant":
         text = joined(parts)
@@ -69,22 +71,33 @@ def signature(row):
 
 
 def expected_rows(inputs):
-    expected, seen = defaultdict(list), defaultdict(set)
+    expected, seen, unprojected = defaultdict(list), defaultdict(set), Counter()
     for session, path in inputs:
         expected[session]  # Include a transcript with no projected rows.
-        with path.open(encoding="utf-8") as handle:
+        with path.open("rb") as handle:
             for line in handle:
-                entry = json.loads(line)
+                if not line.strip():
+                    continue
+                try:
+                    entry = json.loads(line)
+                except (ValueError, UnicodeError):
+                    unprojected[session] += 1
+                    continue
+                if not isinstance(entry, dict) or (entry.get("type") in {"user", "assistant"}
+                        and isinstance(entry.get("message"), dict) and not (
+                            isinstance(entry.get("uuid"), str) and entry["uuid"])):
+                    unprojected[session] += 1
+                    continue
                 digest = canonical({k: v for k, v in entry.items() if k not in {"sessionId", "promptId"}})
                 identity = entry.get("uuid"), digest
                 if identity not in seen[session]:
                     expected[session].extend(signature(row) for row in project(entry))
                     seen[session].add(identity)
-    return expected
+    return expected, unprojected
 
 
 def check(home, inputs):
-    expected = expected_rows(inputs)
+    expected, unprojected = expected_rows(inputs)
     with closing(sqlite3.connect((home / "lcm.db").resolve().as_uri() + "?mode=ro", uri=True)) as conn:
         conn.row_factory = sqlite3.Row
         conn.execute("BEGIN")
@@ -111,12 +124,15 @@ def check(home, inputs):
             raise ValueError("invalid_revision_ancestry")
         predecessors[new].append(old)
     superseded = {old for _, old in revisions}
+    tool_ids = {r["store_id"]: r["tool_call_id"] for r in messages}
     origins = {}
     for row in messages:  # store_id order makes every predecessor's origin available.
         row_id = row["store_id"]
-        origins[row_id] = min([row_id, *(origins[old] for old in predecessors[row_id])])
+        origins[row_id] = min([row_id, *(origins[old] for old in predecessors[row_id]
+                                      if row["tool_call_id"] == tool_ids[old])])
     reports = []
-    for session in sorted(expected.keys() | grouped.keys()):
+    unexpected = [{"session_id": s, "rows": len(grouped[s])} for s in sorted(grouped.keys() - expected.keys())]
+    for session in sorted(expected):
         wanted, actual, ids = expected.get(session, []), [], []
         ambiguous, binding_excess = Counter(), 0
         calls, results = defaultdict(list), defaultdict(list)
@@ -139,6 +155,32 @@ def check(home, inputs):
                     calls[call.get("id")].append(origins[row_id])
                 if row["role"] == "tool":
                     results[row["tool_call_id"]].append(origins[row_id])
+        # Only transcript previews can stand in for recovered content.
+        opaque = {r[:2] + r[3:] for r in wanted if r[1] == "tool"
+                  and isinstance(text := json.loads(r[2]), str)
+                  and text.lstrip().startswith("<persisted-output>")}
+        unverified = sum(r[:2] + r[3:] in opaque for r in actual)
+        def normalize(row):
+            if row[:2] + row[3:] in opaque:
+                return row[:2] + ("null",) + row[3:]
+            text = json.loads(row[2])
+            match = re.fullmatch(
+                r'\[Externalized tool output: .*; chars=(\d+); bytes=(\d+); .*; '
+                r'ref=\d{8}_\d{6}_.+_([0-9a-f]{12})_[0-9a-f]+\.json\]', text) \
+                if row[1] == "tool" and isinstance(text, str) else None
+            if match:
+                for candidate in wanted:
+                    source = json.loads(candidate[2])
+                    if (candidate[:2] + candidate[3:] == row[:2] + row[3:] and isinstance(source, str)
+                            and (len(source), len(source.encode("utf-8")), hashlib.sha256(source.encode("utf-8")).hexdigest()[:12])
+                            == (int(match[1]), int(match[2]), match[3])):
+                        return candidate
+            if row[1] == "tool" and isinstance(text, str) and text.startswith("[Externalized tool output:"):
+                return row[:2] + ("null",) + row[3:]
+            return row
+        wanted = [r[:2] + ("null",) + r[3:] if r[:2] + r[3:] in opaque else r for r in wanted]
+        actual = list(map(normalize, actual))
+        ambiguous = Counter(map(normalize, ambiguous.elements()))
         need, have = Counter(wanted), Counter(actual)
         missing = need - have - ambiguous
         lost = sum(missing.values())
@@ -155,10 +197,12 @@ def check(home, inputs):
                        or calls[uid][0] >= results[uid][0] for uid in calls.keys() | results.keys())
         report = {"lineage": "claude-code:" + session, "expected": len(wanted), "actual": len(actual),
                   "lost": lost, "duplicated": duplicated, "order_kept": order, "unpaired": unpaired,
-                  "store_ids": ids, "parent": parents.get(session)}
+                  "store_ids": ids, "parent": parents.get(session),
+                  "unverified": unverified, "unprojected": unprojected[session]}
         report["pass"] = not lost and not duplicated and order and not unpaired
         reports.append(report)
-    return {"pass": bool(reports) and all(r["pass"] for r in reports), "lineages": reports}
+    return {"pass": bool(reports) and not unexpected and all(r["pass"] for r in reports),
+            "lineages": reports, "unexpected_sessions": unexpected}
 
 
 def main():
@@ -169,8 +213,8 @@ def main():
     try:
         inputs = [(session, Path(path)) for session, path in (item.split("=", 1) for item in args.transcript)]
         report = check(args.home, inputs)
-    except (ValueError, TypeError, KeyError, OSError, sqlite3.Error):
-        report = {"pass": False, "errors": 1}
+    except Exception as exc:
+        report = {"pass": False, "errors": 1, "error_type": type(exc).__name__}
     print(json.dumps(report, sort_keys=True))
     return 0 if report["pass"] else 1
 

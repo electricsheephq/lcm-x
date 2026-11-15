@@ -230,3 +230,90 @@ def test_stdlib_import_boundary():
             assert not (isinstance(node.func, ast.Attribute)
                         and node.func.attr in {"import_module", "__import__"})
     assert imports and set(imports) <= sys.stdlib_module_names
+
+
+@pytest.mark.parametrize("shape", ["empty", "payload", "persisted", "revision", "unexpected",
+                                  "blank", "undecodable", "utf8", "uidless", "docs", "error",
+                                  "store-marker", "digest", "bogus", "persisted-payload"])
+def test_projection_fidelity(tmp_path, shape, record_property):
+    rows = [json.loads(line) for line in FIXTURES[0].read_text().splitlines()]
+    base = tmp_path / "capture"
+    if shape == "empty":
+        rows[0]["message"]["content"] = ""
+    if shape in {"payload", "digest"}:
+        rows[2]["message"]["content"][0]["content"] = "synthetic " * 7500
+        assert len(rows[2]["message"]["content"][0]["content"]) == 75000
+    if shape.startswith("persisted"):
+        saved = base / "claude/projects/synthetic/plain/tool-results/output.txt"
+        saved.parent.mkdir(parents=True)
+        saved.write_text("synthetic recovered full output" if shape == "persisted" else "synthetic " * 7500)
+        rows[2]["message"]["content"][0]["content"] = (
+            f"<persisted-output>\nFull output saved to: {saved}\n\nPreview:\nsynthetic\n</persisted-output>")
+    if shape == "revision":
+        rows = [rows[1], rows[2], rows[5], json.loads(json.dumps(rows[2]))]
+        rows[1]["message"]["content"] = rows[1]["message"]["content"][:1]
+        rows[-1]["message"]["content"] = [rows[1]["message"]["content"][0],
+                                             json.loads(FIXTURES[0].read_text().splitlines()[6])["message"]["content"][0]]
+    fixture = tmp_path / ("09_projection.jsonl" if shape == "revision" else "01_projection.jsonl")
+    fixture.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    home, env, inputs = capture_session(base, fixture)
+    if shape in {"blank", "undecodable", "utf8", "uidless"}:
+        path = inputs[0][1]
+        lines = path.read_text().splitlines(keepends=True)
+        lines.insert(len(lines) if shape == "blank" else 1, {"blank": " \t\n", "undecodable": "{broken\n", "utf8": "BAD_UTF8\n",
+                         "uidless": json.dumps(dict(type="user", message=dict(content="raw"))) + "\n"}[shape])
+        path.write_bytes("".join(lines).encode().replace(b"BAD_UTF8", b"\xff"))
+        hook(home, env, "plain", path)
+        run(CAPTURE, "worker", "--home", home, env=env)
+    if shape == "unexpected":
+        extra = inputs[0][1].with_name("extra.jsonl")
+        extra.write_text(json.dumps(dict(type="user", uuid="extra", sessionId="extra", message=dict(content="extra"))) + "\n")
+        hook(home, env, "extra", extra)
+        run(CAPTURE, "worker", "--home", home, env=env)
+    if shape in {"store-marker", "digest", "bogus"}:
+        content = "<persisted-output>junk" if shape == "store-marker" else "[Externalized tool output: bogus]"
+        if shape == "digest":
+            content = read_sql(home, "SELECT content FROM messages WHERE tool_call_id='call1'")[0][0]
+            digest = content.rsplit("_", 2)[1]
+            content = content.replace(digest, "0" * 12 if digest != "0" * 12 else "1" * 12)
+        with closing(sqlite3.connect(home / "lcm.db")) as conn, conn:
+            conn.execute("UPDATE messages SET content=? WHERE tool_call_id='call1'", (content,))
+    checked, report, audit = verdict(home, env, inputs)
+    record_property("checker", checked.stdout)
+    record_property("audit", json.dumps(audit, sort_keys=True))
+    if shape in {"store-marker", "digest", "bogus"}:
+        assert checked.returncode == 1 and not report["pass"]
+        assert [(r["lost"], r["duplicated"], r["order_kept"], r["unpaired"], r["unverified"], r["unprojected"])
+                for r in report["lineages"]] == [(1, 1, True, 0, 0, 0)]
+        return
+    if shape == "empty":
+        clean_verdict = checked, report, audit
+        with closing(sqlite3.connect(home / "lcm.db")) as conn, conn:
+            conn.execute("DELETE FROM host_uid_bindings WHERE store_id=1")
+            conn.execute("DELETE FROM messages WHERE store_id=1")
+        checked, report, audit = verdict(home, env, inputs)
+        record_property("mutant", checked.stdout)
+        record_property("mutant_audit", json.dumps(audit, sort_keys=True))
+        assert checked.returncode == 1 and not report["pass"] and not audit["ok"]
+        assert [(r["lost"], r["duplicated"], r["order_kept"], r["unpaired"]) for r in report["lineages"]] == [(1, 0, True, 0)]
+        checked, report, audit = clean_verdict
+    assert audit["ok"]
+    assert checked.returncode == int(shape == "unexpected") and report["pass"] == (shape != "unexpected")
+    assert all((r["lost"], r["duplicated"], r["order_kept"], r["unpaired"]) == (0, 0, True, 0) for r in report["lineages"])
+    if shape == "unexpected":
+        assert report["unexpected_sessions"] == [{"session_id": "extra", "rows": 1}]
+    if shape in {"persisted", "persisted-payload", "undecodable", "utf8", "uidless"}:
+        assert sum(r["unverified" if shape.startswith("persisted") else "unprojected"] for r in report["lineages"]) == 1
+    if shape == "payload":
+        assert sum(r["unverified"] for r in report["lineages"]) == 0
+        assert read_sql(home, "SELECT content FROM messages WHERE tool_call_id='call1'")[0][0].startswith("[Externalized tool output:")
+    if shape == "persisted-payload":
+        assert read_sql(home, "SELECT content FROM messages WHERE tool_call_id='call1'")[0][0].startswith("[Externalized tool output:")
+    if shape == "persisted":
+        assert read_sql(home, "SELECT content FROM messages WHERE tool_call_id='call1'") == [("synthetic recovered full output",)]
+    if shape == "docs":
+        paragraph = next(line for line in (ROOT / "docs/claude-code-adapter.md").read_text().splitlines() if "An independent row checker" in line)
+        assert all(word in paragraph for word in ("unverified", "unprojected", "unexpected_sessions", "every captured transcript"))
+    if shape == "error":
+        checked = run(CHECKER, "--home", home, "--transcript", "plain=" + str(tmp_path / "PRIVATE_missing"), env=env, accepted=(1,))
+        assert json.loads(checked.stdout)["error_type"] == "FileNotFoundError" and "PRIVATE" not in checked.stdout
