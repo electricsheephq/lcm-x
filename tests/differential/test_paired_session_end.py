@@ -478,14 +478,26 @@ def test_fake_candidates_intended(monkeypatch, key, kind, reason, record_propert
     ('summaries', 1, 'tables lost rows in summaries'),
     ('ingest_views', 0, None), ('summaries', 3, None),
     ('messages_fts_data', 0, None), ('foo_data', 0, 'tables lost rows in foo_data'),
-    ('lineage_marks', 1, None)),
+    ('lineage_marks', 1, None),
+    ('notes_data', 0, 'tables lost rows in notes_data'),
+    ('foo_data', 0, 'tables lost rows in foo_data'),
+    ('v_content', 0, 'tables lost rows in v_content'),
+    ('v_content', 0, None)),
     ids=('relations-drop-all', 'summaries-drop-one', 'views-prune', 'summaries-add',
-         'fts-shadow-merge', 'lookalike-data-drop', 'lineage-merge'))
-def test_fake_candidates_intended_tables(monkeypatch, table, remaining, reason, record_property):
+         'fts-shadow-merge', 'lookalike-data-drop', 'lineage-merge', 'text-mention-lookalike',
+         'nonfts-vt-lookalike', 'external-content-lookalike', 'own-content-shadow'))
+def test_fake_candidates_intended_tables(monkeypatch, table, remaining, reason, record_property, request):
     main = {name: {} for name in ('canonical', 'schema', 'tables', 'payload', 'pending', 'ledger', 'lifecycle')}
-    if table in ('messages_fts_data', 'foo_data', 'lineage_marks'):
-        main['schema'] = {'lcm.db': [('table', 'messages_fts', 'messages_fts',
-                                    'CREATE VIRTUAL TABLE messages_fts USING fts5(content)')]}
+    schemas = {
+        'text-mention-lookalike': ('notes', "CREATE TABLE notes (x TEXT DEFAULT 'USING fts5')"),
+        'nonfts-vt-lookalike': ('foo', 'CREATE VIRTUAL TABLE foo USING rtree(id, x0, x1)'),
+        'external-content-lookalike': ('v', "CREATE VIRTUAL TABLE v USING fts5(body, content='messages')"),
+        'own-content-shadow': ('v', 'CREATE VIRTUAL TABLE v USING fts5(body)'),
+    }
+    if table in ('messages_fts_data', 'foo_data', 'lineage_marks') or request.node.callspec.id in schemas:
+        name, sql = schemas.get(request.node.callspec.id,
+                                ('messages_fts', 'CREATE VIRTUAL TABLE messages_fts USING fts5(content)'))
+        main['schema'] = {'lcm.db': [('table', name, name, sql)]}
     rows = [(1, 'A'), (2, 'B'), (3, 'C')]
     main['tables'] = {'lcm.db': {table: (('id', 'text'), rows[:2])}}
     candidate = dict(main, tables={'lcm.db': {table: (('id', 'text'), rows[:remaining])}})

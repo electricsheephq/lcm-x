@@ -283,10 +283,13 @@ def judge(main, candidate, stage, *, case=None, mode=None, seen=None):
                         f'{stage}: {key} reordered stored row'
             if key == 'tables':
                 for path, tables in main[key].items():
-                    # FTS5 shadows are derived from messages, covered by the messages guard; their row counts follow segment merges.
+                    # Skip actual FTS5 shadows: their row counts follow segment merges; external content has no _content shadow.
                     shadows = {name + suffix for kind, name, _, sql in main['schema'].get(path, ())
-                               if kind == 'table' and re.search(r'\bUSING\s+fts5\b', sql or '', re.I)
-                               for suffix in ('_data', '_idx', '_content', '_docsize', '_config')}
+                               if kind == 'table' and re.match(
+                                   r'\s*CREATE\s+VIRTUAL\s+TABLE\b.*?\bUSING\s+fts5\b', sql or '', re.I | re.S)
+                               # content_rowid= and contentless_delete= do not count as content=.
+                               for suffix in ('_data', '_idx', '_docsize', '_config', *(
+                                   ('_content',) if re.search(r'\bcontent\s*=', sql, re.I) is None else ()))}
                     for table, (_, rows) in tables.items():
                         if table != 'messages' and table not in SHRINKING_TABLES and table not in shadows:
                             after_rows = candidate[key].get(path, {}).get(table, ((), ()))[1]
