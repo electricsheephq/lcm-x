@@ -115,9 +115,13 @@ def test_prefix_call_before_unstored_result(tmp_path, monkeypatch, writer, uid_m
         engine.shutdown()
 
 
+@pytest.mark.parametrize('uid_mode', [None, 'off'])
 @pytest.mark.parametrize('veto', ['canonical-uid', 'conflicting-uidset'])
-def test_prefix_uid_only_change_matches_as_main(engines, veto, record_property):
+def test_prefix_uid_only_change_matches_as_main(engines, monkeypatch, veto, uid_mode, record_property):
     """Hermes may reissue a prefix occurrence with a new UID; content/stamp still match."""
+    monkeypatch.delenv('LCM_HOST_MESSAGE_UID')
+    if uid_mode is not None:
+        monkeypatch.setenv('LCM_HOST_MESSAGE_UID', uid_mode)
     engine = engines()
     view = history()
     engine.ingest(copy.deepcopy([view[0], view[1], view[3]]))
@@ -132,7 +136,6 @@ def test_prefix_uid_only_change_matches_as_main(engines, veto, record_property):
             "SELECT uid FROM host_uid_bindings WHERE store_id=? AND kind='canonical'", (target,)).fetchall() == [('C',)]
     else:
         conn = engine._store._conn
-        assert not engine._store._host_uid_table_exists()
         occ, blob = conn.execute(
             "SELECT b.occ_id,v.entries FROM occurrence_bindings b JOIN ingest_views v "
             "ON v.lineage=b.lineage AND v.view_seq=b.view_seq AND v.kind='ingest' WHERE b.store_id=?",
@@ -147,4 +150,25 @@ def test_prefix_uid_only_change_matches_as_main(engines, veto, record_property):
     assert contents(engine).count('C') == 1
     assert len(contents(engine)) == 4
     assert proof[0] == 1, proof
+    assert not engine._pending_session_tails
+
+
+@pytest.mark.parametrize('uid_mode', [None, 'off'])
+def test_queued_digest_prefix_reissued_uid_without_view(engines, monkeypatch, uid_mode):
+    monkeypatch.delenv('LCM_HOST_MESSAGE_UID')
+    if uid_mode is not None:
+        monkeypatch.setenv('LCM_HOST_MESSAGE_UID', uid_mode)
+    engine = engines()
+    view = history()
+    engine.ingest(copy.deepcopy(view[:2]))
+    incoming = copy.deepcopy(view)
+    incoming[2]['message_uid'] = 'reissued-C'
+    tail = end_view(engine, incoming)
+    assert 'ledger' in tail
+    replay(engine, view[2:], with_view=False)
+    proof = engine._match_pending_tail(tail)
+    assert proof[3] == 'digest', proof
+    assert proof[0] == 2, proof
+    engine._retry_pending_session_tails()
+    assert contents(engine) == list('ABCD')
     assert not engine._pending_session_tails

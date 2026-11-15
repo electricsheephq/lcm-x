@@ -5,10 +5,11 @@ clock, and with a complete warm proof in the final drain spending 60 ms of its b
 All original source occurrences and complete tool-call/result groups are checked.
 """
 import copy
+from contextlib import contextmanager
 
 import pytest
 
-from hermes_lcm import ingest_ledger, maintenance_scheduler
+from hermes_lcm import engine as engine_module, ingest_ledger, maintenance_scheduler
 from hermes_lcm.engine import LCMEngine
 from tests.invariants.test_issue_2742_warm_tail_refinal import _bind, _open, _row
 from tests.invariants.test_issue_2550_busy_end_and_restamp_paths import _Probe, _turn
@@ -30,15 +31,19 @@ def _clock(monkeypatch, expire, target_event):
     clock.event = None
     clock.warm_pending = []
     clock.expired_admissions = []
-    append = LCMEngine._append_ingest_batch
-
-    def observe_admission(engine, batch):
+    timeout = engine_module._temporary_sqlite_busy_timeout
+    # Observe the expired admission itself, even if a concurrent writer defers it.
+    # A later foreground append has a different budget and is not this assertion.
+    @contextmanager
+    def observe_admission(connections, milliseconds):
         if clock.advances and clock.event == target_event and not clock.expired_admissions:
-            clock.expired_admissions.append(engine._store._conn.execute(
-                "PRAGMA busy_timeout").fetchone()[0])
-        return append(engine, batch)
+            clock.expired_admissions.append(milliseconds)
+        with timeout(connections, milliseconds):
+            yield
 
-    monkeypatch.setattr(LCMEngine, '_append_ingest_batch', observe_admission)
+    monkeypatch.setattr(engine_module, '_temporary_sqlite_busy_timeout', observe_admission)
+    for name in ('_schedule_rollup_maintenance', '_schedule_embedding_maintenance'):
+        monkeypatch.setattr(LCMEngine, name, lambda *args: None)
 
     def wrapped(engine, tail):
         result = match(engine, tail)
@@ -166,10 +171,16 @@ def test_budget_seed_2543487(tmp_path, monkeypatch, expire, record_property):
                 owner._retry_pending_session_tails()
         _assert_sources(engine, original, finals, restamp=True)
         retained = [t for e in made for t in e._pending_session_tails]
-        # A spent budget preserves the older cold view's existing refusal/queue semantics.
-        # Every source occurrence is independently accounted for above.
+        record_property("retained_cold_tails_before_drain", len(retained))
         assert all(t['kind'] == 'cold' for t in retained)
-        record_property("retained_cold_tails", len(retained))
+        # Retry the older cold view with a fresh budget, checking its rows again.
+        clock.event = 11
+        for owner in made:
+            if not owner._stable_use_closed:
+                owner._retry_pending_session_tails()
+        record_property("retained_cold_tails_after_drain",
+                        sum(len(owner._pending_session_tails) for owner in made))
+        _assert_sources(engine, original, finals, restamp=True)
         record_property("virtual_expiries", clock.advances)
         assert clock.advances == int(expire)
         if expire:

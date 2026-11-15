@@ -545,9 +545,10 @@ class IdentityAnchorMixin:
         if resolved is not None and lineage != resolved:
             return
         entries, stamps = self._ledger_view_entries(salt, messages)
-        # Ordinary matches already own their targets. An unrecorded positional prefix
-        # occurrence still owns one eligible receipt; a later twin cannot reuse it.
-        prefix = Counter((entries[i].identity_digest, stamps[i]) for i in range(start) if i not in matched)
+        # Ordinary matches already own their targets. Every unrecorded row treated as
+        # stored still owns one eligible receipt; a later twin cannot reuse it.
+        held = set(range(max(start, plan["cursor"]))) | set(plan.get("positional", ()))
+        prefix = Counter((entries[i].identity_digest, stamps[i]) for i in sorted(held) if i not in matched)
         views = {}
         for i in indexes:
             entry, stamp = entries[i], stamps[i]
