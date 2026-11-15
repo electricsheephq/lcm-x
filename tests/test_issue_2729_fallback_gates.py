@@ -268,6 +268,10 @@ def test_closed_fallback_store_counts_unbound_then_drains_once(cold, monkeypatch
 
 
 def test_two_connections_race_after_prefix_read(cold, monkeypatch):
+    # The fallback BEGIN waits only the 50 ms session-end budget. A winner that holds the write lock longer,
+    # as on a loaded runner, makes the loser queue a cold tail instead of re-comparing (#2761). This test pins
+    # the in-line re-comparison, so the loser must outwait the winner's commit.
+    monkeypatch.setattr('hermes_lcm.engine._SESSION_END_BUSY_TIMEOUT_MS', 10_000)
     first = cold()
     second = _engine(Path(first._hermes_home), session='S1', conversation='conv-S1')
     barrier = threading.Barrier(2)
