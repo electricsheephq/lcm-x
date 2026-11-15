@@ -443,7 +443,7 @@ The WARNING `LCM session-end rows not stored` (or a cold-tail `retry pending` WA
 
 | Reason | Meaning |
 |---|---|
-| `prefix_mismatch_bypass_lineage` | An off-current bypass-lineage end bypassed storage; it fires even when a stored prefix covers the view, because this route compares content, not the rows' stamps. |
+| `prefix_mismatch_bypass_lineage` | An off-current bypass-lineage end of a session with a normal conversation bypassed storage; it fires even when a stored prefix covers the view, because this route compares content, not the rows' stamps. |
 | `bypass_lineage_end` | A same-id bypass-lineage end has rows past its bypass prefix. |
 | `off_current_suffix_append_failed` | A suffix append at a plain off-current or bypass-lineage end failed unqueued; the exception is re-raised (#2738). |
 | `off_current_suffix_append_interrupted` | A suffix append at a plain off-current or bypass-lineage end was interrupted; the interrupt propagates. |
