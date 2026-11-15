@@ -1,4 +1,5 @@
 # Recall LCM-X memory from Codex (read-only)
+The versioned [store contract](store-contract.md) defines the shared schema and read-only reader API.
 
 Codex can search and read an LCM-X store through LCM-X's read-only MCP reader, the same one the
 Claude Code plugin uses. This is step 1 of the Codex harness (#2227): **install and recall only**.
