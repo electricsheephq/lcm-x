@@ -551,7 +551,11 @@ class IdentityAnchorMixin:
         # Ordinary matches already own their targets. Every unrecorded row treated as
         # stored still owns one eligible receipt; a later twin cannot reuse it.
         held = set(range(max(start, plan["cursor"]))) | set(plan.get("positional", ()))
-        prefix = Counter((entries[i].identity_digest, stamps[i]) for i in sorted(held) if i not in matched)
+        prefix = Counter((entries[i].identity_digest, stamps[i]) for i in sorted(held)
+                         if i not in matched and stamps[i] is not None)
+        # A held row with no host stamp owns one stored copy of its digest at any stamp.
+        unstamped = Counter(entries[i].identity_digest for i in sorted(held)
+                            if i not in matched and stamps[i] is None)
         views = {}
         receipts, starts, known_by_store, observations_by_occ = {}, {}, {}, {}
         for i in indexes:
@@ -600,8 +604,11 @@ class IdentityAnchorMixin:
                 elif row["stamp"] is not None or observed is not None or uid is None or uid != entry.uidset_digest:
                     continue  # No stamp: require this binding's own UID occurrence evidence.
                 key = (entry.identity_digest, stamp)
-                if prefix[key]:
-                    prefix[key] -= 1
+                if prefix[key] or unstamped[entry.identity_digest]:
+                    if prefix[key]:
+                        prefix[key] -= 1
+                    else:
+                        unstamped[entry.identity_digest] -= 1
                     if i in held:  # a held row's own reservation: take it, never a second record
                         self._identity_anchor_take(i, [row], consumed, matched, plan)
                         break
