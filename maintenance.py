@@ -152,18 +152,37 @@ def _backup_pair(store, destination):
     staged_records = Path(str(staging) + ".records")
     target_records = Path(str(destination) + ".records")
     previous_records = Path(str(target_records) + ".previous")
-    leftovers = (staging, staged_records, Path(str(staged_records) + ".tmp"), previous_records)
+    previous_tmp = Path(str(previous_records) + ".tmp")
+    # Crash states: during staging or previous.tmp copying, the old pair remains.
+    # After previous is linked/copied, the old pair also has a recovery records file.
+    # After records publish (or unlink for a records-free copy), old lcm.db remains;
+    # staging + previous identify its recoverable records until canonical replace.
+    # After canonical replace, staging is absent: the new pair is complete and
+    # previous is stale. Crashes during cleanup leave that same complete pair.
+    # A crash during restart restoration leaves either the recovery file or the
+    # restored old pair; clearing other leftovers can then safely be retried.
+    if staging.exists() and previous_records.exists():
+        previous_records.replace(target_records)
+    leftovers = (staging, staged_records, Path(str(staged_records) + ".tmp"),
+                 previous_records, previous_tmp)
     for path in leftovers:
         path.unlink(missing_ok=True)
     published_records = False
     try:
         with closing(sqlite3.connect(str(staging))) as dest:
             store.backup(dest)
-        if staged_records.exists():
-            if target_records.exists():
+        if target_records.exists():
+            try:
                 previous_records.hardlink_to(target_records)
+            except OSError:
+                import shutil
+                shutil.copyfile(target_records, previous_tmp)
+                os.replace(previous_tmp, previous_records)
+        if staged_records.exists():
             staged_records.replace(target_records)
             published_records = True
+        else:
+            target_records.unlink(missing_ok=True)
         staging.replace(destination)
     except BaseException:
         if previous_records.exists():
@@ -171,9 +190,6 @@ def _backup_pair(store, destination):
         elif published_records:
             target_records.unlink(missing_ok=True)
         raise
-    else:
-        if not published_records:
-            target_records.unlink(missing_ok=True)
     finally:
         for path in leftovers:
             with suppress(OSError):

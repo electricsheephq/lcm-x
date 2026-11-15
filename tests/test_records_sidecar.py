@@ -1,6 +1,8 @@
 """PR-S format 1: only test writers register a records table (I5/I6)."""
 from contextlib import closing
 from pathlib import Path
+import errno
+import os
 import sqlite3
 from types import SimpleNamespace
 
@@ -669,7 +671,7 @@ def test_rotate_handled_publish_failure_restores_previous_records(pair, tmp_path
     assert (target.read_bytes(), Path(str(target) + '.records').read_bytes()) == before
 
 
-def test_rotate_removes_previous_records_only_after_canonical_publish(pair, tmp_path, monkeypatch):
+def test_rotate_removes_previous_records_before_canonical_publish(pair, tmp_path, monkeypatch):
     store, writer, _ = pair
     target = tmp_path / 'rotate.db'
     maintenance._backup_pair(store, target)
@@ -680,12 +682,196 @@ def test_rotate_removes_previous_records_only_after_canonical_publish(pair, tmp_
 
     def observe_publish(source, destination):
         if Path(destination) == target:
-            assert old_records.exists(), 'old records removed before the canonical publish'
+            assert not old_records.exists(), 'stale records remain at canonical publish'
+            assert Path(str(old_records) + '.previous').exists()
         return real_replace(source, destination)
 
     monkeypatch.setattr(Path, 'replace', observe_publish)
     maintenance._backup_pair(store, target)
     assert not old_records.exists()
+
+
+@pytest.mark.parametrize('point', ['before_preserve', 'during_previous_copy', 'after_previous_copy',
+                                  'after_preserve', 'after_unlink', 'after_canonical'])
+def test_rotate_no_new_records_crash_points_recover_complete_pair(pair, tmp_path, monkeypatch, point):
+    store, writer, _ = pair
+    target = tmp_path / 'rotate.db'
+    maintenance._backup_pair(store, target)
+    before = target.read_bytes()
+    records = Path(str(target) + '.records')
+    previous = Path(str(records) + '.previous')
+    previous_tmp = Path(str(previous) + '.tmp')
+    old_records = records.read_bytes()
+    writer.close()
+    writer.path.unlink()
+    store.append('T', dict(role='user', content='new copy', timestamp=5.))
+    real_replace, real_link, real_unlink = Path.replace, Path.hardlink_to, Path.unlink
+    real_os_replace = os.replace
+
+    def link(source, destination):
+        if source == previous:
+            if point == 'before_preserve':
+                os._exit(73)
+            if point in ('during_previous_copy', 'after_previous_copy'):
+                raise OSError(errno.ENOTSUP, 'no hard links')
+        result = real_link(source, destination)
+        if source == previous and point == 'after_preserve':
+            os._exit(73)
+        return result
+
+    def copy(source, destination):
+        assert destination == previous_tmp
+        destination.write_bytes(old_records[:100])
+        os._exit(73)
+
+    def replace_previous(source, destination):
+        result = real_os_replace(source, destination)
+        if Path(destination) == previous and point == 'after_previous_copy':
+            os._exit(73)
+        return result
+
+    def unlink(source, *args, **kwargs):
+        result = real_unlink(source, *args, **kwargs)
+        if source == records and point == 'after_unlink':
+            os._exit(73)
+        return result
+
+    def replace(source, destination):
+        assert not records.exists(), 'new canonical would be paired with stale records'
+        result = real_replace(source, destination)
+        if Path(destination) == target and point == 'after_canonical':
+            os._exit(73)
+        return result
+
+    pid = os.fork()
+    if pid == 0:
+        try:
+            import shutil
+            monkeypatch.setattr(Path, 'hardlink_to', link)
+            monkeypatch.setattr(Path, 'unlink', unlink)
+            monkeypatch.setattr(Path, 'replace', replace)
+            monkeypatch.setattr(os, 'replace', replace_previous)
+            if point == 'during_previous_copy':
+                monkeypatch.setattr(shutil, 'copyfile', copy)
+            maintenance._backup_pair(store, target)
+        finally:
+            os._exit(74)
+    _, status = os.waitpid(pid, 0)
+    assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 73
+    assert target.exists()
+    if point == 'after_canonical':
+        assert not records.exists(), 'new canonical beside stale records'
+    else:
+        assert target.read_bytes() == before
+        assert (records if records.exists() else previous).read_bytes() == old_records
+    maintenance._backup_pair(store, target)
+    assert not records.exists()
+    assert not list(tmp_path.glob('rotate.db*.tmp*'))
+    assert not list(tmp_path.glob('rotate.db*.previous'))
+    with closing(sqlite3.connect(target)) as conn:
+        assert conn.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
+        assert conn.execute("SELECT count(*) FROM messages WHERE session_id='T'").fetchone()[0] == 1
+
+
+@pytest.mark.parametrize('with_records', [False, True])
+def test_rotate_restart_restores_old_pair_before_failed_backup(pair, tmp_path, monkeypatch, with_records):
+    store, writer, values = pair
+    target = tmp_path / 'rotate.db'
+    maintenance._backup_pair(store, target)
+    records = Path(str(target) + '.records')
+    before = target.read_bytes(), records.read_bytes()
+    assert writer.insert(TABLE, dict(values, payload='new record')) is None
+    if not with_records:
+        writer.close()
+        writer.path.unlink()
+    real_replace = Path.replace
+
+    def die(source, destination):
+        if Path(destination) == target:
+            os._exit(73)
+        return real_replace(source, destination)
+
+    pid = os.fork()
+    if pid == 0:
+        try:
+            monkeypatch.setattr(Path, 'replace', die)
+            maintenance._backup_pair(store, target)
+        finally:
+            os._exit(74)
+    _, status = os.waitpid(pid, 0)
+    assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 73
+    assert Path(str(target) + '.tmp').exists()
+    assert Path(str(records) + '.previous').read_bytes() == before[1]
+    assert (records.read_bytes() != before[1]) if with_records else not records.exists()
+
+    def fail(dest):
+        assert records.read_bytes() == before[1], 'restart discarded recoverable old records'
+        raise OSError('next backup failed')
+
+    monkeypatch.setattr(store, 'backup', fail)
+    with pytest.raises(OSError, match='next backup failed'):
+        maintenance._backup_pair(store, target)
+    assert (target.read_bytes(), records.read_bytes()) == before
+    with closing(sqlite3.connect(target)) as conn:
+        assert conn.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
+
+
+def test_rotate_stale_previous_without_staging_keeps_new_pair(pair, tmp_path, monkeypatch):
+    store, writer, values = pair
+    target = tmp_path / 'rotate.db'
+    maintenance._backup_pair(store, target)
+    records = Path(str(target) + '.records')
+    old_records = records.read_bytes()
+    assert writer.insert(TABLE, dict(values, payload='new record')) is None
+    maintenance._backup_pair(store, target)
+    before = target.read_bytes(), records.read_bytes()
+    assert before[1] != old_records
+    previous = Path(str(records) + '.previous')
+    previous.write_bytes(old_records)
+    assert not Path(str(target) + '.tmp').exists()
+
+    def fail(dest):
+        assert not previous.exists()
+        assert (target.read_bytes(), records.read_bytes()) == before
+        raise OSError('backup failed after cleanup')
+
+    monkeypatch.setattr(store, 'backup', fail)
+    with pytest.raises(OSError, match='backup failed after cleanup'):
+        maintenance._backup_pair(store, target)
+    assert (target.read_bytes(), records.read_bytes()) == before
+
+
+@pytest.mark.parametrize('error', [errno.EPERM, errno.ENOTSUP])
+@pytest.mark.parametrize('with_records', [False, True])
+def test_rotate_hardlink_refused_copies_previous_and_succeeds(pair, tmp_path, monkeypatch, error, with_records):
+    store, writer, values = pair
+    target = tmp_path / 'rotate.db'
+    engine = SimpleNamespace(_store=store, _dag=SimpleNamespace(_conn=store.connection),
+                             rotate_backup_path=lambda: target)
+    assert maintenance.rotate_backup_database(engine)['ok']
+    assert writer.insert(TABLE, dict(values, payload='new record')) is None
+    if not with_records:
+        writer.close()
+        writer.path.unlink()
+    store.append('T', dict(role='user', content='new copy', timestamp=5.))
+    calls = []
+
+    def refuse(source, destination):
+        calls.append(source)
+        raise OSError(error, 'hard links refused')
+
+    monkeypatch.setattr(Path, 'hardlink_to', refuse)
+    result = maintenance.rotate_backup_database(engine)
+    assert result['ok'], result
+    assert len(calls) == 1
+    with closing(sqlite3.connect(target)) as conn:
+        assert conn.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
+        assert conn.execute("SELECT count(*) FROM messages WHERE session_id='T'").fetchone()[0] == 1
+    assert Path(str(target) + '.records').exists() == with_records
+    if with_records:
+        assert [row['payload'] for row in read(target)[0]] == ['record', 'new record']
+    assert not list(tmp_path.glob('rotate.db*.tmp*'))
+    assert not list(tmp_path.glob('rotate.db*.previous'))
 
 
 def test_format2_purge_refuses_without_deletion_and_backup_copies_pair(pair, tmp_path):
@@ -752,6 +938,7 @@ def test_zero_byte_records_read_cut_and_backup_succeed(tmp_path):
             assert sm.read_records(cut, TABLE) == ([], 0)
             assert cut.canonical.execute('SELECT count(*) FROM messages').fetchone()[0] == 1
         assert 'pending purge intents=0' in sm.records_doctor(store)
+        assert 'records: format 0 (empty); bytes=0' in sm.records_doctor(store)
         target = tmp_path / 'copy.db'
         maintenance._backup_pair(store, target)
         assert read(target) == ([], 0)

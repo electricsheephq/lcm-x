@@ -715,7 +715,9 @@ def records_doctor(db_path):
             counts.append(f"{table} attached={len(rows)} unattached={unattached}")
         pending = (cut.records.execute("SELECT count(DISTINCT token) FROM _records_purge_intents").fetchone()[0]
                    if _records_has_table(cut.records, '_records_purge_intents') else 0)
-        return f"records: format 1; bytes={cut.path.stat().st_size}; " + '; '.join([*counts, f"pending purge intents={pending}"])
+        size = cut.path.stat().st_size
+        label = 'format 0 (empty)' if size == 0 else 'format 1'
+        return f"records: {label}; bytes={size}; " + '; '.join([*counts, f"pending purge intents={pending}"])
 
 
 def _purge_records(conn, sessions_sql, args):
