@@ -5619,26 +5619,33 @@ class LCMEngine(
         return True
 
     def _persist_retained_interruption(self, messages):
-        result = self._run_retained_operation(
-            lambda successor: successor._save_retained_interruption(messages),
-        )
+        def save(engine):
+            return engine._save_retained_interruption(messages)
+
+        result = self._run_retained_operation(save)
         if result is not None:
             return
         owner = self._unload_group
-        if (owner is None or owner.current_prototype is None
-                or getattr(self, "_retired_session_start", None)
-                or getattr(self, "_reload_compression_boundary", None)):
+        if owner is None or owner.current_prototype is None:
             return
-        current = owner.current_prototype()
-        if current is not None and not getattr(current, "_plugin_is_unloading", lambda: False)():
-            return
-        # There is no admitted registration in this gap. The last binding
-        # may still prove and append the closed tail in its existing database.
         retired = self._reload_successor or self
-        if (retired._stable_use_closed and retired._foreground_session_id == retired._session_id
-                and not retired._thread_context_has_auxiliary_session(retired._session_id)
-                and not retired._in_process_parent_session_id({})):
-            retired._save_retained_interruption(messages)
+        with retired._exclusive_lifecycle(
+            "interrupted turn replay", deadline=time.monotonic() + SQLITE_BUSY_TIMEOUT_MS / 1000,
+        ) as acquired:
+            if (not acquired or getattr(self, "_retired_session_start", None)
+                    or getattr(self, "_reload_compression_boundary", None)):
+                return
+            current = owner.current_prototype()
+            if current is None or getattr(current, "_plugin_is_unloading", lambda: False)():
+                # While unload drains, the lifecycle lock keeps the binding
+                # stable. The detached writer proves it again inside SQLite.
+                if (retired._plugin_is_unloading() and retired._foreground_session_id == retired._session_id
+                        and not retired._thread_context_has_auxiliary_session(retired._session_id)
+                        and not retired._in_process_parent_session_id({})):
+                    save(retired)
+                return
+        # Registration could publish a successor while we waited for the lease.
+        self._run_retained_operation(save)
 
     def _save_retained_interruption(self, messages):
         if self._pending_reset_session_id or self._bypasses_lcm_context_management():

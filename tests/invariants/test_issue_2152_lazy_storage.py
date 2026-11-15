@@ -413,6 +413,37 @@ def test_retained_stop_between_registrations_uses_only_existing_database(preflig
     assert not db.exists()
 
 
+def test_retained_stop_persists_while_unload_drains_workers(preflight, monkeypatch):
+    monkeypatch.setenv("LCM_SHUTDOWN_COMPACTION_WAIT_S", "10")
+    original, ctx = preflight.register(supports_unload=True)
+    retained = original.clone_for_agent()
+    session = "stop-during-drain"
+    retained.on_session_start(session, platform="cli")
+    prompt = {"role": "user", "content": "stopped question"}
+    retained.ingest([prompt])
+    expected = [("user", "stopped question"), ("assistant", "stopped answer")]
+    stopped = [prompt, {"role": "assistant", "content": "stopped answer"}]
+    release = threading.Event()
+    owner = original._unload_group
+    worker = threading.Thread(target=release.wait, args=(10,), daemon=True)
+    assert owner.start_worker(worker)
+    db = preflight.home / "lcm.db"
+    with ThreadPoolExecutor(1) as executor:
+        unload = executor.submit(ctx.unload_callbacks[0])
+        try:
+            assert owner.closing.wait(5)
+            assert not retained._stable_use_closed
+            retained.on_turn_complete(stopped, interrupted=True)
+            assert _durable_messages(db, session) == expected
+        finally:
+            release.set()
+            unload.result(5)
+    assert retained._stable_use_closed
+    db.unlink()
+    retained.on_turn_complete(stopped, interrupted=True)
+    assert not db.exists()
+
+
 @pytest.mark.parametrize("interrupted", [True, False], ids=["stopped-turn", "retired-exit"])
 def test_retained_stop_and_exit_use_distinct_busy_budgets(preflight, monkeypatch, interrupted):
     original, ctx = preflight.register(supports_unload=True)
