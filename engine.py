@@ -5354,6 +5354,7 @@ class LCMEngine(
                 except Exception as exc:
                     if queue_off_current_busy_tail(exc):
                         return
+                    self._warn_session_end_unstored(session_id, messages, "off_current_suffix_append_failed")
                     raise
             try:
                 state = self._lifecycle.get_by_conversation(off_current_normal_conversation_id)
@@ -5375,7 +5376,8 @@ class LCMEngine(
         ):
             if off_current_should_bypass:
                 self._log_session_ingest_outcome(session_id, reason="bypass_lineage_end")
-                self._warn_session_end_unstored(session_id, messages, "prefix_mismatch_bypass_lineage")
+                if off_current_normal_conversation_id:
+                    self._warn_session_end_unstored(session_id, messages, "prefix_mismatch_bypass_lineage")
             elif same_id_should_bypass and len(messages) > same_id_bypass_prefix_count:
                 self._warn_session_end_unstored(session_id, messages, "bypass_lineage_end")
             self._end_host_fallback_compressor_for_session(
@@ -5479,7 +5481,8 @@ class LCMEngine(
                     return
                 except Exception as exc:
                     if _is_ingest_busy_error(exc):
-                        if len(self._pending_session_tails) == pending_before:
+                        if len(self._pending_session_tails) == pending_before and not any(
+                                t.get("session_id") == session_id for t in self._pending_session_tails):
                             self._warn_session_end_unstored(session_id, messages, "foreground_ingest_busy_unqueued")
                         self._ledger_count("ledger.tail.busy_at_end")
                         logger.warning(
