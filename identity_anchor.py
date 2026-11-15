@@ -586,6 +586,9 @@ class IdentityAnchorMixin:
                 key = (entry.identity_digest, stamp)
                 if prefix[key]:
                     prefix[key] -= 1
+                    if i in held:  # a held row's own reservation: take it, never a second record
+                        self._identity_anchor_take(i, [row], consumed, matched, plan)
+                        break
                     consumed.add(int(row["store_id"]))
                     continue
                 self._identity_anchor_take(i, [row], consumed, matched, plan)

@@ -282,6 +282,8 @@ _EMBEDDING_SCHEMA_LOCK = threading.Lock()
 
 _EMBEDDING_RETIRE_TIMEOUT_S = 2.0
 _SESSION_END_BUSY_TIMEOUT_MS = 50
+# Bound pending-tail gap matching beyond the positional prefix.
+_PENDING_TAIL_GAP_WINDOW = 256
 # #2466's presence-window limit is not on main yet; bound this conflict scan independently.
 _COLD_TAIL_CONFLICT_SCAN_ROWS = 10_000
 _SESSION_DIAGNOSTIC_LOG_MAX = 4096
@@ -12567,9 +12569,11 @@ class LCMEngine(
         """Proven prefix plus independent occurrences, recomputed on the frozen store each time."""
         store, frozen = tail["store"], tail.get("ledger")
         conversation_id = _normalize_conversation_id_value(tail["conversation_id"])
+        # A copy stored more than this window after the frozen boundary stays a
+        # duplicate, as on main: an unmatched tail row is appended, never marked stored.
         rows = store.get_range(
             tail["session_id"], start_id=tail["after_store_id"] + 1,
-            conversation_id=conversation_id, limit=-1,
+            conversation_id=conversation_id, limit=len(tail["messages"]) + _PENDING_TAIL_GAP_WINDOW,
         )
         bound, last, candidates, uids = {}, None, set(), {}
         conn = store._conn

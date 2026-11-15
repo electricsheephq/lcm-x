@@ -154,7 +154,8 @@ def test_prefix_uid_only_change_matches_as_main(engines, monkeypatch, veto, uid_
 
 
 @pytest.mark.parametrize('uid_mode', [None, 'off'])
-def test_queued_digest_prefix_reissued_uid_without_view(engines, monkeypatch, uid_mode):
+@pytest.mark.parametrize('canonical', [False, True])
+def test_queued_digest_prefix_reissued_uid_without_view(engines, monkeypatch, uid_mode, canonical):
     monkeypatch.delenv('LCM_HOST_MESSAGE_UID')
     if uid_mode is not None:
         monkeypatch.setenv('LCM_HOST_MESSAGE_UID', uid_mode)
@@ -165,7 +166,9 @@ def test_queued_digest_prefix_reissued_uid_without_view(engines, monkeypatch, ui
     incoming[2]['message_uid'] = 'reissued-C'
     tail = end_view(engine, incoming)
     assert 'ledger' in tail
-    replay(engine, view[2:], with_view=False)
+    ids = replay(engine, view[2:], with_view=False)
+    if canonical:
+        engine._store.add_host_uid_bindings('foreign-lineage', [(ids[0], 'C', 'canonical', 'stored_new')])
     proof = engine._match_pending_tail(tail)
     assert proof[3] == 'digest', proof
     assert proof[0] == 2, proof
