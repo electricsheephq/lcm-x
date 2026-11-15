@@ -139,6 +139,7 @@ _RELOAD_PROBE = textwrap.dedent(
     """
     from contextlib import closing
     from pathlib import Path
+    from unittest.mock import patch
     import json, os, sqlite3, sys
     from hermes_cli import plugins
 
@@ -172,6 +173,22 @@ _RELOAD_PROBE = textwrap.dedent(
     replacement = plugins.get_plugin_context_engine()
     assert sys.modules[type(replacement).__module__] is not engine_module
     assert type(retained) is not type(replacement)
+
+    construct = replacement._clone_for_agent
+
+    def unload_during_construction():
+        clone = construct()
+        assert manager.unload("hermes-lcm-x")
+        return clone
+
+    view += [message("user", "question during construction"),
+             message("assistant", "answer during construction")]
+    with patch.object(replacement, "_clone_for_agent", new=unload_during_construction):
+        retained.on_turn_complete(view, interrupted=True)
+    assert plugins.get_plugin_context_engine() is None
+    construction_rows = rows()
+    plugins.discover_plugins(force=True)
+
     view += [message("user", "next question")]
     retained.should_compress_preflight(view)
     view += [message("assistant", "next partial answer")]
@@ -182,7 +199,7 @@ _RELOAD_PROBE = textwrap.dedent(
     database.unlink()
     retained.on_turn_complete(view, interrupted=True)
     assert not database.exists()
-    print(json.dumps({"gap": gap_rows, "final": final_rows}))
+    print(json.dumps({"gap": gap_rows, "construction": construction_rows, "final": final_rows}))
     """
 )
 
@@ -193,9 +210,11 @@ def test_retained_interruption_survives_real_plugin_reimport(tmp_path):
     expected = [
         ["user", "first question"], ["assistant", "first answer"],
         ["user", "question in the gap"], ["assistant", "answer in the gap"],
+        ["user", "question during construction"], ["assistant", "answer during construction"],
         ["user", "next question"], ["assistant", "next partial answer"],
     ]
     assert result["gap"] == expected[:4]
+    assert result["construction"] == expected[:6]
     assert result["final"] == expected
 
 

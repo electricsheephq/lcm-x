@@ -1240,6 +1240,14 @@ class LCMEngine(
             group.engines.add(clone)
             return clone
 
+    def _try_clone_for_retained_binding(self) -> "LCMEngine | None":
+        # A retained engine can come from a previous package import. Handle
+        # the admission exception in the registration that created it.
+        try:
+            return self.clone_for_agent()
+        except EngineUnloadInProgress:
+            return None
+
     def _clone_for_agent(self) -> "LCMEngine":
         clone = type(self)(
             config=copy.deepcopy(self._config),
@@ -5697,9 +5705,8 @@ class LCMEngine(
                     or retired._current_binding_stores_nothing()
                     or not retired._db_path.is_file()):
                 return None
-            try:
-                successor = prototype.clone_for_agent()
-            except EngineUnloadInProgress:
+            try_clone = getattr(prototype, "_try_clone_for_retained_binding", None)
+            if not callable(try_clone) or (successor := try_clone()) is None:
                 return None
             try:
                 def adopt(clone):
