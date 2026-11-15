@@ -476,10 +476,16 @@ def test_fake_candidates_intended(monkeypatch, key, kind, reason, record_propert
 @pytest.mark.parametrize('table, remaining, reason', (
     ('message_relations', 0, 'tables lost rows in message_relations'),
     ('summaries', 1, 'tables lost rows in summaries'),
-    ('ingest_views', 0, None), ('summaries', 3, None)),
-    ids=('relations-drop-all', 'summaries-drop-one', 'views-prune', 'summaries-add'))
+    ('ingest_views', 0, None), ('summaries', 3, None),
+    ('messages_fts_data', 0, None), ('foo_data', 0, 'tables lost rows in foo_data'),
+    ('lineage_marks', 1, None)),
+    ids=('relations-drop-all', 'summaries-drop-one', 'views-prune', 'summaries-add',
+         'fts-shadow-merge', 'lookalike-data-drop', 'lineage-merge'))
 def test_fake_candidates_intended_tables(monkeypatch, table, remaining, reason, record_property):
     main = {name: {} for name in ('canonical', 'schema', 'tables', 'payload', 'pending', 'ledger', 'lifecycle')}
+    if table in ('messages_fts_data', 'foo_data', 'lineage_marks'):
+        main['schema'] = {'lcm.db': [('table', 'messages_fts', 'messages_fts',
+                                    'CREATE VIRTUAL TABLE messages_fts USING fts5(content)')]}
     rows = [(1, 'A'), (2, 'B'), (3, 'C')]
     main['tables'] = {'lcm.db': {table: (('id', 'text'), rows[:2])}}
     candidate = dict(main, tables={'lcm.db': {table: (('id', 'text'), rows[:remaining])}})
@@ -491,6 +497,28 @@ def test_fake_candidates_intended_tables(monkeypatch, table, remaining, reason, 
         record_property('failure', str(caught.value))
     else:
         judge(main, candidate, 'retry-1', case='cell', mode='instant')
+
+
+def test_intended_tables_fts_segment_merge(tmp_path, monkeypatch, end_versions):
+    package = end_versions['candidate'].__name__
+    Clock().install(package, monkeypatch)
+    store_type = importlib.import_module(package + '.store').MessageStore
+    states = []
+    for count in (15, 16):
+        store = store_type(tmp_path / str(count) / 'lcm.db')
+        try:
+            for index in range(count):
+                store.append('S1', {'role': 'user', 'content': f'message {index}', 'timestamp': index + 1.})
+            schema, tables = session_end_contract.database(store.db_path)
+        finally:
+            store.close()
+        state = {key: {} for key in ('canonical', 'schema', 'tables', 'payload', 'pending', 'ledger', 'lifecycle')}
+        state.update(canonical={'lcm.db': tables['messages']}, schema={'lcm.db': schema}, tables={'lcm.db': tables})
+        states.append(state)
+    monkeypatch.setattr(session_end_contract, 'INTENDED_DIFFERENCES',
+                        [('cell', '*', 'retry-1', key, '#2543') for key in ('canonical', 'tables')])
+    assert len(states[1]['tables']['lcm.db']['messages_fts_data'][1]) < len(states[0]['tables']['lcm.db']['messages_fts_data'][1])
+    judge(*states, 'retry-1', case='cell', mode='instant')
 
 
 def _seam_probe(engine, canonical=False):

@@ -13,6 +13,7 @@ import hashlib
 import importlib
 import json
 from pathlib import Path
+import re
 import sqlite3
 import sys
 import time
@@ -282,8 +283,12 @@ def judge(main, candidate, stage, *, case=None, mode=None, seen=None):
                         f'{stage}: {key} reordered stored row'
             if key == 'tables':
                 for path, tables in main[key].items():
+                    # FTS5 shadows are derived from messages, covered by the messages guard; their row counts follow segment merges.
+                    shadows = {name + suffix for kind, name, _, sql in main['schema'].get(path, ())
+                               if kind == 'table' and re.search(r'\bUSING\s+fts5\b', sql or '', re.I)
+                               for suffix in ('_data', '_idx', '_content', '_docsize', '_config')}
                     for table, (_, rows) in tables.items():
-                        if table != 'messages' and table not in SHRINKING_TABLES:
+                        if table != 'messages' and table not in SHRINKING_TABLES and table not in shadows:
                             after_rows = candidate[key].get(path, {}).get(table, ((), ()))[1]
                             assert len(after_rows) >= len(rows), f'{stage}: tables lost rows in {table}'
             if seen is not None:
