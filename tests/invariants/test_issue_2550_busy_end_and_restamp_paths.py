@@ -255,6 +255,8 @@ BUSY_CONTROLS = [
 def test_inline_call_stored_once_after_busy_end(env, tmp_path, monkeypatch, scenario, shape, stamp):
     """Correct engine: the turn-0 tool call and its result are each stored once."""
     results, calls, summary = _run_busy(tmp_path, monkeypatch, scenario, shape, stamp)
+    # A missing row must fail loudly, never be absorbed by a strict xfail that expects the duplicate.
+    _require(results >= 1 and calls >= 1, f"turn 0's call and result are each stored at least once: {summary}")
     assert (results, calls) == (1, 1), summary
 
 
@@ -350,6 +352,7 @@ def _assert_once(rows, recon):
     detail = " | ".join(f"{r['store_id']}:{r['role']}:{(r['content'] or '')[:18]}@{r.get('observed_at')}"
                         f"{':TC' if r.get('tool_calls') else ''}" for r in rows) + " || " + repr(
         {k: recon.get(k) for k in ("action", "reason", "cursor", "stored_after_first_cut") if k in recon})
+    _require(replies and results and calls, f"turn 0's reply, call and result are each stored at least once: {detail}")
     assert len(replies) == 1, detail
     assert len(results) == 1, detail
     assert len(calls) == 1, detail
@@ -434,6 +437,8 @@ def test_restamp_cut_later_presentations_store_call_and_result_once(tmp_path, mo
         rows = engine._store.get_session_messages("parent")
         recon = dict(getattr(engine, "_last_ingest_reconciliation", {}) or {})
         recon["stored_after_first_cut"] = first
+        _require(any(r["role"] == "assistant" and r["content"] == "parent-final" for r in rows),
+                 "the later final reply is stored")
         _assert_once(rows, recon)
     finally:
         for instance in reversed(made):

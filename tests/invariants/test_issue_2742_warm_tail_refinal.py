@@ -160,6 +160,7 @@ def test_stamp_only_final_stored_once(tmp_path, monkeypatch, uid_mode, uids, noo
             _bind(engine)
         _require(proofs, "the warm-tail retry ran its proof (_match_pending_tail)")
         rows = [(r["role"], r["content"], r.get("observed_at")) for r in engine._store.get_session_messages("parent")]
+        _require(_count(engine, "FINAL") >= 1, f"FINAL is stored at least once: {rows}")
         assert _count(engine, "FINAL") == 1, (rows, proofs, _relations(engine))
     finally:
         engine.shutdown()
@@ -192,6 +193,7 @@ def test_inline_args_final_stored_once(tmp_path, monkeypatch, uid_mode, tool):
         engine.on_session_end("parent", copy.deepcopy(live))
         _require(proofs, "the warm-tail retry ran its proof (_match_pending_tail)")
         rows = [(r["role"], r["content"], r.get("observed_at")) for r in engine._store.get_session_messages("parent")]
+        _require(_count(engine, "FINAL") >= 1, f"FINAL is stored at least once: {rows}")
         assert _count(engine, "FINAL") == 1, (rows, proofs)
     finally:
         if sibling is not None:
