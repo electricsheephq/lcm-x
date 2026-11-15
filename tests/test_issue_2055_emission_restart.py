@@ -804,6 +804,9 @@ def _main_ledger_write(self, attempt, after_commit, attribution):
 
 def test_plain_ingest_has_exact_main_sql(engines, monkeypatch):
     engine = engines()
+    # This writer-only comparator opens its own savepoint, so it requires the
+    # eager foreground owner; lazy transaction control has a separate differential.
+    monkeypatch.setattr(engine._store, "_ingest_prelock", False)
     write, comparisons = engine._write_ingest_ledger, []
 
     def compare(attempt, callbacks, attribution):

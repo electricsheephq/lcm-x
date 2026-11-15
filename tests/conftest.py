@@ -4,6 +4,7 @@ Patches the plugin modules so they can be imported both as a package
 (relative imports during plugin loading) and directly during testing.
 """
 import hashlib
+import fnmatch
 import os
 import sys
 import importlib.util
@@ -103,6 +104,8 @@ def pytest_report_header(config):
 
 
 def pytest_sessionstart(session):
+    if os.environ.get("LCM_D1_AUDIT", "scoped") not in {"scoped", "all"}:
+        raise pytest.UsageError("LCM_D1_AUDIT must be scoped or all")
     unexpected = [
         name for name, exc in _IMPORT_FAILURES.items()
         if not (
@@ -226,3 +229,68 @@ def _drain_fts_workers():
         with lock:
             if any(thread.is_alive() for thread in registry.values()):
                 pytest.fail("FTS background work outlived its test after a 30 s drain")
+
+
+D1_MODULES = ("test_2293_*.py", "invariants/test_2293_*.py", "test_issue_2042_*.py",
+              "invariants/test_issue_1628_rewind_rescan.py")
+
+
+@pytest.fixture(autouse=True)
+def _message_store_callbacks(monkeypatch, request):
+    """D1 scopes admission coverage; all restores the full-suite audit."""
+    try:
+        # Resolve the directory, not the file, so a symlinked test file keeps its own name.
+        module = Path(os.path.realpath(request.node.path.parent), request.node.path.name).relative_to(
+            plugin_dir / "tests").as_posix()
+    except ValueError:
+        module = ""  # External tests never belong to a D1 module.
+    if os.environ.get("LCM_D1_AUDIT", "scoped") != "all" and not any(
+            fnmatch.fnmatchcase(module, pattern) for pattern in D1_MODULES):
+        yield
+        return
+    from tests.message_store_callback_audit import CALLS, install
+    start = len(CALLS)
+    restore = install(monkeypatch)
+    try:
+        yield
+    finally:
+        restore()
+    assert not [call for call in CALLS[start:] if call[1]], CALLS[start:]
+
+
+@pytest.fixture(autouse=True)
+def _prelock_recording_oracle(monkeypatch, request):
+    if request.node.path.name not in {"test_2293_prelock.py", "test_2293_prelock_probes.py"}:
+        yield
+        return
+    if request.node.name == "test_p3_same_connection_write_by_another_thread_is_caught":
+        yield
+        return  # threaded by design; production detection is the oracle here
+    from contextlib import contextmanager
+    from hermes_lcm.store import MessageStore
+    from tests.prelock_instrument import install_oracle_hooks, recording_prelock
+    install_oracle_hooks(monkeypatch)
+    original = MessageStore.ingest_atomic
+    failures = []
+
+    @contextmanager
+    def recorded(store, **kwargs):
+        with original(store, **kwargs) as timing:
+            import threading
+            if threading.active_count() > 1:
+                # xdist workers have a receiver thread, and the full suite can
+                # have maintenance threads. Run their product assertions without
+                # callbacks; the two clean serial pinned runs supply the oracle.
+                if ("prelock_oracle", "threaded-no-callback") not in request.node.user_properties:
+                    request.node.user_properties.append(("prelock_oracle", "threaded-no-callback"))
+                yield timing
+                return
+            try:
+                with recording_prelock(store):
+                    yield timing
+            except AssertionError as exc:
+                failures.append(exc)  # ingest may swallow this; teardown must still gate
+                raise
+    monkeypatch.setattr(MessageStore, "ingest_atomic", recorded)
+    yield
+    assert not failures, failures

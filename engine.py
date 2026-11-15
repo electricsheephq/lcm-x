@@ -174,6 +174,7 @@ from .message_content import (
 )
 from .sqlite_util import (
     _SqliteSavepointError,
+    _IngestReclassify,
     _is_ingest_busy_error,
     _is_sqlite_locked_error,
     _sqlite_savepoint,
@@ -7412,9 +7413,12 @@ class LCMEngine(
                 ledger_digest_ms=0.0, ledger_ms=0.0)
             ledger_prepared = self._prepare_ingest_ledger(messages, attribution)
             admission_retry = busy_retried = False
-            # One busy retry, plus one #1815 evidence-fault retry that only the first attempt can take.
-            for attempt in range(3):
-                self._ingest_attempt_index = attempt
+            pending = missing = snapshots = receipts = after_commit = emission_claim = None
+            emission_committed = tail_registered = False
+            prepared, record, rollback_failures = {}, None, 0
+
+            def begin_iteration():
+                nonlocal pending, missing, snapshots, receipts, after_commit, emission_claim, emission_committed, prepared, tail_registered, record, rollback_failures
                 # Keep the published frontier untouched until COMMIT. Helpers read
                 # and write the attempt-local holder through the legacy properties.
                 pending = copy.copy(self._frontier)
@@ -7444,11 +7448,9 @@ class LCMEngine(
                 receipts = [(receipt, dict(receipt)) for receipt in getattr(self, "_identity_anchor_recoveries", ())]
                 after_commit = []
                 emission_claim, emission_committed = object(), False
-                prepared = {}
+                prepared = ({"view_only": prepared["view_only"]} if "view_only" in prepared else {})
                 tail_registered = self in maintenance_scheduler._PENDING_TAIL_ENGINES
-                held_at = None
                 record = self._ingest_telemetry(self._new_ingest_lock_record, messages, attempt + 1, no_view)
-                sample = None
                 rollback_failures = self._store._transaction_owner.rollback_failures
                 published_rollbacks = getattr(self, "_ledger_rollback_failures_published", 0)
                 if rollback_failures > published_rollbacks:
@@ -7456,59 +7458,132 @@ class LCMEngine(
                                         self._ledger_count("ledger.rollback_failed", amount=amount))
                 after_commit.append(lambda value=rollback_failures:
                                     setattr(self, "_ledger_rollback_failures_published", value))
+
+            def restore_iteration():
+                for name, value in snapshots.items():
+                    if value is missing:
+                        self.__dict__.pop(name, None)
+                    else:
+                        self.__dict__[name] = value
+                for receipt, previous in receipts:
+                    receipt.clear()
+                    receipt.update(previous)
+                if not tail_registered:
+                    maintenance_scheduler._PENDING_TAIL_ENGINES.discard(self)
+                attribution.update(rows_written=0, bytes_written=0)
+                self._ingest_ledger_attempt = None
+                if not emission_committed and ledger_prepared is not None:
+                    ingest_ledger.settle_pending_emissions(emission_claim)
+
+            # One busy retry, plus one #1815 evidence-fault retry that only the first attempt can take.
+            for attempt in range(3):
+                self._ingest_attempt_index = attempt
+                prepared = {}
+                begin_iteration()
+                held_at = sample = None
                 try:
                     prepared["view_only"] = self._precompute_ingest_view_only(messages)
                     if getattr(self, "_identity_anchor_recovery", None):
                         self._identity_anchor_observe_recovery()
-                    with self._store.ingest_atomic(admission_retry=admission_retry) as sample:
-                        held_at = _perf_counter()
-                        emission_attempt = self._ingest_ledger_attempt = (
-                            dict(ledger_prepared, stored={}, matched={}, remainders={}, observations=[])
-                            if ledger_prepared is not None else None)
-                        if self._ingest_ledger_attempt is not None and no_view:
-                            self._ingest_ledger_attempt["no_view"] = True
-                        if self._ingest_ledger_attempt is not None:
-                            emission_attempt["lineage"] = self._ledger_adopt(self._store, self._session_id,
-                                emission_attempt["resolved"], emission_attempt["salt"], after_commit) or emission_attempt["lineage"]
-                            emission_attempt["adopted"] = True
-                            self._retry_pending_emissions(self._ingest_ledger_attempt, after_commit, emission_claim)
-                        active, finish = self._ingest_messages_transaction(
-                            messages, after_commit, attribution,
-                            prepared=prepared, telemetry=record,
-                            allow_session_end_replay_proof=allow_session_end_replay_proof)
-                        if self._ingest_ledger_attempt is not None:
-                            self._write_ingest_ledger(self._ingest_ledger_attempt, after_commit, attribution)
-                        self._link_stored_todo_replays(messages, prepared.get("stored_at", {}))
+                    with self._store.ingest_atomic(admission_retry=admission_retry,
+                            prelock=retried_tail is None and not admission_retry) as sample:
+                        entered_at = _perf_counter()
+                        reclassified = False
+                        poisoned_before = self._store.ingest_prelock_counts["poisoned"]
+                        try:
+                            while True:
+                                try:
+                                    emission_attempt = self._ingest_ledger_attempt = (
+                                        dict(ledger_prepared, stored={}, matched={}, remainders={}, observations=[])
+                                        if ledger_prepared is not None else None)
+                                    if self._ingest_ledger_attempt is not None and no_view:
+                                        self._ingest_ledger_attempt["no_view"] = True
+                                    if self._ingest_ledger_attempt is not None:
+                                        emission_attempt["lineage"] = self._ledger_adopt(self._store, self._session_id,
+                                            emission_attempt["resolved"], emission_attempt["salt"], after_commit) or emission_attempt["lineage"]
+                                        emission_attempt["adopted"] = True
+                                        self._retry_pending_emissions(self._ingest_ledger_attempt, after_commit, emission_claim)
+                                    active, finish = self._ingest_messages_transaction(
+                                        messages, after_commit, attribution,
+                                        prepared=prepared, telemetry=record,
+                                        allow_session_end_replay_proof=allow_session_end_replay_proof)
+                                    if self._ingest_ledger_attempt is not None:
+                                        self._write_ingest_ledger(self._ingest_ledger_attempt, after_commit, attribution)
+                                    self._link_stored_todo_replays(messages, prepared.get("stored_at", {}))
+                                    self._store._finish_ingest_prelock()
+                                    break
+                                except BaseException as error:
+                                    state = self._store._ingest_prelock_state
+                                    if (isinstance(error, _IngestReclassify) and state is not None
+                                            and state.begin_failed is not None):
+                                        raise state.begin_failed from error
+                                    # A crash-like exit (not an Exception) is never retried; the owner rolls back.
+                                    if (not isinstance(error, (Exception, _IngestReclassify)) or state is None
+                                            or state.begin_failed is not None
+                                            or not (isinstance(error, _IngestReclassify)
+                                                    or state.phase == "prelock" or state.poisoned)):
+                                        raise
+                                    if (not isinstance(error, _IngestReclassify) and state.phase == "prelock"
+                                            and not state.poisoned and not self._store._conn.in_transaction):
+                                        # Nothing was written. Eager meets this error only once its BEGIN succeeds:
+                                        # take the lock first (a busy BEGIN raises eager's busy error). With nothing
+                                        # committed since G0 the pass saw what eager sees: raise the same error.
+                                        try:
+                                            self._store._acquire_ingest_prelock()
+                                        except _IngestReclassify:
+                                            pass  # a commit landed since G0: reclassify below, under the lock
+                                        else:
+                                            raise error
+                                    if reclassified:
+                                        raise AssertionError("Ingest reclassified twice") from error
+                                    if (getattr(error, "full", False) or state.attempt_after_writes
+                                            or self._store._conn.in_transaction and state.phase == "prelock"):
+                                        # Writes predate the attempt savepoint: only a full rollback discards them.
+                                        try:
+                                            self._store._restart_ingest_prelock()
+                                        except _IngestReclassify:
+                                            pass
+                                    else:
+                                        try:
+                                            self._store._acquire_ingest_prelock()
+                                        except _IngestReclassify:
+                                            pass
+                                        self._store._conn.execute("ROLLBACK TO lcm_ingest_attempt")
+                                    restore_iteration()
+                                    self._store._ingest_folded_tail_reads = {}
+                                    begin_iteration()
+                                    if getattr(self, "_identity_anchor_recovery", None):
+                                        self._identity_anchor_observe_recovery()
+                                    state.poisoned = state.reclassify_pending = False
+                                    self._store.ingest_prelock_counts["reclassified"] += 1
+                                    self._ledger_count("ingest.prelock.reclassified")
+                                    reclassified = True
+                        finally:
+                            held_at = sample.get("first_acquired_at", sample.get("acquired_at")) if isinstance(sample, dict) else entered_at
+                            if self._store.ingest_prelock_counts["poisoned"] > poisoned_before:
+                                self._ledger_count("ingest.prelock.poisoned")
                     emission_committed = True
                     if ledger_prepared is not None:
                         ingest_ledger.settle_pending_emissions(
                             emission_claim, completed=emission_attempt["retried_emissions"])
-                    attribution["lock_hold_ms"] += (_perf_counter() - held_at) * 1000
+                    if held_at is not None:
+                        attribution["lock_hold_ms"] += (_perf_counter() - held_at) * 1000
                 except BaseException as exc:
                     self._ingest_telemetry(self._record_ingest_attempt, record, sample, attribution,
                                            None if emission_committed else exc)
                     self._ingest_ledger_attempt = None
                     if held_at is not None:
                         attribution["lock_hold_ms"] += (_perf_counter() - held_at) * 1000
-                    for name, value in snapshots.items():
-                        if value is missing:
-                            self.__dict__.pop(name, None)
-                        else:
-                            self.__dict__[name] = value
-                    for receipt, previous in receipts:
-                        receipt.clear()
-                        receipt.update(previous)
-                    if not tail_registered:
-                        maintenance_scheduler._PENDING_TAIL_ENGINES.discard(self)
-                    attribution.update(rows_written=0, bytes_written=0)
+                    restore_iteration()
                     rollback_ok = self._store._transaction_owner.rollback_failures == rollback_failures
                     if rollback_ok and attempt == 0 and isinstance(exc, _EvidenceFaultRetry):
                         continue  # #1815: nothing of the faulted attempt is kept; the retry classifies again
+                    acquired_at = sample.get("acquired_at") if isinstance(sample, dict) else None
                     if rollback_ok and isinstance(exc, Exception) and not busy_retried and (_is_ingest_busy_error(exc)
-                                                                      or held_at is None and isinstance(exc, sqlite3.Error)):
+                                                                      or acquired_at is None and isinstance(exc, sqlite3.Error)):
                         busy_retried = True
                         attribution["busy_snapshot_retry"] = True
-                        admission_retry = held_at is None and _is_ingest_busy_error(exc)
+                        admission_retry = acquired_at is None and _is_ingest_busy_error(exc)
                         continue
                     if rollback_ok and isinstance(exc, Exception) and self._session_end_flush_active and _is_ingest_busy_error(exc):
                         self._ingest_read_only = exc
@@ -7836,6 +7911,7 @@ class LCMEngine(
             if store.ingest_ledger_state() != "ready" or getattr(self, "_ingest_read_only", None) is not None:
                 return
             salt = store.ingest_ledger_salt()
+            store._sync_ingest_prelock()
             claimed, dropped = ingest_ledger.claim_pending_emissions((store.db_identity, salt), token)
             if dropped:
                 self._ledger_count("ledger.emission_unproven_salt_changed", amount=dropped)
@@ -7845,6 +7921,7 @@ class LCMEngine(
                         persisted = conn.execute("SELECT value FROM ledger_meta WHERE key=?",
                             ("session_lineage:" + str(entry["session_id"]),)).fetchone()
                         lineage = persisted[0] if persisted else entry["lineage"]
+                        store._sync_ingest_prelock()
                         seq = ingest_ledger.next_view_seq(conn)
                         ingest_ledger.insert_emissions(conn, lineage, seq, entry["rows"])
                         conn.execute("INSERT INTO ledger_meta(key,value) VALUES (?,?) "
@@ -7853,7 +7930,8 @@ class LCMEngine(
                                      ("emission_recovered:" + lineage, str(seq)))
                     succeeded.append(entry)
                 except Exception as exc:
-                    if _is_ingest_busy_error(exc) or isinstance(exc, _SqliteSavepointError) or not conn.in_transaction:
+                    store._ingest_prelock_write_failed(exc)
+                    if _is_ingest_busy_error(exc) or isinstance(exc, _SqliteSavepointError) or store._ingest_transaction_lost(conn):
                         raise
                     ingest_ledger.settle_pending_emissions(token, release=[entry])
                     self._ledger_count("ledger.emission_retry_failed", exc)
@@ -7864,7 +7942,8 @@ class LCMEngine(
                     self._ledger_count("ledger.emission_recovered_provenance_only")
             after_commit.append(publish)
         except Exception as exc:
-            if _is_ingest_busy_error(exc) or isinstance(exc, _SqliteSavepointError) or not conn.in_transaction:
+            store._ingest_prelock_write_failed(exc)
+            if _is_ingest_busy_error(exc) or isinstance(exc, _SqliteSavepointError) or store._ingest_transaction_lost(conn):
                 raise
             ingest_ledger.settle_pending_emissions(token)
             self._ledger_count("ledger.emission_retry_failed", exc)
@@ -7952,6 +8031,7 @@ class LCMEngine(
             with _sqlite_savepoint(conn, abort_on_cleanup_failure=True, owner_active=True, foreground_ingest=True):
                 if any(conn.execute(f"SELECT 1 FROM {table} WHERE lineage=? LIMIT 1", (provisional,)).fetchone()
                        for table in ("occurrence_bindings", "ingest_views", "ledger_emissions")):
+                    store._sync_ingest_prelock()
                     result = ingest_ledger.merge_provisional(conn, provisional, lineage)
                     # One possible_replay_of per source: a row another writer already linked keeps its link.
                     linked = {row["store_id"] for row in store.get_message_relations(
@@ -7959,11 +8039,13 @@ class LCMEngine(
                     store.add_message_relations([[(p, "possible_replay_of", target, None, None)]
                                                  for p, target in result["pairs"] if p not in linked])
                 if not persisted:
+                    store._sync_ingest_prelock()
                     conn.execute("INSERT INTO ledger_meta(key,value) VALUES (?,?)", ("session_lineage:" + str(sid), lineage))
         except BaseException as exc:
+            store._ingest_prelock_write_failed(exc)
             store._pending_relation_schema = flag
             if (not isinstance(exc, Exception) or _is_ingest_busy_error(exc)
-                    or isinstance(exc, _SqliteSavepointError) or not conn.in_transaction):
+                    or isinstance(exc, _SqliteSavepointError) or store._ingest_transaction_lost(conn)):
                 raise
             after_commit.append(lambda exc=exc: self._ledger_count("ledger.lineage_merge_failed", exc))
             return persisted or provisional
@@ -8104,14 +8186,16 @@ class LCMEngine(
                                         linked.add(sid)
                                         used.add(target)
                                         stripped_count += int(strip)
+                            store._sync_ingest_prelock()
                             written = store.add_message_relations(pairs)
                         delta["ledger.replay_pairs.cursor0"] += written
                         delta["ledger.replay_pairs.cursor0_unlinked"] += len(candidate_ids - linked)
                         delta["ledger.replay_pairs.cursor0_stripped"] += stripped_count
                     except BaseException as exc:
+                        store._ingest_prelock_write_failed(exc)
                         store._pending_relation_schema = flag
                         if (not isinstance(exc, Exception) or _is_ingest_busy_error(exc)
-                                or isinstance(exc, _SqliteSavepointError) or not conn.in_transaction):
+                                or isinstance(exc, _SqliteSavepointError) or store._ingest_transaction_lost(conn)):
                             raise
                         delta["ledger.write_failed"] += 1
                 key = "session_lineage:" + str(self._session_id)
@@ -8121,6 +8205,7 @@ class LCMEngine(
                     delta["ledger.lineage_drift"] += 1
                 if (attempt.get("recovery_probe") or getattr(self, "_identity_anchor_durable_recovery_pending", False)
                         or "recovery" in attempt.get("stored_markers", {}).values()):
+                    store._sync_ingest_prelock()
                     pending = self._identity_anchor_link_durable_recovery(attempt, lineage)
                     if pending is not None:
                         after_commit.append(lambda pending=pending: setattr(
@@ -8135,6 +8220,7 @@ class LCMEngine(
                                    if attempt["entries"][idx].identity_digest in digests)
                 if flagged:
                     groups = [[(attempt["stored"][idx], "generated_unproven", None, None, None)] for idx in sorted(flagged)]
+                    store._sync_ingest_prelock()
                     delta["ledger.generated_unproven_rows"] += store.add_message_relations(groups)
                 delta.update("ledger.marker_rows." + kind for kind in markers.values())
                 mark, session_top, lag = conn.execute(
@@ -8192,6 +8278,7 @@ class LCMEngine(
                         stamps.add(stamp)
                 seq, rebind_ok = None, True
                 if pending or observations or not same or changed_ref:
+                    store._sync_ingest_prelock()
                     seq = ingest_ledger.next_view_seq(conn)
                     if respace:
                         ingest_ledger.apply_respace(conn, lineage, respace)
@@ -8232,6 +8319,7 @@ class LCMEngine(
                                     pairs.append((i, sid))
                                     placements.append(ingest_ledger.Placement(left, right))
                                     last = bounds
+                                store._sync_ingest_prelock()
                                 rebind_seq = seq if seq is not None else ingest_ledger.next_view_seq(conn) if plan["pairs"] else None
                                 refs = []
                                 if pairs:
@@ -8254,9 +8342,10 @@ class LCMEngine(
                             if not rebind_ok:
                                 self.__dict__.setdefault("_ledger_rebind_too_large", set()).add(memo)
                         except BaseException as exc:
+                            store._ingest_prelock_write_failed(exc)
                             store._pending_relation_schema = flag
                             if (not isinstance(exc, Exception) or _is_ingest_busy_error(exc)
-                                    or isinstance(exc, _SqliteSavepointError) or not conn.in_transaction):
+                                    or isinstance(exc, _SqliteSavepointError) or store._ingest_transaction_lost(conn)):
                                 raise
                             delta["ledger.rebind_failed"] += 1
                             rebind_ok = False
@@ -8270,9 +8359,10 @@ class LCMEngine(
                     ingest_ledger.update_store_mark(conn, lineage, target)
                     delta["ledger.store_mark_advanced"] += 1
         except BaseException as exc:
+            store._ingest_prelock_write_failed(exc)
             store._pending_relation_schema = pending_relation_schema
             if (not isinstance(exc, Exception) or _is_ingest_busy_error(exc)
-                    or isinstance(exc, _SqliteSavepointError) or not conn.in_transaction):
+                    or isinstance(exc, _SqliteSavepointError) or store._ingest_transaction_lost(conn)):
                 raise
             self._ledger_count("ledger.write_failed", exc)
         finally:
@@ -8287,9 +8377,12 @@ class LCMEngine(
 
     def _raise_ingest_busy(self, error, *, store=None):
         store = self._store if store is None else store  # a detached cold tail's own store (#2210)
+        store._ingest_prelock_write_failed(error)
+        store._sync_ingest_prelock()
         if store._transaction_owner.owns_connection(store._conn) and (
             isinstance(error, _SqliteSavepointError) or _is_ingest_busy_error(error, require_code=True)
             or isinstance(error, sqlite3.Error) and not store._conn.in_transaction
+            and not store._ingest_is_prelock()
         ):
             raise error
 
@@ -12230,6 +12323,7 @@ class LCMEngine(
                     "AND disposition IN ('stored','migrated','ambiguous')", (lineage, left)).fetchone()[0]
                 ordinals, respace = ingest_ledger.plan_ordinals(ingest_ledger.lineage_ordinals(conn, lineage),
                     [ingest_ledger.Placement(left, right)] * len(ids))
+                store._sync_ingest_prelock()
                 ingest_ledger.apply_respace(conn, lineage, respace)
                 seq = ingest_ledger.next_view_seq(conn)
                 ingest_ledger.insert_bindings(conn, lineage, [dict(ordinal=ordinal, store_id=sid,
@@ -12241,8 +12335,9 @@ class LCMEngine(
             if respace:
                 after_commit.append(lambda: self._ledger_count("ledger.respaced"))
         except BaseException as exc:
+            store._ingest_prelock_write_failed(exc)
             if (not isinstance(exc, Exception) or _is_ingest_busy_error(exc)
-                    or isinstance(exc, _SqliteSavepointError) or not conn.in_transaction):
+                    or isinstance(exc, _SqliteSavepointError) or store._ingest_transaction_lost(conn)):
                 raise
             after_commit.append(lambda exc=exc: self._ledger_count("ledger.write_failed", exc))
 
