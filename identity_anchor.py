@@ -550,20 +550,31 @@ class IdentityAnchorMixin:
         held = set(range(max(start, plan["cursor"]))) | set(plan.get("positional", ()))
         prefix = Counter((entries[i].identity_digest, stamps[i]) for i in sorted(held) if i not in matched)
         views = {}
+        receipts, starts, known_by_store, observations_by_occ = {}, {}, {}, {}
         for i in indexes:
             entry, stamp = entries[i], stamps[i]
-            records = ingest_ledger._rows(conn.execute(
-                "SELECT b.*,m.* FROM occurrence_bindings b JOIN messages m USING(store_id) "
-                "WHERE b.lineage=? AND b.identity_digest=? AND b.disposition='stored' "
-                "AND m.session_id=? AND m.conversation_id=? ORDER BY b.ordinal,b.store_id",
-                (lineage, entry.identity_digest, self._session_id, str(self._conversation_id or "").strip())))
-            for row in records:
+            if entry.identity_digest not in receipts:
+                receipts[entry.identity_digest] = ingest_ledger._rows(conn.execute(
+                    "SELECT b.*,m.* FROM occurrence_bindings b JOIN messages m USING(store_id) "
+                    "WHERE b.lineage=? AND b.identity_digest=? AND b.disposition='stored' "
+                    "AND m.session_id=? AND m.conversation_id=? ORDER BY b.ordinal,b.store_id",
+                    (lineage, entry.identity_digest, self._session_id, str(self._conversation_id or "").strip())))
+            records = receipts[entry.identity_digest]
+            # Only consumption is permanent here; other vetoes can change with the next host row.
+            first = starts.get(entry.identity_digest, 0)
+            while first < len(records) and int(records[first]["store_id"]) in consumed:
+                first += 1
+            starts[entry.identity_digest] = first
+            for record_index in range(first, len(records)):
+                row = records[record_index]
                 if (int(row["store_id"]) in consumed or
                         "Externalized LCM ingest payload:" not in str(row.get("tool_calls") or "")):
                     continue
                 if entry.uidset_digest is not None and store._host_uid_table_exists():
-                    known = {r[0] for r in conn.execute(
-                        "SELECT uid FROM host_uid_bindings WHERE store_id=? AND kind='canonical'", (row["store_id"],))}
+                    if row["store_id"] not in known_by_store:
+                        known_by_store[row["store_id"]] = {r[0] for r in conn.execute(
+                            "SELECT uid FROM host_uid_bindings WHERE store_id=? AND kind='canonical'", (row["store_id"],))}
+                    known = known_by_store[row["store_id"]]
                     if known and messages[i].get("message_uid") not in known:
                         continue  # Canonical UID evidence can outlive its retained ingest vector.
                 seq = row["view_seq"]
@@ -576,8 +587,10 @@ class IdentityAnchorMixin:
                 if uid is not None and entry.uidset_digest is not None and uid != entry.uidset_digest:
                     continue
                 observed = ingest_ledger.stamp_text(row.get("observed_at"))
-                observations = {r[0] for r in conn.execute(
-                    "SELECT stamp FROM stamp_observations WHERE occ_id=?", (row["occ_id"],))}
+                if row["occ_id"] not in observations_by_occ:
+                    observations_by_occ[row["occ_id"]] = {r[0] for r in conn.execute(
+                        "SELECT stamp FROM stamp_observations WHERE occ_id=?", (row["occ_id"],))}
+                observations = observations_by_occ[row["occ_id"]]
                 if stamp is not None:
                     if stamp not in observations and (row["stamp"] != stamp or observed not in (None, stamp)):
                         continue
