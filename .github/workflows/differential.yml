@@ -20,7 +20,10 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
-          # Keep identical to scripts/maintainer_gate.py's TURN_PATH_FILES.
+          # scripts/maintainer_gate.py's TURN_PATH_FILES plus DIFFERENTIAL_ONLY_FILES;
+          # tests/test_differential_workflow.py checks that this list is exactly that union.
+          # tests/test_differential_relevance.py checks static engine imports
+          # against the gate's lists and its documented exclusions.
           TURN_PATH_FILES: |-
             __init__.py
             assembly_plan.py
@@ -39,6 +42,7 @@ jobs:
             engine.py
             engine_registry.py
             escalation.py
+            expand_tools.py
             externalize.py
             extraction.py
             frontier_state.py
@@ -69,12 +73,14 @@ jobs:
             recognition_matching.py
             reconcile.py
             reset_state.py
+            retrieval_core.py
             rollup_builder.py
             rollup_periods.py
             rollup_store.py
             sender_capture.py
             sanitize.py
             schemas.py
+            search_query.py
             session_patterns.py
             sqlite_util.py
             store.py
@@ -87,6 +93,7 @@ jobs:
             tokens.py
             tool_pairs.py
             tool_registry.py
+            tools.py
             unended_catchup.py
         run: |
           relevant=true

@@ -756,9 +756,12 @@ def test_the_cache_fix_fails_open(env, tmp_path):
             folder.chmod(0o500)
         with open(Path(env["LCMX_CC_HOME"]) / "capture.lock", "a") as handle:
             fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            runs = {name: subprocess.run([sys.executable, "-I", "-S", "-c", as_apple, str(PLUGIN / "bin" / "lcmx_hook.py")],
-                                         input=payload, env={**lane, "HOME": str(home)}, capture_output=True, text=True,
-                                         timeout=60) for name, home in homes.items()}
+            runs = {}
+            for index, (name, home) in enumerate(homes.items(), 1):
+                runs[name] = subprocess.run([sys.executable, "-I", "-S", "-c", as_apple,
+                                             str(PLUGIN / "bin" / "lcmx_hook.py")], input=payload,
+                                            env={**lane, "HOME": str(home)}, capture_output=True, text=True, timeout=60)
+                _wait_hooks(env, index)
             runs["no home"] = subprocess.run([sys.executable, "-I", "-S", "-c", as_apple,
                                               str(PLUGIN / "bin" / "lcmx_hook.py")], input=payload, env=lane,
                                              capture_output=True, text=True, timeout=60)
@@ -792,8 +795,11 @@ def test_apples_python_reads_its_bytecode_cache_under_the_registered_flags(env, 
     try:
         with open(Path(env["LCMX_CC_HOME"]) / "capture.lock", "a") as handle:
             fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            runs = [subprocess.run(argv, input=payload, env={**lane, "HOME": str(home)}, capture_output=True, text=True,
-                                   timeout=60) for home in (user, user, unwritable)]
+            runs = []
+            for index, home in enumerate((user, user, unwritable), 1):
+                runs.append(subprocess.run(argv, input=payload, env={**lane, "HOME": str(home)}, capture_output=True,
+                                           text=True, timeout=60))
+                _wait_hooks(env, index)
             runs.append(subprocess.run(argv, input=payload, env=lane, capture_output=True, text=True, timeout=60))
             _wait_hooks(env, 4)
     finally:

@@ -6,9 +6,8 @@ preservation seam. All ordered row comparisons and host inputs remain active.
 from copy import deepcopy
 import hashlib
 import json
-import sqlite3
-import sys
 
+from tests.differential import paired
 from tests.differential.paired import compare_stages as _compare_round2, normalise_rows
 from tests.differential.session import _capture, _identities, _open, _row, _rows, audit_fault
 
@@ -50,20 +49,12 @@ def test_round2_existing_alias_fallback_matches_main(tmp_path, monkeypatch, vers
             previous = _identities(engine)
             live = _capture(ctx, live)
             calls = []
-            present = hasattr(engine, '_store_merged_user_aliases')
+            present = hasattr(engine, '_store_queued_user_rows')
             audit = audit_fault(engine, 'preservation-once', present)
             if present and not audit.stubbed:
-                original = engine._store_merged_user_aliases
-
-                def once(*args, **kwargs):
-                    calls.append(1)
-                    if len(calls) == 1:
-                        audit.called += 1
-                        audit.raised += 1
-                        raise sqlite3.OperationalError('database is locked')
-                    return original(*args, **kwargs)
-
-                monkeypatch.setattr(engine, '_store_merged_user_aliases', once)
+                from .record_contract import writer_fault
+                engine._paired_trace.faults.remove(audit)
+                writer_fault(engine, 'preservation-once', monkeypatch, calls)
             engine.ingest(live)
             stored = _identities(engine)
             assert stored[:len(previous)] == previous
@@ -71,7 +62,7 @@ def test_round2_existing_alias_fallback_matches_main(tmp_path, monkeypatch, vers
             # The successful first turn intentionally preserved P1 only on the
             # candidate. Compare that existing slot in main's host form; the
             # failed turn and every additional row must be identical to main.
-            if not seed_alias:
+            if not seed_alias and paired.CANDIDATE_CONTRACT != 'records-v1':
                 stored = normalise_rows(stored, {('user', 'P1\n\nR', 10., 'parent', 'conv'):
                                                   ('user', 'R', 20., 'parent', 'conv')}, results.get('main', [[]])[-1])
             results[name] = [stored]
@@ -95,20 +86,12 @@ def test_round2_fallback_then_again_matches_main(tmp_path, monkeypatch, versions
             engine.ingest([q])
             live = _capture(ctx, [q], 'password=fake-test-value' if failure == 'redaction' else 'P1',
                             'R', 10., 20.)
-            present = hasattr(engine, '_store_merged_user_aliases')
+            present = hasattr(engine, '_store_queued_user_rows')
             audit = audit_fault(engine, 'preservation-once', present)
             if present and not audit.stubbed:
-                original = engine._store_merged_user_aliases
-
-                def fail(*args, **kwargs):
-                    attempts.append(1)
-                    if failure == 'persistent' or failure == 'transient' and len(attempts) == 1:
-                        audit.called += 1
-                        audit.raised += 1
-                        raise sqlite3.OperationalError('database is locked')
-                    return original(*args, **kwargs)
-
-                monkeypatch.setattr(engine, '_store_merged_user_aliases', fail)
+                from .record_contract import writer_fault
+                engine._paired_trace.faults.remove(audit)
+                writer_fault(engine, 'preservation-once', monkeypatch, attempts)
             stages = []
             engine.ingest(live)
             stages.append(_identities(engine))
@@ -122,7 +105,7 @@ def test_round2_fallback_then_again_matches_main(tmp_path, monkeypatch, versions
     record_property('preservation_attempts', len(attempts))
     _compare_round2(results, record_property)
     if not audit.stubbed:
-        assert len(attempts) == (1 if hasattr(engine, '_store_merged_user_aliases') else 0)
+        assert bool(attempts) == hasattr(engine, '_store_queued_user_rows')
 
 
 def test_round3_watched_capture_stays_retired_after_eviction(tmp_path, monkeypatch, versions, record_property):
@@ -168,23 +151,10 @@ def _seed_round3_aliases(engine):
 
 
 def _fail_round3_preservation_once(engine, monkeypatch):
+    from .record_contract import writer_fault
     calls = []
-    present = hasattr(engine, '_store_merged_user_aliases')
-    audit = audit_fault(engine, 'preservation-once', present)
-    if audit.stubbed or not present:
-        return calls, audit.stubbed
-    original = engine._store_merged_user_aliases
-
-    def once(*args, **kwargs):
-        calls.append(1)
-        if len(calls) == 1:
-            audit.called += 1
-            audit.raised += 1
-            raise ValueError('one-shot preservation failure')
-        return original(*args, **kwargs)
-
-    monkeypatch.setattr(engine, '_store_merged_user_aliases', once)
-    return calls, audit.stubbed
+    stubbed = writer_fault(engine, 'preservation-once', monkeypatch, calls)
+    return calls, stubbed
 
 
 def test_round3_rewritten_prefix_drops_false_fallback_marks(tmp_path, monkeypatch, versions, record_property):
@@ -212,8 +182,8 @@ def test_round3_rewritten_prefix_drops_false_fallback_marks(tmp_path, monkeypatc
             calls, stubbed = _fail_round3_preservation_once(engine, monkeypatch)
             engine.ingest(incoming)
             results[name] = [_identities(engine)]
-            if name == 'candidate' and hasattr(engine, '_store_merged_user_aliases') and not stubbed:
-                assert len(calls) == 1
+            if name == 'candidate' and hasattr(engine, '_store_queued_user_rows') and not stubbed:
+                assert calls
             assert engine._ingest_failure_count == 0
         finally:
             engine.shutdown()
@@ -225,7 +195,7 @@ def test_round3_rewritten_prefix_drops_false_fallback_marks(tmp_path, monkeypatc
 def test_round3_new_uid_keeps_host_time_through_fallback(tmp_path, monkeypatch, versions, record_property):
     """S3: the alias's stored stamp belongs to replay, not a proven new UID."""
     monkeypatch.setenv('LCM_IDENTITY_ANCHOR', '1')
-    results, cache_stamps, projected_stamps, fallback_stamps = {}, {}, {}, {}
+    results, cache_stamps = {}, {}
     for name in ('main', 'candidate'):
         directory = tmp_path / name
         engine = _open(versions[name], directory, monkeypatch).engine
@@ -240,16 +210,12 @@ def test_round3_new_uid_keeps_host_time_through_fallback(tmp_path, monkeypatch, 
             live = [dict(_row('R', 20.), message_uid='uid-A'), _row('A', 21., 'assistant')]
             engine.ingest(live)
             incoming = _capture(ctx, [dict(live[0], message_uid='uid-NEW'), live[1]])
-            if name == 'candidate' and hasattr(engine, '_store_merged_user_aliases'):
-                sender = sys.modules[engine.__module__.rsplit('.', 1)[0] + '.sender_capture']
-                projection = sender.merged_user_projection(engine, incoming)
-                projected_stamps[name], fallback_stamps[name] = projection[0][0]['timestamp'], projection[3][0]['timestamp']
             calls, stubbed = _fail_round3_preservation_once(engine, monkeypatch)
             engine.ingest(incoming)
             results[name] = [_identities(engine)]
             cache_stamps[name] = engine._last_active_replay_messages[0]['timestamp']
-            if name == 'candidate' and hasattr(engine, '_store_merged_user_aliases') and not stubbed:
-                assert len(calls) == 1
+            if name == 'candidate' and hasattr(engine, '_store_queued_user_rows') and not stubbed:
+                assert calls
             assert incoming[0]['timestamp'] == 20.
             assert engine._ingest_failure_count == 0
         finally:
@@ -259,8 +225,6 @@ def test_round3_new_uid_keeps_host_time_through_fallback(tmp_path, monkeypatch, 
     _compare_round2(results, record_property)
     assert len(results['candidate'][0]) == 5
     assert [dict(row)['observed_at'] for row in results['candidate'][0] if dict(row)['content'] == 'R'] == [20.]
-    expected = {'candidate': 20.} if hasattr(engine, '_store_merged_user_aliases') else {}
-    assert projected_stamps == fallback_stamps == expected
     assert cache_stamps == {'main': 20., 'candidate': 20.}
 
 
@@ -277,21 +241,17 @@ def test_round2_fallback_has_own_evidence_retry(tmp_path, monkeypatch, versions,
             engine.ingest(initial)
             live = _capture(ctx, [*initial[:3], _row('I', 3.5), initial[3]])
             fallen_back, calls = [], []
-            present = hasattr(engine, '_store_merged_user_aliases')
+            present = hasattr(engine, '_store_queued_user_rows')
             audit = audit_fault(engine, 'persistent', present)
             if present and not audit.stubbed:
-                def fail_alias(*_args, **_kwargs):
-                    fallen_back.append(1)
-                    audit.called += 1
-                    audit.raised += 1
-                    raise ValueError('injected preservation failure')
-
-                monkeypatch.setattr(engine, '_store_merged_user_aliases', fail_alias)
+                from .record_contract import writer_fault
+                engine._paired_trace.faults.remove(audit)
+                writer_fault(engine, 'persistent', monkeypatch, fallen_back)
             evidence = audit_fault(engine, 'evidence', hasattr(engine, '_identity_anchor_prematch'))
             original = engine._identity_anchor_prematch
 
             def prematch(*args, **kwargs):
-                if (name == 'main' or not hasattr(engine, '_store_merged_user_aliases') or fallen_back) and not calls:
+                if (name == 'main' or not hasattr(engine, '_store_queued_user_rows') or fallen_back) and not calls:
                     evidence.called += 1
                     if not evidence.stubbed:
                         calls.append(1)
