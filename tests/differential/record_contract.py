@@ -15,7 +15,8 @@ Only observe()'s tool-call adapters may change, keeping the same observations.
 Observation rows have role, content and kind: canonical has store_id; record has
 owner_store_id and ordinal. Search hits also have reference={tool, args} and an
 expanded normalized row. Observations include pages, hits, reload_witness and
-summary_sources, baseline_summary_sources and baseline_canonical_rows for equality.
+summary_sources, baseline_summary_sources and baseline_canonical_rows for equality,
+and listing_projection for the exact listed record rows.
 """
 from collections import Counter
 import json
@@ -195,7 +196,7 @@ def judge(observations, entries):
         return [(index, row['owner_store_id'], row['ordinal'], row['role'], row['content'])
                 for index, row in enumerate(rows) if 'owner_store_id' in row]
     assert listed_records(pages) == listed_records(observations['listing_projection']), \
-        'listing shows an undeclared record'
+        'listed records differ from projection'
     return failures
 
 

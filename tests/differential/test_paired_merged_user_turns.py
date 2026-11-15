@@ -554,7 +554,7 @@ class TestMergedUserTurns:
     ('correct', None), ('per-owner', None), ('retry', None),
     ('listing', 'canonical listing changed'), ('missing', 'declared record multiset'), ('extra', 'declared record multiset'),
     ('listing-content', 'canonical listing changed'),
-    ('listing-extra', 'listing shows an undeclared record'),
+    ('listing-extra', 'listed records differ from projection'),
     ('text', 'declared record multiset'), ('time', 'declared record multiset'), ('duplicate', 'declared record multiset'),
     ('hidden', 'retrieval-missing'), ('superseded', 'superseded without occurrence witness'),
     ('inert', 'declared fault preservation-once never fired'), ('skipped', 'floor skipped'),
