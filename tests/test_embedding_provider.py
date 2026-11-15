@@ -1416,18 +1416,19 @@ def test_fastembed_does_not_encode_after_dispatch_callback_exhausts_deadline(
         query_embed = embed
 
     monkeypatch.setattr(provider_mod, "_load_fastembed", lambda: CachedFastembedModel)
-    provider = FastembedProvider("cached", cache_dir=tmp_path, timeout=0.01)
+    clock = _ControlledClock(monkeypatch)
+    provider = FastembedProvider("cached", cache_dir=tmp_path, timeout=5.0)
 
     def slow_dispatch(_indexes):
-        time.sleep(0.03)
+        clock.advance(10.0)
 
-    with pytest.raises(EmbeddingProviderError, match="deadline exceeded"):
+    # The recheck after the callback must be the one that fires, not the caller's join timeout.
+    with pytest.raises(EmbeddingProviderError, match="deadline exceeded before encode"):
         list(
             provider.embed_document_batches(
                 ["document"], before_dispatch=slow_dispatch
             )
         )
-    time.sleep(0.04)
     assert encode_calls == 0
 
 
