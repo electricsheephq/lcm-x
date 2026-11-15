@@ -3282,7 +3282,7 @@ class ReconcileMixin:
         self,
         messages: List[Dict[str, Any]],
         cursor: int,
-        *, consumed_store_ids=(), consumed_pairs=None,
+        *, consumed_store_ids=(), consumed_pairs=None, backing=None,
     ) -> set[int]:
         """Find exact durable tool pairs replayed after a preserved new delta.
 
@@ -3325,6 +3325,9 @@ class ReconcileMixin:
         matches by construction, not by occurrence. It cannot prove segment
         replay: a fresh same-id call can genuinely return the placeholder text.
         Prefer a duplicate ambiguous salvage pair over losing a fresh pair.
+        ``backing``, when supplied, maps every returned host index to the stored
+        row spent for it, without changing the replay decision.
+
         #1540 exception: a borrowed pair bound to a unique stamped user occurrence,
         with proven UIDs, can be suppressed.
         """
@@ -3376,6 +3379,25 @@ class ReconcileMixin:
         # each suppression is then backed by a stored copy the prefix does not
         # account for. Over-reserving can keep a duplicate.
         stored_identity_counts.subtract(prefix_counts)
+        # #2759: expose the concrete copies spent by this scan to the receipt bridge.
+        # Keep allocation separate from the counters that decide replay; prefix copies
+        # are reserved first, and every returned index takes the next durable copy.
+        backing_rows = {}
+        if backing is not None:
+            for row in sorted(stored_rows, key=lambda row: row["store_id"]):
+                if self._matches_ignore_message_patterns(row, stored_row=True):
+                    continue
+                identity = self._message_replay_identity(row, stored_row=True)
+                if not _has_lossy_redacted_identity(identity):
+                    backing_rows.setdefault(identity, []).append(row["store_id"])
+            backing_rows = {identity: iter(ids[max(0, prefix_counts[identity]):])
+                            for identity, ids in backing_rows.items()}
+
+        def record_backing(indexes):
+            if backing is not None:
+                for idx in sorted(indexes):
+                    backing[idx] = next(backing_rows[self._message_replay_identity(messages[idx])])
+
         # Review round 4: a stored result proves a replay only for a stored copy of the call it follows. Count each
         # stored result under the call that owns it, and reserve the host prefix's own pairs the same way.
         owned = Counter()
@@ -3401,6 +3423,7 @@ class ReconcileMixin:
         stored_uids: set[str] = set()
         at_cursor = self._replayed_results_at_cursor(
             messages, cursor, tail_rows, consumed, consumed_pairs, stored_identity_counts)
+        record_backing(at_cursor)
         for idx in at_cursor:
             owned[(self._message_replay_identity(messages[cursor - 1]), self._message_replay_identity(messages[idx]))] -= 1
         replayed.update(at_cursor)
@@ -3494,6 +3517,7 @@ class ReconcileMixin:
                 and all(owned[pair] >= needed for pair, needed in pair_needs.items())
             ):
                 stored_identity_counts.subtract(segment_needs)
+                record_backing((index, *result_indexes.values()))
                 owned.subtract(pair_needs)
                 replayed.add(index)
                 replayed.update(result_indexes.values())

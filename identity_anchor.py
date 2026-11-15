@@ -270,7 +270,8 @@ class IdentityAnchorMixin:
             logger.debug("LCM identity-anchor host UID shadow would reject alias edges: count=%d", count)
 
     def _identity_anchor_prematch(self, messages, identity_messages, cursor: int, audit_from: Optional[int] = None,
-                                  *, accepted_prefix: int = 0, ledger_pairs=None, ledger_today=None) -> Dict[str, Any]:
+                                  *, accepted_prefix: int = 0, ledger_pairs=None, ledger_today=None,
+                                  receipt_consumed_store_ids=()) -> Dict[str, Any]:
         """Rows at or after ``cursor`` recognised as replays of stored occurrences, plus the R3
         remainders to store, the relations to record and the R5 backfills. ``audit_from``: the host
         changed its list before the cursor from there (a positional cursor no longer proves those rows
@@ -498,7 +499,9 @@ class IdentityAnchorMixin:
                 logger.info("LCM host-rewrite replay: arm=%s parts=%s consumed=%s session=%s",
                             match.arm, match.k, list(match.consumed), self._session_id)
         try:
-            self._identity_anchor_receipts(messages, start, consumed, matched, plan)
+            # #2759: only the receipt bridge reserves the after-cursor scan's copies.
+            self._identity_anchor_receipts(
+                messages, start, consumed | set(receipt_consumed_store_ids), matched, plan)
         except Exception as exc:
             self._raise_ingest_busy(exc)
             logger.warning("LCM original-ingest receipt read failed; keeping ordinary matches")

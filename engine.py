@@ -9022,13 +9022,17 @@ class LCMEngine(
         # helper strip rows out of an unproven batch would partially re-instate
         # the batch-suppression #259 removed. It runs only once reconciliation
         # has already proven a partial replay.
+        replayed_tool_segment_backing = {}
         replayed_tool_segment_indexes = (
             self._replayed_tool_segment_indexes_after_cursor(
-                reconcile_messages, cursor, **({"consumed_pairs": consumed_pairs} if consumed_pairs else {}))
+                reconcile_messages, cursor, backing=replayed_tool_segment_backing,
+                **({"consumed_pairs": consumed_pairs} if consumed_pairs else {}))
             if reconciled_existing_session and today > 0 and cursor > 0
             else set()
         )
         replayed_tool_segment_indexes -= new_prefix_occurrences
+        receipt_consumed_store_ids = {store_id for idx, store_id in replayed_tool_segment_backing.items()
+                                      if idx in replayed_tool_segment_indexes}
         if replayed_tool_segment_indexes:
             self._last_ingest_reconciliation["replayed_tool_segment_rows"] = len(
                 replayed_tool_segment_indexes
@@ -9103,7 +9107,9 @@ class LCMEngine(
                 if ledger_run["k"]:
                     accepted.update(ledger_pairs=ledger_run["pairs"], ledger_today=today)
                 with self._ingest_evidence(classification=True):
-                    anchor_plan = self._identity_anchor_prematch(messages, reconcile_messages, cursor, audit_from, **accepted)
+                    anchor_plan = self._identity_anchor_prematch(
+                        messages, reconcile_messages, cursor, audit_from,
+                        receipt_consumed_store_ids=receipt_consumed_store_ids, **accepted)
                 anchor_plan["replayed"] -= replayed_tool_segment_indexes
                 # A reused stamp cannot override positive evidence of a new uid.
                 anchor_plan["replayed"] -= new_prefix_occurrences
