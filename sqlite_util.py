@@ -159,7 +159,11 @@ def _sqlite_savepoint(conn: sqlite3.Connection, *, abort_on_cleanup_failure: boo
             if scope is not None and not isinstance(error, (KeyboardInterrupt, SystemExit)):
                 state.sync()  # cancellation must reach the owner without a replacement reclassify
                 if scope["uncovered"]:
-                    if state.rollback_uncovered():
+                    try:
+                        rolled_back = state.rollback_uncovered()
+                    except Exception as exc:
+                        raise _SqliteSavepointError("Could not roll back uncovered ingest scope") from exc
+                    if rolled_back:
                         raise  # every write since the implicit BEGIN was this scope's: eager's ROLLBACK TO
                     state.reclassify_pending = True
                     raise _IngestReclassify(full=True) from error

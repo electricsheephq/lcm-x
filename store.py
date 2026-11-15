@@ -487,6 +487,7 @@ class _IngestAttempt:
     phase: str = "prelock"
     poisoned: bool = False
     begin_failed: BaseException | None = None
+    busy_budget_spent: bool = False
     reclassify_pending: bool = False
     scopes: list = field(default_factory=list)
     T_clean: int = 0
@@ -2148,7 +2149,8 @@ class MessageStore:
             trace.ingest_admission = True
         try:
             type(self)._ingest_prelock_before_begin(self)
-            conn.execute("BEGIN IMMEDIATE")
+            with (_temporary_sqlite_busy_timeout([conn], 0) if state.busy_budget_spent else nullcontext()):
+                conn.execute("BEGIN IMMEDIATE")
         except BaseException as exc:
             state.begin_failed = exc
             raise
@@ -2251,6 +2253,9 @@ class MessageStore:
         """A fail-open SQLite error may hide a failed implicit BEGIN: rerun eager."""
         if self._ingest_is_prelock() and isinstance(exc, sqlite3.Error):
             state = self._ingest_prelock_state
+            if _is_ingest_busy_error(exc, require_code=True) and not self._conn.in_transaction:
+                # Implicit BEGIN already waited; later admission only rechecks the lock.
+                state.busy_budget_spent = True
             if not state.poisoned:
                 self.ingest_prelock_counts["poisoned"] += 1
             state.poisoned = True
