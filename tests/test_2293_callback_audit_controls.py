@@ -96,3 +96,23 @@ finally:
     result = subprocess.run([sys.executable, '-c', code, str(tmp_path / 'cprofile.db')],
                             cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_main_thread_callback_on_a_worker_opened_store_is_detected(tmp_path):
+    from hermes_lcm.store import MessageStore
+    from tests import message_store_callback_audit as audit
+    start, gaps, stores = len(audit.CALLS), len(audit.GAPS), []
+    thread = threading.Thread(target=lambda: stores.append(MessageStore(tmp_path / 'worker-open.db')))
+    thread.start()
+    thread.join(10)
+    assert not thread.is_alive() and stores
+    code = compile('conn.set_progress_handler(lambda: 0, 1)', str(audit.ROOT / 'store.py'), 'exec')
+    try:
+        exec(code, {'conn': stores[0]._conn})  # main thread: already running before the open
+        if hasattr(threading, 'setprofile_all_threads'):
+            assert audit.CALLS[start:] == [('set_progress_handler', True, 'store.py', 1)]
+        else:  # Python 3.11: the gap is recorded, never a silent pass
+            assert audit.CALLS[start:] == [] and 'MainThread' in audit.GAPS[gaps:]
+    finally:
+        del audit.CALLS[start:]
+        stores[0].close()

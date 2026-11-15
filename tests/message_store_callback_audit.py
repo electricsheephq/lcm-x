@@ -6,6 +6,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).absolute().parents[1]
 CALLS = []
+GAPS = []  # names of running threads the audit could not observe (Python 3.11 only)
 METHODS = frozenset({'set_authorizer', 'set_trace_callback', 'set_progress_handler', 'create_function',
                      'create_aggregate', 'create_collation', 'create_window_function'})
 
@@ -15,6 +16,7 @@ def install(monkeypatch):
     open_connection = store.open_connection
     connections = {}  # strong references prevent connection-id reuse during this test
     setprofile, set_thread_profile = sys.setprofile, threading.setprofile
+    all_threads = getattr(threading, 'setprofile_all_threads', None)  # Python 3.12+
     prior, thread_prior = sys.getprofile(), threading.getprofile()
     active = [True]
 
@@ -67,11 +69,21 @@ def install(monkeypatch):
     def opened(policy):
         on_open = policy.on_open
         def mark(conn):
+            first = not connections
             connections[id(conn)] = conn
+            current, thread_hook = sys.getprofile(), threading.getprofile()
+            if first and all_threads is not None:
+                # Any running thread may register on this connection, not only the opener.
+                # Another thread's own profiler cannot be read, so it is replaced, not chained.
+                all_threads(compose(None))
+            elif first:
+                # Python 3.11 can profile only the calling thread and threads started later:
+                # record the running threads this audit cannot see instead of passing silently.
+                GAPS.extend(t.name for t in threading.enumerate() if t is not threading.current_thread())
             # Also cover connections opened by threads already alive at setup.
-            if not getattr(sys.getprofile(), '_d1_observer', False):
-                setprofile(compose(sys.getprofile()))
-            set_thread_profile(compose(threading.getprofile()))
+            if not getattr(current, '_d1_observer', False):
+                setprofile(compose(current))
+            set_thread_profile(compose(thread_hook))
             if on_open:
                 on_open(conn)
         return open_connection(replace(policy, on_open=mark))

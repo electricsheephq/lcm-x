@@ -81,21 +81,23 @@ def _run(root, prelock, monkeypatch, *, swallow=False, release_lock=False):
 
 
 @pytest.mark.parametrize("swallow", [False, True], ids=["raising", "swallowing"])
-def test_busy_budget_is_spent_once(tmp_path, monkeypatch, swallow):
+def test_busy_budget_is_spent_once(tmp_path, monkeypatch, swallow, latency_check):
     eager = _run(tmp_path / "eager", False, monkeypatch, swallow=swallow)
     lazy = _run(tmp_path / "lazy", True, monkeypatch, swallow=swallow)
-    assert sum(ms > 300 for _, ms in lazy["waits"]) <= 1, lazy
-    assert lazy["total"] < eager["total"] + 300, (eager, lazy)
+    if latency_check:  # wall-clock bounds run only in the nightly latency cell
+        assert sum(ms > 300 for _, ms in lazy["waits"]) <= 1, lazy
+        assert lazy["total"] < eager["total"] + 300, (eager, lazy)
     assert lazy["timeouts"] == [TIMEOUT_MS, 0, 0]
     assert lazy["restored"] == eager["restored"] == TIMEOUT_MS
 
 
 @pytest.mark.parametrize("swallow", [False, True], ids=["raising", "swallowing"])
-def test_free_lock_reacquires_without_waiting(tmp_path, monkeypatch, swallow):
+def test_free_lock_reacquires_without_waiting(tmp_path, monkeypatch, swallow, latency_check):
     eager = _run(tmp_path / "eager", False, monkeypatch, swallow=swallow, release_lock=True)
     lazy = _run(tmp_path / "lazy", True, monkeypatch, swallow=swallow, release_lock=True)
     assert lazy["timeouts"] == [TIMEOUT_MS, 0], "reacquisition must use the zero busy wait budget"
-    assert sum(ms > 300 for _, ms in lazy["waits"]) == 1, lazy
+    if latency_check:
+        assert sum(ms > 300 for _, ms in lazy["waits"]) == 1, lazy
     assert lazy["restored"] == eager["restored"] == TIMEOUT_MS
     assert lazy["counts"].get("reclassified", 0) == eager["counts"].get("reclassified", 0) + 1
     assert lazy["rows"] == eager["rows"] and all(n == 1 for n in lazy["rows"].values())
