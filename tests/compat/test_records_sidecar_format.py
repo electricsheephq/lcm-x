@@ -10,9 +10,10 @@ from hermes_lcm import store as sm
 from tests.compat.helpers import run_old
 from tests.test_records_sidecar import TABLE, register, read, COLUMNS
 
-# The oldest GA reader. CI's checkout has main's history only, so release-branch pins such as v0.30.1-rc3
-# (98651d61) are not available there; any pre-v0.30.2 reader ignores lcm.db.records the same way.
-PINS = {'v0.30.0': '6260c31f'}
+# The oldest GA reader. CI's checkout is shallow: it fetches each old reader's commit in ci.yml's
+# "Fetch the rollback-reader commits" step, so a new pin goes in that list too. Release-branch pins such
+# as v0.30.1-rc3 (98651d61) wait for v0.30.1's GA tag; any pre-v0.30.2 reader ignores lcm.db.records.
+PINS = {'v0.30.0': '6260c31fbce11e4cd542878f1f6a37410d678ae8'}
 TURN = r'''
 store = store_mod.MessageStore(db, hermes_home=home)
 try:
