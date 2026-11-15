@@ -5381,7 +5381,8 @@ class LCMEngine(
         ):
             if off_current_should_bypass:
                 self._log_session_ingest_outcome(session_id, reason="bypass_lineage_end")
-                if off_current_normal_conversation_id and off_current_store_prefix_count != len(messages):
+                # Warn even when a stored prefix covers the view: this route compares content, not stamps.
+                if off_current_normal_conversation_id:
                     self._warn_session_end_unstored(session_id, messages, "prefix_mismatch_bypass_lineage")
             elif same_id_should_bypass and len(messages) > same_id_bypass_prefix_count:
                 self._warn_session_end_unstored(session_id, messages, "bypass_lineage_end")

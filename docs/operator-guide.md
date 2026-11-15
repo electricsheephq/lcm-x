@@ -439,11 +439,11 @@ settings do not update LCM-X's threshold.
 
 ### Session-end warning says `final messages may be absent` or `retry pending`
 
-The WARNING `LCM session-end rows not stored` (or a cold-tail `retry pending` WARNING with `reason=` and `view_rows=`) means rows may be missing, or their storage could not be verified; `view_rows` is the view size, not the missing-row count (#2543); for a dropped warm tail, it is the tail's row count. In particular, `unverified_stale_end` can fire when every row is already stored (#2747); the fallback skips this WARNING for a session it can show is excluded from storage by design. The reasons are:
+The WARNING `LCM session-end rows not stored` (or a cold-tail `retry pending` WARNING with `reason=` and `view_rows=`) means rows may be missing, or their storage could not be verified; `view_rows` is the view size, not the missing-row count (#2543); for a dropped warm tail, it is the tail's row count. In particular, `unverified_stale_end` and `prefix_mismatch_bypass_lineage` can fire when every row is already stored (#2747, #2543); the fallback skips this WARNING for a session it can show is excluded from storage by design. A missing WARNING does not prove the rows are stored: #2543 lists the known cases where an end stores or queues nothing without one. The reasons are:
 
 | Reason | Meaning |
 |---|---|
-| `prefix_mismatch_bypass_lineage` | An off-current bypass-lineage end has no accepted stored prefix covering its view. |
+| `prefix_mismatch_bypass_lineage` | An off-current bypass-lineage end bypassed storage; it fires even when a stored prefix covers the view, because this route compares content, not the rows' stamps. |
 | `bypass_lineage_end` | A same-id bypass-lineage end has rows past its bypass prefix. |
 | `off_current_suffix_append_failed` | A suffix append at a plain off-current or bypass-lineage end failed unqueued; the exception is re-raised (#2738). |
 | `off_current_suffix_append_interrupted` | A suffix append at a plain off-current or bypass-lineage end was interrupted; the interrupt propagates. |

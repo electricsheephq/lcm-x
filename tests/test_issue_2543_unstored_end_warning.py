@@ -486,8 +486,9 @@ def test_unknown_unflushed_foreground_failure_still_warns(engines, monkeypatch, 
     assert "unflushed=unknown" in caplog.text
 
 
-@pytest.mark.parametrize("unstored_suffix", [False, True])
-def test_equal_bypass_and_stored_prefix_warning_precision(engines, caplog, unstored_suffix):
+@pytest.mark.parametrize("case", ["stored", "restamped", "unstored_suffix"])
+def test_off_current_bypass_end_warns_even_when_its_prefix_is_stored(engines, caplog, case):
+    """The stored-prefix count compares content, not stamps, so it cannot prove a re-stamped row stored."""
     from tests.invariants.test_p1e_cold_tails import off_current_end
     engine = engines(sessions=[("S1", None, None), ("S2", None, None)])
     view = off_current_end(engine)[:2]
@@ -496,13 +497,15 @@ def test_equal_bypass_and_stored_prefix_warning_precision(engines, caplog, unsto
     assert engine._matching_lcm_bypass_prefix_evidence("S1", view)[0] == len(view)
     assert engine._session_end_store_prefix_count("S1", view, conversation_id="conv1") == len(view)
     before = engine._store.get_session_messages("S1")
-    if unstored_suffix:
+    if case == "restamped":
+        view[-1] = dict(view[-1], timestamp=float(view[-1].get("timestamp") or 0) + 3600.0)
+        assert engine._session_end_store_prefix_count("S1", view, conversation_id="conv1") == len(view)
+    if case == "unstored_suffix":
         view.append({"role": "assistant", "content": "FINAL", "timestamp": 5.0})
     caplog.clear()
     assert engine.on_session_end("S1", copy.deepcopy(view)) is None
-    expected = ["LCM session-end rows not stored: session=S1 "
-                "reason=prefix_mismatch_bypass_lineage view_rows=3"] if unstored_suffix else []
-    assert _warnings(caplog) == expected
+    assert _warnings(caplog) == ["LCM session-end rows not stored: session=S1 "
+                                 f"reason=prefix_mismatch_bypass_lineage view_rows={len(view)}"]
     assert engine._store.get_session_messages("S1") == before and not engine._pending_session_tails
 
 
