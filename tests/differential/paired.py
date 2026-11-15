@@ -16,7 +16,7 @@ import pytest
 from .trees import PrerequisiteUnavailable, materialize, resolve, skip_or_fail
 
 BASELINE_REF = "7d614f5fe22eb7cf7d8955230c51619916a1fed3"
-CANDIDATE_CONTRACT = 'main'  # Only the product PR may select 'records-v1'.
+CANDIDATE_CONTRACT = 'records-v1'  # Only the product PR may select 'records-v1'.
 ROOT = Path(__file__).resolve().parents[2]
 
 

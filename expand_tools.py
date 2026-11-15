@@ -1,6 +1,8 @@
 """Describe and expand handlers behind the public tools facade."""
 from __future__ import annotations
 
+from . import queued_user_rows as _queued_records
+
 from typing import Any, Dict
 
 from . import tools as _tools
@@ -114,6 +116,7 @@ def lcm_describe(args: Dict[str, Any], **kwargs: Any) -> str:
     return _tools.json.dumps(overview)  # type: ignore[attr-defined, no-any-return]
 
 
+@_queued_records.surface('expand')
 def lcm_expand(args: Dict[str, Any], **kwargs: Any) -> str:
     """Expand a summary node, externalized payload, or raw message to its content.
 

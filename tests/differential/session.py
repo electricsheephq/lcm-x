@@ -294,10 +294,7 @@ class Trace:
                                  rows=_identities(engine), preserved=dict(self.preserved),
                                  canonical=canonical_rows(engine), records=queued_rows(engine),
                                  captures=captures, committed=dict(self.committed), committed_before=committed_before,
-                                 reload_witness={self.committed[occ]: self.committed[self.occurrence(row)]
-                                     for occ, row, joined in getattr(self, 'reloads', ()) if occ in self.committed
-                                     and self.occurrence(row) in self.committed and row['role'] == 'user'
-                                     and row['content'] == joined and self.committed[self.occurrence(row)] > self.committed[occ]},
+                                 reload_witness=__import__(__package__ + '.record_contract', fromlist=['reload_witness']).reload_witness(self),
                                  protection=dict(sensitive_patterns_enabled=engine._config.sensitive_patterns_enabled,
                                                  sensitive_patterns=engine._config.sensitive_patterns),
                                  binding_diagnostics=_bindings(engine)))

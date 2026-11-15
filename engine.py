@@ -148,6 +148,7 @@ from .message_patterns import compile_message_patterns, matches_message_pattern
 from . import aux_session as _aux_session
 from .aux_session import AuxiliarySessionMixin, DelegateChildMixin, drain_live_child_stores
 from .placeholder_ledger import PlaceholderLedgerMixin
+from . import queued_user_rows
 from .reconcile import _COMPACTION_COMMIT_PROOF_METADATA_PREFIX, ReconcileMixin, _PRESERVED_OBJECTIVE_CONTEXT_PREFIX
 from .reconcile import _HERMES_PRUNED_TOOL_PLACEHOLDER, _emission_identity, _strip_volatile_host_scaffolding
 from .reconcile import _hermes_salvage_protected_positions
@@ -2831,6 +2832,7 @@ class LCMEngine(
             logger.debug("LCM on_turn_complete error: %s", type(exc).__name__)
         finally:
             sender_capture.retire(self, meta.get("turn_id"))
+            queued_user_rows.retire(self, meta.get("turn_id"))
 
     def ingest(self, messages: List[Dict[str, Any]]) -> None:
         """Persist messages to the durable store every turn.
@@ -2860,7 +2862,11 @@ class LCMEngine(
                     messages,
                     conversation_id=self._conversation_id,
                 )
-                self._ingest_messages(messages)
+                self._queued_post_llm = True
+                try:
+                    self._ingest_messages(messages)
+                finally:
+                    self._queued_post_llm = False
                 self._record_ingest_success()
                 self._clear_foreground_rebind_candidate_if_bound_session_confirmed()
                 logger.debug(
@@ -2869,6 +2875,10 @@ class LCMEngine(
                 )
             except Exception as e:
                 self._record_ingest_failure("per-turn ingest()", e)
+            queued_user_rows.drain(self)
+
+    def _store_queued_user_rows(self, entries):
+        queued_user_rows.write(self, entries)
 
     def _is_retry_worthy_leaf_summary_error(self, exc: Exception) -> bool:
         return _is_retry_worthy_leaf_summary_error(exc)
@@ -9341,6 +9351,7 @@ class LCMEngine(
         originals = [messages[idx] for idx, _msg in messages_to_store_with_index]
         after_commit.append(lambda: self._watch_stored_user_rows(zip(originals, protected_messages, store_ids)))
         stored_at = {idx: store_id for (idx, _msg), store_id in zip(messages_to_store_with_index, store_ids)}
+        after_commit.append(lambda: queued_user_rows.committed(self, messages, stored_at))
         if prepared is not None:
             prepared["stored_at"] = stored_at
         if getattr(self, "_ingest_ledger_attempt", None) is not None:
@@ -13077,6 +13088,8 @@ class LCMEngine(
         self._retry_pending_session_tails(
             deadline=deadline, exiting=True, shutdown=True,
         )
+        queued_user_rows.drain(self, exiting=True)
+        queued_user_rows.retire(self)
         self._discard_prepared_leaves()
         self._retire_embedding_maintenance(wait=True)
         cleanup = [

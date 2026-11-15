@@ -165,3 +165,15 @@ return their existing `status: disabled` responses.
 ## Operator tools
 
 `lcm_status`, `lcm_inspect`, and `lcm_doctor` report health and metadata. They do not replace content retrieval.
+
+Queued user records (v0.30.2) are typed recall sources with `owner_store_id` and
+zero-based `ordinal`, attached to their parent's current session/conversation.
+`lcm_grep`, `lcm_recall`, `lcm_load_session` and the read-only MCP reader expose them;
+expand their exact `reference` with `lcm_expand(queued_user_ref=[owner_store_id, ordinal])`.
+They are not summary source ids and must not be passed as message store ids.
+Listings place them before the owner; forward `next_cursor` fields in the next
+request. Every page also has `withheld.counts` (`overlap`, `unscanned`), `locators`
+and a separate `next_cursor` containing `withheld_cursor`. Continue each cursor
+until null; `record_cursor=null` requests only the footer. Withheld text is absent
+from listings/search but expandable by its locator. Blank records remain listed.
+On hosts without absorbed-UID evidence, records are never marked superseded.

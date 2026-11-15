@@ -51,3 +51,33 @@ checkpoints exclude records and replay canonical messages only.
 
 Doctor reports absence, refused format, or format, size, attached/unattached counts
 and pending purge intents. Its message count remains a count of `messages`.
+
+The v0.30.2 `queued_user_rows` writer preserves earlier queued user texts that
+whole-replace Hermes hosts overwrite before ingest. Pre-LLM capture freezes text,
+host timestamp and UID. A committed owner supplies its store id, timestamp,
+ingested time and content digest. No canonical row or canonical writer changes.
+Records are recall sources with `[owner_store_id, ordinal]` locators; their session
+and conversation always come from the attached owner on the same read cut.
+Format remains 1, oldest records reader v0.30.2, with no removal planned.
+
+Listings place visible records immediately before their owner. On this host no
+absorbed-UID evidence survives reload, so records are never superseded. A later
+user row in the owner's session containing a record's stripped text as contiguous
+raw double-newline segments withholds it as `overlap`. Empty stripped records
+stay listed. Each owner receives a floor of 64 later user rows and 1 MiB; the
+shared scan beyond these floors stops at 200,000 rows or 64 MiB. Undecided records
+are withheld as `unscanned`. Every listing page includes counts and paginated
+locators without their text; every attached record remains exactly expandable.
+Search, recall and the read-only MCP reader expose typed record provenance.
+Replay, ledger, compaction, reconciliation and classifier paths use messages only.
+
+Capture conservatively refuses ambiguous ownership, surviving run objects,
+prefix-preserving hosts, earlier ingests, reused heads, backward overlaps,
+exhausted backward windows, inline payloads and externalized whole joins. Ignore
+patterns also apply. Refusals retain main's missing-text behavior and are counted.
+Drains run outside canonical write locks, bounded by 256 entries, 1 MiB and 50 ms,
+with separate shutdown/exit budgets. Busy writes retain frozen entries; entries
+still queued at exit are the crash-window residual and are counted. Doctor reports
+attachment, supersession, withholding, capture refusals and drain/exit counters;
+its message count remains canonical messages only. An `unscanned` count on a real
+host is the evidence gate for a future indexed scan tier.

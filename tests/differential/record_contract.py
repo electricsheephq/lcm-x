@@ -38,6 +38,11 @@ FLOOR_USER_ROWS = 64
 FLOOR_BYTES = 1048576
 
 
+def reload_witness(trace):
+    """3h: the floor host supplies no positive absorbed-UID evidence."""
+    return {}
+
+
 def declaration_stages(trace):
     """Use the same baseline stage evidence for generation and live checks."""
     return [{k: v for k, v in stage.items() if k != 'preserved'} for stage in trace.ingests]

@@ -98,7 +98,7 @@ def backup_database(engine) -> dict[str, Any]:
         return {
             "ok": False,
             "db_path": db_path,
-            "error": str(exc),
+            "error": "\n".join([str(exc), *getattr(exc, "__notes__", ())]),
         }
 
     backup_size = backup_path.stat().st_size if backup_path.exists() else 0
@@ -136,7 +136,7 @@ def rotate_backup_database(engine) -> dict[str, Any]:
             "ok": False,
             "db_path": db_path,
             "backup_path": backup_path,
-            "error": str(exc),
+            "error": "\n".join([str(exc), *getattr(exc, "__notes__", ())]),
         }
 
     backup_size = backup_path.stat().st_size if backup_path.exists() else 0
@@ -177,6 +177,7 @@ def _backup_pair_locked(store, destination):
     target_records = Path(str(destination) + ".records")
     previous_records = Path(str(target_records) + ".previous")
     previous_tmp = Path(str(previous_records) + ".tmp")
+    absent = Path(str(previous_records) + ".absent")
     # Crash states: during staging or previous.tmp copying, the old pair remains.
     # After previous is linked/copied, the old pair also has a recovery records file.
     # After records publish (or unlink for a records-free copy), old lcm.db remains;
@@ -186,10 +187,13 @@ def _backup_pair_locked(store, destination):
     # A crash during restart restoration leaves either the recovery file or the
     # restored old pair; clearing other leftovers can then safely be retried.
     # A failed exception-path restore keeps staging + previous for restart recovery.
-    if staging.exists() and previous_records.exists():
-        previous_records.replace(target_records)
+    if staging.exists():
+        if previous_records.exists():
+            previous_records.replace(target_records)
+        elif absent.exists():
+            target_records.unlink(missing_ok=True)
     leftovers = (staging, staged_records, Path(str(staged_records) + ".tmp"),
-                 previous_records, previous_tmp)
+                 previous_records, previous_tmp, absent)
     for path in leftovers:
         path.unlink(missing_ok=True)
     published_records = False
@@ -203,7 +207,13 @@ def _backup_pair_locked(store, destination):
             except OSError:
                 import shutil
                 shutil.copyfile(target_records, previous_tmp)
+                with previous_tmp.open("rb") as copied:
+                    os.fsync(copied.fileno())
                 os.replace(previous_tmp, previous_records)
+        else:
+            with absent.open("wb") as marker:
+                marker.flush()
+                os.fsync(marker.fileno())
         if staged_records.exists():
             staged_records.replace(target_records)
             published_records = True
@@ -211,10 +221,14 @@ def _backup_pair_locked(store, destination):
             target_records.unlink(missing_ok=True)
         staging.replace(destination)
     except BaseException as original:
+        # replace() may succeed then be interrupted before returning. Absence of
+        # staging proves the new canonical slot is already published.
+        if not staging.exists():
+            raise
         try:
             if previous_records.exists():
                 previous_records.replace(target_records)
-            elif published_records:
+            elif absent.exists() or published_records:
                 target_records.unlink(missing_ok=True)
         except OSError as restore_error:
             keep_recovery = True
@@ -222,7 +236,7 @@ def _backup_pair_locked(store, destination):
         raise
     finally:
         for path in leftovers:
-            if keep_recovery and path in (staging, previous_records):
+            if keep_recovery and path in (staging, previous_records, absent):
                 continue
             with suppress(OSError):
                 path.unlink(missing_ok=True)
