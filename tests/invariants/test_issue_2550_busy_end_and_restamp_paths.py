@@ -368,8 +368,10 @@ RESTAMP_CASES = [
 RESTAMP_CONTROLS = [
     ("plain", "timestamp", "start-other", "end"),      # no inline transform
     ("plain", "timestamp", "restart", "ingest"),
+    ("plain", "timestamp", "rebind", "ingest"),
     ("data-uri-key", None, "start-other", "end"),       # no stamp
     ("wrapped-base64", None, "restart", "ingest"),
+    ("data-uri-key", None, "rebind", "ingest"),
     ("data-uri-key", "timestamp", None, "end"),         # no binding cut
     ("wrapped-base64", "timestamp", None, "ingest"),
 ]
