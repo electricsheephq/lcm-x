@@ -229,9 +229,11 @@ def _durable_messages(path, session):
         ).fetchall()
 
 
-@pytest.mark.parametrize("reload_plugin", [False, True], ids=["first-load", "after-reload"])
-def test_profile_scoped_callback_can_bind_a_cold_unload_capable_registration(preflight, reload_plugin):
+@pytest.mark.parametrize("delivery", ["first-load", "current-hook", "captured-hook"])
+def test_profile_scoped_callback_can_bind_a_cold_unload_capable_registration(preflight, delivery):
     _, ctx = preflight.register(supports_unload=True)
+    captured = ctx.hooks["post_llm_call"]
+    reload_plugin = delivery != "first-load"
     if reload_plugin:
         ctx.unload_callbacks[0]()
         _, ctx = preflight.register(supports_unload=True, manager=ctx._manager)
@@ -242,7 +244,7 @@ def test_profile_scoped_callback_can_bind_a_cold_unload_capable_registration(pre
                 CREATE TABLE messages (session_id TEXT, role TEXT, content TEXT, timestamp REAL);
                 INSERT INTO sessions VALUES ('first-turn', NULL, NULL);
             """)
-    hook = ctx.hooks["post_llm_call"]
+    hook = captured if delivery == "captured-hook" else ctx.hooks["post_llm_call"]
     view = []
     try:
         for turn in range(3):
@@ -262,7 +264,8 @@ def test_profile_scoped_callback_can_bind_a_cold_unload_capable_registration(pre
 
 
 @pytest.mark.parametrize("same_session_id", [False, True])
-def test_reload_callback_needs_a_turn_in_its_profile_database(preflight, same_session_id):
+@pytest.mark.parametrize("captured_hook", [False, True], ids=["current-hook", "captured-hook"])
+def test_reload_callback_needs_a_turn_in_its_profile_database(preflight, same_session_id, captured_hook):
     _, old_ctx = preflight.register(supports_unload=True)
     old_ctx.unload_callbacks[0]()
     _, ctx = preflight.register(supports_unload=True, manager=old_ctx._manager)
@@ -280,8 +283,8 @@ def test_reload_callback_needs_a_turn_in_its_profile_database(preflight, same_se
         {"role": "assistant", "content": "answer from another profile", "timestamp": 2},
     ]
     try:
-        ctx.hooks["post_llm_call"](session_id="foreign-turn", turn_id="pending",
-                                   platform="cli", conversation_history=view)
+        hook = (old_ctx if captured_hook else ctx).hooks["post_llm_call"]
+        hook(session_id="foreign-turn", turn_id="pending", platform="cli", conversation_history=view)
         assert not (preflight.home / "lcm.db").exists()
     finally:
         ctx.unload_callbacks[0]()

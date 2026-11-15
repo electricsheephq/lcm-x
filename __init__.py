@@ -615,6 +615,7 @@ def register(ctx):
         if manager is not None:
             if not hasattr(manager, "_lcm_x_retired_session_starts"):
                 manager._lcm_x_retired_session_starts = WeakValueDictionary()
+            if not hasattr(manager, "_lcm_x_known_sessions"):
                 manager._lcm_x_known_sessions = set()
             engine._unload_group.retired_session_starts = manager._lcm_x_retired_session_starts
             engine._unload_group.bound_sessions = manager._lcm_x_known_sessions
@@ -1127,7 +1128,7 @@ def register(ctx):
                                     and _replay_cli_reset(retired)):
                                 return
                             if (result.status is ActiveEngineUseStatus.ENGINE_NOT_RESIDENT
-                                    and reloaded and not _retained_dispatch and retired is None
+                                    and reloaded and retired is None
                                     and session_id not in owner.bound_sessions
                                     and engine._proves_local_hook_turn(session_id, history)):
                                 # Require local Hermes ownership when the
