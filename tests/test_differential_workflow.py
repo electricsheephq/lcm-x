@@ -14,6 +14,13 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = (ROOT / ".github/workflows/differential.yml").read_text(encoding="utf-8")
+# Explicit retrieval handlers stay outside the maintainer gate's turn-path scope.
+DIFFERENTIAL_ONLY_FILES = {
+    "expand_tools.py",  # The record contract checks exact-source expansion.
+    "retrieval_core.py",  # The record contract's search uses shared retrieval helpers.
+    "search_query.py",  # The record contract's search parses and ranks queries here.
+    "tools.py",  # The record contract calls search, expansion and session listing.
+}
 
 
 def _relevance_parts() -> tuple[str, str]:
@@ -27,15 +34,17 @@ def _relevance_parts() -> tuple[str, str]:
 def test_workflow_turn_paths_match_maintainer_gate() -> None:
     paths, _ = _relevance_parts()
     tree = ast.parse((ROOT / "scripts/maintainer_gate.py").read_text(encoding="utf-8"))
-    assignments = [
-        node for node in tree.body
-        if isinstance(node, ast.Assign)
-        and any(isinstance(target, ast.Name) and target.id == "TURN_PATH_FILES"
-                for target in node.targets)
-    ]
-    assert len(assignments) == 1
+    def gate_paths(name: str) -> set[str]:
+        assignments = [node.value for node in tree.body if isinstance(node, ast.Assign)
+                       and any(isinstance(target, ast.Name) and target.id == name
+                               for target in node.targets)]
+        assert len(assignments) == 1
+        return ast.literal_eval(assignments[0])
+    turn_paths = gate_paths("TURN_PATH_FILES")
     assert len(paths.splitlines()) == len(set(paths.splitlines()))  # no duplicate entries
-    assert set(paths.splitlines()) == ast.literal_eval(assignments[0].value)
+    assert DIFFERENTIAL_ONLY_FILES.isdisjoint(turn_paths)
+    assert DIFFERENTIAL_ONLY_FILES <= gate_paths("NON_TURN_PATH_FILES")
+    assert set(paths.splitlines()) == turn_paths | DIFFERENTIAL_ONLY_FILES
 
 
 def test_required_check_always_reports_and_propagates_failures() -> None:

@@ -1,10 +1,42 @@
 """Ungated absolute-oracle regressions; no engine or baseline is needed."""
 import pytest
+import sqlite3
 from types import SimpleNamespace
 
 from .paired import normalise_rows
 from .session import (FaultRun, Trace, assert_faults, audit_fault, duplicate_rows, fault_counts, freeze,
-                      label_missing, missing_messages)
+                      RECORD_COLUMNS, canonical_rows, label_missing, missing_messages, queued_rows)
+
+
+def test_record_snapshot_requires_columns_and_keeps_multiplicity():
+    with sqlite3.connect(':memory:') as conn:
+        engine = SimpleNamespace(_store=SimpleNamespace(_conn=conn))
+        assert queued_rows(engine) == []
+        conn.execute('CREATE TABLE queued_user_rows (owner_store_id INTEGER)')
+        with pytest.raises(AssertionError, match='missing columns'):
+            queued_rows(engine)
+        conn.execute('DROP TABLE queued_user_rows')
+        conn.execute('CREATE TABLE queued_user_rows (' + ', '.join(RECORD_COLUMNS) + ')')
+        record = (7, 0, 'user', 'P', 10., 'host_message_timestamp', 'parent', 'conv', None, None)
+        conn.executemany('INSERT INTO queued_user_rows VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', [record] * 2)
+        assert queued_rows(engine) == [freeze(dict(zip(RECORD_COLUMNS, record)))] * 2
+
+
+def test_canonical_snapshot_keeps_ids_and_token_estimates_but_excludes_clocks():
+    with sqlite3.connect(':memory:') as conn:
+        conn.execute('CREATE TABLE messages (store_id, sender_id, sender_source)')
+        conn.execute('INSERT INTO messages VALUES (7, NULL, NULL)')
+        row = dict(dict(stored('P')), store_id=7, timestamp='clock', ingested_at=123., token_estimate=1)
+        store = SimpleNamespace(_conn=conn, get_session_messages=lambda _: [row])
+        before = canonical_rows(SimpleNamespace(_store=store))
+        row.update(timestamp='later', ingested_at=456.)
+        assert canonical_rows(SimpleNamespace(_store=store)) == before
+        for key in ('store_id', 'token_estimate'):
+            row[key] += 1
+            conn.execute('UPDATE messages SET store_id = ?', (row['store_id'],))
+            assert canonical_rows(SimpleNamespace(_store=store)) != before
+            row[key] -= 1
+            conn.execute('UPDATE messages SET store_id = ?', (row['store_id'],))
 
 
 def stored(text, bindings=(), **fields):
