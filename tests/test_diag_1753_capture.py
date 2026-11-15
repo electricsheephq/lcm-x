@@ -70,7 +70,8 @@ def inject(request, monkeypatch):
         if mode in {"empty", "missing"}:
             final = [e for e in events if e["kind"] == "append_return"][-1]
             # A retry after the probe's own commit can return later ids than 9 and 10 (#2756).
-            assert (final["returned_ids"] == []) if mode == "empty" else bool(final["returned_ids"])
+            # The gamma batch stores exactly two rows, on every attempt.
+            assert (final["returned_ids"] == []) if mode == "empty" else len(final["returned_ids"]) == 2
             for kind in ("same_reader", "fresh_reader"):
                 rows = next(e["rows"] for e in events if e["kind"] == kind)
                 assert [r[0] for r in rows] == list(range(1, 9))
