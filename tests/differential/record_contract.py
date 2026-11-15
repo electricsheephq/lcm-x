@@ -270,14 +270,18 @@ def judge(observations, entries):
             return matches(row, span=True) and all(row.get(field) == baseline.get(field)
                 for field in ('store_id', 'session_id', 'role', 'content'))
         found = [row for row in observations['hits'] if matches(row, span=True)]
-        record_expansions = [hit['expanded'] for hit in observations['hits']
-                             if hit['expanded']['kind'] == 'record'
-                             and (hit['expanded'].get('owner_store_id'), hit['expanded'].get('ordinal')) == key]
+        record_hits = [hit for hit in observations['hits']
+                       if any(row['kind'] == 'record'
+                              and (row.get('owner_store_id'), row.get('ordinal')) == key
+                              for row in (hit, hit['expanded']))]
         retrieved = (any(exact(r['expanded']) for r in pages if matches(r) and 'expanded' in r)
                      if not expected['content'].strip() else bool(found) and all(
                          exact(r['expanded'], superseded_by=witness.get(key[0]))
                          if r['expanded']['kind'] == 'record' else witness_matches(r['expanded']) for r in found))
-        retrieved = retrieved and all(exact(r, superseded_by=witness.get(key[0])) for r in record_expansions)
+        retrieved = retrieved and all(
+            (r['expanded'].get('owner_store_id'), r['expanded'].get('ordinal')) == key
+            and exact(r['expanded'], superseded_by=witness.get(key[0]))
+            if r['expanded']['kind'] == 'record' else witness_matches(r['expanded']) for r in record_hits)
         listing_exact = all(exact(r['expanded']) for r in pages if matches(r))
         if sum(matches(row, span=True) for row in pages) != 1 or not retrieved or not listing_exact:
             failures.append((entry['capture_view'], entry['predecessor_ordinal'], expected['content']))

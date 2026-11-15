@@ -245,6 +245,32 @@ def test_record_hit_expanding_to_witness():
     assert judge(observed, entries) == []
 
 
+@pytest.mark.parametrize('witness_first', [False, True])
+@pytest.mark.parametrize('expansion', ['owner', 'sibling'])
+def test_snippet_record_hit_wrong_expansion_fails_beside_correct_witness(expansion, witness_first):
+    observed, entries = observation([row(2, 'needle\n\nreply')], witness=True)
+    record_hit = dict(observed['hits'][0], content='needle snippet')
+    expanded = (dict(row(1, 'reply'), kind='canonical') if expansion == 'owner'
+                else dict(record_hit['expanded'], ordinal=1))
+    reference = dict(tool='lcm_expand', args=dict(store_id=1) if expansion == 'owner'
+                     else dict(queued_user_ref=[1, 1]))
+    bad_hit = dict(record_hit, reference=reference, expanded=expanded)
+    witness = dict(row(2, 'needle\n\nreply'), kind='canonical')
+    witness_hit = dict(witness, reference=dict(tool='lcm_expand', args=dict(store_id=2)), expanded=witness)
+    observed['hits'] = [witness_hit, bad_hit] if witness_first else [bad_hit, witness_hit]
+    assert judge(observed, entries) == [(0, 0, 'needle')]
+
+
+@pytest.mark.parametrize('witness_first', [False, True])
+def test_exact_record_hit_beside_correct_witness(witness_first):
+    observed, entries = observation([row(2, 'needle\n\nreply')], witness=True)
+    record_hit = observed['hits'][0]
+    witness = dict(row(2, 'needle\n\nreply'), kind='canonical')
+    witness_hit = dict(witness, reference=dict(tool='lcm_expand', args=dict(store_id=2)), expanded=witness)
+    observed['hits'] = [witness_hit, record_hit] if witness_first else [record_hit, witness_hit]
+    assert judge(observed, entries) == []
+
+
 def test_witness_precedes_overlap():
     observed, entries = observation([row(2, 'needle\n\nreply')], witness=True)
     assert judge(observed, entries) == []
