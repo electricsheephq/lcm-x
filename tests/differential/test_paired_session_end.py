@@ -473,6 +473,26 @@ def test_fake_candidates_intended(monkeypatch, key, kind, reason, record_propert
         judge(main, candidate, 'retry-1', case='cell', mode='instant')
 
 
+@pytest.mark.parametrize('table, remaining, reason', (
+    ('message_relations', 0, 'tables lost rows in message_relations'),
+    ('summaries', 1, 'tables lost rows in summaries'),
+    ('ingest_views', 0, None), ('summaries', 3, None)),
+    ids=('relations-drop-all', 'summaries-drop-one', 'views-prune', 'summaries-add'))
+def test_fake_candidates_intended_tables(monkeypatch, table, remaining, reason, record_property):
+    main = {name: {} for name in ('canonical', 'schema', 'tables', 'payload', 'pending', 'ledger', 'lifecycle')}
+    rows = [(1, 'A'), (2, 'B'), (3, 'C')]
+    main['tables'] = {'lcm.db': {table: (('id', 'text'), rows[:2])}}
+    candidate = dict(main, tables={'lcm.db': {table: (('id', 'text'), rows[:remaining])}})
+    monkeypatch.setattr(session_end_contract, 'INTENDED_DIFFERENCES',
+                        [('cell', '*', 'retry-1', 'tables', '#2543')])
+    if reason:
+        with pytest.raises(AssertionError, match=reason) as caught:
+            judge(main, candidate, 'retry-1', case='cell', mode='instant')
+        record_property('failure', str(caught.value))
+    else:
+        judge(main, candidate, 'retry-1', case='cell', mode='instant')
+
+
 def _seam_probe(engine, canonical=False):
     if canonical:
         engine._store._conn.execute("UPDATE messages SET content='slow canonical work' WHERE store_id=1")

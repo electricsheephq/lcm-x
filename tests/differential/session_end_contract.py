@@ -19,7 +19,7 @@ import time
 from types import SimpleNamespace
 
 from .session import assert_faults, audit_fault, freeze
-from .session_end_expected import FAULTS, INTENDED_DIFFERENCES, ROUTES
+from .session_end_expected import FAULTS, INTENDED_DIFFERENCES, ROUTES, SHRINKING_TABLES
 
 # Local copies keep this gate independent of the historical pin modules.
 FULL_OUTPUT = "SPILLOVER_RECOVERY_NEEDLE:\n" + ("é文abcdef\n" * 600)
@@ -280,6 +280,12 @@ def judge(main, candidate, stage, *, case=None, mode=None, seen=None):
                     remaining = iter(ordered.get(group, ()))
                     assert all(any(row == value for value in remaining) for row in rows), \
                         f'{stage}: {key} reordered stored row'
+            if key == 'tables':
+                for path, tables in main[key].items():
+                    for table, (_, rows) in tables.items():
+                        if table != 'messages' and table not in SHRINKING_TABLES:
+                            after_rows = candidate[key].get(path, {}).get(table, ((), ()))[1]
+                            assert len(after_rows) >= len(rows), f'{stage}: tables lost rows in {table}'
             if seen is not None:
                 seen.update(entries)
         else:
