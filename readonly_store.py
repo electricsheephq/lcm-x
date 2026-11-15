@@ -22,7 +22,7 @@ import os
 import sqlite3
 import threading
 import time
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -328,6 +328,7 @@ class ReadOnlyMessageStore(_CloseWithoutCheckpoint, MessageStore):
         self._stem_usable = bool(stem_usable)
         self._fts_usable = bool(fts_usable)
         self._last_fts_index = "plain"
+        self.ingest_prelock_counts, self._ingest_prelock_state = Counter(), None  # #2293 stock fields (never ingests)
 
     def _search_fts(self, query: str, session_id: str | None = None, limit: int = 20,
                     sort: str | None = None, source: str | None = None,

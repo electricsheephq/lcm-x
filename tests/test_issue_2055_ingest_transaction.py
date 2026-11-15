@@ -302,7 +302,10 @@ def test_begin_precedes_classification_and_reads_see_own_evidence(ingest_case, m
     finally:
         store._conn.set_trace_callback(None)
     assert observed == [True]
-    assert trace[0] == "BEGIN IMMEDIATE"
+    # #2293 M5: BEGIN IMMEDIATE moves from the attempt's start to its first write (here the prefix backfill), which
+    # still precedes the pre-match, so the pre-match reads see the attempt's own evidence inside its transaction.
+    begin = trace.index("BEGIN IMMEDIATE")
+    assert not any(sql.lstrip().upper().startswith(("INSERT", "UPDATE", "DELETE", "REPLACE")) for sql in trace[:begin])
     assert [sql for sql in trace if sql in ("BEGIN IMMEDIATE", "COMMIT")] == ["BEGIN IMMEDIATE", "COMMIT"]
     assert [row["content"] for row in store.get_session_messages("S")] == ["seed", "seed reply", "fresh"]
     assert engine._last_ingest_attribution["rows_written"] == 1
@@ -529,7 +532,9 @@ def test_ingest_ends_only_unowned_transactions(ingest_case, owned, shape):
                 assert replay_fields(engine._ingest_messages(host)) == replay_fields(host)
         finally:
             store._conn.set_trace_callback(None)
-        assert ("COMMIT" not in trace) if owned else (trace[0] == "COMMIT" and trace[1] == "BEGIN IMMEDIATE")
+        # #2293 M5: the unowned transaction still ends first; BEGIN IMMEDIATE now comes at the attempt's first write.
+        assert ("COMMIT" not in trace) if owned else (
+            trace[0] == "COMMIT" and "BEGIN IMMEDIATE" in trace and "COMMIT" not in trace[1:trace.index("BEGIN IMMEDIATE")])
         with sqlite3.connect(store.db_path) as reader:
             assert reader.execute("SELECT COUNT(*) FROM messages WHERE content='fresh'").fetchone()[0] == int(not owned)
             if shape == "write":
@@ -773,13 +778,16 @@ def test_session_end_classifies_read_only_and_freezes_once(ingest_case, monkeypa
     assert [row["content"] for row in engine._store.get_session_messages("S")] == ["seed", "seed reply", "fresh"]
 
 
-def test_session_end_read_only_shadow_keeps_tally_in_memory(ingest_case, monkeypatch, caplog):
+@pytest.mark.parametrize("prelock", [False, True], ids=["eager", "lazy"])
+def test_session_end_read_only_shadow_keeps_tally_in_memory(ingest_case, monkeypatch, caplog, prelock):
     from hermes_lcm.host_uid import HOST_UID_COUNTER_KEY
 
     engine, _seed, host = ingest_case
+    monkeypatch.setattr(engine._store, "_ingest_prelock", prelock)
     host = host[:2]  # An already stored view reaches shadow counting without appending a tail.
     engine.ingest(host)
     store = engine._store
+    counters_before = dict(engine._host_uid_counters)
     before = store.read_metadata_json(HOST_UID_COUNTER_KEY)
     assert before is not None
     classify, count = engine._ingest_messages_transaction, engine._host_uid_count
@@ -821,7 +829,13 @@ def test_session_end_read_only_shadow_keeps_tally_in_memory(ingest_case, monkeyp
         store._conn.set_trace_callback(None)
         locker.rollback()
         locker.close()
-    assert fallback == [True] and len(counted) == 1
+    if not store._ingest_prelock:
+        assert fallback == [True] and len(counted) == 1
+    else:
+        # #2293: an already stored view needs no write, so the lazy attempt never meets the held lock and never
+        # falls back; nothing below may differ from the eager shadow's outcome.
+        assert fallback == [] and counted == []
+        counted = [({}, {}, {})]
     delta, previous, current = counted[0]
     assert delta.get("errors", 0) == 0
     assert current.get("errors", 0) == previous.get("errors", 0)
@@ -830,6 +844,7 @@ def test_session_end_read_only_shadow_keeps_tally_in_memory(ingest_case, monkeyp
     assert store.read_metadata_json(HOST_UID_COUNTER_KEY) == before
     assert engine._pending_session_tails == []
     assert [row["content"] for row in store.get_session_messages("S")] == ["seed", "seed reply"]
+    assert dict(engine._host_uid_counters) == counters_before  # the same in both modes
 
 
 def test_read_only_backfill_plan_falls_back_to_anchor_disabled_tail(ingest_case, monkeypatch):

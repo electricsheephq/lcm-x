@@ -199,6 +199,7 @@ class PlaceholderLedgerMixin:
         try:
             payload = json.dumps(ordered_hashes)
             with self._ingest_evidence():
+                self._store._sync_ingest_prelock()
                 self._store.write_metadata_json(keys, payload)
         except Exception as exc:
             self._raise_ingest_busy(exc)
@@ -261,8 +262,10 @@ class PlaceholderLedgerMixin:
             # skip_unchanged avoids the fsync commit (under synchronous=FULL) when
             # the stored value already matches; this runs on every ingest.
             with self._ingest_evidence():
+                self._store._sync_ingest_prelock()
                 self._store.write_metadata_json(count_keys, serialized, skip_unchanged=True)
         except Exception as exc:
+            self._store._ingest_prelock_write_failed(exc)
             self._raise_ingest_busy(exc)
             logger.debug("LCM ignored placeholder count metadata write failed", exc_info=True)
 
@@ -324,8 +327,10 @@ class PlaceholderLedgerMixin:
             # Skip the write (and its fsync commit) when unchanged; see the counts
             # writer above for rationale.
             with self._ingest_evidence():
+                self._store._sync_ingest_prelock()
                 self._store.write_metadata_json(ordinal_keys, serialized, skip_unchanged=True)
         except Exception as exc:
+            self._store._ingest_prelock_write_failed(exc)
             self._raise_ingest_busy(exc)
             logger.debug("LCM ignored placeholder ordinal metadata write failed", exc_info=True)
 
@@ -503,7 +508,8 @@ class PlaceholderLedgerMixin:
         try:
             payload = json.dumps(normalized)
             self._store.write_metadata_json(keys, payload)
-        except Exception:
+        except Exception as exc:
+            self._store._ingest_prelock_write_failed(exc)
             logger.debug("LCM ignored-dependent reply metadata write failed", exc_info=True)
 
     def _load_generated_ignored_dependent_reply_hashes(self) -> set[str]:
