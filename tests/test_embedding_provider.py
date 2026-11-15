@@ -1046,16 +1046,39 @@ def test_document_dispatch_callback_runs_once_per_actual_request(monkeypatch):
     assert len(transport.calls) == 2
 
 
+class _ControlledClock:
+    """The provider module's clock, advanced only by the test.
+
+    A real 10 ms budget can expire during document preprocessing on a loaded
+    runner (a worker thread and its slot), before the dispatch callback the
+    test is about. The deadline then moves only when the callback advances it.
+    """
+
+    def __init__(self, monkeypatch):
+        self.now = 1000.0
+        monkeypatch.setattr(provider_mod, "time", self)
+
+    def monotonic(self):
+        return self.now
+
+    def advance(self, seconds):
+        self.now += seconds
+
+    def __getattr__(self, name):
+        return getattr(time, name)
+
+
 def test_voyage_rechecks_deadline_after_dispatch_callback(monkeypatch):
     monkeypatch.setenv("VOYAGE_API_KEY", "test-key")
     monkeypatch.setattr(provider_mod, "count_tokens", lambda _text: 1)
     transport = FakeTransport(_voyage_success(1))
-    provider = VoyageProvider("voyage-test", transport=transport, timeout=0.01)
+    clock = _ControlledClock(monkeypatch)
+    provider = VoyageProvider("voyage-test", transport=transport, timeout=5.0)
     dispatched: list[tuple[int, ...]] = []
 
     def slow_dispatch(indexes):
         dispatched.append(indexes)
-        time.sleep(0.03)
+        clock.advance(10.0)
 
     with pytest.raises(ProviderPreDispatchError) as exc_info:
         list(
@@ -1069,12 +1092,13 @@ def test_voyage_rechecks_deadline_after_dispatch_callback(monkeypatch):
     assert transport.calls == []
 
 
-def test_ollama_rechecks_deadline_after_dispatch_callback():
+def test_ollama_rechecks_deadline_after_dispatch_callback(monkeypatch):
     transport = FakeTransport(_response(200, {"embeddings": [[1.0, 0.0]]}))
-    provider = OllamaProvider("model", transport=transport, timeout=0.01)
+    clock = _ControlledClock(monkeypatch)
+    provider = OllamaProvider("model", transport=transport, timeout=5.0)
 
     def slow_dispatch(_indexes):
-        time.sleep(0.03)
+        clock.advance(10.0)
 
     with pytest.raises(ProviderPreDispatchError):
         list(
