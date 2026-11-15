@@ -517,6 +517,7 @@ def test_retained_cli_reset_starts_a_new_lane_in_the_current_registration(prefli
         pytest.param("cli", None, {}, "busy-at-hook", True, id="busy-at-hook"),
         pytest.param("cli", None, {}, "preexisting", False, id="preexisting-target"),
         pytest.param("cli", None, {}, "busy-preexisting", False, id="unknown-preexisting-target"),
+        pytest.param("cli", None, {}, "busy-same-tick", False, id="unknown-preexisting-same-tick"),
         pytest.param("cli", None, {}, "foreign-hook", False, id="wrong-profile"),
         pytest.param("cli", None, {}, "superseded", False, id="superseded-target"),
     ],
@@ -550,14 +551,19 @@ def test_retained_empty_cli_reset_requires_exact_host_confirmation(
 
             with native:
                 native.execute("DELETE FROM sessions WHERE id = 'empty'")
-            preexisting = native_timing in ("preexisting", "busy-preexisting")
+            nomination_time = time.time()
+            same_tick = native_timing == "busy-same-tick"
+            preexisting = native_timing in ("preexisting", "busy-preexisting") or same_tick
             if preexisting:
-                create_replacement(time.time() - 60)
+                create_replacement(nomination_time if same_tick else nomination_time - 60)
             retained.on_session_reset()
             with native:
-                if native_timing in ("busy-at-bind", "busy-preexisting"):
+                if native_timing in ("busy-at-bind", "busy-preexisting") or same_tick:
                     native.execute("BEGIN EXCLUSIVE")
-                retained.bind_session_state(SimpleNamespace(db_path=host_path), "fresh")
+                with monkeypatch.context() as bind_context:
+                    if same_tick:
+                        bind_context.setattr(time, "time", lambda: nomination_time)
+                    retained.bind_session_state(SimpleNamespace(db_path=host_path), "fresh")
             if not preexisting and native_timing != "delayed":
                 create_replacement(time.time())
             db = preflight.home / "lcm.db"

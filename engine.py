@@ -5565,7 +5565,7 @@ class LCMEngine(
                 # establish that this was not a preexisting session.
                 started_at = new["started_at"]
                 was_absent = (isinstance(started_at, (int, float))
-                              and started_at >= self._retired_cli_reset_nominated_at)
+                              and started_at > self._retired_cli_reset_nominated_at)
             return was_absent and self._empty_retired_cli_binding_is_proven(retired)
 
     def _ingest_reload_lane(self, session_id, conversation_id, messages, platform):
