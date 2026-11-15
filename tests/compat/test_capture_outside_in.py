@@ -1,0 +1,232 @@
+"""Synthetic outside-in capture proofs: hook -> worker CLI -> contract SQL checker."""
+import ast
+from contextlib import closing
+import fcntl
+import json
+import os
+from pathlib import Path
+import sqlite3
+import subprocess
+import sys
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[2]
+CHECKER = ROOT / "scripts/capture_outside_in.py"
+CAPTURE = ROOT / "scripts/lcm_x_capture.py"
+FIXTURES = sorted((ROOT / "tests/fixtures/capture_sessions").glob("*.jsonl"))
+
+
+def run(script, *args, env, payload=None, accepted=(0,)):
+    done = subprocess.run([sys.executable, "-I", "-S", str(script), *map(str, args)],
+                          input=payload, env=env, capture_output=True, text=True, timeout=30)
+    assert done.returncode in accepted, {"exit": done.returncode}
+    return done
+
+
+def hook(home, env, session, path, event="SessionStart", **extra):
+    # A real holder prevents detached workers; the explicit CLI invocation owns the drain.
+    with (home / "capture.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        run(ROOT / "adapters/claude-code/bin/lcmx_hook.py", env=env, payload=json.dumps({
+            "hook_event_name": event, "session_id": session, "transcript_path": str(path), **extra}))
+    assert list((home / "spool").glob("*.json"))
+
+
+def read_sql(home, sql):
+    with closing(sqlite3.connect((home / "lcm.db").as_uri() + "?mode=ro", uri=True)) as conn:
+        return conn.execute(sql).fetchall()
+
+
+def capture_session(base, fixture):
+    home = base / "store"
+    home.mkdir(parents=True)
+    env = {"PATH": os.defpath, "HOME": str(base / "user"), "HERMES_HOME": str(base / "hermes"),
+           "CLAUDE_CONFIG_DIR": str(base / "claude"), "LCMX_CC_HOME": str(home),
+           "LCMX_PYTHON": sys.executable, "LCMX_PACKAGE_ROOT": str(ROOT)}
+    rows = [json.loads(line) for line in fixture.read_text().splitlines()]
+    sessions = {}
+    for row in rows:
+        session = row["sessionId"] + ("/agent:" + row["agentId"] if row.get("agentId") else "")
+        sessions.setdefault(session, []).append(row)
+    inputs = []
+    for session, entries in sessions.items():
+        parent, _, agent = session.partition("/agent:")
+        folder = base / "claude/projects/synthetic"
+        path = folder / parent / "subagents" / f"agent-{agent}.jsonl" if agent else folder / f"{parent}.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        inputs.append((session, path))
+        split = {"02": len(entries) - 1, "03": 1, "05": 4, "09": 2}.get(fixture.stem[:2], len(entries))
+        path.write_text("".join(json.dumps(row) + "\n" for row in entries[:split]))
+        if not agent:
+            hook(home, env, parent, path, "SessionStart",
+                 **({"source": "fork"} if parent.startswith("fork-") else {}))
+            run(CAPTURE, "worker", "--home", home, env=env)
+        if split < len(entries):
+            before = read_sql(home, "SELECT count(*) FROM messages")[0][0]
+            with path.open("a") as handle:
+                handle.write("".join(json.dumps(row) + "\n" for row in entries[split:]))
+            hook(home, env, parent, path, "SessionStart", source="resume")
+            run(CAPTURE, "worker", "--home", home, env=env)
+            if fixture.stem.startswith("02"):
+                assert read_sql(home, "SELECT count(*) FROM messages")[0][0] == before
+    # The public worker sweep discovers subagent transcripts after the parent was registered.
+    run(CAPTURE, "worker", "--home", home, env=env)
+    return home, env, inputs
+
+
+def verdict(home, env, inputs):
+    args = [arg for session, path in inputs for arg in ("--transcript", f"{session}={path}")]
+    checked = run(CHECKER, "--home", home, *args, env=env, accepted=(0, 1))
+    audited = run(CAPTURE, "audit", "--home", home, env=env, accepted=(0, 1))
+    return checked, json.loads(checked.stdout), json.loads(audited.stdout)
+
+
+@pytest.fixture(scope="module")
+def clean(tmp_path_factory):
+    return capture_session(tmp_path_factory.mktemp("outside-in-clean"), FIXTURES[0])
+
+
+@pytest.mark.parametrize("fixture", FIXTURES, ids=lambda p: p.stem)
+def test_fixture(tmp_path_factory, fixture, record_property):
+    home, env, inputs = capture_session(tmp_path_factory.mktemp(fixture.stem), fixture)
+    checked, report, audit = verdict(home, env, inputs)
+    record_property("checker", checked.stdout)
+    record_property("audit", json.dumps(audit, sort_keys=True))
+    record_property("home", str(home))
+    assert report["pass"] == audit["ok"], "STOP: clean fixture disagreement; both outputs recorded in JUnit"
+    assert checked.returncode == 0 and audit["ok"] and audit["verified"]
+    assert {r["lineage"] for r in report["lineages"]} == {r["lineage"] for r in audit["lineages"]}
+    assert all(r["pass"] for r in report["lineages"])
+    if fixture.stem.startswith("06"):
+        assert read_sql(home, "SELECT count(*) FROM message_relations WHERE kind='fork_copy_of'")[0][0] == 4
+        assert dict(read_sql(home, "SELECT child_session_id,parent_session_id FROM session_lineage")) == {
+            "fork-a": "parent", "fork-b": "parent"}
+    if fixture.stem.startswith("08"):
+        assert read_sql(home, "SELECT child_session_id,parent_session_id FROM session_lineage") == [
+            ("subparent/agent:child", "subparent")]
+    if fixture.stem.startswith("09"):
+        assert read_sql(home, "SELECT related_store_id,store_id FROM message_relations WHERE kind='supersedes'") == [(1, 3)]
+        assert read_sql(home, "SELECT store_id FROM messages WHERE role='tool'") == [(2,)]
+
+
+def test_generated_batch(tmp_path_factory, record_property):
+    base = tmp_path_factory.mktemp("generated-batch")
+    fixture = base / "batch.jsonl"
+    run(ROOT / "tests/fixtures/capture_sessions/generate_batch.py", fixture, env={"PATH": os.defpath})
+    home, env, inputs = capture_session(base, fixture)
+    checked, report, audit = verdict(home, env, inputs)
+    record_property("checker", checked.stdout)
+    record_property("audit", json.dumps(audit, sort_keys=True))
+    assert report["pass"] == audit["ok"], "STOP: clean batch disagreement; outputs recorded in JUnit"
+    assert checked.returncode == 0 and audit["ok"] and audit["verified"]
+
+
+@pytest.mark.parametrize("mutant, expected, audit_asserted", [
+    ("loss", (1, 0, True, 0), True), ("duplicate", (0, 1, True, 0), True),
+    ("reorder", (0, 0, False, 0), False), ("tool", (1, 0, True, 1), True),
+    ("double-binding", (0, 1, True, 0), True), ("same-uid-twice", (0, 1, True, 0), False),
+    ("fork-rebound", (1, 1, True, 0), True), ("moved-binding", (1, 2, True, 0), False),
+    ("cross-lineage", (0, 1, True, 0), False), ("stray-lineage", (0, 1, True, 0), False),
+])
+def test_mutants(clean, tmp_path_factory, mutant, expected, audit_asserted, record_property):
+    source, env, inputs = clean
+    base = tmp_path_factory.mktemp("mutant-" + mutant)
+    if mutant == "double-binding":
+        fixture = base / "same-text.jsonl"
+        fixture.write_text("".join(json.dumps(dict(type="user", uuid=uid, sessionId="same-text",
+                           message=dict(role="user", content=text))) + "\n"
+                           for uid, text in [("u1", "ok"), ("u2", "ok"), ("u3", "done")]))
+        source, env, inputs = capture_session(base / "source", fixture)
+    if mutant in {"cross-lineage", "fork-rebound"}:
+        source, env, inputs = capture_session(base / "source", FIXTURES[4])
+    home = base / "store"
+    home.mkdir()
+    with closing(sqlite3.connect((source / "lcm.db").as_uri() + "?mode=ro", uri=True)) as src, \
+            closing(sqlite3.connect(home / "lcm.db")) as dst:
+        src.backup(dst)  # One database snapshot, no copied store/home trees.
+    with closing(sqlite3.connect(home / "lcm.db")) as conn, conn:
+        if mutant in {"loss", "tool"}:
+            row_id = conn.execute("SELECT store_id FROM messages WHERE role=? LIMIT 1",
+                                  ("user" if mutant == "loss" else "tool",)).fetchone()[0]
+            conn.execute("DELETE FROM host_uid_bindings WHERE store_id=?", (row_id,))
+            conn.execute("DELETE FROM messages WHERE store_id=?", (row_id,))
+        elif mutant == "duplicate":
+            columns = [r[1] for r in conn.execute("PRAGMA table_info(messages)") if r[1] != "store_id"]
+            names = ",".join(columns)
+            new = conn.execute(f"INSERT INTO messages({names}) SELECT {names} FROM messages WHERE store_id=1").lastrowid
+            conn.execute("INSERT INTO host_uid_bindings(store_id,uid,lineage_key,kind,binding_version) "
+                         "SELECT ?,uid,lineage_key,'version',binding_version FROM host_uid_bindings WHERE store_id=1", (new,))
+        elif mutant == "double-binding":
+            conn.execute("DELETE FROM host_uid_bindings WHERE store_id=2")
+            conn.execute("DELETE FROM messages WHERE store_id=2")
+            conn.execute("INSERT INTO host_uid_bindings(store_id,uid,lineage_key,kind,binding_version) "
+                         "VALUES(1,'u2','claude-code:same-text','version',1)")
+        elif mutant in {"same-uid-twice", "cross-lineage", "stray-lineage"}:
+            lineage = {"cross-lineage": "claude-code:fork-a", "stray-lineage": "claude-code:zzz"}.get(mutant)
+            conn.execute("INSERT INTO host_uid_bindings(store_id,uid,lineage_key,kind,binding_version) "
+                         "SELECT store_id,uid,COALESCE(?,lineage_key),'version',binding_version "
+                         "FROM host_uid_bindings WHERE store_id=1", (lineage,))
+        elif mutant == "fork-rebound":
+            conn.execute("DELETE FROM messages WHERE store_id=3")
+            conn.execute("UPDATE host_uid_bindings SET store_id=1 WHERE store_id=3")
+        elif mutant == "moved-binding":
+            conn.execute("UPDATE host_uid_bindings SET lineage_key='claude-code:zzz' WHERE store_id=1")
+        else:
+            # Move identities with rows, so only chronology changes; ledger references remain stale.
+            for table in ("messages", "host_uid_bindings"):
+                conn.execute(f"UPDATE {table} SET store_id=-store_id WHERE store_id IN (1,2)")
+                conn.execute(f"UPDATE {table} SET store_id=CASE store_id WHEN -1 THEN 2 ELSE 1 END WHERE store_id<0")
+    checked, report, audit = verdict(home, env, inputs)
+    record_property("checker", checked.stdout)
+    record_property("audit", json.dumps(audit, sort_keys=True))
+    record_property("home", str(home))
+    assert checked.returncode == 1 and not report["pass"]
+    observed = (sum(r["lost"] for r in report["lineages"]), sum(r["duplicated"] for r in report["lineages"]),
+                all(r["order_kept"] for r in report["lineages"]), sum(r["unpaired"] for r in report["lineages"]))
+    record_property("expectation", json.dumps(expected))
+    record_property("audit_asserted", json.dumps(audit_asserted))
+    assert observed == expected
+    for row in report["lineages"]:
+        assert len(row["store_ids"]) == len(set(row["store_ids"])) == row["actual"]
+        own_expected = expected
+        if mutant in {"cross-lineage", "fork-rebound"}:
+            own_expected = {"claude-code:parent": (0, 1, True, 0),
+                            "claude-code:fork-a": (int(mutant == "fork-rebound"), 0, True, 0)}.get(
+                                row["lineage"], (0, 0, True, 0))
+        assert (row["lost"], row["duplicated"], row["order_kept"], row["unpaired"]) == own_expected
+    if audit_asserted:
+        assert not audit["ok"]
+
+
+def test_reader_stdio(clean):
+    home, env, _ = clean
+    requests = [dict(jsonrpc="2.0", id=1, method="initialize", params={
+        "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "outside-in", "version": "1"}}),
+        dict(jsonrpc="2.0", method="notifications/initialized", params={}),
+        dict(jsonrpc="2.0", id=2, method="tools/call", params={
+            "name": "lcm_grep", "arguments": {"query": "synthetic amber compass beacon", "mode": "full_text"}})]
+    done = run(ROOT / "scripts/lcm_x_mcp.py", "--store", home / "lcm.db", "--hermes-home", home,
+               env=env, payload="".join(json.dumps(r) + "\n" for r in requests))
+    replies = [json.loads(line) for line in done.stdout.splitlines()]
+    assert [r["id"] for r in replies] == [1, 2] and all("error" not in r for r in replies)
+    found = json.loads(replies[1]["result"]["content"][0]["text"])
+    assert any("synthetic amber compass beacon" in r.get("snippet", "").replace(">>>", "").replace("<<<", "")
+               for r in found["results"])
+
+
+def test_stdlib_import_boundary():
+    tree = ast.parse(CHECKER.read_text())
+    imports = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imports.extend(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            assert node.level == 0
+            assert not any(alias.name in {"import_module", "__import__", "eval", "exec"} for alias in node.names)
+            imports.append(node.module.split(".")[0])
+        elif isinstance(node, ast.Call):
+            assert not (isinstance(node.func, ast.Name) and node.func.id in {"__import__", "eval", "exec"})
+            assert not (isinstance(node.func, ast.Attribute)
+                        and node.func.attr in {"import_module", "__import__"})
+    assert imports and set(imports) <= sys.stdlib_module_names

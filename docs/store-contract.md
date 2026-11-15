@@ -86,6 +86,8 @@ Preserve one stored row per host occurrence per lineage ([I1](invariants.md), wi
 The SHA-256 covers UTF-8 canonical JSON (`sort_keys=True`, compact separators, `ensure_ascii=False`): sorted tables with their ordered PRAGMA table_info rows and sorted index names, callables keyed by sorted module-qualified name with annotation-free signatures, and SCHEMA_VERSION. A fresh isolated store enables the contracted named features before inspection; no stored user content is hashed.
 Run `tests/compat/test_store_contract.py`. For a surface change, raise the contract version by exactly one, refresh the digest and add a dated changelog row with that digest and a one-line reason. An unchanged digest keeps the same version. `scripts/store_contract_gate.py --base-ref <ref>` checks that discipline against the PR base; introduction without a base doc requires version 1.
 
+[Outside-in capture checker](../scripts/capture_outside_in.py) compares explicit transcripts with read-only contracted message rows; its synthetic proofs live in [the capture compatibility tests](../tests/compat/test_capture_outside_in.py).
+
 ## Changelog
 
 | Version | Digest | Date | Reason |

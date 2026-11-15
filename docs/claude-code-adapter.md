@@ -727,6 +727,8 @@ duplicates or surplus, with `fork_parent_unknown`; spool records set aside as `.
 measured: hook wall time (target p95 at most 50 ms on `PostToolBatch`; see the run record below), lag from transcript line to
 committed row, and store growth (the growth gate above).
 
+An independent row checker, [`scripts/capture_outside_in.py`](../scripts/capture_outside_in.py), accepts `--home <store-home>` and repeated `--transcript SESSION=PATH` arguments in capture order (subagents use `SESSION/agent:ID`). It reads only explicit transcripts and the [store contract](store-contract.md) over `mode=ro`, checking loss, duplication, order and exact tool pairing per lineage. Its synthetic sessions exercise the hook and worker CLI (deterministic mid-batch kill coverage remains unproven); it does not replace the audit gate or verify raw-only ledger entries and payload files.
+
 **Each run's record**, which is also evidence for #2141:
 - the backend;
 - the audit's `ok` and `verified`, and every failure counter;
