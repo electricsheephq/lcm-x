@@ -9,9 +9,11 @@ formatting, and the store/dag/lifecycle connection handling lives in one place.
 
 from __future__ import annotations
 
-from contextlib import closing, nullcontext, suppress
+from contextlib import closing, contextmanager, nullcontext, suppress
 from datetime import datetime
 from pathlib import Path
+import errno
+import logging
 import os
 import sqlite3
 from typing import Any
@@ -146,7 +148,29 @@ def rotate_backup_database(engine) -> dict[str, Any]:
     }
 
 
+@contextmanager
+def _backup_folder_lock(folder):
+    with os.fdopen(os.open(folder / ".lcm-backup.lock", os.O_CREAT | os.O_RDWR, 0o600), "r+b") as lock:
+        try:
+            import fcntl
+        except ImportError:
+            logging.getLogger(__name__).warning("Backup locks unavailable; continuing unlocked")
+        else:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as exc:
+                if exc.errno in (errno.EWOULDBLOCK, errno.EAGAIN):
+                    raise OSError("another LCM-X backup in this folder is running") from exc
+                logging.getLogger(__name__).warning("Backup lock failed; continuing unlocked: %s", exc)
+        yield
+
+
 def _backup_pair(store, destination):
+    with _backup_folder_lock(destination.parent):
+        _backup_pair_locked(store, destination)
+
+
+def _backup_pair_locked(store, destination):
     """Publish records first, then atomically replace the complete canonical slot."""
     staging = destination.with_name(destination.name + ".tmp")
     staged_records = Path(str(staging) + ".records")
@@ -161,6 +185,7 @@ def _backup_pair(store, destination):
     # previous is stale. Crashes during cleanup leave that same complete pair.
     # A crash during restart restoration leaves either the recovery file or the
     # restored old pair; clearing other leftovers can then safely be retried.
+    # A failed exception-path restore keeps staging + previous for restart recovery.
     if staging.exists() and previous_records.exists():
         previous_records.replace(target_records)
     leftovers = (staging, staged_records, Path(str(staged_records) + ".tmp"),
@@ -168,6 +193,7 @@ def _backup_pair(store, destination):
     for path in leftovers:
         path.unlink(missing_ok=True)
     published_records = False
+    keep_recovery = False
     try:
         with closing(sqlite3.connect(str(staging))) as dest:
             store.backup(dest)
@@ -184,13 +210,19 @@ def _backup_pair(store, destination):
         else:
             target_records.unlink(missing_ok=True)
         staging.replace(destination)
-    except BaseException:
-        if previous_records.exists():
-            previous_records.replace(target_records)
-        elif published_records:
-            target_records.unlink(missing_ok=True)
+    except BaseException as original:
+        try:
+            if previous_records.exists():
+                previous_records.replace(target_records)
+            elif published_records:
+                target_records.unlink(missing_ok=True)
+        except OSError as restore_error:
+            keep_recovery = True
+            original.add_note(f"Backup restore failed: {restore_error}; recovery files kept at {staging} and {previous_records}")
         raise
     finally:
         for path in leftovers:
+            if keep_recovery and path in (staging, previous_records):
+                continue
             with suppress(OSError):
                 path.unlink(missing_ok=True)

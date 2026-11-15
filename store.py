@@ -575,6 +575,7 @@ class RecordsWriter:
         conn = self.connection
         conn.execute("BEGIN IMMEDIATE")
         try:
+            _check_records_write_format(conn)
             with closing(_records_ro(self.db_path)) as canonical:
                 canonical.execute("BEGIN")
                 self._complete(canonical)
@@ -625,6 +626,7 @@ class RecordsWriter:
         """Explicit maintenance point; also run at every records insert."""
         self.connection.execute("BEGIN IMMEDIATE")
         try:
+            _check_records_write_format(self.connection)
             with closing(_records_ro(self.db_path)) as canonical:
                 canonical.execute("BEGIN")
                 self._complete(canonical)
@@ -635,6 +637,12 @@ class RecordsWriter:
 
     def close(self):
         self.connection.close()
+
+
+def _check_records_write_format(conn):
+    version = conn.execute("PRAGMA user_version").fetchone()[0]
+    if version not in (0, 1):
+        raise RecordsFormatError(version)
 
 
 def open_records_writer(db_path, *, _busy_timeout_ms=0) -> RecordsWriter:
@@ -734,6 +742,7 @@ def _purge_records(conn, sessions_sql, args):
     try:
         side.execute(f"PRAGMA busy_timeout={RECORDS_PURGE_BUSY_MS}")
         side.execute("BEGIN IMMEDIATE")
+        _check_records_write_format(side)
         for table, (_, columns) in _RECORDS_TABLES.items():
             cursor = conn.execute(f"SELECT * FROM messages WHERE session_id IN ({sessions_sql})", args)
             names = [column[0] for column in cursor.description]

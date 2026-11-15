@@ -9,6 +9,7 @@ resolved filename, and retains that identity across retries and profile changes.
 For example, `lcm.db` and `lcm.sqlite3` use different containers. Format 1 uses SQLite
 rollback journaling (`DELETE`), with oldest reader v0.30.2 and no planned removal.
 Newer formats are refused before any DDL or format stamp changes.
+Every records write transaction rechecks the format under its writer reservation before completing intents or changing data.
 
 Writers register their table's DDL in `store.py` through
 `register_records_table(name, ddl, owner_columns)`. The ordered mapping identifies
@@ -42,6 +43,8 @@ caller until #2707's PR-2 wires it.
 Store backups and timestamped/rolling operator backups copy records with SQLite's
 backup API, naming them `<backup filename>.records`. Both copies finish before
 publication; a failed copy preserves the previous pair. Restore the pair together.
+A non-blocking folder lock serializes backups and refuses contention with `another LCM-X backup in this folder is running`.
+If restoring the old records fails, the restart marker and previous records are kept for recovery on the next run.
 Restoring canonical data alone yields no records, or hidden/countable unattached
 records if a newer records file is left beside it. Recorder snapshots and
 checkpoints exclude records and replay canonical messages only.

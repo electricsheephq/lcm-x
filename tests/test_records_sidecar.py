@@ -53,6 +53,47 @@ def counts(writer):
             writer.connection.execute('SELECT count(*) FROM _records_purge_intents').fetchone()[0])
 
 
+@pytest.mark.parametrize('operation', ['insert', 'maintain'])
+def test_retained_writer_refuses_upgraded_format(pair, operation):
+    import json
+    store, writer, values = pair
+    if operation == 'maintain':
+        evidence = json.dumps({key: values[key] for key in COLUMNS}, sort_keys=True)
+        writer.connection.execute('INSERT INTO _records_purge_intents VALUES (?,?,?,?)',
+                                  ('pending', TABLE, values['owner_store_id'], evidence))
+        writer.connection.commit()
+        store.connection.execute('DELETE FROM messages')
+        store.connection.commit()
+    with closing(sqlite3.connect(writer.path)) as newer:
+        newer.execute('PRAGMA user_version=2')
+    before = writer.path.read_bytes()
+    with pytest.raises(sm.RecordsFormatError, match='refused format 2'):
+        writer.insert(TABLE, values) if operation == 'insert' else writer.maintain()
+    assert not writer.connection.in_transaction
+    assert writer.path.read_bytes() == before
+
+
+def test_purge_refuses_format_upgraded_before_intent(pair, monkeypatch):
+    store, writer, _ = pair
+    canonical = store.get_session_messages('S')
+    original = sm.open_records_writer
+    snapshots = []
+
+    def upgrade(*args, **kwargs):
+        retained = original(*args, **kwargs)
+        with closing(sqlite3.connect(retained.path)) as newer:
+            newer.execute('PRAGMA user_version=2')
+        snapshots.append(retained.path.read_bytes())
+        return retained
+
+    monkeypatch.setattr(sm, 'open_records_writer', upgrade)
+    with pytest.raises(sm.RecordsFormatError, match='refused format 2'):
+        store.delete_session_messages('S')
+    assert store.get_session_messages('S') == canonical
+    assert len(snapshots) == 1
+    assert writer.path.read_bytes() == snapshots[0]
+
+
 def test_store_never_creates_records(tmp_path):
     store = sm.MessageStore(tmp_path / 'lcm.db')
     try:
@@ -947,3 +988,160 @@ def test_zero_byte_records_read_cut_and_backup_succeed(tmp_path):
         assert path.stat().st_size == 0
     finally:
         store.close()
+
+
+@pytest.mark.parametrize('old_records', [True, False])
+def test_backup_failed_restore_keeps_recovery_files(pair, tmp_path, monkeypatch, old_records):
+    store, writer, values = pair
+    target = tmp_path / 'rotate.db'
+    records = Path(str(target) + '.records')
+    previous = Path(str(records) + '.previous')
+    marker = Path(str(target) + '.tmp')
+    maintenance._backup_pair(store, target)
+    if not old_records:
+        records.unlink()
+    before = target.read_bytes(), records.read_bytes() if old_records else None
+    store.append('T', dict(role='user', content='new canonical', timestamp=5.))
+    assert writer.insert(TABLE, dict(values, payload='new record')) is None
+    publish_error = OSError('canonical publish failed')
+    restore_error = OSError('records restore failed')
+    real_replace, real_unlink = Path.replace, Path.unlink
+
+    def replace(source, destination):
+        if Path(destination) == target:
+            raise publish_error
+        if source == previous:
+            raise restore_error
+        return real_replace(source, destination)
+
+    def unlink(source, *args, **kwargs):
+        if source == records:
+            raise restore_error
+        return real_unlink(source, *args, **kwargs)
+
+    with monkeypatch.context() as faults:
+        faults.setattr(Path, 'replace', replace)
+        if not old_records:
+            faults.setattr(Path, 'unlink', unlink)
+        with pytest.raises(OSError) as caught:
+            maintenance._backup_pair(store, target)
+    assert caught.value is publish_error
+    assert any('records restore failed' in note for note in publish_error.__notes__)
+    assert target.read_bytes() == before[0]
+    assert marker.exists(), 'failed restore discarded restart marker'
+    if old_records:
+        assert previous.read_bytes() == before[1], 'failed restore discarded old records'
+    original_backup = store.backup
+    restored = []
+
+    def backup(dest):
+        assert target.read_bytes() == before[0]
+        if old_records:
+            assert records.read_bytes() == before[1], 'restart did not restore the old pair'
+        restored.append(True)
+        return original_backup(dest)
+
+    monkeypatch.setattr(store, 'backup', backup)
+    maintenance._backup_pair(store, target)
+    assert restored == [True]
+    for path in (target, records):
+        with closing(sqlite3.connect(path)) as conn:
+            assert conn.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
+    assert read(target) == read(store)
+    with closing(sqlite3.connect(target)) as conn:
+        assert conn.execute("SELECT count(*) FROM messages WHERE session_id='T'").fetchone()[0] == 1
+    assert not marker.exists() and not previous.exists()
+
+
+def test_backup_folder_lock_held_refuses_both_backups(pair, tmp_path):
+    import fcntl
+    import stat
+    store, _, _ = pair
+    target = tmp_path / 'rotate.db'
+    engine = SimpleNamespace(_store=store, _dag=SimpleNamespace(_conn=store.connection),
+                             backup_dir=lambda: tmp_path, rotate_backup_path=lambda: target)
+    assert maintenance.rotate_backup_database(engine)['ok']
+    records = Path(str(target) + '.records')
+    before = target.read_bytes(), records.read_bytes()
+    files = set(tmp_path.iterdir())
+    lock = tmp_path / '.lcm-backup.lock'
+    with os.fdopen(os.open(lock, os.O_CREAT | os.O_RDWR, 0o600), 'r+b') as holder:
+        assert stat.S_IMODE(lock.stat().st_mode) == 0o600
+        files.add(lock)
+        fcntl.flock(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        for operation in (maintenance.rotate_backup_database, maintenance.backup_database):
+            result = operation(engine)
+            assert not result['ok'], result
+            assert result['error'] == 'another LCM-X backup in this folder is running'
+            assert (target.read_bytes(), records.read_bytes()) == before
+            assert set(tmp_path.iterdir()) == files
+    assert lock.exists()
+    assert maintenance.rotate_backup_database(engine)['ok']
+
+
+def test_backup_folder_lock_refuses_interleaved_rotate(pair, tmp_path, monkeypatch):
+    store, writer, values = pair
+    target = tmp_path / 'rotate.db'
+    records = Path(str(target) + '.records')
+    engine = SimpleNamespace(_store=store, _dag=SimpleNamespace(_conn=store.connection),
+                             rotate_backup_path=lambda: target)
+    assert maintenance.rotate_backup_database(engine)['ok']
+    assert writer.insert(TABLE, dict(values, payload='new record')) is None
+    real_replace = Path.replace
+    second = []
+
+    def replace(source, destination):
+        result = real_replace(source, destination)
+        if source == Path(str(target) + '.tmp.records') and not second:
+            second.append(None)  # Guard the injected reentry even without the lock.
+            published = records.read_bytes()
+            second[0] = maintenance.rotate_backup_database(engine)
+            assert not second[0]['ok'], second[0]
+            assert second[0]['error'] == 'another LCM-X backup in this folder is running'
+            assert records.read_bytes() == published
+        return result
+
+    monkeypatch.setattr(Path, 'replace', replace)
+    assert maintenance.rotate_backup_database(engine)['ok']
+    assert len(second) == 1
+    assert read(target) == read(store)
+    for path in (target, records):
+        with closing(sqlite3.connect(path)) as conn:
+            assert conn.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
+    assert not list(tmp_path.glob('rotate.db*.tmp*'))
+    assert not list(tmp_path.glob('rotate.db*.previous'))
+
+
+@pytest.mark.parametrize('error', [errno.ENOLCK, errno.EOPNOTSUPP, errno.ENOTSUP, errno.EINVAL])
+def test_backup_folder_locks_unsupported_warns_once(pair, tmp_path, monkeypatch, caplog, error):
+    import fcntl
+    import logging
+    store, _, _ = pair
+    engine = SimpleNamespace(_store=store, _dag=SimpleNamespace(_conn=store.connection),
+                             rotate_backup_path=lambda: tmp_path / 'rotate.db')
+
+    def unsupported(*args):
+        raise OSError(error, 'locks unsupported')
+
+    monkeypatch.setattr(fcntl, 'flock', unsupported)
+    with caplog.at_level(logging.WARNING, logger=maintenance.__name__):
+        result = maintenance.rotate_backup_database(engine)
+    assert result['ok'], result
+    warnings = [record for record in caplog.records if record.name == maintenance.__name__]
+    assert len(warnings) == 1 and warnings[0].levelno == logging.WARNING
+    assert 'continuing unlocked' in warnings[0].message
+
+
+def test_backup_folder_fcntl_unavailable_warns_once(pair, tmp_path, monkeypatch, caplog):
+    import logging
+    import sys
+    store, _, _ = pair
+    engine = SimpleNamespace(_store=store, _dag=SimpleNamespace(_conn=store.connection),
+                             rotate_backup_path=lambda: tmp_path / 'rotate.db')
+    monkeypatch.setitem(sys.modules, 'fcntl', None)
+    with caplog.at_level(logging.WARNING, logger=maintenance.__name__):
+        result = maintenance.rotate_backup_database(engine)
+    assert result['ok'], result
+    warnings = [record for record in caplog.records if record.name == maintenance.__name__]
+    assert len(warnings) == 1 and warnings[0].levelno == logging.WARNING
+    assert 'continuing unlocked' in warnings[0].message
