@@ -701,7 +701,7 @@ def test_snapshot_checks_binding_and_view_contents(cold, monkeypatch, change):
     before = lifecycle(engine)
     engine.on_session_end('S2', copy.deepcopy(VIEW))
     assert_rows(engine, VIEW if change == 'none' else HISTORY, before)
-    assert calls == ([False] if change == 'none' else [False, True])
+    assert calls == ([False] if change in ('none', 'view-uid') else [False, True])
     assert fallback_counts(engine) == ({'stored': 1} if change == 'none' else {'refused.gate3': 1})
 
 
@@ -923,3 +923,104 @@ def test_retained_compression_child_uid_veto_requires_agreeing_history(engines, 
         assert not replacement._pending_session_tails
     finally:
         replacement.shutdown()
+
+
+@pytest.fixture
+def ingest_during_parent_end(engines, monkeypatch):
+    """T8: commit a second connection's ingest after the outer proof, before retry."""
+    monkeypatch.setattr(time, 'time', lambda: 1_700_000_000.)
+
+    def run(shape, *, force_full=False):
+        engine = engines(f'{shape}-{force_full}', sessions=[
+            ('S1', None, None), ('S2', None, 'compression'), ('S3', 'S2', None)])
+        _start(engine, 'S2')
+        engine.ingest(copy.deepcopy(HISTORY))
+        home = Path(engine._hermes_home)
+        engine.shutdown()
+        parent = _engine(home, session='S1', conversation='conv-S1')
+        child = _engine(home, session='S1' if shape == 'unrelated' else 'S3',
+                        conversation='conv-S1' if shape == 'unrelated' else 'conv-S3')
+        before = {sid: parent._store.get_session_messages(sid) for sid in ('S1', 'S2', 'S3')}
+        calls, reasons, comparing, retrying = [], [], [], False
+        prefix, retry = parent._off_current_fallback_prefix, parent._retry_off_current_fallback
+        equal, warn = parent._session_end_rows_equal, parent._warn_off_current_fallback
+
+        def counted_prefix(*args):
+            calls.append(parent._store._conn.in_transaction)
+            return prefix(*args)
+
+        def counted_equal(*args, **kwargs):
+            if retrying:
+                comparing.append(parent._store._conn.in_transaction)
+            return equal(*args, **kwargs)
+
+        def warned(session, reason):
+            reasons.append(reason)
+            return warn(session, reason)
+
+        def retry_after_ingest(tail):
+            nonlocal retrying
+            view = copy.deepcopy(HISTORY)
+            if shape == 'divergent':
+                view[0]['content'] = 'compression summary of the parent'
+            view[1]['message_uid'] = 'child-occurrence'
+            child.ingest(view)
+            assert not child._store._conn.in_transaction
+            lineage = ingest_ledger.persisted_lineage(parent._store._conn, 'S2', None)
+            inputs = parent._off_current_fallback_inputs(tail, before['S2'], lineage)
+            snapshot = tail['fallback_snapshot']
+            assert inputs[:3] + inputs[4:] == snapshot[:3] + snapshot[4:]
+            assert (inputs[3] == snapshot[3]) == (shape == 'unrelated')
+            if force_full:
+                tail['fallback_snapshot'] = snapshot[:4] + (b'force-full-rerun',) + snapshot[5:]
+            retrying = True
+            try:
+                return retry(tail)
+            finally:
+                retrying = False
+
+        try:
+            with monkeypatch.context() as patch:
+                patch.setattr(parent, '_off_current_fallback_prefix', counted_prefix)
+                patch.setattr(parent, '_session_end_rows_equal', counted_equal)
+                patch.setattr(parent, '_warn_off_current_fallback', warned)
+                patch.setattr(parent, '_retry_off_current_fallback', retry_after_ingest)
+                parent.on_session_end('S2', copy.deepcopy(VIEW))
+            rows = {sid: parent._store.get_session_messages(sid) for sid in before}
+            counts = fallback_counts(parent)
+            if shape == 'agreeing':
+                assert rows['S2'] == before['S2']
+                assert reasons == ['gate 3: occurrence UID mismatch']
+                assert counts == {'refused.gate3': 1}
+            else:
+                assert rows['S2'][:-1] == before['S2']
+                assert Counter(row['content'] for row in rows['S2'])['FINAL'] == 1
+                assert reasons == []
+                assert counts == {'stored': 1}
+            target = 'S1' if shape == 'unrelated' else 'S3'
+            assert rows[target] == child._store.get_session_messages(target)
+            assert rows['S3' if target == 'S1' else 'S1'] == []
+            if force_full:
+                assert comparing and all(comparing)
+            else:
+                assert comparing == [], 'UID-only retry must make zero in-lock row comparisons'
+            assert calls == ([False, True] if force_full else [False])
+            assert not parent._pending_session_tails
+            return reasons, dict(parent._ingest_ledger_counters), rows
+        finally:
+            child.shutdown()
+            parent.shutdown()
+
+    return run
+
+
+@pytest.mark.parametrize('shape', ['divergent', 'agreeing', 'unrelated'])
+def test_ingest_between_outer_proof_and_retry_checks_only_uids(ingest_during_parent_end, shape):
+    """T8/T8b: the new views retain their veto without a second whole-prefix pass."""
+    ingest_during_parent_end(shape)
+
+
+@pytest.mark.parametrize('shape', ['divergent', 'agreeing', 'unrelated'])
+def test_views_only_retry_equals_forced_full_rerun(ingest_during_parent_end, shape):
+    """T8c: reasons, every ledger counter, and complete stored rows are identical."""
+    assert ingest_during_parent_end(shape) == ingest_during_parent_end(shape, force_full=True)

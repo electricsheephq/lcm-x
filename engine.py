@@ -5500,6 +5500,26 @@ class LCMEngine(
         return (rows, lineage, records, views, tail["store"].ingest_ledger_salt(),
                 copy.deepcopy(vars(self._config)), external, copy.deepcopy(tail["view"]))
 
+    def _off_current_fallback_uid(self, incoming, index, view, salt, positional, identities, agreement, known=()):
+        """Apply the positional or binding UID veto, preserving lazy agreement checks."""
+        if incoming is not None:
+            for position, entries in enumerate(positional):
+                if index >= len(entries) or entries[index].uidset_digest in (None, incoming):
+                    continue
+                if position not in agreement:
+                    agreement[position] = True
+                    for shared in range(min(len(entries), len(view))):
+                        if shared not in identities:
+                            identities[shared] = ingest_ledger.identity_digest(salt, view[shared])
+                        if entries[shared].identity_digest != identities[shared]:
+                            agreement[position] = False
+                            break
+                if agreement[position]:
+                    return "gate 3: occurrence UID mismatch"
+        if incoming is not None and any(uid is not None and uid != incoming for uid in known):
+            return "gate 3: occurrence UID mismatch"
+        return None
+
     def _off_current_fallback_prefix(self, tail, rows, lineage):
         """Prove the entire session, never a conversation-filtered fragment of it."""
         view, session = tail["view"], tail["session_id"]
@@ -5537,27 +5557,17 @@ class LCMEngine(
             absorbed = [uid for uid in absorbed if _valid_uid(uid)] if isinstance(absorbed, (list, tuple)) else []
             incoming = ingest_ledger.uidset_digest(salt, message["message_uid"], absorbed) if (
                 salt is not None and _valid_uid(message.get("message_uid"))) else None
-            if incoming is not None:
-                for position, entries in enumerate(positional):
-                    if index >= len(entries) or entries[index].uidset_digest in (None, incoming):
-                        continue
-                    if position not in agreement:
-                        agreement[position] = True
-                        for shared in range(min(len(entries), len(view))):
-                            if shared not in identities:
-                                identities[shared] = ingest_ledger.identity_digest(salt, view[shared])
-                            if entries[shared].identity_digest != identities[shared]:
-                                agreement[position] = False
-                                break
-                    if agreement[position]:
-                        return None, "gate 3: occurrence UID mismatch"
+            reason = self._off_current_fallback_uid(incoming, index, view, salt, positional, identities, agreement)
+            if reason:
+                return None, reason
             for binding in bindings.get(row["store_id"], ()):
                 known = uids.get((binding["view_seq"], binding["occ_id"]))
                 bound_stamp = _normalize_observed_at(binding["stamp"])
                 if None not in (stamp, bound_stamp) and stamp != bound_stamp:
                     return None, "gate 3: occurrence binding stamp mismatch"
-                if known is not None and incoming is not None and known != incoming:
-                    return None, "gate 3: occurrence UID mismatch"
+                reason = self._off_current_fallback_uid(incoming, index, view, salt, (), identities, agreement, (known,))
+                if reason:
+                    return None, reason
         tail["fallback_snapshot"] = snapshot
         return len(rows), None
 
@@ -5571,6 +5581,28 @@ class LCMEngine(
                 inputs = self._off_current_fallback_inputs(tail, rows, lineage)
                 if inputs == tail.get("fallback_snapshot"):
                     count = len(rows)
+                elif (tail.get("fallback_snapshot") is not None and
+                      inputs[:3] + inputs[4:] == tail["fallback_snapshot"][:3] + tail["fallback_snapshot"][4:]):
+                    # All other gate-3 inputs match the outer pass that passed;
+                    # only UID checks can change their verdict when retained views change.
+                    positional = [ingest_ledger.decode_entries(entries) if entries else [] for _, entries in inputs[3]]
+                    uids = {(seq, entry.ref): entry.uidset_digest for (seq, _), entries in zip(inputs[3], positional)
+                            for entry in entries}
+                    bindings, identities, agreement = {}, {}, {}
+                    for record in inputs[2]:
+                        bindings.setdefault(record["store_id"], []).append(uids.get((record["view_seq"], record["occ_id"])))
+                    for index, (row, message) in enumerate(zip(rows, tail["view"])):
+                        absorbed = message.get("_absorbed_message_uids")
+                        absorbed = [uid for uid in absorbed if _valid_uid(uid)] if isinstance(absorbed, (list, tuple)) else []
+                        incoming = ingest_ledger.uidset_digest(inputs[4], message["message_uid"], absorbed) if (
+                            inputs[4] is not None and _valid_uid(message.get("message_uid"))) else None
+                        reason = self._off_current_fallback_uid(incoming, index, tail["view"], inputs[4],
+                            positional, identities, agreement, bindings.get(row["store_id"], ()))
+                        if reason:
+                            break
+                    if reason is None:
+                        tail["fallback_snapshot"] = inputs
+                        count = len(rows)
                 else:
                     tail["fallback_inputs"] = inputs
                     count, reason = self._off_current_fallback_prefix(tail, rows, lineage)
