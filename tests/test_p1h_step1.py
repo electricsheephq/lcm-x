@@ -230,7 +230,8 @@ def test_view_only_hints_fall_back_under_lock(engines, monkeypatch, change):
     real_count = engine_module.count_message_tokens
 
     def count(row):
-        locked = engine._store._conn.in_transaction
+        # #2293: inside the attempt means under the lock (eager) or in the attempt's checked pre-lock pass (lazy).
+        locked = engine._store._conn.in_transaction or engine._store._ingest_prelock_state is not None
         counts.append((locked, copy.deepcopy(row)))
         if change == "precompute-error" and not locked:
             raise ValueError("speculative error")

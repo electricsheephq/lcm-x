@@ -67,10 +67,42 @@ def _catchup_writer(config, home, rows, begin, release, observations):
         observations.put({"error": traceback.format_exc()})
 
 
+def _observe_admission(live, monkeypatch, transactions, first_hold=lambda: None):
+    """Associate the real admission generation check with its classifier pass."""
+    store = live._store
+    generation = store._ingest_write_generation
+    validated = set()
+    held = False
+
+    def on_hold():
+        nonlocal held
+        if not held:
+            held = True
+            first_hold()
+
+    def observed_generation():
+        current = generation()
+        state = store._ingest_prelock_state
+        if state is not None and store.connection.in_transaction:
+            on_hold()
+            # Implicit DML has already advanced total_changes; T_clean is its admission value.
+            admission = (state.T_clean, *current[1:]) if state.phase == "prelock" else current
+            if admission == state.G0 and not state.poisoned:
+                validated.add(len(transactions) - 1)
+        return current
+
+    monkeypatch.setattr(store, "_ingest_write_generation", observed_generation)
+    return on_hold, validated
+
+
+@pytest.mark.parametrize("prelock", [False, True], ids=["eager", "lazy"])
 @pytest.mark.parametrize("writer_kind", ["connection", "process"])
-@pytest.mark.parametrize("order", ["before-begin", "during-hold", "after-commit"])
-def test_catchup_and_eager_ingest_commit_orders(case, monkeypatch, writer_kind, order):
+@pytest.mark.parametrize("order", ["before-begin", "during-hold", "after-commit", "before-admission"])
+def test_catchup_and_eager_ingest_commit_orders(case, monkeypatch, writer_kind, order, prelock):
+    if order == "before-admission" and not prelock:
+        pytest.skip("the probe-to-admission window exists only in lazy mode")
     live = case.bind(SID)
+    live._store._ingest_prelock = prelock
     assert (live._ingest_cursor, live._ingest_cursor_needs_reconcile) == (0, False)
     recovered = failed_rows(False)
     history = recovered + [{"role": "user", "content": "next seam request"},
@@ -88,21 +120,48 @@ def test_catchup_and_eager_ingest_commit_orders(case, monkeypatch, writer_kind, 
     probe = live._store.has_session_messages
 
     def observed_probe(sid):
-        assert live._store.connection.in_transaction
+        locked = live._store.connection.in_transaction
+        if not prelock:
+            assert locked
         found = probe(sid)
-        probes.append(found)
+        probes.append((len(transactions) - 1, found, locked))
         return found
 
     transaction = live._ingest_messages_transaction
 
     def held(*args, **kwargs):
-        assert live._store.connection.in_transaction
-        transactions.append(True)
-        if order == "during-hold" and len(transactions) == 1:
-            begin.set()
-            assert observations.get(timeout=30) == "busy"
+        locked = live._store.connection.in_transaction
+        transactions.append(locked)
+        if not prelock:
+            assert locked
+        if locked:
+            on_hold()
         return transaction(*args, **kwargs)
 
+    hold_fired = []
+
+    def first_hold():
+        if order == "during-hold":
+            begin.set()
+            assert observations.get(timeout=30) == "busy"
+            hold_fired.append(len(transactions) - 1)
+
+    on_hold, validated = _observe_admission(live, monkeypatch, transactions, first_hold)
+    before_begin = type(live._store)._ingest_prelock_before_begin
+    reclassified = live._store.ingest_prelock_counts["reclassified"]
+    window_opened = False
+
+    def admission(store):
+        nonlocal window_opened
+        if store is live._store and order == "before-admission" and not window_opened:
+            window_opened = True
+            assert probes[0] == (0, False, False)
+            begin.set()
+            assert observations.get(timeout=30) == {"recovered_candidates": 1, "recovered_rows": 2}
+            case.assert_rows(recovered)
+        return before_begin(store)
+
+    monkeypatch.setattr(type(live._store), "_ingest_prelock_before_begin", admission)
     monkeypatch.setattr(live._store, "has_session_messages", observed_probe)
     monkeypatch.setattr(live, "_ingest_messages_transaction", held)
     try:
@@ -114,10 +173,21 @@ def test_catchup_and_eager_ingest_commit_orders(case, monkeypatch, writer_kind, 
             assert observations.get(timeout=30) == {"recovered_candidates": 1, "recovered_rows": 2}
             case.assert_rows(recovered)
         live.ingest(copy.deepcopy(history))
-        assert transactions == [True]
-        assert probes[0] is (order == "before-begin")
+        # One classifier pass; only a write between the probe and admission forces one retry.
+        assert len(transactions) == 1 + (order == "before-admission")
+        committed = len(transactions) - 1
+        # The during-hold writer was held off inside the committing pass, never after it.
+        assert hold_fired == ([committed] if order == "during-hold" else [])
+        assert transactions[committed] or committed in validated
+        committed_probes = [(found, locked) for index, found, locked in probes if index == committed]
+        assert committed_probes
+        assert committed_probes[0][1] or committed in validated
+        assert committed_probes[0][0] is (order in {"before-begin", "before-admission"})
+        if order == "before-admission":
+            assert live._store.ingest_prelock_counts["reclassified"] - reclassified == 1
+            assert committed_probes[0] == (True, True)
         assert not live._store.connection.in_transaction
-        if order != "before-begin":
+        if order not in {"before-begin", "before-admission"}:
             # The waiting writer rechecks under its own lock and stores no copy.
             begin.set()
             release.set()
@@ -162,8 +232,10 @@ def test_n4_stamped_store_and_unstamped_live_history(case):
     case.assert_rows(history)
 
 
-def test_probe_error_reconciles_stored_rows_in_same_attempt(case, monkeypatch):
+@pytest.mark.parametrize("prelock", [False, True], ids=["eager", "lazy"])
+def test_probe_error_reconciles_stored_rows_in_same_attempt(case, monkeypatch, prelock):
     live = case.bind(SID)
+    live._store._ingest_prelock = prelock
     assert (live._ingest_cursor, live._ingest_cursor_needs_reconcile) == (0, False)
     recovered = failed_rows(False)
     catchup._store_candidate(LCMEngine, case.config, str(case.home.resolve()), case.db_path,
@@ -177,27 +249,40 @@ def test_probe_error_reconciles_stored_rows_in_same_attempt(case, monkeypatch):
     probe = live._store.has_session_messages
 
     def attempted(*args, **kwargs):
-        assert live._store.connection.in_transaction
-        attempts.append(True)
+        locked = live._store.connection.in_transaction
+        attempts.append(locked)
+        if not prelock:
+            assert locked
+        if locked:
+            on_hold()
         return transaction(*args, **kwargs)
 
     def failed_probe(sid):
         assert sid == SID
-        assert live._store.connection.in_transaction
+        locked = live._store.connection.in_transaction
+        if not prelock:
+            assert locked
         if probes:
+            probes.append((len(attempts) - 1, locked))
             return probe(sid)  # Leave the existing placeholder-budget lookup intact.
-        probes.append(True)
+        probes.append((len(attempts) - 1, locked))
         raise sqlite3.OperationalError("injected session probe read failure")
 
     def reconciled(*args, **kwargs):
         scheduled.append(live._ingest_cursor_needs_reconcile)
         return restamp(*args, **kwargs)
 
+    on_hold, validated = _observe_admission(live, monkeypatch, attempts)
     monkeypatch.setattr(live, "_ingest_messages_transaction", attempted)
     monkeypatch.setattr(live._store, "has_session_messages", failed_probe)
     monkeypatch.setattr(live, "_rotation_restamp_metadata", reconciled)
     live.ingest(copy.deepcopy(history))
-    assert attempts == probes == scheduled == [True]
+    assert len(attempts) == 1
+    committed = len(attempts) - 1
+    assert attempts[committed] or committed in validated
+    committed_probes = [locked for index, locked in probes if index == committed]
+    assert committed_probes and (all(committed_probes) or committed in validated)
+    assert scheduled == [True]
     stored = case.assert_rows(history)
     assert [r["store_id"] for r in stored[:2]] == [r["store_id"] for r in original]
     # Review F1: reconcile keeps the stored copy's metadata on the prefix it adopts.
@@ -206,9 +291,10 @@ def test_probe_error_reconciles_stored_rows_in_same_attempt(case, monkeypatch):
     assert live._last_ingest_reconciliation["cursor"] == 2
     assert live._ingest_cursor == len(history)
     assert not live._store.connection.in_transaction
+    first_probes = list(probes)
     live.ingest(copy.deepcopy(history))
     case.assert_rows(history)
-    assert probes == [True]  # A positive cursor no longer needs the guard's lookup.
+    assert probes == first_probes  # A positive cursor no longer needs the guard's lookup.
 
 
 def _without_guard(monkeypatch, engine):
