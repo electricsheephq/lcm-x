@@ -1024,3 +1024,59 @@ def test_ingest_between_outer_proof_and_retry_checks_only_uids(ingest_during_par
 def test_views_only_retry_equals_forced_full_rerun(ingest_during_parent_end, shape):
     """T8c: reasons, every ledger counter, and complete stored rows are identical."""
     assert ingest_during_parent_end(shape) == ingest_during_parent_end(shape, force_full=True)
+
+
+@pytest.mark.parametrize('tamper', [True, False], ids=['binding-only', 'untampered'])
+def test_views_only_branch_keeps_binding_uid_veto(cold, monkeypatch, tamper):
+    """T8d: a views-only change that only the binding UID check can refuse."""
+    engine = cold()
+    store, calls, reasons, seen = engine._store, [], [], {}
+    atomic, prefix, warn = store.ingest_atomic, engine._off_current_fallback_prefix, engine._warn_off_current_fallback
+
+    def counted(*args):
+        calls.append(store._conn.in_transaction)
+        return prefix(*args)
+
+    def warned(session, reason):
+        reasons.append(reason)
+        return warn(session, reason)
+
+    @contextmanager
+    def changed(**kwargs):
+        # After the outer proof, change only the stored view, so the in-lock inputs differ from
+        # the snapshot at index 3 alone and the retry takes the views-only branch.
+        conn = store._conn
+        lineage = ingest_ledger.persisted_lineage(conn, 'S2', None)
+        rows = list(conn.execute(
+            "SELECT view_seq, entries FROM ingest_views WHERE lineage=? AND kind='ingest'", (lineage,)))
+        seq, blob = rows[0]
+        entries = ingest_ledger.decode_entries(blob)
+        seen.update(views=len(rows), refs=[entry.ref for entry in entries], bindings=conn.execute(
+            'SELECT count(*) FROM occurrence_bindings WHERE lineage=?', (lineage,)).fetchone()[0])
+        if tamper:
+            # The first entry's UID set no longer matches its bound occurrence, and the second
+            # entry's identity breaks the positional agreement: only the binding check can refuse.
+            entries[0] = entries[0]._replace(uidset_digest=b'x' * 16)
+            entries[1] = entries[1]._replace(identity_digest=b'y' * len(entries[1].identity_digest))
+            conn.execute('UPDATE ingest_views SET entries=? WHERE view_seq=?',
+                         (ingest_ledger.encode_entries(entries), seq))
+            conn.commit()
+        with atomic(**kwargs) as timing:
+            yield timing
+
+    monkeypatch.setattr(store, 'ingest_atomic', changed)
+    monkeypatch.setattr(engine, '_off_current_fallback_prefix', counted)
+    monkeypatch.setattr(engine, '_warn_off_current_fallback', warned)
+    engine.on_session_end('S2', copy.deepcopy(VIEW))
+
+    assert seen == {'views': 1, 'refs': [1, 2], 'bindings': 2}
+    assert calls == [False], 'the in-lock retry must not rerun the whole-prefix pass'
+    contents = [row['content'] for row in store.get_session_messages('S2')]
+    if tamper:
+        assert reasons == ['gate 3: occurrence UID mismatch']
+        assert fallback_counts(engine) == {'refused.gate3': 1}
+        assert contents == ['question', 'reply']
+    else:
+        assert reasons == []
+        assert fallback_counts(engine) == {'stored': 1}
+        assert contents == ['question', 'reply', 'FINAL']
