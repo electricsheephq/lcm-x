@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 import sqlite3
 import time
+import types
 
 import pytest
 
@@ -96,6 +97,24 @@ def test_frozen_tail_requires_pending_warm_tail(engines, monkeypatch, caplog, re
         assert tail_contents(engine) == ["C", "D"]
         assert not _warnings(caplog)
 
+
+
+@pytest.mark.parametrize("other", ["other-session", "other-store"])
+def test_stale_frozen_flag_with_unrelated_warm_tail_warns(engines, monkeypatch, caplog, other):
+    """Only a warm tail of this session and store stands in for the end's own queued tail."""
+    engine = engines()
+    store = engine._store if other == "other-session" else types.SimpleNamespace(db_path="/nonexistent/other.db")
+    engine._pending_session_tails.append(dict(
+        kind="warm", store=store, session_id="X" if other == "other-session" else "S",
+        conversation_id=engine._conversation_id, after_store_id=0, source="cli",
+        messages=[{"role": "user", "content": "old-tail"}], estimates=[1],
+        metadata_messages=[{"role": "user", "content": "old-tail"}]))
+    monkeypatch.setattr(engine, "_retry_session_end_tails", lambda *a, **k: None)
+    caplog.clear()
+    end_with_busy(engine, monkeypatch, rollback_fails=True)
+    assert engine.__dict__.get("_frozen_tail_reached")
+    assert _warnings(caplog) == ["LCM session-end rows not stored: session=S "
+                                 "reason=foreground_ingest_busy_unqueued view_rows=4"], other
 
 def _precision_history():
     return [{"role": role, "content": content, "timestamp": float(i + 1)}
