@@ -167,6 +167,34 @@ def test_repeated_end_and_restart_store_suffix_once(cold, caplog):
         replacement.shutdown()
 
 
+@pytest.mark.parametrize('n', [10, 100])
+def test_matching_uid_gate3_computes_no_identity_digests(cold, monkeypatch, n):
+    history = [dict(role='user' if i % 2 == 0 else 'assistant', content=f'row {i}',
+                    timestamp=float(i + 1), message_uid=f'uid-{i}') for i in range(n)]
+    engine = cold(history=history)
+    prefix, digest = engine._off_current_fallback_prefix, ingest_ledger.identity_digest
+    calls, passes = [], []
+
+    def counted(*args, **kwargs):
+        calls.append(args[1])
+        return digest(*args, **kwargs)
+
+    def gate3(*args):
+        passes.append(True)
+        with monkeypatch.context() as patch:
+            patch.setattr(ingest_ledger, 'identity_digest', counted)
+            return prefix(*args)
+
+    monkeypatch.setattr(engine, '_off_current_fallback_prefix', gate3)
+    view = history + [dict(role='assistant', content='FINAL', timestamp=float(n + 1), message_uid='final-uid')]
+    before = lifecycle(engine)
+    engine.on_session_end('S2', copy.deepcopy(view))
+    assert passes
+    assert calls == []
+    assert_rows(engine, view, before)
+    assert fallback_counts(engine) == {'stored': 1}
+
+
 @pytest.mark.parametrize('ingests', [(4,), (1, 2, 3, 4)], ids=['single', 'growing'])
 @pytest.mark.parametrize('matching', [False, True], ids=['foreign-uid', 'matching-uid'])
 @pytest.mark.parametrize('stamped', [True, False], ids=['same-stamp', 'absent-stamp'])
@@ -846,3 +874,52 @@ def test_embedded_reference_in_lock_stats_scale_linearly(cold, monkeypatch, reco
         record_property(f'in_lock_stat_calls_{n}', counts[n])
     assert counts[1000] <= 3 * 1000
     assert counts[1000] <= 12 * counts[100]
+
+
+@pytest.mark.parametrize('agreeing', [False, True], ids=['summary-diverges', 'identical-history'])
+def test_retained_compression_child_uid_veto_requires_agreeing_history(engines, agreeing, caplog):
+    engine = engines(sessions=[('S1', None, None), ('S2', None, 'compression'), ('S3', 'S2', None)])
+    _start(engine, 'S2')
+    engine.ingest(copy.deepcopy(HISTORY))
+    lineage = ingest_ledger.persisted_lineage(engine._store._conn, 'S2', None)
+    _start(engine, 'S3')
+    child = copy.deepcopy(HISTORY)
+    if not agreeing:
+        child[0]['content'] = 'compression summary of the parent'
+    child[1]['message_uid'] = 'child-occurrence'
+    engine.ingest(child)
+    conn = engine._store._conn
+    assert ingest_ledger.persisted_lineage(conn, 'S3', None) == lineage
+    entries = ingest_ledger.decode_entries(ingest_ledger.newest_view(conn, lineage, 'ingest')['entries'])
+    salt = engine._store.ingest_ledger_salt()
+    assert entries[1].identity_digest == ingest_ledger.identity_digest(salt, HISTORY[1])
+    assert entries[1].uidset_digest != ingest_ledger.uidset_digest(salt, HISTORY[1]['message_uid'], [])
+    assert (entries[0].identity_digest == ingest_ledger.identity_digest(salt, HISTORY[0])) == agreeing
+    parent_before = engine._store.get_session_messages('S2')
+    child_before = engine._store.get_session_messages('S3')
+    home = Path(engine._hermes_home)
+    engine.shutdown()
+    replacement = _engine(home, session='S1', conversation='conv-S1')
+    try:
+        before = lifecycle(replacement)
+        assert not replacement._lcm_session_last_normal_conversation_id.get('S2')
+        with caplog.at_level(logging.WARNING):
+            replacement.on_session_end('S2', copy.deepcopy(VIEW))
+            replacement.on_session_end('S2', copy.deepcopy(VIEW))
+        rows = replacement._store.get_session_messages('S2')
+        if agreeing:
+            assert rows == parent_before
+            assert 'gate 3: occurrence UID mismatch' in caplog.text
+            assert fallback_counts(replacement) == {'refused.gate3': 2}
+        else:
+            assert 'occurrence UID mismatch' not in caplog.text
+            assert rows[:-1] == parent_before
+            assert [row['content'] for row in rows] == [row['content'] for row in VIEW]
+            assert Counter(row['content'] for row in rows)['FINAL'] == 1
+            assert fallback_counts(replacement) == {'stored': 1, 'noop': 1}
+        assert replacement._store.get_session_messages('S3') == child_before
+        assert not replacement._store.get_session_messages('S1')
+        assert lifecycle(replacement) == before
+        assert not replacement._pending_session_tails
+    finally:
+        replacement.shutdown()

@@ -5526,6 +5526,7 @@ class LCMEngine(
             positional.append(decoded)
             for entry in decoded:
                 uids[(seq, entry.ref)] = entry.uidset_digest
+        identities, agreement = {}, {}
         for index, (row, message) in enumerate(zip(rows, view)):
             if not self._session_end_rows_equal(row, message, session_id=session, hermes_home=tail["hermes_home"]):
                 return None, "gate 3: stored sequence mismatch"
@@ -5537,10 +5538,19 @@ class LCMEngine(
             incoming = ingest_ledger.uidset_digest(salt, message["message_uid"], absorbed) if (
                 salt is not None and _valid_uid(message.get("message_uid"))) else None
             if incoming is not None:
-                identity = ingest_ledger.identity_digest(salt, message)
-                if any(index < len(entries) and entries[index].identity_digest == identity
-                        and entries[index].uidset_digest not in (None, incoming) for entries in positional):
-                    return None, "gate 3: occurrence UID mismatch"
+                for position, entries in enumerate(positional):
+                    if index >= len(entries) or entries[index].uidset_digest in (None, incoming):
+                        continue
+                    if position not in agreement:
+                        agreement[position] = True
+                        for shared in range(min(len(entries), len(view))):
+                            if shared not in identities:
+                                identities[shared] = ingest_ledger.identity_digest(salt, view[shared])
+                            if entries[shared].identity_digest != identities[shared]:
+                                agreement[position] = False
+                                break
+                    if agreement[position]:
+                        return None, "gate 3: occurrence UID mismatch"
             for binding in bindings.get(row["store_id"], ()):
                 known = uids.get((binding["view_seq"], binding["occ_id"]))
                 bound_stamp = _normalize_observed_at(binding["stamp"])
