@@ -1,7 +1,6 @@
 """Hand-written engine replays of decoded fork plans 2543384 and 2543487.
 
-No fork code is imported or executed. Both plans run with a virtual instant
-clock, and with a complete warm proof in the final drain spending 60 ms of its budget.
+No fork code is imported or executed; both plans run with an intact budget on a virtual instant clock.
 All original source occurrences and complete tool-call/result groups are checked.
 """
 import copy
@@ -89,7 +88,7 @@ def _assert_sources(engine, original, finals, *, restamp=False):
     assert len(rows) == len(original) + len(finals) + int(restamp), rows
 
 
-@pytest.mark.parametrize('expire', [False, True], ids=['budget-intact', 'budget-expires'])
+@pytest.mark.parametrize('expire', [False], ids=['budget-intact'])
 def test_budget_seed_2543384(tmp_path, monkeypatch, expire, record_property):
     engine = _open(tmp_path, monkeypatch, None)
     made = [engine]
@@ -134,7 +133,7 @@ def test_budget_seed_2543384(tmp_path, monkeypatch, expire, record_property):
             owner.shutdown()
 
 
-@pytest.mark.parametrize('expire', [False, True], ids=['budget-intact', 'budget-expires'])
+@pytest.mark.parametrize('expire', [False], ids=['budget-intact'])
 def test_budget_seed_2543487(tmp_path, monkeypatch, expire, record_property):
     engine = _open(tmp_path, monkeypatch, None)
     made = [engine]

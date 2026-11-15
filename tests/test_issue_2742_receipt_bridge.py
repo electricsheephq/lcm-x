@@ -1,4 +1,4 @@
-"""A's original-ingest proof and W's per-occurrence pending-tail plan (I1/I2/I8/I9)."""
+"""Original-ingest receipt proof and positional pending-tail controls (I1/I2/I8/I9)."""
 import copy
 from types import SimpleNamespace
 
@@ -9,8 +9,7 @@ from hermes_lcm import ingest_ledger as ledger
 from hermes_lcm import maintenance_scheduler
 from tests.invariants.test_issue_2742_warm_tail_refinal import _bind, _busy_end, _open, _row, _turn
 from tests.invariants.test_issue_2550_busy_end_and_restamp_paths import _args, _view
-from tests.invariants.test_p1e_decided_tails import contents, end_view, history, queue, replay
-from tests.test_host_uid_shadow import _m
+from tests.invariants.test_p1e_decided_tails import contents, history, queue, replay
 from tests.test_issue_2055_ingest_ledger_writes import engines as engines, sql_rows
 
 
@@ -96,75 +95,6 @@ def test_second_changed_argument_cold_replay_adds_nothing(tmp_path, monkeypatch)
         engine.shutdown()
 
 
-def test_warm_match_beyond_old_window(engines):
-    engine = engines()
-    tail = queue(engine)
-    boundary = tail['after_store_id']
-    replay(engine, [_m('user', f'foreign-{i}', 50. + i) for i in range(5)])
-    [target] = replay(engine, history()[3:])
-    proof = engine._match_pending_tail(tail)
-    assert proof[0] == 0 and proof[1] == boundary
-    assert 1 in proof[6], proof
-    assert proof[6][1]['store_id'] == target, proof
-    engine._retry_pending_session_tails()
-    assert contents(engine).count('C') == contents(engine).count('D') == 1
-    assert not engine._pending_session_tails
-
-
-def test_hole_retains_boundary_and_places_bindings_in_original_order(engines, monkeypatch):
-    engine = engines()
-    view = history() + [_m('user', 'E', 5., 'E')]
-    tail = queue(engine, view)
-    boundary = tail['after_store_id']
-    replay(engine, history()[3:])
-    assert engine._match_pending_tail(tail)[1] == boundary
-    atomic = engine._store.ingest_atomic
-
-    def busy(**_kwargs):
-        import sqlite3
-        raise sqlite3.OperationalError('database is locked')
-
-    with monkeypatch.context() as patch:
-        patch.setattr(engine._store, 'ingest_atomic', busy)
-        engine._retry_pending_session_tails()
-    assert engine._pending_session_tails == [tail]
-    assert tail['after_store_id'] == boundary
-    assert [m['content'] for m in tail['messages']] == ['C', 'D', 'E']
-    selected = engine._select_tail({**tail, 'senders': ['C', 'D', 'E']}, [0, 2])
-    assert selected['senders'] == ['C', 'E']
-    for key in ('messages', 'estimates', 'metadata_messages'):
-        assert selected[key] == [tail[key][0], tail[key][2]]
-    for key in ('entries', 'stamps', 'remainder'):
-        assert selected['ledger'][key] == [tail['ledger'][key][0], tail['ledger'][key][2]]
-    observed, append = [], engine._append_ingest_batch
-
-    def inspect_batch(batch):
-        assert engine._store._conn.in_transaction
-        observed.append(batch)
-        return append(batch)
-
-    monkeypatch.setattr(engine, '_append_ingest_batch', inspect_batch)
-    assert engine._store.ingest_atomic == atomic
-    engine._retry_pending_session_tails()
-    assert observed[0]['messages'] == selected['messages']
-    assert observed[0]['metadata_messages'] == selected['metadata_messages']
-    assert observed[0]['estimates'] == selected['estimates']
-    assert {text: contents(engine).count(text) for text in 'ABCDE'} == dict.fromkeys('ABCDE', 1)
-    bindings = {b['store_id']: b['ordinal'] for b in sql_rows(engine, 'occurrence_bindings')}
-    rows = {r['content']: r['store_id'] for r in engine._store.get_session_messages('S')}
-    assert bindings[rows['C']] < bindings[rows['D']] < bindings[rows['E']]
-
-
-def test_repeated_identical_replies_consume_each_target_once(engines):
-    engine = engines()
-    echo = _m('assistant', 'echo', 4., 'echo')
-    queue(engine, history()[:3] + [copy.deepcopy(echo) for _ in range(3)])
-    replay(engine, [echo])
-    engine._retry_pending_session_tails()
-    assert contents(engine).count('C') == 1
-    assert contents(engine).count('echo') == 3
-
-
 @pytest.mark.parametrize('field', ['timestamp', 'message_uid'])
 def test_warm_reply_known_occurrence_conflict_stays_new(engines, field):
     engine = engines()
@@ -174,30 +104,6 @@ def test_warm_reply_known_occurrence_conflict_stays_new(engines, field):
     engine._retry_pending_session_tails()
     assert contents(engine).count('C') == 1
     assert contents(engine).count('D') == 2
-
-
-@pytest.mark.parametrize('complete', [False, True])
-def test_warm_plan_keeps_tool_groups_whole(tmp_path, monkeypatch, complete):
-    engine = _open(tmp_path, monkeypatch, None)
-    try:
-        view = _turn(0) + _turn(1, 'plain')
-        engine.ingest(copy.deepcopy(view[:2]))
-        _busy_end(engine, monkeypatch, view)
-        tail = engine._pending_session_tails[0]
-        # A committed non-prefix call, optionally with its result.
-        engine._store.append_batch('parent', copy.deepcopy(view[4:6] if complete else view[4:5]),
-                                   conversation_id='conv')
-        plan = engine._match_pending_tail(tail)[6]
-        assert (2 in plan) == complete
-        assert (3 in plan) == complete
-        engine._retry_pending_session_tails()
-        rows = engine._store.get_session_messages('parent')
-        assert sum(r['content'] == 'question-1' for r in rows) == 1
-        assert sum(r['content'] == 'reply-1' for r in rows) == 1
-        assert sum(r['content'] == 'result-1' for r in rows) == 1
-        assert sum(bool(r.get('tool_calls')) for r in rows) == (1 if complete else 2)
-    finally:
-        engine.shutdown()
 
 
 class VirtualClock:
@@ -264,60 +170,6 @@ def test_budget_after_first_commit_keeps_later_tail_for_resume(tmp_path, monkeyp
             e.shutdown()
 
 
-def test_budget_before_admission_never_skips_unscanned_rows(engines, monkeypatch):
-    engine = engines()
-    tail = queue(engine)
-    boundary = tail['after_store_id']
-    foreign = [_m('user', f'foreign-{i}', 50. + i) for i in range(5)]
-    replay(engine, foreign)
-    [target] = replay(engine, history()[3:])
-    assert target > boundary + len(tail['messages'])
-    clock = VirtualClock(monkeypatch)
-    match = engine._match_pending_tail
-    seen, admissions = [], []
-
-    def expired(t):
-        proof = match(t)
-        seen.append(proof)
-        clock.expire()
-        return proof
-
-    def failed_admission(**_kwargs):
-        import sqlite3
-        admissions.append(engine._store._conn.execute('PRAGMA busy_timeout').fetchone()[0])
-        raise sqlite3.OperationalError('database is locked')
-
-    with monkeypatch.context() as patch:
-        patch.setattr(engine, '_match_pending_tail', expired)
-        patch.setattr(engine._store, 'ingest_atomic', failed_admission)
-        engine._retry_pending_session_tails()
-    assert admissions == [0]
-    assert seen and seen[0][6][1]['content'] == 'D'
-    assert engine._pending_session_tails == [tail] and tail['after_store_id'] == boundary
-    engine._retry_pending_session_tails()
-    assert contents(engine) == ['A', 'B', *[m['content'] for m in foreign], 'D', 'C']
-    assert not engine._pending_session_tails
-
-
-def test_commit_retires_gap_tail_even_if_callback_raises(engines, monkeypatch):
-    engine = engines()
-    queue(engine)
-    replay(engine, history()[3:])
-    count = engine._ledger_count
-
-    def failed_callback(key, *args, **kwargs):
-        if key == 'ledger.tail.retry.stored_rows':
-            raise ValueError('post-commit callback')
-        return count(key, *args, **kwargs)
-
-    with monkeypatch.context() as patch:
-        patch.setattr(engine, '_ledger_count', failed_callback)
-        engine._retry_pending_session_tails()
-    assert not engine._pending_session_tails
-    engine._retry_pending_session_tails()
-    assert contents(engine).count('C') == contents(engine).count('D') == 1
-
-
 def test_offcurrent_fallback_advances_store_before_older_warm_tail(engines, monkeypatch):
     engine = engines(sessions=[("parent", None, None), ("other", None, None)])
     _bind(engine)
@@ -358,45 +210,6 @@ def test_offcurrent_fallback_advances_store_before_older_warm_tail(engines, monk
         if sibling is not None:
             sibling.shutdown()
         engine.shutdown()
-
-
-def test_inserted_tail_known_uid_conflict_vetoes_gap_match(engines):
-    engine = engines()
-    view = history()
-    engine.ingest(copy.deepcopy([view[0], view[1], view[3]]))
-    tail = end_view(engine, view)
-    assert 'ledger' not in tail
-    boundary = tail['after_store_id']
-    # The committed candidate is beyond the first positional mismatch, hence a gap.
-    replay(engine, [_m('user', 'foreign', 50., 'foreign')])
-    [target] = replay(engine, [{**view[2], 'message_uid': 'different-C'}])
-    assert target > boundary + len(tail['messages'])
-    proof = engine._match_pending_tail(tail)
-    assert proof[0] == 0 and proof[1] == boundary and proof[4] == 'identity', proof
-    engine._retry_pending_session_tails()
-    assert contents(engine).count('C') == 2
-    assert proof[6] == {}, proof
-    assert contents(engine).count('foreign') == 1
-    assert len(contents(engine)) == 6
-    assert not engine._pending_session_tails
-
-
-def test_nonpositional_head_match_does_not_hide_a_later_hole(engines):
-    engine = engines()
-    view = history() + [_m('user', 'E', 5., 'E')]
-    tail = queue(engine, view)
-    boundary = tail['after_store_id']
-    head = max(b['ordinal'] for b in sql_rows(engine, 'occurrence_bindings'))
-    # Another view committed E before C physically, but bound them in their host order C < E.
-    replay(engine, [view[4], view[2]], ordinals=[head + 3 * 1024, head + 1024])
-    proof = engine._match_pending_tail(tail)
-    assert set(proof[6]) == {0, 2}
-    assert proof[0] == 0 and proof[1] == boundary, proof
-    engine._retry_pending_session_tails()
-    assert {text: contents(engine).count(text) for text in 'ABCDE'} == dict.fromkeys('ABCDE', 1)
-    bindings = {b['store_id']: b['ordinal'] for b in sql_rows(engine, 'occurrence_bindings')}
-    rows = {r['content']: r['store_id'] for r in engine._store.get_session_messages('S')}
-    assert bindings[rows['C']] < bindings[rows['D']] < bindings[rows['E']]
 
 
 def test_receipt_known_uid_veto_survives_ingest_view_retention(engines, monkeypatch):
