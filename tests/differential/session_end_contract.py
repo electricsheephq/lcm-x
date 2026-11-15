@@ -239,6 +239,8 @@ def snapshot(engines, root, paths):
 
 
 def _stored_counts(snapshot, key):
+    # Clock columns are already dropped: genuinely identical rows share a key;
+    # restoring two identical rows main lost would read as doubled.
     counts = Counter()
     for path, data in snapshot[key].items():
         messages = data.get('messages') if key == 'tables' else data
@@ -247,6 +249,19 @@ def _stored_counts(snapshot, key):
             counts.update((path, freeze({col: value for col, value in zip(columns, row) if col != 'store_id'}))
                           for row in rows)
     return counts
+
+
+def _stored_order(snapshot, key):
+    ordered = {}
+    for path, data in snapshot[key].items():
+        messages = data.get('messages') if key == 'tables' else data
+        if messages is not None:
+            columns, rows = messages
+            for row in sorted(rows, key=lambda row: row[columns.index('store_id')]):
+                values = dict(zip(columns, row))
+                group = (path, values['session_id'])
+                ordered.setdefault(group, []).append(freeze({k: v for k, v in values.items() if k != 'store_id'}))
+    return ordered
 
 
 def judge(main, candidate, stage, *, case=None, mode=None, seen=None):
@@ -260,6 +275,11 @@ def judge(main, candidate, stage, *, case=None, mode=None, seen=None):
                 for row in before.keys() | after.keys():
                     assert after[row] >= before[row], f'{stage}: {key} lost stored row'
                     assert after[row] <= max(before[row], 1), f'{stage}: {key} doubled stored row'
+                ordered = _stored_order(candidate, key)
+                for group, rows in _stored_order(main, key).items():
+                    remaining = iter(ordered.get(group, ()))
+                    assert all(any(row == value for value in remaining) for row in rows), \
+                        f'{stage}: {key} reordered stored row'
             if seen is not None:
                 seen.update(entries)
         else:

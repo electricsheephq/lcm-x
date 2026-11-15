@@ -441,16 +441,21 @@ def test_fake_candidates(tmp_path, monkeypatch, end_versions, kind, record_prope
 @pytest.mark.parametrize('key', ('canonical', 'tables'))
 @pytest.mark.parametrize('kind, reason', (
     ('exempt-drop', 'lost'), ('exempt-duplicate', 'doubled'),
-    ('exempt-new-once', None), ('exempt-new-twice', 'doubled')))
+    ('exempt-new-once', None), ('exempt-new-twice', 'doubled'),
+    ('exempt-reorder', 'reordered'), ('exempt-new-before', None)))
 def test_fake_candidates_intended(monkeypatch, key, kind, reason, record_property):
     columns = ('store_id', 'session_id', 'role', 'content')
-    rows = [(1, 'S1', 'user', 'A'), (2, 'S1', 'assistant', 'B')]
+    rows = [(1, 'S1', 'user', 'A'), (2, 'S1', 'assistant', 'B'), (3, 'S1', 'user', 'C')]
     changed = rows[:-1] if kind == 'exempt-drop' else [*rows]
     extra = rows[0][1:] if kind == 'exempt-duplicate' else ('S1', 'assistant', 'FINAL')
     if kind != 'exempt-drop':
-        changed.append((3, *extra))
-    if kind == 'exempt-new-twice':
         changed.append((4, *extra))
+    if kind == 'exempt-new-twice':
+        changed.append((5, *extra))
+    if kind == 'exempt-reorder':
+        changed = [(i, *row[1:]) for i, row in enumerate(reversed(rows), 1)]
+    elif kind == 'exempt-new-before':
+        changed = [*rows, (0, *extra)]  # Input order differs from store_id order.
     changed = [(sid + 10, *values) for sid, *values in changed]  # store_id is exempt.
     main = {name: {} for name in ('canonical', 'schema', 'tables', 'payload', 'pending', 'ledger', 'lifecycle')}
     def observed(items):

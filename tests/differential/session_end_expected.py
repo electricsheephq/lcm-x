@@ -3,6 +3,9 @@
 A fix PR lists (case, mode or '*', stage, key, issue) in INTENDED_DIFFERENCES.
 Each entry must differ; the next PR moves BASELINE to that merge commit and
 deletes its entries and the '#2543 proven' labels of the cells its fix closed.
+A fix that removes a row main stores twice or rewrites a stored row's content
+must change the preservation guard in the same PR. The PR fixing #2736, #2737
+or #2738 also deletes its CONTROL_LOSSES label.
 LCMX_DIFF_SESSION_END_BASELINE overrides the pin locally;
 CI keeps the pinned SHA.
 """
