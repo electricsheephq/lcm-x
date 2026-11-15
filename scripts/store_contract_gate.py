@@ -6,12 +6,13 @@ import subprocess
 import sys
 
 DOC = "docs/store-contract.md"
+ROW = re.compile(r"^\| ([1-9][0-9]*) \| (sha256:[0-9a-f]{64}) \| (\d{4}-\d{2}-\d{2}) \| ([^|\r\n]+) \|$", re.M)
 
 
 def contract(text):
     version, = re.findall(r"^Contract version: ([1-9][0-9]*)$", text, re.M)
     digest, = re.findall(r"^Digest: (sha256:[0-9a-f]{64})$", text, re.M)
-    rows = re.findall(r"^\| ([1-9][0-9]*) \| (sha256:[0-9a-f]{64}) \| (\d{4}-\d{2}-\d{2}) \| ([^|\r\n]+) \|$", text, re.M)
+    rows = ROW.findall(text)
     if sum(v == version and d == digest and bool(reason.strip()) for v, d, _, reason in rows) != 1:
         raise ValueError("current version needs one changelog row with its digest and a one-line reason")
     return int(version), digest
@@ -28,6 +29,10 @@ def check(base, current):
             raise ValueError("changed digest requires exactly version+1; unchanged digest requires the same version")
         if digest != old_digest and re.search(rf"^\| {version} \| {digest} \|", base, re.M):
             raise ValueError("changed digest needs a new changelog row")
+        current_rows = set(ROW.findall(current))
+        for row in ROW.findall(base):
+            if row not in current_rows:
+                raise ValueError(f"changelog row for version {row[0]} was removed or changed")
 
 
 def git(root, *args):
