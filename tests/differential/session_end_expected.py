@@ -2,7 +2,8 @@
 
 A fix PR lists (case, mode or '*', stage, key, issue) in INTENDED_DIFFERENCES.
 Each entry must differ; the next PR moves BASELINE to that merge commit and
-deletes its entries. LCMX_DIFF_SESSION_END_BASELINE overrides the pin locally;
+deletes its entries and the '#2543 proven' labels of the cells its fix closed.
+LCMX_DIFF_SESSION_END_BASELINE overrides the pin locally;
 CI keeps the pinned SHA.
 """
 BASELINE = 'a42baa75e39a0085685b2b368e234fc631bac995'

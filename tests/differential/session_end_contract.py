@@ -238,12 +238,28 @@ def snapshot(engines, root, paths):
                    for e in engines])
 
 
+def _stored_counts(snapshot, key):
+    counts = Counter()
+    for path, data in snapshot[key].items():
+        messages = data.get('messages') if key == 'tables' else data
+        if messages is not None:
+            columns, rows = messages
+            counts.update((path, freeze({col: value for col, value in zip(columns, row) if col != 'store_id'}))
+                          for row in rows)
+    return counts
+
+
 def judge(main, candidate, stage, *, case=None, mode=None, seen=None):
     for key in ('canonical', 'schema', 'tables', 'payload', 'pending', 'ledger', 'lifecycle'):
         entries = [entry for entry in INTENDED_DIFFERENCES
                    if entry[0] == case and entry[1] in ('*', mode) and entry[2:4] == (stage, key)]
         if entries:
             assert candidate[key] != main[key], f'{case}/{mode}/{stage}: stale intended difference {key}'
+            if key in ('canonical', 'tables'):
+                before, after = _stored_counts(main, key), _stored_counts(candidate, key)
+                for row in before.keys() | after.keys():
+                    assert after[row] >= before[row], f'{stage}: {key} lost stored row'
+                    assert after[row] <= max(before[row], 1), f'{stage}: {key} doubled stored row'
             if seen is not None:
                 seen.update(entries)
         else:

@@ -14,6 +14,7 @@ import pytest
 if os.environ.get('LCM_DIFFERENTIAL') != '1':
     pytest.skip('opt in with LCM_DIFFERENTIAL=1', allow_module_level=True)
 
+from . import session_end_contract
 from .paired import ROOT, _load
 from .session import Trace
 from .session_end_contract import (FULL_OUTPUT, Clock, Proof, _call, _history, _state_db, _write_output,
@@ -22,10 +23,12 @@ from .session_end_expected import BASELINE, CELLS, CONTROL_LOSSES, FAULTS, INTEN
 from .trees import materialize, resolve
 
 MODES = ('instant', 'busy-timeout', 'slow-cold')
-CASES = ('wrapped-base64-cold-pairwise', 'wrapped-base64-cold-counted',
+CELL_CASES = ('wrapped-base64-cold-pairwise', 'wrapped-base64-cold-counted',
          'data-uri-key-cold-pairwise', 'data-uri-key-cold-counted',
          'changed-spillover-direct', 'changed-spillover-busy',
-         'changed-hermes-results-direct', 'changed-hermes-results-busy', 'plain-direct', 'plain-busy', 'append', 'commit', 'repeated-retry',
+         'changed-hermes-results-direct', 'changed-hermes-results-busy')
+assert set(CELLS) <= set(CELL_CASES)
+CASES = (*CELL_CASES, 'plain-direct', 'plain-busy', 'append', 'commit', 'repeated-retry',
          'rollback', 'interrupt', 'bypass', 'warm-busy', 'shutdown-deadline', 'missing-payload',
          'restart-between-commits', 'detached', 'newer', 'ledger-off', 'before-ledger', 'failed-ledger-write',
          '2543384-before', '2543384-between', '2543384-after', '2543487-before', '2543487-between', '2543487-after')
@@ -33,6 +36,8 @@ CASES = ('wrapped-base64-cold-pairwise', 'wrapped-base64-cold-counted',
 
 @pytest.fixture(scope='module')
 def end_versions(tmp_path_factory):
+    if os.environ.get('LCMX_DIFF_SESSION_END_BASELINE') is not None and any(k in os.environ for k in ('CI', 'GITHUB_ACTIONS')):
+        pytest.fail('LCMX_DIFF_SESSION_END_BASELINE is forbidden in CI')
     baseline = os.environ.get('LCMX_DIFF_SESSION_END_BASELINE', BASELINE)
     return {'main': _load(materialize(resolve(baseline), tmp_path_factory.mktemp('end-main')), '_end_main'),
             'candidate': _load(Path(os.environ.get('LCMX_DIFF_CANDIDATE_TREE', ROOT)), '_end_candidate')}
@@ -302,7 +307,7 @@ def scenario(run, case):
         run.engine = engine = run.open(run.root)
     run.retry('retry-1')
     run.retry('retry-2')
-    if case in CASES[:8]:
+    if case in CELL_CASES:
         rows = engine._store.get_session_messages('S1')
         if case in CELLS:
             if run.check_proof:  # Pin main's loss; judge compares the candidate at every stage.
@@ -431,6 +436,36 @@ def test_fake_candidates(tmp_path, monkeypatch, end_versions, kind, record_prope
         record_property('failure', str(caught.value))
     else:
         judge(snapshots['main'], snapshots['candidate'], stage)
+
+
+@pytest.mark.parametrize('key', ('canonical', 'tables'))
+@pytest.mark.parametrize('kind, reason', (
+    ('exempt-drop', 'lost'), ('exempt-duplicate', 'doubled'),
+    ('exempt-new-once', None), ('exempt-new-twice', 'doubled')))
+def test_fake_candidates_intended(monkeypatch, key, kind, reason, record_property):
+    columns = ('store_id', 'session_id', 'role', 'content')
+    rows = [(1, 'S1', 'user', 'A'), (2, 'S1', 'assistant', 'B')]
+    changed = rows[:-1] if kind == 'exempt-drop' else [*rows]
+    extra = rows[0][1:] if kind == 'exempt-duplicate' else ('S1', 'assistant', 'FINAL')
+    if kind != 'exempt-drop':
+        changed.append((3, *extra))
+    if kind == 'exempt-new-twice':
+        changed.append((4, *extra))
+    changed = [(sid + 10, *values) for sid, *values in changed]  # store_id is exempt.
+    main = {name: {} for name in ('canonical', 'schema', 'tables', 'payload', 'pending', 'ledger', 'lifecycle')}
+    def observed(items):
+        messages = (columns, items)
+        return {'lcm.db': {'messages': messages} if key == 'tables' else messages}
+    main[key] = observed(rows)
+    candidate = dict(main, **{key: observed(changed)})
+    monkeypatch.setattr(session_end_contract, 'INTENDED_DIFFERENCES',
+                        [('cell', '*', 'retry-1', key, '#2543')])
+    if reason:
+        with pytest.raises(AssertionError, match=f'{key} {reason} stored row') as caught:
+            judge(main, candidate, 'retry-1', case='cell', mode='instant')
+        record_property('failure', str(caught.value))
+    else:
+        judge(main, candidate, 'retry-1', case='cell', mode='instant')
 
 
 def _seam_probe(engine, canonical=False):
