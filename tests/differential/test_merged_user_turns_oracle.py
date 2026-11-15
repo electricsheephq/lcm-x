@@ -8,18 +8,35 @@ from .session import (FaultRun, Trace, assert_faults, audit_fault, duplicate_row
                       RECORD_COLUMNS, canonical_rows, label_missing, missing_messages, queued_rows)
 
 
-def test_record_snapshot_requires_columns_and_keeps_multiplicity():
-    with sqlite3.connect(':memory:') as conn:
-        engine = SimpleNamespace(_store=SimpleNamespace(_conn=conn))
+def test_record_snapshot_requires_columns_and_keeps_multiplicity(tmp_path, monkeypatch):
+    from contextlib import closing
+    from hermes_lcm import store as sm
+    from . import paired
+    monkeypatch.setattr(sm, '_RECORDS_TABLES', dict(sm._RECORDS_TABLES))
+    store = sm.MessageStore(tmp_path / 'lcm.db')
+    try:
+        sid = store.append('parent', dict(role='user', content='owner', timestamp=1.), conversation_id='conv')
+        engine = SimpleNamespace(_store=store)
         assert queued_rows(engine) == []
-        conn.execute('CREATE TABLE queued_user_rows (owner_store_id INTEGER)')
-        with pytest.raises(AssertionError, match='missing columns'):
-            queued_rows(engine)
-        conn.execute('DROP TABLE queued_user_rows')
-        conn.execute('CREATE TABLE queued_user_rows (' + ', '.join(RECORD_COLUMNS) + ')')
-        record = (7, 0, 'user', 'P', 10., 'host_message_timestamp', 'parent', 'conv', None, None)
-        conn.executemany('INSERT INTO queued_user_rows VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', [record] * 2)
-        assert queued_rows(engine) == [freeze(dict(zip(RECORD_COLUMNS, record)))] * 2
+        monkeypatch.setattr(paired, 'CANDIDATE_CONTRACT', 'records-v1')
+        with closing(sm.open_records_writer(store)) as writer:
+            conn = writer.connection
+            conn.execute('CREATE TABLE queued_user_rows (owner_store_id INTEGER)')
+            with pytest.raises(AssertionError, match='missing columns'):
+                queued_rows(engine)
+            conn.execute('DROP TABLE queued_user_rows')
+            ddl = ('CREATE TABLE IF NOT EXISTS queued_user_rows (' + ', '.join(RECORD_COLUMNS) +
+                   ', owner_timestamp REAL, owner_ingested_at REAL)')
+            sm.register_records_table('queued_user_rows', ddl, dict(owner_store_id='store_id',
+                                      owner_timestamp='timestamp', owner_ingested_at='ingested_at'))
+            stamps = store.connection.execute('SELECT timestamp, ingested_at FROM messages').fetchone()
+            record = (sid, 0, 'user', 'P', 10., 'host_message_timestamp', 'parent', 'conv', None, None)
+            values = dict(zip(RECORD_COLUMNS, record), owner_timestamp=stamps[0], owner_ingested_at=stamps[1])
+            for _ in range(2):
+                assert writer.insert('queued_user_rows', values) is None
+            assert queued_rows(engine) == [freeze(dict(zip(RECORD_COLUMNS, record)))] * 2
+    finally:
+        store.close()
 
 
 def test_canonical_snapshot_keeps_ids_and_token_estimates_but_excludes_clocks():

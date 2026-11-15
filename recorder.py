@@ -225,6 +225,7 @@ def _disk_room(target: Path, need: int) -> bool:
 
 
 def _backup(conn, dest: Path) -> dict:
+    """Canonical-only replay snapshot: excludes the optional .records file."""
     target = None
     try:
         _mkdir(dest.parent)

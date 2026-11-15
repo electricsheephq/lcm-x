@@ -31,6 +31,11 @@
           "detail": "no live inactive process"
         },
         {
+          "check": "records",
+          "status": "pass",
+          "detail": "records: absent"
+        },
+        {
           "check": "identity_migration",
           "status": "pass",
           "detail": "config uses hermes-lcm-x / lcm-x"
@@ -298,6 +303,11 @@
           "detail": "no live inactive process"
         },
         {
+          "check": "records",
+          "status": "pass",
+          "detail": "records: absent"
+        },
+        {
           "check": "identity_migration",
           "status": "pass",
           "detail": "config uses hermes-lcm-x / lcm-x"
@@ -548,6 +558,11 @@
           "detail": "no live inactive process"
         },
         {
+          "check": "records",
+          "status": "pass",
+          "detail": "records: absent"
+        },
+        {
           "check": "identity_migration",
           "status": "pass",
           "detail": "config uses hermes-lcm-x / lcm-x"
@@ -796,6 +811,11 @@
           "check": "inactive_process",
           "status": "pass",
           "detail": "no live inactive process"
+        },
+        {
+          "check": "records",
+          "status": "pass",
+          "detail": "records: absent"
         },
         {
           "check": "identity_migration",
@@ -1072,6 +1092,11 @@
           "check": "inactive_process",
           "status": "pass",
           "detail": "no live inactive process"
+        },
+        {
+          "check": "records",
+          "status": "pass",
+          "detail": "records: absent"
         },
         {
           "check": "identity_migration",
@@ -1406,6 +1431,11 @@
           "detail": "no live inactive process"
         },
         {
+          "check": "records",
+          "status": "pass",
+          "detail": "records: absent"
+        },
+        {
           "check": "identity_migration",
           "status": "pass",
           "detail": "config uses hermes-lcm-x / lcm-x"
@@ -1696,6 +1726,11 @@
           "detail": "no live inactive process"
         },
         {
+          "check": "records",
+          "status": "pass",
+          "detail": "records: absent"
+        },
+        {
           "check": "identity_migration",
           "status": "pass",
           "detail": "config uses hermes-lcm-x / lcm-x"
@@ -1963,6 +1998,11 @@
           "detail": "no live inactive process"
         },
         {
+          "check": "records",
+          "status": "pass",
+          "detail": "records: absent"
+        },
+        {
           "check": "identity_migration",
           "status": "pass",
           "detail": "config uses hermes-lcm-x / lcm-x"
@@ -2204,6 +2244,11 @@
           "check": "inactive_process",
           "status": "pass",
           "detail": "no live inactive process"
+        },
+        {
+          "check": "records",
+          "status": "pass",
+          "detail": "records: absent"
         },
         {
           "check": "identity_migration",
@@ -2482,6 +2527,11 @@
           "detail": "no live inactive process"
         },
         {
+          "check": "records",
+          "status": "pass",
+          "detail": "records: absent"
+        },
+        {
           "check": "identity_migration",
           "status": "pass",
           "detail": "config uses hermes-lcm-x / lcm-x"
@@ -2735,6 +2785,11 @@
           "check": "inactive_process",
           "status": "pass",
           "detail": "no live inactive process"
+        },
+        {
+          "check": "records",
+          "status": "pass",
+          "detail": "records: absent"
         },
         {
           "check": "identity_migration",
@@ -3043,6 +3098,11 @@
           "check": "inactive_process",
           "status": "pass",
           "detail": "no live inactive process"
+        },
+        {
+          "check": "records",
+          "status": "pass",
+          "detail": "records: absent"
         },
         {
           "check": "identity_migration",
@@ -3354,6 +3414,11 @@
           "detail": "no live inactive process"
         },
         {
+          "check": "records",
+          "status": "pass",
+          "detail": "records: absent"
+        },
+        {
           "check": "identity_migration",
           "status": "pass",
           "detail": "config uses hermes-lcm-x / lcm-x"
@@ -3663,6 +3728,11 @@
           "detail": "no live inactive process"
         },
         {
+          "check": "records",
+          "status": "pass",
+          "detail": "records: absent"
+        },
+        {
           "check": "identity_migration",
           "status": "pass",
           "detail": "config uses hermes-lcm-x / lcm-x"
@@ -3950,6 +4020,11 @@
           "detail": "no live inactive process"
         },
         {
+          "check": "records",
+          "status": "pass",
+          "detail": "records: absent"
+        },
+        {
           "check": "identity_migration",
           "status": "pass",
           "detail": "config uses hermes-lcm-x / lcm-x"
@@ -4219,6 +4294,11 @@
           "detail": "no live inactive process"
         },
         {
+          "check": "records",
+          "status": "pass",
+          "detail": "records: absent"
+        },
+        {
           "check": "identity_migration",
           "status": "pass",
           "detail": "config uses hermes-lcm-x / lcm-x"
@@ -4458,6 +4538,11 @@
           "check": "inactive_process",
           "status": "pass",
           "detail": "no live inactive process"
+        },
+        {
+          "check": "records",
+          "status": "pass",
+          "detail": "records: absent"
         },
         {
           "check": "identity_migration",
@@ -4738,6 +4823,11 @@
           "detail": "no live inactive process"
         },
         {
+          "check": "records",
+          "status": "pass",
+          "detail": "records: absent"
+        },
+        {
           "check": "identity_migration",
           "status": "pass",
           "detail": "config uses hermes-lcm-x / lcm-x"
@@ -5011,6 +5101,11 @@
           "detail": "no live inactive process"
         },
         {
+          "check": "records",
+          "status": "pass",
+          "detail": "records: absent"
+        },
+        {
           "check": "identity_migration",
           "status": "pass",
           "detail": "config uses hermes-lcm-x / lcm-x"
@@ -5276,6 +5371,11 @@
           "check": "inactive_process",
           "status": "pass",
           "detail": "no live inactive process"
+        },
+        {
+          "check": "records",
+          "status": "pass",
+          "detail": "records: absent"
         },
         {
           "check": "identity_migration",
@@ -5549,6 +5649,11 @@
           "check": "inactive_process",
           "status": "pass",
           "detail": "no live inactive process"
+        },
+        {
+          "check": "records",
+          "status": "pass",
+          "detail": "records: absent"
         },
         {
           "check": "identity_migration",
@@ -5825,6 +5930,11 @@
           "detail": "no live inactive process"
         },
         {
+          "check": "records",
+          "status": "pass",
+          "detail": "records: absent"
+        },
+        {
           "check": "identity_migration",
           "status": "pass",
           "detail": "config uses hermes-lcm-x / lcm-x"
@@ -6096,6 +6206,11 @@
           "check": "inactive_process",
           "status": "pass",
           "detail": "no live inactive process"
+        },
+        {
+          "check": "records",
+          "status": "pass",
+          "detail": "records: absent"
         },
         {
           "check": "identity_migration",
@@ -6372,6 +6487,11 @@
           "detail": "no live inactive process"
         },
         {
+          "check": "records",
+          "status": "pass",
+          "detail": "records: absent"
+        },
+        {
           "check": "identity_migration",
           "status": "pass",
           "detail": "config uses hermes-lcm-x / lcm-x"
@@ -6646,6 +6766,11 @@
           "detail": "no live inactive process"
         },
         {
+          "check": "records",
+          "status": "pass",
+          "detail": "records: absent"
+        },
+        {
           "check": "identity_migration",
           "status": "pass",
           "detail": "config uses hermes-lcm-x / lcm-x"
@@ -6918,6 +7043,11 @@
           "detail": "no live inactive process"
         },
         {
+          "check": "records",
+          "status": "pass",
+          "detail": "records: absent"
+        },
+        {
           "check": "identity_migration",
           "status": "pass",
           "detail": "config uses hermes-lcm-x / lcm-x"
@@ -7185,6 +7315,11 @@
           "detail": "no live inactive process"
         },
         {
+          "check": "records",
+          "status": "pass",
+          "detail": "records: absent"
+        },
+        {
           "check": "identity_migration",
           "status": "pass",
           "detail": "config uses hermes-lcm-x / lcm-x"
@@ -7450,6 +7585,11 @@
           "check": "inactive_process",
           "status": "warn",
           "detail": "LCM-X was not active in process <pid> (fixture inactive)"
+        },
+        {
+          "check": "records",
+          "status": "pass",
+          "detail": "records: absent"
         },
         {
           "check": "identity_migration",
@@ -7728,6 +7868,11 @@
           "detail": "no live inactive process"
         },
         {
+          "check": "records",
+          "status": "pass",
+          "detail": "records: absent"
+        },
+        {
           "check": "identity_migration",
           "status": "pass",
           "detail": "config uses hermes-lcm-x / lcm-x"
@@ -8002,6 +8147,11 @@
           "check": "inactive_process",
           "status": "pass",
           "detail": "no live inactive process"
+        },
+        {
+          "check": "records",
+          "status": "pass",
+          "detail": "records: absent"
         },
         {
           "check": "identity_migration",
@@ -8280,6 +8430,11 @@
           "detail": "no live inactive process"
         },
         {
+          "check": "records",
+          "status": "pass",
+          "detail": "records: absent"
+        },
+        {
           "check": "identity_migration",
           "status": "pass",
           "detail": "config uses hermes-lcm-x / lcm-x"
@@ -8554,6 +8709,11 @@
           "detail": "no live inactive process"
         },
         {
+          "check": "records",
+          "status": "pass",
+          "detail": "records: absent"
+        },
+        {
           "check": "identity_migration",
           "status": "pass",
           "detail": "config uses hermes-lcm-x / lcm-x"
@@ -8821,6 +8981,11 @@
           "detail": "no live inactive process"
         },
         {
+          "check": "records",
+          "status": "pass",
+          "detail": "records: absent"
+        },
+        {
           "check": "identity_migration",
           "status": "pass",
           "detail": "config uses hermes-lcm-x / lcm-x"
@@ -9055,6 +9220,11 @@
           "check": "inactive_process",
           "status": "pass",
           "detail": "no live inactive process"
+        },
+        {
+          "check": "records",
+          "status": "pass",
+          "detail": "records: absent"
         },
         {
           "check": "identity_migration",
@@ -9341,6 +9511,11 @@
           "detail": "no live inactive process"
         },
         {
+          "check": "records",
+          "status": "pass",
+          "detail": "records: absent"
+        },
+        {
           "check": "identity_migration",
           "status": "pass",
           "detail": "config uses hermes-lcm-x / lcm-x"
@@ -9609,6 +9784,11 @@
           "check": "inactive_process",
           "status": "pass",
           "detail": "no live inactive process"
+        },
+        {
+          "check": "records",
+          "status": "pass",
+          "detail": "records: absent"
         },
         {
           "check": "identity_migration",
@@ -9887,6 +10067,11 @@
           "detail": "no live inactive process"
         },
         {
+          "check": "records",
+          "status": "pass",
+          "detail": "records: absent"
+        },
+        {
           "check": "identity_migration",
           "status": "pass",
           "detail": "config uses hermes-lcm-x / lcm-x"
@@ -10161,6 +10346,11 @@
           "check": "inactive_process",
           "status": "pass",
           "detail": "no live inactive process"
+        },
+        {
+          "check": "records",
+          "status": "pass",
+          "detail": "records: absent"
         },
         {
           "check": "identity_migration",

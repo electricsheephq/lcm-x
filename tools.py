@@ -6256,6 +6256,13 @@ def lcm_doctor(args: Dict[str, Any], **kwargs) -> str:
         "status": "warn" if inactive_process else "pass",
         "detail": inactive_process or "no live inactive process",
     })
+    from .store import records_doctor
+    try:
+        records_detail = records_doctor(engine._store)
+    except (OSError, sqlite3.Error, ValueError) as exc:
+        records_detail = f"records: unavailable ({exc})"
+    checks.append({"check": "records", "status": "warn" if "refused" in records_detail or "unavailable" in records_detail
+                   else "pass", "detail": records_detail})
     # Diagnose the foreground session, not whatever side-channel session
     # currently owns engine._session_id. Falls back to the bound id when no
     # foreground has ever been bound.
