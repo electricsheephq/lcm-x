@@ -321,3 +321,70 @@ def test_busy_direct_end_queues_quietly_and_refused_retry_warns_once_with_tail_v
     assert _warnings(caplog) == [STALE_END.format(len(VIEW) + 1)]
     assert not engine._pending_session_tails
     assert _contents(engine) == [m["content"] for m in HISTORY]
+
+
+def test_fallback_direct_exception_warns_once(cold, monkeypatch, caplog):
+    engine = cold()
+
+    def fails(*args, **kwargs):
+        raise RuntimeError("injected compare failure")
+
+    monkeypatch.setattr(engine, "_off_current_fallback_prefix", fails)
+    caplog.clear()
+    engine.on_session_end("S2", copy.deepcopy(VIEW))
+    assert "gate 3: compare failed" in caplog.text
+    assert _warnings(caplog) == [STALE_END.format(len(VIEW))]
+    assert _contents(engine) == [m["content"] for m in HISTORY] and not engine._pending_session_tails
+
+
+def test_fallback_inline_gate4_refusal_warns_once(cold, monkeypatch, caplog):
+    from contextlib import contextmanager
+    engine = cold()
+    store, original, entered = engine._store, engine._store.ingest_atomic, []
+
+    @contextmanager
+    def changed_between_reads(**kwargs):  # Outer gates passed; gate 4 rereads ownership under the lock.
+        entered.append(1)
+        store._conn.execute("UPDATE ledger_meta SET value='foreign:S2' WHERE key='session_lineage:S2'")
+        store._conn.commit()
+        with original(**kwargs) as timing:
+            yield timing
+
+    caplog.clear()
+    with monkeypatch.context() as patch:
+        patch.setattr(store, "ingest_atomic", changed_between_reads)
+        engine.on_session_end("S2", copy.deepcopy(VIEW))
+    assert entered == [1] and caplog.text.count(STALE) == 1
+    assert _warnings(caplog) == [STALE_END.format(len(VIEW))]
+    assert _contents(engine) == [m["content"] for m in HISTORY] and not engine._pending_session_tails
+
+
+def _interrupt(*args, **kwargs):
+    raise KeyboardInterrupt
+
+
+@pytest.mark.parametrize("site", ["_off_current_fallback_prefix", "_append_off_current_session_end_suffix"])
+def test_fallback_interrupt_warns_once_and_propagates(cold, monkeypatch, caplog, site):
+    # Gate-3 compare and gate-4 append: the interrupt still propagates (#2543 is log-only).
+    engine = cold()
+    caplog.clear()
+    with monkeypatch.context() as patch:
+        patch.setattr(engine, site, _interrupt)
+        with pytest.raises(KeyboardInterrupt):
+            engine.on_session_end("S2", copy.deepcopy(VIEW))
+    assert _warnings(caplog) == [
+        f"LCM session-end rows not stored: session=S2 reason=off_current_fallback_interrupted view_rows={len(VIEW)}"]
+    assert _contents(engine) == [m["content"] for m in HISTORY] and not engine._pending_session_tails
+
+
+def test_bypass_lineage_suffix_append_interrupt_warns_once_and_propagates(engines, monkeypatch, caplog):
+    from tests.invariants.test_issue_2738_bypass_lineage_busy_suffix import setup, contents
+    engine, view = setup(engines)
+    caplog.clear()
+    with monkeypatch.context() as patch:
+        patch.setattr(engine, "_append_off_current_session_end_suffix", _interrupt)
+        with pytest.raises(KeyboardInterrupt):
+            engine.on_session_end("S1", copy.deepcopy(view))
+    assert _warnings(caplog) == [
+        f"LCM session-end rows not stored: session=S1 reason=off_current_suffix_append_interrupted view_rows={len(view)}"]
+    assert contents(engine) == ["A", "B"] and not engine._pending_session_tails

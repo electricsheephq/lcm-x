@@ -5353,6 +5353,9 @@ class LCMEngine(
                     )
                     self._ingest_telemetry(self._log_ingest_route, session_id, "S3", prefix_count,
                                            "off-current session end", ids)
+                except KeyboardInterrupt:
+                    self._warn_session_end_unstored(session_id, messages, "off_current_suffix_append_interrupted")
+                    raise
                 except Exception as exc:
                     if queue_off_current_busy_tail(exc):
                         return
@@ -5682,6 +5685,9 @@ class LCMEngine(
                 return True
             stage = "gate 4: atomic revalidation failed"
             return self._retry_off_current_fallback(tail)
+        except KeyboardInterrupt:
+            self._warn_session_end_unstored(session_id, messages, "off_current_fallback_interrupted")
+            raise
         except Exception as exc:
             if "fallback_lineage" in tail and "conversation_id" in tail and _is_ingest_busy_error(exc):
                 try:
