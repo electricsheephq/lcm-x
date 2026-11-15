@@ -36,6 +36,8 @@ engine to the same recording when it uses the same database; foreign engines are
   changes, config file paths with hash and mtime, the `sessions` rows LCM reads from Hermes's `state.db`, the
   `/lcm` task-local context, auxiliary-agent frames LCM inspects, and per-engine seeds (the compaction telemetry
   epoch), and persisted-output read outcomes (path, generation stat, hash and content blob).
+Recorder snapshots and checkpoints exclude the optional `.records` file; they replay canonical messages only.
+
 - **At start:** a snapshot of `lcm.db` pinned at one transaction, a copy of the large-output payload directory with a
   manifest, the plugin's git SHA when readable, Python and host versions.
 

@@ -9,11 +9,12 @@ formatting, and the store/dag/lifecycle connection handling lives in one place.
 
 from __future__ import annotations
 
-from contextlib import nullcontext
+from contextlib import closing, nullcontext, suppress
 from datetime import datetime
 from pathlib import Path
 import os
 import sqlite3
+import secrets
 from typing import Any
 
 
@@ -90,11 +91,7 @@ def backup_database(engine) -> dict[str, Any]:
         backup_dir.mkdir(parents=True, exist_ok=True)
         flush_engine_connections(engine)
 
-        dest = sqlite3.connect(str(backup_path))
-        try:
-            engine._store.backup(dest)
-        finally:
-            dest.close()
+        _backup_pair(engine._store, backup_path)
     except (OSError, sqlite3.Error) as exc:
         return {
             "ok": False,
@@ -114,7 +111,7 @@ def backup_database(engine) -> dict[str, Any]:
 def rotate_backup_database(engine) -> dict[str, Any]:
     """Write a rolling rotate-latest SQLite snapshot of the LCM store.
 
-    Atomic via tmp-then-rename so the slot is never half-written. Unlike
+    Both SQLite copies finish before replacing the previous pair. Unlike
     ``backup_database`` which produces timestamped files, this overwrites a
     single rolling slot so disk usage stays bounded across repeated rotates.
     """
@@ -128,28 +125,11 @@ def rotate_backup_database(engine) -> dict[str, Any]:
 
     backup_path = engine.rotate_backup_path()
     backup_dir = backup_path.parent
-    tmp_path = backup_path.with_name(backup_path.name + ".tmp")
-
     try:
         backup_dir.mkdir(parents=True, exist_ok=True)
         flush_engine_connections(engine)
-
-        if tmp_path.exists():
-            tmp_path.unlink()
-        dest = sqlite3.connect(str(tmp_path))
-        try:
-            engine._store.backup(dest)
-        finally:
-            dest.close()
-        # Atomic replace so the rolling slot is never half-written.
-        tmp_path.replace(backup_path)
+        _backup_pair(engine._store, backup_path)
     except (OSError, sqlite3.Error) as exc:
-        # Best-effort cleanup of the tmp file if something failed midway.
-        try:
-            if tmp_path.exists():
-                tmp_path.unlink()
-        except OSError:
-            pass
         return {
             "ok": False,
             "db_path": db_path,
@@ -164,3 +144,37 @@ def rotate_backup_database(engine) -> dict[str, Any]:
         "backup_path": backup_path,
         "backup_size": backup_size,
     }
+
+
+def _backup_pair(store, destination):
+    """Stage both SQLite copies before publication; restore the old pair on failure."""
+    staging = destination.with_name(destination.name + "." + secrets.token_hex(8) + ".tmp")
+    try:
+        with closing(sqlite3.connect(str(staging))) as dest:
+            store.backup(dest)
+    except BaseException:
+        for path in (staging, Path(str(staging) + ".records")):
+            with suppress(OSError):
+                path.unlink(missing_ok=True)
+        raise
+    staged = [Path(str(staging) + ".records"), staging]
+    targets = [Path(str(destination) + ".records"), destination]
+    previous, published = [], []
+    try:
+        for source, target in zip(staged, targets):
+            saved = target.with_name(target.name + "." + secrets.token_hex(8) + ".previous")
+            if target.exists():
+                target.replace(saved)
+                previous.append((saved, target))
+            if source.exists():
+                source.replace(target)
+                published.append(target)
+    except BaseException:
+        for target in published:
+            target.unlink()
+        for saved, target in previous:
+            saved.replace(target)
+        raise
+    for saved, _ in previous:
+        with suppress(OSError):
+            saved.unlink()

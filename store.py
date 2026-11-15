@@ -17,7 +17,8 @@ import secrets
 import sqlite3
 import threading
 import time
-from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext
+from contextlib import AbstractContextManager, ExitStack, closing, contextmanager, nullcontext, suppress
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Collection, Dict, Iterable, List, Optional
@@ -471,6 +472,302 @@ def _database_identity(path: Path, store: object) -> str:
         return str(path.resolve())
     except (OSError, RuntimeError, ValueError):  # unresolvable: keep the spelled path
         return str(path)
+
+
+# Records format 1; oldest reader v0.30.2; no planned removal. Canonical DDL is unchanged.
+_RECORDS_TABLES: dict[str, tuple[str, dict[str, str]]] = {}
+RECORDS_PURGE_BUSY_MS = 50  # Each purge intent/completion has its own bounded SQLite wait.
+
+
+class RecordsFormatError(ValueError):
+    def __init__(self, version):
+        self.version = version
+        super().__init__(f"records: refused format {version}")
+
+
+def records_path(db_path) -> Path | None:
+    """Bind from MessageStore.db_identity when available; never re-resolve a bound object."""
+    identity = str(getattr(db_path, "db_identity", db_path))
+    if identity.startswith(":memory:"):
+        return None
+    canonical = Path(identity) if hasattr(db_path, "db_identity") else Path(identity).resolve()
+    return Path(str(canonical) + ".records")
+
+
+def register_records_table(name: str, ddl: str, owner_columns: dict[str, str]) -> None:
+    """Map record columns to messages columns: first store_id, then occurrence evidence.
+
+    Writers must include immutable occurrence evidence (e.g. timestamp AND ingested_at),
+    not merely a session or equal text. Scope always comes from the current owner.
+    This registry is process-local; every reader loads the owning writer's registration.
+    """
+    columns = dict(owner_columns)
+    for identifier in (name, *columns, *columns.values()):
+        if not identifier.isidentifier() or not identifier.isascii():
+            raise ValueError("invalid records identifier")
+    if name.startswith("_records_") or len(columns) < 2 or next(iter(columns.values())) != "store_id":
+        raise ValueError("records require owner id and occurrence evidence")
+    if {"session_id", "conversation_id"} & set(columns.values()):
+        raise ValueError("scope is not occurrence evidence")
+    _RECORDS_TABLES[name] = (ddl, columns)
+
+
+def ensure_records_format(conn: sqlite3.Connection) -> None:
+    """Check BEFORE any mutation, including journal mode or registered table DDL."""
+    version = conn.execute("PRAGMA user_version").fetchone()[0]
+    if version not in (0, 1):
+        raise RecordsFormatError(version)
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        # Recheck under the writer reservation: another process may have upgraded
+        # between the initial read and acquiring this lock.
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        if version not in (0, 1):
+            raise RecordsFormatError(version)
+        conn.execute("PRAGMA journal_mode=DELETE")
+        conn.execute("CREATE TABLE IF NOT EXISTS _records_purge_intents ("
+                     "token TEXT, table_name TEXT, owner_id INTEGER, evidence TEXT, "
+                     "PRIMARY KEY(token, table_name, owner_id))")
+        conn.execute("PRAGMA user_version=1")
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+
+
+def _records_ro(path):
+    conn = sqlite3.connect(Path(path).as_uri() + "?mode=ro", uri=True, timeout=0)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _records_has_table(conn, table):
+    return conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()
+
+
+def _records_owner(canonical, columns, row):
+    names = list(columns)
+    owner = canonical.execute("SELECT * FROM messages WHERE store_id=?", (row[names[0]],)).fetchone()
+    if owner is None or any(owner[col] != row[key] for key, col in columns.items()):
+        return None
+    return owner
+
+
+class RecordsWriter:
+    """Owns only a records connection and frozen paths; never a canonical write lock."""
+
+    def __init__(self, canonical_path, path, conn):
+        self.db_path, self.path, self.connection = canonical_path, path, conn
+
+    def insert(self, table, values):
+        """Return a refusal reason, or None after commit. SQLite failures propagate."""
+        ddl, columns = _RECORDS_TABLES[table]
+        conn = self.connection
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            with closing(_records_ro(self.db_path)) as canonical:
+                canonical.execute("BEGIN")
+                self._complete(canonical)
+                owner = _records_owner(canonical, columns, values)
+                if owner is None:
+                    conn.rollback()
+                    return "owner not committed or evidence mismatch"
+                evidence = json.dumps({key: owner[col] for key, col in columns.items()}, sort_keys=True)
+                if conn.execute("SELECT 1 FROM _records_purge_intents WHERE table_name=? "
+                                "AND owner_id=? AND evidence=?", (table, values[next(iter(columns))], evidence)).fetchone():
+                    conn.rollback()
+                    return "pending purge intent"
+                conn.execute(ddl)
+                keys = list(values)
+                if any(not key.isidentifier() or not key.isascii() for key in keys):
+                    raise ValueError("invalid records column")
+                conn.execute(f"INSERT INTO {table} ({','.join(keys)}) VALUES ({','.join('?' for _ in keys)})",
+                             [values[key] for key in keys])
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+        return None
+
+    def _complete(self, canonical, token=None):
+        # Absence of a matching owner only completes an explicit purge intent.
+        # An unattached record with no intent is NEVER swept.
+        query = "SELECT * FROM _records_purge_intents" + (" WHERE token=?" if token is not None else "")
+        for intent in self.connection.execute(query, () if token is None else (token,)).fetchall():
+            table = intent[1]
+            if table not in _RECORDS_TABLES:
+                continue  # An unloaded writer must not lose its pending cleanup.
+            columns = _RECORDS_TABLES[table][1]
+            evidence = json.loads(intent[3])
+            if _records_owner(canonical, columns, evidence) is not None:
+                continue  # May be an in-flight purge. Never infer rollback.
+            self._delete_intent(intent, evidence)
+
+    def _delete_intent(self, intent, evidence):
+        table = intent[1]
+        if _records_has_table(self.connection, table):
+            clause = ' AND '.join(f'{key} IS ?' for key in evidence)
+            self.connection.execute(f"DELETE FROM {table} WHERE {clause}", list(evidence.values()))
+        self.connection.execute("DELETE FROM _records_purge_intents WHERE table_name=? AND owner_id=? AND evidence=?",
+                                tuple(intent[1:]))
+
+    def maintain(self):
+        """Explicit maintenance point; also run at every records insert."""
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            with closing(_records_ro(self.db_path)) as canonical:
+                canonical.execute("BEGIN")
+                self._complete(canonical)
+            self.connection.commit()
+        except BaseException:
+            self.connection.rollback()
+            raise
+
+    def close(self):
+        self.connection.close()
+
+
+def open_records_writer(db_path, *, _busy_timeout_ms=0) -> RecordsWriter:
+    """The sole file creator. A busy write raises without canonical error handling."""
+    path = records_path(db_path)
+    if path is None:
+        raise ValueError("records unavailable for an in-memory store")
+    if path.exists():
+        # Even closing a read-write handle can checkpoint an unknown WAL format.
+        # Refuse it before opening any handle capable of changing its bytes.
+        with closing(_records_ro(path)) as probe:
+            version = probe.execute("PRAGMA user_version").fetchone()[0]
+            if version not in (0, 1):
+                raise RecordsFormatError(version)
+    conn = sqlite3.connect(str(path), timeout=_busy_timeout_ms / 1000)
+    try:
+        ensure_records_format(conn)
+    except BaseException:
+        conn.close()
+        raise
+    return RecordsWriter(Path(str(path)[:-len('.records')]), path, conn)
+
+
+@dataclass
+class RecordsReadCut:
+    path: Path | None
+    records: sqlite3.Connection | None
+    canonical: sqlite3.Connection | None
+    refused_format: int | None = None
+
+
+@contextmanager
+def records_read_cut(db_path):
+    """Pin rollback-journal records BEFORE the one canonical snapshot used by callers."""
+    path = records_path(db_path)
+    with ExitStack() as stack:
+        records = canonical = None
+        refused = None
+        if path is not None and path.exists():
+            records = stack.enter_context(closing(_records_ro(path)))
+            records.execute("BEGIN")
+            version = records.execute("PRAGMA user_version").fetchone()[0]
+            records.execute("SELECT count(*) FROM sqlite_master").fetchone()  # pin even an empty container
+            if version != 1:
+                refused, records = version, None
+        if path is not None:
+            canonical = stack.enter_context(closing(_records_ro(str(path)[:-len('.records')])))
+            canonical.execute("BEGIN")
+            canonical.execute("SELECT count(*) FROM sqlite_master").fetchone()
+        yield RecordsReadCut(path, records, canonical, refused)
+
+
+def read_records(cut, table):
+    """Return (attached dictionaries, unattached count). No writes or orphan deletion."""
+    if cut.records is None or not _records_has_table(cut.records, table):
+        return [], 0
+    columns = _RECORDS_TABLES[table][1]
+    attached, unattached = [], 0
+    for row in cut.records.execute(f"SELECT * FROM {table}"):
+        owner = _records_owner(cut.canonical, columns, row)
+        if owner is None:
+            unattached += 1
+        else:
+            attached.append(dict(row, session_id=owner['session_id'], conversation_id=owner['conversation_id']))
+    return attached, unattached
+
+
+def records_doctor(db_path):
+    with records_read_cut(db_path) as cut:
+        if cut.refused_format is not None:
+            return f"records: refused format {cut.refused_format}"
+        if cut.records is None:
+            return "records: absent"
+        counts = []
+        for table in _RECORDS_TABLES:
+            rows, unattached = read_records(cut, table)
+            counts.append(f"{table} attached={len(rows)} unattached={unattached}")
+        pending = cut.records.execute("SELECT count(DISTINCT token) FROM _records_purge_intents").fetchone()[0]
+        return f"records: format 1; bytes={cut.path.stat().st_size}; " + '; '.join([*counts, f"pending purge intents={pending}"])
+
+
+def _purge_records(conn, sessions_sql, args):
+    identity = conn.execute("PRAGMA database_list").fetchone()[2]
+    path = records_path(identity) if identity else None
+    if path is None or not path.exists():
+        return
+    owner = next(item for item in TransactionOwner._active_owners.get() if item.owns(conn))
+    writer = open_records_writer(identity, _busy_timeout_ms=RECORDS_PURGE_BUSY_MS)
+    side = writer.connection
+    token = secrets.token_hex(16)
+    try:
+        side.execute(f"PRAGMA busy_timeout={RECORDS_PURGE_BUSY_MS}")
+        side.execute("BEGIN IMMEDIATE")
+        for table, (_, columns) in _RECORDS_TABLES.items():
+            cursor = conn.execute(f"SELECT * FROM messages WHERE session_id IN ({sessions_sql})", args)
+            names = [column[0] for column in cursor.description]
+            for values in cursor:
+                row = dict(zip(names, values))
+                evidence = {key: row[col] for key, col in columns.items()}
+                side.execute("INSERT INTO _records_purge_intents VALUES (?,?,?,?)",
+                             (token, table, row['store_id'], json.dumps(evidence, sort_keys=True)))
+        side.commit()
+    finally:
+        writer.close()
+
+    def finish(committed):
+        # Rebind by frozen identity, never by a mutable profile configuration.
+        with closing(_records_ro(path)) as probe:
+            version = probe.execute("PRAGMA user_version").fetchone()[0]
+            if version != 1:
+                raise RecordsFormatError(version)
+        with closing(sqlite3.connect(path.as_uri() + "?mode=rw", uri=True,
+                                     timeout=RECORDS_PURGE_BUSY_MS / 1000)) as side:
+            side.execute("BEGIN IMMEDIATE")
+            try:
+                version = side.execute("PRAGMA user_version").fetchone()[0]
+                if version != 1:
+                    raise RecordsFormatError(version)
+                if committed:
+                    worker = RecordsWriter(identity, path, side)
+                    with closing(_records_ro(identity)) as canonical:
+                        canonical.execute("BEGIN")
+                        worker._complete(canonical, token)
+                else:
+                    # A commit can succeed before its caller reports an error.
+                    # Only matching surviving owners prove this intent rolled back.
+                    with closing(_records_ro(identity)) as canonical:
+                        canonical.execute("BEGIN")
+                        for intent in side.execute("SELECT * FROM _records_purge_intents WHERE token=?", (token,)).fetchall():
+                            table, evidence = intent[1], json.loads(intent[3])
+                            if table in _RECORDS_TABLES and _records_owner(canonical, _RECORDS_TABLES[table][1], evidence):
+                                side.execute("DELETE FROM _records_purge_intents WHERE token=? AND table_name=? "
+                                             "AND owner_id=?", tuple(intent[:3]))
+                side.commit()
+            except BaseException:
+                side.rollback()
+                raise
+
+    owner.on_commit.append(lambda: finish(True))
+    owner.on_rollback.append(lambda: finish(False))
+
+
+register_session_purge("records", _purge_records)
 
 
 class MessageStore:
@@ -2903,11 +3200,40 @@ class MessageStore:
     def backup(self, dest: sqlite3.Connection) -> None:
         """Copy the store's database into the already-open ``dest`` connection.
 
-        Thin wrapper over ``sqlite3.Connection.backup`` so callers snapshot the
-        store without reaching its private connection. Requires a live
-        connection, matching direct ``_conn.backup(dest)`` use.
+        When records exist, copy the pinned pair with SQLite's backup API and
+        publish ``<destination>.records`` only after both copies succeed. A
+        failed copy preserves the previous pair. Requires a live connection.
         """
-        self._conn.backup(dest)
+        path = records_path(self)
+        if path is None or not path.exists():
+            self._conn.backup(dest)
+            return
+        destination = dest.execute("PRAGMA database_list").fetchone()[2]
+        if not destination:
+            raise ValueError("a records pair requires a file-backed backup destination")
+        target = Path(destination + ".records")
+        staged = target.with_name(target.name + "." + secrets.token_hex(8) + ".tmp")
+        try:
+            # Pin records first; both backups use precisely the same read cut as attachment.
+            with records_read_cut(self) as cut, ExitStack() as stack:
+                if cut.refused_format is not None:
+                    raise RecordsFormatError(cut.refused_format)
+                side = stack.enter_context(closing(sqlite3.connect(str(staged))))
+                cut.records.backup(side)
+                candidate = stack.enter_context(closing(sqlite3.connect(":memory:")))
+                cut.canonical.backup(candidate)
+                previous = stack.enter_context(closing(sqlite3.connect(":memory:")))
+                dest.backup(previous)
+                try:
+                    candidate.backup(dest)
+                    side.close()
+                    staged.replace(target)
+                except BaseException:
+                    previous.backup(dest)
+                    raise
+        finally:
+            with suppress(OSError):
+                staged.unlink(missing_ok=True)
 
     # -- Lifecycle ----------------------------------------------------------
 
