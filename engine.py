@@ -12919,6 +12919,12 @@ class LCMEngine(
                             if ids and rule == "digest":
                                 self._write_tail_bindings(batch, ids, left, after_commit)
                         committed = True
+                        if ids and store is self.__dict__.get("_store") and tail["session_id"] == self._session_id:
+                            # #2751: retire both halves of the cached view after committing this
+                            # occurrence. A no-new-rows reconcile refills them from the host, so
+                            # #1179 still sees a genuine later re-stamp and stores it exactly once.
+                            self._last_active_replay_messages = []
+                            self._last_active_replay_source_identities = []
                         after_commit.append(lambda n=covered: self._ledger_count("ledger.tail.retry.replay_rows", amount=n))
                     committed = True
                     after_commit.extend([
