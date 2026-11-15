@@ -35,7 +35,9 @@ A committed purge deletes its records; rollback deletes only its own intent.
 Maintenance never drops an intent whose matching owner remains present. A crash
 can leave such an intent blocking records writes until a retried purge completes.
 `RecordsWriter.maintain()` is the explicit maintenance point for intents whose
-owners are gone; every records insert also attempts that completion.
+owners are gone. Only a successful records write completes pending intents; a
+refused insert rolls back its attempted completion. `maintain()` has no product
+caller until #2707's PR-2 wires it.
 
 Store backups and timestamped/rolling operator backups copy records with SQLite's
 backup API, naming them `<backup filename>.records`. Both copies finish before

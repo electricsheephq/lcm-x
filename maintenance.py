@@ -14,11 +14,11 @@ from datetime import datetime
 from pathlib import Path
 import os
 import sqlite3
-import secrets
 from typing import Any
 
 
 from .externalize import get_large_output_storage_dir
+from .store import RecordsFormatError
 
 
 def externalized_payload_inventory(engine) -> dict:
@@ -92,7 +92,7 @@ def backup_database(engine) -> dict[str, Any]:
         flush_engine_connections(engine)
 
         _backup_pair(engine._store, backup_path)
-    except (OSError, sqlite3.Error) as exc:
+    except (OSError, sqlite3.Error, RecordsFormatError) as exc:
         return {
             "ok": False,
             "db_path": db_path,
@@ -129,7 +129,7 @@ def rotate_backup_database(engine) -> dict[str, Any]:
         backup_dir.mkdir(parents=True, exist_ok=True)
         flush_engine_connections(engine)
         _backup_pair(engine._store, backup_path)
-    except (OSError, sqlite3.Error) as exc:
+    except (OSError, sqlite3.Error, RecordsFormatError) as exc:
         return {
             "ok": False,
             "db_path": db_path,
@@ -147,34 +147,34 @@ def rotate_backup_database(engine) -> dict[str, Any]:
 
 
 def _backup_pair(store, destination):
-    """Stage both SQLite copies before publication; restore the old pair on failure."""
-    staging = destination.with_name(destination.name + "." + secrets.token_hex(8) + ".tmp")
+    """Publish records first, then atomically replace the complete canonical slot."""
+    staging = destination.with_name(destination.name + ".tmp")
+    staged_records = Path(str(staging) + ".records")
+    target_records = Path(str(destination) + ".records")
+    previous_records = Path(str(target_records) + ".previous")
+    leftovers = (staging, staged_records, Path(str(staged_records) + ".tmp"), previous_records)
+    for path in leftovers:
+        path.unlink(missing_ok=True)
+    published_records = False
     try:
         with closing(sqlite3.connect(str(staging))) as dest:
             store.backup(dest)
+        if staged_records.exists():
+            if target_records.exists():
+                previous_records.hardlink_to(target_records)
+            staged_records.replace(target_records)
+            published_records = True
+        staging.replace(destination)
     except BaseException:
-        for path in (staging, Path(str(staging) + ".records")):
+        if previous_records.exists():
+            previous_records.replace(target_records)
+        elif published_records:
+            target_records.unlink(missing_ok=True)
+        raise
+    else:
+        if not published_records:
+            target_records.unlink(missing_ok=True)
+    finally:
+        for path in leftovers:
             with suppress(OSError):
                 path.unlink(missing_ok=True)
-        raise
-    staged = [Path(str(staging) + ".records"), staging]
-    targets = [Path(str(destination) + ".records"), destination]
-    previous, published = [], []
-    try:
-        for source, target in zip(staged, targets):
-            saved = target.with_name(target.name + "." + secrets.token_hex(8) + ".previous")
-            if target.exists():
-                target.replace(saved)
-                previous.append((saved, target))
-            if source.exists():
-                source.replace(target)
-                published.append(target)
-    except BaseException:
-        for target in published:
-            target.unlink()
-        for saved, target in previous:
-            saved.replace(target)
-        raise
-    for saved, _ in previous:
-        with suppress(OSError):
-            saved.unlink()

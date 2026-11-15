@@ -541,6 +541,14 @@ def _records_ro(path):
     return conn
 
 
+def _recover_records_journal(path):
+    # A read-only handle cannot roll back a crashed writer's hot journal.
+    # Never create a missing file or checkpoint a newer format's WAL.
+    if Path(str(path) + '-journal').exists() and not Path(str(path) + '-wal').exists():
+        with closing(sqlite3.connect(path.as_uri() + '?mode=rw', uri=True, timeout=0)) as recovery:
+            recovery.execute('PRAGMA user_version').fetchone()
+
+
 def _records_has_table(conn, table):
     return conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()
 
@@ -633,6 +641,7 @@ def open_records_writer(db_path, *, _busy_timeout_ms=0) -> RecordsWriter:
     if path is None:
         raise ValueError("records unavailable for an in-memory store")
     if path.exists():
+        _recover_records_journal(path)
         # Even closing a read-write handle can checkpoint an unknown WAL format.
         # Refuse it before opening any handle capable of changing its bytes.
         with closing(_records_ro(path)) as probe:
@@ -657,18 +666,19 @@ class RecordsReadCut:
 
 
 @contextmanager
-def records_read_cut(db_path):
+def records_read_cut(db_path, *, _for_backup=False):
     """Pin rollback-journal records BEFORE the one canonical snapshot used by callers."""
     path = records_path(db_path)
     with ExitStack() as stack:
         records = canonical = None
         refused = None
         if path is not None and path.exists():
+            _recover_records_journal(path)
             records = stack.enter_context(closing(_records_ro(path)))
             records.execute("BEGIN")
             version = records.execute("PRAGMA user_version").fetchone()[0]
             records.execute("SELECT count(*) FROM sqlite_master").fetchone()  # pin even an empty container
-            if version != 1:
+            if version not in (0, 1) and not _for_backup:
                 refused, records = version, None
         if path is not None:
             canonical = stack.enter_context(closing(_records_ro(str(path)[:-len('.records')])))
@@ -695,14 +705,16 @@ def read_records(cut, table):
 def records_doctor(db_path):
     with records_read_cut(db_path) as cut:
         if cut.refused_format is not None:
-            return f"records: refused format {cut.refused_format}"
+            return (f"records: refused format {cut.refused_format}; newer than this version reads; "
+                    "purges refused until LCM-X is upgraded")
         if cut.records is None:
             return "records: absent"
         counts = []
         for table in _RECORDS_TABLES:
             rows, unattached = read_records(cut, table)
             counts.append(f"{table} attached={len(rows)} unattached={unattached}")
-        pending = cut.records.execute("SELECT count(DISTINCT token) FROM _records_purge_intents").fetchone()[0]
+        pending = (cut.records.execute("SELECT count(DISTINCT token) FROM _records_purge_intents").fetchone()[0]
+                   if _records_has_table(cut.records, '_records_purge_intents') else 0)
         return f"records: format 1; bytes={cut.path.stat().st_size}; " + '; '.join([*counts, f"pending purge intents={pending}"])
 
 
@@ -732,6 +744,7 @@ def _purge_records(conn, sessions_sql, args):
 
     def finish(committed):
         # Rebind by frozen identity, never by a mutable profile configuration.
+        _recover_records_journal(path)
         with closing(_records_ro(path)) as probe:
             version = probe.execute("PRAGMA user_version").fetchone()[0]
             if version != 1:
@@ -3201,8 +3214,9 @@ class MessageStore:
         """Copy the store's database into the already-open ``dest`` connection.
 
         When records exist, copy the pinned pair with SQLite's backup API and
-        publish ``<destination>.records`` only after both copies succeed. A
-        failed copy preserves the previous pair. Requires a live connection.
+        publish ``<destination>.records`` only after both copies succeed.
+        The caller supplies a fresh staging file and publishes the pair.
+        Requires a live connection; records formats are copied uninterpreted.
         """
         path = records_path(self)
         if path is None or not path.exists():
@@ -3212,25 +3226,15 @@ class MessageStore:
         if not destination:
             raise ValueError("a records pair requires a file-backed backup destination")
         target = Path(destination + ".records")
-        staged = target.with_name(target.name + "." + secrets.token_hex(8) + ".tmp")
+        staged = target.with_name(target.name + ".tmp")
         try:
             # Pin records first; both backups use precisely the same read cut as attachment.
-            with records_read_cut(self) as cut, ExitStack() as stack:
-                if cut.refused_format is not None:
-                    raise RecordsFormatError(cut.refused_format)
-                side = stack.enter_context(closing(sqlite3.connect(str(staged))))
-                cut.records.backup(side)
-                candidate = stack.enter_context(closing(sqlite3.connect(":memory:")))
-                cut.canonical.backup(candidate)
-                previous = stack.enter_context(closing(sqlite3.connect(":memory:")))
-                dest.backup(previous)
-                try:
-                    candidate.backup(dest)
-                    side.close()
-                    staged.replace(target)
-                except BaseException:
-                    previous.backup(dest)
-                    raise
+            with records_read_cut(self, _for_backup=True) as cut:
+                with closing(sqlite3.connect(str(staged))) as side:
+                    cut.records.backup(side)
+                cut.records.rollback()  # Purges need not wait for the canonical copy.
+                cut.canonical.backup(dest)
+            staged.replace(target)
         finally:
             with suppress(OSError):
                 staged.unlink(missing_ok=True)

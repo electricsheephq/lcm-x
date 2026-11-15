@@ -153,7 +153,7 @@ def test_newer_format_is_refused_unchanged_and_doctor_reports(tmp_path):
         with pytest.raises(sm.RecordsFormatError, match='refused format 2'):
             sm.open_records_writer(store)
         assert read(store) == ([], 0)
-        assert sm.records_doctor(store) == 'records: refused format 2'
+        assert sm.records_doctor(store).startswith('records: refused format 2; newer than this version reads;')
         assert path.read_bytes() == before
     finally:
         store.close()
@@ -353,8 +353,8 @@ def test_backup_copies_pair_and_failed_second_copy_keeps_previous_pair(pair, tmp
             raise sqlite3.OperationalError('injected second copy failure')
     from contextlib import contextmanager
     @contextmanager
-    def broken_cut(db):
-        with original(db) as cut:
+    def broken_cut(db, **kwargs):
+        with original(db, **kwargs) as cut:
             cut.canonical = BrokenCanonical()
             yield cut
     monkeypatch.setattr(sm, 'records_read_cut', broken_cut)
@@ -454,7 +454,7 @@ os._exit(0)  # leave committed format-2 pages in WAL, without a close-time check
             sm.open_records_writer(store)
         assert path.read_bytes() == before, 'refusing a newer format must not checkpoint its WAL'
         assert wal.read_bytes() == before_wal
-        assert sm.records_doctor(store) == 'records: refused format 2'
+        assert sm.records_doctor(store).startswith('records: refused format 2; newer than this version reads;')
         assert path.read_bytes() == before
     finally:
         store.close()
@@ -471,7 +471,7 @@ def test_completion_refuses_a_newer_format_and_keeps_its_bytes(pair):
     assert store._transaction_owner.callback_failures == 1
     assert writer.path.read_bytes() == before
     assert counts(writer) == (1, 1)
-    assert sm.records_doctor(store) == 'records: refused format 2'
+    assert sm.records_doctor(store).startswith('records: refused format 2; newer than this version reads;')
 
 
 def test_error_after_commit_does_not_misclassify_the_intent_as_rolled_back(pair, monkeypatch):
@@ -493,3 +493,270 @@ def test_error_after_commit_does_not_misclassify_the_intent_as_rolled_back(pair,
     assert counts(writer) == (1, 1), 'a finished purge must keep its intent until records are deleted'
     writer.maintain()
     assert counts(writer) == (0, 0)
+
+
+def crash_records_writer(path):
+    """The reviewer's forked writer spills uncommitted pages, then dies by PID."""
+    import os
+    import signal
+    pid = os.fork()
+    if pid == 0:
+        try:
+            conn = sqlite3.connect(path, timeout=0)
+            conn.execute('PRAGMA cache_size=2')
+            conn.execute('BEGIN IMMEDIATE')
+            for _ in range(2000):
+                conn.execute(f'INSERT INTO {TABLE} (payload) VALUES (?)', ('x' * 4096,))
+            os.kill(os.getpid(), signal.SIGKILL)
+        finally:
+            os._exit(3)
+    _, status = os.waitpid(pid, 0)
+    assert os.WIFSIGNALED(status) and os.WTERMSIG(status) == signal.SIGKILL
+    journal = Path(str(path) + '-journal')
+    assert journal.exists() and journal.stat().st_size > 0
+    assert not Path(str(path) + '-wal').exists()
+
+
+@pytest.mark.parametrize('entry', ['doctor', 'backup', 'writer', 'purge', 'finish'])
+def test_forked_crash_hot_journal_recovers_at_each_entry(pair, tmp_path, entry):
+    store, writer, _ = pair
+    if entry == 'finish':
+        with store.atomic(immediate=True):
+            store.delete_session_messages('S')
+            crash_records_writer(writer.path)
+        assert counts(writer) == (0, 0), 'purge finish must recover its own hot journal'
+    else:
+        crash_records_writer(writer.path)
+        if entry == 'doctor':
+            assert 'attached=1 unattached=0' in sm.records_doctor(store)
+        elif entry == 'backup':
+            target = tmp_path / 'backup.db'
+            maintenance._backup_pair(store, target)
+            assert read(target) == read(store)
+        elif entry == 'writer':
+            sm.open_records_writer(store).close()
+        else:
+            store.delete_session_messages('S')
+        store.delete_session_messages('S')
+    assert store.get_session_messages('S') == []
+    assert counts(writer) == (0, 0), 'uncommitted spilled records must roll back'
+    assert 'pending purge intents=0' in sm.records_doctor(store)
+    sm.open_records_writer(store).close()
+
+
+def test_purge_during_large_canonical_backup_releases_records_and_keeps_cut(
+        pair, tmp_path, monkeypatch, latency_check):
+    from contextlib import contextmanager
+    from threading import Thread
+    from time import monotonic
+    store, writer, _ = pair
+    with store.atomic(immediate=True):
+        for i in range(24):
+            store.connection.execute(
+                "INSERT INTO messages(session_id, role, content, timestamp) VALUES ('B','user',?,?)",
+                ('x' * (512 * 1024), float(i + 10)))
+    original = sm.records_read_cut
+    outcome = {}
+
+    def purge():
+        start = monotonic()
+        try:
+            store.delete_session_messages('S')
+        except BaseException as exc:
+            outcome['error'] = exc
+        finally:
+            outcome['elapsed'] = monotonic() - start
+
+    class CopyCanonical:
+        def __init__(self, conn):
+            self.conn = conn
+
+        def backup(self, dest):
+            def progress(status, remaining, total):
+                if outcome:
+                    return
+                assert remaining > 0, 'exercise a running multi-page canonical copy'
+                store.append('LATE', dict(role='user', content='after cut', timestamp=100.))
+                worker = Thread(target=purge)
+                worker.start()
+                worker.join(5)
+                assert not worker.is_alive(), 'purge waited for the canonical backup'
+                assert 'error' not in outcome, f"purge blocked by backup: {outcome.get('error')}"
+            self.conn.backup(dest, pages=32, progress=progress)
+
+    @contextmanager
+    def observed_cut(db, **kwargs):
+        with original(db, **kwargs) as cut:
+            cut.canonical = CopyCanonical(cut.canonical)
+            yield cut
+
+    monkeypatch.setattr(sm, 'records_read_cut', observed_cut)
+    target = tmp_path / 'large-copy.db'
+    with closing(sqlite3.connect(target)) as dest:
+        store.backup(dest)
+        assert dest.execute("SELECT count(*) FROM messages WHERE session_id='LATE'").fetchone()[0] == 0
+        assert dest.execute("SELECT count(*) FROM messages WHERE session_id='S'").fetchone()[0] == 1
+    assert outcome and store.get_session_messages('S') == []
+    assert counts(writer) == (0, 0)
+    if latency_check:
+        assert outcome['elapsed'] < sm.RECORDS_PURGE_BUSY_MS / 1000
+    monkeypatch.setattr(sm, 'records_read_cut', original)
+    assert read(target)[0][0]['payload'] == 'record', 'the copy retains the records from its cut'
+
+
+@pytest.mark.parametrize('with_records', [False, True])
+def test_rotate_crash_between_publishes_keeps_canonical_slot_and_clears_leftovers(
+        pair, tmp_path, monkeypatch, with_records):
+    import os
+    store, writer, _ = pair
+    if not with_records:
+        writer.close()
+        writer.path.unlink()
+    target = tmp_path / 'rotate.db'
+    maintenance._backup_pair(store, target)
+    before = target.read_bytes()
+    store.append('T', dict(role='user', content='new copy', timestamp=5.))
+    staging = Path(str(target) + '.tmp')
+    real_replace = Path.replace
+
+    def die_before_canonical_publish(source, destination):
+        if Path(destination) == target:
+            os._exit(73)  # between records publication and canonical replacement
+        return real_replace(source, destination)
+
+    pid = os.fork()
+    if pid == 0:
+        try:
+            monkeypatch.setattr(Path, 'replace', die_before_canonical_publish)
+            maintenance._backup_pair(store, target)
+        finally:
+            os._exit(74)
+    _, status = os.waitpid(pid, 0)
+    assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 73
+    assert target.exists(), 'crash left the canonical backup slot empty'
+    assert target.read_bytes() == before
+    with closing(sqlite3.connect(target)) as conn:
+        assert conn.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
+        assert conn.execute("SELECT count(*) FROM messages WHERE session_id='S'").fetchone()[0] == 1
+    # Include a killed run that left an unfinished nested records copy.
+    Path(str(staging) + '.records.tmp').write_bytes(b'incomplete records staging')
+    assert staging.exists()
+    maintenance._backup_pair(store, target)
+    assert not list(tmp_path.glob('rotate.db*.tmp*'))
+    assert not list(tmp_path.glob('rotate.db*.previous'))
+    with closing(sqlite3.connect(target)) as conn:
+        assert conn.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
+        assert conn.execute("SELECT count(*) FROM messages WHERE session_id='T'").fetchone()[0] == 1
+    assert Path(str(target) + '.records').exists() == with_records
+
+
+def test_rotate_handled_publish_failure_restores_previous_records(pair, tmp_path, monkeypatch):
+    store, writer, values = pair
+    target = tmp_path / 'rotate.db'
+    maintenance._backup_pair(store, target)
+    before = (target.read_bytes(), Path(str(target) + '.records').read_bytes())
+    assert writer.insert(TABLE, dict(values, payload='new record')) is None
+    real_replace = Path.replace
+
+    def fail_canonical(source, destination):
+        if Path(destination) == target:
+            raise OSError('canonical publication failed')
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(Path, 'replace', fail_canonical)
+    with pytest.raises(OSError, match='canonical publication failed'):
+        maintenance._backup_pair(store, target)
+    assert (target.read_bytes(), Path(str(target) + '.records').read_bytes()) == before
+
+
+def test_rotate_removes_previous_records_only_after_canonical_publish(pair, tmp_path, monkeypatch):
+    store, writer, _ = pair
+    target = tmp_path / 'rotate.db'
+    maintenance._backup_pair(store, target)
+    old_records = Path(str(target) + '.records')
+    writer.close()
+    writer.path.unlink()
+    real_replace = Path.replace
+
+    def observe_publish(source, destination):
+        if Path(destination) == target:
+            assert old_records.exists(), 'old records removed before the canonical publish'
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(Path, 'replace', observe_publish)
+    maintenance._backup_pair(store, target)
+    assert not old_records.exists()
+
+
+def test_format2_purge_refuses_without_deletion_and_backup_copies_pair(pair, tmp_path):
+    store, writer, _ = pair
+    writer.connection.execute('PRAGMA user_version=2')
+    before = writer.path.read_bytes()
+    canonical = store.get_session_messages('S')
+    with pytest.raises(sm.RecordsFormatError, match='refused format 2'):
+        store.delete_session_messages('S')
+    assert store.get_session_messages('S') == canonical
+    assert writer.path.read_bytes() == before
+    detail = sm.records_doctor(store)
+    assert 'format 2' in detail and 'newer than this version reads' in detail
+    assert 'purges refused until LCM-X is upgraded' in detail
+    engine = SimpleNamespace(_store=store, _dag=SimpleNamespace(_conn=store.connection),
+                             backup_dir=lambda: tmp_path / 'backups',
+                             rotate_backup_path=lambda: tmp_path / 'backups' / 'rotate.db')
+    for backup in (maintenance.backup_database, maintenance.rotate_backup_database):
+        result = backup(engine)
+        assert result['ok'], result
+        with closing(sqlite3.connect(str(result['backup_path']) + '.records')) as conn:
+            assert conn.execute('PRAGMA user_version').fetchone()[0] == 2
+            assert conn.execute(f'SELECT count(*) FROM {TABLE}').fetchone()[0] == 1
+        with closing(sqlite3.connect(result['backup_path'])) as conn:
+            assert conn.execute('SELECT count(*) FROM messages').fetchone()[0] == 1
+    assert writer.path.read_bytes() == before
+
+
+@pytest.mark.parametrize('operation', ['backup', 'rotate', 'clean'])
+def test_format2_operator_status_errors_are_handled(pair, tmp_path, monkeypatch, operation):
+    from hermes_lcm import command
+    store, writer, _ = pair
+    writer.connection.execute('PRAGMA user_version=2')
+    before = (store.get_session_messages('S'), writer.path.read_bytes())
+    engine = SimpleNamespace(_store=store, _dag=SimpleNamespace(_conn=store.connection),
+                             _config=SimpleNamespace(doctor_clean_apply_enabled=True),
+                             backup_dir=lambda: tmp_path / 'backups',
+                             rotate_backup_path=lambda: tmp_path / 'backups' / 'rotate.db')
+    if operation == 'clean':
+        monkeypatch.setattr(command, '_scan_clean_candidates', lambda engine: {
+            'error': None, 'candidates': [{'session_id': 'S'}]})
+        result = command._doctor_clean_apply_text(engine)
+        assert 'status: error' in result and 'refused format 2' in result
+    else:
+        # Backups themselves are format agnostic. Exercise a propagated refusal
+        # at their boundary, without teaching the copy path a newer schema.
+        def refusal(*args):
+            raise sm.RecordsFormatError(2)
+        monkeypatch.setattr(maintenance, '_backup_pair', refusal)
+        result = (maintenance.backup_database if operation == 'backup'
+                  else maintenance.rotate_backup_database)(engine)
+        assert not result['ok'] and 'refused format 2' in result['error']
+    assert (store.get_session_messages('S'), writer.path.read_bytes()) == before
+
+
+def test_zero_byte_records_read_cut_and_backup_succeed(tmp_path):
+    store = sm.MessageStore(tmp_path / 'lcm.db')
+    try:
+        store.append('S', dict(role='user', content='canonical', timestamp=1.))
+        path = sm.records_path(store)
+        path.touch()
+        with sm.records_read_cut(store) as cut:
+            assert cut.refused_format is None
+            assert sm.read_records(cut, TABLE) == ([], 0)
+            assert cut.canonical.execute('SELECT count(*) FROM messages').fetchone()[0] == 1
+        assert 'pending purge intents=0' in sm.records_doctor(store)
+        target = tmp_path / 'copy.db'
+        maintenance._backup_pair(store, target)
+        assert read(target) == ([], 0)
+        with closing(sqlite3.connect(str(target) + '.records')) as conn:
+            assert conn.execute('SELECT count(*) FROM sqlite_master').fetchone()[0] == 0
+        assert path.stat().st_size == 0
+    finally:
+        store.close()
