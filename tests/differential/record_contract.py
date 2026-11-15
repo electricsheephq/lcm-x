@@ -237,8 +237,8 @@ def judge(observations, entries):
     for entry in entries:
         expected = expected_record(entry)
         key = (expected['owner_store_id'], expected['ordinal'])
-        def exact(row):
-            return all(k in row and row[k] == value for k, value in expected.items())
+        def exact(row, **overrides):
+            return all(k in row and row[k] == value for k, value in dict(expected, **overrides).items())
         locator = withheld.get(key)
         # Main's empty physical projection retains its historical recall misses.
         if key in eligible and any((r.get('owner_store_id'), r.get('ordinal')) == key
@@ -267,7 +267,8 @@ def judge(observations, entries):
         found = [row for row in observations['hits'] if matches(row, span=True)]
         retrieved = (any(exact(r['expanded']) for r in pages if matches(r) and 'expanded' in r)
                      if not expected['content'].strip() else any(
-                         exact(r['expanded']) if r['kind'] == 'record' else matches(r['expanded']) for r in found))
+                         exact(r['expanded'], superseded_by=witness.get(key[0]))
+                         if r['kind'] == 'record' else matches(r['expanded']) for r in found))
         listing_exact = all(exact(r['expanded']) for r in pages if matches(r))
         if sum(matches(row, span=True) for row in pages) != 1 or not retrieved or not listing_exact:
             failures.append((entry['capture_view'], entry['predecessor_ordinal'], expected['content']))

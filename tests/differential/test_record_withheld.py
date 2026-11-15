@@ -19,7 +19,8 @@ def observation(later, outcome='listed', text='needle', witness=False):
     record = expected_record(entry)
     canonical = sorted([row(1, 'reply'), *later], key=lambda r: r['store_id'])
     reference = dict(tool='lcm_expand', args=dict(queued_user_ref=[1, 0]))
-    exact = dict(record, kind='record')
+    # As stored: a witnessed owner's record is superseded by the witness row (fake_records.py sets it).
+    exact = dict(record, kind='record', superseded_by=2 if witness else None)
     visible = dict(exact, reference=reference, expanded=exact)
     snapshot = dict(canonical=list(map(freeze, canonical)),
                     records=[freeze(dict(record, superseded_by=2 if witness else None))])
@@ -126,6 +127,26 @@ def test_search_reference_is_exact(field, value):
     observed, entries = observation([])
     assert judge(observed, entries) == []
     hit = observed['hits'][0]
+    observed['hits'] = [dict(hit, expanded=dict(hit['expanded'], **{field: value}))]
+    assert judge(observed, entries) == [(0, 0, 'needle')]
+
+
+def test_witnessed_search_reference_matches_witness():
+    observed, entries = observation([row(2, 'needle\n\nreply')], witness=True)
+    hit = observed['hits'][0]
+    observed['hits'] = [dict(hit, expanded=dict(hit['expanded'], superseded_by=2))]
+    assert judge(observed, entries) == []
+
+
+@pytest.mark.parametrize('field,value', [
+    ('superseded_by', None), ('superseded_by', 3), ('observed_at', -1.), ('session_id', 'wrong'),
+])
+def test_witnessed_search_reference_is_exact(field, value):
+    observed, entries = observation([row(2, 'needle\n\nreply')], witness=True)
+    hit = observed['hits'][0]
+    hit = dict(hit, expanded=dict(hit['expanded'], superseded_by=2))
+    observed['hits'] = [hit]
+    assert judge(observed, entries) == []
     observed['hits'] = [dict(hit, expanded=dict(hit['expanded'], **{field: value}))]
     assert judge(observed, entries) == [(0, 0, 'needle')]
 
