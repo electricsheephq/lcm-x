@@ -96,3 +96,70 @@ def test_second_restamp_without_final(tmp_path, monkeypatch):
         assert len(rows) == 6
     finally:
         engine.shutdown()
+
+
+@pytest.mark.parametrize('second', ['user', 'reply', 'none'])
+@pytest.mark.parametrize('when', ['pending', 'after-first-end'])
+@pytest.mark.parametrize('clean_ends', [1, 3])
+def test_pending_retry_restamp_matrix(tmp_path, monkeypatch, second, when, clean_ends, record_property):
+    """Every host occurrence, including one arriving before the retry, is committed once."""
+    engine = _open(tmp_path, monkeypatch, None)
+    try:
+        view = _turn(0, 'plain')
+        engine.ingest(copy.deepcopy(view))
+        view[0]['timestamp'] = 1001.
+        probe = _Probe(monkeypatch)
+        with monkeypatch.context() as patch:
+            probe.busy_end(patch, engine, 'warm', view)
+        assert any(t['kind'] == 'warm' for t in engine._pending_session_tails)
+        if when == 'after-first-end':
+            engine.on_session_end('parent', copy.deepcopy(view))
+        expected = [(r['content'], r['timestamp']) for r in _turn(0, 'plain')]
+        expected.append(('question-0', 1001.))
+        if second != 'none':
+            row, stamp = (0, 2001.) if second == 'user' else (1, 2002.)
+            view[row]['timestamp'] = stamp
+            expected.append((view[row]['content'], stamp))
+        for _ in range(clean_ends):
+            engine.on_session_end('parent', copy.deepcopy(view))
+        actual = [(r['content'], r['observed_at']) for r in engine._store.get_session_messages('parent')]
+        record_property('occurrences', repr(sorted(actual)))
+        assert sorted(actual) == sorted(expected), actual
+    finally:
+        engine.shutdown()
+
+
+def test_pending_retry_newer_cache_guard(tmp_path, monkeypatch):
+    """An ordinary successful ingest supersedes the frozen cache before its tail drains."""
+    engine = _open(tmp_path, monkeypatch, None)
+    try:
+        view = _turn(0, 'plain')
+        engine.ingest(copy.deepcopy(view))
+        view[0]['timestamp'] = 1001.
+        probe = _Probe(monkeypatch)
+        with monkeypatch.context() as patch:
+            probe.busy_end(patch, engine, 'warm', view)
+        assert any(t['kind'] == 'warm' for t in engine._pending_session_tails)
+        # The successful view excludes the pending 1001 occurrence and records a newer one.
+        view[0]['timestamp'] = 2001.
+        engine.ingest(copy.deepcopy(view))
+        assert engine._pending_session_tails
+        newer_cache = copy.deepcopy((engine._last_active_replay_source_identities, engine._last_active_replay_messages))
+        drained_caches = []
+        retry = engine._retry_pending_session_tails
+
+        def observe_retry(**kwargs):
+            retry(**kwargs)
+            drained_caches.append(copy.deepcopy((
+                engine._last_active_replay_source_identities, engine._last_active_replay_messages)))
+
+        monkeypatch.setattr(engine, '_retry_pending_session_tails', observe_retry)
+        for _ in range(3):
+            engine.on_session_end('parent', copy.deepcopy(view))
+        rows = engine._store.get_session_messages('parent')
+        stamps = sorted(r['observed_at'] for r in rows if r['content'] == 'question-0')
+        assert drained_caches[0] == newer_cache, 'retry replaced the newer successful cache with the frozen view'
+        assert stamps == [1., 1001., 2001.], stamps
+        assert len(rows) == 6, [(r['content'], r['observed_at']) for r in rows]
+    finally:
+        engine.shutdown()
