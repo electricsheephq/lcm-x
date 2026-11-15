@@ -482,10 +482,14 @@ def test_fake_candidates_intended(monkeypatch, key, kind, reason, record_propert
     ('notes_data', 0, 'tables lost rows in notes_data'),
     ('foo_data', 0, 'tables lost rows in foo_data'),
     ('v_content', 0, 'tables lost rows in v_content'),
-    ('v_content', 0, None)),
+    ('v_content', 0, None),
+    ('v_content', 0, 'tables lost rows in v_content'),
+    ('v_content', 0, None),
+    ('notes2_data', 0, 'tables lost rows in notes2_data')),
     ids=('relations-drop-all', 'summaries-drop-one', 'views-prune', 'summaries-add',
          'fts-shadow-merge', 'lookalike-data-drop', 'lineage-merge', 'text-mention-lookalike',
-         'nonfts-vt-lookalike', 'external-content-lookalike', 'own-content-shadow'))
+         'nonfts-vt-lookalike', 'external-content-lookalike', 'own-content-shadow', 'contentless-lookalike',
+         'own-content-column', 'embedded-ddl-lookalike'))
 def test_fake_candidates_intended_tables(monkeypatch, table, remaining, reason, record_property, request):
     main = {name: {} for name in ('canonical', 'schema', 'tables', 'payload', 'pending', 'ledger', 'lifecycle')}
     schemas = {
@@ -493,6 +497,9 @@ def test_fake_candidates_intended_tables(monkeypatch, table, remaining, reason, 
         'nonfts-vt-lookalike': ('foo', 'CREATE VIRTUAL TABLE foo USING rtree(id, x0, x1)'),
         'external-content-lookalike': ('v', "CREATE VIRTUAL TABLE v USING fts5(body, content='messages')"),
         'own-content-shadow': ('v', 'CREATE VIRTUAL TABLE v USING fts5(body)'),
+        'contentless-lookalike': ('v', "CREATE VIRTUAL TABLE v USING fts5(body, content='')"),
+        'own-content-column': ('v', 'CREATE VIRTUAL TABLE v USING fts5(content)'),
+        'embedded-ddl-lookalike': ('notes2', "CREATE TABLE notes2 (x TEXT DEFAULT 'CREATE VIRTUAL TABLE x USING fts5')"),
     }
     if table in ('messages_fts_data', 'foo_data', 'lineage_marks') or request.node.callspec.id in schemas:
         name, sql = schemas.get(request.node.callspec.id,
