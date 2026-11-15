@@ -67,13 +67,24 @@ def canonical_rows(engine):
 
 
 def queued_rows(engine):
-    conn = engine._store._conn
-    if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='queued_user_rows' AND type='table'").fetchone():
-        return []
-    columns = {row[1] for row in conn.execute('PRAGMA table_info(queued_user_rows)')}
-    assert set(RECORD_COLUMNS) <= columns, f'queued_user_rows missing columns: {set(RECORD_COLUMNS) - columns}'
-    return [freeze(dict(zip(RECORD_COLUMNS, row))) for row in conn.execute(
-        'SELECT ' + ', '.join(RECORD_COLUMNS) + ' FROM queued_user_rows ORDER BY owner_store_id, ordinal')]
+    from hermes_lcm.store import records_path, records_read_cut, read_records
+    from .paired import CANDIDATE_CONTRACT
+    if CANDIDATE_CONTRACT == 'main':
+        path = records_path(engine._store)
+        assert path is None or not path.exists(), 'main created a records file'
+    # The frozen fake contract deliberately mutates a canonical test-only table.
+    # Its explicit adapter is not a product observation or an attachment bypass.
+    fake = getattr(engine, '_fake_queued_rows', None)
+    if fake is not None:
+        return fake()
+    with records_read_cut(engine._store) as cut:
+        if cut.records is not None and cut.records.execute(
+                "SELECT 1 FROM sqlite_master WHERE name='queued_user_rows' AND type='table'").fetchone():
+            columns = {row[1] for row in cut.records.execute('PRAGMA table_info(queued_user_rows)')}
+            assert set(RECORD_COLUMNS) <= columns, f'queued_user_rows missing columns: {set(RECORD_COLUMNS) - columns}'
+        rows, _ = read_records(cut, 'queued_user_rows')
+        return [freeze({key: row[key] for key in RECORD_COLUMNS}) for row in
+                sorted(rows, key=lambda row: (row['owner_store_id'], row['ordinal']))]
 
 
 def duplicate_rows(rows, views=()):
