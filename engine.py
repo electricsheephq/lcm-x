@@ -5474,8 +5474,8 @@ class LCMEngine(
                             file_generation(Path(path)) != stamp for path, stamp in cached[1].items())):
                         text = self._session_end_prefix_compare_value(value, session_id=tail["session_id"],
                             hermes_home=tail["hermes_home"])
-                        # text only finds persisted-output paths; recursion records nested files
-                        # in external, so a nested change still forces the full comparison.
+                        # text only finds persisted-output paths and can be stale after a nested change;
+                        # the nested file's stamp in external then makes the snapshot differ (full compare).
                         compared[value] = (str(directory),
                             {str(directory / ref): external.get(str(directory / ref)) for ref in refs}, text)
                     else:
