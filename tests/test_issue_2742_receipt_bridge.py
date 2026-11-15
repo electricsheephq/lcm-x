@@ -366,10 +366,19 @@ def test_inserted_tail_known_uid_conflict_vetoes_gap_match(engines):
     engine.ingest(copy.deepcopy([view[0], view[1], view[3]]))
     tail = end_view(engine, view)
     assert 'ledger' not in tail
-    replay(engine, [{**view[2], 'message_uid': 'different-C'}])
-    assert engine._match_pending_tail(tail)[6] == {}
+    boundary = tail['after_store_id']
+    # The committed candidate is beyond the first positional mismatch, hence a gap.
+    replay(engine, [_m('user', 'foreign', 50., 'foreign')])
+    [target] = replay(engine, [{**view[2], 'message_uid': 'different-C'}])
+    assert target > boundary + len(tail['messages'])
+    proof = engine._match_pending_tail(tail)
+    assert proof[0] == 0 and proof[1] == boundary and proof[4] == 'identity', proof
     engine._retry_pending_session_tails()
     assert contents(engine).count('C') == 2
+    assert proof[6] == {}, proof
+    assert contents(engine).count('foreign') == 1
+    assert len(contents(engine)) == 6
+    assert not engine._pending_session_tails
 
 
 def test_nonpositional_head_match_does_not_hide_a_later_hole(engines):

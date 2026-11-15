@@ -29,6 +29,16 @@ def _clock(monkeypatch, expire, target_event):
     match = LCMEngine._match_pending_tail
     clock.event = None
     clock.warm_pending = []
+    clock.expired_admissions = []
+    append = LCMEngine._append_ingest_batch
+
+    def observe_admission(engine, batch):
+        if clock.advances and clock.event == target_event and not clock.expired_admissions:
+            clock.expired_admissions.append(engine._store._conn.execute(
+                "PRAGMA busy_timeout").fetchone()[0])
+        return append(engine, batch)
+
+    monkeypatch.setattr(LCMEngine, '_append_ingest_batch', observe_admission)
 
     def wrapped(engine, tail):
         result = match(engine, tail)
@@ -113,6 +123,7 @@ def test_budget_seed_2543384(tmp_path, monkeypatch, expire, record_property):
         assert clock.advances == int(expire)
         if expire:
             assert clock.warm_pending == [True]
+            assert clock.expired_admissions == [0]
     finally:
         for owner in reversed(made):
             owner.shutdown()
@@ -163,6 +174,7 @@ def test_budget_seed_2543487(tmp_path, monkeypatch, expire, record_property):
         assert clock.advances == int(expire)
         if expire:
             assert clock.warm_pending == [True]
+            assert clock.expired_admissions == [0]
     finally:
         for owner in reversed(made):
             owner.shutdown()

@@ -5,6 +5,7 @@ import pytest
 
 from tests.invariants.test_issue_2742_warm_tail_refinal import _busy_end, _open, _turn
 from tests.invariants.test_issue_2550_busy_end_and_restamp_paths import _view
+from hermes_lcm import ingest_ledger
 from tests.invariants.test_p1e_decided_tails import contents, end_view, history, replay
 from tests.test_issue_2055_ingest_ledger_writes import engines as engines
 
@@ -84,7 +85,7 @@ def test_two_busy_ends_preserve_proven_prefix_call(tmp_path, monkeypatch, uid_mo
         rows = engine._store.get_session_messages('parent')
         assert sum(bool(r.get('tool_calls')) for r in rows) == 1, rows
         assert sum(r['role'] == 'tool' for r in rows) == 1
-        assert [r['observed_at'] for r in rows] == [1., 2., 11., 12., 13., 14.]
+        assert [r['observed_at'] for r in rows] == [m['timestamp'] for m in view]
         assert not engine._pending_session_tails
     finally:
         engine.shutdown()
@@ -114,23 +115,36 @@ def test_prefix_call_before_unstored_result(tmp_path, monkeypatch, writer, uid_m
         engine.shutdown()
 
 
-@pytest.mark.parametrize('veto', ['canonical-uid', 'conflicting-stamp'])
-def test_positional_prefix_keeps_main_contract(engines, veto):
+@pytest.mark.parametrize('veto', ['canonical-uid', 'conflicting-uidset'])
+def test_prefix_uid_only_change_matches_as_main(engines, veto, record_property):
+    """Hermes may reissue a prefix occurrence with a new UID; content/stamp still match."""
     engine = engines()
     view = history()
     engine.ingest(copy.deepcopy([view[0], view[1], view[3]]))
-    tail = end_view(engine, view)
+    incoming = copy.deepcopy(view)
+    incoming[2]['message_uid'] = 'reissued-C'
+    tail = end_view(engine, incoming)
     assert 'ledger' not in tail and [m['content'] for m in tail['messages']] == ['C']
-    row = dict(view[2])
-    if veto == 'conflicting-stamp':
-        row['timestamp'] += 1000
-    [target] = replay(engine, [row])
+    [target] = replay(engine, [view[2]], with_view=veto == 'conflicting-uidset')
     if veto == 'canonical-uid':
-        engine._store.add_host_uid_bindings('foreign-lineage', [(target, 'foreign-C', 'canonical', 'stored_new')])
+        engine._store.add_host_uid_bindings('foreign-lineage', [(target, 'C', 'canonical', 'stored_new')])
         assert engine._store._conn.execute(
-            "SELECT uid FROM host_uid_bindings WHERE store_id=? AND kind='canonical'", (target,)).fetchall() == [('foreign-C',)]
+            "SELECT uid FROM host_uid_bindings WHERE store_id=? AND kind='canonical'", (target,)).fetchall() == [('C',)]
+    else:
+        conn = engine._store._conn
+        assert not engine._store._host_uid_table_exists()
+        occ, blob = conn.execute(
+            "SELECT b.occ_id,v.entries FROM occurrence_bindings b JOIN ingest_views v "
+            "ON v.lineage=b.lineage AND v.view_seq=b.view_seq AND v.kind='ingest' WHERE b.store_id=?",
+            (target,)).fetchone()
+        bound = next(e for e in ingest_ledger.decode_entries(blob) if e.ref == occ)
+        [entry], _ = engine._ledger_view_entries(engine._store.ingest_ledger_salt(), [incoming[2]])
+        assert bound.uidset_digest is not None and bound.uidset_digest != entry.uidset_digest
     proof = engine._match_pending_tail(tail)
-    assert proof[0] == 1, proof
     engine._retry_pending_session_tails()
+    record_property('C_count', contents(engine).count('C'))
+    record_property('total_rows', len(contents(engine)))
     assert contents(engine).count('C') == 1
+    assert len(contents(engine)) == 4
+    assert proof[0] == 1, proof
     assert not engine._pending_session_tails
