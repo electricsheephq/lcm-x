@@ -36,8 +36,8 @@ def test_null_copy_needs_its_canonical_uid(tmp_path, monkeypatch, role, proof):
         # Exercise the ingest consumers of the audit, not only the returned plan.
         prematch = engine._identity_anchor_prematch
         monkeypatch.setattr(engine, "_identity_anchor_prematch",
-                            lambda messages, identities, cursor, audit_from=None:
-                            prematch(messages, identities, cursor, 0))
+                            lambda messages, identities, cursor, audit_from=None, **kwargs:
+                            prematch(messages, identities, cursor, 0, **kwargs))
         engine.ingest(deepcopy(host))
         rows = engine._store.get_session_messages("S")
         assert len(rows) == (1 if proven else 2)
