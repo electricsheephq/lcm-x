@@ -107,7 +107,8 @@ def test_owner_scope_comes_from_canonical_snapshot():
     ('needle', 'prefixneedlesuffix', {'listed'}),
     (' needle ', 'needle', {'overlap'}),
     (' \t ', '', {'listed'}),
-    (' \t ', 'x' * 1048577, {'listed'}),
+    # A short id: the 1 MiB value as its id makes CI's collect-only listing take over 20 minutes.
+    pytest.param(' \t ', 'x' * 1048577, {'listed'}, id='blank-text-1mib-later'),
 ])
 def test_segment_predicate_and_empty_text(text, later, allowed):
     assert_outcomes([row(2, later)], allowed, text=text)
