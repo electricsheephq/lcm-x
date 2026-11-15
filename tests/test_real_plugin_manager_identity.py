@@ -11,6 +11,7 @@ from pathlib import Path
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 import textwrap
@@ -60,10 +61,18 @@ HERMES = _hermes_python()
 pytestmark = pytest.mark.skipif(HERMES is None, reason="no real Hermes runtime available")
 
 
-def _run(tmp_path, *, plugin_dir: str, enabled: list[str], engine: str) -> dict:
+def _run(tmp_path, *, plugin_dir: str, enabled: list[str], engine: str, probe: str = _PROBE) -> dict:
     home = tmp_path / "hermes-home"
     (home / "plugins").mkdir(parents=True)
-    (home / "plugins" / plugin_dir).symlink_to(REPO_ROOT)
+    target = home / "plugins" / plugin_dir
+    if os.name == "nt":
+        target.mkdir()
+        for source in (*REPO_ROOT.glob("*.py"), REPO_ROOT / "plugin.yaml"):
+            shutil.copy2(source, target / source.name)
+        for name in ("adapters", "access_context", "access_policy", "skills"):
+            shutil.copytree(REPO_ROOT / name, target / name)
+    else:
+        target.symlink_to(REPO_ROOT)
     (home / "config.yaml").write_text(
         "plugins:\n  enabled: [" + ", ".join(enabled) + "]\n"
         f"context:\n  engine: {engine}\n",
@@ -71,15 +80,21 @@ def _run(tmp_path, *, plugin_dir: str, enabled: list[str], engine: str) -> dict:
     )
     python, src = HERMES
     env = {
+        **{key: os.environ[key] for key in ("SYSTEMROOT", "WINDIR", "COMSPEC") if key in os.environ},
         "HOME": str(tmp_path / "home"),
-        "PATH": "/usr/bin:/bin",
+        "PATH": os.environ.get("PATH", "") if os.name == "nt" else "/usr/bin:/bin",
         "HERMES_HOME": str(home),
         "PROBE_ENGINE": engine,
         "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONUTF8": "1",
         "HERMES_DISABLE_LAZY_INSTALLS": "1",
+        "LCM_EMBEDDINGS_ENABLED": "0",
+        "LCM_TEMPORAL_ROLLUPS_ENABLED": "0",
     }
+    if os.name == "nt":
+        env.update({key: str(home) for key in ("USERPROFILE", "APPDATA", "LOCALAPPDATA", "TEMP", "TMP")})
     completed = subprocess.run(
-        [python, "-c", _PROBE],
+        [python, "-c", probe],
         cwd=src or None,
         env=env,
         capture_output=True,
@@ -118,6 +133,70 @@ def test_in_place_rename_with_only_legacy_name_is_the_documented_failure(tmp_pat
     assert result["selected"] is None
     assert "LCM plugin loaded" not in result["log"]
     assert "Context engine 'lcm' not found — falling back to built-in compressor" in result["log"]
+
+
+_RELOAD_PROBE = textwrap.dedent(
+    """
+    from contextlib import closing
+    from pathlib import Path
+    import json, os, sqlite3, sys
+    from hermes_cli import plugins
+
+    plugins.discover_plugins(force=True)
+    manager = plugins.get_plugin_manager()
+    original = plugins.get_plugin_context_engine()
+    retained = original.clone_for_agent()
+    engine_module = sys.modules[type(retained).__module__]
+    session = "retained-across-import"
+    retained.on_session_start(session, platform="cli")
+
+    def message(role, content):
+        return {"role": role, "content": content}
+
+    def rows():
+        with closing(sqlite3.connect(database.as_uri() + "?mode=ro", uri=True)) as conn:
+            return conn.execute("SELECT role, content FROM messages ORDER BY store_id").fetchall()
+
+    database = Path(os.environ["HERMES_HOME"]) / "lcm.db"
+    view = [message("user", "first question"), message("assistant", "first answer")]
+    retained.ingest(view)
+    assert manager.unload("hermes-lcm-x")
+    assert plugins.get_plugin_context_engine() is None
+
+    # Hermes can finalize a stopped turn before reload publishes the new package.
+    view += [message("user", "question in the gap"), message("assistant", "answer in the gap")]
+    retained.on_turn_complete(view, interrupted=True)
+    gap_rows = rows()
+
+    plugins.discover_plugins(force=True)
+    replacement = plugins.get_plugin_context_engine()
+    assert sys.modules[type(replacement).__module__] is not engine_module
+    assert type(retained) is not type(replacement)
+    view += [message("user", "next question")]
+    retained.should_compress_preflight(view)
+    view += [message("assistant", "next partial answer")]
+    retained.on_turn_complete(view, interrupted=True)
+    retained.on_session_end(session, view)
+    final_rows = rows()
+    assert manager.unload("hermes-lcm-x")
+    database.unlink()
+    retained.on_turn_complete(view, interrupted=True)
+    assert not database.exists()
+    print(json.dumps({"gap": gap_rows, "final": final_rows}))
+    """
+)
+
+
+def test_retained_interruption_survives_real_plugin_reimport(tmp_path):
+    result = _run(tmp_path, plugin_dir="hermes-lcm-x", enabled=["hermes-lcm-x"], engine="lcm-x",
+                  probe=_RELOAD_PROBE)
+    expected = [
+        ["user", "first question"], ["assistant", "first answer"],
+        ["user", "question in the gap"], ["assistant", "answer in the gap"],
+        ["user", "next question"], ["assistant", "next partial answer"],
+    ]
+    assert result["gap"] == expected[:4]
+    assert result["final"] == expected
 
 
 # --- Two physical LCM copies during migration (#471 fix round 1) -------------
