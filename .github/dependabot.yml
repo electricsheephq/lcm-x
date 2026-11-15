@@ -6,7 +6,7 @@
 # routine version bumps are not opened here.
 # Minor and patch updates share one pull request; each major update opens its own, for its own review.
 # The lcmx-1586 workflows run only on dispatch, so a pull request that changes them needs a dispatch of
-# lcmx-1586-floor.yml on its branch before merge.
+# lcmx-1586-floor.yml on its branch before merge; only `cell: recall` also runs lcmx-1586-covered-store.yml.
 version: 2
 updates:
   - package-ecosystem: "github-actions"
