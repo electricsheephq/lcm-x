@@ -1,0 +1,136 @@
+"""Round-two receipt multiplicity and proven-prefix regressions (I1/I2/I8/I9)."""
+import copy
+
+import pytest
+
+from tests.invariants.test_issue_2742_warm_tail_refinal import _busy_end, _open, _turn
+from tests.invariants.test_issue_2550_busy_end_and_restamp_paths import _view
+from tests.invariants.test_p1e_decided_tails import contents, end_view, history, replay
+from tests.test_issue_2055_ingest_ledger_writes import engines as engines
+
+
+@pytest.mark.parametrize('shape', ['plain', 'wrapped-base64', 'data-uri-key'])
+@pytest.mark.parametrize('uid', ['none', 'distinct'])
+@pytest.mark.parametrize('uid_mode', [None, 'off'])
+def test_warm_repeat_reserves_prefix_receipt(tmp_path, monkeypatch, shape, uid, uid_mode):
+    engine = _open(tmp_path, monkeypatch, uid_mode)
+    try:
+        view = _view(shape)
+        engine.ingest(copy.deepcopy(view))
+        call = copy.deepcopy(view[2])
+        call.pop('message_uid')
+        if uid == 'distinct':
+            call['message_uid'] = 'second-call'
+        engine.ingest(copy.deepcopy(view + [call]))
+        rows = engine._store.get_session_messages('parent')
+        assert len(rows) == 5, rows
+        assert sum(bool(r.get('tool_calls')) for r in rows) == 2
+        assert [r['observed_at'] for r in rows] == [1., 2., 3., 4., 3.]
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize('shape', ['wrapped-base64', 'data-uri-key'])
+@pytest.mark.parametrize('uid_mode', [None, 'off'])
+def test_repeat_call_then_new_result_keeps_its_call(tmp_path, monkeypatch, shape, uid_mode):
+    engine = _open(tmp_path, monkeypatch, uid_mode)
+    try:
+        view = _view(shape)
+        engine.ingest(copy.deepcopy(view))
+        call = copy.deepcopy(view[2])
+        call.pop('message_uid')
+        engine.ingest(copy.deepcopy(view + [call]))
+        rows = engine._store.get_session_messages('parent')
+        assert len(rows) == 5 and rows[-1]['tool_calls'], rows
+        result = copy.deepcopy(view[3])
+        result.pop('message_uid')
+        result.update(timestamp=50., content='second-result')
+        engine.ingest(copy.deepcopy(view + [call, result]))
+        rows = engine._store.get_session_messages('parent')
+        assert len(rows) == 6 and rows[-2]['tool_calls'], rows
+        assert rows[-1]['content'] == 'second-result'
+        assert rows[-1]['tool_call_id'] == call['tool_calls'][0]['id']
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize('uid_mode', [None, 'off'])
+def test_cursor_zero_twin_uses_receipt_only_once(tmp_path, monkeypatch, uid_mode):
+    engine = _open(tmp_path, monkeypatch, uid_mode)
+    try:
+        view = _view('wrapped-base64')
+        engine.ingest(copy.deepcopy(view))
+        call = copy.deepcopy(view[2])
+        call.pop('message_uid')
+        view = copy.deepcopy(view) + [call]
+        view[0]['timestamp'] += 1000
+        plan = engine._identity_anchor_prematch(view, view, 0)
+        assert 2 in plan['replayed'] and 4 not in plan['replayed'], plan
+        targets = [r['store_id'] for i in (2, 4) for r in plan['matched'].get(i, ())]
+        assert targets == [3], plan
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize('uid_mode', [None, 'off'])
+def test_two_busy_ends_preserve_proven_prefix_call(tmp_path, monkeypatch, uid_mode):
+    engine = _open(tmp_path, monkeypatch, uid_mode)
+    try:
+        view = _turn(0) + _turn(1, 'plain')
+        engine.ingest(copy.deepcopy(view[:2]))
+        _busy_end(engine, monkeypatch, view[:5])
+        _busy_end(engine, monkeypatch, view)
+        engine._retry_pending_session_tails()
+        rows = engine._store.get_session_messages('parent')
+        assert sum(bool(r.get('tool_calls')) for r in rows) == 1, rows
+        assert sum(r['role'] == 'tool' for r in rows) == 1
+        assert [r['observed_at'] for r in rows] == [1., 2., 11., 12., 13., 14.]
+        assert not engine._pending_session_tails
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize('writer', ['ingest', 'append_batch'])
+@pytest.mark.parametrize('uid_mode', [None, 'off'])
+def test_prefix_call_before_unstored_result(tmp_path, monkeypatch, writer, uid_mode):
+    engine = _open(tmp_path, monkeypatch, uid_mode)
+    try:
+        view = _turn(0) + _turn(1, 'plain')
+        engine.ingest(copy.deepcopy(view[:2]))
+        _busy_end(engine, monkeypatch, view)
+        [tail] = engine._pending_session_tails
+        if writer == 'ingest':
+            engine.ingest(copy.deepcopy(view[:5]))
+        else:
+            engine._store.append_batch('parent', copy.deepcopy(view[2:5]), conversation_id='conv')
+        proof = engine._match_pending_tail(tail)
+        assert proof[0] == 3, proof
+        engine._retry_pending_session_tails()
+        rows = engine._store.get_session_messages('parent')
+        assert sum(bool(r.get('tool_calls')) for r in rows) == 1, rows
+        assert sum(r['role'] == 'tool' for r in rows) == 1
+        assert not engine._pending_session_tails
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize('veto', ['canonical-uid', 'conflicting-stamp'])
+def test_positional_prefix_keeps_main_contract(engines, veto):
+    engine = engines()
+    view = history()
+    engine.ingest(copy.deepcopy([view[0], view[1], view[3]]))
+    tail = end_view(engine, view)
+    assert 'ledger' not in tail and [m['content'] for m in tail['messages']] == ['C']
+    row = dict(view[2])
+    if veto == 'conflicting-stamp':
+        row['timestamp'] += 1000
+    [target] = replay(engine, [row])
+    if veto == 'canonical-uid':
+        engine._store.add_host_uid_bindings('foreign-lineage', [(target, 'foreign-C', 'canonical', 'stored_new')])
+        assert engine._store._conn.execute(
+            "SELECT uid FROM host_uid_bindings WHERE store_id=? AND kind='canonical'", (target,)).fetchall() == [('foreign-C',)]
+    proof = engine._match_pending_tail(tail)
+    assert proof[0] == 1, proof
+    engine._retry_pending_session_tails()
+    assert contents(engine).count('C') == 1
+    assert not engine._pending_session_tails

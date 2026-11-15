@@ -12635,12 +12635,12 @@ class LCMEngine(
             else:
                 matches = self._pending_row_identity(message) == self._pending_row_identity(row, stored=True)
             uid = tail["metadata_messages"][i].get("message_uid")
-            if matches and _valid_uid(uid) and store._host_uid_table_exists():
+            if independent and matches and _valid_uid(uid) and store._host_uid_table_exists():
                 known = {r[0] for r in conn.execute(
                     "SELECT uid FROM host_uid_bindings WHERE store_id=? AND kind='canonical'", (row["store_id"],))}
                 if known and uid not in known:
                     matches = False
-            if matches and rule in ("digest", "no_ledger") and conflicting(i, row):
+            if independent and matches and rule in ("digest", "no_ledger") and conflicting(i, row):
                 matches = False
             if independent and len(bindings) > 1:
                 matches = False
@@ -12662,6 +12662,7 @@ class LCMEngine(
             if rule == "digest" and len(bindings) == 1:
                 ordinal = bindings[0]["ordinal"]
                 last = ordinal if last is None else max(last, ordinal)
+        proven = covered
         for i in range(covered, len(tail["messages"])):
             for row in rows:
                 if row["store_id"] not in used and matches_at(i, row, independent=True):
@@ -12679,7 +12680,8 @@ class LCMEngine(
         for group in groups.values():
             if not all(i in matched for i in group):
                 for i in group:
-                    matched.pop(i, None)
+                    if i >= proven:
+                        matched.pop(i, None)
         # Gap matches never extend the positional prefix: their physical IDs can be reversed.
         covered = min(covered, next((i for i in range(covered) if i not in matched), covered))
         # Only a contiguous prefix moves the frozen boundary; a later match cannot hide a hole.
@@ -12965,9 +12967,11 @@ class LCMEngine(
                                 self._write_tail_bindings(adopted_tail, ids, left, after_commit, matched, indexes)
                         committed = True
                         if ids and store is self.__dict__.get("_store") and tail["session_id"] == self._session_id:
-                            # #2751: the retry committed a new occurrence (#1179) exactly once. An old
-                            # prefix stub must not later present its pre-restamp metadata as the last view.
+                            # #2751: retire both halves of the cached view after committing this
+                            # occurrence. A no-new-rows reconcile refills them from the host, so
+                            # #1179 still sees a genuine later re-stamp and stores it exactly once.
                             self._last_active_replay_messages = []
+                            self._last_active_replay_source_identities = []
                         after_commit.append(lambda n=len(matched): self._ledger_count("ledger.tail.retry.replay_rows", amount=n))
                     committed = True
                     after_commit.extend([

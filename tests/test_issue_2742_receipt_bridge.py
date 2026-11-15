@@ -6,6 +6,7 @@ import pytest
 
 from hermes_lcm import engine as engine_module
 from hermes_lcm import ingest_ledger as ledger
+from hermes_lcm import maintenance_scheduler
 from tests.invariants.test_issue_2742_warm_tail_refinal import _bind, _busy_end, _open, _row, _turn
 from tests.invariants.test_issue_2550_busy_end_and_restamp_paths import _args, _view
 from tests.invariants.test_p1e_decided_tails import contents, end_view, history, queue, replay
@@ -207,6 +208,7 @@ class VirtualClock:
                                   if not k.startswith('__')})
         clock.monotonic = lambda: self.now
         monkeypatch.setattr(engine_module, 'time', clock)
+        monkeypatch.setattr(maintenance_scheduler, 'time', clock)
 
     def expire(self):
         self.now += .060
@@ -266,7 +268,10 @@ def test_budget_before_admission_never_skips_unscanned_rows(engines, monkeypatch
     engine = engines()
     tail = queue(engine)
     boundary = tail['after_store_id']
-    replay(engine, history()[3:])
+    foreign = [_m('user', f'foreign-{i}', 50. + i) for i in range(5)]
+    replay(engine, foreign)
+    [target] = replay(engine, history()[3:])
+    assert target > boundary + len(tail['messages'])
     clock = VirtualClock(monkeypatch)
     match = engine._match_pending_tail
     seen, admissions = [], []
@@ -290,7 +295,7 @@ def test_budget_before_admission_never_skips_unscanned_rows(engines, monkeypatch
     assert seen and seen[0][6][1]['content'] == 'D'
     assert engine._pending_session_tails == [tail] and tail['after_store_id'] == boundary
     engine._retry_pending_session_tails()
-    assert contents(engine) == ['A', 'B', 'D', 'C']
+    assert contents(engine) == ['A', 'B', *[m['content'] for m in foreign], 'D', 'C']
     assert not engine._pending_session_tails
 
 
