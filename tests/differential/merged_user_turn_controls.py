@@ -253,7 +253,10 @@ def test_round2_fallback_has_own_evidence_retry(tmp_path, monkeypatch, versions,
             original = engine._identity_anchor_prematch
 
             def prematch(*args, **kwargs):
-                if name == 'main' or not hasattr(engine, '_store_queued_user_rows') or fallen_back:
+                # The fake writer runs after canonical ingest, so it cannot
+                # trigger this earlier evidence fault through fallen_back.
+                if (name == 'main' or not hasattr(engine, '_store_queued_user_rows') or fallen_back
+                        or hasattr(engine, '_fake_queued_rows')):
                     attempt = engine.__dict__.get('_ingest_attempt_index')
                     if attempt is None:
                         pytest.fail("setup: _ingest_attempt_index missing")

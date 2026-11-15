@@ -23,7 +23,8 @@ from tests.phase0_hygiene import product_env_keys
 
 
 RANDOM_SEEDS = tuple(range(2707400, 2707720))
-RELOAD_SEEDS = tuple(range(2707800, 2707900))
+WIDE_RELOAD_SEEDS = tuple(range(2708000, 2708100))
+RELOAD_SEEDS = tuple(range(2707800, 2707900)) + WIDE_RELOAD_SEEDS
 CONTROL_SEEDS = {
     2707101: 'r1-A-alias-fallback',
     2707102: 'r1-B-fallback-replay',
@@ -286,6 +287,8 @@ def _gateway_reload(transcript):
 
 
 def _reload_case(seed, directory, patch, trees, record):
+    if seed in WIDE_RELOAD_SEEDS:
+        return _wide_reload_case(seed, directory, patch, trees, record)
     rng = random.Random(seed)
     patch.setenv('LCM_IDENTITY_ANCHOR', str(rng.randrange(2)))
     # A durable pending-user transcript is the reload input. It is separate
@@ -318,13 +321,54 @@ def _reload_case(seed, directory, patch, trees, record):
             engine.shutdown()
 
 
+def _wide_reload_plan(seed):
+    rng = random.Random(seed)
+    anchor, count = rng.randrange(2), rng.randint(1, 4)
+    pending = [base._row(f'P-{seed}-{i}', 10. + i) for i in range(count)]
+    blank, split = rng.choice([False, True]), rng.choice([False, True])
+    if blank:
+        pending[rng.randrange(count)]['content'] = ' \t '
+    pending.append(base._row(f'R-{seed}', 20.))
+    return anchor, pending, rng.randint(1, count) if split else None
+
+
+def _wide_reload_case(seed, directory, patch, trees, record):
+    anchor, pending, split = _wide_reload_plan(seed)
+    patch.setenv('LCM_IDENTITY_ANCHOR', str(anchor))
+    for name in ('main', 'candidate'):
+        ctx = base._open(trees[name], directory / name, patch)
+        engine = ctx.engine
+        q, reply = base._row('Q', 1., 'assistant'), base._row('A', 21., 'assistant')
+        try:
+            engine.ingest([q])
+            live = [dict(row) for row in pending]
+            ctx.hooks['pre_llm_call'](session_id='parent', conversation_id='conv',
+                                    user_message=live[-1]['content'], conversation_history=[q, *live])
+            live[0].update(content=live[-1]['content'], timestamp=live[-1]['timestamp'])
+            engine.ingest([q, live[0], reply])
+            # The durable transcript can place a reply between queued users.
+            # The floor's reload strips each row and joins only consecutive users.
+            durable = [dict(row) for row in pending]
+            if split is not None:
+                durable.insert(split, base._row('interleaved reply', 10. + split - .5, 'assistant'))
+            history = _gateway_reload([q, *durable, reply])
+            trace = engine._paired_trace
+            trace.reloads = [(trace.record_captures[-1]['ids'][0], history[1],
+                              '\n\n'.join(r['content'] for r in pending))]
+            engine.ingest([*history, base._row(f'N-{seed}', 30.), base._row('B', 31., 'assistant')])
+            record(name + '_reload', json.dumps(dict(seed=seed, pending=len(pending) - 1,
+                   whitespace=any(not r['content'].strip() for r in pending), split=split)))
+        finally:
+            engine.shutdown()
+
+
 CASES = [*RANDOM_SEEDS, *CONTROL_SEEDS, *RELOAD_SEEDS, 'shifted-replay', 'capture-without-fault']
 
 
-def _execute_case(case, directory, versions, stub_faults=False, fake=False):  # noqa: F811
+def _execute_case(case, directory, versions, stub_faults=False, fake=None):  # noqa: F811
     if os.environ.get('LCMX_DIFF_FAKE_RECORDS') is not None and any(k in os.environ for k in ('CI', 'GITHUB_ACTIONS')):
         pytest.fail('LCMX_DIFF_FAKE_RECORDS is forbidden in CI')
-    fake = fake or os.environ.get('LCMX_DIFF_FAKE_RECORDS') == '1'
+    fake = os.environ.get('LCMX_DIFF_FAKE_RECORDS') == '1' if fake is None else fake
     if fake:
         versions = dict(versions, candidate=SimpleNamespace(register=versions['main'].register))
     traces, properties = {}, [('fake_candidate', 'fake_records.install')] if fake else []
@@ -369,8 +413,24 @@ def _label_violations(case, trace, stubbed):
         stage, kind, value, count = (violation[k] for k in ('stage', 'kind', 'value', 'count'))
         views = trace.ingests[stage - 1]['views']
         if kind == 'missing':
-            label = ('#2707 reload' if case in RELOAD_SEEDS and views[violation['view']]['kind'] == 'ingest'
-                     else label_missing(case, views, violation))
+            if case in WIDE_RELOAD_SEEDS and views[violation['view']]['kind'] == 'hook':
+                from .record_contract import declarations
+                assert any(e['capture_view'] == violation['view'] and e['stage'] <= stage
+                           and e['expected']['content'] == value
+                           for e in declarations(case, trace.ingests, paired.BASELINE_REF)), violation
+                label = '#2707 proven'
+            else:
+                label = ('#2707 reload' if case in RELOAD_SEEDS and views[violation['view']]['kind'] == 'ingest'
+                         else label_missing(case, views, violation))
+        elif case in WIDE_RELOAD_SEEDS:
+            # A widened reload can append the already stored newest user/reply.
+            # Pin this baseline shape separately from injected-fault duplicates.
+            fields = dict(value)
+            assert stage == 3 and not trace.faults and count == 1, violation
+            assert value in trace.ingests[stage - 2]['rows'], violation
+            assert (fields['role'], fields['content'], fields['observed_at']) in (
+                ('assistant', 'A', 21.), ('user', f'R-{case}', 20.)), violation
+            label = '#2707 reload duplicate'
         else:
             remaining = clean.get((stage, kind, value), 0)
             if remaining:
@@ -469,7 +529,8 @@ def sequence(request, tmp_path_factory, versions, fault_run):  # noqa: F811 - im
     if any(v['kind'] == 'duplicate' for v in traces['main'].violations()):
         # Rerun the identical host plan with all fault wrappers disabled.
         _, clean = _execute_case(case, directory / 'fault-free',
-                                 dict(main=versions['main'], candidate=versions['candidate']), stub_faults=True)
+                                 dict(main=versions['main'], candidate=versions['candidate']),
+                                 stub_faults=True, fake=False)
         stubbed = clean['main']
         properties.append(('fault_free_violations', json.dumps(stubbed.violations())))
     labels = _label_violations(case, traces['main'], stubbed)
@@ -567,12 +628,16 @@ class TestMergedUserTurns:
     ('inert', 'declared fault preservation-once never fired'), ('skipped', 'floor skipped'),
     ('canonical', 'canonical row changed'),
     ('early', '2707102: declared record multiset'), ('unsuperseded', '2707802: retrieval-missing'),
-    ('error', 'lcm_load_session: injected tool error'),
+    ('error', 'lcm_load_session: injected tool error'), ('new-range-missing', 'declared record multiset'),
 ])
-def test_fake_record_contract(mutation, message, tmp_path, versions, monkeypatch):  # noqa: F811
+def test_fake_record_contract(mutation, message, tmp_path, versions, monkeypatch, record_property):  # noqa: F811
     from tests.differential import fake_records
     from tests.differential.merged_user_turns_extras import DECLARED
     from tests.differential.record_contract import active, check_stage, mandatory_floor
+    new_range = mutation == 'new-range-missing'
+    mutation = 'missing' if new_range else mutation
+    if mutation == 'unsuperseded':
+        monkeypatch.setattr(fake_records, 'withholding', lambda _engine: [])
     install = fake_records.install
     def modified(engine, entries, patch):
         tools = install(engine, entries, patch)
@@ -626,8 +691,13 @@ def test_fake_record_contract(mutation, message, tmp_path, versions, monkeypatch
                 else:
                     for index, row in enumerate(reply['messages']):
                         if row.get('store_id') == 1 and 'owner_store_id' not in row:
+                            from .session import queued_rows
+                            records = queued_rows(engine)
+                            if not records:
+                                continue
                             reply['messages'].insert(index, dict(owner_store_id=1, ordinal=999,
-                                                                role='user', content='invented queued message'))
+                                role='user', content='invented queued message',
+                                reference=fake_records.reference(dict(records[0]))))
                             break
                 return json.dumps(reply)
             patch.setattr(tools, 'lcm_load_session', drop)
@@ -638,7 +708,7 @@ def test_fake_record_contract(mutation, message, tmp_path, versions, monkeypatch
     def verify():
         if mutation in ('inert', 'skipped'):
             return mandatory_floor(dict(evaluated=mutation != 'skipped'), {})
-        case = 2707480 if mutation in ('per-owner', 'retry') else 2707102 if mutation == 'early' else 2707802 if mutation == 'unsuperseded' else 2707800
+        case = 2708002 if new_range else 2707480 if mutation in ('per-owner', 'retry') else 2707102 if mutation == 'early' else 2707802 if mutation == 'unsuperseded' else 2707800
         _, traces = _execute_case(case, tmp_path, versions, fake=True)
         if mutation in ('per-owner', 'retry'):
             assert any(f.called > 1 and f.raised == f.called for f in traces['candidate'].faults)
@@ -652,8 +722,9 @@ def test_fake_record_contract(mutation, message, tmp_path, versions, monkeypatch
             except AssertionError as exc:
                 raise AssertionError(f'{case}: {exc}') from exc
     if message:
-        with pytest.raises(AssertionError, match=message):
+        with pytest.raises(AssertionError, match=message) as caught:
             verify()
+        record_property('mutation_failure', str(caught.value))
     else:
         verify()
 
@@ -705,3 +776,44 @@ def test_equal_text_supersession_accepts_occurrence_witness():
     canonical = [freeze(dict(record, store_id=record['owner_store_id'])), freeze(dict(record, store_id=999))]
     check_stage(dict(canonical=canonical, records=[freeze(dict(record, superseded_by=999))]),
                 dict(canonical=canonical, reload_witness={record['owner_store_id']: 999}), [entry])
+
+
+@pytest.mark.parametrize('mutation,message', [
+    ('footer-page-2', 'withheld footer incomplete'),
+    ('latch', 'latched visibility: withheld locator missing'),
+])
+def test_fake_withheld_pages_and_latch(mutation, message, tmp_path, versions, monkeypatch, record_property):  # noqa: F811
+    from tests.differential import fake_records
+    monkeypatch.setattr(paired, 'CANDIDATE_CONTRACT', 'records-v1')
+    install, scan = fake_records.install, fake_records.withholding
+    visible_before = []
+    if mutation == 'latch':
+        cached = []
+        def latched(engine):
+            from .session import queued_rows
+            if queued_rows(engine) and not cached:
+                cached.append(scan(engine))
+                visible_before.append(not cached[0])
+            return cached[0] if cached else []
+        monkeypatch.setattr(fake_records, 'withholding', latched)
+    else:
+        def modified(engine, entries, patch):
+            tools = install(engine, entries, patch)
+            load = tools.lcm_load_session
+            def drop(args, **kwargs):
+                reply = json.loads(load(args, **kwargs))
+                if args.get('withheld_cursor') == 1:
+                    reply['withheld']['locators'] = []
+                return json.dumps(reply)
+            patch.setattr(tools, 'lcm_load_session', drop)
+            return tools
+        monkeypatch.setattr(fake_records, 'install', modified)
+    with pytest.raises(AssertionError, match=message) as caught:
+        try:
+            _execute_case(2708002, tmp_path, versions, fake=True)
+        except AssertionError as exc:
+            if mutation == 'latch':
+                assert visible_before == [True], 'record was not initially visible'
+                raise AssertionError(f'latched visibility: {exc}') from exc
+            raise
+    record_property('mutation_failure', str(caught.value))
