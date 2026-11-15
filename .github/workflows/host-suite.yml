@@ -75,7 +75,7 @@ jobs:
         run: git fetch --no-tags --depth=1 origin f3cc8de918ba14c21ae246099652762a26255554 77b2b4f795fb6a4f84c55abf6d0441da4469971e
 
       - name: Set up Python (harness)
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.13"
 

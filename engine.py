@@ -5391,6 +5391,7 @@ class LCMEngine(
         ):
             if off_current_should_bypass:
                 self._log_session_ingest_outcome(session_id, reason="bypass_lineage_end")
+                # Warn even when a stored prefix covers the view: this route compares content, not stamps.
                 if off_current_normal_conversation_id:
                     self._warn_session_end_unstored(session_id, messages, "prefix_mismatch_bypass_lineage")
             elif same_id_should_bypass and len(messages) > same_id_bypass_prefix_count:
@@ -5753,6 +5754,20 @@ class LCMEngine(
             )
             return
         unflushed = "unknown" if self._ingest_cursor_needs_reconcile else max(0, len(messages) - self._ingest_cursor)
+        last_identities = getattr(self, "_last_active_replay_source_identities", None)
+        last_identities = list(last_identities) if unflushed == 0 and last_identities is not None else None
+        last_replay = list(getattr(self, "_last_active_replay_messages", None) or ()) if last_identities is not None else None
+
+        def fully_stored():
+            # The cursor is only a length; a host can rewrite a row below it.
+            try:
+                return (unflushed == 0 and [self._message_replay_identity(m, strip_carrier=False)
+                                            for m in messages] == last_identities
+                        and len(last_replay) == len(messages)
+                        and not any(self._host_occurrence_changed(m, p) for m, p in zip(messages, last_replay)))
+            except Exception:
+                return False
+
         pending_before = len(self._pending_session_tails)
         ingest_finished = False
         try:
@@ -5781,7 +5796,8 @@ class LCMEngine(
                     self._session_end_flush_active = False
                     ingest_finished = True
                 except KeyboardInterrupt:
-                    self._warn_session_end_unstored(session_id, messages, "foreground_ingest_interrupted")
+                    if not fully_stored():
+                        self._warn_session_end_unstored(session_id, messages, "foreground_ingest_interrupted")
                     logger.warning(
                         "LCM session-end raw-message ingest interrupted; "
                         "final messages may be absent from the plugin-local store unflushed=%s",
@@ -5790,8 +5806,17 @@ class LCMEngine(
                     return
                 except Exception as exc:
                     if _is_ingest_busy_error(exc):
-                        if len(self._pending_session_tails) == pending_before and not any(
-                                t.get("session_id") == session_id for t in self._pending_session_tails):
+                        if not fully_stored() and len(self._pending_session_tails) == pending_before and not (self.__dict__.get(
+                                "_frozen_tail_reached") and any(t.get("kind") == "warm" and t.get("session_id") == session_id
+                                and t.get("store") is self._store for t in self._pending_session_tails)) and not any(
+                                t.get("session_id") == session_id
+                                and t.get("store") is self._store
+                                and t.get("conversation_id") == self._conversation_id
+                                and (t.get("view", [])[:len(messages)] == messages if t.get("kind") == "cold" else
+                                     self._ingest_cursor < len(messages)
+                                     and t.get("metadata_messages", [])[:len(messages) - self._ingest_cursor]
+                                     == messages[self._ingest_cursor:])
+                                for t in self._pending_session_tails):
                             self._warn_session_end_unstored(session_id, messages, "foreground_ingest_busy_unqueued")
                         self._ledger_count("ledger.tail.busy_at_end")
                         logger.warning(
@@ -5842,7 +5867,7 @@ class LCMEngine(
                 with self._attribution_span("snapshot"):
                     self._remember_session_end_replay_snapshot(session_id, messages)
         except KeyboardInterrupt:
-            if not ingest_finished:
+            if not ingest_finished and not fully_stored():
                 self._warn_session_end_unstored(session_id, messages, "foreground_flush_interrupted")
             logger.warning(
                 "LCM session-end ingest/finalize interrupted before bounded flush completed%s",
@@ -5851,7 +5876,7 @@ class LCMEngine(
             return
         except Exception as exc:
             if _is_sqlite_locked_error(exc):
-                if not ingest_finished and len(self._pending_session_tails) == pending_before:
+                if not ingest_finished and not fully_stored() and len(self._pending_session_tails) == pending_before:
                     self._warn_session_end_unstored(session_id, messages, "foreground_flush_locked")
                 logger.warning(
                     "LCM session-end ingest/finalize skipped due to SQLite lock before bounded flush: %s%s",
