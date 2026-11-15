@@ -439,6 +439,8 @@ settings do not update LCM-X's threshold.
 
 ### Session-end warning says `final messages may be absent` or `retry pending`
 
+The WARNING `LCM session-end rows not stored` (or a cold-tail `retry pending` WARNING with `reason=` and `view_rows=`) means the session-end view contains rows that are not stored; `view_rows` is the view size, not the missing-row count (#2543); `reason=off_current_suffix_append_failed` marks a busy suffix append at an off-current end of a bypass-lineage session that was re-raised unstored (#2738); `reason=unverified_stale_end` means the off-current fallback refused an end because it could not show the view's rows are stored (some may already be) (#2747), and the fallback skips this WARNING only for a session it can show is excluded from storage by design; `reason=off_current_fallback_interrupted` marks an interrupt during the off-current fallback, and rows may not be stored; `reason=off_current_suffix_append_interrupted` marks an interrupt during that bypass-lineage suffix append.
+
 The interrupted or SQLite-lock raw-flush warning includes `unflushed=N`: a cursor-based estimate
 before the final ingest attempt, not a durability count, without message content. While the ingest
 cursor awaits reconciliation (after a rebind, a lossy proof or a tail recovery), it reports

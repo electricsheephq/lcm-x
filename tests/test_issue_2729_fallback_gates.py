@@ -954,9 +954,9 @@ def ingest_during_parent_end(engines, monkeypatch):
                 comparing.append(parent._store._conn.in_transaction)
             return equal(*args, **kwargs)
 
-        def warned(session, reason):
+        def warned(session, reason, *args):
             reasons.append(reason)
-            return warn(session, reason)
+            return warn(session, reason, *args)
 
         def retry_after_ingest(tail):
             nonlocal retrying
@@ -1037,9 +1037,9 @@ def test_views_only_branch_keeps_binding_uid_veto(cold, monkeypatch, tamper):
         calls.append(store._conn.in_transaction)
         return prefix(*args)
 
-    def warned(session, reason):
+    def warned(session, reason, *args):
         reasons.append(reason)
-        return warn(session, reason)
+        return warn(session, reason, *args)
 
     @contextmanager
     def changed(**kwargs):
