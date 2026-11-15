@@ -5743,6 +5743,17 @@ class LCMEngine(
             )
             return
         unflushed = "unknown" if self._ingest_cursor_needs_reconcile else max(0, len(messages) - self._ingest_cursor)
+        last_identities = getattr(self, "_last_active_replay_source_identities", None)
+        last_identities = list(last_identities) if unflushed == 0 and last_identities is not None else None
+
+        def fully_stored():
+            # The cursor is only a length; a host can rewrite a row below it.
+            try:
+                return unflushed == 0 and [self._message_replay_identity(m, strip_carrier=False)
+                                           for m in messages] == last_identities
+            except Exception:
+                return False
+
         pending_before = len(self._pending_session_tails)
         ingest_finished = False
         try:
@@ -5771,7 +5782,7 @@ class LCMEngine(
                     self._session_end_flush_active = False
                     ingest_finished = True
                 except KeyboardInterrupt:
-                    if unflushed != 0:
+                    if not fully_stored():
                         self._warn_session_end_unstored(session_id, messages, "foreground_ingest_interrupted")
                     logger.warning(
                         "LCM session-end raw-message ingest interrupted; "
@@ -5781,7 +5792,8 @@ class LCMEngine(
                     return
                 except Exception as exc:
                     if _is_ingest_busy_error(exc):
-                        if unflushed != 0 and not any(
+                        if not fully_stored() and len(self._pending_session_tails) == pending_before and not self.__dict__.get(
+                                "_frozen_tail_reached") and not any(
                                 t.get("session_id") == session_id
                                 and t.get("store") is self._store
                                 and t.get("conversation_id") == self._conversation_id
@@ -5840,7 +5852,7 @@ class LCMEngine(
                 with self._attribution_span("snapshot"):
                     self._remember_session_end_replay_snapshot(session_id, messages)
         except KeyboardInterrupt:
-            if not ingest_finished and unflushed != 0:
+            if not ingest_finished and not fully_stored():
                 self._warn_session_end_unstored(session_id, messages, "foreground_flush_interrupted")
             logger.warning(
                 "LCM session-end ingest/finalize interrupted before bounded flush completed%s",
@@ -5849,7 +5861,7 @@ class LCMEngine(
             return
         except Exception as exc:
             if _is_sqlite_locked_error(exc):
-                if not ingest_finished and unflushed != 0 and len(self._pending_session_tails) == pending_before:
+                if not ingest_finished and not fully_stored() and len(self._pending_session_tails) == pending_before:
                     self._warn_session_end_unstored(session_id, messages, "foreground_flush_locked")
                 logger.warning(
                     "LCM session-end ingest/finalize skipped due to SQLite lock before bounded flush: %s%s",

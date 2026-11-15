@@ -1,5 +1,6 @@
 """#2543: report unstored ends without changing main's stored rows or retry decisions."""
 import copy
+import json
 import logging
 from pathlib import Path
 import re
@@ -9,6 +10,7 @@ import time
 import pytest
 
 from hermes_lcm import engine as engine_module, maintenance_scheduler
+from hermes_lcm.config import LCMConfig
 from tests.test_issue_2055_ingest_ledger_writes import engines as engines
 from tests.invariants.test_issue_2543_cold_inline_block import _call
 from tests.invariants.test_issue_2539_offcurrent_marker_end import _setup, _changed_marker_view
@@ -22,6 +24,167 @@ CELLS = [(shape, route) for shape in ("wrapped-base64", "data-uri-key")
          for route in ("cold-pairwise", "cold-counted")]
 CELLS += [(location, route) for location in ("spillover", "hermes-results")
           for route in ("direct", "busy")]
+
+
+def _precision_history():
+    return [{"role": role, "content": content, "timestamp": float(i + 1)}
+            for i, (role, content) in enumerate([
+                ("user", "q1"), ("assistant", "a1"), ("user", "q2"),
+                ("assistant", "partial answer"), ("user", "q3"), ("assistant", "a3")])]
+
+
+def _record_precision_rows(engine, record_property):
+    rows = engine._store.get_session_messages("S")
+    # Compare durable identity, order, ownership and content across the two trees;
+    # wall-clock bookkeeping is intentionally not a cross-run equality claim.
+    keys = ("store_id", "session_id", "conversation_id", "role", "content", "observed_at",
+            "tool_call_id", "tool_calls")
+    record_property("precision_rows", json.dumps([{k: r.get(k) for k in keys} for r in rows], sort_keys=True))
+    return [r["content"] for r in rows]
+
+
+@pytest.mark.parametrize("failure", ["stores", "interrupt", "busy", "real-interrupt",
+                                     "outer-interrupt", "outer-busy", "identity-mutated"])
+def test_rewritten_final_row_with_zero_unflushed_warns(engines, monkeypatch, caplog, record_property, failure):
+    engine = engines()
+    history = _precision_history()[:4]
+    engine.ingest(copy.deepcopy(history))
+    before = engine._store.get_session_messages("S")
+    assert engine._ingest_cursor == 4 and not engine._ingest_cursor_needs_reconcile
+    end = copy.deepcopy(history)
+    end[-1]["content"] = "partial answer, now the full final answer"
+
+    def fail(*args, **kwargs):
+        if failure == "identity-mutated":
+            # Ingest can slice-assign this list; the failure guard needs its entry copy.
+            engine._last_active_replay_source_identities[:] = [
+                engine._message_replay_identity(m, strip_carrier=False) for m in end]
+        if failure.endswith("busy"):
+            raise sqlite3.OperationalError("database is locked")
+        raise KeyboardInterrupt
+
+    with monkeypatch.context() as patch:
+        if failure.startswith("outer-"):
+            patch.setattr(engine_module, "_temporary_sqlite_busy_timeout", fail)
+        elif failure == "real-interrupt":
+            patch.setattr(engine._store, "ingest_atomic", fail)
+        elif failure != "stores":
+            patch.setattr(engine, "_ingest_messages", fail)
+        caplog.clear()
+        assert engine.on_session_end("S", copy.deepcopy(end)) is None
+    if failure == "stores":
+        assert _record_precision_rows(engine, record_property) == [m["content"] for m in history] + [end[-1]["content"]]
+        assert not _warnings(caplog)
+    else:
+        reason = ("foreground_flush_" if failure.startswith("outer-") else "foreground_ingest_") + (
+            "locked" if failure == "outer-busy" else "busy_unqueued" if failure == "busy" else "interrupted")
+        assert _warnings(caplog) == [f"LCM session-end rows not stored: session=S reason={reason} view_rows=4"]
+        assert engine._store.get_session_messages("S") == before
+        _record_precision_rows(engine, record_property)
+        assert not engine._pending_session_tails and "unflushed=0" in caplog.text
+
+
+class _PrecisionIgnorePattern:
+    # Optional regex's search(text, timeout=) API, without requiring that package.
+    pattern = "IGNORE_THIS"
+
+    def search(self, text, timeout=None):
+        return re.search(self.pattern, text)
+
+
+def _precision_engine(tmp_path, shape):
+    config = LCMConfig(database_path=str(tmp_path / "lcm.db"), sensitive_patterns_enabled=shape == "redacted")
+    engine = engine_module.LCMEngine(config=config, hermes_home=str(tmp_path / "home"))
+    if shape == "ignored":
+        engine._compiled_ignore_message_patterns = [_PrecisionIgnorePattern()]
+    engine.on_session_start("S", platform="cli", context_length=200_000)
+    return engine
+
+
+@pytest.mark.parametrize("shape", ["default", "ignored", "redacted"])
+@pytest.mark.parametrize("repeat", [False, True])
+def test_restart_busy_own_tail_and_identical_repeat_are_quiet(tmp_path, monkeypatch, caplog,
+                                                            record_property, shape, repeat):
+    _precision_busy_tail(tmp_path, monkeypatch, caplog, record_property, shape, repeat)
+
+
+def test_new_tail_count_independently_suppresses_warning(tmp_path, monkeypatch, caplog, record_property):
+    # Isolate the count guard from the independent warm-tail marker guard.
+    _precision_busy_tail(tmp_path, monkeypatch, caplog, record_property, "default", False, clear_marker=True)
+
+
+def test_known_limit_older_filtered_tail_failure_before_queue(tmp_path, monkeypatch, caplog, record_property):
+    # Accepted log-only limit: the old filtered metadata cannot prove raw-view coverage.
+    _precision_busy_tail(tmp_path, monkeypatch, caplog, record_property, "ignored", True, fail_before_queue=True)
+
+
+def _precision_busy_tail(tmp_path, monkeypatch, caplog, record_property, shape, repeat,
+                         clear_marker=False, fail_before_queue=False):
+    for name in ("_schedule_rollup_maintenance", "_schedule_embedding_maintenance"):
+        monkeypatch.setattr(engine_module.LCMEngine, name, lambda *a, **k: None)
+    history = _precision_history()
+    if shape == "ignored":
+        history[4]["content"] = "IGNORE_THIS heartbeat"
+    if shape == "redacted":
+        history[5]["content"] = "set password=synthetic-secret now"
+    engine = _precision_engine(tmp_path, shape)
+    engine.ingest(copy.deepcopy(history[:4]))
+    if not fail_before_queue:
+        engine.shutdown()
+        engine = _precision_engine(tmp_path, shape)
+    try:
+        if fail_before_queue:
+            assert engine._ingest_cursor == 4 and not engine._ingest_cursor_needs_reconcile
+        else:
+            assert engine._ingest_cursor == 0 and engine._ingest_cursor_needs_reconcile
+        ingest = engine._ingest_messages
+
+        def without_marker(*args, **kwargs):
+            try:
+                return ingest(*args, **kwargs)
+            finally:
+                engine.__dict__["_frozen_tail_reached"] = False
+
+        def busy_before_queue(*args, **kwargs):
+            raise sqlite3.OperationalError("database is locked")
+
+        locker = sqlite3.connect(str(engine._db_path), timeout=5, isolation_level=None)
+        try:
+            locker.execute("BEGIN IMMEDIATE")
+            with monkeypatch.context() as patch:
+                if clear_marker:
+                    patch.setattr(engine, "_ingest_messages", without_marker)
+                caplog.clear()
+                assert engine.on_session_end("S", copy.deepcopy(history)) is None
+                assert len(engine._pending_session_tails) == 1
+                assert not _warnings(caplog)
+                tail = engine._pending_session_tails[0]
+                assert tail["kind"] == "warm"
+                if repeat:
+                    if fail_before_queue:
+                        patch.setattr(engine, "_ingest_messages", busy_before_queue)
+                    caplog.clear()
+                    assert engine.on_session_end("S", copy.deepcopy(history)) is None
+                    assert len(engine._pending_session_tails) == 1 and engine._pending_session_tails[0] is tail
+                    expected = ["LCM session-end rows not stored: session=S "
+                                "reason=foreground_ingest_busy_unqueued view_rows=6"] if fail_before_queue else []
+                    assert _warnings(caplog) == expected
+                assert "raw-message ingest skipped due to SQLite lock" in caplog.text
+        finally:
+            locker.rollback()
+            locker.close()
+        engine._retry_pending_session_tails()
+        assert not engine._pending_session_tails
+        contents = _record_precision_rows(engine, record_property)
+        if shape == "ignored":
+            assert contents == [m["content"] for i, m in enumerate(history) if i != 4]
+        elif shape == "redacted":
+            assert contents == [m["content"] for m in history[:5]] + [
+                "set password=[LCM sensitive redaction: name=password_assignment; chars=16; bytes=16] now"]
+        else:
+            assert contents == [m["content"] for m in history]
+    finally:
+        engine.shutdown()
 
 
 def _prepare(engines, monkeypatch, tmp_path, shape):

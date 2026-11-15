@@ -439,7 +439,7 @@ settings do not update LCM-X's threshold.
 
 ### Session-end warning says `final messages may be absent` or `retry pending`
 
-The WARNING `LCM session-end rows not stored` (or a cold-tail `retry pending` WARNING with `reason=` and `view_rows=`) means rows may be missing, or their storage could not be verified; `view_rows` is the view size, not the missing-row count (#2543). In particular, `unverified_stale_end` can fire when every row is already stored (#2747); the fallback skips this WARNING for a session it can show is excluded from storage by design. The reasons are:
+The WARNING `LCM session-end rows not stored` (or a cold-tail `retry pending` WARNING with `reason=` and `view_rows=`) means rows may be missing, or their storage could not be verified; `view_rows` is the view size, not the missing-row count (#2543); for a dropped warm tail, it is the tail's row count. In particular, `unverified_stale_end` can fire when every row is already stored (#2747); the fallback skips this WARNING for a session it can show is excluded from storage by design. The reasons are:
 
 | Reason | Meaning |
 |---|---|
@@ -450,7 +450,7 @@ The WARNING `LCM session-end rows not stored` (or a cold-tail `retry pending` WA
 | `unverified_stale_end` | The off-current fallback refused an end because it could not verify storage of its rows. |
 | `off_current_fallback_interrupted` | The off-current fallback was interrupted; the interrupt propagates. |
 | `foreground_ingest_interrupted` | The foreground end's raw-message ingest was interrupted with rows potentially unflushed. |
-| `foreground_ingest_busy_unqueued` | The foreground ingest was busy and no pending tail covers this end's potentially unflushed rows. |
+| `foreground_ingest_busy_unqueued` | The foreground ingest was busy, this end queued no tail, and no pending tail covers its potentially unflushed rows. |
 | `foreground_flush_interrupted` | The foreground flush was interrupted before ingest finished, with rows potentially unflushed. |
 | `foreground_flush_locked` | SQLite locked the foreground flush before ingest finished, with rows potentially unflushed and no new tail queued. |
 | `cold_tail_prefix_mismatch` | A queued cold tail's view does not match the stored prefix; retry remains pending. |
