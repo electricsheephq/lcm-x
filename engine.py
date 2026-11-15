@@ -5375,6 +5375,9 @@ class LCMEngine(
         ):
             if off_current_should_bypass:
                 self._log_session_ingest_outcome(session_id, reason="bypass_lineage_end")
+                self._warn_session_end_unstored(session_id, messages, "prefix_mismatch_bypass_lineage")
+            elif same_id_should_bypass and len(messages) > same_id_bypass_prefix_count:
+                self._warn_session_end_unstored(session_id, messages, "bypass_lineage_end")
             self._end_host_fallback_compressor_for_session(
                 session_id,
                 messages,
@@ -5382,6 +5385,7 @@ class LCMEngine(
             )
             return
         if session_id != self._session_id:
+            self._warn_session_end_unstored(session_id, messages, "unverified_stale_end")
             logger.warning(
                 "LCM ignored unverified stale session-end callback for %s while bound to %s",
                 session_id,
@@ -5466,6 +5470,7 @@ class LCMEngine(
                     self._session_end_flush_active = False
                     ingest_finished = True
                 except KeyboardInterrupt:
+                    self._warn_session_end_unstored(session_id, messages, "foreground_ingest_interrupted")
                     logger.warning(
                         "LCM session-end raw-message ingest interrupted; "
                         "final messages may be absent from the plugin-local store unflushed=%s",
@@ -5474,6 +5479,8 @@ class LCMEngine(
                     return
                 except Exception as exc:
                     if _is_ingest_busy_error(exc):
+                        if len(self._pending_session_tails) == pending_before:
+                            self._warn_session_end_unstored(session_id, messages, "foreground_ingest_busy_unqueued")
                         self._ledger_count("ledger.tail.busy_at_end")
                         logger.warning(
                             "LCM session-end raw-message ingest skipped due to SQLite lock after short wait; "
@@ -5523,6 +5530,8 @@ class LCMEngine(
                 with self._attribution_span("snapshot"):
                     self._remember_session_end_replay_snapshot(session_id, messages)
         except KeyboardInterrupt:
+            if not ingest_finished:
+                self._warn_session_end_unstored(session_id, messages, "foreground_flush_interrupted")
             logger.warning(
                 "LCM session-end ingest/finalize interrupted before bounded flush completed%s",
                 f" unflushed={unflushed}" if not ingest_finished else "",
@@ -5530,6 +5539,8 @@ class LCMEngine(
             return
         except Exception as exc:
             if _is_sqlite_locked_error(exc):
+                if not ingest_finished and len(self._pending_session_tails) == pending_before:
+                    self._warn_session_end_unstored(session_id, messages, "foreground_flush_locked")
                 logger.warning(
                     "LCM session-end ingest/finalize skipped due to SQLite lock before bounded flush: %s%s",
                     exc,
@@ -6201,6 +6212,18 @@ class LCMEngine(
                             session_id, platform or "-", parent or "-", decision, reason, self._diagnostic_engine_token)
         except Exception:
             pass  # Diagnostics cannot change bind or storage outcomes.
+
+    def _warn_session_end_unstored(self, session_id, view, reason, prefix=None):
+        try:
+            if not view:
+                return
+            if prefix is None:
+                logger.warning("LCM session-end rows not stored: session=%s reason=%s view_rows=%d",
+                               session_id, reason, len(view))
+            else:
+                logger.warning("%s reason=%s view_rows=%d", prefix, reason, len(view))
+        except Exception:
+            pass  # Diagnostics cannot change storage or retry outcomes.
 
     def _log_session_ingest_outcome(self, session_id, *, rows=0, reason=""):
         try:
@@ -12289,8 +12312,10 @@ class LCMEngine(
                 if conflict is False:
                     self._ledger_count("ledger.tail.cold_scan_capped")
                 if not tail.get("unmatched_warned"):
-                    logger.warning("LCM session-end cold tail conflict scan capped; retry pending" if conflict is False else
-                                   "LCM session-end cold tail conflicting stamp unplaced; retry pending")
+                    self._warn_session_end_unstored(tail["session_id"], tail["view"],
+                        "cold_tail_scan_capped" if conflict is False else "cold_tail_conflicting_stamp_unplaced",
+                        "LCM session-end cold tail conflict scan capped; retry pending" if conflict is False else
+                        "LCM session-end cold tail conflicting stamp unplaced; retry pending")
                     tail["unmatched_warned"] = True
                 return False
             return True
@@ -12414,8 +12439,10 @@ class LCMEngine(
                 if conflict is False:
                     self._ledger_count("ledger.tail.cold_scan_capped")
                 if not tail.get("unmatched_warned"):
-                    logger.warning("LCM session-end cold tail conflict scan capped; retry pending" if conflict is False else
-                                   "LCM session-end cold tail prefix mismatch; retry pending")
+                    self._warn_session_end_unstored(tail["session_id"], tail["view"],
+                        "cold_tail_scan_capped" if conflict is False else "cold_tail_prefix_mismatch",
+                        "LCM session-end cold tail conflict scan capped; retry pending" if conflict is False else
+                        "LCM session-end cold tail prefix mismatch; retry pending")
                     tail["unmatched_warned"] = True
                 return False
             if stored < len(view):
@@ -12429,7 +12456,7 @@ class LCMEngine(
         return True
 
     def _retry_pending_session_tails(self, *, deadline: float | None = None, exiting: bool = False,
-                                     sibling: bool = False) -> None:
+                                     sibling: bool = False, shutdown: bool = False) -> None:
         """Drain under the lifecycle lock, sharing one busy-wait budget."""
         if not self._pending_session_tails:
             return
@@ -12500,7 +12527,8 @@ class LCMEngine(
             if time.monotonic() >= deadline:
                 break
         if exiting:
-            self._warn_unflushed_session_tails("SQLite lock", deadline=deadline)
+            self._warn_unflushed_session_tails("SQLite lock", deadline=deadline,
+                outcome_reason="pending_tail_dropped_at_shutdown" if shutdown else "pending_tail_dropped_at_exit")
         elif not self._pending_session_tails:
             maintenance_scheduler._PENDING_TAIL_ENGINES.discard(self)
 
@@ -12533,7 +12561,8 @@ class LCMEngine(
         return missing + sum(max(0, amount - available[identity]) for (identity, stamp), amount in wanted.items()
                              if stamp is None)
 
-    def _warn_unflushed_session_tails(self, reason: str, *, deadline=None) -> None:
+    def _warn_unflushed_session_tails(self, reason: str, *, deadline=None,
+                                     outcome_reason="pending_tail_dropped_at_exit") -> None:
         counts = {}
         for tail in self._pending_session_tails:
             why, remaining = reason, len(tail["view"] if tail.get("kind") == "cold" else tail["messages"])
@@ -12545,6 +12574,9 @@ class LCMEngine(
                     pass  # A still-busy or unreadable store retains the conservative exit count.
                 finally:
                     tail["store"]._write_lock.release()
+            if remaining:
+                self._warn_session_end_unstored(tail["session_id"],
+                    tail["view"] if tail.get("kind") == "cold" else tail["messages"], outcome_reason)
             counts[why] = counts.get(why, 0) + remaining
         for why, remaining in counts.items():
             if not remaining:
@@ -12642,7 +12674,7 @@ class LCMEngine(
 
     def _shutdown_unlocked(self, *, deadline: float):
         self._retry_pending_session_tails(
-            deadline=deadline, exiting=True,
+            deadline=deadline, exiting=True, shutdown=True,
         )
         self._discard_prepared_leaves()
         self._retire_embedding_maintenance(wait=True)

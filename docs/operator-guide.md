@@ -439,6 +439,8 @@ settings do not update LCM-X's threshold.
 
 ### Session-end warning says `final messages may be absent` or `retry pending`
 
+The WARNING `LCM session-end rows not stored` (or a cold-tail `retry pending` WARNING with `reason=` and `view_rows=`) means the session-end view contains rows that are not stored; `view_rows` is the view size, not the missing-row count (#2543).
+
 The interrupted or SQLite-lock raw-flush warning includes `unflushed=N`: a cursor-based estimate
 before the final ingest attempt, not a durability count, without message content. While the ingest
 cursor awaits reconciliation (after a rebind, a lossy proof or a tail recovery), it reports
