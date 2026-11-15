@@ -152,6 +152,99 @@ def test_witnessed_search_reference_is_exact(field, value):
     assert judge(observed, entries) == [(0, 0, 'needle')]
 
 
+def test_witnessed_canonical_hit_expands_to_witness():
+    """A witness reference must preserve its row, role and indexed part."""
+    observed, entries = observation([row(2, 'needle\n\nreply')], witness=True)
+    witness = dict(row(2, 'needle\n\nreply'), kind='canonical')
+    hit = dict(witness, reference=dict(tool='lcm_expand', args=dict(store_id=2)), expanded=witness)
+    observed['hits'] = [hit]
+    assert judge(observed, entries) == []
+    for expanded in (dict(witness, content='reply\n\nneedle'), dict(witness, store_id=1),
+                     dict(witness, role='assistant')):
+        observed['hits'] = [dict(hit, expanded=expanded)]
+        assert judge(observed, entries) == [(0, 0, 'needle')], expanded
+
+
+@pytest.mark.parametrize('field,value', [
+    ('observed_at', -1.), ('session_id', 'wrong'), ('superseded_by', None), ('superseded_by', 3),
+])
+def test_inexact_record_hit_fails_beside_correct_witness(field, value):
+    observed, entries = observation([row(2, 'needle\n\nreply')], witness=True)
+    record_hit = observed['hits'][0]
+    witness = dict(row(2, 'needle\n\nreply'), kind='canonical')
+    witness_hit = dict(witness, reference=dict(tool='lcm_expand', args=dict(store_id=2)), expanded=witness)
+    observed['hits'] = [record_hit, witness_hit]
+    assert judge(observed, entries) == []
+    bad_hit = dict(record_hit, expanded=dict(record_hit['expanded'], **{field: value}))
+    for hits in ([bad_hit, witness_hit], [witness_hit, bad_hit]):
+        observed['hits'] = hits
+        assert judge(observed, entries) == [(0, 0, 'needle')]
+
+
+@pytest.mark.parametrize('field,value', [
+    ('observed_at', -1.), ('session_id', 'wrong'), ('superseded_by', None), ('superseded_by', 3),
+])
+def test_canonical_hit_expanding_to_record_is_exact(field, value):
+    observed, entries = observation([row(2, 'needle\n\nreply')], witness=True)
+    record = observed['hits'][0]['expanded']
+    hit = dict(row(2, 'needle\n\nreply'), kind='canonical',
+               reference=dict(tool='lcm_expand', args=dict(queued_user_ref=[1, 0])), expanded=record)
+    observed['hits'] = [hit]
+    assert judge(observed, entries) == []
+    observed['hits'] = [dict(hit, expanded=dict(record, **{field: value}))]
+    assert judge(observed, entries) == [(0, 0, 'needle')]
+
+
+@pytest.mark.parametrize('witness_first', [False, True])
+@pytest.mark.parametrize('field,value', [('observed_at', -1.), ('superseded_by', None)])
+def test_snippet_record_expansion_fails_beside_correct_witness(field, value, witness_first):
+    observed, entries = observation([row(2, 'needle\n\nreply')], witness=True)
+    record_hit = dict(observed['hits'][0], content='needle snippet')
+    witness = dict(row(2, 'needle\n\nreply'), kind='canonical')
+    witness_hit = dict(witness, reference=dict(tool='lcm_expand', args=dict(store_id=2)), expanded=witness)
+    observed['hits'] = [record_hit, witness_hit]
+    assert judge(observed, entries) == []
+    bad_hit = dict(record_hit, expanded=dict(record_hit['expanded'], **{field: value}))
+    observed['hits'] = [witness_hit, bad_hit] if witness_first else [bad_hit, witness_hit]
+    assert judge(observed, entries) == [(0, 0, 'needle')]
+
+
+@pytest.mark.parametrize('witness_first', [False, True])
+@pytest.mark.parametrize('store_id', [1, 3])
+@pytest.mark.parametrize('field,value', [('observed_at', -1.), ('superseded_by', None)])
+def test_other_canonical_hit_record_expansion_fails_beside_correct_witness(
+        field, value, store_id, witness_first):
+    observed, entries = observation([row(2, 'needle\n\nreply')], witness=True)
+    record_hit = observed['hits'][0]
+    hit = dict(row(store_id, 'needle'), kind='canonical', reference=record_hit['reference'],
+               expanded=record_hit['expanded'])
+    witness = dict(row(2, 'needle\n\nreply'), kind='canonical')
+    witness_hit = dict(witness, reference=dict(tool='lcm_expand', args=dict(store_id=2)), expanded=witness)
+    observed['hits'] = [hit, witness_hit]
+    assert judge(observed, entries) == []
+    bad_hit = dict(hit, expanded=dict(hit['expanded'], **{field: value}))
+    observed['hits'] = [witness_hit, bad_hit] if witness_first else [bad_hit, witness_hit]
+    assert judge(observed, entries) == [(0, 0, 'needle')]
+
+
+@pytest.mark.parametrize('field,value', [('session_id', 'other'), ('content', 'needle\n\nGARBAGE')])
+def test_witness_expansion_equals_baseline_row(field, value):
+    observed, entries = observation([row(2, 'needle\n\nreply')], witness=True)
+    witness = dict(row(2, 'needle\n\nreply'), kind='canonical')
+    hit = dict(witness, reference=dict(tool='lcm_expand', args=dict(store_id=2)), expanded=witness)
+    observed['hits'] = [hit]
+    assert judge(observed, entries) == []
+    observed['hits'] = [dict(hit, expanded=dict(witness, **{field: value}))]
+    assert judge(observed, entries) == [(0, 0, 'needle')]
+
+
+def test_record_hit_expanding_to_witness():
+    observed, entries = observation([row(2, 'needle\n\nreply')], witness=True)
+    hit = observed['hits'][0]
+    observed['hits'] = [dict(hit, expanded=dict(row(2, 'needle\n\nreply'), kind='canonical'))]
+    assert judge(observed, entries) == []
+
+
 def test_witness_precedes_overlap():
     observed, entries = observation([row(2, 'needle\n\nreply')], witness=True)
     assert judge(observed, entries) == []
