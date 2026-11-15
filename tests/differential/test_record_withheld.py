@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from .record_contract import expected_record, judge, observe, projection
+from .record_contract import check_stage, expected_record, judge, observe, projection
 from .session import freeze
 
 
@@ -43,10 +43,22 @@ def observation(later, outcome='listed', text='needle', witness=False):
     (64, False, {'listed'}), (65, False, {'listed', 'unscanned'}),
 ])
 def test_user_row_floor(count, hit, allowed):
-    later = [row(i + 2, 'needle' if hit and i == count - 1 else 'other') for i in range(count)]
+    later = [row(i + 3, 'needle' if hit and i == count - 1 else 'other') for i in range(count)]
     # Tool and assistant rows never consume the user-row floor.
-    later = [row(0, 'needle', role='tool'), *later, row(100, 'needle', role='assistant')]
+    later = [row(2, 'needle', role='tool'), *later, row(100, 'needle', role='assistant')]
     assert_outcomes(later, allowed)
+
+
+def test_overlap_inside_floor_with_rows_beyond():
+    later = [row(i + 2, 'needle' if i == 0 else 'other') for i in range(65)]
+    assert_outcomes(later, {'overlap'})
+
+
+def test_cumulative_utf8_byte_floor():
+    suffix = '\n\nneedle'
+    texts = ['é' * 300000, 'é' * ((600000 - len(suffix)) // 2) + suffix]
+    assert [len(text.encode('utf-8')) for text in texts] == [600000, 600000]
+    assert_outcomes([row(i + 2, text) for i, text in enumerate(texts)], {'overlap', 'unscanned'})
 
 
 @pytest.mark.parametrize('size,hit,allowed', [
@@ -63,12 +75,14 @@ def test_utf8_byte_floor(size, hit, allowed):
 
 
 def assert_outcomes(later, allowed, **kwargs):
+    messages = dict(listed='withheld locator missing', overlap='withheld overlap not proven',
+                    unscanned='unscanned inside floor')
     for outcome in ('listed', 'overlap', 'unscanned'):
         observed, entries = observation(later, outcome, **kwargs)
         if outcome in allowed:
             assert judge(observed, entries) == []
         else:
-            with pytest.raises(AssertionError):
+            with pytest.raises(AssertionError, match=messages[outcome]):
                 judge(observed, entries)
 
 
@@ -110,6 +124,58 @@ def test_listing_reference_is_exact(text, field, value):
 def test_witness_precedes_overlap():
     observed, entries = observation([row(2, 'needle\n\nreply')], witness=True)
     assert judge(observed, entries) == []
+
+
+def test_whitespace_turn_raw_witness(monkeypatch, tmp_path):
+    from . import test_paired_merged_user_turns as merged
+    from .session import Trace
+
+    pending = [dict(role='user', content=text, timestamp=10. + i)
+               for i, text in enumerate([' \t ', 'P1', 'P2', 'R'])]
+    traces = []
+    def opened(*_):
+        trace = Trace()
+        traces.append(trace)
+        def capture(**kwargs):
+            trace.capture(kwargs['conversation_history'], kwargs['user_message'])
+        engine = SimpleNamespace(_paired_trace=trace, ingest=lambda *_: None, shutdown=lambda: None)
+        return SimpleNamespace(engine=engine, hooks=dict(pre_llm_call=capture))
+    # Exercise the fixture's actual witness builder without opening a product store.
+    monkeypatch.setattr(merged, '_wide_reload_plan', lambda _: (1, pending, None))
+    monkeypatch.setattr(merged.base, '_open', opened)
+    merged._wide_reload_case(2708039, tmp_path, monkeypatch, dict(main=None, candidate=None), lambda *_: None)
+    _, reloaded, joined = traces[0].reloads[0]
+    assert reloaded['content'] == 'P1\n\nP2\n\nR'
+    observed, template = observation([row(2, reloaded['content'])], text=' \t ')
+    entries = [dict(template[0], predecessor_ordinal=i, expected=dict(template[0]['expected'], content=text))
+               for i, text in enumerate([' \t ', 'P1', 'P2'])]
+    records = [expected_record(entry) for entry in entries]
+    snapshot = dict(canonical=observed['baseline_canonical'], records=list(map(freeze, records)))
+    witness = {1: 2} if reloaded['content'] == joined else {}
+    baseline = dict(canonical=snapshot['canonical'], reload_witness=witness)
+    observed['reload_witness'] = witness
+    observed['listing_projection'] = [dict(r, kind='record' if 'owner_store_id' in r else 'canonical')
+                                      for raw in projection(snapshot) if (r := dict(raw))]
+    observed['withheld'] = [dict(owner_store_id=1, ordinal=r['ordinal'], state='overlap',
+        reference=dict(tool='lcm_expand', args=dict(queued_user_ref=[1, r['ordinal']])),
+        expanded=dict(r, kind='record')) for r in records[1:]]
+    observed['withheld_counts'] = [dict(overlap=2, unscanned=0)]
+    check_stage(snapshot, baseline, entries)
+    assert judge(observed, entries) == []
+
+    superseded = dict(snapshot, records=[freeze(dict(r, superseded_by=2 if r['ordinal'] else None))
+                                        for r in records])
+    with pytest.raises(AssertionError, match='superseded without occurrence witness'):
+        check_stage(superseded, baseline, entries)
+
+
+def test_withheld_search_hit_expands_to_record():
+    observed, entries = observation([row(2, 'needle')], 'overlap')
+    locator = observed['withheld'][0]
+    observed['hits'] = [dict(kind='canonical', role='user', content='needle', reference=locator['reference'],
+                             expanded=locator['expanded'])]
+    with pytest.raises(AssertionError, match='withheld record searchable'):
+        judge(observed, entries)
 
 
 def test_observe_footer_cursor_expansions_and_raw_order():

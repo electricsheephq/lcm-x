@@ -23,6 +23,9 @@ withheld_counts (each footer page's per-state counts), and listing_projection.
 Witnesses take precedence. overlap() uses the owner's canonical session, stripped
 nonempty record segments, later user rows and the longest prefix inside both
 floors. judge applies Revision 3d's outcome table; projection itself is unchanged.
+The witness is the captured texts joined oldest first with "\n\n", with no
+per-text strip and empty texts kept. A turn with a whitespace-only member has
+no witness (Revision 3f).
 """
 from collections import Counter
 import json
@@ -248,7 +251,8 @@ def judge(observations, entries):
                     assert beyond and not inside and expected['content'].strip(), 'unscanned inside floor'
                 assert not any((r.get('owner_store_id'), r.get('ordinal')) == key for r in pages), \
                     'withheld record listed'
-                assert not any((r.get('owner_store_id'), r.get('ordinal')) == key for r in observations['hits']), \
+                assert not any((r.get('owner_store_id'), r.get('ordinal')) == key
+                               for hit in observations['hits'] for r in (hit, hit['expanded'])), \
                     'withheld record searchable'
                 assert exact(locator['expanded']), 'withheld expansion differs'
                 continue
