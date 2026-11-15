@@ -3,6 +3,7 @@
 import copy
 import json
 import logging
+import os
 import sqlite3
 import threading
 from collections import Counter
@@ -13,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from hermes_lcm import ingest_ledger
+from hermes_lcm import ingest_ledger, maintenance_scheduler
 from hermes_lcm.externalize import get_large_output_storage_dir
 from tests.test_host_uid_shadow import _engine
 from tests.test_issue_2055_ingest_ledger_writes import engines as engines
@@ -221,9 +222,17 @@ def test_cross_instance_fallback_covers_busy_pending_tail(engines, monkeypatch, 
         assert_rows(first, HISTORY, before)
         assert not second._lcm_session_last_normal_conversation_id.get('S2')
         before = lifecycle(second)
-        second.on_session_end('S2', copy.deepcopy(VIEW))
+        with monkeypatch.context() as patch:
+            patch.setattr(maintenance_scheduler, '_PENDING_TAIL_ENGINES',
+                          maintenance_scheduler._PENDING_TAIL_ENGINES - {first})
+            second.on_session_end('S2', copy.deepcopy(VIEW))
+        assert fallback_counts(second) == {'stored': 1}
+        assert len(first._pending_session_tails) == 1
         assert_rows(second, VIEW, before)
         before = lifecycle(first)
+        def no_append(*args, **kwargs):
+            pytest.fail('A must not append after B covered its tail')
+        monkeypatch.setattr(first, '_append_ingest_batch', no_append)
         first._retry_pending_session_tails()
         assert not first._pending_session_tails
         assert_rows(first, VIEW, before)
@@ -360,7 +369,7 @@ def test_session_reads_are_bounded_and_atomic(cold, monkeypatch):
     assert reads == [({'limit': len(VIEW) + 1}, False), ({'limit': len(VIEW) + 1}, True)]
 
 
-@pytest.mark.parametrize('sources,expected', [(['A', 'A'], 'A'), (['A', ''], 'A'), (['', ''], '')])
+@pytest.mark.parametrize('sources,expected', [(['A', 'A'], 'A'), (['A', ''], 'A'), (['', ''], 'unknown')])
 @pytest.mark.parametrize('queued', [False, True])
 def test_fallback_source_belongs_to_ended_session(cold, monkeypatch, sources, expected, queued):
     engine = cold()
@@ -375,7 +384,7 @@ def test_fallback_source_belongs_to_ended_session(cold, monkeypatch, sources, ex
             patch.setattr(store, 'ingest_atomic', busy)
         engine.on_session_end('S2', copy.deepcopy(VIEW))
     if queued:
-        assert engine._pending_session_tails[0]['source'] == expected
+        assert engine._pending_session_tails[0]['source'] == (expected if any(sources) else '')
         engine._session_platform = 'C'
         engine._retry_pending_session_tails()
         assert not engine._pending_session_tails
@@ -388,6 +397,7 @@ def test_fallback_source_belongs_to_ended_session(cold, monkeypatch, sources, ex
 def test_resume_after_fallback_stores_full_history_once(cold, fresh):
     engine = cold()
     engine.on_session_end('S2', copy.deepcopy(VIEW))
+    assert fallback_counts(engine) == {'stored': 1}
     home = Path(engine._hermes_home)
     resumed = engine
     if fresh:
@@ -532,7 +542,11 @@ def test_snapshot_checks_mutable_comparison_dependencies(cold, monkeypatch, chan
         elif change == 'view':
             view[0]['content'] = 'different host row'
         else:
-            payload.write_text(json.dumps(dict(content='different payload', session_id='S2', kind='tool_result')))
+            old = payload.stat()
+            payload.write_text(json.dumps(dict(content='tampered', session_id='S2', kind='tool_result')))
+            os.utime(payload, ns=(old.st_atime_ns, old.st_mtime_ns + 1_000_000_000))
+            assert payload.stat().st_size == old.st_size
+            assert payload.stat().st_mtime_ns != old.st_mtime_ns
         with atomic(**kwargs) as timing:
             yield timing
     monkeypatch.setattr(store, 'ingest_atomic', changed)
@@ -548,3 +562,91 @@ def test_snapshot_checks_mutable_comparison_dependencies(cold, monkeypatch, chan
         assert lifecycle(engine) == before
         assert not store.get_session_messages('S1')
     assert fallback_counts(engine) == ({'stored': 1} if change == 'config' else {'refused.gate3': 1})
+
+
+@pytest.mark.parametrize('missing', [False, True])
+def test_snapshot_discovers_nested_marker_and_revalidates_without_file_reads(cold, monkeypatch, missing):
+    from tests.test_issue_10_persisted_output_spillover import _write_output
+    import hermes_lcm.engine as engine_module
+
+    engine = cold()
+    home = Path(engine._hermes_home)
+    directory = get_large_output_storage_dir(engine._config, hermes_home=str(home), create=True)
+    output = home / 'cache' / 'spillover' / 'nested.txt'
+    marker = _write_output(output)
+    inner, outer = directory / 'inner.json', directory / 'outer.json'
+    def placeholder(name):
+        return f'[Externalized tool output: chars=8; ref={name}]'
+    if not missing:
+        inner.write_text(json.dumps(dict(content=marker)))
+    outer.write_text(json.dumps(dict(content=placeholder(inner.name))))
+    tail = dict(store=engine._store, hermes_home=str(home), session_id='S2',
+                view=[dict(content=placeholder(outer.name))])
+    lineage = ingest_ledger.persisted_lineage(engine._store._conn, 'S2', None)
+    reads, read_bytes = [], Path.read_bytes
+    def counted(path):
+        reads.append(str(path))
+        return read_bytes(path)
+    def unexpected(*args, **kwargs):
+        pytest.fail('unchanged discovery must not load or compare payload content')
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, 'read_bytes', counted)
+        patch.setattr(engine, '_session_end_prefix_compare_value', unexpected)
+        first = engine._off_current_fallback_inputs(tail, [], lineage)
+    expected = {str(outer), str(inner)} | (set() if missing else {str(output)})
+    assert set(first[6]) == expected
+    assert reads == [str(outer)] + ([] if missing else [str(inner)])
+    for path, generation in first[6].items():
+        stat = Path(path).stat() if Path(path).exists() else None
+        assert generation == ((stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_ino) if stat else None)
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, 'read_bytes', unexpected)
+        patch.setattr(Path, 'read_text', unexpected)
+        patch.setattr(engine_module, 'recover_hermes_persisted_output_with_file_stat', unexpected)
+        patch.setattr(engine, '_session_end_prefix_compare_value', unexpected)
+        with engine._store.ingest_atomic():
+            second = engine._off_current_fallback_inputs(tail, [], lineage)
+    assert second == first
+    if missing:
+        inner.write_text(json.dumps(dict(content=marker)))
+    else:
+        old = output.stat()
+        os.utime(output, ns=(old.st_atime_ns, old.st_mtime_ns + 1_000_000_000))
+    assert engine._off_current_fallback_inputs(tail, [], lineage) != first
+
+
+def test_snapshot_reuses_repeated_embedded_reference_discovery(cold, monkeypatch):
+    engine = cold()
+    directory = get_large_output_storage_dir(engine._config, hermes_home=engine._hermes_home, create=True)
+    for name in ('embedded.json', 'unrelated.json'):
+        (directory / name).write_text(json.dumps(dict(content='payload', kind='ingest_payload', session_id='S2')))
+    nested = directory / 'nested.json'
+    nested.write_text(json.dumps(dict(content='nested payload')))
+    (directory / 'embedded.json').write_text(json.dumps(dict(kind='ingest_payload', session_id='S2',
+        content='[Externalized tool output: chars=14; ref=nested.json]')))
+    embedded = 'before [Externalized LCM ingest payload: chars=7; ref=embedded.json] after'
+    tail = dict(store=engine._store, hermes_home=engine._hermes_home, session_id='S2', view=[
+        dict(content=embedded),
+        dict(content='[Externalized tool output: chars=7; ref=unrelated.json]'),
+        dict(content=embedded)])
+    lineage = ingest_ledger.persisted_lineage(engine._store._conn, 'S2', None)
+    calls, compare = [], engine._session_end_prefix_compare_value
+    def counted(*args, **kwargs):
+        calls.append(args[0])
+        return compare(*args, **kwargs)
+    monkeypatch.setattr(engine, '_session_end_prefix_compare_value', counted)
+    first = engine._off_current_fallback_inputs(tail, [], lineage)
+    assert calls == [embedded]
+    def unexpected(*args, **kwargs):
+        pytest.fail('unchanged embedded references must not read payload bytes in the lock')
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, 'read_bytes', unexpected)
+        patch.setattr(Path, 'read_text', unexpected)
+        patch.setattr(engine, '_session_end_prefix_compare_value', unexpected)
+        with engine._store.ingest_atomic():
+            assert engine._off_current_fallback_inputs(tail, [], lineage) == first
+    old = nested.stat()
+    nested.write_text(json.dumps(dict(content='changed nested payload')))
+    os.utime(nested, ns=(old.st_atime_ns, old.st_mtime_ns + 1_000_000_000))
+    assert engine._off_current_fallback_inputs(tail, [], lineage) != first
+    assert calls == [embedded, embedded]

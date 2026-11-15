@@ -5425,7 +5425,33 @@ class LCMEngine(
         return rows
 
     def _off_current_fallback_inputs(self, tail, rows, lineage):
-        conn, external, seen = tail["store"]._conn, [], set()
+        conn, external, seen = tail["store"]._conn, {}, set()
+        discovery = tail.setdefault("fallback_file_discovery", {})
+        compared = tail.setdefault("fallback_reference_discovery", {})
+        directory = get_large_output_storage_dir(self._config, hermes_home=tail["hermes_home"], create=False)
+        def file_generation(path):
+            try:
+                stat = path.stat()
+                return (stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_ino)
+            except OSError:
+                return None
+        def capture_file(path, read):
+            key = str(path)
+            if key in seen:
+                return
+            seen.add(key)
+            generation = file_generation(path)
+            external[key] = generation
+            cached = discovery.get(key)
+            if cached is not None and cached[0] == generation:
+                nested = cached[1]
+            else:
+                try:
+                    nested = read() if generation is not None else None
+                except (OSError, ValueError, AttributeError):
+                    nested = None
+                discovery[key] = (generation, nested)
+            capture(nested)
         def capture(value):
             if isinstance(value, (dict, list)):
                 for child in value.values() if isinstance(value, dict) else value:
@@ -5434,20 +5460,24 @@ class LCMEngine(
                 refs = [ref for ref in extract_ingest_externalized_refs(value) + [extract_externalized_ref(value)]
                         if ref and Path(ref).name == ref]
                 for ref in refs:
-                    path = get_large_output_storage_dir(self._config, hermes_home=tail["hermes_home"], create=False) / ref
-                    if path in seen:
-                        continue
-                    seen.add(path)
-                    try:
-                        data = path.read_bytes()
-                        external.append((str(path), data))
-                        capture(json.loads(data).get("content"))
-                    except (OSError, ValueError, AttributeError):
-                        external.append((str(path), None))
-                text = self._session_end_prefix_compare_value(value, session_id=tail["session_id"],
-                    hermes_home=tail["hermes_home"]) if refs else value
+                    path = directory / ref
+                    capture_file(path, lambda: json.loads(path.read_bytes()).get("content"))
+                whole = is_externalized_placeholder(value.strip()) or (
+                    len(refs) == 1 and value.strip().startswith("[Externalized LCM ingest payload:")
+                    and value.strip().endswith("]"))
+                text = value
+                if refs and not whole:
+                    cached = compared.get(value)
+                    if (cached is None or cached[0] != str(directory) or any(
+                            file_generation(Path(path)) != stamp for path, stamp in cached[1].items())):
+                        text = self._session_end_prefix_compare_value(value, session_id=tail["session_id"],
+                            hermes_home=tail["hermes_home"])
+                        compared[value] = (str(directory), dict(external), text)
+                    else:
+                        text = cached[2]
                 if _is_hermes_persisted_output_marker(text):
-                    external.append(recover_hermes_persisted_output_with_file_stat(text, hermes_home=tail["hermes_home"]))
+                    capture_file(Path(_persisted_output_saved_path(text)), lambda: (
+                        recover_hermes_persisted_output_with_file_stat(text, hermes_home=tail["hermes_home"]) or (None,))[0])
         for row in (*rows, *tail["view"]):
             capture([row.get("content"), row.get("tool_calls")])
         records = ingest_ledger._rows(conn.execute(
@@ -5520,9 +5550,6 @@ class LCMEngine(
                     source=tail["source"], conversation_id=tail["conversation_id"], store=store,
                     hermes_home=tail["hermes_home"], _log_outcome=False,
                     context_window_tokens=tail.get("context_window_tokens"))
-                if ids:
-                    store._conn.execute("UPDATE messages SET source=? WHERE store_id IN "
-                        "(SELECT value FROM json_each(?))", (tail["source"], json.dumps(ids)))
         if reason:
             self._warn_off_current_fallback(session, reason)
         elif ids:
