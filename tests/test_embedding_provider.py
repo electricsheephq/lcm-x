@@ -1068,6 +1068,28 @@ class _ControlledClock:
         return getattr(time, name)
 
 
+class _WorkerClock(_ControlledClock):
+    """A controlled clock whose advances only the advancing thread sees.
+
+    FastEmbed runs the dispatch callback and its recheck in a worker thread, while
+    the caller's join reads the same module clock. With one shared clock, a worker
+    that advances it and is descheduled before it exits leaves the caller a zero
+    join timeout, so the caller's own deadline error fires instead of the recheck.
+    Here the caller keeps its time, and its join waits for the worker's error.
+    """
+
+    def __init__(self, monkeypatch):
+        self._offsets = {}
+        super().__init__(monkeypatch)
+
+    def monotonic(self):
+        return self.now + self._offsets.get(threading.get_ident(), 0.0)
+
+    def advance(self, seconds):
+        ident = threading.get_ident()
+        self._offsets[ident] = self._offsets.get(ident, 0.0) + seconds
+
+
 def test_voyage_rechecks_deadline_after_dispatch_callback(monkeypatch):
     monkeypatch.setenv("VOYAGE_API_KEY", "test-key")
     monkeypatch.setattr(provider_mod, "count_tokens", lambda _text: 1)
@@ -1416,7 +1438,7 @@ def test_fastembed_does_not_encode_after_dispatch_callback_exhausts_deadline(
         query_embed = embed
 
     monkeypatch.setattr(provider_mod, "_load_fastembed", lambda: CachedFastembedModel)
-    clock = _ControlledClock(monkeypatch)
+    clock = _WorkerClock(monkeypatch)
     provider = FastembedProvider("cached", cache_dir=tmp_path, timeout=5.0)
 
     def slow_dispatch(_indexes):
