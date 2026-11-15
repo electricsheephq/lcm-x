@@ -5402,12 +5402,14 @@ class LCMEngine(
             with self._attribution_span("retire"):
                 self._retire_embedding_maintenance(wait=False)
 
-    def _warn_off_current_fallback(self, session_id, reason):
+    def _warn_off_current_fallback(self, session_id, reason, view=None):
         self._ledger_count("ledger.offcurrent_fallback.refused." + reason.split(":", 1)[0].replace(" ", ""))
         logger.warning(
             "LCM ignored unverified stale session-end callback for %s while bound to %s; %s",
             session_id, self._session_id, reason,
         )
+        # No view for sessions excluded by design: they are unstored on purpose (#2543).
+        self._warn_session_end_unstored(session_id, view, "unverified_stale_end")
 
     def _off_current_fallback_owner(self, tail):
         store, session = tail["store"], tail["session_id"]
@@ -5645,7 +5647,7 @@ class LCMEngine(
                     hermes_home=tail["hermes_home"], _log_outcome=False,
                     context_window_tokens=tail.get("context_window_tokens"))
         if reason:
-            self._warn_off_current_fallback(session, reason)
+            self._warn_off_current_fallback(session, reason, tail["view"])
         elif ids:
             self._ledger_count("ledger.offcurrent_fallback.stored")
             self._log_session_ingest_outcome(session, rows=len(ids))
@@ -5658,7 +5660,7 @@ class LCMEngine(
     def _fallback_off_current_session_end(self, session_id, messages):
         tail = dict(store=self._store, hermes_home=str(self._hermes_home or ""),
                     session_id=session_id, view=messages, source="")
-        stage = "gate 1: ownership proof unavailable"
+        stage, warn_view = "gate 1: ownership proof unavailable", messages
         try:
             lineage, reason = self._off_current_fallback_owner(tail)
             if reason is None:
@@ -5667,12 +5669,12 @@ class LCMEngine(
                 tail["source"] = next((r["source"] for r in reversed(rows) if str(r.get("source") or "").strip()), "")
                 if any(matches_session_pattern(build_session_match_keys(session_id, platform=tail["source"]), patterns)
                        for patterns in (self._compiled_ignore_session_patterns, self._compiled_stateless_session_patterns)):
-                    reason = "gate 1: session excluded from storage"
+                    reason, warn_view = "gate 1: session excluded from storage", None
                 else:
                     stage = "gate 3: compare failed"
                     count, reason = self._off_current_fallback_prefix(tail, rows, lineage)
             if reason:
-                self._warn_off_current_fallback(session_id, reason)
+                self._warn_off_current_fallback(session_id, reason, warn_view)
                 return False
             if count == len(messages):
                 self._ledger_count("ledger.offcurrent_fallback.noop")
@@ -5689,7 +5691,7 @@ class LCMEngine(
                     return True
                 except Exception:
                     stage = "gate 5: busy tail queue failed"
-            self._warn_off_current_fallback(session_id, stage)
+            self._warn_off_current_fallback(session_id, stage, messages)
             logger.debug("LCM durable session-end fallback refused", exc_info=True)
             return False
 

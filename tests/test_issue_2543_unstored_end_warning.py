@@ -11,6 +11,9 @@ from tests.test_issue_2055_ingest_ledger_writes import engines as engines
 from tests.invariants.test_issue_2543_cold_inline_block import _call
 from tests.invariants.test_issue_2539_offcurrent_marker_end import _setup, _changed_marker_view
 from tests.invariants.test_p1e_cold_tails import fail_end_read, committed_rows
+from tests.test_issue_2729_fallback_gates import cold as cold  # noqa: F401  (fixture)
+from tests.test_issue_2729_fallback_gates import HISTORY, STALE, VIEW, busy as busy_atomic
+from tests.test_issue_2729_offcurrent_end_after_restart import _start
 
 
 CELLS = [(shape, route) for shape in ("wrapped-base64", "data-uri-key")
@@ -210,19 +213,19 @@ def test_ignored_session_off_current_end_has_no_unstored_warning(engines, caplog
     assert not engine._store.get_session_messages("S1")
 
 
-def test_bypass_lineage_busy_suffix_append_warns_before_reraise(engines, caplog):
+def test_bypass_lineage_busy_suffix_append_warns_before_reraise(engines, monkeypatch, caplog):
     # #2738's shape: the suffix append is re-raised unqueued; the loss stays (pinned there), the WARNING names it.
     from tests.invariants.test_issue_2738_bypass_lineage_busy_suffix import setup, contents
     engine, view = setup(engines)
     caplog.clear()
-    locker = sqlite3.connect(engine._store.db_path, isolation_level=None)
-    locker.execute("BEGIN IMMEDIATE")
-    try:
+
+    def busy(*args, **kwargs):  # As #2738's busy_end: no real lock, so no busy-timeout wait.
+        raise sqlite3.OperationalError("database is locked")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(engine, "_append_off_current_session_end_suffix", busy)
         with pytest.raises(sqlite3.OperationalError):
             engine.on_session_end("S1", copy.deepcopy(view))
-    finally:
-        locker.rollback()
-        locker.close()
     assert _warnings(caplog) == [
         f"LCM session-end rows not stored: session=S1 reason=off_current_suffix_append_failed view_rows={len(view)}"]
     assert contents(engine) == ["A", "B"] and not engine._pending_session_tails
@@ -248,3 +251,73 @@ def test_repeated_busy_end_with_pending_tail_has_no_unstored_warning(engines, ca
     assert len(engine._pending_session_tails) == 1 and not _warnings(caplog)
     engine._retry_pending_session_tails()
     assert [r["content"] for r in engine._store.get_session_messages("S")] == [m["content"] for m in history]
+
+
+STALE_END = "LCM session-end rows not stored: session=S2 reason=unverified_stale_end view_rows={}"
+
+
+def _contents(engine):
+    return [r["content"] for r in engine._store.get_session_messages("S2")]
+
+
+def test_fallback_stored_stale_end_has_no_unstored_warning(cold, caplog):
+    engine = cold()
+    caplog.clear()
+    engine.on_session_end("S2", copy.deepcopy(VIEW))
+    assert _contents(engine) == [m["content"] for m in VIEW]
+    assert not _warnings(caplog) and not engine._pending_session_tails
+
+
+@pytest.mark.parametrize("refusal", ["foreign-profile", "two-conversations"])
+def test_fallback_refused_direct_end_warns_once(cold, tmp_path, caplog, refusal):
+    engine = cold()
+    if refusal == "foreign-profile":
+        other = tmp_path / "foreign-home"
+        other.mkdir()
+        _start(engine, "S1", hermes_home=str(other))
+    else:
+        engine._store._conn.execute(
+            "UPDATE messages SET conversation_id='other-conversation' WHERE session_id='S2' AND content='reply'")
+        engine._store._conn.commit()
+    caplog.clear()
+    engine.on_session_end("S2", copy.deepcopy(VIEW))
+    assert STALE in caplog.text
+    assert _warnings(caplog) == [STALE_END.format(len(VIEW))]
+    assert _contents(engine) == [m["content"] for m in HISTORY] and not engine._pending_session_tails
+
+
+@pytest.mark.parametrize("route", ["direct", "retry"])
+def test_fallback_excluded_session_has_no_unstored_warning(cold, monkeypatch, caplog, route):
+    from hermes_lcm.session_patterns import compile_session_patterns
+    engine = cold()
+    if route == "retry":
+        with monkeypatch.context() as patch:
+            patch.setattr(engine._store, "ingest_atomic", busy_atomic)
+            engine.on_session_end("S2", copy.deepcopy(VIEW))
+        assert len(engine._pending_session_tails) == 1
+    engine._compiled_ignore_session_patterns = compile_session_patterns(["cli:*"])
+    caplog.clear()
+    if route == "direct":
+        engine.on_session_end("S2", copy.deepcopy(VIEW))
+    else:
+        engine._retry_pending_session_tails()
+    assert "gate 1: session excluded from storage" in caplog.text
+    assert not _warnings(caplog) and not engine._pending_session_tails
+    assert _contents(engine) == [m["content"] for m in HISTORY]
+
+
+def test_busy_direct_end_queues_quietly_and_refused_retry_warns_once_with_tail_view(cold, monkeypatch, caplog):
+    engine = cold()
+    caplog.clear()
+    with monkeypatch.context() as patch:
+        patch.setattr(engine._store, "ingest_atomic", busy_atomic)
+        engine.on_session_end("S2", copy.deepcopy(VIEW))
+    assert len(engine._pending_session_tails) == 1 and not _warnings(caplog)
+    tail = engine._pending_session_tails[0]
+    tail["view"][0]["content"] = "different history"
+    tail["view"].append(dict(role="user", content="later", timestamp=4., message_uid="u4"))
+    engine._retry_pending_session_tails()
+    assert "gate 3:" in caplog.text
+    assert _warnings(caplog) == [STALE_END.format(len(VIEW) + 1)]
+    assert not engine._pending_session_tails
+    assert _contents(engine) == [m["content"] for m in HISTORY]
