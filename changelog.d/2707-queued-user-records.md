@@ -8,3 +8,5 @@
 - Coordinate first records creation with session purges, refuse unmapped records
   tables during purge, and preserve backup pair identity across failed or
   interrupted publication, including an old backup with no records file.
+- On the first records-writer open in each process, sweep records whose canonical
+  owners were purged by an older reader during rollback.

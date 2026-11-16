@@ -952,15 +952,6 @@ LCM_LOAD_SESSION = {
     "parameters": {
         "type": "object",
         "properties": {
-            "record_cursor": {
-                "type": ["array", "null"], "items": {"type": "integer"},
-                "minItems": 2, "maxItems": 2,
-                "description": "Record-aware cursor from next_cursor; null requests a footer-only page.",
-            },
-            "withheld_cursor": {
-                "type": ["integer", "null"], "minimum": 0,
-                "description": "Withheld locator offset from withheld.next_cursor; null finishes the footer.",
-            },
             "session_id": {
                 "type": "string",
                 "description": "Explicit LCM session id to load. Required; no implicit current/all fallback is applied.",
@@ -1067,11 +1058,6 @@ LCM_EXPAND = {
     "parameters": {
         "type": "object",
         "properties": {
-            "queued_user_ref": {
-                "type": "array", "items": {"type": "integer", "minimum": 0},
-                "minItems": 2, "maxItems": 2,
-                "description": "Exact record locator [owner_store_id, ordinal], exclusive of the other modes.",
-            },
             "node_id": {
                 "type": "integer",
                 "description": (

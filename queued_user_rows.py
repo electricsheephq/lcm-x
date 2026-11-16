@@ -8,6 +8,7 @@ from contextlib import closing
 from dataclasses import dataclass
 import hashlib
 import logging
+import sqlite3
 import time
 
 from . import ingest_protection as protection
@@ -175,6 +176,9 @@ def after_commit(engine, messages, stored_at, *, post_llm=False):
                             observed_at_source='host_message_timestamp', captured_uid=uid,
                             captured_at=item.created, superseded_by=None, session_id=owner['session_id'],
                             conversation_id=owner['conversation_id'], profile=str(item.binding[0]))
+                        if len(protected['content'].encode('utf-8')) > DRAIN_BYTES:
+                            count(engine, 'refused_oversize')
+                            continue
                         queue.append(Entry(item.binding[0], records_path(engine._store), tuple(values.items())))
                     if queue:
                         _EXIT_ENGINES.add(engine)
@@ -214,34 +218,50 @@ def write(engine, entries):
 def drain(engine, *, exiting=False):
     queue = engine.__dict__.get('_queued_entries', ())
     end, used, done = time.monotonic() + DRAIN_SECONDS, 0, 0
-    while queue and done < DRAIN_ENTRIES and time.monotonic() < end:
-        entry = queue[0]
+    for entry in tuple(queue):
+        if done >= DRAIN_ENTRIES or time.monotonic() >= end:
+            break
         size = len(dict(entry.values)['content'].encode('utf-8'))
         if used + size > DRAIN_BYTES:
             break
         try:
             engine._store_queued_user_rows([entry])
-        except Exception:
+        except Exception as exc:
             count(engine, 'drain_failed')
-            break
-        queue.popleft()
+            if isinstance(exc, sqlite3.OperationalError) and any(t in str(exc).lower() for t in ('busy', 'locked')):
+                break
+            values = dict(entry.values)
+            permanent = str(exc) == 'pending purge intent'
+            if str(exc) == 'owner not committed or evidence mismatch':
+                with closing(_records_ro(entry.identity)) as canonical:
+                    permanent = not canonical.execute('SELECT 1 FROM messages WHERE store_id=?',
+                        (values['owner_store_id'],)).fetchone() and not any(
+                            t['session_id'] == values['session_id'] and t['store'].db_identity == entry.identity
+                            for t in engine._pending_session_tails)
+            if permanent:
+                queue.remove(entry)
+                count(engine, 'dropped_permanent')
+                logger.warning('queued records permanent refusal: %s', exc)
+            done, used = done + 1, used + size
+            continue
+        queue.remove(entry)
         done, used = done + 1, used + size
     if not queue:
         _EXIT_ENGINES.discard(engine)
     if exiting:
         count(engine, 'exit_kept', len(queue))
-        count(engine, 'exit_dropped', 0)
-        logger.warning('queued records exit: kept=%d dropped=0 counts=%s', len(queue), dict(engine._queued_counts))
+        logger.warning('queued records exit: discarded_at_exit=%d counts=%s', len(queue), dict(engine._queued_counts))
 
 
 def flush_at_exit():
     for engine in tuple(_EXIT_ENGINES):
-        drain(engine, exiting=True)
+        with engine._storage_lock:
+            drain(engine, exiting=True)
 
 
 
 def reference(record):
-    return dict(tool='lcm_expand', args=dict(queued_user_ref=[record['owner_store_id'], record['ordinal']]))
+    return dict(tool='lcm_expand', args=dict(store_id=record['owner_store_id']))
 
 
 def record_view(row):
@@ -300,61 +320,48 @@ def decide(cut, session):
     return records, states
 
 def listing(cut, args, engine, response, original):
-    """Canonical pages and records share a stable owner/ordinal cursor."""
-    import json
-    session = args['session_id']
-    records, states = decide(cut, session) if cut.records is not None else ([], {})
-    limit = response['limit']
-    hidden = [dict(owner_store_id=r['owner_store_id'], ordinal=r['ordinal'], state=states[(r['owner_store_id'], r['ordinal'])],
-                   reference=reference(r)) for r in records if (r['owner_store_id'], r['ordinal']) in states]
-    offset = args.get('withheld_cursor', 0)
-    if offset is not None and (type(offset) is not int or offset < 0):
-        return dict(error='withheld_cursor must be a non-negative integer or null')
-    response['withheld'] = dict(counts={s: sum(r['state'] == s for r in hidden) for s in ('overlap', 'unscanned')},
-        locators=hidden[offset:offset + limit] if offset is not None else [],
-        next_cursor=dict(withheld_cursor=offset + limit) if offset is not None and offset + limit < len(hidden) else None)
-    if not records and 'record_cursor' not in args:
-        return response
-    cursor = args.get('record_cursor', [args.get('after_store_id', 0), 2147483647])
-    if cursor is None:
-        response.update(messages=[], next_cursor=None, returned_messages=0, has_more=False)
-        return response
-    if not isinstance(cursor, list) or len(cursor) != 2 or any(type(v) is not int or v < 0 for v in cursor):
-        return dict(error='record_cursor must be [owner_store_id, ordinal] or null')
-    base_args = dict(args, after_store_id=cursor[0] if cursor[1] == 2147483647 else max(0, cursor[0] - 1))
-    base_args.pop('record_cursor', None)
-    canonical_page = json.loads(original(base_args, engine=engine))
-    if 'error' in canonical_page:
-        return canonical_page
-    rows = []
-    by_owner = defaultdict(list)
+    """Only attach records owned by canonical rows on this unmodified page."""
+    records, states = decide(cut, response['session_id'])
+    owners = {row['store_id'] for row in response['messages']}
+    visible, hidden = [], []
     for r in records:
-        if (r['owner_store_id'], r['ordinal']) not in states:
-            by_owner[r['owner_store_id']].append(r)
-    for message in canonical_page['messages']:
-        sid = message['store_id']
-        for r in by_owner.get(sid, ()):
-            if not args.get('roles') or 'user' in args['roles']:
-                rows.append(((sid, r['ordinal']), record_view(r)))
-        rows.append(((sid, 2147483647), message))
-    rows = [(key, row) for key, row in rows if key > tuple(cursor)]
-    more = len(rows) > limit or canonical_page.get('has_more', False)
-    selected = rows[:limit]
-    response.update(messages=[row for _, row in selected], returned_messages=len(selected), has_more=more,
-        next_cursor=dict(record_cursor=list(selected[-1][0])) if more and selected else None)
+        if r['owner_store_id'] not in owners:
+            continue
+        state = states.get((r['owner_store_id'], r['ordinal']))
+        if state:
+            hidden.append(dict(owner_store_id=r['owner_store_id'], ordinal=r['ordinal'], state=state, reference=reference(r)))
+        else:
+            visible.append(record_view(r))
+    if visible:
+        response['queued_user_records'] = visible
+    if hidden:
+        response['queued_user_records_withheld'] = dict(counts=dict(dict(overlap=0, unscanned=0), **Counter(r['state'] for r in hidden)), locators=hidden)
     return response
 
 
 def search_records(cut, args, engine):
     """A bounded literal/term recall arm over attached, visible records only."""
     import re
+    from . import tools
+    allowed = {'query', 'limit', 'mode', 'sort', 'session_id', 'session_scope', '_excluded_session_ids',
+               'exclude_current_session', 'exclude_session_ids', 'role', 'conversation_id', 'time_from', 'time_to'}
+    if any(k not in allowed and v not in (None, '', [], False) for k, v in args.items()):
+        return []
+    role, _ = tools._parse_grep_role(args.get('role'))
+    if role is not None and role != 'user':
+        return []
+    start, _ = tools._parse_optional_timestamp(args.get('time_from'), 'time_from')
+    end, _ = tools._parse_optional_timestamp(args.get('time_to'), 'time_to')
     query = str(args.get('query') or '').strip()
     if not query or args.get('content_scope') == 'externalized':
         return []
-    session = args.get('session_id') or engine.current_session_id
-    scope = args.get('session_scope', 'all' if getattr(engine, '_mcp_reader', False) else 'current')
+    scope = str(args.get('session_scope', 'current')).lower()
+    if scope not in ('current', 'all', 'session'):
+        scope = 'current'
+    session = str(args.get('session_id') or '').strip() if scope == 'session' else engine.current_session_id
     sessions = [session] if scope != 'all' else [r[0] for r in cut.canonical.execute('SELECT DISTINCT session_id FROM messages')]
-    excluded = set(args.get('_excluded_session_ids') or args.get('exclude_session_ids') or [])
+    excluded, _ = tools._parse_retrieval_excluded_session_ids(args, engine.current_session_id)
+    excluded.update(args.get('_excluded_session_ids') or ())
     terms = re.findall(r'\w+', query.casefold())
     hits = []
     for session in sessions:
@@ -362,52 +369,77 @@ def search_records(cut, args, engine):
             continue
         records, states = decide(cut, session)
         for row in records:
+            if (str(args.get('conversation_id') or '').strip() and row['conversation_id'] != str(args['conversation_id']).strip()
+                    or start is not None and (row['observed_at'] is None or row['observed_at'] < start)
+                    or end is not None and (row['observed_at'] is None or row['observed_at'] > end)):
+                continue
             text = row['content'].casefold()
             match = query[1:-1].casefold() in text if query.startswith('"') and query.endswith('"') else (
                 bool(terms) and all(term in text for term in terms))
             if match and (row['owner_store_id'], row['ordinal']) not in states:
-                hits.append(dict(record_view(row), snippet=row['content'][:4000]))
-    return hits[:max(1, min(200, int(args.get('limit', 10))))]
+                hits.append(record_view(row))
+    return sorted(hits, key=lambda r: r['observed_at'] or 0, reverse=True)
 
 
 def surface(name):
-    """Use one records-first cut for attachment, decisions and canonical output."""
-    import copy
+    """Canonical handler first, with the real engine; isolated read-only additions."""
     import functools
     import json
+    from . import tools
     def decorate(original):
         @functools.wraps(original)
         def wrapped(args, **kwargs):
+            raw = original(args, **kwargs)
             engine = kwargs.get('engine')
             store = getattr(engine, '_store', None)
-            if store is None or not getattr(store, 'db_identity', None) or records_path(store) is None:
-                result = json.loads(original(args, **kwargs))
-                if name == 'load' and 'error' not in result:
-                    result['withheld'] = dict(counts=dict(overlap=0, unscanned=0), locators=[], next_cursor=None)
-                return json.dumps(result)
-            with records_read_cut(store) as cut:
-                proxy, readonly = copy.copy(engine), copy.copy(store)
-                readonly._conn = cut.canonical
-                proxy._store = readonly
-                if name == 'expand' and 'queued_user_ref' in args:
-                    key = args['queued_user_ref']
-                    if (not isinstance(key, list) or len(key) != 2
-                            or any(type(v) is not int or v < 0 for v in key)
-                            or any(k in args for k in ('store_id', 'node_id', 'externalized_ref'))):
-                        return json.dumps(dict(error='queued_user_ref must be [owner_store_id, ordinal], exclusively'))
-                    owner = cut.canonical.execute('SELECT session_id FROM messages WHERE store_id=?', (key[0],)).fetchone()
-                    rows, _ = read_records(cut, 'queued_user_rows', owner[0]) if owner else ([], 0)
-                    row = next((r for r in rows if [r['owner_store_id'], r['ordinal']] == key), None)
-                    return json.dumps(record_view(row) if row else dict(error='record not attached'))
-                result = json.loads(original(args, **dict(kwargs, engine=proxy)))
+            try:
+                path = records_path(store) if store is not None else None
+                if path is None or not path.exists():
+                    return raw
+                result = json.loads(raw)
                 if 'error' in result:
-                    return json.dumps(result)
-                if name == 'load':
-                    result = listing(cut, args, proxy, result, original)
-                elif name in ('grep', 'recall') and cut.records is not None:
-                    hits = search_records(cut, dict(args, session_scope='all') if name == 'recall' else args, proxy)
-                    result['results'] = [*hits, *result.get('results', [])][:result.get('limit', args.get('limit', 10))]
-                    result['total_results'] = result.get('total_results', 0) + len(hits)
-                return json.dumps(result)
+                    return raw
+                with records_read_cut(store, _read_only=True) as cut:
+                    if cut.refused_format is not None:
+                        raise ValueError('unsupported_format')
+                    if name == 'load':
+                        listing(cut, args, engine, result, original)
+                    elif name == 'expand' and 'store_id' in args:
+                        rows, states = decide(cut, result['session_id'])
+                        rows = [dict(record_view(r), state=states.get((r['owner_store_id'], r['ordinal']), 'visible'))
+                                for r in rows if r['owner_store_id'] == result.get('store_id')]
+                        if rows:
+                            result['queued_user_records'] = rows
+                    elif name in ('grep', 'recall'):
+                        hits = search_records(cut, dict(args, session_scope='all') if name == 'recall' else args, engine)
+                        if hits:
+                            result['queued_user_record_hits'] = hits
+            except (OSError, sqlite3.Error, ValueError) as exc:
+                result = json.loads(raw)
+                result['queued_user_records_status'] = dict(available=False,
+                    reason='recovery_pending' if str(exc) == 'recovery_pending' else 'read_failed')
+            for key in ('queued_user_records', 'queued_user_record_hits'):
+                for row in result.get(key, []):
+                    if name == 'expand':
+                        row.update(tools._slice_content_for_response(row['content'],
+                            tools._parse_positive_int(args.get('max_tokens', 4000), 4000),
+                            tools._parse_non_negative_int(args.get('content_offset', 0), 0)))
+                    else:
+                        bound = result['max_content_chars'] if name == 'load' else tools._LCM_RECALL_SNIPPET_CHARS
+                        row.update(tools._slice_loaded_content(row['content'], bound))
+                        if name in ('grep', 'recall'):
+                            row['snippet'] = row['content']
+            cap = dict(grep=tools._LCM_GREP_RESPONSE_CHAR_CAP, recall=tools._LCM_RECALL_RESPONSE_CHAR_CAP).get(name)
+            omitted = 0
+            while cap and len(json.dumps(result)) > cap:
+                entries = result.get('queued_user_record_hits', [])
+                if not entries:
+                    break
+                entries.pop()
+                omitted += 1
+                result['queued_user_records_omitted'] = omitted
+                if not entries:
+                    del result['queued_user_record_hits']
+            return raw if result == json.loads(raw) else json.dumps(result)
         return wrapped
     return decorate

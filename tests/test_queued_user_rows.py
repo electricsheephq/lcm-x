@@ -51,9 +51,9 @@ def test_two_phase_freeze_and_canonical_control(tmp_path):
             args = dict(session_id='S', session_scope='session', limit=100, query='lost')
             reply = json.loads(getattr(tools, name)(args, engine=e))
             assert 'error' not in reply
-            assert any(r.get('owner_store_id') == row['owner_store_id'] for r in reply.get('messages', reply.get('results', [])))
-        expanded = json.loads(tools.lcm_expand(dict(queued_user_ref=[row['owner_store_id'], 0]), engine=e))
-        assert expanded['content'] == 'lost'
+            assert any(r.get('owner_store_id') == row['owner_store_id'] for r in reply.get('queued_user_records', reply.get('queued_user_record_hits', [])))
+        expanded = json.loads(tools.lcm_expand(dict(store_id=row['owner_store_id']), engine=e))
+        assert expanded['queued_user_records'][0]['content'] == 'lost'
 
 
 @pytest.mark.parametrize('shape,reason', [
@@ -199,32 +199,34 @@ def test_drain_lock_isolation_and_purge_revalidation(tmp_path, monkeypatch):
         with sm.records_read_cut(e._store) as cut:
             attached, unattached = sm.read_records(cut, 'queued_user_rows')
             assert not attached and unattached == 0, 'purge resurrection'
-        assert len(e._queued_entries) == 1
+        assert not e._queued_entries
+        assert e._queued_counts['dropped_permanent'] == 1
         q.drain(e, exiting=True)
-        assert e._queued_counts['exit_kept'] == 1
+        assert e._queued_counts['exit_kept'] == 0
 
 
 def test_withheld_two_conversations_and_footer_pages(tmp_path):
     with engine_context(tmp_path, window=128000, conversation_id='conv', embeddings_enabled=False) as e:
         folded(e)
         e._store.append('S', user('lost\n\nnewest', 55.), conversation_id='other')
-        offset = {}
-        pages = []
+        cursor, pages = 0, []
         while True:
-            page = json.loads(tools.lcm_load_session(dict(session_id='S', limit=1, **offset), engine=e))
+            page = json.loads(tools.lcm_load_session(dict(session_id='S', limit=1, after_store_id=cursor), engine=e))
             pages.append(page)
-            assert page['withheld']['counts'] == dict(overlap=1, unscanned=0)
             if page['next_cursor'] is None:
                 break
-            offset = page['next_cursor']
-        assert all(not r.get('owner_store_id') for p in pages for r in p['messages'])
+            cursor = page['next_cursor']
+        footers = [p['queued_user_records_withheld'] for p in pages if 'queued_user_records_withheld' in p]
+        assert len(footers) == 1 and footers[0]['counts'] == dict(overlap=1, unscanned=0)
+        assert all(not p.get('queued_user_records') for p in pages)
         assert records(e)[0]['superseded_by'] is None
-        footer = json.loads(tools.lcm_load_session(dict(session_id='S', record_cursor=None, limit=1), engine=e))
-        assert footer['messages'] == [] and footer['withheld']['locators']
-        assert json.loads(tools.lcm_expand(dict(queued_user_ref=[records(e)[0]['owner_store_id'], 0]), engine=e))['content'] == 'lost'
+        locator, = footers[0]['locators']
+        expanded = json.loads(tools.lcm_expand(locator['reference']['args'], engine=e))
+        assert expanded['queued_user_records'][0]['content'] == 'lost'
+        assert expanded['queued_user_records'][0]['state'] == 'overlap'
         for name in ('lcm_grep', 'lcm_recall'):
             reply = json.loads(getattr(tools, name)(dict(query='lost', session_id='S', session_scope='session', limit=100), engine=e))
-            assert not any('owner_store_id' in r for r in reply['results'])
+            assert not reply.get('queued_user_record_hits')
 
 
 def test_zero_footer_and_mcp_surface(tmp_path):
@@ -232,21 +234,21 @@ def test_zero_footer_and_mcp_surface(tmp_path):
     from hermes_lcm import schemas
     with engine_context(tmp_path, window=128000, conversation_id='conv', embeddings_enabled=False) as e:
         empty = json.loads(tools.lcm_load_session(dict(session_id='S'), engine=e))
-        assert empty['withheld'] == dict(counts=dict(overlap=0, unscanned=0), locators=[], next_cursor=None)
+        assert not any(k.startswith('queued_user_records') for k in empty)
         folded(e)
         reader = StoreReader(e._store.db_path, tmp_path / 'home', config=e._config, environ={})
         assert READER_TOOLS['lcm_expand'] is schemas.LCM_EXPAND
-        assert 'queued_user_ref' in READER_TOOLS['lcm_expand']['parameters']['properties']
+        assert 'queued_user_ref' not in READER_TOOLS['lcm_expand']['parameters']['properties']
         for name, args in [('lcm_load_session', dict(session_id='S', limit=1)),
                            ('lcm_grep', dict(query='lost', session_scope='all')),
                            ('lcm_recall', dict(query='lost')),
-                           ('lcm_expand', dict(queued_user_ref=[records(e)[0]['owner_store_id'], 0]))]:
+                           ('lcm_expand', dict(store_id=records(e)[0]['owner_store_id']))]:
             text, error = reader.call(name, args)
             assert not error, text
             payload = json.loads(text)
             assert 'lost' in text, (name, payload)
             if name == 'lcm_load_session':
-                assert 'withheld' in payload
+                assert payload['queued_user_records'][0]['content'] == 'lost'
 
 
 def test_long_session_and_owner_floors(tmp_path, monkeypatch, record_property):
@@ -265,7 +267,7 @@ def test_long_session_and_owner_floors(tmp_path, monkeypatch, record_property):
             start = time.perf_counter()
             reply = json.loads(tools.lcm_load_session(dict(session_id='S', limit=1), engine=e))
             elapsed = (time.perf_counter() - start) * 1000
-            counts = reply['withheld']['counts']
+            counts = reply.get('queued_user_records_withheld', {}).get('counts', dict(overlap=0, unscanned=0))
             assert counts == dict(overlap=0, unscanned=int(label == 'near-floor'))
             measures.append(dict(label=label, counts=counts, page_ms=elapsed))
         record_property('long_session', measures)
@@ -344,16 +346,79 @@ def test_limit_one_listing_matches_unpaged(tmp_path, roles):
         args = dict(session_id='S', include_exact_ref=True)
         if roles:
             args['roles'] = roles
-        expected = json.loads(tools.lcm_load_session(dict(args, limit=100), engine=e))['messages']
-        actual, cursor, seen = [], {}, set()
+        whole = json.loads(tools.lcm_load_session(dict(args, limit=100), engine=e))
+        expected = whole['messages']
+        expected_records = whole.get('queued_user_records', [])
+        actual, actual_records, cursor, seen = [], [], 0, set()
         while True:
-            page = json.loads(tools.lcm_load_session(dict(args, limit=1, **cursor), engine=e))
+            page = json.loads(tools.lcm_load_session(dict(args, limit=1, after_store_id=cursor), engine=e))
             actual.extend(page['messages'])
+            actual_records.extend(page.get('queued_user_records', []))
             assert not page['has_more'] or page['next_cursor'] is not None, 'more rows without cursor'
             if page['next_cursor'] is None:
                 break
             cursor = page['next_cursor']
-            key = tuple(cursor['record_cursor'])
+            key = cursor
             assert key not in seen, 'pagination stalled'
             seen.add(key)
         assert actual == expected
+        assert actual_records == expected_records
+
+
+
+def test_refused_head_does_not_block_later_entry(tmp_path, monkeypatch):
+    with engine_context(tmp_path, window=128000, conversation_id='conv', embeddings_enabled=False) as e:
+        original = e._store_queued_user_rows
+        monkeypatch.setattr(e, '_store_queued_user_rows', lambda _: (_ for _ in ()).throw(ValueError('head refused')))
+        folded(e, ('bad', 'good', 'newest'))
+        def write(entries):
+            if dict(entries[0].values)['ordinal'] == 0:
+                raise ValueError('head refused')
+            original(entries)
+        monkeypatch.setattr(e, '_store_queued_user_rows', write)
+        q.drain(e)
+        assert [r['content'] for r in records(e)] == ['good']
+        assert [dict(r.values)['content'] for r in e._queued_entries] == ['bad']
+
+
+def test_oversize_refused_with_externalization_off(tmp_path, monkeypatch):
+    with engine_context(tmp_path, window=128000, conversation_id='conv', embeddings_enabled=False) as e:
+        e._config.large_output_externalization_enabled = False
+        monkeypatch.setattr(q, 'DRAIN_BYTES', 8)
+        folded(e, ('x' * 9, 'R'))
+        assert not e._queued_entries and not records(e)
+        assert e._queued_counts['refused_oversize'] == 1
+
+
+def test_exit_reports_residual_and_uses_storage_lock(tmp_path, monkeypatch, caplog):
+    with engine_context(tmp_path, window=128000, conversation_id='conv', embeddings_enabled=False) as e:
+        monkeypatch.setattr(e, '_store_queued_user_rows', lambda _: (_ for _ in ()).throw(ValueError('fault')))
+        folded(e)
+        calls = []
+        def write(_):
+            calls.append(e._storage_lock._is_owned())
+            raise ValueError('fault')
+        monkeypatch.setattr(e, '_store_queued_user_rows', write)
+        q.flush_at_exit()
+        assert calls == [True]
+        assert 'discarded_at_exit=1' in caplog.text and 'dropped=0' not in caplog.text
+
+
+def test_writer_sweeps_rollback_purge_orphans(tmp_path):
+    with engine_context(tmp_path, window=128000, conversation_id='conv', embeddings_enabled=False) as e:
+        folded(e)
+        owner = records(e)[0]['owner_store_id']
+        e._session_id = 'live'
+        q.capture(e, dict(turn_id='live', session_id='live', conversation_history=[user('keep'), user('R')], user_message='R'))
+        head = e._queued_captures['live'].objects[0]
+        head['content'] = 'R'
+        e.ingest([head])
+        e._store.connection.execute('DELETE FROM messages WHERE store_id=?', (owner,))
+        e._store.connection.commit()
+        # A fresh process would have no first-writer-open bookkeeping.
+        sm._RECORDS_SWEPT.discard(str(sm.records_path(e._store)))
+        writer = sm.open_records_writer(e._store)
+        writer.close()
+        with sqlite3.connect(sm.records_path(e._store)) as side:
+            assert side.execute('SELECT content FROM queued_user_rows').fetchall() == [('keep',)]
+        assert 'orphan_swept=1' in sm.records_doctor(e._store)

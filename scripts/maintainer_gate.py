@@ -48,6 +48,7 @@ MEMORY_MIGRATION_FILES = {
 # tests/test_differential_relevance.py requires every static engine import
 # in this list or NON_TURN_PATH_FILES with a written exclusion reason.
 TURN_PATH_FILES = {
+    "queued_user_rows.py",  # Captures overwritten host user rows and drains them after canonical commit.
     "host_row_recovery.py",  # Off by default; when on, recovery stores turn content under its original session/conversation.
     "unended_catchup.py",  # Off by default; when on, the #2042 catch-up stores failed-turn sessions' content under their own ids.
     "ingest_ledger.py",  # Transaction-owned shadow ledger writes on foreground ingest.

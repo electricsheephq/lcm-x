@@ -1871,10 +1871,18 @@ Safety and reconciliation behavior:
 
 Queued user texts lost by whole-replace hosts are stored in `lcm.db.records` when
 capture ownership is proven. Back up and restore the pair together. `lcm_doctor`
-reports refused captures, pending drains and records withheld from search. Every
-`lcm_load_session` page carries a withheld footer with counts and pageable locators;
-use `lcm_expand(queued_user_ref=[owner_store_id, ordinal])` for exact source, even
-when it is withheld. `overlap` means a later canonical row already shows the text;
+reports refused captures, pending drains and records withheld from search. A
+`lcm_load_session` page adds `queued_user_records` for visible records owned by
+that page's canonical messages, and `queued_user_records_withheld` for withheld
+counts and locators when present. Use `lcm_expand(store_id=owner_store_id)` to read
+the owner's `queued_user_records`, including withheld records and their states.
+Search and recall add `queued_user_record_hits` beside canonical results. Record
+content obeys the tool's bounds; `queued_user_records_omitted` counts entries
+omitted to fit the response cap. Unavailable records add
+`queued_user_records_status`; `recovery_pending` waits for writer recovery.
+After rollback and an older-reader purge, the first records-writer open sweeps
+records whose canonical owners are gone and doctor reports `orphan_swept`.
+`overlap` means a later canonical row already shows the text;
 `unscanned` means a scan budget left its visibility undecided. See [Records](records.md)
 for limits and residuals. A nonzero real-host `unscanned` count is the gate for an
 indexed-scan follow-up; it is not evidence that text was deleted.

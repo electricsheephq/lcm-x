@@ -320,9 +320,20 @@ def test_witness_precedes_overlap():
 
 
 def test_whitespace_turn_raw_witness(monkeypatch, tmp_path):
-    from . import test_paired_merged_user_turns as merged
+    import ast
+    from pathlib import Path
     from .session import Trace
 
+    # Reuse only the pure fixture builders; importing their module opts into a
+    # differential suite and skips this unit test in an ordinary local run.
+    source = Path(__file__).with_name('test_paired_merged_user_turns.py')
+    tree = ast.parse(source.read_text())
+    tree.body = [node for node in tree.body if isinstance(node, ast.FunctionDef)
+                 and node.name in ('_gateway_reload', '_wide_reload_case')]
+    merged = SimpleNamespace(json=json, base=SimpleNamespace(_open=None,
+        _row=lambda text, stamp, role='user': dict(role=role, content=text, timestamp=stamp)),
+        _wide_reload_plan=None)
+    exec(compile(tree, str(source), 'exec'), merged.__dict__)
     pending = [dict(role='user', content=text, timestamp=10. + i)
                for i, text in enumerate([' \t ', 'P1', 'P2', 'R'])]
     traces = []
@@ -350,7 +361,7 @@ def test_whitespace_turn_raw_witness(monkeypatch, tmp_path):
     observed['listing_projection'] = [dict(r, kind='record' if 'owner_store_id' in r else 'canonical')
                                       for raw in projection(snapshot) if (r := dict(raw))]
     observed['withheld'] = [dict(owner_store_id=1, ordinal=r['ordinal'], state='overlap',
-        reference=dict(tool='lcm_expand', args=dict(queued_user_ref=[1, r['ordinal']])),
+        reference=dict(tool='lcm_expand', args=dict(store_id=1)),
         expanded=dict(r, kind='record')) for r in records[1:]]
     observed['withheld_counts'] = [dict(overlap=2, unscanned=0)]
     check_stage(snapshot, baseline, entries)
@@ -373,37 +384,39 @@ def test_withheld_search_hit_expands_to_record():
 
 def test_observe_footer_cursor_expansions_and_raw_order():
     calls, queries, expansions = [], [], []
-    def record(ordinal):
-        return dict(owner_store_id=1, ordinal=ordinal, role='user', content='needle',
-                    reference=dict(tool='lcm_expand', args=dict(ordinal=ordinal)))
+    def record(owner, ordinal):
+        return dict(owner_store_id=owner, ordinal=ordinal, role='user', content='needle',
+                    reference=dict(tool='lcm_expand', args=dict(store_id=owner)))
     def load(args, **_):
         calls.append(args)
-        second = args.get('withheld_cursor') == 1
-        return json.dumps(dict(messages=[] if second else [record(9), record(0)], next_cursor=None,
-            withheld=dict(counts=dict(overlap=2, unscanned=0), locators=[dict(record(0), state='overlap')],
-                          next_cursor=None if second else dict(withheld_cursor=1))))
+        owner = 2 if args['after_store_id'] else 1
+        return json.dumps(dict(messages=[row(owner, 'reply')], next_cursor=2 if owner == 1 else None,
+            queued_user_records=[record(owner, 9)],
+            queued_user_records_withheld=dict(counts=dict(overlap=1, unscanned=0),
+                locators=[dict(record(owner, 0), state='overlap')])))
     def grep(args, **_):
         queries.append(args['query'])
-        return json.dumps(dict(results=[record(9), record(0)]))
+        return json.dumps(dict(results=[], queued_user_record_hits=[record(1, 9), record(2, 9)]))
     def expand(args, **_):
-        expansions.append(args['ordinal'])
-        return json.dumps(record(args['ordinal']))
+        expansions.append(args['store_id'])
+        return json.dumps(dict(row(args['store_id'], 'reply'),
+            queued_user_records=[record(args['store_id'], 9), record(args['store_id'], 0)]))
     engine = SimpleNamespace(_dag=SimpleNamespace(_conn=SimpleNamespace(execute=lambda _: [])),
         _paired_trace=SimpleNamespace(record_captures=[dict(rows=[dict(content=' \t '),
             dict(content='needle'), dict(content='reply')])]))
     observed = observe(engine, SimpleNamespace(lcm_load_session=load, lcm_grep=grep, lcm_expand=expand))
-    assert len(calls) == 2 and calls[1]['record_cursor'] is None
-    assert [r['ordinal'] for r in observed['pages']] == [9, 0]
-    assert [r['ordinal'] for r in observed['hits']] == [9, 0]
+    assert len(calls) == 2 and calls[1]['after_store_id'] == 2
+    assert [r.get('ordinal') for r in observed['pages']] == [9, None, 9, None]
+    assert [r['ordinal'] for r in observed['hits']] == [9, 9]
     assert [r['ordinal'] for r in observed['withheld']] == [0, 0]
-    assert observed['withheld_counts'] == [dict(overlap=2, unscanned=0)] * 2
-    assert expansions == [9, 0, 0, 0, 9, 0] and queries == ['"needle"']
+    assert observed['withheld_counts'] == [dict(overlap=1, unscanned=0)] * 2
+    assert expansions == [1, 1, 2, 2, 1, 2] and queries == ['"needle"']
 
 
 @pytest.mark.parametrize('mutation,message', [
     ('listed', 'withheld record listed'), ('searchable', 'withheld record searchable'),
     ('missing', 'withheld locator missing'), ('expansion', 'withheld expansion differs'),
-    ('counts', 'withheld counts differ from locators'), ('page-counts', 'withheld counts disagree across pages'),
+    ('counts', 'withheld counts differ from locators'), ('page-counts', 'withheld footer incomplete'),
     ('duplicate', 'duplicate withheld locator'), ('no-overlap', 'withheld overlap not proven'),
     ('inside-floor', 'unscanned inside floor'), ('superseded', 'withheld locator not active or superseded'),
 ])
@@ -420,7 +433,7 @@ def test_broken_withheld_judgments(mutation, message, record_property):
     elif mutation == 'counts':
         observed['withheld_counts'] = [dict(overlap=0, unscanned=1)]
     elif mutation == 'page-counts':
-        observed['withheld_counts'].append(dict(overlap=0, unscanned=0))
+        observed['withheld_counts'].append(dict(overlap=1, unscanned=0))
     elif mutation == 'duplicate':
         observed['withheld'].append(deepcopy(locator))
     elif mutation == 'no-overlap':
@@ -461,7 +474,7 @@ def refusal_observation(*, present=True, counted=True, stored=False):
         baseline_canonical_rows=[(r['store_id'], r['role'], r['content']) for r in canonical],
         pages=[dict(prior, kind='canonical'), *([visible] if stored else []), dict(owner, kind='canonical')],
         listing_projection=[dict(prior, kind='canonical'), *([record] if stored else []), dict(owner, kind='canonical')],
-        hits=[dict(prior, kind='canonical', expanded=dict(prior, kind='canonical'))] + ([visible] if stored else []),
+        hits=[dict(prior, kind='canonical', expanded=dict(prior, kind='canonical'), query='P2')] + ([visible] if stored else []),
         refused_captures={0: dict(backward_overlap=int(counted))})
     return observed, entries
 
@@ -504,3 +517,32 @@ def test_unrelated_capture_refusal_is_not_charged_to_declared_record():
     observed, entries = refusal_observation()
     observed['refused_captures'][999] = dict(backward_overlap=1)
     assert judge(observed, entries) == []
+
+
+
+def test_refusal_requires_complete_segments():
+    observed, entries = refusal_observation()
+    prior = row(4, 'prefixP2suffix')
+    observed['baseline_canonical'][0] = freeze(prior)
+    observed['baseline_canonical_rows'][0] = (4, 'user', prior['content'])
+    observed['pages'][0] = dict(prior, kind='canonical')
+    observed['listing_projection'][0] = dict(prior, kind='canonical')
+    observed['hits'][0] = dict(prior, kind='canonical', expanded=dict(prior, kind='canonical'), query='P2')
+    assert judge(observed, entries) == [(0, 0, 'P2')]
+    snapshot = dict(canonical=observed['baseline_canonical'], records=[])
+    with pytest.raises(AssertionError, match='declared record multiset'):
+        check_stage(snapshot, snapshot, entries)
+
+
+def test_refusal_cannot_borrow_another_query_hit():
+    observed, entries = refusal_observation()
+    observed['hits'][0]['query'] = 'unrelated'
+    with pytest.raises(AssertionError, match='refused text not retrievable'):
+        judge(observed, entries)
+
+
+def test_fault_stage_refusal_keeps_frozen_missing_pin():
+    observed, entries = refusal_observation()
+    observed['stage'] = 1
+    entries[0]['due_stage'] = 2
+    assert judge(observed, entries) == [(0, 0, 'P2')]

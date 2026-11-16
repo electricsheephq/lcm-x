@@ -133,12 +133,14 @@ def projection(snapshot):
 
 
 def earlier_spans(record, canonical):
-    """Exact substring evidence, independent of the product's overlap predicate."""
+    """Independent exact run of stripped record segments in an earlier row."""
     rows = [dict(row) for row in canonical]
     owner = next((row for row in rows if row['store_id'] == record['owner_store_id']), None)
-    return [row for row in rows if owner is not None and row['store_id'] < owner['store_id']
+    needle = record['content'].strip().split('\n\n')
+    return [row for row in rows if record['content'].strip() and owner is not None and row['store_id'] < owner['store_id']
             and row['session_id'] == owner['session_id'] and row['role'] == 'user'
-            and record['content'] in row['content']]
+            and any(row['content'].split('\n\n')[i:i + len(needle)] == needle
+                    for i in range(len(row['content'].split('\n\n'))))]
 
 
 def check_stage(snapshot, baseline, entries):
@@ -188,47 +190,42 @@ def observe(engine, tools):
         return dict(row, kind='record' if 'owner_store_id' in row else 'canonical')
     def expanded(row):
         reference = row['reference']
-        return dict(normalized(row), expanded=normalized(call(reference['tool'], reference['args'])))
+        reply = call(reference['tool'], reference['args'])
+        result = next((r for r in reply.get('queued_user_records', [])
+                       if (r['owner_store_id'], r['ordinal']) == (row['owner_store_id'], row['ordinal'])), reply)
+        return dict(normalized(row), expanded=normalized(result))
     pages, withheld, counts = [], [], []
-    cursor, footer_cursor, seen, footer_seen = {}, {}, set(), set()
+    cursor, seen = 0, set()
     while True:
-        args = dict(session_id='parent', limit=1, include_exact_ref=True)
-        if isinstance(cursor, dict):
-            args.update(cursor)
-        elif cursor is not None:
-            assert isinstance(cursor, int), 'unnamed record cursor'
-            args['after_store_id'] = cursor
-        else:
-            args['record_cursor'] = None
-        args.update(footer_cursor if footer_cursor is not None else dict(withheld_cursor=None))
-        page = call('lcm_load_session', args)
-        pages.extend(expanded(row) if 'owner_store_id' in row else normalized(row)
-                     for row in page.get('messages', []))
-        footer = page.get('withheld', {})
+        page = call('lcm_load_session', dict(session_id='parent', limit=1, include_exact_ref=True, after_store_id=cursor))
+        records = page.get('queued_user_records', [])
+        for row in page.get('messages', []):
+            pages.extend(expanded(r) for r in records if r['owner_store_id'] == row['store_id'])
+            pages.append(normalized(row))
+        footer = page.get('queued_user_records_withheld', {})
         if footer:
             counts.append(footer['counts'])
             withheld.extend(expanded(row) for row in footer['locators'])
-        cursor, footer_cursor = page.get('next_cursor'), footer.get('next_cursor')
-        for value, visited in ((cursor, seen), (footer_cursor, footer_seen)):
-            if value is not None:
-                assert freeze(value) not in visited, 'pagination stalled'
-                visited.add(freeze(value))
-        if cursor is None and footer_cursor is None:
+        cursor = page.get('next_cursor')
+        if cursor is None:
             break
+        assert cursor not in seen, 'pagination stalled'
+        seen.add(cursor)
     hits = []
     texts = {row['content'] for capture in engine._paired_trace.record_captures for row in capture['rows'][:-1]}
     for text in sorted(texts):
         if not text.strip():
             continue
         found = call('lcm_grep', dict(query='"' + text + '"', mode='full_text', limit=100))
-        for row in found.get('results', []):
+        for row in [*found.get('results', []), *found.get('queued_user_record_hits', [])]:
             reference = row.get('reference') or dict(tool='lcm_expand', args=dict(store_id=row['store_id']))
-            result = normalized(call(reference['tool'], reference['args']))
+            result = (expanded(row)['expanded'] if 'owner_store_id' in row
+                      else normalized(call(reference['tool'], reference['args'])))
             hits.append(dict(normalized(dict(row, content=row.get('content', result.get('content')))),
-                             reference=reference, expanded=result))
+                             reference=reference, expanded=result, query=text))
     sources = [sid for (raw,) in engine._dag._conn.execute('SELECT source_ids FROM summary_nodes')
                for sid in json.loads(raw)]
-    result = dict(pages=pages, hits=hits, summary_sources=sources, withheld=withheld, withheld_counts=counts)
+    result = dict(stage=len(getattr(engine._paired_trace, 'ingests', [])), pages=pages, hits=hits, summary_sources=sources, withheld=withheld, withheld_counts=counts)
     if hasattr(engine._paired_trace, 'baseline_stages'):
         current = dict(getattr(engine, '_queued_counts', {}))
         previous = getattr(engine, '_contract_refusal_previous', {})
@@ -262,9 +259,11 @@ def judge(observations, entries):
     counts.update(Counter(r['state'] for r in locators))
     reported = observations['withheld_counts']
     if reported:
-        assert all(c == reported[0] for c in reported), 'withheld counts disagree across pages'
-        assert len(locators) == sum(reported[0].values()), 'withheld footer incomplete'
-        assert counts == reported[0], 'withheld counts differ from locators'
+        total = Counter()
+        for page_counts in reported:
+            total.update(page_counts)
+        assert len(locators) == sum(total.values()), 'withheld footer incomplete'
+        assert counts == dict(dict(overlap=0, unscanned=0), **total), 'withheld counts differ from locators'
     assert not locators or observations['withheld_counts'], 'withheld counts missing'
     withheld = dict(zip(keys, locators))
     eligible = {(e['owner_store_id'], e['predecessor_ordinal']) for e in entries
@@ -276,7 +275,7 @@ def judge(observations, entries):
         stored = {(r.get('owner_store_id'), r.get('ordinal')) for r in observations['listing_projection']}
         refused = {(e['owner_store_id'], e['predecessor_ordinal']): earlier_spans(
             expected_record(e), observations['baseline_canonical']) for e in entries
-            if e['due_stage'] is not None and (e['owner_store_id'], e['predecessor_ordinal']) not in stored
+            if (e['owner_store_id'], e['predecessor_ordinal']) not in stored
             and earlier_spans(expected_record(e), observations['baseline_canonical'])}
         checked_views = {e['capture_view'] for e in entries
                          if (e['owner_store_id'], e['predecessor_ordinal']) in stored
@@ -293,10 +292,12 @@ def judge(observations, entries):
             return all(k in row and row[k] == value for k, value in dict(expected, **overrides).items())
         if key in refused:
             fields = ('store_id', 'session_id', 'conversation_id', 'role', 'content')
-            expansions = ([hit['expanded'] for hit in observations['hits']] if expected['content'].strip()
-                          else [row for row in pages if row['kind'] == 'canonical'])
+            # Blank queries cannot retrieve a canonical witness on the real tools.
+            expansions = [hit['expanded'] for hit in observations['hits'] if hit.get('query') == expected['content']]
             assert any(all(expanded.get(f) == prior.get(f) for f in fields)
                        for prior in refused[key] for expanded in expansions), 'refused text not retrievable'
+            if entry['due_stage'] is None or entry['due_stage'] > observations.get('stage', float('inf')):
+                failures.append((entry['capture_view'], entry['predecessor_ordinal'], expected['content']))
             continue
         locator = withheld.get(key)
         # Main's empty physical projection retains its historical recall misses.
