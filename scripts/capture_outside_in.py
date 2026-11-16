@@ -275,11 +275,9 @@ def tool_calls_match(stored_calls, source_calls, index):
         try:
             stored_value = json.loads(left, object_pairs_hook=unique_object)
         except json.JSONDecodeError:
-            # Stored text that is not JSON (a payload run can take in an escape's letter) is checked
-            # placeholder by placeholder, with the text around each one exact. A product marker holds
-            # no quote or backslash (its metadata is sanitized), so a marker holding one is refused.
-            if any('"' in m[0] or "\\" in m[0] for m in INGEST.finditer(left)):
-                return False
+            # Valid stored JSON is matched structurally; stored text that is not JSON passes only when
+            # every source character is exact text or lies inside a placeholder verified at its own
+            # position. The product writes such text when a payload run takes in an escape's letter.
             if content_matches(left, right, None, index):
                 continue
             return False
@@ -288,7 +286,7 @@ def tool_calls_match(stored_calls, source_calls, index):
         try:
             # The source is json.dumps output (project() above, as capture builds it): valid JSON with
             # no escaped slash, duplicate key or NaN. Anything else fails closed.
-            pending = [(stored_value, json.loads(right))]
+            pending = [(stored_value, json.loads(right, object_pairs_hook=unique_object))]
         except (ValueError, RecursionError):
             return False
         while pending:

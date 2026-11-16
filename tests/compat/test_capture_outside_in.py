@@ -910,6 +910,14 @@ def test_checker_release_instructions():
         assert "ingest-payload replacements inside tool-call arguments" in (ROOT / name).read_text()
 
 
+# The user's own text may quote the marker prefix (code that handles markers does). Each literal sits
+# before the escape-letter shape, so the stored arguments are not JSON and take the text-only path.
+LITERAL_MARKERS = {
+    "literal-marker": 'prefix [Externalized LCM ingest payload: field="quoted"] café\n',
+    "code-marker": 'x = r"\\[Externalized LCM ingest payload: assistant output quarantined; "\ny = [1]\n',
+}
+
+
 def capture_tool_call_payload(tmp_path, shape):
     import base64
     payload = base64.b64encode(bytes(range(256)) * 18).decode()[:6000]
@@ -922,6 +930,8 @@ def capture_tool_call_payload(tmp_path, shape):
     elif shape == "escape-letter":
         # The raw JSON run includes the 'n' from \\n: 1 + 4999 is accepted mod 4.
         text = "prefix café\n" + payload[:4999]
+    elif shape in LITERAL_MARKERS:
+        text = LITERAL_MARKERS[shape] + payload[:4999]
     elif shape == "wrapped":
         text = "prefix café\n" + "\n".join(payload[i:i + 76] for i in range(0, 6000, 76)) + "\nsuffix"
     elif shape == "two-payloads":
@@ -939,11 +949,12 @@ def capture_tool_call_payload(tmp_path, shape):
 
 
 @pytest.mark.parametrize("shape", ["uri", "bare", "wrapped", "nested", "two-payloads", "two-calls",
-                                  "raw-bare", "escape-letter"])
+                                  "raw-bare", "escape-letter", *LITERAL_MARKERS])
 def test_tool_call_payload(tmp_path, shape, record_property):
     home, env, inputs = capture_tool_call_payload(tmp_path, shape)
     stored = read_sql(home, "SELECT tool_calls FROM messages WHERE role='assistant'")[0][0]
-    assert stored.count("[Externalized LCM ingest payload:") == (2 if shape == "two-payloads" else 1)
+    twice = shape == "two-payloads" or shape in LITERAL_MARKERS
+    assert stored.count("[Externalized LCM ingest payload:") == (2 if twice else 1)
     if shape == "two-calls":
         assert "[Externalized" not in json.loads(stored)[0]["function"]["arguments"]
     arguments = json.loads(stored)[-1]["function"]["arguments"]
@@ -951,11 +962,15 @@ def test_tool_call_payload(tmp_path, shape, record_property):
         assert json.loads(arguments)["content"].startswith("prefix [Externalized LCM ingest payload:")
         assert arguments.count("[Externalized LCM ingest payload:") == 1
         assert arguments.startswith('{"file_path": "/synthetic/a.html", "content": ')
-    elif shape == "escape-letter":
+    elif shape == "escape-letter" or shape in LITERAL_MARKERS:
         assert "\\[Externalized LCM ingest payload:" in arguments
         assert "chars=5000; bytes=5000;" in arguments
         with pytest.raises(json.JSONDecodeError):
             json.loads(arguments)
+        if shape in LITERAL_MARKERS:
+            # The literal is kept as the user's text, and the product marker follows the escape's backslash.
+            literal = json.dumps(LITERAL_MARKERS[shape][:-1], ensure_ascii=False)[1:-1]
+            assert literal + "\\[Externalized LCM ingest payload: " in arguments
         record_property("base64_run_chars", 4999)
         record_property("stored_arguments", arguments)
     checked, report, audit = verdict(home, env, inputs)
@@ -1115,10 +1130,12 @@ def test_tool_call_invalid_json_needs_verified_text():
     assert not checker.tool_calls_match(calls(corrupted), calls(source), defaultdict(set))
 
 
-@pytest.mark.parametrize("smuggled", ['"extra": 1, "tail": "\\q; ', '"content": 1, "tail": "\\q; '],
-                         ids=["extra-key", "duplicate-key"])
-def test_tool_call_marker_metadata_in_invalid_json(smuggled):
-    # Invalid stored JSON takes the text-only path; a marker carrying a quote or backslash is refused there.
+@pytest.mark.parametrize("shape", ["extra-key", "duplicate-key", "hidden-key"])
+def test_tool_call_invalid_json_restores_exactly(shape):
+    # Pins the accepted limit of the text-only path: stored text that is not JSON passes when every source
+    # character is exact text or lies inside a placeholder verified at its own position, whatever the
+    # marker's metadata holds or which characters its span covers. No character is lost; the product
+    # cannot write these markers. When #2792 is fixed this path goes, and these cases fail.
     from collections import defaultdict
     import importlib.util
     spec = importlib.util.spec_from_file_location("outside_in_marker_invalid", CHECKER)
@@ -1126,9 +1143,33 @@ def test_tool_call_marker_metadata_in_invalid_json(smuggled):
     spec.loader.exec_module(checker)
     def calls(arguments):
         return [dict(id="c", type="function", function=dict(name="Write", arguments=arguments))]
-    crafted = reference_for("payload").replace("chars=", 'field=x", ' + smuggled + 'chars=', 1)
-    source, stored = '{"content": "payload"}', '{"content": "' + crafted + '"}'
-    assert checker.content_matches(stored, source, None, defaultdict(set))
+    if shape == "hidden-key":
+        source = json.dumps(dict(a="x\n", b="y"))
+        span = source[source.index("n"):source.rindex('"')]
+        assert span == 'n", "b": "y'
+        stored = source.replace(span, reference_for(span))
+    else:
+        smuggled = '"extra": 1' if shape == "extra-key" else '"content": 1'
+        crafted = reference_for("payload").replace("chars=", f'field=x", {smuggled}, "tail": "\\q; chars=', 1)
+        source, stored = '{"content": "payload"}', '{"content": "' + crafted + '"}'
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(stored)
+    assert checker.tool_calls_match(calls(stored), calls(source), defaultdict(set))
+    lossy = stored.replace("}", "!}") if shape == "hidden-key" else stored.replace('"}', 'X"}')
+    assert lossy != stored and not checker.tool_calls_match(calls(lossy), calls(source), defaultdict(set))
+
+
+def test_tool_call_source_duplicate_key_fails_closed():
+    # The source is json.dumps output; a duplicate key there cannot come from capture and fails closed.
+    from collections import defaultdict
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("outside_in_source_duplicate", CHECKER)
+    checker = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(checker)
+    def calls(arguments):
+        return [dict(id="c", type="function", function=dict(name="Write", arguments=arguments))]
+    source = '{"content": "lost", "content": "payload"}'
+    stored = '{"content": "' + reference_for("payload") + '"}'
     assert not checker.tool_calls_match(calls(stored), calls(source), defaultdict(set))
 
 
