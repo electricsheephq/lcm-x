@@ -494,7 +494,7 @@ def test_session_start_does_not_wait_for_slow_rollup_provider(tmp_path, monkeypa
                 lambda: engine.on_session_start(scope, conversation_id="slow-rollup-conversation"),
                 release_provider,
             )
-            assert provider_started.wait(timeout=1)
+            assert provider_started.wait(timeout=WAIT_SECONDS)
             release_provider.set()
             assert original_drain(timeout=WAIT_SECONDS)
             assert store.get_rollup("day", target_day.isoformat(), scope)["status"] == "ready"
@@ -542,7 +542,7 @@ def test_session_start_does_not_wait_for_slow_rollup_provider_latency(tmp_path, 
             bind_elapsed = time.monotonic() - started_at
 
             assert bind_elapsed < 0.15
-            assert provider_started.wait(timeout=1)
+            assert provider_started.wait(timeout=WAIT_SECONDS)
             release_provider.set()
             assert engine.drain_rollup_maintenance(timeout=WAIT_SECONDS)
             assert store.get_rollup("day", target_day.isoformat(), scope)["status"] == "ready"
@@ -597,7 +597,7 @@ def test_rollup_background_maintenance_deduplicates_rapid_scope_binds(
     )
     try:
         engine.on_session_start(scope, conversation_id="deduplicated-conversation")
-        assert first_pass_started.wait(timeout=1)
+        assert first_pass_started.wait(timeout=WAIT_SECONDS)
 
         for _ in range(20):
             engine._bind_lifecycle_state(
@@ -629,7 +629,7 @@ def test_rollup_background_scheduler_bounds_distinct_pending_scopes():
 
     try:
         assert scheduler.schedule(("db", "active"), blocking_first)
-        assert first_started.wait(timeout=1)
+        assert first_started.wait(timeout=WAIT_SECONDS)
         assert scheduler.schedule(
             ("db", "queued-1"),
             lambda: completed.append("queued-1"),
@@ -679,7 +679,7 @@ def test_rollup_scheduler_reserves_active_follow_up_when_queue_is_full():
 
     try:
         assert scheduler.schedule(("db", "active"), blocking_first)
-        assert first_started.wait(timeout=1)
+        assert first_started.wait(timeout=WAIT_SECONDS)
         assert scheduler.schedule(
             ("db", "queued"),
             lambda: completed.append("queued"),
@@ -722,7 +722,7 @@ def test_rollup_scheduler_follow_up_slot_is_single_and_queue_fair():
             ("db", "a"),
             blocking("a-1", a1_started, release_a1),
         )
-        assert a1_started.wait(timeout=1)
+        assert a1_started.wait(timeout=WAIT_SECONDS)
         assert scheduler.schedule(
             ("db", "b"),
             blocking("b-1", b1_started, release_b1),
@@ -733,7 +733,7 @@ def test_rollup_scheduler_follow_up_slot_is_single_and_queue_fair():
         )
 
         release_a1.set()
-        assert a2_started.wait(timeout=1)
+        assert a2_started.wait(timeout=WAIT_SECONDS)
         # The immediate follow-up is already consuming the one literal slot;
         # another request is subject to the normal bounded queue instead of
         # accumulating hidden follow-up state.
@@ -745,7 +745,7 @@ def test_rollup_scheduler_follow_up_slot_is_single_and_queue_fair():
         assert scheduler._follow_up_job is None
 
         release_a2.set()
-        assert b1_started.wait(timeout=1)
+        assert b1_started.wait(timeout=WAIT_SECONDS)
         assert scheduler.schedule(
             ("db", "c"),
             lambda: completed.append("c"),
@@ -798,8 +798,8 @@ def test_rollup_scheduler_runs_same_key_after_cancelled_job():
         raise asyncio.CancelledError("forced maintenance cancellation")
 
     assert scheduler.schedule(key, cancelled_job)
-    assert first_started.wait(timeout=1)
-    assert scheduler.drain({key}, timeout=1)
+    assert first_started.wait(timeout=WAIT_SECONDS)
+    assert scheduler.drain({key}, timeout=WAIT_SECONDS)
 
     assert scheduler.schedule(key, second_ran.set)
     assert scheduler.drain({key}, timeout=WAIT_SECONDS)
@@ -893,7 +893,7 @@ def test_engine_shutdown_does_not_wait_for_background_rollup_provider(
             "shutdown-maintenance-scope",
             conversation_id="shutdown-maintenance-conversation",
         )
-        assert maintenance_started.wait(timeout=1)
+        assert maintenance_started.wait(timeout=WAIT_SECONDS)
 
         returns_while_blocked(engine.shutdown, release_maintenance)
     finally:
@@ -931,7 +931,7 @@ def test_engine_shutdown_does_not_wait_for_background_rollup_provider_latency(
             "shutdown-maintenance-scope",
             conversation_id="shutdown-maintenance-conversation",
         )
-        assert maintenance_started.wait(timeout=1)
+        assert maintenance_started.wait(timeout=WAIT_SECONDS)
 
         started_at = time.monotonic()
         engine.shutdown()
