@@ -4,8 +4,10 @@
 Hosted copy format 1. Standard library only; this file shares no code with the tools that make or restore a copy.
 Every database is opened mode=ro; the copy and a rebuilt file also immutable=1, so the bytes read are the bytes
 hashed. With --objects and --rebuild-dir it rebuilds the generation from its parts and delta objects with its own
-decoder, inside that folder only; otherwise it writes nothing. One JSON report on stdout: counts, keys, ids, names
-and codes, never stored text or page bytes. Exit 0 pass, 1 fail, 2 refused input.
+decoder, inside that folder only; otherwise it writes no file of its own (SQLite may still touch the -shm file of a
+live WAL origin during its mode=ro read). The copy and a rebuilt file must be in rollback-journal mode (header bytes
+18-19). One JSON report on stdout: counts, keys, ids, names and codes, never stored text or page bytes. Exit 0 pass,
+1 fail, 2 refused input.
 """
 from __future__ import annotations
 
@@ -389,12 +391,12 @@ def ordered(keys):
     return sorted(keys, key=lambda k: [(type(v).__name__, v) for v in k])
 
 
-def row_key(table, row):
-    names = LEDGER_KEYS.get(row["source_kind"], ("source_kind", "event_id")) if table == "capture_events" else KEYS[table]
+def row_key(table, row, keys=None):
+    names = LEDGER_KEYS.get(row["source_kind"], ("source_kind", "event_id")) if table == "capture_events" else keys or KEYS[table]
     return tuple(row[n] for n in names)
 
 
-def keyed(conn, table, columns):
+def keyed(conn, table, columns, keys):
     """{key: Counter of row digests}; each value hashed with its SQLite type, so blobs are never held."""
     rows = defaultdict(Counter)
     listed = ", ".join(f'typeof("{c}"), "{c}"' for c in columns)
@@ -402,7 +404,7 @@ def keyed(conn, table, columns):
         digest = hashlib.sha256()
         for kind, value in zip(values[::2], values[1::2]):
             digest.update(kind + b":" + (b"%d:" % len(value) + value if isinstance(value, bytes) else repr(value).encode()))
-        rows[row_key(table, dict(zip(columns, values[1::2])))][digest.digest()] += 1
+        rows[row_key(table, dict(zip(columns, values[1::2])), keys)][digest.digest()] += 1
     return rows
 
 
@@ -442,12 +444,19 @@ def diff(mine, theirs, other):
 
 # -- the checks: each returns (failures, extra report fields) --
 
+def rollback_journal(path):
+    """Header bytes 18-19 are 1 and 1 (record section 3.3): immutable=1 then reads what any reader reads."""
+    with open(path, "rb") as file:
+        file.seek(18)
+        return [] if file.read(2) == b"\x01\x01" else [{"code": "copy_journal_mode"}]
+
+
 def file_digest(copy, block):
     path = Path(copy, "lcm.db")
     if regular(path) is None:
         return [{"code": "database_missing"}], {}
     found = dict(zip(("file_bytes", "page_size", "file_sha256", "page_list_sha256"), scan(path, block["page_size"])))
-    return [{"code": field} for field, value in found.items() if value != block[field]], {}
+    return [{"code": field} for field, value in found.items() if value != block[field]] + rollback_journal(path), {}
 
 
 def rebuilt(copy, block, objects, folder, generation):
@@ -455,12 +464,12 @@ def rebuilt(copy, block, objects, folder, generation):
         rebuild(block, objects, folder, generation)
     except Refused as refused:
         return [{"code": refused.code, **refused.detail}], {}
-    size = block["page_size"]
+    size, failures = block["page_size"], rollback_journal(Path(folder, "lcm.db"))
     with open(Path(folder, "lcm.db"), "rb") as mine, open(Path(copy, "lcm.db"), "rb") as theirs:
         for page, (a, b) in enumerate(itertools.zip_longest(chunks(mine, size), chunks(theirs, size))):
             if a != b:
-                return [{"code": "rebuild_differs", "page": page}], {}
-    return [], {}
+                return failures + [{"code": "rebuild_differs", "page": page}], {}
+    return failures, {}
 
 
 def integrity(conn):
@@ -519,7 +528,7 @@ def stamp_check(conn, manifest, owner_file):
     if not same(stamp, manifest.get("stamp")):
         failures.append({"code": "stamp_manifest"})
     if not isinstance(stamp, dict):
-        return failures, {}
+        return failures + [{"code": "stamp_shape"}], {}
     for field in ("copy_id", "generation", "created_at"):
         if not same(stamp.get(field), manifest.get(field)):
             failures.append({"code": "stamp_field", "field": field})
@@ -614,9 +623,11 @@ def tables(conn, origin):
         if have[0] != have[1]:
             failures.append({"code": "columns", "table": table})
         common = [c for c in columns if c in have[0] & have[1]]
-        if not set(KEYS[table] + ["source_kind", "event_id"] * (table == "capture_events")) <= set(common):
+        if table == "capture_events" and not {"source_kind", "event_id"} <= set(common):
+            failures.append({"code": "columns", "table": table})
             continue
-        copy_rows, origin_rows = keyed(conn, table, common), keyed(origin, table, common)
+        keys = [c for c in KEYS[table] if c in common] or common  # F6 allows a contracted column absent on both sides
+        copy_rows, origin_rows = keyed(conn, table, common, keys), keyed(origin, table, common, keys)
         if table == "metadata" and (STAMP_KEY.encode(),) not in origin_rows:
             copy_rows.pop((STAMP_KEY.encode(),), None)
         found = {"only_in_origin": origin_rows.keys() - copy_rows.keys(), "only_in_copy": copy_rows.keys() - origin_rows.keys(),

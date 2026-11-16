@@ -524,6 +524,21 @@ def test_stamp(chain, tmp_path):
     assert "store_uuid_row" in codes(check(c, "manifest")[1], "stamp")
 
 
+def test_stamp_shape(chain, tmp_path):
+    """A stamp that is not a JSON object fails, even when the copy and its manifest agree on it."""
+    for name, value in (("null", None), ("list", [1, "two"])):
+        c = clone(chain, tmp_path / name)
+        database = c.copy / "lcm.db"
+        sql(database, ("UPDATE metadata SET value = ? WHERE key = 'import:origin'", (json.dumps(value),)))
+        manifest = json.loads(c.manifest.read_text(encoding="utf-8"))
+        manifest.update(stamp=value, database=base_block(database.read_bytes(), manifest["generation"], c.objects))
+        c.manifest.write_text(json.dumps(manifest), encoding="utf-8")
+        for mode in ("origin", "manifest"):
+            code, report = check(c, mode)
+            failing = [n for n, done in report["checks"].items() if done["ran"] and not done["pass"]]
+            assert (code, failing, codes(report, "stamp")) == (1, ["stamp"], ["stamp_shape"]), (name, mode, report)
+
+
 def test_exemption_is_exact(chain, tmp_path):
     c = clone(chain, tmp_path)
     sql(c.copy / "lcm.db", "INSERT INTO metadata(key, value) VALUES ('import:other', '1')")
@@ -561,6 +576,27 @@ def test_optional_tables(chain, tmp_path):
     sql(c.copy / "lcm.db", "CREATE TABLE ledger_meta (key TEXT PRIMARY KEY, value BLOB NOT NULL)")
     code, report = check(c)
     assert code == 1 and {"code": "table_presence", "table": "ledger_meta"} in report["checks"]["tables"]["failures"]
+
+
+def test_key_column_absent_on_both_sides(chain, tmp_path):
+    """stamp_observations without its contracted column source on both sides (F6 allows it) is still compared."""
+    c = clone(chain, tmp_path)
+    table = "CREATE TABLE stamp_observations (lineage TEXT, occ_id INTEGER, stamp TEXT, kind TEXT, view_seq INTEGER)"
+    row = "INSERT INTO stamp_observations VALUES ('lineage-1', 1, 'stamp-1', 'seen', 1)"
+    for database in (c.copy / "lcm.db", c.origin / "lcm.db"):
+        sql(database, table, row)
+    manifest = json.loads(c.manifest.read_text(encoding="utf-8"))
+    manifest["tables"]["stamp_observations"] = 1
+    manifest["database"] = base_block((c.copy / "lcm.db").read_bytes(), manifest["generation"], c.objects)
+    c.manifest.write_text(json.dumps(manifest), encoding="utf-8")
+    code, report = check(c)
+    assert code == 0 and report["checks"]["tables"]["pass"], report
+    sql(c.origin / "lcm.db", "INSERT INTO stamp_observations VALUES ('lineage-2', 2, 'stamp-2', 'seen', 2)")
+    code, report = check(c)
+    assert code == 1 and report["checks"]["tables"]["failures"] == [
+        {"code": "only_in_origin", "table": "stamp_observations", "count": 1}], report
+    assert report["checks"]["tables"]["tables"]["stamp_observations"]["only_in_origin"] == [
+        ["lineage-2", 2, "stamp-2", "seen", 2]]
 
 
 # -- 16 and 17: refusals, and where the checker writes --
@@ -971,6 +1007,20 @@ def test_restore_differs(chain, tmp_path):
     code, report = check(c, "manifest")
     assert code == 1 and failed(report, "file_digest")
     assert report["checks"]["rebuild"]["failures"] == [{"code": "rebuild_differs", "page": 2}]
+
+
+def test_copy_journal_mode(chain, tmp_path):
+    """The copy, and the rebuilt file, are in rollback-journal mode: header bytes 18 and 19 are both 1."""
+    c = clone(chain, tmp_path)
+    data = bytearray((c.copy / "lcm.db").read_bytes())
+    assert data[18:20] == b"\x01\x01" and check(c)[0] == 0
+    data[18:20] = b"\x02\x02"
+    (c.copy / "lcm.db").write_bytes(bytes(data))
+    edit(c, lambda m: m.update(database=base_block(bytes(data), m["generation"], c.objects)))
+    for mode, objects in (("origin", True), ("manifest", False)):
+        code, report = check(c, mode, objects)
+        assert code == 1 and codes(report, "file_digest") == ["copy_journal_mode"], (mode, report)
+        assert codes(report, "rebuild") == ["copy_journal_mode"] if objects else not report["checks"]["rebuild"]["ran"]
 
 
 def test_bounded_decode(tool):
