@@ -4,7 +4,7 @@ Capture never writes. Canonical ingest only reports its committed object/id map;
 records transactions and read cuts never participate in canonical recovery.
 """
 from collections import Counter, defaultdict, deque
-from contextlib import closing
+from contextlib import closing, suppress
 from dataclasses import dataclass
 import hashlib
 import logging
@@ -12,7 +12,7 @@ import sqlite3
 import time
 
 from . import ingest_protection as protection
-from .store import _records_ro, open_records_writer, read_records, records_path, records_read_cut
+from .store import _normalize_observed_at, _records_ro, open_records_writer, read_records, records_path, records_read_cut
 
 logger = logging.getLogger(__name__)
 FLOOR_ROWS, FLOOR_BYTES = 64, 1048576
@@ -172,7 +172,7 @@ def after_commit(engine, messages, stored_at, *, post_llm=False):
                         values = dict(owner_store_id=owner['store_id'], owner_timestamp=owner['timestamp'],
                             owner_ingested_at=owner['ingested_at'], owner_content_digest=digest(owner['content']),
                             owner_message_uid=item.members[0][2], ordinal=ordinal, role='user', content=protected['content'],
-                            content_digest=digest(protected['content']), observed_at=stamp,
+                            content_digest=digest(protected['content']), observed_at=_normalize_observed_at(stamp),
                             observed_at_source='host_message_timestamp', captured_uid=uid,
                             captured_at=item.created, superseded_by=None, session_id=owner['session_id'],
                             conversation_id=owner['conversation_id'], profile=str(item.binding[0]))
@@ -239,12 +239,14 @@ def drain(engine, *, exiting=False):
                             t['session_id'] == values['session_id'] and t['store'].db_identity == entry.identity
                             for t in engine._pending_session_tails)
             if permanent:
-                queue.remove(entry)
+                with suppress(ValueError):
+                    queue.remove(entry)
                 count(engine, 'dropped_permanent')
                 logger.warning('queued records permanent refusal: %s', exc)
             done, used = done + 1, used + size
             continue
-        queue.remove(entry)
+        with suppress(ValueError):
+            queue.remove(entry)
         done, used = done + 1, used + size
     if not queue:
         _EXIT_ENGINES.discard(engine)
@@ -255,8 +257,11 @@ def drain(engine, *, exiting=False):
 
 def flush_at_exit():
     for engine in tuple(_EXIT_ENGINES):
-        with engine._storage_lock:
-            drain(engine, exiting=True)
+        try:
+            with engine._storage_lock:
+                drain(engine, exiting=True)
+        except Exception as exc:
+            logger.warning('queued records exit failed: %s', type(exc).__name__)
 
 
 
@@ -264,10 +269,14 @@ def reference(record):
     return dict(tool='lcm_expand', args=dict(store_id=record['owner_store_id']))
 
 
+def observed_at(row):
+    return _normalize_observed_at(row['observed_at'])
+
+
 def record_view(row):
-    keys = ('owner_store_id', 'ordinal', 'role', 'content', 'observed_at', 'observed_at_source',
+    keys = ('owner_store_id', 'ordinal', 'role', 'content', 'observed_at_source',
             'session_id', 'conversation_id', 'captured_uid', 'superseded_by')
-    return dict({key: row[key] for key in keys}, kind='record', reference=reference(row))
+    return dict({key: row[key] for key in keys}, kind='record', observed_at=observed_at(row), reference=reference(row))
 
 
 def decide(cut, session):
@@ -369,16 +378,17 @@ def search_records(cut, args, engine):
             continue
         records, states = decide(cut, session)
         for row in records:
+            stamp = observed_at(row)
             if (str(args.get('conversation_id') or '').strip() and row['conversation_id'] != str(args['conversation_id']).strip()
-                    or start is not None and (row['observed_at'] is None or row['observed_at'] < start)
-                    or end is not None and (row['observed_at'] is None or row['observed_at'] > end)):
+                    or start is not None and (stamp is None or stamp < start)
+                    or end is not None and (stamp is None or stamp > end)):
                 continue
             text = row['content'].casefold()
             match = query[1:-1].casefold() in text if query.startswith('"') and query.endswith('"') else (
                 bool(terms) and all(term in text for term in terms))
             if match and (row['owner_store_id'], row['ordinal']) not in states:
                 hits.append(record_view(row))
-    return sorted(hits, key=lambda r: r['observed_at'] or 0, reverse=True)
+    return sorted(hits, key=lambda r: observed_at(r) or 0, reverse=True)
 
 
 def surface(name):
@@ -390,10 +400,22 @@ def surface(name):
         @functools.wraps(original)
         def wrapped(args, **kwargs):
             raw = original(args, **kwargs)
+            try:
+                return augment(raw, args, **kwargs)
+            except Exception as exc:
+                logger.warning('queued records read failed: %s', type(exc).__name__)
+                with suppress(TypeError, ValueError):
+                    result = json.loads(raw)
+                    if isinstance(result, dict):
+                        result['queued_user_records_status'] = dict(available=False,
+                            reason='recovery_pending' if str(exc) == 'recovery_pending' else 'read_failed')
+                        return json.dumps(result)
+                return raw
+        def augment(raw, args, **kwargs):
             engine = kwargs.get('engine')
             store = getattr(engine, '_store', None)
-            try:
-                path = records_path(store) if store is not None else None
+            if store is not None:
+                path = records_path(store)
                 if path is None or not path.exists():
                     return raw
                 result = json.loads(raw)
@@ -404,8 +426,8 @@ def surface(name):
                         raise ValueError('unsupported_format')
                     if name == 'load':
                         listing(cut, args, engine, result, original)
-                    elif name == 'expand' and 'store_id' in args:
-                        rows, states = decide(cut, result['session_id'])
+                    elif name == 'expand' and args.get('store_id') is not None and result.get('session_id'):
+                        rows, states = decide(cut, result.get('session_id'))
                         rows = [dict(record_view(r), state=states.get((r['owner_store_id'], r['ordinal']), 'visible'))
                                 for r in rows if r['owner_store_id'] == result.get('store_id')]
                         if rows:
@@ -414,10 +436,8 @@ def surface(name):
                         hits = search_records(cut, dict(args, session_scope='all') if name == 'recall' else args, engine)
                         if hits:
                             result['queued_user_record_hits'] = hits
-            except (OSError, sqlite3.Error, ValueError) as exc:
-                result = json.loads(raw)
-                result['queued_user_records_status'] = dict(available=False,
-                    reason='recovery_pending' if str(exc) == 'recovery_pending' else 'read_failed')
+            else:
+                return raw
             for key in ('queued_user_records', 'queued_user_record_hits'):
                 for row in result.get(key, []):
                     if name == 'expand':
@@ -431,7 +451,7 @@ def surface(name):
                             row['snippet'] = row['content']
             cap = dict(grep=tools._LCM_GREP_RESPONSE_CHAR_CAP, recall=tools._LCM_RECALL_RESPONSE_CHAR_CAP).get(name)
             omitted = 0
-            while cap and len(json.dumps(result)) > cap:
+            while cap and len(json.dumps(result, ensure_ascii=False)) > cap:
                 entries = result.get('queued_user_record_hits', [])
                 if not entries:
                     break
@@ -440,6 +460,6 @@ def surface(name):
                 result['queued_user_records_omitted'] = omitted
                 if not entries:
                     del result['queued_user_record_hits']
-            return raw if result == json.loads(raw) else json.dumps(result)
+            return raw if result == json.loads(raw) else json.dumps(result, ensure_ascii=False)
         return wrapped
     return decorate

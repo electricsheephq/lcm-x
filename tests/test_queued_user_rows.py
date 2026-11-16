@@ -422,3 +422,47 @@ def test_writer_sweeps_rollback_purge_orphans(tmp_path):
         with sqlite3.connect(sm.records_path(e._store)) as side:
             assert side.execute('SELECT content FROM queued_user_rows').fetchall() == [('keep',)]
         assert 'orphan_swept=1' in sm.records_doctor(e._store)
+
+
+@pytest.mark.parametrize('mode', ['stored', 'permanent', 'engine_failure'])
+def test_exit_flush_continues_after_concurrent_removal(tmp_path, monkeypatch, caplog, mode):
+    from collections import Counter, deque
+    from threading import RLock
+
+    class Engine:
+        def __init__(self):
+            self._storage_lock = RLock()
+            self._queued_counts = Counter()
+            self._queued_entries = deque([q.Entry('identity', tmp_path, (('content', 'lost'),))])
+
+    class Engines(list):
+        def discard(self, engine):
+            if engine in self:
+                self.remove(engine)
+
+    first, second = Engine(), Engine()
+    def already_drained(entries):
+        first._queued_entries.remove(entries[0])
+        if mode == 'permanent':
+            raise ValueError('pending purge intent')
+    def retry_later(entries):
+        raise ValueError('retry later')
+    first._store_queued_user_rows = already_drained
+    second._store_queued_user_rows = retry_later
+    if mode == 'engine_failure':
+        class BrokenLock:
+            def __enter__(self):
+                raise RuntimeError('private exit failure')
+            def __exit__(self, *args):
+                pass
+        first._storage_lock = BrokenLock()
+    monkeypatch.setattr(q, '_EXIT_ENGINES', Engines([first, second]))
+    q.flush_at_exit()
+    if mode != 'engine_failure':
+        assert not first._queued_entries and first._queued_counts['exit_kept'] == 0
+        assert 'discarded_at_exit=0' in caplog.text
+    else:
+        assert 'queued records exit failed: RuntimeError' in caplog.text
+        assert 'private exit failure' not in caplog.text
+    assert second._queued_counts['exit_kept'] == 1
+    assert 'discarded_at_exit=1' in caplog.text

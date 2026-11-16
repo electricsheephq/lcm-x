@@ -5,10 +5,10 @@ from pathlib import Path
 
 import pytest
 
-from hermes_lcm import expand_tools, store as sm, tools
+from hermes_lcm import expand_tools, queued_user_rows as q, store as sm, tools
 from hermes_lcm.dag import SummaryNode
 from tests.harness import engine_context
-from tests.test_queued_user_rows import folded, records
+from tests.test_queued_user_rows import folded, records, user
 
 
 CALLS = [
@@ -163,3 +163,145 @@ def test_record_session_exclusions(tmp_path, name, exclusions):
         folded(e)
         reply = json.loads(getattr(tools, name)(dict(query='lost', **exclusions), engine=e))
         assert not reply.get('queued_user_record_hits')
+
+
+def test_p1_expand_node_with_null_store_id(tmp_path):
+    with engine_context(tmp_path, window=128000, conversation_id='conv', embeddings_enabled=False) as e:
+        folded(e)
+        e._dag.add_node(SummaryNode(session_id='S', depth=0, summary='summary', token_count=1,
+            source_token_count=1, source_ids=[1], source_type='messages', created_at=1., earliest_at=1., latest_at=1.))
+        assert records(e)
+        args = dict(node_id=1, store_id=None)
+        base = json.loads(expand_tools.lcm_expand.__wrapped__(args, engine=e))
+        assert 'error' not in base
+        assert json.loads(tools.lcm_expand(args, engine=e)) == base
+
+
+def iso_folded(e, stamp='2026-11-16T10:00:00Z'):
+    run = [user('lost', stamp, 'T-0'), user('newest', '2026-11-16T10:00:01Z', 'T-1')]
+    q.capture(e, dict(turn_id='T', session_id='S', conversation_id='conv',
+                      conversation_history=run, user_message='newest'))
+    run[0]['content'] = 'newest'
+    e.ingest([run[0], dict(role='assistant', content='answer', timestamp=50.)])
+
+
+def legacy_iso_stamp(e):
+    with sqlite3.connect(sm.records_path(e._store)) as side:
+        side.execute('UPDATE queued_user_rows SET observed_at=? WHERE captured_uid=?',
+                     ('2026-11-16T10:00:00Z', 'T-0'))
+
+
+@pytest.mark.parametrize('legacy', [False, True])
+def test_p1_grep_time_filter_iso_record(tmp_path, legacy):
+    with engine_context(tmp_path, window=128000, conversation_id='conv', embeddings_enabled=False) as e:
+        iso_folded(e)
+        if legacy:
+            legacy_iso_stamp(e)
+        args = dict(query='lost', time_from=0, time_to='2026-11-16T10:00:01Z')
+        base = json.loads(tools.lcm_grep.__wrapped__(args, engine=e))
+        got = json.loads(tools.lcm_grep(args, engine=e))
+        assert {k: got[k] for k in base} == base
+        hit, = got['queued_user_record_hits']
+        assert hit['content'] == 'lost' and hit['observed_at'] == 1794823200.
+        assert isinstance(hit['observed_at'], (int, float))
+        assert 'queued_user_records_status' not in got
+        if not legacy:
+            assert records(e)[0]['observed_at'] == hit['observed_at']
+        for handler, call in [(tools.lcm_load_session, dict(session_id='S')),
+                              (tools.lcm_expand, dict(store_id=hit['owner_store_id']))]:
+            assert json.loads(handler(call, engine=e))['queued_user_records'][0]['observed_at'] == hit['observed_at']
+
+
+@pytest.mark.parametrize('legacy', [False, True])
+def test_p1_mixed_stamp_sort(tmp_path, legacy):
+    with engine_context(tmp_path, window=128000, conversation_id='conv', embeddings_enabled=False) as e:
+        iso_folded(e)
+        if legacy:
+            legacy_iso_stamp(e)
+        folded(e, texts=('lost again', 'second'), turn='U')
+        args = dict(query='lost')
+        base = json.loads(tools.lcm_grep.__wrapped__(args, engine=e))
+        got = json.loads(tools.lcm_grep(args, engine=e))
+        assert {k: got[k] for k in base} == base
+        hits = got['queued_user_record_hits']
+        assert [hit['content'] for hit in hits] == ['lost', 'lost again']
+        assert all(isinstance(hit['observed_at'], (int, float)) for hit in hits)
+        assert hits[0]['observed_at'] == 1794823200.
+        assert 'queued_user_records_status' not in got
+
+
+def test_unusable_observed_at_keeps_record(tmp_path):
+    with engine_context(tmp_path, window=128000, conversation_id='conv', embeddings_enabled=False) as e:
+        iso_folded(e, '2026-11-16T10:00:00')
+        record, = records(e)
+        assert record['content'] == 'lost' and record['observed_at'] is None
+        assert record['observed_at_source'] == 'host_message_timestamp'
+        got = json.loads(tools.lcm_grep(dict(query='lost'), engine=e))
+        assert got['queued_user_record_hits'][0]['observed_at'] is None
+        assert 'queued_user_records_status' not in got
+        filtered = json.loads(tools.lcm_grep(dict(query='lost', time_from=1), engine=e))
+        assert not filtered.get('queued_user_record_hits')
+
+
+@pytest.mark.parametrize('name,step,args', [
+    ('lcm_load_session', 'listing', dict(session_id='S')),
+    ('lcm_expand', 'decide', dict(store_id=1)),
+    ('lcm_grep', 'search_records', dict(query='lost')),
+    ('lcm_recall', 'search_records', dict(query='lost')),
+])
+@pytest.mark.parametrize('stage', ['records', 'bounds', 'cap'])
+def test_unexpected_records_exception_preserves_main(tmp_path, monkeypatch, caplog, name, step, args, stage):
+    with engine_context(tmp_path, window=128000, conversation_id='conv', embeddings_enabled=False) as e:
+        folded(e)
+        handler = getattr(tools, name)
+        original = expand_tools.lcm_expand.__wrapped__ if name == 'lcm_expand' else handler.__wrapped__
+        base = json.loads(original(args, engine=e))
+        def fail(*args, **kwargs):
+            raise RuntimeError('private record content must never be logged')
+        if stage == 'records':
+            monkeypatch.setattr(q, step, fail)
+        elif stage == 'bounds':
+            slicer = '_slice_content_for_response' if name == 'lcm_expand' else '_slice_loaded_content'
+            original_slice = getattr(tools, slicer)
+            def slice_records(content, *args, **kwargs):
+                return fail() if content == 'lost' else original_slice(content, *args, **kwargs)
+            monkeypatch.setattr(tools, slicer, slice_records)
+        else:
+            if name not in ('lcm_grep', 'lcm_recall'):
+                # Exercise final serialization for tools without a response cap.
+                target = 'queued_user_records'
+            else:
+                target = 'queued_user_record_hits'
+            original_dumps = json.dumps
+            def dump_records(value, *args, **kwargs):
+                return fail() if isinstance(value, dict) and target in value else original_dumps(value, *args, **kwargs)
+            monkeypatch.setattr(json, 'dumps', dump_records)
+        got = json.loads(handler(args, engine=e))
+        assert got == dict(base, queued_user_records_status=dict(available=False, reason='read_failed'))
+        warnings = [r.getMessage() for r in caplog.records if r.name == q.__name__ and r.levelname == 'WARNING']
+        assert warnings == ['queued records read failed: RuntimeError']
+        assert 'private record content' not in caplog.text
+
+
+def test_non_ascii_hits_use_unescaped_response_cap(tmp_path, monkeypatch):
+    with engine_context(tmp_path, window=128000, conversation_id='conv', embeddings_enabled=False) as e:
+        folded(e, ('needle 界' * 20, 'needle 語' * 20, 'newest'))
+        args = dict(query='needle')
+        unbounded = json.loads(tools.lcm_grep(args, engine=e))
+        hits = unbounded['queued_user_record_hits']
+        assert len(hits) == 2
+        cap = len(json.dumps(unbounded, ensure_ascii=False)) + 1
+        assert cap < len(json.dumps(unbounded))
+        monkeypatch.setattr(tools, '_LCM_GREP_RESPONSE_CHAR_CAP', cap)
+        got = json.loads(tools.lcm_grep(args, engine=e))
+        assert got['queued_user_record_hits'] == hits
+        assert 'queued_user_records_omitted' not in got
+        assert len(json.dumps(got, ensure_ascii=False)) <= cap
+
+
+@pytest.mark.parametrize('raw', ['not json', '[]', 'null', '123', '"text"'])
+def test_non_object_main_response_is_returned_unchanged(tmp_path, raw):
+    with engine_context(tmp_path, window=128000, conversation_id='conv', embeddings_enabled=False) as e:
+        folded(e)
+        handler = q.surface('grep')(lambda args, **kwargs: raw)
+        assert handler(dict(query='lost'), engine=e) == raw
