@@ -599,6 +599,60 @@ def test_key_column_absent_on_both_sides(chain, tmp_path):
         ["lineage-2", 2, "stamp-2", "seen", 2]]
 
 
+def rebase(c, **counts):
+    """Remake the manifest's database block for the copy's file as it now is, with any table counts given."""
+    edit(c, lambda m: m.update(tables={**m["tables"], **counts},
+                               database=base_block((c.copy / "lcm.db").read_bytes(), m["generation"], c.objects)))
+
+
+def strings(value):
+    if isinstance(value, dict):
+        return [s for v in value.values() for s in strings(v)]
+    return [s for v in value for s in strings(v)] if isinstance(value, list) else [value] if isinstance(value, str) else []
+
+
+@pytest.mark.parametrize("case", ["messages_copy_only", "messages_both", "metadata_both"])
+def test_no_stored_text_without_key_columns(chain, tmp_path, case):
+    """With none of a table's key columns on both sides, its rows are no key: codes and counts only, never text."""
+    c = clone(chain, tmp_path)
+    table, column = ("metadata", "key") if case == "metadata_both" else ("messages", "store_id")
+    stamp = json.dumps({**json.loads(query(c.copy / "lcm.db", "SELECT value FROM metadata WHERE key = 'import:origin'")[0][0]),
+                        "note": PLANT})
+    sql(c.copy / "lcm.db", ("UPDATE metadata SET value = ? WHERE key = 'import:origin'", (stamp,)))
+    sql(c.origin / "lcm.db", ("UPDATE messages SET content = content || ' edited' WHERE content LIKE ?", (f"%{PLANT}%",)))
+    for database in (c.copy, c.origin) if case.endswith("both") else (c.copy,):
+        sql(database / "lcm.db", f"ALTER TABLE {table} RENAME COLUMN {column} TO renamed")
+    rebase(c)
+    code, report = check(c)  # cli() asserts the planted string is absent from stdout and stderr
+    assert code == 1 and failed(report, "tables") and table not in report["checks"]["tables"]["tables"], report
+    assert any(f.get("table") == table and f.get("count") for f in report["checks"]["tables"]["failures"]), report
+    assert not [s for s in strings(report) if stamp in s or PLANT in s]
+
+
+def test_no_contracted_columns(chain, tmp_path):
+    """A table with none of its contracted columns on both sides is compared by its row count."""
+    c = clone(chain, tmp_path)
+    for database in (c.copy / "lcm.db", c.origin / "lcm.db"):
+        sql(database, "CREATE TABLE ledger_meta (extra TEXT)", "INSERT INTO ledger_meta VALUES ('one')")
+    rebase(c, ledger_meta=1)
+    code, report = check(c)
+    assert code == 0 and report["checks"]["tables"]["pass"], report
+    sql(c.origin / "lcm.db", "INSERT INTO ledger_meta VALUES ('two')")
+    code, report = check(c)
+    assert code == 1 and report["checks"]["tables"]["failures"] == [
+        {"code": "changed", "table": "ledger_meta", "count": 1}], report
+    assert "ledger_meta" not in report["checks"]["tables"]["tables"]
+
+
+def test_one_columns_failure_per_table(chain, tmp_path):
+    c = clone(chain, tmp_path)
+    sql(c.copy / "lcm.db", "ALTER TABLE capture_events RENAME COLUMN source_kind TO renamed")
+    rebase(c)
+    code, report = check(c)
+    assert code == 1 and report["checks"]["tables"]["failures"] == [{"code": "columns", "table": "capture_events"}]
+    assert report["checks"]["tables"]["failure_count"] == 1, report
+
+
 # -- 16 and 17: refusals, and where the checker writes --
 
 def test_refusals(chain, tmp_path):

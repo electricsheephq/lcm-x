@@ -392,14 +392,14 @@ def ordered(keys):
 
 
 def row_key(table, row, keys=None):
-    names = LEDGER_KEYS.get(row["source_kind"], ("source_kind", "event_id")) if table == "capture_events" else keys or KEYS[table]
+    names = LEDGER_KEYS.get(row["source_kind"], ("source_kind", "event_id")) if table == "capture_events" else KEYS[table] if keys is None else keys
     return tuple(row[n] for n in names)
 
 
 def keyed(conn, table, columns, keys):
     """{key: Counter of row digests}; each value hashed with its SQLite type, so blobs are never held."""
     rows = defaultdict(Counter)
-    listed = ", ".join(f'typeof("{c}"), "{c}"' for c in columns)
+    listed = ", ".join(f'typeof("{c}"), "{c}"' for c in columns) or "1"  # no columns: one empty digest per row
     for values in conn.execute(f'SELECT {listed} FROM "{table}"'):
         digest = hashlib.sha256()
         for kind, value in zip(values[::2], values[1::2]):
@@ -620,13 +620,14 @@ def tables(conn, origin):
         if table not in mine or table not in theirs:
             continue
         have = [{r[1].decode() for r in c.execute(f"PRAGMA table_info(\"{table}\")")} & set(columns) for c in (conn, origin)]
-        if have[0] != have[1]:
-            failures.append({"code": "columns", "table": table})
         common = [c for c in columns if c in have[0] & have[1]]
-        if table == "capture_events" and not {"source_kind", "event_id"} <= set(common):
+        short = table == "capture_events" and not {"source_kind", "event_id"} <= set(common)
+        if have[0] != have[1] or short:  # one columns failure per table
             failures.append({"code": "columns", "table": table})
+        if short:
             continue
-        keys = [c for c in KEYS[table] if c in common] or common  # F6 allows a contracted column absent on both sides
+        named = [c for c in KEYS[table] if c in common]  # F6 allows a contracted column absent on both sides
+        keys = named or common
         copy_rows, origin_rows = keyed(conn, table, common, keys), keyed(origin, table, common, keys)
         if table == "metadata" and (STAMP_KEY.encode(),) not in origin_rows:
             copy_rows.pop((STAMP_KEY.encode(),), None)
@@ -635,7 +636,8 @@ def tables(conn, origin):
         for code, keys in found.items():
             if keys:
                 failures.append({"code": code, "table": table, "count": len(keys)})
-                detail.setdefault(table, {}).update({code: [show(k) for k in ordered(keys)[:CAP]], f"{code}_count": len(keys)})
+                if named:  # a whole row is no key: codes and counts only, never stored text
+                    detail.setdefault(table, {}).update({code: [show(k) for k in ordered(keys)[:CAP]], f"{code}_count": len(keys)})
     if sequence(conn) != sequence(origin):
         failures.append({"code": "sequence"})
     return failures, {"tables": detail}
