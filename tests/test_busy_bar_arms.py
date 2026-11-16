@@ -206,11 +206,18 @@ def normalize(rows):
                 op.pop(key)
             threads.setdefault(op["thread"], f"thread-{len(threads)}")
             op["thread"] = threads[op["thread"]]
+        log_only = {}
         for record in row["logs"]:
             record.pop("time")
             record["message"] = re.sub(r"lock_hold_ms=\d+\.\d+", "lock_hold_ms=<timing>", record["message"])
-            threads.setdefault(record["thread"], f"thread-{len(threads)}")
             processes.setdefault(record["process"], f"process-{len(processes)}")
+            if record["thread"] not in threads:
+                rest = {key: value for key, value in record.items() if key not in ("thread", "process")}
+                log_only.setdefault(record["thread"], []).append(json.dumps(rest, sort_keys=True))
+        # A thread with no operations is labeled by what it logged, not by when its first line arrived.
+        for thread in sorted(log_only, key=log_only.get):
+            threads[thread] = f"thread-{len(threads)}"
+        for record in row["logs"]:
             record["thread"] = threads[record["thread"]]
             record["process"] = processes[record["process"]]
         # Threads interleave their log lines by timing. Keep each thread's own order and compare per thread.

@@ -594,7 +594,7 @@ def test_session_end_then_shutdown_waits_before_closing_stores(make_engine, sche
         active.set()
         started.set()
         try:
-            release.wait(10)  # held until the test releases it; 10 s only bounds a hang
+            release.wait(60)  # held until shutdown's retire step releases it; 60 s only bounds a lost release
         finally:
             active.clear()
 
@@ -602,14 +602,30 @@ def test_session_end_then_shutdown_waits_before_closing_stores(make_engine, sche
     # The test releases the pass; a loaded runner must not expire the retire wait first.
     monkeypatch.setattr(engine_mod, "_EMBEDDING_RETIRE_TIMEOUT_S", 30.0)
     engine = make_engine()
-    active_at_close = []
+    active_at_retire, active_at_close, errors = [], [], []
     close = engine._store.close
+    retire = engine._retire_embedding_maintenance
 
     def close_store():
         active_at_close.append(active.is_set())
         close()
 
+    def retire_then_release(wait):
+        if wait:
+            # Shutdown's retire step (session end's does not wait). The pass is released only from here.
+            active_at_retire.append(active.is_set())
+            threading.Timer(0.3, release.set).start()
+        retire(wait=wait)
+
+    def shut_down():
+        try:
+            engine.shutdown()
+        except BaseException as exc:
+            errors.append(exc)
+
     monkeypatch.setattr(engine._store, "close", close_store)
+    monkeypatch.setattr(engine, "_retire_embedding_maintenance", retire_then_release)
+    shutdown = threading.Thread(target=shut_down, daemon=True)
     try:
         _bind(engine)
         assert started.wait(5)
@@ -618,16 +634,20 @@ def test_session_end_then_shutdown_waits_before_closing_stores(make_engine, sche
         # The pass is held, so session end returned without waiting for it (a wait would last 30 s).
         assert time.monotonic() - before < 1.5
         assert active.is_set()
-        threading.Timer(0.3, release.set).start()
-        before = time.monotonic()
-        engine.shutdown()
-        # Shutdown waited for the held pass and closed the stores only after it ended; 10 s bounds a hang.
-        assert 0.2 <= time.monotonic() - before < 10
+        shutdown.start()
+        # On a thread, so a hang fails here. 10 s also fails a shutdown that waited out the 30 s retire timeout.
+        shutdown.join(10)
+        assert not shutdown.is_alive(), "shutdown did not return within 10 s"
+        assert not errors
+        # Shutdown reached its retire step while the pass ran, and closed the stores only after the pass ended.
+        assert active_at_retire == [True]
         assert active_at_close == [False]
         assert not active.is_set()
         assert not scheduler._retired_active_keys
     finally:
         release.set()
+        if shutdown.ident is not None:
+            shutdown.join(30)
 
 
 
