@@ -10,6 +10,30 @@ from .session import RECORD_COLUMNS, canonical_rows, queued_rows
 WRITE_STYLE = 'batch'
 
 
+def withholding(engine):
+    """Fake implementation: scan its own canonical and physical record rows."""
+    rows = [dict(row) for row in canonical_rows(engine)]
+    result = []
+    for raw in queued_rows(engine):
+        record = dict(raw)
+        if record['superseded_by'] is not None or not record['content'].strip():
+            continue
+        owner = next(r for r in rows if r['store_id'] == record['owner_store_id'])
+        needle = record['content'].strip().split('\n\n')
+        for row in rows:
+            if row['session_id'] != owner['session_id'] or row['store_id'] <= owner['store_id'] or row['role'] != 'user':
+                continue
+            segments = row['content'].split('\n\n')
+            if any(segments[start:start + len(needle)] == needle for start in range(len(segments))):
+                result.append(dict(record, state='overlap', reference=reference(record)))
+                break
+    return result
+
+
+def reference(row):
+    return dict(tool='lcm_expand', args=dict(queued_user_ref=[row['owner_store_id'], row['ordinal']]))
+
+
 def install(engine, entries, patch):
     conn = engine._store._conn
     conn.execute('CREATE TABLE IF NOT EXISTS queued_user_rows (' + ', '.join(RECORD_COLUMNS) + ')')
@@ -51,11 +75,15 @@ def install(engine, entries, patch):
         return result
     patch.setattr(engine, 'ingest', ingest)
     def rows():
-        return [dict(row) for row in projection(dict(canonical=canonical_rows(engine), records=queued_rows(engine)))]
+        hidden = {(r['owner_store_id'], r['ordinal']) for r in withholding(engine)}
+        return [dict(row, reference=reference(row)) if 'owner_store_id' in row else row
+                for raw in projection(dict(canonical=canonical_rows(engine), records=queued_rows(engine)))
+                if (row := dict(raw)) and (row.get('owner_store_id'), row.get('ordinal')) not in hidden]
     def grep(args, **_):
         text = args['query'].strip('"')
-        hits = [dict(r, reference=dict(tool='lcm_expand', args=dict(queued_user_ref=[r['owner_store_id'], r['ordinal']])))
-                for r in map(dict, queued_rows(engine)) if r['content'] == text]
+        hidden = {(r['owner_store_id'], r['ordinal']) for r in withholding(engine)}
+        hits = [dict(r, reference=reference(r)) for r in map(dict, queued_rows(engine))
+                if r['content'] == text and (r['owner_store_id'], r['ordinal']) not in hidden]
         return json.dumps(dict(results=hits))
     def expand(args, **_):
         key = args['queued_user_ref']
@@ -63,6 +91,12 @@ def install(engine, entries, patch):
                                if [dict(r)['owner_store_id'], dict(r)['ordinal']] == key))
     def load(args, **_):
         start = args.get('record_cursor', 0)
-        data = rows()
-        return json.dumps(dict(messages=data[start:start + 1], next_cursor={'record_cursor': start + 1} if start + 1 < len(data) else None))
+        data, locators = rows(), withholding(engine)
+        offset = args.get('withheld_cursor', 0)
+        counts = {state: sum(r['state'] == state for r in locators) for state in ('overlap', 'unscanned')}
+        return json.dumps(dict(messages=data[start:start + 1] if start is not None else [],
+            next_cursor={'record_cursor': start + 1} if start is not None and start + 1 < len(data) else None,
+            withheld=dict(counts=counts, locators=locators[offset:offset + 1] if offset is not None else [],
+                next_cursor={'withheld_cursor': offset + 1}
+                if offset is not None and offset + 1 < len(locators) else None)))
     return SimpleNamespace(lcm_grep=grep, lcm_expand=expand, lcm_load_session=load)

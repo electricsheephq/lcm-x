@@ -24,6 +24,11 @@ During plugin reload, a retained agent can save a closed interrupted tail when
 the existing database proves its session is current and the stored prefix
 matches the supplied history. This also works between registrations. The
 callback opens the existing database only, with the normal SQLite write timeout.
+For timestamped `/retry` or orphan-call pruning and user merging, a view retaining
+the original opening row (or its same-stamp merged carrier) uses normal ingest
+reconciliation in a scoped writer. It requires the same current lane and rejects
+mixed conversation ownership. Unstamped, mismatched histories remain unproven;
+generated summaries still require their durable compaction proof.
 The tail and its replay marker commit together so that later preflight,
 completed-turn and session-end callbacks can recognize rows already saved.
 Session-end flushes still use the shorter SQLite busy timeout.
@@ -73,11 +78,14 @@ cannot use this path to replace the foreground or reset its ingest position.
 Initially ignored or stateless sessions can pass the same empty-reset proof;
 the target session filters are applied at the new bind.
 
-After plugin reload, an empty CLI `/new` also needs Hermes to emit
-`on_session_reset` with `reason="new_session"` for the nominated replacement
-in the same profile. LCM-X remembers that event and retries the native row
-check on a later callback if `state.db` was busy or Hermes creates the row
-on the next turn.
+During plugin unload or reload, an empty CLI `/new` can use the direct engine
+reset followed by a same-profile native-handle bind as confirmation. That proof
+belongs to the exact old binding and is consumed by one replacement nomination;
+it does not depend on a registration hook surviving unload. Alternatively, the
+same-profile `on_session_reset` hook with `reason="new_session"` confirms the
+nominated replacement. Both paths still require an empty old LCM binding and a
+new, open, non-child native session; they retry the native row check on a later
+callback if `state.db` was busy or Hermes creates the row on the next turn.
 
 An empty, missing or `None` id is a detach request and raises
 `NotImplementedError` without changing the binding. Hosts with

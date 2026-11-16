@@ -213,7 +213,7 @@ def entry(e, store_id, **fields):
 def ranked(monkeypatch, entries):
     """Freeze ranking; all delivery and exact-row reads stay real."""
     monkeypatch.setattr(tools, "fuse_candidates", lambda *a, **kw: (entries, ["fts"], [1.0]))
-    monkeypatch.setattr(tools, "apply_prior", lambda entries, *a: entries)
+    monkeypatch.setattr(tools, "apply_prior", lambda entries, *a, **kw: entries)
 
 
 def assert_links(payload):

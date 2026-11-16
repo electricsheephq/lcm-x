@@ -459,7 +459,25 @@ settings do not update LCM-X's threshold.
 
 ### Session-end warning says `final messages may be absent` or `retry pending`
 
-The WARNING `LCM session-end rows not stored` (or a cold-tail `retry pending` WARNING with `reason=` and `view_rows=`) means the session-end view contains rows that are not stored; `view_rows` is the view size, not the missing-row count (#2543); `reason=off_current_suffix_append_failed` marks a busy suffix append at an off-current end of a bypass-lineage session that was re-raised unstored (#2738); `reason=unverified_stale_end` means the off-current fallback refused an end because it could not show the view's rows are stored (some may already be) (#2747), and the fallback skips this WARNING only for a session it can show is excluded from storage by design; `reason=off_current_fallback_interrupted` marks an interrupt during the off-current fallback, and rows may not be stored; `reason=off_current_suffix_append_interrupted` marks an interrupt during that bypass-lineage suffix append.
+The WARNING `LCM session-end rows not stored` (or a cold-tail `retry pending` WARNING with `reason=` and `view_rows=`) means rows may be missing, or their storage could not be verified; `view_rows` is the view size, not the missing-row count (#2543); for a dropped warm tail, it is the tail's row count. In particular, `unverified_stale_end` and `prefix_mismatch_bypass_lineage` can fire when every row is already stored (#2747, #2543); the fallback skips this WARNING for a session it can show is excluded from storage by design. A missing WARNING does not prove the rows are stored: #2543 lists the known cases where an end stores or queues nothing without one. The reasons are:
+
+| Reason | Meaning |
+|---|---|
+| `prefix_mismatch_bypass_lineage` | An off-current bypass-lineage end of a session with a normal conversation bypassed storage; it fires even when a stored prefix covers the view, because this route compares content, not the rows' stamps. |
+| `bypass_lineage_end` | A same-id bypass-lineage end has rows past its bypass prefix. |
+| `off_current_suffix_append_failed` | A suffix append at a plain off-current or bypass-lineage end failed unqueued; the exception is re-raised (#2738). |
+| `off_current_suffix_append_interrupted` | A suffix append at a plain off-current or bypass-lineage end was interrupted; the interrupt propagates. |
+| `unverified_stale_end` | The off-current fallback refused an end because it could not verify storage of its rows. |
+| `off_current_fallback_interrupted` | The off-current fallback was interrupted; the interrupt propagates. |
+| `foreground_ingest_interrupted` | The foreground end's raw-message ingest was interrupted with rows potentially unflushed. |
+| `foreground_ingest_busy_unqueued` | The foreground ingest was busy, this end queued no tail, and no pending tail covers its potentially unflushed rows. |
+| `foreground_flush_interrupted` | The foreground flush was interrupted before ingest finished, with rows potentially unflushed. |
+| `foreground_flush_locked` | SQLite locked the foreground flush before ingest finished, with rows potentially unflushed and no new tail queued. |
+| `cold_tail_prefix_mismatch` | A queued cold tail's view does not match the stored prefix; retry remains pending. |
+| `cold_tail_scan_capped` | A queued cold tail's bounded comparison scan reached its cap; retry remains pending. |
+| `cold_tail_conflicting_stamp_unplaced` | A queued cold tail has a conflicting timestamp that could not be placed; retry remains pending. |
+| `pending_tail_dropped_at_shutdown` | A tail remains pending after the engine's final shutdown retry. |
+| `pending_tail_dropped_at_exit` | A tail remains pending after the normal interpreter-exit retry. |
 
 The interrupted or SQLite-lock raw-flush warning includes `unflushed=N`: a cursor-based estimate
 before the final ingest attempt, not a durability count, without message content. While the ingest

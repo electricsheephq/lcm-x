@@ -13,19 +13,26 @@ import sys
 
 import tests.conftest  # noqa: F401 - standalone package aliases
 from . import paired
+from . import merged_user_turns_extras as existing_extras
 from .merged_user_turns_expected import EXPECTED
 from .record_contract import declaration_stages, declarations, writer_fault_stages
-from .test_paired_merged_user_turns import CASES, _execute_case
+from .test_paired_merged_user_turns import CASES, WIDE_RELOAD_SEEDS, _execute_case, _label_violations
 
 
 def generate(directory):
     assert 'LCMX_DIFF_FAKE_RECORDS' not in os.environ, 'generator refuses LCMX_DIFF_FAKE_RECORDS'
     tree = paired.materialize(paired.BASELINE_REF, directory / 'baseline')
     versions = {name: paired._load(tree, '_extras_baseline_' + name) for name in ('main', 'candidate')}
-    evidence, declared, dispositions, retrieval, absent = {}, {}, {}, {}, {}
+    evidence, declared, dispositions, retrieval, absent, new_expected = {}, {}, {}, {}, {}, {}
     for case in CASES:
         _, traces = _execute_case(case, directory / str(case), versions)
         trace = traces['main']
+        if case in WIDE_RELOAD_SEEDS:
+            classified = _label_violations(case, trace, None)
+            if case in EXPECTED:
+                assert EXPECTED[case] == classified, f'{case}: existing pin changed'
+            else:
+                new_expected[case] = classified
         stages = declaration_stages(trace)
         declared[case] = declarations(case, stages, paired.BASELINE_REF)
         absent[case] = [(e['capture_view'], e['predecessor_ordinal'], e['expected']['content'],
@@ -35,7 +42,7 @@ def generate(directory):
                                values=[s['retrieval_missing'] for s in stages])
         evidence[case] = dict(stages=stages, faults=[asdict(f) for f in trace.faults])
         dispositions[case] = []
-        for stage, kind, value, view, count, label in EXPECTED.get(case, ()):
+        for stage, kind, value, view, count, label in new_expected.get(case, EXPECTED.get(case, ())):
             if label != '#2707 proven':
                 continue
             matches = [e for e in declared[case] if e['capture_view'] == view and e['stage'] <= stage
@@ -46,13 +53,25 @@ def generate(directory):
                      else 'copied-head' if not capture['head_present'] else
                      'already-merged-input' if capture['prefix'] else 'other:no-committed-owner')
             dispositions[case].append((stage, kind, value, view, count, reason))
+    additions = {}
+    for name, value in [('DECLARED', declared), ('DISPOSITIONS', dispositions),
+                        ('RETRIEVAL_MISSING', retrieval), ('FAULT_ABSENT', absent)]:
+        existing = getattr(existing_extras, name)
+        assert all(key in value and value[key] == old for key, old in existing.items()), \
+            f'{name}: existing declaration entry changed'
+        additions[name] = {key: rows for key, rows in value.items() if key not in existing}
+    if new_expected:
+        pins = Path(__file__).with_name('merged_user_turns_expected.py')
+        with pins.open('a') as stream:
+            stream.write('\n# Widened reload cases, classified at the unchanged baseline.\nEXPECTED.update('
+                         + pprint.pformat(new_expected, width=120, sort_dicts=False) + ')\n')
     output = Path(__file__).with_name('merged_user_turns_extras.py')
     (directory / 'evidence.json').write_text(json.dumps(evidence, indent=2) + '\n')
-    output.write_text('"""Generated declarations; regenerate with merged_user_turns_generate.py.\n\n'
-                      'Audit stages and faults go to SCRATCH/evidence.json outside the repository.\n"""\n'
-                      + '\n'.join(name + ' = ' + pprint.pformat(value, width=120, sort_dicts=False)
-                                  for name, value in [('DECLARED', declared), ('DISPOSITIONS', dispositions),
-                                                      ('RETRIEVAL_MISSING', retrieval), ('FAULT_ABSENT', absent)]) + '\n')
+    with output.open('a') as stream:
+        for name, value in additions.items():
+            if value:
+                stream.write('\n' + name + '.update('
+                             + pprint.pformat(value, width=120, sort_dicts=False) + ')\n')
     print(json.dumps(dict(records=sum(map(len, declared.values())), pins=dict(__import__('collections').Counter(
         {reason: sum(row[4] for rows in dispositions.values() for row in rows if row[5] == reason)
          for reason in {row[5] for rows in dispositions.values() for row in rows}})))))

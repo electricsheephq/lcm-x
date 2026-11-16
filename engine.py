@@ -4733,7 +4733,11 @@ class LCMEngine(
                             if starts.get(previous) is self:
                                 starts.pop(previous, None)
                         self._retired_session_start = session_id
-                        self._retired_cli_reset_hook = None
+                        reset_binding = self.__dict__.pop("_retired_cli_reset_binding", None)
+                        self._retired_cli_reset_confirmation = (
+                            (retired._session_id, session_id)
+                            if reset_binding == (retired._session_id, retired._conversation_id) else None
+                        )
                         self._retired_cli_reset_nominated_at = time.time()
                         rows = self._retired_cli_reset_rows(retired._session_id, session_id)
                         self._retired_cli_reset_target_was_absent = None if rows is None else rows == (None, None)
@@ -5414,7 +5418,7 @@ class LCMEngine(
                 with self._open_retired_store(old_store, busy_timeout_ms=busy_timeout_ms) as store:
                     if append(store) is not None:
                         return True
-                    if self._replay_retired_projection(store, session_id, messages):
+                    if self._replay_retired_view(store, session_id, messages):
                         return True
             except Exception:
                 logger.debug("LCM retired session-end tail write failed", exc_info=True)
@@ -5425,9 +5429,17 @@ class LCMEngine(
             )
         return False
 
-    def _replay_retired_projection(self, store, session_id, messages):
-        """Replay a proven compacted view using temporary, existing-only connections."""
-        if store.read_metadata_json("compaction_commit_proof:" + session_id) is None:
+    def _replay_retired_view(self, store, session_id, messages):
+        """Reconcile a current lane using temporary, existing-only connections."""
+        projected = any(
+            row.get("_compressed_summary") or (
+                row.get("role") in ("user", "assistant") and isinstance(row.get("content"), str)
+                and self._verified_lcm_summary_prefix(
+                    row["content"], session_id=session_id, node_reader=store.existing_summary_node,
+                )[0] is not None
+            ) for row in messages
+        )
+        if projected and store.read_metadata_json("compaction_commit_proof:" + session_id) is None:
             return False
         writer = self._clone_for_agent()
         writer._discard_prepared_leaves = lambda: None
@@ -5440,12 +5452,30 @@ class LCMEngine(
             writer._conversation_id = self._conversation_id
             writer._reload_lane_guard = True
             writer._ingest_cursor_needs_reconcile = True
-            writer._ingest_messages(messages, no_view=True, retired_projection=True)
+            writer._ingest_messages(messages, no_view=True, retired_view="projection" if projected else "raw")
             return True
         finally:
             # The enclosing retired-store context owns this connection.
             writer.__dict__.pop("_store", None)
             writer._close_storage()
+
+    def _retired_raw_view_is_proven(self, messages):
+        """A repaired raw view needs occurrence stamps and its original opening row."""
+        view = [row for row in messages if not self._cold_tail_ingest_drops(row)]
+        if not view or any(_normalize_observed_at(row.get("timestamp")) is None for row in view):
+            return False
+        stored = self._store.get_range(self._session_id, limit=1, conversation_id=self._conversation_id)
+        if not stored:
+            return False
+        base = self._message_replay_identity(stored[0], stored_row=True)
+        incoming = self._message_replay_identity(view[0])
+        # /retry is a new stamped occurrence with the same opening request.
+        # A merged first user instead retains the original carrier's stamp.
+        return incoming == base or (
+            _normalize_observed_at(view[0].get("timestamp"))
+            == _normalize_observed_at(stored[0].get("observed_at"))
+            and _merge_append_cut(incoming, lambda head: _proof_user_identity(head) == _proof_user_identity(base))
+        )
 
     def _unattached_reload_lane(self, session_id, conversation_id, platform):
         """Find one durable lane when an older host omits its compressor."""
@@ -5532,7 +5562,7 @@ class LCMEngine(
         with self._storage_lock:
             if getattr(self, "_retired_session_start", None) == session_id:
                 retired = self._reload_successor or self
-                self._retired_cli_reset_hook = (retired._session_id, session_id)
+                self._retired_cli_reset_confirmation = (retired._session_id, session_id)
 
     def _empty_retired_cli_binding_is_proven(self, retired):
         try:
@@ -5565,7 +5595,7 @@ class LCMEngine(
             if old is not None:
                 return (old["end_reason"] == "new_session" and old["ended_at"] is not None
                         and new["source"] == old["source"] and new["started_at"] >= old["ended_at"])
-            if self._retired_cli_reset_hook != (retired._session_id, session_id):
+            if self._retired_cli_reset_confirmation != (retired._session_id, session_id):
                 return False
             was_absent = self._retired_cli_reset_target_was_absent
             if was_absent is None:
@@ -5644,6 +5674,11 @@ class LCMEngine(
         self._run_retained_view_operation(messages, save)
 
     def _run_retained_view_operation(self, messages, operation, *, allow_empty_prefix=False):
+        retired = self._reload_successor or self
+        if (not getattr(self, "_retired_session_start", None)
+                and getattr(self, "_retired_cli_reset_binding", None)
+                == (retired._session_id, retired._conversation_id)):
+            return  # A reset without an accepted replacement bind cannot write the old lane.
         start_reset = bool(messages)
         result = self._run_retained_operation(operation, start_reset=start_reset)
         if result is not None:
@@ -6151,6 +6186,7 @@ class LCMEngine(
         ):
             if off_current_should_bypass:
                 self._log_session_ingest_outcome(session_id, reason="bypass_lineage_end")
+                # Warn even when a stored prefix covers the view: this route compares content, not stamps.
                 if off_current_normal_conversation_id:
                     self._warn_session_end_unstored(session_id, messages, "prefix_mismatch_bypass_lineage")
             elif same_id_should_bypass and len(messages) > same_id_bypass_prefix_count:
@@ -6513,6 +6549,20 @@ class LCMEngine(
             )
             return
         unflushed = "unknown" if self._ingest_cursor_needs_reconcile else max(0, len(messages) - self._ingest_cursor)
+        last_identities = getattr(self, "_last_active_replay_source_identities", None)
+        last_identities = list(last_identities) if unflushed == 0 and last_identities is not None else None
+        last_replay = list(getattr(self, "_last_active_replay_messages", None) or ()) if last_identities is not None else None
+
+        def fully_stored():
+            # The cursor is only a length; a host can rewrite a row below it.
+            try:
+                return (unflushed == 0 and [self._message_replay_identity(m, strip_carrier=False)
+                                            for m in messages] == last_identities
+                        and len(last_replay) == len(messages)
+                        and not any(self._host_occurrence_changed(m, p) for m, p in zip(messages, last_replay)))
+            except Exception:
+                return False
+
         pending_before = len(self._pending_session_tails)
         ingest_finished = False
         try:
@@ -6541,7 +6591,8 @@ class LCMEngine(
                     self._session_end_flush_active = False
                     ingest_finished = True
                 except KeyboardInterrupt:
-                    self._warn_session_end_unstored(session_id, messages, "foreground_ingest_interrupted")
+                    if not fully_stored():
+                        self._warn_session_end_unstored(session_id, messages, "foreground_ingest_interrupted")
                     logger.warning(
                         "LCM session-end raw-message ingest interrupted; "
                         "final messages may be absent from the plugin-local store unflushed=%s",
@@ -6550,8 +6601,17 @@ class LCMEngine(
                     return
                 except Exception as exc:
                     if _is_ingest_busy_error(exc):
-                        if len(self._pending_session_tails) == pending_before and not any(
-                                t.get("session_id") == session_id for t in self._pending_session_tails):
+                        if not fully_stored() and len(self._pending_session_tails) == pending_before and not (self.__dict__.get(
+                                "_frozen_tail_reached") and any(t.get("kind") == "warm" and t.get("session_id") == session_id
+                                and t.get("store") is self._store for t in self._pending_session_tails)) and not any(
+                                t.get("session_id") == session_id
+                                and t.get("store") is self._store
+                                and t.get("conversation_id") == self._conversation_id
+                                and (t.get("view", [])[:len(messages)] == messages if t.get("kind") == "cold" else
+                                     self._ingest_cursor < len(messages)
+                                     and t.get("metadata_messages", [])[:len(messages) - self._ingest_cursor]
+                                     == messages[self._ingest_cursor:])
+                                for t in self._pending_session_tails):
                             self._warn_session_end_unstored(session_id, messages, "foreground_ingest_busy_unqueued")
                         self._ledger_count("ledger.tail.busy_at_end")
                         logger.warning(
@@ -6602,7 +6662,7 @@ class LCMEngine(
                 with self._attribution_span("snapshot"):
                     self._remember_session_end_replay_snapshot(session_id, messages)
         except KeyboardInterrupt:
-            if not ingest_finished:
+            if not ingest_finished and not fully_stored():
                 self._warn_session_end_unstored(session_id, messages, "foreground_flush_interrupted")
             logger.warning(
                 "LCM session-end ingest/finalize interrupted before bounded flush completed%s",
@@ -6611,7 +6671,7 @@ class LCMEngine(
             return
         except Exception as exc:
             if _is_sqlite_locked_error(exc):
-                if not ingest_finished and len(self._pending_session_tails) == pending_before:
+                if not ingest_finished and not fully_stored() and len(self._pending_session_tails) == pending_before:
                     self._warn_session_end_unstored(session_id, messages, "foreground_flush_locked")
                 logger.warning(
                     "LCM session-end ingest/finalize skipped due to SQLite lock before bounded flush: %s%s",
@@ -6622,6 +6682,18 @@ class LCMEngine(
             raise
 
     def on_session_reset(self) -> None:
+        # Hermes resets the retained engine directly before binding /new. Its
+        # registration hook can already be gone while unload drains or reloads.
+        with self._storage_lock:
+            retired = self._reload_successor or self
+            self._retired_cli_reset_binding = (
+                (retired._session_id, retired._conversation_id)
+                if retired._session_platform == "cli" and retired._session_id
+                and retired._session_id == retired._foreground_session_id
+                and not self._thread_context_stateless()
+                and not self._thread_context_has_auxiliary_session(retired._session_id)
+                and not self._in_process_parent_session_id({}) else None
+            )
         if self._plugin_is_unloading() and self._reload_successor is not None:
             successor = self._retained_successor()
             if successor is not None:
@@ -6963,7 +7035,7 @@ class LCMEngine(
         handler = handlers.get(name)
         if handler:
             return handler(args, engine=self,
-                           **{k: v for k, v in kwargs.items() if k in {"delivery_unit", "delivery_order", "adjacent_reply", "summary_event_time", "snippet_window_hits", "extra_entries", "later_statements", "min_sessions", "session_hints", "recall_guidance"}})
+                           **{k: v for k, v in kwargs.items() if k in {"delivery_unit", "delivery_order", "adjacent_reply", "summary_event_time", "snippet_window_hits", "extra_entries", "later_statements", "min_sessions", "session_hints", "recall_guidance", "recency_floor"}})
         return json.dumps({"error": f"Unknown LCM tool: {name}"})
 
     def _database_path_source(self) -> str:
@@ -8504,7 +8576,7 @@ class LCMEngine(
         allow_session_end_replay_proof: bool = False,
         no_view: bool = False,
         retried_tail: Dict[str, Any] | None = None,
-        retired_projection: bool = False,
+        retired_view: str | None = None,
     ) -> List[Dict[str, Any]]:
         """Persist new messages to the store.
 
@@ -8642,13 +8714,16 @@ class LCMEngine(
                                         ).fetchone()
                                         if current is None or current[0] != self._session_id:
                                             raise RuntimeError("LCM reload lane is no longer current")
-                                        if retired_projection:
+                                        if retired_view is not None:
                                             mixed_lanes = self._store.connection.execute(
                                                 "SELECT 1 FROM messages WHERE session_id = ? AND conversation_id IS NOT ? LIMIT 1",
                                                 (self._session_id, self._conversation_id),
                                             ).fetchone()
-                                            if mixed_lanes or self._cursor_from_durable_commit_proof(messages) is None:
-                                                raise RuntimeError("LCM retired view no longer matches its durable projection")
+                                            proven = (self._cursor_from_durable_commit_proof(messages) is not None
+                                                      if retired_view == "projection"
+                                                      else self._retired_raw_view_is_proven(messages))
+                                            if mixed_lanes or not proven:
+                                                raise RuntimeError("LCM retired view no longer matches its durable lane")
                                         elif (singleton := self._reload_singleton_cursor(messages)) is not None:
                                             self._ingest_cursor = singleton
                                             self._ingest_cursor_needs_reconcile = False
@@ -8684,7 +8759,7 @@ class LCMEngine(
                                     if self._ingest_ledger_attempt is not None:
                                         self._write_ingest_ledger(self._ingest_ledger_attempt, after_commit, attribution)
                                     self._link_stored_todo_replays(messages, prepared.get("stored_at", {}))
-                                    if retired_projection and (stored := prepared.get("stored_at")):
+                                    if retired_view is not None and (stored := prepared.get("stored_at")):
                                         key = self._retired_tail_key(self._session_id, self._conversation_id)
                                         self._store.write_metadata_json([key], json.dumps(max(stored.values())))
                                     if retired_prefix is not None and retired_prefix[1]:
@@ -11992,7 +12067,7 @@ class LCMEngine(
                 # FTS-only anchor under the floor would displace an eligible hit.
                 fts_anchor=False,
                 delivery_unit="hits",
-                delivery_order="score", adjacent_reply=False, later_statements=0, min_sessions=0, session_hints=False, recall_guidance="v1",
+                delivery_order="score", adjacent_reply=False, later_statements=0, min_sessions=0, session_hints=False, recall_guidance="v1", recency_floor=0.5,
                 snippet_window_hits=0, extra_entries=0,
                 summary_event_time=False,
             )

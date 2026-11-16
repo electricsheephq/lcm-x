@@ -570,9 +570,9 @@ def test_retained_empty_cli_reset_requires_exact_host_confirmation(
         old_ctx.unload_callbacks[0]()
         _, ctx = preflight.register(supports_unload=True, manager=old_ctx._manager)
         try:
-            # Hermes 0.21.3+ CLISessionMixin.new_session discards the empty row, calls the
-            # engine reset and bind methods, and emits the reset hook even if its
-            # first create_session call fails. The agent retries on the next turn.
+            # Exercise hook-only confirmation independently of the direct engine
+            # reset callback (covered by test_issue_2230_reload_gaps). Hermes can
+            # emit the hook even if create_session fails and retries next turn.
             def create_replacement(started_at):
                 with native:
                     native.execute(
@@ -587,7 +587,6 @@ def test_retained_empty_cli_reset_requires_exact_host_confirmation(
             preexisting = native_timing in ("preexisting", "busy-preexisting") or same_tick
             if preexisting:
                 create_replacement(nomination_time if same_tick else nomination_time - 60)
-            retained.on_session_reset()
             with native:
                 if native_timing in ("busy-at-bind", "busy-preexisting") or same_tick:
                     native.execute("BEGIN EXCLUSIVE")
@@ -675,8 +674,6 @@ def test_retained_cli_new_persists_an_interrupted_first_turn(preflight, empty, p
             current._manager._context_engine = None
         view.append({"role": "assistant", "content": "partial first reply"})
         expected = [(row["role"], row["content"]) for row in view]
-        if timing == "draining" and empty:
-            expected = []  # An empty old session needs a matching host reset hook.
         # Interrupted turns have no post_llm_call on Hermes.
         retained.on_turn_complete(view, interrupted=True)
         assert _durable_messages(db, "fresh") == expected

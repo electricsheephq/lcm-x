@@ -1,4 +1,5 @@
 # Schema changes
+The versioned [store contract](../store-contract.md) records the consumer surface and its changelog; update it when that surface changes.
 
 The store's DDL lives in nine modules today (`store.py`, `db_bootstrap.py`, `dag.py`, `vector_store.py`, `query_view_store.py`,
 `scope_storage.py`, `trajectory_store.py`, `teams/catalog.py`, `command.py`), with more than 25 `ALTER TABLE` statements between them.

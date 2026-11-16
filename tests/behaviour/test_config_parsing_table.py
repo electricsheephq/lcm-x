@@ -65,6 +65,8 @@ CONFIG_ROWS = (
     ('recall_snippet_window_hits', 'LCM_RECALL_SNIPPET_WINDOW_HITS', 'int', 0),
     ('recall_extra_entries', 'LCM_RECALL_EXTRA_ENTRIES', 'int', 0),
     ('recall_later_statements', 'LCM_RECALL_LATER_STATEMENTS', 'int', 0),
+    ('recall_recency_floor', 'LCM_RECALL_RECENCY_FLOOR', 'float', 0.5),
+    ('recall_grep_stemmed', 'LCM_RECALL_GREP_STEMMED', 'bool', False),
     ('recall_fts_anchor', 'LCM_RECALL_FTS_ANCHOR', 'bool', True),
     ('recall_min_sessions', 'LCM_RECALL_MIN_SESSIONS', 'int', 0),
     ('recall_session_hints', 'LCM_RECALL_SESSION_HINTS', 'bool', False),
@@ -188,6 +190,7 @@ SPECIAL = {
     "recall_snippet_window_hits": (D, D, D, D, 1, 0, D, D, D, D, D, D, D, D, D, 25),
     "recall_extra_entries": (D, D, D, D, 1, 0, D, D, D, D, D, D, D, D, D, 25),
     "recall_later_statements": (D, D, D, D, 1, 0, D, D, D, D, D, D, D, D, D, 5),
+    "recall_recency_floor": (D, D, D, D, 1.0, 0.0, D, D, D, D, D, D, D, D, 0.5, D),
     "embeddings_enabled": FLAG,  # R3: unset local ON; invalid/blank stays OFF.
     "embedding_provider": (D, D, *VALUES[2:]),  # R4: blank provider follows unset local default.
     "recall_delivery_unit": ("hits",) * 16,

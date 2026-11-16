@@ -49,14 +49,15 @@ def test_missing_file_and_platform(monkeypatch):
 
 def test_cli_roundtrip(tmp_path):
     command = [sys.executable, "-B", hoststat.__file__]
-    before = json.loads(subprocess.check_output([*command, "snapshot"], text=True))
+    # A clock just below a power of two: (m + 2) - m is not exactly 2 in floating point, as on a CI runner.
+    before = dict(json.loads(subprocess.check_output([*command, "snapshot"], text=True)), monotonic=1022.0022)
     after = dict(before, monotonic=before["monotonic"] + 2)
     paths = [tmp_path / "a.json", tmp_path / "b.json"]
     for path, value in zip(paths, (before, after)):
         path.write_text(json.dumps(value))
     found = json.loads(subprocess.check_output([*command, "delta", *map(str, paths)], text=True))
     assert found == hoststat.delta(before, after)
-    assert found["elapsed_s"] == 2
+    assert found["elapsed_s"] == pytest.approx(2)
 
 
 def test_maxima_missing_and_mixed():
