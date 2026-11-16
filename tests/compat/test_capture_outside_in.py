@@ -303,7 +303,7 @@ def test_projection_fidelity(tmp_path, shape, record_property):
     if shape == "unexpected":
         assert report["unexpected_sessions"] == [{"session_id": "extra", "rows": 1}]
     if shape in {"persisted", "persisted-payload", "undecodable", "utf8", "uidless"}:
-        assert sum(r["unverified" if shape.startswith("persisted") else "unprojected"] for r in report["lineages"]) == 1
+        assert sum(r["unverified" if shape.startswith("persisted") else "unprojected"] for r in report["lineages"]) == (0 if shape.startswith("persisted") else 1)
     if shape == "payload":
         assert sum(r["unverified"] for r in report["lineages"]) == 0
         assert read_sql(home, "SELECT content FROM messages WHERE tool_call_id='call1'")[0][0].startswith("[Externalized tool output:")
@@ -313,7 +313,7 @@ def test_projection_fidelity(tmp_path, shape, record_property):
         assert read_sql(home, "SELECT content FROM messages WHERE tool_call_id='call1'") == [("synthetic recovered full output",)]
     if shape == "docs":
         paragraph = next(line for line in (ROOT / "docs/claude-code-adapter.md").read_text().splitlines() if "An independent row checker" in line)
-        assert all(word in paragraph for word in ("unverified", "unprojected", "unexpected_sessions", "every captured transcript"))
+        assert all(word in paragraph for word in ("unverified", "unprojected", "unexpected_sessions", "every transcript file of the session"))
     if shape == "error":
         checked = run(CHECKER, "--home", home, "--transcript", "plain=" + str(tmp_path / "PRIVATE_missing"), env=env, accepted=(1,))
         assert json.loads(checked.stdout)["error_type"] == "FileNotFoundError" and "PRIVATE" not in checked.stdout
@@ -343,7 +343,7 @@ def test_preview_occurrence(tmp_path, preview_first, corrupt, record_property):
     record_property("audit", json.dumps(audit, sort_keys=True))
     assert checked.returncode == int(corrupt) and report["pass"] == (not corrupt)
     assert [(r["lost"], r["duplicated"], r["order_kept"], r["unpaired"], r["unverified"], r["unprojected"])
-            for r in report["lineages"]] == [(int(corrupt), int(corrupt), True, 0, 1, 0)]
+            for r in report["lineages"]] == [(int(corrupt), int(corrupt), True, 0, 0, 0)]
     assert not report["unexpected_sessions"]
     if not corrupt:
         assert audit["ok"]
@@ -465,10 +465,9 @@ def test_preview_then_verbatim_revision(tmp_path, record_property):
     record_property("checker", checked.stdout)
     record_property("audit", json.dumps(audit, sort_keys=True))
     assert audit["ok"]
-    #2777: a recovered text equal to a later verbatim revision is reported out of order; a fix must make this pass while the corrupted-pair tests keep failing.
-    assert checked.returncode == 1 and not report["pass"]
+    assert checked.returncode == 0 and report["pass"]
     assert [(r["lost"], r["duplicated"], r["order_kept"], r["unpaired"], r["unverified"], r["unprojected"])
-            for r in report["lineages"]] == [(0, 0, False, 0, 1, 0)]
+            for r in report["lineages"]] == [(0, 0, True, 0, 0, 0)]
     assert not report["unexpected_sessions"]
 
 
@@ -496,5 +495,212 @@ def test_corrupted_preview_verbatim_pair(tmp_path, preview_first, record_propert
     record_property("audit", json.dumps(audit, sort_keys=True))
     assert checked.returncode == 1 and not report["pass"]
     assert [(r["lost"], r["duplicated"], r["order_kept"], r["unpaired"], r["unverified"], r["unprojected"])
-            for r in report["lineages"]] == [(0, 0, False, 0, 1, 0)]
+            for r in report["lineages"]] == [(1, 1, True, 0, 0, 0)]
     assert not report["unexpected_sessions"]
+
+
+def write_entries(path, entries):
+    path.write_text("".join(json.dumps(entry) + "\n" for entry in entries))
+    return path
+
+
+def check_only(home, env, inputs):
+    args = [arg for session, path in inputs for arg in ("--transcript", f"{session}={path}")]
+    done = run(CHECKER, "--home", home, *args, env=env, accepted=(0, 1))
+    return done.returncode, json.loads(done.stdout)
+
+
+@pytest.mark.parametrize("corrupt", [False, True], ids=["healthy", "corrupted"])
+def test_verified_preview(tmp_path, corrupt, record_property):
+    base = tmp_path / "capture"
+    saved = base / "claude/projects/synthetic/plain/tool-results/output.txt"
+    saved.parent.mkdir(parents=True)
+    saved.write_bytes("synthetic café\r\nfull output\n".encode())
+    rows = [json.loads(line) for line in FIXTURES[0].read_text().splitlines()][1:3]
+    rows[1]["message"]["content"] = rows[1]["message"]["content"][:1]
+    rows[1]["message"]["content"][0]["content"] = (
+        f"<persisted-output>\nFull output saved to: {saved}\n\nPreview:\nsynthetic\n</persisted-output>")
+    home, env, inputs = capture_session(base, write_entries(tmp_path / "01_preview.jsonl", rows))
+    if corrupt:
+        with closing(sqlite3.connect(home / "lcm.db")) as conn, conn:
+            conn.execute("UPDATE messages SET content='corrupted' WHERE role='tool'")
+    code, report = check_only(home, env, inputs)
+    record_property("checker", json.dumps(report))
+    row = report["lineages"][0]
+    assert (code, report["pass"]) == (int(corrupt), not corrupt)
+    assert (row["lost"], row["duplicated"], row["unverified"]) == (int(corrupt), int(corrupt), 0)
+    saved.unlink()
+    code, report = check_only(home, env, inputs)
+    row = report["lineages"][0]
+    assert code == 0 and row["unverified"] == 1
+    assert row["unverified_reasons"] == [{"uid": "r1", "reason": "saved_output_missing"}]
+
+
+@pytest.mark.parametrize("shape", ["base64", "image", "tool-media", "wrapped", "multiple"])
+@pytest.mark.parametrize("corrupt", [False, True], ids=["healthy", "corrupted"])
+def test_inline_payload(tmp_path, shape, corrupt, record_property):
+    import base64
+    payload = base64.b64encode(bytes(range(256)) * 16).decode()
+    text = "café prefix\n" + payload + "\nsuffix"
+    if shape == "wrapped":
+        text = "café prefix\n" + "\n".join(payload[i:i + 76] for i in range(0, len(payload), 76)) + "\nsuffix"
+    if shape == "multiple":
+        text += " data:image/png;base64," + payload
+    rows = [dict(type="user", uuid="media", sessionId="media", message=dict(content=text))]
+    if shape == "image":
+        rows[0]["message"]["content"] = [dict(type="text", text="café"), dict(
+            type="image", source=dict(type="base64", media_type="image/png", data=payload))]
+    if shape == "tool-media":
+        rows = [dict(type="assistant", uuid="call", sessionId="media", message=dict(content=[
+                    dict(type="tool_use", id="c", name="synthetic", input={})])),
+                dict(type="user", uuid="result", sessionId="media", message=dict(content=[
+                    dict(type="tool_result", tool_use_id="c", content=text)]))]
+    home, env, inputs = capture_session(tmp_path / "capture", write_entries(tmp_path / "01_media.jsonl", rows))
+    stored = read_sql(home, "SELECT content FROM messages ORDER BY store_id")[-1][0]
+    assert "[Externalized LCM ingest payload:" in stored
+    if corrupt:
+        with closing(sqlite3.connect(home / "lcm.db")) as conn, conn:
+            conn.execute("UPDATE messages SET content=? WHERE store_id=(SELECT max(store_id) FROM messages)",
+                         (stored.replace("chars=", "chars=9", 1),))
+    code, report = check_only(home, env, inputs)
+    record_property("checker", json.dumps(report))
+    assert (code, report["pass"]) == (int(corrupt), not corrupt)
+    assert [(r["lost"], r["duplicated"], r["unverified"]) for r in report["lineages"]] == [
+        (int(corrupt), int(corrupt), 0)]
+
+
+@pytest.mark.parametrize("role", ["user", "assistant"])
+@pytest.mark.parametrize("corrupt", [False, True], ids=["healthy", "corrupted"])
+def test_non_tool_payload(tmp_path, role, corrupt, record_property):
+    rows = [dict(type=role, uuid="large", sessionId="large", message=dict(content="".join(f"Synthetic observation {i}: café sample number {i*i}.\n" for i in range(2500))))]
+    home, env, inputs = capture_session(tmp_path / "capture", write_entries(tmp_path / "01_large.jsonl", rows))
+    stored = read_sql(home, "SELECT content FROM messages")[0][0]
+    assert stored.startswith("[Externalized payload:")
+    if corrupt:
+        with closing(sqlite3.connect(home / "lcm.db")) as conn, conn:
+            conn.execute("UPDATE messages SET content=?", (stored.replace("bytes=", "bytes=9", 1),))
+    code, report = check_only(home, env, inputs)
+    record_property("checker", json.dumps(report))
+    assert (code, report["pass"]) == (int(corrupt), not corrupt)
+    assert [(r["lost"], r["duplicated"]) for r in report["lineages"]] == [(int(corrupt), int(corrupt))]
+
+
+@pytest.mark.parametrize("corrupt", [False, True], ids=["healthy", "corrupted"])
+def test_reference_then_literal_revision(tmp_path, corrupt, record_property):
+    rows = [json.loads(line) for line in FIXTURES[0].read_text().splitlines()][1:3]
+    rows[1]["message"]["content"] = rows[1]["message"]["content"][:1]
+    rows[1]["message"]["content"][0]["content"] = "synthetic " * 7500
+    home, env, inputs = capture_session(tmp_path / "capture", write_entries(tmp_path / "01_reference.jsonl", rows))
+    marker = read_sql(home, "SELECT content FROM messages WHERE role='tool'")[0][0]
+    assert marker.startswith("[Externalized tool output:")
+    rows[1]["message"]["content"][0]["content"] = marker
+    with inputs[0][1].open("a") as handle:
+        handle.write(json.dumps(rows[1]) + "\n")
+    hook(home, env, "plain", inputs[0][1])
+    run(CAPTURE, "worker", "--home", home, env=env)
+    assert read_sql(home, "SELECT content FROM messages WHERE role='tool' ORDER BY store_id") == [(marker,), (marker,)]
+    if corrupt:
+        with closing(sqlite3.connect(home / "lcm.db")) as conn, conn:
+            conn.execute("UPDATE messages SET content='corrupted' WHERE store_id=2")
+    code, report = check_only(home, env, inputs)
+    record_property("checker", json.dumps(report))
+    assert (code, report["pass"]) == (int(corrupt), not corrupt)
+
+
+@pytest.mark.parametrize("dangling", [False, True], ids=["healthy", "corrupted"])
+def test_dangling_binding(clean, tmp_path, dangling, record_property):
+    source, env, inputs = clean
+    home = tmp_path / "store"
+    home.mkdir()
+    with closing(sqlite3.connect(source / "lcm.db")) as src, closing(sqlite3.connect(home / "lcm.db")) as dst:
+        src.backup(dst)
+        if dangling:
+            dst.execute("INSERT INTO host_uid_bindings(store_id,uid,lineage_key,kind,binding_version) "
+                        "VALUES(999999,'dangling','claude-code:plain','canonical',1)")
+            dst.commit()
+    code, report = check_only(home, env, inputs)
+    record_property("checker", json.dumps(report))
+    assert (code, report["pass"]) == (int(dangling), not dangling)
+    assert report["dangling_bindings"] == ([dict(store_id=999999, uid="dangling", lineage_key="claude-code:plain",
+                                                 kind="canonical")] if dangling else [])
+
+
+@pytest.mark.parametrize("corrupt", [False, True], ids=["healthy", "corrupted"])
+def test_thousand_references(tmp_path, corrupt, record_property, monkeypatch):
+    import hashlib
+    import importlib.util
+    home = tmp_path / "store"
+    home.mkdir()
+    entries, stored = [], []
+    for i in range(1000):
+        text = f"synthetic {i} café " * 100
+        digest = hashlib.sha256(text.encode()).hexdigest()[:12]
+        marker = (f"[Externalized tool output: tool=synthetic; tool_call_id=c{i}; chars={len(text)}; "
+                  f"bytes={len(text.encode())}; read it with lcm_expand; ref=20000101_000000_c{i}_{digest}_abcd.json]")
+        entries.extend([dict(type="assistant", uuid=f"a{i}", sessionId="batch", message=dict(content=[
+                           dict(type="tool_use", id=f"c{i}", name="synthetic", input={})])),
+                        dict(type="user", uuid=f"t{i}", sessionId="batch", message=dict(content=[
+                           dict(type="tool_result", tool_use_id=f"c{i}", content=text)]))])
+        calls = json.dumps([dict(id=f"c{i}", type="function", function=dict(name="synthetic", arguments="{}"))])
+        stored.extend([(2*i+1, "batch", "assistant", "", None, calls, f"a{i}"),
+                       (2*i+2, "batch", "tool", marker, f"c{i}", None, f"t{i}")])
+    with closing(sqlite3.connect(home / "lcm.db")) as conn, conn:
+        conn.execute("CREATE TABLE messages(store_id INTEGER, session_id TEXT, role TEXT, content TEXT, "
+                     "tool_call_id TEXT, tool_calls TEXT)")
+        conn.execute("CREATE TABLE host_uid_bindings(store_id INTEGER, uid TEXT, lineage_key TEXT, kind TEXT)")
+        conn.executemany("INSERT INTO messages VALUES(?,?,?,?,?,?)", [row[:-1] for row in stored])
+        conn.executemany("INSERT INTO host_uid_bindings VALUES(?,?,'claude-code:batch','canonical')",
+                         [(row[0], row[-1]) for row in stored])
+        if corrupt:
+            conn.execute("UPDATE messages SET content=replace(content,'bytes=','bytes=9') WHERE store_id=2000")
+    inputs = [("batch", write_entries(tmp_path / "batch.jsonl", entries))]
+    code, report = check_only(home, {"PATH": os.defpath}, inputs)
+    record_property("checker", json.dumps(report))
+    record_property("home", str(home))
+    assert (code, report["pass"]) == (int(corrupt), not corrupt)
+    assert [(r["lost"], r["duplicated"]) for r in report["lineages"]] == [(int(corrupt), int(corrupt))]
+    spec = importlib.util.spec_from_file_location("outside_in_parse_probe", CHECKER)
+    checker = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(checker)
+    original_loads, parsed = json.loads, []
+    def count_loads(*args, **kwargs):
+        parsed.append(None)
+        return original_loads(*args, **kwargs)
+    with monkeypatch.context() as patch:
+        patch.setattr(checker.json, "loads", count_loads)
+        measured = checker.check(home, inputs)
+    record_property("json_loads", len(parsed))
+    assert measured["pass"] == (not corrupt)
+    assert len(parsed) <= len(entries) * 8
+    assert report["elapsed_ms"] > 0
+
+
+@pytest.mark.parametrize("path_key", [True, False], ids=["path-key", "id-key"])
+def test_reused_workflow_agent_id(tmp_path, path_key, record_property):
+    entries = [dict(type="user", uuid="parent", sessionId="parent", message=dict(content="parent")),
+               dict(type="user", uuid="first", sessionId="parent", agentId="child", message=dict(content="first"))]
+    home, env, inputs = capture_session(tmp_path / "capture", write_entries(tmp_path / "01_workflow.jsonl", entries))
+    later = inputs[1][1].parent / "workflows/run2/agent-child.jsonl"
+    later.parent.mkdir(parents=True)
+    write_entries(later, [dict(type="user", uuid="later", sessionId="parent", message=dict(content="later"))])
+    run(CAPTURE, "worker", "--home", home, env=env)
+    key = "parent/agent:/workflows/run2/agent-child.jsonl"
+    inputs.append((key if path_key else "parent/agent:child", later))
+    code, report = check_only(home, env, inputs)
+    record_property("checker", json.dumps(report))
+    assert (code, report["pass"]) == (int(not path_key), path_key)
+    assert report["unexpected_sessions"] == ([] if path_key else [dict(session_id=key, rows=1)])
+
+
+@pytest.mark.parametrize("reverse", [False, True], ids=["healthy", "reversed"])
+def test_revision_slot_order(tmp_path, reverse, record_property):
+    entries = [dict(type="user", uuid="u", sessionId="order", message=dict(content=text))
+               for text in ("first revision", "second revision")]
+    home, env, inputs = capture_session(tmp_path / "capture", write_entries(tmp_path / "09_order.jsonl", entries))
+    if reverse:
+        with closing(sqlite3.connect(home / "lcm.db")) as conn, conn:
+            conn.execute("UPDATE messages SET content=CASE store_id WHEN 1 THEN 'second revision' ELSE 'first revision' END")
+    code, report = check_only(home, env, inputs)
+    record_property("checker", json.dumps(report))
+    assert (code, report["pass"]) == (int(reverse), not reverse)
+    assert [(r["lost"], r["duplicated"], r["order_kept"]) for r in report["lineages"]] == [(0, 0, not reverse)]

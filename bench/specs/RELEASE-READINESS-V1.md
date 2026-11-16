@@ -59,6 +59,9 @@ never wait for it.
   1. **Audit gate.** Every R1-R10 session's audit exits 0 with `verified: true`: every transcript
      line accounted for, 0 lost, 0 duplicated, no spool record waiting or failed. Sessions with
      Claude Code's local transcript GC on are listed without a lossless claim.
+     The independent row checker takes every transcript file of the session via repeated
+     `--transcript SESSION=PATH` arguments; a reused workflow agent id's later transcript uses
+     `SESSION/agent:/workflows/<run>/agent-<id>.jsonl`.
   2. **Real sessions R1-R10** through Claude Code, each with a record: the backend, the machine
      (model and RAM), the runtime mode, the exact interpreter version, the load average at the
      start, the audit's `ok` and `verified`, per-event hook latency (n, p50, p95, max) with each

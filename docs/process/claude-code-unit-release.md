@@ -19,6 +19,9 @@ the gate's evidence.
      `HOME` and a scratch `CLAUDE_CONFIG_DIR`, each run recorded as the spec lists;
    - `<plugin folder>/lcm-x/scripts/lcm_x_capture.py audit --home <store home>` after each run and
      per session: exit 0 and `verified: true`;
+     The independent row checker takes every transcript file of the session via repeated
+     `--transcript SESSION=PATH` arguments; a reused workflow agent id's later transcript uses
+     `SESSION/agent:/workflows/<run>/agent-<id>.jsonl`.
    - the growth check when its inputs changed since its last run;
    - `python scripts/claude_code_unit_smoke.py --ref <candidate sha> --runtime venv`, then
      `--runtime found`, each on Python 3.11 and 3.14 (the tag workflow's found mode later uses the
