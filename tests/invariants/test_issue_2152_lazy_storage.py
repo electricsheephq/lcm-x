@@ -570,7 +570,7 @@ def test_retained_empty_cli_reset_requires_exact_host_confirmation(
         old_ctx.unload_callbacks[0]()
         _, ctx = preflight.register(supports_unload=True, manager=old_ctx._manager)
         try:
-            # Hermes CLISessionMixin.new_session discards the empty row, calls the
+            # Hermes 0.21.3+ CLISessionMixin.new_session discards the empty row, calls the
             # engine reset and bind methods, and emits the reset hook even if its
             # first create_session call fails. The agent retries on the next turn.
             def create_replacement(started_at):
@@ -632,6 +632,150 @@ def test_retained_empty_cli_reset_requires_exact_host_confirmation(
         finally:
             ctx.unload_callbacks[0]()
     db.unlink()
+
+
+@pytest.mark.parametrize("empty", [False, True], ids=["used-session", "empty-session"])
+@pytest.mark.parametrize(
+    "preflights, timing", [(0, "ready"), (1, "ready"), (2, "ready"), (0, "gap"), (1, "gap"), (0, "draining")],
+    ids=["direct", "preflight", "two-preflights", "second-gap", "preflight-then-gap", "draining-reset"],
+)
+def test_retained_cli_new_persists_an_interrupted_first_turn(preflight, empty, preflights, timing):
+    prototype, old = preflight.register(supports_unload=True)
+    retained = prototype.clone_for_agent()
+    retained.on_session_start("original", platform="cli")
+    first = [{"role": "user", "content": "before reset"}, {"role": "assistant", "content": "old answer"}]
+    if not empty:
+        retained.ingest(first)
+    host_path = preflight.home / "state.db"
+    with closing(sqlite3.connect(host_path)) as native, native:
+        native.execute("""CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, parent_session_id TEXT,
+                           started_at REAL, ended_at REAL, end_reason TEXT)""")
+        if not empty:
+            native.execute("INSERT INTO sessions VALUES ('original', 'cli', NULL, 1, 2, 'new_session')")
+    if timing == "draining":
+        prototype._unload_group.closing.set()
+        old._manager._context_engine = None
+        current = old
+    else:
+        old.unload_callbacks[0]()
+        _, current = preflight.register(supports_unload=True, manager=old._manager)
+    retained.on_session_reset()
+    retained.bind_session_state(SimpleNamespace(db_path=host_path), "fresh")
+    with closing(sqlite3.connect(host_path)) as native, native:
+        native.execute("INSERT INTO sessions VALUES ('fresh', 'cli', NULL, 3, NULL, NULL)")
+    current.hooks["on_session_reset"](session_id="fresh", platform="cli", reason="new_session")
+
+    view = [{"role": "user", "content": "first new question"}]
+    db = preflight.home / "lcm.db"
+    try:
+        for _ in range(preflights):
+            retained.should_compress_preflight(view)
+        if timing == "gap":
+            current.unload_callbacks[0]()
+            current._manager._context_engine = None
+        view.append({"role": "assistant", "content": "partial first reply"})
+        expected = [(row["role"], row["content"]) for row in view]
+        if timing == "draining" and empty:
+            expected = []  # An empty old session needs a matching host reset hook.
+        # Interrupted turns have no post_llm_call on Hermes.
+        retained.on_turn_complete(view, interrupted=True)
+        assert _durable_messages(db, "fresh") == expected
+        retained.on_turn_complete(view, interrupted=True)
+        retained.on_session_end("fresh", view)
+        assert _durable_messages(db, "fresh") == expected
+        assert _durable_messages(db, "original") == (
+            [] if empty else [(row["role"], row["content"]) for row in first]
+        )
+    finally:
+        current.unload_callbacks[0]()
+    db.unlink()
+    retained.on_turn_complete(view, interrupted=True)
+    assert not db.exists()
+
+
+@pytest.mark.parametrize("operation", ["preflight", "compress"])
+@pytest.mark.parametrize("timing", ["gap", "empty-gap", "clone-refused", "gate", "admitted", "marked-review"])
+def test_retained_compaction_saves_view_without_a_successor(preflight, monkeypatch, operation, timing):
+    prototype, old = preflight.register(supports_unload=True)
+    retained = prototype.clone_for_agent()
+    retained.on_session_start("handoff", platform="cli")
+    view = [
+        {"role": role, "content": content}
+        for role, content in [
+            ("user", "first question"), ("assistant", "first answer"),
+            ("user", "later question"), ("assistant", "later answer"),
+        ]
+    ]
+    if timing not in ("empty-gap", "marked-review"):
+        retained.ingest(view[:2])
+    if timing in ("gate", "admitted", "marked-review"):
+        gate = retained._compaction_gate
+        armed = True
+
+        class Gate:
+            def __enter__(self):
+                nonlocal armed
+                if armed and timing == "gate":
+                    armed = False
+                    old.unload_callbacks[0]()
+                    old._manager._context_engine = None
+                return gate.__enter__()
+
+            def __exit__(self, *exc):
+                nonlocal armed
+                result = gate.__exit__(*exc)
+                if armed and timing in ("admitted", "marked-review"):
+                    armed = False
+                    assert retained._compaction_inflight == 1
+                    prototype._unload_group.closing.set()
+                    old._manager._context_engine = None
+                return result
+
+            def __getattr__(self, name):
+                return getattr(gate, name)
+
+        monkeypatch.setattr(retained, "_compaction_gate", Gate())
+    else:
+        old.unload_callbacks[0]()
+        old._manager._context_engine = None
+    if timing == "clone-refused":
+        replacement, current = preflight.register(supports_unload=True, manager=old._manager)
+        construct = replacement._clone_for_agent
+
+        def unload_while_cloning():
+            clone = construct()
+            current.unload_callbacks[0]()
+            old._manager._context_engine = None
+            return clone
+
+        monkeypatch.setattr(replacement, "_clone_for_agent", unload_while_cloning)
+
+    def invoke_engine():
+        if operation == "preflight":
+            assert retained.should_compress_preflight(view) is False
+        else:
+            assert retained.compress(view, force=True) is view
+
+    class ReviewAgent:
+        session_id = "handoff"
+        _parent_session_id = "foreground"
+        _memory_write_origin = "background_review"
+
+        def call(self):
+            invoke_engine()
+
+    call = ReviewAgent().call if timing == "marked-review" else invoke_engine
+    db = preflight.home / "lcm.db"
+    call()
+    if timing in ("admitted", "marked-review"):
+        old.unload_callbacks[0]()
+    expected = [] if timing == "marked-review" else [(row["role"], row["content"]) for row in view]
+    assert _durable_messages(db, "handoff") == expected
+    call()
+    assert _durable_messages(db, "handoff") == expected
+    db.unlink()
+    call()
+    assert not db.exists()
 
 
 def test_retained_engine_uses_new_registration_for_preflight_compaction_and_tools(preflight, monkeypatch):

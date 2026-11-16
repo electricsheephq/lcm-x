@@ -170,7 +170,7 @@ from .db_bootstrap import SQLITE_BUSY_TIMEOUT_MS, refresh_legacy_conversation_id
 from .reset_state import ResetStateMixin
 from .bypass import BypassMixin
 from .prefix_matching import PrefixMatchingMixin
-from .lifecycle_state import LifecycleStateStore
+from .lifecycle_state import LifecycleBindingChangedError, LifecycleStateStore
 from .message_content import (
     normalize_content_value,
     stored_text_content_for_pattern_matching,
@@ -5392,7 +5392,7 @@ class LCMEngine(
 
     def _flush_retired_session_end(
         self, session_id, messages, *, warn=True, require_current=False,
-        busy_timeout_ms=_SESSION_END_BUSY_TIMEOUT_MS,
+        allow_empty_prefix=False, busy_timeout_ms=_SESSION_END_BUSY_TIMEOUT_MS,
     ):
         """Append only the proven suffix of a view from a retired binding."""
         if not messages:
@@ -5407,7 +5407,8 @@ class LCMEngine(
                     with store.ingest_atomic():
                         return self._append_retired_tail(
                             store, old_store, session_id, self._conversation_id, messages,
-                            self._session_platform, allow_empty=not require_current, require_current=require_current,
+                            self._session_platform, allow_empty=allow_empty_prefix or not require_current,
+                            require_current=require_current,
                         )
 
                 with self._open_retired_store(old_store, busy_timeout_ms=busy_timeout_ms) as store:
@@ -5587,8 +5588,8 @@ class LCMEngine(
         self._ingest_messages(messages)
         return True
 
-    def _adopt_retained_binding(self, retired, *, reset_session_id=None, after_compression=False):
-        """Attach to an existing current lane without rebinding durable state."""
+    def _adopt_retained_binding(self, retired, *, reset_session_id=None, after_compression=False, start_reset=False):
+        """Attach to the current lane or claim an unused lane for a proven reset."""
         session_id, conversation_id, platform = retired._session_id, retired._conversation_id, retired._session_platform
         if reset_session_id:
             session_id, conversation_id, platform = reset_session_id, reset_session_id, "cli"
@@ -5603,17 +5604,22 @@ class LCMEngine(
                 "SELECT current_session_id, last_finalized_session_id FROM lcm_lifecycle_state WHERE conversation_id = ?",
                 (conversation_id,),
             ).fetchone()
-        if lane is None or (lane[0] != session_id and not (
+        claim_reset = lane is None and reset_session_id is not None and start_reset
+        if not claim_reset and (lane is None or (lane[0] != session_id and not (
             after_compression and lane == (None, session_id)
-        )):
-            return False
-        state = self._lifecycle.get_by_conversation(conversation_id)
-        if state is None or (state.current_session_id, state.last_finalized_session_id) != lane:
+        ))):
             return False
         self.update_model(retired.model, retired.raw_context_length or retired.context_length,
                           retired.base_url, retired.api_key, retired.provider, retired.api_mode)
         self._apply_session_start_metadata(session_id, {"platform": platform})
         if self._current_binding_stores_nothing():
+            return False
+        if claim_reset:
+            if not self._lifecycle.claim_new_hook_binding(session_id, conversation_id):
+                return False
+            lane = (session_id, None)
+        state = self._lifecycle.get_by_conversation(conversation_id)
+        if state is None or (state.current_session_id, state.last_finalized_session_id) != lane:
             return False
         self._host_session_db = getattr(retired, "_host_session_db", None)
         self._conversation_id = self._foreground_conversation_id = conversation_id
@@ -5628,17 +5634,37 @@ class LCMEngine(
 
     def _persist_retained_interruption(self, messages):
         def save(engine):
-            return engine._save_retained_interruption(messages)
+            if getattr(self, "_retired_session_start", None) == engine._session_id:
+                # The live clone just adopted the proven reset. It can ingest
+                # the first view even when there is no durable prefix yet.
+                engine.ingest(messages)
+                return True
+            return engine._save_retained_view(messages)
 
-        result = self._run_retained_operation(save)
+        self._run_retained_view_operation(messages, save)
+
+    def _run_retained_view_operation(self, messages, operation, *, allow_empty_prefix=False):
+        start_reset = bool(messages)
+        result = self._run_retained_operation(operation, start_reset=start_reset)
         if result is not None:
-            return
+            return result
         owner = self._unload_group
         if owner is None or owner.current_prototype is None:
             return
+        if start_reset:
+            with self._storage_lock:
+                pending = getattr(self, "_retired_session_start", None)
+                if pending:
+                    current = owner.current_prototype()
+                    if current is None or getattr(current, "_plugin_is_unloading", lambda: False)():
+                        self._save_retired_reset_view(pending, messages)
+                        return
         retired = self._reload_successor or self
+        if retired._stable_use_owner_thread == threading.get_ident():
+            # An outer retained call still owns the lease and its ingest.
+            return
         with retired._exclusive_lifecycle(
-            "interrupted turn replay", deadline=time.monotonic() + SQLITE_BUSY_TIMEOUT_MS / 1000,
+            "retained view replay", deadline=time.monotonic() + SQLITE_BUSY_TIMEOUT_MS / 1000,
         ) as acquired:
             if (not acquired or getattr(self, "_retired_session_start", None)
                     or getattr(self, "_reload_compression_boundary", None)):
@@ -5650,32 +5676,60 @@ class LCMEngine(
                 if (retired._plugin_is_unloading() and retired._foreground_session_id == retired._session_id
                         and not retired._thread_context_has_auxiliary_session(retired._session_id)
                         and not retired._in_process_parent_session_id({})):
-                    save(retired)
+                    retired._save_retained_view(messages, allow_empty_prefix=allow_empty_prefix)
                 return
         # Registration could publish a successor while we waited for the lease.
-        self._run_retained_operation(save)
+        return self._run_retained_operation(operation, start_reset=start_reset)
 
-    def _save_retained_interruption(self, messages):
-        if self._pending_reset_session_id or self._bypasses_lcm_context_management():
+    def _save_retired_reset_view(self, session_id, messages):
+        """Store a confirmed CLI reset's first view without opening resident storage."""
+        retired = self._reload_successor or self
+        old_store = retired.__dict__.get("_store")
+        if (not retired._plugin_is_unloading() or retired._foreground_session_id != retired._session_id
+                or old_store is None or str(old_store.db_path) == ":memory:"
+                or retired._thread_context_stateless()
+                or retired._thread_context_has_auxiliary_session(session_id)
+                or retired._in_process_parent_session_id({})
+                or retired._in_process_auxiliary_caller_generation(session_id)
+                or retired._session_id_matches_lcm_bypass_filters(session_id, platform="cli")
+                or not self._confirms_retired_cli_reset(session_id, "cli")):
+            return
+        try:
+            with retired._open_retired_store(old_store, busy_timeout_ms=SQLITE_BUSY_TIMEOUT_MS) as store:
+                with store.ingest_atomic():
+                    LifecycleStateStore.claim_unused_lane(store.connection, session_id, session_id)
+                    saved = retired._append_retired_tail(
+                        store, old_store, session_id, session_id, messages, "cli",
+                        allow_empty=True, require_current=True,
+                    )
+                    if saved is None:
+                        raise LifecycleBindingChangedError("LCM could not prove the retired reset view")
+        except Exception:
+            logger.debug("LCM could not store the retired CLI reset view", exc_info=True)
+
+    def _save_retained_view(self, messages, *, allow_empty_prefix=False):
+        if (self._pending_reset_session_id or self._bypasses_lcm_context_management()
+                or self._in_process_parent_session_id({})
+                or self._in_process_auxiliary_caller_generation(self._session_id)):
             return False
         return self._flush_retired_session_end(
             self._session_id, messages, warn=False, require_current=True,
-            busy_timeout_ms=SQLITE_BUSY_TIMEOUT_MS,
+            allow_empty_prefix=allow_empty_prefix, busy_timeout_ms=SQLITE_BUSY_TIMEOUT_MS,
         )
 
-    def _run_retained_operation(self, operation):
+    def _run_retained_operation(self, operation, *, start_reset=False):
         result = None
 
         def adopted(engine):
             nonlocal result
             result = engine._retained_binding_is_current() and operation(engine)
 
-        successor = self._retained_successor(on_adopt=adopted)
+        successor = self._retained_successor(on_adopt=adopted, start_reset=start_reset)
         if result is not None or successor is None:
             return result
         return successor._use_retained_binding(operation, timeout=None).value
 
-    def _retained_successor(self, *, on_adopt=None):
+    def _retained_successor(self, *, on_adopt=None, start_reset=False):
         """Resolve the current registration's clone for this retired foreground."""
         owner = self._unload_group
         if owner is None or owner.current_prototype is None or not self._stable_use_closed:
@@ -5718,6 +5772,7 @@ class LCMEngine(
                             return False
                     if not clone._adopt_retained_binding(
                         retired, reset_session_id=pending, after_compression=boundary is not None,
+                        start_reset=start_reset,
                     ):
                         return False
                     if boundary is not None:

@@ -85,7 +85,13 @@ def _counted_compaction(*, return_messages: bool):
     def decorate(operation):
         @wraps(operation)
         def counted(self, messages, *args, **kwargs):
-            if self._plugin_is_unloading():
+            with self._compaction_gate:
+                unloading = self._plugin_is_unloading()
+                if not unloading:
+                    if self._compaction_closing:
+                        return messages if return_messages else False
+                    self._compaction_inflight += 1
+            if unloading:
                 def invoke(engine):
                     # The successor's stable lease already covers this call and
                     # keeps storage live if the unload gate closes mid-pass.
@@ -109,7 +115,7 @@ def _counted_compaction(*, return_messages: bool):
                     return result
 
                 if return_messages:
-                    result = self._run_retained_operation(invoke)
+                    result = self._run_retained_view_operation(messages, invoke, allow_empty_prefix=True)
                     if isinstance(result, Exception):
                         raise result
                     return result if isinstance(result, list) else messages
@@ -123,13 +129,16 @@ def _counted_compaction(*, return_messages: bool):
                     self._last_compression_noop_reason = engine.last_compression_noop_reason
                     return result
 
-                return bool(self._run_retained_operation(preflight))
-            with self._compaction_gate:
-                if self._compaction_closing or self._plugin_is_unloading():
-                    return messages if return_messages else False
-                self._compaction_inflight += 1
+                return bool(self._run_retained_view_operation(messages, preflight, allow_empty_prefix=True))
+            binding = (self._session_id, self._conversation_id, self._db_path) if return_messages else None
             try:
-                return operation(self, messages, *args, **kwargs)
+                result = operation(self, messages, *args, **kwargs)
+                if return_messages and result is messages and self._plugin_is_unloading():
+                    # Shutdown drains this admitted call before closing storage.
+                    # Use the proven lane without taking shutdown's lifecycle lock.
+                    if binding == (self._session_id, self._conversation_id, self._db_path):
+                        self._save_retained_view(messages, allow_empty_prefix=True)
+                return result
             finally:
                 with self._compaction_gate:
                     self._compaction_inflight -= 1

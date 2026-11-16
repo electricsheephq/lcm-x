@@ -224,8 +224,13 @@ class LifecycleStateStore:
     @_synchronized
     def claim_new_hook_binding(self, session_id: str, conversation_id: str) -> bool:
         """Atomically claim an unused lane for a compressor-less reload callback."""
+        return self.claim_unused_lane(self._conn, session_id, conversation_id)
+
+    @staticmethod
+    def claim_unused_lane(connection, session_id: str, conversation_id: str) -> bool:
+        """Claim an unused lane on the caller's connection and transaction."""
         now = time.time()
-        cursor = self._conn.execute(
+        cursor = connection.execute(
             """
             INSERT INTO lcm_lifecycle_state (conversation_id, current_session_id, current_bound_at, updated_at)
             SELECT ?, ?, ?, ?
