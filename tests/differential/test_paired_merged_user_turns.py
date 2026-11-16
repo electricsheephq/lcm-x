@@ -459,7 +459,7 @@ def _label_violations(case, trace, stubbed):
     return entries
 
 
-@pytest.mark.parametrize('case', [2707102, 2707202, 2707203])
+@pytest.mark.parametrize('case', [2707102, 2707101, 2707203])
 def test_stubbed_control_with_preservation_seam(case, tmp_path, versions, monkeypatch):  # noqa: F811
     from .trees import check_host, PrerequisiteUnavailable, skip_or_fail
     try:
@@ -730,7 +730,7 @@ def test_fake_record_contract(mutation, message, tmp_path, versions, monkeypatch
         verify()
 
 
-@pytest.mark.parametrize('case', [2707102, 2707202, 2707203, 2707405, 2707407])
+@pytest.mark.parametrize('case', [2707102, 2707101, 2707203, 2707405, 2707407])
 def test_record_fault_floor_and_frozen_retry(case, tmp_path, versions, monkeypatch):  # noqa: F811
     from tests.differential.record_contract import FAULT_CONTROLS
     monkeypatch.setattr(paired, 'CANDIDATE_CONTRACT', 'records-v1')
@@ -780,7 +780,7 @@ def test_equal_text_supersession_accepts_occurrence_witness():
 
 
 @pytest.mark.parametrize('mutation,message', [
-    ('footer-page-2', 'withheld footer incomplete'),
+    ('footer-page-1', 'withheld footer incomplete'),
     ('latch', 'latched visibility: withheld locator missing'),
 ])
 def test_fake_withheld_pages_and_latch(mutation, message, tmp_path, versions, monkeypatch, record_property):  # noqa: F811
@@ -807,10 +807,11 @@ def test_fake_withheld_pages_and_latch(mutation, message, tmp_path, versions, mo
                 footer = reply.get('queued_user_records_withheld')
                 if footer:
                     footer_pages.append(args.get('after_store_id', 0))
-                    if len(footer_pages) == 2:
+                    # T1-167 r5c: no pinned case has two footer-bearing pages.
+                    if len(footer_pages) == 1:
                         footer['locators'] = footer['locators'][1:]
-                        record_property('mutated_footer_page', json.dumps(dict(
-                            case=2708002, footer_page=2, after_store_id=footer_pages[-1],
+                        record_property('mutated_footer_page_1', json.dumps(dict(
+                            case=2708002, footer_page=1, after_store_id=footer_pages[-1],
                             counts=footer['counts'], remaining=len(footer['locators']))))
                 return json.dumps(reply)
             patch.setattr(tools, 'lcm_load_session', drop)

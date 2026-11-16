@@ -375,10 +375,11 @@ def judge(observations, entries):
 
 
 # Explicit accepted (case, kind) exemptions to the main-raised/candidate-inert rule.
-FAULT_EXEMPTIONS = set()
+# T1-167: the decided backward-overlap refusal makes the writer unreachable on this input.
+FAULT_EXEMPTIONS = {(2707202, 'preservation-once')}
 
 
-FAULT_CONTROLS = {2707102: {'preservation-once'}, 2707202: {'preservation-once'},
+FAULT_CONTROLS = {2707102: {'preservation-once'}, 2707101: {'preservation-once'},
                   2707203: {'preservation-once'}, 2707405: {'persistent'}, 2707407: {'preservation-once'}}
 
 
