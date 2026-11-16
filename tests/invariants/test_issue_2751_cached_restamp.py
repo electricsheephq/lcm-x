@@ -516,3 +516,64 @@ def test_lone_tail_after_retired_chain_applies(tmp_path, monkeypatch):
                 engine.shutdown()
 
     assert run(tmp_path / 'busy', True) == run(tmp_path / 'clean', False)
+
+
+def _run_retired_chain_after_lone_retry(root, monkeypatch, drain, followup, *, busy=True):
+    root.mkdir()
+    with monkeypatch.context() as patch:
+        engine = _open(root, patch, None)
+        sibling = None
+        try:
+            view = _turn(0, 'plain', uids=False)[:1]
+            engine.ingest(copy.deepcopy(view))
+            probe = _Probe(patch)
+            view[0]['timestamp'] = 1001.
+            if busy:
+                with patch.context() as fault:
+                    probe.busy_end(fault, engine, 'warm', view)
+                assert [t['kind'] for t in engine._pending_session_tails] == ['warm']
+                if drain == 'sibling':
+                    sibling = engine.__class__(config=engine._config, hermes_home=engine._hermes_home)
+                    sibling.on_session_start('parent', platform='cli', context_length=128000, conversation_id='conv')
+                elif drain == 'retry':
+                    engine._retry_pending_session_tails()
+                else:
+                    engine.on_session_end('parent', copy.deepcopy(view))
+                assert not engine._pending_session_tails
+            else:
+                engine.on_session_end('parent', copy.deepcopy(view))
+            for stamp in (2001., 3001.):
+                view[0]['timestamp'] = stamp
+                if busy:
+                    with patch.context() as fault:
+                        probe.busy_end(fault, engine, 'warm', view)
+                else:
+                    engine.on_session_end('parent', copy.deepcopy(view))
+            if busy:
+                assert [t['kind'] for t in engine._pending_session_tails] == ['warm', 'warm']
+            engine.on_session_end('parent', copy.deepcopy(view))
+            assert not engine._pending_session_tails
+            if followup == 'end':
+                engine.on_session_end('parent', copy.deepcopy(view))
+            elif followup == 'ingest':
+                engine.ingest(copy.deepcopy(view))
+            return sorted((r['content'], r['observed_at'])
+                          for r in engine._store.get_session_messages('parent'))
+        finally:
+            if sibling is not None:
+                sibling.shutdown()
+            engine.shutdown()
+
+
+def test_retired_chain_after_lone_retry_keeps_main(tmp_path, monkeypatch):
+    # Main 4f75302e's exact stored occurrences for the review bot's sequence.
+    expected = [('question-0', 1.), ('question-0', 1001.), ('question-0', 2001.), ('question-0', 3001.)]
+    assert _run_retired_chain_after_lone_retry(tmp_path / 'busy', monkeypatch, 'sibling', 'none') == expected
+
+
+@pytest.mark.parametrize('drain', ['sibling', 'retry', 'end'])
+@pytest.mark.parametrize('followup', ['end', 'ingest'])
+def test_retired_chain_after_lone_retry_variants(tmp_path, monkeypatch, drain, followup):
+    # Main 4f75302e's stored list, independently observed for each of the six cells.
+    expected = [('question-0', 1.), ('question-0', 1001.), ('question-0', 2001.), ('question-0', 3001.)]
+    assert _run_retired_chain_after_lone_retry(tmp_path / 'busy', monkeypatch, drain, followup) == expected

@@ -10041,9 +10041,10 @@ class LCMEngine(
                         self._active_replay_cache_freeze_sequence += 1
                         pending["cache_update"] = (*pending["cache_update"][:4], self._active_replay_cache_freeze_sequence)
                     self._pending_session_tails.append(pending)
-                    # Chained tails keep main's behaviour: no frozen view applies (#2751, #2778).
+                    # Chained tails keep main's behaviour: no frozen view applies, and none applied earlier stays armed (#2751, #2778).
                     if len(self._pending_session_tails) > 1:
                         self._applied_active_replay_cache_sequence = self._active_replay_cache_freeze_sequence
+                        self._deferred_active_replay_cache_generation = None
                     if getattr(self, "_ingest_read_only", None) is not None:
                         self._ledger_count("ledger.tail.queued.warm")
                         if inserted:
@@ -12630,6 +12631,7 @@ class LCMEngine(
             self._pending_session_tails.append(tail)
             if len(self._pending_session_tails) > 1:
                 self._applied_active_replay_cache_sequence = self._active_replay_cache_freeze_sequence
+                self._deferred_active_replay_cache_generation = None
             self._ledger_count("ledger.tail.queued.cold." + type(error).__name__)
         logger.warning("LCM session-end cold tail retry pending (%s)", type(error).__name__)
         maintenance_scheduler._PENDING_TAIL_ENGINES.add(self)
