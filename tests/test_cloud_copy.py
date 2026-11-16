@@ -762,11 +762,16 @@ def test_39_forgotten_is_cumulative(fixture):
     assert [(r['kind'], r['key']) for r in m['forgotten']] == [('as-delete', 'a'), ('forgotten', 'z')]
 
 
-def test_40_the_timers_skip(fixture):
+def test_40_the_timers_skip(fixture, monkeypatch):
     ready(fixture)
     fixture[1].calls.clear()
+    stage_calls, real_stage = [], cp._stage
+    def spy(*args, **kw):
+        stage_calls.append(True)
+        return real_stage(*args, **kw)
+    monkeypatch.setattr(cp, '_stage', spy)
     refused('unchanged', pub, fixture, timer=True, clock=lambda: 101)
-    assert not fixture[1].calls and not staged(fixture).parent.exists()
+    assert not fixture[1].calls and not stage_calls
     data = json.loads(state(fixture).read_text())
     data['last_publish_s'] = time.time()
     state(fixture).write_text(json.dumps(data))
@@ -896,7 +901,7 @@ def test_44_imports(fixture, monkeypatch):
     ('payload_sha_absent', 'bad_head'), ('guard_list', 'bad_head'), ('guard_mark_list', 'bad_head'),
     ('forgotten_list', 'bad_head'), ('invalid_json', 'bad_head'),
 ])
-def test_45_malformed_head_refused_before_upload(fixture, broken, code):
+def test_45_malformed_head_refused_before_upload(fixture, monkeypatch, broken, code):
     pub(fixture)
     grow(fixture)
     pub(fixture)
@@ -929,9 +934,14 @@ def test_45_malformed_head_refused_before_upload(fixture, broken, code):
     result = cli(fixture)
     assert result.returncode == 2 and json.loads(result.stdout)['code'] == code
     assert json.loads(result.stdout)['generation'] == 2
+    stage_calls, real_stage = [], cp._stage
+    def spy(*args, **kw):
+        stage_calls.append(True)
+        return real_stage(*args, **kw)
+    monkeypatch.setattr(cp, '_stage', spy)
     refused(code, pub, fixture)
     assert keys(fixture) == before and not any(method == 'put_new' for method, _ in fixture[1].calls)
-    assert not staged(fixture).parent.exists()
+    assert not stage_calls
 
 
 def test_46_uploaded_bytes_are_checked_bytes(fixture, monkeypatch):
@@ -1070,7 +1080,8 @@ def test_r3_forgotten_ledger_session(fixture, monkeypatch, generation, projected
 
 
 @pytest.mark.parametrize('snapshot_only', [False, True], ids=['publish', 'snapshot'])
-@pytest.mark.parametrize('setting', ['absolute', 'relative', 'export-double', 'single', 'mixed-first', 'mixed-last'])
+@pytest.mark.parametrize('setting', ['absolute', 'relative', 'export-double', 'single', 'mixed-first', 'mixed-last',
+                                         'bom', 'bom-export', 'export-tab', 'quoted-key', 'formfeed', 'u2028'])
 def test_r3_payload_folder_refused(fixture, snapshot_only, setting):
     home, bucket, _, _ = fixture
     key = 'LCM_LARGE_OUTPUT_EXTERNALIZATION_PATH'
@@ -1078,7 +1089,10 @@ def test_r3_payload_folder_refused(fixture, snapshot_only, setting):
     lines = {'absolute': f'{key}={other}', 'relative': f'{key}=relative/folder',
              'export-double': f'export {key}="{other}"', 'single': f"{key}='{other}'",
              'mixed-first': f'{key}={other}\n{key}={default}',
-             'mixed-last': f'{key}={default}\n{key}={other}'}
+             'mixed-last': f'{key}={default}\n{key}={other}',
+             'bom': f'\ufeff{key}={other}', 'bom-export': f'\ufeffexport {key}={other}',
+             'export-tab': f'export\t{key}={other}', 'quoted-key': f"'{key}'={other}",
+             'formfeed': f'{key}={default}\x0c/sub', 'u2028': f'{key}={default}\u2028/sub'}
     (home / '.env').write_text(lines[setting] + '\n')
     # Exercise both CLI exit classification and the library's pre-stage boundary.
     result = subprocess.run([sys.executable, '-I', '-S', '-B', str(ROOT / 'scripts/lcm_x_cloud.py'),
@@ -1241,3 +1255,144 @@ def test_r3_documented_refusal_codes(code):
     command_doc = ast.get_docstring(ast.parse((ROOT / 'scripts/lcm_x_cloud.py').read_text()))
     assert code in command_doc
     assert code not in cp.SKIPS
+
+
+def test_r4_payload_folder_worker_parity(fixture, monkeypatch):
+    from hermes_lcm import externalize, mcp_reader
+    home = fixture[0]
+    monkeypatch.delenv('LCM_HERMES_BASE_DIR', raising=False)
+    key = 'LCM_LARGE_OUTPUT_EXTERNALIZATION_PATH'
+    other, default = str(home.parent / 'elsewhere'), str(home / cp.PAYLOAD_FOLDER)
+    cases = {
+        'bom_first_line_other': b'\xef\xbb\xbf' + f'{key}={other}\n'.encode(),
+        'bom_first_line_default': b'\xef\xbb\xbf' + f'{key}={default}\n'.encode(),
+        'bom_export_other': b'\xef\xbb\xbf' + f'export {key}={other}\n'.encode(),
+        'export_tab_other': f'export\t{key}={other}\n'.encode(),
+        'export_two_spaces_other': f'export  {key}={other}\n'.encode(),
+        'leading_ws_export_other': f'   export {key}={other}\n'.encode(),
+        'crlf_other': f'A=b\r\n{key}={other}\r\n'.encode(),
+        'crlf_default': f'A=b\r\n{key}={default}\r\n'.encode(),
+        'cr_only_other': f'A=b\r{key}={other}\r'.encode(),
+        'latin1_unrelated_default': b'OTHER=caf\xe9\n' + f'{key}={default}\n'.encode(),
+        'latin1_unrelated_other': b'OTHER=caf\xe9\n' + f'{key}={other}\n'.encode(),
+        'latin1_unrelated_nokey': b'OTHER=caf\xe9\n',
+        'inline_comment_default': f'{key}={default} # note\n'.encode(),
+        'inline_comment_other': f'{key}={other} # note\n'.encode(),
+        'dquote_escape_other': f'{key}="{other}\\tx"\n'.encode(),
+        'dquote_default_trailing_comment': f'{key}="{default}" # c\n'.encode(),
+        'spaces_around_eq_other': f'{key} = {other}\n'.encode(),
+        'spaces_around_eq_default': f'{key} = {default}\n'.encode(),
+        'tab_before_eq_other': f'{key}\t={other}\n'.encode(),
+        'lowercase_key_other': f'{key.lower()}={other}\n'.encode(),
+        'single_quoted_key_other': f"'{key}'={other}\n".encode(),
+        'bare_key_unsets_after_other': f'{key}={other}\n{key}\n'.encode(),
+        'formfeed_in_value': f'{key}={default}\x0c/sub\n'.encode(),
+        'u2028_in_value': f'{key}={default}\u2028/sub\n'.encode(),
+        'nbsp_leading_other': f'\u00a0{key}={other}\n'.encode(),
+        'dollar_var_other': f'{key}=${{HOME}}/x\n'.encode(),
+        'dquote_space_inside_default': f'{key}=" {default}"\n'.encode(),
+    }
+    failures = []
+    assert len(cases) == 27
+    for name, data in cases.items():
+        (home / '.env').write_bytes(data)
+        config = LCMConfig(large_output_externalization_path=mcp_reader.read_profile_env(home).get(key, ''))
+        worker_folder = externalize.get_large_output_storage_dir(config, hermes_home=str(home), create=False)
+        try:
+            cp._before(home, 0, time.time, lambda _: 10**12)
+        except cp.Refused as error:
+            if error.code != 'payload_folder_configured':
+                failures.append((name, error.code))
+        except Exception as error:
+            failures.append((name, type(error).__name__))
+        else:
+            if worker_folder != (home / cp.PAYLOAD_FOLDER).resolve():
+                failures.append((name, 'false_proceed'))
+    assert not failures, failures
+
+
+def test_r4_payload_folder_latin1(fixture):
+    home = fixture[0]
+    key = 'LCM_LARGE_OUTPUT_EXTERNALIZATION_PATH'
+    failures = []
+    for bom in (b'', b'\xef\xbb\xbf'):
+        for moved in (False, True):
+            data = bom + b'OTHER=caf\xe9\n'
+            if moved:
+                data += f'{key}={home.parent / "elsewhere"}\n'.encode()
+            (home / '.env').write_bytes(data)
+            try:
+                cp._before(home, 0, time.time, lambda _: 10**12)
+                outcome = 'proceed'
+            except cp.Refused as error:
+                outcome = error.code
+            except Exception as error:
+                outcome = type(error).__name__
+            if outcome != ('payload_folder_configured' if moved else 'proceed'):
+                failures.append((bool(bom), moved, outcome))
+    assert not failures, failures
+
+
+def test_r4_pre_stage_refusal_preserves_snapshot(fixture):
+    home, bucket, _, _ = fixture
+    pub(fixture, snapshot_only=True)
+    folder = staged(fixture).parent
+    def contents():
+        return {p.relative_to(folder): (p.read_bytes(), p.stat().st_mtime_ns)
+                for p in folder.rglob('*') if p.is_file()}
+    before = contents()
+    config = home / 'cloud' / 'cloud.json'
+    config.write_text(json.dumps(dict(copy_id='other')))
+    with pytest.raises(cp.Refused) as caught:
+        pub(fixture)
+    assert caught.value.code == 'bad_name'
+    assert contents() == before
+    config.write_text(json.dumps(dict(copy_id=COPY)))
+    pub(fixture)
+    pub(fixture, snapshot_only=True)
+    with pytest.raises(cp.Refused) as caught:
+        cp.publish(home, COPY, bucket, PREFIX)
+    assert caught.value.code == 'guard_not_installed'
+    assert not folder.exists()
+
+
+def test_r4_disk_floor_reclaims_staging(fixture, tmp_path):
+    home = fixture[0]
+    folder = staged(fixture).parent
+    payload_bytes = sum(p.stat().st_size for p in (home / cp.PAYLOAD_FOLDER).iterdir())
+    budget = (home / 'lcm.db').stat().st_size + payload_bytes + cp.DISK_MARGIN
+    pub(fixture, snapshot_only=True)
+    occupied = sum(p.stat().st_size for p in folder.rglob('*') if p.is_file())
+    capacity = budget + occupied // 2
+    # One staged copy fits in total capacity; keeping both would not fit.
+    free = capacity - occupied
+    assert free < budget <= capacity
+    try:
+        pub(fixture, snapshot_only=True, free_bytes=lambda _: free)
+        outcome = 'proceed'
+    except cp.Refused as error:
+        outcome = error.code
+    assert outcome == 'proceed'
+    shutil.rmtree(folder)
+    assert pub(fixture, snapshot_only=True, free_bytes=lambda _: capacity)['generation'] == 1
+    occupied = sum(p.stat().st_size for p in folder.rglob('*') if p.is_file())
+    before = {p.relative_to(folder): p.read_bytes() for p in folder.rglob('*') if p.is_file()}
+    refused('disk_floor', pub, fixture, snapshot_only=True, free_bytes=lambda _: budget - occupied - 1)
+    assert {p.relative_to(folder): p.read_bytes() for p in folder.rglob('*') if p.is_file()} == before
+    shutil.rmtree(folder)
+    refused('disk_floor', pub, fixture, snapshot_only=True, free_bytes=lambda _: budget - 1)
+    # Nested regular files count; links to files or directories never add credit.
+    outside = tmp_path / 'unowned'
+    outside.mkdir()
+    (outside / 'large').write_bytes(b'x' * 4096)
+    folder.mkdir()
+    (folder / 'nested').mkdir()
+    (folder / 'nested' / 'regular').write_bytes(b'x' * 32)
+    (folder / 'file-link').symlink_to(outside / 'large')
+    (folder / 'dir-link').symlink_to(outside, target_is_directory=True)
+    cp._before(home, 0, time.time, lambda _: budget - 32)
+    refused('disk_floor', cp._before, home, 0, time.time, lambda _: budget - 33)
+    shutil.rmtree(folder)
+    folder.symlink_to(outside, target_is_directory=True)
+    refused('disk_floor', cp._before, home, 0, time.time, lambda _: budget - 1)
+    assert (outside / 'large').read_bytes() == b'x' * 4096

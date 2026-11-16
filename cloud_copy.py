@@ -288,13 +288,20 @@ def _before(home, quiet_s, clock, free_bytes):
     _check_wal(home)
     env = home / '.env'
     if env.is_file():
-        for line in env.read_text(encoding='utf-8').splitlines():
+        raw = env.read_bytes()
+        try:
+            text = raw.decode('utf-8-sig')
+        except UnicodeDecodeError:
+            text = raw.removeprefix(b'\xef\xbb\xbf').decode('latin-1')
+        for line in re.split(r'\r\n|\n|\r', text):
             line = line.strip()
             if not line or line.startswith('#'):
                 continue
+            if 'LCM_LARGE_OUTPUT_EXTERNALIZATION_PATH' not in line:
+                continue
             key, _, value = line.removeprefix('export ').partition('=')
             if key.strip() != 'LCM_LARGE_OUTPUT_EXTERNALIZATION_PATH':
-                continue
+                raise Refused('payload_folder_configured')
             value = value.strip()
             if len(value) >= 2 and value[0] in ('"', "'") and value[-1] == value[0]:
                 value = value[1:-1]
@@ -307,7 +314,14 @@ def _before(home, quiet_s, clock, free_bytes):
         wal_bytes = 0
     folder = home / PAYLOAD_FOLDER
     payload_bytes = sum(p.stat().st_size for p in folder.iterdir() if p.is_file() and not p.is_symlink()) if folder.exists() else 0
-    if free_bytes(home) < db.stat().st_size + wal_bytes + payload_bytes + DISK_MARGIN:
+    staging, staging_bytes = home / 'cloud' / 'staging', 0
+    if staging.is_dir() and not staging.is_symlink():
+        for root, _, files in os.walk(staging, followlinks=False):
+            for name in files:
+                path = Path(root) / name
+                if path.is_file() and not path.is_symlink():
+                    staging_bytes += path.stat().st_size
+    if free_bytes(home) + staging_bytes < db.stat().st_size + wal_bytes + payload_bytes + DISK_MARGIN:
         raise Refused('disk_floor')
     if quiet_s > 0 and not _quiet(home, quiet_s, clock):
         raise Refused('not_quiet')
@@ -488,6 +502,8 @@ def _head(transport, prefix, copy_id):
         for item in head.get('forgotten', []):
             if not all(isinstance(item[k], str) for k in ('kind', 'key')):
                 raise ValueError()
+        # Apply the codec's existing F10 validation before any staging work.
+        cloud_delta._shape(head['database'], generation)
     except Refused as error:
         error.detail['generation'] = generation
         raise
@@ -522,6 +538,7 @@ def publish(home, copy_id, transport, prefix, *, quiet_s=0, part_size=DEFAULT_PA
     _name(token, _TOKEN)
     home = Path(home)
     with _locked(home):
+        staging_started = False
         try:
             config = home / 'cloud' / 'cloud.json'
             if config.exists() and json.loads(config.read_text(encoding='utf-8')).get('copy_id') != copy_id:
@@ -540,6 +557,7 @@ def publish(home, copy_id, transport, prefix, *, quiet_s=0, part_size=DEFAULT_PA
             pages_dir, db = home / 'cloud' / 'pages', home / 'cloud' / 'staging' / 'lcm.db'
             for restart in range(3):
                 _before(home, quiet_s, clock, free_bytes)
+                staging_started = True
                 m, signature, page_size = _stage(home, copy_id, generation, head, head_bytes, clock, progress)
                 if quiet_s > 0 and not _quiet(home, quiet_s, clock):
                     shutil.rmtree(db.parent)
@@ -691,5 +709,5 @@ def publish(home, copy_id, transport, prefix, *, quiet_s=0, part_size=DEFAULT_PA
                     result['blocker'] = blocker
                 return m
         finally:
-            if not snapshot_only:
+            if staging_started and not snapshot_only:
                 shutil.rmtree(home / 'cloud' / 'staging', ignore_errors=True)
