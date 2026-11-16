@@ -24,7 +24,9 @@ the gate's evidence.
      `python scripts/capture_outside_in.py --home <store home> --transcript SESSION=PATH ...`,
      supplying every transcript captured into that store home, in capture order (subagents as
      `SESSION/agent:ID`), including each rewritten transcript's set-aside copy (a file beside it
-     whose name contains `.superseded-` or `.orphaned-`) before its replacement;
+     whose name contains `.superseded-` or `.orphaned-`) before its replacement, listed from the
+     transcript files under the scratch `CLAUDE_CONFIG_DIR`, not from the store (the checker cannot
+     see a transcript it is not given);
      the checker is repository tooling, absent from the unit asset (`ENTRY_SCRIPTS` in
      `scripts/build_claude_code_unit.py` lists only `lcm_x_capture.py` and `lcm_x_mcp.py`);
      pass: exit 0 with 0 lost, 0 duplicated, order kept and 0 unpaired. The #2777 shape,

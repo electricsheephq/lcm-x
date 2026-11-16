@@ -62,8 +62,8 @@ never wait for it.
      Beside the audit, `scripts/capture_outside_in.py` must pass over the session's store home
      and every transcript captured into that store home, in capture order (subagents as
      `SESSION/agent:ID`), including each rewritten transcript's set-aside copy (a file beside it
-     whose name contains `.superseded-` or `.orphaned-`) before its replacement:
-     0 lost, 0 duplicated, order kept, 0 unpaired. The session's record carries the checker's
+     whose name contains `.superseded-` or `.orphaned-`) before its replacement, listed from the
+     transcript files rather than from the store: 0 lost, 0 duplicated, order kept, 0 unpaired. The session's record carries the checker's
      `unverified` and `unprojected` counts. A failure in the documented false-failure shape
      (#2777: a recovered text equal to a later verbatim revision is reported out of order) goes
      to the release manager with the transcript line numbers. The release manager then finds both
