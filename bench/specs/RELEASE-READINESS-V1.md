@@ -62,24 +62,27 @@ never wait for it.
      Beside the audit, `scripts/capture_outside_in.py` must pass over the session's store home
      and every transcript captured into that store home in capture order, oldest first, historical versions before the live file:
      each rewritten transcript's set-aside copy (a file beside it whose name contains
-     `.superseded-` or `.orphaned-`) goes before its replacement. Subagents use `SESSION/agent:ID`,
-     and a reused workflow agent id's later transcript uses
-     `SESSION/agent:/workflows/<run>/agent-<id>.jsonl`. The transcripts are listed from the
+     `.superseded-` or `.orphaned-`) goes before its replacement. Subagents use `SESSION/agent:ID`;
+     when Claude Code reuses an agent id while the first transcript is still on disk, the later
+     one uses `SESSION/agent:/` plus its path below `subagents/`, such as
+     `SESSION/agent:/agent-<id>.jsonl` or `SESSION/agent:/workflows/<run>/agent-<id>.jsonl` (#2566). The transcripts are listed from the
      transcript files rather than from the store. Pass: 0 lost, 0 duplicated, order kept,
-     0 unpaired. The session's record carries the checker's `unverified` and `unprojected` counts.
-     Two more cases:
+     0 unpaired. The session's record carries the checker's `unverified` and `unprojected` counts
+     and each `unverified_reasons` entry. Two more cases:
      - **Unverified rows.** The checker verifies each persisted-output preview against its saved
-       tool-results file (#2777). It leaves an occurrence `unverified`, with its reason in
-       `unverified_reasons`, only when it cannot read that file as text: unnamed, outside the
-       session, missing, not a file, over the product's 64 MiB cap, binary or unreadable.
-       For the row checker, unverified is 0, or each unverified occurrence's reason is listed in the run record and justified.
-       The release manager judges each justification.
+       tool-results file (#2777). When it cannot read that file as text (unnamed, outside the
+       session, missing, not a file, over the product's 64 MiB cap, binary or unreadable), it
+       accepts one stored row for that preview without checking its content (its `unverified`
+       count, with each reason in `unverified_reasons`), and the audit checks only one row per
+       saved file, so a corrupted preview-backed row can pass both.
+       A session with any unverified row cannot pass this gate, whatever its reason: the checker's
+       exit 0 with `unverified` above 0 is not a gate pass.
      - **Interrupted tool calls** go to the release manager. A call the host never answered, as in a
        killed session, counts as unpaired. It passes only when the transcript itself has no result
        line for that call and the audit's `unanswered` count equals the number of such calls; the
        record lists each one with its transcript line.
      (2026-11-16, #2139: the audit gate runs the outside-in checker beside the audit, for candidates gated after this change.)
-     (2026-11-16, #2777: the checker pairs each uid's k-th stored row with its k-th transcript occurrence and verifies previews against their saved files, so the hand comparison for the out-of-order shape and the wait for verified rows are retired.)
+     (2026-11-16, #2777: the checker pairs each uid's k-th stored row with its k-th transcript occurrence and verifies previews against their saved files, so the hand comparison for the out-of-order shape is retired.)
   2. **Real sessions R1-R10** through Claude Code, each with a record: the backend, the machine
      (model and RAM), the runtime mode, the exact interpreter version, the load average at the
      start, the audit's `ok` and `verified`, the checker's result with its `unverified` and

@@ -904,4 +904,5 @@ def test_checker_release_instructions():
                  "bench/specs/RELEASE-READINESS-V1.md"):
         text = (ROOT / name).read_text()
         assert "oldest first, historical versions before the live file" in text
-        assert "unverified is 0, or each unverified occurrence's reason is listed in the run record and justified" in text
+        assert "with any unverified row cannot pass" in text
+        assert "and justified" not in text

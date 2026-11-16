@@ -24,15 +24,16 @@ the gate's evidence.
      `python scripts/capture_outside_in.py --home <store home> --transcript SESSION=PATH ...`,
      supplying every transcript captured into that store home in capture order, oldest first, historical versions before the live file:
      each rewritten transcript's set-aside copy (a file beside it whose name contains
-     `.superseded-` or `.orphaned-`) goes before its replacement. Subagents use `SESSION/agent:ID`,
-     and a reused workflow agent id's later transcript uses
-     `SESSION/agent:/workflows/<run>/agent-<id>.jsonl`. The transcripts are listed from the
+     `.superseded-` or `.orphaned-`) goes before its replacement. Subagents use `SESSION/agent:ID`;
+     when Claude Code reuses an agent id while the first transcript is still on disk, the later
+     one uses `SESSION/agent:/` plus its path below `subagents/`, such as
+     `SESSION/agent:/agent-<id>.jsonl` or `SESSION/agent:/workflows/<run>/agent-<id>.jsonl` (#2566). The transcripts are listed from the
      transcript files under the scratch `CLAUDE_CONFIG_DIR`, not from the store (the checker cannot
      see a transcript it is not given);
      the checker is repository tooling, absent from the unit asset (`ENTRY_SCRIPTS` in
      `scripts/build_claude_code_unit.py` lists only `lcm_x_capture.py` and `lcm_x_mcp.py`);
-     pass: exit 0 with 0 lost, 0 duplicated, order kept and 0 unpaired. For the row checker,
-     unverified is 0, or each unverified occurrence's reason is listed in the run record and justified (gate item 1).
+     pass: exit 0 with 0 lost, 0 duplicated, order kept and 0 unpaired. A session with any unverified row cannot pass
+     (gate item 1): exit 0 with `unverified` above 0 is not a pass, and the record lists each reason.
      Interrupted tool calls follow gate item 1;
    - the growth check when its inputs changed since its last run;
    - `python scripts/claude_code_unit_smoke.py --ref <candidate sha> --runtime venv`, then
