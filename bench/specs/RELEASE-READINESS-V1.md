@@ -65,8 +65,10 @@ never wait for it.
      0 lost, 0 duplicated, order kept, 0 unpaired. The session's record carries the checker's
      `unverified` and `unprojected` counts. A failure in the documented false-failure shape
      (#2777: a recovered text equal to a later verbatim revision is reported out of order) goes
-     to the release manager with the transcript line numbers. The release manager then reads both
-     stored rows from the store and compares them with the transcript's verbatim text and the saved
+     to the release manager with the transcript line numbers. The release manager then finds both
+     stored rows (by the call's `tool_use_id`, stored as `tool_call_id`, and the revision link
+     between them), reads each row's stored text, loading the payload file when the row holds an
+     externalized reference, and compares it with the transcript's verbatim text and the saved
      tool-results file: if either differs, the session lost content and fails the gate. Even when
      both match, the case never passes by itself.
      (2026-11-16, #2139: the audit gate runs the outside-in checker beside the audit, for candidates gated after this change.)
