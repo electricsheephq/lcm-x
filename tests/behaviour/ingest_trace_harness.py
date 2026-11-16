@@ -71,6 +71,7 @@ OBSERVED_ATTRIBUTES = frozenset({
     "_config", "_hermes_home", "_db_path", "_store", "_dag", "_lifecycle", "_host_rewrite_store",
     "_host_rewrite_overrides", "_host_rewrite_watch", "_last_active_replay_messages",
     "_last_active_replay_source_identities", "_last_ingest_reconciliation", "_retired_durable_proof",
+    "_active_replay_cache_generation", "_deferred_active_replay_cache_generation",
     "_compiled_ignore_message_patterns", "_compression_boundary_ingest_pending",
     "_compression_boundary_active_placeholder_digest_budget", "_compression_boundary_active_placeholder_digest_ordinals",
     "_compression_boundary_stored_placeholder_digest_counts", "_ignored_message_count", "_ignore_pattern_dropped_count",
@@ -388,6 +389,8 @@ def snapshot(engine: Any, canonical: IngestCanonical) -> dict[str, Any]:
     for name in sorted(OBSERVED_ATTRIBUTES - DIAGNOSTIC_ATTRIBUTES - {"_last_ingest_attribution", "_ingest_ledger_attempt",
                                             "_frozen_ledger_prepared",  # Transient attempt, cleared before return.
                                             "_frozen_tail_reached",  # Queue-decision flag; pending tails retain the outcome.
+                                            "_active_replay_cache_generation",  # Guard; pending cache_update and replay lists retain the outcome.
+                                            "_deferred_active_replay_cache_generation",  # Guard; pending cache_update and replay lists retain the outcome.
                                             "_compress_calls", "_emission_handle",
                                             "_ledger_rollback_failures_published",
                                             "_ledger_adopted",  # Commit-only optimization; observed in the attribute stream.
