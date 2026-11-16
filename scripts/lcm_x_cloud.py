@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Stage or publish a read-only capture snapshot using the directory transport."""
+"""Stage or publish a read-only capture snapshot using the directory transport.
+
+Exit 2 includes bad_head (otherwise malformed head) and
+payload_folder_configured (a configured payload folder other than the default).
+"""
 import argparse
 import json
 from pathlib import Path

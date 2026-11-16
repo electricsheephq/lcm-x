@@ -6,7 +6,8 @@ combined digest, plus ledger [identity, line_digest, raw_sha256, held_ids] entri
 Identity excludes event_id; raw_from is resolved before hashing. Payload hashes
 cover the decoded content string. Id sets are sorted delta unsigned varints,
 zlib-compressed and base64 encoded. Removed sets and pins pass through unchanged.
-No origin mutation or capture-lock access is permitted here.
+No origin mutation or capture-lock access is permitted here. Exit-2 refusals include
+bad_head (otherwise malformed head) and payload_folder_configured (moved payloads).
 """
 import base64
 from contextlib import closing, contextmanager
@@ -262,11 +263,15 @@ def _header_wal(db):
         return any(b >= 2 for b in handle.read(2))
 
 
-def _live_ro(home):
+def _check_wal(home):
     db = home / 'lcm.db'
     if _header_wal(db) and any(not (home / ('lcm.db-' + s)).exists() for s in ('wal', 'shm')):
         raise Refused('wal_without_sidecars')
-    return _ro(db)
+
+
+def _live_ro(home):
+    _check_wal(home)
+    return _ro(home / 'lcm.db')
 
 
 def _quiet(home, quiet_s, clock):
@@ -280,9 +285,29 @@ def _before(home, quiet_s, clock, free_bytes):
     db = home / 'lcm.db'
     if (home / 'lcm.db.records').exists():
         raise Refused('records_pair_unsupported')
+    _check_wal(home)
+    env = home / '.env'
+    if env.is_file():
+        for line in env.read_text(encoding='utf-8').splitlines():
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            key, _, value = line.removeprefix('export ').partition('=')
+            if key.strip() != 'LCM_LARGE_OUTPUT_EXTERNALIZATION_PATH':
+                continue
+            value = value.strip()
+            if len(value) >= 2 and value[0] in ('"', "'") and value[-1] == value[0]:
+                value = value[1:-1]
+            path = Path(os.path.expanduser(value))
+            if value and (not path.is_absolute() or path.resolve() != (home / PAYLOAD_FOLDER).resolve()):
+                raise Refused('payload_folder_configured')
+    try:
+        wal_bytes = (home / 'lcm.db-wal').stat().st_size
+    except FileNotFoundError:
+        wal_bytes = 0
     folder = home / PAYLOAD_FOLDER
     payload_bytes = sum(p.stat().st_size for p in folder.iterdir() if p.is_file() and not p.is_symlink()) if folder.exists() else 0
-    if free_bytes(home) < db.stat().st_size + payload_bytes + DISK_MARGIN:
+    if free_bytes(home) < db.stat().st_size + wal_bytes + payload_bytes + DISK_MARGIN:
         raise Refused('disk_floor')
     if quiet_s > 0 and not _quiet(home, quiet_s, clock):
         raise Refused('not_quiet')
@@ -428,7 +453,7 @@ def _head(transport, prefix, copy_id):
     generation = int(key.rsplit('/', 1)[-1][:-5])
     try:
         head = json.loads(data)
-        if not isinstance(head, dict) or not isinstance(head.get('database'), dict):
+        if not isinstance(head, dict):
             raise Refused('bad_database_block', generation=generation)
         if type(head['layout']) is not int or head['layout'] < 1:
             raise ValueError()
@@ -439,6 +464,8 @@ def _head(transport, prefix, copy_id):
             raise ValueError()
         if version > CONTRACT_VERSION:
             raise Refused('replica_newer_contract')
+        if not isinstance(head.get('database'), dict):
+            raise Refused('bad_database_block', generation=generation)
         if type(head['generation']) is not int or not isinstance(head['copy_id'], str):
             raise ValueError()
         if head['copy_id'] != copy_id or head['generation'] != generation:
@@ -495,167 +522,174 @@ def publish(home, copy_id, transport, prefix, *, quiet_s=0, part_size=DEFAULT_PA
     _name(token, _TOKEN)
     home = Path(home)
     with _locked(home):
-        config = home / 'cloud' / 'cloud.json'
-        if config.exists() and json.loads(config.read_text(encoding='utf-8')).get('copy_id') != copy_id:
-            raise Refused('bad_name')
-        state, blocker = _state(home, copy_id), None
-        if timer:
-            pair = state.get('last_pair')
-            blocker = cloud_delta.skip_blocker(manual=False, signature=cloud_delta.store_signature(home),
-                recorded_signature=state.get('snapshot_signature'), decision_pending=bool(state.get('unpublished_decisions')),
-                last_pair=pair, pending_pair=state.get('pending_pair'), retention_done_generation=state.get('retention_done_generation'),
-                head_generation=pair[0] if pair else None, last_publish_s=state.get('last_publish_s'), now_s=clock())
-            if blocker is None:
-                raise Refused('unchanged')
-        head, head_bytes = (None, b'') if snapshot_only else _head(transport, prefix, copy_id)
-        generation = head['generation'] + 1 if head else 1
-        pages_dir, db = home / 'cloud' / 'pages', home / 'cloud' / 'staging' / 'lcm.db'
-        for restart in range(3):
-            _before(home, quiet_s, clock, free_bytes)
-            m, signature, page_size = _stage(home, copy_id, generation, head, head_bytes, clock, progress)
-            if quiet_s > 0 and not _quiet(home, quiet_s, clock):
-                shutil.rmtree(db.parent)
-                raise Refused('not_quiet')
-            frozen = (db.stat().st_size, db.stat().st_mtime_ns)
-            new = cloud_delta.hash_pages(db, expected_page_size=page_size)
-            old = head['database'] if head else None
-            usable = old and type(old.get('page_size')) is int and old['page_size'] > 0 and type(old.get('file_bytes')) is int and isinstance(old.get('page_list_sha256'), str)
-            prev = cloud_delta.load_head_list(pages_dir, copy_id, old['page_list_sha256'], old['file_bytes']//old['page_size']) if usable else None
-            items = forget_items(head, db) if forget_items else []
-            args = dict(head_generation=head['generation'] if head else None, page_size=page_size, file_bytes=new.file_bytes,
-                        list_matches=prev is not None, forget=any(i['chain_may_hold'] for i in items), object_missing=False,
-                        delta_bytes=0, size_factor=size_factor, max_generations=max_generations)
-            try:
-                reason = cloud_delta.base_reason(old, **args)
-            except Refused as error:
-                error.detail['generation'] = head['generation']
-                raise
-            if head:
-                if guard is None or forget_items is None:
-                    raise Refused('guard_not_installed')
-                guard(head, db)
-            encoded = []
-            if reason is None:
-                count = len(cloud_delta.changed_pages(prev, new.digests))
-                cap = cloud_delta.max_records(page_size)
-                if free_bytes(home) < count * (4 + page_size) + 16 * ((count + cap - 1)//cap) + DISK_MARGIN:
-                    raise Refused('disk_floor')
-                _mkdir(db.parent / 'deltas')
-                encoded = cloud_delta.encode_delta(db, prev, new, db.parent / 'deltas')
-                args['delta_bytes'] = sum(o.bytes for o in encoded)
-                reason = cloud_delta.base_reason(old, **args)
-            if not snapshot_only:
-                cloud_delta.save_pending_list(pages_dir, copy_id, new.digests)
-            sent, buffers = set(), {}
-            def upload(key, data, force=False):
-                _name(key, _OBJECT)
-                if _sha(data) != key.split('/')[1][:64]:
-                    raise Refused('staging_changed')
-                if snapshot_only or (key in sent and not force):
-                    return
-                if resumed and not force:
-                    try:
-                        if len(transport.get(prefix + '/' + key)) == len(data):
-                            sent.add(key)
-                            return
-                    except FileNotFoundError:
-                        pass
+        try:
+            config = home / 'cloud' / 'cloud.json'
+            if config.exists() and json.loads(config.read_text(encoding='utf-8')).get('copy_id') != copy_id:
+                raise Refused('bad_name')
+            state, blocker = _state(home, copy_id), None
+            if timer:
+                pair = state.get('last_pair')
+                blocker = cloud_delta.skip_blocker(manual=False, signature=cloud_delta.store_signature(home),
+                    recorded_signature=state.get('snapshot_signature'), decision_pending=bool(state.get('unpublished_decisions')),
+                    last_pair=pair, pending_pair=state.get('pending_pair'), retention_done_generation=state.get('retention_done_generation'),
+                    head_generation=pair[0] if pair else None, last_publish_s=state.get('last_publish_s'), now_s=clock())
+                if blocker is None:
+                    raise Refused('unchanged')
+            head, head_bytes = (None, b'') if snapshot_only else _head(transport, prefix, copy_id)
+            generation = head['generation'] + 1 if head else 1
+            pages_dir, db = home / 'cloud' / 'pages', home / 'cloud' / 'staging' / 'lcm.db'
+            for restart in range(3):
+                _before(home, quiet_s, clock, free_bytes)
+                m, signature, page_size = _stage(home, copy_id, generation, head, head_bytes, clock, progress)
+                if quiet_s > 0 and not _quiet(home, quiet_s, clock):
+                    shutil.rmtree(db.parent)
+                    raise Refused('not_quiet')
+                frozen = (db.stat().st_size, db.stat().st_mtime_ns)
+                new = cloud_delta.hash_pages(db, expected_page_size=page_size)
+                old = head['database'] if head else None
+                usable = old and type(old.get('page_size')) is int and old['page_size'] > 0 and type(old.get('file_bytes')) is int and isinstance(old.get('page_list_sha256'), str)
+                prev = cloud_delta.load_head_list(pages_dir, copy_id, old['page_list_sha256'], old['file_bytes']//old['page_size']) if usable else None
+                items = forget_items(head, db) if forget_items else []
+                args = dict(head_generation=head['generation'] if head else None, page_size=page_size, file_bytes=new.file_bytes,
+                            list_matches=prev is not None, forget=any(i['chain_may_hold'] for i in items), object_missing=False,
+                            delta_bytes=0, size_factor=size_factor, max_generations=max_generations)
                 try:
-                    transport.put_new(prefix + '/' + key, data)
-                except FileExistsError:
-                    if len(transport.get(prefix + '/' + key)) != len(data):
-                        raise Refused('staging_changed') from None
-                sent.add(key)
-            previous_payloads = {p['name']: p for p in (head or {}).get('payloads', [])}
-            for payload in m['payloads']:
-                data = (db.parent / PAYLOAD_FOLDER / payload['name']).read_bytes()
-                if _sha(data) != payload['sha256']:
-                    raise Refused('staging_changed')
-                previous = previous_payloads.get(payload['name'])
-                reused = previous is not None and previous['sha256'] == payload['sha256']
-                key = previous['key'] if reused else f"payloads/{payload['sha256']}.{token}"
-                payload['key'] = key
-                buffers[key] = lambda path=db.parent / PAYLOAD_FOLDER / payload['name']: path.read_bytes()
-                if not reused:
-                    upload(key, data)
-            database = {k: getattr(new, k) for k in ('page_size', 'file_bytes', 'file_sha256', 'page_list_sha256')}
-            def base():
-                previous = {r['key'].split('/')[1][:64]: r['key'] for r in old['base']['parts']} if old else {}
-                refs, whole = [], hashlib.sha256()
-                with db.open('rb') as handle:
-                    while data := handle.read(part_size):
-                        digest = _sha(data)
-                        whole.update(data)
-                        key = previous.get(digest, f'parts/{digest}.{token}')
-                        refs.append(dict(key=key, bytes=len(data)))
-                        buffers[key] = lambda offset=handle.tell()-len(data), size=len(data): _read_part(db, offset, size)
-                        if key not in previous.values():
-                            upload(key, data)
-                if whole.hexdigest() != new.file_sha256:
-                    raise Refused('staging_changed')
-                database.update(base=dict(generation=generation, file_bytes=new.file_bytes, file_sha256=new.file_sha256,
-                                          reason=reason, part_size=part_size, parts=refs), deltas=[])
-            if reason is not None:
-                base()
-            else:
-                refs = []
-                for obj in encoded:
-                    data = obj.path.read_bytes()
-                    if len(data) != obj.bytes or _sha(data) != obj.sha256:
-                        raise Refused('staging_changed')
-                    key = f'deltas/{obj.sha256}.{token}'
-                    buffers[key] = lambda path=obj.path: path.read_bytes()
-                    upload(key, data)
-                    refs.append(dict(key=key, bytes=obj.bytes, records=obj.records))
-                database.update(base=old['base'], deltas=old['deltas'] + [dict(generation=generation, file_pages=new.pages, objects=refs)])
-            for check in range(2):
-                present = set()
-                if not snapshot_only:
-                    for folder in ('parts', 'deltas', 'payloads'):
-                        listed = transport.list(prefix + '/' + folder + '/')
-                        for key in listed:
-                            _name(key, re.escape(prefix) + '/' + _OBJECT)
-                        present.update(key[len(prefix)+1:] for key in listed)
-                refs = database['base']['parts'] + [r for e in database['deltas'] for r in e['objects']] + m['payloads']
-                missing = [r for r in refs if r['key'] not in present] if not snapshot_only else []
-                old_missing = reason is None and any(r['key'] not in buffers for r in missing)
-                if old_missing:
-                    args['object_missing'] = True
                     reason = cloud_delta.base_reason(old, **args)
-                    base()
-                    continue
-                for ref in missing:
-                    key = ref['key']
-                    replacement = key.split('.')[0] + '.' + token
-                    data = buffers[key]()
-                    if len(data) != ref['bytes']:
+                except Refused as error:
+                    error.detail['generation'] = head['generation']
+                    raise
+                if head:
+                    if guard is None or forget_items is None:
+                        raise Refused('guard_not_installed')
+                    guard(head, db)
+                encoded = []
+                if reason is None:
+                    count = len(cloud_delta.changed_pages(prev, new.digests))
+                    cap = cloud_delta.max_records(page_size)
+                    if free_bytes(home) < count * (4 + page_size) + 16 * ((count + cap - 1)//cap) + DISK_MARGIN:
+                        raise Refused('disk_floor')
+                    _mkdir(db.parent / 'deltas')
+                    encoded = cloud_delta.encode_delta(db, prev, new, db.parent / 'deltas')
+                    args['delta_bytes'] = sum(o.bytes for o in encoded)
+                    reason = cloud_delta.base_reason(old, **args)
+                if not snapshot_only:
+                    cloud_delta.save_pending_list(pages_dir, copy_id, new.digests)
+                sent, buffers = set(), {}
+                def upload(key, data, force=False):
+                    _name(key, _OBJECT)
+                    if _sha(data) != key.split('/')[1][:64]:
                         raise Refused('staging_changed')
-                    upload(replacement, data, force=True)
-                    ref['key'] = replacement
-                break
-            if (db.stat().st_size, db.stat().st_mtime_ns) != frozen:
-                raise Refused('staging_changed')
-            with closing(_live_ro(home)) as live, closing(_ro(db)) as staged:
-                forgotten = {r[0][len(FORGOTTEN_PREFIX):] for r in live.execute('SELECT key FROM metadata') if r[0].startswith(FORGOTTEN_PREFIX)}
-                sessions = {r[0] for r in staged.execute('SELECT DISTINCT session_id FROM messages')}
-            final_items = forget_items(head, db) if forget_items else []
-            if sessions & forgotten or (reason is None and any(i['chain_may_hold'] for i in final_items)):
-                shutil.rmtree(db.parent)
-                if restart == 2:
-                    raise Refused('forgotten_during_publish')
-                continue
-            m.update(database=database, attempt=dict(generation=generation, token=token),
-                     forgotten=sorted((head or {}).get('forgotten', []) + [
-                         {k: i[k] for k in ('key', 'kind', 'session')} | dict(base_generation=generation if reason is not None and i['chain_may_hold'] else None)
-                         for i in final_items], key=lambda i: (i['kind'], i['key'])))
-            if snapshot_only:
+                    if snapshot_only or (key in sent and not force):
+                        return
+                    if resumed and not force:
+                        try:
+                            if len(transport.get(prefix + '/' + key)) == len(data):
+                                sent.add(key)
+                                return
+                        except FileNotFoundError:
+                            pass
+                    try:
+                        transport.put_new(prefix + '/' + key, data)
+                    except FileExistsError:
+                        if len(transport.get(prefix + '/' + key)) != len(data):
+                            raise Refused('staging_changed') from None
+                    sent.add(key)
+                previous_payloads = {p['name']: p for p in (head or {}).get('payloads', [])}
+                for payload in m['payloads']:
+                    data = (db.parent / PAYLOAD_FOLDER / payload['name']).read_bytes()
+                    if _sha(data) != payload['sha256']:
+                        raise Refused('staging_changed')
+                    previous = previous_payloads.get(payload['name'])
+                    reused = previous is not None and previous['sha256'] == payload['sha256']
+                    key = previous['key'] if reused else f"payloads/{payload['sha256']}.{token}"
+                    payload['key'] = key
+                    buffers[key] = lambda path=db.parent / PAYLOAD_FOLDER / payload['name']: path.read_bytes()
+                    if not reused:
+                        upload(key, data)
+                database = {k: getattr(new, k) for k in ('page_size', 'file_bytes', 'file_sha256', 'page_list_sha256')}
+                def base():
+                    previous = {r['key'].split('/')[1][:64]: r['key'] for r in old['base']['parts']} if old else {}
+                    refs, whole = [], hashlib.sha256()
+                    with db.open('rb') as handle:
+                        while data := handle.read(part_size):
+                            digest = _sha(data)
+                            whole.update(data)
+                            key = previous.get(digest, f'parts/{digest}.{token}')
+                            refs.append(dict(key=key, bytes=len(data)))
+                            buffers[key] = lambda offset=handle.tell()-len(data), size=len(data): _read_part(db, offset, size)
+                            if key not in previous.values():
+                                upload(key, data)
+                    if whole.hexdigest() != new.file_sha256:
+                        raise Refused('staging_changed')
+                    database.update(base=dict(generation=generation, file_bytes=new.file_bytes, file_sha256=new.file_sha256,
+                                              reason=reason, part_size=part_size, parts=refs), deltas=[])
+                if reason is not None:
+                    base()
+                else:
+                    refs = []
+                    for obj in encoded:
+                        data = obj.path.read_bytes()
+                        if len(data) != obj.bytes or _sha(data) != obj.sha256:
+                            raise Refused('staging_changed')
+                        key = f'deltas/{obj.sha256}.{token}'
+                        buffers[key] = lambda path=obj.path: path.read_bytes()
+                        upload(key, data)
+                        refs.append(dict(key=key, bytes=obj.bytes, records=obj.records))
+                    database.update(base=old['base'], deltas=old['deltas'] + [dict(generation=generation, file_pages=new.pages, objects=refs)])
+                for check in range(2):
+                    present = set()
+                    if not snapshot_only:
+                        for folder in ('parts', 'deltas', 'payloads'):
+                            listed = transport.list(prefix + '/' + folder + '/')
+                            for key in listed:
+                                _name(key, re.escape(prefix) + '/' + _OBJECT)
+                            present.update(key[len(prefix)+1:] for key in listed)
+                    refs = database['base']['parts'] + [r for e in database['deltas'] for r in e['objects']] + m['payloads']
+                    missing = [r for r in refs if r['key'] not in present] if not snapshot_only else []
+                    old_missing = reason is None and any(r['key'] not in buffers for r in missing)
+                    if old_missing:
+                        args['object_missing'] = True
+                        reason = cloud_delta.base_reason(old, **args)
+                        base()
+                        continue
+                    for ref in missing:
+                        key = ref['key']
+                        replacement = key.split('.')[0] + '.' + token
+                        data = buffers[key]()
+                        if len(data) != ref['bytes']:
+                            raise Refused('staging_changed')
+                        upload(replacement, data, force=True)
+                        ref['key'] = replacement
+                    break
+                if (db.stat().st_size, db.stat().st_mtime_ns) != frozen:
+                    raise Refused('staging_changed')
+                with closing(_live_ro(home)) as live, closing(_ro(db)) as staged:
+                    forgotten = {r[0][len(FORGOTTEN_PREFIX):] for r in live.execute('SELECT key FROM metadata') if r[0].startswith(FORGOTTEN_PREFIX)}
+                    query = 'SELECT session_id FROM messages'
+                    if 'capture_events' in _tables(staged):
+                        query += ' UNION SELECT session_id FROM capture_events'
+                    sessions = {r[0] for r in staged.execute(query)}
+                final_items = forget_items(head, db) if forget_items else []
+                if sessions & forgotten or (reason is None and any(i['chain_may_hold'] for i in final_items)):
+                    shutil.rmtree(db.parent)
+                    if restart == 2:
+                        raise Refused('forgotten_during_publish')
+                    continue
+                m.update(database=database, attempt=dict(generation=generation, token=token),
+                         forgotten=sorted((head or {}).get('forgotten', []) + [
+                             {k: i[k] for k in ('key', 'kind', 'session')} | dict(base_generation=generation if reason is not None and i['chain_may_hold'] else None)
+                             for i in final_items], key=lambda i: (i['kind'], i['key'])))
+                if snapshot_only:
+                    return m
+                try:
+                    transport.put_new(prefix + f'/gen/{generation}.json', _json(m))
+                except FileExistsError:
+                    raise Refused('chain_conflict') from None
+                cloud_delta.promote_pending_list(pages_dir, copy_id)
+                _save_state(home, state | dict(copy_id=copy_id, snapshot_signature=signature, last_publish_s=clock()))
+                if blocker and result is not None:
+                    result['blocker'] = blocker
                 return m
-            try:
-                transport.put_new(prefix + f'/gen/{generation}.json', _json(m))
-            except FileExistsError:
-                raise Refused('chain_conflict') from None
-            cloud_delta.promote_pending_list(pages_dir, copy_id)
-            _save_state(home, state | dict(copy_id=copy_id, snapshot_signature=signature, last_publish_s=clock()))
-            if blocker and result is not None:
-                result['blocker'] = blocker
-            return m
+        finally:
+            if not snapshot_only:
+                shutil.rmtree(home / 'cloud' / 'staging', ignore_errors=True)

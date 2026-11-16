@@ -39,11 +39,15 @@ class Spy:
         self.inner = cp.DirTransport(root, PREFIX)
         self.calls = []
         self.hook = lambda method, key: None
+        self.checked = Path(root).parent / 'checked-copy'
 
     def __getattr__(self, method):
         def call(*args):
             key = args[0] if args else None
             self.calls.append((method, key))
+            if method == 'put_new' and '/gen/' in key:
+                source = self.inner.root.parent / 'home' / 'cloud' / 'staging'
+                shutil.copytree(source, self.checked, dirs_exist_ok=True)
             self.hook(method, key)
             return getattr(self.inner, method)(*args)
         return call
@@ -96,12 +100,17 @@ def pub(f, **kw):
     result = cp.publish(home, COPY, bucket, PREFIX, guard=lambda head, db: None,
                         forget_items=kw.pop('forget_items', lambda head, db: []), **kw)
     assert isinstance(result, dict), 'publish must produce a manifest'
-    assert staged(f).stat().st_size < 5_000_000
+    assert result['database']['file_bytes'] < 5_000_000
     return result
 
 
 def staged(f):
     return f[0] / 'cloud' / 'staging' / 'lcm.db'
+
+
+def checked(f):
+    # Saved at manifest creation, before publish's required staging cleanup.
+    return f[1].checked / 'lcm.db'
 
 
 def keys(f):
@@ -161,7 +170,7 @@ def test_01_generation_1_is_a_whole_base(fixture):
     junk.parent.mkdir(exist_ok=True)
     junk.write_text('{"content":"unused"}')
     m = pub(fixture, part_size=8192)
-    assert rebuild(fixture, m, 'rebuilt') == staged(fixture).read_bytes()
+    assert rebuild(fixture, m, 'rebuilt') == checked(fixture).read_bytes()
     assert m['payloads'] and all(p['name'] != junk.name for p in m['payloads'])
 
 
@@ -248,12 +257,12 @@ def test_08_stamp(fixture):
     db = fixture[0] / 'lcm.db'
     before = db.read_bytes()
     m = pub(fixture)
-    with closing(sqlite3.connect(staged(fixture))) as conn:
+    with closing(sqlite3.connect(checked(fixture))) as conn:
         assert json.loads(conn.execute("SELECT value FROM metadata WHERE key='import:origin'").fetchone()[0]) == m['stamp']
         assert not conn.execute("SELECT 1 FROM metadata WHERE key='store_uuid'").fetchone()
     assert db.read_bytes() == before
     with pytest.raises(cc.AdmissionError, match='store_unstamped'):
-        cc.admit(staged(fixture).parent, hermes_home=fixture[0].parent / 'unused-host')
+        cc.admit(checked(fixture).parent, hermes_home=fixture[0].parent / 'unused-host')
 
 
 def test_09_lock(fixture):
@@ -280,7 +289,7 @@ def test_10_writer_during_the_copy(fixture):
                 conn.executemany('INSERT INTO messages(session_id,role,content,timestamp) VALUES (?,?,?,?)',
                                  [('race', 'user', str(i), 1) for i in range(4)])
     pub(fixture, progress=progress)
-    with closing(sqlite3.connect(staged(fixture))) as conn:
+    with closing(sqlite3.connect(checked(fixture))) as conn:
         assert conn.execute('PRAGMA integrity_check').fetchone() == ('ok',)
         assert conn.execute("SELECT count(*) FROM messages WHERE session_id='race'").fetchone()[0] in (0, 4)
     assert done
@@ -293,7 +302,7 @@ def test_11_journal_mode(fixture):
         conn.commit()
         before = (fixture[0] / 'lcm.db').read_bytes()
         pub(fixture)
-        assert staged(fixture).read_bytes()[18] == 1
+        assert checked(fixture).read_bytes()[18] == 1
         assert (fixture[0] / 'lcm.db').read_bytes() == before
 
 
@@ -328,7 +337,7 @@ def test_14_forget_before_the_manifest(fixture):
     fixture[1].hook = forget
     m = pub(fixture)
     rebuilt = rebuild(fixture, m, 'forgotten')
-    assert rebuilt == staged(fixture).read_bytes() and not m['payloads']
+    assert rebuilt == checked(fixture).read_bytes() and not m['payloads']
     with closing(sqlite3.connect(fixture[0].parent / 'forgotten')) as conn:
         for table in ('messages', 'capture_events'):
             assert conn.execute(f'SELECT count(*) FROM {table} WHERE session_id=?', ('s1',)).fetchone() == (0,)
@@ -460,7 +469,7 @@ def test_21_no_guard_no_second_generation(fixture):
 
 def test_22_guard_block(fixture):
     pub(fixture)
-    db = staged(fixture)
+    db = checked(fixture)
     payloads = db.parent / cp.PAYLOAD_FOLDER
     expected = cp.guard_block(db, payloads)
     copied = fixture[0].parent / 'guard-copy.db'
@@ -528,7 +537,7 @@ def test_26_newer_head(fixture):
 def test_27_database_block_of_a_base(fixture):
     m = pub(fixture)
     db = m['database']
-    data = staged(fixture).read_bytes()
+    data = checked(fixture).read_bytes()
     p = int.from_bytes(data[16:18], 'big')
     assert db['file_sha256'] == sha(data)
     assert db['page_list_sha256'] == sha(b''.join(hashlib.sha256(data[i:i+p]).digest() for i in range(0, len(data), p)))
@@ -563,7 +572,7 @@ def test_29_every_generation_rebuilds(fixture):
             grow(fixture, count=40 if i == 1 else 1)
         m = pub(fixture)
         lengths.append(m['database']['file_bytes'])
-        assert rebuild(fixture, m, f'rebuilt-{i}') == staged(fixture).read_bytes()
+        assert rebuild(fixture, m, f'rebuilt-{i}') == checked(fixture).read_bytes()
         assert len(m['database']['deltas']) == i
     assert lengths[1] > lengths[0] and lengths[2] == lengths[1]
 
@@ -579,7 +588,7 @@ def test_30_the_page_list_decides(fixture):
     grow(fixture)
     assert pub(fixture)['database']['deltas']
     other = fixture[0].parent / 'other-staging.db'
-    shutil.copyfile(staged(fixture), other)
+    shutil.copyfile(checked(fixture), other)
     with closing(sqlite3.connect(other)) as conn, conn:
         conn.execute("UPDATE messages SET content='another staging copy' WHERE store_id=1")
     cd.save_pending_list(last(fixture).parent, COPY, cd.hash_pages(other).digests)
@@ -693,7 +702,7 @@ def test_35_staged_file_not_written_after_hash(fixture, monkeypatch):
     with monkeypatch.context() as patch:
         patch.setattr(cd, 'hash_pages', hashed)
         pub(fixture)
-    assert observed == [(staged(fixture).read_bytes(), staged(fixture).stat().st_mtime_ns)]
+    assert observed == [(checked(fixture).read_bytes(), checked(fixture).stat().st_mtime_ns)]
     for delta, code in ((False, 'staging_changed'), (True, 'delta_selfcheck')):
         grow(fixture)
         def tamper(path, **kw):
@@ -756,9 +765,8 @@ def test_39_forgotten_is_cumulative(fixture):
 def test_40_the_timers_skip(fixture):
     ready(fixture)
     fixture[1].calls.clear()
-    before = staged(fixture).stat().st_mtime_ns
     refused('unchanged', pub, fixture, timer=True, clock=lambda: 101)
-    assert not fixture[1].calls and staged(fixture).stat().st_mtime_ns == before
+    assert not fixture[1].calls and not staged(fixture).parent.exists()
     data = json.loads(state(fixture).read_text())
     data['last_publish_s'] = time.time()
     state(fixture).write_text(json.dumps(data))
@@ -916,15 +924,14 @@ def test_45_malformed_head_refused_before_upload(fixture, broken, code):
     elif broken == 'forgotten_list':
         m['forgotten'] = [[]]
     path.write_text('{' if broken == 'invalid_json' else json.dumps(m))
-    before, staged_before = keys(fixture), staged(fixture).read_bytes()
+    before = keys(fixture)
     fixture[1].calls.clear()
     result = cli(fixture)
     assert result.returncode == 2 and json.loads(result.stdout)['code'] == code
     assert json.loads(result.stdout)['generation'] == 2
     refused(code, pub, fixture)
     assert keys(fixture) == before and not any(method == 'put_new' for method, _ in fixture[1].calls)
-    if broken not in ('generation', 'base'):
-        assert staged(fixture).read_bytes() == staged_before
+    assert not staged(fixture).parent.exists()
 
 
 def test_46_uploaded_bytes_are_checked_bytes(fixture, monkeypatch):
@@ -970,8 +977,8 @@ def test_r2_writer_closes_before_live_open(fixture, monkeypatch, when):
         fixture[1].hook = lambda method, key: close() if method == 'put_new' else None
     else:
         real = cp.shutil.rmtree
-        def clear(path):
-            real(path)
+        def clear(path, **kw):
+            real(path, **kw)
             close()
         monkeypatch.setattr(cp.shutil, 'rmtree', clear)
     try:
@@ -1017,3 +1024,220 @@ def test_r2_transport_ignores_dot_files(fixture):
     assert transport.list(PREFIX + '/gen/') == [key]
     (folder / 'bad.json').write_bytes(b'{}')
     refused('bad_name', transport.list, PREFIX + '/gen/')
+
+
+@pytest.mark.parametrize('generation', [1, 2])
+@pytest.mark.parametrize('projected', [False, True], ids=['ledger-only', 'message-control'])
+def test_r3_forgotten_ledger_session(fixture, monkeypatch, generation, projected):
+    home, bucket, path, config = fixture
+    planted = 'synthetic-ledger-only-round-three'
+    rows = [dict(type='system', uuid='s2-system', subtype='informational', content=planted),
+            dict(type='file-history-snapshot', messageId='s2-file', snapshot={'note': planted})]
+    if projected:
+        rows.append(entry('user', 's2-user', planted))
+    transcript = path.with_name('s2.jsonl')
+    transcript.write_text(''.join(json.dumps(r) + '\n' for r in rows))
+    with capture_store(home / 'lcm.db', home, config) as store:
+        assert cc.drain(store, cc.Lineage('s2', None, transcript)) == 'drained'
+        assert store.connection.execute("SELECT count(*) FROM messages WHERE session_id='s2'").fetchone()[0] == int(projected)
+        assert store.connection.execute("SELECT count(*) FROM capture_events WHERE session_id='s2'").fetchone()[0] == len(rows)
+    if generation == 2:
+        pub(fixture)
+        grow(fixture)
+    backups, fired = [], []
+    monkeypatch.setattr(cp, '_after_backup', lambda: backups.append(True))
+    def forget(method, key):
+        if method == 'list' and key.endswith('/parts/') and not fired:
+            fired.append(True)
+            with capture_store(home / 'lcm.db', home, config) as store:
+                store.delete_session_messages('s2')
+    def items(head, db):
+        with closing(cp._ro(home / 'lcm.db')) as live:
+            exists = live.execute('SELECT 1 FROM metadata WHERE key=?', (cp.FORGOTTEN_PREFIX + 's2',)).fetchone()
+        return [dict(key='s2', kind='forgotten', session='s2', chain_may_hold=True)] if exists else []
+    bucket.hook = forget
+    m = pub(fixture, forget_items=items, **({'size_factor': 0} if generation == 2 else {}))
+    assert fired == [True] and len(backups) == 2
+    assert m['generation'] == generation and m['database']['base']['generation'] == generation
+    assert m['forgotten'] == [dict(key='s2', kind='forgotten', session='s2', base_generation=generation)]
+    rebuild(fixture, m, 'ledger-rebuilt.db')
+    with closing(sqlite3.connect(home.parent / 'ledger-rebuilt.db')) as conn:
+        for table in ('messages', 'capture_events'):
+            assert conn.execute(f'SELECT count(*) FROM {table} WHERE session_id=?', ('s2',)).fetchone() == (0,)
+        for (raw,) in conn.execute('SELECT raw FROM capture_events WHERE raw IS NOT NULL'):
+            assert planted.encode() not in zlib.decompress(raw)
+    assert not staged(fixture).parent.exists()
+
+
+@pytest.mark.parametrize('snapshot_only', [False, True], ids=['publish', 'snapshot'])
+@pytest.mark.parametrize('setting', ['absolute', 'relative', 'export-double', 'single', 'mixed-first', 'mixed-last'])
+def test_r3_payload_folder_refused(fixture, snapshot_only, setting):
+    home, bucket, _, _ = fixture
+    key = 'LCM_LARGE_OUTPUT_EXTERNALIZATION_PATH'
+    other, default = str(home.parent / 'elsewhere'), str(home / cp.PAYLOAD_FOLDER)
+    lines = {'absolute': f'{key}={other}', 'relative': f'{key}=relative/folder',
+             'export-double': f'export {key}="{other}"', 'single': f"{key}='{other}'",
+             'mixed-first': f'{key}={other}\n{key}={default}',
+             'mixed-last': f'{key}={default}\n{key}={other}'}
+    (home / '.env').write_text(lines[setting] + '\n')
+    # Exercise both CLI exit classification and the library's pre-stage boundary.
+    result = subprocess.run([sys.executable, '-I', '-S', '-B', str(ROOT / 'scripts/lcm_x_cloud.py'),
+        'snapshot' if snapshot_only else 'publish', '--home', str(home), '--copy-id', COPY,
+        '--bucket-dir', str(bucket.inner.root), '--prefix', 'copies'], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 2 and json.loads(result.stdout)['code'] == 'payload_folder_configured'
+    assert not staged(fixture).parent.exists() and not keys(fixture)
+    with pytest.raises(cp.Refused) as caught:
+        pub(fixture, snapshot_only=snapshot_only)
+    assert caught.value.code == 'payload_folder_configured'
+    assert not staged(fixture).parent.exists() and not keys(fixture)
+    assert not any(method == 'put_new' for method, _ in bucket.calls)
+
+
+def test_r3_payload_folder_defaults_proceed(fixture, monkeypatch):
+    home = fixture[0]
+    monkeypatch.setenv('HOME', str(home.parent))
+    key = 'LCM_LARGE_OUTPUT_EXTERNALIZATION_PATH'
+    default = str(home / cp.PAYLOAD_FOLDER)
+    env = home / '.env'
+    settings = [None, '# comment\nUNRELATED=value', f'# {key}=elsewhere', f'{key}=',
+                f'{key}= "" ', f"{key}=''", f'{key}={default}', f'{key}=~/home/{cp.PAYLOAD_FOLDER}',
+                f' export {key}="{default}" ', f"{key}='{default}'"]
+    for content in settings:
+        if content is not None:
+            env.write_text(content + '\n')
+        m = pub(fixture, snapshot_only=True)
+        assert m['payloads'] and staged(fixture).is_file() and not keys(fixture)
+    pub(fixture)
+    assert not staged(fixture).parent.exists()
+
+
+def test_r3_disk_floor_counts_wal(fixture):
+    home = fixture[0]
+    with closing(sqlite3.connect(home / 'lcm.db')) as writer:
+        writer.execute('PRAGMA journal_mode=WAL')
+        writer.execute('PRAGMA wal_autocheckpoint=0')
+        writer.executemany('INSERT INTO metadata(key,value) VALUES (?,?)',
+                           [(f'synthetic-wal:{i}', 'x' * 4000) for i in range(32)])
+        writer.commit()
+        payload = sum(p.stat().st_size for p in (home / cp.PAYLOAD_FOLDER).iterdir())
+        old_budget = (home / 'lcm.db').stat().st_size + payload + cp.DISK_MARGIN
+        wal_bytes = (home / 'lcm.db-wal').stat().st_size
+        assert wal_bytes > 0
+        with pytest.raises(cp.Refused) as caught:
+            pub(fixture, free_bytes=lambda _: old_budget + wal_bytes // 2)
+        assert caught.value.code == 'disk_floor'
+        assert not staged(fixture).parent.exists() and not keys(fixture)
+        assert pub(fixture, free_bytes=lambda _: old_budget + wal_bytes + 1)['generation'] == 1
+
+
+@pytest.mark.parametrize('outcome', ['success', 'staging_changed', 'chain_conflict', 'guard_not_installed',
+                                    'guard_loss', 'disk_floor', 'schema_newer', 'page_size', 'transport_error'])
+def test_r3_publish_cleans_staging(fixture, monkeypatch, outcome):
+    home, bucket, _, _ = fixture
+    if outcome in ('guard_not_installed', 'guard_loss', 'disk_floor'):
+        pub(fixture)
+        grow(fixture)
+    # Snapshot is the control: it must keep its staged copy even after publish cleanup is added.
+    pub(fixture, snapshot_only=True)
+    assert staged(fixture).is_file()
+    live = {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in (home / cp.PAYLOAD_FOLDER).iterdir()}
+    real = cp.shutil.rmtree
+    cleaned = []
+    def clear(path, **kw):
+        assert Path(path) == staged(fixture).parent
+        with (home / 'cloud' / 'upload.lock').open('a') as handle:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if kw.get('ignore_errors'):
+            cleaned.append(True)
+        return real(path, **kw)
+    monkeypatch.setattr(cp.shutil, 'rmtree', clear)
+    kw = dict(guard=lambda *args: None, forget_items=lambda *args: [])
+    if outcome == 'guard_not_installed':
+        kw = {}
+    elif outcome == 'guard_loss':
+        def guard(*args):
+            raise cp.Refused('guard_loss')
+        kw['guard'] = guard
+    elif outcome == 'disk_floor':
+        readings = iter([10**9, 0])
+        kw['free_bytes'] = lambda _: next(readings)
+    elif outcome == 'schema_newer':
+        monkeypatch.setattr(cp, 'SCHEMA_VERSION', 0)
+    elif outcome == 'page_size':
+        def bad_hash(*args, **kwargs):
+            raise cp.Refused('page_size')
+        monkeypatch.setattr(cd, 'hash_pages', bad_hash)
+    elif outcome == 'staging_changed':
+        def tamper(method, key):
+            if method == 'list' and key.endswith('/parts/'):
+                with staged(fixture).open('ab') as handle:
+                    handle.write(b'x')
+        bucket.hook = tamper
+    elif outcome == 'chain_conflict':
+        def conflict(method, key):
+            if method == 'put_new' and key.endswith('/gen/1.json'):
+                bucket.inner.put_new(key, b'{}')
+        bucket.hook = conflict
+    elif outcome == 'transport_error':
+        def outage(method, key):
+            if method == 'put_new' and '/parts/' in key:
+                raise OSError('synthetic outage')
+        bucket.hook = outage
+    if outcome == 'success':
+        cp.publish(home, COPY, bucket, PREFIX, **kw)
+    elif outcome == 'transport_error':
+        with pytest.raises(OSError, match='synthetic outage'):
+            cp.publish(home, COPY, bucket, PREFIX, **kw)
+    else:
+        with pytest.raises(cp.Refused) as caught:
+            cp.publish(home, COPY, bucket, PREFIX, **kw)
+        assert caught.value.code == outcome
+    assert not staged(fixture).parent.exists()
+    assert cleaned == [True]
+    assert {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in live} == live
+
+
+@pytest.mark.parametrize('field,code', [('layout', 'newer_layout'), ('contract', 'replica_newer_contract')])
+def test_r3_head_check_order(fixture, field, code):
+    pub(fixture)
+    path = fixture[1].inner.root / PREFIX / 'gen/1.json'
+    m = json.loads(path.read_bytes())
+    m['database'] = None
+    if field == 'layout':
+        m['layout'] = 2
+    else:
+        m['stamp']['contract']['version'] = 2
+    path.write_text(json.dumps(m))
+    before = keys(fixture)
+    fixture[1].calls.clear()
+    with pytest.raises(cp.Refused) as caught:
+        pub(fixture)
+    assert caught.value.code == code and caught.value.detail['generation'] == 1
+    assert keys(fixture) == before and not any(method == 'put_new' for method, _ in fixture[1].calls)
+
+
+def test_r3_wal_skip_preserves_snapshot(fixture):
+    pub(fixture, snapshot_only=True)
+    db = fixture[0] / 'lcm.db'
+    data = bytearray(db.read_bytes())
+    data[18:20] = b'\2\2'
+    db.write_bytes(data)
+    assert not db.with_name('lcm.db-wal').exists() and not db.with_name('lcm.db-shm').exists()
+    def contents():
+        return {p.relative_to(staged(fixture).parent): (p.read_bytes(), p.stat().st_mtime_ns)
+                for p in staged(fixture).parent.rglob('*') if p.is_file()}
+    before = contents()
+    with pytest.raises(cp.Refused) as caught:
+        pub(fixture, snapshot_only=True)
+    assert caught.value.code == 'wal_without_sidecars'
+    assert contents() == before
+    assert staged(fixture).stat().st_size > 0
+
+
+@pytest.mark.parametrize('code', ['bad_head', 'payload_folder_configured'])
+def test_r3_documented_refusal_codes(code):
+    assert code in cp.__doc__
+    command_doc = ast.get_docstring(ast.parse((ROOT / 'scripts/lcm_x_cloud.py').read_text()))
+    assert code in command_doc
+    assert code not in cp.SKIPS
