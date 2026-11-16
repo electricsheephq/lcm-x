@@ -64,9 +64,7 @@ These changes reached the bundled core after 2026-11-11:
 
 - **Recall responses stay under the cap.** `lcm_recall` snippets responses fit under the response cap on every path, with the flags described under "What it does". A `limit` of plus or minus infinity falls back to the default limit instead of raising an error (#2620).
 - **An opt-in recall session floor,** off by default (#2614). This plugin does not turn it on.
-- **Ingest decides before it locks.** Ingest now classifies a batch's rows before it takes the store's write lock, and checks again under the lock (#2681).
-- **A saved output whose payload file cannot be written** is stored as the marker the host sent, as v0.29.2 stored it (#2602).
-- **Changes for the Hermes plugin.** These shared core changes fix Hermes paths that this plugin does not run: session ends (#2632, #2662, #2698, #2747, #2755, #2766), a replay rule (#2663), the identity-anchor check (#2644), and Hermes saved-output markers under redaction (#2606). The store also gained a records file for a later release that nothing writes yet (#2752), and one docstring was reworded so install scanners do not flag the plugin (#2734).
+- **Changes for the Hermes plugin.** These shared core changes are on Hermes paths that this plugin's capture does not take: session ends (#2632, #2662, #2698, #2747, #2755, #2766), a replay rule (#2663), the identity-anchor check (#2644), ingest that classifies a batch's rows before it takes the store's write lock and checks them again under it (#2681; this plugin's writer classifies before its transaction and does not recheck), and Hermes saved-output markers when a payload file cannot be written (#2602) or when redaction changes a preview (#2606). The store also gained a records file for a later release that nothing writes yet (#2752), and one docstring was reworded so install scanners do not flag the plugin (#2734).
 
 ## What it bundles
 
