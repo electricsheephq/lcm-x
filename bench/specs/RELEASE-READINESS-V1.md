@@ -59,9 +59,33 @@ never wait for it.
   1. **Audit gate.** Every R1-R10 session's audit exits 0 with `verified: true`: every transcript
      line accounted for, 0 lost, 0 duplicated, no spool record waiting or failed. Sessions with
      Claude Code's local transcript GC on are listed without a lossless claim.
+     Beside the audit, `scripts/capture_outside_in.py` must pass over the session's store home
+     and every transcript captured into that store home, in capture order (subagents as
+     `SESSION/agent:ID`), including each rewritten transcript's set-aside copy (a file beside it
+     whose name contains `.superseded-` or `.orphaned-`) before its replacement, listed from the
+     transcript files rather than from the store: 0 lost, 0 duplicated, order kept, 0 unpaired. The session's record carries the checker's
+     `unverified` and `unprojected` counts. A failure in the documented false-failure shape
+     (#2777: a recovered text equal to a later verbatim revision is reported out of order) goes
+     to the release manager with the transcript line numbers. The release manager then finds both
+     stored rows (by the call's `tool_use_id`, stored as `tool_call_id`, and the revision link
+     between them), reads each row's stored text, loading the payload file when the row holds an
+     externalized reference, and compares it with the transcript's verbatim text and the saved
+     tool-results file: if either differs, the session lost content and fails the gate. Even when
+     both match, the case never passes by itself.
+     Two more cases:
+     - **Unverified rows.** The checker accepts one stored row per persisted-output preview without
+       checking its content (its `unverified` count), and the audit checks only one row per saved
+       file, so a corrupted preview-backed row can pass both. A session with any unverified row
+       cannot pass this gate until the checker verifies those rows (#2777).
+     - **Interrupted tool calls** go to the release manager. A call the host never answered, as in a
+       killed session, counts as unpaired. It passes only when the transcript itself has no result
+       line for that call and the audit's `unanswered` count equals the number of such calls; the
+       record lists each one with its transcript line.
+     (2026-11-16, #2139: the audit gate runs the outside-in checker beside the audit, for candidates gated after this change.)
   2. **Real sessions R1-R10** through Claude Code, each with a record: the backend, the machine
      (model and RAM), the runtime mode, the exact interpreter version, the load average at the
-     start, the audit's `ok` and `verified`, per-event hook latency (n, p50, p95, max) with each
+     start, the audit's `ok` and `verified`, the checker's result with its `unverified` and
+     `unprojected` counts, per-event hook latency (n, p50, p95, max) with each
      session's first hook apart, `PreCompact` p50/p95/max and its paths, and the audit's peak
      memory and the store size. Latency is recorded, not gated, until #2141's quiet-host
      measurement sets a bar. An audit over 2 GB, audit memory growing roughly linearly with the

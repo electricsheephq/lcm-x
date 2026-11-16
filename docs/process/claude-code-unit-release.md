@@ -19,6 +19,18 @@ the gate's evidence.
      `HOME` and a scratch `CLAUDE_CONFIG_DIR`, each run recorded as the spec lists;
    - `<plugin folder>/lcm-x/scripts/lcm_x_capture.py audit --home <store home>` after each run and
      per session: exit 0 and `verified: true`;
+   - from the candidate commit's checkout, or, for a candidate that predates the checker, from a
+     checkout of main that contains it,
+     `python scripts/capture_outside_in.py --home <store home> --transcript SESSION=PATH ...`,
+     supplying every transcript captured into that store home, in capture order (subagents as
+     `SESSION/agent:ID`), including each rewritten transcript's set-aside copy (a file beside it
+     whose name contains `.superseded-` or `.orphaned-`) before its replacement, listed from the
+     transcript files under the scratch `CLAUDE_CONFIG_DIR`, not from the store (the checker cannot
+     see a transcript it is not given);
+     the checker is repository tooling, absent from the unit asset (`ENTRY_SCRIPTS` in
+     `scripts/build_claude_code_unit.py` lists only `lcm_x_capture.py` and `lcm_x_mcp.py`);
+     pass: exit 0 with 0 lost, 0 duplicated, order kept and 0 unpaired. The #2777 shape,
+     `unverified` rows and interrupted tool calls follow gate item 1;
    - the growth check when its inputs changed since its last run;
    - `python scripts/claude_code_unit_smoke.py --ref <candidate sha> --runtime venv`, then
      `--runtime found`, each on Python 3.11 and 3.14 (the tag workflow's found mode later uses the
