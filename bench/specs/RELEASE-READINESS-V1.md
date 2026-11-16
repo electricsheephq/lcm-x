@@ -60,15 +60,20 @@ never wait for it.
      line accounted for, 0 lost, 0 duplicated, no spool record waiting or failed. Sessions with
      Claude Code's local transcript GC on are listed without a lossless claim.
      Beside the audit, `scripts/capture_outside_in.py` must pass over the session's store home
-     and every transcript of the run in capture order (subagents as `SESSION/agent:ID`):
+     and every transcript captured into that store home, in capture order (subagents as
+     `SESSION/agent:ID`):
      0 lost, 0 duplicated, order kept, 0 unpaired. The session's record carries the checker's
      `unverified` and `unprojected` counts. A failure in the documented false-failure shape
      (#2777: a recovered text equal to a later verbatim revision is reported out of order) goes
-     to the release manager with the transcript line numbers; it never passes by itself.
+     to the release manager with the transcript line numbers. The release manager then reads both
+     stored rows from the store and compares them with the transcript's verbatim text and the saved
+     tool-results file: if either differs, the session lost content and fails the gate. Even when
+     both match, the case never passes by itself.
      (2026-11-16, #2139: the audit gate runs the outside-in checker beside the audit, for candidates gated after this change.)
   2. **Real sessions R1-R10** through Claude Code, each with a record: the backend, the machine
      (model and RAM), the runtime mode, the exact interpreter version, the load average at the
-     start, the audit's `ok` and `verified`, per-event hook latency (n, p50, p95, max) with each
+     start, the audit's `ok` and `verified`, the checker's result with its `unverified` and
+     `unprojected` counts, per-event hook latency (n, p50, p95, max) with each
      session's first hook apart, `PreCompact` p50/p95/max and its paths, and the audit's peak
      memory and the store size. Latency is recorded, not gated, until #2141's quiet-host
      measurement sets a bar. An audit over 2 GB, audit memory growing roughly linearly with the

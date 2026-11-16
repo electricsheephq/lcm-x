@@ -732,6 +732,7 @@ An independent row checker, [`scripts/capture_outside_in.py`](../scripts/capture
 **Each run's record**, which is also evidence for #2141:
 - the backend;
 - the audit's `ok` and `verified`, and every failure counter;
+- the outside-in checker's result, with its `unverified` and `unprojected` counts;
 - the machine (model and RAM), the runtime mode (venv or found) and the exact interpreter version;
 - the per-turn hook latency per event (n, p50, p95, max): in-process from the audit
   (`hooks_in_process_ms`), and wall time from a smoke run on the same machine right after

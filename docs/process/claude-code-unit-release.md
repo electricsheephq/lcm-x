@@ -19,9 +19,11 @@ the gate's evidence.
      `HOME` and a scratch `CLAUDE_CONFIG_DIR`, each run recorded as the spec lists;
    - `<plugin folder>/lcm-x/scripts/lcm_x_capture.py audit --home <store home>` after each run and
      per session: exit 0 and `verified: true`;
-   - from the candidate commit's checkout,
+   - from the candidate commit's checkout, or, for a candidate that predates the checker, from a
+     checkout of main that contains it,
      `python scripts/capture_outside_in.py --home <store home> --transcript SESSION=PATH ...`,
-     supplying every transcript of the run in capture order (subagents as `SESSION/agent:ID`);
+     supplying every transcript captured into that store home, in capture order (subagents as
+     `SESSION/agent:ID`);
      the checker is repository tooling, absent from the unit asset (`ENTRY_SCRIPTS` in
      `scripts/build_claude_code_unit.py` lists only `lcm_x_capture.py` and `lcm_x_mcp.py`);
      pass: exit 0, 0 lost, 0 duplicated, order kept, 0 unpaired;
