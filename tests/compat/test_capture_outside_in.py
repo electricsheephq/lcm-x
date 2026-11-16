@@ -317,3 +317,52 @@ def test_projection_fidelity(tmp_path, shape, record_property):
     if shape == "error":
         checked = run(CHECKER, "--home", home, "--transcript", "plain=" + str(tmp_path / "PRIVATE_missing"), env=env, accepted=(1,))
         assert json.loads(checked.stdout)["error_type"] == "FileNotFoundError" and "PRIVATE" not in checked.stdout
+
+
+@pytest.mark.parametrize("preview_first", [True, False], ids=["preview-first", "preview-last"])
+@pytest.mark.parametrize("corrupt", [False, True], ids=["clean", "corrupted"])
+def test_preview_occurrence(tmp_path, preview_first, corrupt, record_property):
+    base = tmp_path / "capture"
+    saved = base / "claude/projects/synthetic/plain/tool-results/output.txt"
+    saved.parent.mkdir(parents=True)
+    saved.write_text("synthetic recovered output")
+    rows = [json.loads(line) for line in FIXTURES[0].read_text().splitlines()][1:3]
+    rows[-1]["message"]["content"] = rows[-1]["message"]["content"][:1]
+    rows.append(json.loads(json.dumps(rows[-1])))
+    rows[1 if preview_first else 2]["message"]["content"][0]["content"] = (
+        f"<persisted-output>\nFull output saved to: {saved}\n\nPreview:\nsynthetic\n</persisted-output>")
+    fixture = tmp_path / "09_preview.jsonl"
+    fixture.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    home, env, inputs = capture_session(base, fixture)
+    assert read_sql(home, "SELECT store_id,related_store_id FROM message_relations WHERE kind='supersedes'") == [(3, 2)]
+    if corrupt:
+        with closing(sqlite3.connect(home / "lcm.db")) as conn, conn:
+            conn.execute("UPDATE messages SET content='CORRUPTED' WHERE store_id=?", (3 if preview_first else 2,))
+    checked, report, audit = verdict(home, env, inputs)
+    record_property("checker", checked.stdout)
+    record_property("audit", json.dumps(audit, sort_keys=True))
+    assert checked.returncode == int(corrupt) and report["pass"] == (not corrupt)
+    assert [(r["lost"], r["duplicated"], r["order_kept"], r["unpaired"], r["unverified"], r["unprojected"])
+            for r in report["lineages"]] == [(int(corrupt), int(corrupt), True, 0, 1, 0)]
+    assert not report["unexpected_sessions"]
+    if not corrupt:
+        assert audit["ok"]
+
+
+@pytest.mark.parametrize("changed", [False, True], ids=["retained-id", "changed-id"])
+def test_call_revision_ancestry(tmp_path, changed, record_property):
+    rows = [json.loads(line) for line in next(p for p in FIXTURES if p.stem.startswith("09")).read_text().splitlines()]
+    if changed:
+        rows[0]["message"]["content"][0]["id"] = "old-tool"
+    fixture = tmp_path / "09_call.jsonl"
+    fixture.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    home, env, inputs = capture_session(tmp_path / "capture", fixture)
+    assert read_sql(home, "SELECT store_id,role FROM messages ORDER BY store_id") == [(1, "assistant"), (2, "tool"), (3, "assistant")]
+    assert read_sql(home, "SELECT store_id,related_store_id FROM message_relations WHERE kind='supersedes'") == [(3, 1)]
+    checked, report, audit = verdict(home, env, inputs)
+    record_property("checker", checked.stdout)
+    record_property("audit", json.dumps(audit, sort_keys=True))
+    assert checked.returncode == int(changed) and report["pass"] == (not changed)
+    assert [(r["lost"], r["duplicated"], r["order_kept"], r["unpaired"], r["unverified"], r["unprojected"])
+            for r in report["lineages"]] == [(0, 0, True, int(changed), 0, 0)]
+    assert not report["unexpected_sessions"] and audit["ok"]

@@ -125,11 +125,15 @@ def check(home, inputs):
         predecessors[new].append(old)
     superseded = {old for _, old in revisions}
     tool_ids = {r["store_id"]: r["tool_call_id"] for r in messages}
-    origins = {}
+    origins, call_origins = {}, {}
     for row in messages:  # store_id order makes every predecessor's origin available.
         row_id = row["store_id"]
         origins[row_id] = min([row_id, *(origins[old] for old in predecessors[row_id]
                                       if row["tool_call_id"] == tool_ids[old])])
+        call_origins[row_id] = {
+            call_id: min([row_id, *(call_origins[old][call_id] for old in predecessors[row_id]
+                                   if call_id in call_origins[old])])
+            for call_id in (call.get("id") for call in json.loads(row["tool_calls"] or "[]"))}
     reports = []
     unexpected = [{"session_id": s, "rows": len(grouped[s])} for s in sorted(grouped.keys() - expected.keys())]
     for session in sorted(expected):
@@ -152,17 +156,14 @@ def check(home, inputs):
                              for b in bound[1:])
             if row_id not in superseded:
                 for call in tool_calls:
-                    calls[call.get("id")].append(origins[row_id])
+                    calls[call.get("id")].append(call_origins[row_id][call.get("id")])
                 if row["role"] == "tool":
                     results[row["tool_call_id"]].append(origins[row_id])
         # Only transcript previews can stand in for recovered content.
-        opaque = {r[:2] + r[3:] for r in wanted if r[1] == "tool"
+        opaque = {r for r in wanted if r[1] == "tool"
                   and isinstance(text := json.loads(r[2]), str)
                   and text.lstrip().startswith("<persisted-output>")}
-        unverified = sum(r[:2] + r[3:] in opaque for r in actual)
         def normalize(row):
-            if row[:2] + row[3:] in opaque:
-                return row[:2] + ("null",) + row[3:]
             text = json.loads(row[2])
             match = re.fullmatch(
                 r'\[Externalized tool output: .*; chars=(\d+); bytes=(\d+); .*; '
@@ -171,16 +172,31 @@ def check(home, inputs):
             if match:
                 for candidate in wanted:
                     source = json.loads(candidate[2])
-                    if (candidate[:2] + candidate[3:] == row[:2] + row[3:] and isinstance(source, str)
+                    if (candidate not in opaque and candidate[:2] + candidate[3:] == row[:2] + row[3:] and isinstance(source, str)
                             and (len(source), len(source.encode("utf-8")), hashlib.sha256(source.encode("utf-8")).hexdigest()[:12])
                             == (int(match[1]), int(match[2]), match[3])):
                         return candidate
             if row[1] == "tool" and isinstance(text, str) and text.startswith("[Externalized tool output:"):
                 return row[:2] + ("null",) + row[3:]
             return row
-        wanted = [r[:2] + ("null",) + r[3:] if r[:2] + r[3:] in opaque else r for r in wanted]
         actual = list(map(normalize, actual))
         ambiguous = Counter(map(normalize, ambiguous.elements()))
+        # Reserve exact content matches before spending any occurrence's preview slot.
+        remaining = Counter(r for r in wanted if r not in opaque)
+        previews = Counter(r[:2] + r[3:] for r in wanted if r in opaque)
+        pending, unverified = [], 0
+        for i, row in enumerate(actual):
+            if remaining[row]:
+                remaining[row] -= 1
+            else:
+                pending.append(i)
+        for i in pending:
+            identity = actual[i][:2] + actual[i][3:]
+            if previews[identity]:
+                actual[i] = actual[i][:2] + ("null",) + actual[i][3:]
+                previews[identity] -= 1
+                unverified += 1
+        wanted = [r[:2] + ("null",) + r[3:] if r in opaque else r for r in wanted]
         need, have = Counter(wanted), Counter(actual)
         missing = need - have - ambiguous
         lost = sum(missing.values())
