@@ -906,3 +906,107 @@ def test_checker_release_instructions():
         assert "oldest first, historical versions before the live file" in text
         assert "with any unverified row cannot pass" in text
         assert "and justified" not in text
+
+
+def reference_for(text, kind="LCM ingest payload"):
+    import hashlib
+    digest = hashlib.sha256(text.encode()).hexdigest()[:12]
+    return (f"[Externalized {kind}: chars={len(text)}; bytes={len(text.encode())}; "
+            f"ref=20000101_000000_payload_{digest}_abcd.json]")
+
+
+def checker_store(tmp_path, entries, rows):
+    home = tmp_path / "store"
+    home.mkdir()
+    with closing(sqlite3.connect(home / "lcm.db")) as conn, conn:
+        conn.execute("CREATE TABLE messages(store_id INTEGER, session_id TEXT, role TEXT, content TEXT, "
+                     "tool_call_id TEXT, tool_calls TEXT)")
+        conn.execute("CREATE TABLE host_uid_bindings(store_id INTEGER, uid TEXT, lineage_key TEXT, kind TEXT)")
+        for i, (uid, role, content, call_id, calls) in enumerate(rows, 1):
+            conn.execute("INSERT INTO messages VALUES(?,'s',?,?,?,?)", (i, role, content, call_id, calls))
+            conn.execute("INSERT INTO host_uid_bindings VALUES(?,?,'claude-code:s','canonical')", (i, uid))
+    return home, [("s", write_entries(tmp_path / "s.jsonl", entries))]
+
+
+@pytest.mark.parametrize("shape", ["duplicate-key", "reformatted"])
+@pytest.mark.parametrize("lossy", [True, False], ids=["lossy", "healthy"])
+def test_json_text_preservation(tmp_path, shape, lossy, record_property):
+    payload = "<payload>"
+    source = ('{"data":"important original text","data":"<payload>"}' if shape == "duplicate-key"
+              else '{"data":"<payload>","keep":"same"}')
+    if lossy:
+        stored = json.dumps(dict(data=reference_for(payload)) if shape == "duplicate-key"
+                            else dict(keep="same", data=reference_for(payload)))
+    else:
+        stored = source.replace(payload, reference_for(payload))
+    entries = [dict(type="user", uuid="u", sessionId="s", message=dict(content=source))]
+    home, inputs = checker_store(tmp_path, entries, [("u", "user", stored, None, None)])
+    code, report = check_only(home, {"PATH": os.defpath}, inputs)
+    record_property("checker", json.dumps(report))
+    assert (code, report["pass"]) == (int(lossy), not lossy)
+    assert [(r["lost"], r["duplicated"], r["unverified"]) for r in report["lineages"]] == [
+        (int(lossy), int(lossy), 0)]
+
+
+def test_deep_output_reference(tmp_path, record_property):
+    depth = sys.getrecursionlimit() * 3
+    text = "[" * depth + '"important original text"' + "]" * depth
+    entries = [dict(type="assistant", uuid="a", sessionId="s", message=dict(content=[
+                   dict(type="tool_use", id="c", name="synthetic", input={})])),
+               dict(type="user", uuid="t", sessionId="s", message=dict(content=[
+                   dict(type="tool_result", tool_use_id="c", content=text)]))]
+    calls = json.dumps([dict(id="c", type="function", function=dict(name="synthetic", arguments="{}"))])
+    home, inputs = checker_store(tmp_path, entries, [("a", "assistant", "", None, calls),
+                                ("t", "tool", reference_for(text, "tool output"), "c", None)])
+    code, report = check_only(home, {"PATH": os.defpath}, inputs)
+    record_property("checker", json.dumps(report))
+    assert code == 0 and report["pass"]
+    assert [(r["lost"], r["duplicated"], r["unpaired"], r["unverified"]) for r in report["lineages"]] == [
+        (0, 0, 0, 0)]
+
+
+@pytest.mark.parametrize("operation", ["index", "compare"])
+def test_deep_structured_parse_guard(operation, monkeypatch):
+    from collections import defaultdict
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("outside_in_deep_parse", CHECKER)
+    checker = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(checker)
+    depth = sys.getrecursionlimit() * 3
+    text = "[" * depth + json.dumps(reference_for("payload")) + "]" * depth
+    index = defaultdict(set)
+    def recursion_error(_):
+        raise RecursionError("nested JSON")
+    # Decoder nesting limits vary across Python versions; exercise its failure explicitly.
+    monkeypatch.setattr(checker.json, "loads", recursion_error)
+    if operation == "index":
+        assert checker.index_source(text, index, True) is None
+        assert text in index[checker.fingerprint(text)]
+    else:
+        assert not checker.content_matches(text, "[]", [], index)
+
+
+@pytest.mark.parametrize("container", ["list", "dict"])
+def test_deep_structured_walks(monkeypatch, container):
+    from collections import defaultdict
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("outside_in_deep_walks", CHECKER)
+    checker = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(checker)
+    original, stored = "payload", reference_for("payload")
+    for _ in range(sys.getrecursionlimit() * 3):
+        original = [original] if container == "list" else dict(child=original)
+        stored = [stored] if container == "list" else dict(child=stored)
+    index = defaultdict(set)
+    # Isolate the walks from the JSON decoder's independent nesting limit.
+    with monkeypatch.context() as patch:
+        patch.setattr(checker.json, "loads", lambda _: original)
+        assert checker.index_source("[]", index, True) is original
+        assert "payload" in index[checker.fingerprint("payload")]
+        patch.setattr(checker.json, "loads", lambda _: stored)
+        assert checker.content_matches(reference_for("payload") + " ", "[]", original, index)
+        wrong = "lost"
+        for _ in range(sys.getrecursionlimit() * 3):
+            wrong = [wrong] if container == "list" else dict(child=wrong)
+        patch.setattr(checker.json, "loads", lambda _: wrong)
+        assert not checker.content_matches(reference_for("payload") + " ", "[]", original, index)

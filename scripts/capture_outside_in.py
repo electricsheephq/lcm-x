@@ -2,7 +2,9 @@
 """Check capture message preservation using explicit transcripts and read-only contract SQL.
 
 Repeat --transcript SESSION=PATH in observation order, including historical versions.
+Supply each rewritten transcript's set-aside copy before its replacement.
 Subagents use SESSION/agent:ID. Output contains counts and ids, never transcript text.
+For a reused agent id's later transcript, use SESSION/agent:/ plus its path below subagents/.
 Raw ledger preservation and payload-file recovery are outside this row checker.
 """
 from __future__ import annotations
@@ -97,8 +99,9 @@ def expected_rows(inputs):
                     for row in project(entry):
                         sig = signature(row)
                         expected[session].append(sig)
-                        sources[session].append(json.dumps(row[2], ensure_ascii=False, sort_keys=True)
-                                                if isinstance(row[2], (list, dict)) else row[2])
+                        structured = isinstance(row[2], (list, dict))
+                        sources[session].append((json.dumps(row[2], ensure_ascii=False, sort_keys=True)
+                                                 if structured else row[2], structured))
                         if row[1] == "tool" and isinstance(row[2], str) and row[2].lstrip().startswith("<persisted-output>"):
                             previews[session, len(expected[session]) - 1] = entry.get("toolUseResult")
                     seen[session].add(identity)
@@ -159,22 +162,23 @@ def fingerprint(text):
     return len(text), len(data), hashlib.sha256(data).hexdigest()[:12]
 
 
-def index_source(text, index):
+def index_source(text, index, structured):
     index[fingerprint(text)].add(text)
+    if not structured:
+        return None
     try:
         value = json.loads(text) if text[:1] in {"[", "{"} else None
-    except ValueError:
+    except (ValueError, RecursionError):
         value = None
-    def visit(node):
+    pending = [value]
+    while pending:
+        node = pending.pop()
         if isinstance(node, str):
             index[fingerprint(node)].add(node)
         elif isinstance(node, list):
-            for child in node:
-                visit(child)
+            pending.extend(node)
         elif isinstance(node, dict):
-            for child in node.values():
-                visit(child)
-    visit(value)
+            pending.extend(node.values())
     return value
 
 
@@ -216,17 +220,25 @@ def content_matches(stored, source, structured, index):
         return False
     try:
         value = json.loads(stored)
-    except ValueError:
+    except (ValueError, RecursionError):
         return False
-    def compare(left, right):
+    pending = [(value, structured)]
+    while pending:
+        left, right = pending.pop()
         if isinstance(left, str) and isinstance(right, str):
-            return content_matches(left, right, None, index)
-        if isinstance(left, list) and isinstance(right, list):
-            return len(left) == len(right) and all(compare(a, b) for a, b in zip(left, right))
-        if isinstance(left, dict) and isinstance(right, dict):
-            return left.keys() == right.keys() and all(compare(left[k], right[k]) for k in left)
-        return type(left) is type(right) and left == right
-    return compare(value, structured)
+            if not content_matches(left, right, None, index):
+                return False
+        elif isinstance(left, list) and isinstance(right, list):
+            if len(left) != len(right):
+                return False
+            pending.extend(zip(left, right))
+        elif isinstance(left, dict) and isinstance(right, dict):
+            if left.keys() != right.keys():
+                return False
+            pending.extend((left[k], right[k]) for k in left)
+        elif type(left) is not type(right) or left != right:
+            return False
+    return True
 
 
 def check(home, inputs):
@@ -307,7 +319,7 @@ def check(home, inputs):
         # Prepare each transcript occurrence once, then pair the k-th row of each uid.
         sources, reasons, index = [], {}, defaultdict(set)
         for i, row in enumerate(wanted):
-            source = transcript_sources[session][i]
+            source, structured = transcript_sources[session][i]
             if previews and (session, i) in previews:
                 recovered, reason = saved_preview(source, transcript_paths[session], previews[session, i])
                 if reason:
@@ -315,7 +327,7 @@ def check(home, inputs):
                 else:
                     source = recovered
                     wanted[i] = row[:2] + (canonical(source),) + row[3:]
-            sources.append(source)
+            sources.append((source, structured))
         slots = defaultdict(list)
         for i, row in enumerate(wanted):
             slots[row[0]].append(i)
@@ -334,8 +346,8 @@ def check(home, inputs):
                 unverified += 1
                 unverified_reasons.append({"uid": uid, "reason": reasons[i]})
             elif row != target:
-                source = sources[i]
-                structured = index_source(source, index) if isinstance(source, str) else None
+                source, is_structured = sources[i]
+                structured = index_source(source, index, is_structured) if isinstance(source, str) else None
                 if content_matches(json.loads(row[2]), source, structured, index):
                     actual[n] = target
         need, have = Counter(wanted), Counter(actual)
