@@ -554,7 +554,7 @@ class Merger:
             return self.local_call(local_raw)
         pending, entries = {}, []
         for replica in self.replicas.values():
-            skip = bool(args.get('externalized_refs')) or (hidden is not None and isinstance(args.get('session_id'), str) and args['session_id'] in hidden)
+            skip = bool(args.get('externalized_refs')) or (hidden is not None and isinstance(local_args.get('session_id'), str) and local_args['session_id'] in hidden)
             entry = {'copy_id': replica.prefix, 'generation': replica.generation, 'status': 'ok' if skip else replica.status, 'hits': []}
             entries.append(entry)
             if hidden is None:
@@ -636,7 +636,7 @@ def main():
                     try:
                         reply = merger.local_call(raw, notification)
                     except Exception:
-                        reply = (json.dumps({'jsonrpc': '2.0', 'id': req.get('id') if isinstance(req, dict) else None,
+                        reply = b'' if notification else (json.dumps({'jsonrpc': '2.0', 'id': req.get('id') if isinstance(req, dict) else None,
                                              'error': {'code': -32603, 'message': 'Internal error'}}) + '\n').encode()
                 if reply:
                     sys.stdout.buffer.write(reply)

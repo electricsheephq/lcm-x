@@ -1054,3 +1054,50 @@ def test_r4_list_entries_go_to_owner(key):
             'bare', 'home', qualified('origin', local_uuid), qualified('unknown', unknown)]
     for prefix, bare in [(PREFIX, 'a'), (second, 'b')]:
         assert merger.arguments(args, prefix, True)[key] == (['bare', bare] if key == 'exclude_session_ids' else [bare])
+
+
+def test_p_own_prefix_forgotten_session_not_forwarded(tmp_path, corpus, clients):
+    local, sources = corpus
+    store = cc.open_store(local / 'lcm.db', local)
+    transcript = _transcript(tmp_path / 'fg', [_entry('user', 'f1', 'remote0 marker', 'remote0')], 'remote0')
+    assert cc.drain(store, cc.Lineage('remote0', None, transcript)) == 'drained'
+    assert cc.to_rollback_journal(store.connection)
+    store.close()
+    forget(local, 'remote0')
+    copy_generation(sources[0], local, COPIES[0])
+    client = clients(tmp_path, local, fake=True)
+    ready(client)
+    for session in ('remote0', qualified('remote0', OWN.replace('-', ''))):
+        client.body('lcm_grep', query='marker', session_id=session)
+    requests = [json.loads(line) for pid in client.pids(True)
+                for line in (client.log / f'{pid}.requests').read_text().splitlines()]
+    sent = [req['params']['arguments']['session_id'] for req in requests
+            if 'session_id' in req.get('params', {}).get('arguments', {})]
+    assert sent == [], 'forgotten session forwarded to a replica'
+
+
+def test_r6_notification_double_failure_keeps_serving(monkeypatch):
+    notification = b'{"jsonrpc":"2.0","method":"notifications/initialized"}\n'
+    second = cr.request(2, 'ping')
+    success = b'{"jsonrpc":"2.0","id":2,"result":{}}\n'
+    handled, fallbacks = [], []
+    class BrokenMerger:
+        def __init__(self, *args): pass
+        def handle(self, raw):
+            handled.append(raw)
+            if raw == second:
+                return success
+            raise RuntimeError('handle failed')
+        def local_call(self, raw, notification=False):
+            fallbacks.append((raw, notification))
+            raise RuntimeError('local failed')
+        def close(self): pass
+    output = io.BytesIO()
+    monkeypatch.setattr(cr, 'Merger', BrokenMerger)
+    monkeypatch.setattr(sys, 'argv', ['cloud_reader.py'])
+    monkeypatch.setattr(sys, 'stdin', SimpleNamespace(buffer=io.BytesIO(notification + second)))
+    monkeypatch.setattr(sys, 'stdout', SimpleNamespace(buffer=output))
+    monkeypatch.setenv('LCMX_LOCAL_READER_CMD', json.dumps(['fixture-reader']))
+    assert cr.main() == 0
+    assert handled == [notification, second] and fallbacks == [(notification, True)]
+    assert output.getvalue() == success, 'a failed notification must not emit a reply'
