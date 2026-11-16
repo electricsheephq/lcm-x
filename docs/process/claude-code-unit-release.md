@@ -26,9 +26,8 @@ the gate's evidence.
      `SESSION/agent:ID`);
      the checker is repository tooling, absent from the unit asset (`ENTRY_SCRIPTS` in
      `scripts/build_claude_code_unit.py` lists only `lcm_x_capture.py` and `lcm_x_mcp.py`);
-     pass: exit 0 with 0 lost, 0 duplicated, order kept and 0 unpaired. The cases that gate item 1
-     sends to the release manager (the #2777 shape, `unverified` rows and interrupted tool calls)
-     follow that item;
+     pass: exit 0 with 0 lost, 0 duplicated, order kept and 0 unpaired. The #2777 shape,
+     `unverified` rows and interrupted tool calls follow gate item 1;
    - the growth check when its inputs changed since its last run;
    - `python scripts/claude_code_unit_smoke.py --ref <candidate sha> --runtime venv`, then
      `--runtime found`, each on Python 3.11 and 3.14 (the tag workflow's found mode later uses the
