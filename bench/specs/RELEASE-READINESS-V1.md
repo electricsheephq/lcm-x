@@ -71,6 +71,16 @@ never wait for it.
      externalized reference, and compares it with the transcript's verbatim text and the saved
      tool-results file: if either differs, the session lost content and fails the gate. Even when
      both match, the case never passes by itself.
+     Two more cases go to the release manager before a pass:
+     - **Unverified rows.** The checker accepts one stored row per persisted-output preview without
+       checking its content (its `unverified` count), and the audit checks only one row per saved
+       file. Until the checker reads the saved tool-results files (#2777), the release manager
+       compares each such row's stored text, loading the payload file of an externalized reference,
+       with its saved tool-results file, even when the checker passes. A difference fails the gate.
+     - **Interrupted tool calls.** A call the host never answered, as in a killed session, counts as
+       unpaired. It passes only when the transcript itself has no result line for that call and the
+       audit's `unanswered` count equals the number of such calls; the record lists each one with its
+       transcript line.
      (2026-11-16, #2139: the audit gate runs the outside-in checker beside the audit, for candidates gated after this change.)
   2. **Real sessions R1-R10** through Claude Code, each with a record: the backend, the machine
      (model and RAM), the runtime mode, the exact interpreter version, the load average at the
