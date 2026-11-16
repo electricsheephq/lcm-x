@@ -5,11 +5,15 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import signal
 import sqlite3
 import subprocess
 import sys
+import time
 
 import pytest
+
+from tests.test_claude_code_store import _KILLED_DRIVER
 
 ROOT = Path(__file__).resolve().parents[2]
 CHECKER = ROOT / "scripts/capture_outside_in.py"
@@ -120,6 +124,69 @@ def test_generated_batch(tmp_path_factory, record_property):
     record_property("audit", json.dumps(audit, sort_keys=True))
     assert report["pass"] == audit["ok"], "STOP: clean batch disagreement; outputs recorded in JUnit"
     assert checked.returncode == 0 and audit["ok"] and audit["verified"]
+
+
+def test_worker_killed_mid_batch_then_rerun(tmp_path, record_property):
+    home = tmp_path / "store"
+    home.mkdir()
+    env = {"PATH": os.defpath, "HOME": str(tmp_path / "user"), "HERMES_HOME": str(tmp_path / "hermes"),
+           "CLAUDE_CONFIG_DIR": str(tmp_path / "claude"), "LCMX_CC_HOME": str(home),
+           "LCMX_PYTHON": sys.executable, "LCMX_PACKAGE_ROOT": str(ROOT)}
+    rows = [json.loads(line) for line in FIXTURES[0].read_text().splitlines()]
+    # Two turns with paired tools: each two-line batch holds a whole call/result pair.
+    entries = [rows[index] for index in (1, 2, 5, 6)]
+    path = tmp_path / "claude/projects/synthetic/plain.jsonl"
+    path.parent.mkdir(parents=True)
+    path.write_text("".join(json.dumps(row) + "\n" for row in entries))
+    hook(home, env, "plain", path)
+    stalled = tmp_path / "stalled"
+    worker = subprocess.Popen([sys.executable, "-I", "-S", "-c", _KILLED_DRIVER, str(ROOT), str(home),
+                               env["HERMES_HOME"], str(stalled)], env=env,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        end = time.monotonic() + 30
+        while not stalled.exists() and worker.poll() is None and time.monotonic() < end:
+            time.sleep(0.05)
+    finally:
+        worker.kill()
+        _out, error = worker.communicate(timeout=10)
+    assert stalled.exists(), error[-2000:]
+    assert worker.returncode == -signal.SIGKILL
+    assert list((home / "spool").glob("*.claimed"))
+    assert read_sql(home, "SELECT position FROM capture_events WHERE source_kind='line' ORDER BY position") == [(0,), (1,)]
+    assert read_sql(home, "SELECT role,tool_call_id FROM messages ORDER BY store_id") == [
+        ("assistant", None), ("tool", "call1"), ("user", None)]
+
+    # Mutant: omit the rerun. Only the second batch's two projected rows are missing.
+    checked = run(CHECKER, "--home", home, "--transcript", f"plain={path}", env=env, accepted=(1,))
+    audited = run(CAPTURE, "audit", "--home", home, env=env)
+    report, audit = json.loads(checked.stdout), json.loads(audited.stdout)
+    record_property("mutant_checker", checked.stdout)
+    record_property("mutant_checker_exit", checked.returncode)
+    record_property("mutant_audit", audited.stdout)
+    record_property("mutant_audit_exit", audited.returncode)
+    assert checked.returncode == 1 and not report["pass"]
+    # The audit counts the claimed record as pending work, not loss: consistent so far, never verified.
+    assert audit["ok"] and not audit["verified"] and audit["spool"]["waiting"] == 1
+    [lineage] = report["lineages"]
+    assert (lineage["expected"], lineage["actual"], lineage["lost"], lineage["duplicated"],
+            lineage["order_kept"], lineage["unpaired"]) == (5, 3, 2, 0, True, 0)
+
+    run(CAPTURE, "worker", "--home", home, env=env)
+    checked = run(CHECKER, "--home", home, "--transcript", f"plain={path}", env=env)
+    audited = run(CAPTURE, "audit", "--home", home, env=env)
+    report, audit = json.loads(checked.stdout), json.loads(audited.stdout)
+    record_property("checker", checked.stdout)
+    record_property("checker_exit", checked.returncode)
+    record_property("audit", audited.stdout)
+    record_property("audit_exit", audited.returncode)
+    assert checked.returncode == 0 and report["pass"] and audit["ok"] and audit["verified"]
+    [lineage] = report["lineages"]
+    assert (lineage["expected"], lineage["actual"], lineage["lost"], lineage["duplicated"],
+            lineage["order_kept"], lineage["unpaired"]) == (5, 5, 0, 0, True, 0)
+    assert read_sql(home, "SELECT position FROM capture_events WHERE source_kind='line' ORDER BY position") == [
+        (0,), (1,), (2,), (3,)]
+    assert not any(path.suffix in {".json", ".claimed", ".failed"} for path in (home / "spool").iterdir())
 
 
 @pytest.mark.parametrize("mutant, expected, audit_asserted", [

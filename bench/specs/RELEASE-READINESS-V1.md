@@ -59,14 +59,31 @@ never wait for it.
   1. **Audit gate.** Every R1-R10 session's audit exits 0 with `verified: true`: every transcript
      line accounted for, 0 lost, 0 duplicated, no spool record waiting or failed. Sessions with
      Claude Code's local transcript GC on are listed without a lossless claim.
-     The independent row checker takes every transcript file of the session,
-     oldest first, historical versions before the live file, via repeated
-     `--transcript SESSION=PATH` arguments; a reused workflow agent id's later transcript uses
-     `SESSION/agent:/workflows/<run>/agent-<id>.jsonl`.
-     For the row checker, unverified is 0, or each unverified occurrence's reason is listed in the run record and justified.
+     Beside the audit, `scripts/capture_outside_in.py` must pass over the session's store home
+     and every transcript captured into that store home in capture order, oldest first, historical versions before the live file:
+     each rewritten transcript's set-aside copy (a file beside it whose name contains
+     `.superseded-` or `.orphaned-`) goes before its replacement. Subagents use `SESSION/agent:ID`,
+     and a reused workflow agent id's later transcript uses
+     `SESSION/agent:/workflows/<run>/agent-<id>.jsonl`. The transcripts are listed from the
+     transcript files rather than from the store. Pass: 0 lost, 0 duplicated, order kept,
+     0 unpaired. The session's record carries the checker's `unverified` and `unprojected` counts.
+     Two more cases:
+     - **Unverified rows.** The checker verifies each persisted-output preview against its saved
+       tool-results file (#2777). It leaves an occurrence `unverified`, with its reason in
+       `unverified_reasons`, only when it cannot read that file as text: unnamed, outside the
+       session, missing, not a file, over the product's 64 MiB cap, binary or unreadable.
+       For the row checker, unverified is 0, or each unverified occurrence's reason is listed in the run record and justified.
+       The release manager judges each justification.
+     - **Interrupted tool calls** go to the release manager. A call the host never answered, as in a
+       killed session, counts as unpaired. It passes only when the transcript itself has no result
+       line for that call and the audit's `unanswered` count equals the number of such calls; the
+       record lists each one with its transcript line.
+     (2026-11-16, #2139: the audit gate runs the outside-in checker beside the audit, for candidates gated after this change.)
+     (2026-11-16, #2777: the checker pairs each uid's k-th stored row with its k-th transcript occurrence and verifies previews against their saved files, so the hand comparison for the out-of-order shape and the wait for verified rows are retired.)
   2. **Real sessions R1-R10** through Claude Code, each with a record: the backend, the machine
      (model and RAM), the runtime mode, the exact interpreter version, the load average at the
-     start, the audit's `ok` and `verified`, per-event hook latency (n, p50, p95, max) with each
+     start, the audit's `ok` and `verified`, the checker's result with its `unverified` and
+     `unprojected` counts, per-event hook latency (n, p50, p95, max) with each
      session's first hook apart, `PreCompact` p50/p95/max and its paths, and the audit's peak
      memory and the store size. Latency is recorded, not gated, until #2141's quiet-host
      measurement sets a bar. An audit over 2 GB, audit memory growing roughly linearly with the
