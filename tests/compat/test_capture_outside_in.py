@@ -704,3 +704,137 @@ def test_revision_slot_order(tmp_path, reverse, record_property):
     record_property("checker", json.dumps(report))
     assert (code, report["pass"]) == (int(reverse), not reverse)
     assert [(r["lost"], r["duplicated"], r["order_kept"]) for r in report["lineages"]] == [(0, 0, not reverse)]
+
+
+@pytest.mark.parametrize("quote", ["", "'", '"'], ids=["unquoted", "single-quoted", "double-quoted"])
+def test_preview_supplied_paths(tmp_path, quote, record_property):
+    base = tmp_path / "capture"
+    saved = base / "claude/projects/synthetic/plain/tool-results/output.txt"
+    saved.parent.mkdir(parents=True)
+    saved.write_text("full saved output\ncafé\n")
+    rows = [json.loads(line) for line in FIXTURES[0].read_text().splitlines()][1:3]
+    rows[1]["message"]["content"] = rows[1]["message"]["content"][:1]
+    rows[1]["message"]["content"][0]["content"] = (
+        f"<persisted-output>\nFull output saved to: {quote}{saved}{quote}\n\nPreview:\nx\n</persisted-output>")
+    historical = write_entries(tmp_path / "historical.jsonl", rows)
+    home, env, inputs = capture_session(base, historical)
+    with closing(sqlite3.connect(home / "lcm.db")) as conn, conn:
+        conn.execute("UPDATE messages SET content='' WHERE role='tool'")
+    for order in (inputs, [("plain", historical), *inputs], [*inputs, ("plain", historical)]):
+        code, report = check_only(home, env, order)
+        record_property("checker", json.dumps(report))
+        assert (code, report["pass"]) == (1, False)
+        assert [(r["lost"], r["duplicated"], r["unverified"]) for r in report["lineages"]] == [(1, 1, 0)]
+
+
+@pytest.mark.parametrize("quoted", [
+    "[Externalized LCM ingest payload: kind=x; field=content; chars=1; bytes=1; "
+    "ref=20000101_000000_a_b_0123456789ab_ff.json]",
+    "[Externalized LCM ingest payload: note]",
+], ids=["wellformed", "short"])
+def test_quoted_ingest_marker(tmp_path, quoted, record_property):
+    import base64
+    payload = base64.b64encode(bytes(range(256)) * 16).decode()
+    text = f"docs say {quoted} ok\n{payload}\nsuffix"
+    rows = [dict(type="user", uuid="q", sessionId="quote", message=dict(content=text))]
+    home, env, inputs = capture_session(tmp_path / "capture", write_entries(tmp_path / "01_quote.jsonl", rows))
+    stored = read_sql(home, "SELECT content FROM messages")[0][0]
+    assert quoted in stored and stored.count("[Externalized LCM ingest payload:") == 2
+    checked, report, audit = verdict(home, env, inputs)
+    record_property("checker", checked.stdout)
+    assert audit["ok"] and checked.returncode == 0 and report["pass"]
+    # Preserve the quoted marker, but corrupt the real replacement's fingerprint.
+    with closing(sqlite3.connect(home / "lcm.db")) as conn, conn:
+        conn.execute("UPDATE messages SET content=?", (stored[:len(quoted) + 9] +
+                     stored[len(quoted) + 9:].replace("bytes=", "bytes=9", 1),))
+    code, report = check_only(home, env, inputs)
+    record_property("corrupted", json.dumps(report))
+    assert code == 1 and not report["pass"]
+    assert [(r["lost"], r["duplicated"]) for r in report["lineages"]] == [(1, 1)]
+
+
+@pytest.mark.parametrize("guard", ["cross_occurrence", "corrupt_prefix", "dropped_suffix"])
+def test_ingest_position_guards(tmp_path, guard, record_property):
+    import hashlib
+    def marker(text):
+        digest = hashlib.sha256(text.encode()).hexdigest()[:12]
+        return (f"[Externalized LCM ingest payload: kind=media_payload; field=content; chars={len(text)}; "
+                f"bytes={len(text.encode())}; ref=20000101_000000_media_payload_content_{digest}_abcd.json]")
+    def image(label, data):
+        return [dict(type="text", text=label), dict(type="image", source=dict(
+            type="base64", media_type="image/png", data=data))]
+    a, b = "AAAA" * 500, "BBBB" * 500
+    if guard == "cross_occurrence":
+        sources = [image("a", a), image("b", b)]
+        stored = [json.dumps(image(label, marker(a)), ensure_ascii=False, sort_keys=True) for label in ("a", "b")]
+    else:
+        sources = ["prefix\n" + b + "\nsuffix"]
+        stored = [("PREFIX\n" if guard == "corrupt_prefix" else "prefix\n") + marker(b) +
+                  ("\nsuffix" if guard == "corrupt_prefix" else "")]
+    entries = [dict(type="user", uuid=f"u{i}", sessionId="s", message=dict(content=source))
+               for i, source in enumerate(sources)]
+    home = tmp_path / "store"
+    home.mkdir()
+    with closing(sqlite3.connect(home / "lcm.db")) as conn, conn:
+        conn.execute("CREATE TABLE messages(store_id INTEGER, session_id TEXT, role TEXT, content TEXT, "
+                     "tool_call_id TEXT, tool_calls TEXT)")
+        conn.execute("CREATE TABLE host_uid_bindings(store_id INTEGER, uid TEXT, lineage_key TEXT, kind TEXT)")
+        for i, text in enumerate(stored):
+            conn.execute("INSERT INTO messages VALUES(?,'s','user',?,NULL,NULL)", (i + 1, text))
+            conn.execute("INSERT INTO host_uid_bindings VALUES(?,?,'claude-code:s','canonical')", (i + 1, f"u{i}"))
+    code, report = check_only(home, {"PATH": os.defpath}, [("s", write_entries(tmp_path / "s.jsonl", entries))])
+    record_property("checker", json.dumps(report))
+    assert code == 1 and not report["pass"]
+    assert [(r["lost"], r["duplicated"]) for r in report["lineages"]] == [(1, 1)]
+
+
+def test_preview_size_cap(tmp_path, monkeypatch, record_property):
+    import importlib.util
+    base = tmp_path / "capture"
+    saved = base / "claude/projects/synthetic/plain/tool-results/output.txt"
+    saved.parent.mkdir(parents=True)
+    with saved.open("wb") as handle:
+        handle.truncate(64 * 1024 * 1024 + 1)  # Sparse scratch file, never a repository fixture.
+    rows = [json.loads(line) for line in FIXTURES[0].read_text().splitlines()][1:3]
+    rows[1]["message"]["content"] = rows[1]["message"]["content"][:1]
+    preview = f"<persisted-output>\nFull output saved to: {saved}\n\nPreview:\nx\n</persisted-output>"
+    rows[1]["message"]["content"][0]["content"] = preview
+    home, env, inputs = capture_session(base, write_entries(tmp_path / "01_huge.jsonl", rows))
+    assert read_sql(home, "SELECT content FROM messages WHERE role='tool'") == [(preview,)]
+    code, report = check_only(home, env, inputs)
+    record_property("checker", json.dumps(report))
+    assert code == 0 and report["pass"]
+    row = report["lineages"][0]
+    assert row["unverified"] == 1
+    assert row["unverified_reasons"] == [{"uid": "r1", "reason": "saved_output_too_large"}]
+    spec = importlib.util.spec_from_file_location("outside_in_size_probe", CHECKER)
+    checker = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(checker)
+    original_open = Path.open
+    def guarded_open(path, *args, **kwargs):
+        assert path != saved, "oversized saved output must not be opened"
+        return original_open(path, *args, **kwargs)
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "open", guarded_open)
+        assert checker.check(home, inputs)["lineages"][0]["unverified_reasons"] == row["unverified_reasons"]
+
+
+@pytest.mark.parametrize("metadata", ["Error: x", ["Error: x"]], ids=["str", "list"])
+def test_preview_non_mapping_metadata(tmp_path, metadata, record_property):
+    rows = [json.loads(line) for line in FIXTURES[0].read_text().splitlines()][1:3]
+    rows[1]["message"]["content"] = rows[1]["message"]["content"][:1]
+    rows[1]["message"]["content"][0]["content"] = "<persisted-output>\nPreview:\nx\n</persisted-output>"
+    rows[1]["toolUseResult"] = metadata
+    home, env, inputs = capture_session(tmp_path / "capture", write_entries(tmp_path / "01_metadata.jsonl", rows))
+    code, report = check_only(home, env, inputs)
+    record_property("checker", json.dumps(report))
+    assert code == 0 and report["pass"]
+    assert report["lineages"][0]["unverified_reasons"] == [{"uid": "r1", "reason": "saved_output_unnamed"}]
+
+
+def test_checker_release_instructions():
+    for name in ("docs/claude-code-adapter.md", "docs/process/claude-code-unit-release.md",
+                 "bench/specs/RELEASE-READINESS-V1.md"):
+        text = (ROOT / name).read_text()
+        assert "oldest first, historical versions before the live file" in text
+        assert "unverified is 0, or each unverified occurrence's reason is listed in the run record and justified" in text

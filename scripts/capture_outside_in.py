@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter, defaultdict
+from collections.abc import Mapping
 from contextlib import closing
 import hashlib
 import json
@@ -99,7 +100,7 @@ def expected_rows(inputs):
                         sources[session].append(json.dumps(row[2], ensure_ascii=False, sort_keys=True)
                                                 if isinstance(row[2], (list, dict)) else row[2])
                         if row[1] == "tool" and isinstance(row[2], str) and row[2].lstrip().startswith("<persisted-output>"):
-                            previews[session, len(expected[session]) - 1] = (path, entry.get("toolUseResult"))
+                            previews[session, len(expected[session]) - 1] = entry.get("toolUseResult")
                     seen[session].add(identity)
     return expected, unprojected, previews, sources
 
@@ -110,34 +111,47 @@ REFERENCE = re.compile(
     r"chars=(\d+); bytes=(\d+); [^\]\r\n]*?"
     r"ref=\d{8}_\d{6}_[^\]\r\n]+_([0-9a-f]{12})_[0-9a-f]+\.json\]")
 INGEST = re.compile(r"\[Externalized LCM ingest payload: [^\]\r\n]*\]")
-FILE_CHUNK_BYTES = 64 * 1024 * 1024
+MAX_SAVED_OUTPUT_BYTES = 64 * 1024 * 1024
 
 
-def saved_preview(text, transcript, metadata):
-    """Read only a named saved output inside this transcript's session tool-results/."""
+def saved_preview(text, transcripts, metadata):
+    """Try every supplied path's session folder, without reading oversized outputs."""
     match = re.search(r"Full output saved to:\s*([^\r\n]+)", text)
-    named = match[1].strip() if match else (metadata or {}).get("persistedOutputPath")
+    named = match[1].strip() if match else None
+    if not named and isinstance(metadata, Mapping):
+        named = metadata.get("persistedOutputPath")
     if not named:
         return None, "saved_output_unnamed"
-    ancestors = list(transcript.parents)[:5] if transcript.name.startswith("agent-") else []
-    root = next((up.parent for up in ancestors if up.name == "subagents"), transcript.with_suffix(""))
-    folder = root / "tool-results"
-    try:
-        path = Path(named).expanduser()
-        if (root.is_symlink() or folder.is_symlink() or path.is_symlink()
-                or not path.resolve().is_relative_to(folder.resolve())):
-            return None, "saved_output_outside_session"
-        if not path.exists():
-            return None, "saved_output_missing"
-        if not path.is_file():
-            return None, "saved_output_not_a_file"
-        with path.open("rb") as handle:
-            chunks = iter(lambda: handle.read(FILE_CHUNK_BYTES), b"")
-            return b"".join(chunks).decode("utf-8"), None
-    except UnicodeError:
-        return None, "saved_output_binary"
-    except (OSError, ValueError, RuntimeError):
-        return None, "saved_output_unreadable"
+    if isinstance(named, str) and len(named) >= 2 and named[0] == named[-1] and named[0] in "\"'":
+        named = named[1:-1]
+    reason = "saved_output_outside_session"
+    for transcript in transcripts:
+        ancestors = list(transcript.parents)[:5] if transcript.name.startswith("agent-") else []
+        root = next((up.parent for up in ancestors if up.name == "subagents"), transcript.with_suffix(""))
+        folder = root / "tool-results"
+        try:
+            path = Path(named).expanduser()
+            if (root.is_symlink() or folder.is_symlink() or path.is_symlink()
+                    or not path.resolve().is_relative_to(folder.resolve())):
+                continue
+            if not path.exists():
+                reason = "saved_output_missing"
+            elif not path.is_file():
+                reason = "saved_output_not_a_file"
+            elif path.stat().st_size > MAX_SAVED_OUTPUT_BYTES:
+                reason = "saved_output_too_large"
+            else:
+                with path.open("rb") as handle:
+                    data = handle.read(MAX_SAVED_OUTPUT_BYTES + 1)
+                if len(data) > MAX_SAVED_OUTPUT_BYTES:  # Bound the read even if the file grew.
+                    reason = "saved_output_too_large"
+                else:
+                    return data.decode("utf-8"), None
+        except UnicodeError:
+            reason = "saved_output_binary"
+        except (OSError, ValueError, RuntimeError, TypeError):
+            reason = "saved_output_unreadable"
+    return None, reason
 
 
 def fingerprint(text):
@@ -185,13 +199,15 @@ def content_matches(stored, source, structured, index):
             break
         position += len(literal)
         ref = REFERENCE.fullmatch(match[0])
-        if ref is None:
-            return False
-        span = source[position:position + int(ref[1])]
-        index[fingerprint(span)].add(span)
-        if not reference_matches(ref, span, index):
+        span = source[position:position + int(ref[1])] if ref else ""
+        if ref:
+            index[fingerprint(span)].add(span)
+        if ref and reference_matches(ref, span, index):
+            position += len(span)
+        elif source.startswith(match[0], position):
+            position += len(match[0])  # A quoted marker is literal source text.
+        else:
             break
-        position += len(span)
         start = match.end()
     else:
         if start and stored[start:] == source[position:]:
@@ -216,6 +232,9 @@ def content_matches(stored, source, structured, index):
 def check(home, inputs):
     started = perf_counter()
     expected, unprojected, previews, transcript_sources = expected_rows(inputs)
+    transcript_paths = defaultdict(list)
+    for session, path in inputs:
+        transcript_paths[session].append(path)
     with closing(sqlite3.connect((home / "lcm.db").resolve().as_uri() + "?mode=ro", uri=True)) as conn:
         conn.row_factory = sqlite3.Row
         conn.execute("BEGIN")
@@ -290,7 +309,7 @@ def check(home, inputs):
         for i, row in enumerate(wanted):
             source = transcript_sources[session][i]
             if previews and (session, i) in previews:
-                recovered, reason = saved_preview(source, *previews[session, i])
+                recovered, reason = saved_preview(source, transcript_paths[session], previews[session, i])
                 if reason:
                     reasons[i] = reason
                 else:
