@@ -515,20 +515,23 @@ def check(home, inputs):
         report["pass"] = not lost and not duplicated and order and not unpaired
         return report, verified
 
-    # Pass 1 checks every row with no preview copies, and collects the files that verified rows were checked against.
-    stores, firsts, owned = {}, {}, set()
+    # Pass 1 checks every row with no preview copies, and records which lineages' verified rows read each file.
+    stores, firsts, owners = {}, {}, defaultdict(set)
     for session in sorted(expected):
         stores[session] = store_side(session)
         wanted, sources, reasons, files, named_outside, _ = transcript_side(session, frozenset())
         report, verified = compare(session, stores[session], wanted, sources, reasons)
-        owned.update(files[i] for i in verified if i in files)
+        for i in verified & files.keys():
+            owners[files[i]].add(session)
         firsts[session] = report, named_outside
-    # Pass 2 re-checks a lineage whose preview names a file a verified row of another lineage owns: a preview copy.
+    # Pass 2 re-checks a lineage whose preview names a file that a verified row of ANOTHER lineage read: a preview
+    # copy. A lineage never owns its own copy, even where saved_preview() reads a folder session_folder() does not.
     reports = []
     for session in sorted(expected):
         report, named_outside = firsts[session]
+        owned = {path for path in named_outside if owners.get(path, set()) - {session}}
         copies = set()
-        if named_outside & owned:
+        if owned:
             wanted, sources, reasons, _, _, copies = transcript_side(session, owned)
             report, verified = compare(session, stores[session], wanted, sources, reasons)
             copies &= verified

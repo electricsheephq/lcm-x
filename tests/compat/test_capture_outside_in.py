@@ -702,6 +702,27 @@ def test_preview_copy_needs_a_verified_owner(tmp_path, case, record_property):
         assert (code, counts(report)["plain"], preview_copies(report)["plain"]) == (0, (0, 0, 0), 0)
 
 
+def test_preview_copy_needs_another_lineage(tmp_path, record_property):
+    """A row never owns its own copy. A main transcript directly inside a folder named subagents/ belongs to that
+    folder's parent (capture's session_dir()), while saved_preview() reads <session>/ beside it; a row verified there
+    names a path outside its own folders, and keeps the verdict main gives it."""
+    base = tmp_path / "capture"
+    saved = base / "claude/projects/synthetic/plain/tool-results/output.txt"
+    saved.parent.mkdir(parents=True)
+    saved.write_text("full saved output\n")
+    rows, _ = preview_rows(saved)
+    home, env, inputs = capture_session(base, write_entries(tmp_path / "01_self.jsonl", rows))
+    assert read_sql(home, "SELECT content FROM messages WHERE role='tool'") == [("full saved output\n",)]
+    moved = tmp_path / "moved/subagents"
+    (moved / "plain/tool-results").mkdir(parents=True)
+    (moved / "plain/tool-results/output.txt").write_text("full saved output\n")
+    (moved / "plain.jsonl").write_text(
+        dict(inputs)["plain"].read_text().replace(str(saved), str(moved / "plain/tool-results/output.txt")))
+    code, report = check_only(home, env, [("plain", moved / "plain.jsonl")])
+    record_property("checker", json.dumps(report))
+    assert (code, report["pass"], counts(report), preview_copies(report)) == (0, True, {"plain": (0, 0, 0)}, {"plain": 0})
+
+
 @pytest.mark.parametrize("spelling", ["fork_names_alias", "parent_names_alias", "supplied_through_alias"])
 def test_preview_copy_compares_resolved_paths(tmp_path, spelling, record_property):
     """Paths are compared resolved on both sides. A copy whose marker names its parent's file through a linked

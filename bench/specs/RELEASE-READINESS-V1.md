@@ -74,9 +74,10 @@ never wait for it.
        of its lineage's own session folders (found as capture finds them) is checked as the
        preview text itself only when a row of another lineage verified against that same file (a
        forked session's copy of its parent's preview; 2026-11-16); the record counts these as
-       `preview_copies`. When the preview names no file, or the checker cannot read its saved file
-       as text from the session's own folders (outside them, including through a symlink, missing,
-       not a file, over the product's 64 MiB cap, binary or unreadable), it
+       `preview_copies`; a lineage never owns its own copy. When the preview names no file, or the
+       checker cannot read its saved file as text from a supplied transcript's session folder
+       (outside those folders, including through a symlink, missing, not a file, over the
+       product's 64 MiB cap, binary or unreadable), it
        accepts one stored row for that preview without checking its content (its `unverified`
        count, with each reason in `unverified_reasons`), and the audit checks only one row per
        saved file, so a corrupted preview-backed row can pass both.
