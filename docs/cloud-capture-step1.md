@@ -5,7 +5,7 @@ Claude reviewer and `gpt-6-astra` at high; both approved the fifth edit (Appendi
 A sixth edit (2026-11-16) folds the bot review of the docs PR and lane 0's first results (Appendix H). A seventh
 edit (2026-11-16), after a delivery checkpoint, removes `delete-hosted`, `--resume` and the pinning of superseded
 copies from step 1, so every chain conflict ends in `--new-copy` and retention is the only thing that deletes
-(Appendix I). Drafted against
+(Appendix I). The page-delta design is folded into 3.7 (Appendix J). Drafted against
 `origin/main` at `43e8484c`.
 It replaces draft 1 (2026-11-09). Every `file:line` below was read on that commit. A sentence marked
 **(assumption)** has no citation and no measurement behind it yet.
@@ -68,15 +68,15 @@ restates none of it.
 
 ### 3.1 What is uploaded
 
-- **The database file,** whole. It carries the contracted tables (docs/store-contract.md:14-28) and also tables the
-  contract does not list, such as full-text and vector tables (db_bootstrap.py:1527, :1795). Those travel
+- **The database file,** whole at a base and as changed pages between bases (3.7). It carries the contracted
+  tables (docs/store-contract.md:14-28) and also tables the contract does not list, such as full-text and vector tables (db_bootstrap.py:1527, :1795). Those travel
   uninterpreted. Raw transcript lines are inside it, in `capture_events.raw`.
 - **Payload files that rows in the snapshot reference,** and no others. A forgotten session's payload file is
   then absent from the next generation. Payload files are written before their batch commits
   (docs/claude-code-adapter.md:280-282), so every reference the product wrote has its file on disk. References are
   found by scanning text, which also finds placeholders that sessions only quote (lane 0's real store held five,
   such as `...` and `{ref}`). Such a reference names no file, and 3.3 reports it under one of two counts.
-- **A manifest,** written last.
+- **A manifest,** written last. Its `database` block names the base and complete delta chain (3.7.3).
 - **Not uploaded:** transcripts, the spool, logs, the lock, the runtime, `.env`, `capture-owner.json`, the
   override file, cloud settings and credentials.
 - **The `.records` sidecar.** Main now has a second database beside the store, `lcm.db.records`
@@ -93,6 +93,7 @@ Layout in the bucket, under one prefix per user:
 
 ```
 <prefix>/<copy id>/parts/<sha256>.<token>     database parts, 32 MiB each, named by content and by the attempt that uploaded them
+<prefix>/<copy id>/deltas/<sha256>.<token>    changed-page objects, at most 32 MiB, named by content and attempt (3.7)
 <prefix>/<copy id>/payloads/<sha256>.<token>  payload files, named the same way
 <prefix>/<copy id>/gen/<number>.json          one manifest per generation, created once with a conditional PUT, never rewritten
 ```
@@ -100,8 +101,7 @@ Layout in the bucket, under one prefix per user:
 Parts are small on purpose. No object needs a multipart upload. A part or payload that the head names is reused
 under its existing key. Any other part or payload is uploaded under a key unique to the attempt
 (`<sha256>.<token>`, with the publish token of 3.4), never onto an existing key, and a resumed attempt skips its
-own keys. So two generations share every part that did not change, through the keys the head names. How much
-they share is measured (section 6, row 2); the plan does not depend on it.
+own keys. Generations share their base and every earlier delta (3.7).
 
 ### 3.2 Identity and the import stamp
 
@@ -158,15 +158,19 @@ they share is measured (section 6, row 2); the plan does not depend on it.
    row. `status` names both counts by session, and the restore check and the copy checker report them (5.3). A payload the head names that is now missing, and
    whose session is not forgotten, is a loss, and the guard refuses it (3.4).
 4. Run the publish guard (3.4). Record the attempt as pending, or resume the pending one (3.4, Chain), then
-   upload the parts and payloads the head does not name, under the attempt's keys (3.1). Just before the
-   manifest, check that every part and payload it names exists in the bucket, and upload any that is missing under the attempt's key (3.1), which the manifest then names;
-   then read the live forgotten markers again over `mode=ro`, and drop and retry a staging copy that holds a
-   session forgotten since the copy. Write the manifest last, as a create-if-absent (conditional) PUT of
+   upload the base parts or delta objects, and payloads, the head does not name, under the attempt's keys (3.1).
+   Just before the manifest, check every named part, delta and payload exists. A delta attempt with a missing
+   base part or delta becomes a base (3.7.3); a base attempt re-uploads missing parts under its attempt key,
+   and missing payloads are uploaded again. Re-read live forgotten markers over `mode=ro` and `state.json`'s
+   `--as-delete` decisions: drop and retry a copy holding rows forgotten since the copy, or a delta with a new
+   item whose session the head's chain may hold, even if staging holds no forgotten rows. Refuse a copy holding
+   ids covered by a pending decision with `as_delete_rows_present`; the final-check rules are in 3.7.3.
+   Write the manifest last, as a create-if-absent (conditional) PUT of
    `gen/<N+1>.json`. Only when this attempt's own create wins and a head read then shows that manifest is the head
    does it run retention (3.5), still under the lock; a resumed attempt whose create is refused because the manifest
    already exists runs none.
 
-A crash leaves orphan parts and no manifest. An outage queues nothing: the next snapshot is simply newer. A batch
+A crash leaves orphan parts or delta objects and no manifest. An outage queues nothing: the next snapshot is simply newer. A batch
 is never half in a snapshot, because rows, bindings, ledger rows and the cursor commit together
 (docs/claude-code-adapter.md:280-282). Free disk is checked first: staging needs one store's size, plus the payloads it copies rather than links.
 
@@ -232,14 +236,16 @@ forgot.** It compares generation N+1 with N before N+1's manifest is written.
   `chain_conflict`; `status` never calls the twin's copy safe to delete (idle copies, below). Nothing in step 1
   deletes except retention after its own winning create (below); every machine but one then meets
   `chain_conflict`, `store_id_reused` or a loss refusal. No kept manifest names a missing key,
-  because no attempt writes onto an existing key (3.1) and the part check re-uploads any key a manifest will name
-  (3.3), with one exception that step 1 states and does not fence. It needs two stalls in such a pair of copies:
+  because no attempt writes onto an existing key (3.1) and the object check re-uploads available content or
+  cuts a base when a delta attempt lacks a base part or delta (3.7.3), with one exception that step 1 states and
+  does not fence. It needs two stalls in such a pair of copies:
   the other copy's retention, after its winning create of N+1, stalls for 7 days or more between its head read and
   its deletes, and this copy's attempt for N+2, more than 7 days old, passes its part check before that delete and
   creates N+2 after it. N+2 is then a head that names a key deleted as never named. No local row is lost: a restore
   of that generation fails visibly on the missing object (5.3), and the generations before it stay kept unless a
-  forget pruned them. If this copy publishes again, its part check uploads that content again under its own key and
-  the newest generation is whole; otherwise the other copy meets `chain_conflict` and leaves by `--new-copy`, and
+  forget pruned them. If this copy publishes again, a missing base part or delta makes it cut a base; other
+  available content is uploaded again (3.7.4), and the newest generation is whole; otherwise the other copy meets
+  `chain_conflict` and leaves by `--new-copy`, and
   the hosted copy stays idle with a newest generation whose restore and refresh fail visibly (lane 3 tests this
   interleaving). An
   attempt paused for a long time can also create a manifest number that retention deleted. That manifest is not the
@@ -283,19 +289,23 @@ row would fail the content compare anyway. Draft 1's "GC and cloud are mutually 
 
 - Retention runs only under `cloud/upload.lock`, and only when this attempt's own conditional create wins and a head read then shows that manifest is the head (3.4). Every command that writes to the bucket (`enable` with `--new-copy`, `sync`) takes the same lock; every network call has a timeout, and `status` shows the lock's age, so a hung holder is visible.
 - Keep the current generation, the two before it, and any generation pinned by `accept-loss` (3.4). Every manifest
-  carries the head's pins forward. Older manifests are deleted. Then retention deletes a key that no kept manifest
-  names at once when a manifest it is deleting named it; a key that no manifest ever named it deletes only when the
-  bucket's own clock (the `Date` of a response, never the machine's clock) shows it older than G = 7 days.
+  carries the head's pins forward. Retention deletes keys named only by manifests being pruned before those
+  manifests, and deletes a manifest only after its exclusive keys returned success or not found; otherwise the
+  next winning publish retries. This covers `parts/`, `deltas/` and `payloads/` (3.7.4). A never-named key is
+  deleted only when the bucket's clock (a response's `Date`, never the machine's clock) shows it older than G = 7 days.
 - Every publish deletes each older kept generation that is not pinned and whose manifest still names a session
-  that the current store marks `capture:forgotten:`, or an identity accepted with `--as-delete`. **A pinned
+  that the current store marks `capture:forgotten:`, or an identity accepted with `--as-delete`; it also prunes
+  by the cumulative `forgotten` list's base-generation cutoff (3.7.4). **A pinned
   generation is never pruned by a forget:** it would take with it the rows a bug lost. `status` reports
   `pin_holds_forgotten` with the session count until the user releases the pin (`accept-loss --release`), and the
   opt-in says that a forgotten session stays in a pinned generation until then. `status` also warns 7 days and
   1 day before a pin expires. Because the check runs on
   every publish, a crash or a failed delete is retried by the next winning publish. Once a publish has finished its retention
   step, no object in the bucket holds the forgotten rows outside a pinned generation, a superseded copy or an idle copy (3.4), which
-  `status` reports (`pin_holds_forgotten`, `superseded_holds_forgotten`), except parts of a failed or interrupted
-  attempt that no manifest ever named: they can hold a forgotten session for at least 7 days, until the next successful retention after that, and the opt-in says so.
+  `status` reports (`pin_holds_forgotten`, `superseded_holds_forgotten`), except parts and delta objects of failed
+  or interrupted attempts or dropped staging copies that no manifest named: they can hold a forgotten session
+  for at least 7 days, until the next successful retention after that. Free-page residue has 5.2's separate
+  limit. The opt-in says both.
 - **Superseded copies.** When `enable --new-copy` leaves a copy whose head names this machine (after
   `store_id_reused`), `cloud/cloud.json` and the new copy's manifests list it as superseded. It is an idle copy
   (3.4): nothing prunes it, and no command of step 1 deletes it. A forget does not physically reach it; `status`
@@ -331,6 +341,277 @@ digest, and `SCHEMA_VERSION`.**
 - The reader already refuses a store whose schema stamp is above its build (readonly_store.py:198-200). That
   stays the last line.
 
+### 3.7 Base-plus-delta upload
+
+**The unit of change is the SQLite page. A base holds the whole file in 3.1's 32 MiB parts; a delta holds the
+pages that differ from the generation before it.** Row 2's real-store replay found that busy publishes changed
+pages across nearly every part, so whole-part uploads exceeded the daily bar. This is the decided upload design;
+row 2D below measures its real snapshot path before the bars are claimed.
+
+#### 3.7.1 The delta object
+
+- Read page size P from bytes 16-17 of the staging file's header, unsigned big-endian, with 1 meaning 65,536.
+  It must equal `PRAGMA page_size` on the staging connection, and file length must be a whole number of pages;
+  otherwise refuse the snapshot. The live store is not read for this.
+- A delta holds pages only. The header is page 0; the import stamp travels inside pages and remains
+  in the manifest. File length, page size and digests are in the `database` block (3.7.3).
+- Object bytes, from which lane 4 writes its own decoder:
+  - bytes 0-7: `LCMXPD1\n`; bytes 8-11: P; bytes 12-15: record count n; both integers unsigned big-endian;
+  - bytes 16 to the end: one zlib stream, written with the standard library's `zlib` at level 6. It decompresses
+    to exactly n records: a 4-byte unsigned big-endian page index i, then P bytes replacing file bytes i·P to
+    (i+1)·P. Indexes rise strictly within an object and across the objects of one delta entry;
+  - at most ⌊(2^25 - 2^16) / (4 + P)⌋ records per object (8,168 at 4 KiB), allowing for zlib's growth on
+    incompressible pages. `MAX_OBJECT_BYTES` is 2^25 (32 MiB); a larger delta uses several objects;
+  - key: `<prefix>/<copy id>/deltas/<sha256 of the object>.<token>`, with 3.1's content-and-attempt naming.
+- Readers refuse bad object sha256 (`object_sha256`), byte length (`object_bytes`), magic (`delta_magic`), page
+  size (`delta_page_size`), manifest/header count (`delta_count`), decompressed length or stream (`delta_stream`),
+  trailing bytes (`delta_trailing`), and non-increasing indexes (`delta_order`). A missing object is
+  `object_missing`. They also refuse an index at or past the entry's `file_pages` (`delta_index`), a growing
+  entry that leaves any appended page unwritten (`delta_gap`), and generations not exactly
+  `base.generation + 1` through the manifest's generation (`chain_generation`); malformed `database` fields are
+  `bad_database_block`. When one malformed input trips two checks, an implementation may report either code
+  (a growing entry that skips a page then holds a corrupt object: `delta_gap` or `delta_stream`; a missing or
+  non-integer manifest `generation`: `chain_generation` or `bad_database_block`), and every consumer treats any
+  refusal the same way.
+- This is row 2's measured encoding, index plus page in one level-6 zlib stream, with a 16-byte object header.
+  It needs only the standard library (D14); the raw ledger already uses `zlib` (claude_code_store.py:20, :736).
+- No stable page layout is assumed. Shrink, reshuffle and any other change are changed pages; rebuild sets the
+  file length after each entry (3.7.3).
+
+#### 3.7.2 Page lists, self-check and the unchanged-store skip
+
+After 3.3 step 2's journal switch and stamp, one sequential pass over the staging file computes each page's
+sha256, the whole-file sha256, and `page_list_sha256`: the sha256 of the raw 32-byte page digests concatenated
+in page order from 0 through `file_pages - 1`, with no separator. Lanes 2d and 4 share one test vector for it.
+After that pass the staging copy is opened read-only only. No step takes `capture.lock` or hashes the live store.
+
+- The page list stays local, in `<home>/cloud/pages/<copy id>.last` and `.pending`, mirroring `state.json`'s
+  last and pending pairs. Write `.pending` by replace before uploading; promote it to `.last` when the attempt's
+  manifest is recorded as head. Read the head first and promote a `.pending` that matches it before writing a
+  new one. A delta requires a local list whose digest equals the head's `page_list_sha256`; otherwise cut a base.
+  Lost or damaged lists, a crash after manifest create, and a head adopted from a twin's different staging copy
+  therefore never cause a delta against the wrong predecessor. Lost `state.json` still requires `--new-copy`.
+- Compare the head's page digests with the new list. Every index at or past the head's page count is changed,
+  including an appended all-zero page. The base page count is `base.file_bytes / page_size`; that is also the
+  previous count for its first delta. Encoding checks each emitted page's sha256 against the new list and checks
+  that the emitted indexes equal exactly the changed-page set; a mismatch refuses the publish (`delta_selfcheck`).
+- Before the backup, the timer compares the size and mtime of `lcm.db` and `lcm.db-wal` with those recorded when
+  the last published snapshot began. It skips only if both match, no decision (`accept-loss`, `--as-delete`,
+  `--release`) is unpublished, the pending pair equals the last winning pair, and `retention_done_generation`
+  in `state.json` equals the head's generation. Lane 2's skip check reads both the pending pair and `retention_done_generation`.
+  Manual `sync` never skips. `SKIP_CEILING_S` is provisionally
+  86,400: at most 24 hours from the last successful publish. An unchanged store still publishes a stamp-only
+  delta then, to expire pins and sweep orphans. The stamp prevents using page hashes as the skip test.
+  Capture's return to rollback mode moves the signature **(assumption)**; a wrong unchanged result delays a
+  change by up to 24 hours and loses nothing. A dropped staging copy restarts at the hash pass; base rules 2 to 6
+  and `.pending` are evaluated on the copy that will publish.
+- Local cost per publish that is not skipped:
+
+  | | 1 GB store | 3 GB store |
+  |---|---|---|
+  | Staging copy written, at least (3.3's existing cost) | 1 GB | 3 GB |
+  | Hash pass read | 1 GB | 3 GB |
+  | Page lists: memory for two lists, bytes written | 17 MB, 8.4 MB | 50 MB, 25 MB |
+  | Disk held between publishes (two lists) | 17 MB | 50 MB |
+  | Staging writes per day at 16 / 48 publishes, at least | 16 GB / 48 GB | 48 GB / 144 GB |
+
+  The hash pass's synthetic probe was about 1.4 s per GiB on the shared development machine; no timing there
+  is judged. Row 2D reports local bytes written per day and bench timing. Its results trigger revisiting a
+  copy-on-write snapshot under a read lock as follow-up; step 1 keeps D6's consistent backup copy.
+
+#### 3.7.3 Manifest, rebuild and base rules
+
+**Every manifest names all base parts and deltas needed to rebuild its generation, in order. No reader follows
+a pointer to another manifest.** The manifest's `database` block is:
+
+| Field | Meaning |
+|---|---|
+| `page_size`, `file_bytes`, `file_sha256` | This generation's staged file. |
+| `page_list_sha256` | Digest of its raw page-digest list (3.7.2). |
+| `base.generation`, `base.file_bytes`, `base.file_sha256` | The base generation and its whole file. |
+| `base.parts[]`: `key`, `bytes` | Base parts, in file order. |
+| `deltas[]`: `generation`, `file_pages`, `objects[]` (`key`, `bytes`, `records`) | One entry per generation after the base, oldest first; objects in ascending page-index order. |
+
+Rebuild writes base parts in order and checks `base.file_bytes` and `base.file_sha256`
+(`base_digest_mismatch` on failure). Apply each delta entry in order, enforcing 3.7.1's checks, then set length to
+`file_pages × page_size`. Finally check the rebuilt file's `file_bytes`, `file_sha256` and `page_list_sha256`;
+a mismatch is `rebuild_digest_mismatch`, with the generation. A base has empty `deltas` and equal base and file fields.
+Each object's sha256 is in its key; there are no per-page or per-range digests in a manifest. A page list of
+8 to 25 MB is about four busy publishes' worth of deltas.
+
+Every manifest also carries a cumulative `forgotten` list that never shrinks. Each entry has a key (the session
+for a forget, the decision's own id for an `--as-delete`), its kind (`forgotten` or `as-delete`), its session and
+`base_generation` (or `null`). A new item is a live forgotten marker or `--as-delete` decision whose key is absent
+from the head's list; a second decision on the same session is a new item. The head's chain may hold a session
+when its per-session digests name it or its cumulative removed list carries it, including a plain accepted loss.
+
+Cut a base when any rule holds, recording its reason in the manifest and showing it in `status`:
+
+1. No generation exists for the copy id (`enable`, `--new-copy`; `first`).
+2. Page size changed (`page_size`), or no local list matches the head's `page_list_sha256` (`page_list`).
+3. At staging, a new item's session is one the head's chain may hold (`forget`). A session never published
+   triggers nothing. A forget after plain `accept-loss`, a forget after `--as-delete` followed by new published
+   rows, and a second `--as-delete` of new published rows all trigger a base.
+4. On a delta attempt, the check before the manifest finds a missing base part or delta (`missing_object`). List
+   `parts/` and `deltas/` once each, rather than one request per key. An old base part cannot be reconstructed
+   from the current staging file: the delta becomes a base. A base attempt re-uploads a missing part from staging
+   under its attempt key, as in 3.3.
+5. Stored delta-object bytes since the base, including this delta and excluding base parts, reach
+   `SIZE_FACTOR × file_bytes`, provisionally 2 times the current file (`size`).
+6. The chain would pass `MAX_CHAIN_GENERATIONS`, provisionally 1,024 generations including the base (`length`).
+
+Just before the manifest, re-read the live forgotten markers and `state.json`'s `--as-delete` decisions. Drop the
+staging copy and restart at the hash pass only if it holds rows of a session forgotten since the copy, or if the
+attempt is a delta and a new item's session is one the head's chain may hold. The latter restarts even a delta
+whose staging copy holds no forgotten rows; it never restarts a base. Re-evaluate the rules on the new copy.
+An `--as-delete` decision covers rows already missing and removes nothing itself. If a staging copy holds ids
+covered by a pending decision after a rollback, refuse with `as_delete_rows_present` until the user withdraws
+the decision or the rows go again; never restart in a loop. Record every new item read at the final check:
+`base_generation` is this generation only when it is a base and the item's session is one the head's chain may
+hold; otherwise it is `null`. Inherited entries on `--new-copy` take that copy's first base.
+
+There is no age cap. The size and length constants and skip ceiling are provisional pending row 2D; readers
+rebuild any chain a manifest names, so changing them needs no format change. `status` shows chain length, stored
+bytes and base reason. The existing bucket layout format covers this block; no hosted copy exists in the earlier
+layout, so no migration is needed.
+
+Storage usually peaks near 4 times the database after a size base. That is not a bound: large deltas immediately
+after a size base can keep two chains at once, under 6 times. Pins, 7-day orphans, manifests and payloads come on
+top, as do idle and superseded copies (section 9).
+
+#### 3.7.4 Consumers, retention and forget
+
+- **Publish guard (3.4).** Row semantics are unchanged. It reads the staging copy's contracted rows,
+  `sqlite_sequence` and the head's digests, mark and removed-id sets, never parts or deltas. Transport digests
+  do not judge loss.
+- **Retention (3.5).** List and delete `deltas/` as well as `parts/` and `payloads/`. A manifest names its entire
+  base and chain, so a kept manifest protects all of them. Delete keys named only by manifests being pruned
+  before deleting those manifests. Delete a manifest only after every key it alone names returned success or
+  not found; otherwise leave it for the next winning publish. A crash between keys and manifests leaves unkept
+  manifests with missing keys; the next retention deletes them. Write `retention_done_generation` only when
+  every delete returned success or not found. Never-named objects retain the 7-day rule.
+- **Forget.** Besides 3.5's session rule, every publish deletes each unpinned generation whose `base.generation`
+  is older than the largest non-null `base_generation` in the head's cumulative `forgotten` list. Reading the
+  cutoff from the head makes a kill before retention retryable. A base part reused under its old key is a slice
+  of the current file and holds nothing the local file does not. The promise holds after the forget publish
+  completes retention, subject to pins, idle and superseded copies, and 5.2's limits: objects from failed or
+  interrupted attempts or dropped staging copies that no manifest named wait for the 7-day rule. Free-page
+  residue travels in base parts and delta objects; it stays while the local file keeps it, and a later base can
+  copy it again. LCM-X does not set `secure_delete`; SQLite reuses free pages over time. Older objects keep
+  residue until their generations go. Step 1 adds no scrubbing.
+- **The missing-key exception (3.4).** If the stalled-retention interleaving deletes a base part or delta, this
+  copy's next publish cuts a base instead of re-uploading that old content. Content still available to upload is
+  uploaded again. The newest generation is whole either way; lane 3 tests the interleaving with delta keys.
+- **Restore (5.3).** Verify each downloaded object and rebuild as in 3.7.3 before checks 1 to 4. A rebuild digest
+  mismatch stops restore and reports `rebuild_digest_mismatch` with the generation. The proof publishes base,
+  delta, delta, forced base; restore the newest, delete it as simulated loss and restore the preceding base with
+  two deltas, then delete the first delta's object and show that the same restore fails and names it.
+- **Replica refresh (4.1).** If the held generation has the same base parts and its delta list is a prefix of
+  the head's, clone its `lcm.db` into the new generation folder where supported (`cp -c` on APFS, a reflink on
+  Linux), otherwise copy it in full. Hold the source folder's shared lock during clone or copy. Apply only the
+  remaining deltas and check the rebuilt digests. Only those deltas need database download; payload handling
+  stays as in 4.1. If the prefix condition fails or patching fails, download the base and chain and rebuild,
+  checking `base.file_sha256` and `file_sha256`. On a mismatch the previous generation keeps serving and
+  `status` names the generation. The old folder is never modified; 4.1's handover and peak disk stay. Crossing
+  a re-base downloads the new base once.
+- **Independent checker (lane 4).** Import no uploader module. Decode and rebuild independently, check
+  `file_sha256` and `page_list_sha256`, compare byte for byte with restore's file, and run row checks on the
+  checker's own file. Add three faults to the existing five: a delta omitted, two deltas swapped, and one
+  record's page replaced by that page's earlier bytes with the object's key recomputed. Only the result digest
+  catches the last one.
+- **Upload retry (section 6, row 3).** Re-send no complete unchanged base part and at most one generation's
+  delta objects. A resumed attempt takes a new snapshot, so its delta may differ from the interrupted one.
+
+#### 3.7.5 Daily bar and row 2D
+
+The daily bar is the largest of 20% of the database at the day's start, 3 times that day's growth, and 32 MiB.
+The floor matters below 160 MiB (168 MB). Count every uploaded byte: manifests, delta objects, base parts and
+payloads. Each day without a base must meet its bar. Bases are cut only by 3.7.3's rules, with the reason shown;
+any 30 days with no forced base must total at most their 30 daily bars. Forced-base and forget cells report
+their day against its bar plus one database.
+
+Row 2's 1,390,985,216-byte store had a 278 MB 20% term. These are delta bytes only, scaled from seven bins:
+
+| Day | Scaling | Delta bytes | Share of the 20% term |
+|---|---|---:|---:|
+| 16 publishes, replay mix | 7-bin sum × 16/7 | 32.5 MB | 12% |
+| 16 publishes, all like the largest bin | 3,376,727 × 16 | 54 MB | 19% |
+| 48 publishes, replay mix | 7-bin sum × 48/7 | 98 MB | 35% |
+| 48 publishes, all like the largest bin | 3,376,727 × 48 | 162 MB | 58% |
+
+The day's delta/growth ratio over the seven bins was 14,232,909 / 9,867,264 = 1.44 (1.25 to 1.62 for five busy
+bins; 2.97 uncompressed). The two trickle bins were 2.9 and 3.9. Churn followed activity rather than file size
+in the two measured stores. A user several times busier is unmeasured; proportional delta growth is an
+**(assumption)**. Evidence is one replay, two sessions, 3.5 hours, embeddings off, hashing the live file after
+worker runs rather than staging, and no full-text merge spike. It proves no delta restore time, heavy-user day,
+embeddings-on default or real manifest size.
+
+A prototype manifest for a separate payload-heavy 2.75 GB store was 1,263,640 bytes (82 parts, 5,804 payloads),
+not the final format. That proxy adds 20 MB at 16 publishes and 61 MB at 48. At 48 the replay mix becomes about
+159 MB (57% of the 20% term), passing line (5); the all-largest-bin day becomes 223 MB, 66% of its governing
+3-times-growth term.
+Every share must name the term that governs it. Manifests stay plain JSON; row 2D measures the actual writer.
+
+Size bases cost a whole database but count only delta bytes toward the 2-times threshold. Growth alone does not
+trip it while delta/growth stays below 2. With churn and no growth a size base averages 1.5 times delta bytes;
+staying below two thirds of the bar leaves room for that base. Length bases add about 1.6% of a database per day
+at 16 publishes and 4.7% at 48 (8% and 23% of the 20% term). When growth governs, their contributions are at most
+0.23 and 0.70 times growth. These arithmetic estimates do not replace the simulation gate.
+
+**Row 2D runs once lane 2's real snapshot path exists, after lane 2 merges, and moves no date unless it fails.**
+
+- Size cells run on the shared development machine: seed a scratch store from real transcripts by row 2's
+  method at a cut T0 at least 24 hours back, then replay the following 24 hours in 30-minute bins (48 publishes)
+  through lane 2's real backup, journal switch, stamp, page-list and delta path, embeddings off and on. Real
+  transcripts stay there. Timing cells (hash and encode seconds per GB, rebuild) run on the bench hosts using
+  row 1's recorded replay; those need no 24 hours. Include one forced base and one forget.
+- Report per publish: changed pages, stored delta bytes, growth, manifest bytes, hash and encode seconds per GB.
+  Per day: total uploaded bytes, largest publish, ratio and local bytes written. Measure every replay manifest;
+  beyond 48 deltas run lane 2's manifest writer on synthetic chains of 128, 256, 512 and 1,024 deltas repeating
+  replay entries, interpolating linearly. Scale the store-growing part (per-session digests, payload names and
+  id sets) with file bytes.
+- Repeat the replayed day for 90 days from a fresh base at its starting size. Advance file bytes by measured
+  per-publish growth. Publish deltas unless size or length fires; a base costs that publish's file bytes and
+  manifest. Every simulated publish adds its measured new-payload bytes, including bases. Compute each daily
+  bar from the file at that day's start, that day's growth and the floor. No forced base is simulated.
+- Pass lines: (1) every day with no base is within its bar; (2) every 30-day window starting on days 0 through 60
+  totals at most its summed daily bars; (3) replay-day delta bytes divided by whole-day growth is at most 2.0;
+  (4) every generation rebuilds to its `file_sha256`, and snapshot, guard, hash and encode together fit row 3's
+  60 s per GB; (5) the replayed day's whole delta bytes plus manifests are at most two thirds of 20% of the file.
+  Do not subtract raw growth from compressed delta bytes. The continuation with growth zero after day 1,
+  keeping each day's whole delta bytes and no new payloads, must also pass (1) and (2).
+- Report the worst window's share with and without manifests. If that window passes two thirds of its summed
+  bars, manifest compression becomes a follow-up lane decided on those numbers. If the ratio fails, raise the
+  zlib level once, then report; the size constant must stay above the ratio. If (5) fails, return the size
+  constant to the release manager. The provisional size, length and skip constants can be revisited on row 2D.
+
+#### 3.7.6 Lane assignments
+
+Lane 2d holds `cloud_delta.py` and `tests/test_cloud_delta.py`: page lists and digests, last/pending list files,
+encode and apply, the pure base rule and skip signature. Its surface includes the object format, page lists,
+changed pages, rebuild, emitted-page self-check, record cap, skip completion checks and appended-zero-page test.
+It takes the forget trigger computed by lane 3 and the missing-object input checked by lane 2 as given. Its
+estimated ~220 non-generated lines, tests apart, exceed the 200-line signal; it is a separate High lane so lane 2
+does not grow past 600 lines. It needs no transport, manifest writer or snapshot. Codex (`gpt-6.1-sol`, high)
+authors it with one fresh Claude reviewer.
+
+Lanes 2 and 4 receive the delta-object and `database` format blocks from one source. Lane 2 adds about 80 lines
+(to ~480): manifest block, base-or-delta publish and pre-manifest chain check. Lane 3 adds about 30: `deltas/`
+retention, forget input, and interleaving tests with delta keys. Lane 4 adds about 60 (to ~310): independent
+decoder, rebuild and three faults. Lane 5 adds about 80 (to ~380): restore rebuild and local patch with full
+fallback. Lane 8 adds about 15: chain length, bytes and last base reason in `status`. All are High; these are
+estimates **(assumption)**. Dependencies and dates are in section 8; lane 7a is unaffected.
+
+#### 3.7.7 What stays
+
+D4 and D6 stand: no writes to the live store, its payload folder or spool, no `capture.lock`, and a staging
+backup, journal switch and stamp before hashing. Payload upload, 32 MiB base parts, attempt keys, the publisher,
+pending pair and conditional create, row guard semantics, `accept-loss`, pins, contract constants and D14 stay.
+The retention window and 7-day orphan rule stay, with the key-before-manifest order and cumulative forget cutoff
+above. The merger's routing, recall semantics and handover stay; only refresh's database rebuild changes.
+A single-machine user's chain is not re-read between bases, so damage may first appear at restore, as with whole
+parts. `sync --verify` is follow-up work, outside this lane.
+
 ## 4. Recall across stores
 
 **Recall stays local. A merger runs one stock reader per store in parallel, returns the local answer unchanged,
@@ -345,8 +626,9 @@ and adds hits from the user's other machines in a separate list.**
   `<home>/cloud/replicas/<copy id>/gen-<n>/` with `lcm.db` and `lcm-large-outputs/`, the layout the reader expects.
 - **A refresh never changes files under a running reader.** The stock reader opens several connections in turn and
   resolves payloads separately (mcp_reader.py:360), so a home swapped mid-call could mix generations. Each
-  generation downloads into its own directory, which is never modified, with every part's and payload's sha256
-  verified. A missing or bad object stops the refresh: the previous generation keeps serving, and `status` names the
+  generation rebuilds into its own directory, which is never modified once served, with every downloaded
+  object's sha256 verified. Rebuild uses the base and chain, or patches a clone/copy of the held generation
+  under its shared folder lock, with full download as fallback and rebuilt-file digest checks (3.7.4). A missing or bad object stops the refresh: the previous generation keeps serving, and `status` names the
   object (lane 5 tests it on a generation with a deleted part). Otherwise the refresh writes
   `replicas/<copy id>/current` (the generation number, replaced atomically). Every merger in the home reads that
   file before each call, so all of them learn of a new generation. A merger starts a new stock reader on it and
@@ -491,15 +773,19 @@ Hermes `/lcm doctor clean apply` pointed at a capture store is refused at upload
   rows can remain in unused pages of the database file and in the full-text index's internal tables, in the
   hosted copy exactly as in the local file; search no longer returns them. Row 6's synthetic run found a planted
   id in the full-text index's backing tables even after `VACUUM` (section 6).
-  Parts of a failed or interrupted attempt that no manifest ever named can hold a forgotten session for at least
-  7 days, until the next successful retention after that (3.5). The opt-in says each in one line.
+  Free-page residue travels in base parts and delta objects while the local file keeps it; a later base can
+  copy it again, and older objects keep it until their generations go. LCM-X does not set `secure_delete` and
+  step 1 adds no scrubbing (3.7.4). Parts and delta objects of failed or interrupted attempts or dropped staging
+  copies that no manifest named can hold a forgotten session for at least 7 days, until the next successful
+  retention after that (3.5). The opt-in says each in one line.
 - **Tests.** (a) With no pin in the bucket, forget a session that holds a planted string; publish; restore the current generation: 0 rows,
   0 ledger lines, 0 payloads of that session, and recall finds nothing. List the bucket: no older generation
   holds the session, and no key holds it except one that no manifest ever named, younger than 7 days by the
   bucket's clock. Then repeat with the process killed after the manifest is written and before retention: the
   next publish that wins its own create leaves no generation that holds it. Then forget a session after the staging copy is taken and
-  before the manifest is created: that copy is dropped, and the retried publish holds none of it. (b) Delete rows with no marker: the publish is refused and the
-  bucket is unchanged. (c) `accept-loss`, then publish: passes, and the generation before the loss is still in the
+  before the manifest is created: that copy is dropped, and the retried publish is a base holding none of it.
+  Kill between deleting exclusive keys and deleting manifests: the next winning retention finishes (3.7.4).
+  (b) Delete rows with no marker: the publish is refused and the bucket is unchanged. (c) `accept-loss`, then publish: passes, and the generation before the loss is still in the
   bucket and restores with the rows. (d) `accept-loss --as-delete`, then publish: passes, and no generation holds
   the rows. (e) Control: a publish with no delete passes. (f) Two publishers under one copy id, interleaved at each
   step (parts, part check, manifest, retention): at most one manifest per number, no part a kept manifest names is
@@ -530,12 +816,21 @@ Hermes `/lcm doctor clean apply` pointed at a capture store is refused at upload
   newest generation is whole again only if this copy publishes again. Resume an
   attempt more than 3.5 days after it started: it is abandoned and a new attempt starts. Copy a home, forget session S on the first machine, run `--new-copy` on the second: it uploads S.
 
+- **Delta lifecycle tests (lane 3).** Publish S, lose S, plain `accept-loss`, stage a snapshot, then forget S
+  before the manifest: exactly one restart ends in a winning base. Repeat with a kill before retention: the
+  next winning publish prunes older unpinned generations by the head's cutoff. `--as-delete` S, publish new rows for S,
+  then forget S: a base. Separately, a second `--as-delete` decision on a session whose new rows were published
+  also cuts a base. Release pins in each case and
+  verify no unpinned object holds the removed rows. Roll back under a pending
+  decision: `as_delete_rows_present` once, no restart loop (3.7.3).
+
 ### 5.3 Restore
 
-- **What it is.** `restore --generation N --to <fresh directory>` downloads the manifest, parts and payloads,
-  verifies every sha256, assembles `lcm.db` and `lcm-large-outputs/`, and checks the result. A named object that is
+- **What it is.** `restore --generation N --to <fresh directory>` downloads the manifest, base parts,
+  delta objects and payloads, verifies every sha256, rebuilds `lcm.db` by base plus chain (3.7.3), assembles
+  `lcm-large-outputs/`, and checks the result. A named object that is
   missing or fails its sha256 stops the restore and names the object (lane 5 tests it on a generation with a deleted
-  part).
+  part). A rebuild digest mismatch stops restore with `rebuild_digest_mismatch` and the generation (3.7.4).
 - **Refusals.** The target of `restore --to` must be empty. It must not hold `capture-owner.json` or `lcm.db`, and
   must not be a capture home, a Hermes home, or anything inside one. Replica refresh is a separate path that
   writes only under `<home>/cloud/replicas/`; staging writes only under `<home>/cloud/staging/`. Test: each
@@ -552,26 +847,29 @@ Hermes `/lcm doctor clean apply` pointed at a capture store is refused at upload
   (4) Start the stock reader on the restored folder, run one `lcm_grep`, and run one `lcm_expand`: of a payload
   the manifest names when it names any, otherwise of one message by `store_id`; with no rows, (4) is the
   reader's start and one empty `lcm_grep`. A failed check that does run stops the restore and keeps the folder.
-- **The proof, before any user upload.** Seed a store from real sessions. Publish three generations to the gate
-  bucket, with capture running between publishes. At each publish keep a scratch copy of the origin store and of
+- **The proof, before any user upload.** Seed a store from real sessions. Publish four generations to the gate
+  bucket (base, delta, delta, forced base), with capture running between publishes. At each publish keep a scratch copy of the origin store and of
   its transcripts, so each generation has its own oracle. Restore the newest: all four checks pass against its own
   saved copy. Then delete the newest manifest and its unique parts from the test bucket, as a simulated loss, and
   restore the one before: all four checks pass against that generation's saved copy. The generations differ, so this
-  is a real test. Record: generation ids, digests, counts, no content.
+  is a real test. Then delete the first delta's object: that same restore must fail and name it (3.7.4).
+  Record: generation ids, digests, counts, no content.
 - **Per user.** D12: `enable` repeats checks 1, 2 and 4 on the user's first generation before uploads are
   scheduled.
 
 ## 6. The design check
 
-**Six rows of measurements decide the open numbers before the lanes that depend on them start. Each has a method,
-a bar set now, and what happens if it fails.** The check runs on throwaway prototypes, not on product code: a
-snapshot script (the standard library's backup, about 60 lines), a comparer that digests every contracted table
-of two stores (about 80 lines), a merger stub (two to four stock readers, prefixes, a separate hit list; about
-200 lines) and a file-swap loop (about 60 lines). None of it is lane code.
+**Six rows plus row 2D decide the open numbers for their dependent lanes. Each has a method,
+a bar set now, and what happens if it fails.** Rows 1 to 6 run before the lanes that depend on them start,
+on throwaway prototypes; row 2D runs after lane 2 merges, on its real snapshot path and manifest writer,
+with size and timing cells separated as in 3.7.5. The prototypes are a snapshot script
+(the standard library's backup, about 60 lines), a comparer that digests every contracted table of two stores
+(about 80 lines), a merger stub (two to four stock readers, prefixes, a separate hit list; about
+200 lines) and a file-swap loop (about 60 lines).
 
 **Where it runs (release manager's edit).** The shared development machine is used by several lanes, so no timing on it is judged.
-- Rows 2 and 6 (sizes, deleted bytes) measure no time. They run on the shared development machine, on scratch copies.
-- Rows 1, 3, 4 and 5 are timing rows. They run on the bench hosts, Linux, which also adds the cross-platform case:
+- Rows 2 and 6, and row 2D's size cells, measure no time. They run on the shared development machine, on scratch copies.
+- Rows 1, 3, 4 and 5, and row 2D's timing cells, run on the bench hosts, Linux, adding the cross-platform case:
   - the first bench host once the v0.30.1 D1 row ends (about 11-18 22Z);
   - the second bench host as the second machine once D4 ends (about 11-19 09Z).
 
@@ -593,18 +891,20 @@ result counts.
 | # | What | How it is measured | Bar | If it fails |
 |---|---|---|---|---|
 | 1 | **Snapshot beside live capture** | Four sessions in parallel on one scratch store (the unit's R6 shape, replayed from recorded transcripts) for 30 minutes: first without the snapshot loop (the control), then with a snapshot every 60 s, then the control again, on the same host. | Audit `ok` and `verified`; outside-in checker passes; 0 failed batches, 0 `still_wal`, 0 `.failed` spool records in the worker log; hook wall p95 no more than 5 ms above the higher control's, or no more than the two controls' difference if that is larger. The absolute wall p95 is recorded beside the unit's 50 ms target (docs/claude-code-adapter.md:727) and is not gated (bench/specs/RELEASE-READINESS-V1.md:90); a run over 50 ms is reported to #2141 (docs/claude-code-adapter.md:740-741) and does not fail this row. Every snapshot passes `integrity_check` and the comparer against the origin at its cut; 95% of cycles finish within three restarts. | Snapshot only when no worker is running and the store has been quiet for a set time. If that also fails, the snapshot moves into the capture worker, a core-train lane. |
-| 2 | **Store and upload sizes** | Three stores: the GA gate's growth-check store (about 690,000 lines); a store seeded from a maintainer's real transcripts by the growth check's method (bench/specs/RELEASE-READINESS-V1.md:94-96); the second machine's store. For each: database bytes, payload bytes, the raw-ledger share, the vector share, bytes against transcripts. Then one working day of publishes at the default 30-minute cadence: bytes uploaded by each, and in total, since parts that capture keeps writing are sent again at every publish. Also the number of session ids held by more than one of the three stores. | Sizes have no pass line; they are recorded. Daily bar: the day's publishes together upload at most the larger of 20% of the database and 3 times that day's store growth. The same bytes are what the user's other machines download, so O1's cost figures use this number. | Tune the part size once. If still over, add a base-plus-delta upload lane before build and move the date by its size. |
-| 3 | **Upload time** | First upload and incremental upload from each machine. A fixed 1 GiB transfer first gives the link's throughput. Then `kill -9` mid-upload three times and rerun. | Work outside the transfer (snapshot, guard, hashing) at most 60 s per GB. Transfer at least 80% of the link's throughput. After each kill: the rerun resumes the same attempt with its pending token, completes, re-sends no complete part, writes nothing onto an existing key, and the bucket never holds a manifest that names a missing part. | Fix in the transport lane; no design change. |
+| 2 | **Store and upload sizes** | Three stores: the GA gate's growth-check store (about 690,000 lines); a store seeded from a maintainer's real transcripts by the growth check's method (bench/specs/RELEASE-READINESS-V1.md:94-96); the second machine's store. For each: database bytes, payload bytes, the raw-ledger share, the vector share, bytes against transcripts. Then one working day of publishes at the default 30-minute cadence: bytes uploaded by each, and in total, counting base parts or delta objects, manifests and payloads (3.7). Also the number of session ids held by more than one of the three stores. | Sizes have no pass line; they are recorded. Daily bar and base-day rules: 3.7.5, including the 32 MiB floor and all uploaded bytes. The same bytes are what the user's other machines download, so O1's cost figures use this number. | Whole parts exceeded the bar; base-plus-delta is adopted (3.7), with row 2D as its gate. |
+| 2D | **Base-plus-delta path** | The replay, manifest scaling, 90-day simulation, forced-base and forget cells of 3.7.5, embeddings off and on. Size cells on the shared development machine; timing cells on bench hosts with row 1's replay. | All five pass lines in 3.7.5, including the no-growth continuation; all uploaded bytes count. | Raise zlib level once on ratio failure, then report; return the size constant on line (5) failure; worst-window share above two thirds triggers manifest-compression follow-up. |
+| 3 | **Upload time** | First upload and incremental upload from each machine. A fixed 1 GiB transfer first gives the link's throughput. Then `kill -9` mid-upload three times and rerun. | Work outside the transfer (snapshot, guard, hashing) at most 60 s per GB. Transfer at least 80% of the link's throughput. After each kill: the rerun resumes the same attempt with its pending token, completes, re-sends no complete unchanged base part and at most one generation's delta objects (3.7.4), writes nothing onto an existing key, and the bucket never holds a manifest that names a missing part. | Fix in the transport lane; no design change. |
 | 4 | **Recall wait across 1, 2 and 4 stores** | The GA recall kit (bench/instruments/cc_mcp_recall/README.md:9-17, :23-25), arm T. Cells: plain reader, one store; merger, no replica; corpus split over 2 stores; over 4 stores; then 2 and 4 again with each replica padded to the largest real store from row 2. At least 200 warm calls per tool per cell, first calls reported apart, memory of all readers recorded with one session open and with four, each replica's mode recorded. | The bars in 4.4. Also correctness: 44 of 44 values found with byte-equal expand in every cell; 0 duplicates; with one session planted in two stores, including at least one externalized tool result, it is returned once; the kit's empty-store control passes first. | The kill line in 4.4: step 1 folds into step 2. |
 | 5 | **Replica refresh** | The second machine pulls each new generation into its own directory while two sessions' mergers send recall calls, with the handover in 4.1 (pointer file, probe call, shared folder locks, then delete). 100 handovers, some timed to land mid-call. | 0 failed calls; no call more than 300 ms above local-only (the merger waits 250 ms for a replica, so 50 ms is left for its own work); an id issued before a handover expands after it; the first call after a handover finds a value that only the new generation holds; no call reads two generations; refresh takes at most the transfer time plus 30 s per GB; peak disk at most twice the replica, or three times while another session still reads the oldest generation (4.1). | If calls still fail under this handover, the kill line applies. |
 | 6 | **Deleted bytes** | On a scratch store, forget a session that holds a planted string, through `delete_session_messages` with the adapter loaded. Take a snapshot. Search the snapshot's bytes and its full-text index for the string. | No pass line. The result decides the wording of the opt-in's limit in 5.2. | Not applicable: it is a disclosure, not a bar. |
 
-The product instruments prove themselves later, in their own lanes: lane 4's checker must name five seeded faults
-(a row removed, a row doubled, a row's content changed, a payload removed, a raw ledger blob cut) and pass a clean
-copy; lane 3's guard must refuse an unexplained delete and pass a deliberate one. Neither gates anything before
-that.
+The product instruments prove themselves later, in their own lanes: lane 4's checker must name eight seeded faults
+(a row removed, a row doubled, a row's content changed, a payload removed, a raw ledger blob cut, and the three
+delta faults in 3.7.4) and pass a clean copy; lane 3's guard must refuse an unexplained delete and pass a
+deliberate one. Neither gates anything before that.
 
-Order: row 1 first, because lane 2 waits for it. Then rows 2, 3 and 6. Rows 4 and 5 last, on the merger stub.
+Order: row 1 first, because lane 2 waits for it. Then rows 2, 3 and 6.
+Rows 4 and 5 last, on the merger stub. Row 2D runs once lane 2's real snapshot path exists, after lane 2 merges.
 
 The numbers still assumed today: 6 GB per user (draft 1's hosting estimate) and every upload time. The shared development machine's own
 capture store is 13 MB (created 2026-11-13), so it is not a size sample. Draft 1's question on whether the reader
@@ -620,7 +920,7 @@ implements it.**
 | Capture is opt-in | Socket-blocked run on a home that never opted in; `enable` and `disable` tests (5.1) | 0 connection attempts before opt-in; uploads start only after `--accept` and a passed restore check; 0 uploads after `disable` |
 | Each hosted store reachable only by its own user's agents | Two-credential negative test on the host that ships, positive control first, with our client's own prefix check bypassed (5.1) | Every cross-prefix list, read, write and delete refused by the host (HTTP 403); own-prefix operations succeed |
 | One proven restore before any capture | The restore proof in 5.3, on a store seeded from real sessions, before any user upload; plus `enable`'s own check | All four checks pass on the newest generation and on the one before it after a simulated loss, each against its own cut |
-| 0 lost and 0 duplicate rows across stores | Chain of four links, on two machines. (1) Transcript to local: the audit and the outside-in checker, as the unit gate runs them (bench/specs/RELEASE-READINESS-V1.md:57-66). (2) Local to hosted: the copy checker, origin store against restored generation, every contracted table by key, plus payload digests and raw ledger digests; a reference that names no file is reported under its count (3.3); the same unresolved names on both sides pass, and one-sided ones fail. (3) Hosted to replica: sha256 of every part and payload. (4) Transcript to restored copy: the outside-in checker on the restored folder. The list of hosted copies comes from each machine's `cloud/cloud.json` (copy id) and `capture-owner.json` (origin id), not from the bucket, because a checker cannot see an input it is not given (docs/claude-code-adapter.md:730). | 0 lost and 0 duplicated at every link; order kept; 0 unpaired. No copy id published by two machines past one generation each (the invariant and the publish token, 3.4; test (j)); an origin id under two copy ids (a copied home) is listed. Merged recall returns no occurrence twice. |
+| 0 lost and 0 duplicate rows across stores | Chain of four links, on two machines. (1) Transcript to local: the audit and the outside-in checker, as the unit gate runs them (bench/specs/RELEASE-READINESS-V1.md:57-66). (2) Local to hosted: the copy checker, origin store against restored generation, every contracted table by key, plus payload digests and raw ledger digests; a reference that names no file is reported under its count (3.3); the same unresolved names on both sides pass, and one-sided ones fail. (3) Hosted to replica: every downloaded object's sha256 and the rebuilt file's `file_sha256` (3.7.4). (4) Transcript to restored copy: the outside-in checker on the restored folder. The list of hosted copies comes from each machine's `cloud/cloud.json` (copy id) and `capture-owner.json` (origin id), not from the bucket, because a checker cannot see an input it is not given (docs/claude-code-adapter.md:730). | 0 lost and 0 duplicated at every link; order kept; 0 unpaired. No copy id published by two machines past one generation each (the invariant and the publish token, 3.4; test (j)); an origin id under two copy ids (a copied home) is listed. Merged recall returns no occurrence twice. |
 | One real recall proof | The recall kit's agent arm through the merger: a value captured only on machine A is asked for on machine B in a fresh Claude Code session told nothing about stores. One more run on a machine with no local history, the replaced-machine case. Question and expected value written down first by someone other than the runner. | The agent answers with the value; the hit carries A's copy id; `lcm_expand` returns the stored source byte-equal. With the replica removed, the same question gets a local-only answer and no tool error. Claim class: one real session, not a pass rate. |
 | Copied stores carry an import stamp | The copy checker reads `import:origin` in every restored generation and replica and compares it with the manifest | Present, equal to the manifest, origin id equal to the origin machine's owner file |
 | A deliberate delete reaches the hosted copy, or the opt-in says it does not | The tests in 5.2 | (a) to (j) pass; the opt-in text carries the delete rule and its limits |
@@ -632,7 +932,7 @@ copy checker, once its capture ships.
 
 ## 8. The build plan
 
-**Twelve lanes: the design check, a document lane, nine code lanes and the gate run. No lane changes the core
+**Thirteen lanes: the design check, a document lane, ten code lanes and the gate run. No lane changes the core
 store, ingest or the stock reader. Only lane 9 enters the unit's import closure.** Sizes are non-generated lines,
 tests apart. Tiers follow the diff: anything that guards, deletes, authenticates or sits on a user's data path is
 High. **(Assumption:** every size and every day count below is an estimate from the scope in this record, not
@@ -642,21 +942,25 @@ from a prototype.)
 |---|---|---|---|---|---|
 | 0 | Design check: throwaway prototypes, kit runs, result card | none in the repository; prototypes in a scratch folder outside the repository; the result card goes into lane 1's document | ~400 throwaway | none (no product code) | this record's bars |
 | 1 | This record as a repo document; roadmap and adapter-doc wording | `docs/cloud-capture-step1.md`; `ROADMAP.md`, `docs/claude-code-adapter.md` (edits) | docs | Low | decision by 11-21 |
-| 2 | Snapshot, manifest, part store, directory transport, contract constants | `cloud_copy.py`, `scripts/lcm_x_cloud.py` (`snapshot`, `publish`), `tests/test_cloud_copy.py`, `tests/compat/test_cloud_copy_contract.py` | ~400 | High | row 1's result |
-| 3 | Publish guard (`store_id_reused`, `forgotten_session_returned`, the chain), retention, superseded copies, `accept-loss` | `cloud_guard.py`, tests | ~300 | High | 2 |
-| 4 | Independent copy checker, written from section 3 only, by a different author than lanes 2 and 3; accepted on five seeded faults | `scripts/cloud_copy_outside_in.py`, `tests/compat/test_cloud_copy_outside_in.py` | ~250 | High | section 3 |
-| 5 | Restore, restore check, replica refresh into per-generation directories and the reader handover (4.1) | `cloud_restore.py`, tests | ~300 | High | 2 |
+| 2d | Page lists/digests, last/pending lists, delta encode/apply, pure base rule, skip signature (3.7.6) | `cloud_delta.py`, `tests/test_cloud_delta.py` | ~220 | High | 3.7's codec interface |
+| 2 | Snapshot, manifest including `database`, base-or-delta publish through 2d, pre-manifest chain check, part store, directory transport, contract constants | `cloud_copy.py`, `scripts/lcm_x_cloud.py` (`snapshot`, `publish`), `tests/test_cloud_copy.py`, `tests/compat/test_cloud_copy_contract.py` | ~480 (+~80) | High | row 1's result; 2d before merge |
+| 3 | Publish guard (`store_id_reused`, `forgotten_session_returned`, the chain), retention including `deltas/`, forget trigger for the base rule, tests of `as_delete_rows_present`, delta-key interleavings, superseded copies, `accept-loss` | `cloud_guard.py`, tests | ~330 (+~30) | High | 2 |
+| 4 | Independent decoder, rebuild and copy checker, written from section 3 only, by a different author than lanes 2 and 3; eight seeded faults | `scripts/cloud_copy_outside_in.py`, `tests/compat/test_cloud_copy_outside_in.py` | ~310 (+~60) | High | section 3 |
+| 5 | Restore rebuild/check, replica refresh by local patch into a new directory with full download as fallback, reader handover (4.1, 3.7.4) | `cloud_restore.py`, tests | ~380 (+~80) | High | 2 |
 | 6 | S3 transport (conditional create, TLS verification), credentials, isolation test | `cloud_s3.py`, tests (recorded responses; live tests against the O1 bucket, skipped without its credentials, required at the gate) | ~350 | High | 2; the bucket for its live proof |
 | 7a | Merger: children, routing, id qualification, fallback | `cloud_reader.py`, tests | ~300 | High | a hand-built replica home; rows 4 and 5 decide whether it continues |
 | 7b | Merger: duplicate rule, status, deadline; kit cells for 2 and 4 stores | `cloud_reader.py`, `bench/instruments/cc_mcp_recall/` (edit) | ~250 | High | 7a |
-| 8 | Opt-in: `enable` (with `--new-copy`; a plain `enable` re-run on a home whose `cloud.json` names a copy id reads the head first, per the invariant), `disable`, `status`, `sync`, `accept-loss` (`--as-delete`, `--release`); `cloud/upload.lock` around every bucket write; opt-in text; the sync timer | `scripts/lcm_x_cloud.py` (edit), `cloud_reader.py` (edit), tests | ~300 | High | 3, 5, 6, 7b |
+| 8 | Opt-in: `enable` (with `--new-copy`; a plain `enable` re-run on a home whose `cloud.json` names a copy id reads the head first, per the invariant), `disable`, `status`, `sync`, `accept-loss` (`--as-delete`, `--release`); `cloud/upload.lock` around every bucket write; opt-in text; the sync timer; `status` chain length, bytes and last base reason | `scripts/lcm_x_cloud.py` (edit), `cloud_reader.py` (edit), tests | ~315 (+~15) | High | 3, 5, 6, 7b |
 | 9 | Unit packaging, smoke, release-spec gate items, user docs | `scripts/build_claude_code_unit.py:32`, `scripts/claude_code_unit_delta.py:24`, `scripts/claude_code_unit_smoke.py`, `bench/specs/RELEASE-READINESS-V1.md`, `adapters/claude-code/README.md` (all edits) | ~200 | High | 8 |
 | 10 | Gate run on the candidate: two machines, the real bucket, records | none | none | gate | 4, 6 and 9; row 3; owner decisions O1 and O3 |
 
-- **Parallel.** Lanes 2, 4 and 7a start together: 4 and 7a need only section 3's layout. After 2 merges, lanes 3, 5
-  and 6 run together. 7b follows 7a. The week of 11-30 holds four writers (3, 5, 6 and 7b), each Codex lane in its
+- **Parallel.** Lane 2d precedes lane 2's merge; lane 2 starts against its interface. Lanes 4 and 7a start with 2:
+  4 and 7a need only section 3's layout. After 2 merges, lanes 3, 5 and 6 run together. 7b follows 7a. The week
+  of 11-30 holds four writers (3, 5, 6 and 7b), each Codex lane in its
   own leased home; review, not homes, is the limit that week, so 7b's review queues behind 3, 5 and 6.
-- **One writer each.** The chain 2 to 3 to 8 to 9 to 10 is dependent and is never split across parallel writers.
+- **One writer each.** The chain 2d to 2 to 3 to 8 to 9 to 10 is dependent and is never split across parallel writers.
+- **Lane 2d** has a closed codec surface (3.7.6); lanes 2 and 4 receive the delta-object and `database` blocks
+  from one source, and 2d and 4 share the page-list vector. It takes rule 3 and rule 4 inputs from lanes 3 and 2.
 - **Lanes 7a and 7b** are split because one merger PR would pass 200 lines, the stop-and-report signal.
 - **Unit closure.** The unit asset ships only two entry scripts today (scripts/build_claude_code_unit.py:32;
   docs/process/claude-code-unit-release.md:30-31). Lane 9 adds the third. Until then nothing in lanes 2 to 8 can
@@ -664,30 +968,42 @@ from a prototype.)
 - **Core store.** No lane touches it. If the design check forces one (row 1's last fallback, or a reader change
   for swaps), that lane ships in a core train and the unit pins that core commit.
 - **Authors (release manager's edit).**
-  - Lanes 2, 3, 5, 6, 7a, 7b, 8 and 9 go to Codex (`gpt-6.1-sol`, high) against a spec with its acceptance tests.
+  - Lanes 2d, 2, 3, 5, 6, 7a, 7b, 8 and 9 go to Codex (`gpt-6.1-sol`, high) against a spec with its acceptance tests.
   - Lane 4, the independent checker, goes to a Claude `coder`. A different model family from the author of lanes 2
     and 3 writes what judges them.
   - Lane 1 is the release manager's.
 - **Review.** A Claude-authored High lane takes two reviewers; a Codex-authored one takes one fresh Claude reviewer.
   Lanes 3 and 4 decide what counts as loss, so they get the strongest reviewers available.
 
-**Proposed ship date: 2026-12-22, with a stated risk to 12-29.** It is derived, not chosen:
+**Proposed ship date: 2026-12-28, with a stated risk to 2027-01-04.** Dates are ceilings; the count is
+Monday to Friday and prices no holiday. It is derived, not chosen:
 
 - 11-17 to 11-24: design check, beside the decision on this record (due 11-21).
   - Prototypes and rows 2 and 6 from 11-17.
   - Row 1 on the first bench host from 11-19, done by 11-20, because lane 2 waits for it.
   - Rows 4 and 5 by 11-24.
   - Six rows on two hosts that are busy until 11-18 and 11-19 is the weakest number in this plan.
+- Row 2D runs once lane 2's real snapshot path exists, after lane 2 merges (3.7.5); it reports manifest bytes
+  and local writes as well as the upload bar.
+- Lane 2d was dispatched when the design was decided, 11-16; four working days and one review round put its
+  merge about 11-24. Lane 2 starts 11-23 against its interface and merges after 2d, about three working days
+  later than without delta work.
+  Lanes 4 and 7a start with 2; 7a is unaffected. Lanes 3, 5 and 6 follow 2; 7b follows 7a.
 - Week of 11-23: lanes 2, 4, 7a. Week of 11-30: lanes 3, 5, 6, 7b. Week of 12-07: lanes 8 and 9.
 - Week of 12-14: candidate and gate, including the unit's 24-hour lane.
-- The critical path is 2, 3, 8, 9, then the gate: about 4 + 4 + 4 + 2 + 4 working days from 11-23, which lands on
-  12-16, the roadmap's floor, with no slip at all. Two review rounds on two High lanes of that path add four
-  working days: 12-22. All four lanes of that path are High; if each needs two rounds, it is about 12-29.
+- Lanes 3, 5 and 6 start once lane 2 merges, about three working days later than without the delta work; later lanes and the gate move with them, and the critical path below carries the end dates.
+- Lane 3 adds under a day. Lane 5's extra ~80 lines can delay lane 8, which needs it, by about a day, within
+  the same four-working-day move.
+- The critical path is 2d, 2, 3, 8, 9, then the gate. From lane 2's 11-23 start, its
+  4 + 4 + 4 + 2 + 4 working days plus the delta work's four working days land on 12-22 with no slip at all.
+  Two review rounds on two High lanes of that path add four working days: 12-28. All four code lanes after 2d
+  are High; if each needs two rounds, it is about 01-04. Best case, with one review round, is 12-24 if
+  2d merges by 11-25 and lane 2 merges in its slot.
 - It moves day for day if the owner's bucket (O1) arrives after 12-07 (lane 6's live proof, row 3 and the gate
   wait for it), if row 1 is not in by 11-23, or if rows 4 and 5 end after 11-24.
-  It moves by one lane if row 2 forces delta uploads. The week of 12-14 also holds facts that update (12-16) and
-  compaction part 1 (12-19), so reviewer time is the likeliest slip.
-- The gate decides. If it passes earlier, step 1 ships earlier, but not before 12-16.
+  The week of 12-14 also holds facts that update (12-16) and compaction part 1 (12-19), so reviewer time is
+  the likeliest slip.
+- The gate decides. If it passes earlier, step 1 ships earlier, but not before 12-16, the roadmap's floor.
 
 ## 9. Owner decisions
 
@@ -695,15 +1011,16 @@ from a prototype.)
 The third is what a user's other machines and the bucket hold, and what a lost machine exposes.**
 
 **O1. Whose bucket (money).** Prices below were read 2026-11-10 for draft 1 and were not re-read. They assume
-6 GB per user, which is unmeasured. They also price one copy. Step 1 keeps three generations (3.5), plus any
-generation pinned by `accept-loss` for up to 30 days, and how many bytes generations share is unmeasured
-(section 6, row 2). So stored bytes, and each figure below, can be three times higher, or more while a pin
-lasts or while idle and superseded copies remain, since step 1 never deletes a copy.
+6 GB per user, which is unmeasured. They price one database, while step 1 keeps three generations (3.5).
+Base-plus-delta storage usually peaks near 4 times the database after a size base; with large new deltas,
+two kept chains can reach under 6 times. These are database-only figures: pins (up to 30 days), 7-day orphans,
+manifests and payloads come on top (3.7.3). Idle and superseded copies add more, since step 1 never deletes a copy.
+The figures below are single-copy estimates before those multipliers.
 
 | Answer | What it costs | What follows |
 |---|---|---|
 | **a. Users bring their own bucket. We operate none. (recommended)** | Nothing for us. About $0.10 to $0.30 a month for a user at 6 GB. | We hold no user data and issue no credentials. The gate still needs one test bucket with two scoped keys from the owner: free at proof sizes on Cloudflare R2 or Backblaze B2 (each has 10 GB free). |
-| b. We also operate one bucket, one prefix per user | About $1, $9 and $110 a month at 10, 100 and 1,000 users on R2 for one copy, so up to about $3, $27 and $330 with three generations; or about EUR 6.50 flat up to 1 TB on Hetzner Object Storage. | Credentials issued and revoked by hand for the first users. Decision O2 becomes live. The date holds only if the bucket exists by 12-07. |
+| b. We also operate one bucket, one prefix per user | About $1, $9 and $110 a month at 10, 100 and 1,000 users on R2 for one copy, before the storage multipliers above; or about EUR 6.50 flat up to 1 TB on Hetzner Object Storage. | Credentials issued and revoked by hand for the first users. Decision O2 becomes live. The date holds only if the bucket exists by 12-07. |
 | c. No real bucket; prove on MinIO only | Nothing. | The isolation bar is then proven on a local server, not on a host a user would use. Not recommended: the bar names a hosted store. |
 
 What we need under the recommendation: one bucket and two prefix-scoped keys, created by the owner, by 12-07 for
@@ -743,8 +1060,9 @@ replica carries them too.
 
 ## 10. What this record does not settle
 
-- **Every size and every wait** is unmeasured until section 6 runs. The date assumes rows 1, 2, 4, 5 and 6 pass
-  by 11-24; row 3 runs when the O1 bucket exists, before the gate.
+- **Every size and every wait** is unmeasured until section 6 runs. The date assumes rows 1, 4, 5 and 6 pass
+  by 11-24, with row 2D now the gate after row 2 fired its fallback; row 3 runs when the O1 bucket exists,
+  before the gate.
 - **A session-end publish.** A capture made after A's last upload waits for A's next session or a manual `sync`
   (4.5). Publishing when a session ends needs a hook, and D13 has none, so this stays open.
 - **Conditional create on a user's host.** The chain and retention rely on a create-if-absent PUT. `enable` accepts
@@ -797,6 +1115,26 @@ replica carries them too.
 - **Drop a replica hit because another store holds the same occurrence.** That store may not have returned it, so
   the only copy in the response would vanish.
 - **Restore into the live home.** See D9.
+
+For base-plus-delta upload (3.7), these alternatives are also rejected:
+
+- **Smaller parts.** 64 KiB re-sends about 0.75 GB a day. At 16 KiB, 16 publishes send about 172 MB of parts
+  (62% of the 278 MB term) but about 85,000 entries per base make a manifest about 18 MB at the prototype's
+  215 bytes per entry, about 292 MB a day on top. At 48 publishes, parts alone send about 515 MB.
+- **Cumulative deltas since the base.** Re-sending about 800 additional distinct pages per busy bin costs
+  about 210 MB on day one and 610 MB on day two, over the bar.
+- **Rolling re-base.** Smooths size/length bases, but a forget still needs every part; adds per-part generations
+  and a daily budget. The ordered manifest list could admit it later.
+- **Daily roll-up deltas.** Send each day's pages twice and need a second local page list; 1,024 small objects
+  cost less.
+- **Page lists in the bucket.** 8 to 25 MB per generation, more than deltas; a lost local list costs one base.
+- **Per-page content objects.** About 1,500 PUTs per publish and 340,000 objects per base.
+- **Row deltas, WAL shipping, SQLite's session extension.** Row deltas have the earlier objection above; WAL
+  shipping controls live checkpoints against D4; the session extension is absent from stdlib `sqlite3`.
+- **Bridge delta on a base generation.** Helps only a replica within two publishes of re-base and adds a second
+  path; revisit if replica downloads matter.
+- **Chain age cap.** Re-sends an unchanged store; the missing-object rule already heals an incomplete chain.
+- **Compressed base parts or `lzma`.** Compressing parts is separate work; some builds lack `lzma`.
 
 ## Appendix A. The critic's objections to draft 1, each with its disposition
 
@@ -996,3 +1334,20 @@ checkpoint required; none adds protocol. Where this table and the one above diff
 | Scout: a recreated manifest inside the kept window can be kept and named for restore | Important | Narrowed: it is not the head, runs no retention, and fails visibly on restore when it names a missing object; test (f) | 3.4, 5.2 (f) |
 | Scout: a copy taken during a publish can adopt a generation holding its twin's later rows, and then meets `store_id_reused` or a loss refusal | Important | Stated, with test (j): every copy but one meets `chain_conflict`, `store_id_reused` or a loss refusal; nothing deletes outside its own winning retention; `status` never calls the other copy safe to delete | 3.4, 5.2 (j) |
 | Scout: the opt-in named idle copies too narrowly; O1's storage figure left out idle copies; lane 2 measured hardware-id uniqueness that only a later `--resume` needs | Important; nits | Fixed: the opt-in covers every idle copy; O1 counts idle and superseded copies; the measurement moves to that later lane | 5.1, O1, lane 2 |
+
+## Appendix J. Review of the page-delta design
+
+The base-plus-delta design was reviewed separately from the whole-copy record in four rounds.
+Each round used one fresh Claude review and `gpt-6-astra` at high, with delta passes after the first round.
+The release manager's ruling closed the design.
+Section 3.7 states its decided rules, including all four rounds' corrections.
+The object format, page-list digest and rebuild checks are shared specifications, with an independent decoder.
+The final forget rule keys each decision separately and rechecks live items just before the manifest.
+A racing forget restarts a delta once into a base; a rolled-back pending delete refuses rather than loops.
+Cumulative base-generation cutoffs make pruning retryable, without pruning for sessions the chain never held.
+Retention deletes exclusive objects before manifests and records completion only after successful deletes.
+The daily bar counts all uploads and includes a 32 MiB floor; row 2D gates both growth and no-growth runs.
+Its sizes use a transcript replay on the shared development machine; timing uses the bench hosts.
+Manifest scaling, payloads, size bases and length bases all enter the 90-day simulation.
+Lane 2d separates the codec from the uploader; section 8 carries the dependencies and revised date.
+This fold is documentation evidence only. It proves no codec behavior, upload bar, restore time or release gate.
