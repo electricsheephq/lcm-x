@@ -99,6 +99,7 @@ NON_TURN_PATH_FILES = {
     "claude_code_audit.py",  # Claude Code capture audit; reads a capture store only, never on the turn path.
     "claude_code_capture.py",  # Claude Code transcript projection; not imported by the Hermes turn path.
     "claude_code_store.py",  # Claude Code capture writer, only for stores it creates and stamps.
+    "cloud_reader.py",  # Cloud capture recall merger; a separate process started through reader-override.json, never loaded by Hermes.
     "command.py",  # Explicit commands or default-off embedding backfill.
     "command_auth.py",  # Explicit slash-command authorization only.
     "command_doctor.py",  # Read-only /lcm doctor text diagnostics only.
