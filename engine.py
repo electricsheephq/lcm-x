@@ -6755,14 +6755,13 @@ class LCMEngine(
             replay[unaudited_from:end] = self._last_active_replay_messages[unaudited_from:end]
         generated = [idx for idx, row in enumerate(replay)
                      if id(row) in self._generated_ignored_active_replay_placeholder_message_ids]
-        self._active_replay_cache_freeze_sequence += 1
         return (self._ordinary_active_replay_cache_generation, copy.deepcopy(identities), copy.deepcopy(replay),
-                generated, self._active_replay_cache_freeze_sequence)
+                generated, None)
 
     def _apply_active_replay_cache_update(self, update):
         generation, identities, replay, generated, sequence = update
-        # Deferred writes compose; only an ordinary write supersedes their frozen generation.
-        # A failed earlier tail may retry after a later one has already applied its view.
+        # Only an ordinary write supersedes a frozen generation.
+        # The sequence check also rejects retired updates from chained tails.
         if (generation != self._ordinary_active_replay_cache_generation
                 or sequence <= self._applied_active_replay_cache_sequence):
             return
@@ -7834,7 +7833,8 @@ class LCMEngine(
                     "_generated_ignored_active_replay_placeholder_hash_counts",
                     "_generated_ignored_active_replay_placeholder_hash_ordinals",
                     "_out_of_band_durable_rows", "_emitted_carriers_seen", "_emitted_carriers_retired",
-                    "_pending_session_tails",
+                    "_pending_session_tails", "_active_replay_cache_freeze_sequence",
+                    "_applied_active_replay_cache_sequence",
                 )}
                 # Stores and host objects are identity-bearing; never deepcopy them.
                 for name in ("_host_rewrite_store", "_pruned_tool_source_store"):
@@ -8004,7 +8004,9 @@ class LCMEngine(
                             self.__dict__.pop("_ingest_read_only", None)
                             self._store._read_only_ingest_thread = read_only_thread
                             for name, value in snapshots.items():
-                                if name != "_pending_session_tails":
+                                # A frozen tail keeps its number and its retirement with it (#2751).
+                                if name not in ("_pending_session_tails", "_active_replay_cache_freeze_sequence",
+                                                "_applied_active_replay_cache_sequence"):
                                     if value is missing:
                                         self.__dict__.pop(name, None)
                                     else:
@@ -10035,7 +10037,13 @@ class LCMEngine(
                 if "senders" in pending:
                     pending["senders"] = copy.deepcopy(pending["senders"])
                 if not any(self._tail_key(old) == self._tail_key(pending) for old in self._pending_session_tails):
+                    if "cache_update" in pending:
+                        self._active_replay_cache_freeze_sequence += 1
+                        pending["cache_update"] = (*pending["cache_update"][:4], self._active_replay_cache_freeze_sequence)
                     self._pending_session_tails.append(pending)
+                    # Chained tails keep main's behaviour: no frozen view applies (#2751, #2778).
+                    if len(self._pending_session_tails) > 1:
+                        self._applied_active_replay_cache_sequence = self._active_replay_cache_freeze_sequence
                     if getattr(self, "_ingest_read_only", None) is not None:
                         self._ledger_count("ledger.tail.queued.warm")
                         if inserted:
@@ -12620,6 +12628,8 @@ class LCMEngine(
             tail["fallback_lineage"] = fallback_lineage
         if not any(self._tail_key(old) == self._tail_key(tail) for old in self._pending_session_tails):
             self._pending_session_tails.append(tail)
+            if len(self._pending_session_tails) > 1:
+                self._applied_active_replay_cache_sequence = self._active_replay_cache_freeze_sequence
             self._ledger_count("ledger.tail.queued.cold." + type(error).__name__)
         logger.warning("LCM session-end cold tail retry pending (%s)", type(error).__name__)
         maintenance_scheduler._PENDING_TAIL_ENGINES.add(self)

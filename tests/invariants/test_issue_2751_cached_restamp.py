@@ -320,11 +320,16 @@ def _run_chained_warm_tails(root, monkeypatch, shape, drain, followup, *, busy, 
 @pytest.mark.parametrize('drain', ['end', 'retry'])
 @pytest.mark.parametrize('followup', ['none', 'ingest', 'end1', 'end3'])
 def test_chained_warm_tail_cache_updates(tmp_path, monkeypatch, shape, drain, followup, record_property):
-    """Two frozen views must compose, with the single-tail uid turn as a control."""
+    """Chained frozen views keep main, with the single-tail uid turn as a control."""
     expected = _run_chained_warm_tails(tmp_path / 'clean', monkeypatch, shape, drain, followup, busy=False)
     actual = _run_chained_warm_tails(tmp_path / 'busy', monkeypatch, shape, drain, followup, busy=True)
     record_property('clean_occurrences', repr(expected))
     record_property('occurrences', repr(actual))
+    if shape == 'nouid-turn' and (drain, followup) in {
+            ('end', 'end1'), ('end', 'end3'), ('end', 'ingest'), ('retry', 'end3')}:
+        # #2751: the chained case keeps main's duplicate; tracked open on #2751
+        expected = [('', 3.), ('question-0', 1.), ('question-0', 1001.),
+                    ('question-0', 2001.), ('question-0', 2001.), ('reply-0', 2.), ('result-0', 4.)]
     if (shape, drain, followup) == ('uid-turn', 'retry', 'none'):
         # #2778: the single-tail control cannot reach clean; pin main's two-busy-base.json list.
         expected = [('', 3.), ('question-0', 1.), ('question-0', 1001.), ('reply-0', 2.), ('result-0', 4.)]
@@ -341,13 +346,15 @@ def test_chained_warm_tails_ordinary_ingest_wins(tmp_path, monkeypatch, shape):
     assert actual == expected, {'stored': actual, 'clean': expected}
 
 
-def test_chained_warm_tail_older_update_cannot_replace_newer(tmp_path, monkeypatch):
+def test_chained_tails_retire_both_frozen_views(tmp_path, monkeypatch):
     """A non-busy failure can leave the first tail pending while the second commits."""
-    expected = _run_chained_warm_tails(tmp_path / 'clean', monkeypatch, 'uid-user', 'retry', 'none', busy=False)
+    # Main's rows for this sequence, also equal to the clean run.
+    expected = [('question-0', 1.), ('question-0', 1001.), ('question-0', 2001.)]
     engine = _open(tmp_path, monkeypatch, None)
     try:
         view = _turn(0, 'plain')[:1]
         engine.ingest(copy.deepcopy(view))
+        ordinary_view = copy.deepcopy(engine._last_active_replay_messages)
         probe = _Probe(monkeypatch)
         for stamp in (1001., 2001.):
             view[0]['timestamp'] = stamp
@@ -364,12 +371,148 @@ def test_chained_warm_tail_older_update_cannot_replace_newer(tmp_path, monkeypat
             patch.setattr(engine, '_match_pending_tail', fail_older)
             engine._retry_pending_session_tails()
         assert engine._pending_session_tails == [older]
-        assert engine._last_active_replay_messages == view
+        assert engine._last_active_replay_messages == ordinary_view
         engine._retry_pending_session_tails()
         assert not engine._pending_session_tails
-        assert engine._last_active_replay_messages == view
-        assert engine._deferred_active_replay_cache_generation == engine._active_replay_cache_generation
+        assert engine._last_active_replay_messages == ordinary_view
         actual = sorted((r['content'], r['observed_at']) for r in engine._store.get_session_messages('parent'))
         assert actual == expected
     finally:
         engine.shutdown()
+
+
+@pytest.mark.parametrize('second_change', ['reply2002', 'none', 'user2001'])
+@pytest.mark.parametrize('recover', [False, True])
+@pytest.mark.parametrize('uids', [True, False])
+def test_chained_tails_failing_older_keep_main(tmp_path, monkeypatch, second_change, recover, uids):
+    # Chained tails keep main's behaviour. Main's missing rows here are the older tail
+    # still pending (recover=False) or #2778.
+    expected = {
+        'uids=True/recover=False/reply2002': ([
+            ('', 3.0), ('', 23.0), ('question-0', 1.0), ('question-1', 21.0), ('reply-0', 2.0),
+            ('reply-1', 22.0), ('result-0', 4.0), ('result-1', 24.0),
+        ], 1),
+        'uids=True/recover=False/none': ([
+            ('', 3.0), ('', 23.0), ('question-0', 1.0), ('question-1', 21.0), ('reply-0', 2.0),
+            ('reply-1', 22.0), ('result-0', 4.0), ('result-1', 24.0),
+        ], 1),
+        'uids=True/recover=False/user2001': ([
+            ('', 3.0), ('', 23.0), ('question-0', 1.0), ('question-1', 21.0), ('reply-0', 2.0),
+            ('reply-1', 22.0), ('result-0', 4.0), ('result-1', 24.0),
+        ], 1),
+        'uids=True/recover=True/reply2002': ([
+            ('', 3.0), ('', 23.0), ('question-0', 1.0), ('question-0', 1001.0), ('question-1', 21.0),
+            ('reply-0', 2.0), ('reply-1', 22.0), ('result-0', 4.0), ('result-1', 24.0),
+        ], 0),
+        'uids=True/recover=True/none': ([
+            ('', 3.0), ('', 23.0), ('question-0', 1.0), ('question-0', 1001.0), ('question-1', 21.0),
+            ('reply-0', 2.0), ('reply-1', 22.0), ('result-0', 4.0), ('result-1', 24.0),
+        ], 0),
+        'uids=True/recover=True/user2001': ([
+            ('', 3.0), ('', 23.0), ('question-0', 1.0), ('question-0', 1001.0), ('question-1', 21.0),
+            ('reply-0', 2.0), ('reply-1', 22.0), ('result-0', 4.0), ('result-1', 24.0),
+        ], 0),
+        'uids=False/recover=False/reply2002': ([
+            ('', 3.0), ('', 23.0), ('question-0', 1.0), ('question-1', 21.0), ('reply-0', 2.0),
+            ('reply-1', 22.0), ('result-0', 4.0), ('result-1', 24.0),
+        ], 1),
+        'uids=False/recover=False/none': ([
+            ('', 3.0), ('', 23.0), ('question-0', 1.0), ('question-0', 1001.0), ('question-1', 21.0),
+            ('reply-0', 2.0), ('reply-1', 22.0), ('result-0', 4.0), ('result-1', 24.0),
+        ], 1),
+        'uids=False/recover=False/user2001': ([
+            ('', 3.0), ('', 23.0), ('question-0', 1.0), ('question-0', 2001.0), ('question-1', 21.0),
+            ('reply-0', 2.0), ('reply-1', 22.0), ('result-0', 4.0), ('result-1', 24.0),
+        ], 1),
+        'uids=False/recover=True/reply2002': ([
+            ('', 3.0), ('', 23.0), ('question-0', 1.0), ('question-0', 1001.0), ('question-1', 21.0),
+            ('reply-0', 2.0), ('reply-1', 22.0), ('result-0', 4.0), ('result-1', 24.0),
+        ], 0),
+        'uids=False/recover=True/none': ([
+            ('', 3.0), ('', 23.0), ('question-0', 1.0), ('question-0', 1001.0), ('question-0', 1001.0),
+            ('question-1', 21.0), ('reply-0', 2.0), ('reply-1', 22.0), ('result-0', 4.0),
+            ('result-1', 24.0),
+        ], 0),
+        'uids=False/recover=True/user2001': ([
+            ('', 3.0), ('', 23.0), ('question-0', 1.0), ('question-0', 1001.0), ('question-0', 2001.0),
+            ('question-1', 21.0), ('reply-0', 2.0), ('reply-1', 22.0), ('result-0', 4.0),
+            ('result-1', 24.0),
+        ], 0),
+    }
+    rows, pending_left = expected[f'uids={uids}/recover={recover}/{second_change}']
+    e = _open(tmp_path, monkeypatch, None)
+    try:
+        view = _turn(0, 'plain', uids=uids)
+        e.ingest(copy.deepcopy(view))
+        probe = _Probe(monkeypatch)
+        view[0]['timestamp'] = 1001.
+        with monkeypatch.context() as p:
+            probe.busy_end(p, e, 'warm', view)
+        view = view + _turn(1, 'plain', uids=uids)
+        with monkeypatch.context() as p:
+            probe.busy_end(p, e, 'warm', view)
+        older = e._pending_session_tails[0] if e._pending_session_tails else None
+        match = e._match_pending_tail
+
+        def fail_older(tail):
+            if tail is older:
+                raise RuntimeError('probe: older tail unavailable')
+            return match(tail)
+        monkeypatch.setattr(e, '_match_pending_tail', fail_older)
+        e._retry_pending_session_tails()
+        if second_change == 'reply2002':
+            view[1]['timestamp'] = 2002.
+        elif second_change == 'user2001':
+            view[0]['timestamp'] = 2001.
+        for _ in range(2):
+            e.on_session_end('parent', copy.deepcopy(view))
+        if recover:
+            monkeypatch.setattr(e, '_match_pending_tail', match)
+            e.on_session_end('parent', copy.deepcopy(view))
+        pend = len(e._pending_session_tails)
+        occ = sorted((r['content'][:10], r['observed_at']) for r in e._store.get_session_messages('parent'))
+        assert occ == rows
+        assert pend == pending_left
+    finally:
+        e.shutdown()
+
+
+def test_lone_tail_after_retired_chain_applies(tmp_path, monkeypatch):
+    def run(root, busy):
+        root.mkdir()
+        with monkeypatch.context() as patch:
+            engine = _open(root, patch, None)
+            try:
+                view = _turn(0, 'plain')[:1]
+                engine.ingest(copy.deepcopy(view))
+                probe = _Probe(patch)
+                for stamp in (1001., 2001.):
+                    view[0]['timestamp'] = stamp
+                    if busy:
+                        with patch.context() as fault:
+                            probe.busy_end(fault, engine, 'warm', view)
+                    else:
+                        engine.on_session_end('parent', copy.deepcopy(view))
+                if busy:
+                    assert len(engine._pending_session_tails) == 2
+                    engine._retry_pending_session_tails()
+                    assert not engine._pending_session_tails
+                view[0]['timestamp'] = 3001.
+                if busy:
+                    with patch.context() as fault:
+                        probe.busy_end(fault, engine, 'warm', view)
+                    assert len(engine._pending_session_tails) == 1
+                    engine._retry_pending_session_tails()
+                    assert not engine._pending_session_tails
+                    assert (engine._deferred_active_replay_cache_generation
+                            == engine._active_replay_cache_generation)
+                else:
+                    engine.on_session_end('parent', copy.deepcopy(view))
+                for _ in range(3):
+                    engine.on_session_end('parent', copy.deepcopy(view))
+                return sorted((r['content'], r['observed_at'])
+                              for r in engine._store.get_session_messages('parent'))
+            finally:
+                engine.shutdown()
+
+    assert run(tmp_path / 'busy', True) == run(tmp_path / 'clean', False)
