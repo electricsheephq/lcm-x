@@ -178,6 +178,23 @@ def test_checkpoint_smoke(tmp_path):
         assert not (tmp_path / f"checkpoint-run-{i}" / "holds.jsonl").exists()
 
 
+def _drop_aborted_ingest_attempts(logs):
+    """Drop the first copy of an ingest attempt that one thread logs twice in a row.
+
+    Under contention the engine's abort-once evidence retry (#1815, engine.py `_EvidenceFaultRetry`) re-runs an
+    ingest silently, so the attempt's opening lines appear twice in that thread. Whether it fires is timing.
+    """
+    out = []
+    for record in logs:
+        out.append(record)
+        for size in range(1, len(out) // 2 + 1):
+            block, before = out[-size:], out[-2 * size:-size]
+            if block == before and block[0]["message"].startswith(("LCM reconciled ingest cursor", "Ingest: session=")):
+                del out[-2 * size:-size]
+                break
+    return out
+
+
 def normalize(rows):
     """Exclude timing values only; canonically rename OS IDs, retaining relationships."""
     rows = deepcopy(rows)
@@ -198,6 +215,7 @@ def normalize(rows):
             record["process"] = processes[record["process"]]
         # Threads interleave their log lines by timing. Keep each thread's own order and compare per thread.
         row["logs"].sort(key=lambda record: (record["process"], record["thread"]))
+        row["logs"] = _drop_aborted_ingest_attempts(row["logs"])
         for summary in row["success_wall_ms"].values():
             if isinstance(summary, dict):
                 for key in ("p50", "p95", "max"):
