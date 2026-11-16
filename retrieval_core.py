@@ -724,17 +724,19 @@ _LCM_RECALL_RRF_K = 60
 _LCM_RECALL_FTS_ANCHOR_SLOTS = 10
 
 
-def _lcm_recall_recency_boost(timestamp: Any, *, now: float) -> float:
+def _lcm_recall_recency_boost(
+    timestamp: Any, *, now: float, floor: float = _LCM_RECALL_RECENCY_FLOOR,
+) -> float:
     """Half-life recency multiplier in ``[floor, 1.0]`` (newer => closer to 1)."""
     try:
         ts = float(timestamp or 0.0)
     except (TypeError, ValueError):
         ts = 0.0
     if ts <= 0:
-        return _LCM_RECALL_RECENCY_FLOOR
+        return floor
     age = max(0.0, now - ts)
     boost = 2.0 ** (-(age / _LCM_RECALL_RECENCY_HALF_LIFE_S))
-    return max(_LCM_RECALL_RECENCY_FLOOR, boost)
+    return max(floor, boost)
 
 
 def _lcm_recall_excerpt_expand_hint(hit: dict[str, Any]) -> str:
@@ -827,6 +829,7 @@ def fuse_candidates(
 
 def apply_prior(
     entries: list[dict[str, Any]], scope_ids: set[str], now: float, bias: float,
+    *, recency_floor: float = _LCM_RECALL_RECENCY_FLOOR,
 ) -> list[dict[str, Any]]:
     """Return scope/recency-ranked entries using the caller's explicit clock.
 
@@ -843,7 +846,7 @@ def apply_prior(
         hit = entry["hit"]
         rank_score = float(entry.get("rrf_score", 0.0))
         is_current = 1.0 if hit.get("session_id") in scope_ids else 0.0
-        recency = _lcm_recall_recency_boost(hit.get("timestamp"), now=now)
+        recency = _lcm_recall_recency_boost(hit.get("timestamp"), now=now, floor=recency_floor)
         entry["_final_score"] = rank_score * (1.0 + bias * is_current) * recency
     ordered.sort(
         key=lambda entry: (

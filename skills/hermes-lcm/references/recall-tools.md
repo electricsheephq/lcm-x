@@ -39,6 +39,7 @@ Use for discovery across current-session raw messages and summary nodes.
 - Indexed history zero hits with multiple terms retry once with any-term matching; `retried='any_term'` reports this. Top-level OR/NOT queries and CJK/emoji substring searches do not retry.
 - `content_scope='externalized'` matches the query as typed or all its terms in any order (quoted phrases kept, uppercase OR honoured); a NOT query matches only as typed.
 - Keep `sort='recency'` for recent events, use `sort='relevance'` for the strongest older match, and use `sort='hybrid'` when both matter.
+- With `LCM_RECALL_GREP_STEMMED=true` (default false), full-text history search uses the ready Porter index (for example, `cake` matches `cakes`) and falls back to the plain index if unavailable or failing. A top-level uppercase OR query defaults to relevance unless you pass `sort`; other queries retain recency ordering.
 - `mode='semantic'` or `'hybrid'` is useful when embeddings are configured; degraded coverage is reported.
 - Broader `session_scope='all'|'session'` is explicit, bounded, raw-message-only archive recovery inside `lcm.db`.
 - Delegated subagents are stored under their own session ids: `session_scope='current'` also searches the current session's subagents, `session_scope='session'` takes a subagent's id, and a subagent's hit carries `lineage: "subagent of <parent id>"` (also in `lcm_recall`).
