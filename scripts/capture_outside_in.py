@@ -7,9 +7,10 @@ Subagents use SESSION/agent:ID. Output contains counts and ids, never transcript
 For a reused agent id's later transcript, use SESSION/agent:/ plus its path below subagents/.
 Externalized references and ingest-payload replacements inside tool-call arguments
 verify source character and UTF-8 byte counts and SHA-256 prefixes.
-A preview whose named file resolves outside tool-results/ of every supplied transcript's own session folder
-(found as capture finds it) must equal the preview text, because capture keeps such a preview (a forked
-session's copy of its parent's preview).
+A preview naming a file outside tool-results/ of every own session folder of its lineage (found as capture finds
+them, both sides resolved) verifies as a preview copy, its stored row equal to the preview text, only when a row of
+another lineage verified against that same file (a forked session's copy of its parent's preview); every other
+preview is checked against its saved file or stays unverified. Each lineage reports its preview_copies count.
 Raw ledger preservation and payload-file recovery are outside this row checker.
 """
 from __future__ import annotations
@@ -148,37 +149,38 @@ def own_session_folders(transcript):
     return folders
 
 
-def outside_own_results(text, metadata, transcripts):
-    """Whether the file this preview names resolves outside tool-results/ of every folder capture may have read
-    this lineage's saved outputs from (own_session_folders() of each supplied transcript). Capture keeps such a
-    preview as the row's text, because its saved-output recovery reads only the folder of the lineage's live
-    transcript (claude_code_capture._recover_saved_output), so the stored row must equal the preview: a forked
-    session's copy of its parent's preview names the parent's file. When the live transcript is supplied, every
-    name this accepts is one capture kept the preview for, given the same working directory and HOME (Claude Code
-    names saved outputs by absolute path; a relative or ~ path resolves in this process). A name inside any of
-    those folders stays with saved_preview(), even where capture keeps the preview (the folder missing or
-    symlinked, or the file a symlink that resolves inside), so a missing saved output stays unverified (#2611)."""
+def outside_named_path(text, metadata, transcripts):
+    """The resolved path this preview names when it lies outside tool-results/ of every folder capture may have read
+    this lineage's saved outputs from (own_session_folders() of each supplied transcript), else None. Both sides are
+    resolved, so a linked file or folder cannot make an outside file look inside. Capture keeps such a preview as
+    the row's text, because its saved-output recovery reads only the folder of the lineage's live transcript
+    (claude_code_capture._recover_saved_output). check() expects that preview only for a copy: a row of another
+    lineage verified against the same resolved file (a forked session's copy of its parent's preview names the
+    parent's file). A relative or ~ path resolves in this process's working directory and HOME."""
     match = SAVED_TO.search(text)
     saved = metadata.get("persistedOutputPath") if isinstance(metadata, Mapping) else None
     named = (match["path"].strip() if match else None) or (saved if isinstance(saved, str) and saved else None)
     if not named or not transcripts:
-        return False
+        return None
     try:
         path = Path(named).expanduser().resolve()
-        return not any(path.is_relative_to((folder / "tool-results").resolve())
-                       for transcript in transcripts for folder in own_session_folders(transcript))
+        if any(path.is_relative_to((folder / "tool-results").resolve())
+               for transcript in transcripts for folder in own_session_folders(transcript)):
+            return None
+        return path
     except (OSError, RuntimeError, ValueError):
-        return False
+        return None
 
 
 def saved_preview(text, transcripts, metadata):
-    """Try every supplied path's session folder, without reading oversized outputs."""
+    """Try every supplied path's session folder, without reading oversized outputs. Returns the saved file's text,
+    the reason it could not be read, and the resolved file it read."""
     match = re.search(r"Full output saved to:\s*([^\r\n]+)", text)
     named = match[1].strip() if match else None
     if not named and isinstance(metadata, Mapping):
         named = metadata.get("persistedOutputPath")
     if not named:
-        return None, "saved_output_unnamed"
+        return None, "saved_output_unnamed", None
     if isinstance(named, str) and len(named) >= 2 and named[0] == named[-1] and named[0] in "\"'":
         named = named[1:-1]
     reason = "saved_output_outside_session"
@@ -203,12 +205,12 @@ def saved_preview(text, transcripts, metadata):
                 if len(data) > MAX_SAVED_OUTPUT_BYTES:  # Bound the read even if the file grew.
                     reason = "saved_output_too_large"
                 else:
-                    return data.decode("utf-8"), None
+                    return data.decode("utf-8"), None, path.resolve()
         except UnicodeError:
             reason = "saved_output_binary"
         except (OSError, ValueError, RuntimeError, TypeError):
             reason = "saved_output_unreadable"
-    return None, reason
+    return None, reason, None
 
 
 def fingerprint(text):
@@ -412,11 +414,10 @@ def check(home, inputs):
             call_id: min([row_id, *(call_origins[old][call_id] for old in predecessors[row_id]
                                    if call_id in call_origins[old])])
             for call_id in (call.get("id") for call in json.loads(row["tool_calls"] or "[]"))}
-    reports = []
     unexpected = [{"session_id": s, "rows": len(grouped[s])} for s in sorted(grouped.keys() - expected.keys())]
-    for session in sorted(expected):
-        wanted, actual, ids = expected.get(session, []), [], []
-        ambiguous, binding_excess = Counter(), 0
+
+    def store_side(session):
+        actual, ids, ambiguous, binding_excess = [], [], Counter(), 0
         calls, results = defaultdict(list), defaultdict(list)
         for row in grouped[session]:
             row_id = row["store_id"]
@@ -436,26 +437,38 @@ def check(home, inputs):
                     calls[call.get("id")].append(call_origins[row_id][call.get("id")])
                 if row["role"] == "tool":
                     results[row["tool_call_id"]].append(origins[row_id])
-        # Prepare each transcript occurrence once, then pair the k-th row of each uid.
-        sources, reasons, index = [], {}, defaultdict(set)
+        return actual, ids, ambiguous, binding_excess, calls, results
+
+    def transcript_side(session, owned):
+        """Prepare each transcript occurrence once. A preview naming a path outside every own folder is expected as
+        its own text only when `owned` holds that resolved path; every other preview takes saved_preview()."""
+        wanted, sources, reasons, files, named_outside, copies = list(expected[session]), [], {}, {}, set(), set()
         for i, row in enumerate(wanted):
             source, structured = transcript_sources[session][i]
-            if previews and (session, i) in previews:
+            if (session, i) in previews:
                 metadata = previews[session, i]
-                if outside_own_results(source, metadata, transcript_paths[session]):
-                    pass  # capture stored the preview itself, so the stored row must equal it exactly
+                named = outside_named_path(source, metadata, transcript_paths[session])
+                if named is not None:
+                    named_outside.add(named)
+                if named is not None and named in owned:
+                    copies.add(i)  # capture stored the preview itself, so the stored row must equal it exactly
                 else:
-                    recovered, reason = saved_preview(source, transcript_paths[session], metadata)
+                    recovered, reason, file = saved_preview(source, transcript_paths[session], metadata)
                     if reason:
                         reasons[i] = reason
                     else:
-                        source = recovered
+                        source, files[i] = recovered, file
                         wanted[i] = row[:2] + (canonical(source),) + row[3:]
             sources.append((source, structured))
-        slots = defaultdict(list)
+        return wanted, sources, reasons, files, named_outside, copies
+
+    def compare(session, store, wanted, sources, reasons):
+        """Pair the k-th row of each uid; returns the lineage's report and the occurrences whose rows verified."""
+        actual, ids, ambiguous, binding_excess, calls, results = store
+        actual, index, slots = list(actual), defaultdict(set), defaultdict(list)
         for i, row in enumerate(wanted):
             slots[row[0]].append(i)
-        used, unverified, unverified_reasons = Counter(), 0, []
+        used, unverified, unverified_reasons, verified = Counter(), 0, [], set()
         for n, row in enumerate(actual):
             k, uid = used[row[0]], row[0]
             used[uid] += 1
@@ -472,11 +485,14 @@ def check(home, inputs):
                 actual[n] = target
                 unverified += 1
                 unverified_reasons.append({"uid": uid, "reason": reasons[i]})
-            elif row != target:
+            elif row == target:
+                verified.add(i)
+            else:
                 source, is_structured = sources[i]
                 structured = index_source(source, index, is_structured) if isinstance(source, str) else None
                 if content_matches(json.loads(row[2]), source, structured, index):
                     actual[n] = target
+                    verified.add(i)
         need, have = Counter(wanted), Counter(actual)
         missing = need - have - ambiguous
         lost = sum(missing.values())
@@ -497,6 +513,26 @@ def check(home, inputs):
                   "unverified": unverified, "unprojected": unprojected[session],
                   "unverified_reasons": unverified_reasons}
         report["pass"] = not lost and not duplicated and order and not unpaired
+        return report, verified
+
+    # Pass 1 checks every row with no preview copies, and collects the files that verified rows were checked against.
+    stores, firsts, owned = {}, {}, set()
+    for session in sorted(expected):
+        stores[session] = store_side(session)
+        wanted, sources, reasons, files, named_outside, _ = transcript_side(session, frozenset())
+        report, verified = compare(session, stores[session], wanted, sources, reasons)
+        owned.update(files[i] for i in verified if i in files)
+        firsts[session] = report, named_outside
+    # Pass 2 re-checks a lineage whose preview names a file a verified row of another lineage owns: a preview copy.
+    reports = []
+    for session in sorted(expected):
+        report, named_outside = firsts[session]
+        copies = set()
+        if named_outside & owned:
+            wanted, sources, reasons, _, _, copies = transcript_side(session, owned)
+            report, verified = compare(session, stores[session], wanted, sources, reasons)
+            copies &= verified
+        report["preview_copies"] = len(copies)
         reports.append(report)
     return {"pass": bool(reports) and not unexpected and not dangling and all(r["pass"] for r in reports),
             "lineages": reports, "unexpected_sessions": unexpected, "dangling_bindings": dangling,

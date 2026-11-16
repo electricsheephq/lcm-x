@@ -620,6 +620,10 @@ def counts(report):
     return {r["lineage"].split(":", 1)[1]: (r["lost"], r["duplicated"], r["unverified"]) for r in report["lineages"]}
 
 
+def preview_copies(report):
+    return {r["lineage"].split(":", 1)[1]: r["preview_copies"] for r in report["lineages"]}
+
+
 @pytest.mark.parametrize("named", ["marker", "metadata", "marker_and_own_metadata", "two_markers"])
 @pytest.mark.parametrize("own_results", ["absent", "present"])
 @pytest.mark.parametrize("corrupt", [False, True], ids=["healthy", "corrupted"])
@@ -656,14 +660,55 @@ def test_fork_copy_of_parent_preview(tmp_path, named, own_results, corrupt, reco
     record_property("checker", json.dumps(report))
     assert (code, report["pass"]) == (int(corrupt), not corrupt)
     assert counts(report) == {"plain": (0, 0, 0), "fork-plain": (int(corrupt), int(corrupt), 0)}
+    assert preview_copies(report) == {"plain": 0, "fork-plain": int(not corrupt)}
+
+
+@pytest.mark.parametrize("case", ["owner_altered", "owner_not_supplied", "other_file_in_parent_folder",
+                                  "outside_every_session"])
+def test_preview_copy_needs_a_verified_owner(tmp_path, case, record_property):
+    """A preview naming a path outside its own folders verifies as a copy only when a row of another lineage
+    verified against that same file. Without one (the owner row altered or not supplied, a file in the parent's
+    folder that no parent row names, a path outside every session) it takes the saved-file path and stays
+    unverified."""
+    base = tmp_path / "capture"
+    projects = base / "claude/projects/synthetic"
+    saved = projects / "plain/tool-results/output.txt"
+    saved.parent.mkdir(parents=True)
+    saved.write_text("full saved output\n")
+    named = {"other_file_in_parent_folder": projects / "plain/tool-results/other.txt",
+             "outside_every_session": tmp_path / "elsewhere/output.txt"}.get(case, saved)
+    named.parent.mkdir(parents=True, exist_ok=True)
+    named.write_text("full saved output\n")
+    rows, _ = preview_rows(saved)
+    fork, fork_preview = preview_rows(named, "fork-plain")
+    home, env, inputs = capture_session(base, write_entries(tmp_path / "01_owner.jsonl", rows + fork))
+    stored = dict(read_sql(home, "SELECT session_id, content FROM messages WHERE role='tool'"))
+    assert stored == {"plain": "full saved output\n", "fork-plain": fork_preview}
+    if case == "owner_altered":
+        with closing(sqlite3.connect(home / "lcm.db")) as conn, conn:
+            conn.execute("UPDATE messages SET content='altered' WHERE role='tool' AND session_id='plain'")
+    if case == "owner_not_supplied":
+        inputs = [item for item in inputs if item[0] == "fork-plain"]
+    code, report = check_only(home, env, inputs)
+    record_property("checker", json.dumps(report))
+    fork_report = next(r for r in report["lineages"] if r["lineage"] == "claude-code:fork-plain")
+    assert counts(report)["fork-plain"] == (0, 0, 1) and fork_report["preview_copies"] == 0
+    assert fork_report["unverified_reasons"] == [{"uid": "r1", "reason": "saved_output_outside_session"}]
+    if case == "owner_altered":
+        assert (code, counts(report)["plain"]) == (1, (1, 1, 0))
+    elif case == "owner_not_supplied":
+        assert code == 1 and [s["session_id"] for s in report["unexpected_sessions"]] == ["plain"]
+    else:
+        assert (code, counts(report)["plain"], preview_copies(report)["plain"]) == (0, (0, 0, 0), 0)
 
 
 @pytest.mark.parametrize("shape", ["file_linked_elsewhere", "quoted_marker"])
 @pytest.mark.parametrize("corrupt", [False, True], ids=["healthy", "corrupted"])
 def test_preview_named_outside_own_folder(tmp_path, shape, corrupt, record_property):
-    """Other names that resolve outside the row's own tool-results/: a saved file linked to a file elsewhere, and a
-    quoted marker (capture reads the path as written, quotes included). Capture keeps the preview, so the row must
-    equal it exactly."""
+    """Other names that resolve outside the row's own tool-results/, with no owner row: a saved file linked to a file
+    elsewhere, and a quoted marker (capture reads the path as written, quotes included). Capture keeps the preview;
+    the checker does not verify it. The linked file stays unverified; the quoted marker is read with its quotes
+    stripped, so the stored preview fails against the file's text (as on main)."""
     base = tmp_path / "capture"
     own = base / "claude/projects/synthetic/plain"
     (own / "tool-results").mkdir(parents=True)
@@ -683,7 +728,12 @@ def test_preview_named_outside_own_folder(tmp_path, shape, corrupt, record_prope
             conn.execute("UPDATE messages SET content='corrupted' WHERE role='tool'")
     code, report = check_only(home, env, inputs)
     record_property("checker", json.dumps(report))
-    assert (code, report["pass"], counts(report)) == (int(corrupt), not corrupt, {"plain": (int(corrupt),) * 2 + (0,)})
+    if shape == "file_linked_elsewhere":  # accepted unverified, whatever its content
+        assert (code, report["pass"], counts(report)) == (0, True, {"plain": (0, 0, 1)})
+        assert report["lineages"][0]["unverified_reasons"] == [{"uid": "r1", "reason": "saved_output_outside_session"}]
+    else:
+        assert (code, report["pass"], counts(report)) == (1, False, {"plain": (1, 1, 0)})
+    assert preview_copies(report) == {"plain": 0}
 
 
 @pytest.mark.parametrize("shape,reason", [
@@ -841,7 +891,7 @@ def test_own_session_folders_match_capture(tmp_path):
     for copy, live in (("s.v1.jsonl.superseded-1", "s.v1.jsonl"), ("s.v1.orphaned-1.jsonl", "s.v1.jsonl")):
         copy = tmp_path / "projects/p" / copy
         assert checker.own_session_folders(copy) == [capture.session_dir(copy), capture.session_dir(copy.with_name(live))]
-    assert checker.outside_own_results("Full output saved to: /x/tool-results/y", {}, []) is False
+    assert checker.outside_named_path("Full output saved to: /x/tool-results/y", {}, []) is None
 
 
 @pytest.mark.parametrize("shape", ["base64", "image", "tool-media", "wrapped", "multiple"])
@@ -1030,7 +1080,10 @@ def test_preview_supplied_paths(tmp_path, quote, record_property):
     for order in orders:  # a copy supplied from another folder never moves the row's own folder
         code, report = check_only(home, env, order)
         record_property("checker", json.dumps(report))
-        assert (code, report["pass"], counts(report)) == (0, True, {"plain": (0, 0, 0)})
+        if quote:  # capture keeps a quoted preview; the checker strips the quotes and reads the file (as on main)
+            assert (code, report["pass"], counts(report)) == (1, False, {"plain": (1, 1, 0)})
+        else:
+            assert (code, report["pass"], counts(report)) == (0, True, {"plain": (0, 0, 0)})
     with closing(sqlite3.connect(home / "lcm.db")) as conn, conn:
         conn.execute("UPDATE messages SET content='' WHERE role='tool'")
     for order in orders:
