@@ -567,7 +567,8 @@ def test_11_unknown_keys_and_inventory(tmp_path, corpus, clients):
              for mode in ('full_text', 'semantic', 'hybrid') for scope in ('history', 'externalized', 'both')]
     calls += [('lcm_recall', dict(query='marker', detail=detail, seen_refs=[]))
               for detail in ('snippets', 'answer_ready')]
-    calls += [('lcm_expand', {'store_id': 1, 'include_exact_ref': True}),
+    calls += [('lcm_recall', dict(query='marker', detail='answer_ready', include_occurrence_time=True)),
+              ('lcm_expand', {'store_id': 1, 'include_exact_ref': True}),
               ('lcm_expand', {'store_id': 3}), ('lcm_expand', {'node_id': 1}),
               ('lcm_expand', {'node_id': 2, 'source_limit': 1}), ('lcm_expand', {'node_id': 0}),
               ('lcm_load_session', {'session_id': 'remote0', 'limit': 1, 'include_exact_ref': True}),
@@ -605,8 +606,15 @@ def test_11_unknown_keys_and_inventory(tmp_path, corpus, clients):
                         assert rebuilt['provenance']['delivery']['sessions']
                 profile.close()
     print('INVENTORY_PATHS=' + json.dumps(sorted('.'.join(path) for path in paths)))
-    unknown = [path for path in paths if path[-1] not in cr.CLASSIFIED | cr.DROPPED and not re.fullmatch(r'd\d+', path[-1])]
+    temporal_dropped = {'reason', 'session_date', 'policy_version', 'support', 'quote',
+                        'anchor_source', 'observation_is_not_occurrence'}
+    unknown = [path for path in paths if path[-1] not in cr.CLASSIFIED | cr.DROPPED | temporal_dropped and not re.fullmatch(r'd\d+', path[-1])]
     assert unknown == [], sorted(unknown)
+    temporal = dict(time_uncertain='carried', observed_at=1700000000, ingested_at=1700000001,
+                    date='2023-11-14', stored_at=1700000001, occurred_at=1699920000,
+                    event_at=1699920000, event_date='2023-11-14', precision='day')
+    for container in ('occurrence_time', 'observation_time'):
+        assert cr.rebuild({container: {**temporal, 'reason': 'free text'}}, PREFIX) == {container: temporal}
     assert {'results', 'hits', 'messages', 'depths', 'error'} <= {p[-1] for p in paths}
 
 
@@ -682,7 +690,8 @@ def test_15_optin(tmp_path, corpus, clients):
         client.close()
 
 
-def test_16_startup_fallback(tmp_path, corpus, clients):
+@pytest.mark.parametrize('failure', ['startup', 'parse'])
+def test_16_startup_fallback(tmp_path, corpus, clients, failure):
     local, _ = corpus
     (local / 'cloud' / 'replicas').write_text('not a directory')
     client = clients(tmp_path, local)
@@ -693,6 +702,19 @@ def test_16_startup_fallback(tmp_path, corpus, clients):
         assert missing.proc.returncode == 2 and len(err.splitlines()) == 1
     finally:
         missing.close()
+    # A bare-name reader works at Popen and must work at both exec fallbacks.
+    stub = tmp_path / 'r12-stock-reader'
+    stub.write_text(f'#!{sys.executable}\nprint("r12 PATH stock reader", flush=True)\n')
+    stub.chmod(0o700)
+    env = dict(os.environ, PATH=str(tmp_path) + os.pathsep + os.environ.get('PATH', ''),
+               LCMX_LOCAL_READER_CMD=json.dumps([stub.name, '--store', str(local / 'lcm.db'),
+                                                '--hermes-home', str(local)]))
+    command = [sys.executable, '-I', '-S', str(ROOT / 'cloud_reader.py')]
+    if failure == 'parse':
+        command.append('--unknown-r12-flag')
+    result = subprocess.run(command, input='', capture_output=True, text=True, env=env, timeout=10)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == 'r12 PATH stock reader\n'
 
 
 def test_17_generation_change(tmp_path, corpus, clients):
@@ -1482,3 +1504,92 @@ def test_r11_forgotten_invalid_cursor_equals_missing(tmp_path, corpus, clients, 
         expected = json.loads(json.dumps(missing).replace(qualified('never-existing'), qualified('remote0')))
         assert actual == expected, (cursor, limit, anchored)
         assert actual['isError'] is True
+
+
+@pytest.mark.parametrize('mode', ['full_text', 'semantic', 'hybrid'])
+@pytest.mark.parametrize('shape', ['forgotten', 'padded', 'mixed'])
+def test_r12_forgotten_conversation_equals_missing(tmp_path, corpus, clients, mode, shape):
+    local, sources = corpus
+    source = sources[0]
+    store = cc.open_store(source / 'lcm.db', source)
+    try:
+        for session, conversation in [('r12-visible', 'r12-visible-conversation'),
+                                      ('r12-mixed-visible', 'r12-mixed-conversation')]:
+            transcript = _transcript(tmp_path / session,
+                [_entry('user', 'r12', session + ' marker', session)], session)
+            assert cc.drain(store, cc.Lineage(session, None, transcript)) == 'drained'
+            store.connection.execute('UPDATE messages SET conversation_id=? WHERE session_id=?',
+                                     (conversation, session))
+        store.connection.execute("UPDATE messages SET conversation_id='r12-forgotten-conversation' WHERE session_id='remote0'")
+        store.connection.execute("UPDATE messages SET conversation_id='r12-mixed-conversation' WHERE store_id=4")
+        store.connection.commit()
+        assert cc.to_rollback_journal(store.connection)
+    finally:
+        store.close()
+    assert cc.leave_readable(source / 'lcm.db')
+    forget(local, 'remote0')
+    generation = copy_generation(source, local, COPIES[0])
+    client = clients(tmp_path, local)
+    ready(client)
+    plain = clients(tmp_path, generation, stock=True)
+    extra = dict(mode=mode, content_scope='history', limit=1)
+    visible = plain.body(query='marker', conversation_id='r12-visible-conversation', **extra)
+    actual_visible = client.body(query='marker', conversation_id=qualified('r12-visible-conversation'), **extra)
+    assert visible['results'] and visible['total_results'] == 1
+    assert actual_visible == {'store': PREFIX, 'generation': 1, **cr.rebuild(visible, PREFIX)}
+    conversation = 'r12-mixed-conversation' if shape == 'mixed' else 'r12-forgotten-conversation'
+    requested = ' ' + conversation + ' ' if shape == 'padded' else conversation
+    missing = client.call(query='marker', conversation_id=qualified('r12-never-existing'), **extra)['result']
+    actual = client.call(query='marker', conversation_id=qualified(requested), **extra)['result']
+    body = json.loads(actual['content'][0]['text'])
+    assert body['total_results'] == 0, 'forgotten conversation match count must be missing, not query dependent'
+    expected = json.loads(json.dumps(missing).replace(qualified('r12-never-existing'), qualified(conversation)))
+    assert actual == expected, 'trimmed conversation scope must equal missing, including its restored id echo'
+    assert actual['isError'] is False
+    no_match = client.call(query='r12unmatchable', conversation_id=qualified(requested), **extra)['result']
+    assert no_match == json.loads(json.dumps(actual).replace('marker', 'r12unmatchable'))
+    if shape == 'padded':
+        assert actual == client.call(query='marker', conversation_id=qualified(conversation), **extra)['result']
+    if shape == 'mixed':
+        by_session = client.body(query='marker', session_id=qualified('r12-mixed-visible'), **extra)
+        assert by_session['results'] and by_session['total_results'] == 1
+        fanout = client.body(query='r12-mixed-visible', **extra)['other_stores'][0]
+        assert any(h.get('session_id') == qualified('r12-mixed-visible') for h in fanout['hits'])
+
+
+@pytest.mark.parametrize('detail', ['snippets', 'answer_ready'])
+def test_r12_temporal_fields_survive_rebuild(tmp_path, corpus, clients, detail):
+    local, sources = corpus
+    source = sources[0]
+    store = cc.open_store(source / 'lcm.db', source)
+    try:
+        store.connection.execute("UPDATE messages SET observed_at=1700000000, observed_at_source='host_message_timestamp' WHERE store_id=1")
+        store.connection.commit()
+        store.add_message_relations([[(1, 'carried_stamp', None, 0, 1700000000)]])
+        assert cc.to_rollback_journal(store.connection)
+    finally:
+        store.close()
+    assert cc.leave_readable(source / 'lcm.db')
+    generation = copy_generation(source, local, COPIES[0])
+    client = clients(tmp_path, local)
+    ready(client)
+    plain = clients(tmp_path, generation, stock=True)
+    args = dict(query='remote0', detail=detail, include='verbatim', limit=10)
+    if detail == 'answer_ready':
+        args['include_occurrence_time'] = True
+    original = plain.body('lcm_recall', **args)
+    local_hit = next(h for h in original['hits'] if h.get('store_id') == 1)
+    hosted = client.body('lcm_recall', **args)['other_stores'][0]
+    hit = next(h for h in hosted['hits'] if h.get('store_id') == qualified(1))
+    assert local_hit['event_time'] == '2023-11-14T22:13:20Z' and local_hit['time_uncertain'] == 'carried'
+    if detail == 'snippets':
+        assert (hit.get('event_time'), hit.get('time_uncertain')) == (local_hit['event_time'], 'carried')
+    else:
+        # Existing resolver metadata remains dropped; compare every admitted value.
+        omitted = {'reason', 'session_date', 'policy_version', 'support'}
+        for key in ('occurrence_time', 'observation_time'):
+            assert key in hit, 'hosted answer_ready evidence must retain its temporal objects'
+            assert hit[key] == {k: v for k, v in local_hit[key].items() if k not in omitted}
+            assert 'reason' not in hit[key]
+        assert hit['time_uncertain'] == 'carried'
+        assert 'reason' in local_hit['occurrence_time']

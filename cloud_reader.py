@@ -51,11 +51,12 @@ PLAIN = set('''active_session_only best_rank byte_position candidate_files char_
     source_limit source_offset source_token_count source_type store_message_count summary_truncated
     termination_reason timestamp token_budget token_count tool_call_id tool_name total_messages
     total_results total_source_tokens total_sources total_tokens truncated type unit
+    time_uncertain observed_at ingested_at date stored_at occurred_at event_at event_date precision
     unreferenced_dropped_count unreferenced_omitted_count'''.split())
 CONTAINERS = set('''adjacent_reply answer_ready arm_weights arms arms_run children coverage delivery delta depths
     embedding_queries evidence_span expanded externalized externalized_payloads externalized_scan hits
     include later_statements messages metrics nodes pagination provenance results roles seed_leads
-    sessions snippet_window summary_leads'''.split())
+    sessions snippet_window summary_leads occurrence_time observation_time'''.split())
 DROPPED = {'store_uuid', 'reader', 'error', 'degraded_reason', 'message_search_error',
            'externalized_note', 'rerank_scores'}
 CLASSIFIED = (INTEGER_IDS | INTEGER_LISTS | PAIRS | STRING_IDS | STRING_LISTS | REFERENCES
@@ -492,6 +493,12 @@ class Merger:
         target = {k: v for k, v in args.items() if k in SCALARS - {'after_store_id'} or k == 'externalized_refs'}
         invisible = hidden and ((isinstance(args.get('session_id'), str) and args['session_id'] in hidden) or
                     (any(k in args for k in ('store_id', 'node_id')) and not visible_item(target, replica.prefix, replica.child.folder, hidden)))
+        if hidden and isinstance(args.get('conversation_id'), str):
+            # Match store.py:189-190, :239 (_normalize_conversation_id_value) for lookup and twin.
+            target['conversation_id'] = args['conversation_id'].strip()
+            with closing(sqlite3.connect((replica.child.folder / 'lcm.db').resolve().as_uri() + '?mode=ro&immutable=1', uri=True)) as conn:
+                sessions = conn.execute('SELECT DISTINCT session_id FROM messages WHERE conversation_id = ?', (target['conversation_id'],))
+                invisible = invisible or any(row[0] in hidden for row in sessions)
         if hidden and not invisible:
             for ref in args.get('externalized_refs', []):
                 future = replica.child.ask(tool_request('lcm_describe', {'externalized_ref': ref}))
@@ -668,13 +675,13 @@ def main():
             options = parser.parse_args()
         except SystemExit as exc:
             if exc.code:
-                os.execv(argv[0], argv)
+                os.execvp(argv[0], argv)
             return 0
         merger = Merger(argv, max(0, options.replica_wait_s), max(0.01, options.budget_s))
     except Exception:
         if merger:
             merger.close()
-        os.execv(argv[0], argv)
+        os.execvp(argv[0], argv)
     try:
         for raw in sys.stdin.buffer:
             if raw.strip():
