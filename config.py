@@ -243,6 +243,21 @@ def _recall_later_statements(value: Any, **kwargs) -> int:
     })
 
 
+def _recall_recency_floor(
+    value: Any, *, warnings: list[str], allow_string: bool, source: str,
+) -> float:
+    try:
+        if isinstance(value, bool) or not isinstance(value, (int, float, str) if allow_string else (int, float)):
+            raise ValueError
+        floor = float(value)
+        if not 0.0 <= floor <= 1.0:
+            raise ValueError
+    except (TypeError, ValueError, OverflowError):
+        warnings.append(f"invalid {source}={value!r} ignored; using recall_recency_floor=0.5")
+        return 0.5
+    return floor
+
+
 def _parse_float_env(key: str, default: float, *, warnings: list[str] | None = None) -> float:
     raw = lcm_env_get(key)
     if raw is None:
@@ -526,6 +541,7 @@ _SUPPORTED_LCM_CONFIG_YAML_KEYS = {
     "recall_snippet_window_hits",
     "recall_extra_entries",
     "recall_later_statements",
+    "recall_recency_floor", "recall_grep_stemmed",
     "large_output_active_replay_stub_threshold_tokens",
     "large_output_active_replay_stub_aged_threshold_tokens",
     "recall_summary_event_time",
@@ -1023,6 +1039,8 @@ ENV_FIELD_SPECS: tuple[_EnvFieldSpec, ...] = (
     _EnvFieldSpec("recall_session_hints", "LCM_RECALL_SESSION_HINTS", bool),
     _EnvFieldSpec("recall_guidance", "LCM_RECALL_GUIDANCE", str),
     _EnvFieldSpec("recall_fts_anchor", "LCM_RECALL_FTS_ANCHOR", bool),
+    _EnvFieldSpec("recall_recency_floor", "LCM_RECALL_RECENCY_FLOOR", float),
+    _EnvFieldSpec("recall_grep_stemmed", "LCM_RECALL_GREP_STEMMED", bool),
     _EnvFieldSpec("proactive_recall_enabled", "LCM_PROACTIVE_RECALL_ENABLED", bool),
     _EnvFieldSpec("proactive_recall_min_score", "LCM_PROACTIVE_RECALL_MIN_SCORE", float),
     _EnvFieldSpec("proactive_recall_budget_tokens", "LCM_PROACTIVE_RECALL_BUDGET_TOKENS", int),
@@ -1084,6 +1102,7 @@ _SOURCE_TRACKED_ENV_FIELDS = frozenset({
     "recall_snippet_window_hits",
     "recall_extra_entries",
     "recall_later_statements",
+    "recall_recency_floor", "recall_grep_stemmed",
     "large_output_active_replay_stub_threshold_tokens",
     "large_output_active_replay_stub_aged_threshold_tokens",
     "fresh_tail_count",
@@ -1412,6 +1431,10 @@ class LCMConfig:
     recall_snippet_window_hits: int = 0
     recall_extra_entries: int = 0
     recall_later_statements: int = 0
+    # Preserve today's recency prior; 1.0 disables decay, including undated hits.
+    recall_recency_floor: float = 0.5
+    # Opt-in Porter-index grep and relevance ordering for an implicit-sort OR query.
+    recall_grep_stemmed: bool = False
     # lcm_recall FTS anchor slot: with two or more arms, the FTS arm's best
     # message is kept inside the delivered window (at most one session evicted).
     # Evidence (#950): frozen LongMemEval-M LOCAL replay, R@10 0.898 -> 0.905 (470 q).
@@ -1605,6 +1628,34 @@ class LCMConfig:
 
         cfg_yaml = _load_hermes_config_yaml_for_env(env)
         prefix_yaml = cfg_yaml.get("lcm", {}) if isinstance(cfg_yaml, dict) else {}
+        raw_floor = env.get("LCM_RECALL_RECENCY_FLOOR", "").strip()
+        floor_value = raw_floor or (prefix_yaml.get("recall_recency_floor", c.recall_recency_floor)
+                                   if isinstance(prefix_yaml, dict) else c.recall_recency_floor)
+        floor_source = "env:LCM_RECALL_RECENCY_FLOOR" if raw_floor else (
+            "config_yaml:lcm.recall_recency_floor" if isinstance(prefix_yaml, dict)
+            and "recall_recency_floor" in prefix_yaml else "default")
+        warning_count = len(config_source_warnings)
+        c.recall_recency_floor = _recall_recency_floor(
+            floor_value, warnings=config_source_warnings, allow_string=bool(raw_floor),
+            source="env LCM_RECALL_RECENCY_FLOOR" if raw_floor else "config.yaml lcm.recall_recency_floor",
+        )
+        _record("recall_recency_floor", floor_source
+                if len(config_source_warnings) == warning_count else "default")
+
+        stemmed_value = prefix_yaml.get("recall_grep_stemmed", False) if isinstance(prefix_yaml, dict) else False
+        stemmed_source = ("config_yaml:lcm.recall_grep_stemmed" if isinstance(prefix_yaml, dict)
+                          and "recall_grep_stemmed" in prefix_yaml else "default")
+        if not isinstance(stemmed_value, bool):
+            stemmed_value, stemmed_source = False, "default"
+            config_source_warnings.append("invalid config.yaml lcm.recall_grep_stemmed ignored; expected bool")
+        warning_count = len(config_source_warnings)
+        c.recall_grep_stemmed = _parse_bool_env(
+            "LCM_RECALL_GREP_STEMMED", stemmed_value, warnings=config_source_warnings)
+        if env.get("LCM_RECALL_GREP_STEMMED") is not None:
+            stemmed_source = "env:LCM_RECALL_GREP_STEMMED"
+        _record("recall_grep_stemmed", stemmed_source
+                if len(config_source_warnings) == warning_count else "default")
+
         for name in ("embedding_query_prefix", "embedding_document_prefix"):
             if isinstance(prefix_yaml, dict) and isinstance(prefix_yaml.get(name), str):
                 setattr(c, name, prefix_yaml[name])

@@ -1,0 +1,275 @@
+"""Offline contracts for the opt-in recency floor and stemmed grep options."""
+import importlib.util
+import json
+from pathlib import Path
+import sqlite3
+import sys
+from types import SimpleNamespace
+
+import pytest
+
+from hermes_lcm import config as config_module, db_bootstrap as boot, retrieval_core, tools
+from hermes_lcm.config import LCMConfig
+from hermes_lcm.dag import SummaryDAG
+from hermes_lcm.store import MessageStore, build_message_stem_fts_spec
+
+NOW = 1_800_000_000.0
+# Captured from unchanged 62a8137a with the fixture and clocks below.
+BASELINE = {
+    'recall': (
+        '{"query": "cake", '
+        '"limit": 3, '
+        '"scope_bias": 0.5, '
+        '"include": "all", '
+        '"total_results": 3, '
+        '"hits": [{"kind": "message_excerpt", '
+        '"session_id": "fresh", '
+        '"timestamp": 1800000000.0, '
+        '"snippet": ">>>cake<<< garden", '
+        '"score": 0.008197, '
+        '"expand_hint": "lcm_expand(store_id=2, '
+        'content_offset=0)", '
+        '"from_current_session": false, '
+        '"arms": ["fts"], '
+        '"store_id": 2}, '
+        '{"kind": "message_excerpt", '
+        '"session_id": "plural", '
+        '"timestamp": 1800000000.0, '
+        '"snippet": ">>>cakes<<< for the party", '
+        '"score": 0.007937, '
+        '"expand_hint": "lcm_expand(store_id=3, '
+        'content_offset=0)", '
+        '"from_current_session": false, '
+        '"arms": ["fts"], '
+        '"store_id": 3}, '
+        '{"kind": "message_excerpt", '
+        '"session_id": "old", '
+        '"timestamp": 1768464000.0, '
+        '"snippet": ">>>cake<<< orchard orchard", '
+        '"score": 0.004032, '
+        '"expand_hint": "lcm_expand(store_id=1, '
+        'content_offset=0)", '
+        '"from_current_session": false, '
+        '"arms": ["fts"], '
+        '"store_id": 1}], '
+        '"provenance": {"arms_run": ["fts"], '
+        '"arm_weights": {"fts": 0.5}, '
+        '"coverage": {"fts": "ok", '
+        '"summary": "disabled", '
+        '"chunk": "disabled"}, '
+        '"fts_index": "stem", '
+        '"rerank": "disabled", '
+        '"ordering": "rrf-fusion -> scope/recency prior -> rerank reorder (top window); the reported score is the scope/recency-adjusted RRF score, '
+        'and rerank (when applied) only permutes the top window without replacing that score"}, '
+        '"metrics": {"embedding_query_calls": 0, '
+        '"embedding_query_tokens": 0, '
+        '"embedding_query_tokens_complete": true, '
+        '"embedding_queries": []}, '
+        '"degraded": true, '
+        '"degraded_reason": "semantic retrieval is disabled"}'
+    ),
+    'grep': (
+        '{"query": "cake", '
+        '"sort": "recency", '
+        '"session_scope": "all", '
+        '"content_scope": "history", '
+        '"source": null, '
+        '"conversation_id": null, '
+        '"limit": 10, '
+        '"total_results": 2, '
+        '"results": [{"type": "message", '
+        '"depth": "raw", '
+        '"store_id": 2, '
+        '"session_id": "fresh", '
+        '"source": "unknown", '
+        '"conversation_id": "", '
+        '"role": "user", '
+        '"timestamp": 1800000000.0, '
+        '"snippet": ">>>cake<<< garden", '
+        '"from_current_session": false}, '
+        '{"type": "message", '
+        '"depth": "raw", '
+        '"store_id": 1, '
+        '"session_id": "old", '
+        '"source": "unknown", '
+        '"conversation_id": "", '
+        '"role": "user", '
+        '"timestamp": 1768464000.0, '
+        '"snippet": ">>>cake<<< orchard orchard", '
+        '"from_current_session": false}]}'
+    ),
+}
+
+
+@pytest.fixture
+def engine(tmp_path, monkeypatch):
+    monkeypatch.setattr(boot, "dispatch_background_stem_backfill", lambda *a: None)
+    monkeypatch.setattr(tools.time, "time", lambda: NOW)
+    monkeypatch.setattr(tools.time, "monotonic", lambda: 100.0)
+    config = LCMConfig(database_path=str(tmp_path / "recall.db"), embeddings_enabled=False)
+    store = MessageStore(config.database_path, ingest_protection_config=config)
+    dag = SummaryDAG(config.database_path)
+    old = store.append("old", {"role": "user", "content": "cake orchard orchard"})
+    fresh = store.append("fresh", {"role": "user", "content": "cake garden"})
+    plural = store.append("plural", {"role": "user", "content": "cakes for the party"})
+    store.connection.execute("UPDATE messages SET timestamp=? WHERE store_id=?", (NOW - 365 * 86400, old))
+    store.connection.commit()
+    boot._run_stem_backfill(str(store.db_path), build_message_stem_fts_spec(), "l1l2-test")
+    assert store._stem_state() == "ready"
+    obj = SimpleNamespace(_config=config, _store=store, _dag=dag,
+                          _hermes_home=str(tmp_path), current_session_id="active",
+                          old=old, fresh=fresh, plural=plural)
+    try:
+        yield obj
+    finally:
+        dag.close()
+        store.close()
+
+
+def answers(engine):
+    return {
+        "recall": tools.lcm_recall({"query": "cake", "limit": 3}, engine=engine),
+        "grep": tools.lcm_grep({"query": "cake", "session_scope": "all"}, engine=engine),
+    }
+
+
+def test_1_defaults_byte_identical(engine):
+    absent = answers(engine)
+    engine._config = LCMConfig(database_path=engine._config.database_path, embeddings_enabled=False,
+                               recall_recency_floor=0.5, recall_grep_stemmed=False)
+    assert absent == answers(engine) == BASELINE
+    assert all(isinstance(value, str) for value in absent.values())
+
+
+def test_2_recency_floor_ranking(engine, monkeypatch):
+    # Deterministic ranked arms isolate the reported inversion from vector providers.
+    hits = [{"kind": "message_excerpt", "store_id": sid, "session_id": session,
+             "timestamp": stamp, "snippet": "cake", "content_offset": 0}
+            for sid, session, stamp in ((engine.old, "old", NOW - 365 * 86400),
+                                        (engine.fresh, "fresh", NOW))]
+    arms = {"fts": [hits[0]], "chunk": hits}
+    fuse = retrieval_core.fuse_candidates
+    monkeypatch.setattr(tools, "fuse_candidates", lambda _arms, weights: fuse(arms, weights))
+    for floor, expected in ((0.5, [engine.fresh, engine.old]), (1.0, [engine.old, engine.fresh])):
+        engine._config.recall_recency_floor = floor
+        result = json.loads(tools.lcm_recall({"query": "cake", "limit": 2}, engine=engine))
+        assert [hit["store_id"] for hit in result["hits"]] == expected
+    for floor in (0.0, 0.5, 1.0):
+        for stamp in (None, 0, "invalid"):
+            assert retrieval_core._lcm_recall_recency_boost(stamp, now=NOW, floor=floor) == floor
+        assert retrieval_core._lcm_recall_recency_boost(NOW + 1, now=NOW, floor=floor) == 1.0
+    assert retrieval_core._lcm_recall_recency_boost(NOW - 30 * 86400, now=NOW, floor=0.25) == 0.5
+
+
+@pytest.mark.parametrize("value", [-0.1, 1.1, "x", True, None, float("nan"), float("inf")])
+@pytest.mark.parametrize("source", ["config", "environment"])
+def test_3_recency_floor_validation(monkeypatch, source, value):
+    env = {"LCM_RECALL_RECENCY_FLOOR": str(value)} if source == "environment" else {}
+    yaml = {"lcm": {"recall_recency_floor": value}} if source == "config" else {}
+    monkeypatch.setattr(config_module, "lcm_env", lambda: env)
+    monkeypatch.setattr(config_module, "_load_hermes_config_yaml_for_env", lambda _env: yaml)
+    config = LCMConfig.from_env()
+    label = "env LCM_RECALL_RECENCY_FLOOR" if source == "environment" else "config.yaml lcm.recall_recency_floor"
+    assert config.config_source_warnings == [
+        f"invalid {label}={value!r} ignored; using recall_recency_floor=0.5"
+        if source == "config" else
+        f"invalid {label}={str(value)!r} ignored; using recall_recency_floor=0.5"
+    ]
+    assert config.recall_recency_floor == 0.5
+    assert config.config_sources["recall_recency_floor"] == "default"
+
+
+@pytest.mark.parametrize("state", ["ready", "backfilling", "absent", "error"])
+def test_4_grep_stemmed(engine, monkeypatch, state):
+    args = {"query": "cake", "session_scope": "session", "session_id": "plural"}
+    engine._config.recall_grep_stemmed = False
+    assert json.loads(tools.lcm_grep({**args, "_stemmed": True}, engine=engine))["results"] == []
+    engine._config.recall_grep_stemmed = True
+    result = json.loads(tools.lcm_grep(args, engine=engine))
+    assert [hit["store_id"] for hit in result["results"]] == [engine.plural]
+    assert result["fts_index"] == "stem"
+    if state == "backfilling":
+        engine._store.connection.execute("UPDATE metadata SET value='backfilling' WHERE key='fts_stem_state'")
+    elif state == "absent":
+        engine._store.connection.execute("DELETE FROM metadata WHERE key='fts_stem_state'")
+    elif state == "error":
+        # A broken stem index uses the same plain-index fallback as recall.
+        connection = engine._store.connection
+
+        class ErrorConnection:
+            def execute(self, sql, *args):
+                if "messages_fts_stem MATCH" in sql:
+                    raise sqlite3.OperationalError("injected stem failure")
+                return connection.execute(sql, *args)
+
+            def __getattr__(self, name):
+                return getattr(connection, name)
+
+        monkeypatch.setattr(engine._store, "_conn", ErrorConnection())
+    engine._store.connection.commit()
+    if state != "ready":
+        result = json.loads(tools.lcm_grep(args, engine=engine))
+        assert result["results"] == []
+        assert result["fts_index"] == "plain"
+
+
+def test_5_grep_or_relevance_and_explicit_sort(engine):
+    args = {"query": "cake OR orchard", "session_scope": "all", "limit": 2}
+    engine._config.recall_grep_stemmed = False
+    off = json.loads(tools.lcm_grep(args, engine=engine))
+    assert off["sort"] == "recency"
+    assert off["results"][0]["store_id"] == engine.fresh
+    engine._config.recall_grep_stemmed = True
+    on = json.loads(tools.lcm_grep(args, engine=engine))
+    assert on["sort"] == "relevance"
+    assert on["results"][0]["store_id"] == engine.old
+    explicit = json.loads(tools.lcm_grep({**args, "sort": "recency"}, engine=engine))
+    assert explicit["sort"] == "recency"
+    assert explicit["results"][0]["store_id"] == engine.fresh
+    for query in ('"cake OR orchard"', "cake or orchard", "(cake OR orchard)", "OR cake", "cake"):
+        result = json.loads(tools.lcm_grep({**args, "query": query}, engine=engine))
+        assert result["sort"] == "recency"
+
+
+def test_6_fmp_options_reach_engine(tmp_path, monkeypatch):
+    # Stores imports delivery only for build-time question_clock. Neither the parser
+    # nor engine opening uses it; isolate the unrelated optional HTTP backends.
+    root = Path(__file__).resolve().parents[1]
+    spec = importlib.util.spec_from_file_location("bench.fmp._l1l2_stores", root / "bench/fmp/stores.py")
+    stores = importlib.util.module_from_spec(spec)
+    with monkeypatch.context() as imports:
+        imports.setitem(sys.modules, "bench.fmp.delivery", SimpleNamespace(question_clock=None))
+        spec.loader.exec_module(stores)
+    options = stores.parse_recall_options(["recall_recency_floor=1.0", "recall_grep_stemmed=true"])
+    assert options == {"recall_grep_stemmed": True, "recall_recency_floor": 1.0}
+    monkeypatch.setattr(stores, "commit", lambda _: "62a8137a2c46b0dd4bfa51102238d1c96e9523cd")
+    product = stores.Stores(tmp_path / "stores", "off", root,
+                            "synthetic", None, recall_options=options)
+    question = SimpleNamespace(qid="l1l2")
+    with product.engine(question, path=tmp_path) as (engine, _vectors):
+        assert engine._config.recall_recency_floor == 1.0
+        assert engine._config.recall_grep_stemmed is True
+    for value in ("-0.1", "1.1", "x"):
+        with pytest.raises(stores.RecallOptionError, match="invalid --recall-option"):
+            stores.parse_recall_options([f"recall_recency_floor={value}"])
+    for floor, stemmed in ((0.0, False), (0.25, True), (0.5, False), (1.0, True)):
+        assert stores.parse_recall_options([
+            f"recall_recency_floor={floor}", f"recall_grep_stemmed={stemmed}",
+        ]) == {"recall_recency_floor": floor, "recall_grep_stemmed": stemmed}
+        monkeypatch.setattr(config_module, "lcm_env", lambda: {})
+        monkeypatch.setattr(config_module, "_load_hermes_config_yaml_for_env", lambda _env: {
+            "lcm": {"recall_recency_floor": floor, "recall_grep_stemmed": stemmed},
+        })
+        config = LCMConfig.from_env()
+        assert (config.recall_recency_floor, config.recall_grep_stemmed) == (floor, stemmed)
+        assert config.config_sources["recall_recency_floor"] == "config_yaml:lcm.recall_recency_floor"
+        assert config.config_sources["recall_grep_stemmed"] == "config_yaml:lcm.recall_grep_stemmed"
+        assert config.config_source_warnings == []
+        assert config.ignored_config_yaml_lcm_keys == []
+        monkeypatch.setattr(config_module, "lcm_env", lambda: {
+            "LCM_RECALL_RECENCY_FLOOR": "0.5", "LCM_RECALL_GREP_STEMMED": "false",
+        })
+        config = LCMConfig.from_env()
+        assert (config.recall_recency_floor, config.recall_grep_stemmed) == (0.5, False)
+        assert config.config_sources["recall_recency_floor"] == "env:LCM_RECALL_RECENCY_FLOOR"
+        assert config.config_sources["recall_grep_stemmed"] == "env:LCM_RECALL_GREP_STEMMED"

@@ -2792,6 +2792,11 @@ def lcm_grep(args: Dict[str, Any], **kwargs) -> str:
     parsed_args["_agent_operators"] = True
     parsed_args["_reader_default_payloads"] = _reader_any_session(engine) and mode == "full_text" and "content_scope" not in args
     if mode == "full_text":
+        if getattr(engine._config, "recall_grep_stemmed", False):
+            # MessageStore.search owns the same readiness/failure fallback as recall.
+            parsed_args["_stemmed"] = True
+            if "sort" not in args and "OR" in agent_grep_operands(_coerce_query_arg(args.get("query")))[1]:
+                parsed_args["sort"] = "relevance"
         payload = json.loads(_lcm_grep_full_text({**parsed_args, "_payload_any_term_stash": True}, **kwargs))
         stashed = payload.pop("_payload_any_term", None) or []
         query = _coerce_query_arg(args.get("query"))
@@ -5362,7 +5367,10 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
             scope_session_ids.update(engine._store.session_lineage_descendants(str(engine.current_session_id or "")))
     except Exception as exc:
         logger.debug("LCM subagent scope read failed: %s", exc)
-    ordered = apply_prior(ordered, scope_session_ids, now, scope_bias)
+    ordered = apply_prior(
+        ordered, scope_session_ids, now, scope_bias,
+        recency_floor=getattr(engine._config, "recall_recency_floor", 0.5),
+    )
 
     # -- Optional rerank stage (default OFF): a pure rank-REORDER within the top
     #    window of the post-prior order (no score splicing onto the RRF scale). --
