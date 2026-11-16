@@ -361,9 +361,10 @@ row 2D below measures its real snapshot path before the bars are claimed.
     to exactly n records: a 4-byte unsigned big-endian page index i, then P bytes replacing file bytes i·P to
     (i+1)·P. Indexes rise strictly within an object and across the objects of one delta entry;
   - at most ⌊(2^25 - 2^16) / (4 + P)⌋ records per object (8,168 at 4 KiB), allowing for zlib's growth on
-    incompressible pages. `MAX_OBJECT_BYTES` is 2^25 (32 MiB); a larger delta uses several objects. A reader should refuse, before
-    fetching, a part or object reference whose `bytes` exceed it, or an object reference whose `records` exceed
-    the limit above (`bad_database_block`); the merged codec checks the length only after the fetch (#2800);
+    incompressible pages. `MAX_OBJECT_BYTES` is 2^25 (32 MiB); a larger delta uses several objects. In format 1 a reader does
+    not refuse on these two caps (Appendix K, F8 and F9). #2800 proposes that readers refuse, before fetching, a
+    part or object reference whose `bytes` exceed 2^25, or an object reference whose `records` exceed the limit
+    above (`bad_database_block`); Appendix K changes with it if it lands;
   - key: `<prefix>/<copy id>/deltas/<sha256 of the object>.<token>`, with 3.1's content-and-attempt naming.
 - Readers refuse bad object sha256 (`object_sha256`), byte length (`object_bytes`), magic (`delta_magic`), page
   size (`delta_page_size`), manifest/header count (`delta_count`), decompressed length or stream (`delta_stream`),
@@ -1356,3 +1357,310 @@ Its sizes use a transcript replay on the shared development machine; timing uses
 Manifest scaling, payloads, size bases and length bases all enter the 90-day simulation.
 Lane 2d separates the codec from the uploader; section 8 carries the dependencies and revised date.
 This fold is documentation evidence only. It proves no codec behavior, upload bar, restore time or release gate.
+
+## Appendix K. Hosted copy format 1 (F1 to F12)
+
+This appendix is the format text the hosted-copy code was built from. It is the whole agreement between the code
+that makes a hosted copy (`cloud_copy.py`) and the code that checks one (`scripts/cloud_copy_outside_in.py`).
+F7 to F11 are also the agreement of the page-delta codec (`cloud_delta.py`). The two sides were written by
+different authors who never read each other's work, so a sentence here that can be read two ways is a defect in
+this text: report it rather than pick a reading. Code comments cite these labels.
+
+Known differences, each tracked:
+- the codec has refusal codes this text does not list, `start_mismatch` and `output_exists`; section 3.7 lists
+  them;
+- this text has no reader refuse on F8's writer limits (F8, F9), and neither merged reader does. #2800 proposes
+  that the codec refuse, before fetching, a part or object reference over them (`bad_database_block`). If it
+  lands, F8 to F10 change with it, so that every reader refuses the same references;
+- F12 does not yet cover `--new-copy`: section 3.7.3 gives inherited entries that copy's first base generation.
+  F12 gains the rule with the lane that builds `--new-copy` (#2801).
+
+**F1. Names.** Hex digits are lower case. A payload name keeps its case.
+- copy id: a UUID with dashes, `[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`. Its 32-hex form is
+  the same with the dashes removed.
+- sha256: `[0-9a-f]{64}`. token: `[0-9a-f]{32}`. generation: `[1-9][0-9]*`.
+- payload name: a file name of 1 to 255 bytes with no `/`, no `\`, no NUL, and not `.` or `..`.
+- A name read from a manifest, a pointer file or a directory listing is matched against its grammar before it
+  becomes part of a path. A name that fails is a refusal, `bad_name`.
+
+**F2. Folders.**
+- **Origin home:** `lcm.db`, `lcm-large-outputs/` (payload files), `capture-owner.json` (its `store_uuid` is the
+  origin id; claude_code_store.py:49, :180-183).
+- **Copy home** (a restored generation, or one generation of a replica): `lcm.db` and `lcm-large-outputs/<payload
+  name>`. It has no `capture-owner.json`. Other entries are ignored.
+- **Replica:** `<home>/cloud/replicas/<copy id>/gen-<generation>/` is a copy home and is never modified.
+  `<home>/cloud/replicas/<copy id>/current` holds the generation number in ASCII digits, with an optional
+  newline.
+- **Own copy id:** `<home>/cloud/cloud.json` is a JSON object whose `copy_id` names this home's own hosted copy.
+  Only `enable` (a later step) writes it. Other keys are not fixed here.
+- **Working files:** `<home>/cloud/staging/` and the lock `<home>/cloud/upload.lock`.
+- **Bucket,** under `<prefix>/<copy id>/`: `parts/<sha256>.<token>`, `deltas/<sha256>.<token>` (F8),
+  `payloads/<sha256>.<token>`, `gen/<generation>.json`. The sha256 is of the object's bytes. The token is the
+  publish attempt that uploaded it, which can be an earlier generation's.
+
+**F3. References.** A reference is a payload name that stored text points at. Both tools find references the
+same way:
+1. Read `messages.content` and `messages.tool_calls` of every row, by column name, where the value is text
+   (Python `str` through `sqlite3`'s default decoding; a value that does not decode is a refusal,
+   `undecodable_text`).
+2. Apply these two patterns, each on its own with `finditer`, with no flags, and take group 1 of every match:
+   - `\[(?:Externalized|GC'd externalized) (?:tool output|payload):.*?;\s*ref=([^;\]\s]+)\]`
+   - `\[Externalized LCM ingest payload:.*?;\s*ref=([^;\]\s]+)\]`
+3. Each distinct captured string is one reference. It is:
+   - **resolved** when it is a payload name (F1) and `lcm-large-outputs/<name>` in that home is a regular file,
+     not a symlink;
+   - otherwise **unresolved minted** when it fully matches `\d{8}_\d{6}_.+_[0-9a-f]{12}_[0-9a-f]+\.json` and is a
+     payload name;
+   - otherwise **unresolved quoted** (for example `...` or `{ref}`).
+4. No other table, column or pattern adds a reference. A payload file that no reference names is not part of the
+   copy.
+(Sources in the code when this was written: externalize.py:31-33, :123; ingest_content.py:90. Real stores quote
+placeholders: one real store held five unresolved references, two of them minted names from other stores.)
+
+**F4. The import stamp.** One row in the copy's `metadata` table, key `import:origin`. Its value is the JSON of
+this object (`sort_keys=True`, separators `(",", ":")`, `ensure_ascii=False`). The live store never gets it.
+
+| Field | Type | Value |
+|---|---|---|
+| `format` | int | 1 |
+| `origin_id` | string | `store_uuid` in the store's `capture:owner` metadata row |
+| `copy_id` | string | copy id |
+| `origin_harness` | string | `host` in the `capture:owner` row |
+| `generation` | int | this generation |
+| `parent` | null or object | `{"generation": int, "manifest_sha256": sha256 of that manifest's stored bytes}` |
+| `contract` | object | `{"version": 1, "digest": "sha256:76644a990e50b9613697704dcb05b349a952d44ea22187bd768b0eab9a9badc9"}` (docs/store-contract.md:3-4) |
+| `schema_version` | int | the store's own `metadata` value for key `schema_version`, as an integer; 0 when the row is absent |
+| `projection_versions` | list of strings | distinct `capture_events.projection_version`, sorted; `[]` when the table is absent |
+| `unit` | object | `{"version": string or null, "core_commit": string or null, "core_version": string or null}` |
+| `max_store_id` | int | highest `messages.store_id`, 0 when there is none |
+| `created_at` | number | seconds since the epoch on the publishing machine |
+
+The copy gets no `metadata.store_uuid` row and no other new row.
+
+**F5. The manifest.** `gen/<generation>.json` is one UTF-8 JSON object. Key order and whitespace are free; its
+digest is the sha256 of the stored bytes. A reader ignores keys it does not know. It refuses a `layout` above 1
+(`newer_layout`), and a `stamp.contract.version` above its own constant (`replica_newer_contract`).
+
+| Key | Type | Value |
+|---|---|---|
+| `layout` | int | 1 |
+| `copy_id`, `generation` | string, int | as in the stamp |
+| `created_at` | number | as in the stamp |
+| `stamp` | object | equal to the F4 object in the copy |
+| `database` | object | the block of F9: this generation's file, the base it rests on and every delta after that base |
+| `payloads` | list | `{"name", "sha256", "bytes", "key"}` for each resolved reference, sorted by name; sha256 and bytes are of the file; `key` is `payloads/<sha256>.<token>`. |
+| `unresolved_minted`, `unresolved_quoted` | lists | `{"name": string, "sessions": [session_id, ...]}`, sorted by name, sessions sorted and distinct: the `messages.session_id` of each row that holds the reference. |
+| `tables` | object | row count of each contracted table (F6) that exists in the copy, counted in the copy as hashed (so `metadata` includes the stamp row); an absent table has no key |
+| `sequence` | object | `{"messages": int or null}`: `seq` of the `messages` row in `sqlite_sequence`, null when there is no row |
+| `attempt` | object | `{"generation": int, "token": token}` |
+| `publisher` | null or string | null in this format until the publish chain exists |
+| `pins`, `superseded` | lists | `[]` until the publish guard exists |
+| `forgotten` | list | the list of F12 |
+| `guard` | object | inputs of the publish guard. One author writes and reads it. **The checker never reads it.** |
+
+**F6. When a copy equals its origin.** The origin is the store as of the copy's cut. Contracted tables and their
+columns are the generated table at docs/store-contract.md:12-28 (15 tables); hold them as constants and pin them
+with a test that parses that file.
+- A contracted table exists in both or in neither, with the same contracted columns present. Columns are read by
+  name; column order means nothing (docs/store-contract.md:9).
+- Rows are equal by key and by every contracted column. Keys: `host_uid_bindings` by (`store_id`, `uid`,
+  `lineage_key`, `kind`); `capture_events` by (`lineage_key`, `generation`, `position`) where
+  `source_kind = 'line'` and by (`lineage_key`, `uid`, `content_digest`, `position`) where it is `'file'`
+  (claude_code_store.py:74-77); every other table by its primary key, or by all its contracted columns when it
+  has none. Rows that share a key are compared as a multiset.
+- One exemption: the copy's `metadata` holds exactly one row the origin does not, key `import:origin`.
+- The `sqlite_sequence` row for `messages` is equal.
+- The resolved references are the same names with the same file sha256; the unresolved minted names are the
+  same; the unresolved quoted names are the same.
+- Tables the contract does not list are not compared row by row. In the copy they are covered by `file_sha256`
+  (F10).
+
+F7 to F11 below are shared word for word with the page-delta codec. Where they say they add to or replace a sentence of
+F2, F5 or F6, that edit is already made above.
+
+**F7. Pages and their digests.**
+- `lcm.db` is a whole number of pages, at least one. The page size P is bytes 16-17 of the file, unsigned
+  big-endian, where the value 1 means 65,536. P is a power of two from 512 to 65,536. Page `i` is file bytes
+  `i`·P to (`i`+1)·P − 1. Page 0 holds the file header and is a page like any other.
+- A page digest is the sha256 of the page's P bytes. The page list is every page digest, from page 0 to the last
+  page, in page order.
+- `page_list_sha256` is the sha256 of the page list as raw bytes: the 32-byte digests joined in page order, with
+  no separator, no hex text and no length in front.
+
+**F8. The delta object.** A delta object holds whole pages and nothing else.
+- **Key** (this adds one line to F2's bucket list): `deltas/<sha256>.<token>` under `<prefix>/<copy id>/`. The
+  sha256 is of the object's bytes. The token is the publish attempt that uploaded it.
+- **Bytes.**
+  - Bytes 0-7: the magic `LCMXPD1\n` (hex `4c 43 4d 58 50 44 31 0a`).
+  - Bytes 8-11: the page size P. Bytes 12-15: the record count `n`. Both unsigned big-endian.
+  - Bytes 16 to the end: exactly one zlib stream (RFC 1950, as the standard library's `zlib` writes and reads
+    it). A writer uses level 6. A reader accepts any level.
+  - The stream decompresses to exactly `n` records and nothing else. A record is 4 + P bytes: a page index `i`
+    (4 bytes, unsigned big-endian), then the P bytes that replace file bytes `i`·P to (`i`+1)·P − 1.
+  - Indexes rise strictly from each record to the next.
+- **What binds a writer only.** An object has at least 1 record and at most ⌊(2^25 − 2^16) / (4 + P)⌋ (8,168 at
+  4 KiB; 510 at 64 KiB), and is at most 2^25 bytes long, so it never needs a multipart upload. A larger delta is
+  several objects. A reader does not enforce these limits: it reads a count of 0 as an object that changes
+  nothing, and it never sizes memory by the count.
+- **A reader refuses an object** when:
+
+  | Code | Condition |
+  |---|---|
+  | `object_sha256` | the sha256 of its bytes is not the sha256 in its key |
+  | `delta_magic` | it is shorter than 16 bytes, or bytes 0-7 are not the magic |
+  | `delta_page_size` | bytes 8-11 are not the manifest's `page_size` |
+  | `delta_stream` | bytes 16 on are not a zlib stream; the stream ends early (a stream cut inside its last 4 bytes included); or the decompressed bytes are not exactly `n` × (4 + P) |
+  | `delta_trailing` | any byte follows the end of the zlib stream |
+  | `delta_order` | an index is not above the index before it |
+
+**F9. The manifest's `database` block.** This replaces the `database` row of F5's table. Every manifest is
+self-contained: it names the base parts and every delta needed to rebuild its generation, in order. No reader
+follows a pointer to another manifest.
+
+| Key | Type | Value |
+|---|---|---|
+| `page_size` | int | P of this generation's file (F7) |
+| `file_bytes`, `file_sha256` | int, sha256 | length and sha256 of this generation's whole file |
+| `page_list_sha256` | sha256 | of this generation's file (F7) |
+| `base` | object | the chain's base, below |
+| `base.generation` | int | the generation whose whole file the parts are |
+| `base.file_bytes`, `base.file_sha256` | int, sha256 | that file |
+| `base.reason` | string | why that base was cut: `first`, `page_size`, `page_list`, `forget`, `missing_object`, `size` or `length` |
+| `base.part_size` | int | default 33554432 |
+| `base.parts` | list | `{"key", "bytes"}` in file order. `key` is `parts/<sha256>.<token>`. The parts joined in order are the base file. Every part but the last has `bytes == part_size` |
+| `deltas` | list | one entry per generation after the base, oldest first |
+| `deltas[].generation` | int | that generation |
+| `deltas[].file_pages` | int | the file's page count as of that generation, at least 1 |
+| `deltas[].objects` | list | `{"key", "bytes", "records"}`. `key` is `deltas/<sha256>.<token>`, `bytes` the object's length, `records` its header count |
+
+- The sha256 of a part or an object is the 64 hex digits in its key. No entry carries it a second time.
+- An int here is a JSON integer, zero or above; `true` and `1.0` are not ints. A reader ignores keys it does not
+  know, in the block and in every entry.
+- **A base generation** has an empty `deltas`, `base.generation` equal to the manifest's `generation`, and file
+  fields equal to its base fields. **A delta generation** has at least one entry; entry k (from 0) is generation
+  `base.generation` + 1 + k, and the last entry is the manifest's `generation`. F10 checks both.
+- The previous page count of an entry is `base.file_bytes` / `page_size` for the first entry, and the entry
+  before's `file_pages` for the others.
+- The objects of one entry are listed in ascending index order. `objects` may be empty: that generation changed
+  no page, or only got shorter.
+- The manifest holds no digest of a single page or range. An object's sha256 is in its key, and the result has
+  one whole-file sha256.
+- **What a reader checks is in F10, and only there.**
+- **What binds the writer only.** A reader does not check these and never refuses on them:
+  - every part but the last has `bytes == part_size`;
+  - `base.reason` is one of the seven words (a reader that shows it prints what it finds);
+  - a delta generation carries the head manifest's `base` (its `reason` included) and `deltas` unchanged, plus
+    one new last entry;
+  - an entry's objects hold every page of that generation's file that differs from the generation before. A
+    reader cannot see a changed page left out below the previous page count; only `file_sha256` shows it. Pages
+    at or past the previous count are checked (F10, `delta_gap`);
+  - F8's writer limits.
+
+**F10. Rebuilding a generation, and when a reader refuses.** This replaces "`lcm.db` is the parts joined in that
+order" (F5) and "covered by the part digests" (F6, last bullet): tables the contract does not list are covered by
+`file_sha256`.
+1. **Shape first.** Before any object is read, refuse the block when one of the conditions below holds, and for
+   no other reason. When several hold, any one of their codes is a right answer.
+   - `bad_database_block`:
+     a. a key of F9's table, other than `base.reason` and `base.part_size`, is missing or is not of its type (a
+        sha256 that fails its grammar included);
+     b. `page_size` is not a value F7 allows;
+     c. `base.file_bytes` is 0 or is not a whole number of pages, or the parts' `bytes` do not sum to it;
+     d. a `file_pages` is below 1;
+     e. `file_bytes` is not the last entry's `file_pages` × `page_size`; or, with an empty `deltas`, is not
+        `base.file_bytes`;
+     f. `deltas` is empty and `file_sha256` is not `base.file_sha256`.
+   - `bad_name`: a part's key does not match `parts/<sha256>.<token>` in full, or an object's key does not match
+     `deltas/<sha256>.<token>` in full.
+   - `chain_generation`: some `deltas[k].generation` is not `base.generation` + 1 + k; or the last entry's
+     generation is not the manifest's `generation`; or `deltas` is empty and `base.generation` is not the
+     manifest's `generation`.
+2. **The base.** Write `base.parts` in order. Refuse a named object that is absent (`object_missing`, with its
+   key), whose length is not its `bytes` (`object_bytes`), or whose sha256 is not its key's (`object_sha256`).
+   Then the file must be `base.file_bytes` long and hash to `base.file_sha256` (`base_digest_mismatch`).
+3. **Each `deltas` entry, in order.** For each object in order, refuse as in step 2 and as in F8, and also when:
+
+   | Code | Condition |
+   |---|---|
+   | `delta_count` | the header count is not the manifest's `records` |
+   | `delta_order` | its first index is at or below the last index of the object before it in the same entry |
+   | `delta_index` | an index is at or past this entry's `file_pages` |
+
+   Write each record's page at `i`·P. When the entry's `file_pages` is above the previous page count (F9), every
+   page from the previous count to `file_pages` − 1 must have been written by this entry (`delta_gap`). Then set
+   the file's length to `file_pages` × `page_size`. Do this after every entry, so that a shorter generation
+   followed by a longer one never keeps old bytes.
+4. **The result.** Bytes 16-17 of the file must state `page_size` (F7), and the file must be `file_bytes` long
+   and hash to `file_sha256`. Each failure is `rebuild_digest_mismatch`, with the generation. The result's page
+   list hashes to `page_list_sha256`; the copy checker checks that as well, under the same code.
+- A reader rebuilds any chain a manifest names. No reader limits a chain's length or stored size.
+- After a refusal the file being built is not a copy of anything and must not be served or kept as one.
+
+**F11. Shared test vectors.** Every hex string is lower case.
+
+*File A*, 1,536 bytes, P = 512: page `k` (k = 0, 1, 2) is 512 bytes of value `k`, and then bytes 16 and 17 of
+the file are set to `02 00`.
+
+| | sha256 |
+|---|---|
+| page 0 | `b6d17a1a271154e2d74bdf05d114d2f55626bd2898e9c147c7489e3c1c878f75` |
+| page 1 | `6caf38d537984e261527b8caef5f990fb91415a1db917198821a79ed28997973` |
+| page 2 | `1bd8d04bb127c9dbdb406c3c213b202c84dc75f122ecd553b02fb322bffafdc9` |
+| `page_list_sha256` | `5651d68c2542dc58414e77e1816c5af341e54e5b2daf96396af4cdae06813e8a` |
+| `file_sha256` | `144056a8546425225385ebdb956b7584a8a34f1ebecac3e68c3f73553c8f9a46` |
+
+*File B*, 2,048 bytes: file A with page 1 replaced by 512 bytes of `aa` and a page 3 of 512 zero bytes appended.
+
+| | sha256 |
+|---|---|
+| page 1 | `799edf40e8115dc980109a64ff0a7ae2c6b62e20313c4a01f9871d0e189aa7c2` |
+| page 3 | `076a27c79e5ace2a3d47f9dd2e83e4ff6ea8872b3c2218f66c92b89b55f36560` |
+| `page_list_sha256` | `0b4ae118a4c210fabb5d988c90f4d4a3fdfafd6727f7426b7e08bd461147d1f4` |
+| `file_sha256` | `916e79b77b05ac39fbb92433771f87ced54de932e04c3a01042be863e537ac4f` |
+
+Pages 0 and 2 of B are those of A. The pages that differ from A to B are 1 and 3: page 3 is all zeros and is
+still sent, because it is past A's page count.
+
+*File C*, 65,536 bytes: all zeros, and then bytes 16 and 17 are set to `00 01`. P = 65,536, one page.
+`file_sha256` and the page 0 digest are `0a0c88c08b7fcf477db1ae6d68f48abc6b2ef3e3e7fad9936e518f94e26c2d7b`.
+`page_list_sha256` is `b03d47e0fc0d7bb43d78f933243b667f09b8b8a212f7bfa74f7442bf9c90cf0f`.
+
+*One valid delta object from A to B*, 42 bytes, sha256
+`e467bc42aa2753ec64ece09b0f147c8b3f6a14265916145d222328707e7c69ea`:
+
+```
+4c434d585044310a0000020000000002789c636060605c350a463460606060661805231a0000442e5414
+```
+
+Its stream decompresses to 1,032 bytes: `00000001`, 512 bytes of `aa`, `00000003`, 512 bytes of `00`. Every
+reader must accept this object. A writer need not produce these 42 bytes: zlib builds compress differently, so a
+writer is checked by decompressing what it wrote, never by comparing compressed bytes.
+
+*The `database` block of generation 2 on base generation 1*, with A cut into parts of 1,024 bytes:
+
+```json
+{"page_size": 512, "file_bytes": 2048,
+ "file_sha256": "916e79b77b05ac39fbb92433771f87ced54de932e04c3a01042be863e537ac4f",
+ "page_list_sha256": "0b4ae118a4c210fabb5d988c90f4d4a3fdfafd6727f7426b7e08bd461147d1f4",
+ "base": {"generation": 1, "file_bytes": 1536,
+          "file_sha256": "144056a8546425225385ebdb956b7584a8a34f1ebecac3e68c3f73553c8f9a46",
+          "reason": "first", "part_size": 1024,
+          "parts": [
+            {"key": "parts/3b2318e81fd1de9fc1e3fbd184bfdca9efdac6ee7d10bcf78cba505b2bfb475b.00000000000000000000000000000001", "bytes": 1024},
+            {"key": "parts/1bd8d04bb127c9dbdb406c3c213b202c84dc75f122ecd553b02fb322bffafdc9.00000000000000000000000000000001", "bytes": 512}]},
+ "deltas": [{"generation": 2, "file_pages": 4, "objects": [
+            {"key": "deltas/e467bc42aa2753ec64ece09b0f147c8b3f6a14265916145d222328707e7c69ea.00000000000000000000000000000002", "bytes": 42, "records": 2}]}]}
+```
+
+The first part is A's bytes 0 to 1,023 and the second is A's page 2. Rebuilding this block gives file B.
+
+**F12. The `forgotten` list.** A list at the manifest's top level (the `forgotten` row of F5).
+- Each entry is `{"key": string, "kind": "forgotten" | "as-delete", "session": session_id,
+  "base_generation": int or null}`, sorted by kind, then key.
+- `key` is the session id for a forget, and the decision's own id for an `--as-delete` decision. Two
+  `--as-delete` decisions on one session are two entries.
+- `base_generation`: a manifest records each new item with its own generation only when it is a base and the
+  item's session is one the head's chain may hold. Every other new item gets `null`.
+- The list is cumulative: a manifest carries every entry of the head's list unchanged and adds its new items. It
+  never shrinks. It is `[]` until something is forgotten.
+- The copy checker does not judge this list. It is an input of the publish rule and of pruning.
