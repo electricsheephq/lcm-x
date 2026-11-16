@@ -2,19 +2,23 @@
 """Check capture message preservation using explicit transcripts and read-only contract SQL.
 
 Repeat --transcript SESSION=PATH in observation order, including historical versions.
+Supply each rewritten transcript's set-aside copy before its replacement.
 Subagents use SESSION/agent:ID. Output contains counts and ids, never transcript text.
+For a reused agent id's later transcript, use SESSION/agent:/ plus its path below subagents/.
 Raw ledger preservation and payload-file recovery are outside this row checker.
 """
 from __future__ import annotations
 
 import argparse
 from collections import Counter, defaultdict
+from collections.abc import Mapping
 from contextlib import closing
 import hashlib
 import json
 from pathlib import Path
 import re
 import sqlite3
+from time import perf_counter
 
 
 def canonical(value):
@@ -72,6 +76,7 @@ def signature(row):
 
 def expected_rows(inputs):
     expected, seen, unprojected = defaultdict(list), defaultdict(set), Counter()
+    previews, sources = {}, defaultdict(list)
     for session, path in inputs:
         expected[session]  # Include a transcript with no projected rows.
         with path.open("rb") as handle:
@@ -91,13 +96,157 @@ def expected_rows(inputs):
                 digest = canonical({k: v for k, v in entry.items() if k not in {"sessionId", "promptId"}})
                 identity = entry.get("uuid"), digest
                 if identity not in seen[session]:
-                    expected[session].extend(signature(row) for row in project(entry))
+                    for row in project(entry):
+                        sig = signature(row)
+                        expected[session].append(sig)
+                        structured = isinstance(row[2], (list, dict))
+                        sources[session].append((json.dumps(row[2], ensure_ascii=False, sort_keys=True)
+                                                 if structured else row[2], structured))
+                        if row[1] == "tool" and isinstance(row[2], str) and row[2].lstrip().startswith("<persisted-output>"):
+                            previews[session, len(expected[session]) - 1] = entry.get("toolUseResult")
                     seen[session].add(identity)
-    return expected, unprojected
+    return expected, unprojected, previews, sources
+
+
+# Ref names carry a SHA-256 prefix; no payload file is opened by this checker.
+REFERENCE = re.compile(
+    r"\[Externalized (?:tool output|payload|LCM ingest payload): [^\]\r\n]*?"
+    r"chars=(\d+); bytes=(\d+); [^\]\r\n]*?"
+    r"ref=\d{8}_\d{6}_[^\]\r\n]+_([0-9a-f]{12})_[0-9a-f]+\.json\]")
+INGEST = re.compile(r"\[Externalized LCM ingest payload: [^\]\r\n]*\]")
+MAX_SAVED_OUTPUT_BYTES = 64 * 1024 * 1024
+
+
+def saved_preview(text, transcripts, metadata):
+    """Try every supplied path's session folder, without reading oversized outputs."""
+    match = re.search(r"Full output saved to:\s*([^\r\n]+)", text)
+    named = match[1].strip() if match else None
+    if not named and isinstance(metadata, Mapping):
+        named = metadata.get("persistedOutputPath")
+    if not named:
+        return None, "saved_output_unnamed"
+    if isinstance(named, str) and len(named) >= 2 and named[0] == named[-1] and named[0] in "\"'":
+        named = named[1:-1]
+    reason = "saved_output_outside_session"
+    for transcript in transcripts:
+        ancestors = list(transcript.parents)[:5] if transcript.name.startswith("agent-") else []
+        root = next((up.parent for up in ancestors if up.name == "subagents"), transcript.with_suffix(""))
+        folder = root / "tool-results"
+        try:
+            path = Path(named).expanduser()
+            if (root.is_symlink() or folder.is_symlink() or path.is_symlink()
+                    or not path.resolve().is_relative_to(folder.resolve())):
+                continue
+            if not path.exists():
+                reason = "saved_output_missing"
+            elif not path.is_file():
+                reason = "saved_output_not_a_file"
+            elif path.stat().st_size > MAX_SAVED_OUTPUT_BYTES:
+                reason = "saved_output_too_large"
+            else:
+                with path.open("rb") as handle:
+                    data = handle.read(MAX_SAVED_OUTPUT_BYTES + 1)
+                if len(data) > MAX_SAVED_OUTPUT_BYTES:  # Bound the read even if the file grew.
+                    reason = "saved_output_too_large"
+                else:
+                    return data.decode("utf-8"), None
+        except UnicodeError:
+            reason = "saved_output_binary"
+        except (OSError, ValueError, RuntimeError, TypeError):
+            reason = "saved_output_unreadable"
+    return None, reason
+
+
+def fingerprint(text):
+    data = text.encode("utf-8")
+    return len(text), len(data), hashlib.sha256(data).hexdigest()[:12]
+
+
+def index_source(text, index, structured):
+    index[fingerprint(text)].add(text)
+    if not structured:
+        return None
+    try:
+        value = json.loads(text) if text[:1] in {"[", "{"} else None
+    except (ValueError, RecursionError):
+        value = None
+    pending = [value]
+    while pending:
+        node = pending.pop()
+        if isinstance(node, str):
+            index[fingerprint(node)].add(node)
+        elif isinstance(node, list):
+            pending.extend(node)
+        elif isinstance(node, dict):
+            pending.extend(node.values())
+    return value
+
+
+def reference_matches(match, source, index):
+    key = int(match[1]), int(match[2]), match[3]
+    return source in index.get(key, ())
+
+
+def content_matches(stored, source, structured, index):
+    if stored == source:
+        return True
+    if not isinstance(stored, str) or not isinstance(source, str):
+        return False
+    match = REFERENCE.fullmatch(stored)
+    if match and reference_matches(match, source, index):
+        return True
+    # Verify each replacement at its own position, preserving all surrounding text.
+    position, start = 0, 0
+    for match in INGEST.finditer(stored):
+        literal = stored[start:match.start()]
+        if not source.startswith(literal, position):
+            break
+        position += len(literal)
+        ref = REFERENCE.fullmatch(match[0])
+        span = source[position:position + int(ref[1])] if ref else ""
+        if ref:
+            index[fingerprint(span)].add(span)
+        if ref and reference_matches(ref, span, index):
+            position += len(span)
+        elif source.startswith(match[0], position):
+            position += len(match[0])  # A quoted marker is literal source text.
+        else:
+            break
+        start = match.end()
+    else:
+        if start and stored[start:] == source[position:]:
+            return True
+    if structured is None or not INGEST.search(stored):
+        return False
+    try:
+        value = json.loads(stored)
+    except (ValueError, RecursionError):
+        return False
+    pending = [(value, structured)]
+    while pending:
+        left, right = pending.pop()
+        if isinstance(left, str) and isinstance(right, str):
+            if not content_matches(left, right, None, index):
+                return False
+        elif isinstance(left, list) and isinstance(right, list):
+            if len(left) != len(right):
+                return False
+            pending.extend(zip(left, right))
+        elif isinstance(left, dict) and isinstance(right, dict):
+            if left.keys() != right.keys():
+                return False
+            pending.extend((left[k], right[k]) for k in left)
+        elif type(left) is not type(right) or left != right:
+            return False
+    return True
 
 
 def check(home, inputs):
-    expected, unprojected = expected_rows(inputs)
+    started = perf_counter()
+    expected, unprojected, previews, transcript_sources = expected_rows(inputs)
+    transcript_paths = defaultdict(list)
+    for session, path in inputs:
+        transcript_paths[session].append(path)
     with closing(sqlite3.connect((home / "lcm.db").resolve().as_uri() + "?mode=ro", uri=True)) as conn:
         conn.row_factory = sqlite3.Row
         conn.execute("BEGIN")
@@ -115,6 +264,8 @@ def check(home, inputs):
             if "message_relations" in tables else []
         parents = dict(conn.execute("SELECT child_session_id, parent_session_id FROM session_lineage")) \
             if "session_lineage" in tables else {}
+    message_ids = {r["store_id"] for r in messages}
+    dangling = [b for row_id in sorted(bindings) if row_id not in message_ids for b in bindings[row_id]]
     grouped, lineage_bindings = defaultdict(list), {}
     for row in messages:
         grouped[row["session_id"]].append(row)
@@ -165,52 +316,40 @@ def check(home, inputs):
                     calls[call.get("id")].append(call_origins[row_id][call.get("id")])
                 if row["role"] == "tool":
                     results[row["tool_call_id"]].append(origins[row_id])
-        # Only transcript previews can stand in for recovered content.
-        opaque = {r for r in wanted if r[1] == "tool"
-                  and isinstance(text := json.loads(r[2]), str)
-                  and text.lstrip().startswith("<persisted-output>")}
-        def normalize(row):
-            text = json.loads(row[2])
-            match = re.fullmatch(
-                r'\[Externalized tool output: .*; chars=(\d+); bytes=(\d+); .*; '
-                r'ref=\d{8}_\d{6}_.+_([0-9a-f]{12})_[0-9a-f]+\.json\]', text) \
-                if row[1] == "tool" and isinstance(text, str) else None
-            if match:
-                for candidate in wanted:
-                    source = json.loads(candidate[2])
-                    if (candidate not in opaque and candidate[:2] + candidate[3:] == row[:2] + row[3:] and isinstance(source, str)
-                            and (len(source), len(source.encode("utf-8")), hashlib.sha256(source.encode("utf-8")).hexdigest()[:12])
-                            == (int(match[1]), int(match[2]), match[3])):
-                        return candidate
-            if row[1] == "tool" and isinstance(text, str) and text.startswith("[Externalized tool output:"):
-                return row[:2] + ("null",) + row[3:]
-            return row
-        # Literal references and markers are content when the transcript kept them verbatim.
-        exact, normalized = Counter(wanted), []
-        for row in actual:
-            if exact[row]:
-                exact[row] -= 1
-                normalized.append(row)
-            else:
-                normalized.append(normalize(row))
-        actual = normalized
-        ambiguous = Counter(map(normalize, ambiguous.elements()))
-        # Reserve exact content matches before spending any occurrence's preview slot.
-        remaining = Counter(r for r in wanted if r not in opaque)
-        previews = Counter(r[:2] + r[3:] for r in wanted if r in opaque)
-        pending, unverified = [], 0
-        for i, row in enumerate(actual):
-            if remaining[row]:
-                remaining[row] -= 1
-            else:
-                pending.append(i)
-        for i in pending:
-            identity = actual[i][:2] + actual[i][3:]
-            if previews[identity]:
-                actual[i] = actual[i][:2] + ("null",) + actual[i][3:]
-                previews[identity] -= 1
+        # Prepare each transcript occurrence once, then pair the k-th row of each uid.
+        sources, reasons, index = [], {}, defaultdict(set)
+        for i, row in enumerate(wanted):
+            source, structured = transcript_sources[session][i]
+            if previews and (session, i) in previews:
+                recovered, reason = saved_preview(source, transcript_paths[session], previews[session, i])
+                if reason:
+                    reasons[i] = reason
+                else:
+                    source = recovered
+                    wanted[i] = row[:2] + (canonical(source),) + row[3:]
+            sources.append((source, structured))
+        slots = defaultdict(list)
+        for i, row in enumerate(wanted):
+            slots[row[0]].append(i)
+        used, unverified, unverified_reasons = Counter(), 0, []
+        for n, row in enumerate(actual):
+            k, uid = used[row[0]], row[0]
+            used[uid] += 1
+            if k >= len(slots[uid]):
+                continue
+            i = slots[uid][k]
+            target = wanted[i]
+            if row[:2] + row[3:] != target[:2] + target[3:]:
+                continue
+            if i in reasons:
+                actual[n] = target
                 unverified += 1
-        wanted = [r[:2] + ("null",) + r[3:] if r in opaque else r for r in wanted]
+                unverified_reasons.append({"uid": uid, "reason": reasons[i]})
+            elif row != target:
+                source, is_structured = sources[i]
+                structured = index_source(source, index, is_structured) if isinstance(source, str) else None
+                if content_matches(json.loads(row[2]), source, structured, index):
+                    actual[n] = target
         need, have = Counter(wanted), Counter(actual)
         missing = need - have - ambiguous
         lost = sum(missing.values())
@@ -228,11 +367,13 @@ def check(home, inputs):
         report = {"lineage": "claude-code:" + session, "expected": len(wanted), "actual": len(actual),
                   "lost": lost, "duplicated": duplicated, "order_kept": order, "unpaired": unpaired,
                   "store_ids": ids, "parent": parents.get(session),
-                  "unverified": unverified, "unprojected": unprojected[session]}
+                  "unverified": unverified, "unprojected": unprojected[session],
+                  "unverified_reasons": unverified_reasons}
         report["pass"] = not lost and not duplicated and order and not unpaired
         reports.append(report)
-    return {"pass": bool(reports) and not unexpected and all(r["pass"] for r in reports),
-            "lineages": reports, "unexpected_sessions": unexpected}
+    return {"pass": bool(reports) and not unexpected and not dangling and all(r["pass"] for r in reports),
+            "lineages": reports, "unexpected_sessions": unexpected, "dangling_bindings": dangling,
+            "elapsed_ms": round((perf_counter() - started) * 1000, 3)}
 
 
 def main():
