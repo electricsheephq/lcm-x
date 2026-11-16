@@ -120,7 +120,9 @@ def test_search_bounds_and_omissions_preserve_canonical(tmp_path, monkeypatch, n
         actual = json.loads(raw)
         assert {k: actual[k] for k in base} == base
         hits = actual.get('queued_user_record_hits', [])
-        assert raw.isascii() and len(json.dumps(actual, ensure_ascii=False)) <= 4000
+        # Each cap in main's measure: grep unescaped, recall the written (escaped) reply.
+        assert raw.isascii()
+        assert len(raw if name == 'lcm_recall' else json.dumps(actual, ensure_ascii=False)) <= 4000
         assert len(hits) + actual['queued_user_records_omitted'] == 30
         assert [r['ordinal'] for r in hits] == list(reversed(range(30)))[:len(hits)]
         for hit in hits:
@@ -329,3 +331,15 @@ def test_augmented_reply_with_lone_surrogate_is_ingested(tmp_path):
                        function=dict(name='lcm_grep', arguments='{}'))], timestamp=61.),
                   dict(role='tool', tool_call_id='c1', content=reply, timestamp=62.)])
         assert len(e._store.get_session_messages('S')) == before + 3
+
+
+def test_recall_reply_fits_default_cap_as_written(tmp_path):
+    from hermes_lcm import queued_user_rows as q
+    with engine_context(tmp_path, window=128000, conversation_id='conv', embeddings_enabled=False) as e:
+        folded(e, tuple('needle-' + str(i) + '界' * 1000 for i in range(30)) + ('newest',))
+        while e._queued_entries:
+            q.drain(e)
+        raw = tools.lcm_recall(dict(query='needle'), engine=e)
+        actual = json.loads(raw)
+        assert actual.get('queued_user_records_omitted', 0) > 0
+        assert raw.isascii() and len(raw) <= tools._LCM_RECALL_RESPONSE_CHAR_CAP

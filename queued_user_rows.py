@@ -451,7 +451,9 @@ def surface(name):
                             row['snippet'] = row['content']
             cap = dict(grep=tools._LCM_GREP_RESPONSE_CHAR_CAP, recall=tools._LCM_RECALL_RESPONSE_CHAR_CAP).get(name)
             omitted = 0
-            while cap and len(json.dumps(result, ensure_ascii=False)) > cap:
+            # Each cap in main's own measure: grep counts unescaped characters (tools.py:1841),
+            # recall the escaped reply (recall_delivery.py:486-511).
+            while cap and len(json.dumps(result, ensure_ascii=name != 'grep')) > cap:
                 entries = result.get('queued_user_record_hits', [])
                 if not entries:
                     break
@@ -460,7 +462,7 @@ def surface(name):
                 result['queued_user_records_omitted'] = omitted
                 if not entries:
                     del result['queued_user_record_hits']
-            # Measured as main measures its cap, written as main writes its reply (ASCII-escaped).
+            # Written ASCII-escaped, as main's grep and default recall write their replies.
             return raw if result == json.loads(raw) else json.dumps(result)
         return wrapped
     return decorate
