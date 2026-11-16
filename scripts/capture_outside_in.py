@@ -273,13 +273,22 @@ def tool_calls_match(stored_calls, source_calls, index):
         if left == right:
             continue
         try:
-            pending = [(json.loads(left, object_pairs_hook=unique_object), json.loads(right))]
+            stored_value = json.loads(left, object_pairs_hook=unique_object)
         except json.JSONDecodeError:
-            # Text that is not JSON (a payload run can take in an escape's letter) is checked
-            # placeholder by placeholder, with the text around each one exact.
+            # Stored text that is not JSON (a payload run can take in an escape's letter) is checked
+            # placeholder by placeholder, with the text around each one exact. A product marker holds
+            # no quote or backslash (its metadata is sanitized), so a marker holding one is refused.
+            if any('"' in m[0] or "\\" in m[0] for m in INGEST.finditer(left)):
+                return False
             if content_matches(left, right, None, index):
                 continue
             return False
+        except (ValueError, RecursionError):
+            return False
+        try:
+            # The source is json.dumps output (project() above, as capture builds it): valid JSON with
+            # no escaped slash, duplicate key or NaN. Anything else fails closed.
+            pending = [(stored_value, json.loads(right))]
         except (ValueError, RecursionError):
             return False
         while pending:

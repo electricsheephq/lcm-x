@@ -1114,6 +1114,38 @@ def test_tool_call_invalid_json_needs_verified_text():
     assert corrupted != stored
     assert not checker.tool_calls_match(calls(corrupted), calls(source), defaultdict(set))
 
+
+@pytest.mark.parametrize("smuggled", ['"extra": 1, "tail": "\\q; ', '"content": 1, "tail": "\\q; '],
+                         ids=["extra-key", "duplicate-key"])
+def test_tool_call_marker_metadata_in_invalid_json(smuggled):
+    # Invalid stored JSON takes the text-only path; a marker carrying a quote or backslash is refused there.
+    from collections import defaultdict
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("outside_in_marker_invalid", CHECKER)
+    checker = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(checker)
+    def calls(arguments):
+        return [dict(id="c", type="function", function=dict(name="Write", arguments=arguments))]
+    crafted = reference_for("payload").replace("chars=", 'field=x", ' + smuggled + 'chars=', 1)
+    source, stored = '{"content": "payload"}', '{"content": "' + crafted + '"}'
+    assert checker.content_matches(stored, source, None, defaultdict(set))
+    assert not checker.tool_calls_match(calls(stored), calls(source), defaultdict(set))
+
+
+def test_tool_call_source_parse_error_fails_closed():
+    # Only the stored side may take the text-only path; a source that does not parse fails closed.
+    from collections import defaultdict
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("outside_in_source_invalid", CHECKER)
+    checker = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(checker)
+    def calls(arguments):
+        return [dict(id="c", type="function", function=dict(name="Write", arguments=arguments))]
+    crafted = reference_for("pay\tload").replace("chars=", 'field=x", "extra": "x; chars=', 1)
+    source, stored = '{"content": "pay\tload"}', '{"content": "' + crafted + '"}'
+    assert sorted(json.loads(stored)) == ["content", "extra"]
+    assert not checker.tool_calls_match(calls(stored), calls(source), defaultdict(set))
+
 @pytest.mark.parametrize("side", ["stored", "source"])
 def test_tool_call_argument_parse_recursion(side, monkeypatch):
     from collections import defaultdict
