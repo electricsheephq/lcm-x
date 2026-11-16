@@ -272,10 +272,14 @@ def tool_calls_match(stored_calls, source_calls, index):
             return False
         if left == right:
             continue
-        if content_matches(left, right, None, index):
-            continue
         try:
             pending = [(json.loads(left, object_pairs_hook=unique_object), json.loads(right))]
+        except json.JSONDecodeError:
+            # Text that is not JSON (a payload run can take in an escape's letter) is checked
+            # placeholder by placeholder, with the text around each one exact.
+            if content_matches(left, right, None, index):
+                continue
+            return False
         except (ValueError, RecursionError):
             return False
         while pending:

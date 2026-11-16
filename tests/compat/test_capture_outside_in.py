@@ -1070,6 +1070,50 @@ def test_tool_call_placeholder_at_leaf_start():
     assert checker.tool_calls_match(calls(stored), calls(source), defaultdict(set))
 
 
+
+@pytest.mark.parametrize("smuggled", ['"content": "', '"extra": "'], ids=["duplicate-key", "extra-key"])
+def test_tool_call_marker_metadata_cannot_add_keys(smuggled):
+    # A marker whose metadata holds JSON syntax can verify at its position and still add a key around it.
+    from collections import defaultdict
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("outside_in_marker_keys", CHECKER)
+    checker = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(checker)
+    def calls(arguments):
+        return [dict(id="c", type="function", function=dict(name="Write", arguments=arguments))]
+    honest = reference_for("payload")
+    crafted = honest.replace("chars=", f'field=x", {smuggled}x; chars=', 1)
+    assert checker.REFERENCE.fullmatch(crafted) and checker.INGEST.fullmatch(crafted)
+    source = '{"content": "payload"}'
+    stored = '{"content": "' + crafted + '"}'
+    assert checker.content_matches(stored, source, None, defaultdict(set))
+    assert not checker.tool_calls_match(calls(stored), calls(source), defaultdict(set))
+    assert checker.tool_calls_match(calls('{"content": "' + honest + '"}'), calls(source), defaultdict(set))
+
+
+def test_tool_call_invalid_json_needs_verified_text():
+    # Invalid stored JSON (#2792's escape letter) passes only on the text check; a wrong digest fails.
+    from collections import defaultdict
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("outside_in_invalid_json", CHECKER)
+    checker = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(checker)
+    def calls(arguments):
+        return [dict(id="c", type="function", function=dict(name="Write", arguments=arguments))]
+    run = "QUJD" * 300
+    source = json.dumps(dict(content="line\n" + run))
+    stored = source.replace("n" + run, reference_for("n" + run))
+    try:
+        json.loads(stored)
+    except json.JSONDecodeError:
+        pass
+    else:
+        raise AssertionError("expected invalid stored JSON")
+    assert checker.tool_calls_match(calls(stored), calls(source), defaultdict(set))
+    corrupted = stored.replace(reference_for("n" + run).split("_")[-2], "0" * 12)
+    assert corrupted != stored
+    assert not checker.tool_calls_match(calls(corrupted), calls(source), defaultdict(set))
+
 @pytest.mark.parametrize("side", ["stored", "source"])
 def test_tool_call_argument_parse_recursion(side, monkeypatch):
     from collections import defaultdict
