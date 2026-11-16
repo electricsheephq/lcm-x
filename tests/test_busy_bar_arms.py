@@ -196,6 +196,8 @@ def normalize(rows):
             processes.setdefault(record["process"], f"process-{len(processes)}")
             record["thread"] = threads[record["thread"]]
             record["process"] = processes[record["process"]]
+        # Threads interleave their log lines by timing. Keep each thread's own order and compare per thread.
+        row["logs"].sort(key=lambda record: (record["process"], record["thread"]))
         for summary in row["success_wall_ms"].values():
             if isinstance(summary, dict):
                 for key in ("p50", "p95", "max"):
