@@ -115,12 +115,19 @@ def check(home, inputs):
             if "message_relations" in tables else []
         parents = dict(conn.execute("SELECT child_session_id, parent_session_id FROM session_lineage")) \
             if "session_lineage" in tables else {}
-    grouped = defaultdict(list)
+    grouped, lineage_bindings = defaultdict(list), {}
     for row in messages:
         grouped[row["session_id"]].append(row)
+        lineage_bindings[row["store_id"]] = sorted(
+            (b for b in bindings[row["store_id"]] if b["lineage_key"] == "claude-code:" + row["session_id"]),
+            key=lambda b: (b["kind"] != "canonical", b["uid"]))
+    # Split components use <transcript uid>#<index> (claude_code_capture.project_entry).
+    revision_uids = {row_id: re.sub(r"#[0-9]+\Z", "", bound[0]["uid"]) if bound else None
+                     for row_id, bound in lineage_bindings.items()}
     predecessors, owners = defaultdict(list), {r["store_id"]: r["session_id"] for r in messages}
     for new, old in revisions:
-        if new not in owners or old not in owners or old >= new or owners[new] != owners[old]:
+        if (new not in owners or old not in owners or old >= new or owners[new] != owners[old]
+                or revision_uids[new] is None or revision_uids[new] != revision_uids[old]):
             raise ValueError("invalid_revision_ancestry")
         predecessors[new].append(old)
     superseded = {old for _, old in revisions}
@@ -144,8 +151,7 @@ def check(home, inputs):
             row_id = row["store_id"]
             tool_calls = json.loads(row["tool_calls"] or "[]")
             content = row["content"]
-            bound = sorted((b for b in bindings[row_id] if b["lineage_key"] == "claude-code:" + session),
-                           key=lambda b: (b["kind"] != "canonical", b["uid"]))
+            bound = lineage_bindings[row_id]
             binding_excess += sum(b["lineage_key"] != "claude-code:" + session for b in bindings[row_id])
             bound = bound or [{"uid": None}]
             actual.append(signature((bound[0]["uid"], row["role"], content, row["tool_call_id"], tool_calls)))

@@ -376,6 +376,37 @@ def crafted_revision(conn, new, old):
     conn.execute("INSERT INTO message_relations(store_id,kind,related_store_id) VALUES(?,'supersedes',?)", (new, old))
 
 
+@pytest.mark.parametrize("uids", [("A", "B"), ("A#0", "B#1")], ids=["plain", "split"])
+def test_cross_uid_revision(tmp_path, uids, record_property):
+    rows = [dict(type="assistant", uuid=uids[0], sessionId="crafted", message=dict(content=[
+                dict(type="tool_use", id="c", name="synthetic", input={})])),
+            dict(type="assistant", uuid=uids[1], sessionId="crafted", message=dict(content="final"))]
+    fixture = tmp_path / "01_cross_uid.jsonl"
+    fixture.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    home, env, inputs = capture_session(tmp_path / "capture", fixture)
+    assert read_sql(home, "SELECT store_id,uid FROM host_uid_bindings ORDER BY store_id") == list(enumerate(uids, 1))
+    with closing(sqlite3.connect(home / "lcm.db")) as conn, conn:
+        crafted_revision(conn, 2, 1)
+    checked, report, audit = verdict(home, env, inputs)
+    record_property("checker", checked.stdout)
+    record_property("audit", json.dumps(audit, sort_keys=True))
+    assert checked.returncode == 1
+    assert report == {"pass": False, "errors": 1, "error_type": "ValueError"}
+
+
+@pytest.mark.parametrize("unbound", [1, 3], ids=["old", "new"])
+def test_unbound_revision(tmp_path, unbound, record_property):
+    home, env, inputs = capture_session(tmp_path / "capture", next(p for p in FIXTURES if p.stem.startswith("09")))
+    assert read_sql(home, "SELECT store_id,related_store_id FROM message_relations WHERE kind='supersedes'") == [(3, 1)]
+    with closing(sqlite3.connect(home / "lcm.db")) as conn, conn:
+        conn.execute("DELETE FROM host_uid_bindings WHERE store_id=?", (unbound,))
+    checked, report, audit = verdict(home, env, inputs)
+    record_property("checker", checked.stdout)
+    record_property("audit", json.dumps(audit, sort_keys=True))
+    assert checked.returncode == 1
+    assert report == {"pass": False, "errors": 1, "error_type": "ValueError"}
+
+
 @pytest.mark.parametrize("literal", ["reference", "marker"])
 @pytest.mark.parametrize("duplicate", [False, True], ids=["once", "twice"])
 def test_literal_tool_output(tmp_path, literal, duplicate, record_property):
