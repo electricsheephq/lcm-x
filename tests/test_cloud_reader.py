@@ -1302,3 +1302,51 @@ def test_r7_exclusive_generation_lock_never_stalls(corpus, direct_mergers):
     finally:
         os.close(fd)
         future.result(timeout=10)  # Release a blocked base constructor before fixture cleanup.
+
+
+def test_r8_startup_warms_only_with_optin(tmp_path, corpus, clients):
+    local, sources = corpus
+    copy_generation(sources[0], local, COPIES[0])
+    (local / 'cloud' / 'cloud.json').unlink()
+    plain = clients(tmp_path, local)
+    requests = [json.loads(line) for pid in plain.pids(False)
+                for line in (plain.log / f'{pid}.requests').read_text().splitlines()]
+    assert [req['method'] for req in requests] == ['initialize'], 'no opt-in must add no private tools/list'
+    assert plain.pids(True) == []
+    plain.close()
+    optin(local)
+    client = clients(tmp_path, local)
+    deadline = time.monotonic() + 5
+    while not client.pids(True) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert any(alive(pid) for pid in client.pids(True)), 'initialize alone must start a replica reader'
+
+
+def test_r8_idle_start_first_grep_is_ok(corpus, direct_mergers):
+    local, sources = corpus
+    copy_generation(sources[0], local, COPIES[0])
+    merger = direct_mergers(local)
+    replica = merger.replicas[PREFIX]
+    # Wait only for background warm-up; send no tool call to trigger it.
+    if replica.probe is not None:
+        cr.wait([replica.probe], timeout=20)
+        assert replica.probe.done(), 'startup warm-up did not finish within its bounded wait'
+        replica.probe.result()
+    body, _ = cr.tool_body(merger.handle(cr.tool_request('lcm_grep', {'query': 'marker'})))
+    assert body['other_stores'][0]['status'] == 'ok', 'first grep after idle warm-up must include the replica'
+    assert body['other_stores'][0]['hits']
+
+
+def test_r8_recall_forgotten_session_equals_missing(tmp_path, corpus, clients):
+    local, sources = corpus
+    forget(local, 'remote0')
+    copy_generation(sources[0], local, COPIES[0])
+    client = clients(tmp_path, local)
+    ready(client)
+    missing = client.call('lcm_recall', query='marker', session_id=qualified('never-existing'))['result']
+    actual = client.call('lcm_recall', query='marker', session_id=qualified('remote0'))['result']
+    expected = json.loads(json.dumps(missing).replace(qualified('never-existing'), qualified('remote0')))
+    assert actual == expected, 'forgotten recall scope must equal the missing-session success answer'
+    assert actual['isError'] is False
+    body = json.loads(actual['content'][0]['text'])
+    assert body['hits'] == [], 'no hit from the forgotten session may survive'

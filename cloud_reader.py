@@ -379,9 +379,14 @@ class Merger:
         except (OSError, ValueError, AttributeError):
             pass
         try:
-            if self.own:
-                self.refresh()
             self.local = Child(argv, None)
+            if self.own:
+                try:
+                    tools = json.loads(self.local_call(request('lcmx-private-tools', 'tools/list')))['result']['tools']
+                    self.enabled_tools = {tool['name'] for tool in tools}
+                except Exception:
+                    pass
+                self.refresh()
         except Exception:
             self.close()
             raise
@@ -518,6 +523,13 @@ class Merger:
                 if len(set(args.get('externalized_refs', []))) > 1:
                     return {'error': 'the other store could not answer this call', 'store': replica.prefix}
                 body = error_body(absent['error'], {}, replica.prefix, replacements)
+            elif name == 'lcm_recall' and 'error' not in absent and target.keys() == {'session_id'}:
+                body = rebuild(absent, replica.prefix, lambda item: visible_item(item, replica.prefix, replica.child.folder, hidden))
+                for key in target.keys() & body.keys():
+                    body[key] = replace_token(body[key], qualify(replica.prefix, missing[key]), qualify(replica.prefix, target[key]))
+                clean = error_body(json.dumps(body), {}, replica.prefix)
+                if 'store' in clean:
+                    return clean
             elif 'error' not in absent and (
                 (name == 'lcm_load_session' and 'anchor_store_id' not in args
                  and type(absent.get('total_messages')) is int and absent['total_messages'] == 0 and absent.get('messages') == [])
