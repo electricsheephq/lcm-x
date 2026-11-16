@@ -489,3 +489,13 @@ def test_permanent_refusal_counted_once_when_another_drain_removed_it(tmp_path):
         e._store_queued_user_rows = write
         q.drain(e)
         assert e._queued_counts['dropped_permanent'] == 1
+
+
+def test_doctor_reports_withheld_states(tmp_path):
+    # lcm_doctor passes decide to store.records_doctor; without it these states would vanish silently.
+    with engine_context(tmp_path, window=128000, conversation_id='conv', embeddings_enabled=False) as e:
+        folded(e)
+        e._store.append('S', user('lost\n\nnewest', 55.), conversation_id='other')
+        report = json.loads(tools.lcm_doctor({}, engine=e))
+        detail, = [check['detail'] for check in report['checks'] if check['check'] == 'records']
+        assert 'superseded=0 withheld.overlap=1 withheld.unscanned=0' in detail
