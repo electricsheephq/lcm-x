@@ -366,3 +366,75 @@ def test_call_revision_ancestry(tmp_path, changed, record_property):
     assert [(r["lost"], r["duplicated"], r["order_kept"], r["unpaired"], r["unverified"], r["unprojected"])
             for r in report["lineages"]] == [(0, 0, True, int(changed), 0, 0)]
     assert not report["unexpected_sessions"] and audit["ok"]
+
+
+def crafted_revision(conn, new, old):
+    # Plain public captures need not create this optional contracted table.
+    conn.execute("CREATE TABLE IF NOT EXISTS message_relations (relation_id INTEGER PRIMARY KEY, "
+                 "store_id INTEGER NOT NULL, kind TEXT NOT NULL, related_store_id INTEGER, "
+                 "ordinal INTEGER, observed_at REAL, created_at REAL)")
+    conn.execute("INSERT INTO message_relations(store_id,kind,related_store_id) VALUES(?,'supersedes',?)", (new, old))
+
+
+@pytest.mark.parametrize("literal", ["reference", "marker"])
+@pytest.mark.parametrize("duplicate", [False, True], ids=["once", "twice"])
+def test_literal_tool_output(tmp_path, literal, duplicate, record_property):
+    rows = [json.loads(line) for line in FIXTURES[0].read_text().splitlines()]
+    rows[2]["message"]["content"] = rows[2]["message"]["content"][:1]
+    rows[2]["message"]["content"][0]["content"] = "synthetic " * 7500
+    fixture = tmp_path / "01_literal.jsonl"
+    fixture.write_text("".join(json.dumps(row) + "\n" for row in rows[:3]))
+    home, env, inputs = capture_session(tmp_path / "capture", fixture)
+    reference = read_sql(home, "SELECT content FROM messages WHERE tool_call_id='call1'")[0][0]
+    assert reference.startswith("[Externalized tool output:") and "chars=75000; bytes=75000;" in reference
+    text = reference if literal == "reference" else "[Externalized tool output: bogus]"
+    rows[6]["message"]["content"][0]["content"] = text
+    with inputs[0][1].open("a") as handle:
+        handle.write("".join(json.dumps(row) + "\n" for row in rows[3:]))
+    hook(home, env, "plain", inputs[0][1])
+    run(CAPTURE, "worker", "--home", home, env=env)
+    assert read_sql(home, "SELECT content FROM messages WHERE tool_call_id='call2'") == [(text,)]
+    if duplicate:
+        with closing(sqlite3.connect(home / "lcm.db")) as conn, conn:
+            old = conn.execute("SELECT store_id FROM messages WHERE tool_call_id='call2'").fetchone()[0]
+            names = ",".join(r[1] for r in conn.execute("PRAGMA table_info(messages)") if r[1] != "store_id")
+            new = conn.execute(f"INSERT INTO messages({names}) SELECT {names} FROM messages WHERE store_id=?", (old,)).lastrowid
+            conn.execute("INSERT INTO host_uid_bindings(store_id,uid,lineage_key,kind,binding_version) "
+                         "SELECT ?,uid,lineage_key,'version',binding_version FROM host_uid_bindings WHERE store_id=?", (new, old))
+            crafted_revision(conn, new, old)
+    checked, report, audit = verdict(home, env, inputs)
+    record_property("checker", checked.stdout)
+    record_property("audit", json.dumps(audit, sort_keys=True))
+    assert checked.returncode == int(duplicate) and report["pass"] == (not duplicate)
+    assert [(r["lost"], r["duplicated"], r["order_kept"], r["unpaired"], r["unverified"], r["unprojected"])
+            for r in report["lineages"]] == [(0, int(duplicate), True, 0, 0, 0)]
+    assert not report["unexpected_sessions"]
+    if not duplicate:
+        assert audit["ok"]
+
+
+def test_preview_then_verbatim_revision(tmp_path, record_property):
+    base = tmp_path / "capture"
+    saved = base / "claude/projects/synthetic/plain/tool-results/output.txt"
+    saved.parent.mkdir(parents=True)
+    recovered = "synthetic recovered output"
+    saved.write_text(recovered)
+    rows = [json.loads(line) for line in FIXTURES[0].read_text().splitlines()][1:3]
+    rows[-1]["message"]["content"] = rows[-1]["message"]["content"][:1]
+    rows.append(json.loads(json.dumps(rows[-1])))
+    rows[1]["message"]["content"][0]["content"] = (
+        f"<persisted-output>\nFull output saved to: {saved}\n\nPreview:\nsynthetic\n</persisted-output>")
+    rows[2]["message"]["content"][0]["content"] = recovered
+    fixture = tmp_path / "09_verbatim.jsonl"
+    fixture.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    home, env, inputs = capture_session(base, fixture)
+    assert read_sql(home, "SELECT content FROM messages WHERE role='tool' ORDER BY store_id") == [(recovered,), (recovered,)]
+    assert read_sql(home, "SELECT store_id,related_store_id FROM message_relations WHERE kind='supersedes'") == [(3, 2)]
+    checked, report, audit = verdict(home, env, inputs)
+    record_property("checker", checked.stdout)
+    record_property("audit", json.dumps(audit, sort_keys=True))
+    assert audit["ok"]
+    assert checked.returncode == 0 and report["pass"]
+    assert [(r["lost"], r["duplicated"], r["order_kept"], r["unpaired"], r["unverified"], r["unprojected"])
+            for r in report["lineages"]] == [(0, 0, True, 0, 1, 0)]
+    assert not report["unexpected_sessions"]
