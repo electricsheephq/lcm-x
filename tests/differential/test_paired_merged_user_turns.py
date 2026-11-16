@@ -775,7 +775,7 @@ def test_equal_text_supersession_accepts_occurrence_witness():
     record = expected_record(entry)
     canonical = [freeze(dict(record, store_id=record['owner_store_id'])), freeze(dict(record, store_id=999))]
     check_stage(dict(canonical=canonical, records=[freeze(dict(record, superseded_by=999))]),
-                dict(canonical=canonical, reload_witness={record['owner_store_id']: 999}), [entry])
+                dict(canonical=canonical, supersession_witness={record['owner_store_id']: 999}), [entry])
 
 
 @pytest.mark.parametrize('mutation,message', [

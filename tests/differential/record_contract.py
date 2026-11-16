@@ -4,7 +4,8 @@ Writer faults are ingest-scoped and never inspect arguments: every writer entry
 in the first faulted ingest raises for once; every ingest raises for persistent.
 Entries are counted per ingest regardless of batching, retries or call shape.
 
-Frozen except the accepted round-3 refusal and canonical-expansion amendments:
+Frozen except the accepted round-3 refusal and canonical-expansion amendments
+and T1-167's retrieval/supersession witness split:
 check_stage, active, expected_record, projection,
 mandatory_floor, judge(), overlap(), FLOOR_USER_ROWS=64, FLOOR_BYTES=1048576,
 the records-v1 block in test_paired_merged_user_turns.py,
@@ -16,7 +17,8 @@ positions. check_stage independently validates the stored projection's records.
 Only observe()'s tool-call adapters may change, keeping the same observations.
 Observation rows have role, content and kind: canonical has store_id; record has
 owner_store_id and ordinal. Search hits also have reference={tool, args} and an
-expanded normalized row. Observations include pages, hits, reload_witness and
+expanded normalized row. Observations include pages, hits, reload_witness (retrieval truth),
+supersession_witness (positive absorbed-UID evidence) and
 summary_sources, baseline_summary_sources and baseline_canonical_rows for equality,
 baseline_canonical (the full canonical snapshot, including session/conversation),
 withheld (owner_store_id, ordinal, state, reference, expanded; duplicates kept),
@@ -39,7 +41,7 @@ FLOOR_USER_ROWS = 64
 FLOOR_BYTES = 1048576
 
 
-def reload_witness(trace):
+def supersession_witness(trace):
     """3h: the floor host supplies no positive absorbed-UID evidence."""
     return {}
 
@@ -146,7 +148,7 @@ def earlier_spans(record, canonical):
 def check_stage(snapshot, baseline, entries):
     assert snapshot['canonical'] == baseline['canonical'], 'canonical row changed'
     # Supersession needs a same-turn reload witness, not equal bytes from another turn.
-    witness = baseline.get('reload_witness', {})
+    witness = baseline.get('supersession_witness', {})
     assert len(set(witness.values())) == len(witness), 'reload consumed by multiple owners'
     records = [dict(row) for row in snapshot['records']]
     for row in records:
@@ -252,6 +254,7 @@ def judge(observations, entries):
         'canonical listing changed'
     assert observations['summary_sources'] == observations['baseline_summary_sources'], 'summary sources changed'
     witness = observations.get('reload_witness', {})
+    supersession = observations.get('supersession_witness', {})
     locators = observations['withheld']
     keys = [(r['owner_store_id'], r['ordinal']) for r in locators]
     assert len(keys) == len(set(keys)), 'duplicate withheld locator'
@@ -267,7 +270,7 @@ def judge(observations, entries):
     assert not locators or observations['withheld_counts'], 'withheld counts missing'
     withheld = dict(zip(keys, locators))
     eligible = {(e['owner_store_id'], e['predecessor_ordinal']) for e in entries
-                if e['due_stage'] is not None and e['owner_store_id'] not in witness}
+                if e['due_stage'] is not None and e['owner_store_id'] not in supersession}
     assert set(withheld) <= eligible, 'withheld locator not active or superseded'
     declared = {(r['owner_store_id'], r['ordinal']) for r in map(expected_record, entries)}
     refused = {}
@@ -343,11 +346,11 @@ def judge(observations, entries):
         found.extend(hit for hit in canonical_hits if hit not in found and witness_matches(hit['expanded']))
         retrieved = (any(exact(r['expanded']) for r in pages if matches(r) and 'expanded' in r)
                      if not expected['content'].strip() else bool(found) and all(
-                         exact(r['expanded'], superseded_by=witness.get(key[0]))
+                         exact(r['expanded'], superseded_by=supersession.get(key[0]))
                          if r['expanded']['kind'] == 'record' else witness_matches(r['expanded']) for r in found))
         retrieved = retrieved and all(
             (r['expanded'].get('owner_store_id'), r['expanded'].get('ordinal')) == key
-            and exact(r['expanded'], superseded_by=witness.get(key[0]))
+            and exact(r['expanded'], superseded_by=supersession.get(key[0]))
             if r['expanded']['kind'] == 'record' else witness_matches(r['expanded']) for r in record_hits)
         retrieved = retrieved and all(witness_matches(hit['expanded']) for hit in canonical_hits)
         listing_exact = all(exact(r['expanded']) for r in pages if matches(r))

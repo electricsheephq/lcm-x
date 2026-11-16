@@ -294,7 +294,11 @@ class Trace:
                                  rows=_identities(engine), preserved=dict(self.preserved),
                                  canonical=canonical_rows(engine), records=queued_rows(engine),
                                  captures=captures, committed=dict(self.committed), committed_before=committed_before,
-                                 reload_witness=__import__(__package__ + '.record_contract', fromlist=['reload_witness']).reload_witness(self),
+                                 reload_witness={self.committed[occ]: self.committed[self.occurrence(row)]
+                                     for occ, row, joined in getattr(self, 'reloads', ()) if occ in self.committed
+                                     and self.occurrence(row) in self.committed and row['role'] == 'user'
+                                     and row['content'] == joined and self.committed[self.occurrence(row)] > self.committed[occ]},
+                                 supersession_witness=__import__(__package__ + '.record_contract', fromlist=['supersession_witness']).supersession_witness(self),
                                  protection=dict(sensitive_patterns_enabled=engine._config.sensitive_patterns_enabled,
                                                  sensitive_patterns=engine._config.sensitive_patterns),
                                  binding_diagnostics=_bindings(engine)))
@@ -371,6 +375,7 @@ def _open(module, directory, monkeypatch, trace=None, fake=False):
                     if hasattr(trace, 'baseline_stages') else observation['summary_sources'])
                 trace.ingests[-1]['summary_sources'] = observation['summary_sources']
                 observation['reload_witness'] = baseline[-1]['reload_witness']
+                observation['supersession_witness'] = baseline[-1]['supersession_witness']
                 listing = trace.ingests[-1] if hasattr(trace, 'baseline_stages') \
                     and CANDIDATE_CONTRACT == 'records-v1' else dict(canonical=baseline[-1]['canonical'], records=[])
                 observation['listing_projection'] = [dict(row) for row in projection(listing)]

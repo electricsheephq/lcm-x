@@ -3,7 +3,7 @@ import json
 import sqlite3
 from types import SimpleNamespace
 
-from .record_contract import expected_record, projection, writer_fault_stages
+from .record_contract import expected_record, writer_fault_stages
 from .session import RECORD_COLUMNS, canonical_rows, queued_rows
 
 
@@ -31,7 +31,7 @@ def withholding(engine):
 
 
 def reference(row):
-    return dict(tool='lcm_expand', args=dict(queued_user_ref=[row['owner_store_id'], row['ordinal']]))
+    return dict(tool='lcm_expand', args=dict(store_id=row['owner_store_id']))
 
 
 def install(engine, entries, patch):
@@ -68,35 +68,42 @@ def install(engine, entries, patch):
                     assert stage in writer_fault_stages(engine._paired_trace.case)
                 else:
                     break
-        witness = engine._paired_trace.baseline_stages[stage - 1]['reload_witness']
+        witness = engine._paired_trace.baseline_stages[stage - 1]['supersession_witness']
         for owner, sid in witness.items():
             conn.execute('UPDATE queued_user_rows SET superseded_by=? WHERE owner_store_id=?', (sid, owner))
         conn.commit()
         return result
     patch.setattr(engine, 'ingest', ingest)
-    def rows():
-        hidden = {(r['owner_store_id'], r['ordinal']) for r in withholding(engine)}
-        return [dict(row, reference=reference(row)) if 'owner_store_id' in row else row
-                for raw in projection(dict(canonical=canonical_rows(engine), records=queued_rows(engine)))
-                if (row := dict(raw)) and (row.get('owner_store_id'), row.get('ordinal')) not in hidden]
+    def record_view(row):
+        return dict(row, kind='record', reference=reference(row))
     def grep(args, **_):
         text = args['query'].strip('"')
         hidden = {(r['owner_store_id'], r['ordinal']) for r in withholding(engine)}
-        hits = [dict(r, reference=reference(r)) for r in map(dict, queued_rows(engine))
+        hits = [record_view(r) for r in map(dict, queued_rows(engine))
                 if r['content'] == text and (r['owner_store_id'], r['ordinal']) not in hidden]
-        return json.dumps(dict(results=hits))
+        canonical = [dict(r) for r in canonical_rows(engine) if text in dict(r)['content']]
+        return json.dumps(dict(results=canonical, queued_user_record_hits=hits))
     def expand(args, **_):
-        key = args['queued_user_ref']
-        return json.dumps(next(dict(r) for r in queued_rows(engine)
-                               if [dict(r)['owner_store_id'], dict(r)['ordinal']] == key))
+        owner = args['store_id']
+        canonical = next(dict(r) for r in canonical_rows(engine) if dict(r)['store_id'] == owner)
+        hidden = {(r['owner_store_id'], r['ordinal']): r['state'] for r in withholding(engine)}
+        records = [dict(record_view(r), state=hidden.get((r['owner_store_id'], r['ordinal']), 'visible'))
+                   for r in map(dict, queued_rows(engine)) if r['owner_store_id'] == owner]
+        return json.dumps(dict(canonical, queued_user_records=records))
     def load(args, **_):
-        start = args.get('record_cursor', 0)
-        data, locators = rows(), withholding(engine)
-        offset = args.get('withheld_cursor', 0)
-        counts = {state: sum(r['state'] == state for r in locators) for state in ('overlap', 'unscanned')}
-        return json.dumps(dict(messages=data[start:start + 1] if start is not None else [],
-            next_cursor={'record_cursor': start + 1} if start is not None and start + 1 < len(data) else None,
-            withheld=dict(counts=counts, locators=locators[offset:offset + 1] if offset is not None else [],
-                next_cursor={'withheld_cursor': offset + 1}
-                if offset is not None and offset + 1 < len(locators) else None)))
+        remaining = [dict(r) for r in canonical_rows(engine) if dict(r)['store_id'] > args.get('after_store_id', 0)]
+        page = remaining[:args.get('limit', 1)]
+        owners = {r['store_id'] for r in page}
+        locators = [dict(owner_store_id=r['owner_store_id'], ordinal=r['ordinal'], state=r['state'],
+                         reference=reference(r)) for r in withholding(engine) if r['owner_store_id'] in owners]
+        hidden = {(r['owner_store_id'], r['ordinal']) for r in locators}
+        visible = [record_view(r) for r in map(dict, queued_rows(engine)) if r['owner_store_id'] in owners
+                   and r['superseded_by'] is None and (r['owner_store_id'], r['ordinal']) not in hidden]
+        reply = dict(messages=page, next_cursor=page[-1]['store_id'] if len(remaining) > len(page) else None)
+        if visible:
+            reply['queued_user_records'] = visible
+        if locators:
+            counts = {state: sum(r['state'] == state for r in locators) for state in ('overlap', 'unscanned')}
+            reply['queued_user_records_withheld'] = dict(counts=counts, locators=locators)
+        return json.dumps(reply)
     return SimpleNamespace(lcm_grep=grep, lcm_expand=expand, lcm_load_session=load)

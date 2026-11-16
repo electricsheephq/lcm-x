@@ -19,7 +19,7 @@ def observation(later, outcome='listed', text='needle', witness=False):
     record = expected_record(entry)
     canonical = sorted([row(1, 'reply'), *later], key=lambda r: r['store_id'])
     reference = dict(tool='lcm_expand', args=dict(queued_user_ref=[1, 0]))
-    # As stored: a witnessed owner's record is superseded by the witness row (fake_records.py sets it).
+    # This synthetic host supplies positive supersession evidence separately from retrieval.
     exact = dict(record, kind='record', superseded_by=2 if witness else None)
     visible = dict(exact, reference=reference, expanded=exact)
     snapshot = dict(canonical=list(map(freeze, canonical)),
@@ -36,7 +36,8 @@ def observation(later, outcome='listed', text='needle', witness=False):
                 withheld=withheld, withheld_counts=[counts], listing_projection=listing,
                 baseline_canonical=snapshot['canonical'],
                 baseline_canonical_rows=[(r['store_id'], r['role'], r['content']) for r in canonical],
-                summary_sources=[], baseline_summary_sources=[], reload_witness={1: 2} if witness else {}), [entry]
+                summary_sources=[], baseline_summary_sources=[], reload_witness={1: 2} if witness else {},
+                supersession_witness={1: 2} if witness else {}), [entry]
 
 
 @pytest.mark.parametrize('count,hit,allowed', [
