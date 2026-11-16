@@ -465,7 +465,36 @@ def test_preview_then_verbatim_revision(tmp_path, record_property):
     record_property("checker", checked.stdout)
     record_property("audit", json.dumps(audit, sort_keys=True))
     assert audit["ok"]
-    assert checked.returncode == 0 and report["pass"]
+    #2777: a recovered text equal to a later verbatim revision is reported out of order; a fix must make this pass while the corrupted-pair tests keep failing.
+    assert checked.returncode == 1 and not report["pass"]
     assert [(r["lost"], r["duplicated"], r["order_kept"], r["unpaired"], r["unverified"], r["unprojected"])
-            for r in report["lineages"]] == [(0, 0, True, 0, 1, 0)]
+            for r in report["lineages"]] == [(0, 0, False, 0, 1, 0)]
+    assert not report["unexpected_sessions"]
+
+
+@pytest.mark.parametrize("preview_first", [True, False], ids=["corrupted-pair", "mirror"])
+def test_corrupted_preview_verbatim_pair(tmp_path, preview_first, record_property):
+    base = tmp_path / "capture"
+    saved = base / "claude/projects/synthetic/plain/tool-results/output.txt"
+    saved.parent.mkdir(parents=True)
+    saved.write_text("A")
+    rows = [json.loads(line) for line in FIXTURES[0].read_text().splitlines()][1:3]
+    rows[-1]["message"]["content"] = rows[-1]["message"]["content"][:1]
+    rows.append(json.loads(json.dumps(rows[-1])))
+    rows[1 if preview_first else 2]["message"]["content"][0]["content"] = (
+        f"<persisted-output>\nFull output saved to: {saved}\n\nPreview:\nsynthetic\n</persisted-output>")
+    rows[2 if preview_first else 1]["message"]["content"][0]["content"] = "A"
+    fixture = tmp_path / "09_corrupted_verbatim.jsonl"
+    fixture.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    home, env, inputs = capture_session(base, fixture)
+    assert read_sql(home, "SELECT store_id,content FROM messages WHERE role='tool' ORDER BY store_id") == [(2, "A"), (3, "A")]
+    assert read_sql(home, "SELECT store_id,related_store_id FROM message_relations WHERE kind='supersedes'") == [(3, 2)]
+    with closing(sqlite3.connect(home / "lcm.db")) as conn, conn:
+        conn.execute("UPDATE messages SET content='garbage' WHERE store_id=?", (3 if preview_first else 2,))
+    checked, report, audit = verdict(home, env, inputs)
+    record_property("checker", checked.stdout)
+    record_property("audit", json.dumps(audit, sort_keys=True))
+    assert checked.returncode == 1 and not report["pass"]
+    assert [(r["lost"], r["duplicated"], r["order_kept"], r["unpaired"], r["unverified"], r["unprojected"])
+            for r in report["lineages"]] == [(0, 0, False, 0, 1, 0)]
     assert not report["unexpected_sessions"]

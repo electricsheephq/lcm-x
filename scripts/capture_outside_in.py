@@ -195,7 +195,6 @@ def check(home, inputs):
                 normalized.append(normalize(row))
         actual = normalized
         ambiguous = Counter(map(normalize, ambiguous.elements()))
-        order_rows, order_wanted = actual[:], wanted
         # Reserve exact content matches before spending any occurrence's preview slot.
         remaining = Counter(r for r in wanted if r not in opaque)
         previews = Counter(r[:2] + r[3:] for r in wanted if r in opaque)
@@ -216,18 +215,13 @@ def check(home, inputs):
         missing = need - have - ambiguous
         lost = sum(missing.values())
         duplicated = sum((have - need).values()) + binding_excess
-        positions, preview_positions = defaultdict(list), defaultdict(list)
-        for i, row in enumerate(order_wanted):
-            if row in opaque:
-                preview_positions[row[:2] + row[3:]].append(i)
-            else:
-                positions[row].append(i)
+        positions = defaultdict(list)
+        for i, row in enumerate(wanted):
+            positions[row].append(i)
         observed = []
-        for row in order_rows:
-            # Counts reserve exact matches; chronology takes the earliest eligible slot.
-            slots = [p for p in (positions[row], preview_positions[row[:2] + row[3:]]) if p]
-            if slots:
-                observed.append(min(slots, key=lambda p: p[0]).pop(0))
+        for row in actual:
+            if positions[row]:
+                observed.append(positions[row].pop(0))
         order = observed == sorted(observed)
         unpaired = sum(not uid or len(calls[uid]) != 1 or len(results[uid]) != 1
                        or calls[uid][0] >= results[uid][0] for uid in calls.keys() | results.keys())
