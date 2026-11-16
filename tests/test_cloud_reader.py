@@ -1350,3 +1350,33 @@ def test_r8_recall_forgotten_session_equals_missing(tmp_path, corpus, clients):
     assert actual['isError'] is False
     body = json.loads(actual['content'][0]['text'])
     assert body['hits'] == [], 'no hit from the forgotten session may survive'
+
+
+@pytest.mark.parametrize('text', [
+    'visible1 marker commit 0123456789abcdef0123456789abcdef01234567',
+    'visible1 marker store_id=3 lcm:3:0-5',
+], ids=['commit_sha', 'id_patterns'])
+def test_r9_recall_forgotten_with_visible_hits(tmp_path, corpus, clients, text):
+    local, sources = corpus
+    store = cc.open_store(sources[0] / 'lcm.db', sources[0])
+    try:
+        transcript = _transcript(tmp_path / 'extra-visible1',
+                                 [_entry('user', 'x1', text, 'visible1')], 'visible1')
+        assert cc.drain(store, cc.Lineage('visible1', None, transcript)) == 'drained'
+        assert cc.to_rollback_journal(store.connection)
+    finally:
+        store.close()
+    assert cc.leave_readable(sources[0] / 'lcm.db')
+    assert (sources[0] / 'lcm.db').stat().st_size < 5_000_000
+    forget(local, 'remote0')
+    copy_generation(sources[0], local, COPIES[0])
+    client = clients(tmp_path, local)
+    ready(client)
+    missing = client.call('lcm_recall', query='marker', session_id=qualified('never-existing'))['result']
+    actual = client.call('lcm_recall', query='marker', session_id=qualified('remote0'))['result']
+    expected = json.loads(json.dumps(missing).replace(qualified('never-existing'), qualified('remote0')))
+    assert actual['isError'] is False, 'visible stored text must not turn forgotten recall into an error'
+    assert actual == expected, 'forgotten recall must equal the missing-session answer with visible hits'
+    hits = json.loads(actual['content'][0]['text'])['hits']
+    assert any(hit.get('session_id') == qualified('visible1') for hit in hits)
+    assert all(hit.get('session_id') != qualified('remote0') for hit in hits)

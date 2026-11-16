@@ -527,9 +527,6 @@ class Merger:
                 body = rebuild(absent, replica.prefix, lambda item: visible_item(item, replica.prefix, replica.child.folder, hidden))
                 for key in target.keys() & body.keys():
                     body[key] = replace_token(body[key], qualify(replica.prefix, missing[key]), qualify(replica.prefix, target[key]))
-                clean = error_body(json.dumps(body), {}, replica.prefix)
-                if 'store' in clean:
-                    return clean
             elif 'error' not in absent and (
                 (name == 'lcm_load_session' and 'anchor_store_id' not in args
                  and type(absent.get('total_messages')) is int and absent['total_messages'] == 0 and absent.get('messages') == [])
