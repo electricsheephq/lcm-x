@@ -7,6 +7,8 @@ Subagents use SESSION/agent:ID. Output contains counts and ids, never transcript
 For a reused agent id's later transcript, use SESSION/agent:/ plus its path below subagents/.
 Externalized references and ingest-payload replacements inside tool-call arguments
 verify source character and UTF-8 byte counts and SHA-256 prefixes.
+A preview whose named file resolves outside its row's own session folder's tool-results/ must equal
+the preview text, because capture keeps such a preview (a forked session's copy of its parent's preview).
 Raw ledger preservation and payload-file recovery are outside this row checker.
 """
 from __future__ import annotations
@@ -105,7 +107,7 @@ def expected_rows(inputs):
                         sources[session].append((json.dumps(row[2], ensure_ascii=False, sort_keys=True)
                                                  if structured else row[2], structured))
                         if row[1] == "tool" and isinstance(row[2], str) and row[2].lstrip().startswith("<persisted-output>"):
-                            previews[session, len(expected[session]) - 1] = entry.get("toolUseResult")
+                            previews[session, len(expected[session]) - 1] = entry.get("toolUseResult"), path
                     seen[session].add(identity)
     return expected, unprojected, previews, sources
 
@@ -117,6 +119,37 @@ REFERENCE = re.compile(
     r"ref=\d{8}_\d{6}_[^\]\r\n]+_([0-9a-f]{12})_[0-9a-f]+\.json\]")
 INGEST = re.compile(r"\[Externalized LCM ingest payload: [^\]\r\n]*\]")
 MAX_SAVED_OUTPUT_BYTES = 64 * 1024 * 1024
+
+
+SAVED_TO = re.compile(r"Full output saved to:\s*(?P<path>[^\r\n]+)")
+
+
+def own_session_folder(transcript):
+    """The row's own session folder, found as capture's session_dir() finds it: <session>/ beside <session>.jsonl,
+    or, for a subagent transcript, the folder holding its subagents/ (up to four folders below it). A set-aside copy
+    belongs to the same session as its replacement."""
+    depth = 5 if transcript.name.startswith("agent-") else 1
+    folder = next((up for up in list(transcript.parents)[:depth] if up.name == "subagents"), None)
+    return folder.parent if folder is not None else transcript.parent / transcript.name.split(".", 1)[0]
+
+
+def outside_own_results(text, metadata, transcript):
+    """Whether the file this preview names resolves outside the row's own session folder's tool-results/. Capture
+    keeps such a preview as the row's text, because its saved-output recovery reads only that folder
+    (claude_code_capture._recover_saved_output), so the stored row must equal the preview: a forked session's copy
+    of its parent's preview names the parent's file. This is a strict subset of capture's outside-session test.
+    A path inside that folder stays with saved_preview() even where capture keeps the preview (the folder missing
+    or symlinked, or the file a symlink), so a missing saved output stays unverified (#2611)."""
+    match = SAVED_TO.search(text)
+    saved = metadata.get("persistedOutputPath") if isinstance(metadata, Mapping) else None
+    named = (match["path"].strip() if match else None) or (saved if isinstance(saved, str) and saved else None)
+    if not named:
+        return False
+    results = own_session_folder(transcript) / "tool-results"
+    try:
+        return not Path(named).expanduser().resolve().is_relative_to(results.resolve())
+    except (OSError, RuntimeError, ValueError):
+        return False
 
 
 def saved_preview(text, transcripts, metadata):
@@ -389,12 +422,16 @@ def check(home, inputs):
         for i, row in enumerate(wanted):
             source, structured = transcript_sources[session][i]
             if previews and (session, i) in previews:
-                recovered, reason = saved_preview(source, transcript_paths[session], previews[session, i])
-                if reason:
-                    reasons[i] = reason
+                metadata, own = previews[session, i]
+                if outside_own_results(source, metadata, own):
+                    pass  # capture stored the preview itself, so the stored row must equal it exactly
                 else:
-                    source = recovered
-                    wanted[i] = row[:2] + (canonical(source),) + row[3:]
+                    recovered, reason = saved_preview(source, transcript_paths[session], metadata)
+                    if reason:
+                        reasons[i] = reason
+                    else:
+                        source = recovered
+                        wanted[i] = row[:2] + (canonical(source),) + row[3:]
             sources.append((source, structured))
         slots = defaultdict(list)
         for i, row in enumerate(wanted):

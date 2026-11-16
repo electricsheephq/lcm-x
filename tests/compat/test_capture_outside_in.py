@@ -603,6 +603,197 @@ def test_verified_preview(tmp_path, corrupt, record_property):
     assert row["unverified_reasons"] == [{"uid": "r1", "reason": "saved_output_missing"}]
 
 
+def preview_rows(saved, session="plain", named="marker"):
+    """Two fixture rows, the second a tool result whose content is a preview naming `saved` in its marker line, or
+    only in the entry's toolUseResult.persistedOutputPath."""
+    rows = [json.loads(line) for line in FIXTURES[0].read_text().splitlines()][1:3]
+    rows[1]["message"]["content"] = rows[1]["message"]["content"][:1]
+    marker = f"Full output saved to: {saved}\n\n" if named == "marker" else ""
+    preview = f"<persisted-output>\n{marker}Preview:\nfull saved\n</persisted-output>"
+    rows[1]["message"]["content"][0]["content"] = preview
+    if named != "marker":
+        rows[1]["toolUseResult"] = {"persistedOutputPath": saved}
+    return [dict(row, sessionId=session) for row in rows], preview
+
+
+def counts(report):
+    return {r["lineage"].split(":", 1)[1]: (r["lost"], r["duplicated"], r["unverified"]) for r in report["lineages"]}
+
+
+@pytest.mark.parametrize("named", ["marker", "metadata"])
+@pytest.mark.parametrize("own_results", ["absent", "present"])
+@pytest.mark.parametrize("corrupt", [False, True], ids=["healthy", "corrupted"])
+def test_fork_copy_of_parent_preview(tmp_path, named, own_results, corrupt, record_property):
+    """A fork's copy of its parent's preview names the parent's saved file, outside the fork's own session folder.
+    Capture keeps that preview as the fork's row, so the check compares the row with the preview exactly."""
+    base = tmp_path / "capture"
+    projects = base / "claude/projects/synthetic"
+    saved = projects / "plain/tool-results/output.txt"
+    saved.parent.mkdir(parents=True)
+    saved.write_text("full saved output\ncafé\n")
+    if own_results == "present":  # the fork saved an output of its own, so its folder has tool-results/
+        (projects / "fork-plain/tool-results").mkdir(parents=True)
+    rows, preview = preview_rows(str(saved), named=named)
+    fork, _ = preview_rows(str(saved), "fork-plain", named)
+    home, env, inputs = capture_session(base, write_entries(tmp_path / "01_fork_preview.jsonl", rows + fork))
+    stored = dict(read_sql(home, "SELECT session_id, content FROM messages WHERE role='tool'"))
+    assert stored == {"plain": "full saved output\ncafé\n", "fork-plain": preview}
+    if corrupt:
+        with closing(sqlite3.connect(home / "lcm.db")) as conn, conn:
+            conn.execute("UPDATE messages SET content=? WHERE role='tool' AND session_id='fork-plain'",
+                         (preview.replace("full saved\n", "full saveD\n"),))
+    code, report = check_only(home, env, inputs)
+    record_property("checker", json.dumps(report))
+    assert (code, report["pass"]) == (int(corrupt), not corrupt)
+    assert counts(report) == {"plain": (0, 0, 0), "fork-plain": (int(corrupt), int(corrupt), 0)}
+
+
+@pytest.mark.parametrize("shape", ["file_linked_elsewhere", "quoted_marker"])
+@pytest.mark.parametrize("corrupt", [False, True], ids=["healthy", "corrupted"])
+def test_preview_named_outside_own_folder(tmp_path, shape, corrupt, record_property):
+    """Other names that resolve outside the row's own tool-results/: a saved file linked to a file elsewhere, and a
+    quoted marker (capture reads the path as written, quotes included). Capture keeps the preview, so the row must
+    equal it exactly."""
+    base = tmp_path / "capture"
+    own = base / "claude/projects/synthetic/plain"
+    (own / "tool-results").mkdir(parents=True)
+    saved = own / "tool-results/output.txt"
+    if shape == "file_linked_elsewhere":
+        (tmp_path / "elsewhere").mkdir()
+        (tmp_path / "elsewhere/real.txt").write_text("full saved output\n")
+        saved.symlink_to(tmp_path / "elsewhere/real.txt")
+        rows, preview = preview_rows(saved)
+    else:
+        saved.write_text("full saved output\n")
+        rows, preview = preview_rows(f'"{saved}"')
+    home, env, inputs = capture_session(base, write_entries(tmp_path / "01_elsewhere.jsonl", rows))
+    assert read_sql(home, "SELECT content FROM messages WHERE role='tool'") == [(preview,)]
+    if corrupt:
+        with closing(sqlite3.connect(home / "lcm.db")) as conn, conn:
+            conn.execute("UPDATE messages SET content='corrupted' WHERE role='tool'")
+    code, report = check_only(home, env, inputs)
+    record_property("checker", json.dumps(report))
+    assert (code, report["pass"], counts(report)) == (int(corrupt), not corrupt, {"plain": (int(corrupt),) * 2 + (0,)})
+
+
+@pytest.mark.parametrize("shape,reason", [
+    ("no_results_folder", "saved_output_missing"), ("results_is_a_file", "saved_output_missing"),
+    ("linked_session_folder", "saved_output_outside_session"), ("linked_results_folder", "saved_output_outside_session"),
+    ("file_linked_inside", "saved_output_outside_session")])
+def test_preview_inside_own_folder_capture_kept_stays_unverified(tmp_path, shape, reason, record_property):
+    """Capture also keeps the preview when a path inside the row's own folder cannot be read safely: tool-results
+    missing or not a folder, the session folder or tool-results symlinked, or the saved file a symlink. The check
+    covers only names outside that folder, so these stay unverified with their reason, as before."""
+    base = tmp_path / "capture"
+    projects = base / "claude/projects/synthetic"
+    own, real = projects / "plain", tmp_path / "elsewhere"
+    if shape == "no_results_folder":
+        own.mkdir(parents=True)
+    elif shape == "results_is_a_file":
+        own.mkdir(parents=True)
+        (own / "tool-results").write_text("not a folder\n")
+    elif shape == "linked_session_folder":
+        (real / "tool-results").mkdir(parents=True)
+        (real / "tool-results/output.txt").write_text("full saved output\n")
+        projects.mkdir(parents=True)
+        own.symlink_to(real, target_is_directory=True)
+    elif shape == "linked_results_folder":
+        real.mkdir(parents=True)
+        (real / "output.txt").write_text("full saved output\n")
+        own.mkdir(parents=True)
+        (own / "tool-results").symlink_to(real, target_is_directory=True)
+    else:  # a link inside the session's own tool-results to a real file beside it
+        (own / "tool-results").mkdir(parents=True)
+        (own / "tool-results/real.txt").write_text("full saved output\n")
+        (own / "tool-results/output.txt").symlink_to(own / "tool-results/real.txt")
+    rows, preview = preview_rows(own / "tool-results/output.txt")
+    home, env, inputs = capture_session(base, write_entries(tmp_path / "01_kept.jsonl", rows))
+    assert read_sql(home, "SELECT content FROM messages WHERE role='tool'") == [(preview,)]
+    code, report = check_only(home, env, inputs)
+    record_property("checker", json.dumps(report))
+    assert (code, report["pass"], counts(report)) == (0, True, {"plain": (0, 0, 1)})
+    assert report["lineages"][0]["unverified_reasons"] == [{"uid": "r1", "reason": reason}]
+
+
+@pytest.mark.parametrize("named", ["unknown_user", "not_text", "blank_marker"])
+def test_preview_path_error_stays_unverified(tmp_path, named, record_property):
+    """A path capture cannot use (an unknown ~user, a persistedOutputPath that is not text, or a marker that names
+    nothing) keeps the preview, but capture reports it as missing or unnamed, not outside the session: it stays
+    unverified."""
+    base = tmp_path / "capture"
+    (base / "claude/projects/synthetic/plain/tool-results").mkdir(parents=True)
+    rows, preview = (preview_rows("~lcmx-no-such-user/output.txt") if named == "unknown_user"
+                     else preview_rows(7, named="metadata"))
+    if named == "blank_marker":  # the marker's path is only spaces, with nothing after it
+        preview = "<persisted-output>\nFull output saved to:   "
+        rows[1]["message"]["content"][0]["content"] = preview
+        del rows[1]["toolUseResult"]
+    home, env, inputs = capture_session(base, write_entries(tmp_path / "01_user.jsonl", rows))
+    assert read_sql(home, "SELECT content FROM messages WHERE role='tool'") == [(preview,)]
+    code, report = check_only(home, env, inputs)
+    record_property("checker", json.dumps(report))
+    assert (code, report["pass"], counts(report)) == (0, True, {"plain": (0, 0, 1)})
+    reason = "saved_output_unnamed" if named == "blank_marker" else "saved_output_unreadable"
+    assert report["lineages"][0]["unverified_reasons"] == [{"uid": "r1", "reason": reason}]
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a folder without permissions")
+def test_preview_unsearchable_session_folder(tmp_path, record_property):
+    """A session folder capture cannot search keeps the preview, but the named path lies inside the row's own
+    folder, so the row stays unverified with its reason, as before."""
+    base = tmp_path / "capture"
+    own = base / "claude/projects/synthetic/plain"
+    (own / "tool-results").mkdir(parents=True)
+    own.chmod(0)
+    try:
+        rows, preview = preview_rows(own / "tool-results/output.txt")
+        home, env, inputs = capture_session(base, write_entries(tmp_path / "01_closed.jsonl", rows))
+        assert read_sql(home, "SELECT content FROM messages WHERE role='tool'") == [(preview,)]
+        code, report = check_only(home, env, inputs)
+        record_property("checker", json.dumps(report))
+        assert (code, report["pass"], counts(report)) == (0, True, {"plain": (0, 0, 1)})
+        reasons = report["lineages"][0]["unverified_reasons"]  # the folder check raises on Python 3.11-3.13
+        assert reasons in ([{"uid": "r1", "reason": "saved_output_unreadable"}],
+                           [{"uid": "r1", "reason": "saved_output_missing"}])
+    finally:
+        own.chmod(0o755)
+
+
+@pytest.mark.parametrize("shape", ["subagent", "workflow_subagent", "set_aside_copy"])
+def test_preview_own_folder(tmp_path, shape, record_property):
+    """The row's own session folder is found as capture finds it: a subagent's saved output is in its session's
+    tool-results/, and a set-aside copy belongs to the same session as its replacement."""
+    base = tmp_path / "capture"
+    projects = base / "claude/projects/synthetic"
+    saved = projects / "plain/tool-results/output.txt"
+    saved.parent.mkdir(parents=True)
+    saved.write_text("full saved output\n")
+    rows, preview = preview_rows(saved)
+    head = [json.loads(line) for line in FIXTURES[0].read_text().splitlines()][:1]
+    agent = [dict(row, uuid="s" + row["uuid"], agentId="x") for row in rows]
+    if shape == "subagent":
+        rows = head + agent
+    home, env, inputs = capture_session(base, write_entries(
+        tmp_path / "01_own.jsonl", head if shape == "workflow_subagent" else rows))
+    if shape == "workflow_subagent":  # a workflow agent sits folders below its session's subagents/ (#2562)
+        path = projects / "plain/subagents/workflows/run-1/agent-x.jsonl"
+        path.parent.mkdir(parents=True)
+        write_entries(path, agent)
+        run(CAPTURE, "worker", "--home", home, env=env)
+        inputs = [*inputs, ("plain/agent:x", path)]
+    stored = [content for (content,) in read_sql(home, "SELECT content FROM messages WHERE role='tool'")]
+    assert stored == ["full saved output\n"] and preview not in stored  # recovered from the row's own session folder
+    if shape == "set_aside_copy":
+        live = dict(inputs)["plain"]
+        copy = live.with_name("plain.superseded-1.jsonl")
+        copy.write_bytes(live.read_bytes())
+        inputs = [("plain", copy), ("plain", live)]
+    code, report = check_only(home, env, inputs)
+    record_property("checker", json.dumps(report))
+    assert (code, report["pass"]) == (0, True)
+    assert all(row == (0, 0, 0) for row in counts(report).values())
+
+
 @pytest.mark.parametrize("shape", ["base64", "image", "tool-media", "wrapped", "multiple"])
 @pytest.mark.parametrize("corrupt", [False, True], ids=["healthy", "corrupted"])
 def test_inline_payload(tmp_path, shape, corrupt, record_property):

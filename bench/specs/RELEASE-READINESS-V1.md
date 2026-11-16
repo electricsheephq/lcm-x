@@ -70,9 +70,11 @@ never wait for it.
      0 unpaired. The session's record carries the checker's `unverified` and `unprojected` counts
      and each `unverified_reasons` entry. Two more cases:
      - **Unverified rows.** The checker verifies each persisted-output preview against its saved
-       tool-results file (#2777). When it cannot read that file as text (unnamed, outside the
-       session, missing, not a file, over the product's 64 MiB cap, binary or unreadable), it
-       accepts one stored row for that preview without checking its content (its `unverified`
+       tool-results file (#2777). A preview whose named path resolves outside its row's own
+       session folder's `tool-results/` is checked as the preview text itself, because capture
+       keeps such a preview (a forked session's copy of its parent's preview; 2026-11-16). When
+       it cannot read a file inside that folder as text (unnamed, reached through a symlink,
+       missing, not a file, over the product's 64 MiB cap, binary or unreadable), it accepts one stored row for that preview without checking its content (its `unverified`
        count, with each reason in `unverified_reasons`), and the audit checks only one row per
        saved file, so a corrupted preview-backed row can pass both.
        A session with any unverified row cannot pass this gate, whatever its reason: the checker's
