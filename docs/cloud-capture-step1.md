@@ -361,7 +361,9 @@ row 2D below measures its real snapshot path before the bars are claimed.
     to exactly n records: a 4-byte unsigned big-endian page index i, then P bytes replacing file bytes i·P to
     (i+1)·P. Indexes rise strictly within an object and across the objects of one delta entry;
   - at most ⌊(2^25 - 2^16) / (4 + P)⌋ records per object (8,168 at 4 KiB), allowing for zlib's growth on
-    incompressible pages. `MAX_OBJECT_BYTES` is 2^25 (32 MiB); a larger delta uses several objects;
+    incompressible pages. `MAX_OBJECT_BYTES` is 2^25 (32 MiB); a larger delta uses several objects. A reader should refuse, before
+    fetching, a part or object reference whose `bytes` exceed it, or an object reference whose `records` exceed
+    the limit above (`bad_database_block`); the merged codec checks the length only after the fetch (#2800);
   - key: `<prefix>/<copy id>/deltas/<sha256 of the object>.<token>`, with 3.1's content-and-attempt naming.
 - Readers refuse bad object sha256 (`object_sha256`), byte length (`object_bytes`), magic (`delta_magic`), page
   size (`delta_page_size`), manifest/header count (`delta_count`), decompressed length or stream (`delta_stream`),
@@ -369,7 +371,10 @@ row 2D below measures its real snapshot path before the bars are claimed.
   `object_missing`. They also refuse an index at or past the entry's `file_pages` (`delta_index`), a growing
   entry that leaves any appended page unwritten (`delta_gap`), and generations not exactly
   `base.generation + 1` through the manifest's generation (`chain_generation`); malformed `database` fields are
-  `bad_database_block`. When one malformed input trips two checks, an implementation may report either code
+  `bad_database_block`. A part or object key that fails 3.1's key grammar is `bad_name`. When a replica refresh
+  patches the generation it holds (4.1), a held generation outside the chain, or a held file whose length is not that
+  generation's, is `start_mismatch`; a full rebuild whose output file already exists is `output_exists`. When one
+  malformed input trips two checks, an implementation may report either code
   (a growing entry that skips a page then holds a corrupt object: `delta_gap` or `delta_stream`; a missing or
   non-integer manifest `generation`: `chain_generation` or `bad_database_block`), and every consumer treats any
   refusal the same way.
@@ -985,9 +990,9 @@ Monday to Friday and prices no holiday. It is derived, not chosen:
   - Six rows on two hosts that are busy until 11-18 and 11-19 is the weakest number in this plan.
 - Row 2D runs once lane 2's real snapshot path exists, after lane 2 merges (3.7.5); it reports manifest bytes
   and local writes as well as the upload bar.
-- Lane 2d was dispatched when the design was decided, 11-16; four working days and one review round put its
-  merge about 11-24. Lane 2 starts 11-23 against its interface and merges after 2d, about three working days
-  later than without delta work.
+- Lane 2d was dispatched when the design was decided, 11-16, and merged the same day (#2797), so its four
+  working days are spent. Lanes 2, 4 and 7a also started on 11-16, a week before the weekly plan below. The
+  dates in this section are the plan as decided on 11-16 and are not re-dated here.
   Lanes 4 and 7a start with 2; 7a is unaffected. Lanes 3, 5 and 6 follow 2; 7b follows 7a.
 - Week of 11-23: lanes 2, 4, 7a. Week of 11-30: lanes 3, 5, 6, 7b. Week of 12-07: lanes 8 and 9.
 - Week of 12-14: candidate and gate, including the unit's 24-hour lane.
