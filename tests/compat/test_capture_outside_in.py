@@ -702,6 +702,32 @@ def test_preview_copy_needs_a_verified_owner(tmp_path, case, record_property):
         assert (code, counts(report)["plain"], preview_copies(report)["plain"]) == (0, (0, 0, 0), 0)
 
 
+@pytest.mark.parametrize("spelling", ["fork_names_alias", "parent_names_alias", "supplied_through_alias"])
+def test_preview_copy_compares_resolved_paths(tmp_path, spelling, record_property):
+    """Paths are compared resolved on both sides. A copy whose marker names its parent's file through a linked
+    folder, or a parent whose marker does, is still that file's copy; and transcripts supplied through a linked folder
+    keep a row's own saved output inside its own folder, so it is checked against the file, never as a copy."""
+    base = tmp_path / "capture"
+    projects = base / "claude/projects/synthetic"
+    saved = projects / "plain/tool-results/output.txt"
+    saved.parent.mkdir(parents=True)
+    saved.write_text("full saved output\n")
+    alias = tmp_path / "alias"
+    alias.symlink_to(projects, target_is_directory=True)
+    aliased = alias / "plain/tool-results/output.txt"
+    rows, _ = preview_rows(aliased if spelling == "parent_names_alias" else saved)
+    fork, fork_preview = preview_rows(aliased if spelling == "fork_names_alias" else saved, "fork-plain")
+    home, env, inputs = capture_session(base, write_entries(tmp_path / "01_resolved.jsonl", rows + fork))
+    stored = dict(read_sql(home, "SELECT session_id, content FROM messages WHERE role='tool'"))
+    assert stored == {"plain": "full saved output\n", "fork-plain": fork_preview}
+    if spelling == "supplied_through_alias":
+        inputs = [(session, alias / path.relative_to(projects)) for session, path in inputs]
+    code, report = check_only(home, env, inputs)
+    record_property("checker", json.dumps(report))
+    assert (code, report["pass"], counts(report)) == (0, True, {"plain": (0, 0, 0), "fork-plain": (0, 0, 0)})
+    assert preview_copies(report) == {"plain": 0, "fork-plain": 1}
+
+
 @pytest.mark.parametrize("shape", ["file_linked_elsewhere", "quoted_marker"])
 @pytest.mark.parametrize("corrupt", [False, True], ids=["healthy", "corrupted"])
 def test_preview_named_outside_own_folder(tmp_path, shape, corrupt, record_property):
