@@ -3,11 +3,12 @@
 
 Hosted copy format 1. Standard library only; this file shares no code with the tools that make or restore a copy.
 Every database is opened mode=ro; the copy and a rebuilt file also immutable=1, so the bytes read are the bytes
-hashed. With --objects and --rebuild-dir it rebuilds the generation from its parts and delta objects with its own
-decoder, inside that folder only; otherwise it writes no file of its own (SQLite may still touch the -shm file of a
-live WAL origin during its mode=ro read). The copy and a rebuilt file must be in rollback-journal mode (header bytes
-18-19). One JSON report on stdout: counts, keys, ids, names and codes, never stored text or page bytes. Exit 0 pass,
-1 fail, 2 refused input.
+hashed. --origin must be the origin store as of the copy's cut, for example a copy saved at the cut. A live store is
+not a supported input: rows written after the cut fail `tables` with only_in_origin. With --objects and --rebuild-dir
+it rebuilds the generation from its parts and delta objects with its own decoder, inside that folder only; otherwise
+it writes no file of its own (for an origin in WAL mode, SQLite may still touch its -shm file during the mode=ro
+read). The copy and a rebuilt file must be in rollback-journal mode (header bytes 18-19). One JSON report on stdout:
+counts, keys, ids, names and codes, never stored text or page bytes. Exit 0 pass, 1 fail, 2 refused input.
 """
 from __future__ import annotations
 
@@ -492,6 +493,8 @@ def payload_files(manifest, refs, copy):
             failures.append({"code": "payload_missing", "name": name})
         elif not (is_int(entry.get("bytes")) and file_hash(path) == (entry["sha256"], entry["bytes"])):
             failures.append({"code": "payload_differs", "name": name})
+        if OBJECT_KEY["payloads"].fullmatch(entry["key"]).group(1) != entry["sha256"]:  # F2: the key names the file's digest
+            failures.append({"code": "payload_key_sha256", "name": name})
     failures += [{"code": "payload_unlisted", "name": n} for n in sorted(refs[0].keys() - listed)]
     failures += [{"code": "payload_unreferenced", "name": n} for n in sorted(listed - refs[0].keys())]
     return failures, {"listed": len(listed), "resolved": len(refs[0])}

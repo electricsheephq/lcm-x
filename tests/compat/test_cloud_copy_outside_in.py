@@ -437,6 +437,27 @@ def test_payload_removed(chain, tmp_path):
     assert {"code": "payload_only_in_origin", "name": name} in report["checks"]["payloads"]["failures"]
 
 
+@pytest.mark.parametrize("case", ["other_key", "keys_swapped"])
+def test_payload_key_sha256(chain, tmp_path, case):
+    """A payload entry's key names its file's digest (F2, F5): a key that names other content fails payload_files."""
+    c = clone(chain, tmp_path)
+    assert check(c, "manifest", objects=False)[0] == 0
+    entries = json.loads(c.manifest.read_text(encoding="utf-8"))["payloads"]
+    assert len(entries) >= 2 and entries[0]["sha256"] != entries[1]["sha256"]
+    if case == "other_key":
+        edit(c, lambda m: m["payloads"][0].update(key=f"payloads/{sha(b'other content')}.{99:032x}"))
+        names = [entries[0]["name"]]
+    else:
+        edit(c, lambda m: m["payloads"][0].update(key=entries[1]["key"]) or m["payloads"][1].update(key=entries[0]["key"]))
+        names = [entries[0]["name"], entries[1]["name"]]
+    for mode, objects in itertools.product(("origin", "manifest"), (False, True)):
+        code, report = check(c, mode, objects)
+        failing = [n for n, done in report["checks"].items() if done["ran"] and not done["pass"]]
+        assert (code, failing) == (1, ["payload_files"]), (mode, objects, report)
+        assert report["checks"]["payload_files"]["failures"] == [
+            {"code": "payload_key_sha256", "name": n} for n in names], (mode, objects, report)
+
+
 def ledger_row(database):
     return query(database, "SELECT event_id, lineage_key, generation, position, raw FROM capture_events "
                            "WHERE source_kind = 'line' AND raw IS NOT NULL ORDER BY event_id LIMIT 1")[0]
