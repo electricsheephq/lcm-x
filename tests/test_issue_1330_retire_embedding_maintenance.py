@@ -599,6 +599,8 @@ def test_session_end_then_shutdown_waits_before_closing_stores(make_engine, sche
             active.clear()
 
     monkeypatch.setattr(engine_mod, "run_incremental_embedding_pass", run)
+    # The test releases the pass; a loaded runner must not expire the retire wait first.
+    monkeypatch.setattr(engine_mod, "_EMBEDDING_RETIRE_TIMEOUT_S", 30.0)
     engine = make_engine()
     active_at_close = []
     close = engine._store.close
@@ -613,7 +615,7 @@ def test_session_end_then_shutdown_waits_before_closing_stores(make_engine, sche
         assert started.wait(5)
         before = time.monotonic()
         engine.on_session_end("session", [])
-        # The pass is held, so session end returned without waiting for it (the retire wait is 2.0 s).
+        # The pass is held, so session end returned without waiting for it (a wait would last 30 s).
         assert time.monotonic() - before < 1.5
         assert active.is_set()
         threading.Timer(0.3, release.set).start()
