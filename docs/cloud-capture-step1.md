@@ -361,9 +361,10 @@ row 2D below measures its real snapshot path before the bars are claimed.
     to exactly n records: a 4-byte unsigned big-endian page index i, then P bytes replacing file bytes i·P to
     (i+1)·P. Indexes rise strictly within an object and across the objects of one delta entry;
   - at most ⌊(2^25 - 2^16) / (4 + P)⌋ records per object (8,168 at 4 KiB), allowing for zlib's growth on
-    incompressible pages. `MAX_OBJECT_BYTES` is 2^25 (32 MiB); a larger delta uses several objects. A reader should refuse, before
-    fetching, a part or object reference whose `bytes` exceed it, or an object reference whose `records` exceed
-    the limit above (`bad_database_block`); the merged codec checks the length only after the fetch (#2800);
+    incompressible pages. `MAX_OBJECT_BYTES` is 2^25 (32 MiB); a larger delta uses several objects. In format 1 a reader does
+    not refuse on these two caps (Appendix K, F8 and F9). #2800 proposes that readers refuse, before fetching, a
+    part or object reference whose `bytes` exceed 2^25, or an object reference whose `records` exceed the limit
+    above (`bad_database_block`); Appendix K changes with it if it lands;
   - key: `<prefix>/<copy id>/deltas/<sha256 of the object>.<token>`, with 3.1's content-and-attempt naming.
 - Readers refuse bad object sha256 (`object_sha256`), byte length (`object_bytes`), magic (`delta_magic`), page
   size (`delta_page_size`), manifest/header count (`delta_count`), decompressed length or stream (`delta_stream`),
@@ -1365,10 +1366,14 @@ F7 to F11 are also the agreement of the page-delta codec (`cloud_delta.py`). The
 different authors who never read each other's work, so a sentence here that can be read two ways is a defect in
 this text: report it rather than pick a reading. Code comments cite these labels.
 
-Where the merged code differs from this text, the difference is tracked:
-- the codec checks F9's size limits after it fetches an object, not in F10's shape step (#2800);
+Known differences, each tracked:
 - the codec has refusal codes this text does not list, `start_mismatch` and `output_exists`; section 3.7 lists
-  them.
+  them;
+- this text has no reader refuse on F8's writer limits (F8, F9), and neither merged reader does. #2800 proposes
+  that the codec refuse, before fetching, a part or object reference over them (`bad_database_block`). If it
+  lands, F8 to F10 change with it, so that every reader refuses the same references;
+- F12 does not yet cover `--new-copy`: section 3.7.3 gives inherited entries that copy's first base generation.
+  F12 gains the rule with the lane that builds `--new-copy` (#2801).
 
 **F1. Names.** Hex digits are lower case. A payload name keeps its case.
 - copy id: a UUID with dashes, `[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`. Its 32-hex form is
