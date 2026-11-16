@@ -173,7 +173,11 @@ def test_protection_refusals(tmp_path, text, reason):
         assert e._queued_counts[reason] == 1
 
 
-def test_ignore_pattern_drop(tmp_path):
+def test_ignore_pattern_drop(tmp_path, monkeypatch):
+    from hermes_lcm import message_patterns
+    from tests.engine_helpers import _FakeTimeoutRegexEngine
+    # Patterns need the optional regex engine, which CI does not install; main's tests use this stand-in.
+    monkeypatch.setattr(message_patterns, '_regex_engine', _FakeTimeoutRegexEngine)
     with engine_context(tmp_path, window=128000, conversation_id='conv', embeddings_enabled=False,
                         ignore_message_patterns=['lost']) as e:
         folded(e)

@@ -6261,9 +6261,10 @@ def lcm_doctor(args: Dict[str, Any], **kwargs) -> str:
         "status": "warn" if inactive_process else "pass",
         "detail": inactive_process or "no live inactive process",
     })
+    from .queued_user_rows import decide as decide_queued_rows
     from .store import records_doctor
     try:
-        records_detail = records_doctor(engine._store)
+        records_detail = records_doctor(engine._store, decide=decide_queued_rows)
         if getattr(engine, '_queued_counts', None):
             records_detail += "; capture/drain counts=" + str(dict(engine._queued_counts))
     except (OSError, sqlite3.Error, ValueError) as exc:

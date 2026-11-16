@@ -766,7 +766,8 @@ def read_records(cut, table, session_id=None):
     return attached, unattached
 
 
-def records_doctor(db_path):
+def records_doctor(db_path, decide=None):
+    # The caller passes queued_user_rows.decide: store.py must not import it, since it reaches command.py (#2138).
     with records_read_cut(db_path) as cut:
         if cut.refused_format is not None:
             return (f"records: refused format {cut.refused_format}; newer than this version reads; "
@@ -777,8 +778,7 @@ def records_doctor(db_path):
         for table in _RECORDS_TABLES:
             rows, unattached = read_records(cut, table)
             counts.append(f"{table} attached={len(rows)} unattached={unattached}")
-            if table == 'queued_user_rows':
-                from .queued_user_rows import decide
+            if table == 'queued_user_rows' and decide is not None:
                 states = Counter()
                 for session in {row['session_id'] for row in rows}:
                     _, decided = decide(cut, session)
