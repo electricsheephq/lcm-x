@@ -22,6 +22,13 @@ class DeltaRefused(Exception):
         self.code, self.detail = code, detail
         super().__init__(code, detail)
 
+    def __reduce__(self):
+        return _rebuild_refused, (self.code, self.detail)
+
+
+def _rebuild_refused(code, detail):
+    return DeltaRefused(code, **detail)
+
 
 class PageList(NamedTuple):
     page_size: int
@@ -99,11 +106,15 @@ def save_pending_list(pages_dir, copy_id, digests):
     folder = Path(pages_dir)
     folder.mkdir(mode=0o700, parents=True, exist_ok=True)
     temp = folder / f"{copy_id}.{os.urandom(8).hex()}.tmp"
-    with os.fdopen(os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as handle:
-        handle.write(digests)
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(temp, folder / f"{copy_id}.pending")
+    try:
+        with os.fdopen(os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as handle:
+            handle.write(digests)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp, folder / f"{copy_id}.pending")
+    except BaseException:
+        temp.unlink(missing_ok=True)
+        raise
 
 
 def promote_pending_list(pages_dir, copy_id):
@@ -264,7 +275,12 @@ def _fetch(ref, fetch):
 
 
 def rebuild(path, database, generation, fetch, *, have=None):
-    """Rebuild a checked copy. After any refusal the caller must discard the file."""
+    """Rebuild a checked copy. After any refusal the caller must discard the file.
+
+    With have, path must be a scratch copy of the held generation (the restore
+    lane clones it); it is modified in place and must be discarded after a
+    refusal or an error.
+    """
     _shape(database, generation)
     base, entries, p = database["base"], database["deltas"], database["page_size"]
     if have is not None and (type(have) is not int or not 0 <= have <= len(entries)):

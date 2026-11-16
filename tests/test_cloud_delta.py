@@ -1,9 +1,10 @@
 """Packet 2d: literal vectors, independent objects and small synthetic stores."""
 import ast
-from copy import deepcopy
+from copy import copy, deepcopy
 import hashlib
 import json
 import os
+import pickle
 from pathlib import Path
 import random
 import sqlite3
@@ -585,6 +586,18 @@ def test_no_match_is_none(tmp_path, monkeypatch):
     assert cd.load_head_list(unreadable, COPY, A_LIST, 3) == digests
 
 
+@pytest.mark.parametrize("reconstruct", [lambda e: pickle.loads(pickle.dumps(e)), copy], ids=["pickle", "copy"])
+def test_delta_refused_survives_reconstruction(reconstruct):
+    original = cd.DeltaRefused("object_sha256", key="k")
+    assert original.args == ("object_sha256", {"key": "k"})
+    assert str(original) == "('object_sha256', {'key': 'k'})"
+    rebuilt = reconstruct(original)
+    assert rebuilt.code == "object_sha256"
+    assert rebuilt.detail == {"key": "k"}
+    assert rebuilt.args == original.args
+    assert str(rebuilt) == str(original)
+
+
 def test_the_two_crashes(tmp_path, monkeypatch):
     folder = tmp_path / "pages"
     folder.mkdir()
@@ -602,6 +615,7 @@ def test_the_two_crashes(tmp_path, monkeypatch):
     monkeypatch.setattr(cd.os, "replace", failed_replace)
     with pytest.raises(OSError):
         cd.save_pending_list(folder, COPY, info(C, 65536).digests)
+    assert list(folder.glob("*.tmp")) == []
     assert pending.read_bytes() == info(A).digests
     assert last.read_bytes() == info(B).digests
 
