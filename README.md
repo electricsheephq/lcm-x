@@ -733,6 +733,21 @@ assistant even when doing so exceeds a configured bound.
 
 ### Filtering and storage settings
 
+Recall experiments can opt into a different recency floor or stemmed full-text
+grep through `config.yaml` (the corresponding environment variables take precedence):
+
+```yaml
+lcm:
+  recall_recency_floor: 0.5  # LCM_RECALL_RECENCY_FLOOR; 0..1, 1 disables decay
+  recall_grep_stemmed: false  # LCM_RECALL_GREP_STEMMED; ready Porter index, OR relevance
+```
+
+These values preserve existing recall and grep answers. Invalid recency floors
+warn and use `0.5`. Enabling stemmed grep also sorts a top-level uppercase `OR`
+query by relevance when `sort` is omitted; an explicit sort is preserved.
+The [configuration reference](skills/hermes-lcm/references/configuration.md#recall-ranking)
+describes index fallback and timestamp handling.
+
 **What is stored where**
 
 - Raw messages and summaries live in the local SQLite store, `lcm.db`.
