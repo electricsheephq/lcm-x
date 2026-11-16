@@ -1463,7 +1463,7 @@ def test_r10_empty_shape_echo_scan_keeps_refusals(monkeypatch):
         return scan(text, *scan_args, **kwargs)
     def ask(raw):
         sent = json.loads(raw)['params']['arguments']
-        assert sent == {**args, 'session_id': twin_session}
+        assert sent == {**args, 'session_id': twin_session, 'exclude_session_ids': [session]}
         future = cr.Future()
         future.set_result(cr.Merger.answer({'id': 1}, twin))
         return future
@@ -1593,3 +1593,178 @@ def test_r12_temporal_fields_survive_rebuild(tmp_path, corpus, clients, detail):
             assert 'reason' not in hit[key]
         assert hit['time_uncertain'] == 'carried'
         assert 'reason' in local_hit['occurrence_time']
+
+
+R13_HIDDEN = 'hiddensess'
+R13_QUERY = 'quokkaswirl'
+
+
+def r13_world(tmp_path, corpus, clients, mode='hits', nodes=False, conversation=False):
+    """S1-S4: never-held and locally deleted replicas beside the forgotten one."""
+    local, sources = corpus
+    source = sources[0]
+    homes, generations = {'merger': local}, {}
+    for label in ('never', 'deleted'):
+        home, _ = make_store(tmp_path / label, 'local')
+        optin(home)
+        homes[label] = home
+    generations['never'] = copy_generation(source, homes['never'], COPIES[0])
+    store = cc.open_store(source / 'lcm.db', source)
+    try:
+        tx = _transcript(tmp_path / 'hidden-transcript', [
+            _entry('user', 'h1', f'{R13_QUERY} only lives here', R13_HIDDEN),
+            _entry('assistant', 'h2', f'{R13_QUERY} echoed back', R13_HIDDEN)], R13_HIDDEN)
+        assert cc.drain(store, cc.Lineage(R13_HIDDEN, None, tx)) == 'drained'
+        hidden_ids = [r[0] for r in store.connection.execute(
+            'SELECT store_id FROM messages WHERE session_id=? ORDER BY store_id', (R13_HIDDEN,))]
+        assert len(hidden_ids) == 2
+        if conversation:
+            store.connection.execute('UPDATE messages SET conversation_id=? WHERE session_id=?', ('r13-conversation', R13_HIDDEN))
+            store.connection.commit()
+        leaves = {}
+        if nodes:
+            dag = SummaryDAG(source / 'lcm.db')
+            for label, ids in [('mixed', [1, 2] + hidden_ids), ('visible', [1, 2])]:
+                leaves[label] = dag.add_node(SummaryNode(
+                    session_id='remote0', summary='synthetic visible leaf', source_ids=ids,
+                    source_type='messages', token_count=5, source_token_count=40),
+                    escalation_level=1, model='synthetic')
+            dag.close()
+        assert cc.to_rollback_journal(store.connection)
+    finally:
+        store.close()
+    assert cc.leave_readable(source / 'lcm.db')
+    generations['deleted'] = copy_generation(source, homes['deleted'], COPIES[0])
+    forget(generations['deleted'], R13_HIDDEN)
+    forget(local, R13_HIDDEN)
+    assert R13_HIDDEN in cr.forgotten(local / 'lcm.db')
+    generations['merger'] = copy_generation(source, local, COPIES[0])
+    if mode == 'session':
+        for generation in generations.values():
+            (generation / '.env').write_text('LCM_RECALL_DELIVERY_UNIT=session\n')
+    readers = {}
+    for label, home in homes.items():
+        base = tmp_path if label == 'merger' else tmp_path / label
+        readers[label] = clients(base, home)
+        ready(readers[label])
+    readers['stock'] = clients(tmp_path, generations['merger'], stock=True)
+    return SimpleNamespace(**readers, gen=generations['merger'], leaves=leaves)
+
+
+def r13_normalize(value):
+    """Probe comparison: every field except explicitly named timing fields."""
+    if isinstance(value, dict):
+        return {k: r13_normalize(v) for k, v in value.items()
+                if not re.search(r'(^|_)ms$|elapsed|latency|duration|seconds', k)}
+    if isinstance(value, list):
+        return [r13_normalize(v) for v in value]
+    return value
+
+
+@pytest.mark.parametrize('mode', ['hits', 'session', 'answer_ready', 'grep'])
+def test_r13_forgotten_excluded_at_query_time(tmp_path, corpus, clients, mode):
+    world = r13_world(tmp_path, corpus, clients, mode)
+    tool = 'lcm_grep' if mode == 'grep' else 'lcm_recall'
+    if mode == 'grep':
+        ref = next((world.gen / 'lcm-large-outputs').iterdir()).name
+        args = dict(externalized_refs=[qualified(ref)], content_scope='both', session_scope='all')
+        stock_args = {**args, 'externalized_refs': [ref]}
+        assert world.merger.body(tool, query='amber', **args)['results'], 'visible ref precheck control'
+    else:
+        args = dict(session_id=qualified('remote0'))
+        if mode == 'answer_ready':
+            args['detail'] = 'answer_ready'
+        stock_args = {**args, 'session_id': 'remote0'}
+    key = 'results' if mode == 'grep' else 'hits'
+    stock = world.stock.body(tool, query=R13_QUERY, **stock_args)
+    assert any(h.get('session_id') == R13_HIDDEN for h in stock[key])
+    assert not world.stock.body(tool, query='wombatplume', **stock_args)[key]
+    assert world.merger.body(tool, query='marker', **args)[key], 'visible hit control'
+    actual = world.merger.body(tool, query=R13_QUERY, **args)
+    assert actual['total_results'] == 0, 'replica counts must exclude forgotten rows before retrieval'
+    for oracle in (world.never, world.deleted):
+        assert r13_normalize(actual) == r13_normalize(oracle.body(tool, query=R13_QUERY, **args))
+    assert R13_HIDDEN not in json.dumps(actual), 'no hidden id or exclusion list echo'
+    no_match = world.merger.body(tool, query='wombatplume', **args)
+    assert r13_normalize(json.loads(json.dumps(actual).replace(R13_QUERY, 'wombatplume'))) == r13_normalize(no_match)
+    # A named payload from an excluded session is a stock-reader scope error;
+    # use history scope to test caller exclusions with an empty success answer.
+    exclude_args = dict(session_id=qualified('remote0'), session_scope='session', content_scope='history') if mode == 'grep' else args
+    excluded = world.merger.body(tool, query='marker', exclude_session_ids=[qualified('remote0')], **exclude_args)
+    assert not excluded[key] and excluded['total_results'] == 0, 'caller exclusion still applies'
+    unchanged = world.never.body(tool, query='marker', **args)
+    never_excluded = world.never.body(tool, query='marker', exclude_session_ids=[qualified(R13_HIDDEN)], **args)
+    assert r13_normalize(unchanged) == r13_normalize(never_excluded)
+    world.never.close()
+    forget(world.never.local, R13_HIDDEN)
+    (tmp_path / 'never-reopened').mkdir()
+    never_hidden = clients(tmp_path / 'never-reopened', world.never.local)
+    ready(never_hidden)
+    assert r13_normalize(unchanged) == r13_normalize(never_hidden.body(tool, query='marker', **args))
+
+
+@pytest.mark.parametrize('tool', ['lcm_grep', 'lcm_recall'])
+@pytest.mark.parametrize('path', ['routed', 'twin', 'fanout'])
+def test_r13_replica_exclusion_requests(tmp_path, monkeypatch, tool, path):
+    sent = []
+    def ask(raw):
+        sent.append(raw)
+        future = cr.Future()
+        body = {'results': [], 'hits': [], 'total_results': 0}
+        future.set_result(cr.Merger.answer({'id': 1}, body))
+        return future
+    replica = SimpleNamespace(status='ok', child=SimpleNamespace(ask=ask, folder=tmp_path),
+                              prefix=PREFIX, generation=1)
+    merger = object.__new__(cr.Merger)
+    merger.own, merger.replicas = OWN.replace('-', ''), {PREFIX: replica}
+    merger.enabled_tools, merger.database, merger.replica_wait = set(TOOLS), tmp_path / 'lcm.db', 0
+    merger.refresh = lambda: None
+    merger.local_call = lambda raw: cr.Merger.answer({'id': 1}, {'hits': [], 'results': []})
+    hidden = set()
+    monkeypatch.setattr(cr, 'forgotten', lambda _: hidden)
+    args = {'query': 'marker', 'exclude_session_ids': ['caller', qualified('zulu'), qualified('foreign', 'e' * 32)]}
+    if path != 'fanout':
+        args['session_id'] = qualified('deadbeef-session' if path == 'twin' else 'remote0')
+    request = cr.tool_request(tool, args)
+    merger.handle(request)
+    expected = merger.arguments(args, PREFIX, True)
+    assert sent == [cr.tool_request(tool, expected)], 'empty hidden set must preserve request bytes'
+    sent.clear()
+    hidden.update({'zulu', 'alpha', 'deadbeef-session'})
+    merger.handle(request)
+    expected['exclude_session_ids'] += ['alpha', 'deadbeef-session']
+    if path == 'twin':
+        expected['session_id'] = '00000000-s0ssion'
+    assert sent == [cr.tool_request(tool, expected)], 'caller order retained; hidden ids appended once, sorted'
+    assert args['exclude_session_ids'] == ['caller', qualified('zulu'), qualified('foreign', 'e' * 32)]
+
+
+def test_r13_expand_counts_match_local_forget(tmp_path, corpus, clients):
+    world = r13_world(tmp_path, corpus, clients, nodes=True)
+    for label, expected_rows in [('visible', 2), ('mixed', 2)]:
+        args = {'node_id': qualified(world.leaves[label])}
+        actual = world.merger.body('lcm_expand', **args)
+        oracle = world.deleted.body('lcm_expand', **args)
+        assert len(actual['expanded']) == len(oracle['expanded']) == expected_rows
+        assert actual['pagination'] == oracle['pagination'], 'all pagination fields must equal local-forget oracle'
+        assert actual['pagination']['returned_sources'] == len(actual['expanded'])
+        if label == 'visible':
+            stock = world.stock.body('lcm_expand', node_id=world.leaves[label])
+            assert actual['pagination'] == stock['pagination'], 'unfiltered counts unchanged'
+
+
+def test_r13_recall_coverage_survives_rebuild(tmp_path, corpus, clients):
+    world = r13_world(tmp_path, corpus, clients)
+    args = dict(query='wombatplume', session_id=qualified('remote0'))
+    expected = world.never.body('lcm_recall', **args)['provenance']['coverage']
+    stock = world.stock.body('lcm_recall', query='wombatplume', session_id='remote0')
+    assert stock['provenance']['coverage'] == expected
+    # An unowned object with stored data still fails closed, even at the coverage path.
+    def visible(item):
+        return cr.visible_item(item, PREFIX, world.gen, {R13_HIDDEN})
+    for item in ({'summary': 'stored secret'}, {'summary': 'disabled', 'content': 'stored secret'}):
+        assert cr.rebuild({'provenance': {'coverage': item}, 'results': [item]}, PREFIX, visible) == {'provenance': {}, 'results': []}
+    actual = world.merger.body('lcm_recall', **args)['provenance']
+    assert actual.get('coverage') == expected, {
+        'direct_coverage': expected, 'types': {k: type(v).__name__ for k, v in expected.items()},
+        'rebuilt_coverage': actual.get('coverage')}

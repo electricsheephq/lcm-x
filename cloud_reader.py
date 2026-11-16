@@ -109,13 +109,17 @@ def hint(text, prefix):
         return None
 
 
-def rebuild(value, copy_id, visible=None, result_context=False):
+def rebuild(value, copy_id, visible=None, result_context=False, path=()):
     """Allow-list replica data; stored data is opaque, including nested tool calls."""
     if isinstance(value, list):
-        return [result for item in value if (not result_context or isinstance(item, dict)) and (result := rebuild(item, copy_id, visible, result_context)) is not None]
+        return [result for item in value if (not result_context or isinstance(item, dict)) and (result := rebuild(item, copy_id, visible, result_context, path)) is not None]
     if not isinstance(value, dict):
         return value if not isinstance(value, str) or (len(value) <= 512 and not UNSAFE.search(value)) else None
-    if visible and (result_context or STORED & value.keys() or any(k in value for k in ('session_id', 'store_id', 'node_id', 'externalized_ref', 'ref'))):
+    # Recall coverage's summary is an arm status, not stored summary text.
+    coverage = (path == ('provenance', 'coverage') and not result_context
+                and value.keys() <= {'fts', 'summary', 'chunk'}
+                and all(type(v) is str and v in {'ok', 'disabled', 'none', 'full', 'bounded', 'full_approx'} for v in value.values()))
+    if visible and not coverage and (result_context or STORED & value.keys() or any(k in value for k in ('session_id', 'store_id', 'node_id', 'externalized_ref', 'ref'))):
         if not visible(value):
             return None
     out = {}
@@ -145,7 +149,7 @@ def rebuild(value, copy_id, visible=None, result_context=False):
         elif key in PLAIN and (item is None or type(item) in (bool, int, float, str)):
             result = item if not isinstance(item, str) or (len(item) <= 512 and not UNSAFE.search(item) and not split_id(item)) else None
         elif (key in CONTAINERS or re.fullmatch(r'd\d+', key)) and isinstance(item, (dict, list)):
-            result = rebuild(item, copy_id, visible, key in {'results', 'hits', 'messages', 'expanded', 'children', 'nodes', 'sessions', 'summary_leads', 'seed_leads'})
+            result = rebuild(item, copy_id, visible, key in {'results', 'hits', 'messages', 'expanded', 'children', 'nodes', 'sessions', 'summary_leads', 'seed_leads'}, path + (key,))
         if result is not None:
             out[key] = result
     refs = list(out.get('externalized_refs', []))
@@ -156,6 +160,10 @@ def rebuild(value, copy_id, visible=None, result_context=False):
                 refs.append(ref)
     if refs:
         out['externalized_refs'] = refs
+    if visible and isinstance(out.get('expanded'), list) and len(out['expanded']) != len(value['expanded']):
+        pagination = out.get('pagination', {})
+        if type(pagination.get('returned_sources')) is int:
+            pagination['returned_sources'] = len(out['expanded'])
     return out
 
 
@@ -478,6 +486,10 @@ class Merger:
     def replica_call(self, replica, name, args, hidden):
         if replica.status != 'ok' or not replica.child:
             return None
+        # Only these reader schemas accept exclusions (schemas.py:99,200).
+        if hidden and name in {'lcm_grep', 'lcm_recall'} and isinstance(args.get('exclude_session_ids', []), list):
+            excluded = args.get('exclude_session_ids', [])
+            args = {**args, 'exclude_session_ids': excluded + [sid for sid in sorted(hidden) if sid not in excluded]}
         return replica.child.ask(tool_request(name, args))
 
     def rebuilt(self, raw, replica, args, hidden):
@@ -518,7 +530,7 @@ class Merger:
             missing = {k: ([re.sub(r'[\da-fA-F]', '0', item) for item in v] if isinstance(v, list)
                            else 0 if k in INTEGER_ARGS else re.sub(r'[\da-fA-F]', '0', v)) for k, v in target.items()}
             changed = {**args, **missing}
-            future = replica.child.ask(tool_request(name, changed))
+            future = self.replica_call(replica, name, changed, hidden)
             if future is None:
                 return {'error': 'the other store could not answer this call', 'store': replica.prefix}
             absent, _ = tool_body(future.result())
