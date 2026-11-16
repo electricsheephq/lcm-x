@@ -906,6 +906,156 @@ def test_checker_release_instructions():
         assert "oldest first, historical versions before the live file" in text
         assert "with any unverified row cannot pass" in text
         assert "and justified" not in text
+    for name in ("scripts/capture_outside_in.py", "docs/claude-code-adapter.md"):
+        assert "ingest-payload replacements inside tool-call arguments" in (ROOT / name).read_text()
+
+
+def capture_tool_call_payload(tmp_path, shape):
+    import base64
+    payload = base64.b64encode(bytes(range(256)) * 18).decode()[:6000]
+    uri = "data:image/png;base64," + payload
+    text = f'<html>café<img src="{uri}"></html>'
+    if shape == "bare":
+        text = "prefix café\n" + payload[:5000] + "\nsuffix"
+    elif shape == "wrapped":
+        text = "prefix café\n" + "\n".join(payload[i:i + 76] for i in range(0, 6000, 76)) + "\nsuffix"
+    elif shape == "two-payloads":
+        text += "\nsecond: " + payload[:5000] + "\nend"
+    arguments = dict(file_path="/synthetic/a.html", content=text)
+    if shape == "nested":
+        arguments = dict(edits=[dict(new=text)])
+    calls = [dict(type="tool_use", id="write", name="Write", input=arguments)]
+    if shape == "two-calls":
+        calls.insert(0, dict(type="tool_use", id="read", name="Read", input=dict(file_path="/synthetic/a.html")))
+    entries = [dict(type="assistant", uuid="a", sessionId="tool-payload", message=dict(content=calls)),
+               dict(type="user", uuid="r", sessionId="tool-payload", message=dict(content=[
+                   dict(type="tool_result", tool_use_id=call["id"], content="ok") for call in calls]))]
+    return capture_session(tmp_path / "capture", write_entries(tmp_path / "01_calls.jsonl", entries))
+
+
+@pytest.mark.parametrize("shape", ["uri", "bare", "wrapped", "nested", "two-payloads", "two-calls"])
+def test_tool_call_payload(tmp_path, shape, record_property):
+    home, env, inputs = capture_tool_call_payload(tmp_path, shape)
+    stored = read_sql(home, "SELECT tool_calls FROM messages WHERE role='assistant'")[0][0]
+    assert stored.count("[Externalized LCM ingest payload:") == (2 if shape == "two-payloads" else 1)
+    if shape == "two-calls":
+        assert "[Externalized" not in json.loads(stored)[0]["function"]["arguments"]
+    checked, report, audit = verdict(home, env, inputs)
+    record_property("checker", checked.stdout)
+    record_property("audit", json.dumps(audit))
+    assert [(r["lost"], r["duplicated"]) for r in report["lineages"]] == [(0, 0)]
+    assert checked.returncode == 0 and report["pass"] and audit["ok"] and audit["verified"]
+
+
+@pytest.mark.parametrize("corruption", ["sha12", "chars", "extra-key", "duplicate-key", "name", "swap", "surrounding"])
+def test_tool_call_payload_corrupted(tmp_path, corruption, record_property):
+    import re
+    home, env, inputs = capture_tool_call_payload(tmp_path, "two-calls" if corruption == "swap" else "uri")
+    calls = json.loads(read_sql(home, "SELECT tool_calls FROM messages WHERE role='assistant'")[0][0])
+    function = calls[-1]["function"]
+    arguments = function["arguments"]
+    if corruption == "sha12":
+        arguments = re.sub(r"_([0-9a-f]{12})_", lambda m: "_" + ("1" if m[1][0] == "0" else "0") + m[1][1:] + "_",
+                           arguments, count=1)
+    elif corruption == "chars":
+        arguments = arguments.replace("chars=", "chars=9", 1)
+    elif corruption == "extra-key":
+        arguments = arguments[:-1] + ', "extra": 1}'
+    elif corruption == "duplicate-key":
+        # Last-wins parsing would hide the injected value and accept this row.
+        arguments = '{"content": "lost original", ' + arguments[1:]
+    elif corruption == "name":
+        function["name"] = "Wrong"
+    elif corruption == "swap":
+        calls.reverse()
+    else:
+        arguments = arguments.replace("<html>", "<htmL>", 1)
+    function["arguments"] = arguments
+    with closing(sqlite3.connect(home / "lcm.db")) as conn, conn:
+        conn.execute("UPDATE messages SET tool_calls=? WHERE role='assistant'", (json.dumps(calls),))
+    code, report = check_only(home, env, inputs)
+    record_property("checker", json.dumps(report))
+    assert code == 1 and not report["pass"]
+    assert [(r["lost"], r["duplicated"]) for r in report["lineages"]] == [(1, 1)]
+
+
+def test_tool_call_formatting_without_placeholder(tmp_path, record_property):
+    entries = [dict(type="assistant", uuid="a", sessionId="format", message=dict(content=[
+                   dict(type="tool_use", id="c", name="Write", input=dict(file_path="/synthetic/a", content="plain"))])),
+               dict(type="user", uuid="r", sessionId="format", message=dict(content=[
+                   dict(type="tool_result", tool_use_id="c", content="ok")]))]
+    home, env, inputs = capture_session(tmp_path / "capture", write_entries(tmp_path / "01_format.jsonl", entries))
+    original = read_sql(home, "SELECT tool_calls FROM messages WHERE role='assistant'")[0][0]
+    assert "[Externalized" not in original
+    calls = json.loads(original)
+    function = calls[0]["function"]
+    function["arguments"] = json.dumps(json.loads(function["arguments"]), separators=(",", ":"))
+    assert json.dumps(calls) != original
+    with closing(sqlite3.connect(home / "lcm.db")) as conn, conn:
+        conn.execute("UPDATE messages SET tool_calls=? WHERE role='assistant'", (json.dumps(calls),))
+    code, report = check_only(home, env, inputs)
+    record_property("checker", json.dumps(report))
+    assert code == 1 and not report["pass"]
+    assert [(r["lost"], r["duplicated"]) for r in report["lineages"]] == [(1, 1)]
+
+
+@pytest.mark.parametrize("stored, source", [
+    ('{"v":true}', '{"v":1}'), ('{"v":1}', '{"v":1.0}'),
+    ('{"v":null}', '{"v":false}'), ('{"v":2}', '{"v":1}'),
+    ('{"v":"1"}', '{"v":1}'), ('{"v":[]}', '{"v":{}}'),
+    ('{"v":[1]}', '{"v":[1,2]}'), ('{"v":1}', '{"other":1}'),
+    ('{"nested":{"v":0,"v":1}}', '{"nested":{"v":1}}'),
+    ('invalid', '{}'), ('{}', 'invalid'),
+])
+def test_tool_call_argument_mismatches(stored, source):
+    from collections import defaultdict
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("outside_in_arguments", CHECKER)
+    checker = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(checker)
+    def calls(arguments):
+        return [dict(id="c", type="function", function=dict(name="Write", arguments=arguments))]
+    assert not checker.tool_calls_match(calls(stored), calls(source), defaultdict(set))
+
+
+@pytest.mark.parametrize("side", ["stored", "source"])
+def test_tool_call_argument_parse_recursion(side, monkeypatch):
+    from collections import defaultdict
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("outside_in_argument_recursion", CHECKER)
+    checker = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(checker)
+    original_loads = json.loads
+    def guarded_loads(text, **kwargs):
+        if text == side:
+            raise RecursionError("nested JSON")
+        return original_loads(text, **kwargs)
+    def calls(arguments):
+        return [dict(id="c", type="function", function=dict(name="Write", arguments=arguments))]
+    monkeypatch.setattr(checker.json, "loads", guarded_loads)
+    assert not checker.tool_calls_match(calls(side if side == "stored" else "{}"),
+                                        calls(side if side == "source" else "{}"), defaultdict(set))
+
+
+@pytest.mark.parametrize("container", ["list", "dict"])
+def test_tool_call_argument_walk_iterative(container, monkeypatch):
+    from collections import defaultdict
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("outside_in_argument_walk", CHECKER)
+    checker = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(checker)
+    source, stored = "payload café", reference_for("payload café")
+    for _ in range(sys.getrecursionlimit() * 3):
+        source = [source] if container == "list" else dict(child=source)
+        stored = [stored] if container == "list" else dict(child=stored)
+    def decoded(text, **kwargs):
+        return stored if text == "stored" else source
+    def calls(arguments):
+        return [dict(id="c", type="function", function=dict(name="Write", arguments=arguments))]
+    monkeypatch.setattr(checker.json, "loads", decoded)
+    index = defaultdict(set)
+    assert checker.tool_calls_match(calls("stored"), calls("source"), index)
+    assert set(index) == {checker.fingerprint("payload café")}
 
 
 def reference_for(text, kind="LCM ingest payload"):

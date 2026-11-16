@@ -5,6 +5,8 @@ Repeat --transcript SESSION=PATH in observation order, including historical vers
 Supply each rewritten transcript's set-aside copy before its replacement.
 Subagents use SESSION/agent:ID. Output contains counts and ids, never transcript text.
 For a reused agent id's later transcript, use SESSION/agent:/ plus its path below subagents/.
+Externalized references and ingest-payload replacements inside tool-call arguments
+verify source character and UTF-8 byte counts and SHA-256 prefixes.
 Raw ledger preservation and payload-file recovery are outside this row checker.
 """
 from __future__ import annotations
@@ -241,6 +243,57 @@ def content_matches(stored, source, structured, index):
     return True
 
 
+def tool_calls_match(stored_calls, source_calls, index):
+    """Verify argument replacements while preserving call identity and JSON structure."""
+    def unique_object(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError("duplicate_argument_key")
+            value[key] = item
+        return value
+
+    if not isinstance(stored_calls, list) or not isinstance(source_calls, list):
+        return False
+    if len(stored_calls) != len(source_calls):
+        return False
+    for stored, source in zip(stored_calls, source_calls):
+        if not isinstance(stored, dict) or not isinstance(source, dict) or stored.keys() != source.keys():
+            return False
+        if stored.get("id") != source.get("id") or stored.get("type") != source.get("type"):
+            return False
+        left, right = stored.get("function"), source.get("function")
+        if not isinstance(left, dict) or not isinstance(right, dict) or left.keys() != right.keys():
+            return False
+        if left.get("name") != right.get("name"):
+            return False
+        left, right = left.get("arguments"), right.get("arguments")
+        if not isinstance(left, str) or not isinstance(right, str):
+            return False
+        if left == right:
+            continue
+        try:
+            pending = [(json.loads(left, object_pairs_hook=unique_object), json.loads(right))]
+        except (ValueError, RecursionError):
+            return False
+        while pending:
+            left, right = pending.pop()
+            if isinstance(left, str) and isinstance(right, str):
+                if not content_matches(left, right, None, index):
+                    return False
+            elif isinstance(left, dict) and isinstance(right, dict):
+                if left.keys() != right.keys():
+                    return False
+                pending.extend((left[key], right[key]) for key in left)
+            elif isinstance(left, list) and isinstance(right, list):
+                if len(left) != len(right):
+                    return False
+                pending.extend(zip(left, right))
+            elif type(left) is not type(right) or left != right:
+                return False
+    return True
+
+
 def check(home, inputs):
     started = perf_counter()
     expected, unprojected, previews, transcript_sources = expected_rows(inputs)
@@ -339,7 +392,10 @@ def check(home, inputs):
                 continue
             i = slots[uid][k]
             target = wanted[i]
-            if row[:2] + row[3:] != target[:2] + target[3:]:
+            if row[:2] + row[3:4] != target[:2] + target[3:4]:
+                continue
+            if row[4] != target[4] and (not INGEST.search(grouped[session][n]["tool_calls"] or "")
+                    or not tool_calls_match(json.loads(row[4]), json.loads(target[4]), index)):
                 continue
             if i in reasons:
                 actual[n] = target
