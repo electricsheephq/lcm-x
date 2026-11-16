@@ -39,7 +39,7 @@ plugins and settings hooks are also run by Grok Build, so the same package is th
 harnesses (see "Grok Build").
 
 Non-goals: Hermes behaviour, paths or defaults (unchanged; a Hermes-side refusal of capture stores
-is a separate follow-up); writing to a Hermes profile's store; hosted or cloud ingest; customer or
+is a separate follow-up); writing to a Hermes profile's store; hosted or cloud ingest (cloud capture step 1 is designed in [docs/cloud-capture-step1.md](cloud-capture-step1.md)); customer or
 reference-agent stores; a continuation capsule or any context injection; importing old transcripts
 automatically (an explicit backfill command comes later).
 
