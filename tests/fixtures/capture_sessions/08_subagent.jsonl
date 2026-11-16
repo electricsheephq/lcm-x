@@ -1,0 +1,2 @@
+{"type": "user", "uuid": "parent-msg", "sessionId": "subparent", "timestamp": "2000-01-01T00:00:00Z", "message": {"role": "user", "content": "synthetic parent"}}
+{"type": "assistant", "uuid": "child-msg", "sessionId": "subparent", "timestamp": "2000-01-01T00:00:00Z", "message": {"role": "assistant", "content": "synthetic child"}, "isSidechain": true, "agentId": "child"}
