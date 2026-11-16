@@ -28,6 +28,9 @@ from hermes_lcm.rollup_builder import (
 from hermes_lcm.rollup_store import RollupStore
 from hermes_lcm.tokens import count_tokens
 
+# Bound for waits that end as soon as the work finishes; a loaded CI host can need more than 2 s (#2787's first merge run).
+WAIT_SECONDS = 30
+
 
 @pytest.fixture
 def rollup_parts(tmp_path):
@@ -324,7 +327,7 @@ def test_publication_staleness_and_bounded_bind_maintenance(tmp_path, monkeypatc
     month_start = today.replace(day=1)
     try:
         engine.on_session_start(scope, conversation_id="temporal-conversation")
-        assert engine.drain_rollup_maintenance(timeout=2)
+        assert engine.drain_rollup_maintenance(timeout=WAIT_SECONDS)
         node_id = _add_node(engine._dag, scope, today, "today source node")
         store = RollupStore(db_path)
         try:
@@ -364,7 +367,7 @@ def test_publication_staleness_and_bounded_bind_maintenance(tmp_path, monkeypatc
                 lambda _text, **_kwargs: ("rebuilt rollup", 1),
             )
             engine._bind_lifecycle_state(scope, conversation_id="temporal-conversation")
-            assert engine.drain_rollup_maintenance(timeout=2)
+            assert engine.drain_rollup_maintenance(timeout=WAIT_SECONDS)
 
             statuses = [
                 store.get_rollup(kind, start.isoformat(), scope)["status"]
@@ -493,7 +496,7 @@ def test_session_start_does_not_wait_for_slow_rollup_provider(tmp_path, monkeypa
             )
             assert provider_started.wait(timeout=1)
             release_provider.set()
-            assert original_drain(timeout=2)
+            assert original_drain(timeout=WAIT_SECONDS)
             assert store.get_rollup("day", target_day.isoformat(), scope)["status"] == "ready"
         finally:
             store.close()
@@ -519,7 +522,7 @@ def test_session_start_does_not_wait_for_slow_rollup_provider_latency(tmp_path, 
 
     def slow_summarizer(_text, **_kwargs):
         provider_started.set()
-        if not release_provider.wait(timeout=2):
+        if not release_provider.wait(timeout=WAIT_SECONDS):
             raise AssertionError("test did not release slow rollup provider")
         return "completed in background", 1
 
@@ -541,7 +544,7 @@ def test_session_start_does_not_wait_for_slow_rollup_provider_latency(tmp_path, 
             assert bind_elapsed < 0.15
             assert provider_started.wait(timeout=1)
             release_provider.set()
-            assert engine.drain_rollup_maintenance(timeout=2)
+            assert engine.drain_rollup_maintenance(timeout=WAIT_SECONDS)
             assert store.get_rollup("day", target_day.isoformat(), scope)["status"] == "ready"
         finally:
             store.close()
@@ -580,7 +583,7 @@ def test_rollup_background_maintenance_deduplicates_rapid_scope_binds(
         try:
             if call_number == 1:
                 first_pass_started.set()
-                if not release_first_pass.wait(timeout=2):
+                if not release_first_pass.wait(timeout=WAIT_SECONDS):
                     raise AssertionError("test did not release first maintenance pass")
             return 0
         finally:
@@ -603,7 +606,7 @@ def test_rollup_background_maintenance_deduplicates_rapid_scope_binds(
             )
 
         release_first_pass.set()
-        assert engine.drain_rollup_maintenance(timeout=2)
+        assert engine.drain_rollup_maintenance(timeout=WAIT_SECONDS)
         assert len(call_threads) == 2
         assert len(set(call_threads)) == 1
         assert maximum_active_calls == 1
@@ -620,7 +623,7 @@ def test_rollup_background_scheduler_bounds_distinct_pending_scopes():
 
     def blocking_first():
         first_started.set()
-        if not release_first.wait(timeout=2):
+        if not release_first.wait(timeout=WAIT_SECONDS):
             raise AssertionError("test did not release first scheduler job")
         completed.append("active")
 
@@ -648,7 +651,7 @@ def test_rollup_background_scheduler_bounds_distinct_pending_scopes():
             ("db", "queued-1"),
             ("db", "queued-2"),
         },
-        timeout=2,
+        timeout=WAIT_SECONDS,
     )
     assert completed == ["active", "queued-1", "queued-2"]
 
@@ -658,7 +661,7 @@ def test_rollup_background_scheduler_bounds_distinct_pending_scopes():
         ("db", "overflow"),
         lambda: completed.append("overflow"),
     )
-    assert scheduler.drain({("db", "overflow")}, timeout=2)
+    assert scheduler.drain({("db", "overflow")}, timeout=WAIT_SECONDS)
     assert completed == ["active", "queued-1", "queued-2", "overflow"]
 
 
@@ -670,7 +673,7 @@ def test_rollup_scheduler_reserves_active_follow_up_when_queue_is_full():
 
     def blocking_first():
         first_started.set()
-        if not release_first.wait(timeout=2):
+        if not release_first.wait(timeout=WAIT_SECONDS):
             raise AssertionError("test did not release first scheduler job")
         completed.append("active-1")
 
@@ -690,7 +693,7 @@ def test_rollup_scheduler_reserves_active_follow_up_when_queue_is_full():
 
     assert scheduler.drain(
         {("db", "active"), ("db", "queued")},
-        timeout=2,
+        timeout=WAIT_SECONDS,
     )
     assert completed == ["active-1", "active-2", "queued"]
 
@@ -708,7 +711,7 @@ def test_rollup_scheduler_follow_up_slot_is_single_and_queue_fair():
     def blocking(label, started, release):
         def run():
             started.set()
-            if not release.wait(timeout=2):
+            if not release.wait(timeout=WAIT_SECONDS):
                 raise AssertionError(f"test did not release {label}")
             completed.append(label)
 
@@ -758,7 +761,7 @@ def test_rollup_scheduler_follow_up_slot_is_single_and_queue_fair():
 
     assert scheduler.drain(
         {("db", "a"), ("db", "b"), ("db", "c")},
-        timeout=2,
+        timeout=WAIT_SECONDS,
     )
     assert completed == ["a-1", "a-2", "b-1", "b-2", "c"]
     assert scheduler._follow_up_key is None
@@ -777,7 +780,7 @@ def test_rollup_scheduler_releases_completed_owner_keys():
             lambda index=index: completed.append(index),
             owner=owner,
         )
-        assert scheduler.drain_owner(owner, timeout=2)
+        assert scheduler.drain_owner(owner, timeout=WAIT_SECONDS)
         assert owner not in scheduler._owned_keys
         assert key not in scheduler._key_owners
 
@@ -799,7 +802,7 @@ def test_rollup_scheduler_runs_same_key_after_cancelled_job():
     assert scheduler.drain({key}, timeout=1)
 
     assert scheduler.schedule(key, second_ran.set)
-    assert scheduler.drain({key}, timeout=2)
+    assert scheduler.drain({key}, timeout=WAIT_SECONDS)
     assert second_ran.is_set()
 
 
@@ -823,7 +826,7 @@ def test_rollup_scheduler_operator_exclusion_is_bounded_and_defers_maintenance()
         operator_key,
         lambda: completed.append("after-release"),
     )
-    assert scheduler.drain({operator_key}, timeout=2)
+    assert scheduler.drain({operator_key}, timeout=WAIT_SECONDS)
     assert completed == ["after-release"]
 
 
@@ -848,7 +851,7 @@ def test_rollup_background_failure_is_logged_without_breaking_bind(
             "failed-maintenance-scope",
             conversation_id="failed-maintenance-conversation",
         )
-        assert engine.drain_rollup_maintenance(timeout=2)
+        assert engine.drain_rollup_maintenance(timeout=WAIT_SECONDS)
         assert engine.bound_session_id == "failed-maintenance-scope"
         assert "background temporal rollup maintenance failed" in caplog.text
         assert "forced background maintenance failure" in caplog.text
@@ -896,7 +899,7 @@ def test_engine_shutdown_does_not_wait_for_background_rollup_provider(
     finally:
         monkeypatch.setattr(engine, "drain_rollup_maintenance", original_drain)
         release_maintenance.set()
-        assert original_drain(timeout=2)
+        assert original_drain(timeout=WAIT_SECONDS)
 
 
 @pytest.mark.latency
@@ -914,7 +917,7 @@ def test_engine_shutdown_does_not_wait_for_background_rollup_provider_latency(
 
     def blocking_maintenance(*_args, **_kwargs):
         maintenance_started.set()
-        if not release_maintenance.wait(timeout=2):
+        if not release_maintenance.wait(timeout=WAIT_SECONDS):
             raise AssertionError("test did not release background maintenance")
         return 0
 
@@ -937,7 +940,7 @@ def test_engine_shutdown_does_not_wait_for_background_rollup_provider_latency(
         assert shutdown_elapsed < 0.15
     finally:
         release_maintenance.set()
-        assert engine.drain_rollup_maintenance(timeout=2)
+        assert engine.drain_rollup_maintenance(timeout=WAIT_SECONDS)
 
 
 def test_pending_maintenance_query_uses_partial_index(rollup_parts):
@@ -963,7 +966,7 @@ def test_session_reset_stales_rollups_referencing_deleted_nodes(tmp_path):
     scope = "reset-session"
     try:
         engine.on_session_start(scope, conversation_id="reset-conversation")
-        assert engine.drain_rollup_maintenance(timeout=2)
+        assert engine.drain_rollup_maintenance(timeout=WAIT_SECONDS)
         node_id = _add_node(engine._dag, scope, date(2026, 7, 15), "deleted source")
         store = RollupStore(db_path)
         try:
@@ -1042,7 +1045,7 @@ def test_engine_invalidates_rollups_when_a_node_is_published(tmp_path):
     target_day = date(2026, 7, 15)
     try:
         engine.on_session_start(scope, conversation_id="publish-hook-conversation")
-        assert engine.drain_rollup_maintenance(timeout=2)
+        assert engine.drain_rollup_maintenance(timeout=WAIT_SECONDS)
         node_id = _add_node(engine._dag, scope, target_day, "published node")
         store = RollupStore(db_path)
         try:
@@ -1225,12 +1228,12 @@ def test_raw_ingest_does_not_prebuild_then_publication_drives_stale(tmp_path, mo
     day = datetime.now(timezone.utc).date()
     try:
         engine.on_session_start(scope, conversation_id="p1-conv")
-        assert engine.drain_rollup_maintenance(timeout=2)
+        assert engine.drain_rollup_maintenance(timeout=WAIT_SECONDS)
         store = RollupStore(db_path)
         try:
             engine.ingest([{"role": "user", "content": "raw only, no summary yet"}])
             engine._bind_lifecycle_state(scope, conversation_id="p1-conv")
-            assert engine.drain_rollup_maintenance(timeout=2)
+            assert engine.drain_rollup_maintenance(timeout=WAIT_SECONDS)
             assert store.get_rollup("day", day.isoformat(), scope) is None
 
             node_id = _add_node(engine._dag, scope, day, "published leaf summary")
@@ -1243,7 +1246,7 @@ def test_raw_ingest_does_not_prebuild_then_publication_drives_stale(tmp_path, mo
             assert store.get_rollup("day", day.isoformat(), scope)["status"] == "stale"
 
             engine._bind_lifecycle_state(scope, conversation_id="p1-conv")
-            assert engine.drain_rollup_maintenance(timeout=2)
+            assert engine.drain_rollup_maintenance(timeout=WAIT_SECONDS)
             built = store.get_rollup("day", day.isoformat(), scope)
             assert built["status"] == "ready"
             assert node_id in built["source_node_ids"]
@@ -1267,23 +1270,23 @@ def test_bypassed_session_skips_rollup_maintenance(tmp_path, monkeypatch):
     engine = LCMEngine(config=config)
     try:
         engine.on_session_start("bypass-session", conversation_id="bypass-conv")
-        assert engine.drain_rollup_maintenance(timeout=2)
+        assert engine.drain_rollup_maintenance(timeout=WAIT_SECONDS)
         calls.clear()
 
         engine._session_stateless = True
         engine._bind_lifecycle_state("bypass-session", conversation_id="bypass-conv")
-        assert engine.drain_rollup_maintenance(timeout=2)
+        assert engine.drain_rollup_maintenance(timeout=WAIT_SECONDS)
         assert calls == []
 
         engine._session_stateless = False
         engine._session_ignored = True
         engine._bind_lifecycle_state("bypass-session", conversation_id="bypass-conv")
-        assert engine.drain_rollup_maintenance(timeout=2)
+        assert engine.drain_rollup_maintenance(timeout=WAIT_SECONDS)
         assert calls == []
 
         engine._session_ignored = False
         engine._bind_lifecycle_state("bypass-session", conversation_id="bypass-conv")
-        assert engine.drain_rollup_maintenance(timeout=2)
+        assert engine.drain_rollup_maintenance(timeout=WAIT_SECONDS)
         assert calls == ["maintenance"]
     finally:
         engine.shutdown()
@@ -1731,13 +1734,13 @@ def test_scope_frontier_serializes_connection_temp_tables_between_threads(
                 return result
             if threading.current_thread().name == "frontier-scope-a":
                 a_staged.set()
-                if not allow_a_to_read.wait(timeout=2):
+                if not allow_a_to_read.wait(timeout=WAIT_SECONDS):
                     raise AssertionError("scope A was not released by the test")
             else:
                 b_staged_before_a_done.append(not a_done.is_set())
                 b_staged.set()
                 allow_a_to_read.set()
-                if not a_done.wait(timeout=2):
+                if not a_done.wait(timeout=WAIT_SECONDS):
                     raise AssertionError("scope A did not finish before scope B read")
             return result
 
@@ -1766,19 +1769,19 @@ def test_scope_frontier_serializes_connection_temp_tables_between_threads(
     )
     try:
         thread_a.start()
-        assert a_staged.wait(timeout=2)
+        assert a_staged.wait(timeout=WAIT_SECONDS)
         thread_b.start()
         # With the fixed whole-lifecycle lock B cannot stage until A finishes.
         # Without it B stages immediately and releases A onto B's temp IDs.
         if not b_staged.wait(timeout=0.2):
             allow_a_to_read.set()
-        thread_a.join(timeout=2)
-        thread_b.join(timeout=2)
+        thread_a.join(timeout=WAIT_SECONDS)
+        thread_b.join(timeout=WAIT_SECONDS)
     finally:
         allow_a_to_read.set()
         a_done.set()
-        thread_a.join(timeout=2)
-        thread_b.join(timeout=2)
+        thread_a.join(timeout=WAIT_SECONDS)
+        thread_b.join(timeout=WAIT_SECONDS)
         dag._conn = real_connection
 
     assert not thread_a.is_alive() and not thread_b.is_alive()
