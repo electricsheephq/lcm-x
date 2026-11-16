@@ -7835,6 +7835,7 @@ class LCMEngine(
                     "_out_of_band_durable_rows", "_emitted_carriers_seen", "_emitted_carriers_retired",
                     "_pending_session_tails", "_active_replay_cache_freeze_sequence",
                     "_applied_active_replay_cache_sequence",
+                    "_deferred_active_replay_cache_generation",
                 )}
                 # Stores and host objects are identity-bearing; never deepcopy them.
                 for name in ("_host_rewrite_store", "_pruned_tool_source_store"):
@@ -8004,8 +8005,9 @@ class LCMEngine(
                             self.__dict__.pop("_ingest_read_only", None)
                             self._store._read_only_ingest_thread = read_only_thread
                             for name, value in snapshots.items():
-                                # A frozen tail keeps its number and its retirement with it (#2751).
+                                # A frozen tail keeps its number, its retirement and its disarm with it (#2751).
                                 if name not in ("_pending_session_tails", "_active_replay_cache_freeze_sequence",
+                                                "_deferred_active_replay_cache_generation",
                                                 "_applied_active_replay_cache_sequence"):
                                     if value is missing:
                                         self.__dict__.pop(name, None)
