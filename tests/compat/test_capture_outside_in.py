@@ -702,6 +702,38 @@ def test_preview_copy_needs_a_verified_owner(tmp_path, case, record_property):
         assert (code, counts(report)["plain"], preview_copies(report)["plain"]) == (0, (0, 0, 0), 0)
 
 
+@pytest.mark.parametrize("supplied", ["as_captured", "historical_copy_first", "through_alias"])
+def test_preview_shared_saved_file_stays_inside(tmp_path, supplied, record_property):
+    """A session and its subagent both name one saved file in the session's tool-results/. Each row is inside its
+    own lineage's folders, however the transcripts are supplied, so each is checked against the file and neither
+    becomes the other's copy."""
+    base = tmp_path / "capture"
+    projects = base / "claude/projects/synthetic"
+    saved = projects / "plain/tool-results/output.txt"
+    saved.parent.mkdir(parents=True)
+    saved.write_text("full saved output\n")
+    rows, _ = preview_rows(saved)
+    agent = [dict(row, uuid="s" + row["uuid"], agentId="x") for row in rows]
+    home, env, inputs = capture_session(base, write_entries(tmp_path / "01_shared.jsonl", rows + agent))
+    stored = [content for (content,) in read_sql(home, "SELECT content FROM messages WHERE role='tool'")]
+    assert stored == ["full saved output\n"] * 2  # recovered for both lineages
+    if supplied == "historical_copy_first":
+        live = dict(inputs)["plain"]
+        historical = tmp_path / "historical/plain.jsonl"
+        historical.parent.mkdir()
+        historical.write_bytes(live.read_bytes())
+        inputs = [("plain", historical), *inputs]
+    elif supplied == "through_alias":
+        alias = tmp_path / "alias"
+        alias.symlink_to(projects, target_is_directory=True)
+        inputs = [(session, alias / path.relative_to(projects)) for session, path in inputs]
+    code, report = check_only(home, env, inputs)
+    record_property("checker", json.dumps(report))
+    assert (code, report["pass"]) == (0, True)
+    assert counts(report) == {"plain": (0, 0, 0), "plain/agent:x": (0, 0, 0)}
+    assert preview_copies(report) == {"plain": 0, "plain/agent:x": 0}
+
+
 def test_preview_copy_needs_another_lineage(tmp_path, record_property):
     """A row never owns its own copy. A main transcript directly inside a folder named subagents/ belongs to that
     folder's parent (capture's session_dir()), while saved_preview() reads <session>/ beside it; a row verified there
