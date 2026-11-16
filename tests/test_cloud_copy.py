@@ -150,7 +150,7 @@ def ready(f, now=100):
 
 
 def cli(f, *extra):
-    return subprocess.run([sys.executable, '-I', '-S', str(ROOT / 'scripts/lcm_x_cloud.py'),
+    return subprocess.run([sys.executable, '-I', '-S', '-B', str(ROOT / 'scripts/lcm_x_cloud.py'),
                            'publish', '--home', str(f[0]), '--copy-id', COPY,
                            '--bucket-dir', str(f[1].inner.root), '--prefix', 'copies', *extra],
                           capture_output=True, text=True)
@@ -192,7 +192,9 @@ def test_03_bucket_holds_nothing_else(fixture):
 
 def test_04_records_sidecar(fixture):
     (fixture[0] / 'lcm.db.records').touch()
-    refused('records_pair_unsupported', pub, fixture)
+    with pytest.raises(cp.Refused) as caught:
+        pub(fixture)
+    assert caught.value.code == 'records_pair_unsupported'
     assert not keys(fixture)
 
 
@@ -258,7 +260,9 @@ def test_09_lock(fixture):
     lock = fixture[0] / 'cloud' / 'upload.lock'
     with lock.open('a') as handle:
         fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        refused('lock_held', pub, fixture)
+        with pytest.raises(cp.Refused) as caught:
+            pub(fixture)
+        assert caught.value.code == 'lock_held'
         assert not staged(fixture).exists()
     leftovers = staged(fixture).parent
     leftovers.mkdir(exist_ok=True)
@@ -325,8 +329,15 @@ def test_14_forget_before_the_manifest(fixture):
     m = pub(fixture)
     rebuilt = rebuild(fixture, m, 'forgotten')
     assert rebuilt == staged(fixture).read_bytes() and not m['payloads']
-    with closing(sqlite3.connect(staged(fixture))) as conn:
-        assert conn.execute('SELECT count(*) FROM messages').fetchone() == (0,)
+    with closing(sqlite3.connect(fixture[0].parent / 'forgotten')) as conn:
+        for table in ('messages', 'capture_events'):
+            assert conn.execute(f'SELECT count(*) FROM {table} WHERE session_id=?', ('s1',)).fetchone() == (0,)
+    assert 's1' not in m['guard']['sessions']
+    assert not m['guard']['payloads']
+    assert m['unresolved_minted'] == m['unresolved_quoted'] == m['payloads'] == []
+    assert not m['database']['deltas']
+    assert json.loads(fetch(fixture, 'gen/1.json')) == m
+    assert fired == [True]
 
 
 def test_15_manifest_last_created_once(fixture):
@@ -365,7 +376,9 @@ def test_16_crash_before_the_manifest(fixture):
 
 
 def test_17_disk_floor(fixture):
-    refused('disk_floor', pub, fixture, free_bytes=lambda _: 0)
+    with pytest.raises(cp.Refused) as caught:
+        pub(fixture, free_bytes=lambda _: 0)
+    assert caught.value.code == 'disk_floor'
     assert not staged(fixture).exists()
     pub(fixture)
     grow(fixture)
@@ -431,7 +444,9 @@ def test_20_wal_without_sidecars(fixture):
     data[18:20] = b'\2\2'
     path.write_bytes(data)
     before = sorted(p.name for p in fixture[0].iterdir())
-    refused('wal_without_sidecars', pub, fixture)
+    with pytest.raises(cp.Refused) as caught:
+        pub(fixture)
+    assert caught.value.code == 'wal_without_sidecars'
     assert sorted(p.name for p in fixture[0].iterdir()) == before
 
 
@@ -504,7 +519,9 @@ def test_26_newer_head(fixture):
             m['stamp']['contract']['version'] = 2
         path.write_text(json.dumps(m))
         fixture[1].calls.clear()
-        refused(code, pub, fixture)
+        with pytest.raises(cp.Refused) as caught:
+            pub(fixture)
+        assert caught.value.code == code
         assert not any(method == 'put_new' for method, _ in fixture[1].calls)
 
 
@@ -686,11 +703,15 @@ def test_35_staged_file_not_written_after_hash(fixture, monkeypatch):
             changed = cd.changed_pages(previous, result.digests)
             index = changed[0] if delta else next(i for i in range(result.pages) if i not in changed)
             data[(index + 1) * result.page_size - 1] ^= 1
+            metadata = path.stat()
             path.write_bytes(data)
+            os.utime(path, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
             return result
         with monkeypatch.context() as patch:
             patch.setattr(cd, 'hash_pages', tamper)
-            refused(code, pub, fixture, **({} if delta else {'size_factor': 0}))
+            with pytest.raises(cp.Refused) as caught:
+                pub(fixture, **({} if delta else {'size_factor': 0}))
+            assert caught.value.code == code
         assert PREFIX + '/gen/2.json' not in keys(fixture)
 
 
@@ -748,23 +769,31 @@ def test_40_the_timers_skip(fixture):
     assert pub(fixture, timer=True, clock=lambda: 103)['generation'] == 3
 
 
-def test_41_each_blocker_publishes(fixture):
-    ready(fixture)
+def test_41_each_blocker_publishes(fixture, monkeypatch, capsys):
+    from scripts import lcm_x_cloud
+    real = cp.publish
+    def allowed(*args, **kw):
+        return real(*args, **(kw | dict(guard=lambda *a: None, forget_items=lambda *a: [], clock=lambda: 101)))
+    monkeypatch.setattr(cp, 'publish', allowed)
     for field, value, blocker in (('unpublished_decisions', ['d'], 'decision_pending'),
                                   ('pending_pair', [99, TOKEN], 'attempt_pending'),
                                   ('retention_done_generation', 99, 'retention_pending'),
-                                  ('last_publish_s', -86400, 'ceiling')):
+                                  ('last_publish_s', -86400, 'ceiling'),
+                                  ('missing_pairs', None, 'attempt_pending')):
         ready(fixture)
         data = json.loads(state(fixture).read_text())
-        data[field] = value
+        if field == 'missing_pairs':
+            for key in ('last_pair', 'pending_pair', 'retention_done_generation', 'unpublished_decisions'):
+                data.pop(key, None)
+        else:
+            data[field] = value
         state(fixture).write_text(json.dumps(data))
-        m = pub(fixture, timer=True, clock=lambda: 101)
-        assert m['blocker'] == blocker
-    data = json.loads(state(fixture).read_text())
-    for field in ('last_pair', 'pending_pair', 'retention_done_generation', 'unpublished_decisions'):
-        data.pop(field, None)
-    state(fixture).write_text(json.dumps(data))
-    assert pub(fixture, timer=True, clock=lambda: 102)['blocker'] == 'attempt_pending'
+        assert lcm_x_cloud.main(['publish', '--home', str(fixture[0]), '--copy-id', COPY,
+            '--bucket-dir', str(fixture[1].inner.root), '--prefix', 'copies', '--timer']) == 0
+        printed = json.loads(capsys.readouterr().out)
+        assert printed['blocker'] == blocker
+        manifest = json.loads(fetch(fixture, f"gen/{printed['generation']}.json"))
+        assert 'blocker' not in manifest
 
 
 def test_42_state_json(fixture, monkeypatch):
@@ -826,7 +855,12 @@ def test_43_codecs_refusals_pass_through(fixture, monkeypatch, capsys):
     assert not keys(fixture)
 
 
-def test_44_imports(fixture):
+def test_44_imports(fixture, monkeypatch):
+    real = subprocess.run
+    def isolated(command, **kw):
+        assert '-I' in command and '-S' in command and '-B' in command
+        return real(command, **kw)
+    monkeypatch.setattr(subprocess, 'run', isolated)
     tree = ast.parse((ROOT / 'cloud_copy.py').read_text())
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -834,34 +868,63 @@ def test_44_imports(fixture):
         elif isinstance(node, ast.ImportFrom):
             assert (node.level == 1 and node.module is None and [n.name for n in node.names] == ['cloud_delta']) or (
                 node.level == 0 and node.module.split('.')[0] in sys.stdlib_module_names)
-    result = subprocess.run([sys.executable, '-I', '-S', str(ROOT / 'scripts/lcm_x_cloud.py'), '--help'], capture_output=True)
+    result = subprocess.run([sys.executable, '-I', '-S', '-B', str(ROOT / 'scripts/lcm_x_cloud.py'), '--help'], capture_output=True)
     assert result.returncode == 0
-    result = subprocess.run([sys.executable, '-I', '-S', str(ROOT / 'scripts/lcm_x_cloud.py'),
+    result = subprocess.run([sys.executable, '-I', '-S', '-B', str(ROOT / 'scripts/lcm_x_cloud.py'),
         'snapshot', '--home', str(fixture[0]), '--copy-id', COPY, '--bucket-dir', str(fixture[1].inner.root),
         '--prefix', 'copies'], capture_output=True, text=True)
     assert result.returncode == 0 and json.loads(result.stdout)['code'] == 'done'
     assert staged(fixture).exists() and not keys(fixture) and not state(fixture).exists()
 
 
-def test_45_malformed_head_refused_before_upload(fixture):
+@pytest.mark.parametrize('broken,code', [
+    ('generation', 'chain_generation'), ('base', 'bad_database_block'),
+    ('database_null', 'bad_database_block'), ('database_absent', 'bad_database_block'),
+    ('database_list', 'bad_database_block'), ('head_list', 'bad_database_block'),
+    ('stamp_absent', 'bad_head'), ('stamp_list', 'bad_head'), ('contract_null', 'bad_head'),
+    ('version_list', 'bad_head'), ('layout_absent', 'bad_head'), ('layout_list', 'bad_head'),
+    ('copy_id_absent', 'bad_head'), ('generation_absent', 'bad_head'), ('generation_list', 'bad_head'),
+    ('payloads_absent', 'bad_head'), ('payloads_null', 'bad_head'), ('payload_list', 'bad_head'),
+    ('payload_sha_absent', 'bad_head'), ('guard_list', 'bad_head'), ('guard_mark_list', 'bad_head'),
+    ('forgotten_list', 'bad_head'), ('invalid_json', 'bad_head'),
+])
+def test_45_malformed_head_refused_before_upload(fixture, broken, code):
     pub(fixture)
     grow(fixture)
     pub(fixture)
     path = fixture[1].inner.root / PREFIX / 'gen/2.json'
-    original = path.read_bytes()
-    for broken, code in (('generation', 'chain_generation'), ('base', 'bad_database_block')):
-        m = json.loads(original)
-        if broken == 'base':
-            del m['database']['base']
-        else:
-            m['database']['deltas'][-1]['generation'] = 99
-        path.write_text(json.dumps(m))
-        before = keys(fixture)
-        fixture[1].calls.clear()
-        refused(code, pub, fixture)
-        assert keys(fixture) == before and not any(method == 'put_new' for method, _ in fixture[1].calls)
-        result = cli(fixture)
-        assert result.returncode == 2 and json.loads(result.stdout)['code'] == code
+    m = json.loads(path.read_bytes())
+    if broken == 'base':
+        del m['database']['base']
+    elif broken == 'generation':
+        m['database']['deltas'][-1]['generation'] = 99
+    elif broken == 'head_list':
+        m = [m]
+    elif broken.endswith('_absent'):
+        field = broken.removesuffix('_absent')
+        del (m['payloads'][0] if field == 'payload_sha' else m)['sha256' if field == 'payload_sha' else field]
+    elif broken in ('database_null', 'database_list', 'stamp_list', 'layout_list', 'generation_list', 'payloads_null', 'guard_list'):
+        m[broken.rsplit('_', 1)[0]] = None if broken.endswith('_null') else []
+    elif broken == 'contract_null':
+        m['stamp']['contract'] = None
+    elif broken == 'version_list':
+        m['stamp']['contract']['version'] = []
+    elif broken == 'payload_list':
+        m['payloads'] = [[]]
+    elif broken == 'guard_mark_list':
+        m['guard']['mark'] = []
+    elif broken == 'forgotten_list':
+        m['forgotten'] = [[]]
+    path.write_text('{' if broken == 'invalid_json' else json.dumps(m))
+    before, staged_before = keys(fixture), staged(fixture).read_bytes()
+    fixture[1].calls.clear()
+    result = cli(fixture)
+    assert result.returncode == 2 and json.loads(result.stdout)['code'] == code
+    assert json.loads(result.stdout)['generation'] == 2
+    refused(code, pub, fixture)
+    assert keys(fixture) == before and not any(method == 'put_new' for method, _ in fixture[1].calls)
+    if broken not in ('generation', 'base'):
+        assert staged(fixture).read_bytes() == staged_before
 
 
 def test_46_uploaded_bytes_are_checked_bytes(fixture, monkeypatch):
@@ -878,5 +941,79 @@ def test_46_uploaded_bytes_are_checked_bytes(fixture, monkeypatch):
         rewritten.append(data)
         return result
     monkeypatch.setattr(cd, 'encode_delta', change)
-    refused('staging_changed', pub, fixture)
+    with pytest.raises(cp.Refused) as caught:
+        pub(fixture)
+    assert caught.value.code == 'staging_changed'
     assert rewritten and not any(fetch(fixture, key[len(PREFIX)+1:]) == rewritten[0] for key in keys(fixture))
+
+
+@pytest.mark.parametrize('when', ['upload', 'backup'])
+def test_r2_writer_closes_before_live_open(fixture, monkeypatch, when):
+    home = fixture[0]
+    staging = staged(fixture).parent
+    staging.mkdir(exist_ok=True)
+    (staging / 'leftover').touch()
+    writer = sqlite3.connect(home / 'lcm.db')
+    writer.execute('PRAGMA journal_mode=WAL')
+    writer.execute("UPDATE metadata SET value=value WHERE key='schema_version'")
+    writer.commit()
+    def files():
+        return {p.relative_to(home).as_posix(): (p.stat().st_size, sha(p.read_bytes()))
+                for p in home.rglob('*') if p.is_file() and 'cloud' not in p.relative_to(home).parts}
+    closed = []
+    def close():
+        if not closed:
+            writer.close()
+            closed.append(files())
+            assert not (home / 'lcm.db-wal').exists() and not (home / 'lcm.db-shm').exists()
+    if when == 'upload':
+        fixture[1].hook = lambda method, key: close() if method == 'put_new' else None
+    else:
+        real = cp.shutil.rmtree
+        def clear(path):
+            real(path)
+            close()
+        monkeypatch.setattr(cp.shutil, 'rmtree', clear)
+    try:
+        with pytest.raises(cp.Refused) as caught:
+            pub(fixture)
+        assert caught.value.code == 'wal_without_sidecars'
+        assert closed and files() == closed[0]
+        assert not (home / 'lcm.db-wal').exists() and not (home / 'lcm.db-shm').exists()
+        assert PREFIX + '/gen/1.json' not in keys(fixture)
+    finally:
+        writer.close()
+
+
+def test_r2_transport_symlinked_ancestor(tmp_path):
+    real = tmp_path / 'real'
+    real.mkdir()
+    alias = tmp_path / 'alias'
+    alias.symlink_to(real, target_is_directory=True)
+    transport = cp.DirTransport(alias / 'deep' / 'bucket', PREFIX)
+    key = PREFIX + '/gen/1.json'
+    transport.put_new(key, b'{}')
+    assert transport.root == (real / 'deep' / 'bucket').resolve()
+    assert transport.get(key) == b'{}' and transport.list(PREFIX + '/gen/') == [key]
+    outside = tmp_path / 'outside'
+    outside.mkdir()
+    (transport.root / PREFIX / 'parts').symlink_to(outside, target_is_directory=True)
+    refused('bad_name', transport.list, PREFIX + '/parts/')
+    refused('bad_name', transport.put_new, PREFIX + '/parts/' + 'a' * 64 + '.' + TOKEN, b'x')
+    (transport.root / PREFIX / 'gen/2.json').symlink_to(outside / 'secret')
+    for call in (transport.get, transport.stat):
+        refused('bad_name', call, PREFIX + '/gen/2.json')
+    refused('bad_name', transport.list, PREFIX + '/gen/')
+    assert list(outside.iterdir()) == []
+
+
+def test_r2_transport_ignores_dot_files(fixture):
+    transport = fixture[1].inner
+    key = PREFIX + '/gen/1.json'
+    transport.put_new(key, b'{}')
+    folder = transport.root / PREFIX / 'gen'
+    (folder / '.upload-abandoned').write_bytes(b'partial')
+    (folder / '.other').mkdir()
+    assert transport.list(PREFIX + '/gen/') == [key]
+    (folder / 'bad.json').write_bytes(b'{}')
+    refused('bad_name', transport.list, PREFIX + '/gen/')

@@ -100,7 +100,7 @@ def _write(path, data):
 class DirTransport:
     """Keys include the configured prefix and copy id; listings return full keys."""
     def __init__(self, root, prefix, *, clock=time.time):
-        self.root, self.prefix, self.clock = Path(root), _name(prefix, r'[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*'), clock
+        self.root, self.prefix, self.clock = Path(root).resolve(), _name(prefix, r'[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*'), clock
         _name(prefix.rsplit('/', 1)[-1], _COPY)
 
     def _path(self, key, listing=False):
@@ -110,7 +110,7 @@ class DirTransport:
             raise Refused('bad_name')
         _name(suffix, grammar)
         path = self.root / key
-        if self.root.is_symlink() or any(p.is_symlink() for p in (path, *path.parents) if p != self.root.parent):
+        if any(p.is_symlink() for p in (path, *path.parents) if p.is_relative_to(self.root)):
             raise Refused('bad_name')
         return path
 
@@ -130,6 +130,8 @@ class DirTransport:
             return []
         result = []
         for entry in os.scandir(folder):
+            if entry.name.startswith('.'):
+                continue
             key = prefix + entry.name
             self._path(key)
             if not entry.is_file(follow_symlinks=False):
@@ -260,6 +262,13 @@ def _header_wal(db):
         return any(b >= 2 for b in handle.read(2))
 
 
+def _live_ro(home):
+    db = home / 'lcm.db'
+    if _header_wal(db) and any(not (home / ('lcm.db-' + s)).exists() for s in ('wal', 'shm')):
+        raise Refused('wal_without_sidecars')
+    return _ro(db)
+
+
 def _quiet(home, quiet_s, clock):
     db, spool = home / 'lcm.db', home / 'spool'
     pending = spool.exists() and any(not p.name.startswith('.') and p.name.endswith(('.json', '.claimed')) for p in spool.iterdir())
@@ -271,8 +280,6 @@ def _before(home, quiet_s, clock, free_bytes):
     db = home / 'lcm.db'
     if (home / 'lcm.db.records').exists():
         raise Refused('records_pair_unsupported')
-    if _header_wal(db) and any(not (home / ('lcm.db-' + s)).exists() for s in ('wal', 'shm')):
-        raise Refused('wal_without_sidecars')
     folder = home / PAYLOAD_FOLDER
     payload_bytes = sum(p.stat().st_size for p in folder.iterdir() if p.is_file() and not p.is_symlink()) if folder.exists() else 0
     if free_bytes(home) < db.stat().st_size + payload_bytes + DISK_MARGIN:
@@ -338,7 +345,7 @@ def _stage(home, copy_id, generation, head, head_bytes, clock, progress):
     signature = cloud_delta.store_signature(home)
     db = staging / 'lcm.db'
     _write(db, b'')
-    with closing(_ro(home / 'lcm.db')) as source, closing(sqlite3.connect(db)) as target:
+    with closing(_live_ro(home)) as source, closing(sqlite3.connect(db)) as target:
         source.backup(target, pages=16, progress=progress)
     _after_backup()
     with closing(sqlite3.connect(db)) as conn:
@@ -418,17 +425,47 @@ def _head(transport, prefix, copy_id):
         return None, b''
     key = max(keys, key=lambda k: int(k.rsplit('/', 1)[-1][:-5]))
     data = transport.get(key)
-    head = json.loads(data)
-    if head['layout'] > 1:
-        raise Refused('newer_layout')
-    if head['stamp']['contract']['version'] > CONTRACT_VERSION:
-        raise Refused('replica_newer_contract')
-    if head['copy_id'] != copy_id or str(head['generation']) + '.json' != key.rsplit('/', 1)[-1]:
-        raise Refused('bad_name')
-    for row in head['payloads']:
-        if not _payload_name(row['name']):
+    generation = int(key.rsplit('/', 1)[-1][:-5])
+    try:
+        head = json.loads(data)
+        if not isinstance(head, dict) or not isinstance(head.get('database'), dict):
+            raise Refused('bad_database_block', generation=generation)
+        if type(head['layout']) is not int or head['layout'] < 1:
+            raise ValueError()
+        if head['layout'] > 1:
+            raise Refused('newer_layout')
+        version = head['stamp']['contract']['version']
+        if type(version) is not int or version < 1:
+            raise ValueError()
+        if version > CONTRACT_VERSION:
+            raise Refused('replica_newer_contract')
+        if type(head['generation']) is not int or not isinstance(head['copy_id'], str):
+            raise ValueError()
+        if head['copy_id'] != copy_id or head['generation'] != generation:
             raise Refused('bad_name')
-        _name(row['key'], r'payloads/[0-9a-f]{64}\.' + _TOKEN)
+        if not isinstance(head['payloads'], list):
+            raise ValueError()
+        for row in head['payloads']:
+            if not _payload_name(row['name']):
+                raise Refused('bad_name')
+            _name(row['key'], r'payloads/[0-9a-f]{64}\.' + _TOKEN)
+            _name(row['sha256'], r'[0-9a-f]{64}')
+            if type(row['bytes']) is not int or row['bytes'] < 0:
+                raise ValueError()
+        parent_guard = head.get('guard', {})
+        if not isinstance(parent_guard, dict) or type(parent_guard.get('mark', 0)) is not int:
+            raise ValueError()
+        for field in ('pins', 'superseded', 'forgotten'):
+            if not isinstance(head.get(field, []), list):
+                raise ValueError()
+        for item in head.get('forgotten', []):
+            if not all(isinstance(item[k], str) for k in ('kind', 'key')):
+                raise ValueError()
+    except Refused as error:
+        error.detail['generation'] = generation
+        raise
+    except (ValueError, TypeError, KeyError, AttributeError):
+        raise Refused('bad_head', generation=generation) from None
     return head, data
 
 
@@ -442,11 +479,12 @@ def publish(home, copy_id, transport, prefix, *, quiet_s=0, part_size=DEFAULT_PA
             guard=None, forget_items=None, token=None, timer=False, clock=time.time,
             free_bytes=lambda p: shutil.disk_usage(p).free, progress=None,
             size_factor=cloud_delta.SIZE_FACTOR, max_generations=cloud_delta.MAX_CHAIN_GENERATIONS,
-            snapshot_only=False):
+            snapshot_only=False, result=None):
     """Return a manifest; refusals and skips raise Refused with a content-free code.
 
     snapshot_only stages a generation-1 base without transport or page/state writes.
     A guard receives (parent manifest, staged database); forget_items has that seam.
+    result receives printable status fields after success, outside the manifest.
     """
     _name(copy_id, _COPY)
     _name(prefix, r'[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*')
@@ -597,7 +635,7 @@ def publish(home, copy_id, transport, prefix, *, quiet_s=0, part_size=DEFAULT_PA
                 break
             if (db.stat().st_size, db.stat().st_mtime_ns) != frozen:
                 raise Refused('staging_changed')
-            with closing(_ro(home / 'lcm.db')) as live, closing(_ro(db)) as staged:
+            with closing(_live_ro(home)) as live, closing(_ro(db)) as staged:
                 forgotten = {r[0][len(FORGOTTEN_PREFIX):] for r in live.execute('SELECT key FROM metadata') if r[0].startswith(FORGOTTEN_PREFIX)}
                 sessions = {r[0] for r in staged.execute('SELECT DISTINCT session_id FROM messages')}
             final_items = forget_items(head, db) if forget_items else []
@@ -610,8 +648,6 @@ def publish(home, copy_id, transport, prefix, *, quiet_s=0, part_size=DEFAULT_PA
                      forgotten=sorted((head or {}).get('forgotten', []) + [
                          {k: i[k] for k in ('key', 'kind', 'session')} | dict(base_generation=generation if reason is not None and i['chain_may_hold'] else None)
                          for i in final_items], key=lambda i: (i['kind'], i['key'])))
-            if blocker:
-                m['blocker'] = blocker
             if snapshot_only:
                 return m
             try:
@@ -620,4 +656,6 @@ def publish(home, copy_id, transport, prefix, *, quiet_s=0, part_size=DEFAULT_PA
                 raise Refused('chain_conflict') from None
             cloud_delta.promote_pending_list(pages_dir, copy_id)
             _save_state(home, state | dict(copy_id=copy_id, snapshot_signature=signature, last_publish_s=clock()))
+            if blocker and result is not None:
+                result['blocker'] = blocker
             return m

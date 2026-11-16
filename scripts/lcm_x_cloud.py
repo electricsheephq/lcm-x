@@ -30,14 +30,13 @@ def main(argv=None):
     try:
         prefix = args.prefix + '/' + args.copy_id
         transport = cloud_copy.DirTransport(args.bucket_dir, prefix)
+        result = {}
         manifest = cloud_copy.publish(args.home, args.copy_id, transport, prefix,
             quiet_s=args.quiet_s, part_size=args.part_size, timer=getattr(args, 'timer', False),
-            snapshot_only=args.command == 'snapshot')
-        result = dict(code='done', copy_id=manifest['copy_id'], generation=manifest['generation'],
+            snapshot_only=args.command == 'snapshot', result=result)
+        result.update(code='done', copy_id=manifest['copy_id'], generation=manifest['generation'],
                       file_bytes=manifest['database']['file_bytes'], payloads=len(manifest['payloads']),
                       unresolved_minted=len(manifest['unresolved_minted']), unresolved_quoted=len(manifest['unresolved_quoted']))
-        if 'blocker' in manifest:
-            result['blocker'] = manifest['blocker']
         status = 0
     except Exception as error:
         code = getattr(error, 'code', 'error')
