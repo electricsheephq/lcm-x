@@ -72,6 +72,8 @@ OBSERVED_ATTRIBUTES = frozenset({
     "_host_rewrite_overrides", "_host_rewrite_watch", "_last_active_replay_messages",
     "_last_active_replay_source_identities", "_last_ingest_reconciliation", "_retired_durable_proof",
     "_active_replay_cache_generation", "_deferred_active_replay_cache_generation",
+    "_ordinary_active_replay_cache_generation", "_active_replay_cache_freeze_sequence",
+    "_applied_active_replay_cache_sequence",
     "_compiled_ignore_message_patterns", "_compression_boundary_ingest_pending",
     "_compression_boundary_active_placeholder_digest_budget", "_compression_boundary_active_placeholder_digest_ordinals",
     "_compression_boundary_stored_placeholder_digest_counts", "_ignored_message_count", "_ignore_pattern_dropped_count",
@@ -391,6 +393,9 @@ def snapshot(engine: Any, canonical: IngestCanonical) -> dict[str, Any]:
                                             "_frozen_tail_reached",  # Queue-decision flag; pending tails retain the outcome.
                                             "_active_replay_cache_generation",  # Guard; pending cache_update and replay lists retain the outcome.
                                             "_deferred_active_replay_cache_generation",  # Guard; pending cache_update and replay lists retain the outcome.
+                                            "_ordinary_active_replay_cache_generation",  # Guard; pending updates and replay lists retain the outcome.
+                                            "_active_replay_cache_freeze_sequence",  # Order; frozen updates retain the outcome.
+                                            "_applied_active_replay_cache_sequence",  # Order; replay lists retain the applied outcome.
                                             "_compress_calls", "_emission_handle",
                                             "_ledger_rollback_failures_published",
                                             "_ledger_adopted",  # Commit-only optimization; observed in the attribute stream.

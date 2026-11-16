@@ -270,3 +270,106 @@ def test_pending_retry_newer_cache_guard(tmp_path, monkeypatch):
         assert len(rows) == 6, [(r['content'], r['observed_at']) for r in rows]
     finally:
         engine.shutdown()
+
+
+def _run_chained_warm_tails(root, monkeypatch, shape, drain, followup, *, busy, ordinary=False):
+    root.mkdir()
+    with monkeypatch.context() as patch:
+        engine = _open(root, patch, None)
+        try:
+            view = _turn(0, 'plain', uids=shape.startswith('uid-'))
+            if shape.endswith('user'):
+                view = view[:1]
+            engine.ingest(copy.deepcopy(view))
+            probe = _Probe(patch)
+            frozen = []
+            for stamp in (1001., 2001.):
+                view[0]['timestamp'] = stamp
+                if ordinary and stamp == 2001.:
+                    engine.ingest(copy.deepcopy(view))
+                    newer_cache = copy.deepcopy(engine._last_active_replay_messages)
+                if busy:
+                    with patch.context() as fault:
+                        probe.busy_end(fault, engine, 'warm', view)
+                    frozen.append([t['kind'] for t in engine._pending_session_tails])
+                else:
+                    engine.on_session_end('parent', copy.deepcopy(view))
+            if busy:
+                expected_frozen = [['warm'], ['warm']] if ordinary or shape == 'uid-turn' else [
+                    ['warm'], ['warm', 'warm']]
+                assert frozen == expected_frozen
+            if drain == 'end':
+                engine.on_session_end('parent', copy.deepcopy(view))
+            else:
+                engine._retry_pending_session_tails()
+            assert not engine._pending_session_tails
+            if ordinary:
+                assert engine._last_active_replay_messages == newer_cache
+            if followup == 'ingest':
+                engine.ingest(copy.deepcopy(view))
+            elif followup.startswith('end'):
+                for _ in range(int(followup[3:])):
+                    engine.on_session_end('parent', copy.deepcopy(view))
+            return sorted((r['content'], r['observed_at'])
+                          for r in engine._store.get_session_messages('parent'))
+        finally:
+            engine.shutdown()
+
+
+@pytest.mark.parametrize('shape', ['uid-user', 'nouid-user', 'nouid-turn', 'uid-turn'])
+@pytest.mark.parametrize('drain', ['end', 'retry'])
+@pytest.mark.parametrize('followup', ['none', 'ingest', 'end1', 'end3'])
+def test_chained_warm_tail_cache_updates(tmp_path, monkeypatch, shape, drain, followup, record_property):
+    """Two frozen views must compose, with the single-tail uid turn as a control."""
+    expected = _run_chained_warm_tails(tmp_path / 'clean', monkeypatch, shape, drain, followup, busy=False)
+    actual = _run_chained_warm_tails(tmp_path / 'busy', monkeypatch, shape, drain, followup, busy=True)
+    record_property('clean_occurrences', repr(expected))
+    record_property('occurrences', repr(actual))
+    if (shape, drain, followup) == ('uid-turn', 'retry', 'none'):
+        # #2778: the single-tail control cannot reach clean; pin main's two-busy-base.json list.
+        expected = [('', 3.), ('question-0', 1.), ('question-0', 1001.), ('reply-0', 2.), ('result-0', 4.)]
+    assert actual == expected, {'stored': actual, 'clean': expected}
+
+
+@pytest.mark.parametrize('shape', ['uid-user', 'nouid-user', 'nouid-turn'])
+def test_chained_warm_tails_ordinary_ingest_wins(tmp_path, monkeypatch, shape):
+    """An ordinary ingest between busy ends supersedes the first frozen view."""
+    expected = _run_chained_warm_tails(tmp_path / 'clean', monkeypatch, shape, 'retry', 'end3',
+                                       busy=False, ordinary=True)
+    actual = _run_chained_warm_tails(tmp_path / 'busy', monkeypatch, shape, 'retry', 'end3',
+                                     busy=True, ordinary=True)
+    assert actual == expected, {'stored': actual, 'clean': expected}
+
+
+def test_chained_warm_tail_older_update_cannot_replace_newer(tmp_path, monkeypatch):
+    """A non-busy failure can leave the first tail pending while the second commits."""
+    expected = _run_chained_warm_tails(tmp_path / 'clean', monkeypatch, 'uid-user', 'retry', 'none', busy=False)
+    engine = _open(tmp_path, monkeypatch, None)
+    try:
+        view = _turn(0, 'plain')[:1]
+        engine.ingest(copy.deepcopy(view))
+        probe = _Probe(monkeypatch)
+        for stamp in (1001., 2001.):
+            view[0]['timestamp'] = stamp
+            with monkeypatch.context() as patch:
+                probe.busy_end(patch, engine, 'warm', view)
+        assert len(engine._pending_session_tails) == 2
+        older = engine._pending_session_tails[0]
+        match = engine._match_pending_tail
+        with monkeypatch.context() as patch:
+            def fail_older(tail):
+                if tail is older:
+                    raise RuntimeError('first tail temporarily unavailable')
+                return match(tail)
+            patch.setattr(engine, '_match_pending_tail', fail_older)
+            engine._retry_pending_session_tails()
+        assert engine._pending_session_tails == [older]
+        assert engine._last_active_replay_messages == view
+        engine._retry_pending_session_tails()
+        assert not engine._pending_session_tails
+        assert engine._last_active_replay_messages == view
+        assert engine._deferred_active_replay_cache_generation == engine._active_replay_cache_generation
+        actual = sorted((r['content'], r['observed_at']) for r in engine._store.get_session_messages('parent'))
+        assert actual == expected
+    finally:
+        engine.shutdown()

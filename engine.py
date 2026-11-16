@@ -1078,6 +1078,9 @@ class LCMEngine(
         self._current_compress_placeholder_identity_counts: dict[tuple[str, str, str, str], int] = {}
         self._active_replay_cache_generation = 0
         self._deferred_active_replay_cache_generation = None
+        self._ordinary_active_replay_cache_generation = 0
+        self._active_replay_cache_freeze_sequence = 0
+        self._applied_active_replay_cache_sequence = 0
         self._last_active_replay_source_identities: list[tuple[Any, ...]] = []
         self._last_active_replay_messages: list[Dict[str, Any]] = []
         self._generated_ignored_active_replay_placeholder_message_ids: set[int] = set()
@@ -6752,12 +6755,18 @@ class LCMEngine(
             replay[unaudited_from:end] = self._last_active_replay_messages[unaudited_from:end]
         generated = [idx for idx, row in enumerate(replay)
                      if id(row) in self._generated_ignored_active_replay_placeholder_message_ids]
-        return (self._active_replay_cache_generation, copy.deepcopy(identities), copy.deepcopy(replay), generated)
+        self._active_replay_cache_freeze_sequence += 1
+        return (self._ordinary_active_replay_cache_generation, copy.deepcopy(identities), copy.deepcopy(replay),
+                generated, self._active_replay_cache_freeze_sequence)
 
     def _apply_active_replay_cache_update(self, update):
-        generation, identities, replay, generated = update
-        if generation != self._active_replay_cache_generation:
+        generation, identities, replay, generated, sequence = update
+        # Deferred writes compose; only an ordinary write supersedes their frozen generation.
+        # A failed earlier tail may retry after a later one has already applied its view.
+        if (generation != self._ordinary_active_replay_cache_generation
+                or sequence <= self._applied_active_replay_cache_sequence):
             return
+        self._applied_active_replay_cache_sequence = sequence
         self._active_replay_cache_generation += 1
         self._deferred_active_replay_cache_generation = self._active_replay_cache_generation
         self._last_active_replay_source_identities = identities
@@ -6778,6 +6787,7 @@ class LCMEngine(
         *, persist_placeholder_evidence: bool = True,
     ) -> List[Dict[str, Any]]:
         self._active_replay_cache_generation += 1
+        self._ordinary_active_replay_cache_generation = self._active_replay_cache_generation
         self._last_active_replay_source_identities = [  # full identity (#488): no carrier aliasing
             self._message_replay_identity(message, strip_carrier=False) for message in original_messages
         ]
@@ -6846,6 +6856,7 @@ class LCMEngine(
                     original_messages if fresh_replay_messages is None else fresh_replay_messages,
                 )
                 self._active_replay_cache_generation += 1
+                self._ordinary_active_replay_cache_generation = self._active_replay_cache_generation
                 self._last_active_replay_messages = current
                 self._refresh_generated_active_replay_placeholder_retention(
                     original_messages,
@@ -9300,6 +9311,7 @@ class LCMEngine(
                 end = min(cursor, len(cached_source_identities), len(previous_replay),
                           len(self._last_active_replay_source_identities), len(self._last_active_replay_messages))
                 self._active_replay_cache_generation += 1
+                self._ordinary_active_replay_cache_generation = self._active_replay_cache_generation
                 self._last_active_replay_source_identities[unaudited_from:end] = cached_source_identities[unaudited_from:end]
                 self._last_active_replay_messages[unaudited_from:end] = previous_replay[unaudited_from:end]
                 for message in self._last_active_replay_messages[unaudited_from:end]:

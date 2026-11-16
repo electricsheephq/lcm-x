@@ -565,8 +565,8 @@
       "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "protect-after-filter-copy": {
-      "outcome_sha": "c64582d01138f3bb5a12a259f0347da465e5fe1478f23af751b920715ca15d02",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2751: pending tail carries its frozen cache update; retained-copy labels renumbered; durable rows unchanged"
+      "outcome_sha": "06282e2624dd38a5f2041e4fbe2236ec21661960b2802307b7d3c668c646aced",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2751: pending tail carries its frozen cache update; retained-copy labels renumbered; durable rows unchanged; then #2751: frozen cache updates carry their freeze sequence so chained deferred applies compose in order; durable rows unchanged"
     },
     "protect-large-assistant": {
       "outcome_sha": "b13645e0987309b318d49f96c14ecdc690b5dc9023f02f2334744f05bb61f2ba",
@@ -605,8 +605,8 @@
       "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then row-filter-generated-append-error: adds possible_replay_of 7->5, 8->6 (#2305 P1h PR5 cursor-0 batch links)"
     },
     "row-filter-ignore-ledger-lock": {
-      "outcome_sha": "1c08a5636182ffef6f946dd1661435d9c6b79d8ba2efb381b607d3ebaa98abe5",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2751: pending tail carries its frozen cache update; retained-copy labels renumbered; durable rows unchanged"
+      "outcome_sha": "91873c6970a3f27d12cf60ff64263b8ac5bc96ddab17823144b48f72d42643aa",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2751: pending tail carries its frozen cache update; retained-copy labels renumbered; durable rows unchanged; then #2751: frozen cache updates carry their freeze sequence so chained deferred applies compose in order; durable rows unchanged"
     },
     "row-filter-ignored-append-error": {
       "outcome_sha": "eb4bd089208db13599496286680fe550a8a6e76e5e524b0db66686231d66cdbb",
@@ -637,24 +637,24 @@
       "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then sqlite-append: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links)"
     },
     "sqlite-duplicate-existing-tail": {
-      "outcome_sha": "65b54d573a8c541031cd4380cd88380f22c1b8674b2fe90e6b4cbf6073676327",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2751: pending tail carries its frozen cache update; durable rows unchanged"
+      "outcome_sha": "3d66cca4435ad1e85fb24e190fd81b66f63a9306afffd5b5123754a5518fb3f8",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2751: pending tail carries its frozen cache update; durable rows unchanged; then #2751: frozen cache updates carry their freeze sequence so chained deferred applies compose in order; durable rows unchanged"
     },
     "sqlite-duplicate-tail": {
-      "outcome_sha": "c602104972b08339519557468a89f89f1c94013f6883eaecd96d18ccb60ab9ab",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then sqlite-duplicate-tail: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links); then #2751: pending tail carries its frozen cache update; durable rows unchanged"
+      "outcome_sha": "54513a46e91a4f07124f2bf49b279829606f8e42b0085b58a0fb8e1346f012c7",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then sqlite-duplicate-tail: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links); then #2751: pending tail carries its frozen cache update; durable rows unchanged; then #2751: frozen cache updates carry their freeze sequence so chained deferred applies compose in order; durable rows unchanged"
     },
     "sqlite-durable": {
       "outcome_sha": "0b115b03d0f2495bbdd6c3efac4a0ee3096fcad6e0f05d70bcb3c1da48016051",
       "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "sqlite-locked": {
-      "outcome_sha": "b7a0ecb0b52082eb7281c664edb3bdd831ae90b4f26782e7868c0ff41680721e",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then sqlite-locked: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links); then #2751: pending tail carries its frozen cache update; durable rows unchanged"
+      "outcome_sha": "dd917c08f9b1057347ff5bafce3e210fcfcf05beb8f2c25366feea7f67ccc962",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then sqlite-locked: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links); then #2751: pending tail carries its frozen cache update; durable rows unchanged; then #2751: frozen cache updates carry their freeze sequence so chained deferred applies compose in order; durable rows unchanged"
     },
     "sqlite-locked-existing-tail": {
-      "outcome_sha": "6683b265b48ba4f3ae904b00c9d46969565632271e9bcd803d1336af2196cedf",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2751: pending tail carries its frozen cache update; durable rows unchanged"
+      "outcome_sha": "a22a2fcb9a5d46c4b8252f314d83695d75c99b81de40e237e1222c5577ea748b",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2751: pending tail carries its frozen cache update; durable rows unchanged; then #2751: frozen cache updates carry their freeze sequence so chained deferred applies compose in order; durable rows unchanged"
     },
     "sqlite-metadata": {
       "outcome_sha": "9f42b0bcef170e51636e96a1bb5e4c3f29fad2b9ca590fb07698975c09c8f6e8",
