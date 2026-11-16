@@ -120,7 +120,7 @@ def test_search_bounds_and_omissions_preserve_canonical(tmp_path, monkeypatch, n
         actual = json.loads(raw)
         assert {k: actual[k] for k in base} == base
         hits = actual.get('queued_user_record_hits', [])
-        assert len(raw) <= 4000
+        assert raw.isascii() and len(json.dumps(actual, ensure_ascii=False)) <= 4000
         assert len(hits) + actual['queued_user_records_omitted'] == 30
         assert [r['ordinal'] for r in hits] == list(reversed(range(30)))[:len(hits)]
         for hit in hits:
@@ -305,3 +305,27 @@ def test_non_object_main_response_is_returned_unchanged(tmp_path, raw):
         folded(e)
         handler = q.surface('grep')(lambda args, **kwargs: raw)
         assert handler(dict(query='lost'), engine=e) == raw
+
+
+@pytest.mark.parametrize('name', ['lcm_grep', 'lcm_recall'])
+def test_lone_surrogate_query_reply_is_written_like_main(tmp_path, name):
+    with engine_context(tmp_path, window=128000, conversation_id='conv', embeddings_enabled=False) as e:
+        folded(e)
+        args = dict(query='lost \ud83d', session_scope='all')
+        base = getattr(tools, name).__wrapped__(args, engine=e)
+        got = getattr(tools, name)(args, engine=e)
+        assert 'queued_user_record_hits' in json.loads(got)
+        assert base.isascii() and got.isascii()
+
+
+def test_augmented_reply_with_lone_surrogate_is_ingested(tmp_path):
+    with engine_context(tmp_path, window=128000, conversation_id='conv', embeddings_enabled=False) as e:
+        folded(e)
+        reply = tools.lcm_grep(dict(query='lost \ud83d', session_scope='all'), engine=e)
+        assert 'queued_user_record_hits' in json.loads(reply)
+        before = len(e._store.get_session_messages('S'))
+        e.ingest([dict(role='user', content='q2', timestamp=60.),
+                  dict(role='assistant', content='', tool_calls=[dict(id='c1', type='function',
+                       function=dict(name='lcm_grep', arguments='{}'))], timestamp=61.),
+                  dict(role='tool', tool_call_id='c1', content=reply, timestamp=62.)])
+        assert len(e._store.get_session_messages('S')) == before + 3

@@ -466,3 +466,22 @@ def test_exit_flush_continues_after_concurrent_removal(tmp_path, monkeypatch, ca
         assert 'private exit failure' not in caplog.text
     assert second._queued_counts['exit_kept'] == 1
     assert 'discarded_at_exit=1' in caplog.text
+
+
+def test_permanent_refusal_counted_once_when_another_drain_removed_it(tmp_path):
+    with engine_context(tmp_path, window=128000, conversation_id='conv', embeddings_enabled=False) as e:
+        orig = e._store_queued_user_rows
+        e._store_queued_user_rows = lambda _: (_ for _ in ()).throw(sqlite3.OperationalError('busy'))
+        folded(e)
+        e._store.delete_session_messages('S')
+        e._store_queued_user_rows = orig
+        entry = e._queued_entries[0]
+
+        def write(entries):
+            if entry in e._queued_entries:  # another drain refuses and removes it meanwhile
+                e._queued_entries.remove(entry)
+                e._queued_counts['dropped_permanent'] += 1
+            return orig(entries)
+        e._store_queued_user_rows = write
+        q.drain(e)
+        assert e._queued_counts['dropped_permanent'] == 1

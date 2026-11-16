@@ -241,8 +241,8 @@ def drain(engine, *, exiting=False):
             if permanent:
                 with suppress(ValueError):
                     queue.remove(entry)
-                count(engine, 'dropped_permanent')
-                logger.warning('queued records permanent refusal: %s', exc)
+                    count(engine, 'dropped_permanent')
+                    logger.warning('queued records permanent refusal: %s', exc)
             done, used = done + 1, used + size
             continue
         with suppress(ValueError):
@@ -460,6 +460,7 @@ def surface(name):
                 result['queued_user_records_omitted'] = omitted
                 if not entries:
                     del result['queued_user_record_hits']
-            return raw if result == json.loads(raw) else json.dumps(result, ensure_ascii=False)
+            # Measured as main measures its cap, written as main writes its reply (ASCII-escaped).
+            return raw if result == json.loads(raw) else json.dumps(result)
         return wrapped
     return decorate
