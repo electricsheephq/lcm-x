@@ -223,9 +223,10 @@ def test_5_grep_or_relevance_and_explicit_sort(engine):
     on = json.loads(tools.lcm_grep(args, engine=engine))
     assert on["sort"] == "relevance"
     assert on["results"][0]["store_id"] == engine.old
-    explicit = json.loads(tools.lcm_grep({**args, "sort": "recency"}, engine=engine))
-    assert explicit["sort"] == "recency"
-    assert explicit["results"][0]["store_id"] == engine.fresh
+    for sort in ("recency", None, ""):
+        explicit = json.loads(tools.lcm_grep({**args, "sort": sort}, engine=engine))
+        assert explicit["sort"] == "recency"
+        assert explicit["results"][0]["store_id"] == engine.fresh
     for query in ('"cake OR orchard"', "cake or orchard", "(cake OR orchard)", "OR cake", "cake"):
         result = json.loads(tools.lcm_grep({**args, "query": query}, engine=engine))
         assert result["sort"] == "recency"
@@ -273,3 +274,94 @@ def test_6_fmp_options_reach_engine(tmp_path, monkeypatch):
         assert (config.recall_recency_floor, config.recall_grep_stemmed) == (0.5, False)
         assert config.config_sources["recall_recency_floor"] == "env:LCM_RECALL_RECENCY_FLOOR"
         assert config.config_sources["recall_grep_stemmed"] == "env:LCM_RECALL_GREP_STEMMED"
+
+
+@pytest.mark.parametrize("raw", ["", "   ", "maybe"])
+def test_r2_stemmed_env_source(monkeypatch, raw):
+    monkeypatch.setattr(config_module, "lcm_env", lambda: {"LCM_RECALL_GREP_STEMMED": raw})
+    monkeypatch.setattr(config_module, "_load_hermes_config_yaml_for_env", lambda _env: {
+        "lcm": {"recall_grep_stemmed": True},
+    })
+    config = LCMConfig.from_env()
+    assert config.recall_grep_stemmed is (raw != "maybe")
+    assert config.config_sources["recall_grep_stemmed"] == (
+        "default" if raw == "maybe" else "config_yaml:lcm.recall_grep_stemmed")
+    assert config.config_source_warnings == (
+        ["invalid env LCM_RECALL_GREP_STEMMED ignored; expected bool"] if raw == "maybe" else [])
+
+
+@pytest.mark.parametrize("consumer", ["proactive", "baseline", "requirements", "pack", "proposal", "auto"])
+def test_r2_internal_callers_keep_recency_floor(engine, monkeypatch, consumer):
+    from hermes_lcm import answer_contract, evidence_compiler, evidence_pack
+    from hermes_lcm.engine import LCMEngine
+
+    hits = [{"kind": "message_excerpt", "store_id": sid, "session_id": session,
+             "timestamp": stamp, "snippet": "cake", "content_offset": 0}
+            for sid, session, stamp in ((engine.old, "old", NOW - 365 * 86400),
+                                        (engine.fresh, "fresh", NOW))]
+    fuse = retrieval_core.fuse_candidates
+    monkeypatch.setattr(tools, "fuse_candidates", lambda _arms, weights:
+                        fuse({"fts": [hits[0]], "chunk": hits}, weights))
+    args = {"query": "cake", "limit": 2}
+    original = tools.lcm_recall
+    expected = [hit["store_id"] for hit in json.loads(original(args, engine=engine))["hits"]]
+    assert expected == [engine.fresh, engine.old]
+    engine._config.recall_recency_floor = 1.0
+    assert [hit["store_id"] for hit in json.loads(original(args, engine=engine))["hits"]] == [engine.old, engine.fresh]
+    captured = []
+
+    def capture(recall_args, **kwargs):
+        result = original(recall_args, **kwargs)
+        captured.append(json.loads(result))
+        return result
+
+    def consume(*a, retrieve, **kwargs):
+        return {"context": retrieve(args)}
+
+    monkeypatch.setattr(tools, "lcm_recall", capture)
+    monkeypatch.setattr(evidence_pack, "build_evidence_pack", consume)
+    monkeypatch.setattr(evidence_compiler, "compile_evidence", consume)
+    monkeypatch.setattr(evidence_compiler, "compile_preanswer_evidence", consume)
+    engine._disabled_tool_names = lambda: set()
+    engine.handle_tool_call = lambda name, recall_args, **kw: LCMEngine.handle_tool_call(engine, name, recall_args, **kw)
+    if consumer == "proactive":
+        engine._proactive_recall_eligible = lambda: True
+        engine._newest_user_message_text = LCMEngine._newest_user_message_text
+        engine._wrap_relevant_memories = LCMEngine._wrap_relevant_memories
+        engine._proactive_recall_skipped_count = engine._proactive_recall_injected_count = 0
+        engine._config.proactive_recall_min_score = 0.0
+        assert LCMEngine._build_proactive_recall_message(
+            engine, [{"role": "user", "content": "cake"}], "user", set())
+    elif consumer in {"baseline", "requirements"}:
+        spec = importlib.util.spec_from_file_location("hermes_lcm.l1l2_hook", Path(tools.__file__).with_name("__init__.py"))
+        spec.submodule_search_locations = None
+        plugin = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(plugin)
+        if consumer == "baseline":
+            plugin._answer_ready_baseline(engine, "cake", {})
+        else:
+            engine._config.preanswer_evidence_enabled = True
+            engine._config.preanswer_evidence_mode = "requirements_v1"
+            monkeypatch.setattr(answer_contract, "compile_answer_contract", lambda *a: SimpleNamespace(status="planned"))
+            plugin._pre_llm_context(engine, {"user_message": "cake", "baseline_refs": []})
+    elif consumer == "pack":
+        tools.lcm_evidence_pack({}, engine=engine)
+    else:
+        tools.lcm_compile_evidence({"mode": consumer}, engine=engine)
+    assert len(captured) == 1
+    assert [hit["store_id"] for hit in captured[0]["hits"]] == expected
+
+
+def test_r2_externalized_scope_omits_stale_fts_index(engine, monkeypatch):
+    engine._config.recall_grep_stemmed = True
+    history = json.loads(tools.lcm_grep({"query": "cake", "session_scope": "all"}, engine=engine))
+    assert history["fts_index"] == engine._store._last_fts_index == "stem"
+
+    def unexpected_search(*a, **kw):
+        pytest.fail("externalized-only scope searched history")
+
+    monkeypatch.setattr(engine._store, "search", unexpected_search)
+    result = json.loads(tools.lcm_grep({"query": "cake", "content_scope": "externalized"}, engine=engine))
+    assert "error" not in result
+    assert result["content_scope"] == "externalized"
+    assert "fts_index" not in result

@@ -100,6 +100,8 @@
     "recall_snippet_window_hits": 0,
     "recall_extra_entries": 0,
     "recall_later_statements": 0,
+    "recall_recency_floor": 0.5,
+    "recall_grep_stemmed": false,
     "recall_arm_weights": {
       "chunk": 1.0,
       "fts": 0.5,

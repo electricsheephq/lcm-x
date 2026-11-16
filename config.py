@@ -1641,20 +1641,7 @@ class LCMConfig:
         )
         _record("recall_recency_floor", floor_source
                 if len(config_source_warnings) == warning_count else "default")
-
-        stemmed_value = prefix_yaml.get("recall_grep_stemmed", False) if isinstance(prefix_yaml, dict) else False
-        stemmed_source = ("config_yaml:lcm.recall_grep_stemmed" if isinstance(prefix_yaml, dict)
-                          and "recall_grep_stemmed" in prefix_yaml else "default")
-        if not isinstance(stemmed_value, bool):
-            stemmed_value, stemmed_source = False, "default"
-            config_source_warnings.append("invalid config.yaml lcm.recall_grep_stemmed ignored; expected bool")
-        warning_count = len(config_source_warnings)
-        c.recall_grep_stemmed = _parse_bool_env(
-            "LCM_RECALL_GREP_STEMMED", stemmed_value, warnings=config_source_warnings)
-        if env.get("LCM_RECALL_GREP_STEMMED") is not None:
-            stemmed_source = "env:LCM_RECALL_GREP_STEMMED"
-        _record("recall_grep_stemmed", stemmed_source
-                if len(config_source_warnings) == warning_count else "default")
+        _record("recall_grep_stemmed", "default")
 
         for name in ("embedding_query_prefix", "embedding_document_prefix"):
             if isinstance(prefix_yaml, dict) and isinstance(prefix_yaml.get(name), str):
@@ -1667,17 +1654,18 @@ class LCMConfig:
             else:
                 config_source_warnings.append("invalid config.yaml lcm.recall_adjacent_reply ignored; expected bool")
 
-        for name, expected in (("recall_guidance", "v1 or v2"), ("recall_session_hints", "bool")):
+        for name, expected in (("recall_guidance", "v1 or v2"), ("recall_session_hints", "bool"),
+                               ("recall_grep_stemmed", "bool")):
             key = "LCM_" + name.upper()
             raw = env.get(key, "").strip()
             value = raw or (prefix_yaml.get(name, getattr(c, name)) if isinstance(prefix_yaml, dict) else getattr(c, name))
             source = f"env:{key}" if raw else (f"config_yaml:lcm.{name}"
                 if isinstance(prefix_yaml, dict) and name in prefix_yaml else "default")
-            if name == "recall_session_hints" and raw:
+            if expected == "bool" and raw:
                 value = _PARSER_BY_TYPE[bool](key, None)
             if name == "recall_guidance" and isinstance(value, str):
                 value = value.strip().lower()
-            valid = isinstance(value, bool) if name == "recall_session_hints" else value in ("v1", "v2")
+            valid = isinstance(value, bool) if expected == "bool" else value in ("v1", "v2")
             setattr(c, name, value if valid else getattr(cls, name))
             if raw or source != "default":
                 _record(name, source if valid else "default", None if valid else

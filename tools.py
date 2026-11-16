@@ -1889,7 +1889,7 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
         "total_results": len(results),
         "results": results[:limit],
     }
-    if args.get("_stemmed"):
+    if args.get("_stemmed") and content_scope in {"history", "both"}:
         response["fts_index"] = getattr(engine._store, "_last_fts_index", "plain")
     if role is not None:
         response["role"] = role
@@ -5369,7 +5369,7 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
         logger.debug("LCM subagent scope read failed: %s", exc)
     ordered = apply_prior(
         ordered, scope_session_ids, now, scope_bias,
-        recency_floor=getattr(engine._config, "recall_recency_floor", 0.5),
+        recency_floor=kwargs.get("recency_floor", getattr(engine._config, "recall_recency_floor", 0.5)),
     )
 
     # -- Optional rerank stage (default OFF): a pure rank-REORDER within the top
