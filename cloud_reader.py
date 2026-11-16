@@ -514,10 +514,9 @@ class Merger:
             if future is None:
                 return {'error': 'the other store could not answer this call', 'store': replica.prefix}
             absent, _ = tool_body(future.result())
-            zero_text = absent['error'] if isinstance(absent.get('error'), str) else json.dumps(absent)
-            if any(type(v) is int for v in missing.values()) and len(re.findall(r'(?<![\w:.-])0(?![\w.-])', zero_text)) > 1:
-                return {'error': 'the other store could not answer this call', 'store': replica.prefix}
             if isinstance(absent.get('error'), str):
+                if any(type(v) is int for v in missing.values()) and len(re.findall(r'(?<![\w:.-])0(?![\w.-])', absent['error'])) > 1:
+                    return {'error': 'the other store could not answer this call', 'store': replica.prefix}
                 replacements = {zero: qualify(replica.prefix, original) for k, v in target.items()
                                 for zero, original in (zip(missing[k], v) if isinstance(v, list) else [(missing[k], v)])}
                 if len(set(args.get('externalized_refs', []))) > 1:
@@ -537,7 +536,9 @@ class Merger:
                 body = rebuild(absent, replica.prefix)
                 for key in target.keys() & body.keys():
                     body[key] = replace_token(body[key], qualify(replica.prefix, missing[key]), qualify(replica.prefix, target[key]))
-                clean = error_body(json.dumps(body), {}, replica.prefix)
+                echo = {k for k, v in body.items() if (k in changed and k in absent and absent[k] == changed[k])
+                        or (k in target and v == qualify(replica.prefix, target[k]))}
+                clean = error_body(json.dumps({k: v for k, v in body.items() if k not in echo}), {}, replica.prefix)
                 if 'store' in clean:
                     return clean
             else:

@@ -1380,3 +1380,77 @@ def test_r9_recall_forgotten_with_visible_hits(tmp_path, corpus, clients, text):
     hits = json.loads(actual['content'][0]['text'])['hits']
     assert any(hit.get('session_id') == qualified('visible1') for hit in hits)
     assert all(hit.get('session_id') != qualified('remote0') for hit in hits)
+
+
+@pytest.mark.parametrize('limit', [None, 1], ids=['default_limit', 'limit_1'])
+def test_r10_forgotten_cursor_equals_missing(tmp_path, corpus, clients, limit):
+    local, sources = corpus
+    copy_generation(sources[0], local, COPIES[0])
+    before = clients(tmp_path, local)
+    ready(before)
+    page = before.body('lcm_load_session', session_id=qualified('remote0'), limit=1)
+    assert page['has_more'] is True
+    cursor = page['next_cursor']
+    before.close()
+    forget(local, 'remote0')
+    client = clients(tmp_path, local)
+    ready(client)
+    extra = {'after_store_id': cursor, **({'limit': limit} if limit is not None else {})}
+    missing = client.call('lcm_load_session', session_id=qualified('never-existing'), **extra)['result']
+    actual = client.call('lcm_load_session', session_id=qualified('remote0'), **extra)['result']
+    expected = json.loads(json.dumps(missing).replace(qualified('never-existing'), qualified('remote0')))
+    assert actual['isError'] is False, 'a forgotten cursor must return the missing-session empty page'
+    assert actual == expected
+    body = json.loads(actual['content'][0]['text'])
+    assert body['messages'] == [] and body['after_store_id'] == cursor
+
+
+@pytest.mark.parametrize('query', [
+    '0123456789abcdef0123456789abcdef01234567',
+    'parser regression fixed in deadbeefcafebabe0123456789abcdef42 yesterday',
+], ids=['commit_sha', 'hex_in_sentence'])
+def test_r10_forgotten_grep_echo_equals_missing(tmp_path, corpus, clients, query):
+    local, sources = corpus
+    forget(local, 'remote0')
+    copy_generation(sources[0], local, COPIES[0])
+    client = clients(tmp_path, local)
+    ready(client)
+    missing = client.call('lcm_grep', query=query, session_id=qualified('never-existing'))['result']
+    actual = client.call('lcm_grep', query=query, session_id=qualified('remote0'))['result']
+    expected = json.loads(json.dumps(missing).replace(qualified('never-existing'), qualified('remote0')))
+    assert actual['isError'] is False, 'the caller query must not trigger the replica error scan'
+    assert actual == expected
+    body = json.loads(actual['content'][0]['text'])
+    assert body['query'] == query and body['results'] == []
+
+
+def test_r10_empty_shape_echo_scan_keeps_refusals(monkeypatch):
+    foreign = 'abcdefabcdefabcdefabcdefabcdefab'
+    session = '12345678-1234-4234-8234-123456789abc'
+    args = {'query': foreign, 'session_id': session}
+    twin_session = re.sub(r'[\da-fA-F]', '0', session)
+    twin = {'query': foreign, 'session_id': twin_session, 'results': []}
+    scans = []
+    scan = cr.error_body
+    def record(text, *scan_args, **kwargs):
+        scans.append(json.loads(text))
+        return scan(text, *scan_args, **kwargs)
+    def ask(raw):
+        sent = json.loads(raw)['params']['arguments']
+        assert sent == {**args, 'session_id': twin_session}
+        future = cr.Future()
+        future.set_result(cr.Merger.answer({'id': 1}, twin))
+        return future
+    monkeypatch.setattr(cr, 'error_body', record)
+    replica = SimpleNamespace(prefix=PREFIX, status='ok', generation=1,
+                              child=SimpleNamespace(folder=None, ask=ask))
+    merger = object.__new__(cr.Merger)
+    actual = merger.routed(replica, 'lcm_grep', args, {session})
+    assert 'error' not in actual, 'an unchanged caller echo must pass before testing refusals'
+    assert actual['query'] == foreign and actual['session_id'] == qualified(session)
+    assert scans[-1] == {'results': []}, 'scan neither the exact echo nor the put-back target id'
+    generic = {'error': 'the other store could not answer this call', 'store': PREFIX}
+    for produced in ({'mode': foreign}, {'externalized_scan': {'mode': foreign}},
+                     {'query': 'changed ' + foreign}):
+        twin = {'query': foreign, 'session_id': twin_session, 'results': [], **produced}
+        assert merger.routed(replica, 'lcm_grep', args, {session}) == generic, produced
