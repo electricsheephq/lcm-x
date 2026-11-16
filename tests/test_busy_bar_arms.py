@@ -178,18 +178,25 @@ def test_checkpoint_smoke(tmp_path):
         assert not (tmp_path / f"checkpoint-run-{i}" / "holds.jsonl").exists()
 
 
-def _drop_aborted_ingest_attempts(logs):
-    """Drop the first copy of an ingest attempt that one thread logs twice in a row.
+_INGEST_OPENINGS = ("LCM reconciled ingest cursor", "Ingest: session=")
+_INGEST_FINISHED = ("LCM attribution phase=ingest", "Per-turn ingest OK")
 
-    Under contention the engine's abort-once evidence retry (#1815, engine.py `_EvidenceFaultRetry`) re-runs an
-    ingest silently, so the attempt's opening lines appear twice in that thread. Whether it fires is timing.
+
+def _drop_aborted_ingest_attempts(logs):
+    """Drop the first copy of an unfinished ingest attempt that one thread logs twice in a row.
+
+    Under contention the engine reruns an attempt once with no log line of its own: the prelock reclassification
+    after another writer commits (engine.py, `_IngestReclassify`), or the evidence retry (#1815). The aborted copy
+    logs the attempt's opening lines but never the attribution line, which only a finished call logs. Whether a
+    rerun fires is timing. A repeated finished call is never dropped.
     """
     out = []
     for record in logs:
         out.append(record)
         for size in range(1, len(out) // 2 + 1):
             block, before = out[-size:], out[-2 * size:-size]
-            if block == before and block[0]["message"].startswith(("LCM reconciled ingest cursor", "Ingest: session=")):
+            if (block == before and block[0]["message"].startswith(_INGEST_OPENINGS)
+                    and not any(line["message"].startswith(_INGEST_FINISHED) for line in before)):
                 del out[-2 * size:-size]
                 break
     return out
