@@ -627,7 +627,8 @@ class TestMergedUserTurns:
     ('hidden', 'retrieval-missing'), ('superseded', 'superseded without occurrence witness'),
     ('inert', 'declared fault preservation-once never fired'), ('skipped', 'floor skipped'),
     ('canonical', 'canonical row changed'),
-    ('early', '2707102: declared record multiset'), ('unsuperseded', '2707802: retrieval-missing'),
+    ('early', '2707102: declared record multiset'),
+    ('unsuperseded', 'withheld locator missing'),  # T1-167: overlap rejects the visible duplicate first.
     ('error', 'lcm_load_session: injected tool error'), ('new-range-missing', 'declared record multiset'),
 ])
 def test_fake_record_contract(mutation, message, tmp_path, versions, monkeypatch, record_property):  # noqa: F811
@@ -797,13 +798,20 @@ def test_fake_withheld_pages_and_latch(mutation, message, tmp_path, versions, mo
             return cached[0] if cached else []
         monkeypatch.setattr(fake_records, 'withholding', latched)
     else:
+        footer_pages = []
         def modified(engine, entries, patch):
             tools = install(engine, entries, patch)
             load = tools.lcm_load_session
             def drop(args, **kwargs):
                 reply = json.loads(load(args, **kwargs))
-                if args.get('withheld_cursor') == 1:
-                    reply['withheld']['locators'] = []
+                footer = reply.get('queued_user_records_withheld')
+                if footer:
+                    footer_pages.append(args.get('after_store_id', 0))
+                    if len(footer_pages) == 2:
+                        footer['locators'] = footer['locators'][1:]
+                        record_property('mutated_footer_page', json.dumps(dict(
+                            case=2708002, footer_page=2, after_store_id=footer_pages[-1],
+                            counts=footer['counts'], remaining=len(footer['locators']))))
                 return json.dumps(reply)
             patch.setattr(tools, 'lcm_load_session', drop)
             return tools
