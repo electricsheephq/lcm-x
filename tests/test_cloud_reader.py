@@ -14,6 +14,7 @@ import signal
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 from types import SimpleNamespace
 import uuid
@@ -65,6 +66,8 @@ if os.environ.get('TEST_FAKE_READER'):
         if replica and cfg.get('stall') and request['method'] == 'tools/call':
             time.sleep(60)
         if request['method'] == 'initialize': result = {'serverInfo': {'name': 'fake'}}
+        elif request['method'] == 'tools/list':
+            result = {'tools': [{'name': name} for name in ('lcm_grep', 'lcm_recall', 'lcm_expand', 'lcm_load_session', 'lcm_describe')]}
         elif request['method'] == 'tools/call':
             hit = {'store_id': 1, 'session_id': 'remote', 'snippet': 'remote marker',
                    'unknown_handle': 'store_id=999', 'content': 'verbatim',
@@ -1101,3 +1104,201 @@ def test_r6_notification_double_failure_keeps_serving(monkeypatch):
     assert cr.main() == 0
     assert handled == [notification, second] and fallbacks == [(notification, True)]
     assert output.getvalue() == success, 'a failed notification must not emit a reply'
+
+
+def r7_async(call):
+    future = cr.Future()
+    def run():
+        try:
+            future.set_result(call())
+        except Exception as exc:
+            future.set_exception(exc)
+    threading.Thread(target=run, daemon=True).start()
+    return future
+
+
+@pytest.fixture
+def direct_mergers(tmp_path, monkeypatch):
+    wrapper = tmp_path / 'direct-reader.py'
+    wrapper.write_text(WRAPPER)
+    monkeypatch.setenv('TEST_READER_PATH', json.dumps(sys.path))
+    monkeypatch.setenv('TEST_STOCK_SCRIPT', str(ROOT / 'scripts' / 'lcm_x_mcp.py'))
+    monkeypatch.setenv('HF_HUB_OFFLINE', '1')
+    opened = []
+    def start(local, **kwargs):
+        argv = [sys.executable, str(wrapper), '--store', str(local / 'lcm.db'),
+                '--hermes-home', str(local), '--log-dir', str(tmp_path / 'direct-logs')]
+        merger = cr.Merger(argv, **kwargs)
+        opened.append(merger)
+        merger.handle(cr.request(1, 'initialize', {'protocolVersion': '2025-06-18'}))
+        return merger
+    yield start
+    for merger in opened:
+        try:
+            merger.close()
+        except OSError:
+            pass  # Preserve the regression assertion when the base cleanup fails too.
+
+
+@pytest.mark.parametrize('tool,args', [('lcm_expand', {'store_id': qualified(1)}),
+                                      ('lcm_grep', {'query': 'marker'})])
+def test_r7_disabled_tool_stays_local(tmp_path, corpus, clients, tool, args):
+    local, sources = corpus
+    (local / '.env').write_text('LCM_EMBEDDINGS_ENABLED=false\nLCM_DISABLED_TOOLS=lcm_expand,lcm_grep\n')
+    copy_generation(sources[0], local, COPIES[0])
+    client = clients(tmp_path, local)
+    eventually(lambda: client.body('lcm_recall', query='marker')['other_stores'][0]['status'] == 'ok', timeout=40)
+    logs = [client.log / f'{pid}.requests' for pid in client.pids(True)]
+    before = [path.read_bytes() for path in logs]
+    plain = clients(tmp_path, local, stock=True)
+    expected = plain.call(tool, **args)['result']
+    reply = client.call(tool, **args)
+    assert reply['result'] == expected, 'disabled calls must return the stock local error unchanged'
+    assert reply['result']['isError'] is True
+    assert [path.read_bytes() for path in logs] == before, 'disabled tool reached a replica'
+
+
+def test_r7_exited_child_completes_future():
+    child = cr.Child(['/usr/bin/true'], None)
+    child.process.wait(timeout=5)
+    try:
+        with pytest.raises(Exception) as error:
+            child.ask(cr.request(1, 'ping')).result(timeout=5)
+        assert not isinstance(error.value, TimeoutError), 'dead reader left its Future pending'
+    finally:
+        try:
+            child.close()
+        except OSError:
+            pass
+
+
+def test_r7_broken_pipe_close_releases_all(tmp_path):
+    child = cr.Child(['/usr/bin/true'], None, tmp_path)
+    child.process.wait(timeout=5)
+    fd = child.fd
+    child.process.stdin.write(b'buffer retained until close\n')
+    errors = []
+    for _ in range(2):
+        try:
+            child.close()
+        except OSError as exc:
+            errors.append(exc)
+    try:
+        assert errors == [], 'close must tolerate broken-pipe flush and remain idempotent'
+        assert child.process.stdin.closed and child.process.stdout.closed
+        with pytest.raises(OSError):
+            os.fstat(fd)
+    finally:
+        if child.fd is not None:
+            os.close(child.fd)
+        child.process.stdout.close()
+
+
+@pytest.mark.parametrize('opted_in', [False, True])
+def test_r7_reaped_local_restarts(corpus, direct_mergers, opted_in):
+    local, _ = corpus
+    if not opted_in:
+        (local / 'cloud' / 'cloud.json').unlink()
+    merger = direct_mergers(local)
+    old = merger.local.process
+    old.kill()
+    old.wait(timeout=5)
+    future = r7_async(lambda: merger.handle(cr.tool_request('lcm_expand', {'store_id': 1})))
+    cr.wait([future], timeout=10)
+    assert future.done(), 'reaped local reader stalled the request for 10 seconds'
+    body, _ = cr.tool_body(future.result())
+    assert body['content'].startswith('local marker')
+    assert merger.local.process.pid != old.pid
+
+
+def test_r7_reaped_replica_is_unavailable(corpus, direct_mergers, monkeypatch):
+    local, sources = corpus
+    copy_generation(sources[0], local, COPIES[0])
+    merger = direct_mergers(local, replica_wait=5)
+    eventually(lambda: cr.tool_body(merger.handle(cr.tool_request('lcm_grep', {'query': 'marker'})))[0]
+               ['other_stores'][0]['status'] == 'ok', timeout=40)
+    original = merger.replica_call
+    def kill_before_write(replica, *args):
+        replica.child.process.kill()
+        replica.child.process.wait(timeout=5)
+        return original(replica, *args)
+    monkeypatch.setattr(merger, 'replica_call', kill_before_write)
+    started = time.monotonic()
+    body, _ = cr.tool_body(merger.handle(cr.tool_request('lcm_grep', {'query': 'marker'})))
+    assert body['other_stores'][0]['status'] == 'unavailable', 'a reaped reader must never be late'
+    assert time.monotonic() - started < 2, 'dead reader consumed the replica wait'
+
+
+def test_r7_reaped_warming_probe_completes(tmp_path, monkeypatch):
+    original = cr.Child
+    children = []
+    def exited_child(argv, budget, folder):
+        child = original(['/usr/bin/true'], None, folder)
+        child.process.wait(timeout=5)
+        children.append(child)
+        return child
+    monkeypatch.setattr(cr, 'Child', exited_child)
+    replica = cr.Replica(PREFIX, ['fixture-reader', '--store', 'unused', '--hermes-home', 'unused'], 8)
+    replica.refresh(tmp_path, 1)
+    try:
+        cr.wait([replica.probe], timeout=5)
+        assert replica.probe.done(), 'dead warming reader left its probe pending'
+        with pytest.raises(Exception):
+            replica.probe.result()
+    finally:
+        for child in children:
+            try:
+                child.close()
+            except OSError:
+                if child.fd is not None:
+                    os.close(child.fd)
+                child.process.stdout.close()
+
+
+@pytest.mark.parametrize('tool', ['lcm_describe', 'lcm_grep'])
+def test_r7_forgotten_session_equals_missing(tmp_path, corpus, clients, tool):
+    local, sources = corpus
+    forget(local, 'remote0')
+    copy_generation(sources[0], local, COPIES[0])
+    client = clients(tmp_path, local)
+    ready(client)
+    args = {'query': 'marker'} if tool == 'lcm_grep' else {}
+    missing = client.call(tool, session_id=qualified('never-existing'), **args)['result']
+    actual = client.call(tool, session_id=qualified('remote0'), **args)['result']
+    expected = json.loads(json.dumps(missing).replace(qualified('never-existing'), qualified('remote0')))
+    assert actual == expected, 'forgotten session must have the stock missing-session success shape'
+    assert actual['isError'] is False
+
+
+@pytest.mark.parametrize('args', [{'externalized_refs': ['payload']}, {'session_id': 'forgotten'}])
+def test_r7_busy_routed_precheck_fails_closed(args):
+    replica = SimpleNamespace(prefix=PREFIX, status='ok', generation=1,
+                              child=SimpleNamespace(ask=lambda raw: None))
+    merger = object.__new__(cr.Merger)
+    try:
+        answer = merger.routed(replica, 'lcm_grep', args, {'forgotten'})
+    except Exception as exc:
+        answer = exc
+    assert answer == {'error': 'the other store could not answer this call', 'store': PREFIX}
+
+
+def test_r7_exclusive_generation_lock_never_stalls(corpus, direct_mergers):
+    local, sources = corpus
+    folder = copy_generation(sources[0], local, COPIES[0])
+    fd = os.open(folder, os.O_RDONLY)
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    future = r7_async(lambda: direct_mergers(local))
+    try:
+        cr.wait([future], timeout=2)
+        assert future.done(), 'held generation lock stalled merger startup'
+        merger = future.result()
+        started = time.monotonic()
+        raw = cr.tool_request('lcm_grep', {'query': 'marker'})
+        body, reply = cr.tool_body(merger.handle(raw))
+        assert time.monotonic() - started < 2
+        assert body['other_stores'][0]['status'] == 'unavailable'
+        plain = json.loads(merger.local_call(raw))['result']['content'][0]['text']
+        assert cr.strip_other_stores(reply['result']['content'][0]['text']) == plain
+    finally:
+        os.close(fd)
+        future.result(timeout=10)  # Release a blocked base constructor before fixture cleanup.

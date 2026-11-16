@@ -222,7 +222,7 @@ class Child:
         try:
             if folder:
                 self.fd = os.open(folder, os.O_RDONLY | os.O_NOFOLLOW)
-                fcntl.flock(self.fd, fcntl.LOCK_SH)
+                fcntl.flock(self.fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
             self.process = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                             stderr=subprocess.DEVNULL, close_fds=True)
         except Exception:
@@ -231,15 +231,26 @@ class Child:
 
     def close(self):
         with self.guard:
-            if self.process:
-                if self.process.poll() is None:
-                    self.process.kill()
-                self.process.wait()
-                self.process.stdin.close()
-                self.process.stdout.close()
-            if self.fd is not None:
-                os.close(self.fd)
-                self.fd = None
+            try:
+                if self.process:
+                    try:
+                        if self.process.poll() is None:
+                            self.process.kill()
+                    except ProcessLookupError:
+                        pass
+                    self.process.wait()
+                    for stream in (self.process.stdin, self.process.stdout):
+                        try:
+                            stream.close()
+                        except OSError:
+                            pass
+            finally:
+                if self.fd is not None:
+                    try:
+                        os.close(self.fd)
+                    except OSError:
+                        pass
+                    self.fd = None
 
     def ask(self, raw, notification=False):
         future = Future()
@@ -258,8 +269,11 @@ class Child:
                     raise RuntimeError('reader unavailable')
                 result, error = reply, None
             except Exception as exc:
-                self.close()
                 result, error = None, exc
+                try:
+                    self.close()
+                except Exception:
+                    pass
             finally:
                 if timer:
                     timer.cancel()
@@ -338,8 +352,10 @@ class Replica:
                     raise ValueError('probe refused')
                 probe.set_result(None)
             except Exception as exc:
-                child.close()
-                probe.set_exception(exc)
+                try:
+                    child.close()
+                finally:
+                    probe.set_exception(exc)
         threading.Thread(target=warm, daemon=True).start()
         self.status = 'ok' if self.child else 'warming'
 
@@ -350,6 +366,7 @@ class Merger:
         self.home = Path(argv[argv.index('--hermes-home') + 1])
         self.database = Path(argv[argv.index('--store') + 1])
         self.local = None
+        self.enabled_tools = None
         self.replicas = {}
         self.own = None
         path = self.home / 'cloud' / 'cloud.json'
@@ -370,10 +387,12 @@ class Merger:
             raise
 
     def close(self):
-        if self.local:
-            self.local.close()
-        for replica in self.replicas.values():
-            replica.close()
+        for reader in [self.local, *self.replicas.values()]:
+            if reader:
+                try:
+                    reader.close()
+                except OSError:
+                    pass
 
     def refresh(self):
         root = self.home / 'cloud' / 'replicas'
@@ -396,7 +415,8 @@ class Merger:
                 folder = copy_folder / f'gen-{generation}'
                 if folder.is_symlink() or not folder.is_dir() or not (folder / 'lcm.db').is_file():
                     raise ValueError('bad_name')
-                replica.refresh(folder, generation)
+                if self.enabled_tools is not None:
+                    replica.refresh(folder, generation)
             except Exception:
                 replica.status = 'unavailable'
 
@@ -409,6 +429,7 @@ class Merger:
                 if attempt:
                     raise
                 self.local = Child(self.argv, None)
+                self.enabled_tools = None
 
     def route(self, args):
         values = [v for k, v in args.items() if k in SCALARS]
@@ -467,7 +488,10 @@ class Merger:
                     (any(k in args for k in ('store_id', 'node_id')) and not visible_item(target, replica.prefix, replica.child.folder, hidden)))
         if hidden and not invisible:
             for ref in args.get('externalized_refs', []):
-                meta, _ = tool_body(replica.child.ask(tool_request('lcm_describe', {'externalized_ref': ref})).result())
+                future = replica.child.ask(tool_request('lcm_describe', {'externalized_ref': ref}))
+                if future is None:
+                    return {'error': 'the other store could not answer this call', 'store': replica.prefix}
+                meta, _ = tool_body(future.result())
                 if not visible_item(meta, replica.prefix, replica.child.folder, hidden):
                     invisible = True
                     break
@@ -481,7 +505,10 @@ class Merger:
             missing = {k: ([re.sub(r'[\da-fA-F]', '0', item) for item in v] if isinstance(v, list)
                            else 0 if k in INTEGER_ARGS else re.sub(r'[\da-fA-F]', '0', v)) for k, v in target.items()}
             changed = {**args, **missing}
-            absent, _ = tool_body(replica.child.ask(tool_request(name, changed)).result())
+            future = replica.child.ask(tool_request(name, changed))
+            if future is None:
+                return {'error': 'the other store could not answer this call', 'store': replica.prefix}
+            absent, _ = tool_body(future.result())
             zero_text = absent['error'] if isinstance(absent.get('error'), str) else json.dumps(absent)
             if any(type(v) is int for v in missing.values()) and len(re.findall(r'(?<![\w:.-])0(?![\w.-])', zero_text)) > 1:
                 return {'error': 'the other store could not answer this call', 'store': replica.prefix}
@@ -491,9 +518,13 @@ class Merger:
                 if len(set(args.get('externalized_refs', []))) > 1:
                     return {'error': 'the other store could not answer this call', 'store': replica.prefix}
                 body = error_body(absent['error'], {}, replica.prefix, replacements)
-            elif (name == 'lcm_load_session' and 'anchor_store_id' not in args and 'error' not in absent
-                  and type(absent.get('total_messages')) is int and absent['total_messages'] == 0
-                  and absent.get('messages') == []):
+            elif 'error' not in absent and (
+                (name == 'lcm_load_session' and 'anchor_store_id' not in args
+                 and type(absent.get('total_messages')) is int and absent['total_messages'] == 0 and absent.get('messages') == [])
+                or (name == 'lcm_describe' and target.keys() == {'session_id'}
+                    and type(absent.get('store_message_count')) is int and absent['store_message_count'] == 0 and absent.get('depths') == {})
+                or (name == 'lcm_grep' and absent.get('results') == [])
+            ):
                 body = rebuild(absent, replica.prefix)
                 for key in target.keys() & body.keys():
                     body[key] = replace_token(body[key], qualify(replica.prefix, missing[key]), qualify(replica.prefix, target[key]))
@@ -531,6 +562,14 @@ class Merger:
             return self.local_call(raw)
         name, args = params.get('name'), params.get('arguments') or {}
         if not isinstance(args, dict):
+            return self.local_call(raw)
+        if self.enabled_tools is None:
+            try:
+                tools = json.loads(self.local_call(request('lcmx-private-tools', 'tools/list')))['result']['tools']
+                self.enabled_tools = {tool['name'] for tool in tools}
+            except Exception:
+                return self.local_call(raw)
+        if name not in self.enabled_tools:
             return self.local_call(raw)
         try:
             prefix = self.route(args)
