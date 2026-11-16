@@ -286,7 +286,12 @@ def rebuild(path, database, generation, fetch, *, have=None):
     if have is not None and (type(have) is not int or not 0 <= have <= len(entries)):
         raise DeltaRefused("start_mismatch")
     try:
-        handle = open(path, "x+b" if have is None else "r+b")
+        if have is None:
+            fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            os.fchmod(fd, 0o600)
+            handle = os.fdopen(fd, "r+b")
+        else:
+            handle = open(path, "r+b")
     except FileExistsError:
         raise DeltaRefused("output_exists") from None
     with handle:

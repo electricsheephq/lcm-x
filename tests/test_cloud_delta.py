@@ -529,6 +529,20 @@ def test_rebuild_by_patch(tmp_path):
     refused("rebuild_digest_mismatch", cd.rebuild, put(tmp_path, wrong, "wrong"), block, 3, objects.__getitem__, have=1)
 
 
+def test_rebuild_fresh_output_is_owner_only(tmp_path):
+    block, objects = worked()
+    path = tmp_path / "rebuilt"
+    previous_umask = os.umask(0o022)
+    try:
+        cd.rebuild(path, block, 2, objects.__getitem__)
+    finally:
+        os.umask(previous_umask)
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert path.read_bytes() == B
+    refused("output_exists", cd.rebuild, path, block, 2, objects.__getitem__)
+    assert path.read_bytes() == B
+
+
 def test_rebuild_never_overwrites(tmp_path):
     block, objects = worked()
     path = put(tmp_path, b"keep")
