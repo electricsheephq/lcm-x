@@ -203,6 +203,10 @@ def encode_delta(db_path, prev_digests, new, out_dir, *, records_per_object=None
         if os.fstat(handle.fileno()).st_size != new.file_bytes:
             raise DeltaRefused("delta_selfcheck")
     verify_delta([item.path for item in result], prev_digests, new)
+    for item in result:
+        data = item.path.read_bytes()
+        if len(data) != item.bytes or hashlib.sha256(data).hexdigest() != item.sha256:
+            raise DeltaRefused("delta_selfcheck")
     return result
 
 
@@ -310,17 +314,12 @@ def rebuild(path, database, generation, fetch, *, have=None):
     return result
 
 
-def base_reason(head, *, page_size, file_bytes, list_matches, forget, object_missing,
+def base_reason(head, *, head_generation, page_size, file_bytes, list_matches, forget, object_missing,
                 delta_bytes, size_factor=SIZE_FACTOR, max_generations=MAX_CHAIN_GENERATIONS):
     if head is None:
         return "first"
-    _fields(head, page_size=int, deltas=list)
-    stored = 0
-    for entry in head["deltas"]:
-        _fields(entry, objects=list)
-        for ref in entry["objects"]:
-            _fields(ref, bytes=int)
-            stored += ref["bytes"]
+    _shape(head, head_generation)
+    stored = sum(ref["bytes"] for entry in head["deltas"] for ref in entry["objects"])
     for holds, reason in ((head["page_size"] != page_size, "page_size"), (not list_matches, "page_list"),
                           (forget, "forget"), (object_missing, "missing_object"),
                           (stored+delta_bytes >= size_factor*file_bytes, "size"),

@@ -41,6 +41,20 @@ C_SHA = "0a0c88c08b7fcf477db1ae6d68f48abc6b2ef3e3e7fad9936e518f94e26c2d7b"
 C_LIST = "b03d47e0fc0d7bb43d78f933243b667f09b8b8a212f7bfa74f7442bf9c90cf0f"
 VECTOR = bytes.fromhex("4c434d585044310a0000020000000002789c636060605c350a463460606060661805231a0000442e5414")
 
+F11_DATABASE = '''
+{"page_size": 512, "file_bytes": 2048,
+ "file_sha256": "916e79b77b05ac39fbb92433771f87ced54de932e04c3a01042be863e537ac4f",
+ "page_list_sha256": "0b4ae118a4c210fabb5d988c90f4d4a3fdfafd6727f7426b7e08bd461147d1f4",
+ "base": {"generation": 1, "file_bytes": 1536,
+          "file_sha256": "144056a8546425225385ebdb956b7584a8a34f1ebecac3e68c3f73553c8f9a46",
+          "reason": "first", "part_size": 1024,
+          "parts": [
+            {"key": "parts/3b2318e81fd1de9fc1e3fbd184bfdca9efdac6ee7d10bcf78cba505b2bfb475b.00000000000000000000000000000001", "bytes": 1024},
+            {"key": "parts/1bd8d04bb127c9dbdb406c3c213b202c84dc75f122ecd553b02fb322bffafdc9.00000000000000000000000000000001", "bytes": 512}]},
+ "deltas": [{"generation": 2, "file_pages": 4, "objects": [
+            {"key": "deltas/e467bc42aa2753ec64ece09b0f147c8b3f6a14265916145d222328707e7c69ea.00000000000000000000000000000002", "bytes": 42, "records": 2}]}]}
+'''
+
 
 def sha(data):
     return hashlib.sha256(data).hexdigest()
@@ -232,7 +246,7 @@ def test_several_objects(tmp_path, monkeypatch):
     refused("delta_object_too_large", cd.encode_delta, put(tmp_path, B), info(A).digests, info(B), tmp_path / "tiny")
 
 
-def test_self_check_passes_and_fails(tmp_path):
+def test_self_check_passes_and_fails(tmp_path, monkeypatch):
     old, new = info(A).digests, info(B)
     refs = cd.encode_delta(put(tmp_path, B), old, new, tmp_path / "objects")
     cd.verify_delta([r.path for r in refs], old, new)
@@ -243,6 +257,19 @@ def test_self_check_passes_and_fails(tmp_path):
     assert refs
     refs[0].path.write_bytes(obj([(1, bytes(512)), (3, bytes(512))]))
     refused("delta_selfcheck", cd.verify_delta, [r.path for r in refs], old, new)
+
+    real_verify = cd.verify_delta
+    def rewrite_before_verify(paths, prev_digests, current):
+        for path in paths:
+            encoded = path.read_bytes()
+            records = list(cd.read_object(encoded, current.page_size))
+            rewritten = encoded[:16] + zlib.compress(zlib.decompress(encoded[16:]), 0)
+            path.write_bytes(rewritten)
+            assert rewritten != encoded
+            assert list(cd.read_object(path.read_bytes(), current.page_size)) == records
+        real_verify(paths, prev_digests, current)
+    monkeypatch.setattr(cd, "verify_delta", rewrite_before_verify)
+    refused("delta_selfcheck", cd.encode_delta, put(tmp_path, B), old, new, tmp_path / "rewritten")
 
 
 def test_file_changed_after_hash_pass(tmp_path):
@@ -283,7 +310,25 @@ def test_bounded_decode():
         tracemalloc.stop()
 
 
-def test_rebuild_worked_example(tmp_path):
+@pytest.mark.parametrize("literal", [False, True], ids=["helpers", "literal"])
+def test_rebuild_worked_example(tmp_path, literal):
+    if literal:
+        block = json.loads(F11_DATABASE)
+        first_key = "parts/3b2318e81fd1de9fc1e3fbd184bfdca9efdac6ee7d10bcf78cba505b2bfb475b.00000000000000000000000000000001"
+        object_key = "deltas/e467bc42aa2753ec64ece09b0f147c8b3f6a14265916145d222328707e7c69ea.00000000000000000000000000000002"
+        objects = {
+            first_key: A[:1024],
+            "parts/1bd8d04bb127c9dbdb406c3c213b202c84dc75f122ecd553b02fb322bffafdc9.00000000000000000000000000000001": A[1024:],
+            object_key: VECTOR,
+        }
+        assert sha(A[:1024]) == first_key.split("/")[1].split(".")[0]
+        assert object_key.split("/")[1].split(".")[0] == "e467bc42aa2753ec64ece09b0f147c8b3f6a14265916145d222328707e7c69ea"
+        assert sha(VECTOR) == "e467bc42aa2753ec64ece09b0f147c8b3f6a14265916145d222328707e7c69ea"
+        path = tmp_path / "literal"
+        expected = cd.PageList(512, 4, bytes.fromhex("".join(B_PAGES)), 2048, B_SHA, B_LIST)
+        assert cd.rebuild(path, block, 2, objects.__getitem__) == expected
+        assert path.read_bytes() == B
+        return
     block, objects = worked()
     path = tmp_path / "rebuilt"
     assert cd.rebuild(path, block, 2, objects.__getitem__) == info(B)
@@ -570,15 +615,16 @@ def test_copy_id_checked_first(tmp_path):
         assert not folder.exists()
 
 
-def base_args():
-    return dict(page_size=512, file_bytes=2048, list_matches=True, forget=False,
+def base_args(head=None):
+    generation = None if head is None else (head["deltas"][-1]["generation"] if head["deltas"] else head["base"]["generation"])
+    return dict(head_generation=generation, page_size=512, file_bytes=2048, list_matches=True, forget=False,
                 object_missing=False, delta_bytes=0)
 
 
 def test_base_rule_each_rule_alone():
     block, _ = worked()
-    args = base_args()
-    assert cd.base_reason(None, **args) == "first"
+    args = base_args(block)
+    assert cd.base_reason(None, **(args | {"head_generation": None})) == "first"
     assert cd.base_reason(block, **args) is None
     for change, reason in (({"page_size": 4096}, "page_size"), ({"list_matches": False}, "page_list"),
                            ({"forget": True}, "forget"), ({"object_missing": True}, "missing_object"),
@@ -586,28 +632,61 @@ def test_base_rule_each_rule_alone():
         assert cd.base_reason(block, **(args | change)) == reason
 
 
-def test_base_rule_edges():
+@pytest.mark.parametrize("case", [None, "missing-base", "bad-delta-key", "generation-7",
+                                 "head-generation-3", "head-generation-none", "missing-head-generation",
+                                 "shape-before-page-size"])
+def test_base_rule_edges(case):
+    if case is not None:
+        block = json.loads(F11_DATABASE)
+        args = base_args(block)
+        code = "bad_database_block"
+        if case in ("missing-base", "shape-before-page-size"):
+            del block["base"]
+            if case == "shape-before-page-size":
+                args["page_size"] = 4096
+        elif case == "bad-delta-key":
+            block["deltas"][0]["objects"][0]["key"] = "deltas/not-a-digest.not-a-token"
+            code = "bad_name"
+        elif case == "generation-7":
+            block["deltas"].append({"generation": 7, "file_pages": 4, "objects": []})
+            args["head_generation"] = 7
+            code = "chain_generation"
+        elif case == "head-generation-3":
+            args["head_generation"] = 3
+            code = "chain_generation"
+        elif case == "head-generation-none":
+            args["head_generation"] = None
+        else:
+            del args["head_generation"]
+            with pytest.raises(TypeError):
+                cd.base_reason(block, **args)
+            return
+        refused(code, cd.base_reason, block, **args)
+        return
     block, _ = worked()
-    args = base_args()
+    args = base_args(block)
     assert cd.base_reason(block, **(args | {"delta_bytes": 4096-42})) == "size"
     assert cd.base_reason(block, **(args | {"delta_bytes": 4096-43})) is None
     block["base"]["parts"][0]["bytes"] = 10**20
+    block["base"]["file_bytes"] = sum(ref["bytes"] for ref in block["base"]["parts"])
     assert cd.base_reason(block, **args) is None
-    block["deltas"] = [{"objects": []} for _ in range(1022)]
-    assert cd.base_reason(block, **args) is None
-    block["deltas"].append({"objects": []})
-    assert cd.base_reason(block, **args) == "length"
-    assert cd.base_reason(block, **args, max_generations=1025) is None
+    block, objects = base(B)
+    for _ in range(1022):
+        append(block, objects, B, B)
+    assert cd.base_reason(block, **base_args(block)) is None
+    append(block, objects, B, B)
+    assert cd.base_reason(block, **base_args(block)) == "length"
+    assert cd.base_reason(block, **base_args(block), max_generations=1025) is None
     block, _ = worked()
     assert cd.base_reason(block, **args, size_factor=0) == "size"
     all_set = args | dict(page_size=4096, list_matches=False, forget=True, object_missing=True, delta_bytes=99999)
-    assert cd.base_reason(None, **all_set) == "first"
+    assert cd.base_reason(None, **(all_set | {"head_generation": None})) == "first"
     assert cd.base_reason(block, **(args | {"forget": True, "delta_bytes": 99999})) == "forget"
     del args["forget"]
     with pytest.raises(TypeError):
         cd.base_reason(block, **args)
     del block["deltas"]
-    refused("bad_database_block", cd.base_reason, block, **base_args())
+    refused("bad_database_block", cd.base_reason, block, **(base_args() | {"head_generation": 2}))
 
 
 def test_store_signature(tmp_path, monkeypatch):
