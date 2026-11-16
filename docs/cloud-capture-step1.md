@@ -115,8 +115,9 @@ they share is measured (section 6, row 2); the plan does not depend on it.
   position) for files, the ledger's own unique keys (claude_code_store.py:74-77). `event_id` is not used: it is
   not AUTOINCREMENT, so SQLite can reuse it (claude_code_store.py:69).
 - **Cross-check key:** (lineage key, uid, content identity), the harness's own identity. Content identity is the
-  sha256 of the row content with every externalized placeholder expanded to its payload's text, read from that
-  store's own payload folder. Two stores can hold one output differently: externalized under different file names
+  sha256 of the row's role, its content, and its tool-call and tool-result fields, with every externalized
+  placeholder expanded to its payload's text, read from that store's own payload folder. So two revisions of one
+  entry that keep the text but change a tool call stay apart (lane 7b tests one). Two stores can hold one output differently: externalized under different file names
   (externalize.py:1547), or inline in one store and externalized in the other, when externalization is off, below
   its threshold or without storage there (externalize.py:1490-1503). Expansion gives all three the same identity. A placeholder whose payload file is missing or unreadable falls
   back to its own fingerprint, marked as a fallback: its character and byte counts (externalize.py:866-876) and
@@ -390,7 +391,9 @@ and adds hits from the user's other machines in a separate list.**
 ### 4.3 Id stability
 
 - The merger qualifies every id in a replica hit with the copy id in its 32-hex form (the dashes removed), which
-  is the grammar the reader already uses (mcp_reader.py:95-98). Local ids stay bare.
+  is the grammar the reader already uses (mcp_reader.py:95-98). Local ids stay bare. The merger advertises its own
+  tool schemas: every argument that takes an id (`store_id`, and the cursor and anchor arguments) accepts a bare
+  integer or a qualified string, so a schema-valid call can name a replica row (lane 7a tests it).
 - A follow-up call with a qualified id goes to that replica's reader with the prefix removed. A bare id goes to
   the local reader. The stock reader accepts bare ids (mcp_reader.py:230-244), so its own derived uuid, which
   changes at every download (readonly_store.py:175-179), never matters and `ForeignStoreError` cannot fire.
