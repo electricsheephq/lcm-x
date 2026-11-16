@@ -917,6 +917,11 @@ def capture_tool_call_payload(tmp_path, shape):
     text = f'<html>café<img src="{uri}"></html>'
     if shape == "bare":
         text = "prefix café\n" + payload[:5000] + "\nsuffix"
+    elif shape == "raw-bare":
+        text = "prefix " + payload[:5000]
+    elif shape == "escape-letter":
+        # The raw JSON run includes the 'n' from \\n: 1 + 4999 is accepted mod 4.
+        text = "prefix café\n" + payload[:4999]
     elif shape == "wrapped":
         text = "prefix café\n" + "\n".join(payload[i:i + 76] for i in range(0, 6000, 76)) + "\nsuffix"
     elif shape == "two-payloads":
@@ -933,13 +938,26 @@ def capture_tool_call_payload(tmp_path, shape):
     return capture_session(tmp_path / "capture", write_entries(tmp_path / "01_calls.jsonl", entries))
 
 
-@pytest.mark.parametrize("shape", ["uri", "bare", "wrapped", "nested", "two-payloads", "two-calls"])
+@pytest.mark.parametrize("shape", ["uri", "bare", "wrapped", "nested", "two-payloads", "two-calls",
+                                  "raw-bare", "escape-letter"])
 def test_tool_call_payload(tmp_path, shape, record_property):
     home, env, inputs = capture_tool_call_payload(tmp_path, shape)
     stored = read_sql(home, "SELECT tool_calls FROM messages WHERE role='assistant'")[0][0]
     assert stored.count("[Externalized LCM ingest payload:") == (2 if shape == "two-payloads" else 1)
     if shape == "two-calls":
         assert "[Externalized" not in json.loads(stored)[0]["function"]["arguments"]
+    arguments = json.loads(stored)[-1]["function"]["arguments"]
+    if shape == "raw-bare":
+        assert json.loads(arguments)["content"].startswith("prefix [Externalized LCM ingest payload:")
+        assert arguments.count("[Externalized LCM ingest payload:") == 1
+        assert arguments.startswith('{"file_path": "/synthetic/a.html", "content": ')
+    elif shape == "escape-letter":
+        assert "\\[Externalized LCM ingest payload:" in arguments
+        assert "chars=5000; bytes=5000;" in arguments
+        with pytest.raises(json.JSONDecodeError):
+            json.loads(arguments)
+        record_property("base64_run_chars", 4999)
+        record_property("stored_arguments", arguments)
     checked, report, audit = verdict(home, env, inputs)
     record_property("checker", checked.stdout)
     record_property("audit", json.dumps(audit))
@@ -947,14 +965,16 @@ def test_tool_call_payload(tmp_path, shape, record_property):
     assert checked.returncode == 0 and report["pass"] and audit["ok"] and audit["verified"]
 
 
-@pytest.mark.parametrize("corruption", ["sha12", "chars", "extra-key", "duplicate-key", "name", "swap", "surrounding"])
+@pytest.mark.parametrize("corruption", ["sha12", "chars", "extra-key", "duplicate-key", "name", "swap",
+                                       "surrounding", "escape-sha12"])
 def test_tool_call_payload_corrupted(tmp_path, corruption, record_property):
     import re
-    home, env, inputs = capture_tool_call_payload(tmp_path, "two-calls" if corruption == "swap" else "uri")
+    shape = "escape-letter" if corruption == "escape-sha12" else "two-calls" if corruption == "swap" else "uri"
+    home, env, inputs = capture_tool_call_payload(tmp_path, shape)
     calls = json.loads(read_sql(home, "SELECT tool_calls FROM messages WHERE role='assistant'")[0][0])
     function = calls[-1]["function"]
     arguments = function["arguments"]
-    if corruption == "sha12":
+    if corruption in {"sha12", "escape-sha12"}:
         arguments = re.sub(r"_([0-9a-f]{12})_", lambda m: "_" + ("1" if m[1][0] == "0" else "0") + m[1][1:] + "_",
                            arguments, count=1)
     elif corruption == "chars":
@@ -1001,6 +1021,7 @@ def test_tool_call_formatting_without_placeholder(tmp_path, record_property):
 
 @pytest.mark.parametrize("stored, source", [
     ('{"v":true}', '{"v":1}'), ('{"v":1}', '{"v":1.0}'),
+    pytest.param('{"v":-0.0}', '{"v":0.0}', id="zero-sign"),
     ('{"v":null}', '{"v":false}'), ('{"v":2}', '{"v":1}'),
     ('{"v":"1"}', '{"v":1}'), ('{"v":[]}', '{"v":{}}'),
     ('{"v":[1]}', '{"v":[1,2]}'), ('{"v":1}', '{"other":1}'),
@@ -1016,6 +1037,37 @@ def test_tool_call_argument_mismatches(stored, source):
     def calls(arguments):
         return [dict(id="c", type="function", function=dict(name="Write", arguments=arguments))]
     assert not checker.tool_calls_match(calls(stored), calls(source), defaultdict(set))
+
+
+@pytest.mark.parametrize("field, stored, source", [
+    ("id", True, 1), ("name", 1.0, 1), ("type", 1, True),
+], ids=["id", "name", "type"])
+def test_tool_call_identity_types(field, stored, source):
+    from collections import defaultdict
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("outside_in_identity_types", CHECKER)
+    checker = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(checker)
+    left = dict(id="c", type="function", function=dict(name="Write", arguments="{}"))
+    right = json.loads(json.dumps(left))
+    if field == "name":
+        left["function"][field], right["function"][field] = stored, source
+    else:
+        left[field], right[field] = stored, source
+    assert not checker.tool_calls_match([left], [right], defaultdict(set))
+
+
+def test_tool_call_placeholder_at_leaf_start():
+    from collections import defaultdict
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("outside_in_leaf_start", CHECKER)
+    checker = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(checker)
+    def calls(arguments):
+        return [dict(id="c", type="function", function=dict(name="Write", arguments=arguments))]
+    source = json.dumps(dict(content="payload café tail"))
+    stored = json.dumps(dict(content=reference_for("payload café") + " tail"), separators=(",", ":"))
+    assert checker.tool_calls_match(calls(stored), calls(source), defaultdict(set))
 
 
 @pytest.mark.parametrize("side", ["stored", "source"])

@@ -260,17 +260,19 @@ def tool_calls_match(stored_calls, source_calls, index):
     for stored, source in zip(stored_calls, source_calls):
         if not isinstance(stored, dict) or not isinstance(source, dict) or stored.keys() != source.keys():
             return False
-        if stored.get("id") != source.get("id") or stored.get("type") != source.get("type"):
+        if any(canonical(stored.get(key)) != canonical(source.get(key)) for key in ("id", "type")):
             return False
         left, right = stored.get("function"), source.get("function")
         if not isinstance(left, dict) or not isinstance(right, dict) or left.keys() != right.keys():
             return False
-        if left.get("name") != right.get("name"):
+        if canonical(left.get("name")) != canonical(right.get("name")):
             return False
         left, right = left.get("arguments"), right.get("arguments")
         if not isinstance(left, str) or not isinstance(right, str):
             return False
         if left == right:
+            continue
+        if content_matches(left, right, None, index):
             continue
         try:
             pending = [(json.loads(left, object_pairs_hook=unique_object), json.loads(right))]
@@ -290,6 +292,8 @@ def tool_calls_match(stored_calls, source_calls, index):
                     return False
                 pending.extend(zip(left, right))
             elif type(left) is not type(right) or left != right:
+                return False
+            elif isinstance(left, float) and repr(left) != repr(right):
                 return False
     return True
 
