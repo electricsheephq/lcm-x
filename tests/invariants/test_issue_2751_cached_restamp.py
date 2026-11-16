@@ -1,5 +1,6 @@
 """#2751: a committed warm retry must retire the cached pre-restamp occurrence."""
 import copy
+from collections import Counter
 
 import pytest
 
@@ -87,6 +88,65 @@ def test_cached_restamp_forced_durable_proof(tmp_path, monkeypatch, proof_metada
         assert actual == expected, {'stored': actual, 'clean': expected}
     finally:
         engine.shutdown()
+
+
+@pytest.mark.parametrize('proof_metadata', ['empty', 'full'])
+def test_cached_restamp_unknown_pruned_tool_sibling(tmp_path, monkeypatch, proof_metadata, record_property):
+    """#1540 must not inherit cached skip evidence discarded by the durable proof."""
+    from hermes_lcm.reconcile import _HERMES_PRUNED_TOOL_PLACEHOLDER
+
+    def run(root, busy):
+        root.mkdir()
+        with monkeypatch.context() as patch:
+            engine = _open(root, patch, None)
+            try:
+                turn = _turn(0, 'plain', uids=False)
+                view = [turn[0], turn[2], turn[3]]
+                view[2].pop('timestamp')
+                view[2]['content'] = 'original tool output ' * 11
+                engine.ingest(copy.deepcopy(view))
+                view[0]['timestamp'] = 1001.
+                if busy:
+                    with patch.context() as fault:
+                        _Probe(patch).busy_end(fault, engine, 'warm', view)
+                    assert any(t['kind'] == 'warm' and t.get('cache_update')
+                               for t in engine._pending_session_tails)
+                    proof = {'output_metadata': []}
+                    if proof_metadata == 'full':
+                        engine._prepare_compress_commit_proof(proof, copy.deepcopy(view))
+                        assert proof['output_metadata'][0]['timestamp'] == 1001.
+                        assert proof['output_metadata'][0]['identity_sha256']
+                    with engine._exclusive_lifecycle('end'):
+                        engine._retry_pending_session_tails()
+                    assert not engine._pending_session_tails
+                    assert engine._last_active_replay_messages == view
+                    assert (engine._deferred_active_replay_cache_generation
+                            == engine._active_replay_cache_generation)
+                else:
+                    engine.on_session_end('parent', copy.deepcopy(view))
+                view[0]['timestamp'] = 2001.
+                view[2]['content'] = _HERMES_PRUNED_TOOL_PLACEHOLDER
+                for n in (1, 2):
+                    view.extend(_turn(n, 'plain', uids=False)[2:])
+                if busy:
+                    patch.setattr(engine, '_durable_commit_proof_payload',
+                                  lambda *a, **k: proof)
+                    patch.setattr(engine, '_cursor_from_durable_commit_proof', lambda *a, **k: len(view))
+                engine.on_session_end('parent', copy.deepcopy(view))
+                assert not engine._pending_session_tails
+                return sorted((row['role'], row['content'], row['observed_at'])
+                              for row in engine._store.get_session_messages('parent'))
+            finally:
+                engine.shutdown()
+
+    expected = run(tmp_path / 'clean', False)
+    actual = run(tmp_path / 'busy', True)
+    record_property('occurrences', repr(actual))
+    record_property('clean_occurrences', repr(expected))
+    stored, clean = Counter(actual), Counter(expected)
+    # Known #436 partial-segment re-store on the forced durable branch (identity_anchor.py:1598-1599); #2781.
+    assert clean <= stored, {'missing': clean - stored, 'stored': actual, 'clean': expected}
+    assert stored - clean == Counter({('assistant', '', 3.0): 1}), stored - clean
 
 
 @pytest.mark.parametrize('clean_ends', [1, 2])

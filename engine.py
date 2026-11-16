@@ -9068,7 +9068,7 @@ class LCMEngine(
                                          for idx in durable_new_prefix_occurrences})
                 new_prefix_occurrences |= durable_new_prefix_occurrences
                 if new_prefix_occurrences:
-                    unchanged_prefix_occurrences |= {
+                    unchanged_prefix_occurrences = {
                         idx for idx, previous in metadata.items()
                         if self._host_occurrence_metadata(messages[idx]) == self._host_occurrence_metadata(previous)
                     }
