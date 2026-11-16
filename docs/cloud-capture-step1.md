@@ -620,7 +620,7 @@ implements it.**
 | 0 lost and 0 duplicate rows across stores | Chain of four links, on two machines. (1) Transcript to local: the audit and the outside-in checker, as the unit gate runs them (bench/specs/RELEASE-READINESS-V1.md:57-66). (2) Local to hosted: the copy checker, origin store against restored generation, every contracted table by key, plus payload digests and raw ledger digests; a reference that names no file is reported under its count (3.3); the same unresolved names on both sides pass, and one-sided ones fail. (3) Hosted to replica: sha256 of every part and payload. (4) Transcript to restored copy: the outside-in checker on the restored folder. The list of hosted copies comes from each machine's `cloud/cloud.json` (copy id) and `capture-owner.json` (origin id), not from the bucket, because a checker cannot see an input it is not given (docs/claude-code-adapter.md:730). | 0 lost and 0 duplicated at every link; order kept; 0 unpaired. No copy id published by two machines past one generation each (the invariant and the publish token, 3.4; test (j)); an origin id under two copy ids (a copied home) is listed. Merged recall returns no occurrence twice. |
 | One real recall proof | The recall kit's agent arm through the merger: a value captured only on machine A is asked for on machine B in a fresh Claude Code session told nothing about stores. One more run on a machine with no local history, the replaced-machine case. Question and expected value written down first by someone other than the runner. | The agent answers with the value; the hit carries A's copy id; `lcm_expand` returns the stored source byte-equal. With the replica removed, the same question gets a local-only answer and no tool error. Claim class: one real session, not a pass rate. |
 | Copied stores carry an import stamp | The copy checker reads `import:origin` in every restored generation and replica and compares it with the manifest | Present, equal to the manifest, origin id equal to the origin machine's owner file |
-| A deliberate delete reaches the hosted copy, or the opt-in says it does not | The tests in 5.2 | (a) to (e) pass; the opt-in text carries the delete rule and its limits |
+| A deliberate delete reaches the hosted copy, or the opt-in says it does not | The tests in 5.2 | (a) to (j) pass; the opt-in text carries the delete rule and its limits |
 | The design check shows recall can read across stores | Section 6, rows 4 and 5 | Their bars |
 | Unstated but binding: local capture is unharmed (VISION.md:60) | Section 6 row 1, repeated on the candidate; the unit's own gate on the candidate | As row 1; R1-R10 pass |
 
@@ -744,8 +744,10 @@ replica carries them too.
   by 11-24; row 3 runs when the O1 bucket exists, before the gate.
 - **A session-end publish.** A capture made after A's last upload waits for A's next session or a manual `sync`
   (4.5). Publishing when a session ends needs a hook, and D13 has none, so this stays open.
-- **Conditional create on a user's host.** The chain and retention rely on a create-if-absent PUT. `enable` refuses
-  a host that does not honour it **(assumption: R2, B2 and Hetzner do; lane 6 checks each host it names)**.
+- **Conditional create on a user's host.** The chain and retention rely on a create-if-absent PUT. `enable` accepts
+  only a host that lane 6 has shown honours it, and refuses every other host by name **(assumption: R2, B2 and
+  Hetzner do; lane 6 checks each host it names, including that a second create of the same key is refused with 412
+  and never answered with a 2xx)**.
 - **TLS on found interpreters.** Some ship without a CA bundle; `enable` then refuses and says so.
 - **Grok Build.** Covered by design only. The roadmap rows say so: Grok Build stores join once Grok capture ships
   and its own restore proof and copy checker pass.
