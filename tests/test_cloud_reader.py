@@ -1408,7 +1408,11 @@ def test_r10_forgotten_cursor_equals_missing(tmp_path, corpus, clients, limit):
 @pytest.mark.parametrize('query', [
     '0123456789abcdef0123456789abcdef01234567',
     'parser regression fixed in deadbeefcafebabe0123456789abcdef42 yesterday',
-], ids=['commit_sha', 'hex_in_sentence'])
+    ' 0123456789abcdef0123456789abcdef01234567 ',
+    '0123456789abcdef0123456789abcdef01234567\n',
+    'parser regression fixed in deadbeefcafebabe0123456789abcdef42 yesterday ',
+    10**40,
+], ids=['commit_sha', 'hex_in_sentence', 'padded_sha', 'newline_sha', 'padded_sentence', 'integer_query'])
 def test_r10_forgotten_grep_echo_equals_missing(tmp_path, corpus, clients, query):
     local, sources = corpus
     forget(local, 'remote0')
@@ -1421,7 +1425,7 @@ def test_r10_forgotten_grep_echo_equals_missing(tmp_path, corpus, clients, query
     assert actual['isError'] is False, 'the caller query must not trigger the replica error scan'
     assert actual == expected
     body = json.loads(actual['content'][0]['text'])
-    assert body['query'] == query and body['results'] == []
+    assert body['query'] == str(query).strip() and body['results'] == []
 
 
 def test_r10_empty_shape_echo_scan_keeps_refusals(monkeypatch):
@@ -1454,3 +1458,27 @@ def test_r10_empty_shape_echo_scan_keeps_refusals(monkeypatch):
                      {'query': 'changed ' + foreign}):
         twin = {'query': foreign, 'session_id': twin_session, 'results': [], **produced}
         assert merger.routed(replica, 'lcm_grep', args, {session}) == generic, produced
+
+
+@pytest.mark.parametrize('cursor', [-1, 10**40, 'abc'], ids=['negative', 'overflow', 'noninteger'])
+@pytest.mark.parametrize('limit', [None, 1], ids=['default_limit', 'limit_1'])
+def test_r11_forgotten_invalid_cursor_equals_missing(tmp_path, corpus, clients, cursor, limit):
+    local, sources = corpus
+    copy_generation(sources[0], local, COPIES[0])
+    before = clients(tmp_path, local)
+    ready(before)
+    page = before.body('lcm_load_session', session_id=qualified('remote0'), limit=1)
+    anchor = page['messages'][0]['store_id']
+    assert page['messages'][0]['session_id'] == qualified('remote0')
+    before.close()
+    forget(local, 'remote0')
+    client = clients(tmp_path, local)
+    ready(client)
+    for anchored in (False, True):
+        extra = {'after_store_id': cursor, **({'limit': limit} if limit is not None else {}),
+                 **({'anchor_store_id': anchor} if anchored else {})}
+        missing = client.call('lcm_load_session', session_id=qualified('never-existing'), **extra)['result']
+        actual = client.call('lcm_load_session', session_id=qualified('remote0'), **extra)['result']
+        expected = json.loads(json.dumps(missing).replace(qualified('never-existing'), qualified('remote0')))
+        assert actual == expected, (cursor, limit, anchored)
+        assert actual['isError'] is True

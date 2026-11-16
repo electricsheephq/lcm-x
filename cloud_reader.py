@@ -488,7 +488,8 @@ class Merger:
     def routed(self, replica, name, args, hidden):
         if replica.status != 'ok' or not replica.child:
             return {'error': 'the other store could not answer this call', 'store': replica.prefix}
-        target = {k: v for k, v in args.items() if k in SCALARS or k == 'externalized_refs'}
+        # The paging bound is not a row target; preserve it in the missing-id twin.
+        target = {k: v for k, v in args.items() if k in SCALARS - {'after_store_id'} or k == 'externalized_refs'}
         invisible = hidden and ((isinstance(args.get('session_id'), str) and args['session_id'] in hidden) or
                     (any(k in args for k in ('store_id', 'node_id')) and not visible_item(target, replica.prefix, replica.child.folder, hidden)))
         if hidden and not invisible:
@@ -536,7 +537,10 @@ class Merger:
                 body = rebuild(absent, replica.prefix)
                 for key in target.keys() & body.keys():
                     body[key] = replace_token(body[key], qualify(replica.prefix, missing[key]), qualify(replica.prefix, target[key]))
-                echo = {k for k, v in body.items() if (k in changed and k in absent and absent[k] == changed[k])
+                # Match tools.py:307-314 (_coerce_query_arg) without importing the reader.
+                query = '' if changed.get('query') is None else str(changed['query']).strip()
+                echo = {k for k, v in body.items() if (k in changed and k in absent and
+                        (absent[k] == changed[k] or (k == 'query' and absent[k] == query)))
                         or (k in target and v == qualify(replica.prefix, target[k]))}
                 clean = error_body(json.dumps({k: v for k, v in body.items() if k not in echo}), {}, replica.prefix)
                 if 'store' in clean:
