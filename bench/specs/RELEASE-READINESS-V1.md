@@ -59,6 +59,13 @@ never wait for it.
   1. **Audit gate.** Every R1-R10 session's audit exits 0 with `verified: true`: every transcript
      line accounted for, 0 lost, 0 duplicated, no spool record waiting or failed. Sessions with
      Claude Code's local transcript GC on are listed without a lossless claim.
+     Beside the audit, `scripts/capture_outside_in.py` must pass over the session's store home
+     and every transcript of the run in capture order (subagents as `SESSION/agent:ID`):
+     0 lost, 0 duplicated, order kept, 0 unpaired. The session's record carries the checker's
+     `unverified` and `unprojected` counts. A failure in the documented false-failure shape
+     (#2777: a recovered text equal to a later verbatim revision is reported out of order) goes
+     to the release manager with the transcript line numbers; it never passes by itself.
+     (2026-11-16, #2139: the audit gate runs the outside-in checker beside the audit, for candidates gated after this change.)
   2. **Real sessions R1-R10** through Claude Code, each with a record: the backend, the machine
      (model and RAM), the runtime mode, the exact interpreter version, the load average at the
      start, the audit's `ok` and `verified`, per-event hook latency (n, p50, p95, max) with each
