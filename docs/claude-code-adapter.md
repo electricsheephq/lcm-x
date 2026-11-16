@@ -1,4 +1,5 @@
 # Claude Code adapter: capture and recall (design r2)
+The versioned [store contract](store-contract.md) defines the shared schema, write methods and adapter-owned rows.
 
 Status: draft, 2026-11-01. Tracker: #1192 (one memory across harnesses), with #1010 (portable recall).
 Prior work: draft #1011 (portable capture and packaging) and draft #1216 (read-only MCP reader).

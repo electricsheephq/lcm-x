@@ -60,6 +60,10 @@ jobs:
             python scripts/golden_outcome_gate.py --base-ref HEAD^1
           fi
 
+      - name: Gate store contract
+        if: github.event_name == 'pull_request'
+        run: python scripts/store_contract_gate.py --base-ref HEAD^1
+
   test:
     name: test-shard (${{ matrix.python-version }}, ${{ matrix.shard }}/4)
     runs-on: ubuntu-latest
