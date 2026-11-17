@@ -104,6 +104,7 @@ NON_TURN_PATH_FILES = {
     "cloud_copy.py",  # Cloud capture snapshot and upload; run only by scripts/lcm_x_cloud.py, never loaded by Hermes or the capture worker.
     "cloud_restore.py",  # Cloud restore in a separate process; never loaded by Hermes or the capture worker.
     "cloud_s3.py",  # Cloud S3 transport; called only by cloud copy/guard, never the Hermes turn path.
+    "cloud_view.py",  # Isolated replica-view builder; never loaded by Hermes or the capture worker.
     "command.py",  # Explicit commands or default-off embedding backfill.
     "command_auth.py",  # Explicit slash-command authorization only.
     "command_doctor.py",  # Read-only /lcm doctor text diagnostics only.

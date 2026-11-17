@@ -15,6 +15,8 @@ ALLOWLIST = (
     ('bench/instruments/local_catchup/tests/test_1653.py', 'test_08_audit_reads_one_snapshot.concurrent', 'set_trace_callback', 'instrument, not product: c is the instrumented connection'),
     ('bench/instruments/local_catchup/tests/test_i2_fix1.py', 'test_cheap_counts_ignore_new_trace_and_foreign_identity.connect', 'set_trace_callback', 'instrument, not product: c is the instrumented connection'),
     ('bench/instruments/reliability/test_reply_held_fault.py', 'test_kill_exit_checks_rollback_order', 'set_trace_callback', 'instrument, not product: held.reservation is the instrumented connection'),
+    ('cloud_view.py', 'connect', 'create_function', "view builder's own private connection; lineage_hit reads no engine state"),
+    ('cloud_view.py', 'connect', 'create_function', "view builder's own private connection; metadata_hit reads no engine state"),
     ('command.py', '_register_summary_has_text', 'create_function', 'VectorStore.connection or _embedding_read_connection; each opens a connection independently of MessageStore'),
     ('docs/process/evidence/1880-persisted-hold/cost/cost_probe.py', 'main', 'set_trace_callback', 'instrument, not product: archived cost probe under docs/process/evidence; sets a trace callback on the MessageStore connection by design, to measure its statements'),
     ('docs/process/evidence/1880-persisted-hold/cost/cost_probe.py', 'main', 'set_trace_callback', 'instrument, not product: archived cost probe on held._dag._conn, the separate DAG connection'),

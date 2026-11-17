@@ -843,8 +843,9 @@ connection from another host."
   out gives the same `<e>`: the build rewrites `view.json` with the new digests, the folder is untouched, and the
   running reader keeps serving. When nothing is left out at all, the view's `lcm.db` is a hard link to the byte
   copy's file (a reader opens `mode=ro`, readonly_store.py:155), so nobody pays a second copy. The link is made only
-  when the byte copy has a rollback journal and no sidecar file (V4's check); otherwise the build clones or copies
-  it. Reason: a forget usually names a session of this machine, which other machines' copies do not hold (4.2).
+  when the byte copy has a rollback journal and no sidecar file (V4's check) and the filesystem accepts the link;
+  otherwise the build clones or copies it, after the floor check (V11). Reason: a forget usually names a session
+  of this machine, which other machines' copies do not hold (4.2).
 - **V8. Building.** A builder waits for `replicas/<copy id>/view.lock` (exclusive) for up to 10 minutes, then exits
   `view_busy`. Holding it, the builder:
   1. reads `current` for the generation and holds that `gen-<n>/`'s shared lock (4.1) until it ends, so refresh
@@ -880,9 +881,11 @@ connection from another host."
   reads the forgotten set once per call, before its serial dispatch; a forget that commits during a call counts as
   after it. Handover: on a new generation with unchanged digests the old reader serves until the new one has
   answered its probe, as today; on a changed digest it receives no further call.
-- **V11. Disk.** S is one copy's database. Payloads are stored once wherever hard links work; on a filesystem
-  without them V6 copies the kept files, which costs their bytes again. The view's database costs nothing when
-  nothing is left out, a few changed pages when cloned, and S when copied: at worst 2S plus payloads at rest. While
+- **V11. Disk.** S is one copy's database at its logical size, which counts committed WAL frames. Payloads are
+  stored once wherever hard links work; on a filesystem without them V6 copies the kept files, which costs their
+  bytes again. The view's database costs nothing when nothing is left out and the filesystem takes the link (a
+  refused link falls back to a copy), a few changed pages when cloned, and S when copied: at worst 2S plus
+  payloads at rest. While
   a build's deletes run, their rollback journal holds the original of every page they change, up to one more S,
   until they commit. A forget deletes the stale view first when no reader holds it; otherwise it costs one more S
   until that reader closes. A refresh deletes the old byte copy once the new one is verified, then builds the new
