@@ -169,6 +169,8 @@ def canary(args, client, dataset_sha, q):
                     client.call(args.reader, messages, records)
             except ToolViolation:
                 status = "tool_violation"
+            except delivery.LocalRecallUnavailable:
+                raise
             except Exception as exc:
                 status = "error:" + type(exc).__name__
                 # With no tools at all, Claude may write a tool call as text; Claude Code cannot run it
@@ -455,6 +457,8 @@ def run(args, client, questions, dataset_sha, ids_sha, excluded, store):
             except ToolViolation as exc:  # the harness used a non-MCP tool: a failed question
                 row.update(getattr(exc, "delivery_result", {}))
                 row.update(status="tool_violation")
+            except delivery.LocalRecallUnavailable:
+                raise
             except Exception as exc:
                 row.update(getattr(exc, "delivery_result", {}))
                 row.update(status="error", error=type(exc).__name__)

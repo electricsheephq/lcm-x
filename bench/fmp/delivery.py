@@ -30,6 +30,17 @@ FINAL_NUDGE = ("The tool budget for this question is exhausted. Give your final 
 NUDGE = {"role": "user", "content": FINAL_NUDGE}
 
 
+class LocalRecallUnavailable(RuntimeError):
+    """A LOCAL benchmark must not silently measure full-text-only recall."""
+
+
+def require_local_semantic(raw):
+    payload = json.loads(raw)
+    if ("chunk" not in payload.get("provenance", {}).get("arms_run", []) or
+            "coverage not certified" in str(payload.get("degraded_reason", ""))):
+        raise LocalRecallUnavailable("local_recall_semantic_unavailable")
+
+
 def tokens(value):
     return -(-len(json.dumps(value, ensure_ascii=False)) // 4)
 
@@ -118,6 +129,9 @@ def dispatch(name, arguments, engine, offered=None):
         raw = getattr(production, name)(args, engine=engine)
     except Exception as exc:
         return json.dumps({"error": f"Error executing {name}: {exc}"}, ensure_ascii=False)
+    if name == "lcm_recall" and getattr(engine, "_fmp_local_recall_pending", False):
+        require_local_semantic(raw)
+        engine._fmp_local_recall_pending = False
     if name == "lcm_recall" and getattr(getattr(engine, "_config", None), "recall_delivery_unit", "hits") == "session":
         payload = json.loads(raw)
         if "error" not in payload and payload.get("provenance", {}).get("delivery", {}).get("unit") != "session":
@@ -204,6 +218,8 @@ def harness_agentic(q, client, reader, server, records):
                            for i, log in enumerate(logs, 1) if log.exists() for line in log.read_text().split("\n") if line.strip()]
         result["tool_calls"] = sum(bool(t.get("counted")) for t in result["trace"])
         result["forced_final"] = "tool_calls" if any(t.get("counted") is False for t in result["trace"]) else None
+        if any(t.get("fatal") == "LocalRecallUnavailable" for t in result["trace"]):
+            raise LocalRecallUnavailable("local_recall_semantic_unavailable")
     if any(t.get("fatal") == "DeliveryMismatch" for t in result["trace"]):
         raise DeliveryMismatch("MCP session delivery verification failed")
     result["finish_reason"] = records[-1].get("finish_reason") if records else None

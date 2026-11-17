@@ -13,6 +13,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from . import delivery
 from .common import commit, sha, write_json
 from .delivery import question_clock
 
@@ -121,7 +122,7 @@ class Stores:
         self.identity = {"lcmx_commit": commit(repo), "config": self.base,
                          "dataset_sha256": dataset_sha, "summaries": summaries,
                          "provider": self.provider_name, "model": self.model,
-                         "embedding_privacy": "raw-public-benchmark", "format": 3, "store_text": store_text}
+                         "embedding_privacy": "raw-public-benchmark", "format": 4, "store_text": store_text}
         self.identity["effective_config"] = None  # Identity-only callers do not run a product tree.
         if lme is not None:
             lme._ensure_hermes_lcm_package()
@@ -169,7 +170,8 @@ class Stores:
         dag = SummaryDAG(config.database_path)
         vector = VectorStore(config.database_path, config=config)
         engine = SimpleNamespace(_config=config, _store=store, _dag=dag, _hermes_home=str(directory),
-                                 current_session_id="__fmp_probe__" + safe(q.qid))
+                                 current_session_id="__fmp_probe__" + safe(q.qid),
+                                 _fmp_local_recall_pending=self.base == "local" and frozen)
         if self.provider:
             engine._lcm_embedding_provider_cache = ((self.provider_name, self.model), self.provider)
         if frozen:
@@ -230,6 +232,20 @@ class Stores:
                         summary_identity = vectors.capture_identity(self.model, provider=self.provider_name)
                         vectors.record_embedding(str(node_id), "summary", self.model,
                             self.provider.embed_documents([text])[0], identity=summary_identity)
+        if self.base != "off":
+            from hermes_lcm import command
+            from benchmarking.longmemeval import certify_local_recall_store
+            config = engine._config
+            db_path = config.database_path
+            registered = command._embedding_register_profiles(config, db_path, allow_download=False)
+            if not isinstance(registered, dict):
+                raise RuntimeError("store_embedding_registration_failed")
+            certify_local_recall_store(config, db_path, summaries=True)
+            if self.base == "local":
+                with self.engine(q, stage, frozen=False) as (probe, _):
+                    with question_clock(q.question_date):
+                        raw = delivery.dispatch("lcm_recall", {"query": q.question}, probe)
+                    delivery.require_local_semantic(raw)
         write_json(stage / "speakers.json", speakers)
         write_json(stage / "build-manifest.json", expected)
         if path.exists():
