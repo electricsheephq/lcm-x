@@ -97,8 +97,10 @@ def grow(f, count=1):
 
 def pub(f, **kw):
     home, bucket, _, _ = f
-    result = cp.publish(home, COPY, bucket, PREFIX, guard=lambda head, db: None,
-                        forget_items=kw.pop('forget_items', lambda head, db: []), **kw)
+    result = cp.publish(home, COPY, bucket, PREFIX, guard=kw.pop('guard', lambda *args: None),
+                        forget_items=kw.pop('forget_items', lambda head, db: []),
+                        publisher=lambda: None, chain_check=lambda *args: None,
+                        after_create=lambda m: {}, prepare_manifest=lambda m: None, **kw)
     assert isinstance(result, dict), 'publish must produce a manifest'
     assert result['database']['file_bytes'] < 5_000_000
     return result
@@ -361,7 +363,9 @@ def test_15_manifest_last_created_once(fixture):
         return original(key, data)
     fixture[1].inner.put_new = collide
     refused('chain_conflict', pub, fixture)
-    assert state(fixture).read_bytes() == before_state and last(fixture).read_bytes() == before_last
+    after_state = json.loads(state(fixture).read_text())
+    assert {k: v for k, v in after_state.items() if k not in ('pending_pair', 'pending_started')} == {k: v for k, v in json.loads(before_state).items() if k not in ('pending_pair', 'pending_started')}
+    assert last(fixture).read_bytes() == before_last
     assert all(fetch(fixture, k[len(PREFIX)+1:]) == v for k, v in before.items())
     assert first['generation'] == 1
     assert not any(method == 'delete' for method, _ in fixture[1].calls)
@@ -377,7 +381,9 @@ def test_16_crash_before_the_manifest(fixture):
     previous_state, previous_last = state(fixture).read_bytes(), last(fixture).read_bytes()
     with pytest.raises(OSError):
         pub(fixture)
-    assert state(fixture).read_bytes() == previous_state and last(fixture).read_bytes() == previous_last
+    after_state = json.loads(state(fixture).read_text())
+    assert {k: v for k, v in after_state.items() if k not in ('pending_pair', 'pending_started')} == {k: v for k, v in json.loads(previous_state).items() if k not in ('pending_pair', 'pending_started')}
+    assert last(fixture).read_bytes() == previous_last
     assert PREFIX + '/gen/2.json' not in keys(fixture)
     assert json.loads(fetch(fixture, 'gen/1.json')) == first
     fixture[1].hook = lambda method, key: None
@@ -464,7 +470,7 @@ def test_21_no_guard_no_second_generation(fixture):
     for kw in ({}, {'guard': lambda *args: None}, {'forget_items': lambda *args: []}):
         refused('guard_not_installed', cp.publish, fixture[0], COPY, fixture[1], PREFIX, **kw)
     result = cli(fixture)
-    assert result.returncode == 2 and json.loads(result.stdout)['code'] == 'guard_not_installed'
+    assert result.returncode == 2 and json.loads(result.stdout)['code'] == 'chain_conflict'
 
 
 def test_22_guard_block(fixture):
@@ -771,7 +777,7 @@ def test_40_the_timers_skip(fixture, monkeypatch):
         return real_stage(*args, **kw)
     monkeypatch.setattr(cp, '_stage', spy)
     refused('unchanged', pub, fixture, timer=True, clock=lambda: 101)
-    assert not fixture[1].calls and not stage_calls
+    assert fixture[1].calls == [('list', PREFIX + '/gen/')] and not stage_calls
     data = json.loads(state(fixture).read_text())
     data['last_publish_s'] = time.time()
     state(fixture).write_text(json.dumps(data))
@@ -786,7 +792,8 @@ def test_41_each_blocker_publishes(fixture, monkeypatch, capsys):
     from scripts import lcm_x_cloud
     real = cp.publish
     def allowed(*args, **kw):
-        return real(*args, **(kw | dict(guard=lambda *a: None, forget_items=lambda *a: [], clock=lambda: 101)))
+        return real(*args, **(kw | dict(guard=lambda *a: None, forget_items=lambda *a: [], publisher=lambda: None,
+            chain_check=lambda *a: None, after_create=lambda m: {}, prepare_manifest=lambda m: None, clock=lambda: 101)))
     monkeypatch.setattr(cp, 'publish', allowed)
     for field, value, blocker in (('unpublished_decisions', ['d'], 'decision_pending'),
                                   ('pending_pair', [99, TOKEN], 'attempt_pending'),
@@ -812,12 +819,14 @@ def test_41_each_blocker_publishes(fixture, monkeypatch, capsys):
 def test_42_state_json(fixture, monkeypatch):
     assert not state(fixture).exists()
     signature = cd.store_signature(fixture[0])
-    pub(fixture, clock=lambda: 100)
-    assert json.loads(state(fixture).read_text()) == dict(copy_id=COPY, snapshot_signature=signature, last_publish_s=100)
+    m = pub(fixture, clock=lambda: 100)
+    data = json.loads(state(fixture).read_text())
+    assert data.get('pending_pair') == [1, m['attempt']['token']] and 'pending_started' in data
+    assert {k: v for k, v in data.items() if k not in ('pending_pair', 'pending_started')} == dict(copy_id=COPY, snapshot_signature=signature, last_publish_s=100)
     for identity in ({'copy_id': 'another'}, {}):
         state(fixture).write_text(json.dumps(identity | dict(unknown=True, last_pair=[1, TOKEN])))
         pub(fixture, timer=True, clock=lambda: 101)
-        assert set(json.loads(state(fixture).read_text())) == {'copy_id', 'snapshot_signature', 'last_publish_s'}
+        assert set(json.loads(state(fixture).read_text())) == {'copy_id', 'snapshot_signature', 'last_publish_s', 'pending_pair', 'pending_started'}
     ready(fixture)
     data = json.loads(state(fixture).read_text()) | {'unknown': {'keep': [1, 2]}}
     state(fixture).write_text(json.dumps(data))
@@ -827,7 +836,8 @@ def test_42_state_json(fixture, monkeypatch):
     def deny(*args):
         raise cp.Refused('as_delete_rows_present')
     refused('as_delete_rows_present', cp.publish, fixture[0], COPY, fixture[1], PREFIX,
-            guard=deny, forget_items=lambda *args: [])
+            guard=deny, forget_items=lambda *args: [], publisher=lambda: None,
+            chain_check=lambda *args: None, after_create=lambda m: {}, prepare_manifest=lambda m: None)
     assert state(fixture).read_bytes() == before
     def fail_upload(method, key):
         if method == 'put_new' and '/gen/' in key:
@@ -835,11 +845,12 @@ def test_42_state_json(fixture, monkeypatch):
     fixture[1].hook = fail_upload
     with pytest.raises(OSError):
         pub(fixture)
-    assert state(fixture).read_bytes() == before
+    after_failure = json.loads(state(fixture).read_text())
+    assert {k: v for k, v in after_failure.items() if k not in ('pending_pair', 'pending_started')} == {k: v for k, v in json.loads(before).items() if k not in ('pending_pair', 'pending_started')}
     fixture[1].hook = lambda *args: None
     pub(fixture, clock=lambda: 102)
     after = json.loads(state(fixture).read_text())
-    assert all(after[k] == v for k, v in data.items() if k not in ('snapshot_signature', 'last_publish_s'))
+    assert all(after[k] == v for k, v in data.items() if k not in ('snapshot_signature', 'last_publish_s', 'pending_pair', 'pending_started'))
     before = state(fixture).read_bytes()
     real = os.replace
     def fail(source, dest):
@@ -874,7 +885,7 @@ def test_44_imports(fixture, monkeypatch):
         assert '-I' in command and '-S' in command and '-B' in command
         return real(command, **kw)
     monkeypatch.setattr(subprocess, 'run', isolated)
-    tree = ast.parse((ROOT / 'cloud_copy.py').read_text())
+    tree = ast.parse((ROOT / 'cloud_copy.py').read_text() + '\n' + (ROOT / 'cloud_guard.py').read_text())
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             assert all(n.name.split('.')[0] in sys.stdlib_module_names for n in node.names)
@@ -1166,7 +1177,8 @@ def test_r3_publish_cleans_staging(fixture, monkeypatch, outcome):
             cleaned.append(True)
         return real(path, **kw)
     monkeypatch.setattr(cp.shutil, 'rmtree', clear)
-    kw = dict(guard=lambda *args: None, forget_items=lambda *args: [])
+    kw = dict(guard=lambda *args: None, forget_items=lambda *args: [], publisher=lambda: None,
+              chain_check=lambda *args: None, after_create=lambda m: {}, prepare_manifest=lambda m: None)
     if outcome == 'guard_not_installed':
         kw = {}
     elif outcome == 'guard_loss':

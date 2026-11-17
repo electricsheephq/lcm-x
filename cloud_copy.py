@@ -5,7 +5,8 @@ Sessions carry sorted message [id, hash] pairs, binding/relation row hashes and 
 combined digest, plus ledger [identity, line_digest, raw_sha256, held_ids] entries.
 Identity excludes event_id; raw_from is resolved before hashing. Payload hashes
 cover the decoded content string. Id sets are sorted delta unsigned varints,
-zlib-compressed and base64 encoded. Removed sets and pins pass through unchanged.
+zlib-compressed and base64 encoded. The injected guard authors cumulative removed
+sets and the manifest's top-level pins.
 No origin mutation or capture-lock access is permitted here. Exit-2 refusals include
 bad_head (otherwise malformed head) and payload_folder_configured (moved payloads).
 """
@@ -254,7 +255,7 @@ def guard_block(db, payloads, parent=None):
         hashes[path.name] = _sha(content.encode('utf-8'))
     return dict(mark=mark, sessions=sessions, payloads=hashes,
                 **{k: parent.get(k, [] if k != 'removed_ids' else encode_ids([]))
-                   for k in ('removed_sessions', 'removed_ids', 'pins', 'superseded')})
+                   for k in ('removed_sessions', 'removed_ids')})
 
 
 def _header_wal(db):
@@ -456,6 +457,15 @@ def _save_state(home, value):
         temp.unlink(missing_ok=True)
 
 
+def _update_state(home, copy_id, *, consumed_decisions=(), **keys):
+    """Merge named keys under the caller's upload.lock; preserve unknown state."""
+    value = _state(home, copy_id)
+    if consumed_decisions:
+        value['unpublished_decisions'] = [d for d in value.get('unpublished_decisions', [])
+                                          if d['id'] not in consumed_decisions]
+    _save_state(home, value | keys | dict(copy_id=copy_id))
+
+
 def _head(transport, prefix, copy_id):
     keys = transport.list(prefix + '/gen/')
     for key in keys:
@@ -519,21 +529,23 @@ def _read_part(path, offset, size):
 
 
 def publish(home, copy_id, transport, prefix, *, quiet_s=0, part_size=DEFAULT_PART_SIZE,
-            guard=None, forget_items=None, token=None, timer=False, clock=time.time,
+            guard=None, forget_items=None, publisher=None, chain_check=None, after_create=None, prepare_manifest=None,
+            token=None, timer=False, clock=time.time,
             free_bytes=lambda p: shutil.disk_usage(p).free, progress=None,
             size_factor=cloud_delta.SIZE_FACTOR, max_generations=cloud_delta.MAX_CHAIN_GENERATIONS,
             snapshot_only=False, result=None):
     """Return a manifest; refusals and skips raise Refused with a content-free code.
 
     snapshot_only stages a generation-1 base without transport or page/state writes.
-    A guard receives (parent manifest, staged database); forget_items has that seam.
+    A guard receives (parent manifest, staged database, candidate manifest).
     result receives printable status fields after success, outside the manifest.
     """
     _name(copy_id, _COPY)
     _name(prefix, r'[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*')
     if prefix.rsplit('/', 1)[-1] != copy_id or type(part_size) is not int or part_size <= 0 or quiet_s < 0:
         raise Refused('bad_name')
-    resumed = token is not None
+    explicit_token = token is not None
+    resumed = explicit_token
     token = token or _sha(os.urandom(16) + str(time.time_ns()).encode() + str(os.getpid()).encode())[:32]
     _name(token, _TOKEN)
     home = Path(home)
@@ -544,16 +556,36 @@ def publish(home, copy_id, transport, prefix, *, quiet_s=0, part_size=DEFAULT_PA
             if config.exists() and json.loads(config.read_text(encoding='utf-8')).get('copy_id') != copy_id:
                 raise Refused('bad_name')
             state, blocker = _state(home, copy_id), None
-            if timer:
+            if not snapshot_only and any(fn is None for fn in (guard, forget_items, publisher, chain_check, after_create, prepare_manifest)):
+                staging_started = True
+                raise Refused('guard_not_installed')
+            if timer and not snapshot_only:
                 pair = state.get('last_pair')
+                try:
+                    listed = transport.list(prefix + '/gen/')
+                    for key in listed:
+                        _name(key, re.escape(prefix) + r'/gen/[1-9][0-9]*\.json')
+                    head_generation = max((int(k.rsplit('/', 1)[1][:-5]) for k in listed), default=0)
+                except OSError:
+                    head_generation = None
                 blocker = cloud_delta.skip_blocker(manual=False, signature=cloud_delta.store_signature(home),
                     recorded_signature=state.get('snapshot_signature'), decision_pending=bool(state.get('unpublished_decisions')),
                     last_pair=pair, pending_pair=state.get('pending_pair'), retention_done_generation=state.get('retention_done_generation'),
-                    head_generation=pair[0] if pair else None, last_publish_s=state.get('last_publish_s'), now_s=clock())
+                    head_generation=head_generation, last_publish_s=state.get('last_publish_s'), now_s=clock())
                 if blocker is None:
                     raise Refused('unchanged')
             head, head_bytes = (None, b'') if snapshot_only else _head(transport, prefix, copy_id)
             generation = head['generation'] + 1 if head else 1
+            publisher_id = None if snapshot_only else publisher()
+            bucket_now = None if snapshot_only else transport.now()
+            pending = state.get('pending_pair')
+            started = state.get('pending_started')
+            if not explicit_token and pending and pending[0] == generation and bucket_now is not None and started is not None and 0 <= bucket_now - started <= 3.5 * 86400:
+                token, resumed = pending[1], True
+                _name(token, _TOKEN)
+            elif not snapshot_only and pending and pending[0] == generation and explicit_token and token == pending[1]:
+                if bucket_now is None or started is None or bucket_now - started > 3.5 * 86400:
+                    token, resumed = _sha(os.urandom(16) + str(time.time_ns()).encode() + str(os.getpid()).encode())[:32], False
             pages_dir, db = home / 'cloud' / 'pages', home / 'cloud' / 'staging' / 'lcm.db'
             for restart in range(3):
                 _before(home, quiet_s, clock, free_bytes)
@@ -568,6 +600,8 @@ def publish(home, copy_id, transport, prefix, *, quiet_s=0, part_size=DEFAULT_PA
                 usable = old and type(old.get('page_size')) is int and old['page_size'] > 0 and type(old.get('file_bytes')) is int and isinstance(old.get('page_list_sha256'), str)
                 prev = cloud_delta.load_head_list(pages_dir, copy_id, old['page_list_sha256'], old['file_bytes']//old['page_size']) if usable else None
                 items = forget_items(head, db) if forget_items else []
+                if not snapshot_only:
+                    chain_check(head, state, publisher_id, head_bytes)
                 args = dict(head_generation=head['generation'] if head else None, page_size=page_size, file_bytes=new.file_bytes,
                             list_matches=prev is not None, forget=any(i['chain_may_hold'] for i in items), object_missing=False,
                             delta_bytes=0, size_factor=size_factor, max_generations=max_generations)
@@ -576,10 +610,9 @@ def publish(home, copy_id, transport, prefix, *, quiet_s=0, part_size=DEFAULT_PA
                 except Refused as error:
                     error.detail['generation'] = head['generation']
                     raise
-                if head:
-                    if guard is None or forget_items is None:
-                        raise Refused('guard_not_installed')
-                    guard(head, db)
+                m['publisher'] = publisher_id
+                if head and not snapshot_only:
+                    guard(head, db, m)
                 encoded = []
                 if reason is None:
                     count = len(cloud_delta.changed_pages(prev, new.digests))
@@ -591,6 +624,8 @@ def publish(home, copy_id, transport, prefix, *, quiet_s=0, part_size=DEFAULT_PA
                     args['delta_bytes'] = sum(o.bytes for o in encoded)
                     reason = cloud_delta.base_reason(old, **args)
                 if not snapshot_only:
+                    _update_state(home, copy_id, pending_pair=[generation, token],
+                                  pending_started=started if resumed and started is not None else bucket_now)
                     cloud_delta.save_pending_list(pages_dir, copy_id, new.digests)
                 sent, buffers = set(), {}
                 def upload(key, data, force=False):
@@ -699,12 +734,14 @@ def publish(home, copy_id, transport, prefix, *, quiet_s=0, part_size=DEFAULT_PA
                              for i in final_items], key=lambda i: (i['kind'], i['key'])))
                 if snapshot_only:
                     return m
+                prepare_manifest(m)
                 try:
                     transport.put_new(prefix + f'/gen/{generation}.json', _json(m))
                 except FileExistsError:
                     raise Refused('chain_conflict') from None
                 cloud_delta.promote_pending_list(pages_dir, copy_id)
-                _save_state(home, state | dict(copy_id=copy_id, snapshot_signature=signature, last_publish_s=clock()))
+                changes = after_create(m)
+                _update_state(home, copy_id, snapshot_signature=signature, last_publish_s=clock(), **changes)
                 if blocker and result is not None:
                     result['blocker'] = blocker
                 return m
