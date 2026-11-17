@@ -438,3 +438,181 @@ def test_checker_child_environment(tmp_path, monkeypatch):
     assert 'HERMES_HOME' not in env
     assert not any(k.startswith('LCM_') for k in env) and 'RESTORE_PARENT_SENTINEL' not in env
     assert env['PATH'] == os.defpath and set(env) <= {'PATH', 'LC_CTYPE', '__CF_USER_TEXT_ENCODING'}
+
+
+def tree_bytes(home):
+    return {p.relative_to(home).as_posix(): (p.stat().st_mode, p.read_bytes() if p.is_file() else None)
+            for p in [home, *home.rglob('*')]}
+
+
+@pytest.mark.parametrize('kind', ['parts', 'deltas', 'file', 'deep', 'root'])
+@pytest.mark.parametrize('marker', ['config.yaml', 'capture-owner.json'])
+def test_cache_symlinks(fixture, tmp_path, kind, marker):
+    manifest = pub(fixture, part_size=8192)
+    if kind == 'deltas':
+        grow(fixture)
+        manifest = pub(fixture, part_size=8192)
+        assert manifest['database']['deltas']
+    home = tmp_path / 'synthetic-home'
+    home.mkdir(mode=0o755)
+    (home / marker).write_text('synthetic marker')
+    objects = tmp_path / 'objects'
+    objects.mkdir()
+    ref = manifest['database']['base']['parts'][0]
+    if kind == 'file':
+        (objects / 'parts').mkdir()
+        source = home / 'existing-object'
+        source.write_bytes(object_path(fixture, ref['key']).read_bytes())
+        (objects / ref['key']).symlink_to(source)
+    elif kind in ('deep', 'root'):
+        link = objects / 'nested' if kind == 'deep' else tmp_path / 'cache-link'
+        link.symlink_to(home, target_is_directory=True)
+        objects = link / 'cache' if kind == 'deep' else link
+    else:
+        (objects / kind).symlink_to(home, target_is_directory=True)
+    before = tree_bytes(home)
+    try:
+        code = restore(fixture, tmp_path / 'restored', manifest['generation'], objects_dir=objects,
+                       reader_argv=successful_reader(tmp_path))['code']
+    except cp.Refused as error:
+        code = error.code
+    assert code == 'restore_objects_symlink'
+    assert tree_bytes(home) == before
+    assert home.stat().st_mode & 0o777 == 0o755
+
+
+def test_target_busy(fixture, tmp_path, monkeypatch):
+    pub(fixture)
+    target = tmp_path / 'restored'
+    real_run, observed = cr._run, []
+    def competing(*args):
+        before = tree_bytes(target)
+        try:
+            code = restore(fixture, target)['code']
+        except cp.Refused as error:
+            code = error.code
+        observed.append(code)
+        assert tree_bytes(target) == before
+        return real_run(*args)
+    monkeypatch.setattr(cr, '_run', competing)
+    assert restore(fixture, target, reader_argv=successful_reader(tmp_path))['code'] == 'done'
+    assert observed == ['restore_target_busy']
+
+
+@pytest.mark.parametrize('failing', [True, False])
+def test_target_swap(fixture, tmp_path, failing):
+    manifest = pub(fixture)
+    target, moved, home = (tmp_path / name for name in ('target', 'moved', 'synthetic-home'))
+    target.mkdir()
+    home.mkdir(mode=0o755)
+    (home / 'config.yaml').write_text('synthetic configuration')
+    (home / 'keep').mkdir()
+    (home / 'keep/data').write_bytes(b'untouched')
+    before, swapped = tree_bytes(home), []
+    def fetch(key):
+        if not swapped:
+            target.rename(moved)
+            target.symlink_to(home, target_is_directory=True)
+            swapped.append(True)
+            if failing:
+                raise KeyError(key)
+        return fixture[1].inner.get(PREFIX + '/' + key)
+    try:
+        cr.materialize(manifest, head_path(fixture, 1).read_bytes(), fetch, target)
+        outcome = 'done'
+    except Exception as error:
+        outcome = getattr(error, 'code', type(error).__name__)
+    assert tree_bytes(home) == before
+    assert outcome == ('object_missing' if failing else 'done')
+    assert list(moved.iterdir()) == [] if failing else (moved / 'lcm.db').read_bytes() == checked(fixture).read_bytes()
+
+
+@pytest.mark.parametrize('other', ['good', 'short', 'wrong'])
+def test_cache_create_race(fixture, tmp_path, monkeypatch, other):
+    manifest = pub(fixture, part_size=8192)
+    target, objects = tmp_path / 'target', tmp_path / 'objects'
+    target.mkdir()
+    ref = manifest['database']['base']['parts'][0]
+    needed = objects / ref['key']
+    original = object_path(fixture, ref['key']).read_bytes()
+    competing = original if other == 'good' else original[:-1] if other == 'short' else b'x' * len(original)
+    real_open, raced = os.open, []
+    def win_first(path, flags, mode=0o777, **kw):
+        if Path(path) == needed and flags & os.O_EXCL and not raced:
+            raced.append(True)
+            with os.fdopen(real_open(path, flags, mode, **kw), 'wb') as handle:
+                handle.write(competing)
+        return real_open(path, flags, mode, **kw)
+    monkeypatch.setattr(cr.os, 'open', win_first)
+    def fetch(key):
+        if raced and key != ref['key']:
+            raise KeyError(key)
+        return fixture[1].inner.get(PREFIX + '/' + key)
+    try:
+        cr.materialize(manifest, head_path(fixture, 1).read_bytes(), fetch, target, objects_dir=objects)
+        code = 'done'
+    except Exception as error:
+        code = getattr(error, 'code', type(error).__name__)
+    assert raced and needed.exists(), 'rollback deleted the competing cache object'
+    assert needed.read_bytes() == competing
+    assert code == {'good': 'object_missing', 'short': 'object_bytes', 'wrong': 'object_sha256'}[other]
+    assert not list(target.iterdir())
+
+
+@pytest.mark.parametrize('check', [2, 3, 4])
+@pytest.mark.parametrize('timeout', [True, False])
+def test_check_timeout(fixture, tmp_path, monkeypatch, check, timeout):
+    pub(fixture)
+    real_run = cr._run
+    def failure():
+        if timeout:
+            raise subprocess.TimeoutExpired('synthetic slow check', 60)
+        raise ValueError('synthetic mismatch')
+    def run(script, args):
+        if (check == 2 and script == 'cloud_copy_outside_in.py') or (
+                check == 3 and script == 'capture_outside_in.py'):
+            failure()
+        return real_run(script, args)
+    monkeypatch.setattr(cr, '_run', run)
+    if check == 4:
+        monkeypatch.setattr(cr, '_reader', lambda *args: failure())
+    target = tmp_path / 'restored'
+    detail = refusal('restore_check_timeout' if timeout else 'restore_check_failed', lambda: restore(
+        fixture, target, transcripts=[f's1={fixture[2]}'], reader_argv=successful_reader(tmp_path)))
+    assert detail['check'] == check and detail['generation'] == 1
+    assert (target / 'manifest.json').exists()
+
+
+@pytest.mark.parametrize('where', ['equal', 'inside', 'contains', 'hermes', 'unicode'])
+def test_path_aliases(fixture, tmp_path, monkeypatch, where):
+    probe = tmp_path / 'CaseProbe'
+    probe.mkdir()
+    if not (tmp_path / 'caseprobe').exists():
+        pytest.skip('test volume is case-sensitive (probed CaseProbe/caseprobe)')
+    pub(fixture)
+    target = tmp_path / 'Restored'
+    target.mkdir()
+    alias = tmp_path / 'RESTORED'
+    options = {'equal': alias, 'inside': alias / 'cache', 'contains': tmp_path / 'CACHE'}
+    if where == 'hermes':
+        monkeypatch.setenv('HERMES_HOME', str(target))
+        target = alias / 'child'
+    elif where == 'unicode':
+        target = tmp_path / 'caf\u00e9'
+        target.mkdir()
+        alias = tmp_path / 'cafe\u0301'
+        if not alias.exists():
+            pytest.skip('test volume distinguishes composed and decomposed Unicode (probed)')
+        options[where] = alias / 'cache'
+    elif where == 'contains':
+        cache = tmp_path / 'cache'
+        cache.mkdir()
+        target = cache / 'child'
+    before = tree_bytes(tmp_path)
+    try:
+        code = restore(fixture, target, objects_dir=options.get(where),
+                       reader_argv=None)['code']
+    except cp.Refused as error:
+        code = error.code
+    assert code == ('restore_target_is_home' if where == 'hermes' else 'restore_objects_overlap')
+    assert tree_bytes(tmp_path) == before
