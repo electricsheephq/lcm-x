@@ -375,6 +375,7 @@ def test_environment_read_inventory():
         ("embedding_provider.py", "__init__"): "FASTEMBED_CACHE_PATH: process-wide model download cache",
         ("inactive_record.py", "_process_start"): "LC_ALL=C subprocess for ps process identity, not profile configuration",
         ("__init__.py", "_engine_took_slot"): "HERMES_HOME: process launch identity for inactive-record ownership, not profile configuration",
+        ("cloud_restore.py", "_safe_path"): "HERMES_HOME: scalar restore destination guard, not profile configuration",
         ("adapters/claude-code/bin/lcmx_hook.py", "main"):
             "Claude Code plugin hook: the harness's own variables (capture switch, config dir, plugin paths), "
             "never Hermes profile configuration",
@@ -440,7 +441,7 @@ def test_environment_read_inventory():
             if key == ("embedding_provider.py", "__init__"):
                 call = parents.get(parents.get(node))
                 assert isinstance(call, ast.Call) and ast.literal_eval(call.args[0]) == "FASTEMBED_CACHE_PATH"
-            if key == ("__init__.py", "_engine_took_slot"):
+            if key in {("__init__.py", "_engine_took_slot"), ("cloud_restore.py", "_safe_path")}:
                 call = parents.get(parents.get(node))
                 assert isinstance(call, ast.Call) and ast.literal_eval(call.args[0]) == "HERMES_HOME"
     assert not failures, "\n".join(failures)
