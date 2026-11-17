@@ -1483,3 +1483,72 @@ def test_r7_cleanup_stderr_cannot_affect_build(world, monkeypatch, capsys, stder
     assert not capsys.readouterr().out
     assert (copy / 'view.json').exists() == enough_free
     assert json.loads((copy / 'view-result.json').read_bytes())['code'] == result['code']
+
+
+def r8_unopenable_folder(world, monkeypatch, capsys, temporary):
+    home, copy, _ = world
+    built(world)
+    name = 'view-1-1-' + 'e' * 16
+    if temporary:
+        name += '.tmp-' + 'f' * 32
+    abandoned = copy / name
+    abandoned.mkdir()
+    (abandoned / 'keep').write_bytes(b'unopenable control')
+    r7_advance(copy, 2)
+    original_open = os.open
+    failures = []
+    def fail_open(path, *args, **kwargs):
+        if path == abandoned:
+            failures.append(True)
+            raise PermissionError('synthetic open refusal')
+        return original_open(path, *args, **kwargs)
+    capsys.readouterr()
+    with monkeypatch.context() as patch:
+        patch.setattr(cv.os, 'open', fail_open)
+        result = cv.build(home, COPY, clone=lambda *_: False)
+    assert result['code'] == 'ok', result
+    pointer = json.loads((copy / 'view.json').read_bytes())
+    assert pointer['generation'] == 2 and (copy / pointer['folder'] / 'lcm.db').is_file()
+    assert (abandoned / 'keep').read_bytes() == b'unopenable control'
+    assert len(failures) == (3 if temporary else 2)
+    captured = capsys.readouterr()
+    assert captured.err == 'view_temp_cleanup_failed\n' * len(failures)
+    assert not captured.out
+    assert cv.build(home, COPY, clone=lambda *_: False)['code'] == 'ok'
+    assert not abandoned.exists() and not capsys.readouterr().err
+
+
+def test_r8_unopenable_temp_folder(world, monkeypatch, capsys):
+    r8_unopenable_folder(world, monkeypatch, capsys, temporary=True)
+
+
+def test_r8_unopenable_stale_view(world, monkeypatch, capsys):
+    r8_unopenable_folder(world, monkeypatch, capsys, temporary=False)
+
+
+def test_r8_retry_reuses_same_identity_orphan(world):
+    home, copy, _ = world
+    built(world)
+    r7_advance(copy, 2)
+    r7_kill_after_rename(home)
+    orphan, = copy.glob('view-2-*')
+    inode = (orphan / 'lcm.db').stat().st_ino
+    database = (orphan / 'lcm.db').read_bytes()
+    reused, checks = [], []
+    def seam(step):
+        if step == 'reuse':
+            reused.append(True)
+            if len(reused) == 1:
+                (copy / 'removed.json').write_text(json.dumps(
+                    {'format': 1, 'session_ids': ['nobody'], 'row_ids': []}))
+    def free_space(_):
+        checks.append(True)
+        return 0
+    result = cv.build(home, COPY, seam=seam, free_space=free_space, clone=lambda *_: False)
+    assert result['code'] == 'ok', result
+    assert reused == [True, True] and checks == []
+    pointer = json.loads((copy / 'view.json').read_bytes())
+    assert pointer['generation'] == 2 and pointer['folder'] == orphan.name
+    assert pointer['removed_sha256'] == hashlib.sha256((copy / 'removed.json').read_bytes()).hexdigest()
+    assert (orphan / 'lcm.db').stat().st_ino == inode
+    assert (orphan / 'lcm.db').read_bytes() == database

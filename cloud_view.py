@@ -214,8 +214,9 @@ def _sweep(copy_folder, *, temporary_only=False, keep=None):
         temporary = re.fullmatch(VIEW + r'\.tmp-[0-9a-f]{32}', path.name)
         if path.name in (current, keep) or not temporary and (temporary_only or not re.fullmatch(VIEW, path.name)):
             continue
-        fd = os.open(path, os.O_RDONLY)
+        fd = None
         try:
+            fd = os.open(path, os.O_RDONLY)
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             shutil.rmtree(path)
         except BlockingIOError:
@@ -227,7 +228,8 @@ def _sweep(copy_folder, *, temporary_only=False, keep=None):
             except Exception:
                 pass
         finally:
-            os.close(fd)
+            if fd is not None:
+                os.close(fd)
 
 
 
@@ -388,7 +390,7 @@ def build(home, copy_id=None, *, seam=lambda _: None, free_space=lambda p: shuti
                         sync(temp)
                         seam('synced')
                 if local != removed_set(home) or raw != removed_bytes(folder) or generation != (folder / 'current').read_text('ascii').strip('\n'):
-                    _sweep(folder)
+                    _sweep(folder, keep=name)
                     continue
                 seam('rechecked')
                 if not target.exists():
