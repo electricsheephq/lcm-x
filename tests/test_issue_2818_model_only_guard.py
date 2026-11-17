@@ -115,3 +115,51 @@ def test_bypassed_compress_preserves_input_identity_for_marker(tmp_path, monkeyp
         longer = marked + [{"role": "assistant", "content": "New row."}]
         monkeypatch.setattr(compressor, "compress", lambda *args, **kwargs: longer)
         assert bypassed.compress(original, force=True) == longer
+
+
+@pytest.mark.parametrize(
+    ("host_key", "result_fields", "input_fields", "equal"),
+    [
+        pytest.param("host_model_only", {"display_metadata": None}, {}, False, id="result-metadata-none"),
+        pytest.param("host_model_only", {"display_metadata": {"model_only": True}},
+                     {"display_metadata": None}, False, id="input-metadata-none"),
+        pytest.param("host_model_only", {"display_metadata": None},
+                     {"display_metadata": None}, True, id="both-metadata-none"),
+        pytest.param("host_model_only", {"display_metadata": "model_only"}, {}, False, id="result-metadata-text"),
+        pytest.param("host_model_only", {"display_metadata": {"model_only": True}},
+                     {"display_metadata": ["model_only"]}, False, id="input-metadata-list"),
+        pytest.param("host_model_only", {"display_metadata": {"model_only": True, "host_model_only": True}},
+                     {"display_metadata": {"model_only": True}}, True, id="one-kept-one-added"),
+        pytest.param("host_model_only", {"display_metadata": {"model_only": True}, "content": "Changed text."},
+                     {}, False, id="marker-and-content"),
+        pytest.param("host_model_only", {"display_metadata": {"model_only": True}, "display_kind": "steer"},
+                     {}, False, id="marker-and-display-kind"),
+        pytest.param(None, {"display_metadata": {"model_only": True}}, {}, True, id="older-host-literal-key"),
+        pytest.param(None, {"display_metadata": {"host_model_only": True}}, {}, False, id="older-host-other-key"),
+    ],
+)
+def test_compression_row_comparison_edge_shapes(monkeypatch, host_key, result_fields, input_fields, equal):
+    _host(monkeypatch, host_key)
+    common = {"role": "user", "content": "Synthetic text."}
+    result = {**common, **result_fields}
+    original = {**common, **input_fields}
+    before = deepcopy((result, original))
+
+    assert CompactionMixin()._compression_rows_equal(result, original) is equal
+    assert (result, original) == before
+
+
+@pytest.mark.parametrize(
+    ("result", "original", "equal"),
+    [
+        pytest.param(None, {"role": "user", "content": "Synthetic text."}, False, id="result-not-a-row"),
+        pytest.param({"role": "user", "content": "Synthetic text.", "display_metadata": {"model_only": True}},
+                     "Synthetic text.", False, id="input-not-a-row"),
+        pytest.param("Synthetic text.", "Synthetic text.", True, id="same-non-row"),
+    ],
+)
+def test_compression_row_comparison_non_rows(result, original, equal):
+    before = deepcopy((result, original))
+
+    assert CompactionMixin()._compression_rows_equal(result, original) is equal
+    assert (result, original) == before
