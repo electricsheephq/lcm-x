@@ -26,6 +26,7 @@ from functools import wraps
 from typing import Any, Callable, Dict, List, Literal, Optional
 
 from .dag import SummaryNode
+from .engine_registry import engine_unload_group
 from .escalation import (
     _THRESHOLD_FULL_SWEEP_MIN_CALL_SECONDS,
     ForegroundBudget,
@@ -79,21 +80,73 @@ _THRESHOLD_FULL_SWEEP_PARTIAL_STOP_REASONS = frozenset({
 })
 
 
-def _counted_compaction(operation):
-    """Keep connections live through the entire pass, including its finalizers."""
-    @wraps(operation)
-    def counted(self, messages, *args, **kwargs):
-        with self._compaction_gate:
-            if self._compaction_closing:
-                return messages
-            self._compaction_inflight += 1
-        try:
-            return operation(self, messages, *args, **kwargs)
-        finally:
+def _counted_compaction(*, return_messages: bool):
+    """Keep connections live through preflight and compaction, including finalizers."""
+    def decorate(operation):
+        @wraps(operation)
+        def counted(self, messages, *args, **kwargs):
             with self._compaction_gate:
-                self._compaction_inflight -= 1
-                self._compaction_gate.notify_all()
-    return counted
+                unloading = self._plugin_is_unloading()
+                if not unloading:
+                    if self._compaction_closing:
+                        return messages if return_messages else False
+                    self._compaction_inflight += 1
+            if unloading:
+                def invoke(engine):
+                    # The successor's stable lease already covers this call and
+                    # keeps storage live if the unload gate closes mid-pass.
+                    result = messages
+                    if not engine._compaction_is_closing():
+                        try:
+                            result = engine.compress(messages, *args, **kwargs)
+                        except LifecycleBindingChangedError:
+                            return messages
+                        except Exception as exc:
+                            # Let the host handle a compression failure after
+                            # the lease exits, as it does for a live engine.
+                            return exc
+                    if result is messages and engine._compaction_is_closing():
+                        # Compaction can stop before it reaches ingest. Persist
+                        # the original view under the existing lease.
+                        if engine._retained_binding_is_current():
+                            engine.ingest(messages)
+                        engine._stop_pass_for_shutdown()
+                    self._last_compression_status = engine.last_compression_status
+                    self._last_compression_noop_reason = engine.last_compression_noop_reason
+                    self.compression_count = engine.compression_count
+                    return result
+
+                if return_messages:
+                    result = self._run_retained_view_operation(messages, invoke, allow_empty_prefix=True)
+                    if isinstance(result, Exception):
+                        raise result
+                    return result if isinstance(result, list) else messages
+
+                def preflight(engine):
+                    # A stable-use lease covers this operation, including when
+                    # it was acquired for adoption before the gate closed.
+                    with engine._fresh_tail_pressure_yield_invocation():
+                        result = engine._should_compress_preflight_impl(messages)
+                    self._last_compression_status = engine.last_compression_status
+                    self._last_compression_noop_reason = engine.last_compression_noop_reason
+                    return result
+
+                return bool(self._run_retained_view_operation(messages, preflight, allow_empty_prefix=True))
+            binding = (self._session_id, self._conversation_id, self._db_path) if return_messages else None
+            try:
+                result = operation(self, messages, *args, **kwargs)
+                if return_messages and result is messages and self._plugin_is_unloading():
+                    # Shutdown drains this admitted call before closing storage.
+                    # Use the proven lane without taking shutdown's lifecycle lock.
+                    if binding == (self._session_id, self._conversation_id, self._db_path):
+                        self._save_retained_view(messages, allow_empty_prefix=True)
+                return result
+            finally:
+                with self._compaction_gate:
+                    self._compaction_inflight -= 1
+                    self._compaction_gate.notify_all()
+        return counted
+    return decorate
 
 
 @dataclass
@@ -236,6 +289,11 @@ class CompactionMixin:
             maybe_reclassify()
 
     def should_compress(self, prompt_tokens: int = None) -> bool:
+        if self._plugin_is_unloading():
+            successor = self._retained_successor()
+            return successor is not None and bool(successor._use_retained_binding(
+                lambda engine: engine.should_compress(prompt_tokens),
+            ).value)
         if self._bypasses_lcm_context_management():
             if self._compression_boundary_cooldown_active():
                 return False
@@ -264,6 +322,7 @@ class CompactionMixin:
             return False
         return tokens >= self.threshold_tokens and not self._sweep_budget_hold_applies(tokens, managed_scope=True)
 
+    @_counted_compaction(return_messages=False)
     def should_compress_preflight(self, messages):
         """Pre-flight check — also ingests messages into the store."""
         with self._fresh_tail_pressure_yield_invocation():
@@ -728,7 +787,7 @@ class CompactionMixin:
         self._last_compression_noop_reason = "engine shutting down"
         self._ingest_cursor_needs_reconcile = True  # the pass may have moved the cursor for a result it drops
 
-    @_counted_compaction
+    @_counted_compaction(return_messages=True)
     def compress(self, messages: List[Dict[str, Any]],
                  current_tokens: int = None,
                  focus_topic: Optional[str] = None,
@@ -1611,7 +1670,7 @@ class CompactionMixin:
             return None
         db_path, conversation_id = str(self._store.db_path), self._conversation_id
         state = self._lifecycle.get_by_conversation(conversation_id)
-        chain = leaf_prep.ready_chain(db_path, conversation_id, int(getattr(state, "current_frontier_store_id", 0) or 0))
+        chain = leaf_prep.ready_chain(db_path, conversation_id, int(getattr(state, "current_frontier_store_id", 0) or 0), engine_unload_group(self))
         bounds = leaf_prep.levels(self.threshold_tokens, self.context_length,
                                   self._working_leaf_chunk_tokens(raw_tokens_outside_tail))
         if not chain or bounds is None or estimated_active_tokens <= bounds[1]:
@@ -1682,8 +1741,9 @@ class CompactionMixin:
     def _reject_prepared_chain(self, leaf, reason: str) -> None:
         """#787: the first rejection ends the chain from ``leaf`` on, each leaf counted under ``reason``."""
         db_path, conversation_id = str(self._store.db_path), str(self._conversation_id or "")
-        chain = leaf_prep.ready_chain(db_path, conversation_id, leaf.start_frontier) or [leaf]
-        leaf_prep.reject(db_path, conversation_id, chain, reason)
+        owner = engine_unload_group(self)
+        chain = leaf_prep.ready_chain(db_path, conversation_id, leaf.start_frontier, owner) or [leaf]
+        leaf_prep.reject(db_path, conversation_id, chain, reason, owner)
         logger.info("LCM prepared leaf promotion rejected: reason=%s leaves=%d", reason, len(chain))
 
     def _prepared_leaf_summary(self, leaf):
@@ -3219,7 +3279,7 @@ class CompactionMixin:
         self._clear_persisted_no_progress_hold()
         state.leaf_passes += 1
         if leaf.prepared is not None:  # #787: a promoted pass spends no summariser pass
-            leaf_prep.promoted(str(self._store.db_path), self._conversation_id, leaf.prepared)
+            leaf_prep.promoted(str(self._store.db_path), self._conversation_id, leaf.prepared, engine_unload_group(self))
             state.promoted_leaves, state.max_leaf_passes = state.promoted_leaves + 1, state.max_leaf_passes + 1
             state.prep_freed += count_messages_tokens(leaf.source_lookup_chunk) - count_tokens(leaf.summary_text)
         state.level3_leaves += leaf.level == 3

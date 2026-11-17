@@ -14,6 +14,8 @@ import sys
 import threading
 import time
 from unittest.mock import patch
+from urllib.parse import urlsplit
+from urllib.request import url2pathname
 
 
 def nonnegative(value: str) -> int:
@@ -103,6 +105,10 @@ class HoldRecorder:
             def __init__(self, *args, **kwargs):
                 super().__init__(*args, **kwargs)
                 self.database = os.fsdecode(args[0] if args else kwargs["database"])
+                if kwargs.get("uri") and self.database.startswith("file:"):
+                    uri = urlsplit(self.database)
+                    if uri.netloc in ("", "localhost"):
+                        self.database = url2pathname(uri.path)
                 self.record_holds = bool(
                     recorder.database and self.database and self.database != ":memory:"
                     and Path(self.database).resolve() == Path(recorder.database).resolve())
@@ -375,14 +381,14 @@ class StorageArms:
             self.stack.enter_context(patch.object(engine, "run_incremental_embedding_pass", embedding_pass))
             original_retire = engine.LCMEngine._retire_embedding_maintenance
 
-            def retire(instance, wait):
+            def retire(instance, wait, **kwargs):
                 self.gate.set()  # Also release a pass gated before a failed cell's first operation.
                 if wait:
                     self.drain_embedding(instance)
                 else:
                     self.embedding_owners.append(instance._embedding_maintenance_owner)
                 try:
-                    return original_retire(instance, wait)
+                    return original_retire(instance, wait, **kwargs)
                 except Exception as exc:
                     self.embedding_errors.append(f"embedding retire:{type(exc).__name__}:{exc}")
                     raise
@@ -415,9 +421,9 @@ class StorageArms:
             self.stack.enter_context(patch.object(scheduler, "retire_owner", retire_owner))
             original_shutdown = engine.LCMEngine.shutdown
 
-            def shutdown(instance):
+            def shutdown(instance, **kwargs):
                 try:
-                    return original_shutdown(instance)
+                    return original_shutdown(instance, **kwargs)
                 except Exception as exc:
                     self.embedding_errors.append(f"embedding shutdown:{type(exc).__name__}:{exc}")
                     raise

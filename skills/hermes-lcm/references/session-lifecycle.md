@@ -20,6 +20,19 @@ Errors log only their class and do not escape host finalization; no leaves are
 prepared here. A host failed-turn boundary appended after the callback is stored
 once by the next completed turn or a session-end flush supplied that final history.
 
+During plugin reload, a retained agent can save a closed interrupted tail when
+the existing database proves its session is current and the stored prefix
+matches the supplied history. This also works between registrations. The
+callback opens the existing database only, with the normal SQLite write timeout.
+For timestamped `/retry` or orphan-call pruning and user merging, a view retaining
+the original opening row (or its same-stamp merged carrier) uses normal ingest
+reconciliation in a scoped writer. It requires the same current lane and rejects
+mixed conversation ownership. Unstamped, mismatched histories remain unproven;
+generated summaries still require their durable compaction proof.
+The tail and its replay marker commit together so that later preflight,
+completed-turn and session-end callbacks can recognize rows already saved.
+Session-end flushes still use the shorter SQLite busy timeout.
+
 ## Interrupted delegated children
 
 A delegated child (sub-agent) is stored at its turn end, its session end, and
@@ -65,6 +78,29 @@ cannot use this path to replace the foreground or reset its ingest position.
 Initially ignored or stateless sessions can pass the same empty-reset proof;
 the target session filters are applied at the new bind.
 
+During plugin unload or reload, an empty CLI `/new` can use the direct engine
+reset followed by a same-profile native-handle bind as confirmation. That proof
+belongs to the exact old binding and is consumed by one replacement nomination;
+it does not depend on a registration hook surviving unload. Alternatively, the
+same-profile `on_session_reset` hook with `reason="new_session"` confirms the
+nominated replacement. Both paths still require an empty old LCM binding and a
+new, open, non-child native session; they retry the native row check on a later
+callback if `state.db` was busy or Hermes creates the row on the next turn.
+
+CLI `/resume` and `/branch` can leave the original engine bound while Hermes
+switches sessions. LCM-X records the explicit bind and verifies the switch
+against the native session rows. After unload, the retained engine uses the
+confirmed target for replay and session-end writes. A branch must name the
+outgoing session as its parent. Resume can reopen the target's own finalized
+conversation and keeps its saved frontier.
+
+An unloaded engine can reconcile a view whose opening changed after `/undo`
+when the native session database proves the replacement rows. A retry after
+`/new` uses the same replay path as other retained turns. If Hermes closes the
+native session before delivering session end, the final view must match the
+confirmed target's native rows. The database connections used for these writes
+close before the callback returns.
+
 An empty, missing or `None` id is a detach request and raises
 `NotImplementedError` without changing the binding. Hosts with
 `agent/background_review.py::_detach_fork_compression` catch this refusal and
@@ -77,6 +113,11 @@ to its parent session.
 ## Compaction commits
 
 Hermes commits a compaction by calling the session-end hook with the list it compressed, then the compression-start hook. LCM-X treats that call as a commit, not a session end. It does not re-store those rows. The session keeps its identity, published frontier and ingest position across the boundary, both when Hermes keeps the session id (in place) and when it rotates to a new one. A genuine session end (exit, `/new`, or an end after a cancelled compaction) still finalizes the session. It also pauses this engine's background embedding maintenance: queued passes are dropped and nothing new is scheduled until the next live bind re-arms it (a compaction commit leaves maintenance running; see `architecture.md` for the shutdown and process-exit waits). A session that resumes later continues from the frontier it finalized itself, never another session's.
+
+When a retained agent calls `compress` after a plugin reload, the replacement
+engine holds the admitted session binding through the call. If unload cancels
+compaction, LCM-X returns the original messages and saves eligible rows while the
+binding is still open.
 
 At process exit, scheduler work and orphaned local encoder workers share one deadline.
 A timed-out encoder holds its worker slot until it finishes. Exit waits for that slot

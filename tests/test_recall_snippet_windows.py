@@ -211,7 +211,7 @@ def test_reranker_documents_stay_unchanged():
     d = make_delivery()
     config = SimpleNamespace(rerank_enabled=True, rerank_margin=0)
     provider = SimpleNamespace(provider_id="voyage", rerank=Mock(return_value=[(i, 1.0) for i in range(7)]))
-    kwargs = dict(window=7, deadline=float("inf"), config=config)
+    kwargs = dict(window=7, deadline=float("inf"), engine=SimpleNamespace(_config=config))
     # Exercise the real rerank document builder with privacy dispatch replaced
     # by an inert local policy; no provider call can leave this process.
     with pytest.MonkeyPatch.context() as patch:

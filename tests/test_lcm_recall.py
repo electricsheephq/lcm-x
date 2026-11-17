@@ -21,6 +21,7 @@ import hermes_lcm.tools as lcm_tools
 import hermes_lcm.vector_store as vector_store_module
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.dag import SummaryDAG, SummaryNode
+from hermes_lcm.engine_registry import EngineUnloadGroup
 from hermes_lcm.embedding_provider import (
     VoyageError,
     resolve_provider as real_resolve_provider,
@@ -1544,6 +1545,47 @@ def test_rerank_skips_silently_on_non_voyage_provider(recall_engine, monkeypatch
     payload = _recall(recall_engine, monkeypatch, include="summaries", limit=5)
     assert payload["provenance"]["rerank"].startswith("skipped")
     assert payload["hits"]  # order preserved from RRF, not dropped
+
+
+def test_rerank_skips_provider_when_unload_starts_before_dispatch(recall_engine, monkeypatch):
+    from hermes_lcm.retrieval_core import _retire_owned_vector_stores
+
+    class Registration:
+        pass
+
+    class RerankProvider(MockProvider):
+        provider_id = "voyage"
+        dispatched = False
+
+        def rerank(self, query, documents, **kwargs):
+            self.dispatched = True
+            return [(0, 1.0)]
+
+    # The test engine normally has no unload capability. Give it the real
+    # registration gate and close admission at the targeted worker start.
+    registration = Registration()
+    group = EngineUnloadGroup(registration)
+    recall_engine._unload_group = group
+    recall_engine._config.rerank_enabled = True
+    node = _add_summary(recall_engine, "kanban dashboard sprint", session_id="session-a", created_at=5.0)
+    _seed_summary_vectors(recall_engine, [(node, [1.0, 0.0])], provider="voyage")
+    run_within_deadline = lcm_tools._run_within_deadline
+
+    def close_before_rerank(invoke, *, name, **kwargs):
+        if name == "lcm-recall-rerank":
+            group.closing.set()
+        return run_within_deadline(invoke, name=name, **kwargs)
+
+    monkeypatch.setattr(lcm_tools, "_run_within_deadline", close_before_rerank)
+    provider = RerankProvider()
+    try:
+        payload = _recall(recall_engine, monkeypatch, provider=provider, include="summaries")
+    finally:
+        _retire_owned_vector_stores(group, deadline=None)
+    assert group.closing.is_set()
+    assert provider.dispatched is False
+    assert payload["provenance"]["rerank"] == "skipped: LCM is unloading"
+    assert payload["hits"][0]["node_id"] == node
 
 
 def test_rerank_protects_cloud_payload_and_reorders_original_hits(

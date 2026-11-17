@@ -853,7 +853,8 @@ def prepared_state(engine: Any, canonical: Canonical) -> Any:
     prep = leaf_prep._LEAF_PREP
     key = (str(engine._store.db_path), engine._conversation_id)
     with prep._condition:
-        return canonical.value({"chain": list(prep._cache.get(key, [])),
+        owner_key = (*key, getattr(engine, "_unload_group", None))
+        return canonical.value({"chain": list(prep._cache.get(owner_key, prep._cache.get(key, []))),
                                 "counters": dict(prep.counters)})
 
 

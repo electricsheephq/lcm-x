@@ -813,3 +813,51 @@ def test_failed_pre_store_with_repeated_tail_publishes_no_boundary(host, monkeyp
     child.compress(engine, [user, repeated, unwritten, repeated])
     assert engine._delegate_child_key("child") not in aux._DELEGATE_RESUME_BOUNDARIES
     assert aux.delegate_child_store_counts()["fallbacks"] > before
+
+
+def test_child_retry_after_commit_failure_keeps_boundary_at_durable_rows(host, monkeypatch):
+    load, clone = host
+    ctx, _ = load()
+    ctx.offered._enable_plugin_unload()
+    engine = clone(ctx)
+    engine.on_session_start("parent", platform="cli", context_length=200_000)
+    child = Agent("child", **DELEGATE)
+    child.start(engine)
+
+    original = child_view(2)
+    compacted = [{"role": "user", "content": "compressed head"}, original[-1]]
+    monkeypatch.setattr(engine, "_compress_bypassed", lambda *args: compacted)
+    assert child.compress(engine, original) == compacted
+    initial = [(row["content"],) for row in original]
+    late = {"role": "assistant", "content": "answer committed on retry only"}
+
+    denied = []
+
+    def deny_one_commit(action, arg1, arg2, db_name, trigger):
+        if action == sqlite3.SQLITE_TRANSACTION and arg1 == "COMMIT" and not denied:
+            denied.append(arg1)
+            return sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK
+
+    def durable_rows():
+        connection = sqlite3.connect(engine._store.db_path)
+        try:
+            return connection.execute(
+                "SELECT content FROM messages WHERE session_id=? ORDER BY store_id", ("child",)
+            ).fetchall()
+        finally:
+            connection.close()
+
+    assert durable_rows() == initial
+    connection = engine._store.connection
+    connection.set_authorizer(deny_one_commit)
+    try:
+        child.end(engine, [*compacted, late])
+    finally:
+        connection.set_authorizer(None)
+    assert denied == ["COMMIT"]
+    assert durable_rows() == initial
+
+    child.end(engine, [*compacted, late])
+    child.end(engine, [*compacted, late])
+    assert durable_rows() == [*initial, (late["content"],)]

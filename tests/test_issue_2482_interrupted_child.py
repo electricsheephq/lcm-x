@@ -8,9 +8,12 @@ interrupted shapes are the ones the v0.30.0 driven run (r7) lost; the guards pin
 normally stores the same rows exactly once, and that the parent's resume in a new process adds no copy.
 """
 
+import hashlib
+import sqlite3
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing as close_connection
 
 import pytest
 
@@ -83,10 +86,12 @@ class HostChild(Agent):
             self.api_call(ctx, view(k, tag=self.tag), k + 1)
 
 
-def _setup(host, route):
+def _setup(host, route, *, supports_unload=False):
     load, clone = host
     ctx, module = load()
     ctx.module = module
+    if supports_unload:
+        ctx.unload = ctx.offered._enable_plugin_unload()
     parent = clone(ctx)
     parent.on_session_start("parent", platform="cli", context_length=200_000)
     ctx.hooks["post_llm_call"][0](session_id="parent", platform="cli",
@@ -495,20 +500,20 @@ def test_a_store_cut_off_mid_write_leaves_no_partial_prefix_and_a_resume_appends
     assert _contents(child_rows(parent)) == _contents(view(2))
 
 
-def _blocked_drain(host, monkeypatch):
+def _blocked_drain(host, monkeypatch, *, supports_unload=False):
     """A store stuck past the shutdown drain (as a database busy at exit), with a newer list queued behind it.
 
     The first store lands, then its worker waits outside any engine use until ``release`` is set, so the shutdowns
     run while the newer list is still queued (deterministic: the drain times out, the engines close, then it runs).
     """
-    _, _, ctx, parent, child, engine = _setup(host, "own_engine")
+    _, _, ctx, parent, child, engine = _setup(host, "own_engine", supports_unload=supports_unload)
     aux = ctx.module("aux_session")
     monkeypatch.setattr(aux, "_LIVE_CHILD_STORE_JOIN_S", 0.1, raising=False)
     monkeypatch.setattr(aux, "_LIVE_CHILD_SHUTDOWN_DRAIN_S", 0.2, raising=False)
     release, first = threading.Event(), [True]
     real_run = aux.run_live_child_store
 
-    def run(session_id, operation, rows=0):
+    def run(session_id, operation, rows=0, **kwargs):
         if first[0]:
             first[0] = False
 
@@ -517,8 +522,8 @@ def _blocked_drain(host, monkeypatch):
                 release.wait(10)
                 return outcome
 
-            return real_run(session_id, held, rows)
-        return real_run(session_id, operation, rows)
+            return real_run(session_id, held, rows, **kwargs)
+        return real_run(session_id, operation, rows, **kwargs)
 
     monkeypatch.setattr(aux, "run_live_child_store", run)
     db_path = parent._store.db_path
@@ -535,6 +540,201 @@ def _stored_after_close(aux, db_path, release, session_id="child"):
     with sqlite3.connect(db_path) as conn:
         return conn.execute("SELECT role, content FROM messages WHERE session_id = ? ORDER BY store_id",
                             (session_id,)).fetchall()
+
+
+@pytest.mark.parametrize("budget_expires", [False, True])
+def test_plugin_unload_preserves_already_queued_child_rows(host, monkeypatch, budget_expires):
+    ctx, aux, _, engines, db_path, release = _blocked_drain(host, monkeypatch, supports_unload=True)
+    owner = ctx.offered._unload_group
+    draining = threading.Event()
+    wait = aux._LIVE_CHILD_LOCK.wait
+
+    def observe_wait(timeout=None):
+        if owner.closing.is_set() and not release.is_set():
+            draining.set()
+        return wait(timeout)
+
+    monkeypatch.setattr(aux._LIVE_CHILD_LOCK, "wait", observe_wait)
+    if budget_expires:
+        monkeypatch.setenv("LCM_SHUTDOWN_COMPACTION_WAIT_S", "0.05")
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        unloaded = executor.submit(ctx.unload)
+        try:
+            assert draining.wait(5)
+            if budget_expires:
+                unloaded.result(timeout=5)
+                assert not any(engine._stable_use_closed for engine in engines)
+            else:
+                assert not unloaded.done()
+        finally:
+            release.set()
+        unloaded.result(timeout=5)
+    deadline = time.monotonic() + 5
+    while not all(engine._stable_use_closed for engine in engines) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert all(engine._stable_use_closed for engine in engines)
+    assert _stored_after_close(aux, db_path, release) == _contents(view(1))
+
+
+def test_dispatched_child_hook_stores_rows_during_unload(host):
+    _, _, ctx, parent, child, engine = _setup(host, "own_engine", supports_unload=True)
+    child.api_call(ctx, view(0), 1)
+    assert _contents(child_rows(parent)) == _contents(view(0))
+    db = parent._store.db_path
+    owner = engine._unload_group
+    owner.closing.set()
+    try:
+        child.api_call(ctx, view(1), 2)
+        assert _contents(child_rows(parent)) == _contents(view(1))
+    finally:
+        ctx.unload()
+    db.unlink()
+    child.api_call(ctx, view(1), 3)
+    assert not db.exists()
+
+
+def test_retained_child_end_keeps_tool_call_and_result(host, caplog):
+    import sqlite3
+    from contextlib import closing
+
+    _, _, ctx, parent, child, engine = _setup(host, "own_engine", supports_unload=True)
+    child.api_call(ctx, view(0), 1)
+    db = parent._store.db_path
+    ctx.unload()
+    child.end(engine, view(1))
+    child.end(engine, view(1))
+    with closing(sqlite3.connect(db)) as reader:
+        rows = reader.execute(
+            "SELECT role, content FROM messages WHERE session_id = ? ORDER BY store_id", ("child",),
+        ).fetchall()
+    assert rows == _contents(view(1)), caplog.text
+    db.unlink()
+
+@pytest.mark.parametrize("rotate", [False, True], ids=["same-id", "rotated-id"])
+def test_retained_compacted_child_end_keeps_its_answer_and_lineage(host, monkeypatch, rotate):
+    import sqlite3
+    from contextlib import closing
+
+    _, _, ctx, parent, child, engine = _setup(host, "own_engine", supports_unload=True)
+    original = [{"role": "user" if i % 2 == 0 else "assistant", "content": f"turn {i} " + "payload " * 400}
+                for i in range(12)]
+    monkeypatch.setattr(engine, "_get_host_fallback_compressor", lambda: None)
+    monkeypatch.setattr(engine, "_bypass_compaction_target_tokens", lambda **kwargs: 64)
+    compacted = child.compress(engine, original)
+    assert compacted != original and len(compacted) < 3
+    if rotate:
+        child.rotate(engine, "continued")
+    db = parent._store.db_path
+
+    ctx.unload()
+    late = {"role": "assistant", "content": "late compacted child answer"}
+    child.end(engine, [*compacted, late])
+    child.end(engine, [*compacted, late])
+
+    with closing(sqlite3.connect(db)) as reader:
+        rows = reader.execute(
+            "SELECT session_id, conversation_id, role, content FROM messages "
+            "WHERE session_id IN (?, ?) ORDER BY store_id", ("child", "continued"),
+        ).fetchall()
+        lineage = reader.execute(
+            "SELECT child_session_id, parent_session_id, source FROM session_lineage ORDER BY child_session_id",
+        ).fetchall()
+    assert rows == [
+        *[("child", "child", row["role"], row["content"]) for row in original],
+        (child.session_id, child.session_id, late["role"], late["content"]),
+    ]
+    assert ("child", "parent", "subagent_start") in lineage
+    if rotate:
+        assert ("continued", "child", "compression") in lineage
+
+
+def test_plugin_unload_retries_admitted_child_after_sqlite_busy(host, monkeypatch):
+    import sqlite3
+    from contextlib import closing
+
+    _, _, ctx, parent, child, engine = _setup(host, "own_engine", supports_unload=True)
+    aux = ctx.module("aux_session")
+    monkeypatch.setenv("LCM_SHUTDOWN_COMPACTION_WAIT_S", "0.05")
+    monkeypatch.setattr(aux, "_LIVE_CHILD_STORE_RETRIES", 0)
+    monkeypatch.setattr(aux, "_LIVE_CHILD_RETRY_DELAY_S", 0.02)
+    engine._store.connection.execute("PRAGMA busy_timeout=20")
+    entered, allow_write, retried = threading.Event(), threading.Event(), threading.Event()
+    append = engine._append_delegate_child_rows
+
+    def observe_append(*args, **kwargs):
+        if entered.is_set():
+            retried.set()
+        else:
+            entered.set()
+            assert allow_write.wait(5)
+        return append(*args, **kwargs)
+
+    monkeypatch.setattr(engine, "_append_delegate_child_rows", observe_append)
+    db_path = parent._store.db_path
+    with closing(sqlite3.connect(db_path, isolation_level=None)) as writer, ThreadPoolExecutor(max_workers=2) as executor:
+        writer.execute("BEGIN IMMEDIATE")
+        call = executor.submit(child.api_call, ctx, view(1), 1)
+        try:
+            assert entered.wait(5)
+            unload = executor.submit(ctx.unload)
+            assert ctx.offered._unload_group.closing.wait(5)
+            allow_write.set()
+            unload.result(timeout=5)
+            assert retried.wait(5), "the admitted child store was dropped after SQLite BUSY"
+        finally:
+            allow_write.set()
+            writer.rollback()
+        call.result(timeout=5)
+    assert aux.drain_live_child_stores(5, owner=ctx.offered._unload_group)
+    with closing(sqlite3.connect(db_path)) as reader:
+        rows = reader.execute("SELECT role, content FROM messages WHERE session_id = ? ORDER BY store_id", ("child",)).fetchall()
+    assert rows == _contents(view(1))
+
+
+def test_plugin_unload_closes_after_persistent_child_sqlite_busy(host, monkeypatch, caplog):
+    import sqlite3
+    from contextlib import closing
+
+    _, _, ctx, parent, child, engine = _setup(host, "own_engine", supports_unload=True)
+    aux = ctx.module("aux_session")
+    monkeypatch.setenv("LCM_SHUTDOWN_COMPACTION_WAIT_S", "0.05")
+    monkeypatch.setattr(aux, "_LIVE_CHILD_UNLOAD_RETRY_S", 0.15, raising=False)
+    monkeypatch.setattr(aux, "_LIVE_CHILD_RETRY_DELAY_S", 0.02)
+    connection = engine._store.connection
+    connection.execute("PRAGMA busy_timeout=20")
+    entered, release = threading.Event(), threading.Event()
+    append = engine._append_delegate_child_rows
+
+    def hold_first_append(*args, **kwargs):
+        if not entered.is_set():
+            entered.set()
+            assert release.wait(5)
+        return append(*args, **kwargs)
+
+    monkeypatch.setattr(engine, "_append_delegate_child_rows", hold_first_append)
+    db_path = parent._store.db_path
+    owner = ctx.offered._unload_group
+    with closing(sqlite3.connect(db_path, isolation_level=None)) as writer, ThreadPoolExecutor(max_workers=2) as executor:
+        writer.execute("BEGIN IMMEDIATE")
+        call = executor.submit(child.api_call, ctx, view(1), 1)
+        try:
+            assert entered.wait(5)
+            unload = executor.submit(ctx.unload)
+            assert owner.closing.wait(5)
+            release.set()
+            unload.result(timeout=5)
+            assert aux.drain_live_child_stores(3, owner=owner)
+            deadline = time.monotonic() + 3
+            while not engine._stable_use_closed and time.monotonic() < deadline:
+                time.sleep(0.01)
+            with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+                connection.execute("SELECT 1")
+            assert "unload retry expired" in caplog.text
+            assert f"up to {len(view(1))} handed-over row(s)" in caplog.text
+        finally:
+            release.set()
+            writer.rollback()
+        call.result(timeout=5)
 
 
 @pytest.mark.xfail(strict=True, reason="#2482 named loss limit (v0.30.0, #2483): a delegated child's rows after its "
@@ -779,3 +979,144 @@ def test_a_store_skipped_on_a_busy_lock_lands_once_the_lock_frees_without_anothe
         assert _contents(child_rows(parent)) == _contents(view(1))
     else:
         assert child_rows(parent) == []  # without a retry the list was dropped
+
+
+@pytest.mark.parametrize("same_projection", [False, True], ids=["changed-prefix", "identical-prefix"])
+@pytest.mark.parametrize("fault_phase", ["lineage", "insert", "commit"])
+def test_stale_projection_receipt_cannot_suppress_later_real_user_row(host, monkeypatch, same_projection, fault_phase):
+    load, clone, ctx, parent, child, engine = _setup(host, "own_engine", supports_unload=True)
+    raw = [
+        {"role": "user", "content": "initial real user message"},
+        {"role": "assistant", "content": "initial answer"},
+    ]
+    old_projection = {"role": "user", "content": "approved stop"}
+    new_projection = (old_projection if same_projection else
+                      {"role": "user", "content": "projection for the second compacted view"})
+    monkeypatch.setattr(engine, "_compress_bypassed", lambda *args: [old_projection])
+    assert child.compress(engine, raw) == [old_projection]
+    repeated = {"role": "user", "content": old_projection["content"]}
+    earlier_answer = {"role": "assistant", "content": "answer to the first real approval"}
+    previous_view = [old_projection, repeated, earlier_answer]
+    child.turn(ctx, previous_view, engine)
+    connection = engine._store.connection
+    database = engine._store.db_path
+    key = "delegate_compaction_outputs:" + hashlib.sha256(child.session_id.encode()).hexdigest()
+    faults = []
+
+    def reject_commit(action, arg, *_):
+        if action == sqlite3.SQLITE_TRANSACTION and arg == "COMMIT":
+            faults.append(arg)
+            return sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK
+
+    def reject_lineage(action, table, *_):
+        if action == sqlite3.SQLITE_READ and table == "session_lineage":
+            faults.append(table)
+            return sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK
+
+    def compact_then_arm_fault(*_):
+        if fault_phase == "commit":
+            connection.set_authorizer(reject_commit)
+        return [new_projection]
+
+    if fault_phase == "insert":
+        connection.execute(f"""
+            CREATE TEMP TRIGGER reject_projection_receipt
+            BEFORE INSERT ON metadata WHEN NEW.key = '{key}'
+            BEGIN SELECT RAISE(ABORT, 'injected projection receipt fault'); END
+        """)
+        connection.commit()
+    monkeypatch.setattr(engine, "_compress_bypassed", compact_then_arm_fault)
+    if fault_phase == "lineage":
+        connection.set_authorizer(reject_lineage)
+    try:
+        retained = child.compress(engine, previous_view)
+        assert retained is previous_view
+        assert not connection.in_transaction
+    finally:
+        connection.set_authorizer(None)
+        if fault_phase == "insert":
+            connection.execute("DROP TRIGGER reject_projection_receipt")
+            connection.commit()
+    if fault_phase == "commit":
+        assert faults == ["COMMIT"]
+    elif fault_phase == "lineage":
+        assert faults
+    ctx.unload()
+
+    # A fresh module sees the retained view and the earlier, still-valid receipt.
+    next_ctx, _ = load()
+    next_ctx.unload = next_ctx.offered._enable_plugin_unload()
+    next_parent = clone(next_ctx)
+    next_parent.on_session_start("parent", platform="cli", context_length=200_000)
+    child.spawn(next_ctx)
+    next_engine = clone(next_ctx)
+    child.start(next_engine)
+    answer = {"role": "assistant", "content": "stopped after user approval"}
+    continued = [*retained, dict(repeated), answer]
+    child.turn(next_ctx, continued, next_engine)
+    child.end(next_engine, continued)
+
+    with close_connection(sqlite3.connect(database)) as reader:
+        recorded = reader.execute(
+            "SELECT role, content FROM messages WHERE session_id='child' ORDER BY store_id"
+        ).fetchall()
+    assert recorded == [(row["role"], row["content"]) for row in [*raw, repeated, earlier_answer, repeated, answer]]
+
+
+def test_detached_child_commit_invalidates_the_same_module_resume_boundary(host, monkeypatch):
+    _, _, ctx, parent, child, old = _setup(host, "own_engine", supports_unload=True)
+    initial = [{"role": "user", "content": "original question"}, {"role": "assistant", "content": "original answer"}]
+    projected = {"role": "user", "content": "condensed history"}
+    monkeypatch.setattr(old, "_compress_bypassed", lambda *args: [projected])
+    assert child.compress(old, initial) == [projected]
+    database = parent._store.db_path
+    live = type(old)(config=old._config, hermes_home=str(old._hermes_home))
+    live._enable_plugin_unload()
+    child.start(live)
+    ctx.unload()
+    late = {"role": "assistant", "content": "retired callback's answer"}
+    fresh = {"role": "user", "content": "new user turn"}
+    try:
+        child.end(old, [projected, late])
+        child.end(live, [projected, late, fresh])
+        with close_connection(sqlite3.connect(database)) as reader:
+            rows = reader.execute("SELECT role, content FROM messages WHERE session_id=? ORDER BY store_id",
+                                  (child.session_id,)).fetchall()
+        assert rows == [(row["role"], row["content"]) for row in [*initial, late, fresh]]
+    finally:
+        live.shutdown()
+
+
+def test_fresh_projection_receipt_keeps_matching_user_row_after_its_prefix(host, monkeypatch):
+    load, clone, ctx, parent, child, engine = _setup(host, "own_engine", supports_unload=True)
+    raw = [
+        {"role": "user", "content": "initial real user message"},
+        {"role": "assistant", "content": "initial answer"},
+    ]
+    projection = {"role": "user", "content": "approved stop"}
+    monkeypatch.setattr(engine, "_compress_bypassed", lambda *args: [projection])
+    assert child.compress(engine, raw) == [projection]
+    database = engine._store.db_path
+    ctx.unload()
+
+    next_ctx, _ = load()
+    next_ctx.unload = next_ctx.offered._enable_plugin_unload()
+    next_parent = clone(next_ctx)
+    next_parent.on_session_start("parent", platform="cli", context_length=200_000)
+    child.spawn(next_ctx)
+    next_engine = clone(next_ctx)
+    child.start(next_engine)
+    new_user = {"role": "user", "content": projection["content"]}
+    new_assistant = {"role": "assistant", "content": "stopped after user approval"}
+    current_view = [projection, new_user, new_assistant]
+    child.turn(next_ctx, current_view, next_engine)
+    child.turn(next_ctx, current_view, next_engine)
+    child.end(next_engine, current_view)
+
+    with close_connection(sqlite3.connect(database)) as reader:
+        recorded = reader.execute(
+            "SELECT role, content FROM messages WHERE session_id='child' ORDER BY store_id"
+        ).fetchall()
+    assert recorded == [(row["role"], row["content"]) for row in [*raw, new_user, new_assistant]]

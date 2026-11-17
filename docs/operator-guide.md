@@ -398,6 +398,26 @@ prepends the policy. The canonical file and digest source is
 
 ## Troubleshooting
 
+### Unloading LCM-X in a running Hermes process
+
+When Hermes exposes `PluginContext.on_unload`, LCM-X closes the registered
+context engine and its per-agent clones, and drains SQLite work owned by that
+registration. An idle `lcm.db` can be moved or removed after unload on Windows.
+LCM-X uses `LCM_SHUTDOWN_COMPACTION_WAIT_S` as the wait budget for active work.
+If the deadline expires, the logs report which cleanup is still pending. An
+engine still in use is closed after its active operation finishes.
+Queued host recovery and rollup jobs from the retired registration are
+discarded. Active index maintenance opens only an existing database.
+An admitted delegated-child store retries SQLite contention for up to 30
+seconds before logging how many rows may be missing and letting cleanup finish
+(the busy-store limit tracked in #2482). A retained agent's late callback can
+finish an identifiable tail through an existing database. It closes its own
+connection before returning when no current engine owns the session.
+After reload, the current registration can finish a callback that Hermes
+selected before the reload.
+If the host lacks the callback or rejects registration, stop Hermes to release
+the files.
+
 ### SQLite connection and descriptor counts
 
 Storage opens lazily on first real use. Once bound, an engine holds three core

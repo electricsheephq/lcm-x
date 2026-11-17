@@ -27,6 +27,8 @@ from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Any, Dict, Iterator, TYPE_CHECKING
 
+from .engine_registry import engine_unload_group
+
 if TYPE_CHECKING:
     from .engine import LCMEngine
 
@@ -36,14 +38,16 @@ if TYPE_CHECKING:
 # it in a finally, which cleared both matrix caches every time -- the "cache"
 # never survived the single call that built it, so back-to-back identical recalls
 # re-paid the full candidate-load + matmul (F2-matrix-cache-never-persists). We
-# now keep a small LRU pool of long-lived stores keyed by (db_path, scan_rows).
+# now keep a small LRU pool of long-lived stores keyed by database, scan rows,
+# and plugin registration (if the host supports unload).
 # The per-identity/data_version cache keys already invalidate on any committed
 # write (the durable data_version counter is bumped inside every vector write),
 # so a pooled store observes cross-process writes and never serves stale vectors.
 _POOL_MAX_PATHS = 2
 _pool_lock = threading.Lock()
+_pool_idle = threading.Condition(_pool_lock)
 # Entries track reservations under _pool_lock, including callers awaiting "lock".
-_vector_store_pool: "OrderedDict[tuple[str, int], dict[str, Any]]" = OrderedDict()
+_vector_store_pool: "OrderedDict[tuple, dict[str, Any]]" = OrderedDict()
 
 
 def _retire_vector_store(entry: dict[str, Any]) -> None:
@@ -63,10 +67,11 @@ def _vector_store_lease(entry: dict[str, Any]) -> Iterator[None]:
         with entry["lock"]:
             yield
     finally:
-        with _pool_lock:
+        with _pool_idle:
             entry["users"] -= 1
             if entry["retired"]:
                 _retire_vector_store(entry)
+            _pool_idle.notify_all()
 
 
 def _reset_vector_store_pool() -> None:
@@ -75,6 +80,32 @@ def _reset_vector_store_pool() -> None:
         while _vector_store_pool:
             _, entry = _vector_store_pool.popitem()
             _retire_vector_store(entry)
+
+
+def _retire_owned_vector_stores(group, *, deadline: float | None) -> bool:
+    if deadline is None:
+        _pool_idle.acquire()
+    elif not _pool_idle.acquire(timeout=max(0.0, deadline - time.monotonic())):
+        # A store constructor may be blocked on SQLite. Keep unload bounded and
+        # retire cached stores once the constructor releases the pool lock.
+        threading.Thread(
+            target=_retire_owned_vector_stores, args=(group,), kwargs={"deadline": None},
+            name="lcm-retire-vector-stores", daemon=True,
+        ).start()
+        return False
+    try:
+        entries = []
+        for key in list(_vector_store_pool):
+            if len(key) == 3 and key[2] is group:
+                entry = _vector_store_pool.pop(key)
+                _retire_vector_store(entry)
+                entries.append(entry)
+        return _pool_idle.wait_for(
+            lambda: all(entry["users"] == 0 for entry in entries),
+            timeout=0.0 if deadline is None else max(0.0, deadline - time.monotonic()),
+        )
+    finally:
+        _pool_idle.release()
 
 
 def _acquire_vector_store(
@@ -92,7 +123,12 @@ def _acquire_vector_store(
     """
     resolved_scan = int(scan_rows) if scan_rows is not None else -1
     key = (str(engine._store.db_path), resolved_scan)
+    group = engine_unload_group(engine)
+    if group is not None:
+        key = (*key, group)
     with _pool_lock:
+        if group is not None and group.closing.is_set():
+            raise RuntimeError("Cannot open vector storage during plugin unload")
         entry = _vector_store_pool.get(key)
         if entry is not None:
             _vector_store_pool.move_to_end(key)
@@ -101,6 +137,9 @@ def _acquire_vector_store(
         store = vector_store_cls(
             engine._store.db_path, config=engine._config, bounded_scan_rows=scan_rows
         )
+        if group is not None and group.closing.is_set():
+            store.close()
+            raise RuntimeError("Cannot open vector storage during plugin unload")
         if not getattr(vector_store_cls, "_supports_pooling", False):
             return store, None, True  # transient: caller closes it
         entry = {"store": store, "lock": threading.RLock(), "users": 1, "retired": False}

@@ -298,17 +298,18 @@ def test_spawned_processes_recover_suffix_exactly_once(case, tmp_path):
 
 @pytest.mark.parametrize("fail_open", [False, True], ids=["success", "storage-open-failure"])
 def test_detached_close_preserves_live_prepared_leaves(case, monkeypatch, fail_open):
-    from hermes_lcm import engine as engine_module, leaf_prep
+    from hermes_lcm import host_row_recovery, leaf_prep
     discarded = []
-    monkeypatch.setattr(leaf_prep, "discard", lambda path: discarded.append(str(path)))
+    monkeypatch.setattr(leaf_prep, "discard", lambda path, owner=None: discarded.append(str(path)))
     failed_paths = []
 
-    def fail_dag(path):
+    def fail_dag(path, *, existing_only):
+        assert existing_only
         failed_paths.append(str(path))
         raise RuntimeError("injected detached storage open failure")
 
     if fail_open:
-        monkeypatch.setattr(engine_module, "SummaryDAG", fail_dag)
+        monkeypatch.setattr(host_row_recovery, "SummaryDAG", fail_dag)
     warnings = case.run()
     if fail_open:
         assert failed_paths == [str(case.live._store.db_path)]
