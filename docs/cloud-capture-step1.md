@@ -819,8 +819,10 @@ connection from another host."
   out only when its own `session_id` field, the field the reader checks (tools.py:269-281), names a session in R, or
   when every row that references it (F3) is left out by V3, by its session or by a row id `removed.json` names. The
   uploader stages only files some row references (cloud_copy.py:352-374), so the next generation drops such a file
-  too, and the output of a message the user deleted from a session that stays is absent. A file that a kept row
-  references stays even when a removed row quotes it too, so the kept session's own `lcm_expand` still resolves. So
+  too, and the output of a message the user deleted from a session that stays is absent, unless a row that stays
+  references the same file. A file that a kept row references stays even when a removed row quotes it too, so the
+  kept session's own `lcm_expand` still resolves: those bytes are that kept row's output as well, and the next
+  generation keeps the file for it. So
   a removed session's payload, asked for through a visible session's lineage (expand_tools.py:189-198) or by name
   with no session (tools.py:255, :272), is absent.
 - **V7. Identity, and the forget that removes nothing.** `<r>` is the rules version; a rule fix retires every older
