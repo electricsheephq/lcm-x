@@ -317,6 +317,7 @@ def build(home, copy_id=None, *, seam=lambda _: None, free_space=lambda p: shuti
                 with closing(connect(database, sessions)) as conn:
                     tables, conditions, matches = plan(conn, sessions, removed['row_ids'])
                     kept, omitted = payload_plan(source, conn, sessions, set(removed['row_ids']))
+                    size = max(database.stat().st_size, conn.execute('PRAGMA page_count').fetchone()[0] * conn.execute('PRAGMA page_size').fetchone()[0])
                 identity = hashlib.sha256(json.dumps([matches, omitted], sort_keys=True).encode()).hexdigest()[:16]
                 name = f'view-{generation}-{RULES}-{identity}'
                 target = folder / name
@@ -341,6 +342,11 @@ def build(home, copy_id=None, *, seam=lambda _: None, free_space=lambda p: shuti
                                 os.link(source / 'lcm-large-outputs' / item, payloads / item)
                             except OSError:
                                 copying.append(item)
+                        if linking:
+                            try:
+                                os.link(database, output)
+                            except OSError:
+                                linking = False
                         retirement = retire(folder, pointer)
                         if not linking or copying or retirement:
                             budget = os.open(folder.parent / 'space.lock', os.O_CREAT | os.O_RDWR, 0o600)
@@ -349,16 +355,14 @@ def build(home, copy_id=None, *, seam=lambda _: None, free_space=lambda p: shuti
                                 raise Refused('view_busy')
                         if not linking or copying:
                             extra = sum((source / 'lcm-large-outputs' / item).stat().st_size for item in kept) if copying else 0
-                            if free_space(folder) < FLOOR + 2 * database.stat().st_size + extra:
+                            if free_space(folder) < FLOOR + 2 * size + extra:
                                 raise Refused('view_disk_floor')
                         if retirement:
                             retirement()
-                        if linking:
-                            os.link(database, output)
-                        elif not clean(database):
+                        if not linking and not clean(database):
                             with closing(sqlite3.connect(database.resolve().as_uri() + '?mode=ro', uri=True)) as src, closing(sqlite3.connect(output)) as dst:
                                 src.backup(dst)
-                        elif not clone(database, output):
+                        elif not linking and not clone(database, output):
                             shutil.copyfile(database, output)
                         seam('database')
                         if not linking:
@@ -418,5 +422,7 @@ def build(home, copy_id=None, *, seam=lambda _: None, free_space=lambda p: shuti
                               removed_sha256=removed_sha256(folder))
             except Exception:
                 pass
-        atomic(folder, 'view-result.json', dict(result, ended_at=time.time()))
-        os.close(lock)
+        try:
+            atomic(folder, 'view-result.json', dict(result, ended_at=time.time()))
+        finally:
+            os.close(lock)

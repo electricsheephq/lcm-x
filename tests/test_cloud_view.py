@@ -1552,3 +1552,78 @@ def test_r8_retry_reuses_same_identity_orphan(world):
     assert pointer['removed_sha256'] == hashlib.sha256((copy / 'removed.json').read_bytes()).hexdigest()
     assert (orphan / 'lcm.db').stat().st_ino == inode
     assert (orphan / 'lcm.db').read_bytes() == database
+
+
+def test_r9_database_link_fallback(tmp_path, monkeypatch):
+    home = tmp_path / 'local'
+    database = cc.admit(home, hermes_home=tmp_path / 'unused-host')
+    config = LCMConfig(database_path=str(database), embeddings_enabled=False)
+    transcript = _transcript(tmp_path / 'fixture', [_entry('user', 'u1', 'visible control', V)], V)
+    with closing(cc.open_store(database, home, config)) as store:
+        assert cc.drain(store, cc.Lineage(V, None, transcript)) == 'drained'
+        assert cc.to_rollback_journal(store.connection)
+    assert cc.leave_readable(database)
+    copy = home / 'cloud/replicas' / COPY
+    source = copy / 'gen-1/lcm.db'
+    source.parent.mkdir(parents=True)
+    shutil.copyfile(database, source)
+    (copy / 'current').write_text('1\n')
+    assert not cv.removed_set(home) and not (source.parent / 'lcm-large-outputs').exists()
+    before = rows(source)
+    floor = cv.FLOOR + 2 * source.stat().st_size
+    def no_links(*_):
+        raise OSError('synthetic no hard links')
+    monkeypatch.setattr(cv.os, 'link', no_links)
+    assert cv.build(home, COPY, free_space=lambda _: floor - 1, clone=lambda *_: False)['code'] == 'view_disk_floor'
+    assert not (copy / 'view.json').exists() and not list(copy.glob('*.tmp-*'))
+    folder, _ = built((home, copy, {}), free_space=lambda _: floor, clone=lambda *_: False)
+    assert (folder / 'lcm.db').stat().st_ino != source.stat().st_ino
+    assert rows(folder / 'lcm.db') == before == rows(source)
+    assert not list(folder.glob('lcm.db-*')) and not list(copy.glob('*.tmp-*'))
+
+
+def test_r9_wal_logical_floor(world):
+    home, copy, _ = world
+    sql(home / 'lcm.db', "DELETE FROM metadata WHERE key LIKE 'capture:forgotten:%'")
+    database = copy / 'gen-1/lcm.db'
+    with closing(sqlite3.connect(database)) as writer:
+        assert writer.execute('PRAGMA journal_mode=WAL').fetchone() == ('wal',)
+        writer.execute('PRAGMA wal_autocheckpoint=0')
+        writer.executemany('INSERT INTO messages(store_id,session_id,role,content,timestamp) VALUES (?,?,\'user\',?,0)',
+                           [(100 + n, V, 'wal growth control ' * 256) for n in range(24)])
+        writer.commit()
+        logical = writer.execute('PRAGMA page_count').fetchone()[0] * writer.execute('PRAGMA page_size').fetchone()[0]
+        assert database.stat().st_size < logical < 5_000_000
+        assert Path(str(database) + '-wal').stat().st_size > 0
+        before = rows(database)
+        floor = cv.FLOOR + 2 * logical
+        assert cv.build(home, COPY, free_space=lambda _: floor - 1)['code'] == 'view_disk_floor'
+        assert not (copy / 'view.json').exists() and not list(copy.glob('*.tmp-*'))
+        folder, _ = built(world, free_space=lambda _: floor)
+        assert (folder / 'lcm.db').stat().st_ino != database.stat().st_ino
+        assert rows(folder / 'lcm.db') == before == rows(database)
+        assert not list(folder.glob('lcm.db-*')) and not list(copy.glob('*.tmp-*'))
+
+
+def test_r9_result_write_releases_lock(world, monkeypatch):
+    home, copy, _ = world
+    original = cv.atomic
+    def fail_result(folder, name, body):
+        if name == 'view-result.json':
+            raise OSError('synthetic result write refusal')
+        return original(folder, name, body)
+    with monkeypatch.context() as patch:
+        patch.setattr(cv, 'atomic', fail_result)
+        with pytest.raises(OSError, match='synthetic result write refusal'):
+            cv.build(home, COPY)
+    def nonblocking(fd, _):
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except BlockingIOError:
+            return False
+    with (copy / 'view.lock').open('a') as held:
+        released = nonblocking(held.fileno(), None)
+    result = cv.build(home, COPY, lock_wait=nonblocking)
+    assert released and result['code'] == 'ok', (released, result)
+    assert json.loads((copy / 'view-result.json').read_bytes())['code'] == 'ok'
