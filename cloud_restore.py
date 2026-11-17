@@ -65,19 +65,22 @@ def materialize(manifest, stored_bytes, fetch, folder, *, held=None, objects_dir
     def checked_fetch(key):
         data = cloud_delta._fetch(refs[key], fetch)
         if objects_dir is not None:
-            path = _object_path(objects_dir, key)
+            path = _safe_path(_object_path(objects_dir, key))
+            if _within(path, folder) or _within(folder, path):
+                raise cloud_copy.Refused('restore_objects_overlap')
             if not path.parent.exists():
                 directories.add(path.parent)
             cloud_copy._mkdir(path.parent)
-            try:
-                with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600), 'wb') as handle:
+            with tempfile.NamedTemporaryFile(prefix='.restore-', dir=path.parent) as handle:
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+                try:
+                    os.link(handle.name, path)
                     saved.append(path)
-                    handle.write(data)
-                    handle.flush()
-                    os.fsync(handle.fileno())
-            except FileExistsError:
-                with os.fdopen(os.open(_object_path(objects_dir, key), os.O_RDONLY | os.O_NOFOLLOW), 'rb') as handle:
-                    cloud_delta._fetch(refs[key], lambda _: handle.read())
+                except FileExistsError:
+                    with os.fdopen(os.open(_object_path(objects_dir, key), os.O_RDONLY | os.O_NOFOLLOW), 'rb') as existing:
+                        cloud_delta._fetch(refs[key], lambda _: existing.read())
         return data
 
     def write(name, data, fd):
@@ -128,12 +131,14 @@ def _within(path, parent):
     return normalized[0].is_relative_to(normalized[1])
 
 
-def _safe_path(path):
+def _safe_path(path, *, cache=False):
     path = Path(path).resolve()
     hermes = Path(os.environ.get('HERMES_HOME') or Path.home() / '.hermes').expanduser().resolve()
-    if _within(path, hermes) or any(
+    if _within(path, hermes) or (cache and _within(hermes, path)) or any(
             (parent / name).exists() for parent in (path, *path.parents)
             for name in (OWNER_FILE, *HERMES_MARKERS)):
+        raise cloud_copy.Refused('restore_target_is_home')
+    if cache and any(p.name in (OWNER_FILE, *HERMES_MARKERS) for p in path.rglob('*')):
         raise cloud_copy.Refused('restore_target_is_home')
     return path
 
@@ -200,7 +205,7 @@ def restore(transport, prefix, copy_id, generation, to, *, origin=None, owner_fi
     """Restore a named generation; four ordered checks retain a failed copy."""
     to = Path(to).resolve()
     if objects_dir is not None:
-        objects_dir = _safe_path(_object_path(objects_dir))
+        objects_dir = _safe_path(_object_path(objects_dir), cache=True)
         if _within(objects_dir, to) or _within(to, objects_dir):
             raise cloud_copy.Refused('restore_objects_overlap')
     to = _target(to)

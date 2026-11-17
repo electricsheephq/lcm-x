@@ -536,14 +536,13 @@ def test_cache_create_race(fixture, tmp_path, monkeypatch, other):
     needed = objects / ref['key']
     original = object_path(fixture, ref['key']).read_bytes()
     competing = original if other == 'good' else original[:-1] if other == 'short' else b'x' * len(original)
-    real_open, raced = os.open, []
-    def win_first(path, flags, *args, **kw):  # forwards the caller's own arguments, mode included
-        if Path(path) == needed and flags & os.O_EXCL and not raced:
+    real_link, raced = os.link, []
+    def win_first(source, path, *args, **kw):
+        if Path(path) == needed and not raced:
             raced.append(True)
-            with os.fdopen(real_open(path, flags, *args, **kw), 'wb') as handle:
-                handle.write(competing)
-        return real_open(path, flags, *args, **kw)
-    monkeypatch.setattr(cr.os, 'open', win_first)
+            needed.write_bytes(competing)
+        return real_link(source, path, *args, **kw)
+    monkeypatch.setattr(cr.os, 'link', win_first)
     def fetch(key):
         if raced and key != ref['key']:
             raise KeyError(key)
@@ -557,6 +556,113 @@ def test_cache_create_race(fixture, tmp_path, monkeypatch, other):
     assert needed.read_bytes() == competing
     assert code == {'good': 'object_missing', 'short': 'object_bytes', 'wrong': 'object_sha256'}[other]
     assert not list(target.iterdir())
+
+
+@pytest.mark.parametrize('home_kind', ['hermes', 'capture', 'nested_capture'])
+def test_cache_contains_home(fixture, tmp_path, monkeypatch, home_kind):
+    pub(fixture, part_size=8192)
+    objects = tmp_path / 'objects'
+    home = objects / ('parts' if home_kind == 'hermes' else 'deltas')
+    if home_kind == 'nested_capture':
+        home /= 'unused/deeper'
+    home.mkdir(mode=0o755, parents=True)
+    (home / 'keep').write_bytes(b'synthetic protected data')
+    if home_kind == 'hermes':
+        monkeypatch.setenv('HERMES_HOME', str(home))
+    else:
+        (home / 'capture-owner.json').write_text('synthetic owner')
+    target = tmp_path / 'restored'
+    before = tree_bytes(tmp_path)
+    fixture[1].calls.clear()
+    try:
+        code = cr.restore(fixture[1], PREFIX, COPY, 1, target, objects_dir=objects)['code']
+    except cp.Refused as error:
+        code = error.code
+    assert code == 'restore_target_is_home'
+    assert tree_bytes(tmp_path) == before
+    assert home.stat().st_mode & 0o777 == 0o755
+    assert not fixture[1].calls
+
+
+@pytest.mark.parametrize('home_kind', ['hermes', 'capture', 'target'])
+def test_cache_object_destination_guard(fixture, tmp_path, monkeypatch, home_kind):
+    manifest = pub(fixture, part_size=8192)
+    objects = tmp_path / 'objects'
+    home = objects / 'parts'
+    home.mkdir(mode=0o755, parents=True)
+    target = home if home_kind == 'target' else tmp_path / 'restored'
+    target.mkdir(exist_ok=True)
+    before = tree_bytes(objects)
+    def fetch(key):
+        if home_kind == 'hermes':
+            monkeypatch.setenv('HERMES_HOME', str(home))
+        elif home_kind == 'capture':
+            (home / 'capture-owner.json').write_text('synthetic owner')
+        return fixture[1].inner.get(PREFIX + '/' + key)
+    try:
+        cr.materialize(manifest, head_path(fixture, 1).read_bytes(), fetch, target, objects_dir=objects)
+        code = 'done'
+    except cp.Refused as error:
+        code = error.code
+    assert code == ('restore_objects_overlap' if home_kind == 'target' else 'restore_target_is_home')
+    if home_kind == 'capture':
+        (home / 'capture-owner.json').unlink()
+    if home_kind == 'target':
+        # The claim legitimately sets the restore target's mode before the fetch.
+        before['parts'] = (home.stat().st_mode, None)
+    assert tree_bytes(objects) == before
+    assert not list(target.iterdir())
+
+
+def test_cache_atomic_publish_race(fixture, tmp_path, monkeypatch):
+    manifest = pub(fixture, part_size=8192)
+    objects = tmp_path / 'objects'
+    targets = [tmp_path / name for name in ('first', 'second')]
+    for target in targets:
+        target.mkdir()
+    ref = manifest['database']['base']['parts'][0]
+    needed = objects / ref['key']
+    original = object_path(fixture, ref['key']).read_bytes()
+    stored = head_path(fixture, 1).read_bytes()
+    def fetch(key):
+        return fixture[1].inner.get(PREFIX + '/' + key)
+    real_open, real_link, real_sync = os.open, os.link, os.fsync
+    raced, outcomes, synced, published = [], [], set(), []
+    def sync(fd):
+        real_sync(fd)
+        info = os.fstat(fd)
+        synced.add((info.st_dev, info.st_ino))
+    def link(source, destination, *args, **kw):
+        if Path(destination).parent == needed.parent:
+            info = Path(source).stat()
+            assert (info.st_dev, info.st_ino) in synced
+            assert Path(source) != Path(destination)
+            published.append(Path(source))
+        return real_link(source, destination, *args, **kw)
+    def half_written(path, flags, *args, **kw):
+        fd = real_open(path, flags, *args, **kw)
+        if flags & os.O_EXCL and Path(path).parent == needed.parent and not raced:
+            raced.append(Path(path))
+            os.write(fd, original[:len(original) // 2])
+            try:
+                cr.materialize(manifest, stored, fetch, targets[1], objects_dir=objects)
+                outcomes.append('done')
+            except cp.Refused as error:
+                outcomes.append(error.code)
+            finally:
+                os.ftruncate(fd, 0)
+                os.lseek(fd, 0, os.SEEK_SET)
+        return fd
+    monkeypatch.setattr(cr.os, 'open', half_written)
+    monkeypatch.setattr(cr.os, 'link', link)
+    monkeypatch.setattr(cr.os, 'fsync', sync)
+    cr.materialize(manifest, stored, fetch, targets[0], objects_dir=objects)
+    assert raced and outcomes == ['done'], 'the second restore validated an in-progress cache write'
+    assert raced[0] != needed and published and all(not path.exists() for path in published)
+    assert needed.read_bytes() == original
+    assert all((target / 'lcm.db').read_bytes() == checked(fixture).read_bytes() for target in targets)
+    assert {p.relative_to(objects).as_posix() for p in objects.rglob('*') if p.is_file()} == {
+        row['key'] for row in manifest['database']['base']['parts']}
 
 
 @pytest.mark.parametrize('check', [2, 3, 4])
