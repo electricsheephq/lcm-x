@@ -237,6 +237,22 @@ def losses(head_guard, staged_guard, *, unresolved=(), forgotten=()):
                     valid = valid and actual[4] == row[4] and all(new_messages.get(i) == old_messages[i] for i in ids if i in old_messages)
             if not valid:
                 result.setdefault('ledger', {}).setdefault(sid, []).append(row[:2])
+    for sid, new in current_sessions.items():
+        if sid in forgotten:
+            continue
+        previous_keys = {_json(row[:2]) for row in head_guard['sessions'].get(sid, {}).get('ledger', [])}
+        messages = dict(new.get('messages', []))
+        for row in new.get('ledger', []):
+            if _json(row[:2]) in previous_keys:
+                continue
+            valid = True
+            if row[3] is not None:
+                valid = row[3] == row[2]
+            elif row[4] is not None:
+                ids = json.loads(row[4]) if isinstance(row[4], str) else row[4]
+                valid = all(i in messages for i in ids)
+            if not valid:
+                result.setdefault('ledger', {}).setdefault(sid, []).append(row[:2])
     unresolved = {i['name'] for i in unresolved}
     for name, digest in head_guard.get('payloads', {}).items():
         actual = staged_guard.get('payloads', {}).get(name)

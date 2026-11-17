@@ -183,7 +183,7 @@ forgot.** It compares generation N+1 with N before N+1's manifest is written.
 - **Messages:** every `store_id` in N is in N+1 with the same content digest, or its session has a
   `capture:forgotten:<session>` marker (claude_code_store.py:52, :100-108). Compare the per-id `[id, hash]` pairs; a matching whole-session digest is a fast path for messages, bindings and relations only.
   Ledger entries are always compared individually; the digest does not cover them. An id of N that is missing is a loss (below); an id of N that holds a
-  different row is `store_id_reused` (next). The digest covers every column of the row. No step-1 writer changes a capture-store row in place; a later writer that does needs its own guard rule first, or the next publish refuses `store_id_reused`.
+  different row is `store_id_reused` (next). The digest covers every column of the row. No step-1 writer changes a guarded column of a capture-store row in place (the ledger's notes and the binding check columns are outside the digests); a later writer that does needs its own guard rule first, or the next publish refuses `store_id_reused`.
 - **Bindings and relations:** every `host_uid_bindings` row and every `message_relations` row in N is in N+1
   unchanged, or its message's session is forgotten; a relation names two messages and is exempt when either one's session is forgotten, and an `--as-delete` decision covers it when either one's session is the decision's (store.py:399 deletes a relation with either end's session). For a binding, unchanged means its identity columns
   (`store_id`, `uid`, `lineage_key`, `kind`): the check columns `first_check` and `disagree_seen` are updated in
@@ -208,11 +208,14 @@ forgot.** It compares generation N+1 with N before N+1's manifest is written.
   sessions, which are this machine's own history; a `--new-copy` after a chain conflict starts with none.
 - **Ledger:** every ledger key in N is in N+1, or its session is forgotten. Like the message check, it
   compares N+1 with N. For an entry with bytes, the sha256 of its decompressed raw line (resolving `raw_from`)
-  equals the value N's manifest recorded, and also its `line_digest` when it did in N, so a cut raw line with an
-  unchanged digest column fails; an accepted cut keeps N's values and is not judged again. A `held` file entry has
+  equals the value N's manifest recorded, and also its `line_digest` when it did in N; an accepted cut keeps N's
+  values and is not judged again. A `held` file entry has
   no bytes: its text is held whole by the rows it names (claude_code_store.py:765-782). For it, the digest is
   unchanged and every row in its `store_ids` that N held is present with an unchanged content digest; a row N
-  already lacked was judged when it went.
+  already lacked was judged when it went. A key that N lacks is judged against itself: an entry with bytes needs its
+  raw sha256 to equal its `line_digest`, and a held entry needs every row in its `store_ids` present in its session.
+  A cut raw line with an unchanged digest column fails both for a key N held intact and for a new key.
+  Damage before the first generation is not caught, because no guard runs without a head.
 - **Payloads:** every payload name in N is in N+1 with the same decoded content. An absent name is a `guard_loss` if N+1 still references it in `unresolved_minted` or `unresolved_quoted`; without a reference it is exempt here because the message rule judges its rows. Core
   can replace a payload file in place (externalize.py:264-268); whether capture stores ever reach that path is
   not established, so a content change refuses.

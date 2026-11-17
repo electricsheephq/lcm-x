@@ -974,7 +974,7 @@ def test_unrecorded_create_then_failed_attempt_recovers(fixture, monkeypatch):
     assert {k for k in before.keys() | after.keys() if before.get(k) != after.get(k)} <= {'pending_pair', 'pending_started'}
 
 
-@pytest.mark.parametrize('fault', ['head-list', 'retention-get', 'retention-list', 'retention-stat', 'retention-now'])
+@pytest.mark.parametrize('fault', ['head-list', 'head-get', 'retention-get', 'retention-list', 'retention-stat', 'retention-now'])
 def test_won_create_io_failure_still_records_state(fixture, fault):
     head = pub(fixture)
     lost(fixture)
@@ -988,6 +988,7 @@ def test_won_create_io_failure_still_records_state(fixture, fault):
         if method == 'delete':
             deleted.append(key)
         matches = ((fault == 'head-list' and method == 'list' and key.endswith('/gen/'))
+                   or (fault == 'head-get' and method == 'get' and key.endswith('/gen/2.json'))
                    or (fault == 'retention-get' and method == 'get' and key.endswith('/gen/1.json'))
                    or (fault == 'retention-list' and method == 'list' and key.endswith('/parts/'))
                    or (fault == 'retention-stat' and method == 'stat' and key == stray)
@@ -1007,6 +1008,51 @@ def test_won_create_io_failure_still_records_state(fixture, fault):
     fixture[1].hook = lambda *args: None
     assert pub(fixture)['generation'] == 3
     assert json.loads(state(fixture).read_text())['retention_done_generation'] == 3
+
+
+@pytest.mark.parametrize('sid', ['s1', 'new-session'])
+@pytest.mark.parametrize('damage', ['cut-raw', 'held-row-gone'])
+def test_new_ledger_key_judged_at_first_appearance(fixture, sid, damage):
+    import zlib
+    head = pub(fixture)
+    with closing(sqlite3.connect(fixture[0] / 'lcm.db')) as conn:
+        before = conn.execute('SELECT max(event_id) FROM capture_events').fetchone()[0]
+    grow(fixture)
+    if sid != 's1':
+        sql(fixture, 'UPDATE messages SET session_id=? WHERE store_id>?', (sid, head['guard']['mark']))
+        sql(fixture, 'UPDATE capture_events SET session_id=? WHERE event_id>?', (sid, before))
+    with closing(sqlite3.connect(fixture[0] / 'lcm.db')) as conn:
+        event = conn.execute("SELECT event_id FROM capture_events WHERE event_id>? AND source_kind='line' "
+                             'AND raw IS NOT NULL ORDER BY event_id DESC LIMIT 1', (before,)).fetchone()[0]
+        ident = conn.execute('SELECT max(store_id) FROM messages').fetchone()[0]
+    if damage == 'held-row-gone':
+        sql(fixture, "UPDATE capture_events SET raw=NULL,raw_from=NULL,disposition='held',store_ids=? WHERE event_id=?",
+            (json.dumps([ident]), event))
+    intact = (fixture[0] / 'lcm.db').read_bytes()
+    if damage == 'cut-raw':
+        sql(fixture, 'UPDATE capture_events SET raw=? WHERE event_id=?', (zlib.compress(b'synthetic cut'), event))
+    else:
+        remove_message(fixture, ident)
+    staged = cp.publish(fixture[0], COPY, fixture[1], PREFIX, snapshot_only=True)
+    old_keys = {cg._json(row[:2]) for row in head['guard']['sessions'].get(sid, {}).get('ledger', [])}
+    new_keys = [row[:2] for row in staged['guard']['sessions'][sid]['ledger'] if cg._json(row[:2]) not in old_keys]
+    loss = cg.losses(head['guard'], staged['guard'])
+    assert loss.get('ledger', {}).get(sid) == new_keys, 'damage must be judged before the new key is published'
+    assert not cg.losses(head['guard'], staged['guard'], forgotten=[sid])
+    unchanged = keys(fixture), state(fixture).read_bytes()
+    refused('guard_loss', pub, fixture)
+    assert unchanged == (keys(fixture), state(fixture).read_bytes())
+    # Both raw and held intact first appearances publish.
+    (fixture[0] / 'lcm.db').write_bytes(intact)
+    assert pub(fixture)['generation'] == 2
+    # A new damaged key in a forgotten session is exempt, even on the digest fast path.
+    exempt = copy.deepcopy(staged['guard'])
+    exempt['sessions'][sid]['digest'] = head['guard']['sessions'].get(sid, {}).get('digest')
+    sql(fixture, 'INSERT INTO metadata(key,value) VALUES (?,?)', (cg.FORGOTTEN + sid, '1'))
+    assert cg.guard(head, fixture[0] / 'lcm.db', staged | {'guard': exempt}) == set()
+    with capture_store(fixture[0] / 'lcm.db', fixture[0], fixture[3]) as store:
+        store.delete_session_messages(sid)
+    assert pub(fixture)['generation'] == 3
 
 
 @pytest.mark.parametrize('recorded', ['last-1', 'last-2', 'pending-2'])
