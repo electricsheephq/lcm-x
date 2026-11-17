@@ -181,11 +181,11 @@ bindings, relations, ledger lines and payloads between two generations, with one
 forgot.** It compares generation N+1 with N before N+1's manifest is written.
 
 - **Messages:** every `store_id` in N is in N+1 with the same content digest, or its session has a
-  `capture:forgotten:<session>` marker (claude_code_store.py:52, :100-108). The manifest holds one prefix digest
-  per session, so the compare is one pass. An id of N that is missing is a loss (below); an id of N that holds a
-  different row is `store_id_reused` (next).
+  `capture:forgotten:<session>` marker (claude_code_store.py:52, :100-108). Compare the per-id `[id, hash]` pairs; a matching whole-session digest is a fast path for messages, bindings and relations only.
+  Ledger entries are always compared individually; the digest does not cover them. An id of N that is missing is a loss (below); an id of N that holds a
+  different row is `store_id_reused` (next). The digest covers every column of the row. No step-1 writer changes a guarded column of a capture-store row in place (the ledger's notes and the binding check columns are outside the digests); a later writer that does needs its own guard rule first, or the next publish refuses `store_id_reused`.
 - **Bindings and relations:** every `host_uid_bindings` row and every `message_relations` row in N is in N+1
-  unchanged, or its message's session is forgotten. For a binding, unchanged means its identity columns
+  unchanged, or its message's session is forgotten; a relation names two messages and is exempt when either one's session is forgotten, and an `--as-delete` decision covers it when either one's session is the decision's (store.py:399 deletes a relation with either end's session). For a binding, unchanged means its identity columns
   (`store_id`, `uid`, `lineage_key`, `kind`): the check columns `first_check` and `disagree_seen` are updated in
   place (store.py:1877-1885). Both are contracted tables (docs/store-contract.md:14-28). The
   delete helpers remove them only with their rows (store.py:393-434), but nothing else stops one from vanishing
@@ -206,12 +206,17 @@ forgot.** It compares generation N+1 with N before N+1's manifest is written.
   `store_id_reused` is `enable --new-copy`, never `accept-loss`. The old copy id keeps its ids and
   becomes this machine's superseded copy (3.5); on this path only, the new copy id starts with the old one's forgotten
   sessions, which are this machine's own history; a `--new-copy` after a chain conflict starts with none.
-- **Ledger:** every ledger key in N is in N+1, or its session is forgotten. For an entry with bytes, the sha256 of
-  its decompressed raw line (resolving `raw_from`) equals both its `line_digest` and the value N's manifest
-  recorded, so a cut raw line with an unchanged digest column fails. A `held` file entry has no bytes: its text is
-  held whole by the rows it names (claude_code_store.py:765-782). For it, the digest is unchanged and every row in
-  its `store_ids` is present with an unchanged content digest.
-- **Payloads:** every payload name in N is in N+1 with the same decoded content, or its session is forgotten. Core
+- **Ledger:** every ledger key in N is in N+1, or its session is forgotten. Like the message check, it
+  compares N+1 with N. For an entry with bytes, the sha256 of its decompressed raw line (resolving `raw_from`)
+  equals the value N's manifest recorded, and also its `line_digest` when it did in N; an accepted cut keeps N's
+  values and is not judged again. A `held` file entry has
+  no bytes: its text is held whole by the rows it names (claude_code_store.py:765-782). For it, the digest is
+  unchanged and every row in its `store_ids` that N held is present with an unchanged content digest; a row N
+  already lacked was judged when it went. A key that N lacks is judged against itself: an entry with bytes needs its
+  raw sha256 to equal its `line_digest`, and a held entry needs a non-empty `store_ids` that names only rows present in its session. An entry with neither bytes nor such a list fails.
+  A cut raw line with an unchanged digest column fails both for a key N held intact and for a new key.
+  Damage before the first generation is not caught, because no guard runs without a head.
+- **Payloads:** every payload name in N is in N+1 with the same decoded content. An absent name is a `guard_loss` if N+1 still references it in `unresolved_minted` or `unresolved_quoted`; without a reference it is exempt here because the message rule judges its rows. Core
   can replace a payload file in place (externalize.py:264-268); whether capture stores ever reach that path is
   not established, so a content change refuses.
 - **Chain:** each manifest names its publisher: a digest of the copy id and the machine's hardware id (the macOS
@@ -221,9 +226,9 @@ forgot.** It compares generation N+1 with N before N+1's manifest is written.
   ends in `--new-copy`)**. Each publish attempt records (N+1, a random 128-bit token) as pending in `cloud/state.json`
   before it uploads anything, and the manifest carries the token. The token comes from the OS random source mixed
   with `time_ns` and the pid. A publish goes ahead only when the bucket's newest generation names this publisher
-  and its (generation, token) pair equals this machine's recorded last or pending pair for that copy; and the
+  and its (generation, token) pair equals this machine's recorded last or pending pair for that copy; a null or different publisher is `chain_conflict`; and the
   manifest is created only if `gen/<N+1>.json` does not exist. Otherwise the publish stops with `chain_conflict`
-  and overwrites nothing. A pending pair is replaced only by the next attempt, never cleared. An interrupted
+  and overwrites nothing. With no generation in the bucket, a publish goes ahead only when this machine records no last pair for that copy and no pending pair above generation 1; otherwise it stops with `chain_conflict` (the hosted copy was deleted in the console or lost), whose exit is `--new-copy`. A pending pair is replaced only by the next attempt, never cleared. An interrupted
   attempt resumes with its pending token. The pending record keeps the bucket's `Date` from the attempt's first
   response; an attempt that resumes more than 3.5 days (G/2) after that, by the bucket's clock, is abandoned and a
   new attempt starts. Two machines taking turns are caught as well as two racing ones, so a
@@ -270,11 +275,11 @@ forgot.** It compares generation N+1 with N before N+1's manifest is written.
   prefix with its head's publisher, number and time by the bucket's clock, and says that a whole copy is deleted in
   the bucket host's own console; it never names a copy as safe to delete. Step 1 has no command that deletes a copy
   (Appendix I).
-- **On refusal for a loss:** N stays current. Nothing in the bucket changes. `status` names what disappeared, by
+- **On refusal for a loss (`guard_loss`):** N stays current. Nothing in the bucket changes. `status` names what disappeared, by
   session and count. The user then chooses:
   - `accept-loss` records the acceptance in `cloud/state.json`, not in the store, and the next publish goes ahead;
     every later manifest carries the pin, so a lost `state.json` does not lose it.
-    It **pins the generation before the loss**: retention keeps it, and the parts it names, for 30 days or until
+    It **pins the generation before the loss**, dated only by the bucket clock at the winning publish: retention keeps it, and the parts it names, for 30 days or until
     `accept-loss --release`, which only records the release: the next manifest omits the pin, and that publish's
     retention prunes. So a loss caused by a bug is not mirrored into the hosted copy's only intact
     generation. `status` lists pinned generations.
@@ -287,7 +292,7 @@ row would fail the content compare anyway. Draft 1's "GC and cloud are mutually 
 
 ### 3.5 Retention
 
-- Retention runs only under `cloud/upload.lock`, and only when this attempt's own conditional create wins and a head read then shows that manifest is the head (3.4). Every command that writes to the bucket (`enable` with `--new-copy`, `sync`) takes the same lock; every network call has a timeout, and `status` shows the lock's age, so a hung holder is visible.
+- Every writer of `cloud/state.json`, including decision recording, release, withdrawal and `--new-copy`, takes `cloud/upload.lock`. Retention runs only under `cloud/upload.lock`, and only when this attempt's own conditional create wins and a head read then shows that manifest is the head (3.4). Every command that writes to the bucket (`enable` with `--new-copy`, `sync`) takes the same lock; every network call has a timeout, and `status` shows the lock's age, so a hung holder is visible.
 - Keep the current generation, the two before it, and any generation pinned by `accept-loss` (3.4). Every manifest
   carries the head's pins forward. Retention deletes keys named only by manifests being pruned before those
   manifests, and deletes a manifest only after its exclusive keys returned success or not found; otherwise the
@@ -300,7 +305,7 @@ row would fail the content compare anyway. Draft 1's "GC and cloud are mutually 
   `pin_holds_forgotten` with the session count until the user releases the pin (`accept-loss --release`), and the
   opt-in says that a forgotten session stays in a pinned generation until then. `status` also warns 7 days and
   1 day before a pin expires. Because the check runs on
-  every publish, a crash or a failed delete is retried by the next winning publish. Once a publish has finished its retention
+  every publish, a crash or a failed delete is retried by the next winning publish. A delete that keeps failing, for example under a credential without delete permission, is retried on every publish, so nothing is pruned and the forgotten rows stay until it succeeds; `status` reports repeated retention failures, and `enable` checks delete permission (#2801). Once a publish has finished its retention
   step, no object in the bucket holds the forgotten rows outside a pinned generation, a superseded copy or an idle copy (3.4), which
   `status` reports (`pin_holds_forgotten`, `superseded_holds_forgotten`), except parts and delta objects of failed
   or interrupted attempts or dropped staging copies that no manifest named: they can hold a forgotten session
@@ -472,7 +477,7 @@ attempt is a delta and a new item's session is one the head's chain may hold. Th
 whose staging copy holds no forgotten rows; it never restarts a base. Re-evaluate the rules on the new copy.
 An `--as-delete` decision covers rows already missing and removes nothing itself. If a staging copy holds ids
 covered by a pending decision after a rollback, refuse with `as_delete_rows_present` until the user withdraws
-the decision or the rows go again; never restart in a loop. Record every new item read at the final check:
+the decision or the rows go again; checked at staging, before the guard's codes, and again at the final check; never restart in a loop. Record every new item read at the final check:
 `base_generation` is this generation only when it is a base and the item's session is one the head's chain may
 hold; otherwise it is `null`. Inherited entries on `--new-copy` take that copy's first base.
 
@@ -950,13 +955,13 @@ from a prototype.)
 | 1 | This record as a repo document; roadmap and adapter-doc wording | `docs/cloud-capture-step1.md`; `ROADMAP.md`, `docs/claude-code-adapter.md` (edits) | docs | Low | decision by 11-21 |
 | 2d | Page lists/digests, last/pending lists, delta encode/apply, pure base rule, skip signature (3.7.6) | `cloud_delta.py`, `tests/test_cloud_delta.py` | ~220 | High | 3.7's codec interface |
 | 2 | Snapshot, manifest including `database`, base-or-delta publish through 2d, pre-manifest chain check, part store, directory transport, contract constants | `cloud_copy.py`, `scripts/lcm_x_cloud.py` (`snapshot`, `publish`), `tests/test_cloud_copy.py`, `tests/compat/test_cloud_copy_contract.py` | ~480 (+~80) | High | row 1's result; 2d before merge |
-| 3 | Publish guard (`store_id_reused`, `forgotten_session_returned`, the chain), retention including `deltas/`, forget trigger for the base rule, tests of `as_delete_rows_present`, delta-key interleavings, superseded copies, `accept-loss` | `cloud_guard.py`, tests | ~330 (+~30) | High | 2 |
+| 3 | Publish guard (`store_id_reused`, `forgotten_session_returned`, the chain), retention including `deltas/`, forget trigger for the base rule, tests of `as_delete_rows_present`, delta-key interleavings, superseded copies, `accept-loss` decisions, pins and their effect on the guard and retention (library) | `cloud_guard.py`, `cloud_copy.py` (edit), `scripts/lcm_x_cloud.py` (edit), `scripts/maintainer_gate.py` (edit), tests | ~330 (+~30) | High | 2 |
 | 4 | Independent decoder, rebuild and copy checker, written from section 3 only, by a different author than lanes 2 and 3; eight seeded faults | `scripts/cloud_copy_outside_in.py`, `tests/compat/test_cloud_copy_outside_in.py` | ~310 (+~60) | High | section 3 |
 | 5 | Restore rebuild/check, replica refresh by local patch into a new directory with full download as fallback, reader handover (4.1, 3.7.4) | `cloud_restore.py`, tests | ~380 (+~80) | High | 2 |
 | 6 | S3 transport (conditional create, TLS verification), credentials, isolation test | `cloud_s3.py`, tests (recorded responses; live tests against the O1 bucket, skipped without its credentials, required at the gate) | ~350 | High | 2; the bucket for its live proof |
 | 7a | Merger: children, routing, id qualification, fallback | `cloud_reader.py`, tests | ~300 | High | a hand-built replica home; rows 4 and 5 decide whether it continues |
 | 7b | Merger: duplicate rule, status, deadline; kit cells for 2 and 4 stores | `cloud_reader.py`, `bench/instruments/cc_mcp_recall/` (edit) | ~250 | High | 7a |
-| 8 | Opt-in: `enable` (with `--new-copy`; a plain `enable` re-run on a home whose `cloud.json` names a copy id reads the head first, per the invariant), `disable`, `status`, `sync`, `accept-loss` (`--as-delete`, `--release`); `cloud/upload.lock` around every bucket write; opt-in text; the sync timer; `status` chain length, bytes and last base reason | `scripts/lcm_x_cloud.py` (edit), `cloud_reader.py` (edit), tests | ~315 (+~15) | High | 3, 5, 6, 7b |
+| 8 | Opt-in: `enable` (with `--new-copy`; a plain `enable` re-run on a home whose `cloud.json` names a copy id reads the head first, per the invariant), `disable`, `status`, `sync`, `accept-loss` (`--as-delete`, `--release`; calls lane 3's decision API); `cloud/upload.lock` around every bucket write; opt-in text; the sync timer; `status` chain length, bytes and last base reason | `scripts/lcm_x_cloud.py` (edit), `cloud_reader.py` (edit), tests | ~315 (+~15) | High | 3, 5, 6, 7b |
 | 9 | Unit packaging, smoke, release-spec gate items, user docs | `scripts/build_claude_code_unit.py:32`, `scripts/claude_code_unit_delta.py:24`, `scripts/claude_code_unit_smoke.py`, `bench/specs/RELEASE-READINESS-V1.md`, `adapters/claude-code/README.md` (all edits) | ~200 | High | 8 |
 | 10 | Gate run on the candidate: two machines, the real bucket, records | none | none | gate | 4, 6 and 9; row 3; owner decisions O1 and O3 |
 
@@ -1453,10 +1458,10 @@ digest is the sha256 of the stored bytes. A reader ignores keys it does not know
 | `tables` | object | row count of each contracted table (F6) that exists in the copy, counted in the copy as hashed (so `metadata` includes the stamp row); an absent table has no key |
 | `sequence` | object | `{"messages": int or null}`: `seq` of the `messages` row in `sqlite_sequence`, null when there is no row |
 | `attempt` | object | `{"generation": int, "token": token}` |
-| `publisher` | null or string | null in this format until the publish chain exists |
-| `pins`, `superseded` | lists | `[]` until the publish guard exists |
+| `publisher` | string | sha256 of the copy id, a newline and the hardware id (3.4); required from generation 1 |
+| `pins`, `superseded` | lists | pins: `{generation, decision, from, until}`, dated only by the bucket clock; superseded: `{copy_id, generation, manifest_sha256}`, written by `--new-copy` |
 | `forgotten` | list | the list of F12 |
-| `guard` | object | inputs of the publish guard. One author writes and reads it. **The checker never reads it.** |
+| `guard` | object | inputs of the publish guard. The uploader side (`cloud_copy.py` and `cloud_guard.py`) authors it; lane 3 owns its guard semantics. **The checker never reads it.** |
 
 **F6. When a copy equals its origin.** The origin is the store as of the copy's cut. Contracted tables and their
 columns are the generated table at docs/store-contract.md:12-28 (15 tables); hold them as constants and pin them

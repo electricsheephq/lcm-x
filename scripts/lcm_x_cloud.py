@@ -30,14 +30,15 @@ def main(argv=None):
         package.__path__ = [str(Path(__file__).resolve().parents[1])]
         package.__package__ = 'hermes_lcm'
         sys.modules['hermes_lcm'] = package
-    from hermes_lcm import cloud_copy
+    from hermes_lcm import cloud_copy, cloud_guard
     try:
         prefix = args.prefix + '/' + args.copy_id
         transport = cloud_copy.DirTransport(args.bucket_dir, prefix)
         result = {}
+        hooks = cloud_guard.install(args.home, args.copy_id, transport, prefix, uploader=cloud_copy) if args.command == 'publish' else {}
         manifest = cloud_copy.publish(args.home, args.copy_id, transport, prefix,
             quiet_s=args.quiet_s, part_size=args.part_size, timer=getattr(args, 'timer', False),
-            snapshot_only=args.command == 'snapshot', result=result)
+            snapshot_only=args.command == 'snapshot', result=result, **hooks)
         result.update(code='done', copy_id=manifest['copy_id'], generation=manifest['generation'],
                       file_bytes=manifest['database']['file_bytes'], payloads=len(manifest['payloads']),
                       unresolved_minted=len(manifest['unresolved_minted']), unresolved_quoted=len(manifest['unresolved_quoted']))
