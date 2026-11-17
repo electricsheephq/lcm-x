@@ -43,12 +43,19 @@ class Reader:
         from . import delivery
         started = time.monotonic()
         counted = self.counted < self.spec["max_calls"]
-        if counted:
-            with delivery.question_clock(self.spec["question"]["question_date"]):  # D12
-                raw = delivery.dispatch(name, arguments if arguments is not None else {}, self.engine, self.offered)
-            self.counted += 1
-        else:
-            raw = OVER_BUDGET
+        fatal, metadata = None, {}
+        try:
+            if counted:
+                with delivery.question_clock(self.spec["question"]["question_date"]):  # D12
+                    raw = delivery.dispatch(name, arguments if arguments is not None else {}, self.engine, self.offered)
+                self.counted += 1
+            else:
+                raw = OVER_BUDGET
+        except delivery.LocalRecallUnavailable as exc:
+            fatal, metadata = exc, {**exc.recall_metadata, "fatal": "LocalRecallUnavailable"}
+            raw = json.dumps({"error": "local_recall_semantic_unavailable"})
+        if name == "lcm_recall" and fatal is None:
+            metadata = delivery.recall_metadata(raw)
         try:
             error = "error" in json.loads(raw)
         except (ValueError, TypeError):
@@ -56,7 +63,10 @@ class Reader:
         with self.log.open("a") as stream:
             stream.write(json.dumps({"at": utc(), "tool": name, "counted": counted, "error": error,
                 "args_sha256": sha(json.dumps(arguments, sort_keys=True).encode()),
-                "latency_s": time.monotonic() - started, "output_bytes": len(raw.encode())}) + "\n")
+                "latency_s": time.monotonic() - started,
+                "output_bytes": 0 if fatal else len(raw.encode()), **metadata}) + "\n")
+        if fatal is not None:
+            raise fatal
         return raw, error
 
     def handle(self, request):

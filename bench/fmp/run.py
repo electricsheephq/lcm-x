@@ -164,11 +164,16 @@ def canary(args, client, dataset_sha, q):
             messages = [{"role": "user", "content": ask}]
             try:
                 if mode == "mcp":
-                    client.agentic(args.reader, messages, records, server_spec(args, dataset_sha, q))
+                    try:
+                        client.agentic(args.reader, messages, records, server_spec(args, dataset_sha, q))
+                    finally:
+                        delivery.require_mcp_local_recall(delivery.mcp_trace(records))
                 else:
                     client.call(args.reader, messages, records)
             except ToolViolation:
                 status = "tool_violation"
+            except delivery.LocalRecallUnavailable:
+                raise
             except Exception as exc:
                 status = "error:" + type(exc).__name__
                 # With no tools at all, Claude may write a tool call as text; Claude Code cannot run it
@@ -455,6 +460,8 @@ def run(args, client, questions, dataset_sha, ids_sha, excluded, store):
             except ToolViolation as exc:  # the harness used a non-MCP tool: a failed question
                 row.update(getattr(exc, "delivery_result", {}))
                 row.update(status="tool_violation")
+            except delivery.LocalRecallUnavailable:
+                raise
             except Exception as exc:
                 row.update(getattr(exc, "delivery_result", {}))
                 row.update(status="error", error=type(exc).__name__)
@@ -604,8 +611,8 @@ def main():
             execute(args)
     except Exception as exc:
         import traceback
-        # Only harness canary/option diagnostics are shown; other exception text may carry corpus content.
-        reason = str(exc) if isinstance(exc, RecallOptionError) or (
+        # Only fixed harness diagnostics are shown; other exception text may carry corpus content.
+        reason = str(exc) if isinstance(exc, (RecallOptionError, delivery.LocalRecallUnavailable)) or (
             isinstance(exc, RuntimeError) and str(exc) in (CANARY_NO_MCP, CANARY_FAILED)) else None
         message = "FMP failed: " + type(exc).__name__ + (f" ({reason})" if reason else "") + " (no corpus logged)"
         home = getattr(args, "codex_home", None)
