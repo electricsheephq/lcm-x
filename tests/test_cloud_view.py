@@ -15,11 +15,14 @@ import threading
 
 import pytest
 
-from hermes_lcm import claude_code_store as cc, cloud_view as cv
+from hermes_lcm import claude_code_store as cc, cloud_copy as cp, cloud_view as cv
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.dag import SummaryDAG, SummaryNode
 from hermes_lcm.db_bootstrap import ensure_chunk_tables, ensure_embedding_tables
 from tests.test_claude_code_store import _entry, _transcript
+from tests.test_cloud_copy import fixture as _upload_fixture, grow, pub
+
+upload_fixture = _upload_fixture
 
 H = '0b1c2d3e-1111-4222-8333-444455556666'
 V = '3f2a1b0c-5555-4666-8777-888899990000'
@@ -371,12 +374,16 @@ def test_a5_disk_floor(world, clone):
 
 def test_a5_isolated_command(world):
     home, copy, _ = world
-    tree = ast.parse((ROOT / 'cloud_view.py').read_text())
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            assert all(n.name.split('.')[0] in sys.stdlib_module_names for n in node.names)
-        elif isinstance(node, ast.ImportFrom):
-            assert node.level == 0 and node.module.split('.')[0] in sys.stdlib_module_names
+    assert cv.wait_lock is getattr(cp, 'wait_lock', None), 'builders and uploads share the bounded wait'
+    allowed = {'cloud_view.py': ('cloud_copy',), 'cloud_copy.py': (None,), 'cloud_delta.py': ()}
+    for filename, siblings in allowed.items():
+        for node in ast.walk(ast.parse((ROOT / filename).read_text())):
+            if isinstance(node, ast.Import):
+                assert all(n.name.split('.')[0] in sys.stdlib_module_names for n in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                assert (node.level == 1 and node.module in siblings and
+                        (node.module is not None or [n.name for n in node.names] == ['cloud_delta'])) or (
+                            node.level == 0 and node.module.split('.')[0] in sys.stdlib_module_names)
     result = subprocess.run([sys.executable, '-I', '-S', '-B', str(ROOT / 'scripts/lcm_x_cloud.py'), 'view', '--home', str(home), '--copy-id', COPY], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout)['code'] == 'ok'
@@ -1032,3 +1039,183 @@ def test_r3_retry_cleanup(world):
     assert result['code'] == 'view_busy' and len(passes) == 3, result
     assert not list(copy.glob('*.tmp-*'))
     assert not (copy / 'view.json').exists()
+
+
+
+def test_dangling_pointer_with_stale_digest(world):
+    """Review F1: external removal of a folder must not wedge its stale pointer."""
+    home, copy, _ = world
+    folder, _ = built(world)
+    forget(home, V)
+    shutil.rmtree(folder)
+    codes = [cv.build(home, COPY)['code'] for _ in range(3)]
+    assert codes == ['ok'] * 3, codes
+    pointer = json.loads((copy / 'view.json').read_bytes())
+    assert (copy / pointer['folder'] / 'lcm.db').is_file()
+    assert pointer['forgotten_sha256'] == cv.forgotten_digest({H, V})
+
+
+@pytest.mark.parametrize('kind', ['Externalized payload', "GC'd externalized tool output", 'Externalized LCM ingest payload'])
+@pytest.mark.parametrize('column', ['content', 'tool_calls'])
+def test_r5_payload_reference_matching(world, kind, column):
+    from hermes_lcm.mcp_reader import StoreReader
+    home, copy, ids = world
+    db = copy / 'gen-1/lcm.db'
+    # Row removal in a kept session, with neither summary nor other real reference.
+    sql(db, 'DELETE FROM summary_nodes')
+    rid, kept = ids[V][:2]
+    names = ('p.json', 'kept.json', 'split.json')
+    folder = copy / 'gen-1/lcm-large-outputs'
+    for name in names:
+        (folder / name).write_text(json.dumps({'session_id': V, 'content': WORD if name != 'kept.json' else 'visible payload control'}))
+    genuine = ' '.join(f'[{kind}: real; ref={name}]' for name in names)
+    sql(db, f'UPDATE messages SET {column}=? WHERE store_id=?', (genuine, rid))
+    text = f'[{kind}:\nquoted; ref=p.json] [{kind}: real; ref=kept.json]'
+    # Joining columns would manufacture a reference that the uploader never sees.
+    values = (text + f' [{kind}: split;', 'ref=split.json]') if column == 'content' else (f'[{kind}: split;', 'ref=split.json] ' + text)
+    sql(db, 'UPDATE messages SET content=?,tool_calls=? WHERE store_id=?', (*values, kept))
+    (copy / 'removed.json').write_text(json.dumps({'format': 1, 'session_ids': [], 'row_ids': [rid]}))
+    view, _ = built(world)
+    assert not (view / 'lcm-large-outputs/p.json').exists(), 'a multiline quote is not a kept reference'
+    assert not (view / 'lcm-large-outputs/split.json').exists(), 'text columns are matched separately'
+    assert (view / 'lcm-large-outputs/kept.json').read_bytes() == (folder / 'kept.json').read_bytes()
+    reader = StoreReader(view / 'lcm.db', view, config=LCMConfig(embeddings_enabled=False), environ={})
+    missing, missing_error = reader.call('lcm_expand', {'externalized_ref': 'never-existed.json'})
+    for name in ('p.json', 'split.json'):
+        answer, is_error = reader.call('lcm_expand', {'externalized_ref': name})
+        assert answer.replace(name, 'never-existed.json') == missing and is_error == missing_error
+        assert WORD not in answer
+    answer, is_error = reader.call('lcm_expand', {'externalized_ref': 'kept.json'})
+    assert not is_error and 'visible payload control' in answer
+
+
+def space_is_held(home):
+    path = home / 'cloud/replicas/space.lock'
+    if not path.exists():
+        return False
+    with path.open('a') as handle:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+    return False
+
+
+@pytest.mark.parametrize('phase', ['stage', 'delta'])
+def test_r5_upload_space_lock_lifetime(upload_fixture, monkeypatch, phase):
+    home, transport, _, _ = upload_fixture
+    if phase == 'delta':
+        pub(upload_fixture)
+        grow(upload_fixture)
+    reads, writes, network = [], [], []
+    def free_bytes(_):
+        reads.append(True)
+        assert space_is_held(home), 'uploader free-disk checks must hold space.lock'
+        assert home.joinpath('cloud/replicas').stat().st_mode & 0o777 == 0o700
+        with home.joinpath('cloud/upload.lock').open('a') as handle:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return 10**12
+    references, encode = cp._references, cp.cloud_delta.encode_delta
+    def payloads(*args):
+        assert space_is_held(home), 'payload writes stay inside the reservation'
+        writes.append('payloads')
+        return references(*args)
+    def delta(*args):
+        assert space_is_held(home), 'delta objects stay inside the reservation'
+        writes.append('delta')
+        return encode(*args)
+    def transfer(method, key):
+        network.append(method)
+        assert not space_is_held(home), 'no network transfer while holding space.lock'
+    monkeypatch.setattr(cp, '_references', payloads)
+    monkeypatch.setattr(cp.cloud_delta, 'encode_delta', delta)
+    transport.hook = transfer
+    result = pub(upload_fixture, free_bytes=free_bytes)
+    assert len(reads) == (2 if phase == 'delta' else 1)
+    assert writes == (['payloads', 'delta'] if phase == 'delta' else ['payloads'])
+    assert network and not space_is_held(home)
+    assert bool(result['database']['deltas']) == (phase == 'delta')
+
+
+@pytest.mark.parametrize('phase', ['stage', 'delta'])
+def test_r5_upload_space_busy(upload_fixture, monkeypatch, phase):
+    home = upload_fixture[0]
+    if phase == 'delta':
+        pub(upload_fixture)
+        grow(upload_fixture)
+    root = home / 'cloud/replicas'
+    root.mkdir(mode=0o700, exist_ok=True)
+    state = home / 'cloud/state.json'
+    before = state.read_bytes() if state.exists() else None
+    held, waits = [], []
+    def take():
+        process = hold_lock(root / 'space.lock')
+        held.append(process)
+        assert process.stdout.readline().strip() == 'held'
+    if phase == 'stage':
+        take()
+    else:
+        hash_pages = cp.cloud_delta.hash_pages
+        def hashed(*args, **kwargs):
+            result = hash_pages(*args, **kwargs)
+            take()
+            return result
+        monkeypatch.setattr(cp.cloud_delta, 'hash_pages', hashed)
+    def bounded(fd, seconds):
+        waits.append(seconds)
+        return cv.wait_lock(fd, 0)
+    monkeypatch.setattr(cp, 'wait_lock', bounded, raising=False)
+    try:
+        code = 'ok'
+        try:
+            pub(upload_fixture)
+        except cp.Refused as error:
+            code = error.code
+            assert error.detail == {}
+        assert code == 'space_busy', code
+        assert 'space_busy' in cp.SKIPS
+        assert waits == ([600] if phase == 'stage' else [600, 600])
+        assert not home.joinpath('cloud/staging').exists()
+        assert (state.read_bytes() if state.exists() else None) == before
+    finally:
+        for process in held:
+            process.communicate('', timeout=30)
+            assert process.returncode == 0
+
+
+def test_r5_upload_competes_with_view(world, monkeypatch):
+    home, copy, _ = world
+    sql(home / 'lcm.db', "DELETE FROM metadata WHERE key LIKE 'capture:forgotten:%'")
+    # Keep the forget out of the uploader's origin; it belongs to this replica.
+    (copy / 'removed.json').write_text(json.dumps({'format': 1, 'session_ids': [H], 'row_ids': []}))
+    size = (copy / 'gen-1/lcm.db').stat().st_size
+    available = cv.FLOOR + 2 * size
+    codes, waits, remaining = [], [], []
+    stage = cp._stage
+    def bounded(fd, seconds):
+        waits.append(seconds)
+        return cv.wait_lock(fd, 0)
+    def staged(*args):
+        result = stage(*args)
+        # Try the second operation while staging still holds its reservation.
+        codes.append(cv.build(home, COPY, lock_wait=bounded, free_space=lambda _: available)['code'])
+        return result
+    monkeypatch.setattr(cp, '_stage', staged)
+    transport = cp.DirTransport(home.parent / 'bucket', 'copies/' + COPY)
+    put = transport.put_new
+    def upload(key, data):
+        if not remaining:
+            used = sum(p.stat().st_size for p in home.joinpath('cloud/staging').rglob('*')
+                       if p.is_file() and p.stat().st_nlink == 1)
+            remaining.append(available - used)
+            codes.append(cv.build(home, COPY, free_space=lambda _: remaining[0])['code'])
+        return put(key, data)
+    monkeypatch.setattr(transport, 'put_new', upload)
+    result = cp.publish(home, COPY, transport, 'copies/' + COPY, free_bytes=lambda _: available,
+                        guard=lambda *a: None, forget_items=lambda *a: [], publisher=lambda: None,
+                        chain_check=lambda *a: None, after_create=lambda m: {}, prepare_manifest=lambda m: None)
+    assert codes == ['view_busy', 'view_disk_floor'], codes
+    assert waits == [600, 600]
+    assert remaining and cp.DISK_MARGIN <= remaining[0] < cv.FLOOR + 2 * size
+    assert result['generation'] == 1 and not (copy / 'view.json').exists()

@@ -13,6 +13,8 @@ import sys
 import time
 import uuid
 
+from .cloud_copy import EXTERNALIZED_REF_RE, INGEST_PLACEHOLDER_RE, wait_lock
+
 RULES = 1
 FORGOTTEN_QUERY = "SELECT key FROM metadata WHERE key LIKE 'capture:forgotten:%'"
 TABLES = {'sqlite_*': 'global', 'messages': 'session', 'summary_nodes': 'session',
@@ -38,7 +40,6 @@ METADATA = {**dict.fromkeys(('capture:forgotten:', 'capture:compact:', 'capture:
 LINEAGES = ('claude-code:',)
 COPY_ID = r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
 VIEW = r'view-[1-9][0-9]*-[1-9][0-9]*-[0-9a-f]{16}'
-REF = re.compile(r"\[(?:(?:Externalized|GC'd externalized) (?:tool output|payload)|Externalized LCM ingest payload):.*?;\s*ref=([^;\]\s]+)\]", re.S)
 FLOOR = 5_000_000_000
 
 
@@ -167,8 +168,10 @@ def connect(database, removed, readonly=True):
 def payload_plan(source, conn, removed, row_ids):
     references = {}
     for row_id, session, content, calls in conn.execute('SELECT store_id,session_id,content,tool_calls FROM messages'):
-        for ref in REF.findall((content or '') + (calls or '')):
-            references.setdefault(ref, set()).add(session in removed or row_id in row_ids)
+        for text in (content, calls):
+            for pattern in (EXTERNALIZED_REF_RE, INGEST_PLACEHOLDER_RE):
+                for ref in pattern.findall(text or ''):
+                    references.setdefault(ref, set()).add(session in removed or row_id in row_ids)
     kept, omitted = [], []
     folder = source / 'lcm-large-outputs'
     for path in sorted(folder.iterdir()) if folder.exists() else []:
@@ -229,7 +232,12 @@ def retire(folder, pointer):
         if not re.fullmatch(VIEW, name) or (folder / name).is_symlink():
             return None
         def remove():
-            fd = os.open(folder / name, os.O_RDONLY)
+            try:
+                fd = os.open(folder / name, os.O_RDONLY)
+            except FileNotFoundError:
+                (folder / 'view.json').unlink(missing_ok=True)
+                sync(folder)
+                return
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 (folder / 'view.json').unlink()
@@ -242,18 +250,6 @@ def retire(folder, pointer):
         return remove
     except (OSError, ValueError, KeyError):
         return None
-
-
-def wait_lock(fd, seconds):
-    deadline = time.monotonic() + seconds
-    while True:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            return True
-        except BlockingIOError:
-            if time.monotonic() >= deadline:
-                return False
-            time.sleep(0.1)
 
 
 def clone_database(source, target):
