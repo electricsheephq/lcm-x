@@ -202,7 +202,7 @@ def sync(path):
         os.close(fd)
 
 
-def _sweep(copy_folder, *, temporary_only=False):
+def _sweep(copy_folder, *, temporary_only=False, keep=None):
     folder = Path(copy_folder)
     try:
         current = json.loads((folder / 'view.json').read_bytes())['folder']
@@ -211,13 +211,8 @@ def _sweep(copy_folder, *, temporary_only=False):
     for path in folder.iterdir():
         if path.is_symlink() or not path.is_dir():
             continue
-        if re.fullmatch(VIEW + r'\.tmp-[0-9a-f]{32}', path.name):
-            try:
-                shutil.rmtree(path)
-            except OSError:
-                print('view_temp_cleanup_failed', file=sys.stderr)
-            continue
-        if temporary_only or path.name == current or not re.fullmatch(VIEW, path.name):
+        temporary = re.fullmatch(VIEW + r'\.tmp-[0-9a-f]{32}', path.name)
+        if path.name in (current, keep) or not temporary and (temporary_only or not re.fullmatch(VIEW, path.name)):
             continue
         fd = os.open(path, os.O_RDONLY)
         try:
@@ -225,6 +220,12 @@ def _sweep(copy_folder, *, temporary_only=False):
             shutil.rmtree(path)
         except BlockingIOError:
             pass
+        except OSError:
+            try:
+                if sys.stderr is not None:
+                    print('view_temp_cleanup_failed', file=sys.stderr)
+            except Exception:
+                pass
         finally:
             os.close(fd)
 
@@ -317,6 +318,7 @@ def build(home, copy_id=None, *, seam=lambda _: None, free_space=lambda p: shuti
                 identity = hashlib.sha256(json.dumps([matches, omitted], sort_keys=True).encode()).hexdigest()[:16]
                 name = f'view-{generation}-{RULES}-{identity}'
                 target = folder / name
+                _sweep(folder, keep=name)
                 pointer = dict(format=1, generation=int(generation), rules=RULES, folder=name,
                                forgotten_sha256=result['forgotten_sha256'], removed_sha256=result['removed_sha256'])
                 seam('matched')

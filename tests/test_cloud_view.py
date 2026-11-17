@@ -1300,3 +1300,186 @@ def test_r6_abandoned_build_removal_failure(world, monkeypatch, capsys, enough_f
     assert 'view_temp_cleanup_failed' in captured.err and not captured.out
     assert 'synthetic removal refusal' not in captured.err
     assert (copy / 'view.json').exists() == enough_free
+
+
+def r7_advance(copy, generation):
+    shutil.copytree(copy / 'gen-1', copy / f'gen-{generation}', copy_function=os.link)
+    (copy / 'current').write_text(f'{generation}\n')
+
+
+def r7_kill_after_rename(home):
+    child = '''
+import os, signal, sys
+import tests.conftest
+from hermes_lcm import cloud_view as cv
+def seam(step):
+    if step == 'renamed':
+        os.kill(os.getpid(), signal.SIGKILL)
+cv.build(sys.argv[1], sys.argv[2], seam=seam, clone=lambda *_: False)
+'''
+    result = subprocess.run([sys.executable, '-c', child, str(home), COPY],
+                            cwd=ROOT, capture_output=True)
+    import signal
+    assert result.returncode == -signal.SIGKILL, result.stderr
+
+
+def r7_bytes(folder):
+    return sum(p.stat().st_size for p in folder.rglob('*') if p.is_file() and not p.is_symlink())
+
+
+def test_r7_renamed_orphan_before_floor(world):
+    home, copy, _ = world
+    current, _ = built(world)
+    r7_advance(copy, 2)
+    r7_kill_after_rename(home)
+    orphan, = copy.glob('view-2-*')
+    assert re.fullmatch(cv.VIEW, orphan.name) and current.is_dir()
+    orphan_bytes = r7_bytes(orphan)
+    assert 0 < orphan_bytes < 5_000_000
+    r7_advance(copy, 3)
+    floor = cv.FLOOR + 2 * (copy / 'gen-3/lcm.db').stat().st_size
+    checks = []
+    pointer = (copy / 'view.json').read_bytes()
+    def free_space(_):
+        assert current.is_dir() and (copy / 'view.json').read_bytes() == pointer
+        available = floor - (orphan_bytes if orphan.exists() else 0)
+        checks.append(available)
+        return available
+    result = cv.build(home, COPY, free_space=free_space, clone=lambda *_: False)
+    assert result['code'] == 'ok', result
+    assert checks == [floor] and not orphan.exists()
+    assert json.loads((copy / 'view.json').read_bytes())['generation'] == 3
+
+
+def test_r7_same_identity_adopts_orphan(world):
+    home, copy, _ = world
+    current, _ = built(world)
+    r7_advance(copy, 2)
+    r7_kill_after_rename(home)
+    orphan, = copy.glob('view-2-*')
+    inode = (orphan / 'lcm.db').stat().st_ino
+    database = (orphan / 'lcm.db').read_bytes()
+    stale = copy / ('view-9-1-' + 'e' * 16)
+    stale.mkdir()
+    (stale / 'keep').write_bytes(b'reclaimable control')
+    checks, reused = [], []
+    def free_space(_):
+        checks.append(True)
+        return 0
+    def seam(step):
+        if step == 'reuse':
+            reused.append(True)
+            assert current.is_dir() and not stale.exists()
+            assert orphan.is_dir() and (orphan / 'lcm.db').stat().st_ino == inode
+    result = cv.build(home, COPY, free_space=free_space, seam=seam, clone=lambda *_: False)
+    assert result['code'] == 'ok', result
+    assert reused == [True] and checks == [] and not stale.exists()
+    assert json.loads((copy / 'view.json').read_bytes())['folder'] == orphan.name
+    assert (orphan / 'lcm.db').stat().st_ino == inode
+    assert (orphan / 'lcm.db').read_bytes() == database
+
+
+def test_r7_released_reader_before_floor(world):
+    home, copy, _ = world
+    old, _ = built(world)
+    with ExitStack() as stack:
+        held = os.open(old, os.O_RDONLY)
+        stack.callback(os.close, held)
+        fcntl.flock(held, fcntl.LOCK_SH)
+        r7_advance(copy, 2)
+        current, _ = built(world)
+        assert old.is_dir()
+        old_bytes = r7_bytes(old)
+        r7_advance(copy, 3)
+        floor = cv.FLOOR + 2 * (copy / 'gen-3/lcm.db').stat().st_size
+        pointer = (copy / 'view.json').read_bytes()
+        checks = []
+        def free_space(_):
+            assert current.is_dir() and (copy / 'view.json').read_bytes() == pointer
+            available = floor - (old_bytes if old.exists() else 0)
+            checks.append(available)
+            return available
+        result = cv.build(home, COPY, free_space=free_space, clone=lambda *_: False)
+        assert result['code'] == 'view_disk_floor' and old.is_dir()
+        assert checks == [floor - old_bytes]
+    checks.clear()
+    result = cv.build(home, COPY, free_space=free_space, clone=lambda *_: False)
+    assert result['code'] == 'ok', result
+    assert checks == [floor] and not old.exists()
+
+
+def test_r7_held_temp_before_floor(world, tmp_path):
+    home, copy, _ = world
+    current, _ = built(world)
+    r7_advance(copy, 2)
+    name = 'view-2-1-' + 'a' * 16 + '.tmp-' + 'b' * 32
+    held_temp = copy / name
+    held_temp.mkdir()
+    (held_temp / 'keep').write_bytes(b'held temporary control')
+    free_temp = copy / ('view-2-1-' + 'c' * 16 + '.tmp-' + 'd' * 32)
+    free_temp.mkdir()
+    outside = tmp_path / 'outside'
+    outside.mkdir()
+    (outside / 'keep').write_bytes(b'outside control')
+    symlink = copy / ('view-2-1-' + 'e' * 16)
+    symlink.symlink_to(outside, target_is_directory=True)
+    temp_symlink = copy / ('view-2-1-' + 'f' * 16 + '.tmp-' + 'a' * 32)
+    temp_symlink.symlink_to(outside, target_is_directory=True)
+    near_misses = [copy / (name + suffix) for suffix in ('x', '\n')]
+    near_misses += [copy / 'gen-9', copy / ('view-0-1-' + 'a' * 16),
+                    copy / (name[:-1]), copy / 'view.json.tmp-control']
+    for path in near_misses:
+        path.mkdir()
+        (path / 'keep').write_bytes(b'near miss control')
+    regular = copy / ('view-3-1-' + 'a' * 16)
+    regular.write_bytes(b'regular file control')
+    floor = cv.FLOOR + 2 * (copy / 'gen-2/lcm.db').stat().st_size
+    checks = []
+    def free_space(_):
+        checks.append(True)
+        assert current.is_dir() and held_temp.is_dir() and not free_temp.exists()
+        return floor - 1
+    with ExitStack() as stack:
+        held = os.open(held_temp, os.O_RDONLY)
+        stack.callback(os.close, held)
+        fcntl.flock(held, fcntl.LOCK_SH)
+        result = cv.build(home, COPY, free_space=free_space, clone=lambda *_: False)
+        assert result['code'] == 'view_disk_floor', result
+        assert checks == [True] and (held_temp / 'keep').read_bytes() == b'held temporary control'
+    assert all((p / 'keep').read_bytes() == b'near miss control' for p in near_misses)
+    assert symlink.is_symlink() and temp_symlink.is_symlink()
+    assert (outside / 'keep').read_bytes() == b'outside control'
+    assert regular.read_bytes() == b'regular file control'
+    checks.clear()
+    cv._sweep(copy, temporary_only=True)
+    assert not held_temp.exists() and current.is_dir()
+
+
+@pytest.mark.parametrize('stderr_mode', ['none', 'raises'])
+@pytest.mark.parametrize('enough_free', [False, True])
+def test_r7_cleanup_stderr_cannot_affect_build(world, monkeypatch, capsys, stderr_mode, enough_free):
+    home, copy, _ = world
+    abandoned = copy / ('view-1-1-' + 'e' * 16 + '.tmp-' + 'f' * 32)
+    abandoned.mkdir()
+    original = shutil.rmtree
+    def fail_removal(path, *args, **kwargs):
+        if Path(path) == abandoned:
+            raise PermissionError('synthetic removal refusal')
+        return original(path, *args, **kwargs)
+    class BrokenStderr:
+        def write(self, _):
+            raise RuntimeError('synthetic stderr refusal')
+    floor = cv.FLOOR + 2 * (copy / 'gen-1/lcm.db').stat().st_size
+    checks = []
+    def free_space(_):
+        checks.append(True)
+        return floor if enough_free else floor - 1
+    with monkeypatch.context() as patch:
+        patch.setattr(cv.shutil, 'rmtree', fail_removal)
+        patch.setattr(cv.sys, 'stderr', None if stderr_mode == 'none' else BrokenStderr())
+        result = cv.build(home, COPY, free_space=free_space, clone=lambda *_: False)
+    assert result['code'] == ('ok' if enough_free else 'view_disk_floor'), result
+    assert checks == [True] and abandoned.is_dir()
+    assert not capsys.readouterr().out
+    assert (copy / 'view.json').exists() == enough_free
+    assert json.loads((copy / 'view-result.json').read_bytes())['code'] == result['code']
