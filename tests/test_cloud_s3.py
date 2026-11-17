@@ -732,26 +732,3 @@ def test_host_probe_first_failure():
     with pytest.raises(s3.S3Error):
         s3.check_host(transport(r))
     assert [c[0] for c in r.calls] == ['PUT', 'DELETE']
-
-
-def test_live_configured_credentials_file(tmp_path, monkeypatch):
-    from tests.test_cloud_s3_live import configured
-    credential_file = tmp_path / 'private-credentials.json'
-    credential_file.write_text(json.dumps(CREDS))
-    credential_file.chmod(0o600)
-    config_file = tmp_path / 'host.json'
-    config_file.write_text(json.dumps(dict(endpoint='s3.example.invalid', bucket='bucket',
-        region='us-east-1', prefix=PREFIX, credentials_file=str(credential_file))))
-    monkeypatch.setenv('LCMX_S3_LIVE_A', str(config_file))
-    constructor = s3.S3Transport
-    fake = FakeBucket()
-    def offline(*args):
-        return constructor(*args, request=fake, clock=lambda: EPOCH)
-    monkeypatch.setattr(s3, 'S3Transport', offline)
-    t = configured('LCMX_S3_LIVE_A')
-    assert t.credentials.secret_access_key == SECRET
-    assert t.context.verify_mode == ssl.CERT_REQUIRED and t.context.check_hostname
-    t.put_new(KEY, b'fixture')
-    assert t.get(KEY) == b'fixture'
-    credential_file.chmod(0o640)
-    refused('credentials_mode', configured, 'LCMX_S3_LIVE_A')

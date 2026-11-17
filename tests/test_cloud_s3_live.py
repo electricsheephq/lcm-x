@@ -61,3 +61,29 @@ def configured(name):
                     reason='owner bucket and two scoped credentials required (O1)')
 def test_live_isolation():
     exercise(configured('LCMX_S3_LIVE_A'), configured('LCMX_S3_LIVE_B'))
+
+
+
+def test_live_configured_credentials_file(tmp_path, monkeypatch):
+    # Offline, so this file runs a test in every CI shard; the gate above needs the owner's bucket.
+    from tests.test_cloud_copy import PREFIX, refused
+    from tests.test_cloud_s3 import CREDS, EPOCH, KEY, SECRET, FakeBucket
+    credential_file = tmp_path / 'private-credentials.json'
+    credential_file.write_text(json.dumps(CREDS))
+    credential_file.chmod(0o600)
+    config_file = tmp_path / 'host.json'
+    config_file.write_text(json.dumps(dict(endpoint='s3.example.invalid', bucket='bucket',
+        region='us-east-1', prefix=PREFIX, credentials_file=str(credential_file))))
+    monkeypatch.setenv('LCMX_S3_LIVE_A', str(config_file))
+    constructor = s3.S3Transport
+    fake = FakeBucket()
+    def offline(*args):
+        return constructor(*args, request=fake, clock=lambda: EPOCH)
+    monkeypatch.setattr(s3, 'S3Transport', offline)
+    t = configured('LCMX_S3_LIVE_A')
+    assert t.credentials.secret_access_key == SECRET
+    assert t.context.verify_mode == ssl.CERT_REQUIRED and t.context.check_hostname
+    t.put_new(KEY, b'fixture')
+    assert t.get(KEY) == b'fixture'
+    credential_file.chmod(0o640)
+    refused('credentials_mode', configured, 'LCMX_S3_LIVE_A')
