@@ -611,8 +611,8 @@ def main():
             execute(args)
     except Exception as exc:
         import traceback
-        # Only harness canary/option diagnostics are shown; other exception text may carry corpus content.
-        reason = str(exc) if isinstance(exc, RecallOptionError) or (
+        # Only fixed harness diagnostics are shown; other exception text may carry corpus content.
+        reason = str(exc) if isinstance(exc, (RecallOptionError, delivery.LocalRecallUnavailable)) or (
             isinstance(exc, RuntimeError) and str(exc) in (CANARY_NO_MCP, CANARY_FAILED)) else None
         message = "FMP failed: " + type(exc).__name__ + (f" ({reason})" if reason else "") + " (no corpus logged)"
         home = getattr(args, "codex_home", None)

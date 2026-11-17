@@ -34,6 +34,34 @@ class LocalRecallUnavailable(RuntimeError):
     """A LOCAL benchmark must not silently measure full-text-only recall."""
 
 
+LOCAL_RECALL_STOP = {"not_certified", "catching_up", "prefix_stale", "provider_unavailable", "unavailable"}
+
+
+def recall_metadata(raw):
+    """Classify product replies without retaining reason, query or hit text."""
+    from hermes_lcm import tools
+    prefix_stale = getattr(tools, "_EMBEDDING_PREFIX_STALE_REASON", None)
+    payload = json.loads(raw)
+    reason = str(payload.get("degraded_reason") or "")
+    # Capacity exhaustion is wrapped as provider-unavailable by the product.
+    provider_failure = re.search(
+        r"embedding provider unavailable: (?![^;]*worker capacity is exhausted)", reason)
+    checks = [("error", "error" in payload),
+              ("not_certified", "coverage not certified" in reason),
+              ("catching_up", "semantic index catching up" in reason),
+              ("prefix_stale", prefix_stale is not None and prefix_stale in reason),
+              ("provider_unavailable", provider_failure),
+              ("unavailable", "local semantic recall unavailable; using full-text recall" in reason),
+              ("preparing", "local semantic recall preparing; using full-text recall" in reason),
+              ("worker_capacity", "worker capacity is exhausted" in reason),
+              ("arm_failed", "arm failed:" in reason),
+              ("timeout", payload.get("timeout") or "timed out" in reason),
+              ("summary_vectors_unavailable", "summary vectors are unavailable" in reason),
+              ("other", reason or payload.get("degraded"))]
+    return {"arms_run": list(payload.get("provenance", {}).get("arms_run", [])),
+            "reason_class": next((name for name, matched in checks if matched), "none")}
+
+
 def require_local_semantic(raw):
     payload = json.loads(raw)
     if ("chunk" not in payload.get("provenance", {}).get("arms_run", []) or
@@ -130,9 +158,11 @@ def dispatch(name, arguments, engine, offered=None):
     except Exception as exc:
         return json.dumps({"error": f"Error executing {name}: {exc}"}, ensure_ascii=False)
     if name == "lcm_recall" and getattr(engine, "_fmp_local_recall_guard", False):
-        payload = json.loads(raw)
-        if "error" not in payload and "coverage not certified" in str(payload.get("degraded_reason", "")):
-            raise LocalRecallUnavailable("local_recall_semantic_unavailable")
+        metadata = recall_metadata(raw)
+        if metadata["reason_class"] in LOCAL_RECALL_STOP:
+            exc = LocalRecallUnavailable("local_recall_semantic_unavailable")
+            exc.recall_metadata = metadata
+            raise exc
     if name == "lcm_recall" and getattr(getattr(engine, "_config", None), "recall_delivery_unit", "hits") == "session":
         payload = json.loads(raw)
         if "error" not in payload and payload.get("provenance", {}).get("delivery", {}).get("unit") != "session":

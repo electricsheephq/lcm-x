@@ -135,7 +135,7 @@ def retrieve(q, store, overrides):
              and payload.get("total_results") == len(hits) and delivery_valid)
     if not valid:
         raise Incomplete("effective recall readback mismatch")
-    return dict(evidence=evidence, source_sha256=sha(raw.encode()), metadata=dict(
+    return dict(evidence=evidence, source_sha256=sha(raw.encode()), metadata=dict(delivery.recall_metadata(raw),
         declared=expected, observed=observed, response_limit=payload["limit"], hit_count=len(hits),
         expanded_count=expansion.get("expanded_hit_count"),
         delivery_unit="session" if is_session else "hits", delivery_budget=16000 if is_session else None,
@@ -485,7 +485,8 @@ def main():
                 frames=[dict(file=Path(f.filename).name, line=f.lineno, function=f.name)
                         for f in traceback.extract_tb(exc.__traceback__)])
             write_json(receipt, state)
-        reason = str(exc) if isinstance(exc, ValueError) and str(exc).startswith("unsupported recall-time override") else None
+        reason = str(exc) if isinstance(exc, delivery.LocalRecallUnavailable) or (
+            isinstance(exc, ValueError) and str(exc).startswith("unsupported recall-time override")) else None
         print(json.dumps(dict(status="INCOMPLETE", error=type(exc).__name__, reason=reason)), file=sys.stderr)
         return 2
 
