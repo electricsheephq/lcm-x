@@ -651,8 +651,8 @@ and adds hits from the user's other machines in a separate list.**
   on its generation's folder; a folder is deleted only by a process that takes the lock exclusively without
   waiting, so a folder another session still reads stays. An old reader is stopped once its in-flight calls end,
   or when the tool budget runs out, so no reader holds a folder longer than one call. Row 5 runs with two mergers.
-  Peak disk: V11 (4.7). A refresh starts only when free disk exceeds twice the replica plus 5 GB; otherwise it
-  waits and `status` says why.
+  Peak disk: V11 (4.7). A refresh starts only when free disk exceeds twice the replica plus 5 GB, checked under
+  `replicas/space.lock` (V11); otherwise it waits and `status` says why.
 - A machine never reads the hosted copy of its own current copy id. It reads its superseded copies like any other
   replica (3.5).
 - The override owns recall once started (docs/claude-code-adapter.md:413-415). So the merger must fall back to
@@ -793,13 +793,14 @@ connection from another host."
       (mcp_reader.py:213-227) cannot reach it.
 - **V4. The build refuses what it cannot classify, and checks itself.** Every table has a class in one map in the
   view module (session, message, node, link, lineage, metadata, full-text, global), and so do every `metadata` family
-  and lineage encoding. When anything is to be left out:
-  - a table outside the map, or one the map classes `unsupported`, that holds rows stops the build with
-    `view_unsupported_table`. The six entity-memory tables are `unsupported` in rules 1: only the Hermes engine
-    creates them (db_bootstrap.py:3923), step 1 copies capture stores (D3), and their ownership (scope-wide entity
-    records, notes citing several sessions, an append-only event log) is not decided (V13);
+  and lineage encoding.
+  - When anything is to be left out, a table outside the map, or one the map classes `unsupported`, that holds rows
+    stops the build with `view_unsupported_table`. The six entity-memory tables are `unsupported` in rules 1: only
+    the Hermes engine creates them (db_bootstrap.py:3923), step 1 copies capture stores (D3), and their ownership
+    (scope-wide entity records, notes citing several sessions, an append-only event log) is not decided (V13);
   - a `metadata` key outside the families, or a lineage value that does not parse, that holds an id of R stops it
-    with `view_unsupported_key`.
+    with `view_unsupported_key`, even when nothing else is left out: no rule removes such a key, so a hard-linked or
+    reused view would serve a forgotten id.
   A compat test builds a store with every feature on and fails on a table the map lacks (as 3.6 does for the
   contract). It then builds that store's view without one of its sessions and runs the lane's independent scanner
   over it, so a new key family, a new value shape or a new session column also fails the test. After its deletes
@@ -816,7 +817,9 @@ connection from another host."
 - **V6. Payload files.** The view's `lcm-large-outputs/` holds hard links to the byte copy's files (a copy where
   linking fails), as the uploader stages them (cloud_copy.py:365-374). A reference is not ownership. A file is left
   out only when its own `session_id` field, the field the reader checks (tools.py:269-281), names a session in R, or
-  when it has no `session_id` and every row that references it (F3) belongs to a session in R. A file that a kept row
+  when every row that references it (F3) is left out by V3, by its session or by a row id `removed.json` names. The
+  uploader stages only files some row references (cloud_copy.py:352-374), so the next generation drops such a file
+  too, and the output of a message the user deleted from a session that stays is absent. A file that a kept row
   references stays even when a removed row quotes it too, so the kept session's own `lcm_expand` still resolves. So
   a removed session's payload, asked for through a visible session's lineage (expand_tools.py:189-198) or by name
   with no session (tools.py:255, :272), is absent.
@@ -833,7 +836,8 @@ connection from another host."
   1. reads `current` for the generation and holds that `gen-<n>/`'s shared lock (4.1) until it ends, so refresh
      cannot delete the byte copy under it;
   2. reads R and `removed.json`, then finds what would be left out, with the deletes' own conditions run as reads
-     on the byte copy and V6's test on its payload files;
+     on the byte copy and V6's test on its payload files, and runs V4's refusals the same way, so a view that is
+     reused (step 3) or hard-linked is checked against this R too;
   3. if that view exists, rewrites `view.json` and stops;
   4. otherwise builds in `view-...tmp-<token>/`: a hard link when nothing is left out (V7); else it checks the disk
      floor (V11), clones `lcm.db` where the filesystem can (`cp -c`, a reflink) or copies it, deletes and checks
@@ -864,16 +868,23 @@ connection from another host."
   answered its probe, as today; on a changed digest it receives no further call.
 - **V11. Disk.** S is one copy's database. Payloads are stored once wherever hard links work; on a filesystem
   without them V6 copies the kept files, which costs their bytes again. The view's database costs nothing when
-  nothing is left out, a few changed pages when cloned, and S when copied: at worst 2S plus payloads at rest. A
-  forget deletes the stale view first when no reader holds it; otherwise it costs one more S until that reader
-  closes. A refresh deletes the old byte copy once the new one is verified, then builds the new view while the old
-  one serves: at worst 3S, plus S per older view another session still reads. Two view folders can exist during a
+  nothing is left out, a few changed pages when cloned, and S when copied: at worst 2S plus payloads at rest. While
+  a build's deletes run, their rollback journal holds the original of every page they change, up to one more S,
+  until they commit. A forget deletes the stale view first when no reader holds it; otherwise it costs one more S
+  until that reader closes. A refresh deletes the old byte copy once the new one is verified, then builds the new
+  view while the old one serves: at worst 3S, or 4S while the deletes' journal exists, plus S per older view
+  another session still reads, plus copied payload bytes where hard links fail. Two view folders can exist during a
   refresh; only the one `view.json` names is served, and V2 holds for it because a refresh leaves the digests
   unchanged unless the new lineage lists new removals. Floors: refresh keeps 4.1's. A build checks its floor only
-  before it clones or copies the database or copies payload files: 5 GB free plus S, whether it clones or copies
-  (the deletes can change every page of a clone), plus the kept files' bytes when it must copy them. Below it the
-  copy stays unavailable (`view_disk_floor`); the no-rebuild path and hard links write almost nothing and need no
-  floor.
+  before it clones or copies the database or copies payload files: 5 GB free plus 2S, whether it clones or copies
+  (the deletes can change every page of a clone, and their journal can hold as much again), plus the kept files'
+  bytes when it must copy them. Below it the copy stays unavailable (`view_disk_floor`); the no-rebuild path and
+  hard links write almost nothing and need no floor. Builds and refreshes of every copy in a home take
+  `replicas/space.lock` (an exclusive OS file lock) for their floor check and hold it until the space they checked
+  for is in use: a build until its deletes commit and its payloads are in place, a refresh until its download or
+  patch ends. So no two of them pass a check against the same free space. A process takes `space.lock` last and
+  waits for no other lock while it holds it; a builder waits for it as for `view.lock` (V8), a refresh as for its
+  floor (4.1).
 - **V12. The wait. (Assumption: every number in this item; row 5V measures them.)** Each call adds two small file
   reads per copy (`view.json`, `removed.json`), one digest of the local forgotten set and one per copy. A routed call
   becomes one reader call; the parked merger made up to three and opened the copy's database itself
@@ -1053,7 +1064,7 @@ result counts.
 | 2D | **Base-plus-delta path** | The replay, manifest scaling, 90-day simulation, forced-base and forget cells of 3.7.5, embeddings off and on. Size cells on the shared development machine; timing cells on bench hosts with row 1's replay. | All five pass lines in 3.7.5, including the no-growth continuation; all uploaded bytes count. | Raise zlib level once on ratio failure, then report; return the size constant on line (5) failure; worst-window share above two thirds triggers manifest-compression follow-up. |
 | 3 | **Upload time** | First upload and incremental upload from each machine. A fixed 1 GiB transfer first gives the link's throughput. Then `kill -9` mid-upload three times and rerun. | Work outside the transfer (snapshot, guard, hashing) at most 60 s per GB. Transfer at least 80% of the link's throughput. After each kill: the rerun resumes the same attempt with its pending token, completes, re-sends no complete unchanged base part and at most one generation's delta objects (3.7.4), writes nothing onto an existing key, and the bucket never holds a manifest that names a missing part. | Fix in the transport lane; no design change. |
 | 4 | **Recall wait across 1, 2 and 4 stores** | The GA recall kit (bench/instruments/cc_mcp_recall/README.md:9-17, :23-25), arm T. Cells: plain reader, one store; merger, no replica; corpus split over 2 stores; over 4 stores; then 2 and 4 again with each replica padded to the largest real store from row 2. At least 200 warm calls per tool per cell, first calls reported apart, memory of all readers recorded with one session open and with four, each replica's mode recorded. | The bars in 4.4. Also correctness: 44 of 44 values found with byte-equal expand in every cell; 0 duplicates; with one session planted in two stores, including at least one externalized tool result, it is returned once; the kit's empty-store control passes first. | The kill line in 4.4: step 1 folds into step 2. |
-| 5 | **Replica refresh** | The second machine pulls each new generation into its own directory while two sessions' mergers send recall calls, with the handover in 4.1 (pointer file, probe call, shared folder locks, then delete). 100 handovers, some timed to land mid-call, with 20 forgets among them; same bars. | 0 failed calls; no call more than 300 ms above local-only (the merger waits 250 ms for a replica, so 50 ms is left for its own work); an id issued before a handover expands after it; the first call after a handover finds a value that only the new generation holds; no call reads two generations; refresh takes at most the transfer time plus 30 s per GB; peak disk at most twice the replica, or three times while another session still reads the oldest generation (4.1). | If calls still fail under this handover, the kill line applies. |
+| 5 | **Replica refresh** | The second machine pulls each new generation into its own directory while two sessions' mergers send recall calls, with the handover in 4.1 (pointer file, probe call, shared folder locks, then delete). 100 handovers, some timed to land mid-call, with 20 forgets among them; same bars. | 0 failed calls; no call more than 300 ms above local-only (the merger waits 250 ms for a replica, so 50 ms is left for its own work); an id issued before a handover expands after it; the first call after a handover finds a value that only the new generation holds; no call reads two generations; refresh takes at most the transfer time plus 30 s per GB; peak disk within V11's bound for the build path each handover used (hard link, clone or copy, recorded), counting the deletes' journal and any copied payload bytes; at least 10 of the 20 forgets name a session the replica holds, so views are built, not only hard-linked (V7). | If calls still fail under this handover, the kill line applies. |
 | 5V | **Replica view build** | On row 2's largest real store, time the match, a cloned build, a copied build and the reader's start, embeddings off and on. | V12's. | If the build misses: `quick_check` for `integrity_check`. If the match misses: a per-generation list (section 11). |
 | 6 | **Deleted bytes** | On a scratch store, forget a session that holds a planted string, through `delete_session_messages` with the adapter loaded. Take a snapshot. Search the snapshot's bytes and its full-text index for the string. | No pass line. The result decides the wording of the opt-in's limit in 5.2. | Not applicable: it is a disclosure, not a bar. |
 
@@ -1552,7 +1563,8 @@ Known differences, each tracked:
 - **Replica:** `<home>/cloud/replicas/<copy id>/gen-<generation>/` is a copy home and is never modified.
   `<home>/cloud/replicas/<copy id>/current` holds the generation number in ASCII digits, with an optional
   newline. Beside them, in `<home>/cloud/replicas/<copy id>/`: `view-<generation>-<rules>-<e>/` (a copy home, never
-  modified once renamed), `view.json`, `view-result.json`, `removed.json` and `view.lock` (F13, 4.7).
+  modified once renamed), `view.json`, `view-result.json`, `removed.json` and `view.lock` (F13, 4.7). The home's one
+  disk lock is `<home>/cloud/replicas/space.lock` (4.7 V11).
 - **Own copy id:** `<home>/cloud/cloud.json` is a JSON object whose `copy_id` names this home's own hosted copy.
   Only `enable` (a later step) writes it. Other keys are not fixed here.
 - **Working files:** `<home>/cloud/staging/` and the lock `<home>/cloud/upload.lock`.
@@ -1873,6 +1885,11 @@ item. On that revision's delta both answered SOUND, with no blocking finding.
 | Bot review of this record: the delete list removed messages by session only, so a message named only by a row id in `removed.json` (a partial delete whose session stays) could survive in a view built on the held generation | non-blocking | Fixed: the deletes name `messages` rows whose `store_id` is such a row id, and the byte-identical rule for kept sessions excepts them; the lane packet already required it (its test A4) | 4.7 V3 |
 | Bot review of this record: V6 copies payload files where hard links fail, but V11 said payloads are never stored twice and set no floor for those copies | non-blocking | Fixed: the floor also counts the kept files' bytes when they must be copied, and V11 says where payloads are stored twice | 4.7 V11 |
 | Bot review of this record: a clone passed the 5 GB floor, yet its deletes can change pages across the whole database and fill the disk | non-blocking | Fixed: a build that clones also reserves S, as a copy does; the no-rebuild path and hard links stay exempt | 4.7 V11 |
+| Bot review of this record, round 2: V6 kept a payload whose only referencing message `removed.json` names by row id, so the deleted message's output stayed readable by name | non-blocking (Important) | Fixed: a file is also left out when every row that references it is left out, by session or by row id; the uploader stages only referenced files, so the next generation drops it too | 4.7 V6 |
+| Bot review of this record, round 2: a reused or hard-linked view skipped V4's refusals, so an unclassified key holding a newly forgotten id could be served | non-blocking (Important) | Fixed: step 2 runs V4's refusals as reads on every build, and the key refusal no longer waits for something else to be left out | 4.7 V4, V8 |
+| Bot review of this record, round 2: the floor did not count the deletes' rollback journal | non-blocking | Fixed: a build's floor is 5 GB plus 2S, and V11's peaks count the journal | 4.7 V11 |
+| Bot review of this record, round 2: builds of two copies, or a build and a refresh, could pass their floors against the same free space | non-blocking | Fixed: every build and refresh in a home takes `replicas/space.lock` for its floor check and holds it until that space is in use | 4.1, 4.7 V11, F13 |
+| Bot review of this record, round 2: row 5's disk bar predated V11 | non-blocking | Fixed: row 5 uses V11's bound, records each handover's build path and names forgets of sessions the replica holds | section 6 row 5 |
 
 Both re-reviews are static design reviews with synthetic probes on capture stores the product built. They prove no
 built view, real-store timing, embeddings-on run, live interleaving or crash behavior; row 5V and the lanes'
