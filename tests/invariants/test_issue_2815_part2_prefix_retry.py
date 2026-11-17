@@ -526,3 +526,99 @@ def test_p8_prefix_rehole_retained_and_paced(tmp_path, monkeypatch):
         assert engine._retained_stop_hold_active()
     finally:
         engine.shutdown()
+
+
+
+def test_r3_scan_extension_forwards_prefix_retry(tmp_path, monkeypatch):
+    engine = build(tmp_path)
+    try:
+        call = {'role': 'assistant', 'content': '', 'timestamp': 2.0, 'tool_calls': [
+            {'id': name, 'type': 'function', 'function': {'name': 'read_file', 'arguments': '{}'}}
+            for name in ('first', 'second')]}
+        stored = [row(1), call, *[
+            {'role': 'tool', 'tool_call_id': name, 'content': 'synthetic result', 'timestamp': float(i)}
+            for i, name in enumerate(('first', 'second'), 3)], *[row(i) for i in range(5, 65)]]
+        engine.ingest(stored)
+        monkeypatch.setattr(store_complete, '_SCAN_LIMIT', 3)
+        holder = dict(stored[0])
+        chunk = [stored[49], holder]
+        mapping, claims = {id(chunk[0]): 50}, {id(holder): [1]}
+        budget = count_messages_tokens(chunk)
+        calls = []
+        original = engine._store_complete_input
+
+        def counted(*args, **kwargs):
+            calls.append((args[7], kwargs))
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(engine, '_store_complete_input', counted)
+        # Enter a lifted escape frame with the original caller's retry permission
+        # and budget. The first tool group straddles both sides of the scan cap.
+        out = engine._store_complete_input(chunk, claims, mapping, chunk, chunk, 0, [], 400_000,
+                                          escape_retained=True, allow_retained_escape=False,
+                                          lift_allowed=False, retry_allowed=True, retry_budget=budget)
+        extended = [(b, kw) for b, kw in calls if kw.get('scale') == store_complete._SCAN_EXTEND]
+        assert extended, 'fixture did not reach the scan-extension recursion'
+        frame_budget, flags = extended[0]
+        assert frame_budget > budget
+        assert flags.get('escape_retained') is True
+        assert flags.get('retry_allowed') is True, 'scan extension dropped the inherited retry permission'
+        assert flags.get('retry_budget') == budget, 'scan extension reset the inherited retry budget'
+        retry_budget, retry_flags = calls[calls.index(extended[0]) + 1]
+        assert retry_flags.get('prefix_retry') is False, 'the extended frame did not retry its retained hole'
+        assert retry_flags.get('retry_allowed') is False
+        assert retry_budget == min(frame_budget, budget)
+        assert engine._store_complete_hole == 1
+        assert covered(out, mapping) == [1]
+        assert count_messages_tokens([m for m, _ in out]) <= budget
+        assert engine._store_complete_cut
+    finally:
+        engine.shutdown()
+
+
+def test_r3_copy_rerun_forwards_prefix_retry(tmp_path, monkeypatch):
+    from hermes_lcm.dag import SummaryNode
+
+    engine = build(tmp_path)
+    try:
+        call = {'role': 'assistant', 'content': '', 'tool_calls': [
+            {'id': 'copy', 'type': 'function', 'function': {'name': 'read_file', 'arguments': '{}'}}]}
+        stored = [dict(call, timestamp=1.0), *[row(i) for i in range(2, 21)],
+                  dict(call, timestamp=21.0), *[row(i) for i in range(22, 65)]]
+        engine.ingest(stored)
+        engine._dag.add_node(SummaryNode(session_id='S', summary='synthetic prior leaf',
+                                        source_ids=[1], token_count=5, created_at=1.0))
+        engine._last_compacted_store_id = 1
+        monkeypatch.setattr(store_complete, '_SCAN_LIMIT', 40)
+        holder = dict(stored[1])
+        chunk = [stored[49], holder]
+        mapping, claims = {id(chunk[0]): 50}, {id(holder): [2]}
+        budget = count_messages_tokens(chunk)
+        calls = []
+        original = engine._store_complete_input
+
+        def counted(*args, **kwargs):
+            calls.append((args[7], kwargs))
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(engine, '_store_complete_input', counted)
+        # The small first frame stops before the E1 copy at 21; the lifted walk
+        # reaches it, then the retained claim at 2 empties the whole leaf.
+        out = engine._store_complete_input(chunk, claims, mapping, chunk, chunk, 1, [], budget,
+                                          allow_retained_escape=True)
+        reruns = [(b, kw) for b, kw in calls if kw.get('copy_lookup') == ({}, set())]
+        assert reruns, 'fixture did not reach the copy-exclusion rerun'
+        frame_budget, flags = reruns[0]
+        assert frame_budget > budget
+        assert flags.get('retry_allowed') is True, 'copy rerun dropped the inherited retry permission'
+        assert flags.get('retry_budget') == budget, 'copy rerun reset the inherited retry budget'
+        retry_budget, retry_flags = calls[calls.index(reruns[0]) + 1]
+        assert retry_flags.get('prefix_retry') is False, 'the copy-exclusion rerun did not retry its retained hole'
+        assert retry_flags.get('retry_allowed') is False
+        assert retry_budget == min(frame_budget, budget)
+        assert engine._store_complete_hole == 2
+        assert covered(out, mapping) == [2, 3]
+        assert count_messages_tokens([m for m, _ in out]) <= budget
+        assert engine._store_complete_cut
+    finally:
+        engine.shutdown()
