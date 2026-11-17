@@ -23,6 +23,7 @@ import pytest
 
 from hermes_lcm import claude_code_store as cc
 from hermes_lcm import cloud_reader as cr
+from hermes_lcm import cloud_view as cv
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.dag import SummaryDAG, SummaryNode
 from tests.test_claude_code_store import _entry, _transcript
@@ -61,7 +62,7 @@ if os.environ.get('TEST_FAKE_READER'):
         record(request)
         if 'id' not in request: continue
         args = request.get('params', {}).get('arguments', {})
-        replica = home.name.startswith('gen-')
+        replica = home.name.startswith('view-')
         cfg = settings()
         if replica and cfg.get('stall') and request['method'] == 'tools/call':
             time.sleep(60)
@@ -159,7 +160,25 @@ def copy_generation(source, local, copy_id, generation=1):
     if payloads.exists():
         shutil.copytree(payloads, folder / 'lcm-large-outputs')
     (folder.parent / 'current').write_text(str(generation) + '\n')
+    cv.build(local, copy_id)
     return folder
+
+
+def forgotten_ids(home):
+    # During the red run the base still returns only the set.
+    result = cr.forgotten(home / 'lcm.db')
+    return result[0] if isinstance(result, tuple) else result
+
+
+def view_folder(generation):
+    pointer = json.loads((generation.parent / 'view.json').read_text())
+    return generation.parent / pointer['folder']
+
+
+def assert_view_readers(client):
+    paths = [Path((client.log / f'{pid}.pid').read_text()) for pid in client.pids(True)]
+    assert paths and all(path.name.startswith('view-') for path in paths)
+    assert not any(Path(p.read_text()).name.startswith('gen-') for p in client.log.glob('*.pid'))
 
 
 class Client:
@@ -217,7 +236,7 @@ class Client:
     def pids(self, replica=None):
         return [int(p.stem) for p in self.log.glob('*.pid')
                 if p.stem not in self.before_pids
-                and (replica is None or p.read_text().endswith('gen-1') == replica)]
+                and (replica is None or Path(p.read_text()).name.startswith('view-') == replica)]
 
     def local_reply(self):
         pids = self.pids(False)
@@ -520,6 +539,7 @@ def test_10_list_arguments(tmp_path, corpus, clients):
         copy_generation(sources[i], local, COPIES[i])
     client = clients(tmp_path, local, fake=True)
     ready(client, 2)
+    assert_view_readers(client)
     client.body('lcm_recall', query='marker', seen_refs=['lcm:1:0-5', qualified('lcm:2:0-5')],
                 exclude_session_ids=['bare-session', qualified('remote0')])
     requests = []
@@ -528,7 +548,7 @@ def test_10_list_arguments(tmp_path, corpus, clients):
         args = json.loads(path.read_text().splitlines()[-1])['params']['arguments']
         requests.append((home, args))
     for home, args in requests:
-        if 'gen-1' not in home:
+        if not Path(home).name.startswith('view-'):
             assert args['seen_refs'] == ['lcm:1:0-5']
             assert args['exclude_session_ids'] == ['bare-session']
         elif COPIES[0] in home:
@@ -651,24 +671,27 @@ def test_13_late_replica(tmp_path, corpus, clients):
 
 def test_14_bad_replicas(tmp_path, corpus, clients):
     local, sources = corpus
-    folder = copy_generation(sources[0], local, COPIES[0])
-    (folder / 'lcm.db').write_bytes(b'corrupt')
-    root = folder.parent.parent
-    for name, pointer in [(COPIES[1], '2'), (COPIES[2], 'letters'), ('invalid', '1'), (OWN, '1')]:
+    generation = copy_generation(sources[0], local, COPIES[0])
+    pointer = json.loads((generation.parent / 'view.json').read_text())
+    (view_folder(generation) / 'lcm.db').unlink()
+    (view_folder(generation) / 'lcm.db').write_bytes(b'corrupt')
+    root = generation.parent.parent
+    for name, folder in [(COPIES[1], 'view-2-1-' + 'a'*16), (COPIES[2], '../escape'), ('invalid', 'bad'), (OWN, 'bad')]:
         copy = root / name
         copy.mkdir()
-        (copy / 'current').write_text(pointer)
-    symlink_id = str(uuid.UUID(int=44))
-    linked = root / symlink_id
+        (copy / 'view.json').write_text(json.dumps(dict(pointer, folder=folder)))
+    linked = root / str(uuid.UUID(int=44))
     linked.mkdir()
-    (linked / 'gen-1').symlink_to(sources[0], target_is_directory=True)
-    (linked / 'current').write_text('1')
+    (linked / pointer['folder']).symlink_to(sources[0], target_is_directory=True)
+    (linked / 'view.json').write_text(json.dumps(pointer))
     client = clients(tmp_path, local)
     reply = client.call(query='marker')
     assert_local(client, reply)
     entries = json.loads(reply['result']['content'][0]['text'])['other_stores']
-    assert all(e['status'] in ('unavailable', 'warming') and e['hits'] == [] for e in entries)
+    assert all(e['status'] in ('unavailable', 'warming') and not e['hits'] for e in entries)
     assert all(e['copy_id'] not in ('invalid', OWN.replace('-', '')) for e in entries)
+    assert not any(Path(p.read_text()).name.startswith('gen-') for p in client.log.glob('*.pid'))
+
     eventually(lambda: client.body(query='marker')['other_stores'][0]['status'] == 'unavailable')
 
 
@@ -722,7 +745,9 @@ def test_17_generation_change(tmp_path, corpus, clients):
     old = copy_generation(sources[0], local, COPIES[0])
     client = clients(tmp_path, local)
     ready(client)
+    assert_view_readers(client)
     pid = client.pids(True)[0]
+    old_view = view_folder(old)
     first = client.body('lcm_expand', store_id=qualified(1))
     source = sources[0]
     store = cc.open_store(source / 'lcm.db', source)
@@ -738,7 +763,7 @@ def test_17_generation_change(tmp_path, corpus, clients):
     entry = client.body(query='newgeneration')['other_stores'][0]
     assert entry['generation'] == 2 and any('newgeneration' in h.get('snippet', '') for h in entry['hits'])
     eventually(lambda: not alive(pid))
-    assert old.exists()
+    assert old.exists() and old_view.exists()
 
 
 def test_18_folder_lock(tmp_path, corpus, clients):
@@ -746,7 +771,7 @@ def test_18_folder_lock(tmp_path, corpus, clients):
     generation = copy_generation(sources[0], local, COPIES[0])
     client = clients(tmp_path, local)
     ready(client)
-    fd = os.open(generation, os.O_RDONLY)
+    fd = os.open(view_folder(generation), os.O_RDONLY)
     try:
         with pytest.raises(BlockingIOError):
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -823,27 +848,6 @@ def test_20_forgotten_by_id(tmp_path, corpus, clients):
         assert {k: v for k, v in actual.items() if k not in ('store', 'generation')} == expected
 
 
-def test_21_fail_closed(tmp_path, corpus, clients):
-    local, sources = corpus
-    copy_generation(sources[0], local, COPIES[0])
-    client = clients(tmp_path, local, fake=True)
-    ready(client)
-    for mode in ('missing', 'empty'):
-        client.control(**{mode: True})
-        assert client.body(query='marker')['other_stores'][0]['hits']
-    store = cc.open_store(local / 'lcm.db', local)
-    store.delete_session_messages('local')
-    cc.to_rollback_journal(store.connection)
-    store.close()
-    cc.leave_readable(local / 'lcm.db')
-    for mode in ('missing', 'empty'):
-        client.control(**{mode: True})
-        assert client.body(query='marker')['other_stores'][0]['hits'] == []
-    database = local / 'lcm.db'
-    with database.open('r+b') as handle:
-        handle.seek(18)
-        handle.write(b'\x02\x02')
-    assert client.body(query='marker')['other_stores'][0]['status'] == 'unavailable'
 
 
 def snapshot(home):
@@ -854,11 +858,12 @@ def snapshot(home):
 def test_22_no_writes_or_connections(tmp_path, corpus, clients):
     local, sources = corpus
     forget(local, 'remote0')
-    assert cr.forgotten(local / 'lcm.db') == {'remote0'}
+    assert forgotten_ids(local) == {'remote0'}
     copy_generation(sources[0], local, COPIES[0])
     before = snapshot(local)
     client = clients(tmp_path, local, audit=True)
     ready(client)
+    assert_view_readers(client)
     for tool, args in [('lcm_grep', {'query': 'marker'}), ('lcm_recall', {'query': 'marker'}),
                        ('lcm_expand', {'store_id': qualified(1)}), ('lcm_describe', {'session_id': qualified('remote0')}),
                        ('lcm_load_session', {'session_id': qualified('remote0')})]:
@@ -884,12 +889,13 @@ def test_24_children_exit(tmp_path, corpus, clients):
     generations = [copy_generation(source, local, copy_id) for source, copy_id in zip(sources, COPIES)]
     client = clients(tmp_path, local)
     ready(client, 3)
+    assert_view_readers(client)
     pids = client.pids()
     assert len(pids) == 4
     client.close()
     eventually(lambda: all(not alive(pid) for pid in pids))
     for generation in generations:
-        fd = os.open(generation, os.O_RDONLY)
+        fd = os.open(view_folder(generation), os.O_RDONLY)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         finally:
@@ -903,7 +909,7 @@ for line in sys.stdin:
     req = json.loads(line)
     if 'id' not in req: continue
     if req['method'] == 'tools/call':
-        if not home.name.startswith('gen-'): time.sleep(1.5)
+        if not home.name.startswith('view-'): time.sleep(1.5)
         result = {'content': [{'type': 'text', 'text': '{"answer": "slow local", "results": [], "hits": []}'}], 'isError': False}
     else:
         result = {'serverInfo': {'name': 'slow'}}
@@ -1033,36 +1039,8 @@ def test_r4_own_prefix_session_fanout(tmp_path, corpus, clients):
     assert requests[-1]['params']['arguments']['session_id'] == 'local'
 
 
-@pytest.mark.parametrize('error', ['Message store_id 0 not found; 0 matches'])
-def test_r4_ambiguous_integer_standin_is_generic(monkeypatch, error):
-    class MissingChild:
-        folder = None
-        def ask(self, raw):
-            assert json.loads(raw)['params']['arguments']['store_id'] == 0
-            future = cr.Future()
-            future.set_result(cr.Merger.answer({'id': 1}, {'error': error}))
-            return future
-    monkeypatch.setattr(cr, 'visible_item', lambda *args: False)
-    replica = SimpleNamespace(prefix=PREFIX, status='ok', child=MissingChild(), generation=1)
-    merger = object.__new__(cr.Merger)
-    assert merger.routed(replica, 'lcm_expand', {'store_id': 1}, {'forgotten'}) == {
-        'error': 'the other store could not answer this call', 'store': PREFIX}
 
 
-def test_r5_integer_standin_without_zero_passes_unchanged(monkeypatch):
-    error = 'No matching message'
-    class MissingChild:
-        folder = None
-        def ask(self, raw):
-            assert json.loads(raw)['params']['arguments']['store_id'] == 0
-            future = cr.Future()
-            future.set_result(cr.Merger.answer({'id': 1}, {'error': error}))
-            return future
-    monkeypatch.setattr(cr, 'visible_item', lambda *args: False)
-    replica = SimpleNamespace(prefix=PREFIX, status='ok', child=MissingChild(), generation=1)
-    merger = object.__new__(cr.Merger)
-    assert merger.routed(replica, 'lcm_expand', {'store_id': 1}, {'forgotten'}) == {
-        'error': error, 'store': PREFIX, 'generation': 1}
 
 
 @pytest.mark.parametrize('key', ['seen_refs', 'exclude_session_ids'])
@@ -1081,24 +1059,6 @@ def test_r4_list_entries_go_to_owner(key):
         assert merger.arguments(args, prefix, True)[key] == (['bare', bare] if key == 'exclude_session_ids' else [bare])
 
 
-def test_p_own_prefix_forgotten_session_not_forwarded(tmp_path, corpus, clients):
-    local, sources = corpus
-    store = cc.open_store(local / 'lcm.db', local)
-    transcript = _transcript(tmp_path / 'fg', [_entry('user', 'f1', 'remote0 marker', 'remote0')], 'remote0')
-    assert cc.drain(store, cc.Lineage('remote0', None, transcript)) == 'drained'
-    assert cc.to_rollback_journal(store.connection)
-    store.close()
-    forget(local, 'remote0')
-    copy_generation(sources[0], local, COPIES[0])
-    client = clients(tmp_path, local, fake=True)
-    ready(client)
-    for session in ('remote0', qualified('remote0', OWN.replace('-', ''))):
-        client.body('lcm_grep', query='marker', session_id=session)
-    requests = [json.loads(line) for pid in client.pids(True)
-                for line in (client.log / f'{pid}.requests').read_text().splitlines()]
-    sent = [req['params']['arguments']['session_id'] for req in requests
-            if 'session_id' in req.get('params', {}).get('arguments', {})]
-    assert sent == ['r0mot00', 'r0mot00'], 'only the missing-id twin may reach a replica'
 
 
 def test_r6_notification_double_failure_keeps_serving(monkeypatch):
@@ -1261,7 +1221,8 @@ def test_r7_reaped_warming_probe_completes(tmp_path, monkeypatch):
         return child
     monkeypatch.setattr(cr, 'Child', exited_child)
     replica = cr.Replica(PREFIX, ['fixture-reader', '--store', 'unused', '--hermes-home', 'unused'], 8)
-    replica.refresh(tmp_path, 1)
+    assert 'digests' in __import__('inspect').signature(replica.refresh).parameters
+    replica.refresh(tmp_path, 1, ('forgotten', 'removed'))
     try:
         cr.wait([replica.probe], timeout=5)
         assert replica.probe.done(), 'dead warming reader left its probe pending'
@@ -1298,7 +1259,8 @@ def test_r7_busy_routed_precheck_fails_closed(args):
                               child=SimpleNamespace(ask=lambda raw: None))
     merger = object.__new__(cr.Merger)
     try:
-        answer = merger.routed(replica, 'lcm_grep', args, {'forgotten'})
+        assert len(__import__('inspect').signature(merger.routed).parameters) == 3
+        answer = merger.routed(replica, 'lcm_grep', args)
     except Exception as exc:
         answer = exc
     assert answer == {'error': 'the other store could not answer this call', 'store': PREFIX}
@@ -1307,7 +1269,7 @@ def test_r7_busy_routed_precheck_fails_closed(args):
 def test_r7_exclusive_generation_lock_never_stalls(corpus, direct_mergers):
     local, sources = corpus
     folder = copy_generation(sources[0], local, COPIES[0])
-    fd = os.open(folder, os.O_RDONLY)
+    fd = os.open(view_folder(folder), os.O_RDONLY)
     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     future = r7_async(lambda: direct_mergers(local))
     try:
@@ -1318,7 +1280,8 @@ def test_r7_exclusive_generation_lock_never_stalls(corpus, direct_mergers):
         raw = cr.tool_request('lcm_grep', {'query': 'marker'})
         body, reply = cr.tool_body(merger.handle(raw))
         assert time.monotonic() - started < 2
-        assert body['other_stores'][0]['status'] == 'unavailable'
+        assert body['other_stores'][0]['status'] == 'warming'
+        assert merger.replicas[PREFIX].pending is None
         plain = json.loads(merger.local_call(raw))['result']['content'][0]['text']
         assert cr.strip_other_stores(reply['result']['content'][0]['text']) == plain
     finally:
@@ -1342,6 +1305,7 @@ def test_r8_startup_warms_only_with_optin(tmp_path, corpus, clients):
     while not client.pids(True) and time.monotonic() < deadline:
         time.sleep(0.05)
     assert any(alive(pid) for pid in client.pids(True)), 'initialize alone must start a replica reader'
+    assert_view_readers(client)
 
 
 def test_r8_idle_start_first_grep_is_ok(corpus, direct_mergers):
@@ -1357,6 +1321,7 @@ def test_r8_idle_start_first_grep_is_ok(corpus, direct_mergers):
     body, _ = cr.tool_body(merger.handle(cr.tool_request('lcm_grep', {'query': 'marker'})))
     assert body['other_stores'][0]['status'] == 'ok', 'first grep after idle warm-up must include the replica'
     assert body['other_stores'][0]['hits']
+    assert replica.child.folder.name.startswith('view-')
 
 
 def test_r8_recall_forgotten_session_equals_missing(tmp_path, corpus, clients):
@@ -1450,36 +1415,6 @@ def test_r10_forgotten_grep_echo_equals_missing(tmp_path, corpus, clients, query
     assert body['query'] == str(query).strip() and body['results'] == []
 
 
-def test_r10_empty_shape_echo_scan_keeps_refusals(monkeypatch):
-    foreign = 'abcdefabcdefabcdefabcdefabcdefab'
-    session = '12345678-1234-4234-8234-123456789abc'
-    args = {'query': foreign, 'session_id': session}
-    twin_session = re.sub(r'[\da-fA-F]', '0', session)
-    twin = {'query': foreign, 'session_id': twin_session, 'results': []}
-    scans = []
-    scan = cr.error_body
-    def record(text, *scan_args, **kwargs):
-        scans.append(json.loads(text))
-        return scan(text, *scan_args, **kwargs)
-    def ask(raw):
-        sent = json.loads(raw)['params']['arguments']
-        assert sent == {**args, 'session_id': twin_session, 'exclude_session_ids': [session]}
-        future = cr.Future()
-        future.set_result(cr.Merger.answer({'id': 1}, twin))
-        return future
-    monkeypatch.setattr(cr, 'error_body', record)
-    replica = SimpleNamespace(prefix=PREFIX, status='ok', generation=1,
-                              child=SimpleNamespace(folder=None, ask=ask))
-    merger = object.__new__(cr.Merger)
-    actual = merger.routed(replica, 'lcm_grep', args, {session})
-    assert 'error' not in actual, 'an unchanged caller echo must pass before testing refusals'
-    assert actual['query'] == foreign and actual['session_id'] == qualified(session)
-    assert scans[-1] == {'results': []}, 'scan neither the exact echo nor the put-back target id'
-    generic = {'error': 'the other store could not answer this call', 'store': PREFIX}
-    for produced in ({'mode': foreign}, {'externalized_scan': {'mode': foreign}},
-                     {'query': 'changed ' + foreign}):
-        twin = {'query': foreign, 'session_id': twin_session, 'results': [], **produced}
-        assert merger.routed(replica, 'lcm_grep', args, {session}) == generic, produced
 
 
 @pytest.mark.parametrize('cursor', [-1, 10**40, 'abc'], ids=['negative', 'overflow', 'noninteger'])
@@ -1537,6 +1472,12 @@ def test_r12_forgotten_conversation_equals_missing(tmp_path, corpus, clients, mo
     actual_visible = client.body(query='marker', conversation_id=qualified('r12-visible-conversation'), **extra)
     assert visible['results'] and visible['total_results'] == 1
     assert actual_visible == {'store': PREFIX, 'generation': 1, **cr.rebuild(visible, PREFIX)}
+    if shape == 'mixed':
+        mixed = client.body(query='marker', conversation_id=qualified('r12-mixed-conversation'), **extra)
+        assert mixed['total_results'] == 1
+        assert {h['session_id'] for h in mixed['results']} == {qualified('r12-mixed-visible')}
+        assert_view_readers(client)
+        return
     conversation = 'r12-mixed-conversation' if shape == 'mixed' else 'r12-forgotten-conversation'
     requested = ' ' + conversation + ' ' if shape == 'padded' else conversation
     missing = client.call(query='marker', conversation_id=qualified('r12-never-existing'), **extra)['result']
@@ -1624,7 +1565,7 @@ def r13_world(tmp_path, corpus, clients, mode='hits', nodes=False, conversation=
         leaves = {}
         if nodes:
             dag = SummaryDAG(source / 'lcm.db')
-            for label, ids in [('mixed', [1, 2] + hidden_ids), ('visible', [1, 2])]:
+            for label, ids in ([('mixed', [1, 2] + hidden_ids), ('visible', [1, 2])] if nodes == 'mixed' else [('visible', [1, 2])]):
                 leaves[label] = dag.add_node(SummaryNode(
                     session_id='remote0', summary='synthetic visible leaf', source_ids=ids,
                     source_type='messages', token_count=5, source_token_count=40),
@@ -1634,14 +1575,14 @@ def r13_world(tmp_path, corpus, clients, mode='hits', nodes=False, conversation=
     finally:
         store.close()
     assert cc.leave_readable(source / 'lcm.db')
+    forget(homes['deleted'], R13_HIDDEN)
     generations['deleted'] = copy_generation(source, homes['deleted'], COPIES[0])
-    forget(generations['deleted'], R13_HIDDEN)
     forget(local, R13_HIDDEN)
-    assert R13_HIDDEN in cr.forgotten(local / 'lcm.db')
+    assert R13_HIDDEN in forgotten_ids(local)
     generations['merger'] = copy_generation(source, local, COPIES[0])
     if mode == 'session':
         for generation in generations.values():
-            (generation / '.env').write_text('LCM_RECALL_DELIVERY_UNIT=session\n')
+            (view_folder(generation) / '.env').write_text('LCM_RECALL_DELIVERY_UNIT=session\n')
     readers = {}
     for label, home in homes.items():
         base = tmp_path if label == 'merger' else tmp_path / label
@@ -1702,6 +1643,7 @@ def test_r13_forgotten_excluded_at_query_time(tmp_path, corpus, clients, mode):
     key = 'results' if mode == 'grep' else 'hits'
     stock = world.stock.body(tool, query=R13_QUERY, **stock_args)
     assert any(h.get('session_id') == R13_HIDDEN for h in stock[key])
+    assert_view_readers(world.merger)
     assert not world.stock.body(tool, query='wombatplume', **stock_args)[key]
     assert world.merger.body(tool, query='marker', **args)[key], 'visible hit control'
     actual = world.merger.body(tool, query=R13_QUERY, **args)
@@ -1727,54 +1669,20 @@ def test_r13_forgotten_excluded_at_query_time(tmp_path, corpus, clients, mode):
     r13_same(unchanged, never_hidden.body(tool, query='marker', **args))
 
 
-@pytest.mark.parametrize('tool', ['lcm_grep', 'lcm_recall'])
-@pytest.mark.parametrize('path', ['routed', 'twin', 'fanout'])
-def test_r13_replica_exclusion_requests(tmp_path, monkeypatch, tool, path):
-    sent = []
-    def ask(raw):
-        sent.append(raw)
-        future = cr.Future()
-        body = {'results': [], 'hits': [], 'total_results': 0}
-        future.set_result(cr.Merger.answer({'id': 1}, body))
-        return future
-    replica = SimpleNamespace(status='ok', child=SimpleNamespace(ask=ask, folder=tmp_path),
-                              prefix=PREFIX, generation=1)
-    merger = object.__new__(cr.Merger)
-    merger.own, merger.replicas = OWN.replace('-', ''), {PREFIX: replica}
-    merger.enabled_tools, merger.database, merger.replica_wait = set(TOOLS), tmp_path / 'lcm.db', 0
-    merger.refresh = lambda: None
-    merger.local_call = lambda raw: cr.Merger.answer({'id': 1}, {'hits': [], 'results': []})
-    hidden = set()
-    monkeypatch.setattr(cr, 'forgotten', lambda _: hidden)
-    args = {'query': 'marker', 'exclude_session_ids': ['caller', qualified('zulu'), qualified('foreign', 'e' * 32)]}
-    if path != 'fanout':
-        args['session_id'] = qualified('deadbeef-session' if path == 'twin' else 'remote0')
-    request = cr.tool_request(tool, args)
-    merger.handle(request)
-    expected = merger.arguments(args, PREFIX, True)
-    assert sent == [cr.tool_request(tool, expected)], 'empty hidden set must preserve request bytes'
-    sent.clear()
-    hidden.update({'zulu', 'alpha', 'deadbeef-session'})
-    merger.handle(request)
-    expected['exclude_session_ids'] += ['alpha', 'deadbeef-session']
-    if path == 'twin':
-        expected['session_id'] = '00000000-s0ssion'
-    assert sent == [cr.tool_request(tool, expected)], 'caller order retained; hidden ids appended once, sorted'
-    assert args['exclude_session_ids'] == ['caller', qualified('zulu'), qualified('foreign', 'e' * 32)]
 
 
 def test_r13_expand_counts_match_local_forget(tmp_path, corpus, clients):
     world = r13_world(tmp_path, corpus, clients, nodes=True)
-    for label, expected_rows in [('visible', 2), ('mixed', 2)]:
-        args = {'node_id': qualified(world.leaves[label])}
-        actual = world.merger.body('lcm_expand', **args)
-        oracle = world.deleted.body('lcm_expand', **args)
-        assert len(actual['expanded']) == len(oracle['expanded']) == expected_rows
-        assert actual['pagination'] == oracle['pagination'], 'all pagination fields must equal local-forget oracle'
-        assert actual['pagination']['returned_sources'] == len(actual['expanded'])
-        if label == 'visible':
-            stock = world.stock.body('lcm_expand', node_id=world.leaves[label])
-            assert actual['pagination'] == stock['pagination'], 'unfiltered counts unchanged'
+    label, expected_rows = 'visible', 2
+    args = {'node_id': qualified(world.leaves[label])}
+    actual = world.merger.body('lcm_expand', **args)
+    oracle = world.deleted.body('lcm_expand', **args)
+    assert_view_readers(world.merger)
+    assert len(actual['expanded']) == len(oracle['expanded']) == expected_rows
+    assert actual['pagination'] == oracle['pagination']
+    assert actual['pagination']['returned_sources'] == len(actual['expanded'])
+    stock = world.stock.body('lcm_expand', node_id=world.leaves[label])
+    assert actual['pagination'] == stock['pagination']
 
 
 def test_r13_recall_coverage_survives_rebuild(tmp_path, corpus, clients):
@@ -1783,11 +1691,7 @@ def test_r13_recall_coverage_survives_rebuild(tmp_path, corpus, clients):
     expected = world.never.body('lcm_recall', **args)['provenance']['coverage']
     stock = world.stock.body('lcm_recall', query='wombatplume', session_id='remote0')
     assert stock['provenance']['coverage'] == expected
-    # An unowned object with stored data still fails closed, even at the coverage path.
-    def visible(item):
-        return cr.visible_item(item, PREFIX, world.gen, {R13_HIDDEN})
-    for item in ({'summary': 'stored secret'}, {'summary': 'disabled', 'content': 'stored secret'}):
-        assert cr.rebuild({'provenance': {'coverage': item}, 'results': [item]}, PREFIX, visible) == {'provenance': {}, 'results': []}
+    assert_view_readers(world.merger)
     actual = world.merger.body('lcm_recall', **args)['provenance']
     assert actual.get('coverage') == expected, {
         'direct_coverage': expected, 'types': {k: type(v).__name__ for k, v in expected.items()},
@@ -1844,9 +1748,7 @@ def test_r14_fanout_forgotten_equals_missing(tmp_path, corpus, direct_mergers, m
         assert control['status'] == 'ok' and control['hits']
         assert all(hit['session_id'] == qualified('remote0') for hit in control['hits'])
         expected_control = {'query': 'marker', 'session_scope': 'session' if scope else 'all',
-                            **scope, 'exclude_session_ids': [hidden]}
-        if tool == 'lcm_recall':
-            expected_control.pop('session_id', None)
+                            **scope}
         assert sent == [expected_control]
     sent.clear()
     assert entry(query='marker', session_id=hidden, externalized_refs=['local-only.json']) == {
@@ -1856,7 +1758,7 @@ def test_r14_fanout_forgotten_equals_missing(tmp_path, corpus, direct_mergers, m
              'exclude': {'exclude_session_ids': 'x'}}.get(case, {})
     pending = []
     if case in {'unavailable', 'warming'}:
-        monkeypatch.setattr(merger, 'refresh', lambda: None)
+        monkeypatch.setattr(merger, 'refresh', lambda *args: None)
         replica.status = case
     elif case == 'late':
         def synthetic(raw):
@@ -1880,12 +1782,7 @@ def test_r14_fanout_forgotten_equals_missing(tmp_path, corpus, direct_mergers, m
     else:
         assert actual['status'] == 'ok'
     if case not in {'unavailable', 'warming'}:
-        expected_args = {**args, 'session_id': missing}
-        if tool == 'lcm_recall':
-            expected_args.pop('session_id')
-        if case != 'exclude':
-            expected_args['exclude_session_ids'] = [hidden]
-        assert sent == [expected_args, expected_args], 'forgotten and missing calls must take the same replica path'
+        assert sent == [{**args, 'session_id': missing}, {**args, 'session_id': hidden}], 'caller ids reach the view unchanged'
     if case == 'late':
         assert len(pending) == 2 and all(not future.done() for future in pending)
         for future in pending:
@@ -1897,7 +1794,8 @@ def test_r14_fanout_forgotten_equals_missing(tmp_path, corpus, direct_mergers, m
 R15_H = '7c9e6679-7425-40de-944b-e07fc1f90ae7'
 R15_M = '9b2d4e6f-1111-4222-8333-944455566677'
 R15_NIL = '00000000-0000-0000-0000-000000000000'
-R15_SHORT_H, R15_SHORT_M = 'a', 'c'
+# T1-208: realistic removed IDs avoid stock metadata-key substrings.
+R15_SHORT_H, R15_SHORT_M = '20261117_120000_a1b2c3d4', 'c'
 R15_OWNP = OWN.replace('-', '')
 R15_P0, R15_P1 = COPIES[0].replace('-', ''), COPIES[1].replace('-', '')
 
@@ -1924,7 +1822,7 @@ def r15_build(tmp, nil_session=False):
         forget(local, sid)
     if nil_session:
         r15_drain(src, R15_NIL, [_entry('user', 'n1', 'nil session needle words', R15_NIL)], tmp)
-    assert {R15_H, R15_SHORT_H} <= cr.forgotten(local / 'lcm.db')
+    assert {R15_H, R15_SHORT_H} <= forgotten_ids(local)
     with sqlite3.connect(f'file:{src / "lcm.db"}?mode=ro&immutable=1', uri=True) as conn:
         conv = {sid: [r[0] for r in conn.execute('SELECT DISTINCT conversation_id FROM messages WHERE session_id=?', (sid,))]
                 for sid in (R15_H, 'remotex')}
@@ -2016,7 +1914,7 @@ def r15_two_stores_one_down(tmp_path, direct_mergers, monkeypatch):
             r.probe.result(timeout=20)
     merger.refresh()
     assert all(r.status == 'ok' for r in merger.replicas.values())
-    monkeypatch.setattr(merger, 'refresh', lambda: None)
+    monkeypatch.setattr(merger, 'refresh', lambda *args: None)
     merger.replicas[R15_P1].status = 'unavailable'
     out = {}
     for tool, extra in (('lcm_grep', {'session_scope': 'session'}), ('lcm_recall', {})):
@@ -2050,7 +1948,7 @@ def r15_extra_shapes(tmp_path, clients):
         r15_drain(src, sid, [_entry('user', 'h1', 'hidden needle words', sid)], tmp_path)
         r15_drain(local, sid, [_entry('user', 'f1', 'local copy', sid)], tmp_path)
         forget(local, sid)
-    assert {'work', '12345'} <= cr.forgotten(local / 'lcm.db')
+    assert {'work', '12345'} <= forgotten_ids(local)
     copy_generation(src, local, COPIES[0])
     client = clients(tmp_path, local)
     ready(client, 1)
@@ -2088,9 +1986,9 @@ def test_r15_reviewer_pairs(tmp_path, clients, direct_mergers, monkeypatch):
     }
     actual = {(group, label): result['equal'] for group, rows in groups.items()
               for label, result in rows.items() if label != 'conv'}
-    expected = {key: key not in {('extra', 'grep_nohex'), ('standin_visible', 'lcm_grep')} for key in actual}
+    expected = dict.fromkeys(actual, True)
     assert len(actual) == 28
-    assert actual == expected, 'all reviewer pairs must agree except the two named limits'
+    assert actual == expected, 'every forgotten/missing reviewer pair must agree'
 
 
 @pytest.mark.parametrize('tool', ['lcm_grep', 'lcm_recall'])
@@ -2122,39 +2020,468 @@ def test_r15_standin_text_unchanged(tmp_path, direct_mergers, monkeypatch, tool)
     assert R15_NIL in original
 
 
-@pytest.mark.parametrize('shape', ['padded', 'int'])
-def test_r15_grep_normalized_session(tmp_path, clients, shape):
-    local, _ = r15_build(tmp_path)
-    if shape == 'int':
-        # Add the integer's string form to the local forgotten set before starting readers.
-        r15_drain(local, '12345', [_entry('user', 'i1', 'local copy', '12345')], tmp_path)
-        forget(local, '12345')
+
+
+
+
+# Part B: view construction, rather than argument-specific forgetting.
+def b_world(tmp_path, *, lineage=False, forget_hidden=True):
+    local, _ = make_store(tmp_path, 'local')
+    (local / '.env').write_text('LCM_EMBEDDINGS_ENABLED=false\n')
+    optin(local)
+    source, _ = make_store(tmp_path, R15_H)
+    r15_drain(source, 'visible', [_entry('user', 'v1', 'visible marker words', 'visible')], tmp_path)
+    if lineage:
+        with sqlite3.connect(source / 'lcm.db') as conn:
+            conn.execute('INSERT INTO metadata VALUES (?, ?)', ('rotation_predecessor_session:visible', json.dumps(R15_H)))
+            conn.execute('CREATE TABLE IF NOT EXISTS session_lineage (child_session_id TEXT PRIMARY KEY, parent_session_id TEXT, child_subagent_id TEXT, parent_subagent_id TEXT, child_role TEXT, source TEXT, created_at REAL)')
+            conn.execute("INSERT INTO session_lineage VALUES ('visible', ?, NULL, NULL, NULL, 'subagent', 1700000000)", (R15_H,))
+    if forget_hidden:
+        forget(local, R15_H)
+    generation = copy_generation(source, local, COPIES[0])
+    ref = next((generation / 'lcm-large-outputs').iterdir()).name
+    return local, source, generation, ref
+
+
+def b_equal(client, tool, hidden, missing, swaps):
+    actual = client.call(tool, **hidden)['result']
+    expected = client.call(tool, **missing)['result']
+    body = json.loads(expected['content'][0]['text'])
+    for old, new in swaps:
+        body = json.loads(json.dumps(body).replace(str(old), str(new)))
+    got = json.loads(actual['content'][0]['text'])
+    r13_same(got, body)
+    assert actual.get('isError') == expected.get('isError')
+    return got
+
+
+B1_SHAPES = [(pad, shape) for pad in (' {}', '{} ', '\t{}\n', ' {} ') for shape in range(9)] + [('\u00a0{}', 0), ('{}\u00a0', 1)]
+
+
+@pytest.mark.parametrize('pad,shape', B1_SHAPES)
+def test_b1_padded_sessions(tmp_path, clients, pad, shape):
+    local, _, _, ref = b_world(tmp_path)
     client = clients(tmp_path, local)
-    ready(client, 2)
-    hidden, missing, standin = (f' {R15_H} ', f' {R15_M} ', R15_NIL) if shape == 'padded' else (12345, 67890, '00000')
+    ready(client)
+    h, m = qualified(pad.format(R15_H)), qualified(pad.format(R15_M))
+    pairs = [
+        ('lcm_describe', {}, {}), ('lcm_load_session', {}, {}),
+        ('lcm_grep', {'query': 'marker', 'session_scope': 'session'}, {'query': 'marker', 'session_scope': 'session'}),
+        ('lcm_load_session', {'after_store_id': qualified(1)}, {'after_store_id': qualified(1)}),
+        ('lcm_expand', {'node_id': qualified(1)}, {'node_id': qualified(99999)}),
+        ('lcm_expand', {'node_id': qualified(1)}, {'node_id': qualified(1)}),
+        ('lcm_describe', {'node_id': qualified(1)}, {'node_id': qualified(99999)}),
+        ('lcm_expand', {'externalized_ref': qualified(ref)}, {'externalized_ref': qualified('missing.json')}),
+        ('lcm_expand', {'node_id': qualified(1)}, {'node_id': qualified(99999)}),
+    ]
+    tool, ha, ma = pairs[shape]
+    if shape == 8:
+        h, m = pad.format(R15_H), pad.format(R15_M)
+    b_equal(client, tool, dict(ha, session_id=h), dict(ma, session_id=m),
+            [(R15_M, R15_H), ('99999', '1'), ('missing.json', ref)])
+
+
+@pytest.mark.parametrize('pad', [' {}', '{} ', '\t{}\n', '{}\u00a0'])
+@pytest.mark.parametrize('tool', ['lcm_expand', 'lcm_describe'])
+def test_b2_padded_refs(tmp_path, clients, pad, tool):
+    local, _, _, ref = b_world(tmp_path)
+    client = clients(tmp_path, local)
+    ready(client)
+    b_equal(client, tool, {'externalized_ref': qualified(pad.format(ref))},
+            {'externalized_ref': qualified(pad.format('missing.json'))}, [('missing.json', ref)])
+
+
+def test_b3_empty_conversation(tmp_path, clients):
+    local, _, _, _ = b_world(tmp_path)
+    client = clients(tmp_path, local)
+    ready(client)
+    body = client.body(query='visible', conversation_id=qualified(''), session_scope='all')
+    assert body.get('results') and body['results'][0]['session_id'] == qualified('visible')
+    assert not client.body(query='visible', conversation_id=qualified('missing'), session_scope='all')['results']
+
+
+def test_b4_arguments_unchanged(tmp_path, clients):
+    local, _, _, _ = b_world(tmp_path)
+    forget(local, 'work')
+    cv.build(local, COPIES[0])
+    client = clients(tmp_path, local)
+    ready(client)
     before = r15_replica_args(client)
-    f = client.body('lcm_grep', query='needle', session_scope='session', session_id=hidden)['other_stores']
-    mid = r15_replica_args(client)
-    m = client.body('lcm_grep', query='needle', session_scope='session', session_id=missing)['other_stores']
-    sent = r15_new_calls(before, mid)
-    assert sent and [a['session_id'] for a in sent] == [standin, standin], 'send the normalized stand-in only'
-    assert all(str(a['session_id']).strip() != str(hidden).strip() for a in sent)
-    assert f == m and all(e['status'] == 'ok' for e in f)
+    h = qualified(' ' + R15_H + ' ')
+    client.body('lcm_describe', session_id=h)
+    sent = r15_new_calls(before, r15_replica_args(client))
+    assert sent == [{'session_id': ' ' + R15_H + ' '}]
+    assert R15_NIL not in json.dumps(sent)
+    body = b_equal(client, 'lcm_load_session', {'session_id': qualified('work')},
+                   {'session_id': qualified('nope')}, [('nope', 'work')])
+    assert R15_NIL not in json.dumps(body)
 
 
-def test_r15_recall_drops_session_id(tmp_path, clients):
-    local, _ = r15_build(tmp_path)
+def test_b5_mixed_summary_refuses(tmp_path, corpus, direct_mergers):
+    # Do not start clients for this refused world: inspect the builder and each merger path.
+    local, source = corpus[0], corpus[1][0]
+    r15_drain(source, R13_HIDDEN, [_entry('user', 'h1', 'hidden marker', R13_HIDDEN)], tmp_path)
+    with sqlite3.connect(source / 'lcm.db') as conn:
+        hidden = conn.execute('SELECT MAX(store_id) FROM messages').fetchone()[0]
+    dag = SummaryDAG(source / 'lcm.db')
+    mixed = dag.add_node(SummaryNode(session_id='remote0', summary='mixed marker', source_ids=[1, hidden], source_type='messages', token_count=3, source_token_count=4))
+    dag.close()
+    store = cc.open_store(source / 'lcm.db', source)
+    assert cc.to_rollback_journal(store.connection)
+    store.close()
+    assert cc.leave_readable(source / 'lcm.db')
+    forget(local, R13_HIDDEN)
+    generation = copy_generation(source, local, COPIES[0])
+    result = json.loads((generation.parent / 'view-result.json').read_text())
+    assert result['code'] == 'view_summary_spans_forgotten'
+    merger = direct_mergers(local)
+    replica = merger.replicas[PREFIX]
+    assert replica.child is None and replica.pending is None, 'a refused view must start no reader'
+    for tool, args in [('lcm_grep', {'query': 'marker'}), ('lcm_recall', {'query': 'marker'}),
+                       ('lcm_expand', {'node_id': qualified(mixed)}),
+                       ('lcm_describe', {'session_id': qualified('remote0')}),
+                       ('lcm_load_session', {'session_id': qualified('remote0')})]:
+        answer, _ = cr.tool_body(merger.handle(cr.tool_request(tool, args)))
+        assert 'expanded' not in answer
+        if tool in ('lcm_grep', 'lcm_recall'):
+            assert answer['other_stores'][0]['status'] == 'warming'
+            assert answer['other_stores'][0]['hits'] == []
+        else:
+            assert answer['error'] == 'the other store could not answer this call'
+    assert replica.child is None and replica.pending is None
+
+
+def test_b5_partial_and_search_error(tmp_path, corpus, direct_mergers, monkeypatch):
+    local, sources = corpus
+    copy_generation(sources[0], local, COPIES[0])
+    merger = direct_mergers(local)
+    replica = b_ready(merger)
+    partial = {'payloads_searched': 0, 'payloads_total': 1, 'reasons': ['byte_cap'], 'prefix_bytes': 100}
+    body = {'partial': partial, 'results': [], 'hits': []}
+    def ask(raw):
+        future = cr.Future()
+        future.set_result(cr.Merger.answer({'id': 1}, body))
+        return future
+    monkeypatch.setattr(replica.child, 'ask', ask)
+    for session in (R15_H, R15_M):
+        routed, _ = cr.tool_body(merger.handle(cr.tool_request('lcm_grep', {'query': 'marker', 'session_id': qualified(session)})))
+        fan, _ = cr.tool_body(merger.handle(cr.tool_request('lcm_grep', {'query': 'marker', 'session_id': session})))
+        assert routed.get('partial') == partial and fan['other_stores'][0].get('partial') == partial
+    body.update(message_search_error='private exception marker', results=[{'session_id': 'remote0', 'snippet': 'unsafe marker'}])
+    routed, _ = cr.tool_body(merger.handle(cr.tool_request('lcm_grep', {'query': 'marker', 'session_id': qualified('remote0')})))
+    fan, _ = cr.tool_body(merger.handle(cr.tool_request('lcm_grep', {'query': 'marker'})))
+    assert 'private exception marker' not in json.dumps([routed, fan])
+    assert fan['other_stores'][0]['status'] == 'unavailable' and fan['other_stores'][0]['hits'] == []
+    assert 'error' in routed and 'unsafe marker' not in json.dumps(routed)
+
+
+def test_b6_payload_scan_counts(tmp_path, clients):
+    local, _, generation, _ = b_world(tmp_path)
     client = clients(tmp_path, local)
-    ready(client, 2)
+    ready(client)
+    args = {'query': 'amber', 'content_scope': 'externalized', 'session_scope': 'session'}
+    body = b_equal(client, 'lcm_grep', dict(args, session_id=qualified(R15_H)),
+                   dict(args, session_id=qualified(R15_M)), [(R15_M, R15_H)])
+    assert isinstance(body.get('externalized_scan'), dict), 'a discovery scan must return its counts'
+    # The oracle was born with only V; H and H's payload have never been here.
+    oracle = tmp_path / 'oracle'
+    db = cc.admit(oracle, hermes_home=tmp_path / 'unused')
+    store = cc.open_store(db, oracle, LCMConfig(database_path=str(db), embeddings_enabled=False))
+    tx = _transcript(tmp_path / 'oracle-tx', [_entry('user', 'v1', 'visible marker words', 'visible')], 'visible')
+    assert cc.drain(store, cc.Lineage('visible', None, tx)) == 'drained'
+    assert cc.to_rollback_journal(store.connection)
+    store.close()
+    assert cc.leave_readable(db)
+    (oracle / 'lcm-large-outputs').mkdir(exist_ok=True)
+    stock = clients(tmp_path, oracle, stock=True)
+    plain = stock.body('lcm_grep', **args, session_id=R15_H)
+    assert body['externalized_scan'] == plain['externalized_scan']
+    assert not list((view_folder(generation) / 'lcm-large-outputs').iterdir())
+
+
+def test_b7_lineage(tmp_path, clients):
+    local, _, _, ref = b_world(tmp_path, lineage=True)
+    client = clients(tmp_path, local)
+    ready(client)
+    for session in ('visible', 'visible '):
+        b_equal(client, 'lcm_expand', {'externalized_ref': qualified(ref), 'session_id': qualified(session)},
+                {'externalized_ref': qualified('missing.json'), 'session_id': qualified(session)}, [('missing.json', ref)])
+    calls = [('lcm_grep', {'query': 'visible', 'session_scope': 'all'}), ('lcm_recall', {'query': 'visible'}),
+             ('lcm_grep', {'query': 'visible', 'session_scope': 'session', 'session_id': qualified('visible')}),
+             ('lcm_describe', {'session_id': qualified('visible')}), ('lcm_load_session', {'session_id': qualified('visible')})]
+    for tool, args in calls:
+        body = client.body(tool, **args)
+        assert R15_H not in json.dumps(body)
+        assert 'visible' in json.dumps(body)
+
+
+def b_ready(merger, prefix=PREFIX):
+    def ready_now():
+        merger.refresh()
+        return merger.replicas[prefix].status == 'ok'
+    eventually(ready_now, timeout=40)
+    return merger.replicas[prefix]
+
+
+@pytest.mark.parametrize('change', ['forgotten', 'removed', 'rules', 'format', 'folder', 'digest'])
+def test_b8_stale_view_never_called(tmp_path, direct_mergers, monkeypatch, change):
+    local, _, generation, _ = b_world(tmp_path, forget_hidden=False)
+    merger = direct_mergers(local)
+    replica = b_ready(merger)
+    old = replica.child
     sent = []
-    entries = []
-    for value in (R15_H, R15_M, f'{R15_OWNP}:{R15_H}', f' {R15_H} ', 12345, None, ['x']):
-        before = r15_replica_args(client)
-        reply = client.call('lcm_recall', query='needle', session_id=value)
+    original = old.ask
+    def traced(raw):
+        sent.append(raw)
+        return original(raw)
+    monkeypatch.setattr(old, 'ask', traced)
+    pointer_path = generation.parent / 'view.json'
+    pointer = json.loads(pointer_path.read_text())
+    if change == 'forgotten':
+        forget(local, R15_H)
+    elif change == 'removed':
+        (generation.parent / 'removed.json').write_text(json.dumps({'format': 1, 'session_ids': [R15_H], 'row_ids': []}))
+    else:
+        pointer[{'digest': 'forgotten_sha256'}.get(change, change)] = {'rules': 77, 'format': 2, 'folder': '../gen-1', 'digest': 'wrong'}[change]
+        pointer_path.write_text(json.dumps(pointer))
+    builds = []
+    real_popen = cr.subprocess.Popen
+    class Blocked:
+        def poll(self): return None
+    def popen(argv, **kwargs):
+        if 'view' in argv:
+            builds.append((argv, kwargs))
+            return Blocked()
+        return real_popen(argv, **kwargs)
+    monkeypatch.setattr(cr.subprocess, 'Popen', popen)
+    for _ in range(2):
+        for tool in TOOLS:
+            args = {'query': 'marker'} if tool in ('lcm_grep', 'lcm_recall') else {'session_id': qualified('visible')}
+            raw = cr.tool_request(tool, args)
+            body, reply = cr.tool_body(merger.handle(raw))
+            if tool in ('lcm_grep', 'lcm_recall'):
+                assert body['other_stores'][0]['status'] == 'warming'
+                plain = json.loads(merger.local_call(raw))['result']['content'][0]['text']
+                assert cr.strip_other_stores(reply['result']['content'][0]['text']) == plain
+            else:
+                assert 'error' in body
+    assert not sent and len(builds) == 1
+    argv, kwargs = builds[0]
+    assert argv == [sys.executable, '-I', '-S', '-B', str(ROOT / 'scripts/lcm_x_cloud.py'), 'view', '--home', str(local), '--copy-id', COPIES[0]]
+    assert kwargs['start_new_session'] is True
+    assert all(kwargs[key] == subprocess.DEVNULL for key in ('stdin', 'stdout', 'stderr'))
+    # Publish the repaired view: no call to the stale reader during warm-up either.
+    assert cv.build(local, COPIES[0])['code'] == 'ok'
+    b_ready(merger)
+    assert not sent
+    assert replica.child.folder == view_folder(generation)
+
+
+@pytest.mark.parametrize('code,age,retry', [('view_unsupported_table', 500, False), ('view_unsupported_key', 500, False),
+                                           ('view_summary_spans_forgotten', 500, False), ('view_busy', 59, False),
+                                           ('view_busy', 61, True), ('view_disk_floor', 59, False), ('view_disk_floor', 61, True)])
+def test_b8_build_result_retry(tmp_path, direct_mergers, monkeypatch, code, age, retry):
+    local, _, generation, _ = b_world(tmp_path)
+    folder = generation.parent
+    now = time.time()
+    monkeypatch.setattr(time, 'time', lambda: now)
+    record = json.loads((folder / 'view-result.json').read_text())
+    (folder / 'view.json').unlink()
+    record.update(code=code, ended_at=time.time()-age)
+    (folder / 'view-result.json').write_text(json.dumps(record))
+    builds = []
+    real_popen = cr.subprocess.Popen
+    class Ended:
+        def poll(self): return 2
+    def popen(argv, **kwargs):
+        if 'view' in argv:
+            builds.append(argv)
+            # An actual builder writes the result before it exits.
+            record['ended_at'] = time.time()
+            (folder / 'view-result.json').write_text(json.dumps(record))
+            return Ended()
+        return real_popen(argv, **kwargs)
+    monkeypatch.setattr(cr.subprocess, 'Popen', popen)
+    merger = direct_mergers(local)
+    for _ in range(3):
+        merger.handle(cr.tool_request('lcm_grep', {'query': 'marker'}))
+    assert len(builds) == int(retry)
+    record['rules'] += 1
+    (folder / 'view-result.json').write_text(json.dumps(record))
+    merger.handle(cr.tool_request('lcm_grep', {'query': 'marker'}))
+    assert len(builds) == int(retry) + 1
+    assert merger.replicas[PREFIX].status == 'warming'
+
+
+def test_b8_digest_contract(tmp_path, corpus):
+    local, sources = corpus
+    generation = copy_generation(sources[0], local, COPIES[0])
+    ids = {'0b1c2d3e-1111-4222-8333-444455556666', '3f2a1b0c-5555-4666-8777-888899990000'}
+    for session in ids:
+        forget(local, session)
+    result = cr.forgotten(local / 'lcm.db')
+    assert isinstance(result, tuple), 'forgotten must return the set and its F13 digest'
+    assert result == (ids, 'd32b75cc4f118d8e709d786a1d10998880f9517537e7df297302a09905e6f88c')
+    assert cr.RULES == cv.RULES
+    assert cr.FORGOTTEN_QUERY == cv.FORGOTTEN_QUERY
+    assert cr.forgotten_digest(set()) == cv.forgotten_digest(set())
+    for raw in (None, b'{"format":1,"session_ids":[],"row_ids":[]}\n'):
+        if raw is not None:
+            (generation.parent / 'removed.json').write_bytes(raw)
+        assert cr.removed_sha256(generation.parent) == cv.removed_sha256(generation.parent)
+
+
+def test_b10_vanished_view(tmp_path, direct_mergers, monkeypatch):
+    local, _, generation, _ = b_world(tmp_path)
+    copy_generation(make_store(tmp_path, 'other')[0], local, COPIES[1])
+    merger = direct_mergers(local)
+    b_ready(merger)
+    b_ready(merger, COPIES[1].replace('-', ''))
+    # Force a new folder, so its lock is acquired after reading a fresh pointer.
+    old_pointer = json.loads((generation.parent / 'view.json').read_text())
+    target = generation.parent / old_pointer['folder'].replace('view-1-', 'view-2-')
+    shutil.copytree(view_folder(generation), target)
+    shutil.copytree(generation, generation.parent / 'gen-2')
+    (generation.parent / 'current').write_text('2\n')
+    pointer = dict(old_pointer, folder=target.name, generation=2)
+    (generation.parent / 'view.json').write_text(json.dumps(pointer))
+    opened = []
+    original = cr.os.open
+    def vanish(path, flags, *args, **kwargs):
+        if Path(path) == target:
+            opened.append(flags)
+            subprocess.run([sys.executable, '-c', 'import shutil,sys; shutil.rmtree(sys.argv[1])', str(target)], check=True)
+        return original(path, flags, *args, **kwargs)
+    with monkeypatch.context() as patch:
+        patch.setattr(cr.os, 'open', vanish)
+        raw = cr.tool_request('lcm_grep', {'query': 'marker'})
+        body, reply = cr.tool_body(merger.handle(raw))
+    assert body['other_stores'][0]['status'] == 'warming'
+    assert body['other_stores'][1]['status'] == 'ok' and body['other_stores'][1]['hits']
+    plain = json.loads(merger.local_call(raw))['result']['content'][0]['text']
+    assert cr.strip_other_stores(reply['result']['content'][0]['text']) == plain
+    assert len(opened) == 1 and opened[0] & os.O_ACCMODE == os.O_RDONLY
+    assert cv.build(local, COPIES[0])['code'] == 'ok'
+    eventually(lambda: b_ready(merger).child.folder == view_folder(generation), timeout=40)
+
+
+def test_b11_view_lock_lifetime(tmp_path, corpus, direct_mergers):
+    local, sources = corpus
+    generation = copy_generation(sources[0], local, COPIES[0])
+    merger = direct_mergers(local)
+    replica = b_ready(merger)
+    x = view_folder(generation)
+    fd = os.open(x, os.O_RDONLY)
+    try:
+        with pytest.raises(BlockingIOError):
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        # A changed generation builds Y while X is still held by the reader.
+        gen2 = generation.parent / 'gen-2'
+        shutil.copytree(generation, gen2)
+        (generation.parent / 'current').write_text('2\n')
+        phases = []
+        def seam(name):
+            if name in ('matched', 'published'):
+                phases.append(name)
+                assert x.exists(), 'sweep reclaimed a serving view'
+        assert cv.build(local, COPIES[0], seam=seam)['code'] == 'ok'
+        y = view_folder(gen2)
+        assert phases == ['matched', 'published'] and y != x and x.exists()
+        old = replica.child
+        eventually(lambda: b_ready(merger).child.folder == y, timeout=40)
+        assert old.process.poll() is not None
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        assert cv.build(local, COPIES[0])['code'] == 'ok'
+        assert not x.exists() and y.exists()
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.parametrize('replacement', ['gone', 'symlink', 'different'])
+def test_b10_lock_before_trust(tmp_path, monkeypatch, replacement):
+    folder = tmp_path / 'view'
+    folder.mkdir()
+    (folder / 'lcm.db').write_bytes(b'fixture')
+    other = tmp_path / 'other'
+    other.mkdir()
+    (other / 'lcm.db').write_bytes(b'fixture')
+    original = cr.fcntl.flock
+    def mutate(fd, flags):
+        original(fd, flags)
+        folder.rename(tmp_path / 'moved')
+        if replacement == 'symlink':
+            folder.symlink_to(other, target_is_directory=True)
+        elif replacement == 'different':
+            folder.mkdir()
+            (folder / 'lcm.db').write_bytes(b'fixture')
+    monkeypatch.setattr(cr.fcntl, 'flock', mutate)
+    child = None
+    try:
+        with pytest.raises((OSError, ValueError)):
+            child = cr.Child([sys.executable, '-c', 'import time; time.sleep(60)'], 8, folder)
+    finally:
+        if child:
+            child.close()
+
+
+def test_b8_real_build_child(tmp_path, clients):
+    local, _, generation, _ = b_world(tmp_path)
+    (generation.parent / 'view.json').unlink()
+    (generation.parent / 'view-result.json').unlink()
+    client = clients(tmp_path, local)
+    # The isolated builder's reply never enters the MCP stream. All calls parse as JSON-RPC.
+    for _ in range(3):
+        reply = client.call(query='marker')
         assert_local(client, reply)
-        entries.append(json.loads(reply['result']['content'][0]['text'])['other_stores'])
-        calls = r15_new_calls(before, r15_replica_args(client))
-        assert len(calls) == 2
-        sent.extend(calls)
-    assert all('session_id' not in a for a in sent), 'recall replicas receive no off-schema session_id, for any value'
-    assert all(entry == entries[0] for entry in entries)
+        body = json.loads(reply['result']['content'][0]['text'])
+        assert body['other_stores'][0]['status'] in ('warming', 'ok')
+    eventually(lambda: (generation.parent / 'view.json').is_file(), timeout=40)
+    ready(client)
+    assert_view_readers(client)
+
+
+def test_b8_local_read_failure(tmp_path, corpus, direct_mergers, monkeypatch):
+    local, sources = corpus
+    copy_generation(sources[0], local, COPIES[0])
+    merger = direct_mergers(local)
+    replica = b_ready(merger)
+    assert replica.child.folder.name.startswith('view-')
+    sent, reads = [], []
+    ask, read = replica.child.ask, cr.forgotten
+    def traced(raw):
+        sent.append(raw)
+        return ask(raw)
+    def forgotten(database):
+        reads.append(database)
+        return read(database)
+    monkeypatch.setattr(replica.child, 'ask', traced)
+    monkeypatch.setattr(cr, 'forgotten', forgotten)
+    merger.handle(cr.tool_request('lcm_grep', {'query': 'marker'}))
+    assert len(reads) == 1, 'one forgotten snapshot per call'
+    sent.clear()
+    with (local / 'lcm.db').open('r+b') as handle:
+        handle.seek(18)
+        handle.write(b'\x02\x02')
+    body, _ = cr.tool_body(merger.handle(cr.tool_request('lcm_grep', {'query': 'marker'})))
+    assert body['other_stores'][0]['status'] == 'unavailable' and not sent
+    body, _ = cr.tool_body(merger.handle(cr.tool_request('lcm_describe', {'session_id': qualified('remote0')})))
+    assert 'error' in body and not sent
+
+
+def test_b_r2_short_id_refuses_view(tmp_path):
+    # T1-208: short IDs still fail closed when they collide with stock keys.
+    local, _ = make_store(tmp_path, 'local')
+    source, _ = make_store(tmp_path, 'a')
+    r15_drain(local, 'a', [_entry('user', 'f1', 'local copy', 'a')], tmp_path)
+    forget(local, 'a')
+    assert 'a' in forgotten_ids(local)
+    source_bytes = (source / 'lcm.db').read_bytes()
+    with sqlite3.connect(f'file:{source / "lcm.db"}?mode=ro', uri=True) as conn:
+        assert conn.execute("SELECT key FROM metadata WHERE key='schema_version'").fetchone()
+    generation = copy_generation(source, local, COPIES[0])
+    result = cv.build(local, COPIES[0])
+    assert result['code'] == 'view_unsupported_key'
+    assert not (generation.parent / 'view.json').exists()
+    assert (source / 'lcm.db').read_bytes() == source_bytes
+    assert (generation / 'lcm.db').read_bytes() == source_bytes

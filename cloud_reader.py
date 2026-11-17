@@ -7,6 +7,7 @@ from concurrent.futures import Future, wait
 from contextlib import closing
 import copy
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -16,7 +17,11 @@ import stat
 import subprocess
 import sys
 import threading
+import time
 
+RULES = 1
+FORGOTTEN_QUERY = "SELECT key FROM metadata WHERE key LIKE 'capture:forgotten:%'"
+VIEW = re.compile(r'view-([1-9][0-9]*)-([1-9][0-9]*)-[0-9a-f]{16}')
 REPLICA_WAIT_S = 0.25
 COPY = re.compile(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}')
 QUALIFIED = re.compile(r'([0-9a-f]{32}):(.*)', re.DOTALL)
@@ -52,11 +57,11 @@ PLAIN = set('''active_session_only best_rank byte_position candidate_files char_
     termination_reason timestamp token_budget token_count tool_call_id tool_name total_messages
     total_results total_source_tokens total_sources total_tokens truncated type unit
     time_uncertain observed_at ingested_at date stored_at occurred_at event_at event_date precision
-    unreferenced_dropped_count unreferenced_omitted_count'''.split())
+    unreferenced_dropped_count unreferenced_omitted_count partial payloads_searched payloads_total prefix_bytes'''.split())
 CONTAINERS = set('''adjacent_reply answer_ready arm_weights arms arms_run children coverage delivery delta depths
     embedding_queries evidence_span expanded externalized externalized_payloads externalized_scan hits
     include later_statements messages metrics nodes pagination provenance results roles seed_leads
-    sessions snippet_window summary_leads occurrence_time observation_time'''.split())
+    sessions snippet_window summary_leads occurrence_time observation_time partial reasons'''.split())
 DROPPED = {'store_uuid', 'reader', 'error', 'degraded_reason', 'message_search_error',
            'externalized_note', 'rerank_scores'}
 CLASSIFIED = (INTEGER_IDS | INTEGER_LISTS | PAIRS | STRING_IDS | STRING_LISTS | REFERENCES
@@ -109,19 +114,14 @@ def hint(text, prefix):
         return None
 
 
-def rebuild(value, copy_id, visible=None, result_context=False, path=()):
+def rebuild(value, copy_id, result_context=False):
     """Allow-list replica data; stored data is opaque, including nested tool calls."""
     if isinstance(value, list):
-        return [result for item in value if (not result_context or isinstance(item, dict)) and (result := rebuild(item, copy_id, visible, result_context, path)) is not None]
+        return [result for item in value if (not result_context or isinstance(item, dict)) and (result := rebuild(item, copy_id, result_context)) is not None]
     if not isinstance(value, dict):
         return value if not isinstance(value, str) or (len(value) <= 512 and not UNSAFE.search(value)) else None
-    # Recall coverage's summary is an arm status, not stored summary text.
-    coverage = (path == ('provenance', 'coverage') and not result_context
-                and value.keys() <= {'fts', 'summary', 'chunk'}
-                and all(type(v) is str and v in {'ok', 'disabled', 'none', 'full', 'bounded', 'full_approx'} for v in value.values()))
-    if visible and not coverage and (result_context or STORED & value.keys() or any(k in value for k in ('session_id', 'store_id', 'node_id', 'externalized_ref', 'ref'))):
-        if not visible(value):
-            return None
+    if 'message_search_error' in value:
+        raise ValueError('replica search failed')
     out = {}
     for key, item in value.items():
         result = None
@@ -149,7 +149,7 @@ def rebuild(value, copy_id, visible=None, result_context=False, path=()):
         elif key in PLAIN and (item is None or type(item) in (bool, int, float, str)):
             result = item if not isinstance(item, str) or (len(item) <= 512 and not UNSAFE.search(item) and not split_id(item)) else None
         elif (key in CONTAINERS or re.fullmatch(r'd\d+', key)) and isinstance(item, (dict, list)):
-            result = rebuild(item, copy_id, visible, key in {'results', 'hits', 'messages', 'expanded', 'children', 'nodes', 'sessions', 'summary_leads', 'seed_leads'}, path + (key,))
+            result = rebuild(item, copy_id, key in {'results', 'hits', 'messages', 'expanded', 'children', 'nodes', 'sessions', 'summary_leads', 'seed_leads'})
         if result is not None:
             out[key] = result
     refs = list(out.get('externalized_refs', []))
@@ -160,16 +160,10 @@ def rebuild(value, copy_id, visible=None, result_context=False, path=()):
                 refs.append(ref)
     if refs:
         out['externalized_refs'] = refs
-    if visible and isinstance(out.get('expanded'), list) and len(out['expanded']) != len(value['expanded']):
-        pagination = out.get('pagination', {})
-        if type(pagination.get('returned_sources')) is int:
-            pagination['returned_sources'] = len(out['expanded'])
     return out
 
 
-def error_body(text, args, prefix, replacements=None):
-    for bare, original in (replacements or {}).items():
-        text = replace_token(text, bare, original)
+def error_body(text, args, prefix):
     for key, value in args.items():
         values = value if key in LISTS and isinstance(value, list) else [value] if key in SCALARS else []
         for item in values:
@@ -198,26 +192,20 @@ def forgotten(database):
     if len(header) != 2 or (max(header) >= 2 and not all(Path(str(database) + suffix).is_file() for suffix in ('-wal', '-shm'))):
         raise ValueError('unsafe local database')
     with closing(sqlite3.connect(database.resolve().as_uri() + '?mode=ro', uri=True)) as conn:
-        return {row[0][len('capture:forgotten:'):] for row in conn.execute("SELECT key FROM metadata WHERE key LIKE 'capture:forgotten:%'")}
+        ids = {row[0][len('capture:forgotten:'):] for row in conn.execute(FORGOTTEN_QUERY)}
+    return ids, forgotten_digest(ids)
 
 
-def visibility(copy_id, session_id, store_id, forgotten_sessions):
-    """Seam for manifest removals: copy, session and store identity stay distinct."""
-    return bool(session_id) and session_id not in forgotten_sessions
+def forgotten_digest(ids):
+    return hashlib.sha256(b''.join(x + b'\n' for x in sorted({s.encode('utf-8') for s in ids}))).hexdigest()
 
 
-def visible_item(item, prefix, folder, hidden):
-    if not hidden:
-        return True
-    session = item.get('session_id')
-    if not session:
-        with closing(sqlite3.connect((folder / 'lcm.db').resolve().as_uri() + '?mode=ro&immutable=1', uri=True)) as conn:
-            for key, table in (('store_id', 'messages'), ('node_id', 'summary_nodes')):
-                if type(item.get(key)) is int:
-                    row = conn.execute(f'SELECT session_id FROM {table} WHERE {key} = ?', (item[key],)).fetchone()
-                    session = row[0] if row else None
-                    break
-    return visibility(prefix, session, item.get('store_id'), hidden)
+def removed_sha256(copy_folder):
+    try:
+        raw = (copy_folder / 'removed.json').read_bytes()
+    except FileNotFoundError:
+        raw = b''
+    return hashlib.sha256(raw).hexdigest()
 
 
 class Child:
@@ -232,6 +220,9 @@ class Child:
             if folder:
                 self.fd = os.open(folder, os.O_RDONLY | os.O_NOFOLLOW)
                 fcntl.flock(self.fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                mode, held = folder.lstat(), os.fstat(self.fd)
+                if not stat.S_ISDIR(mode.st_mode) or (mode.st_dev, mode.st_ino) != (held.st_dev, held.st_ino):
+                    raise ValueError('bad view folder')
             self.process = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                             stderr=subprocess.DEVNULL, close_fds=True)
         except Exception:
@@ -314,13 +305,20 @@ class Replica:
         self.child = self.pending = self.probe = None
         self.generation = self.target = None
         self.status = 'unavailable'
+        self.digests = self.target_digests = self.target_folder = None
 
     def close(self):
         for child in (self.child, self.pending):
             if child:
                 child.close()
 
-    def refresh(self, folder, generation):
+    def refresh(self, folder, generation, digests):
+        if self.child and self.digests != digests:
+            self.child.close()
+            self.child = None
+        if self.pending and (self.target_folder != folder or self.target_digests != digests):
+            self.pending.close()
+            self.pending = self.probe = None
         if self.child and self.child.process.poll() is not None:
             self.child.close()
             self.child = None
@@ -333,7 +331,7 @@ class Replica:
             try:
                 self.probe.result()
                 old, self.child = self.child, self.pending
-                self.generation = self.target
+                self.generation, self.digests = self.target, self.target_digests
                 if old:
                     old.close()  # Main dispatch is serial; no old call is in flight here.
                 self.status = 'ok'
@@ -343,14 +341,14 @@ class Replica:
                 self.pending = self.probe = None
                 return
             self.pending = self.probe = None
-        if self.child and self.generation == generation:
+        if self.child and self.child.folder == folder:
             self.status = 'ok'
             return
         if self.pending:
             self.status = 'ok' if self.child else 'warming'
             return
         self.pending = Child(reader_args(self.argv, folder), self.budget, folder)
-        self.target = generation
+        self.target, self.target_folder, self.target_digests = generation, folder, digests
         self.probe = Future()
         child, probe = self.pending, self.probe
         def warm():
@@ -377,6 +375,7 @@ class Merger:
         self.local = None
         self.enabled_tools = None
         self.replicas = {}
+        self.builders = {}
         self.own = None
         path = self.home / 'cloud' / 'cloud.json'
         try:
@@ -408,10 +407,42 @@ class Merger:
                 except OSError:
                     pass
 
-    def refresh(self):
-        root = self.home / 'cloud' / 'replicas'
+    def start_build(self, folder, digests):
+        child = self.builders.get(folder.name)
+        if child and child.poll() is None:
+            return
+        self.builders.pop(folder.name, None)
+        try:
+            current = (folder / 'current').read_bytes()
+            generation = int(current) if re.fullmatch(rb'[1-9][0-9]*\n?', current) else None
+            result = json.loads((folder / 'view-result.json').read_bytes())
+            same = (result.get('generation') == generation and result.get('rules') == RULES
+                    and (result.get('forgotten_sha256'), result.get('removed_sha256')) == digests)
+            if same and result.get('code') in {'view_unsupported_table', 'view_unsupported_key', 'view_summary_spans_forgotten'}:
+                return
+            if same and result.get('code') in {'view_busy', 'view_disk_floor'} and 0 <= time.time() - result['ended_at'] < 60:
+                return
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            pass
+        child = subprocess.Popen([sys.executable, '-I', '-S', '-B', str(Path(__file__).parent / 'scripts/lcm_x_cloud.py'),
+                                  'view', '--home', str(self.home), '--copy-id', folder.name],
+                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL, start_new_session=True)
+        self.builders[folder.name] = child
+        try:
+            os.setpriority(os.PRIO_PROCESS, child.pid, 19)
+        except (AttributeError, OSError):
+            pass
+
+    def refresh(self, digest=None):
         for replica in self.replicas.values():
             replica.status = 'unavailable'
+        if digest is None:
+            try:
+                _, digest = forgotten(self.database)
+            except Exception:
+                return
+        root = self.home / 'cloud' / 'replicas'
         if not root.exists():
             return
         for copy_folder in sorted(root.iterdir()):
@@ -421,18 +452,29 @@ class Merger:
             if prefix == self.own:
                 continue
             replica = self.replicas.setdefault(prefix, Replica(prefix, self.argv, self.budget))
+            builder = self.builders.get(copy_folder.name)
+            if builder and builder.poll() is not None:
+                self.builders.pop(copy_folder.name)
+            digests = None
             try:
-                pointer = (copy_folder / 'current').read_bytes()
-                if not re.fullmatch(rb'[1-9][0-9]*\n?', pointer):
-                    raise ValueError('bad_name')
-                generation = int(pointer)
-                folder = copy_folder / f'gen-{generation}'
-                if folder.is_symlink() or not folder.is_dir() or not (folder / 'lcm.db').is_file():
-                    raise ValueError('bad_name')
+                digests = digest, removed_sha256(copy_folder)
+                pointer = json.loads((copy_folder / 'view.json').read_bytes())
+                name = pointer['folder']
+                match = VIEW.fullmatch(name)
+                if (type(pointer.get('format')) is not int or pointer['format'] != 1 or not match or type(pointer.get('generation')) is not int
+                        or int(match[1]) != pointer['generation'] or int(match[2]) != RULES
+                        or type(pointer.get('rules')) is not int or pointer['rules'] != RULES
+                        or (pointer.get('forgotten_sha256'), pointer.get('removed_sha256')) != digests):
+                    raise ValueError('stale view')
                 if self.enabled_tools is not None:
-                    replica.refresh(folder, generation)
+                    replica.refresh(copy_folder / name, pointer['generation'], digests)
             except Exception:
-                replica.status = 'unavailable'
+                replica.status = 'warming'
+                if digests is not None:
+                    try:
+                        self.start_build(copy_folder, digests)
+                    except Exception:
+                        pass  # A failed builder launch cannot affect the local answer.
 
     def local_call(self, raw, notification=False):
         for attempt in range(2):
@@ -483,89 +525,26 @@ class Merger:
                         out[key].append(item)
         return out
 
-    def replica_call(self, replica, name, args, hidden):
+    def replica_call(self, replica, name, args):
         if replica.status != 'ok' or not replica.child:
             return None
-        # Only these reader schemas accept exclusions (schemas.py:99,200).
-        if hidden and name in {'lcm_grep', 'lcm_recall'} and isinstance(args.get('exclude_session_ids', []), list):
-            excluded = args.get('exclude_session_ids', [])
-            args = {**args, 'exclude_session_ids': excluded + [sid for sid in sorted(hidden) if sid not in excluded]}
         return replica.child.ask(tool_request(name, args))
 
-    def rebuilt(self, raw, replica, args, hidden):
+    def rebuilt(self, raw, replica, args):
         body, _ = tool_body(raw)
+        if 'message_search_error' in body:
+            raise ValueError('replica search failed')
         if isinstance(body.get('error'), str):
             return error_body(body['error'], args, replica.prefix)
-        return rebuild(body, replica.prefix, lambda item: visible_item(item, replica.prefix, replica.child.folder, hidden))
+        return rebuild(body, replica.prefix)
 
-    def routed(self, replica, name, args, hidden):
+    def routed(self, replica, name, args):
         if replica.status != 'ok' or not replica.child:
             return {'error': 'the other store could not answer this call', 'store': replica.prefix}
-        # The paging bound is not a row target; preserve it in the missing-id twin.
-        target = {k: v for k, v in args.items() if k in SCALARS - {'after_store_id'} or k == 'externalized_refs'}
-        invisible = hidden and ((isinstance(args.get('session_id'), str) and args['session_id'] in hidden) or
-                    (any(k in args for k in ('store_id', 'node_id')) and not visible_item(target, replica.prefix, replica.child.folder, hidden)))
-        if hidden and isinstance(args.get('conversation_id'), str):
-            # Match store.py:189-190, :239 (_normalize_conversation_id_value) for lookup and twin.
-            target['conversation_id'] = args['conversation_id'].strip()
-            with closing(sqlite3.connect((replica.child.folder / 'lcm.db').resolve().as_uri() + '?mode=ro&immutable=1', uri=True)) as conn:
-                sessions = conn.execute('SELECT DISTINCT session_id FROM messages WHERE conversation_id = ?', (target['conversation_id'],))
-                invisible = invisible or any(row[0] in hidden for row in sessions)
-        if hidden and not invisible:
-            for ref in args.get('externalized_refs', []):
-                future = replica.child.ask(tool_request('lcm_describe', {'externalized_ref': ref}))
-                if future is None:
-                    return {'error': 'the other store could not answer this call', 'store': replica.prefix}
-                meta, _ = tool_body(future.result())
-                if not visible_item(meta, replica.prefix, replica.child.folder, hidden):
-                    invisible = True
-                    break
-        body = None
-        if not invisible:
-            future = self.replica_call(replica, name, args, hidden)
-            if future is None:
-                return {'error': 'the other store could not answer this call', 'store': replica.prefix}
-            body = self.rebuilt(future.result(), replica, args, hidden)
-        if body is None or invisible:
-            missing = {k: ([re.sub(r'[\da-fA-F]', '0', item) for item in v] if isinstance(v, list)
-                           else 0 if k in INTEGER_ARGS else re.sub(r'[\da-fA-F]', '0', v)) for k, v in target.items()}
-            changed = {**args, **missing}
-            future = self.replica_call(replica, name, changed, hidden)
-            if future is None:
-                return {'error': 'the other store could not answer this call', 'store': replica.prefix}
-            absent, _ = tool_body(future.result())
-            if isinstance(absent.get('error'), str):
-                if any(type(v) is int for v in missing.values()) and len(re.findall(r'(?<![\w:.-])0(?![\w.-])', absent['error'])) > 1:
-                    return {'error': 'the other store could not answer this call', 'store': replica.prefix}
-                replacements = {zero: qualify(replica.prefix, original) for k, v in target.items()
-                                for zero, original in (zip(missing[k], v) if isinstance(v, list) else [(missing[k], v)])}
-                if len(set(args.get('externalized_refs', []))) > 1:
-                    return {'error': 'the other store could not answer this call', 'store': replica.prefix}
-                body = error_body(absent['error'], {}, replica.prefix, replacements)
-            elif name == 'lcm_recall' and 'error' not in absent and target.keys() == {'session_id'}:
-                body = rebuild(absent, replica.prefix, lambda item: visible_item(item, replica.prefix, replica.child.folder, hidden))
-                for key in target.keys() & body.keys():
-                    body[key] = replace_token(body[key], qualify(replica.prefix, missing[key]), qualify(replica.prefix, target[key]))
-            elif 'error' not in absent and (
-                (name == 'lcm_load_session' and 'anchor_store_id' not in args
-                 and type(absent.get('total_messages')) is int and absent['total_messages'] == 0 and absent.get('messages') == [])
-                or (name == 'lcm_describe' and target.keys() == {'session_id'}
-                    and type(absent.get('store_message_count')) is int and absent['store_message_count'] == 0 and absent.get('depths') == {})
-                or (name == 'lcm_grep' and absent.get('results') == [])
-            ):
-                body = rebuild(absent, replica.prefix)
-                for key in target.keys() & body.keys():
-                    body[key] = replace_token(body[key], qualify(replica.prefix, missing[key]), qualify(replica.prefix, target[key]))
-                # Match tools.py:307-314 (_coerce_query_arg) without importing the reader.
-                query = '' if changed.get('query') is None else str(changed['query']).strip()
-                echo = {k for k, v in body.items() if (k in changed and k in absent and
-                        (absent[k] == changed[k] or (k == 'query' and absent[k] == query)))
-                        or (k in target and v == qualify(replica.prefix, target[k]))}
-                clean = error_body(json.dumps({k: v for k, v in body.items() if k not in echo}), {}, replica.prefix)
-                if 'store' in clean:
-                    return clean
-            else:
-                return {'error': 'the other store could not answer this call', 'store': replica.prefix}
+        future = self.replica_call(replica, name, args)
+        if future is None:
+            return {'error': 'the other store could not answer this call', 'store': replica.prefix}
+        body = self.rebuilt(future.result(), replica, args)
         return {'store': replica.prefix, 'generation': replica.generation, **body}
 
     def handle(self, raw):
@@ -609,14 +588,16 @@ class Merger:
         except ValueError as exc:
             return self.answer(req, {'error': str(exc)}, True)
         try:
-            self.refresh()
-            hidden = forgotten(self.database) if self.replicas else set()
+            hidden, digest = forgotten(self.database)
+            self.refresh(digest)
         except Exception:
             hidden = None
+            for replica in self.replicas.values():
+                replica.status = 'unavailable'
         if prefix and prefix != self.own:
             replica = self.replicas[prefix]
             try:
-                body = self.routed(replica, name, self.arguments(args, prefix, True), hidden) if hidden is not None else None
+                body = self.routed(replica, name, self.arguments(args, prefix, True)) if hidden is not None else None
             except Exception:
                 body = None
             return self.answer(req, body or {'error': 'the other store could not answer this call', 'store': prefix}, bool(not body or 'error' in body))
@@ -625,9 +606,6 @@ class Merger:
         if name not in ('lcm_grep', 'lcm_recall') or not self.replicas:
             return self.local_call(local_raw)
         pending, entries = {}, []
-        session = local_args.get('session_id')
-        session = str(session).strip() if session is not None else ''
-        missing = re.sub(r'[\da-fA-F]', '0', session) if name == 'lcm_grep' and hidden is not None and session in hidden else None
         for replica in self.replicas.values():
             skip = bool(args.get('externalized_refs'))
             entry = {'copy_id': replica.prefix, 'generation': replica.generation, 'status': 'ok' if skip else replica.status, 'hits': []}
@@ -636,11 +614,7 @@ class Merger:
                 entry['status'] = 'unavailable'
             elif not skip:
                 replica_args = self.arguments(args, replica.prefix, True)
-                if name == 'lcm_recall':
-                    replica_args.pop('session_id', None)
-                elif missing is not None:
-                    replica_args['session_id'] = missing
-                future = self.replica_call(replica, name, replica_args, hidden)
+                future = self.replica_call(replica, name, replica_args)
                 if future:
                     pending[future] = (replica, entry)
                 elif replica.status == 'ok':
@@ -653,9 +627,11 @@ class Merger:
                 entry['status'] = 'late'
                 continue
             try:
-                body = self.rebuilt(future.result(), replica, args, hidden)
+                body = self.rebuilt(future.result(), replica, args)
                 if body is None or 'error' in body:
                     raise ValueError('replica refused')
+                if 'partial' in body:
+                    entry['partial'] = body['partial']
                 hits = body.get('results' if name == 'lcm_grep' else 'hits', [])
                 entry['hits'] = hits if isinstance(hits, list) else []
                 sessions = body.get('provenance', {}).get('delivery', {}).get('sessions')
