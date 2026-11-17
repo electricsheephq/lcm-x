@@ -1396,3 +1396,88 @@ def test_r4_disk_floor_reclaims_staging(fixture, tmp_path):
     folder.symlink_to(outside, target_is_directory=True)
     refused('disk_floor', cp._before, home, 0, time.time, lambda _: budget - 1)
     assert (outside / 'large').read_bytes() == b'x' * 4096
+
+
+@pytest.mark.parametrize('component', ['a #b', 'a\t#b', r'a\tb', r'a\\b'],
+                         ids=['space-hash', 'tab-hash', 'backslash-t', 'backslash-backslash'])
+@pytest.mark.parametrize('quote', ['', '"', "'"], ids=['unquoted', 'double', 'single'])
+def test_r5_payload_folder_special_home_refused(fixture, tmp_path, component, quote):
+    home = tmp_path / component / 'home'
+    shutil.copytree(fixture[0], home)
+    default = str(home / cp.PAYLOAD_FOLDER)
+    (home / '.env').write_text(f'LCM_LARGE_OUTPUT_EXTERNALIZATION_PATH={quote}{default}{quote}\n')
+    result = subprocess.run([sys.executable, '-I', '-S', '-B', str(ROOT / 'scripts/lcm_x_cloud.py'),
+        'snapshot', '--home', str(home), '--copy-id', COPY,
+        '--bucket-dir', str(fixture[1].inner.root), '--prefix', 'copies'],
+        capture_output=True, text=True, timeout=30)
+    assert (result.returncode, json.loads(result.stdout)['code']) == (2, 'payload_folder_configured')
+    refused('payload_folder_configured', cp._before, home, 0, time.time, lambda _: 10**12)
+    assert not (home / 'cloud' / 'staging').exists() and not keys(fixture)
+
+
+@pytest.mark.parametrize('encoding', ['utf-8', 'latin-1'])
+@pytest.mark.parametrize('folder', ['default', 'other'])
+@pytest.mark.parametrize('position', ['end', 'quoted-end', 'mid', 'mid-x'])
+def test_r5_payload_folder_nul_refused(fixture, encoding, folder, position):
+    home, bucket, _, _ = fixture
+    value = str(home / cp.PAYLOAD_FOLDER if folder == 'default' else home.parent / 'elsewhere')
+    value = {'end': value + '\x00', 'quoted-end': '"' + value + '\x00"',
+             'mid': value + '\x00/sub', 'mid-x': value + '\x00x'}[position]
+    data = f'LCM_LARGE_OUTPUT_EXTERNALIZATION_PATH={value}\n'.encode(encoding)
+    (home / '.env').write_bytes(data + (b'OTHER=caf\xe9\n' if encoding == 'latin-1' else b''))
+    result = subprocess.run([sys.executable, '-I', '-S', '-B', str(ROOT / 'scripts/lcm_x_cloud.py'),
+        'snapshot', '--home', str(home), '--copy-id', COPY,
+        '--bucket-dir', str(bucket.inner.root), '--prefix', 'copies'],
+        capture_output=True, text=True, timeout=30)
+    assert (result.returncode, json.loads(result.stdout)['code']) == (2, 'payload_folder_configured')
+    refused('payload_folder_configured', cp._before, home, 0, time.time, lambda _: 10**12)
+    assert not staged(fixture).parent.exists() and not keys(fixture)
+
+
+def test_r5_disk_floor_link_then_copy(fixture, monkeypatch):
+    home = fixture[0]
+    monkeypatch.setattr(cp, 'DISK_MARGIN', 0)
+    pub(fixture, snapshot_only=True)
+    folder = staged(fixture).parent
+    linked = [p for p in (folder / cp.PAYLOAD_FOLDER).iterdir() if p.stat().st_nlink > 1]
+    assert linked, 'the earlier snapshot must link a payload'
+
+    def usage():
+        seen, total = set(), 0
+        for path in home.rglob('*'):
+            if path.is_file() and not path.is_symlink():
+                info = path.stat()
+                identity = info.st_dev, info.st_ino
+                if identity not in seen:
+                    seen.add(identity)
+                    total += info.st_size
+        return total
+
+    reclaimable = sum(p.stat().st_size for p in folder.rglob('*')
+                      if p.is_file() and p.stat().st_nlink == 1)
+    need = (home / 'lcm.db').stat().st_size + sum(p.stat().st_size for p in (home / cp.PAYLOAD_FOLDER).iterdir())
+    capacity = usage() - reclaimable + need - 1
+    peaks, real_stage = [], cp._stage
+
+    def no_link(*args, **kwargs):
+        raise OSError('simulated cross-device link failure')
+
+    def measuring(*args, **kwargs):
+        result = real_stage(*args, **kwargs)
+        peaks.append(usage())
+        return result
+
+    monkeypatch.setattr(cp.os, 'link', no_link)
+    monkeypatch.setattr(cp, '_stage', measuring)
+    try:
+        pub(fixture, snapshot_only=True, free_bytes=lambda _: capacity - usage())
+        outcome = 'proceed'
+    except cp.Refused as error:
+        outcome = error.code
+    assert outcome == 'disk_floor'
+    assert not peaks
+    assert all(p.stat().st_nlink > 1 for p in linked)
+    capacity += 1
+    pub(fixture, snapshot_only=True, free_bytes=lambda _: capacity - usage())
+    assert peaks and max(peaks) <= capacity, (peaks, capacity)
+    assert all(p.stat().st_nlink == 1 for p in (folder / cp.PAYLOAD_FOLDER).iterdir())

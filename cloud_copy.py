@@ -306,7 +306,7 @@ def _before(home, quiet_s, clock, free_bytes):
             if len(value) >= 2 and value[0] in ('"', "'") and value[-1] == value[0]:
                 value = value[1:-1]
             path = Path(os.path.expanduser(value))
-            if value and (not path.is_absolute() or path.resolve() != (home / PAYLOAD_FOLDER).resolve()):
+            if value and ('#' in value or '\\' in value or '\x00' in value or not path.is_absolute() or path.resolve() != (home / PAYLOAD_FOLDER).resolve()):
                 raise Refused('payload_folder_configured')
     try:
         wal_bytes = (home / 'lcm.db-wal').stat().st_size
@@ -319,7 +319,7 @@ def _before(home, quiet_s, clock, free_bytes):
         for root, _, files in os.walk(staging, followlinks=False):
             for name in files:
                 path = Path(root) / name
-                if path.is_file() and not path.is_symlink():
+                if path.is_file() and not path.is_symlink() and path.stat().st_nlink == 1:
                     staging_bytes += path.stat().st_size
     if free_bytes(home) + staging_bytes < db.stat().st_size + wal_bytes + payload_bytes + DISK_MARGIN:
         raise Refused('disk_floor')
