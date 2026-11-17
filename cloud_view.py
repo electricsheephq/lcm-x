@@ -202,14 +202,22 @@ def sync(path):
         os.close(fd)
 
 
-def _sweep(copy_folder):
+def _sweep(copy_folder, *, temporary_only=False):
     folder = Path(copy_folder)
     try:
         current = json.loads((folder / 'view.json').read_bytes())['folder']
     except (OSError, ValueError, KeyError):
         current = None
     for path in folder.iterdir():
-        if path.is_symlink() or not path.is_dir() or path.name == current or not re.fullmatch(VIEW + r'(?:\.tmp-[0-9a-f]{32})?', path.name):
+        if path.is_symlink() or not path.is_dir():
+            continue
+        if re.fullmatch(VIEW + r'\.tmp-[0-9a-f]{32}', path.name):
+            try:
+                shutil.rmtree(path)
+            except OSError:
+                print('view_temp_cleanup_failed', file=sys.stderr)
+            continue
+        if temporary_only or path.name == current or not re.fullmatch(VIEW, path.name):
             continue
         fd = os.open(path, os.O_RDONLY)
         try:
@@ -274,6 +282,7 @@ def build(home, copy_id=None, *, seam=lambda _: None, free_space=lambda p: shuti
     try:
         if not lock_wait(lock, 600):
             raise Refused('view_busy')
+        _sweep(folder, temporary_only=True)
         for attempt in range(3):
             generation = (folder / 'current').read_text('ascii').strip('\n')
             if not re.fullmatch(r'[1-9][0-9]*', generation):

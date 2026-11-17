@@ -1219,3 +1219,84 @@ def test_r5_upload_competes_with_view(world, monkeypatch):
     assert waits == [600, 600]
     assert remaining and cp.DISK_MARGIN <= remaining[0] < cv.FLOOR + 2 * size
     assert result['generation'] == 1 and not (copy / 'view.json').exists()
+
+
+@pytest.mark.parametrize('reader_holds_view', [False, True])
+def test_r6_abandoned_build_before_floor(world, tmp_path, reader_holds_view):
+    home, copy, _ = world
+    old_view, _ = built(world)
+    pointer = (copy / 'view.json').read_bytes()
+    old_database = (old_view / 'lcm.db').read_bytes()
+    old_inode = (old_view / 'lcm.db').stat().st_ino
+    shutil.copytree(copy / 'gen-1', copy / 'gen-2')
+    (copy / 'current').write_text('2\n')
+    name = 'view-2-1-' + 'a' * 16 + '.tmp-' + 'b' * 32
+    abandoned = copy / name
+    abandoned.mkdir()
+    # Direct writes model SIGKILL: no builder ExitStack gets to clean this up.
+    shutil.copyfile(copy / 'gen-2/lcm.db', abandoned / 'lcm.db')
+    abandoned_bytes = (abandoned / 'lcm.db').stat().st_size
+    assert 0 < abandoned_bytes < 5_000_000
+    unmatched = copy / (name + 'x')
+    unmatched.mkdir()
+    (unmatched / 'keep').write_bytes(b'unmatched control')
+    outside = tmp_path / 'symlink-target'
+    outside.mkdir()
+    (outside / 'keep').write_bytes(b'symlink control')
+    symlink = copy / ('view-2-1-' + 'c' * 16 + '.tmp-' + 'd' * 32)
+    symlink.symlink_to(outside, target_is_directory=True)
+    floor = cv.FLOOR + 2 * (copy / 'gen-2/lcm.db').stat().st_size
+    checks, steps = [], []
+    def free_space(_):
+        available = floor - (abandoned_bytes if abandoned.exists() else 0)
+        checks.append(available)
+        return available
+    def seam(step):
+        assert old_view.exists()
+        assert (old_view / 'lcm.db').read_bytes() == old_database
+        assert (old_view / 'lcm.db').stat().st_ino == old_inode
+        assert symlink.is_symlink() and (outside / 'keep').read_bytes() == b'symlink control'
+        assert (unmatched / 'keep').read_bytes() == b'unmatched control'
+        if step != 'published':
+            assert (copy / 'view.json').read_bytes() == pointer
+        steps.append(step)
+    with ExitStack() as stack:
+        if reader_holds_view:
+            held = os.open(old_view, os.O_RDONLY)
+            stack.callback(os.close, held)
+            fcntl.flock(held, fcntl.LOCK_SH)
+        result = cv.build(home, COPY, free_space=free_space, seam=seam, clone=lambda *_: False)
+        assert result['code'] == 'ok', result
+        assert checks == [floor] and 'database' in steps and 'published' in steps
+        assert not abandoned.exists()
+        assert old_view.exists() == reader_holds_view
+        successor = json.loads((copy / 'view.json').read_bytes())
+        assert successor['generation'] == 2 and (copy / successor['folder'] / 'lcm.db').is_file()
+    assert symlink.is_symlink() and (outside / 'keep').read_bytes() == b'symlink control'
+    assert (unmatched / 'keep').read_bytes() == b'unmatched control'
+
+
+@pytest.mark.parametrize('enough_free', [False, True])
+def test_r6_abandoned_build_removal_failure(world, monkeypatch, capsys, enough_free):
+    home, copy, _ = world
+    abandoned = copy / ('view-1-1-' + 'e' * 16 + '.tmp-' + 'f' * 32)
+    abandoned.mkdir()
+    shutil.copyfile(copy / 'gen-1/lcm.db', abandoned / 'lcm.db')
+    original = shutil.rmtree
+    def fail_removal(path, *args, **kwargs):
+        if Path(path) == abandoned:
+            raise PermissionError('synthetic removal refusal')
+        return original(path, *args, **kwargs)
+    monkeypatch.setattr(cv.shutil, 'rmtree', fail_removal)
+    floor = cv.FLOOR + 2 * (copy / 'gen-1/lcm.db').stat().st_size
+    checks = []
+    def free_space(_):
+        checks.append(True)
+        return floor if enough_free else floor - 1
+    result = cv.build(home, COPY, free_space=free_space, clone=lambda *_: False)
+    assert result['code'] == ('ok' if enough_free else 'view_disk_floor'), result
+    assert checks == [True] and abandoned.is_dir()
+    captured = capsys.readouterr()
+    assert 'view_temp_cleanup_failed' in captured.err and not captured.out
+    assert 'synthetic removal refusal' not in captured.err
+    assert (copy / 'view.json').exists() == enough_free
