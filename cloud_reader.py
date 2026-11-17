@@ -469,6 +469,8 @@ class Merger:
                 if self.enabled_tools is not None:
                     replica.refresh(copy_folder / name, pointer['generation'], digests)
             except Exception:
+                replica.close()
+                replica.child = replica.pending = replica.probe = None
                 replica.status = 'warming'
                 if digests is not None:
                     try:

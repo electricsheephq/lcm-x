@@ -2325,6 +2325,7 @@ def test_b8_digest_contract(tmp_path, corpus):
     assert cr.RULES == cv.RULES
     assert cr.FORGOTTEN_QUERY == cv.FORGOTTEN_QUERY
     assert cr.forgotten_digest(set()) == cv.forgotten_digest(set())
+    assert cv.forgotten_digest(ids) == result[1]
     for raw in (None, b'{"format":1,"session_ids":[],"row_ids":[]}\n'):
         if raw is not None:
             (generation.parent / 'removed.json').write_bytes(raw)
@@ -2469,9 +2470,11 @@ def test_b8_local_read_failure(tmp_path, corpus, direct_mergers, monkeypatch):
     assert 'error' in body and not sent
 
 
-def test_b_r2_short_id_refuses_view(tmp_path):
+def test_b_r2_short_id_refuses_view(tmp_path, direct_mergers, monkeypatch):
     # T1-208: short IDs still fail closed when they collide with stock keys.
     local, _ = make_store(tmp_path, 'local')
+    (local / '.env').write_text('LCM_EMBEDDINGS_ENABLED=false\n')
+    optin(local)
     source, _ = make_store(tmp_path, 'a')
     r15_drain(local, 'a', [_entry('user', 'f1', 'local copy', 'a')], tmp_path)
     forget(local, 'a')
@@ -2485,3 +2488,82 @@ def test_b_r2_short_id_refuses_view(tmp_path):
     assert not (generation.parent / 'view.json').exists()
     assert (source / 'lcm.db').read_bytes() == source_bytes
     assert (generation / 'lcm.db').read_bytes() == source_bytes
+    started = []
+    real_popen = cr.subprocess.Popen
+    def popen(argv, **kwargs):
+        if '--store' in argv:
+            started.append(Path(argv[argv.index('--store') + 1]))
+        return real_popen(argv, **kwargs)
+    monkeypatch.setattr(cr.subprocess, 'Popen', popen)
+    merger = direct_mergers(local)
+    replica = merger.replicas[PREFIX]
+    for _ in range(3):
+        for tool in TOOLS:
+            args = {'query': 'marker'} if tool in ('lcm_grep', 'lcm_recall') else {'session_id': qualified('a')}
+            body, _ = cr.tool_body(merger.handle(cr.tool_request(tool, args)))
+            if tool in ('lcm_grep', 'lcm_recall'):
+                assert body['other_stores'][0]['status'] == 'warming'
+                assert body['other_stores'][0]['hits'] == []
+            else:
+                assert body['error'] == 'the other store could not answer this call'
+            assert replica.child is None and replica.pending is None, 'a refused copy must start no reader'
+            assert started == [local / 'lcm.db'], 'neither a view nor gen-<n> may be read'
+
+
+@pytest.mark.parametrize('refuses', [False, True], ids=['builds', 'refuses'])
+def test_b_r3_forget_releases_readers(tmp_path, direct_mergers, monkeypatch, refuses):
+    local, _, generation, _ = b_world(tmp_path, forget_hidden=False)
+    if refuses:
+        # The kept session's summary spans its own row and a row of H.
+        dag = SummaryDAG(generation / 'lcm.db')
+        dag.add_node(SummaryNode(session_id='visible', summary='mixed marker', source_ids=[1, 5],
+                                 source_type='messages', token_count=3, source_token_count=4))
+        dag.close()
+        store = cc.open_store(generation / 'lcm.db', generation)
+        assert cc.to_rollback_journal(store.connection)
+        store.close()
+        assert cc.leave_readable(generation / 'lcm.db')
+    merger = direct_mergers(local)
+    replica = b_ready(merger)
+    old = replica.child
+    folder = old.folder
+    # Also pin release during a pending reader's initialization, before its probe completes.
+    pending = cr.Child(cr.reader_args(merger.argv, folder), merger.budget, folder)
+    replica.pending, replica.probe = pending, cr.Future()
+    builds = []
+    monkeypatch.setattr(merger, 'start_build', lambda *args: builds.append(args))
+    forget(local, R15_H)
+    body, _ = cr.tool_body(merger.handle(cr.tool_request('lcm_grep', {'query': 'marker'})))
+    assert body['other_stores'][0]['status'] == 'warming'
+    assert body['other_stores'][0]['hits'] == []
+    for reader in (old, pending):
+        assert reader.process.poll() is not None, 'a forget must end every stale reader immediately'
+        assert reader.fd is None
+    assert replica.child is None and replica.pending is None and replica.probe is None
+    fd = os.open(folder, os.O_RDONLY)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    finally:
+        os.close(fd)
+    assert len(builds) == 1
+    result = cv.build(local, COPIES[0])
+    if refuses:
+        assert result['code'] == 'view_summary_spans_forgotten'
+        for tool in TOOLS:
+            args = {'query': 'marker'} if tool in ('lcm_grep', 'lcm_recall') else {'session_id': qualified('visible')}
+            body, _ = cr.tool_body(merger.handle(cr.tool_request(tool, args)))
+            if tool in ('lcm_grep', 'lcm_recall'):
+                assert body['other_stores'][0]['status'] == 'warming' and not body['other_stores'][0]['hits']
+            else:
+                assert body['error'] == 'the other store could not answer this call'
+        assert replica.child is None and replica.pending is None
+        assert old.process.poll() is not None and pending.process.poll() is not None
+    else:
+        assert result['code'] == 'ok'
+        assert not folder.exists(), 'the forget build itself must reclaim the old view'
+        assert view_folder(generation) != folder
+        b_ready(merger)
+        body, _ = cr.tool_body(merger.handle(cr.tool_request('lcm_grep', {'query': 'marker', 'session_scope': 'all'})))
+        hits = body['other_stores'][0]['hits']
+        assert hits and all(hit['session_id'] == qualified('visible') for hit in hits)
+        assert R15_H not in json.dumps(body)
