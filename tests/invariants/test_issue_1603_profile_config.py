@@ -385,6 +385,9 @@ def test_environment_read_inventory():
             "lcm-x mcp reader process: replaces its own LCM_* view with the one profile it serves (#1192)",
         ("mcp_reader.py", "disabled_tool_names"):
             "lcm-x mcp reader process: LCM_DISABLED_TOOLS from that profile view, parsed as the engine does (#1192)",
+        ("cloud_reader.py", "main"):
+            "cloud recall merger process: LCMX_LOCAL_READER_CMD, the stock reader's argv handed over by the "
+            "Claude Code launcher through reader-override.json, never profile configuration",
         ("docs/process/evidence/1880-persisted-hold/compat_probe.py", "main"):
             "synthetic compatibility proof tool: isolated home and lazy-install controls only",
         ("docs/process/evidence/1880-persisted-hold/cost/cost_probe.py", "main"):
