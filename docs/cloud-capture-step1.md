@@ -145,7 +145,9 @@ own keys. Generations share their base and every earlier delta (3.7).
    capture always wins and the snapshot waits for a quiet moment. Right after the database copy, the payload
    files the staging rows reference are listed, and each one whose file exists is cloned or hard-linked into
    staging (copied through an open file when the folders are on different devices; the free-disk check counts
-   those bytes).
+   those bytes). The free-disk check and these copies run under `replicas/space.lock` (4.7 V11): the uploader
+   takes it after `upload.lock`, holds it until the staging copy and its payload files are written, and skips this
+   cycle if it cannot take it in time.
 2. On the staging copy only: switch it to rollback-journal mode and write the import stamp. The live store flips
    between WAL and rollback mode (claude_code_store.py:250-265, :1169-1173), and the reader refuses a WAL header
    with no sidecar files (docs/claude-code-adapter.md:416-419). So the copy is normalised before it is hashed.
@@ -891,12 +893,15 @@ connection from another host."
   before it clones or copies the database or copies payload files: 5 GB free plus 2S, whether it clones or copies
   (the deletes can change every page of a clone, and their journal can hold as much again), plus the kept files'
   bytes when it must copy them. Below it the copy stays unavailable (`view_disk_floor`); the no-rebuild path and
-  hard links write almost nothing and need no floor. Builds and refreshes of every copy in a home take
-  `replicas/space.lock` (an exclusive OS file lock) for their floor check and hold it until the space they checked
-  for is in use: a build until its deletes commit and its payloads are in place, a refresh until its download or
-  patch ends. So no two of them pass a check against the same free space. A process takes `space.lock` last and
+  hard links write almost nothing and need no floor. Builds and refreshes of every copy in a home, and the
+  uploader's staging copy (3.3), take `replicas/space.lock` (an exclusive OS file lock) for their floor or free-disk
+  check and hold it until the space they checked for is in use: a build until its deletes commit and its payloads
+  are in place, a refresh until its download or patch ends, the uploader until its staging copy and payload files
+  are written. So no two of them pass a check against the same free space. A process takes `space.lock` last and
   waits for no other lock while it holds it; a builder waits for it as for `view.lock` (V8), a refresh as for its
-  floor (4.1).
+  floor (4.1), and the uploader skips its cycle when it cannot take it in time (3.3). Tests: an upload and a view
+  build, and an upload and a refresh, each against free space that covers only one of them: the other waits or
+  skips, and free disk never falls below the floor the passing check used.
 - **V12. The wait. (Assumption: every number in this item; row 5V measures them.)** Each call adds two small file
   reads per copy (`view.json`, `removed.json`), one digest of the local forgotten set and one per copy. A routed call
   becomes one reader call; the parked merger made up to three and opened the copy's database itself
@@ -1905,6 +1910,7 @@ item. On that revision's delta both answered SOUND, with no blocking finding.
 | Bot review of this record, round 3: the table refusal ran only when something was left out, so with R not empty a hard-linked view could serve a populated table outside the map or classed `unsupported` | Important | Fixed (release manager's ruling): the refusal applies whenever R is not empty; with R empty the view is the byte copy; step 1 pays nothing (D3 and the compat test) | 4.7 V4 |
 | Bot review of this record, round 3: V6's kept-row sentence read as overriding the own-session rule | non-blocking | Fixed: it holds for a file whose own session stays or that has none; a file of a session in R leaves even when a kept row quotes it | 4.7 V6 |
 | Delta review of lane 5v, round 3: removing one message by row id also removed that kept session's capture event for it, which V3 did not list | Important | Adopted by the release manager's ruling: V3 lists such a capture event with the rows keyed by a collected id, since its raw line is the deleted message's text; the lane's test compares every table of the kept session | 4.7 V3 |
+| Bot review of this record, round 4: the uploader's staging copy checked free disk outside `space.lock`, so it and a view build or refresh could pass their checks against the same free space | non-blocking | Fixed: the staging copy takes `replicas/space.lock` after `upload.lock`, holds it until its files are written and skips the cycle when the lock is not free in time; V11 names the interleaving tests | 3.3, 4.7 V11 |
 
 Both re-reviews are static design reviews with synthetic probes on capture stores the product built. They prove no
 built view, real-store timing, embeddings-on run, live interleaving or crash behavior; row 5V and the lanes'
