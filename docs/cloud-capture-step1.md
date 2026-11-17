@@ -766,7 +766,8 @@ connection from another host."
     `session_lineage` edge with either end in R, a `rotation_predecessor_session:<V>` row whose value is in R, an
     `lcm_lifecycle_state` row with either session column in R, a `message_relations` row with either end a removed
     message. A kept session's own rows stay byte-identical: no kept session loses or changes a row of its own,
-    except a row `removed.json` names by id, which the origin deleted (a partial delete, F12's `as-delete`).
+    except a row `removed.json` names by id, which the origin deleted (a partial delete, F12's `as-delete`), and
+    the rows keyed by that id under *The deletes*.
   - *Names match whole.* A session id matches by equality only. A lineage value matches only as an encoding the
     product writes, parsed and compared whole: today `<source>:<row session id>` (claude_code_capture.py:63-74). A
     kept subagent `P/agent:<A>` whose agent id happens to equal a removed id is not that session, and a removed
@@ -785,7 +786,11 @@ connection from another host."
     - the link rows named under *Ownership*;
     - rows keyed by a collected message or node id: full-text rows (through the store's own delete triggers), chunk
       rows and their vectors, `lcm_embedding_*` rows (keyed by node id, db_bootstrap.py:1513-1521),
-      `summary_node_provenance`, `host_uid_bindings`, `occurrence_bindings`, `stamp_observations`, `ledger_emissions`;
+      `summary_node_provenance`, `host_uid_bindings`, `occurrence_bindings`, `stamp_observations`, `ledger_emissions`,
+      and `capture_events` rows whose `store_ids` list names a collected id. Such a row's `raw` column is that
+      message's transcript line. The origin keeps it after a partial delete (it purges capture events by session
+      only, claude_code_store.py:100-106) and no reader reads capture events, so here the view is stricter than the
+      origin: a deleted message's text does not reach the view;
     - rows whose lineage value parses to a row session in R: `capture_events`, `host_uid_bindings`, `ingest_views`,
       `lineage_marks`, and the lineage columns of the tables above;
     - `metadata` rows whose family key names a session in R. With the links, that takes
@@ -1899,6 +1904,7 @@ item. On that revision's delta both answered SOUND, with no blocking finding.
 | Bot review of this record, round 2: row 5's disk bar predated V11 | non-blocking | Fixed: row 5 uses V11's bound, records each handover's build path and names forgets of sessions the replica holds | section 6 row 5 |
 | Bot review of this record, round 3: the table refusal ran only when something was left out, so with R not empty a hard-linked view could serve a populated table outside the map or classed `unsupported` | Important | Fixed (release manager's ruling): the refusal applies whenever R is not empty; with R empty the view is the byte copy; step 1 pays nothing (D3 and the compat test) | 4.7 V4 |
 | Bot review of this record, round 3: V6's kept-row sentence read as overriding the own-session rule | non-blocking | Fixed: it holds for a file whose own session stays or that has none; a file of a session in R leaves even when a kept row quotes it | 4.7 V6 |
+| Delta review of lane 5v, round 3: removing one message by row id also removed that kept session's capture event for it, which V3 did not list | Important | Adopted by the release manager's ruling: V3 lists such a capture event with the rows keyed by a collected id, since its raw line is the deleted message's text; the lane's test compares every table of the kept session | 4.7 V3 |
 
 Both re-reviews are static design reviews with synthetic probes on capture stores the product built. They prove no
 built view, real-store timing, embeddings-on run, live interleaving or crash behavior; row 5V and the lanes'
