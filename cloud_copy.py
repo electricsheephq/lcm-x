@@ -478,14 +478,22 @@ def _update_state(home, copy_id, *, consumed_decisions=(), **keys):
     _save_state(home, value | keys | dict(copy_id=copy_id))
 
 
-def _head(transport, prefix, copy_id):
-    keys = transport.list(prefix + '/gen/')
+def _head(transport, prefix, copy_id, generation=None):
+    if generation is not None and (type(generation) is not int or generation < 1):
+        raise Refused('bad_name')
+    keys = transport.list(prefix + '/gen/') if generation is None else [f'{prefix}/gen/{generation}.json']
     for key in keys:
         _name(key, re.escape(prefix) + r'/gen/[1-9][0-9]*\.json')
     if not keys:
         return None, b''
     key = max(keys, key=lambda k: int(k.rsplit('/', 1)[-1][:-5]))
-    data = transport.get(key)
+    if generation is None:
+        data = transport.get(key)
+    else:
+        try:
+            data = transport.get(key)
+        except (KeyError, FileNotFoundError):
+            raise Refused('object_missing', key=key) from None
     generation = int(key.rsplit('/', 1)[-1][:-5])
     try:
         head = json.loads(data)
@@ -508,9 +516,11 @@ def _head(transport, prefix, copy_id):
             raise Refused('bad_name')
         if not isinstance(head['payloads'], list):
             raise ValueError()
+        names = set()
         for row in head['payloads']:
-            if not _payload_name(row['name']):
+            if not _payload_name(row['name']) or row['name'] in names:
                 raise Refused('bad_name')
+            names.add(row['name'])
             _name(row['key'], r'payloads/[0-9a-f]{64}\.' + _TOKEN)
             _name(row['sha256'], r'[0-9a-f]{64}')
             if type(row['bytes']) is not int or row['bytes'] < 0:

@@ -102,6 +102,7 @@ NON_TURN_PATH_FILES = {
     "cloud_delta.py",  # Cloud capture page-delta codec; called only by the cloud upload and restore code, never loaded by Hermes or the capture worker.
     "cloud_guard.py",  # Cloud publication guard and retention; isolated CLI only, never the Hermes turn path.
     "cloud_copy.py",  # Cloud capture snapshot and upload; run only by scripts/lcm_x_cloud.py, never loaded by Hermes or the capture worker.
+    "cloud_restore.py",  # Cloud restore in a separate process; never loaded by Hermes or the capture worker.
     "cloud_s3.py",  # Cloud S3 transport; called only by cloud copy/guard, never the Hermes turn path.
     "command.py",  # Explicit commands or default-off embedding backfill.
     "command_auth.py",  # Explicit slash-command authorization only.
