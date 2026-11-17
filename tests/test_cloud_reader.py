@@ -1651,14 +1651,38 @@ def r13_world(tmp_path, corpus, clients, mode='hits', nodes=False, conversation=
     return SimpleNamespace(**readers, gen=generations['merger'], leaves=leaves)
 
 
+R13_SCORE = re.compile(r'(^|_)score$')
+
+
 def r13_normalize(value):
-    """Probe comparison: every field except explicitly named timing fields."""
+    """Probe comparison: every field except named timing fields and scores (r13_same compares scores)."""
     if isinstance(value, dict):
         return {k: r13_normalize(v) for k, v in value.items()
-                if not re.search(r'(^|_)ms$|elapsed|latency|duration|seconds', k)}
+                if not re.search(r'(^|_)ms$|elapsed|latency|duration|seconds', k) and not R13_SCORE.search(k)}
     if isinstance(value, list):
         return [r13_normalize(v) for v in value]
     return value
+
+
+def r13_scores(value):
+    """Every numeric score field, in document order."""
+    if isinstance(value, dict):
+        return [s for k, v in value.items()
+                for s in ([v] if R13_SCORE.search(k) and isinstance(v, (int, float)) else r13_scores(v))]
+    if isinstance(value, list):
+        return [s for v in value for s in r13_scores(v)]
+    return []
+
+
+def r13_same(actual, expected):
+    """Equal apart from timing fields; scores equal within 1e-4.
+
+    Scores are recency-adjusted against the wall clock, so two calls a moment apart can differ in the sixth
+    decimal (CI run 43966940518). A changed rank moves a score by far more than the tolerance.
+    """
+    assert r13_normalize(actual) == r13_normalize(expected)
+    got, want = r13_scores(actual), r13_scores(expected)
+    assert len(got) == len(want) and all(abs(a - b) <= 1e-4 for a, b in zip(got, want)), (got, want)
 
 
 @pytest.mark.parametrize('mode', ['hits', 'session', 'answer_ready', 'grep'])
@@ -1683,10 +1707,10 @@ def test_r13_forgotten_excluded_at_query_time(tmp_path, corpus, clients, mode):
     actual = world.merger.body(tool, query=R13_QUERY, **args)
     assert actual['total_results'] == 0, 'replica counts must exclude forgotten rows before retrieval'
     for oracle in (world.never, world.deleted):
-        assert r13_normalize(actual) == r13_normalize(oracle.body(tool, query=R13_QUERY, **args))
+        r13_same(actual, oracle.body(tool, query=R13_QUERY, **args))
     assert R13_HIDDEN not in json.dumps(actual), 'no hidden id or exclusion list echo'
     no_match = world.merger.body(tool, query='wombatplume', **args)
-    assert r13_normalize(json.loads(json.dumps(actual).replace(R13_QUERY, 'wombatplume'))) == r13_normalize(no_match)
+    r13_same(json.loads(json.dumps(actual).replace(R13_QUERY, 'wombatplume')), no_match)
     # A named payload from an excluded session is a stock-reader scope error;
     # use history scope to test caller exclusions with an empty success answer.
     exclude_args = dict(session_id=qualified('remote0'), session_scope='session', content_scope='history') if mode == 'grep' else args
@@ -1694,13 +1718,13 @@ def test_r13_forgotten_excluded_at_query_time(tmp_path, corpus, clients, mode):
     assert not excluded[key] and excluded['total_results'] == 0, 'caller exclusion still applies'
     unchanged = world.never.body(tool, query='marker', **args)
     never_excluded = world.never.body(tool, query='marker', exclude_session_ids=[qualified(R13_HIDDEN)], **args)
-    assert r13_normalize(unchanged) == r13_normalize(never_excluded)
+    r13_same(unchanged, never_excluded)
     world.never.close()
     forget(world.never.local, R13_HIDDEN)
     (tmp_path / 'never-reopened').mkdir()
     never_hidden = clients(tmp_path / 'never-reopened', world.never.local)
     ready(never_hidden)
-    assert r13_normalize(unchanged) == r13_normalize(never_hidden.body(tool, query='marker', **args))
+    r13_same(unchanged, never_hidden.body(tool, query='marker', **args))
 
 
 @pytest.mark.parametrize('tool', ['lcm_grep', 'lcm_recall'])
