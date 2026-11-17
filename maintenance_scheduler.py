@@ -426,6 +426,8 @@ def _flush_pending_tails_at_exit() -> None:
                 engine._retry_pending_session_tails(deadline=deadline, exiting=True)
             else:
                 engine._warn_unflushed_session_tails("lifecycle lock", deadline=deadline)
+    from .queued_user_rows import flush_at_exit
+    flush_at_exit()  # Separate records budgets, after canonical retry work.
 
 
 atexit.register(_flush_pending_tails_at_exit)

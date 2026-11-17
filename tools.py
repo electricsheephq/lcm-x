@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from . import queued_user_rows as _queued_records
+
 import codecs
 import copy
 import heapq
@@ -1041,6 +1043,7 @@ def _serialize_loaded_message(
     return item
 
 
+@_queued_records.surface('load')
 def lcm_load_session(args: Dict[str, Any], **kwargs) -> str:
     """Load an ordered, bounded raw-message page for one explicit session_id."""
     engine = _require_engine(kwargs)
@@ -2770,6 +2773,7 @@ def _lcm_grep_hybrid(
     return response
 
 
+@_queued_records.surface('grep')
 def lcm_grep(args: Dict[str, Any], **kwargs) -> str:
     """Search LCM history using full-text, semantic, or RRF hybrid retrieval."""
     request_started = time.monotonic()
@@ -4882,6 +4886,7 @@ def _lcm_recall_session_floor(
                     "promoted": promoted, "delivered": None}
 
 
+@_queued_records.surface('recall')
 def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
     """Search the agent's entire memory (all conversations, all time) by meaning.
 
@@ -6264,9 +6269,12 @@ def lcm_doctor(args: Dict[str, Any], **kwargs) -> str:
         "status": "warn" if inactive_process else "pass",
         "detail": inactive_process or "no live inactive process",
     })
+    from .queued_user_rows import decide as decide_queued_rows
     from .store import records_doctor
     try:
-        records_detail = records_doctor(engine._store)
+        records_detail = records_doctor(engine._store, decide=decide_queued_rows)
+        if getattr(engine, '_queued_counts', None):
+            records_detail += "; capture/drain counts=" + str(dict(engine._queued_counts))
     except (OSError, sqlite3.Error, ValueError) as exc:
         records_detail = f"records: unavailable ({exc})"
     checks.append({"check": "records", "status": "warn" if "refused" in records_detail or "unavailable" in records_detail

@@ -166,3 +166,22 @@ return their existing `status: disabled` responses.
 ## Operator tools
 
 `lcm_status`, `lcm_inspect`, and `lcm_doctor` report health and metadata. They do not replace content retrieval.
+
+Queued user records (v0.30.2) are typed recall sources with `owner_store_id` and
+zero-based `ordinal`, attached to their parent's current session/conversation.
+`lcm_grep` and `lcm_recall` add `queued_user_record_hits` beside canonical hits.
+`lcm_load_session` adds `queued_user_records` for visible records whose owners
+are on the canonical page, ordered by owner and ordinal. When present,
+`queued_user_records_withheld` holds counts (`overlap`, `unscanned`) and locators
+for that page's owners. Canonical pagination selects owners; records have no
+separate cursor. Follow a record's `reference` with
+`lcm_expand(store_id=owner_store_id)` and select its ordinal from
+`queued_user_records`; expansion includes withheld records and their `state`.
+Records are not summary source ids. Their owner id identifies the canonical row.
+The read-only MCP reader uses the same response shape. Record content obeys the
+tool's bounds; `queued_user_records_omitted` counts trailing entries omitted to
+fit search response caps. Unsupported search filters omit record hits.
+With no records for a call there are no extra keys. An unreadable records file
+adds `queued_user_records_status` (`available=false`); `recovery_pending` means
+writer recovery is needed. Blank records remain listed. On hosts without
+absorbed-UID evidence, records are never marked superseded.

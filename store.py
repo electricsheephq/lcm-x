@@ -477,6 +477,8 @@ def _database_identity(path: Path, store: object) -> str:
 
 
 # Records format 1; oldest reader v0.30.2; no planned removal. Canonical DDL is unchanged.
+_RECORDS_SWEPT, _RECORDS_ORPHANS = set(), Counter()
+RECORDS_SWEEP_BATCH = 256
 _RECORDS_TABLES: dict[str, tuple[str, dict[str, str]]] = {}
 RECORDS_PURGE_BUSY_MS = 50  # Each purge intent/completion has its own bounded SQLite wait.
 
@@ -512,6 +514,23 @@ def register_records_table(name: str, ddl: str, owner_columns: dict[str, str]) -
     if {"session_id", "conversation_id"} & set(columns.values()):
         raise ValueError("scope is not occurrence evidence")
     _RECORDS_TABLES[name] = (ddl, columns)
+
+
+# Product registrations must load on both the engine and operator purge paths.
+register_records_table("queued_user_rows", """CREATE TABLE IF NOT EXISTS queued_user_rows (
+    owner_store_id INTEGER NOT NULL, owner_timestamp REAL, owner_ingested_at REAL,
+    owner_content_digest TEXT NOT NULL, owner_message_uid TEXT, ordinal INTEGER NOT NULL,
+    role TEXT NOT NULL, content TEXT NOT NULL, content_digest TEXT NOT NULL,
+    observed_at REAL, observed_at_source TEXT NOT NULL, captured_uid TEXT,
+    captured_at REAL NOT NULL, superseded_by INTEGER, session_id TEXT, conversation_id TEXT, profile TEXT,
+    PRIMARY KEY(owner_store_id, ordinal))""",
+    dict(owner_store_id="store_id", owner_timestamp="timestamp",
+         owner_ingested_at="ingested_at", owner_content_digest="content"))
+
+
+def _records_evidence(columns, owner):
+    return {key: (hashlib.sha256((owner[col] or "").encode("utf-8")).hexdigest()
+                  if key == "owner_content_digest" else owner[col]) for key, col in columns.items()}
 
 
 def ensure_records_format(conn: sqlite3.Connection) -> None:
@@ -558,7 +577,7 @@ def _records_has_table(conn, table):
 def _records_owner(canonical, columns, row):
     names = list(columns)
     owner = canonical.execute("SELECT * FROM messages WHERE store_id=?", (row[names[0]],)).fetchone()
-    if owner is None or any(owner[col] != row[key] for key, col in columns.items()):
+    if owner is None or any(value != row[key] for key, value in _records_evidence(columns, owner).items()):
         return None
     return owner
 
@@ -583,7 +602,7 @@ class RecordsWriter:
                 if owner is None:
                     conn.rollback()
                     return "owner not committed or evidence mismatch"
-                evidence = json.dumps({key: owner[col] for key, col in columns.items()}, sort_keys=True)
+                evidence = json.dumps(_records_evidence(columns, owner), sort_keys=True)
                 if conn.execute("SELECT 1 FROM _records_purge_intents WHERE table_name=? "
                                 "AND owner_id=? AND evidence=?", (table, values[next(iter(columns))], evidence)).fetchone():
                     conn.rollback()
@@ -602,7 +621,7 @@ class RecordsWriter:
 
     def _complete(self, canonical, token=None):
         # Absence of a matching owner only completes an explicit purge intent.
-        # An unattached record with no intent is NEVER swept.
+        # First-open rollback cleanup is separate from intent completion.
         query = "SELECT * FROM _records_purge_intents" + (" WHERE token=?" if token is not None else "")
         for intent in self.connection.execute(query, () if token is None else (token,)).fetchall():
             table = intent[1]
@@ -661,6 +680,21 @@ def open_records_writer(db_path, *, _busy_timeout_ms=0) -> RecordsWriter:
     conn = sqlite3.connect(str(path), timeout=_busy_timeout_ms / 1000)
     try:
         ensure_records_format(conn)
+        if str(path) not in _RECORDS_SWEPT:
+            swept = 0
+            with closing(_records_ro(str(path)[:-len('.records')])) as canonical:
+                canonical.execute('BEGIN')
+                if _records_has_table(conn, 'queued_user_rows'):
+                    conn.execute('BEGIN IMMEDIATE')
+                    owners = conn.execute('SELECT DISTINCT owner_store_id FROM queued_user_rows ORDER BY owner_store_id')
+                    while batch := owners.fetchmany(RECORDS_SWEEP_BATCH):
+                        for (owner,) in batch:
+                            if not canonical.execute('SELECT 1 FROM messages WHERE store_id=?', (owner,)).fetchone():
+                                swept += conn.execute('DELETE FROM queued_user_rows WHERE owner_store_id=?', (owner,)).rowcount
+                    conn.commit()
+            _RECORDS_ORPHANS[str(path)] += swept
+            _RECORDS_SWEPT.add(str(path))
+            logger.info('queued records orphan_swept=%d', swept)
     except BaseException:
         conn.close()
         raise
@@ -676,14 +710,17 @@ class RecordsReadCut:
 
 
 @contextmanager
-def records_read_cut(db_path, *, _for_backup=False):
+def records_read_cut(db_path, *, _for_backup=False, _read_only=False):
     """Pin rollback-journal records BEFORE the one canonical snapshot used by callers."""
     path = records_path(db_path)
     with ExitStack() as stack:
         records = canonical = None
         refused = None
         if path is not None and path.exists():
-            _recover_records_journal(path)
+            if _read_only and Path(str(path) + '-journal').exists():
+                raise ValueError('recovery_pending')
+            if not _read_only:
+                _recover_records_journal(path)
             records = stack.enter_context(closing(_records_ro(path)))
             records.execute("BEGIN")
             version = records.execute("PRAGMA user_version").fetchone()[0]
@@ -697,13 +734,30 @@ def records_read_cut(db_path, *, _for_backup=False):
         yield RecordsReadCut(path, records, canonical, refused)
 
 
-def read_records(cut, table):
+def read_records(cut, table, session_id=None):
     """Return (attached dictionaries, unattached count). No writes or orphan deletion."""
     if cut.records is None or not _records_has_table(cut.records, table):
         return [], 0
     columns = _RECORDS_TABLES[table][1]
     attached, unattached = [], 0
-    for row in cut.records.execute(f"SELECT * FROM {table}"):
+    if session_id is None:
+        attached_rows = cut.records.execute(f"SELECT * FROM {table}")
+    else:
+        # Read this session's canonical owner ids in bounded SQL batches. Never
+        # inspect unrelated records or trust scope cached in a records row.
+        owner_key = next(iter(columns))
+        ids = cut.canonical.execute("SELECT store_id FROM messages WHERE session_id=?", (session_id,))
+        attached_rows, batch = [], []
+        for (sid,) in ids:
+            batch.append(sid)
+            if len(batch) == 500:
+                marks = ','.join('?' for _ in batch)
+                attached_rows.extend(cut.records.execute(f"SELECT * FROM {table} WHERE {owner_key} IN ({marks})", batch))
+                batch.clear()
+        if batch:
+            marks = ','.join('?' for _ in batch)
+            attached_rows.extend(cut.records.execute(f"SELECT * FROM {table} WHERE {owner_key} IN ({marks})", batch))
+    for row in attached_rows:
         owner = _records_owner(cut.canonical, columns, row)
         if owner is None:
             unattached += 1
@@ -712,7 +766,8 @@ def read_records(cut, table):
     return attached, unattached
 
 
-def records_doctor(db_path):
+def records_doctor(db_path, decide=None):
+    # The caller passes queued_user_rows.decide: store.py must not import it, since it reaches command.py (#2138).
     with records_read_cut(db_path) as cut:
         if cut.refused_format is not None:
             return (f"records: refused format {cut.refused_format}; newer than this version reads; "
@@ -723,18 +778,37 @@ def records_doctor(db_path):
         for table in _RECORDS_TABLES:
             rows, unattached = read_records(cut, table)
             counts.append(f"{table} attached={len(rows)} unattached={unattached}")
+            if table == 'queued_user_rows' and decide is not None:
+                states = Counter()
+                for session in {row['session_id'] for row in rows}:
+                    _, decided = decide(cut, session)
+                    states.update(decided.values())
+                counts.append(f"superseded={sum(r['superseded_by'] is not None for r in rows)} "
+                              f"withheld.overlap={states['overlap']} withheld.unscanned={states['unscanned']}")
         pending = (cut.records.execute("SELECT count(DISTINCT token) FROM _records_purge_intents").fetchone()[0]
                    if _records_has_table(cut.records, '_records_purge_intents') else 0)
         size = cut.path.stat().st_size
         label = 'format 0 (empty)' if size == 0 else 'format 1'
-        return f"records: {label}; bytes={size}; " + '; '.join([*counts, f"pending purge intents={pending}"])
+        return f"records: {label}; bytes={size}; " + '; '.join([*counts, f"pending purge intents={pending}", f"orphan_swept={_RECORDS_ORPHANS[str(cut.path)]}"])
+
+
+def _check_records_tables(side):
+    unknown = {row[0] for row in side.execute("SELECT name FROM sqlite_master WHERE type='table'")
+               if not row[0].startswith(("sqlite_", "_records_"))} - _RECORDS_TABLES.keys()
+    if unknown:
+        raise ValueError("records purge refused: unmapped tables " + ", ".join(sorted(unknown)))
 
 
 def _purge_records(conn, sessions_sql, args):
     identity = conn.execute("PRAGMA database_list").fetchone()[2]
     path = records_path(identity) if identity else None
-    if path is None or not path.exists():
+    if path is None:
         return
+    if path.exists():
+        _recover_records_journal(path)
+        with closing(_records_ro(path)) as probe:
+            _check_records_write_format(probe)
+            _check_records_tables(probe)  # Refuse before ensure can stamp any bytes.
     owner = next(item for item in TransactionOwner._active_owners.get() if item.owns(conn))
     writer = open_records_writer(identity, _busy_timeout_ms=RECORDS_PURGE_BUSY_MS)
     side = writer.connection
@@ -743,12 +817,17 @@ def _purge_records(conn, sessions_sql, args):
         side.execute(f"PRAGMA busy_timeout={RECORDS_PURGE_BUSY_MS}")
         side.execute("BEGIN IMMEDIATE")
         _check_records_write_format(side)
+        _check_records_tables(side)
         for table, (_, columns) in _RECORDS_TABLES.items():
             cursor = conn.execute(f"SELECT * FROM messages WHERE session_id IN ({sessions_sql})", args)
             names = [column[0] for column in cursor.description]
+            if not set(columns.values()) <= set(names):
+                if _records_has_table(side, table):
+                    raise ValueError('records purge refused: missing canonical owner evidence')
+                continue  # This canonical schema cannot own a row in this absent table.
             for values in cursor:
                 row = dict(zip(names, values))
-                evidence = {key: row[col] for key, col in columns.items()}
+                evidence = _records_evidence(columns, row)
                 side.execute("INSERT INTO _records_purge_intents VALUES (?,?,?,?)",
                              (token, table, row['store_id'], json.dumps(evidence, sort_keys=True)))
         side.commit()

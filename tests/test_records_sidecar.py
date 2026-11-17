@@ -50,7 +50,7 @@ def read(store):
 
 def counts(writer):
     return (writer.connection.execute(f'SELECT count(*) FROM {TABLE}').fetchone()[0],
-            writer.connection.execute('SELECT count(*) FROM _records_purge_intents').fetchone()[0])
+            writer.connection.execute('SELECT count(*) FROM _records_purge_intents WHERE table_name=?', (TABLE,)).fetchone()[0])
 
 
 @pytest.mark.parametrize('operation', ['insert', 'maintain'])
@@ -1038,6 +1038,8 @@ def test_backup_failed_restore_keeps_recovery_files(pair, tmp_path, monkeypatch,
         assert target.read_bytes() == before[0]
         if old_records:
             assert records.read_bytes() == before[1], 'restart did not restore the old pair'
+        else:
+            assert not records.exists(), 'restart paired new records with old canonical data'
         restored.append(True)
         return original_backup(dest)
 
@@ -1145,3 +1147,117 @@ def test_backup_folder_fcntl_unavailable_warns_once(pair, tmp_path, monkeypatch,
     warnings = [record for record in caplog.records if record.name == maintenance.__name__]
     assert len(warnings) == 1 and warnings[0].levelno == logging.WARNING
     assert 'continuing unlocked' in warnings[0].message
+
+
+def test_first_creation_is_coordinated_with_purge(tmp_path):
+    store = sm.MessageStore(tmp_path / 'lcm.db')
+    sid = store.append('S', dict(role='user', content='owner', timestamp=1.))
+    owner = store.get(sid)
+    values = dict(owner_store_id=sid, owner_timestamp=owner['timestamp'],
+                  owner_ingested_at=owner['ingested_at'], owner_content_digest=sm.hashlib.sha256(b'owner').hexdigest(),
+                  ordinal=0, role='user', content='earlier', content_digest=sm.hashlib.sha256(b'earlier').hexdigest(),
+                  observed_at=0., observed_at_source='host_message_timestamp', captured_at=0., superseded_by=None)
+    try:
+        assert not sm.records_path(store).exists()
+        with store.atomic(immediate=True):
+            sm.run_session_purges(store.connection, 'SELECT ?', ('S',))
+            with closing(sm.open_records_writer(store)) as writer:
+                assert writer.insert('queued_user_rows', values) == 'pending purge intent', 'purge resurrection'
+            store.connection.execute("DELETE FROM messages WHERE session_id='S'")
+        with sm.records_read_cut(store) as cut:
+            assert sm.read_records(cut, 'queued_user_rows') == ([], 0)
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize('path', ['store', 'operator'])
+def test_unmapped_table_refuses_every_purge(pair, path):
+    store, writer, _ = pair
+    writer.connection.execute('CREATE TABLE unknown_product (owner_id INTEGER, content TEXT)')
+    writer.connection.execute("INSERT INTO unknown_product VALUES (1, 'keep')")
+    writer.connection.commit()
+    before = store.get_session_messages('S'), writer.path.read_bytes()
+    with pytest.raises(ValueError, match='unmapped tables'):
+        if path == 'store':
+            store.delete_session_messages('S')
+        else:
+            with store.atomic(immediate=True):
+                sm.run_session_purges(store.connection, 'SELECT ?', ('S',))
+                store.connection.execute("DELETE FROM messages WHERE session_id='S'")
+    assert (store.get_session_messages('S'), writer.path.read_bytes()) == before
+
+
+def test_backup_copy_fallback_fsync_before_publish(pair, tmp_path, monkeypatch):
+    store, _, _ = pair
+    target = tmp_path / 'rotate.db'
+    maintenance._backup_pair(store, target)
+    events = []
+    real_replace, real_fsync = os.replace, os.fsync
+    def unsupported(*_):
+        raise OSError('no hardlinks')
+    def sync(fd):
+        events.append('fsync')
+        return real_fsync(fd)
+    def replace(source, destination):
+        if str(destination).endswith('.records.previous'):
+            assert 'fsync' in events, 'fallback records copy not synced before publish'
+        return real_replace(source, destination)
+    monkeypatch.setattr(Path, 'hardlink_to', unsupported)
+    monkeypatch.setattr(os, 'fsync', sync)
+    monkeypatch.setattr(os, 'replace', replace)
+    maintenance._backup_pair(store, target)
+    assert events
+
+
+@pytest.mark.parametrize('operation', ['timestamped', 'rotate'])
+def test_backup_error_includes_recovery_note(pair, tmp_path, monkeypatch, operation):
+    store, _, _ = pair
+    engine = SimpleNamespace(_store=store, _dag=SimpleNamespace(_conn=store.connection),
+                             backup_dir=lambda: tmp_path, rotate_backup_path=lambda: tmp_path / 'rotate.db')
+    def fail(*_):
+        exc = OSError('publish failed')
+        exc.add_note('Backup restore failed: recovery files kept')
+        raise exc
+    monkeypatch.setattr(maintenance, '_backup_pair', fail)
+    result = (maintenance.backup_database if operation == 'timestamped' else maintenance.rotate_backup_database)(engine)
+    assert result['error'] == 'publish failed\nBackup restore failed: recovery files kept'
+
+
+@pytest.mark.parametrize('old_records', [False, True])
+def test_interrupted_after_canonical_replace_keeps_new_pair(pair, tmp_path, monkeypatch, old_records):
+    store, writer, values = pair
+    target = tmp_path / 'rotate.db'
+    maintenance._backup_pair(store, target)
+    records = Path(str(target) + '.records')
+    if not old_records:
+        records.unlink()
+    store.append('T', dict(role='user', content='new canonical', timestamp=2.))
+    assert writer.insert(TABLE, dict(values, payload='new record')) is None
+    real_replace = Path.replace
+    def interrupted(source, destination):
+        result = real_replace(source, destination)
+        if destination == target:
+            raise KeyboardInterrupt('after canonical replace')
+        return result
+    monkeypatch.setattr(Path, 'replace', interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        maintenance._backup_pair(store, target)
+    with closing(sqlite3.connect(target)) as canonical, closing(sqlite3.connect(records)) as side:
+        assert canonical.execute("SELECT count(*) FROM messages WHERE session_id='T'").fetchone()[0] == 1
+        assert side.execute("SELECT count(*) FROM test_records WHERE payload='new record'").fetchone()[0] == 1, \
+            'interrupted replace paired old records with new canonical'
+
+
+def test_purge_preflight_recovers_hot_journal_before_read(pair, monkeypatch):
+    store, writer, _ = pair
+    crash_records_writer(writer.path)
+    checked = []
+    original = sm._check_records_tables
+    def check(side):
+        assert not Path(str(writer.path) + '-journal').exists(), 'preflight read before journal recovery'
+        checked.append(True)
+        return original(side)
+    monkeypatch.setattr(sm, '_check_records_tables', check)
+    store.delete_session_messages('S')
+    assert checked and store.get_session_messages('S') == []
+    assert counts(writer) == (0, 0)

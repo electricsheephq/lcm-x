@@ -25,6 +25,7 @@ jobs:
           # tests/test_differential_relevance.py checks static engine imports
           # against the gate's lists and its documented exclusions.
           TURN_PATH_FILES: |-
+            queued_user_rows.py
             __init__.py
             assembly_plan.py
             aux_session.py

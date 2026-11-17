@@ -727,6 +727,7 @@ def register(ctx):
         try:
             def _on_pre_llm_call(**payload):
                 from .sender_capture import create_pending
+                from .queued_user_rows import capture
 
                 _on_live_delegate_child_list(**payload)  # #2482; returns None, never raises
                 session_id = str(payload.get("session_id") or "")
@@ -737,6 +738,7 @@ def register(ctx):
                 )
                 def prepare(active_engine):
                     create_pending(active_engine, payload)
+                    capture(active_engine, payload)
                     return _pre_llm_context(active_engine, payload)
 
                 result = use_active_lcm_engine(

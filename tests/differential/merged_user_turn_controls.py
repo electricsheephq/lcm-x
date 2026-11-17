@@ -185,7 +185,11 @@ def test_round3_rewritten_prefix_drops_false_fallback_marks(tmp_path, monkeypatc
             engine.ingest(incoming)
             results[name] = [_identities(engine)]
             if name == 'candidate' and hasattr(engine, '_store_queued_user_rows') and not stubbed:
-                assert calls
+                from .record_contract import FAULT_EXEMPTIONS
+                if (engine._paired_trace.case, 'preservation-once') in FAULT_EXEMPTIONS:
+                    assert not calls
+                else:
+                    assert calls
             assert engine._ingest_failure_count == 0
         finally:
             engine.shutdown()
@@ -253,9 +257,10 @@ def test_round2_fallback_has_own_evidence_retry(tmp_path, monkeypatch, versions,
             original = engine._identity_anchor_prematch
 
             def prematch(*args, **kwargs):
-                # The fake writer runs after canonical ingest, so it cannot
-                # trigger this earlier evidence fault through fallen_back.
-                if (name == 'main' or not hasattr(engine, '_store_queued_user_rows') or fallen_back
+                # T1-147/T1-167: records-v1 writes after the canonical commit,
+                # so its evidence fault cannot depend on the later writer failure.
+                if (name == 'main' or paired.CANDIDATE_CONTRACT == 'records-v1'
+                        or not hasattr(engine, '_store_queued_user_rows') or fallen_back
                         or hasattr(engine, '_fake_queued_rows')):
                     attempt = engine.__dict__.get('_ingest_attempt_index')
                     if attempt is None:
