@@ -90,8 +90,8 @@ def _frontier(engine) -> int:
 
 
 def _passes(engine, view, n, lines, label="") -> tuple[list, list[dict]]:
-    """``n`` threshold passes, each a foreground turn; the 600 s no-progress hold only paces passes (a real host
-    retries after it), so it is cleared between them."""
+    """``n`` threshold passes, each a foreground turn; the no-progress hold and retained-stop back-off only pace
+    passes (a real host retries after them), so both are cleared between passes."""
     trace = []
     for _ in range(n):
         start = len(lines)
@@ -99,6 +99,7 @@ def _passes(engine, view, n, lines, label="") -> tuple[list, list[dict]]:
         engine.note_turn_complete()
         engine._clear_persisted_no_progress_hold()
         engine._no_progress_hold = None
+        engine._record_retained_stop(None)
         new = lines[start:]
         stop = next((msg for _lvl, msg in new if msg.startswith("LCM compaction stop:")), "")
         trace.append({
@@ -271,10 +272,12 @@ def _streak_of_three(tmp_path, lines):
 
 
 def _one_pass(engine, view, **kwargs):
+    """Run one turn, clearing both pacing holds as in _passes; a real host retries after them."""
     view = engine.compress(view, **kwargs)
     engine.note_turn_complete()
     engine._clear_persisted_no_progress_hold()
     engine._no_progress_hold = None
+    engine._record_retained_stop(None)
     return view
 
 

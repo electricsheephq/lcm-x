@@ -399,7 +399,7 @@ class LiteralPattern:
 # The original 123 names include callable fingerprints. Four existing helper
 # state fields complete the original transitive inventory. The two hung-route
 # fields added on the R3 train and the leaf preparation/refusal state are also
-# read/written by compaction. Update deliberately
+# read/written by compaction, as is the #2815 gap diagnostic. Update deliberately
 # when changing this list, never derive the runtime observer from source.
 OBSERVED_ATTRIBUTES = (
     "_active_replay_placeholder_digest",
@@ -523,6 +523,7 @@ OBSERVED_ATTRIBUTES = (
     "_store_complete_empty_reason",
     "_store_complete_escaped",
     "_store_complete_excluded",
+    "_store_complete_hole",
     "_store_complete_order",
     "_stored_publication_filter_exclusions",
     "_stub_first_exit",

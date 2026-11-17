@@ -449,6 +449,7 @@ class StoreCompleteMixin:
             # become a hole. Once, retry on the tool-group-safe chunk prefix before the blocking row: the
             # rows cut off stay retained host rows, which the #1162 escape summarises from the store.
             hole, pending = hole_stop
+            self._store_complete_hole = hole  # Refs #2815: retain the id even when the outer stop is retained.
             holder = next((k for k in range(index, len(chunk)) if hole in claims.get(id(chunk[k]), ())), None)
             end = tool_group_safe_end(chunk, index) if holder is not None else 0
             retry = (prefix_retry and holder is not None and not escape_retained and allow_retained_escape
