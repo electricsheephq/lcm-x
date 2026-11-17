@@ -1795,7 +1795,7 @@ def test_r13_recall_coverage_survives_rebuild(tmp_path, corpus, clients):
 
 
 @pytest.mark.parametrize('tool', ['lcm_grep', 'lcm_recall'])
-@pytest.mark.parametrize('case', ['messages', 'mode', 'exclude', 'healthy', 'unavailable', 'warming', 'late', 'sessions'])
+@pytest.mark.parametrize('case', ['messages', 'mode', 'exclude', 'healthy', 'unavailable', 'warming', 'late'])
 def test_r14_fanout_forgotten_equals_missing(tmp_path, corpus, direct_mergers, monkeypatch, tool, case):
     local, sources = corpus
     hidden, missing = 'deadbeef-session', '00000000-s0ssion'
@@ -1843,8 +1843,11 @@ def test_r14_fanout_forgotten_equals_missing(tmp_path, corpus, direct_mergers, m
         control = entry(query='marker', session_scope='session' if scope else 'all', **scope)
         assert control['status'] == 'ok' and control['hits']
         assert all(hit['session_id'] == qualified('remote0') for hit in control['hits'])
-        assert sent == [{'query': 'marker', 'session_scope': 'session' if scope else 'all',
-                         **scope, 'exclude_session_ids': [hidden]}]
+        expected_control = {'query': 'marker', 'session_scope': 'session' if scope else 'all',
+                            **scope, 'exclude_session_ids': [hidden]}
+        if tool == 'lcm_recall':
+            expected_control.pop('session_id', None)
+        assert sent == [expected_control]
     sent.clear()
     assert entry(query='marker', session_id=hidden, externalized_refs=['local-only.json']) == {
         'copy_id': PREFIX, 'generation': 1, 'status': 'ok', 'hits': []}
@@ -1855,21 +1858,16 @@ def test_r14_fanout_forgotten_equals_missing(tmp_path, corpus, direct_mergers, m
     if case in {'unavailable', 'warming'}:
         monkeypatch.setattr(merger, 'refresh', lambda: None)
         replica.status = case
-    elif case in {'late', 'sessions'}:
+    elif case == 'late':
         def synthetic(raw):
             args = json.loads(raw)['params']['arguments']
             sent.append(args)
             future = cr.Future()
             pending.append(future)
-            if case == 'sessions':
-                echo = {'session_id': args['session_id'], 'message_count': 0}
-                future.set_result(cr.Merger.answer({'id': 1}, {
-                    'results': [echo], 'hits': [echo], 'provenance': {'delivery': {'sessions': [echo]}}}))
             return future
         monkeypatch.setattr(replica.child, 'ask', synthetic)
         # An unresolved Future and zero wait make lateness independent of scheduling.
-        if case == 'late':
-            merger.replica_wait = 0
+        merger.replica_wait = 0
     sent.clear()
     args = dict(query='wombatplume', session_scope='session', **extra)
     expected = entry(session_id=missing, **args)
@@ -1881,10 +1879,10 @@ def test_r14_fanout_forgotten_equals_missing(tmp_path, corpus, direct_mergers, m
         assert actual['status'] == status and actual['hits'] == []
     else:
         assert actual['status'] == 'ok'
-    if case == 'sessions':
-        assert actual['sessions'] == actual['hits'] == [{'session_id': qualified(hidden), 'message_count': 0}]
     if case not in {'unavailable', 'warming'}:
         expected_args = {**args, 'session_id': missing}
+        if tool == 'lcm_recall':
+            expected_args.pop('session_id')
         if case != 'exclude':
             expected_args['exclude_session_ids'] = [hidden]
         assert sent == [expected_args, expected_args], 'forgotten and missing calls must take the same replica path'
@@ -1893,3 +1891,270 @@ def test_r14_fanout_forgotten_equals_missing(tmp_path, corpus, direct_mergers, m
         for future in pending:
             future.set_result(cr.Merger.answer({'id': 1}, {'results': [], 'hits': []}))
         assert actual['status'] == 'late', 'a discarded late response cannot change the returned entry'
+
+
+# The round-14 review's complete differential corpus, adapted to this module.
+R15_H = '7c9e6679-7425-40de-944b-e07fc1f90ae7'
+R15_M = '9b2d4e6f-1111-4222-8333-944455566677'
+R15_NIL = '00000000-0000-0000-0000-000000000000'
+R15_SHORT_H, R15_SHORT_M = 'a', 'c'
+R15_OWNP = OWN.replace('-', '')
+R15_P0, R15_P1 = COPIES[0].replace('-', ''), COPIES[1].replace('-', '')
+
+
+def r15_drain(home, session, entries, tmp):
+    store = cc.open_store(home / 'lcm.db', home)
+    try:
+        tx = _transcript(tmp / f'tx-{session}-{home.name}', entries, session)
+        assert cc.drain(store, cc.Lineage(session, None, tx)) == 'drained'
+        assert cc.to_rollback_journal(store.connection)
+    finally:
+        store.close()
+    assert cc.leave_readable(home / 'lcm.db')
+
+
+def r15_build(tmp, nil_session=False):
+    local, _ = make_store(tmp, 'local')
+    (local / '.env').write_text('LCM_EMBEDDINGS_ENABLED=false\n')
+    optin(local)
+    src = make_store(tmp, 'remotex', text=f'needle {R15_NIL} tail')[0]
+    for sid in (R15_H, R15_SHORT_H):
+        r15_drain(src, sid, [_entry('user', 'h1', 'hidden needle words', sid)], tmp)
+        r15_drain(local, sid, [_entry('user', 'f1', 'local copy', sid)], tmp)
+        forget(local, sid)
+    if nil_session:
+        r15_drain(src, R15_NIL, [_entry('user', 'n1', 'nil session needle words', R15_NIL)], tmp)
+    assert {R15_H, R15_SHORT_H} <= cr.forgotten(local / 'lcm.db')
+    with sqlite3.connect(f'file:{src / "lcm.db"}?mode=ro&immutable=1', uri=True) as conn:
+        conv = {sid: [r[0] for r in conn.execute('SELECT DISTINCT conversation_id FROM messages WHERE session_id=?', (sid,))]
+                for sid in (R15_H, 'remotex')}
+    copy_generation(src, local, COPIES[0])
+    src2 = make_store(tmp, 'remotey')[0]
+    copy_generation(src2, local, COPIES[1])
+    return local, conv
+
+
+def r15_swap(entry, old, new):
+    text = json.dumps(entry)
+    for p in (R15_P0, R15_P1):
+        text = cr.replace_token(text, f'{p}:{old}', f'{p}:{new}')
+    return json.loads(cr.replace_token(text, old, new))
+
+
+def r15_replica_args(client):
+    out = {}
+    for pid in client.pids(True):
+        path = client.log / f'{pid}.requests'
+        if path.exists():
+            out[pid] = [json.loads(line) for line in path.read_text().splitlines()]
+    return out
+
+
+def r15_new_calls(before, after):
+    return [r['params']['arguments'] for pid, reqs in after.items() for r in reqs[len(before.get(pid, [])):]
+            if r.get('method') == 'tools/call']
+
+
+def r15_pairs(tmp_path, clients):
+    local, conv = r15_build(tmp_path)
+    client = clients(tmp_path, local)
+    ready(client, 2)
+    hconv = conv[R15_H][0] if conv[R15_H] else None
+    pairs = {
+        'grep_session': ('lcm_grep', dict(query='needle', session_scope='session', session_id=R15_H), dict(query='needle', session_scope='session', session_id=R15_M)),
+        'grep_session_default_scope': ('lcm_grep', dict(query='needle', session_id=R15_H), dict(query='needle', session_id=R15_M)),
+        'recall_session_id': ('lcm_recall', dict(query='needle', session_id=R15_H), dict(query='needle', session_id=R15_M)),
+        'recall_session_id_nil_query': ('lcm_recall', dict(query=R15_NIL, session_id=R15_H), dict(query=R15_NIL, session_id=R15_M)),
+        'recall_own_prefix': ('lcm_recall', dict(query='needle', session_id=f'{R15_OWNP}:{R15_H}'), dict(query='needle', session_id=f'{R15_OWNP}:{R15_M}')),
+        'grep_own_prefix': ('lcm_grep', dict(query='needle', session_scope='session', session_id=f'{R15_OWNP}:{R15_H}'), dict(query='needle', session_scope='session', session_id=f'{R15_OWNP}:{R15_M}')),
+        'recall_short_hex': ('lcm_recall', dict(query='needle', session_id=R15_SHORT_H), dict(query='needle', session_id=R15_SHORT_M)),
+        'grep_short_hex': ('lcm_grep', dict(query='needle', session_scope='session', session_id=R15_SHORT_H), dict(query='needle', session_scope='session', session_id=R15_SHORT_M)),
+        'grep_padded': ('lcm_grep', dict(query='needle', session_scope='session', session_id=f' {R15_H} '), dict(query='needle', session_scope='session', session_id=f' {R15_M} ')),
+        'recall_padded': ('lcm_recall', dict(query='needle', session_id=f' {R15_H} '), dict(query='needle', session_id=f' {R15_M} ')),
+        'grep_excl_self': ('lcm_grep', dict(query='needle', session_scope='session', session_id=R15_H, exclude_session_ids=[R15_H]), dict(query='needle', session_scope='session', session_id=R15_M, exclude_session_ids=[R15_M])),
+        'recall_excl_self': ('lcm_recall', dict(query='needle', session_id=R15_H, exclude_session_ids=[R15_H]), dict(query='needle', session_id=R15_M, exclude_session_ids=[R15_M])),
+        'grep_excl_standin': ('lcm_grep', dict(query='needle', session_scope='session', session_id=R15_H, exclude_session_ids=[R15_NIL]), dict(query='needle', session_scope='session', session_id=R15_M, exclude_session_ids=[R15_NIL])),
+        'grep_all_excl_forgotten': ('lcm_grep', dict(query='needle', session_scope='all', exclude_session_ids=[R15_H]), dict(query='needle', session_scope='all', exclude_session_ids=[R15_M])),
+        'recall_excl_forgotten': ('lcm_recall', dict(query='needle', exclude_session_ids=[R15_H]), dict(query='needle', exclude_session_ids=[R15_M])),
+        'grep_conv': ('lcm_grep', dict(query='needle', session_scope='all', conversation_id=hconv or R15_H), dict(query='needle', session_scope='all', conversation_id='missingconv')),
+        'grep_limit1': ('lcm_grep', dict(query='needle', session_scope='session', session_id=R15_H, limit=1), dict(query='needle', session_scope='session', session_id=R15_M, limit=1)),
+        'grep_int_like': ('lcm_grep', dict(query='needle', session_scope='session', session_id=7), dict(query='needle', session_scope='session', session_id=8)),
+    }
+    out = {'conv': conv}
+    for label, (tool, fa, ma) in pairs.items():
+        before = r15_replica_args(client)
+        f = client.body(tool, **fa).get('other_stores')
+        mid = r15_replica_args(client)
+        sent_f = r15_new_calls(before, mid)
+        m = client.body(tool, **ma).get('other_stores')
+        sent_m = r15_new_calls(mid, r15_replica_args(client))
+        old = ma.get('session_id') if isinstance(ma.get('session_id'), str) else None
+        new = fa.get('session_id') if isinstance(fa.get('session_id'), str) else None
+        ms = m
+        if old and new:
+            o, n = old.strip().split(':')[-1], new.strip().split(':')[-1]
+            ms = r15_swap(m, o, n)
+        diffs = []
+        for fe, me in zip(f or [], ms or []):
+            for k in sorted(set(fe) | set(me)):
+                if fe.get(k) != me.get(k):
+                    diffs.append({'copy': fe.get('copy_id'), 'key': k, 'forgotten': fe.get(k), 'missing_swapped': me.get(k)})
+        out[label] = {'equal': f == ms, 'diffs': diffs, 'forgotten': f, 'missing': m,
+                      'status_f': [e['status'] for e in f or []], 'status_m': [e['status'] for e in m or []],
+                      'hits_f': [len(e['hits']) for e in f or []], 'hits_m': [len(e['hits']) for e in m or []],
+                      'sent_f_session_ids': [a.get('session_id') for a in sent_f], 'sent_m_session_ids': [a.get('session_id') for a in sent_m],
+                      'sent_f_conv': [a.get('conversation_id') for a in sent_f],
+                      'forgotten_id_as_session_arg': any(isinstance(a.get('session_id'), str) and a['session_id'].strip() in (R15_H, R15_SHORT_H) for a in sent_f)}
+    return out
+
+
+def r15_two_stores_one_down(tmp_path, direct_mergers, monkeypatch):
+    local, _ = r15_build(tmp_path)
+    merger = direct_mergers(local, replica_wait=30)
+    for r in merger.replicas.values():
+        if r.probe is not None:
+            r.probe.result(timeout=20)
+    merger.refresh()
+    assert all(r.status == 'ok' for r in merger.replicas.values())
+    monkeypatch.setattr(merger, 'refresh', lambda: None)
+    merger.replicas[R15_P1].status = 'unavailable'
+    out = {}
+    for tool, extra in (('lcm_grep', {'session_scope': 'session'}), ('lcm_recall', {})):
+        res = {}
+        for sid in (R15_H, R15_M):
+            body, _ = cr.tool_body(merger.handle(cr.tool_request(tool, dict(query='needle', session_id=sid, **extra))))
+            res[sid] = body['other_stores']
+        ms = r15_swap(res[R15_M], R15_M, R15_H)
+        out[tool] = {'equal': res[R15_H] == ms, 'forgotten': res[R15_H], 'missing': res[R15_M]}
+    return out
+
+
+def r15_standin_is_visible_session(tmp_path, clients):
+    local, _ = r15_build(tmp_path, nil_session=True)
+    client = clients(tmp_path, local)
+    ready(client, 2)
+    out = {}
+    for tool, extra in (('lcm_grep', {'session_scope': 'session'}), ('lcm_recall', {})):
+        f = client.body(tool, query='needle', session_id=R15_H, **extra)['other_stores']
+        m = client.body(tool, query='needle', session_id=R15_M, **extra)['other_stores']
+        out[tool] = {'equal': f == r15_swap(m, R15_M, R15_H), 'forgotten': f, 'missing': m}
+    return out
+
+
+def r15_extra_shapes(tmp_path, clients):
+    local, _ = make_store(tmp_path, 'local')
+    (local / '.env').write_text('LCM_EMBEDDINGS_ENABLED=false\n')
+    optin(local)
+    src = make_store(tmp_path, 'remotex', text='needle visible tail')[0]
+    for sid in ('work', '12345'):
+        r15_drain(src, sid, [_entry('user', 'h1', 'hidden needle words', sid)], tmp_path)
+        r15_drain(local, sid, [_entry('user', 'f1', 'local copy', sid)], tmp_path)
+        forget(local, sid)
+    assert {'work', '12345'} <= cr.forgotten(local / 'lcm.db')
+    copy_generation(src, local, COPIES[0])
+    client = clients(tmp_path, local)
+    ready(client, 1)
+    unknown = 'f' * 32
+    pairs = {
+        'grep_nohex': ('lcm_grep', dict(query='needle', session_scope='session', session_id='work'), dict(query='needle', session_scope='session', session_id='nope')),
+        'recall_nohex': ('lcm_recall', dict(query='needle', session_id='work'), dict(query='needle', session_id='nope')),
+        'grep_int_forgotten': ('lcm_grep', dict(query='needle', session_scope='session', session_id=12345), dict(query='needle', session_scope='session', session_id=67890)),
+        'grep_str_digits_forgotten': ('lcm_grep', dict(query='needle', session_scope='session', session_id='12345'), dict(query='needle', session_scope='session', session_id='67890')),
+        'recall_int_forgotten': ('lcm_recall', dict(query='needle', session_id=12345), dict(query='needle', session_id=67890)),
+        'grep_unknown_prefix': ('lcm_grep', dict(query='needle', session_scope='session', session_id=f'{unknown}:work'), dict(query='needle', session_scope='session', session_id=f'{unknown}:nope')),
+    }
+    out = {}
+    for label, (tool, fa, ma) in pairs.items():
+        before = r15_replica_args(client)
+        f = client.body(tool, **fa).get('other_stores')
+        mid = r15_replica_args(client)
+        m = client.body(tool, **ma).get('other_stores')
+        after = r15_replica_args(client)
+        o, n = str(ma['session_id']).split(':')[-1], str(fa['session_id']).split(':')[-1]
+        ms = r15_swap(m, o, n)
+        out[label] = {'equal': f == ms, 'forgotten': f, 'missing': m,
+                      'sent_f': [a.get('session_id') for a in r15_new_calls(before, mid)],
+                      'sent_m': [a.get('session_id') for a in r15_new_calls(mid, after)]}
+    return out
+
+
+def test_r15_reviewer_pairs(tmp_path, clients, direct_mergers, monkeypatch):
+    # Keep all reviewer pairs, including the two explicitly deferred classes.
+    groups = {
+        'pairs': r15_pairs(tmp_path / 'pairs', clients),
+        'extra': r15_extra_shapes(tmp_path / 'extra', clients),
+        'two_stores': r15_two_stores_one_down(tmp_path / 'two', direct_mergers, monkeypatch),
+        'standin_visible': r15_standin_is_visible_session(tmp_path / 'collision', clients),
+    }
+    actual = {(group, label): result['equal'] for group, rows in groups.items()
+              for label, result in rows.items() if label != 'conv'}
+    expected = {key: key not in {('extra', 'grep_nohex'), ('standin_visible', 'lcm_grep')} for key in actual}
+    assert len(actual) == 28
+    assert actual == expected, 'all reviewer pairs must agree except the two named limits'
+
+
+@pytest.mark.parametrize('tool', ['lcm_grep', 'lcm_recall'])
+def test_r15_standin_text_unchanged(tmp_path, direct_mergers, monkeypatch, tool):
+    local, _ = r15_build(tmp_path)
+    merger = direct_mergers(local, replica_wait=30)
+    replica = merger.replicas[PREFIX]
+    for r in merger.replicas.values():
+        if r.probe is not None:
+            r.probe.result(timeout=20)
+    merger.refresh()
+    assert all(r.status == 'ok' for r in merger.replicas.values())
+    # Use a real visible grep hit; replay it to pin rebuilding independently of scope.
+    future = replica.child.ask(cr.tool_request('lcm_grep', {'query': 'needle', 'session_scope': 'all'}))
+    stock, _ = cr.tool_body(future.result(timeout=20))
+    hit = next(hit for hit in stock['results'] if R15_NIL in hit['snippet'])
+    original = hit['snippet']
+    def replay(raw):
+        future = cr.Future()
+        future.set_result(cr.Merger.answer({'id': 1}, {'results': [hit], 'hits': [hit]}))
+        return future
+    monkeypatch.setattr(replica.child, 'ask', replay)
+    def entries(sid):
+        body, _ = cr.tool_body(merger.handle(cr.tool_request(tool, {'query': 'needle', 'session_id': sid})))
+        return body['other_stores']
+    missing, forgotten = entries(R15_M), entries(R15_H)
+    assert json.dumps(forgotten).encode() == json.dumps(missing).encode(), 'entry bytes must match'
+    assert forgotten[0]['hits'][0]['snippet'] == original
+    assert R15_NIL in original
+
+
+@pytest.mark.parametrize('shape', ['padded', 'int'])
+def test_r15_grep_normalized_session(tmp_path, clients, shape):
+    local, _ = r15_build(tmp_path)
+    if shape == 'int':
+        # Add the integer's string form to the local forgotten set before starting readers.
+        r15_drain(local, '12345', [_entry('user', 'i1', 'local copy', '12345')], tmp_path)
+        forget(local, '12345')
+    client = clients(tmp_path, local)
+    ready(client, 2)
+    hidden, missing, standin = (f' {R15_H} ', f' {R15_M} ', R15_NIL) if shape == 'padded' else (12345, 67890, '00000')
+    before = r15_replica_args(client)
+    f = client.body('lcm_grep', query='needle', session_scope='session', session_id=hidden)['other_stores']
+    mid = r15_replica_args(client)
+    m = client.body('lcm_grep', query='needle', session_scope='session', session_id=missing)['other_stores']
+    sent = r15_new_calls(before, mid)
+    assert sent and [a['session_id'] for a in sent] == [standin, standin], 'send the normalized stand-in only'
+    assert all(str(a['session_id']).strip() != str(hidden).strip() for a in sent)
+    assert f == m and all(e['status'] == 'ok' for e in f)
+
+
+def test_r15_recall_drops_session_id(tmp_path, clients):
+    local, _ = r15_build(tmp_path)
+    client = clients(tmp_path, local)
+    ready(client, 2)
+    sent = []
+    entries = []
+    for value in (R15_H, R15_M, f'{R15_OWNP}:{R15_H}', f' {R15_H} ', 12345, None, ['x']):
+        before = r15_replica_args(client)
+        reply = client.call('lcm_recall', query='needle', session_id=value)
+        assert_local(client, reply)
+        entries.append(json.loads(reply['result']['content'][0]['text'])['other_stores'])
+        calls = r15_new_calls(before, r15_replica_args(client))
+        assert len(calls) == 2
+        sent.extend(calls)
+    assert all('session_id' not in a for a in sent), 'recall replicas receive no off-schema session_id, for any value'
+    assert all(entry == entries[0] for entry in entries)
