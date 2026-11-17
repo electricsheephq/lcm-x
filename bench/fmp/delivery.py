@@ -129,9 +129,10 @@ def dispatch(name, arguments, engine, offered=None):
         raw = getattr(production, name)(args, engine=engine)
     except Exception as exc:
         return json.dumps({"error": f"Error executing {name}: {exc}"}, ensure_ascii=False)
-    if name == "lcm_recall" and getattr(engine, "_fmp_local_recall_pending", False):
-        require_local_semantic(raw)
-        engine._fmp_local_recall_pending = False
+    if name == "lcm_recall" and getattr(engine, "_fmp_local_recall_guard", False):
+        payload = json.loads(raw)
+        if "error" not in payload and "coverage not certified" in str(payload.get("degraded_reason", "")):
+            raise LocalRecallUnavailable("local_recall_semantic_unavailable")
     if name == "lcm_recall" and getattr(getattr(engine, "_config", None), "recall_delivery_unit", "hits") == "session":
         payload = json.loads(raw)
         if "error" not in payload and payload.get("provenance", {}).get("delivery", {}).get("unit") != "session":
@@ -196,6 +197,17 @@ def date_exposure(q):
     return {"wall_date_visible": True, "temporal_question": q.qtype in ("temporal-reasoning", "2")}
 
 
+def mcp_trace(records):
+    logs = [Path(c["mcp_log"]) for c in records if c.get("mcp_log")]
+    return [{**json.loads(line), **({"attempt": i} if len(logs) > 1 else {})}
+            for i, log in enumerate(logs, 1) if log.exists() for line in log.read_text().split("\n") if line.strip()]
+
+
+def require_mcp_local_recall(trace):
+    if any(t.get("fatal") == "LocalRecallUnavailable" for t in trace):
+        raise LocalRecallUnavailable("local_recall_semantic_unavailable")
+
+
 def harness_agentic(q, client, reader, server, records):
     # The harness (Codex or Claude Code) runs its own loop over the MCP reader; its sufficiency stop
     # is its own, capped at models.AGENTIC_TOOL_CAP counted calls by the server. The trace is metadata only.
@@ -204,8 +216,8 @@ def harness_agentic(q, client, reader, server, records):
     result = {"qid": q.qid, "qtype": q.qtype, "status": "ok", "hypothesis": "", "calls": records,
               "trace": [], "tool_calls": 0, "forced_final": None, "finish_reason": None}
     def retryable(attempt_records):
-        return not any(json.loads(line).get("counted") for c in attempt_records if c.get("mcp_log")
-                       for log in [Path(c["mcp_log"])] if log.exists() for line in log.read_text().split("\n") if line.strip())
+        return not any(t.get("counted") or t.get("fatal") == "LocalRecallUnavailable"
+                       for t in mcp_trace(attempt_records))
     try:
         message = retry_call(lambda: client.agentic(reader, messages, records, server, readiness_attempts=1),
                              records, result, retryable=retryable)
@@ -213,13 +225,10 @@ def harness_agentic(q, client, reader, server, records):
         exc.delivery_result = result
         raise
     finally:
-        logs = [Path(c["mcp_log"]) for c in records if c.get("mcp_log")]
-        result["trace"] = [{**json.loads(line), **({"attempt": i} if len(logs) > 1 else {})}
-                           for i, log in enumerate(logs, 1) if log.exists() for line in log.read_text().split("\n") if line.strip()]
+        result["trace"] = mcp_trace(records)
         result["tool_calls"] = sum(bool(t.get("counted")) for t in result["trace"])
         result["forced_final"] = "tool_calls" if any(t.get("counted") is False for t in result["trace"]) else None
-        if any(t.get("fatal") == "LocalRecallUnavailable" for t in result["trace"]):
-            raise LocalRecallUnavailable("local_recall_semantic_unavailable")
+        require_mcp_local_recall(result["trace"])
     if any(t.get("fatal") == "DeliveryMismatch" for t in result["trace"]):
         raise DeliveryMismatch("MCP session delivery verification failed")
     result["finish_reason"] = records[-1].get("finish_reason") if records else None

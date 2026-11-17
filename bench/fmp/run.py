@@ -164,7 +164,10 @@ def canary(args, client, dataset_sha, q):
             messages = [{"role": "user", "content": ask}]
             try:
                 if mode == "mcp":
-                    client.agentic(args.reader, messages, records, server_spec(args, dataset_sha, q))
+                    try:
+                        client.agentic(args.reader, messages, records, server_spec(args, dataset_sha, q))
+                    finally:
+                        delivery.require_mcp_local_recall(delivery.mcp_trace(records))
                 else:
                     client.call(args.reader, messages, records)
             except ToolViolation:

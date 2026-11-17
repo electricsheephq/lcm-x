@@ -7,7 +7,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from bench.fmp import delivery, mcp_reader, run, stores as store_module
+from bench.fmp import delivery, derived_panel, mcp_reader, models, run, stores as store_module
 from bench.fmp.tests import test_fmp
 
 REPO = test_fmp.REPO
@@ -114,13 +114,14 @@ def test_failed_certification_is_never_published(local_store, question, monkeypa
     else:
         monkeypatch.setattr(longmemeval, "certify_local_recall_store",
                             Mock(side_effect=RuntimeError("synthetic certification failure")))
-    with pytest.raises(RuntimeError):
+    error = delivery.LocalRecallUnavailable if failure == "register" else RuntimeError
+    reason = "store_embedding_registration_failed" if failure == "register" else "synthetic certification failure"
+    with pytest.raises(error, match=reason):
         local_store.build(question)
     assert not local_store.directory(question).exists()
 
 
-@pytest.mark.parametrize("command", ["canary", "answer"])
-def test_uncertified_run_stops_before_reader(local_store, question, monkeypatch, tmp_path, command):
+def test_uncertified_run_stops_before_reader(local_store, question, monkeypatch, tmp_path):
     local_store.build(question)
     with sqlite3.connect(local_store.directory(question) / "lcm.db") as con:
         con.execute("DELETE FROM metadata WHERE key LIKE 'embedding_catchup:%'")
@@ -135,12 +136,8 @@ def test_uncertified_run_stops_before_reader(local_store, question, monkeypatch,
         delivery.dispatch("lcm_recall", {"query": q.question}, engine)
         reader_started()
         return {"status": "ok", "hypothesis": "synthetic"}
-    def canary(*a):
-        with local_store.engine(question) as (engine, _):
-            answer(question, None, None, None, engine)
-    monkeypatch.setattr(run, "canary", canary)
     monkeypatch.setattr(delivery, "answer", answer)
-    args = run.parser().parse_args([command, "--split-label", "synthetic", "--config", "local",
+    args = run.parser().parse_args(["answer", "--split-label", "synthetic", "--config", "local",
         "--data", str(tmp_path / "unused.json"), "--store-root", str(local_store.root),
         "--output", str(tmp_path / "output"), "--allow-dirty", "--delivery", "single", "--workers", "1"])
     with pytest.raises(RuntimeError, match="local_recall_semantic_unavailable"):
@@ -160,14 +157,146 @@ def test_uncertified_mcp_recall_fails(local_store, question, tmp_path):
 
 
 @pytest.mark.parametrize("backend_raises", [False, True])
-def test_mcp_semantic_failure_stops_harness(question, tmp_path, backend_raises):
+def test_mcp_semantic_failure_stops_harness(question, tmp_path, monkeypatch, backend_raises):
     log = tmp_path / "mcp.jsonl"
-    log.write_text('{"fatal":"LocalRecallUnavailable","counted":true}\n')
+    log.write_text('{"at":"2026-11-17T00:00:00Z","fatal":"LocalRecallUnavailable"}\n')
+    monkeypatch.setattr(models.time, "sleep", lambda seconds: None)
+    launches = Mock()
     class Client:
         def agentic(self, reader, messages, records, server, **kw):
-            records.append({"mcp_log": str(log)})
+            launches()
+            records.append({"mcp_log": str(log), "error": "codex_failed" if backend_raises else None})
             if backend_raises:
                 raise RuntimeError("synthetic MCP disconnection")
             return {"content": "synthetic answer"}
-    with pytest.raises(RuntimeError, match="local_recall_semantic_unavailable"):
+    with pytest.raises(delivery.LocalRecallUnavailable, match="local_recall_semantic_unavailable"):
         delivery.harness_agentic(question, Client(), "fixture", {}, [])
+    assert launches.call_count == 1
+
+
+@pytest.mark.parametrize("summaries", ["none", "deterministic"])
+def test_certified_recall_passes_product_replies(local_store, question, monkeypatch, summaries):
+    from hermes_lcm import tools
+    local_store.summaries = summaries
+    assert local_store.build(question) == "built"
+    product = tools.lcm_recall
+    replies = []
+    def capture(args, *, engine):
+        raw = product(args, engine=engine)
+        replies.append(raw)
+        return raw
+    monkeypatch.setattr(tools, "lcm_recall", capture)
+    calls = [{"include": "summaries"}, {}, {"include": "verbatim"},
+             {"exclude_session_ids": list(question.session_map)}, {"query": ""},
+             {"limit": 0}, {"include": "bogus"}]
+    for extra in calls:
+        args = {"query": question.question, **extra}
+        with local_store.engine(question, frozen=True) as (engine, _):
+            raw = delivery.dispatch("lcm_recall", args, engine)
+        assert raw == replies[-1]
+        if extra.get("query") == "" or extra.get("limit") == 0 or extra.get("include") == "bogus":
+            assert json.loads(raw)["error"] == json.loads(replies[-1])["error"]
+
+
+@pytest.mark.parametrize("include", [None, "summaries", "verbatim", "empty-scope"])
+def test_uncertified_recall_checked_after_passing_call(local_store, question, include):
+    assert local_store.build(question) == "built"
+    args = {"query": question.question}
+    if include == "empty-scope":
+        args["exclude_session_ids"] = list(question.session_map)
+    elif include is not None:
+        args["include"] = include
+    with local_store.engine(question, frozen=True) as (engine, _):
+        delivery.dispatch("lcm_recall", {"query": question.question}, engine)
+        with sqlite3.connect(local_store.directory(question) / "lcm.db") as con:
+            con.execute("DELETE FROM metadata WHERE key LIKE 'embedding_catchup:%'")
+        with pytest.raises(delivery.LocalRecallUnavailable, match="local_recall_semantic_unavailable"):
+            delivery.dispatch("lcm_recall", args, engine)
+    with local_store.engine(question, frozen=True) as (engine, _):
+        with pytest.raises(delivery.LocalRecallUnavailable, match="local_recall_semantic_unavailable"):
+            delivery.dispatch("lcm_recall", args, engine)
+
+
+def test_certified_mcp_summaries_returns_result(local_store, question, tmp_path):
+    assert local_store.build(question) == "built"
+    with local_store.engine(question, frozen=True) as (engine, _):
+        reader = mcp_reader.Reader({"max_calls": 2, "question": {"question_date": question.question_date}},
+                                   engine, delivery.schemas(engine), tmp_path / "mcp.jsonl")
+        reply = reader.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+            "name": "lcm_recall", "arguments": {"query": question.question, "include": "summaries"}}})
+        assert reply["id"] == 1 and not reply["result"]["isError"]
+        assert "error" not in json.loads(reply["result"]["content"][0]["text"])
+        assert reader.handle({"id": 2, "method": "ping"})["result"] == {}
+
+
+def test_voyage_build_does_not_certify(local_store, question, monkeypatch):
+    from hermes_lcm import command
+    from benchmarking import longmemeval
+    provider = LocalProvider()
+    provider.provider_id, provider.model_id = "voyage", "voyage-context-3"
+    monkeypatch.setattr(local_store.lme, "resolve_harness_provider", lambda *a, **kw: provider)
+    register, certify = Mock(return_value={}), Mock()
+    monkeypatch.setattr(command, "_embedding_register_profiles", register)
+    monkeypatch.setattr(longmemeval, "certify_local_recall_store", certify)
+    voyage = store_module.Stores(local_store.root, "voyage", REPO, "synthetic-sha", local_store.lme)
+    assert voyage.build(question) == "built"
+    register.assert_not_called()
+    certify.assert_not_called()
+    with voyage.engine(question, frozen=True) as (engine, _):
+        assert not getattr(engine, "_fmp_local_recall_guard", False)
+
+
+@pytest.mark.parametrize("backend_raises", [False, True])
+def test_real_canary_surfaces_mcp_fatal(question, tmp_path, monkeypatch, backend_raises):
+    args = SimpleNamespace(output=tmp_path, data=tmp_path / "unused.json", reader="fixture")
+    monkeypatch.setattr(run, "server_spec", lambda *a: {})
+    log = tmp_path / "canary-mcp.jsonl"
+    class Client:
+        def call(self, reader, messages, records):
+            return {"content": "unknown"}
+
+        def agentic(self, reader, messages, records, server):
+            log.write_text(json.dumps({"at": "2026-11-17T00:00:00Z", "fatal": "LocalRecallUnavailable"}) + "\n")
+            records.append({"mcp_log": str(log)})
+            if backend_raises:
+                raise RuntimeError("synthetic MCP disconnection")
+            return {"content": "unknown"}
+    with pytest.raises(delivery.LocalRecallUnavailable, match="local_recall_semantic_unavailable"):
+        run.canary(args, Client(), "synthetic-sha", question)
+
+
+def test_local25_rejects_format_three(tmp_path):
+    panel = derived_panel
+    directory = tmp_path / "stores" / "local-none-old" / "synthetic"
+    directory.mkdir(parents=True)
+    (directory / "build-manifest.json").write_text(json.dumps({"config": "local", "format": 3}))
+    (directory / "lcm.db").write_bytes(b"synthetic")
+    (directory / "speakers.json").write_text("{}")
+    sources = {key: panel.digest_file(directory / name) for name, key in (
+        ("build-manifest.json", "manifest_sha256"), ("lcm.db", "database_sha256"),
+        ("speakers.json", "speakers_sha256"))}
+    product, value = "synthetic-product", {"evidence": "synthetic"}
+    identity = {"store": sources, "product": product, "config": {"recall_depth": 25}}
+    key = panel.sha(panel.encoded(identity))
+    retrieval = tmp_path / "retrieval"
+    retrieval.mkdir()
+    (retrieval / (key + ".json")).write_text(json.dumps({"identity": identity, "value": value,
+        "value_sha256": panel.sha(panel.encoded(value))}))
+    receipt = {"status": "COMPLETE", "product": product, "rows": [{"id": "q1", "sources": sources,
+        "cache_key": key, "observed": {"limit": 25}, "delivered_sha256": panel.sha(b"synthetic")}]}
+    with pytest.raises(panel.Incomplete, match=r"W1 store is not certified \(format\)"):
+        panel.local25(receipt, product, tmp_path, population=None)
+
+
+def test_format_three_store_rebuilt_in_place(local_store, question):
+    assert local_store.build(question) == "built"
+    directory = local_store.directory(question)
+    manifest = directory / "build-manifest.json"
+    old = json.loads(manifest.read_text())
+    old["format"] = 3
+    manifest.write_text(json.dumps(old))
+    assert local_store.build(question) == "built"
+    assert json.loads(manifest.read_text())["format"] == 4
+    superseded = list(directory.parent.glob(directory.name + ".superseded-*"))
+    assert len(superseded) == 1
+    assert json.loads((superseded[0] / "build-manifest.json").read_text())["format"] == 3
