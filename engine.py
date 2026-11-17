@@ -7495,12 +7495,38 @@ class LCMEngine(
                     linked = {row["store_id"] for row in self._store.get_message_relations(
                         list(current), "possible_replay_of")}
                     linked_stamps, predecessors = set(), None
+                    target_buckets, target_identities = defaultdict(list), {}
+                    bucket_positions, bucket_identities = {}, {}
+
+                    def bucket_targets(rows):
+                        for target in rows:
+                            target_buckets[(target["session_id"], target["observed_at"])].append(target)
+
+                    def target_identity(target):
+                        # Call-local: only replay relations are written here. Stored row bytes,
+                        # the bound engine and pre-row pruned-tool sources stay unchanged; an
+                        # alt_stamp changes observed_at, which stored replay identity ignores.
+                        sid = target["store_id"]
+                        if sid not in target_identities:
+                            target_identities[sid] = _proof_user_identity(
+                                self._message_replay_identity(target, stored_row=True))
+                        return target_identities[sid]
+
+                    bucket_targets(targets)
 
                     def same_occurrence(tier, stamp, identity, sid):
-                        return [target for target in targets
-                                if target["session_id"] == tier and target["observed_at"] == stamp
-                                and target["store_id"] < sid and _proof_user_identity(self._message_replay_identity(
-                                    target, stored_row=True)) == _proof_user_identity(identity)]
+                        key = (tier, stamp)
+                        bucket = target_buckets.get(key, ())  # store order, including alt_stamps
+                        identities = bucket_identities.setdefault(key, defaultdict(list))
+                        position = bucket_positions.get(key, 0)
+                        # Index only eligible targets, lazily, once; do not read a future row's
+                        # payload. Later lookups touch the identity's candidates, not the bucket.
+                        while position < len(bucket) and bucket[position]["store_id"] < sid:
+                            target = bucket[position]
+                            identities[target_identity(target)].append(target)
+                            position += 1
+                        bucket_positions[key] = position
+                        return [target for target in identities.get(identity, ()) if target["store_id"] < sid]
 
                     for idx, (session, row) in sorted(previous.items()):
                         sid = stored_at.get(idx)
@@ -7509,8 +7535,8 @@ class LCMEngine(
                         stamp = self._host_occurrence_metadata(messages[idx])["timestamp"]
                         if stamp is None or row.get("timestamp") is None or stamp == row["timestamp"]:
                             continue
-                        identity = self._message_replay_identity(current[sid], stored_row=True)
-                        if _commit_proof_identity_digest(_proof_user_identity(identity)) != row.get("identity_sha256"):
+                        identity = target_identity(current[sid])
+                        if _commit_proof_identity_digest(identity) != row.get("identity_sha256"):
                             continue
                         # Per row, in tiers: the proof's session, then the current session, then (a
                         # carried row the child's proof records may live there) the one-hop predecessor.
@@ -7526,6 +7552,7 @@ class LCMEngine(
                                     [target["store_id"] for target in more], "possible_replay_of", related=True)
                                     if relation["observed_at"] is None}  # a borrowed-stamp link never consumes
                                 targets = [*targets, *more]
+                                bucket_targets(more)
                         for tier in [s for s in predecessors if s not in tiers] if not matches else ():
                             matches = matches or same_occurrence(tier, row["timestamp"], identity, sid)
                         if len(matches) > 1:
