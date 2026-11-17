@@ -765,7 +765,8 @@ connection from another host."
     one belongs to the removed one and leaves with it, since it would not exist had that session never existed: a
     `session_lineage` edge with either end in R, a `rotation_predecessor_session:<V>` row whose value is in R, an
     `lcm_lifecycle_state` row with either session column in R, a `message_relations` row with either end a removed
-    message. A kept session's own rows stay byte-identical: no kept session loses or changes a row of its own.
+    message. A kept session's own rows stay byte-identical: no kept session loses or changes a row of its own,
+    except a row `removed.json` names by id, which the origin deleted (a partial delete, F12's `as-delete`).
   - *Names match whole.* A session id matches by equality only. A lineage value matches only as an encoding the
     product writes, parsed and compared whole: today `<source>:<row session id>` (claude_code_capture.py:63-74). A
     kept subagent `P/agent:<A>` whose agent id happens to equal a removed id is not that session, and a removed
@@ -779,6 +780,8 @@ connection from another host."
     rows already deleted would match nothing.
   - *The deletes*, in one transaction on a private copy of `lcm.db`, with plain SQL from a standard-library module:
     - rows whose session column is in R: `messages`, `summary_nodes`, `capture_events`;
+    - `messages` rows whose `store_id` is a row id `removed.json` names, even when their session stays: refresh
+      writes the file before its download, so a build on the held generation must leave such a row out itself;
     - the link rows named under *Ownership*;
     - rows keyed by a collected message or node id: full-text rows (through the store's own delete triggers), chunk
       rows and their vectors, `lcm_embedding_*` rows (keyed by node id, db_bootstrap.py:1513-1521),
@@ -859,15 +862,18 @@ connection from another host."
   reads the forgotten set once per call, before its serial dispatch; a forget that commits during a call counts as
   after it. Handover: on a new generation with unchanged digests the old reader serves until the new one has
   answered its probe, as today; on a changed digest it receives no further call.
-- **V11. Disk.** S is one copy's database. Payloads are never stored twice. The view's database costs nothing when
+- **V11. Disk.** S is one copy's database. Payloads are stored once wherever hard links work; on a filesystem
+  without them V6 copies the kept files, which costs their bytes again. The view's database costs nothing when
   nothing is left out, a few changed pages when cloned, and S when copied: at worst 2S plus payloads at rest. A
   forget deletes the stale view first when no reader holds it; otherwise it costs one more S until that reader
   closes. A refresh deletes the old byte copy once the new one is verified, then builds the new view while the old
   one serves: at worst 3S, plus S per older view another session still reads. Two view folders can exist during a
   refresh; only the one `view.json` names is served, and V2 holds for it because a refresh leaves the digests
   unchanged unless the new lineage lists new removals. Floors: refresh keeps 4.1's. A build checks its floor only
-  before it clones or copies the database: 5 GB free, plus S when it must copy. Below it the copy stays unavailable
-  (`view_disk_floor`); the no-rebuild path and the hard link write almost nothing and need no floor.
+  before it clones or copies the database or copies payload files: 5 GB free plus S, whether it clones or copies
+  (the deletes can change every page of a clone), plus the kept files' bytes when it must copy them. Below it the
+  copy stays unavailable (`view_disk_floor`); the no-rebuild path and hard links write almost nothing and need no
+  floor.
 - **V12. The wait. (Assumption: every number in this item; row 5V measures them.)** Each call adds two small file
   reads per copy (`view.json`, `removed.json`), one digest of the local forgotten set and one per copy. A routed call
   becomes one reader call; the parked merger made up to three and opened the copy's database itself
@@ -1864,6 +1870,9 @@ item. On that revision's delta both answered SOUND, with no blocking finding.
 | Claude, re-review N1: a kept fork of a removed session keeps its own rows, its cursor's `fork_parent` included, but the packet's scanner would fail on it and would not catch a build that deleted it | non-blocking (Important) | Adopted in the lane packet: a kept-fork fixture whose own rows stay byte-identical, and a scanner allowance for the own rows of the kept sessions the fixture names | lane 5v |
 | Claude, re-review N2: nothing said who writes `removed.json` for idle and superseded copies, or when | nit | Adopted: a refresh writes it once the head has verified and before the download, for its own copy and, with the forgotten sessions only, for each copy its head lists as superseded; a superseded copy's own head never moves, so its file is written by the copy that supersedes it | 4.7 V3, F13; lane 5 |
 | Lane 5v's first run stopped at its classification gate: six entity-memory tables had no class | Important | Adopted by the release manager's ruling: they are `unsupported`, so a build that would leave out any of their rows refuses `view_unsupported_table`, and none is deleted or edited; the every-feature test store covers the capture writer's features | 4.7 V4, V13 |
+| Bot review of this record: the delete list removed messages by session only, so a message named only by a row id in `removed.json` (a partial delete whose session stays) could survive in a view built on the held generation | non-blocking | Fixed: the deletes name `messages` rows whose `store_id` is such a row id, and the byte-identical rule for kept sessions excepts them; the lane packet already required it (its test A4) | 4.7 V3 |
+| Bot review of this record: V6 copies payload files where hard links fail, but V11 said payloads are never stored twice and set no floor for those copies | non-blocking | Fixed: the floor also counts the kept files' bytes when they must be copied, and V11 says where payloads are stored twice | 4.7 V11 |
+| Bot review of this record: a clone passed the 5 GB floor, yet its deletes can change pages across the whole database and fill the disk | non-blocking | Fixed: a build that clones also reserves S, as a copy does; the no-rebuild path and hard links stay exempt | 4.7 V11 |
 
 Both re-reviews are static design reviews with synthetic probes on capture stores the product built. They prove no
 built view, real-store timing, embeddings-on run, live interleaving or crash behavior; row 5V and the lanes'
