@@ -99,18 +99,26 @@ def _write(path, data):
         os.fsync(handle.fileno())
 
 
+def check_key(prefix, key, *, listing=False):
+    """Validate the shared hosted prefix and one object or folder key."""
+    _name(prefix, r'[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*')
+    _name(prefix.rsplit('/', 1)[-1], _COPY)
+    suffix = key.removeprefix(prefix + '/') if isinstance(key, str) else ''
+    grammar = r'(?:parts|deltas|payloads|gen)/' if listing else _OBJECT + r'|gen/[1-9][0-9]*\.json'
+    if not isinstance(key, str) or not key.startswith(prefix + '/'):
+        raise Refused('bad_name')
+    _name(suffix, grammar)
+    return key
+
+
 class DirTransport:
     """Keys include the configured prefix and copy id; listings return full keys."""
     def __init__(self, root, prefix, *, clock=time.time):
-        self.root, self.prefix, self.clock = Path(root).resolve(), _name(prefix, r'[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*'), clock
-        _name(prefix.rsplit('/', 1)[-1], _COPY)
+        self.root, self.prefix, self.clock = Path(root).resolve(), prefix, clock
+        check_key(prefix, f'{prefix}/gen/', listing=True)
 
     def _path(self, key, listing=False):
-        suffix = key.removeprefix(self.prefix + '/') if isinstance(key, str) else ''
-        grammar = r'(?:parts|deltas|payloads|gen)/' if listing else _OBJECT + r'|gen/[1-9][0-9]*\.json'
-        if not isinstance(key, str) or not key.startswith(self.prefix + '/'):
-            raise Refused('bad_name')
-        _name(suffix, grammar)
+        check_key(self.prefix, key, listing=listing)
         path = self.root / key
         if any(p.is_symlink() for p in (path, *path.parents) if p.is_relative_to(self.root)):
             raise Refused('bad_name')
