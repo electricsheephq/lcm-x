@@ -1112,6 +1112,59 @@ def test_as_delete_preserves_other_session_payload_loss(tmp_path):
     assert len(m['pins']) == 1
 
 
+@pytest.mark.parametrize('damage', ['raw-null', 'held-empty-ids', 'held-null-ids', 'held-malformed-ids'])
+def test_new_ledger_key_must_hold_content(fixture, damage):
+    head = pub(fixture)
+    with closing(sqlite3.connect(fixture[0] / 'lcm.db')) as conn:
+        before = conn.execute('SELECT max(event_id) FROM capture_events').fetchone()[0]
+    grow(fixture)
+    with closing(sqlite3.connect(fixture[0] / 'lcm.db')) as conn:
+        event = conn.execute("SELECT event_id FROM capture_events WHERE event_id>? AND source_kind='line' "
+                             'AND raw IS NOT NULL ORDER BY event_id DESC LIMIT 1', (before,)).fetchone()[0]
+    intact = (fixture[0] / 'lcm.db').read_bytes()
+    if damage == 'raw-null':
+        sql(fixture, 'UPDATE capture_events SET raw=NULL,raw_from=NULL WHERE event_id=?', (event,))
+    else:
+        ids = {'held-empty-ids': '[]', 'held-null-ids': None, 'held-malformed-ids': '[4'}[damage]
+        sql(fixture, "UPDATE capture_events SET raw=NULL,raw_from=NULL,disposition='held',store_ids=? WHERE event_id=?",
+            (ids, event))
+    staged = cp.publish(fixture[0], COPY, fixture[1], PREFIX, snapshot_only=True)
+    old_keys = {cg._json(row[:2]) for row in head['guard']['sessions']['s1']['ledger']}
+    new_keys = [row[:2] for row in staged['guard']['sessions']['s1']['ledger'] if cg._json(row[:2]) not in old_keys]
+    try:
+        loss = cg.losses(head['guard'], staged['guard'])
+    except (ValueError, TypeError) as error:
+        loss = type(error).__name__
+    assert loss == {'ledger': {'s1': new_keys}}, 'a new entry holding no content must be a ledger loss, without an exception'
+    unchanged = keys(fixture), state(fixture).read_bytes()
+    refused('guard_loss', pub, fixture)
+    assert unchanged == (keys(fixture), state(fixture).read_bytes())
+    # The same exemption applies to every no-content shape, even malformed JSON.
+    assert not cg.losses(head['guard'], staged['guard'], forgotten=['s1'])
+    sql(fixture, 'INSERT INTO metadata(key,value) VALUES (?,?)', (cg.FORGOTTEN + 's1', '1'))
+    assert cg.guard(head, fixture[0] / 'lcm.db', staged) == set()
+    # Parseable non-lists and unhashable ids must also refuse, rather than crash.
+    if damage == 'held-malformed-ids':
+        for value in ('null', '0', 'true', '"text"', '{}', '[[]]', '[{}]'):
+            invalid = copy.deepcopy(staged['guard'])
+            row = next(row for row in invalid['sessions']['s1']['ledger'] if row[:2] in new_keys)
+            row[4] = value
+            assert cg.losses(head['guard'], invalid) == {'ledger': {'s1': new_keys}}
+    # Intact raw and held entries both publish at their first appearance.
+    (fixture[0] / 'lcm.db').write_bytes(intact)
+    assert pub(fixture)['generation'] == 2
+    grow(fixture)
+    with closing(sqlite3.connect(fixture[0] / 'lcm.db')) as conn:
+        event = conn.execute("SELECT max(event_id) FROM capture_events WHERE source_kind='line' AND raw IS NOT NULL").fetchone()[0]
+        ident = conn.execute('SELECT max(store_id) FROM messages').fetchone()[0]
+    sql(fixture, "UPDATE capture_events SET raw=NULL,raw_from=NULL,disposition='held',store_ids=? WHERE event_id=?",
+        (json.dumps([ident]), event))
+    assert pub(fixture)['generation'] == 3
+    # Forget through the writer; the damaged new entry's session can still publish.
+    forget(fixture)
+    assert pub(fixture)['generation'] == 4
+
+
 def test_ownership_detects_renamed_proof(monkeypatch):
     monkeypatch.delitem(globals(), 'test_delta_lifecycle')
     detected = False

@@ -213,7 +213,7 @@ forgot.** It compares generation N+1 with N before N+1's manifest is written.
   no bytes: its text is held whole by the rows it names (claude_code_store.py:765-782). For it, the digest is
   unchanged and every row in its `store_ids` that N held is present with an unchanged content digest; a row N
   already lacked was judged when it went. A key that N lacks is judged against itself: an entry with bytes needs its
-  raw sha256 to equal its `line_digest`, and a held entry needs every row in its `store_ids` present in its session.
+  raw sha256 to equal its `line_digest`, and a held entry needs a non-empty `store_ids` that names only rows present in its session. An entry with neither bytes nor such a list fails.
   A cut raw line with an unchanged digest column fails both for a key N held intact and for a new key.
   Damage before the first generation is not caught, because no guard runs without a head.
 - **Payloads:** every payload name in N is in N+1 with the same decoded content. An absent name is a `guard_loss` if N+1 still references it in `unresolved_minted` or `unresolved_quoted`; without a reference it is exempt here because the message rule judges its rows. Core

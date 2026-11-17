@@ -245,12 +245,14 @@ def losses(head_guard, staged_guard, *, unresolved=(), forgotten=()):
         for row in new.get('ledger', []):
             if _json(row[:2]) in previous_keys:
                 continue
-            valid = True
             if row[3] is not None:
                 valid = row[3] == row[2]
-            elif row[4] is not None:
-                ids = json.loads(row[4]) if isinstance(row[4], str) else row[4]
-                valid = all(i in messages for i in ids)
+            else:
+                try:
+                    ids = json.loads(row[4]) if isinstance(row[4], str) else row[4]
+                    valid = isinstance(ids, list) and bool(ids) and all(i in messages for i in ids)
+                except (ValueError, TypeError):
+                    valid = False
             if not valid:
                 result.setdefault('ledger', {}).setdefault(sid, []).append(row[:2])
     unresolved = {i['name'] for i in unresolved}
