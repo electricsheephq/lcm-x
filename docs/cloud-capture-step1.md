@@ -794,10 +794,14 @@ connection from another host."
 - **V4. The build refuses what it cannot classify, and checks itself.** Every table has a class in one map in the
   view module (session, message, node, link, lineage, metadata, full-text, global), and so do every `metadata` family
   and lineage encoding.
-  - When anything is to be left out, a table outside the map, or one the map classes `unsupported`, that holds rows
-    stops the build with `view_unsupported_table`. The six entity-memory tables are `unsupported` in rules 1: only
-    the Hermes engine creates them (db_bootstrap.py:3923), step 1 copies capture stores (D3), and their ownership
-    (scope-wide entity records, notes citing several sessions, an append-only event log) is not decided (V13);
+  - While R is not empty, a table outside the map, or one the map classes `unsupported`, that holds rows stops the
+    build with `view_unsupported_table`, even when nothing else is left out: no rule removes its rows, so a
+    hard-linked or reused view would serve whatever they name. With R empty nothing is forgotten, and the view is
+    the hard-linked byte copy (V7). The six entity-memory tables are `unsupported` in rules 1: only the Hermes
+    engine creates them (db_bootstrap.py:3923), step 1 copies capture stores (D3), and their ownership (scope-wide
+    entity records, notes citing several sessions, an append-only event log) is not decided (V13). In step 1 the
+    refusal costs nothing: capture stores never hold these tables, and the compat test below fails on a table the
+    map lacks. A step that copies Hermes stores decides their ownership before such a copy can be served;
   - a `metadata` key outside the families, or a lineage value that does not parse, that holds an id of R stops it
     with `view_unsupported_key`, even when nothing else is left out: no rule removes such a key, so a hard-linked or
     reused view would serve a forgotten id.
@@ -820,11 +824,12 @@ connection from another host."
   when every row that references it (F3) is left out by V3, by its session or by a row id `removed.json` names. The
   uploader stages only files some row references (cloud_copy.py:352-374), so the next generation drops such a file
   too, and the output of a message the user deleted from a session that stays is absent, unless a row that stays
-  references the same file. A file that a kept row references stays even when a removed row quotes it too, so the
-  kept session's own `lcm_expand` still resolves: those bytes are that kept row's output as well, and the next
-  generation keeps the file for it. So
-  a removed session's payload, asked for through a visible session's lineage (expand_tools.py:189-198) or by name
-  with no session (tools.py:255, :272), is absent.
+  references the same file. A file whose own session stays, or that has none, stays while a kept row references it,
+  even when a removed row quotes it too: those bytes are that kept row's output as well, so the kept session's own
+  `lcm_expand` still resolves, and the next generation keeps the file for it. A file whose own session is in R
+  leaves even when a kept row quotes it, since a quote is not ownership; that row's expand answers not-found, as
+  for any forgotten output. So a removed session's payload, asked for through a visible session's lineage
+  (expand_tools.py:189-198) or by name with no session (tools.py:255, :272), is absent.
 - **V7. Identity, and the forget that removes nothing.** `<r>` is the rules version; a rule fix retires every older
   view. `<e>` is the first 16 hex of a digest of everything the build leaves out of this generation: each session of
   R that matches a row, each payload file left out, each removed row id present. A forget that leaves nothing more
@@ -1892,6 +1897,8 @@ item. On that revision's delta both answered SOUND, with no blocking finding.
 | Bot review of this record, round 2: the floor did not count the deletes' rollback journal | non-blocking | Fixed: a build's floor is 5 GB plus 2S, and V11's peaks count the journal | 4.7 V11 |
 | Bot review of this record, round 2: builds of two copies, or a build and a refresh, could pass their floors against the same free space | non-blocking | Fixed: every build and refresh in a home takes `replicas/space.lock` for its floor check and holds it until that space is in use | 4.1, 4.7 V11, F13 |
 | Bot review of this record, round 2: row 5's disk bar predated V11 | non-blocking | Fixed: row 5 uses V11's bound, records each handover's build path and names forgets of sessions the replica holds | section 6 row 5 |
+| Bot review of this record, round 3: the table refusal ran only when something was left out, so with R not empty a hard-linked view could serve a populated table outside the map or classed `unsupported` | Important | Fixed (release manager's ruling): the refusal applies whenever R is not empty; with R empty the view is the byte copy; step 1 pays nothing (D3 and the compat test) | 4.7 V4 |
+| Bot review of this record, round 3: V6's kept-row sentence read as overriding the own-session rule | non-blocking | Fixed: it holds for a file whose own session stays or that has none; a file of a session in R leaves even when a kept row quotes it | 4.7 V6 |
 
 Both re-reviews are static design reviews with synthetic probes on capture stores the product built. They prove no
 built view, real-store timing, embeddings-on run, live interleaving or crash behavior; row 5V and the lanes'
