@@ -41,7 +41,7 @@ _TOKEN = r'[0-9a-f]{32}'
 _OBJECT = r'(?:parts|deltas|payloads)/[0-9a-f]{64}\.' + _TOKEN
 Refused = cloud_delta.DeltaRefused
 DISK_MARGIN = 1024 * 1024
-SKIPS = {'lock_held', 'not_quiet', 'wal_without_sidecars', 'disk_floor', 'forgotten_during_publish', 'unchanged'}
+SKIPS = {'space_busy', 'lock_held', 'not_quiet', 'wal_without_sidecars', 'disk_floor', 'forgotten_during_publish', 'unchanged'}
 TABLE_COLUMNS = {
     'capture_events': ['event_id', 'session_id', 'lineage_key', 'source_kind', 'generation', 'position', 'uid', 'entry_type', 'entry_class', 'line_digest', 'content_digest', 'disposition', 'store_ids', 'notes', 'raw', 'raw_from', 'projection_version', 'captured_at'],
     'host_uid_bindings': ['store_id', 'uid', 'lineage_key', 'kind', 'binding_version', 'proof_kind', 'created_at', 'first_check', 'disagree_seen'],
@@ -294,6 +294,31 @@ def _quiet(home, quiet_s, clock):
                 or (home / 'lcm.db-journal').exists() or clock() - db.stat().st_mtime < quiet_s)
 
 
+def wait_lock(fd, seconds):
+    deadline = time.monotonic() + seconds
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.1)
+
+
+@contextmanager
+def space_lock(home):
+    root = home / 'cloud' / 'replicas'
+    _mkdir(root)
+    fd = os.open(root / 'space.lock', os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        if not wait_lock(fd, 600):
+            raise Refused('space_busy')
+        yield
+    finally:
+        os.close(fd)
+
+
 def _before(home, quiet_s, clock, free_bytes):
     db = home / 'lcm.db'
     if (home / 'lcm.db.records').exists():
@@ -478,14 +503,22 @@ def _update_state(home, copy_id, *, consumed_decisions=(), **keys):
     _save_state(home, value | keys | dict(copy_id=copy_id))
 
 
-def _head(transport, prefix, copy_id):
-    keys = transport.list(prefix + '/gen/')
+def _head(transport, prefix, copy_id, generation=None):
+    if generation is not None and (type(generation) is not int or generation < 1):
+        raise Refused('bad_name')
+    keys = transport.list(prefix + '/gen/') if generation is None else [f'{prefix}/gen/{generation}.json']
     for key in keys:
         _name(key, re.escape(prefix) + r'/gen/[1-9][0-9]*\.json')
     if not keys:
         return None, b''
     key = max(keys, key=lambda k: int(k.rsplit('/', 1)[-1][:-5]))
-    data = transport.get(key)
+    if generation is None:
+        data = transport.get(key)
+    else:
+        try:
+            data = transport.get(key)
+        except (KeyError, FileNotFoundError):
+            raise Refused('object_missing', key=key) from None
     generation = int(key.rsplit('/', 1)[-1][:-5])
     try:
         head = json.loads(data)
@@ -508,9 +541,11 @@ def _head(transport, prefix, copy_id):
             raise Refused('bad_name')
         if not isinstance(head['payloads'], list):
             raise ValueError()
+        names = set()
         for row in head['payloads']:
-            if not _payload_name(row['name']):
+            if not _payload_name(row['name']) or row['name'] in names:
                 raise Refused('bad_name')
+            names.add(row['name'])
             _name(row['key'], r'payloads/[0-9a-f]{64}\.' + _TOKEN)
             _name(row['sha256'], r'[0-9a-f]{64}')
             if type(row['bytes']) is not int or row['bytes'] < 0:
@@ -600,9 +635,10 @@ def publish(home, copy_id, transport, prefix, *, quiet_s=0, part_size=DEFAULT_PA
                     token, resumed = _sha(os.urandom(16) + str(time.time_ns()).encode() + str(os.getpid()).encode())[:32], False
             pages_dir, db = home / 'cloud' / 'pages', home / 'cloud' / 'staging' / 'lcm.db'
             for restart in range(3):
-                _before(home, quiet_s, clock, free_bytes)
-                staging_started = True
-                m, signature, page_size = _stage(home, copy_id, generation, head, head_bytes, clock, progress)
+                with space_lock(home):
+                    _before(home, quiet_s, clock, free_bytes)
+                    staging_started = True
+                    m, signature, page_size = _stage(home, copy_id, generation, head, head_bytes, clock, progress)
                 if quiet_s > 0 and not _quiet(home, quiet_s, clock):
                     shutil.rmtree(db.parent)
                     raise Refused('not_quiet')
@@ -629,10 +665,11 @@ def publish(home, copy_id, transport, prefix, *, quiet_s=0, part_size=DEFAULT_PA
                 if reason is None:
                     count = len(cloud_delta.changed_pages(prev, new.digests))
                     cap = cloud_delta.max_records(page_size)
-                    if free_bytes(home) < count * (4 + page_size) + 16 * ((count + cap - 1)//cap) + DISK_MARGIN:
-                        raise Refused('disk_floor')
-                    _mkdir(db.parent / 'deltas')
-                    encoded = cloud_delta.encode_delta(db, prev, new, db.parent / 'deltas')
+                    with space_lock(home):
+                        if free_bytes(home) < count * (4 + page_size) + 16 * ((count + cap - 1)//cap) + DISK_MARGIN:
+                            raise Refused('disk_floor')
+                        _mkdir(db.parent / 'deltas')
+                        encoded = cloud_delta.encode_delta(db, prev, new, db.parent / 'deltas')
                     args['delta_bytes'] = sum(o.bytes for o in encoded)
                     reason = cloud_delta.base_reason(old, **args)
                 if not snapshot_only:
