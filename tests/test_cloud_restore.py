@@ -537,12 +537,12 @@ def test_cache_create_race(fixture, tmp_path, monkeypatch, other):
     original = object_path(fixture, ref['key']).read_bytes()
     competing = original if other == 'good' else original[:-1] if other == 'short' else b'x' * len(original)
     real_open, raced = os.open, []
-    def win_first(path, flags, mode=0o777, **kw):
+    def win_first(path, flags, *args, **kw):  # forwards the caller's own arguments, mode included
         if Path(path) == needed and flags & os.O_EXCL and not raced:
             raced.append(True)
-            with os.fdopen(real_open(path, flags, mode, **kw), 'wb') as handle:
+            with os.fdopen(real_open(path, flags, *args, **kw), 'wb') as handle:
                 handle.write(competing)
-        return real_open(path, flags, mode, **kw)
+        return real_open(path, flags, *args, **kw)
     monkeypatch.setattr(cr.os, 'open', win_first)
     def fetch(key):
         if raced and key != ref['key']:
