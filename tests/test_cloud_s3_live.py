@@ -1,4 +1,5 @@
 """Owner-bucket isolation gate; never enabled by the lane's offline acceptance run."""
+import hashlib
 import json
 import os
 import ssl
@@ -14,27 +15,38 @@ def exercise(a, b):
     # Both credentials must address the same host and bucket, with verified TLS.
     assert (a.host, a.bucket) == (b.host, b.bucket)
     assert all(t.context.verify_mode == ssl.CERT_REQUIRED and t.context.check_hostname for t in (a, b))
-    # Positive control precedes every cross-prefix request. Use a fresh generation key.
-    key = a.prefix + '/gen/' + str(uuid.uuid4().int) + '.json'
+    # Unreferenced payloads are safe to leave behind if this process is interrupted.
+    probes = []
+    for t in (a, b):
+        body = ('LCM-X isolation probe ' + uuid.uuid4().hex).encode()
+        key = t.prefix + '/payloads/' + hashlib.sha256(body).hexdigest() + '.' + uuid.uuid4().hex
+        probes.append((t, key, body))
+    cleanup = []
     try:
-        assert a.now() > 0
-        a.put_new(key, b'{}')
-        assert key in a.list(a.prefix + '/gen/')
-        assert a.get(key) == b'{}'
-        a.delete(key)
-        assert a.stat(key) is None
-        a.put_new(key, b'{}')
+        # Both positive controls must pass before any cross-prefix denial counts.
+        for t, key, body in probes:
+            assert t.now() > 0
+            cleanup.append((t, key))
+            t.put_new(key, body)
+            assert key in t.list(t.prefix + '/payloads/')
+            assert t.get(key) == body
+            t.delete(key)
+            assert t.stat(key) is None
+            t.put_new(key, body)
+        _, key, body = probes[0]
         for method, target, query in [
+            ('GET', '', [('list-type', '2'), ('prefix', a.prefix + '/payloads/'), ('delimiter', '/')]),
             ('GET', '', [('list-type', '2'), ('prefix', a.prefix + '/gen/'), ('delimiter', '/')]),
             ('GET', key, []), ('PUT', key, []), ('DELETE', key, []),
         ]:
             # Deliberately bypass the client's name/prefix validator. The host must deny.
-            status, _, _ = b._send(method, target, query, b'{}' if method == 'PUT' else b'',
+            status, _, _ = b._send(method, target, query, body if method == 'PUT' else b'',
                                     {'If-None-Match': '*'} if method == 'PUT' else {})
             assert status == 403
         assert s3.check_host(a)['conditional_create'] is True
     finally:
-        a.delete(key)
+        for t, key in cleanup:
+            t.delete(key)
 
 
 def configured(name):

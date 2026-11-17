@@ -46,7 +46,7 @@ class Credentials:
 
 
 def load_credentials(home):
-    """Read the fixed credential file; never consult the environment."""
+    """Read credentials only from the fixed file."""
     return _read_credentials(Path(home) / 'cloud' / 'credentials.json')
 
 
@@ -136,7 +136,7 @@ def _date(value):
 
 def _ca_directory():
     # OpenSSL loads hashed directory certificates lazily, during a handshake.
-    directory = os.environ.get('SSL_CERT_DIR', ssl.get_default_verify_paths().capath)
+    directory = ssl.get_default_verify_paths().capath
     try:
         return bool(directory) and any(re.fullmatch(r'[0-9a-f]{8}\.[0-9]', name) for name in os.listdir(directory))
     except OSError:
@@ -185,7 +185,7 @@ class S3Transport:
                           self.credentials, self.region, self.clock())
             try:
                 status, reply_headers, reply_body = self.request(method, url, signed, body)
-            except (ConnectionResetError, TimeoutError):
+            except (ConnectionResetError, TimeoutError, ssl.SSLEOFError, http.client.IncompleteRead):
                 if attempt + 1 == attempts:
                     raise S3Error(0, 'ConnectionError') from None
             except (OSError, http.client.HTTPException):

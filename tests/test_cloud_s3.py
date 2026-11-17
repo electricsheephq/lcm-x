@@ -2,6 +2,7 @@
 import ast
 from contextlib import closing
 import hashlib
+import http.client
 import io
 import json
 from pathlib import Path
@@ -159,10 +160,13 @@ def test_zero_ca(tmp_path, monkeypatch, source, entry):
         (directory / entry).touch()
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     monkeypatch.setattr(ssl, 'create_default_context', lambda: context)
-    paths = ssl.get_default_verify_paths()._replace(cafile=None, capath=str(directory) if source == 'default' else None)
-    monkeypatch.setattr(ssl, 'get_default_verify_paths', lambda: paths)
-    monkeypatch.delenv('SSL_CERT_DIR', raising=False)
-    if source == 'environment':
+    if source == 'default':
+        paths = ssl.get_default_verify_paths()._replace(cafile=None, capath=str(directory))
+        monkeypatch.setattr(ssl, 'get_default_verify_paths', lambda: paths)
+        # The resolved capath is authoritative, even if the environment differs.
+        monkeypatch.setenv('SSL_CERT_DIR', str(tmp_path / 'missing'))
+    else:
+        # Exercise CPython's real environment resolution, including missing paths.
         monkeypatch.setenv('SSL_CERT_DIR', str(directory))
     if entry in ('0123abcd.0', 'abcdef01.9'):
         try:
@@ -261,6 +265,27 @@ def test_retry_exhausted(monkeypatch):
         transport(r).get(KEY)
     assert (caught.value.status, caught.value.code) == (503, 'SlowDown')
     assert len(r.calls) == 3 and sleeps == [1, 4]
+
+
+@pytest.mark.parametrize('method', ['get', 'now'])
+@pytest.mark.parametrize('failure', [ssl.SSLEOFError(SECRET), http.client.IncompleteRead(b'partial')])
+def test_retry_dropped_peer_and_body(monkeypatch, method, failure):
+    sleeps = []
+    monkeypatch.setattr(s3.time, 'sleep', sleeps.append)
+    r = Responses(failure, response(body=b'value', Date=DATE))
+    try:
+        result = getattr(transport(r), method)(*([KEY] if method == 'get' else []))
+    except s3.S3Error:
+        result = None
+    assert result == (b'value' if method == 'get' else EPOCH)
+    assert [call[0] for call in r.calls] == (['GET'] if method == 'get' else ['HEAD']) * 2
+    assert sleeps == [1]
+    sleeps.clear()
+    put = Responses(failure, response())
+    with pytest.raises(s3.S3Error) as caught:
+        transport(put).put_new(KEY, b'value')
+    assert caught.value.code == 'ConnectionError'
+    assert len(put.calls) == 1 and sleeps == []
 
 
 # Synthetic documented S3 XML shapes, not captured host responses:
@@ -541,21 +566,82 @@ def test_import_rule_44():
     assert '"cloud_s3.py",' in (root / 'scripts/maintainer_gate.py').read_text()
 
 
+class ScopedRequests:
+    """Two independent scoped credentials over one synthetic bucket."""
+    def __init__(self, fake, prefix, *, invalid=False):
+        self.fake, self.prefix, self.invalid = fake, prefix, invalid
+        self.calls, self.denials = [], []
+
+    def __call__(self, method, url, headers, body):
+        parsed = urlsplit(url)
+        key = unquote(parsed.path).split('/', 2)[2] if parsed.path.count('/') >= 2 else ''
+        query = parse_qs(parsed.query)
+        target = query['prefix'][0] if query else key
+        safe_headers = {k.lower(): v for k, v in headers.items() if k.lower() != 'authorization'}
+        self.calls.append((method, target, safe_headers, body))
+        if self.invalid or (target and not target.startswith(self.prefix + '/')):
+            self.denials.append((method, target))
+            return response(403, b'<Error><Code>AccessDenied</Code></Error>')
+        return self.fake(method, url, headers, body)
+
+
+def scoped_pair(*, invalid_b=False):
+    fake = FakeBucket()
+    a_wire = ScopedRequests(fake, PREFIX)
+    b_prefix = 'copies/11111111-1111-1111-1111-111111111111'
+    b_wire = ScopedRequests(fake, b_prefix, invalid=invalid_b)
+    b = s3.S3Transport('s3.example.invalid', 'bucket', 'us-east-1', b_prefix,
+                       CREDS, request=b_wire, clock=lambda: EPOCH)
+    return fake, transport(a_wire), b, a_wire, b_wire
+
+
 def test_live_contract_offline():
     from tests.test_cloud_s3_live import exercise
-    fake = FakeBucket()
-    a = transport(fake)
-    attempts = []
-    def denied(method, url, headers, body):
-        attempts.append(method)
-        return response(403, b'<Error><Code>AccessDenied</Code></Error>')
-    b = s3.S3Transport('s3.example.invalid', 'bucket', 'us-east-1',
-                       'copies/11111111-1111-1111-1111-111111111111',
-                       {'access_key_id': 'fixture-key', 'secret_access_key': 'fixture-secret'},
-                       request=denied)
+    fake, a, b, a_wire, b_wire = scoped_pair()
     exercise(a, b)
-    assert sum(method == 'HEAD' and key == '' for method, key, _ in fake.calls) == 1
-    assert attempts == ['GET', 'GET', 'PUT', 'DELETE']
+    for t, wire in ((a, a_wire), (b, b_wire)):
+        own = [(method, target) for method, target, _, _ in wire.calls
+               if not target or target.startswith(t.prefix + '/')]
+        assert [method for method, _ in own[:7]] == ['HEAD', 'PUT', 'GET', 'GET', 'DELETE', 'HEAD', 'PUT']
+        assert own[2][1] == t.prefix + '/payloads/'
+    assert [method for method, _ in b_wire.denials] == ['GET', 'GET', 'GET', 'PUT', 'DELETE']
+    assert b_wire.denials[0][1] == a.prefix + '/payloads/'
+    assert b_wire.denials[1][1] == a.prefix + '/gen/'
+    assert b_wire.denials[2][1] == b_wire.denials[3][1] == b_wire.denials[4][1]
+    cross_put = next(c for c in b_wire.calls if c[:2] == b_wire.denials[3])
+    assert cross_put[2]['if-none-match'] == '*'
+    assert fake.data == {}
+
+
+def test_live_invalid_b_fails_positive_control():
+    from tests.test_cloud_s3_live import exercise
+    fake, a, b, _, b_wire = scoped_pair(invalid_b=True)
+    try:
+        exercise(a, b)
+    except (s3.S3Error, AssertionError) as error:
+        caught = error
+    else:
+        caught = None
+    assert isinstance(caught, s3.S3Error)
+    assert [c[:2] for c in b_wire.calls] == [('HEAD', '')]
+    assert not any(target.startswith(a.prefix + '/') for _, target in b_wire.denials)
+    assert fake.data == {}
+
+
+def test_live_probe_payload_namespace():
+    from tests.test_cloud_s3_live import exercise
+    fake, a, b, a_wire, b_wire = scoped_pair()
+    exercise(a, b)
+    assert not any(method in ('PUT', 'DELETE') and '/gen/' in key
+                   for method, key, _ in fake.calls)
+    for t, wire in ((a, a_wire), (b, b_wire)):
+        puts = [(key, body) for method, key, _, body in wire.calls
+                if method == 'PUT' and key.startswith(t.prefix + '/payloads/')]
+        assert len(puts) == 2
+        assert puts[0] == puts[1]
+        key, body = puts[0]
+        cp.check_key(t.prefix, key)
+        assert key.rsplit('/', 1)[1].split('.')[0] == hashlib.sha256(body).hexdigest()
     assert fake.data == {}
 
 
