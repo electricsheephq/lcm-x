@@ -155,6 +155,23 @@ def test_leaf_clears_backoff(stuck, clock):
     assert not engine._retained_stop_hold_active(), "a leaf must reset the consecutive-stop counter"
 
 
+def test_home_rebind_drops_retained_stop_hold(stuck, clock, tmp_path):
+    engine, view = stuck()
+    view = arm(engine, view)
+    frontier = engine._store_complete_frontier()
+    other, _ = stuck("B")
+    assert other._store_complete_frontier() == frontier
+    other.shutdown()
+    engine._config.database_path = ""
+    engine.on_session_start("S", platform="cli", context_length=200_000,
+                            conversation_id="conv", hermes_home=str(tmp_path / "B"))
+    clear_old_hold(engine)
+    assert Path(engine._store.db_path).parent == tmp_path / "B"
+    assert engine._store_complete_frontier() == frontier
+    assert not engine._retained_stop_hold_active(), "home B inherited home A's retained-stop hold"
+    assert engine.should_compress(10_001)
+
+
 @pytest.mark.parametrize("bypass", ["ceiling", "overflow", "recovery"])
 def test_emergency_paths_bypass(stuck, clock, monkeypatch, bypass):
     engine, view = stuck()
@@ -182,7 +199,7 @@ def test_error_neither_arms_nor_clears(stuck, clock, monkeypatch):
     def error_pass():
         clear_old_hold(engine)
         with monkeypatch.context() as patch:
-            patch.setattr(engine, "_compress_impl", Mock(side_effect=ValueError("synthetic failure")))
+            patch.setattr(engine, "_compress_impl", Mock(side_effect=sqlite3.OperationalError("database is locked")))
             assert engine.compress(view, current_tokens=10_000) is view
         assert engine._last_compression_status == "error"
 

@@ -36,6 +36,7 @@ from .escalation import (
 )
 from .externalize import ingest_payload_writes, payload_lookup_scope
 from .fresh_tail import tool_group_safe_end
+from .ingest_protection import redact_sensitive_value
 from . import leaf_prep
 from .lifecycle_state import LifecycleBindingChangedError, LifecyclePublicationConflictError
 from .message_content import text_content_for_pattern_matching
@@ -888,11 +889,17 @@ class CompactionMixin:
                                    type(exc).__name__, exc_info=True)
                     returned = fitted
                     return fitted
-                if (rolled_back and not force and not bypass_cooldown and not self._compress_forced_overflow
+                if (rolled_back and _is_sqlite_locked_error(exc)
+                        and not force and not bypass_cooldown and not self._compress_forced_overflow
                         and not self._should_force_overflow_recovery(observed_tokens=current_tokens, messages=messages)):
                     try:
                         fit_budget = self._survival_fit_budget(messages, current_tokens)
                         host_fits = fit_budget is not None and self._survival_measure(messages) <= fit_budget
+                        host_fits = host_fits and not any(
+                            redact_sensitive_value(message.get(field), self._config, parse_json_strings=parse_json)
+                            != message.get(field)
+                            for message in messages
+                            for field, parse_json in (("content", False), ("tool_calls", True)))
                     except Exception:
                         host_fits = False  # Preserve the original exception when fit cannot be established.
                     if host_fits:

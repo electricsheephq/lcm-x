@@ -1431,6 +1431,7 @@ class LCMEngine(
         # R6-4: survival-fit warnings belong to the store they were raised on.
         self._survival_fit_pending_warning, self._survival_fit_warned = None, set()
         self._survival_overhead_observation = None  # #1012 F4: an overhead peak never crosses profile homes
+        self.__dict__.pop("_retained_stop_backoffs", None)  # #2815: retained-stop holds never cross homes
         self.emit_automatic_compaction_status = False
         adaptive = self.__dict__.get("_adaptive_retrieval")
         if adaptive is not None:

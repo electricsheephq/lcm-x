@@ -5,6 +5,7 @@ from __future__ import annotations
 import sqlite3
 
 import hermes_lcm.engine as lcm_engine
+import pytest
 
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
@@ -122,8 +123,8 @@ def test_frontier_failure_rolls_back_insert_and_frontier_together(
     )
 
     try:
-        messages = _messages()
-        assert engine.compress(messages) is messages
+        with pytest.raises(RuntimeError, match="post-frontier failure"):
+            engine.compress(_messages())
         state = engine._lifecycle.get_by_conversation(identity)
         node_count = len(engine._dag.get_session_nodes(identity))
     finally:

@@ -21,6 +21,8 @@ Semantics under test:
   mode.
 """
 
+import pytest
+
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
 from hermes_lcm.tokens import count_messages_tokens
@@ -311,7 +313,8 @@ def test_yield_bound_cleared_when_summarizer_raises(tmp_path, monkeypatch):
         messages = [_fat_user(i) for i in range(40)]
         observed = count_messages_tokens(messages)
 
-        assert engine.compress(list(messages), current_tokens=observed) == messages
+        with pytest.raises(RuntimeError):
+            engine.compress(list(messages), current_tokens=observed)
 
         assert engine._last_compression_status == "error"
         assert engine._pressure_yield_tail_token_limit == 0
@@ -517,7 +520,8 @@ def test_exception_neither_extends_nor_resets_blocked_streak(tmp_path, monkeypat
             patch.setattr(
                 engine, "_summarize_leaf_chunk_with_rescue", _raising_summarizer
             )
-            assert engine.compress(list(messages), current_tokens=observed) == messages
+            with pytest.raises(RuntimeError):
+                engine.compress(list(messages), current_tokens=observed)
 
         # The failed compress counted its own blocked observation before the
         # yield engaged and the summarizer died; the exception exit must not

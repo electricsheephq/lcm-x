@@ -1802,7 +1802,8 @@ class TestEngineCompress:
 
         monkeypatch.setattr(engine_module, "summarize_with_escalation", always_fails)
 
-        assert engine.compress(messages) is messages
+        with pytest.raises(RuntimeError, match="context length exceeded"):
+            engine.compress(messages)
 
         assert len(attempts) == 2
         assert attempts[0] > attempts[-1]
@@ -1840,7 +1841,8 @@ class TestEngineCompress:
 
         monkeypatch.setattr(engine_module, "summarize_with_escalation", bad_template)
 
-        assert engine.compress(messages) is messages
+        with pytest.raises(RuntimeError, match="template exploded"):
+            engine.compress(messages)
 
         assert call_count == 1
         assert engine._dag.get_session_nodes("test-session") == []

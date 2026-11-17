@@ -1084,7 +1084,8 @@ def test_b4_summary_failure_does_not_report_escape(tmp_path, summaries, lines, m
         monkeypatch.setattr(engine_module, "summarize_with_escalation", boom)
         for _ in range(2):
             start = len(lines)
-            assert engine.compress(view, current_tokens=10_000) is view
+            with pytest.raises(RuntimeError, match="synthetic route down"):
+                engine.compress(view, current_tokens=10_000)
             emitted = [message for _level, message in lines[start:]]
             stop = next(m for m in emitted if m.startswith("LCM compaction stop:"))
             assert "reason=error leaves=0" in stop and " escaped=" not in stop

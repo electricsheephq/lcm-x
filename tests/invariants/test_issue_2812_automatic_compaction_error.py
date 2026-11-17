@@ -54,6 +54,82 @@ def digest(engine):
     return len(rows), hashlib.sha256(json.dumps(content, sort_keys=True).encode()).hexdigest()
 
 
+@pytest.mark.parametrize("route", ["preflight", "threshold"])
+@pytest.mark.parametrize("field", ["content", "content_blocks", "tool_calls", "tool_calls_json"])
+def test_redaction_host_fallback_requires_unchanged_values(engines, monkeypatch, route, field):
+    # Check the unchanged-policy control first: enabling redaction alone is not a veto.
+    for matching in (False, True):
+        engine = engines(f"store-{matching}")
+        engine._config.sensitive_patterns_enabled = True
+        view = turns(0, 3)
+        view.append({"role": "user", "content": "synthetic extra question", "timestamp": 1010.0})
+        if matching:
+            secret_text = "api_key=sk-test-0123456789abcdefABCDEF0123"
+            if field == "content":
+                view[-1]["content"] = secret_text
+            elif field == "content_blocks":
+                view[-1]["content"] = [{"type": "text", "text": secret_text}]
+        if field in ("tool_calls", "tool_calls_json"):
+            # Only JSON parsing finds this key's value, so the check must parse tool_calls as replay does;
+            # the control's benign call shows that a tool call alone is not a veto.
+            arguments = '{"api_key":"plainvalue"}' if matching else '{"query":"synthetic weather"}'
+            calls = [{"id": "synthetic-call", "type": "function", "function": {
+                "name": "synthetic", "arguments": arguments}}]
+            view.append({"role": "assistant", "content": "", "tool_calls":
+                         json.dumps(calls, indent=2) if field == "tool_calls_json" else calls})
+        tokens = 10_000 if route == "preflight" else engine.threshold_tokens + 1
+        if route == "preflight":
+            wanted = engine.should_compress_preflight(view)
+            if matching:
+                assert wanted is True
+        else:
+            assert engine.should_compress(tokens)
+        original = copy.deepcopy(view)
+        failure = sqlite3.OperationalError("database is locked")
+        reached = []
+
+        def after_ingest(*args, **kwargs):
+            reached.append(digest(engine)[0])
+            raise failure
+
+        with monkeypatch.context() as patch:
+            patch.setattr(engine, "_prepare_retained_user_anchor", after_ingest)
+            if matching:
+                with pytest.raises(sqlite3.OperationalError) as caught:
+                    engine.compress(view, current_tokens=tokens)
+                assert caught.value is failure
+            else:
+                assert engine.compress(view, current_tokens=tokens) is view
+        assert reached and reached[0] > 0, "the lock error must follow real ingest"
+        assert view == original
+        assert engine._last_compression_status == "error"
+
+
+def test_lock_fallback_preserves_predicate_shapes(engines, monkeypatch):
+    engine, view = engines(), turns(0, 3)
+    engine.ingest(view)
+    plain = sqlite3.OperationalError("database is locked")
+    try:
+        raise sqlite3.OperationalError("database is locked")
+    except sqlite3.OperationalError:
+        try:
+            raise KeyError("synthetic wrapper")
+        except KeyError as error:
+            chained = error
+    busy = sqlite3.OperationalError("synthetic busy")
+    busy.sqlite_errorcode = sqlite3.SQLITE_BUSY
+    for failure in (plain, chained, busy):
+        with monkeypatch.context() as patch:
+            patch.setattr(engine, "_compress_impl", Mock(side_effect=failure))
+            if failure is busy:
+                with pytest.raises(sqlite3.OperationalError) as caught:
+                    engine.compress(view, current_tokens=10_000)
+                assert caught.value is failure
+            else:
+                assert engine.compress(view, current_tokens=10_000) is view
+        assert engine._last_compression_status == "error"
+
+
 @pytest.mark.parametrize("fit_fails", [False, True], ids=["already_fits", "fit_raises"])
 def test_automatic_fallback_records_error_and_manual_still_raises(engines, monkeypatch, caplog, fit_fails):
     engine, view = engines(), turns(0, 3)

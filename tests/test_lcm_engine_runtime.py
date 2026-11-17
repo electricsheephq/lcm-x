@@ -706,8 +706,10 @@ def test_compress_exception_sets_terminal_error_status_and_reraises_same_excepti
         raise original
 
     monkeypatch.setattr(engine, "_ingest_messages", fail_ingest)
-    messages = [{"role": "user", "content": "trigger"}]
-    assert engine.compress(messages) is messages
+    with pytest.raises(RuntimeError) as caught:
+        engine.compress([{"role": "user", "content": "trigger"}])
+
+    assert caught.value is original
     assert engine.last_compression_status == "error"
     assert engine.last_compression_noop_reason == ""
     assert engine.last_compression_was_noop is False
