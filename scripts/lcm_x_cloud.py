@@ -24,12 +24,31 @@ def main(argv=None):
         sub.add_argument('--part-size', type=int, default=33554432)
         if command == 'publish':
             sub.add_argument('--timer', action='store_true')
+    view = commands.add_parser('view')
+    view.add_argument('--home', required=True, type=Path)
+    view.add_argument('--copy-id')
     args = parser.parse_args(argv)
     if 'hermes_lcm' not in sys.modules:
         package = types.ModuleType('hermes_lcm')
         package.__path__ = [str(Path(__file__).resolve().parents[1])]
         package.__package__ = 'hermes_lcm'
         sys.modules['hermes_lcm'] = package
+    if args.command == 'view':
+        from hermes_lcm import cloud_view
+        try:
+            os_nice = __import__('os').nice
+            try:
+                os_nice(19)
+            except OSError:
+                pass
+            result = cloud_view.build(args.home, args.copy_id)
+            records = result if isinstance(result, list) else [result]
+            codes = {r['code'] for r in records}
+            status = 2 if codes - {'ok', 'view_busy', 'view_disk_floor'} else 3 if codes - {'ok'} else 0
+        except Exception as error:
+            result, status = {'code': getattr(error, 'code', 'bad_database_block')}, 2
+        print(json.dumps(result, sort_keys=True))
+        return status
     from hermes_lcm import cloud_copy, cloud_guard
     try:
         prefix = args.prefix + '/' + args.copy_id
