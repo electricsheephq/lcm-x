@@ -99,6 +99,8 @@ def _counted_compaction(*, return_messages: bool):
                     if not engine._compaction_is_closing():
                         try:
                             result = engine.compress(messages, *args, **kwargs)
+                        except LifecycleBindingChangedError:
+                            return messages
                         except Exception as exc:
                             # Let the host handle a compression failure after
                             # the lease exits, as it does for a live engine.

@@ -87,6 +87,20 @@ nominated replacement. Both paths still require an empty old LCM binding and a
 new, open, non-child native session; they retry the native row check on a later
 callback if `state.db` was busy or Hermes creates the row on the next turn.
 
+CLI `/resume` and `/branch` can leave the original engine bound while Hermes
+switches sessions. LCM-X records the explicit bind and verifies the switch
+against the native session rows. After unload, the retained engine uses the
+confirmed target for replay and session-end writes. A branch must name the
+outgoing session as its parent. Resume can reopen the target's own finalized
+conversation and keeps its saved frontier.
+
+An unloaded engine can reconcile a view whose opening changed after `/undo`
+when the native session database proves the replacement rows. A retry after
+`/new` uses the same replay path as other retained turns. If Hermes closes the
+native session before delivering session end, the final view must match the
+confirmed target's native rows. The database connections used for these writes
+close before the callback returns.
+
 An empty, missing or `None` id is a detach request and raises
 `NotImplementedError` without changing the binding. Hosts with
 `agent/background_review.py::_detach_fork_compression` catch this refusal and

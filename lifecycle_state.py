@@ -366,8 +366,15 @@ class LifecycleStateStore:
         written by ONE conditional UPDATE (atomic across engines and processes). Same fields as
         :meth:`bind_session`'s own-finalize branch. None (nothing written) when another session bound it
         first or the row no longer qualifies."""
+        rebound = self.rebind_own_finalized_in_transaction(self._conn, session_id, conversation_id)
+        self._conn.commit()
+        return self.get_by_conversation(conversation_id) if rebound else None
+
+    @staticmethod
+    def rebind_own_finalized_in_transaction(connection, session_id: str, conversation_id: str) -> bool:
+        """Rebind this exact finalized session using the caller's transaction."""
         now = time.time()
-        cursor = self._conn.execute(
+        cursor = connection.execute(
             """
             UPDATE lcm_lifecycle_state
             SET current_session_id = ?,
@@ -381,8 +388,7 @@ class LifecycleStateStore:
             """,
             (session_id, now, now, conversation_id, session_id),
         )
-        self._conn.commit()
-        return self.get_by_conversation(conversation_id) if cursor.rowcount == 1 else None
+        return cursor.rowcount == 1
 
     @_synchronized
     def finalize_session(

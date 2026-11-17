@@ -972,15 +972,6 @@ def register(ctx):
                 _ingest_and_note(active_engine)
                 return True
 
-            def _bind_reset_session(active_engine):
-                # Concurrent callbacks for the same reset must reconcile
-                # through the durable lane after the first writer binds it.
-                lane = active_engine._unattached_reload_lane(session_id, conversation_id, platform)
-                if lane:
-                    return active_engine._ingest_reload_lane(session_id, lane, history, platform)
-                _bind_and_ingest(active_engine)
-                return True
-
             def _use_scoped_writer(operation):
                 with engine._admit_plugin_operation() as admitted:
                     if not admitted:
@@ -996,14 +987,22 @@ def register(ctx):
                         replacement.shutdown()
 
             def _replay_cli_reset(retired):
-                return (
-                    (not conversation_id or conversation_id == session_id)
-                    and getattr(retired, "_retired_session_start", None) == session_id
-                    and _resolved_profile_home(retired._hermes_home) == _resolved_profile_home(engine._hermes_home)
-                    and retired._db_path == engine._db_path
-                    and retired._confirms_retired_cli_reset(session_id, platform)
-                    and _use_scoped_writer(_bind_reset_session)
-                )
+                if (conversation_id not in ("", session_id)
+                        or getattr(retired, "_retired_session_start", None) != session_id
+                        or _resolved_profile_home(retired._hermes_home) != _resolved_profile_home(engine._hermes_home)
+                        or retired._db_path != engine._db_path):
+                    return False
+
+                def replay(active_engine):
+                    reason = retired._confirmed_retired_cli_switch(session_id, platform)
+                    if reason is None or not active_engine._adopt_retained_binding(
+                        retired._reload_successor or retired, reset_session_id=session_id,
+                        start_reset=True, resume=reason == "resumed_other",
+                    ):
+                        return False
+                    return _ingest_retained(active_engine)
+
+                return _use_scoped_writer(replay)
 
             try:
                 if host_engine is not None:
