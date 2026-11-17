@@ -222,7 +222,11 @@ def guard_block(db, payloads, parent=None):
                                     ('message_relations', 'relations', TABLE_COLUMNS['message_relations'])):
             if table in tables:
                 for row in _rows(conn, table, cols):
-                    session(owner.get(row['store_id'], ''))[field].append(_sha(_json(row)))
+                    ends = {owner.get(row['store_id'], '')}
+                    if field == 'relations':
+                        ends.add(owner.get(row['related_store_id'], ''))
+                    for sid in ends:
+                        session(sid)[field].append(_sha(_json(row)))
         events = _rows(conn, 'capture_events') if 'capture_events' in tables else []
         by_id = {r['event_id']: r for r in events}
         for row in events:
@@ -601,7 +605,7 @@ def publish(home, copy_id, transport, prefix, *, quiet_s=0, part_size=DEFAULT_PA
                 prev = cloud_delta.load_head_list(pages_dir, copy_id, old['page_list_sha256'], old['file_bytes']//old['page_size']) if usable else None
                 items = forget_items(head, db) if forget_items else []
                 if not snapshot_only:
-                    chain_check(head, state, publisher_id, head_bytes)
+                    recovered = chain_check(head, state, publisher_id, head_bytes)
                 args = dict(head_generation=head['generation'] if head else None, page_size=page_size, file_bytes=new.file_bytes,
                             list_matches=prev is not None, forget=any(i['chain_may_hold'] for i in items), object_missing=False,
                             delta_bytes=0, size_factor=size_factor, max_generations=max_generations)
@@ -625,7 +629,8 @@ def publish(home, copy_id, transport, prefix, *, quiet_s=0, part_size=DEFAULT_PA
                     reason = cloud_delta.base_reason(old, **args)
                 if not snapshot_only:
                     _update_state(home, copy_id, pending_pair=[generation, token],
-                                  pending_started=started if resumed and started is not None else bucket_now)
+                                  pending_started=started if resumed and started is not None else bucket_now,
+                                  **(recovered or {}))
                     cloud_delta.save_pending_list(pages_dir, copy_id, new.digests)
                 sent, buffers = set(), {}
                 def upload(key, data, force=False):

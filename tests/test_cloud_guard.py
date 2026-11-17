@@ -11,18 +11,29 @@ import sys
 
 import pytest
 
-from hermes_lcm import cloud_copy as cp, cloud_guard as cg, cloud_delta as cd
+from hermes_lcm import cloud_copy as cp, cloud_guard as cg, cloud_delta as cd, claude_code_store as cc
 from tests.test_cloud_copy import (COPY, PREFIX, TOKEN, ROOT, grow, keys, objects,
-                                  capture_store, fetch, refused, state)
+                                  capture_store, entry, fetch, refused, state)
 
 from tests.test_cloud_copy import fixture as _capture_fixture
 
 fixture = _capture_fixture
 
 
-OWNED = {'a1', 'a2', 'a3', 'a4', 'b', 'c', 'd', 'e', 'f1', 'f2', 'g2', 'h',
-         'i1', 'i2', 'i3-retention', 'j1', 'j2', 'j4', 'j5', 'j6', 'j7',
-         'L1', 'L2', 'L3', 'L4', 'L5', 'L6'}
+OWNED = {
+    **dict.fromkeys(('a1', 'a2', 'a3', 'a4'), ('test_forget_retention_and_rebuild',)),
+    **dict.fromkeys(('b', 'e'), ('test_loss_surfaces', 'test_control_publisher_and_state')),
+    **dict.fromkeys(('c', 'd', 'g2'), ('test_decisions_pins_and_pruning', 'test_pin_bucket_clock_expiry_and_missing_date')),
+    **dict.fromkeys(('f1', 'j4', 'j5'), ('test_twin_interleavings',)),
+    'f2': ('test_recreated_number_below_head_never_retains',),
+    'h': ('test_newest_forget_then_capture',),
+    **dict.fromkeys(('i1', 'i2'), ('test_rollback_before_after_mark', 'test_reuse_priority', 'test_forgotten_returned_priority')),
+    'i3-retention': ('test_retention_window_chain_and_other_prefix',),
+    **dict.fromkeys(('j1', 'j2'), ('test_chain_priority', 'test_crash_after_create_pending_pair_recovers', 'test_decision_consumed_after_winning_crash')),
+    'j6': ('test_two_stall_residual_candidates',),
+    'j7': ('test_pending_crash_and_abandon',),
+    **dict.fromkeys(('L1', 'L2', 'L3', 'L4', 'L5', 'L6'), ('test_delta_lifecycle', 'test_ledger_only_accepted_session_forget_race')),
+}
 
 
 def installed(f, host='synthetic-host'):
@@ -518,7 +529,11 @@ def test_payload_exemption_and_fast_path():
 
 def test_import_rule_and_ownership():
     assert cg.publisher(COPY, 'synthetic-host') is not None
-    assert OWNED == {'a1', 'a2', 'a3', 'a4', 'b', 'c', 'd', 'e', 'f1', 'f2', 'g2', 'h', 'i1', 'i2', 'i3-retention', 'j1', 'j2', 'j4', 'j5', 'j6', 'j7', 'L1', 'L2', 'L3', 'L4', 'L5', 'L6'}
+    assert set(OWNED) == {'a1', 'a2', 'a3', 'a4', 'b', 'c', 'd', 'e', 'f1', 'f2', 'g2', 'h', 'i1', 'i2', 'i3-retention', 'j1', 'j2', 'j4', 'j5', 'j6', 'j7', 'L1', 'L2', 'L3', 'L4', 'L5', 'L6'}
+    for clause, names in OWNED.items():
+        assert names, clause
+        for name in names:
+            assert callable(globals().get(name)), f'{clause}: missing {name}'
     text = (ROOT / 'scripts/maintainer_gate.py').read_text()
     assert '"cloud_guard.py",' in text
     for name in ('cloud_guard.py', 'cloud_copy.py'):
@@ -836,3 +851,226 @@ def test_retention_window_chain_and_other_prefix(fixture):
         rebuild(fixture, manifest, 'chain-' + str(i))
     assert other.get(foreign_key) == b'synthetic other-copy object'
     assert other.get(other_prefix + '/gen/1.json') == b'synthetic other-copy manifest'
+
+
+def fork_capture(f):
+    rows = [dict(json.loads(line), sessionId='f1') for line in f[2].read_text().splitlines()]
+    rows.append(dict(entry('user', 'fork-new', 'synthetic fork turn'), sessionId='f1'))
+    path = f[2].parent / 'f1.jsonl'
+    path.write_text(''.join(json.dumps(row) + '\n' for row in rows))
+    with capture_store(f[0] / 'lcm.db', f[0], f[3]) as store:
+        store.update_metadata_json(cc.FORK_PREFIX + 'f1', lambda _: True)
+        assert cc.drain(store, cc.Lineage('f1', None, path)) == 'drained'
+        assert store.connection.execute("SELECT count(*) FROM message_relations WHERE kind='fork_copy_of'").fetchone()[0]
+
+
+def remove_message(f, ident):
+    sql(f, 'DELETE FROM host_uid_bindings WHERE store_id=?', (ident,))
+    sql(f, 'DELETE FROM message_relations WHERE store_id=? OR related_store_id=?', (ident, ident))
+    sql(f, 'DELETE FROM messages WHERE store_id=?', (ident,))
+
+
+def publish_answer(f, **kw):
+    try:
+        return pub(f, **kw)
+    except (cp.Refused, OSError) as error:
+        return error
+
+
+@pytest.mark.parametrize('action', ['forget-parent', 'forget-fork', 'as-delete-parent'])
+def test_cross_session_relation_exempt_at_either_end(fixture, action):
+    fork_capture(fixture)
+    head = pub(fixture)
+    if action == 'forget-fork':
+        assert set(head['guard']['sessions']['s1']['relations']) & set(head['guard']['sessions']['f1']['relations']), 'both endpoints must name each cross-session relation'
+    before = (fixture[0] / 'lcm.db').read_bytes()
+    # A vanished relation without either exemption still refuses.
+    sql(fixture, "DELETE FROM message_relations WHERE kind='fork_copy_of'")
+    refused('guard_loss', pub, fixture)
+    (fixture[0] / 'lcm.db').write_bytes(before)
+    if action == 'as-delete-parent':
+        with closing(sqlite3.connect(fixture[0] / 'lcm.db')) as conn:
+            ids = [r[0] for r in conn.execute("SELECT store_id FROM messages WHERE session_id='s1'")]
+        for ident in ids:
+            remove_message(fixture, ident)
+        sql(fixture, "DELETE FROM capture_events WHERE session_id='s1'")
+        refused('guard_loss', pub, fixture)
+        accept(fixture, head, 'as-delete')
+    else:
+        sid = 's1' if action == 'forget-parent' else 'f1'
+        with capture_store(fixture[0] / 'lcm.db', fixture[0], fixture[3]) as store:
+            store.delete_session_messages(sid)
+    answer = publish_answer(fixture)
+    assert isinstance(answer, dict), f'{action} must publish: {answer}'
+    assert answer['generation'] == 2
+    assert not answer['pins']
+    remaining = 's1' if action == 'forget-fork' else 'f1'
+    assert answer['guard']['sessions'][remaining]['messages']
+    assert not answer['guard']['sessions'][remaining]['relations'] or action == 'forget-fork'
+
+
+@pytest.mark.parametrize('kind', ['accept-loss', 'as-delete'])
+def test_held_accepted_loss_compares_to_previous_generation(fixture, kind):
+    # Synthetic held entry covers two message rows, with no raw bytes of its own.
+    sql(fixture, "UPDATE capture_events SET raw=NULL,raw_from=NULL,disposition='held',store_ids='[1,2]' "
+        'WHERE event_id=(SELECT min(event_id) FROM capture_events)')
+    head = pub(fixture)
+    remove_message(fixture, 1)
+    refused('guard_loss', pub, fixture)
+    accept(fixture, head, kind)
+    assert pub(fixture)['generation'] == 2
+    answer = publish_answer(fixture)
+    assert isinstance(answer, dict), f'an unchanged accepted held entry must publish: {answer}'
+    assert answer['generation'] == 3
+    remove_message(fixture, 2)
+    refused('guard_loss', pub, fixture)
+
+
+def test_raw_accepted_cut_compares_to_previous_generation(fixture):
+    import zlib
+    head = pub(fixture)
+    statement = 'UPDATE capture_events SET raw=? WHERE event_id=(SELECT min(event_id) FROM capture_events WHERE raw IS NOT NULL)'
+    sql(fixture, statement, (zlib.compress(b'synthetic accepted cut'),))
+    refused('guard_loss', pub, fixture)
+    accept(fixture, head)
+    assert pub(fixture)['generation'] == 2
+    answer = publish_answer(fixture)
+    assert isinstance(answer, dict), f'an unchanged accepted raw cut must publish: {answer}'
+    assert answer['generation'] == 3
+    sql(fixture, statement, (zlib.compress(b'further cut'),))
+    refused('guard_loss', pub, fixture)
+
+
+def test_unrecorded_create_then_failed_attempt_recovers(fixture, monkeypatch):
+    pub(fixture)
+    grow(fixture)
+    original_promote = cd.promote_pending_list
+    def killed(*args):
+        raise RuntimeError('killed after winning create')
+    monkeypatch.setattr(cd, 'promote_pending_list', killed)
+    with pytest.raises(RuntimeError):
+        pub(fixture)
+    monkeypatch.setattr(cd, 'promote_pending_list', original_promote)
+    won = json.loads(fetch(fixture, 'gen/2.json'))['attempt']
+    grow(fixture)
+    original_put = fixture[1].inner.put_new
+    def failed(key, data):
+        if '/gen/' in key:
+            raise OSError('failed before next create')
+        return original_put(key, data)
+    monkeypatch.setattr(fixture[1].inner, 'put_new', failed)
+    with pytest.raises(OSError):
+        pub(fixture)
+    data = json.loads(state(fixture).read_text())
+    assert data['last_pair'] == [won['generation'], won['token']], 'preserve the recognized pending head before replacing pending'
+    monkeypatch.setattr(fixture[1].inner, 'put_new', original_put)
+    assert pub(fixture)['generation'] == 3
+    before = json.loads(state(fixture).read_text())
+    grow(fixture)
+    monkeypatch.setattr(fixture[1].inner, 'put_new', failed)
+    with pytest.raises(OSError):
+        pub(fixture)
+    after = json.loads(state(fixture).read_text())
+    assert {k for k in before.keys() | after.keys() if before.get(k) != after.get(k)} <= {'pending_pair', 'pending_started'}
+
+
+@pytest.mark.parametrize('fault', ['head-list', 'retention-get', 'retention-list', 'retention-stat', 'retention-now'])
+def test_won_create_io_failure_still_records_state(fixture, fault):
+    head = pub(fixture)
+    lost(fixture)
+    decision = accept(fixture, head)
+    stray = PREFIX + '/parts/' + 'e' * 64 + '.' + TOKEN
+    fixture[1].put_new(stray, b'synthetic never-named object')
+    created, injected, deleted = [], [], []
+    def hook(method, key):
+        if method == 'put_new' and key.endswith('/gen/2.json'):
+            created.append(True)
+        if method == 'delete':
+            deleted.append(key)
+        matches = ((fault == 'head-list' and method == 'list' and key.endswith('/gen/'))
+                   or (fault == 'retention-get' and method == 'get' and key.endswith('/gen/1.json'))
+                   or (fault == 'retention-list' and method == 'list' and key.endswith('/parts/'))
+                   or (fault == 'retention-stat' and method == 'stat' and key == stray)
+                   or (fault == 'retention-now' and method == 'now'))
+        if created and matches and not injected:
+            injected.append(True)
+            raise OSError('transient post-create I/O error')
+    fixture[1].hook = hook
+    answer = publish_answer(fixture)
+    assert isinstance(answer, dict), f'a won create must record state despite {fault}: {answer}'
+    assert injected and not deleted
+    data = json.loads(state(fixture).read_text())
+    assert data['last_pair'] == data['pending_pair'] == [2, answer['attempt']['token']]
+    assert data['snapshot_signature'] == cd.store_signature(fixture[0])
+    assert data['unpublished_decisions'] == [] and decision['id'] in {p['decision'] for p in answer['pins']}
+    assert data.get('retention_done_generation') != 2
+    fixture[1].hook = lambda *args: None
+    assert pub(fixture)['generation'] == 3
+    assert json.loads(state(fixture).read_text())['retention_done_generation'] == 3
+
+
+@pytest.mark.parametrize('recorded', ['last-1', 'last-2', 'pending-2'])
+def test_empty_published_bucket_conflicts(fixture, recorded):
+    # First publish and a resumed first attempt remain valid controls.
+    original_put = fixture[1].inner.put_new
+    def fail(key, data):
+        raise OSError('interrupted first upload')
+    fixture[1].inner.put_new = fail
+    with pytest.raises(OSError):
+        pub(fixture)
+    pending = json.loads(state(fixture).read_text())['pending_pair']
+    assert pending[0] == 1
+    fixture[1].inner.put_new = original_put
+    first = pub(fixture)
+    assert [1, first['attempt']['token']] == pending
+    if recorded != 'last-1':
+        pub(fixture)
+    if recorded == 'pending-2':
+        data = json.loads(state(fixture).read_text())
+        data.pop('last_pair')
+        state(fixture).write_bytes(cp._json(data))
+    for key in keys(fixture):
+        fixture[1].inner.delete(key)
+    before = state(fixture).read_bytes()
+    fixture[1].calls.clear()
+    answer = publish_answer(fixture)
+    assert isinstance(answer, cp.Refused) and answer.code == 'chain_conflict', 'an emptied published copy must refuse'
+    assert not keys(fixture) and state(fixture).read_bytes() == before
+    assert not any(method in ('put_new', 'delete') for method, key in fixture[1].calls)
+
+
+def test_as_delete_preserves_other_session_payload_loss(tmp_path):
+    db = tmp_path / 'staged.db'
+    with closing(sqlite3.connect(db)) as conn, conn:
+        conn.execute('CREATE TABLE messages(store_id INTEGER, session_id TEXT)')
+        conn.execute('CREATE TABLE metadata(key TEXT, value TEXT)')
+        conn.execute("INSERT INTO messages VALUES (2,'s2')")
+    s1 = dict(messages=[[1, 'h1']], bindings=[], relations=[], ledger=[], digest='d1')
+    s2 = dict(messages=[[2, 'h2']], bindings=[], relations=[], ledger=[], digest='d2')
+    old = dict(mark=2, sessions={'s1': s1, 's2': s2}, payloads={'P.json': 'aa'},
+               removed_ids=cg._ids([]), removed_sessions=[])
+    new = dict(old, sessions={'s2': copy.deepcopy(s2)}, payloads={})
+    head = dict(generation=1, forgotten=[], pins=[], guard=old)
+    m = dict(guard=new, sequence={'messages': 2}, unresolved_minted=[{'name': 'P.json', 'sessions': ['s2']}], unresolved_quoted=[])
+    loss = cg.losses(old, new, unresolved=m['unresolved_minted'])
+    d = dict(id='0' * 32, kind='as-delete', generation=1, manifest_sha256='f' * 64,
+             session='s1', ids=cg._ids([1]), losses=loss)
+    outcome = None
+    try:
+        cg.guard(head, db, m, decisions=[d], bucket_now=100, head_sha='f' * 64)
+    except cp.Refused as error:
+        outcome = error.code
+    assert outcome == 'guard_loss', 'as-delete cannot accept a surviving session payload loss'
+    d['kind'] = 'accept-loss'
+    cg.guard(head, db, m, decisions=[d], bucket_now=100, head_sha='f' * 64)
+    assert len(m['pins']) == 1
+
+
+def test_ownership_detects_renamed_proof(monkeypatch):
+    monkeypatch.delitem(globals(), 'test_delta_lifecycle')
+    detected = False
+    try:
+        test_import_rule_and_ownership()
+    except AssertionError as error:
+        detected = 'test_delta_lifecycle' in str(error)
+    assert detected, 'ownership must detect a missing test_delta_lifecycle'

@@ -151,11 +151,16 @@ def validate_head(head):
 
 def check_chain(head, state, publisher):
     if head is None:
+        pending = state.get('pending_pair')
+        if state.get('last_pair') or (pending and pending[0] > 1):
+            raise Refused('chain_conflict')
         return
     validate_head(head)
     pair = [head['attempt']['generation'], head['attempt']['token']]
     if head.get('publisher') != publisher or pair not in (state.get('last_pair'), state.get('pending_pair')):
         raise Refused('chain_conflict', generation=head['generation'])
+    if pair == state.get('pending_pair') and pair != state.get('last_pair'):
+        return {'last_pair': pair}
 
 
 def inherited_items(old_head):
@@ -202,6 +207,7 @@ def losses(head_guard, staged_guard, *, unresolved=(), forgotten=()):
     """Return content-free exact missing sets. Ledger bypasses the digest fast path."""
     result = {}
     current_sessions = staged_guard['sessions']
+    exempt_relations = {r for sid in forgotten for r in head_guard['sessions'].get(sid, {}).get('relations', [])}
     for sid, old in head_guard['sessions'].items():
         if sid in forgotten:
             continue
@@ -213,6 +219,8 @@ def losses(head_guard, staged_guard, *, unresolved=(), forgotten=()):
                 result.setdefault('messages', {})[sid] = _ids(missing)
             for field in ('bindings', 'relations'):
                 missing = sorted(set(old[field]) - set(new.get(field, [])))
+                if field == 'relations':
+                    missing = [r for r in missing if r not in exempt_relations]
                 if missing:
                     result.setdefault(field, {})[sid] = missing
         ledger = {_json(row[:2]): row for row in new.get('ledger', [])}
@@ -222,10 +230,11 @@ def losses(head_guard, staged_guard, *, unresolved=(), forgotten=()):
             valid = actual is not None and actual[2:4] == row[2:4]
             if actual is not None:
                 if actual[3] is not None:
-                    valid = valid and actual[3] == actual[2]
+                    if row[3] == row[2]:
+                        valid = valid and actual[3] == actual[2]
                 elif row[4] is not None:
                     ids = json.loads(row[4]) if isinstance(row[4], str) else row[4]
-                    valid = valid and actual[4] == row[4] and all(i in new_messages and new_messages[i] == old_messages.get(i) for i in ids)
+                    valid = valid and actual[4] == row[4] and all(new_messages.get(i) == old_messages[i] for i in ids if i in old_messages)
             if not valid:
                 result.setdefault('ledger', {}).setdefault(sid, []).append(row[:2])
     unresolved = {i['name'] for i in unresolved}
@@ -246,12 +255,15 @@ def _subtract(loss, decision):
     covered = decision.get('losses', {})
     for field in list(loss):
         if field == 'payloads':
+            if decision['kind'] == 'as-delete':
+                continue
             loss[field] = sorted(set(loss[field]) - set(covered.get(field, [])))
         else:
             for sid in list(loss[field]):
-                if decision['kind'] == 'as-delete' and sid != decision['session']:
+                if decision['kind'] == 'as-delete' and field != 'relations' and sid != decision['session']:
                     continue
-                available = covered.get(field, {}).get(sid, [])
+                covered_session = decision['session'] if decision['kind'] == 'as-delete' and field == 'relations' else sid
+                available = covered.get(field, {}).get(covered_session, [])
                 if field == 'messages':
                     available = decision['ids'] if decision['kind'] == 'as-delete' else available
                     remain = _decode(loss[field][sid]) - (_decode(available) if available else set())
@@ -391,8 +403,9 @@ def install(home, copy_id, transport, prefix, *, uploader, hardware_id=hardware_
     home, applied = Path(home), set()
     checked, decisions = {}, []
     def chain_check(head, state, publisher_id, head_bytes):
-        check_chain(head, state, publisher_id)
+        recovered = check_chain(head, state, publisher_id)
         checked.update(head=head, sha=_sha(head_bytes))
+        return recovered
     def prepare_manifest(m):
         if checked.get('head'):
             _pins(checked['head'], m, decisions, [d for d in decisions if d['id'] in applied], transport.now())
@@ -401,11 +414,14 @@ def install(home, copy_id, transport, prefix, *, uploader, hardware_id=hardware_
         decisions[:] = uploader._state(home, copy_id).get('unpublished_decisions', [])
         applied.update(guard(head, db, m, decisions=decisions, bucket_now=transport.now(), head_sha=checked['sha']))
     def after_create(m):
-        current, data = uploader._head(transport, prefix, copy_id)
-        own = current is not None and _sha(data) == _sha(uploader._json(m))
         result = dict(last_pair=[m['generation'], m['attempt']['token']])
-        if own and retention(transport, prefix, m, uploader=uploader):
-            result['retention_done_generation'] = m['generation']
+        try:
+            current, data = uploader._head(transport, prefix, copy_id)
+            own = current is not None and _sha(data) == _sha(uploader._json(m))
+            if own and retention(transport, prefix, m, uploader=uploader):
+                result['retention_done_generation'] = m['generation']
+        except OSError:
+            pass  # The create won; record it and retry retention on the next win.
         consumed = (applied | {i['key'] for i in m['forgotten'] if i['kind'] == 'as-delete'}
                     | {p['decision'] for p in m['pins']}
                     | {p['decision'] for p in (checked.get('head') or {}).get('pins', [])})

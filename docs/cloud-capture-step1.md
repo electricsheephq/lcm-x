@@ -183,9 +183,9 @@ forgot.** It compares generation N+1 with N before N+1's manifest is written.
 - **Messages:** every `store_id` in N is in N+1 with the same content digest, or its session has a
   `capture:forgotten:<session>` marker (claude_code_store.py:52, :100-108). Compare the per-id `[id, hash]` pairs; a matching whole-session digest is a fast path for messages, bindings and relations only.
   Ledger entries are always compared individually; the digest does not cover them. An id of N that is missing is a loss (below); an id of N that holds a
-  different row is `store_id_reused` (next).
+  different row is `store_id_reused` (next). The digest covers every column of the row. No step-1 writer changes a capture-store row in place; a later writer that does needs its own guard rule first, or the next publish refuses `store_id_reused`.
 - **Bindings and relations:** every `host_uid_bindings` row and every `message_relations` row in N is in N+1
-  unchanged, or its message's session is forgotten. For a binding, unchanged means its identity columns
+  unchanged, or its message's session is forgotten; a relation names two messages and is exempt when either one's session is forgotten, and an `--as-delete` decision covers it when either one's session is the decision's (store.py:399 deletes a relation with either end's session). For a binding, unchanged means its identity columns
   (`store_id`, `uid`, `lineage_key`, `kind`): the check columns `first_check` and `disagree_seen` are updated in
   place (store.py:1877-1885). Both are contracted tables (docs/store-contract.md:14-28). The
   delete helpers remove them only with their rows (store.py:393-434), but nothing else stops one from vanishing
@@ -206,11 +206,13 @@ forgot.** It compares generation N+1 with N before N+1's manifest is written.
   `store_id_reused` is `enable --new-copy`, never `accept-loss`. The old copy id keeps its ids and
   becomes this machine's superseded copy (3.5); on this path only, the new copy id starts with the old one's forgotten
   sessions, which are this machine's own history; a `--new-copy` after a chain conflict starts with none.
-- **Ledger:** every ledger key in N is in N+1, or its session is forgotten. For an entry with bytes, the sha256 of
-  its decompressed raw line (resolving `raw_from`) equals both its `line_digest` and the value N's manifest
-  recorded, so a cut raw line with an unchanged digest column fails. A `held` file entry has no bytes: its text is
-  held whole by the rows it names (claude_code_store.py:765-782). For it, the digest is unchanged and every row in
-  its `store_ids` is present with an unchanged content digest.
+- **Ledger:** every ledger key in N is in N+1, or its session is forgotten. Like the message check, it
+  compares N+1 with N. For an entry with bytes, the sha256 of its decompressed raw line (resolving `raw_from`)
+  equals the value N's manifest recorded, and also its `line_digest` when it did in N, so a cut raw line with an
+  unchanged digest column fails; an accepted cut keeps N's values and is not judged again. A `held` file entry has
+  no bytes: its text is held whole by the rows it names (claude_code_store.py:765-782). For it, the digest is
+  unchanged and every row in its `store_ids` that N held is present with an unchanged content digest; a row N
+  already lacked was judged when it went.
 - **Payloads:** every payload name in N is in N+1 with the same decoded content. An absent name is a `guard_loss` if N+1 still references it in `unresolved_minted` or `unresolved_quoted`; without a reference it is exempt here because the message rule judges its rows. Core
   can replace a payload file in place (externalize.py:264-268); whether capture stores ever reach that path is
   not established, so a content change refuses.
@@ -223,7 +225,7 @@ forgot.** It compares generation N+1 with N before N+1's manifest is written.
   with `time_ns` and the pid. A publish goes ahead only when the bucket's newest generation names this publisher
   and its (generation, token) pair equals this machine's recorded last or pending pair for that copy; a null or different publisher is `chain_conflict`; and the
   manifest is created only if `gen/<N+1>.json` does not exist. Otherwise the publish stops with `chain_conflict`
-  and overwrites nothing. A pending pair is replaced only by the next attempt, never cleared. An interrupted
+  and overwrites nothing. With no generation in the bucket, a publish goes ahead only when this machine records no last pair for that copy and no pending pair above generation 1; otherwise it stops with `chain_conflict` (the hosted copy was deleted in the console or lost), whose exit is `--new-copy`. A pending pair is replaced only by the next attempt, never cleared. An interrupted
   attempt resumes with its pending token. The pending record keeps the bucket's `Date` from the attempt's first
   response; an attempt that resumes more than 3.5 days (G/2) after that, by the bucket's clock, is abandoned and a
   new attempt starts. Two machines taking turns are caught as well as two racing ones, so a
@@ -300,7 +302,7 @@ row would fail the content compare anyway. Draft 1's "GC and cloud are mutually 
   `pin_holds_forgotten` with the session count until the user releases the pin (`accept-loss --release`), and the
   opt-in says that a forgotten session stays in a pinned generation until then. `status` also warns 7 days and
   1 day before a pin expires. Because the check runs on
-  every publish, a crash or a failed delete is retried by the next winning publish. Once a publish has finished its retention
+  every publish, a crash or a failed delete is retried by the next winning publish. A delete that keeps failing, for example under a credential without delete permission, is retried on every publish, so nothing is pruned and the forgotten rows stay until it succeeds; `status` reports repeated retention failures, and `enable` checks delete permission (#2801). Once a publish has finished its retention
   step, no object in the bucket holds the forgotten rows outside a pinned generation, a superseded copy or an idle copy (3.4), which
   `status` reports (`pin_holds_forgotten`, `superseded_holds_forgotten`), except parts and delta objects of failed
   or interrupted attempts or dropped staging copies that no manifest named: they can hold a forgotten session
@@ -1663,5 +1665,4 @@ The first part is A's bytes 0 to 1,023 and the second is A's page 2. Rebuilding 
   item's session is one the head's chain may hold. Every other new item gets `null`.
 - The list is cumulative: a manifest carries every entry of the head's list unchanged and adds its new items. It
   never shrinks. It is `[]` until something is forgotten.
-- On `--new-copy` after `store_id_reused`, inherit only the old head's `forgotten` entries in-process, at base generation 1; refuse inherited sessions still present in staging. After a chain conflict inherit none. Add live items with null unless the chain may hold them.
 - The copy checker does not judge this list. It is an input of the publish rule and of pruning.
