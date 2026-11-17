@@ -33,16 +33,17 @@ def exercise(a, b):
             t.delete(key)
             assert t.stat(key) is None
             t.put_new(key, body)
-        _, key, body = probes[0]
-        for method, target, query in [
-            ('GET', '', [('list-type', '2'), ('prefix', a.prefix + '/payloads/'), ('delimiter', '/')]),
-            ('GET', '', [('list-type', '2'), ('prefix', a.prefix + '/gen/'), ('delimiter', '/')]),
-            ('GET', key, []), ('PUT', key, []), ('DELETE', key, []),
-        ]:
-            # Deliberately bypass the client's name/prefix validator. The host must deny.
-            status, _, _ = b._send(method, target, query, body if method == 'PUT' else b'',
-                                    {'If-None-Match': '*'} if method == 'PUT' else {})
-            assert status == 403
+        # Each credential must be denied the other's prefix, in both directions, so one bucket-wide key fails.
+        for (owner, key, body), other in ((probes[0], b), (probes[1], a)):
+            for method, target, query in [
+                ('GET', '', [('list-type', '2'), ('prefix', owner.prefix + '/payloads/'), ('delimiter', '/')]),
+                ('GET', '', [('list-type', '2'), ('prefix', owner.prefix + '/gen/'), ('delimiter', '/')]),
+                ('GET', key, []), ('PUT', key, []), ('DELETE', key, []),
+            ]:
+                # Deliberately bypass the client's name/prefix validator. The host must deny.
+                status, _, _ = other._send(method, target, query, body if method == 'PUT' else b'',
+                                           {'If-None-Match': '*'} if method == 'PUT' else {})
+                assert status == 403
         assert s3.check_host(a)['conditional_create'] is True
     finally:
         for t, key in cleanup:

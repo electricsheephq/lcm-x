@@ -604,12 +604,14 @@ def test_live_contract_offline():
                if not target or target.startswith(t.prefix + '/')]
         assert [method for method, _ in own[:7]] == ['HEAD', 'PUT', 'GET', 'GET', 'DELETE', 'HEAD', 'PUT']
         assert own[2][1] == t.prefix + '/payloads/'
-    assert [method for method, _ in b_wire.denials] == ['GET', 'GET', 'GET', 'PUT', 'DELETE']
-    assert b_wire.denials[0][1] == a.prefix + '/payloads/'
-    assert b_wire.denials[1][1] == a.prefix + '/gen/'
-    assert b_wire.denials[2][1] == b_wire.denials[3][1] == b_wire.denials[4][1]
-    cross_put = next(c for c in b_wire.calls if c[:2] == b_wire.denials[3])
-    assert cross_put[2]['if-none-match'] == '*'
+    # Both directions: B is denied A's prefix and A is denied B's.
+    for wire, owner in ((b_wire, a), (a_wire, b)):
+        assert [method for method, _ in wire.denials] == ['GET', 'GET', 'GET', 'PUT', 'DELETE']
+        assert wire.denials[0][1] == owner.prefix + '/payloads/'
+        assert wire.denials[1][1] == owner.prefix + '/gen/'
+        assert wire.denials[2][1] == wire.denials[3][1] == wire.denials[4][1]
+        cross_put = next(c for c in wire.calls if c[:2] == wire.denials[3])
+        assert cross_put[2]['if-none-match'] == '*'
     assert fake.data == {}
 
 
