@@ -135,8 +135,8 @@ def test_latest_call_resets_observations_and_records_exception_leaves(engine, mo
         raise RuntimeError("after leaf commit")
 
     monkeypatch.setattr(engine, "_compress_impl", fail)
-    with pytest.raises(RuntimeError, match="after leaf commit"):
-        engine.compress(_turn("fresh", 10.0), current_tokens=1_000)
+    view = _turn("fresh", 10.0)
+    assert engine.compress(view, current_tokens=1_000) is view
     assert engine._last_compress_leaves == ("conv", 1)
     engine.record_rejected_compaction()
     assert engine._no_progress_hold_status()["reason"] == "host_rejected_progress"

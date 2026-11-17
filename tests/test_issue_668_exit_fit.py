@@ -174,8 +174,7 @@ def test_t8_exception_path_never_gets_exit_cap(engine, monkeypatch, recovery):
     if recovery:
         engine.compress(view, current_tokens=observed, bypass_cooldown=True)
     else:
-        with pytest.raises(RuntimeError, match="synthetic compress failure"):
-            engine.compress(view, current_tokens=observed)
+        assert engine.compress(view, current_tokens=observed) is view
     assert captured["after_exception"] is True
     assert not captured["reason"].startswith("exit_fit:")
     assert captured.get("request_cap") == (int(engine.threshold_tokens * 0.95) if recovery else None)

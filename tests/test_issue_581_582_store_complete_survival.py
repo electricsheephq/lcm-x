@@ -530,8 +530,7 @@ def test_issue_1180_stop_line_names_compress_exception(tmp_path, monkeypatch, ho
                 result = engine.compress(view, current_tokens=host_estimator(view))
                 _assert_fitted(engine, view, result, host_estimator)
             else:
-                with pytest.raises(RuntimeError, match="injected compress failure"):
-                    engine.compress(view, current_tokens=host_estimator(view))
+                assert engine.compress(view, current_tokens=host_estimator(view)) is view
         stops = [r.getMessage() for r in caplog.records if r.getMessage().startswith("LCM compaction stop:")]
         assert len(stops) == 1 and "reason=error " in stops[0]
         assert "failure=exception:RuntimeError" in stops[0].split()

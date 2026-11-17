@@ -1969,8 +1969,7 @@ class TestSessionRollover:
             {"role": "user", "content": "iota " * 80},
             {"role": "assistant", "content": "kappa"},
         ]
-        with pytest.raises(TimeoutError):
-            engine.compress(failing_messages)
+        assert engine.compress(failing_messages) is failing_messages
 
         after_failure = engine._lifecycle.get_by_conversation(engine._conversation_id)
         assert after_failure is not None
