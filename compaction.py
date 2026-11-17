@@ -809,9 +809,8 @@ class CompactionMixin:
                 and self._last_compression_status != "error"
                 and len(result) == len(messages)
                 and all(
-                    self._public_compression_row(left)
-                    == self._public_compression_row(right)
-                    for left, right in zip(result, messages)
+                    self._compression_rows_equal(result_row, input_row)
+                    for result_row, input_row in zip(result, messages)
                 )
             ):
                 result = messages
@@ -961,8 +960,8 @@ class CompactionMixin:
                     returned = messages
                     return messages
                 if (isinstance(result, list) and result is not messages and len(result) == len(messages)
-                        and all(self._public_compression_row(left) == self._public_compression_row(right)
-                                for left, right in zip(result, messages))):
+                        and all(self._compression_rows_equal(result_row, input_row)
+                                for result_row, input_row in zip(result, messages))):
                     result = messages
             self._host_uid_log_compaction_summary()
             logger.debug("LCM compaction emission descriptor count=%d", 0)
@@ -1102,6 +1101,30 @@ class CompactionMixin:
             return message
         return {key: value for key, value in message.items()
                 if key != "timestamp" and not str(key).startswith("_")}
+
+    def _compression_rows_equal(self, result_row: Any, input_row: Any) -> bool:
+        """Ignore newly stamped hide keys when Hermes has projected them out (#2818)."""
+        result = self._public_compression_row(result_row)
+        original = self._public_compression_row(input_row)
+        if result == original:
+            return True
+        if not isinstance(result, dict) or not isinstance(original, dict):
+            return False
+
+        result_metadata = result.pop("display_metadata", {})
+        input_metadata = original.pop("display_metadata", {})
+        if result != original or not isinstance(result_metadata, dict) or not isinstance(input_metadata, dict):
+            return False
+        if result_metadata == input_metadata:
+            return True
+
+        from .engine import _model_only_display_metadata_keys
+
+        added_hide_keys = _model_only_display_metadata_keys() - input_metadata.keys()
+        return {
+            key: value for key, value in result_metadata.items()
+            if key not in added_hide_keys or value is not True
+        } == input_metadata
 
     def _record_compress_commit_proof(self, messages, result):
         """Remember the exact host input of this compress() call (process-local).
