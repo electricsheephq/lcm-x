@@ -1098,7 +1098,7 @@ def test_p_own_prefix_forgotten_session_not_forwarded(tmp_path, corpus, clients)
                 for line in (client.log / f'{pid}.requests').read_text().splitlines()]
     sent = [req['params']['arguments']['session_id'] for req in requests
             if 'session_id' in req.get('params', {}).get('arguments', {})]
-    assert sent == [], 'forgotten session forwarded to a replica'
+    assert sent == ['r0mot00', 'r0mot00'], 'only the missing-id twin may reach a replica'
 
 
 def test_r6_notification_double_failure_keeps_serving(monkeypatch):
@@ -1792,3 +1792,104 @@ def test_r13_recall_coverage_survives_rebuild(tmp_path, corpus, clients):
     assert actual.get('coverage') == expected, {
         'direct_coverage': expected, 'types': {k: type(v).__name__ for k, v in expected.items()},
         'rebuilt_coverage': actual.get('coverage')}
+
+
+@pytest.mark.parametrize('tool', ['lcm_grep', 'lcm_recall'])
+@pytest.mark.parametrize('case', ['messages', 'mode', 'exclude', 'healthy', 'unavailable', 'warming', 'late', 'sessions'])
+def test_r14_fanout_forgotten_equals_missing(tmp_path, corpus, direct_mergers, monkeypatch, tool, case):
+    local, sources = corpus
+    hidden, missing = 'deadbeef-session', '00000000-s0ssion'
+    source = sources[0]
+    store = cc.open_store(source / 'lcm.db', source)
+    try:
+        tx = _transcript(tmp_path / 'hidden-transcript',
+                         [_entry('user', 'h1', 'hidden marker', hidden)], hidden)
+        assert cc.drain(store, cc.Lineage(hidden, None, tx)) == 'drained'
+        assert cc.to_rollback_journal(store.connection)
+    finally:
+        store.close()
+    assert cc.leave_readable(source / 'lcm.db')
+    # A local tombstone hides a session that the replica still holds.
+    store = cc.open_store(local / 'lcm.db', local)
+    try:
+        tx = _transcript(tmp_path / 'local-forget', [_entry('user', 'f1', 'local copy', hidden)], hidden)
+        assert cc.drain(store, cc.Lineage(hidden, None, tx)) == 'drained'
+        assert cc.to_rollback_journal(store.connection)
+    finally:
+        store.close()
+    forget(local, hidden)
+    copy_generation(source, local, COPIES[0])
+    merger = direct_mergers(local, replica_wait=30)
+    replica = merger.replicas[PREFIX]
+    if replica.probe is not None:
+        replica.probe.result(timeout=20)
+    merger.refresh()
+    assert replica.status == 'ok'
+    sent = []
+    ask = replica.child.ask
+    def traced(raw):
+        sent.append(json.loads(raw)['params']['arguments'])
+        return ask(raw)
+    monkeypatch.setattr(replica.child, 'ask', traced)
+    def entry(**args):
+        raw = cr.tool_request(tool, args)
+        body, reply = cr.tool_body(merger.handle(raw))
+        plain, _ = cr.tool_body(merger.local_call(raw))
+        assert json.loads(cr.strip_other_stores(reply['result']['content'][0]['text'])) == plain
+        return body['other_stores'][0]
+    # Controls retain the existing arguments, exclusions, local body, and hits.
+    for scope in ({'session_id': 'remote0'}, {}):
+        sent.clear()
+        control = entry(query='marker', session_scope='session' if scope else 'all', **scope)
+        assert control['status'] == 'ok' and control['hits']
+        assert all(hit['session_id'] == qualified('remote0') for hit in control['hits'])
+        assert sent == [{'query': 'marker', 'session_scope': 'session' if scope else 'all',
+                         **scope, 'exclude_session_ids': [hidden]}]
+    sent.clear()
+    assert entry(query='marker', session_id=hidden, externalized_refs=['local-only.json']) == {
+        'copy_id': PREFIX, 'generation': 1, 'status': 'ok', 'hits': []}
+    assert sent == [], 'externalized_refs still skips every replica'
+    extra = {'messages': {'content_scope': 'messages'}, 'mode': {'mode': 'nonsense'},
+             'exclude': {'exclude_session_ids': 'x'}}.get(case, {})
+    pending = []
+    if case in {'unavailable', 'warming'}:
+        monkeypatch.setattr(merger, 'refresh', lambda: None)
+        replica.status = case
+    elif case in {'late', 'sessions'}:
+        def synthetic(raw):
+            args = json.loads(raw)['params']['arguments']
+            sent.append(args)
+            future = cr.Future()
+            pending.append(future)
+            if case == 'sessions':
+                echo = {'session_id': args['session_id'], 'message_count': 0}
+                future.set_result(cr.Merger.answer({'id': 1}, {
+                    'results': [echo], 'hits': [echo], 'provenance': {'delivery': {'sessions': [echo]}}}))
+            return future
+        monkeypatch.setattr(replica.child, 'ask', synthetic)
+        # An unresolved Future and zero wait make lateness independent of scheduling.
+        if case == 'late':
+            merger.replica_wait = 0
+    sent.clear()
+    args = dict(query='wombatplume', session_scope='session', **extra)
+    expected = entry(session_id=missing, **args)
+    actual = entry(session_id=hidden, **args)
+    expected = json.loads(cr.replace_token(json.dumps(expected), qualified(missing), qualified(hidden)))
+    assert actual == expected, 'every entry field must equal the missing-id entry after swapping ids'
+    if case in {'unavailable', 'warming', 'late'} or case == 'exclude' or (tool == 'lcm_grep' and case in {'messages', 'mode'}):
+        status = case if case in {'unavailable', 'warming', 'late'} else 'unavailable'
+        assert actual['status'] == status and actual['hits'] == []
+    else:
+        assert actual['status'] == 'ok'
+    if case == 'sessions':
+        assert actual['sessions'] == actual['hits'] == [{'session_id': qualified(hidden), 'message_count': 0}]
+    if case not in {'unavailable', 'warming'}:
+        expected_args = {**args, 'session_id': missing}
+        if case != 'exclude':
+            expected_args['exclude_session_ids'] = [hidden]
+        assert sent == [expected_args, expected_args], 'forgotten and missing calls must take the same replica path'
+    if case == 'late':
+        assert len(pending) == 2 and all(not future.done() for future in pending)
+        for future in pending:
+            future.set_result(cr.Merger.answer({'id': 1}, {'results': [], 'hits': []}))
+        assert actual['status'] == 'late', 'a discarded late response cannot change the returned entry'

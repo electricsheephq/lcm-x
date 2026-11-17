@@ -625,14 +625,19 @@ class Merger:
         if name not in ('lcm_grep', 'lcm_recall') or not self.replicas:
             return self.local_call(local_raw)
         pending, entries = {}, []
+        session = local_args.get('session_id')
+        missing = re.sub(r'[\da-fA-F]', '0', session) if hidden is not None and isinstance(session, str) and session in hidden else None
         for replica in self.replicas.values():
-            skip = bool(args.get('externalized_refs')) or (hidden is not None and isinstance(local_args.get('session_id'), str) and local_args['session_id'] in hidden)
+            skip = bool(args.get('externalized_refs'))
             entry = {'copy_id': replica.prefix, 'generation': replica.generation, 'status': 'ok' if skip else replica.status, 'hits': []}
             entries.append(entry)
             if hidden is None:
                 entry['status'] = 'unavailable'
             elif not skip:
-                future = self.replica_call(replica, name, self.arguments(args, replica.prefix, True), hidden)
+                replica_args = self.arguments(args, replica.prefix, True)
+                if missing is not None:
+                    replica_args['session_id'] = missing
+                future = self.replica_call(replica, name, replica_args, hidden)
                 if future:
                     pending[future] = (replica, entry)
                 elif replica.status == 'ok':
@@ -653,6 +658,9 @@ class Merger:
                 sessions = body.get('provenance', {}).get('delivery', {}).get('sessions')
                 if isinstance(sessions, list):
                     entry['sessions'] = sessions
+                if missing is not None:
+                    text = replace_token(json.dumps(entry), qualify(replica.prefix, missing), qualify(replica.prefix, session))
+                    entry.update(json.loads(replace_token(text, missing, session)))
             except Exception:
                 entry['status'] = 'unavailable'
         reply = json.loads(reply_raw)
