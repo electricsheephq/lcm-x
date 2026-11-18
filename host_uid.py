@@ -36,9 +36,10 @@ _UID_RECOGNITION = ContextVar("_UID_RECOGNITION", default=None)
 def _uid_recognition_pass(operation):
     @wraps(operation)
     def wrapped(self, *args, **kwargs):
-        if not host_uid_recognition_enabled():
+        binding = getattr(self, "_uid_recognition_binding", None)
+        if binding is None or not host_uid_recognition_enabled():
             return operation(self, *args, **kwargs)
-        key = self._uid_recognition_binding()
+        key = binding()
         current = _UID_RECOGNITION.get()
         if current is not None and current[0] == key:
             return operation(self, *args, **kwargs)

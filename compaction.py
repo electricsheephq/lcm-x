@@ -20,11 +20,13 @@ import json
 import logging
 import sys
 import time
+from threading import get_ident
 from collections import Counter
 from dataclasses import dataclass, field
 from functools import wraps
 from typing import Any, Callable, Dict, List, Literal, Optional
 
+from .config import uid_recognition_enabled
 from .dag import SummaryNode
 from .escalation import (
     _THRESHOLD_FULL_SWEEP_MIN_CALL_SECONDS,
@@ -749,17 +751,21 @@ class CompactionMixin:
                     self._emission_handle = None
                 # #1931: store a delegated child's rows before the host rewrites its view.
                 return self._compress_delegate_child_bypassed(messages, current_tokens, focus_topic, force)
+        caller = get_ident()
         with self._compaction_gate:
-            if self._compress_owned_inflight:
+            if self._compress_owner not in (None, caller):
                 self._compress_reentry_refusals += 1
                 logger.info("LCM compression skipped: another pass owns this engine")
                 return messages
-            self._compress_owned_inflight = True
+            self._compress_owner = caller
+            self._compress_owner_depth += 1
         try:
             return self._compress_owned(messages, current_tokens, focus_topic, force, bypass_cooldown)
         finally:
             with self._compaction_gate:
-                self._compress_owned_inflight = False
+                self._compress_owner_depth -= 1
+                if not self._compress_owner_depth:
+                    self._compress_owner = None
 
     @_uid_recognition_pass
     def _compress_owned(self, messages, current_tokens, focus_topic, force, bypass_cooldown):
@@ -783,7 +789,7 @@ class CompactionMixin:
         store_id_scope = self._compress_run.preserve_store_ids()
         store_id_scope.__enter__()
         uid_drop_scope = _UID_DROP_INPUT.set(None)
-        copy_sources_scope = _UID_COPY_SOURCES.set({} if self._uid_recognition_enabled() else None)
+        copy_sources_scope = _UID_COPY_SOURCES.set({} if uid_recognition_enabled(self) else None)
         try:
             budget.pre_leaf = PhaseSqlTrace()  # #1127: timed until the first leaf call, or the stop before one
             budget.pre_leaf.install([(self._store, "_conn"), (self._store, "_write_lock"), (self._dag, "_conn"),
@@ -796,15 +802,19 @@ class CompactionMixin:
             self._no_progress_proof_complete = False
             self._stub_first_exit_now = self._last_stub_first_exit = None  # #671: the latest compaction only
             self._compress_calls += 1  # #1116: a stub-first proof becomes durable only for the latest call
-            hold = self._no_progress_hold
             if bypass_cooldown:  # #651: a host recovery attempt is never cleanup-only maintenance
                 self._compaction_request.below_threshold_cleanup_only = self._compaction_request.automatic_request = False
                 # #684: nor held by a boundary cooldown.
                 self._compaction_request.cleanup_only_due_to_boundary_cooldown = False
-            elif (not force and (self._retained_stop_hold_active() or (hold is not None
-                  and (hold[1] != "no_progress"
-                       or not getattr(self, "_no_progress_hold_persisted", False))))) and self._no_progress_hold_blocks(
-                    current_tokens if current_tokens is not None else count_messages_tokens(messages)):
+            elif (
+                not force
+                and (self._retained_stop_hold_active() or (
+                    (hold := self._no_progress_hold) is not None
+                    and (hold[1] != "no_progress" or not getattr(self, "_no_progress_hold_persisted", False))
+                ))
+                and self._no_progress_hold_blocks(
+                    current_tokens if current_tokens is not None else count_messages_tokens(messages))
+            ):
                 # #677: an automatic call the #651 hold blocks (a caller that skipped the host gate) is held
                 # maintenance; the survival ceiling and forced overflow are never blocked, so they summarise.
                 self._compaction_request.below_threshold_cleanup_only = True
@@ -1625,7 +1635,7 @@ class CompactionMixin:
                     carried_ranges,
                     copy_exclusion_proofs=self._store_complete_copy_exclusion_proofs,
                     **({"copy_matches": self._store_complete_uid_copy_publication_match}
-                       if self._uid_recognition_enabled() else {}),
+                       if uid_recognition_enabled(self) else {}),
                 )
             before_commit = stage_frontier
         self._dag.add_node(
@@ -2210,10 +2220,9 @@ class CompactionMixin:
             self._pre_leaf_span("ingest", span_started)
         retained_hold = (not force and not recovery_attempt and not state.force_overflow
                          and self._retained_stop_hold_active())
-        hold = self._no_progress_hold
         if (not force and not recovery_attempt and not state.force_overflow
                 and self._no_progress_hold_blocks(state.observed_prompt_tokens or 0)
-                and (retained_hold or (hold is not None and hold[1] == "no_progress"))):
+                and (retained_hold or ((hold := self._no_progress_hold) is not None and hold[1] == "no_progress"))):
             # A cold direct caller now has current replay proof. Ingest cleanup
             # is adopted, but no attribution/leaf/condensation work is repeated.
             self._ingest_cursor = len(state.working_messages)
@@ -2717,7 +2726,6 @@ class CompactionMixin:
         ):
             state.sweep_stop_reason = "pass_budget_exhausted"
 
-        strike = self._hung_summary_strike
         if state.sweep_stop_reason == "summary_route_unavailable":
             seconds_left = self._summary_route_seconds_left()
             logger.warning(
@@ -2731,7 +2739,7 @@ class CompactionMixin:
                 self._start_sweep_budget_hold(seconds_left, turn_paced=(
                     self._sweep_budget_hold_turn_paced
                     and self._sweep_budget_hold_active()
-                    and strike is not None
+                    and (strike := self._hung_summary_strike) is not None
                     and strike[0] == self._hold_conversation_key()
                 ))
         elif state.sweep_stop_reason == "summary_result_rejected":
@@ -2741,7 +2749,7 @@ class CompactionMixin:
 
         if state.budget.hung_route is not None:
             first_hang = (
-                strike is None
+                (strike := self._hung_summary_strike) is None
                 or strike[0] != self._hold_conversation_key())
             if not first_hang:
                 # #1369: even an exempt forced retry consumes the pending turn-end release.
@@ -3640,7 +3648,7 @@ class CompactionMixin:
         pre_leaf_condensation_passes = state.pre_leaf_condensation_passes
         pre_leaf_condensation_reason = state.pre_leaf_condensation_reason
         max_leaf_passes = state.max_leaf_passes
-        if self._uid_recognition_enabled():
+        if uid_recognition_enabled(self):
             trimmed = self._drop_uid_covered_live_rows(working_messages)
             if trimmed is not working_messages:
                 _UID_DROP_INPUT.set(working_messages)

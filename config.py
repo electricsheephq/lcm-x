@@ -304,6 +304,12 @@ def host_uid_recognition_enabled() -> bool:
     return host_message_uid_mode() == "on"
 
 
+def uid_recognition_enabled(owner) -> bool:
+    """Use the owner's UID recognition policy when it provides one."""
+    enabled = getattr(owner, "_uid_recognition_enabled", None)
+    return enabled is not None and enabled()
+
+
 _ingest_ledger_mode_warned = False
 
 

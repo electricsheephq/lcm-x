@@ -502,7 +502,6 @@ class MessageStore:
         # change semantics for single-threaded callers and adds only a single
         # uncontended ``RLock.acquire``/``release`` pair per operation.
         self._write_lock = threading.RLock()
-        self._compaction_telemetry_skips = 0
         self._transaction_owner = TransactionOwner(self._write_lock)
         self._manual_chunk_backlog_pending = False
         self._init_db()
@@ -2249,15 +2248,11 @@ class MessageStore:
         if lock.acquire(blocking=False):
             try:
                 if self._conn is not None and not self._conn.in_transaction:
-                    result = self.increment_compaction_telemetry(conversation_id, increment, updates)
-                    if result is not None:
-                        return result
+                    return self.increment_compaction_telemetry(conversation_id, increment, updates)
             except Exception:
                 logger.debug("LCM turn telemetry write failed", exc_info=True)
             finally:
                 lock.release()
-        self._compaction_telemetry_skips += 1
-        logger.debug("LCM skipped turn compaction telemetry")
         return None
 
     def increment_compaction_telemetry(

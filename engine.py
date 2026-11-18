@@ -34,7 +34,10 @@ from .compaction_policy import (
     resolve_threshold,
     threshold_tokens,
 )
-from .config import LCMConfig, _disabled_tool_names, _parse_float_env, containment_base_dir, identity_anchor_enabled, ingest_ledger_mode, lcm_env_get, profile_bound
+from .config import (
+    LCMConfig, _disabled_tool_names, _parse_float_env, containment_base_dir, identity_anchor_enabled,
+    ingest_ledger_mode, lcm_env_get, profile_bound, uid_recognition_enabled,
+)
 from .dag import SummaryDAG, SummaryNode
 from . import ingest_ledger, sender_capture, survival_codec
 from . import maintenance_scheduler
@@ -784,7 +787,8 @@ class LCMEngine(
         self._hermes_home = hermes_home
         self._stable_use_lock = threading.Lock()
         self._compaction_gate = threading.Condition()
-        self._compress_owned_inflight = False
+        self._compress_owner: int | None = None
+        self._compress_owner_depth = 0
         self._compress_reentry_refusals = 0
         self._compaction_inflight = 0
         self._compaction_closing = False
@@ -953,6 +957,7 @@ class LCMEngine(
         # Distinguishes this reset-scoped process counter from overlapping or
         # previous runtimes that write the same conversation telemetry row.
         self._compaction_telemetry_counter_epoch = uuid.uuid4().hex
+        self._compaction_telemetry_skips = 0
         self._compaction_telemetry_counter_rebaseline_pending = True
         self._compaction_telemetry_turn_reset_pending = False
         # Wall-clock of the last leaf compaction (ms); surfaced via telemetry only.
@@ -2087,7 +2092,12 @@ class LCMEngine(
                 record["last_cache_hit_at"] = time.time()
             # Even zero-delta snapshots use the transactional updater so an
             # overlapping snapshot cannot overwrite a newly incremented total.
-            if self._store.try_increment_compaction_telemetry(conversation_id, compaction_delta, record) is None:
+            try_increment = getattr(self._store, "try_increment_compaction_telemetry", None)
+            if try_increment is None:
+                self._store.increment_compaction_telemetry(conversation_id, compaction_delta, record)
+            elif try_increment(conversation_id, compaction_delta, record) is None:
+                self._compaction_telemetry_skips += 1
+                logger.debug("LCM skipped turn compaction telemetry")
                 return
             self._compaction_telemetry_counter_rebaseline_pending = False
             self._compaction_telemetry_turn_reset_pending = False
@@ -2112,8 +2122,8 @@ class LCMEngine(
         hold = _SWEEP_BUDGET_HOLD_SECONDS if seconds is None else min(_SWEEP_BUDGET_HOLD_SECONDS, max(1.0, seconds))
         self._sweep_budget_hold_until = time.monotonic() + hold
         self._sweep_budget_hold_conversation = self._hold_conversation_key()  # #618
-        strike = self._hung_summary_strike
-        if turn_paced and not self._sweep_budget_hold_turn_paced and strike is not None:
+        if (turn_paced and not self._sweep_budget_hold_turn_paced
+                and (strike := self._hung_summary_strike) is not None):
             logger.info("LCM hung summary hold armed until turn end (cap %.0fs): %s", hold, strike[1])
         self._sweep_budget_hold_turn_paced = turn_paced
 
@@ -2449,7 +2459,10 @@ class LCMEngine(
             hold[1] == "no_progress" and getattr(self, "_no_progress_hold_persisted", False))
         if not self._no_progress_hold_active(managed_scope=local_only):
             return None
-        until, reason = self._no_progress_hold
+        hold = self._no_progress_hold
+        if hold is None:
+            return None
+        until, reason = hold
         return {"reason": reason, "until": time.time() + max(0.0, until - time.monotonic())}  # #618: wall clock
 
     def _zero_leaf_streak_status(self) -> Optional[dict]:
@@ -2491,8 +2504,7 @@ class LCMEngine(
         """#597/#922/#904: end turn-paced holds at the end of a foreground turn of this engine (never a
         bypassed auxiliary/stateless call); cheap, fail-soft host notification."""
         try:
-            strike = self._hung_summary_strike
-            if (self._sweep_budget_hold_turn_paced and strike is not None
+            if (self._sweep_budget_hold_turn_paced and (strike := self._hung_summary_strike) is not None
                     and strike[0] == self._hold_conversation_key()
                     and self._sweep_budget_hold_conversation == self._hold_conversation_key()
                     and self._sweep_budget_hold_active()
@@ -8585,7 +8597,7 @@ class LCMEngine(
                 rows_classified=n - scan_start))
         reconcile_messages = replay_messages
         bind_session_counts: list = []
-        uid_recognition = self._uid_recognition_enabled()
+        uid_recognition = uid_recognition_enabled(self)
         uid_fetched = {} if uid_recognition else None
         ledger_run, today = dict(k=0, pairs={}), self._ingest_cursor
         if self._ingest_cursor_needs_reconcile:

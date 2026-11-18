@@ -27,7 +27,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional
 
-from .config import host_message_uid_mode, identity_anchor_enabled
+from .config import host_message_uid_mode, identity_anchor_enabled, uid_recognition_enabled
 # Keep this facade: runtime callers and patch seams resolve projection here.
 from .emission_projection import (
     EmissionProjectionEntry as EmissionProjectionEntry,
@@ -2369,7 +2369,7 @@ class ReconcileMixin:
         native_prefix_digests = run.native_prefix_digests
         empty_prefix_cursor: int | None = None
         exhausted = False
-        cuts_left = _UID_ON_CURSOR_CUT_BUDGET if self._uid_recognition_enabled() else len(messages) + 1
+        cuts_left = _UID_ON_CURSOR_CUT_BUDGET if uid_recognition_enabled(self) else len(messages) + 1
         for cursor in range(len(messages), -1, -1):
             native_recovery_snapshot_digest = native_prefix_digests.get(cursor, "")
             if (
@@ -3158,7 +3158,7 @@ class ReconcileMixin:
         session_count = self._store.get_session_count(self._session_id)
         if session_counts is not None:
             session_counts.append(session_count)
-        recognition = self._uid_recognition_enabled()
+        recognition = uid_recognition_enabled(self)
         uid_cursor = 0
         if recognition:
             uid_matches = self._host_uid_resolve(messages, prefix_only=True, fetched=uid_fetched)
@@ -3907,7 +3907,7 @@ class ReconcileMixin:
             )
             candidates.sort(key=lambda candidate: int(candidate["store_id"]))
         resolved = (self._host_uid_resolve(messages, excluded=exclude_store_ids)
-                    if uid_first and self._uid_recognition_enabled() and any(m.get("message_uid") for m in messages) else {})
+                    if uid_first and uid_recognition_enabled(self) and any(m.get("message_uid") for m in messages) else {})
         if resolved:
             frontier = self._store_complete_frontier()
             anchors = {int(row["store_id"]) for row in candidates}

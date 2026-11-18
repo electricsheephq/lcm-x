@@ -215,7 +215,7 @@ def test_turn_telemetry_never_waits_for_compaction_lock(tmp_path):
         assert locked.wait(5)
         try:
             workers.submit(engine.update_from_response, _hot_usage()).result(timeout=1)
-            assert engine._store._compaction_telemetry_skips == 1
+            assert engine._compaction_telemetry_skips == 1
             assert engine._compaction_telemetry_counter_rebaseline_pending
             assert engine._compaction_telemetry_turn_reset_pending
         finally:

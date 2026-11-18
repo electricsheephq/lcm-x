@@ -29,7 +29,7 @@ from collections import Counter
 from contextvars import ContextVar
 from typing import NamedTuple, Optional
 
-from .config import host_message_uid_mode, identity_anchor_enabled
+from .config import host_message_uid_mode, identity_anchor_enabled, uid_recognition_enabled
 from .fresh_tail import tool_group_safe_end
 from .ingest_protection import quarantine_suspicious_assistant_messages
 from .message_analysis import _tool_call_id
@@ -111,7 +111,7 @@ class StoreCompleteMixin:
         return {int(row[0]) for row in found}
 
     def _drop_uid_covered_live_rows(self, messages):
-        if not self._uid_recognition_enabled():
+        if not uid_recognition_enabled(self):
             return messages
         resolved = self._host_uid_resolve(messages)
         frontier = self._store_complete_frontier()
@@ -232,7 +232,7 @@ class StoreCompleteMixin:
                 if matches:
                     twins[sid] = matches
             by_key.setdefault(key, []).append(sid)
-        if lineage and self._uid_recognition_enabled():
+        if lineage and uid_recognition_enabled(self):
             try:
                 sources = self._store_complete_uid_copy_sources(lineage, carry)
                 raw_columns = {int(raw[0]): raw[3:] for raw in owned}
@@ -262,7 +262,7 @@ class StoreCompleteMixin:
             row.get("content") == _HERMES_PRUNED_TOOL_PLACEHOLDER and identity in self._stored_row_forms(twin)))
 
     def _store_complete_uid_copy_sources(self, lineage, carry):
-        if not self._uid_recognition_enabled():
+        if not uid_recognition_enabled(self):
             return {}
         cache = _UID_COPY_SOURCES.get()
         key = (id(self._store), self._session_id, lineage, tuple(carry))
@@ -291,7 +291,7 @@ class StoreCompleteMixin:
         return by_key
 
     def _store_complete_uid_copy_publication_match(self, conn, raw, twin):
-        if not self._uid_recognition_enabled():
+        if not uid_recognition_enabled(self):
             return False
         lineage = self._host_uid_lineage_key()[0]
         if not lineage or not conn.execute(
