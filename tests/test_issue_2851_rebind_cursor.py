@@ -385,6 +385,7 @@ def test_legacy_finish_holds(tmp_path, monkeypatch, first, anchor):
 
 
 def test_rebind_after_compaction(tmp_path, monkeypatch, caplog):
+    caplog.set_level(logging.INFO, logger="hermes_lcm.compaction")  # STOP is logged at INFO
     control = _exercise(tmp_path / "control", monkeypatch, "summary", "user-unstamped", control=True)
     assert control["b_stored"] == control["b_expected"]
     assert control["a_before"] == control["a_after"]
