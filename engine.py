@@ -6862,7 +6862,11 @@ class LCMEngine(
         if len(host_messages) == len(cached) == len(current):
             generated_ids = self._generated_ignored_active_replay_placeholder_message_ids
             # UID and address fields still use the host-UID mode and placeholder rules.
-            excluded = {"role", "content", "tool_calls", "tool_call_id", "api_content", *IDENTITY_KEYS, *ADDRESS_KEYS}
+            # Timestamp belongs to the cached occurrence established at ingest.
+            excluded = {
+                "role", "content", "tool_calls", "tool_call_id", "api_content", "timestamp",
+                *IDENTITY_KEYS, *ADDRESS_KEYS,
+            }
             for host, row in zip(host_messages, current):
                 if row is host or id(row) in generated_ids:
                     continue
