@@ -334,6 +334,9 @@ def _condensation_source_text(nodes) -> str:
 
 
 _SUMMARY_DEPTH_LABELS = {0: "Recent", 1: "Session Arc", 2: "Durable"}
+_LCM_SUMMARY_PART_HEADER_RE = re.compile(
+    r"\[(?:Recent|Session Arc|Durable|Depth-\d+) Summary \(d(\d+), node (\d+)\)\]\n"
+)
 
 
 def _summary_part_text(node) -> str:
@@ -6937,9 +6940,7 @@ class LCMEngine(
         )
         return len(messages) if exact or safe_trailing_skip else None
 
-    _LCM_SUMMARY_PART_HEADER_RE = re.compile(
-        r"\[(?:Recent|Session Arc|Durable|Depth-\d+) Summary \(d(\d+), node (\d+)\)\]\n"
-    )
+    _LCM_SUMMARY_PART_HEADER_RE = _LCM_SUMMARY_PART_HEADER_RE
 
     @staticmethod
     def _lcm_generated_marker(message) -> Optional[str]:
@@ -10329,8 +10330,36 @@ class LCMEngine(
             if msg.get("role") == "assistant":
                 cleaned_msg = _clean_active_assistant_message(msg)
                 if cleaned_msg is None:
-                    dropped_assistant_messages += 1
-                    continue
+                    if not isinstance(msg.get("api_content"), str) or not msg["api_content"]:
+                        dropped_assistant_messages += 1
+                        continue
+                    cleaned_msg = msg
+                    if merge_adjacent_assistants:
+                        # Repair all tool pairs first, then merge within runs between API-only rows.
+                        paired = self._sanitize_active_context_messages(
+                            messages, insert_missing_tool_stubs=insert_missing_tool_stubs,
+                            merge_adjacent_assistants=False, generated_rows=generated_rows,
+                        )
+                        merged, merged_generated, start = [], [], 0
+                        for index, row in enumerate([*paired, None]):
+                            if row is not None and not (
+                                isinstance(row.get("api_content"), str) and row["api_content"]
+                                and _clean_active_assistant_message(row) is None
+                            ):
+                                continue
+                            generated_run = list(generated_rows or ())
+                            merged.extend(_merge_adjacent_assistant_messages(
+                                paired[start:index], generated_rows=generated_run,
+                            ))
+                            merged_generated.extend(generated_run)
+                            if row is not None:
+                                merged.append(row)
+                                if id(row) in generated_ids:
+                                    merged_generated.append(row)
+                            start = index + 1
+                        if generated_rows is not None:
+                            generated_rows[:] = merged_generated
+                        return merged
                 if cleaned_msg is not msg:
                     stripped_assistant_messages += 1
                 cleaned.append(cleaned_msg)

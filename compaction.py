@@ -2842,6 +2842,28 @@ class CompactionMixin:
                     self._start_sweep_budget_hold(turn_paced=first_hang)
 
 
+    def _replayed_head_covers_frontier(self, state: _CompressionState) -> bool:
+        from .engine import _LCM_SUMMARY_PART_HEADER_RE
+
+        occurrences = getattr(self, "_compress_occurrences", None)
+        if not occurrences or not self._emission_proof_matches_binding(
+            self._active_emission_proof(), self._emission_binding(),
+        ):
+            return False
+        anchor = state.anchor_source_messages
+        start = self._leading_anchor_count(anchor)
+        end = start + len(anchor) - len(state.working_messages)
+        visible = set()
+        for index, row in enumerate(anchor[start:end], start):
+            entry, identity = occurrences.get(id(row), (None, ()))
+            if (identity is not None or not entry.generated_span or entry.output_index != index
+                    or entry.kind not in {"summary", "objective"}):
+                return False
+            # A quoted node header in the summary can satisfy the ID scan until the next publishing pass.
+            visible.update((int(m[1]), int(m[2])) for m in _LCM_SUMMARY_PART_HEADER_RE.finditer(entry.generated_span)
+                           if m.start() == 0 or entry.generated_span[m.start() - 7:m.start()] == "\n\n---\n\n")
+        return all((node.depth, node.node_id) in visible for node in self._summary_frontier_nodes())
+
     def _finish_without_leaf(
         self, state: _CompressionState, messages: List[Dict[str, Any]],
         warn_rejected: Callable[[], None],
@@ -2887,7 +2909,19 @@ class CompactionMixin:
                 state.working_messages,
                 state.preexisting_dependent_reply_records,
             )
-            if state.dropped_replayed_scaffold_messages:
+            kept_replayed_head = (
+                state.dropped_replayed_scaffold_messages and not state.pre_leaf_condensation_passes
+                and not (state.resumed_prefix or state.ingest_cleanup_changed_active_context
+                         or self._compress_dropped_ignored_rows or self._ingest_cursor_needs_reconcile)
+                and self._ingest_cursor == len(messages)
+                and active_context_messages is state.working_messages and self._replayed_head_covers_frontier(state)
+                and self._sanitize_active_context_messages(
+                    active_context_messages, insert_missing_tool_stubs=False,
+                ) == active_context_messages
+            )
+            if kept_replayed_head:
+                sanitized_messages = messages
+            elif state.dropped_replayed_scaffold_messages:
                 leading_anchor_count = self._leading_anchor_count(active_context_messages)
                 if state.resumed_ahead == 1 and leading_anchor_count == 1 and active_context_messages[1].get("role") == "user":
                     leading_anchor_count = 2  # #457: attempt 1's retained anchor, kept, goes back ahead of its summary
@@ -2911,7 +2945,8 @@ class CompactionMixin:
                     active_context_messages,
                     insert_missing_tool_stubs=False,
                 )
-            if sanitized_messages != state.working_messages or state.ingest_cleanup_changed_active_context:
+            if not kept_replayed_head and (sanitized_messages != state.working_messages
+                                           or state.ingest_cleanup_changed_active_context):
                 # _ingest_messages() already advanced the cursor to the original
                 # active-context length. If the host continues from a sanitized
                 # or reassembled context, keeping the old cursor could make the
