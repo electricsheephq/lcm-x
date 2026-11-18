@@ -208,8 +208,8 @@ def test_summary_share_cli(tmp_path):
     result = subprocess.run([*cmd, *paths[:2]], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     assert [json.loads(line) for line in result.stdout.splitlines()] == [
-        dict(base, arm=PLAIN, summary_tokens=35, prompt_tokens=100, share=0.35),
-        dict(base, arm=OPEN, summary_tokens=80, prompt_tokens=160, share=0.5, checkpoint="S1-CP340000"),
+        dict(base, arm=PLAIN, summary_tokens=35, prompt_tokens=100, share=0.35, fixed_load_tokens=0),
+        dict(base, arm=OPEN, summary_tokens=80, prompt_tokens=160, share=0.5, checkpoint="S1-CP340000", fixed_load_tokens=0),
     ]
     result = subprocess.run([*cmd, paths[2], paths[0]], capture_output=True, text=True)
     assert result.returncode == 2
