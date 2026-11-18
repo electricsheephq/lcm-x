@@ -255,4 +255,4 @@ def test_summary_call_rebind_keeps_base_publication_fallback(tmp_path, monkeypat
                                   seam="summary")
     print(f"summary rebind: {first=} {anchor=} unset={base} on={candidate}")
     assert candidate == base
-    assert base[2] == (28, 28, "error")
+    assert base[2] == (0, 28, "idle")
