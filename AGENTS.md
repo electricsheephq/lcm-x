@@ -218,7 +218,8 @@ gh pr merge <PR> --merge --match-head-commit <HEAD_SHA>
   `hermes acp` soak), Phase D (release-over-release scorecard against the previous GA: recall
   flips, Track S facts kept, QA rows, latency) — before the GA tag. From v0.31.0 the spec's
   tiers select the rows each rc runs (the R tier, which from v0.30.2's first release candidate
-  includes the live-session rows D9-D12, plus promoted rows, the release's own gate
+  includes the live-session rows D9-D12 and two smoke checks, recorded, not judged, before
+  it, plus promoted rows, the release's own gate
   rows, and the full tier at its cadence); patch releases from v0.29.1 use the same tiers, except
   that before v0.31.0 there is no weekly M run, so a patch's unselected rows are not run and its
   release notes list them as not run; the minor releases v0.29.0 and v0.30.0 run all phases.
