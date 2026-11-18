@@ -36,6 +36,7 @@ from .escalation import (
 )
 from .externalize import ingest_payload_writes, payload_lookup_scope
 from .fresh_tail import tool_group_safe_end
+from .ingest_protection import redact_sensitive_value
 from . import leaf_prep
 from .lifecycle_state import LifecycleBindingChangedError, LifecyclePublicationConflictError
 from .message_content import text_content_for_pattern_matching
@@ -778,9 +779,9 @@ class CompactionMixin:
                 self._compaction_request.below_threshold_cleanup_only = self._compaction_request.automatic_request = False
                 # #684: nor held by a boundary cooldown.
                 self._compaction_request.cleanup_only_due_to_boundary_cooldown = False
-            elif (not force and self._no_progress_hold is not None
+            elif (not force and (self._retained_stop_hold_active() or (self._no_progress_hold is not None
                   and (self._no_progress_hold[1] != "no_progress"
-                       or not getattr(self, "_no_progress_hold_persisted", False))) and self._no_progress_hold_blocks(
+                       or not getattr(self, "_no_progress_hold_persisted", False))))) and self._no_progress_hold_blocks(
                     current_tokens if current_tokens is not None else count_messages_tokens(messages)):
                 # #677: an automatic call the #651 hold blocks (a caller that skipped the host gate) is held
                 # maintenance; the survival ceiling and forced overflow are never blocked, so they summarise.
@@ -808,9 +809,8 @@ class CompactionMixin:
                 and self._last_compression_status != "error"
                 and len(result) == len(messages)
                 and all(
-                    self._public_compression_row(left)
-                    == self._public_compression_row(right)
-                    for left, right in zip(result, messages)
+                    self._compression_rows_equal(result_row, input_row)
+                    for result_row, input_row in zip(result, messages)
                 )
             ):
                 result = messages
@@ -869,8 +869,10 @@ class CompactionMixin:
             self._last_compression_noop_reason = ""
             self._survival_fit_reason = f"exception:{type(exc).__name__}"
             if isinstance(exc, Exception):  # #582: an over-window list survives the failure, fitted
+                rolled_back = False
                 try:
                     self._store.rollback_pending_write()
+                    rolled_back = True
                     reason = self._survival_fit_reason
                     fitted = self._survival_fit(messages, messages, current_tokens, after_exception=True,
                                                 summary_failure=budget.summary_failure,
@@ -886,20 +888,42 @@ class CompactionMixin:
                                    type(exc).__name__, exc_info=True)
                     returned = fitted
                     return fitted
+                if (rolled_back and _is_sqlite_locked_error(exc)
+                        and not force and not bypass_cooldown and not self._compress_forced_overflow
+                        and not self._should_force_overflow_recovery(observed_tokens=current_tokens, messages=messages)):
+                    try:
+                        fit_budget = self._survival_fit_budget(messages, current_tokens)
+                        host_fits = fit_budget is not None and self._survival_measure(messages) <= fit_budget
+                        host_fits = host_fits and not any(
+                            redact_sensitive_value(message.get(field), self._config, parse_json_strings=parse_json)
+                            != message.get(field)
+                            for message in messages
+                            for field, parse_json in (("content", False), ("tool_calls", True)))
+                    except Exception:
+                        host_fits = False  # Preserve the original exception when fit cannot be established.
+                    if host_fits:
+                        logger.warning("LCM automatic compress failed (%s); returning the host messages",
+                                       type(exc).__name__, exc_info=True)
+                        returned = messages
+                        return messages
             raise
         finally:
             try:
                 self._end_pre_leaf_phase(budget, "stopped")
                 self._last_compress_leaves = (self._hold_conversation_key(), budget.leaves)
+                automatic = not force and not bypass_cooldown and not self._compress_forced_overflow
                 self._compress_forced_overflow = False
                 self._foreground_budget = None
                 if thread_context is not None:
                     thread_context.foreground_budget = None
+                exit_written = False
                 try:
                     if returned is not None and returned is not messages:
                         self._compress_exit_write(returned, exit_capture)
+                    exit_written = True
                 finally:
-                    self._finish_foreground_budget(budget, returned, current_tokens if (current_tokens or 0) > 0 else messages)
+                    self._finish_foreground_budget(budget, returned, current_tokens if (current_tokens or 0) > 0 else messages,
+                                                   automatic=automatic and exit_written and not self._compaction_is_closing())
             finally:
                 store_id_scope.__exit__(None, None, None)  # #2344: last, even if the cleanup above raises
 
@@ -936,8 +960,8 @@ class CompactionMixin:
                     returned = messages
                     return messages
                 if (isinstance(result, list) and result is not messages and len(result) == len(messages)
-                        and all(self._public_compression_row(left) == self._public_compression_row(right)
-                                for left, right in zip(result, messages))):
+                        and all(self._compression_rows_equal(result_row, input_row)
+                                for result_row, input_row in zip(result, messages))):
                     result = messages
             self._host_uid_log_compaction_summary()
             logger.debug("LCM compaction emission descriptor count=%d", 0)
@@ -1001,7 +1025,7 @@ class CompactionMixin:
         return ForegroundBudget(soft=soft, hard=hard, configured_timeout=self._config.summary_timeout_ms / 1000,
                                 estimates=self.__dict__.setdefault("_foreground_estimates", ForegroundEstimates()))
 
-    def _finish_foreground_budget(self, budget: ForegroundBudget, result, observed=None) -> None:
+    def _finish_foreground_budget(self, budget: ForegroundBudget, result, observed=None, *, automatic=False) -> None:
         """#605 K8: one INFO stop line per compaction, its seconds adding up to the elapsed time; a compaction
         that made a summariser call records its finalize wall (last call end to return) for the next reserve."""
         reason = ""
@@ -1035,6 +1059,13 @@ class CompactionMixin:
                     empty_input = " empty_input=no_source,rows:" + empty_reason.rsplit("=", 1)[1][:-1]
             blocked = (getattr(self, "_store_complete_blocked", None)
                        if budget.selected and retained and not bypassed else None)
+            if automatic and not bypassed and reason != "error":
+                if budget.leaves:
+                    self._record_retained_stop(None)
+                elif budget.selected:
+                    signature = ((self._store_complete_frontier(), blocked[0],
+                                  getattr(self, "_store_complete_hole", None)) if blocked else None)
+                    self._record_retained_stop(signature)
             exited = getattr(self, "_stub_first_exit_now", None) if reason != "error" and not bypassed else None
             escaped = getattr(self, "_compress_escaped", []) if not bypassed else []
             if exited:  # #671: the free cuts reached the target before any model call
@@ -1070,6 +1101,30 @@ class CompactionMixin:
             return message
         return {key: value for key, value in message.items()
                 if key != "timestamp" and not str(key).startswith("_")}
+
+    def _compression_rows_equal(self, result_row: Any, input_row: Any) -> bool:
+        """Ignore newly stamped hide keys when Hermes has projected them out (#2818)."""
+        result = self._public_compression_row(result_row)
+        original = self._public_compression_row(input_row)
+        if result == original:
+            return True
+        if not isinstance(result, dict) or not isinstance(original, dict):
+            return False
+
+        result_metadata = result.pop("display_metadata", {})
+        input_metadata = original.pop("display_metadata", {})
+        if result != original or not isinstance(result_metadata, dict) or not isinstance(input_metadata, dict):
+            return False
+        if result_metadata == input_metadata:
+            return True
+
+        from .engine import _model_only_display_metadata_keys
+
+        added_hide_keys = _model_only_display_metadata_keys() - input_metadata.keys()
+        return {
+            key: value for key, value in result_metadata.items()
+            if key not in added_hide_keys or value is not True
+        } == input_metadata
 
     def _record_compress_commit_proof(self, messages, result):
         """Remember the exact host input of this compress() call (process-local).
@@ -1646,7 +1701,7 @@ class CompactionMixin:
         saved = getattr(self, "_store_complete_excluded", []), getattr(self, "_store_complete_cut", False)
         saved_diagnostics = (getattr(self, "_store_complete_blocked", None),
                              getattr(self, "_store_complete_empty_reason", ""), getattr(self, "_store_complete_escaped", []),
-                             getattr(self, "_store_complete_order", {}))
+                             getattr(self, "_store_complete_order", {}), getattr(self, "_store_complete_hole", None))
         selected_input = [message for message in chunk if id(message) not in dependent_reply_message_ids]
         self._store_complete_excluded, self._store_complete_cut = [], False
         try:
@@ -1677,7 +1732,7 @@ class CompactionMixin:
         finally:
             self._store_complete_excluded, self._store_complete_cut = saved
             (self._store_complete_blocked, self._store_complete_empty_reason, self._store_complete_escaped,
-             self._store_complete_order) = saved_diagnostics
+             self._store_complete_order, self._store_complete_hole) = saved_diagnostics
 
     def _reject_prepared_chain(self, leaf, reason: str) -> None:
         """#787: the first rejection ends the chain from ``leaf`` on, each leaf counted under ``reason``."""
@@ -2121,9 +2176,11 @@ class CompactionMixin:
             self._record_ingest_success()
         finally:  # #1127: ingest and reconcile, untimed by the sweep steps; a raised lock wait is theirs too
             self._pre_leaf_span("ingest", span_started)
+        retained_hold = (not force and not recovery_attempt and not state.force_overflow
+                         and self._retained_stop_hold_active())
         if (not force and not recovery_attempt and not state.force_overflow
                 and self._no_progress_hold_blocks(state.observed_prompt_tokens or 0)
-                and self._no_progress_hold[1] == "no_progress"):
+                and (retained_hold or (self._no_progress_hold is not None and self._no_progress_hold[1] == "no_progress"))):
             # A cold direct caller now has current replay proof. Ingest cleanup
             # is adopted, but no attribution/leaf/condensation work is repeated.
             self._ingest_cursor = len(state.working_messages)
@@ -3421,6 +3478,7 @@ class CompactionMixin:
         self._store_complete_excluded, self._store_complete_cut, self._store_complete_blocked = [], False, None
         self._store_complete_copy_exclusion_proofs = {}
         self._store_complete_empty_reason = ""
+        self._store_complete_hole = None  # Refs #2815: this leaf's diagnostic, including nested escape walks.
         self._store_complete_escaped = []
         self._store_complete_order = {}  # #2007: also when identity anchoring is off (a stale id() could recur)
         step_started = time.monotonic() if state.threshold_full_sweep_active else 0.0

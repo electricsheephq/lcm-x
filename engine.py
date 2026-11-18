@@ -1429,6 +1429,7 @@ class LCMEngine(
         # R6-4: survival-fit warnings belong to the store they were raised on.
         self._survival_fit_pending_warning, self._survival_fit_warned = None, set()
         self._survival_overhead_observation = None  # #1012 F4: an overhead peak never crosses profile homes
+        self.__dict__.pop("_retained_stop_backoffs", None)  # #2815: retained-stop holds never cross homes
         self.emit_automatic_compaction_status = False
         adaptive = self.__dict__.get("_adaptive_retrieval")
         if adaptive is not None:
@@ -2196,6 +2197,34 @@ class LCMEngine(
         self._sweep_budget_hold_until = 0.0
         return False
 
+    def _record_retained_stop(self, signature) -> None:
+        """Refs #2815: successful automatic passes only; no durable pacing state."""
+        states, key = self.__dict__.setdefault("_retained_stop_backoffs", {}), self._hold_conversation_key()
+        if signature is None:
+            states.pop(key, None)
+            return
+        previous = states.get(key)
+        count = previous[1] + 1 if previous and previous[0] == signature else 1
+        wait = min(600 * 2 ** min(count - 2, 3), 3600) if count >= 2 else 0
+        states[key] = (signature, count, time.monotonic() + wait)
+        if wait:
+            logger.info("LCM retained-stop back-off: frontier_store_id=%d blocked_store_id=%d "
+                        "hole_store_id=%s wait=%ds", *signature, wait)
+
+    def _retained_stop_hold_active(self) -> bool:
+        states, key = self.__dict__.get("_retained_stop_backoffs", {}), self._hold_conversation_key()
+        state = states.get(key)
+        if self._compaction_is_closing() or state is None or state[1] < 2 or time.monotonic() >= state[2]:
+            return False
+        try:
+            frontier = self._store_complete_frontier()
+        except Exception:
+            return False
+        if state[0][0] != frontier:
+            states.pop(key, None)
+            return False
+        return True
+
     def _start_no_progress_hold(self, reason: str, *, persist: bool = False) -> None:
         """#651: hold automatic threshold passes until its time or a stored leaf; turn-paced reasons
         (#597 progress refusals, #922 objective-only no-ops, #904 hidden-only passes) also end at turn end."""
@@ -2495,7 +2524,7 @@ class LCMEngine(
         if self._bypasses_lcm_context_management():
             return False
         self._no_progress_observed_tokens = int(tokens or 0)
-        if not self._no_progress_hold_active(managed_scope=True):
+        if not self._no_progress_hold_active(managed_scope=True) and not self._retained_stop_hold_active():
             return False
         if self._should_force_overflow_recovery(observed_tokens=tokens):
             return False
@@ -2512,6 +2541,8 @@ class LCMEngine(
     def _compression_block_reason(self) -> Optional[str]:
         """#651: the host classifies ``cooldown*`` as a transient block: defer, never exhaust. #625: the #608
         sweep hold is ``cooldown:lcm_sweep_budget``."""
+        if self._retained_stop_hold_active():
+            return "cooldown:lcm_retained_stop"
         status = self._no_progress_hold_status()
         if status:
             return f"cooldown:lcm_{status['reason']}"
@@ -2543,7 +2574,8 @@ class LCMEngine(
         if not managed_scope and self._bypasses_lcm_context_management():
             return False
         self._no_progress_observed_tokens = None if tokens is None else int(tokens)
-        if not self._sweep_budget_hold_active() and not self._no_progress_hold_active(managed_scope=True):
+        if (not self._sweep_budget_hold_active() and not self._no_progress_hold_active(managed_scope=True)
+                and not self._retained_stop_hold_active()):
             return False
         ceiling = self._survival_ceiling()
         if ceiling is None or tokens is None:
