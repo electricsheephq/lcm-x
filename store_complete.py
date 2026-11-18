@@ -52,10 +52,21 @@ _CONTIGUITY = "leaf input cannot form a contiguous stored prefix"
 class _UidDropState:
     owner: object
     before: list
+    binding: tuple
     uid_trimmed: bool = False
+    binding_changed: bool = False
+    scaffold_ids: set[int] = field(default_factory=set)
     legacy_replay: Optional[tuple[list, bool, bool, int]] = None
     # Object id -> (store id, re-resolve UID, base removes or whole scaffold).
     removed: dict[int, tuple[Optional[int], bool, bool]] = field(default_factory=dict)
+
+    def matches_binding(self):
+        if self.binding == self.owner._uid_recognition_binding():
+            return True
+        if not self.binding_changed:
+            logger.info("LCM UID drop skipped after rebind: input_rows=%d", len(self.before))
+            self.binding_changed = True
+        return False
 
 
 class HiddenBacklog(NamedTuple):
@@ -144,17 +155,25 @@ class StoreCompleteMixin:
             elif role == "tool" and (owner := owners.get(str(message.get("tool_call_id") or "").strip())) is not None:
                 groups[owner].add(i)
         drop.difference_update(*(group for group in groups.values() if not group <= drop))
+        scope = _UID_DROP_INPUT.get()
+        owned = scope is not None and scope.owner is self
+        if owned and not scope.matches_binding():
+            return messages
         if drop:
             self._compress_host_rows_consumed += len(drop)
-            if (scope := _UID_DROP_INPUT.get()) is not None and scope.owner is self:
+            if owned:
                 scope.removed.update((id(messages[i]), (candidates[i], True, False)) for i in drop)
-        drop.update(i for i, row in enumerate(messages)
-                    if i >= leading and i not in resolved and self._host_uid_whole_scaffold(row))
+        scaffold = {i for i in range(leading, tail) if i not in resolved
+                    and self._host_uid_whole_scaffold(messages[i], allow_task_list=False)}
+        if owned:
+            scope.scaffold_ids.update(id(messages[i]) for i in scaffold)
+        drop.update(scaffold)
         return [m for i, m in enumerate(messages) if i not in drop] if drop else messages
 
     def _guard_uid_covered_drop(self, result):
         scope = _UID_DROP_INPUT.get()
-        if scope is None or scope.owner is not self or not (scope.uid_trimmed or scope.removed):
+        if (scope is None or scope.owner is not self or not scope.matches_binding()
+                or not (scope.uid_trimmed or scope.removed)):
             return result
         present = Counter((str(row.get("message_uid") or ""), _emission_identity(row)) for row in result)
         present_ids = {id(row) for row in result}
@@ -172,9 +191,9 @@ class StoreCompleteMixin:
                 present[key] -= 1
             elif row.get("role") == "system" and system == self._append_lcm_note_to_content(row.get("content")):
                 continue
-            elif id(row) in scope.removed or not self._host_uid_whole_scaffold(row):
+            elif id(row) in scope.removed or id(row) not in scope.scaffold_ids:
                 missing.append(row)
-        if not missing:
+        if not missing or not scope.matches_binding():
             return result
         for row in result:
             content = row.get("content")
@@ -196,8 +215,10 @@ class StoreCompleteMixin:
                         len(scope.removed), failing, len(other), unproven)
         if not failing:
             return result
-        self._compress_host_rows_consumed = 0
         restored = self._sanitize_active_context_messages(scope.before, insert_missing_tool_stubs=False)
+        if not scope.matches_binding():
+            return result
+        self._compress_host_rows_consumed = 0
         self._ingest_cursor = len(restored)
         return restored
 

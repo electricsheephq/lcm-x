@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from functools import wraps
 from typing import Any, Callable, Dict, List, Literal, Optional
 
-from .config import host_uid_recognition_enabled, uid_recognition_enabled
+from .config import uid_recognition_enabled
 from .dag import SummaryNode
 from .escalation import (
     _THRESHOLD_FULL_SWEEP_MIN_CALL_SECONDS,
@@ -769,6 +769,7 @@ class CompactionMixin:
 
     @_uid_recognition_pass
     def _compress_owned(self, messages, current_tokens, focus_topic, force, bypass_cooldown):
+        uid_binding = self._uid_recognition_binding() if uid_recognition_enabled(self) else None
         handle = self._emission_handle
         if handle is not None and handle.session_id == self._session_id:
             self._emission_handle = None
@@ -788,8 +789,8 @@ class CompactionMixin:
         # map must too, or a later ingest can match a reused address and store a carried ignored placeholder.
         store_id_scope = self._compress_run.preserve_store_ids()
         store_id_scope.__enter__()
-        uid_drop_scope = _UID_DROP_INPUT.set(_UidDropState(self, []) if host_uid_recognition_enabled() else None)
-        copy_sources_scope = _UID_COPY_SOURCES.set({} if uid_recognition_enabled(self) else None)
+        uid_drop_scope = _UID_DROP_INPUT.set(_UidDropState(self, [], uid_binding) if uid_binding is not None else None)
+        copy_sources_scope = _UID_COPY_SOURCES.set({} if uid_binding is not None else None)
         try:
             budget.pre_leaf = PhaseSqlTrace()  # #1127: timed until the first leaf call, or the stop before one
             budget.pre_leaf.install([(self._store, "_conn"), (self._store, "_write_lock"), (self._dag, "_conn"),
@@ -837,11 +838,13 @@ class CompactionMixin:
             self._compress_occurrences = None
             scope = _UID_DROP_INPUT.get()
             if budget.leaves and scope is not None:
-                result = self._guard_uid_covered_drop(result)
+                if scope.matches_binding():
+                    result = self._guard_uid_covered_drop(result)
             elif scope is not None and scope.uid_trimmed and result is not messages:
                 result = self._sanitize_active_context_messages(scope.before, insert_missing_tool_stubs=False)
-                self._ingest_cursor = len(result)
-                self._compress_host_rows_consumed = 0
+                if scope.matches_binding():
+                    self._ingest_cursor = len(result)
+                    self._compress_host_rows_consumed = 0
             if (
                 isinstance(result, list)
                 and result is not messages
@@ -2558,9 +2561,11 @@ class CompactionMixin:
             if state.threshold_full_sweep_active and sweep_step_done("replay_drops", step_started) >= state.sweep_deadline:
                 state.sweep_stop_reason = "time_budget_exhausted"
                 return "break", None
-            if (scope := _UID_DROP_INPUT.get()) is not None and scope.owner is self and scope.before:
+            if ((scope := _UID_DROP_INPUT.get()) is not None and scope.owner is self and scope.before
+                    and scope.matches_binding()):
                 working, start = state.working_messages, leaf.candidate_start
-                scaffold = {i for i in resumed if self._host_uid_whole_scaffold(working[i])}
+                scaffold = {i for i in resumed if leaf.leading_anchor_count <= i < leaf.fresh_tail_start
+                            and self._host_uid_whole_scaffold(working[i], allow_task_list=False)}
                 replay = {i: None if i in scaffold else (store_ids or {}).get(id(working[i])) for i in resumed}
                 base = (self._committed_replay_drops(working, start, uid_first=False)[0]
                         if None in replay.values() or (not scope.uid_trimmed and hasattr(store_ids, "legacy_id")) else resumed)
@@ -2797,10 +2802,11 @@ class CompactionMixin:
             if scope is not None and scope.uid_trimmed:
                 state.working_messages = scope.before
                 state.dropped_replayed_scaffold_messages = state.resumed_prefix = False
-                self._compress_host_rows_consumed = 0
+                if scope.matches_binding():
+                    self._compress_host_rows_consumed = 0
+                    if state.sweep_stop_reason == "time_budget_exhausted":
+                        self._no_progress_candidate = False
                 _UID_DROP_INPUT.set(None)
-                if state.sweep_stop_reason == "time_budget_exhausted":
-                    self._no_progress_candidate = False
             elif scope is not None and scope.legacy_replay is not None:
                 (state.working_messages, state.dropped_replayed_scaffold_messages,
                  state.resumed_prefix, state.resumed_ahead) = scope.legacy_replay
@@ -3670,7 +3676,8 @@ class CompactionMixin:
         pre_leaf_condensation_passes = state.pre_leaf_condensation_passes
         pre_leaf_condensation_reason = state.pre_leaf_condensation_reason
         max_leaf_passes = state.max_leaf_passes
-        if uid_recognition_enabled(self) and (scope := _UID_DROP_INPUT.get()) is not None and scope.owner is self:
+        if ((scope := _UID_DROP_INPUT.get()) is not None and scope.owner is self
+                and scope.matches_binding() and uid_recognition_enabled(self)):
             scope.before = working_messages
             trimmed = self._drop_uid_covered_live_rows(working_messages)
             if trimmed is not working_messages:

@@ -2352,6 +2352,8 @@ class ReconcileMixin:
         raw_session_count: int,
         allow_session_end_replay_proof: bool = False,
         content_cut: int | None = None,
+        cut_budget: int | None = None,
+        uid_cursor: int = 0,
     ) -> int | None:
         run = _TailReplayRun(
             messages=messages,
@@ -2368,8 +2370,9 @@ class ReconcileMixin:
         native_recovery_snapshot_digests = run.native_recovery_snapshot_digests
         native_prefix_digests = run.native_prefix_digests
         empty_prefix_cursor: int | None = None
-        exhausted = False
-        cuts_left = _UID_ON_CURSOR_CUT_BUDGET if uid_recognition_enabled(self) else len(messages) + 1
+        skipped = 0
+        native_cursor = None
+        cuts_left = len(messages) + 1 if cut_budget is None else cut_budget
         for cursor in range(len(messages), -1, -1):
             native_recovery_snapshot_digest = native_prefix_digests.get(cursor, "")
             if (
@@ -2377,11 +2380,12 @@ class ReconcileMixin:
                 and native_recovery_snapshot_digest
                 in native_recovery_snapshot_digests
             ):
-                return cursor
+                native_cursor = cursor
+                break
             if content_cut is not None and cursor > content_cut:
                 continue
             if not cuts_left:
-                exhausted = True
+                skipped += 1
                 continue
             cuts_left -= 1
             candidate_messages = messages[:cursor]
@@ -2485,7 +2489,11 @@ class ReconcileMixin:
                 or has_durable_compacted_snapshot_replay
             ):
                 return cursor
-        return empty_prefix_cursor if allow_empty_prefix and not exhausted else None
+        if skipped:
+            logger.info("LCM UID cut budget exhausted: uid_cursor=%d cuts_skipped=%d", uid_cursor, skipped)
+        if native_cursor is not None:
+            return native_cursor
+        return empty_prefix_cursor if allow_empty_prefix and not skipped else None
 
     def _record_ingest_reconciliation(
         self,
@@ -3192,7 +3200,7 @@ class ReconcileMixin:
         ]
         run.stored_tail = stored_tail
         # Later cuts can mistake new rows for older equal content (#1511). Earlier ones keep their own proof.
-        content_cut = self._host_uid_tail_cut(messages, stored_tail_rows[-1]) if recognition and stored_tail_rows else None
+        content_cut = self._host_uid_tail_cut(messages, stored_tail_rows[-1]) if uid_cursor and stored_tail_rows else None
         cursor = self._find_reconciled_cursor_for_store_tail(
             messages,
             stored_tail,
@@ -3201,7 +3209,8 @@ class ReconcileMixin:
             session_count=len(stored_tail),
             raw_session_count=session_count,
             allow_session_end_replay_proof=allow_session_end_replay_proof,
-            content_cut=content_cut,
+            **({"content_cut": content_cut, "cut_budget": _UID_ON_CURSOR_CUT_BUDGET, "uid_cursor": uid_cursor}
+               if uid_cursor else {}),
         )
         head_cursor = self._cursor_from_host_rewrite_head(messages, session_count)
         if head_cursor is not None and head_cursor > (cursor or 0):

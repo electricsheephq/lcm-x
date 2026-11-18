@@ -279,10 +279,12 @@ class HostUidShadowMixin:
             self._host_uid_count(Counter(errors=1), exc)
         return set()
 
-    def _host_uid_whole_scaffold(self, message):
+    def _host_uid_whole_scaffold(self, message, *, allow_task_list=True):
         content = message.get("content")
         if (message.get("role") not in ("assistant", "user") or not isinstance(content, str)
                 or message.get("tool_calls") or message.get("tool_call_id")):
+            return False
+        if not allow_task_list and _PRESERVED_TODO_CONTEXT_PREFIX in content:
             return False
         if self._is_lcm_emitted_head_row(message, 2**63 - 1):
             return True
