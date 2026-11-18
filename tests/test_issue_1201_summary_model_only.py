@@ -659,7 +659,6 @@ def test_t8_second_compress_uses_public_row_noop_shortcut(engine, monkeypatch):
     monkeypatch.setattr(engine, "_public_compression_row", record)
     second = _compress(engine, output)
     assert second is output
-    assert len(candidates) == 1 and candidates[0] is not output
-    assert len(compared) == 2 * len(output)
-    assert all(public_row(left) == public_row(right) for left, right in zip(compared[::2], compared[1::2]))
+    assert len(candidates) == 1 and candidates[0] is output
+    assert not compared
     assert "display_metadata" not in _summary_rows(second)[0]

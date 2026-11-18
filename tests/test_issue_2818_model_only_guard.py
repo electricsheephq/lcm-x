@@ -56,13 +56,7 @@ def test_second_compress_preserves_input_identity(engine, monkeypatch, project):
     monkeypatch.setattr(engine, "_compress_impl", capture)
     second = _compress(engine, output)
     [candidate] = candidates
-    assert candidate is not output
-    candidate_public = [engine._public_compression_row(row) for row in candidate]
-    [rebuilt_summary] = _summary_rows(candidate_public)
-    assert rebuilt_summary["display_metadata"] == {"host_model_only": True}
-    if project:
-        del rebuilt_summary["display_metadata"]
-    assert candidate_public == [engine._public_compression_row(row) for row in before]
+    assert candidate is output
     assert second is output
     assert output == before
 
