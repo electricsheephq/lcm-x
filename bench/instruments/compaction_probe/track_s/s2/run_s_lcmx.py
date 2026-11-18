@@ -545,6 +545,7 @@ def main():
     (run_dir / "assembled_context.json").write_text(json.dumps({"system": run.system, "view": view}))
     if args.prefix60k or args.full_stream:  # a timing population only: no probes
         summary.update(status="DONE", finished=time.time(), prefix60k=getattr(run, "p60", None))
+        summary.update(summary_tokens=summary_tokens(run, view), prompt_tokens=summary["final_context"]["tokens"])  # untimed
         (run_dir / "summary.json").write_text(json.dumps(summary, indent=1, default=str))
         return print(f"wrote {run_dir}/summary.json ({len(run.events)} event(s), no probes)")
     if run.snaps:

@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Print the recorded summary share of each Track S reader prompt as JSON lines."""
+"""Print the recorded summary share of each Track S replay as JSON lines.
+
+The share is of the assembled context: the system message plus the view the reader is sent. The reader's
+question, tool schemas, guidance and tool exchanges are not in the denominator, so a plain and an open replay
+of one context report the same share.
+"""
 
 import argparse
 import json

@@ -147,8 +147,9 @@ def test_env_file_dry_run_consumers(stubbed_runner, env_file, name, monkeypatch,
 
 
 @pytest.mark.parametrize("name", [PLAIN, OPEN])
-@pytest.mark.parametrize("checkpoint", [False, True])
-def test_replay_records_env_file_and_prompt_tokens(stubbed_runner, env_file, name, checkpoint, tmp_path, monkeypatch):
+@pytest.mark.parametrize("mode", ["final", "checkpoint", "timing"])
+def test_replay_records_env_file_and_prompt_tokens(stubbed_runner, env_file, name, mode, tmp_path, monkeypatch):
+    checkpoint = mode == "checkpoint"
     summary_block = "[Recent Summary (d0, node 1)]\nSynthetic memory\n[Expand for details: node 1]"
     tail = "Fixed reader load"
     view = [{"role": "user", "content": summary_block + "\n\n" + tail},
@@ -166,9 +167,13 @@ def test_replay_records_env_file_and_prompt_tokens(stubbed_runner, env_file, nam
         return view + [{"role": "user", "content": "After checkpoint"}]
 
     monkeypatch.setattr(stubbed_runner.Run, "replay", replay)
+    timing = ["--full-stream"] if mode == "timing" else []  # a timing population: no probes, counts still recorded
+    if timing:
+        (tmp_path / "material/seed-1/transcript.jsonl").write_text(
+            json.dumps({"role": "system", "content": "Fixed system load", "turn": 0}) + "\n")
     monkeypatch.setattr(sys, "argv", ["run_s_lcmx.py", "--arm", name, "--seed", "1",
-                                      "--reader", "fake", "--lane", "fake"])
-    assert stubbed_runner.main() == 0
+                                      "--reader", "fake", "--lane", "fake", *timing])
+    assert stubbed_runner.main() == (None if timing else 0)  # the timing path returns print()'s None (exit 0)
     out = tmp_path / "lcmx-runs" / name / "seed-1/1"
     if checkpoint:
         assert "summary_tokens" not in json.loads((out / "summary.json").read_text())
