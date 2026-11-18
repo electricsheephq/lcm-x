@@ -309,6 +309,7 @@ def _compacted_engine(tmp_path, monkeypatch, *, turns=12, tail=6):
     pre = list(host)
     compressed = engine.compress(list(host), force=True)
     assert engine._last_compression_status == "compacted"
+    _drain_session_end_maintenance(engine)
     return engine, pre, compressed
 
 
@@ -319,6 +320,8 @@ def _row_count(engine, session_id="S0"):
 def _drain_session_end_maintenance(engine):
     # Bind-time rollups and incremental embeddings can write to this database
     # on private connections while session end uses a short SQLite busy timeout.
+    # _compacted_engine drains after its bind; a test that binds again drains
+    # again before its session end.
     assert engine.drain_rollup_maintenance(timeout=10)
     assert engine.drain_embedding_maintenance(timeout=10)
 
@@ -332,7 +335,6 @@ def test_compaction_commit_end_finalizes_without_reingest(tmp_path, monkeypatch)
         frontier = engine._lifecycle.get_by_session("S0").current_frontier_store_id
         assert frontier > 0
 
-        _drain_session_end_maintenance(engine)
         engine.on_session_end("S0", pre)
 
         state = engine._lifecycle.get_by_session("S0")
@@ -1747,6 +1749,7 @@ def test_conversation_change_clears_the_commit_proof(tmp_path, monkeypatch):
         assert engine._compress_commit_proof is not None
         engine.on_session_start("S0", platform="acp", conversation_id="other-conversation", context_length=200_000)
         assert engine._conversation_id == "other-conversation" != old_conversation
+        _drain_session_end_maintenance(engine)
         engine.on_session_end("S0", pre)
         assert engine._compress_commit_proof is None or not engine._compress_commit_proof.get("end_consumed")
         state = engine._lifecycle.get_by_conversation("other-conversation")
