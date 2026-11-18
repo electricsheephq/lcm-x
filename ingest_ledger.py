@@ -10,7 +10,9 @@ from __future__ import annotations
 
 from bisect import bisect_left
 from collections import Counter, defaultdict, deque
+from itertools import accumulate
 import json
+import logging
 import struct
 import threading
 import time
@@ -27,7 +29,13 @@ ORDINAL_STEP = 1 << 20
 MIN_GAP = 1 << 10
 STAMP_WRITTEN, STAMP_EXISTS, STAMP_CAPPED = "written", "exists", "capped"
 _MAX_ORDINAL = (1 << 63) - 1
+# Widest window the fallback searches (#2840): at most (W+1)(W+2)/2 O(1) candidates;
+# past it the whole lineage is re-spaced at ORDINAL_STEP, which also ends the packing.
+_RESPACE_WINDOW_LIMIT = 256
+# Labels per re-spacing statement: 3 * 300 + 1 bound parameters, under SQLite's oldest 999 limit.
+_RESPACE_CHUNK = 300
 _ENTRY = struct.Struct(">16sB16s16sq")
+logger = logging.getLogger(__name__)
 
 
 class LedgerError(ValueError):
@@ -206,12 +214,21 @@ def common_prefix_len(chain_a, chain_b):
     return min(len(chain_a), len(chain_b)) // 16
 
 
+def _window_step(positions, prefix, start, end):
+    """Return (lower, step) for re-spacing gaps start..end; prefix sums make it O(1)."""
+    lower = positions[start - 1] if start else 0
+    count = end - start + prefix[end + 1] - prefix[start]
+    return lower, ((positions[end] - lower) // (count + 1) if end < len(positions)
+                   else min(ORDINAL_STEP, (_MAX_ORDINAL - lower) // count))
+
+
 def plan_ordinals(existing, placements):
     """Return (new ordinals in placement order, changed old-to-new ordinals).
 
     A supersedes target inside [left, right) determines its natural gap; an
     out-of-bounds target uses the NEW gap. View-order clamping then applies.
-    Tied minimal windows choose the leftmost. Duplicate existing labels (part
+    Tied minimal windows choose the leftmost; none within _RESPACE_WINDOW_LIMIT
+    re-spaces the whole lineage. Duplicate existing labels (part
     witnesses) share one label and therefore one re-spacing map entry.
     """
     original = sorted(set(existing))
@@ -236,7 +253,10 @@ def plan_ordinals(existing, placements):
             gap = len(original) if right is None else bisect_left(original, right)
         previous_gap = max(gap, previous_gap)
         groups[previous_gap].append(index)
-    result = [None] * sum(map(len, groups.values()))
+    result, sizes = [None] * sum(map(len, groups.values())), [0] * (len(positions) + 1)
+    for gap, indexes in groups.items():
+        sizes[gap] = len(indexes)
+    prefix = [0, *accumulate(sizes)]
     for gap, indexes in sorted(groups.items()):
         if result[indexes[0]] is not None:
             continue  # A preceding re-spacing already placed this whole gap.
@@ -249,29 +269,33 @@ def plan_ordinals(existing, placements):
                                  else lower + (upper - lower) * offset // (len(indexes) + 1))
             continue
         # Width counts movable EXISTING labels; outer endpoints remain fixed.
-        window = None
-        for width in range(len(positions) + 1):
+        window, widths = None, min(len(positions), _RESPACE_WINDOW_LIMIT)
+        for width in range(widths + 1):
             for start in range(max(0, gap - width), min(gap, len(positions) - width) + 1):
-                end = start + width
-                lower = positions[start - 1] if start else 0
-                count = width + sum(len(groups[g]) for g in range(start, end + 1))
-                step = ((positions[end] - lower) // (count + 1) if end < len(positions)
-                        else min(ORDINAL_STEP, (_MAX_ORDINAL - lower) // count))
+                lower, step = _window_step(positions, prefix, start, start + width)
                 if step >= MIN_GAP:
-                    window = start, end, lower, step
+                    window = start, start + width, lower, step
                     break
             if window is not None:
                 break
+        if window is None and widths < len(positions):
+            # No window within the limit: every label and placement, in order, at the normal step.
+            lower, step = _window_step(positions, prefix, 0, len(positions))
+            window = (0, len(positions), lower, step) if step >= 1 else None
         if window is None:
             raise LedgerError("signed 64-bit ordinal space exhausted")
         start, end, value, step = window
+        moved = 0
         for g in range(start, end + 1):
             for index in groups[g]:
                 value += step
                 result[index] = value
             if g < end:
                 value += step
+                moved += positions[g] != value
                 positions[g] = value
+        logger.info("LCM ledger ordinals respace fallback: window %s, %d labels moved",
+                    "whole lineage" if end - start > _RESPACE_WINDOW_LIMIT else end - start, moved)
     return result, {old: new for old, new in zip(original, positions) if old != new}
 
 
@@ -395,17 +419,26 @@ def apply_respace(conn, lineage, mapping):
             or len(set(mapping.values())) != len(mapping)
             or set(mapping.values()) & (occupied - mapping.keys())):
         raise LedgerError("invalid re-spacing map")
-    temporary, count, staged = min(occupied | {0}), 0, []
-    for old, new in mapping.items():
-        temporary -= 1
-        if temporary < -(1 << 63):
-            raise LedgerError("temporary ordinal space exhausted")
-        cursor = conn.execute("UPDATE occurrence_bindings SET ordinal=? WHERE lineage=? AND ordinal=?",
-                              (temporary, lineage, old))
-        count += cursor.rowcount
-        staged.append((temporary, new))
-    for temporary, new in staged:
-        conn.execute("UPDATE occurrence_bindings SET ordinal=? WHERE lineage=? AND ordinal=?", (new, lineage, temporary))
+    # Two phases: old -> unique temporaries below every label, then temporaries -> new (#2840: chunked).
+    temporary = min(occupied | {0})
+    staged = [(old, new, temporary - offset) for offset, (old, new) in enumerate(mapping.items(), 1)]
+    valid = [item for item in staged if item[2] >= -(1 << 63)]
+    count = _move_ordinals(conn, lineage, [(old, temp) for old, _new, temp in valid])
+    if len(valid) < len(staged):
+        raise LedgerError("temporary ordinal space exhausted")
+    _move_ordinals(conn, lineage, [(temp, new) for _old, new, temp in staged])
+    return count
+
+
+def _move_ordinals(conn, lineage, pairs):
+    """Apply (from, to) pairs with one CASE statement per chunk; each scans the lineage once."""
+    count = 0
+    for at in range(0, len(pairs), _RESPACE_CHUNK):
+        chunk = pairs[at:at + _RESPACE_CHUNK]
+        count += conn.execute(
+            "UPDATE occurrence_bindings SET ordinal=CASE ordinal" + " WHEN ? THEN ?" * len(chunk)
+            + " END WHERE lineage=? AND ordinal IN (" + ",".join("?" * len(chunk)) + ")",
+            (*(value for pair in chunk for value in pair), lineage, *(old for old, _new in chunk))).rowcount
     return count
 
 
