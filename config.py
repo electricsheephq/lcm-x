@@ -1004,6 +1004,8 @@ ENV_FIELD_SPECS: tuple[_EnvFieldSpec, ...] = (
     ),
     _EnvFieldSpec("large_output_transcript_gc_enabled", "LCM_LARGE_OUTPUT_TRANSCRIPT_GC_ENABLED", bool),
     _EnvFieldSpec("stub_first_exit_target_ratio", "LCM_STUB_FIRST_EXIT_TARGET_RATIO", float),
+    _EnvFieldSpec("depth_target_ratio", "LCM_DEPTH_TARGET_RATIO", float),
+    _EnvFieldSpec("summary_prefix_target_ratio", "LCM_SUMMARY_PREFIX_TARGET_RATIO", float),
     _EnvFieldSpec("summary_model", "LCM_SUMMARY_MODEL", str),
     _EnvFieldSpec("native_recovery", "LCM_NATIVE_RECOVERY", bool),
     _EnvFieldSpec("survival_fit", "LCM_SURVIVAL_FIT", bool),
@@ -1118,6 +1120,8 @@ _SOURCE_TRACKED_ENV_FIELDS = frozenset({
     "summary_timeout_ms",
     "summary_prompt_version",
     "stub_first_exit_target_ratio",
+    "depth_target_ratio",
+    "summary_prefix_target_ratio",
 })
 
 # Fields exposed as runtime preset overrides (consumed by presets.py).
@@ -1576,6 +1580,9 @@ class LCMConfig:
     # #671 stub-first exit: a share of the threshold that lowers the exit's target to
     # min(threshold - leaf chunk, 0.95 x threshold, int(ratio x threshold)); 0 = the built-in target.
     stub_first_exit_target_ratio: float = 0.0
+    # Shares of the model window. Zero disables the depth target or leaves the prefix ratio unset.
+    depth_target_ratio: float = 0.0
+    summary_prefix_target_ratio: float = 0.0
     # #48: absolute compaction trigger in tokens (0 = ratio-based). from_env() reads
     # LCM_ABSOLUTE_THRESHOLD_TOKENS, then config.yaml lcm.context_threshold_tokens.
     absolute_threshold_tokens: int = 0
@@ -1881,6 +1888,17 @@ class LCMConfig:
                        "(must be >= 0 and <= 1)")
             c.stub_first_exit_target_ratio, source = LCMConfig.stub_first_exit_target_ratio, "default"
         _record("stub_first_exit_target_ratio", source, warning)
+        for name, key in (
+            ("depth_target_ratio", "LCM_DEPTH_TARGET_RATIO"),
+            ("summary_prefix_target_ratio", "LCM_SUMMARY_PREFIX_TARGET_RATIO"),
+        ):
+            default = getattr(c, name)
+            ratio, source, warning = _parse_float_env_with_source(key, default)
+            if not 0 <= ratio < 1:
+                warning = f"invalid env {key}={ratio!r} ignored (must be >= 0 and < 1)"
+                ratio, source = default, "default"
+            setattr(c, name, ratio)
+            _record(name, source, warning)
 
         # Every other scalar LCM_* override is applied uniformly from the spec.
         for spec in ENV_FIELD_SPECS:

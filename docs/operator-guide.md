@@ -561,7 +561,8 @@ Useful environment variables:
 | `LCM_DYNAMIC_LEAF_CHUNK_ENABLED` | `false` | Enable backlog-sized leaf chunk targets; when off, one leaf takes at most max(`LCM_LEAF_CHUNK_TOKENS`, `LCM_DYNAMIC_LEAF_CHUNK_MAX`) of the oldest non-tail raw backlog, capped at 40% of a known window |
 | `LCM_DYNAMIC_LEAF_CHUNK_MAX` | `40000` | Upper bound for dynamic leaf chunk targets |
 | `LCM_THRESHOLD_FULL_SWEEP_ENABLED` | `true` | At threshold, run one synchronous bounded sweep that drains chunked raw history before publishing one new active context; `false` compacts only until pressure falls below the trigger |
-| `LCM_SUMMARY_PREFIX_TARGET_TOKENS` | `0` | Sweep-only summary-frontier target; `0` uses one leaf budget, capped at a quarter of the compaction threshold |
+| `LCM_SUMMARY_PREFIX_TARGET_TOKENS` | `0` | Positive values override the ratio. When both settings are `0`, the sweep uses one leaf budget capped at a quarter of the compaction threshold |
+| `LCM_SUMMARY_PREFIX_TARGET_RATIO` | `0` | Summary-frontier budget as a share of the model window, used when the tokens setting is `0`. Env only, valid from `0` up to but excluding `1` |
 | `LCM_BACKGROUND_LEAF_PREP_ENABLED` | `false` | #787 slice 1: after each turn, summarise the oldest raw backlog above the frontier off-turn (never the fresh tail) once the host count passes P = threshold − 0.15 × window, and at the threshold crossing publish those prepared leaves through the fenced publication, with no model call, down to L = threshold − max(2 × chunk, 0.1 × window); still above L, the turn runs the normal path. Prepared leaves are in memory only. Off on windows where P ≤ 0.30 × window or L ≤ 0, when `auxiliary.compression.max_concurrency` is 1, and while ignore-message patterns are set. `/lcm status` reports `background_leaf_prep` counters while on |
 | `LCM_BACKGROUND_LEAF_PREP_MAX_CALLS` | `8` | The background preparation's own spend guard: summariser calls per window (it also waits while the foreground guard has fewer than 2 calls left, and uses its own `prep:` circuit keys) |
 | `LCM_BACKGROUND_LEAF_PREP_WINDOW_S` | `600` | The window of that guard, in seconds |
@@ -581,6 +582,7 @@ Useful environment variables:
 | `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUB_THRESHOLD_TOKENS` | `10000` | First-sight threshold: a new tool result over this many tokens is stubbed at ingest |
 | `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUB_AGED_THRESHOLD_TOKENS` | `2000` | Aged tier: at a compaction, a tool result outside the fresh tail is stubbed from this many tokens (`0` = the first-sight threshold; never above it) |
 | `LCM_STUB_FIRST_EXIT_TARGET_RATIO` | `0` | Lowers the stub-first exit's target (#671) to min(built-in, int(ratio x threshold)); `0` keeps the built-in min(threshold - `LCM_LEAF_CHUNK_TOKENS`, 0.95 x threshold); `>= 0` and `<= 1`, else the built-in target with a config warning |
+| `LCM_DEPTH_TARGET_RATIO` | `0` | Whole-prompt target as a share of the model window for automatic threshold sweeps. Env only, off at `0`, and active only below the compaction trigger |
 | `LCM_LARGE_OUTPUT_TRANSCRIPT_GC_ENABLED` | `false` | Removed in v0.30.0; parsed and ignored (#1246). Setting it true logs one warning per process; summarized tool rows are no longer rewritten |
 | `LCM_CRITICAL_BUDGET_PRESSURE_RATIO` | `0.0` | Disabled at `0.0`; when set, permits critical-pressure bypasses for bounded deferred catch-up only |
 | `LCM_SURVIVAL_FIT` | `true` | When compaction cannot bring the returned list under the model window (a publication failure, a sweep deadline, a lock), drop the oldest whole user turns from live context until it fits; an oversized newest turn gets a bounded projection. Nothing is deleted: the rows stay stored and reachable with `lcm_grep` / `lcm_load_session`. Logs `LCM survival fit applied`, warns the user once, and `/lcm doctor` reports `survival_fit` |
@@ -1105,13 +1107,18 @@ What the main knobs do:
   otherwise MIN resets with a warning naming `LCM_LEAF_TARGET_MAX_TOKENS` (#614, #1138).
 - `LCM_THRESHOLD_FULL_SWEEP_ENABLED=true` (the default) makes a threshold-triggered invocation
   keep draining oldest raw chunks outside the protected tail, even after prompt
-  pressure falls below the trigger. It always uses the configured working leaf
-  size, then condenses a too-large summary frontier toward
-  `LCM_SUMMARY_PREFIX_TARGET_TOKENS` (`0` means one leaf budget, capped at a quarter
-  of the compaction threshold). The whole invocation is bounded to 12 summary calls,
+  pressure falls below the trigger. `LCM_DEPTH_TARGET_RATIO` can stop the leaf passes
+  early based on the whole-prompt estimate, including the host's fixed load.
+  The sweep then condenses an oversized summary frontier toward the configured
+  prefix budget. The whole invocation is bounded to 12 summary calls,
   persists each completed DAG pass,
   and publishes one active context at the end. It remains synchronous and does
   not enable deferred/background maintenance.
+- With depth targeting active, the `lcm_status` sweep block reports
+  `depth_target_tokens`, `fixed_load_tokens`, `whole_prompt_tokens_after`, and
+  `depth_target_met`. The pass estimate determines whether the target was met.
+  The reported size after compaction is measured from the returned context plus
+  fixed load.
 - Its time is one budget counted from `compress()` entry (#605). The progress
   call (a condensation pass when the summary frontier is over its target, else
   the first leaf) is tried while at least 15 s of usable time is left before

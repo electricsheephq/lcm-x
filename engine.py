@@ -2351,13 +2351,18 @@ class LCMEngine(
             node_max = self._dag._conn.execute(
                 "SELECT COALESCE(MAX(node_id), 0) FROM summary_nodes WHERE session_id = ?",
                 (self._session_id,)).fetchone()[0]
+            config_values = [getattr(self._config, name) for name in names]
+            for name in ("depth_target_ratio", "summary_prefix_target_ratio"):
+                value = getattr(self._config, name)
+                if value != 0:
+                    config_values.append((name, value))
             state = [replay, bound_store[2], message_max,
                      self._store_complete_frontier(),
                      node_max,
                      pressure, tokens // 1024, tokens, int(self.context_length or 0), self.threshold_tokens,
                      yield_ready,
                      route,
-                     [getattr(self._config, name) for name in names]]
+                     config_values]
             return hashlib.sha256(json.dumps(state, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
         except Exception:
             self._no_progress_metadata_warning()

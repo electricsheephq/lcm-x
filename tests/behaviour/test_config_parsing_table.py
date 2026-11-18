@@ -56,6 +56,8 @@ CONFIG_ROWS = (
     ('large_output_active_replay_stubbing_enabled', 'LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUBBING_ENABLED', 'bool', True),
     ('large_output_transcript_gc_enabled', 'LCM_LARGE_OUTPUT_TRANSCRIPT_GC_ENABLED', 'bool', False),
     ('stub_first_exit_target_ratio', 'LCM_STUB_FIRST_EXIT_TARGET_RATIO', 'float', 0.0),
+    ('depth_target_ratio', 'LCM_DEPTH_TARGET_RATIO', 'float', 0.0),
+    ('summary_prefix_target_ratio', 'LCM_SUMMARY_PREFIX_TARGET_RATIO', 'float', 0.0),
     ('native_recovery', 'LCM_NATIVE_RECOVERY', 'bool', False),
     ('survival_fit', 'LCM_SURVIVAL_FIT', 'bool', True),
     ('embeddings_enabled', 'LCM_EMBEDDINGS_ENABLED', 'bool', True),
@@ -202,6 +204,8 @@ SPECIAL = {
     "leaf_target_max_tokens": (D, D, D, D, D, D, D, D, D, D, D, D, D, D, D, HUGE),
     "summary_prompt_version": (1,) * 16,
     "stub_first_exit_target_ratio": (D, D, D, D, 1.0, 0.0, D, D, D, D, D, D, D, D, 0.5, D),
+    "depth_target_ratio": (D, D, D, D, D, 0.0, D, D, D, D, D, D, D, D, 0.5, D),
+    "summary_prefix_target_ratio": (D, D, D, D, D, 0.0, D, D, D, D, D, D, D, D, 0.5, D),
     # #1982: below the 500-token floor falls back to the default; the aged threshold also accepts 0.
     "large_output_active_replay_stub_threshold_tokens": (D,) * 15 + (HUGE,),
     "large_output_active_replay_stub_aged_threshold_tokens": (D, D, D, D, D, 0) + (D,) * 9 + (HUGE,),
