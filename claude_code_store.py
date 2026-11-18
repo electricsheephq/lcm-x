@@ -44,6 +44,7 @@ from .config import embedding_provider_id
 from .embedding_maintenance import run_incremental_embedding_pass
 from .embedding_provider import FastembedProvider
 from .externalize import extract_externalized_refs, load_externalized_payload
+from .message_content import canonical_text
 from .store import MessageStore, register_session_purge
 
 OWNER_FILE = "capture-owner.json"
@@ -535,7 +536,7 @@ def ingest_lines(store: MessageStore, lineage: Lineage, cursor: dict, lines: lis
         entry = entry if isinstance(entry, dict) else None
         uid = entry.get("uuid") if entry and isinstance(entry.get("uuid"), str) and entry["uuid"] else None
         parsed.append(_Line(cursor["line_index"] + index, raw, entry,
-                            classify_entry(entry) if entry else UNKNOWN, uid,
+                            classify_entry(entry) if entry else UNKNOWN, canonical_text(uid) if uid else None,
                             content_digest(entry) if entry else None))
     uids = {line.uid for line in parsed if line.uid and line.entry_class == PROJECTED}
     known = _versions(store, lineage.key, uids)

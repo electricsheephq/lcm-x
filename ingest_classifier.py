@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from bisect import bisect_left
 from collections import Counter, defaultdict
+from contextlib import suppress
 from copy import deepcopy
 from dataclasses import dataclass, field
 import json
@@ -15,7 +16,7 @@ from typing import NamedTuple, Protocol
 
 from . import ingest_ledger as ledger
 from .host_uid import _valid_uid
-from .message_content import normalize_content_value
+from .message_content import canonical_value, normalize_content_value
 from .reconcile import ReconcileMixin, _strip_volatile_host_scaffolding
 from .store import _normalize_observed_at, ledger_digest
 
@@ -182,7 +183,8 @@ class SqliteLedgerSnapshot:
         for b in bindings:
             calls = b["tool_calls"]
             if isinstance(calls, str):
-                b["tool_calls"] = json.loads(calls)
+                with suppress(ValueError, TypeError):
+                    b["tool_calls"] = canonical_value(json.loads(calls))
             self._payloads[b["occ_id"]] = b
             b["uids"], b["constituents"] = set(), set()
             if b["stamp"] is not None:

@@ -169,6 +169,8 @@ from .bypass import BypassMixin
 from .prefix_matching import PrefixMatchingMixin
 from .lifecycle_state import LifecycleStateStore
 from .message_content import (
+    canonical_text,
+    canonical_value,
     normalize_content_value,
     stored_text_content_for_pattern_matching,
     text_content_for_pattern_matching,
@@ -2838,6 +2840,7 @@ class LCMEngine(
             # turns may still fire it; meta has no final-response/hook-fired bit.
             if not meta.get("interrupted"):
                 return
+            messages, host_view = self._canonical_host_view(messages)
             binding = (self._session_id, self._conversation_id)
 
             def ingest_stopped(active_engine):
@@ -2859,7 +2862,7 @@ class LCMEngine(
                     logger.debug("LCM stopped user tail still mutable; defer to completed-turn catch-up")
                     return
                 try:
-                    active_engine.ingest(messages)
+                    active_engine.ingest(messages, **host_view)
                 finally:
                     active_engine.note_turn_complete()
 
@@ -2869,7 +2872,7 @@ class LCMEngine(
         finally:
             sender_capture.retire(self, meta.get("turn_id"))
 
-    def ingest(self, messages: List[Dict[str, Any]]) -> None:
+    def ingest(self, messages: List[Dict[str, Any]], *, host_pairs=()) -> None:
         """Persist messages to the durable store every turn.
 
         Called by the post_llm_call plugin hook so messages land in LCM
@@ -2882,30 +2885,29 @@ class LCMEngine(
         compression runs later the same turn, already-ingested messages
         are skipped (no duplicates).
         """
-        if self._maybe_reclassify_current_session_as_auxiliary_before_message_ingest():
-            self._log_bypassed_ingest()
-            self._remember_lcm_bypass_message_prefix(self._bypass_lcm_session_id(), messages)
-            return
-        if self._bypasses_lcm_context_management():
-            self._log_bypassed_ingest()
-            self._remember_lcm_bypass_message_prefix(self._bypass_lcm_session_id(), messages)
-            return
-        if self._session_id and messages:
-            try:
+        try:
+            if not host_pairs:
+                messages, host_view = self._canonical_host_view(messages)
+                host_pairs = host_view.get("host_pairs", ())
+            if (self._maybe_reclassify_current_session_as_auxiliary_before_message_ingest()
+                    or self._bypasses_lcm_context_management()):
+                self._log_bypassed_ingest()
+                self._remember_lcm_bypass_message_prefix(self._bypass_lcm_session_id(), messages)
+            elif self._session_id and messages:
                 self._remember_lcm_normal_message_prefix(
                     self._session_id,
                     messages,
                     conversation_id=self._conversation_id,
                 )
-                self._ingest_messages(messages)
+                self._ingest_messages(messages, **({"host_pairs": host_pairs} if host_pairs else {}))
                 self._record_ingest_success()
                 self._clear_foreground_rebind_candidate_if_bound_session_confirmed()
                 logger.debug(
                     "Per-turn ingest OK: session=%s msgs=%d cursor=%d",
                     self._session_id, len(messages), self._ingest_cursor,
                 )
-            except Exception as e:
-                self._record_ingest_failure("per-turn ingest()", e)
+        except Exception as e:
+            self._record_ingest_failure("per-turn ingest()", e)
 
     def _is_retry_worthy_leaf_summary_error(self, exc: Exception) -> bool:
         return _is_retry_worthy_leaf_summary_error(exc)
@@ -5112,14 +5114,18 @@ class LCMEngine(
                 self._frozen_tail_reached = False
                 self._retry_session_end_tails()
                 try:
-                    self._on_session_end_unlocked(session_id, messages)
+                    messages, host_view = self._canonical_host_view(messages)
+                except Exception as exc:
+                    self._record_ingest_failure("session-end ingest", exc)
+                else:
+                    self._on_session_end_unlocked(session_id, messages, **host_view)
                 finally:
                     self._session_end_flush_active = False
 
     def _on_session_end_unlocked(
         self,
         session_id: str,
-        messages: List[Dict[str, Any]],
+        messages: List[Dict[str, Any]], *, host_pairs=(),
     ) -> None:
         ended_generation = self._in_process_auxiliary_caller_generation(session_id)
         active_auxiliary_end = session_id in self._active_auxiliary_session_ids()
@@ -5438,7 +5444,8 @@ class LCMEngine(
         # Only this path ends the foreground binding. Same-id bypass callbacks
         # above can leave it serving, so session-id equality alone is insufficient.
         try:
-            self._finalize_foreground_session_end_unlocked(session_id, messages)
+            self._finalize_foreground_session_end_unlocked(
+                session_id, messages, **({"host_pairs": host_pairs} if host_pairs else {}))
         finally:
             with self._attribution_span("retire"):
                 self._retire_embedding_maintenance(wait=False)
@@ -5742,7 +5749,7 @@ class LCMEngine(
     def _finalize_foreground_session_end_unlocked(
         self,
         session_id: str,
-        messages: List[Dict[str, Any]],
+        messages: List[Dict[str, Any]], *, host_pairs=(),
     ) -> None:
         with self._attribution_span("classifier"):
             proof = getattr(self, "_compress_commit_proof", None)
@@ -5819,6 +5826,7 @@ class LCMEngine(
                         self._ingest_messages(
                             messages,
                             allow_session_end_replay_proof=is_current_session_full_history_end,
+                            **({"host_pairs": host_pairs} if host_pairs else {}),
                         )
                     self._session_end_flush_active = False
                     ingest_finished = True
@@ -6202,25 +6210,24 @@ class LCMEngine(
         messages = kwargs.get("messages")
 
         if name != "lcm_inspect" and messages and self._session_id:
-            if self._maybe_reclassify_current_session_as_auxiliary_before_message_ingest():
-                self._remember_lcm_bypass_message_prefix(self._bypass_lcm_session_id(), messages)
-            elif not (
-                self._session_ignored or self._session_stateless or self._thread_context_stateless()
-            ):
-                try:
-                    self._ingest_messages(messages)
+            try:
+                messages, host_view = self._canonical_host_view(messages)
+                if self._maybe_reclassify_current_session_as_auxiliary_before_message_ingest():
+                    self._remember_lcm_bypass_message_prefix(self._bypass_lcm_session_id(), messages)
+                elif not (self._session_ignored or self._session_stateless or self._thread_context_stateless()):
+                    self._ingest_messages(messages, **host_view)
                     self._record_ingest_success()
                     self._clear_foreground_rebind_candidate_if_bound_session_confirmed()
-                except Exception as e:
-                    self._record_ingest_failure("tool-call ingest", e)
+            except Exception as e:
+                self._record_ingest_failure("tool-call ingest", e)
 
         handlers = {
             spec.name: getattr(lcm_tools, spec.handler_name) for spec in TOOL_REGISTRY
         }
         handler = handlers.get(name)
         if handler:
-            return handler(args, engine=self,
-                           **{k: v for k, v in kwargs.items() if k in {"delivery_unit", "delivery_order", "adjacent_reply", "summary_event_time", "snippet_window_hits", "extra_entries", "later_statements", "min_sessions", "session_hints", "recall_guidance", "recency_floor"}})
+            return canonical_text(handler(canonical_value(args), engine=self,
+                           **{k: v for k, v in kwargs.items() if k in {"delivery_unit", "delivery_order", "adjacent_reply", "summary_event_time", "snippet_window_hits", "extra_entries", "later_statements", "min_sessions", "session_hints", "recall_guidance", "recency_floor"}}))
         return json.dumps({"error": f"Unknown LCM tool: {name}"})
 
     def _database_path_source(self) -> str:
@@ -7780,6 +7787,7 @@ class LCMEngine(
         allow_session_end_replay_proof: bool = False,
         no_view: bool = False,
         retried_tail: Dict[str, Any] | None = None,
+        host_pairs=(),
     ) -> List[Dict[str, Any]]:
         """Persist new messages to the store.
 
@@ -7919,7 +7927,7 @@ class LCMEngine(
                                     active, finish = self._ingest_messages_transaction(
                                         messages, after_commit, attribution,
                                         prepared=prepared, telemetry=record,
-                                        allow_session_end_replay_proof=allow_session_end_replay_proof)
+                                        allow_session_end_replay_proof=allow_session_end_replay_proof, host_pairs=host_pairs)
                                     if self._ingest_ledger_attempt is not None:
                                         self._write_ingest_ledger(self._ingest_ledger_attempt, after_commit, attribution)
                                     self._link_stored_todo_replays(messages, prepared.get("stored_at", {}))
@@ -8015,7 +8023,7 @@ class LCMEngine(
                             self._identity_anchor_observe_recovery()
                             self._frozen_ledger_prepared = ledger_prepared
                             frozen_replay, _finish = self._ingest_messages_transaction(messages, [], attribution,
-                                allow_session_end_replay_proof=allow_session_end_replay_proof)
+                                allow_session_end_replay_proof=allow_session_end_replay_proof, host_pairs=host_pairs)
                         except Exception as error:
                             frozen_error = error
                         finally:
@@ -8909,7 +8917,7 @@ class LCMEngine(
                 self._ingest_ledger_observations = collector
 
     def _ingest_messages_transaction(self, messages, after_commit, attribution, *,
-                                     allow_session_end_replay_proof=False, prepared=None, telemetry=None):
+                                     allow_session_end_replay_proof=False, prepared=None, telemetry=None, host_pairs=()):
         """Today's classifier and evidence; caller owns COMMIT and retry.
 
         Store-dependent protection/token counts are part of lock_hold_ms, and
@@ -8923,7 +8931,7 @@ class LCMEngine(
             except Exception as exc:
                 logger.debug("LCM ingest cursor reconciliation probe failed: %s", exc)
                 self._ingest_cursor_needs_reconcile = True
-        self._capture_host_rewrites(messages)
+        self._capture_host_rewrites(messages, **({"host_pairs": host_pairs} if host_pairs else {}))
         n = len(messages)
         cursor = entry_cursor = min(max(self._ingest_cursor, 0), n)
         restamp_metadata, recovery_fallback = {}, False
@@ -9428,7 +9436,7 @@ class LCMEngine(
             self, {sid for (idx, _m), sid in zip(messages_to_store_with_index, store_ids)
                    if idx in anchor_remainders and sid}))
         originals = [messages[idx] for idx, _msg in messages_to_store_with_index]
-        after_commit.append(lambda: self._watch_stored_user_rows(zip(originals, protected_messages, store_ids)))
+        after_commit.append(lambda: self._watch_stored_user_rows(zip(originals, protected_messages, store_ids), host_pairs))
         stored_at = {idx: store_id for (idx, _msg), store_id in zip(messages_to_store_with_index, store_ids)}
         if prepared is not None:
             prepared["stored_at"] = stored_at

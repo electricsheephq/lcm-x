@@ -24,7 +24,7 @@ import re
 from typing import Any, Dict, List, Optional
 
 from .host_uid_emit import carry_identity
-from .message_content import text_content_for_pattern_matching
+from .message_content import canonical_text, text_content_for_pattern_matching
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +53,7 @@ class PlaceholderLedgerMixin:
 
     @staticmethod
     def _ignored_active_replay_placeholder(content: str) -> str:
+        content = canonical_text(content)
         digest = hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
         return (
             "[LCM active replay placeholder: message ignored; "

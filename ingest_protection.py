@@ -200,7 +200,7 @@ from .ingest_integrity import (
     scan_sqlite_payload_risks as scan_sqlite_payload_risks,
     externalized_payload_stats as externalized_payload_stats,
 )
-from .message_content import normalize_content_value
+from .message_content import canonical_value, normalize_content_value
 from .tokens import count_tokens
 
 logger = logging.getLogger(__name__)
@@ -445,7 +445,7 @@ def redact_sensitive_value(value: Any, config, *, parse_json_strings: bool = Fal
         if parsed is not None and not _json_has_duplicate_object_keys(value):
             protected = redact_sensitive_value(parsed, config, parse_json_strings=True)
             if protected != parsed:
-                return json.dumps(protected, ensure_ascii=False, separators=(",", ":"))
+                return json.dumps(canonical_value(protected), ensure_ascii=False, separators=(",", ":"))
     return redact_sensitive_text(value, config)
 
 
@@ -669,7 +669,7 @@ def _protect_value(
                 parse_json_strings=True,
             )
             if protected != parsed:
-                return json.dumps(protected, ensure_ascii=False, separators=(",", ":"))
+                return json.dumps(canonical_value(protected), ensure_ascii=False, separators=(",", ":"))
             return value
 
     return _protect_payload_substrings(
