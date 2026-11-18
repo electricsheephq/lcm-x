@@ -27,6 +27,7 @@ import json
 import logging
 from collections import Counter
 from contextvars import ContextVar
+from dataclasses import dataclass, field
 from typing import NamedTuple, Optional
 
 from .config import host_message_uid_mode, identity_anchor_enabled, uid_recognition_enabled
@@ -45,6 +46,16 @@ _SCAN_LIMIT = 2000  # owned rows per source page; a larger eligible backlog drai
 _SCAN_EXTEND = 4  # a first tool group open at the cap is re-read once with this many times the page
 _COPY_WINDOW = 8000  # store ids before the scanned prefix; a lookup miss leaves the row summarized
 _CONTIGUITY = "leaf input cannot form a contiguous stored prefix"
+
+
+@dataclass
+class _UidDropState:
+    owner: object
+    before: list
+    uid_trimmed: bool = False
+    legacy_replay: Optional[tuple[list, bool, bool, int]] = None
+    # Object id -> (store id, re-resolve UID, base removes or whole scaffold).
+    removed: dict[int, tuple[Optional[int], bool, bool]] = field(default_factory=dict)
 
 
 class HiddenBacklog(NamedTuple):
@@ -135,28 +146,33 @@ class StoreCompleteMixin:
         drop.difference_update(*(group for group in groups.values() if not group <= drop))
         if drop:
             self._compress_host_rows_consumed += len(drop)
+            if (scope := _UID_DROP_INPUT.get()) is not None and scope.owner is self:
+                scope.removed.update((id(messages[i]), (candidates[i], True, False)) for i in drop)
         drop.update(i for i, row in enumerate(messages)
                     if i >= leading and i not in resolved and self._host_uid_whole_scaffold(row))
         return [m for i, m in enumerate(messages) if i not in drop] if drop else messages
 
     def _guard_uid_covered_drop(self, result):
-        before = _UID_DROP_INPUT.get()
-        if before is None:
+        scope = _UID_DROP_INPUT.get()
+        if scope is None or scope.owner is not self or not (scope.uid_trimmed or scope.removed):
             return result
         present = Counter((str(row.get("message_uid") or ""), _emission_identity(row)) for row in result)
+        present_ids = {id(row) for row in result}
         for row in result:
             absorbed = row.get("_absorbed_message_uids") or ()
             if len(absorbed) == 1 and (remainder := self._generated_context_carrier_remainder(row)) is not None:
                 present[(str(absorbed[0]), _emission_identity(row, content=remainder))] += 1
         system = result[0].get("content") if result and result[0].get("role") == "system" else None
         missing, nodes = [], set()
-        for row in before:
+        # Match surviving objects before falling back to emitted identity, so an equal
+        # retained occurrence cannot stand in for a different recorded occurrence.
+        for row in sorted(scope.before, key=lambda row: id(row) not in present_ids):
             key = str(row.get("message_uid") or ""), _emission_identity(row)
             if present[key]:
                 present[key] -= 1
             elif row.get("role") == "system" and system == self._append_lcm_note_to_content(row.get("content")):
                 continue
-            elif not self._host_uid_whole_scaffold(row):
+            elif id(row) in scope.removed or not self._host_uid_whole_scaffold(row):
                 missing.append(row)
         if not missing:
             return result
@@ -165,13 +181,23 @@ class StoreCompleteMixin:
             if row.get("role") in {"user", "assistant"} and isinstance(content, str):
                 for header in self._LCM_SUMMARY_PART_HEADER_RE.finditer(content):
                     nodes.update(self._verified_lcm_summary_prefix(content[header.start():])[1])
-        matches = self._host_uid_resolve(missing) if nodes else {}
-        if len(matches) == len(missing) and {row["store_id"] for row in matches.values()} <= {
-            sid for node_id in nodes for sid in self._dag.source_message_ids(node_id, limit=2**63 - 1)
-        }:
+        covered = {sid for node in nodes for sid in self._dag.source_message_ids(node, limit=2**63 - 1)}
+        other = [row for row in missing if id(row) not in scope.removed]
+        uid_rows = [row for row in missing if id(row) in scope.removed and scope.removed[id(row)][1]]
+        resolved = {id(uid_rows[i]): row["store_id"] for i, row in self._host_uid_resolve(uid_rows).items()}
+        failing = 0
+        for row in missing:
+            if (record := scope.removed.get(id(row))) is not None:
+                sid, check_uid, exempt = record
+                failing += not exempt and (sid not in covered or (check_uid and resolved.get(id(row)) != sid))
+        unproven = len(other) - sum(row["store_id"] in covered for row in self._host_uid_resolve(other).values())
+        if failing or unproven:
+            logger.info("LCM UID covered drop: recorded=%d recorded_failing=%d other_missing=%d other_unproven=%d",
+                        len(scope.removed), failing, len(other), unproven)
+        if not failing:
             return result
         self._compress_host_rows_consumed = 0
-        restored = self._sanitize_active_context_messages(before, insert_missing_tool_stubs=False)
+        restored = self._sanitize_active_context_messages(scope.before, insert_missing_tool_stubs=False)
         self._ingest_cursor = len(restored)
         return restored
 
