@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """Print the recorded summary share of each Track S replay as JSON lines.
 
-The share is of the assembled context: the system message plus the view the reader is sent. The reader's
-question, tool schemas, guidance and tool exchanges are not in the denominator, so a plain and an open replay
-of one context report the same share.
+The denominator is the system message plus the view, plus the declared fixed load when set. Plain and open
+replays of the same context with the same declared load report the same share.
 """
 
 import argparse
@@ -27,6 +26,7 @@ def main(argv=None) -> int:
                 "arm": record["arm"]["name"], "seed": record["seed"], "run": record["run"],
                 "checkpoint": record.get("checkpoint_id", record.get("checkpoint")),
                 "summary_tokens": summary_tokens, "prompt_tokens": prompt_tokens,
+                "fixed_load_tokens": record.get("fixed_load_tokens", 0),
                 "share": summary_tokens / prompt_tokens,
             }
         except (OSError, KeyError, TypeError, ValueError) as exc:
