@@ -96,6 +96,12 @@ def test_render_decision_preserves_open_recall_source(load, tmp_path, monkeypatc
     assert rows["open"][OPEN]["recall_source"] == OPEN
     assert "one run per seed" in rows["open"][OPEN]["note"]
 
+    # Data without the env-file arms renders no env-file rows (the existing arms' output is unchanged).
+    monkeypatch.setitem(render.main.__globals__, "load", lambda _: {"LCMX-fleet": {"seed-1": []}})
+    render.main()
+    assert PLAIN not in (render.H / "DECISION-RUN.md").read_text()
+    assert PLAIN not in (render.H / "DECISION-RUN.json").read_text()
+
 
 @pytest.fixture
 def stubbed_runner(load, tmp_path, monkeypatch):
@@ -183,6 +189,13 @@ def test_summary_share_cli(tmp_path):
         dict(base, arm={"name": OPEN}, summary_tokens=80, prompt_tokens=160, checkpoint_id="S1-CP340000"),
         dict(base, arm={"name": OPEN}, prompt_tokens=160),
     ]
+    for name, bad in (("zero-prompt", {"summary_tokens": 1, "prompt_tokens": 0}),
+                      ("bool-count", {"summary_tokens": True, "prompt_tokens": 10})):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "summary.json").write_text(json.dumps(dict(base, arm={"name": PLAIN}, **bad)))
+        rejected = subprocess.run([sys.executable, str(TRACK / "scorer/summary_share.py"), tmp_path / name],
+                                  capture_output=True, text=True)
+        assert rejected.returncode == 2 and not rejected.stdout, name
     for path, record in zip(paths, receipts):
         (path / "summary.json").write_text(json.dumps(record))
     cmd = [sys.executable, str(TRACK / "scorer/summary_share.py")]
@@ -219,3 +232,7 @@ def test_summary_blocks_match_the_engine_render(load):
             {"role": "user", "content": [{"type": "text", "text": glued}, {"type": "image_url", "image_url": {}}]},
             {"role": "assistant", "content": "Quoting [Recent Summary (d0, node 13)] in a reply is not a block."}]
     assert runner.summary_tokens(run, view) == sum(len(p) for p in parts)
+    # A block counts only at the start or after the part separator, and only when a paragraph break or the end follows.
+    part = parts[-1]
+    for text in ("Quoted earlier:\n\n" + part, "Quoted inline: " + part, part + "\nthe same paragraph goes on"):
+        assert runner.SUMMARY_BLOCK_RE.findall(text) == [], text[:20]
