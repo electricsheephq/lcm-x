@@ -236,3 +236,16 @@ def test_summary_blocks_match_the_engine_render(load):
     part = parts[-1]
     for text in ("Quoted earlier:\n\n" + part, "Quoted inline: " + part, part + "\nthe same paragraph goes on"):
         assert runner.SUMMARY_BLOCK_RE.findall(text) == [], text[:20]
+
+
+def test_schema_engine_serves_the_current_engine(load):
+    """The open reader's schema lookup on this tree: a bare shell raises, the configured shell lists the public tools."""
+    import hermes_lcm.config as lcm_config
+    import hermes_lcm.engine as lcm_engine
+
+    runner = load("s2/run_s_lcmx.py")
+    with pytest.raises(AttributeError):
+        lcm_engine.LCMEngine.get_tool_schemas(lcm_engine.LCMEngine.__new__(lcm_engine.LCMEngine))
+    shell = runner.schema_engine(SimpleNamespace(engine=lcm_engine, config=lcm_config))
+    names = {schema.get("name") for schema in lcm_engine.LCMEngine.get_tool_schemas(shell)}
+    assert set(runner.R.PUBLIC_TOOLS) & names

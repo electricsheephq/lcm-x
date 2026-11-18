@@ -340,6 +340,13 @@ def summary_tokens(run: Run, view: list[dict]) -> int:
             total += sum(run.m.tokens.count_tokens(block) for block in SUMMARY_BLOCK_RE.findall(text))
     return total
 
+def schema_engine(m):
+    """A closed engine shell for the tool-schema lookup. Engines from b48011df on read their config there, so the shell
+    carries one built from the arm's env, which the caller has applied."""
+    shell = m.engine.LCMEngine.__new__(m.engine.LCMEngine)
+    shell._config = m.config.LCMConfig.from_env()
+    return shell
+
 def probe(run: Run, view: list[dict], reader, is_store: bool, src=None) -> list[dict]:
     src_db, src_home, out = (src["db"], src["home"], src["dir"]) if src else (run.db, run.home, run.dir)
     blocks = sum(len(SUMMARY_RE.findall(m["content"] if isinstance(m.get("content"), str) else json.dumps(m.get("content"))))
@@ -531,7 +538,7 @@ def main():
     else:
         view = [to_msg(r) for r in rows if r["role"] != "system"]
         view = view[-int(arm["env"]["LCM_FRESH_TAIL_COUNT"]):] if arm["name"] == "C1" else view
-    run.engine = m.engine.LCMEngine.__new__(m.engine.LCMEngine)  # closed; only for the tool-schema lookup
+    run.engine = schema_engine(m)  # closed; only for the tool-schema lookup
     summary.update(gates=run.gates, events=run.events, receipts=run.receipts_out,
                    final_context={"rows": len(view), "tokens": run.ntok([run.sysmsg] + view)},
                    final_continuity=continuity(man, run.system, view))
