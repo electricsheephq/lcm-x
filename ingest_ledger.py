@@ -280,6 +280,7 @@ def plan_ordinals(existing, placements):
                 break
         if window is None and widths < len(positions):
             # No window within the limit: every label and placement, in order, at the normal step.
+            # Invariant: a caller passing more than _RESPACE_WINDOW_LIMIT labels passes the complete lineage.
             lower, step = _window_step(positions, prefix, 0, len(positions))
             window = (0, len(positions), lower, step) if step >= 1 else None
         if window is None:
@@ -294,7 +295,7 @@ def plan_ordinals(existing, placements):
                 value += step
                 moved += positions[g] != value
                 positions[g] = value
-        logger.info("LCM ledger ordinals respace fallback: window %s, %d labels moved",
+        logger.info("LCM ledger ordinals respace fallback planned: window %s, %d labels to move",
                     "whole lineage" if end - start > _RESPACE_WINDOW_LIMIT else end - start, moved)
     return result, {old: new for old, new in zip(original, positions) if old != new}
 
