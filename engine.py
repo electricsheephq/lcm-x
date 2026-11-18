@@ -19,7 +19,7 @@ import time
 import uuid
 from bisect import bisect_left, bisect_right
 from collections import Counter, defaultdict, deque
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
@@ -163,7 +163,7 @@ from .host_uid import HostUidShadowMixin, _uid_recognition_pass, _valid_uid
 from .host_row_recovery import HostRowRecoveryMixin
 from .unended_catchup import UnendedCatchupMixin
 from .host_uid_emit import carry_identity, identity_emit_enabled, record_absorbed_message, sync_cached_host_metadata
-from .store_complete import HiddenBacklog, StoreCompleteMixin
+from .store_complete import _UID_DROP_INPUT, HiddenBacklog, StoreCompleteMixin
 from .survival_fit import SurvivalFitMixin, _carries_survival_notice, _host_estimate, survival_reserve_fraction
 from .db_bootstrap import refresh_legacy_conversation_ids
 from .reset_state import ResetStateMixin
@@ -2523,14 +2523,15 @@ class LCMEngine(
 
     def _compression_owned_by_another_thread(self) -> bool:
         owner = self._compress_owner
-        return owner not in (None, threading.get_ident())
+        return owner not in (None, threading.get_ident()) and not self._bypasses_lcm_context_management()
 
     def _automatic_compression_blocked(self, *, ignore_cooldown: bool = False) -> bool:
         """Defer while another thread owns a pass, including on host recovery attempts.
 
         The #651 and #625 holds exempt recovery, cleanup-only, forced overflow, the survival ceiling
         and bypassed sessions."""
-        if self._compression_owned_by_another_thread():
+        self._thread_context.compression_busy = self._compression_owned_by_another_thread()
+        if self._thread_context.compression_busy:
             return True
         if ignore_cooldown or self._compaction_request.below_threshold_cleanup_only:
             return False
@@ -2560,6 +2561,9 @@ class LCMEngine(
     def _compression_block_reason(self) -> Optional[str]:
         """#651: the host classifies ``cooldown*`` as a transient block: defer, never exhaust. #625: the #608
         sweep hold is ``cooldown:lcm_sweep_budget``."""
+        if getattr(self._thread_context, "compression_busy", False):
+            self._thread_context.compression_busy = False
+            return "cooldown:lcm_compaction_in_progress"
         if self._compression_owned_by_another_thread():
             return "cooldown:lcm_compaction_in_progress"
         if self._retained_stop_hold_active():
@@ -11540,7 +11544,10 @@ class LCMEngine(
         if compressed != original_messages or ingest_cleanup_changed_active_context:
             self._last_compression_status = "overflow_recovery"
             self._last_compression_noop_reason = ""
-            self._frontier_holder().adopt_trusted(len(compressed))
+            scope = _UID_DROP_INPUT.get()
+            with scope.cursor_binding() if scope is not None and scope.owner is self and scope.restored else nullcontext(True) as bound:
+                if bound:
+                    self._frontier_holder().adopt_trusted(len(compressed))
             logger.info(
                 "LCM assembly guardrail recovery: %d messages → %d (no new summary node)",
                 len(original_messages),

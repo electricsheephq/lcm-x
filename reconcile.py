@@ -3200,9 +3200,9 @@ class ReconcileMixin:
             for row in stored_tail_rows
         ]
         run.stored_tail = stored_tail
-        budgeted = bool(uid_cursor)
+        budgeted = bool(uid_cursor) and identity_anchor_enabled()
         if budgeted and (unbound := self._host_uid_unbound_rows(
-            messages[uid_cursor:-_UID_ON_CURSOR_CUT_BUDGET], bound_uids
+            messages[uid_cursor:max(uid_cursor, len(messages) - _UID_ON_CURSOR_CUT_BUDGET + 1)], bound_uids
         )):
             logger.info("LCM UID cut budget disabled: unbound_host_rows=%d", unbound)
             budgeted = False

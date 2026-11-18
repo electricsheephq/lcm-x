@@ -26,15 +26,20 @@ from __future__ import annotations
 import json
 import logging
 from collections import Counter
+from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from threading import get_ident
 from typing import NamedTuple, Optional
 
 from .config import host_message_uid_mode, identity_anchor_enabled, uid_recognition_enabled
 from .fresh_tail import tool_group_safe_end
 from .ingest_protection import quarantine_suspicious_assistant_messages
 from .message_analysis import _tool_call_id
-from .reconcile import _HERMES_PRUNED_TOOL_PLACEHOLDER, _emission_identity, _has_lossy_redacted_identity
+from .message_content import text_content_for_pattern_matching
+from .reconcile import (
+    _HERMES_PRUNED_TOOL_PLACEHOLDER, _PRESERVED_TODO_CONTEXT_PREFIX, _emission_identity, _has_lossy_redacted_identity,
+)
 from .store import _MESSAGE_SELECT_COLUMNS
 from .tokens import count_message_tokens
 
@@ -54,6 +59,7 @@ class _UidDropState:
     before: list
     binding: tuple
     uid_trimmed: bool = False
+    restored: bool = False
     binding_changed: bool = False
     scaffold_ids: set[int] = field(default_factory=set)
     legacy_replay: Optional[tuple[list, bool, bool, int]] = None
@@ -67,6 +73,16 @@ class _UidDropState:
             logger.info("LCM UID drop skipped after rebind: input_rows=%d", len(self.before))
             self.binding_changed = True
         return False
+
+    @contextmanager
+    def cursor_binding(self):
+        """Check and write together without waiting on lifecycle or shutdown."""
+        owner = self.owner
+        if owner._stable_use_owner_thread == get_ident():
+            yield self.matches_binding()
+        else:
+            with owner._exclusive_lifecycle("restore cursor", deadline=0.0) as acquired:
+                yield acquired and self.matches_binding()
 
 
 class HiddenBacklog(NamedTuple):
@@ -141,7 +157,9 @@ class StoreCompleteMixin:
         keep = {(self._load_retained_user_anchor_row() or {}).get("store_id"), folded[1]["store_id"] if folded else None}
         leading, tail = self._leading_anchor_count(messages), self._fresh_tail_start(messages)
         candidates = {i: row["store_id"] for i, row in resolved.items()
-                      if row["store_id"] <= frontier and row["store_id"] not in keep and leading <= i < tail}
+                      if row["store_id"] <= frontier and row["store_id"] not in keep and leading <= i < tail
+                      and _PRESERVED_TODO_CONTEXT_PREFIX not in (
+                          text_content_for_pattern_matching(messages[i].get("content")) or "")}
         covered = self._store_complete_node_covered(set(candidates.values()))
         drop = {i for i, sid in candidates.items() if sid in covered}
         owners, groups = {}, {}
@@ -218,8 +236,11 @@ class StoreCompleteMixin:
         restored = self._sanitize_active_context_messages(scope.before, insert_missing_tool_stubs=False)
         if not scope.matches_binding():
             return result
-        self._compress_host_rows_consumed = 0
-        self._ingest_cursor = len(restored)
+        scope.restored = True
+        with scope.cursor_binding() as bound:
+            if bound:
+                self._compress_host_rows_consumed = 0
+                self._ingest_cursor = len(restored)
         return restored
 
     def _store_complete_messages(self, rows) -> list:

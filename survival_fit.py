@@ -31,6 +31,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
+from .config import uid_recognition_enabled
 from .host_uid import _valid_uid
 from .host_uid_emit import ADDRESS_KEYS, IDENTITY_KEYS, identity_emit_enabled, record_absorbed_message
 from .message_analysis import _is_codex_interim
@@ -256,7 +257,11 @@ class SurvivalFitMixin:
         persisted = (not after_exception and not self._ingest_cursor_needs_reconcile
                      and self._ingest_cursor == len(result))
         # one map of the whole conversation part: its occurrence and order evidence needs every row (#650)
-        store_ids = self._get_store_id_map_for_messages(result[system:])
+        live_rows = result[system:]
+        store_ids = self._get_store_id_map_for_messages(live_rows)
+        if uid_recognition_enabled(self):
+            for index, original in self._host_uid_resolve(live_rows).items():
+                store_ids.setdefault(id(live_rows[index]), original["store_id"])
         if exit_fit:
             # #668: headroom drops only whole turns between the summary prefix and the fresh tail: never the
             # prefix, a protected fresh-tail row or a projection. The window budget still holds the list.

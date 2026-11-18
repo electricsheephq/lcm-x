@@ -22,6 +22,7 @@ import sys
 import time
 from threading import get_ident
 from collections import Counter
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from functools import wraps
 from typing import Any, Callable, Dict, List, Literal, Optional
@@ -47,6 +48,7 @@ from .reconcile import (
     _COMPACTION_COMMIT_PROOF_METADATA_PREFIX,
     _COMPACTION_COMMIT_PROOF_VERSION,
     _COMPACTION_COMMIT_PROOF_WIRE_VERSION,
+    _PRESERVED_TODO_CONTEXT_PREFIX,
     _carrier_emission_key,
     _commit_proof_identity_digest,
     _emission_identity,
@@ -837,14 +839,16 @@ class CompactionMixin:
                 return messages
             self._compress_occurrences = None
             scope = _UID_DROP_INPUT.get()
-            if budget.leaves and scope is not None:
+            if budget.leaves and scope is not None and not scope.restored:
                 if scope.matches_binding():
                     result = self._guard_uid_covered_drop(result)
-            elif scope is not None and scope.uid_trimmed and result is not messages:
+            elif scope is not None and scope.uid_trimmed and not scope.restored and result is not messages:
                 result = self._sanitize_active_context_messages(scope.before, insert_missing_tool_stubs=False)
-                if scope.matches_binding():
-                    self._ingest_cursor = len(result)
-                    self._compress_host_rows_consumed = 0
+                scope.restored = True
+                with scope.cursor_binding() as bound:
+                    if bound:
+                        self._ingest_cursor = len(result)
+                        self._compress_host_rows_consumed = 0
             if (
                 isinstance(result, list)
                 and result is not messages
@@ -869,9 +873,11 @@ class CompactionMixin:
                 # #904: published hidden leaves advance the frontier, not the host-visible list.
                 sanitized = self._sanitize_active_context_messages(messages)
                 result = messages if sanitized == messages else sanitized
-                self._ingest_cursor = len(result)
-                if not force and not bypass_cooldown and not self._compress_forced_overflow:
-                    self._start_no_progress_hold("hidden_only")
+                with scope.cursor_binding() if scope is not None and scope.restored else nullcontext(True) as bound:
+                    if bound:
+                        self._ingest_cursor = len(result)
+                        if not force and not bypass_cooldown and not self._compress_forced_overflow:
+                            self._start_no_progress_hold("hidden_only")
                 logger.info("LCM hidden-only compaction kept host list unchanged: leaves=%d hidden_rows=%d",
                             budget.leaves, self._compress_hidden_rows_consumed)
             pending_no_progress = (self._no_progress_candidate and not bypass_cooldown
@@ -2543,11 +2549,17 @@ class CompactionMixin:
             return "break", None
 
         leaf.candidate_start = leaf.leading_anchor_count
+        scope = _UID_DROP_INPUT.get()
         while leaf.candidate_start < leaf.fresh_tail_start and (
             self._is_replayed_context_scaffold_message(state.working_messages[leaf.candidate_start])
             if self._compress_occurrences is None  # no v4 proof in force: the rc4 contract
             else self._compress_occurrences.get(id(state.working_messages[leaf.candidate_start]), (None, ()))[1] is None
         ):
+            if (scope is not None and scope.owner is self and scope.uid_trimmed
+                    and _PRESERVED_TODO_CONTEXT_PREFIX in (
+                        text_content_for_pattern_matching(state.working_messages[leaf.candidate_start].get("content")) or ""
+                    )):
+                break
             leaf.candidate_start += 1
         # #457: a retry replays rows a cancelled attempt already committed; drop
         # those with the scaffold, keeping any row committed lineage does not hold.
@@ -2801,12 +2813,12 @@ class CompactionMixin:
                 scope = None
             if scope is not None and scope.uid_trimmed:
                 state.working_messages = scope.before
+                scope.restored = True
                 state.dropped_replayed_scaffold_messages = state.resumed_prefix = False
                 if scope.matches_binding():
                     self._compress_host_rows_consumed = 0
                     if state.sweep_stop_reason == "time_budget_exhausted":
                         self._no_progress_candidate = False
-                _UID_DROP_INPUT.set(None)
             elif scope is not None and scope.legacy_replay is not None:
                 (state.working_messages, state.dropped_replayed_scaffold_messages,
                  state.resumed_prefix, state.resumed_ahead) = scope.legacy_replay
@@ -2879,7 +2891,9 @@ class CompactionMixin:
                 # or reassembled context, keeping the old cursor could make the
                 # next appended messages look already ingested. This applies to
                 # content-only cleanup as well as dropped-message cleanup.
-                self._ingest_cursor = len(sanitized_messages)
+                with scope.cursor_binding() if scope is not None and scope.restored else nullcontext(True) as bound:
+                    if bound:
+                        self._ingest_cursor = len(sanitized_messages)
                 # A resumed committed prefix returns that compaction's output.
                 self._last_compression_status = "compacted" if state.resumed_prefix else "sanitized"
                 if state.unattributed_leaf_refused:  # #1147: the refusal reason stays visible

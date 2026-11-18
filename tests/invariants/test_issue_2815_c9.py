@@ -117,7 +117,7 @@ def test_bound_prefix_with_200_unbound_rows_uses_full_cold_walk(tmp_path, monkey
     _, base, base_cuts = _cold(tmp_path / "unset", monkeypatch, on=False, bound=True, added=added, unlocated=True)
     assert stored == base
     assert cuts == base_cuts and len(cuts) > 64
-    assert "LCM UID cut budget disabled: unbound_host_rows=136" in caplog.text
+    assert "LCM UID cut budget disabled: unbound_host_rows=137" in caplog.text
 
 
 @pytest.mark.parametrize("shape", _TASK_ROWS)
@@ -211,6 +211,17 @@ def _compaction_rebind(path, monkeypatch, *, on, first, anchor, seam):
         patch.setattr(engine, "_compress_impl", compress_impl)
         patch.setattr(engine_module, "summarize_with_escalation", summarize)
         output = engine.compress(deepcopy(view), current_tokens=24000)
+        if seam == "after-leaf":
+            summary = (
+                "[Recent Summary (d0, node 1)]\ns\n[Expand for details: ]\n\n---\n\n"
+                "[Recent Summary (d0, node 2)]\nEarlier turns.\nExpand for details about: turns\n"
+                "[Expand for details: turns]"
+            )
+            if on:
+                objective = f"[Current user objective preserved from compacted history]\n{view[24]['content']}"
+                assert output == [{"role": "user", "content": f"{objective}\n\n---\n\n{summary}"}, *view[25:]]
+            else:
+                assert output == [{"role": "user", "content": summary}, *view[5:]]
         before_rebind = (engine._ingest_cursor, len(output), engine._last_compression_status)
         if seam == "none":
             rebind()
