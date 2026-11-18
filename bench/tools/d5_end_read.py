@@ -10,7 +10,7 @@ reported as unmatched with a hint class, never as lost.
   final rows.
 - Check 2, coverage: the end capture's host rows above the start capture's highest host id (the window) against the
   end store's rows above the start capture's highest store_id, matched one to one and in order per session by
-  identity alone (bars._ordered).
+  identity alone (with bars._ordered's tie-breaking).
 
 Output: one JSON object with counts, ids, sha256s and the verdict rule; never row content, a path or a settings value.
 
@@ -31,6 +31,7 @@ from pathlib import Path
 import message_content
 import message_patterns
 from bench.instruments.d5_clone import bars, capture, run as runner, snapshot
+from bench.tools.d5_ordered import identity_key, ordered_pairs
 from session_patterns import build_session_match_keys, compile_session_patterns, matches_session_pattern
 
 PASS, FAIL, INCONCLUSIVE = "PASS", "FAIL", "INCONCLUSIVE"
@@ -110,7 +111,9 @@ def coverage(start, end, identity, end_dir, by_design=lambda session: False, inh
     for session in dict.fromkeys(h["session_id"] for h in window):
         hosts = [h for h in window if h["session_id"] == session]
         rows = [r for r in new if r["session_id"] == session]
-        pairs = bars._ordered(rows, hosts, lambda r, h: identity(r) == identity(h))
+        row_keys = [identity_key(identity(row)) for row in rows]
+        host_keys = [identity_key(identity(host)) for host in hosts]
+        pairs = ordered_pairs(row_keys, host_keys)
         used_rows, used_hosts = {i for i, _ in pairs}, {j for _, j in pairs}
         spare = [r for i, r in enumerate(rows) if i not in used_rows]
         s = per_session.setdefault(_sha12(session), Counter())
