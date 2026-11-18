@@ -15,7 +15,7 @@ import stat
 from pathlib import Path
 from typing import Any, Mapping, NamedTuple
 
-from .message_content import canonical_message, canonical_text
+from .message_content import canonical_message, canonical_text, canonical_value
 
 PROJECTION_VERSION = "claude-code-v1"
 SOURCE = "claude-code"
@@ -133,7 +133,7 @@ def project_entry(entry: Mapping[str, Any], *, folder: Path | None = None) -> Pr
             rows.append({"role": "system", "content": text, **stamp})
         else:
             calls = [{"id": part.get("id"), "type": "function", "function": {
-                "name": part.get("name"), "arguments": json.dumps(part.get("input", {}), ensure_ascii=False)}}
+                "name": part.get("name"), "arguments": json.dumps(canonical_value(part.get("input", {})), ensure_ascii=False)}}
                 for part in parts if part.get("type") == "tool_use"]
             if text or calls:
                 rows.append({"role": "assistant", "content": text, **({"tool_calls": calls} if calls else {}),

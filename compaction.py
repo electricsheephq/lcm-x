@@ -39,7 +39,7 @@ from .fresh_tail import tool_group_safe_end
 from .ingest_protection import redact_sensitive_value
 from . import leaf_prep
 from .lifecycle_state import LifecycleBindingChangedError, LifecyclePublicationConflictError
-from .message_content import canonical_value, text_content_for_pattern_matching
+from .message_content import text_content_for_pattern_matching
 from .reconcile import (
     _COMPACTION_COMMIT_PROOF_METADATA_PREFIX,
     _COMPACTION_COMMIT_PROOF_VERSION,
@@ -89,13 +89,13 @@ def _counted_compaction(operation):
                 return messages
             self._compaction_inflight += 1
         try:
-            messages = canonical_value(messages)
+            messages, host_view = self._canonical_host_view(messages)
         except Exception as exc:
             self._last_compression_status = "error"
             self._record_ingest_failure("compress", exc)
             return messages
         else:
-            return operation(self, messages, *args, **kwargs)
+            return operation(self, messages, *args, **kwargs, **host_view)
         finally:
             with self._compaction_gate:
                 self._compaction_inflight -= 1
@@ -277,9 +277,8 @@ class CompactionMixin:
             return self._should_compress_preflight_impl(messages)
 
     def _should_compress_preflight_impl(self, messages):
-        original = messages
         try:
-            messages = canonical_value(messages)
+            messages, host_view = self._canonical_host_view(messages)
         except Exception as exc:
             self._record_ingest_failure("preflight", exc)
             return self._should_force_overflow_recovery(observed_tokens=self.last_prompt_tokens)
@@ -340,12 +339,7 @@ class CompactionMixin:
         if self._session_id and messages:
             try:
                 with self._attribution_span("preflight", len(messages)):
-                    replay_messages = self._ingest_messages(messages)
-                if messages is not original:
-                    try:
-                        self._rekey_host_rewrite_watch(messages, original)
-                    except Exception:
-                        logger.debug("LCM preflight: host-rewrite watch rekey failed", exc_info=True)
+                    replay_messages = self._ingest_messages(messages, **host_view)
                 self._prepare_retained_user_anchor(replay_messages)
                 self._record_ingest_success()
             except Exception as e:
@@ -751,7 +745,7 @@ class CompactionMixin:
                  current_tokens: int = None,
                  focus_topic: Optional[str] = None,
                  force: bool = False,
-                 bypass_cooldown: bool = False) -> List[Dict[str, Any]]:
+                 bypass_cooldown: bool = False, *, host_pairs=()) -> List[Dict[str, Any]]:
         """Run compaction and leave a terminal public status on every failure. ``bypass_cooldown`` is the
         host's mark of a recovery attempt (#608): the returned list fits under the compaction threshold."""
         if self._compaction_is_closing():
@@ -814,6 +808,7 @@ class CompactionMixin:
                     focus_topic=focus_topic,
                     force=force,
                     recovery_attempt=bypass_cooldown,
+                    **({"host_pairs": host_pairs} if host_pairs else {}),
                 )
             if self._compaction_is_closing():
                 self._stop_pass_for_shutdown()
@@ -863,7 +858,7 @@ class CompactionMixin:
             self._host_uid_log_compaction_summary()
             logger.debug("LCM compaction emission descriptor count=%d",
                          len((self._compress_commit_proof or {}).get("emissions") or ()))
-            self._rekey_host_rewrite_watch(messages, result)
+            self._rekey_host_rewrite_watch(messages, result, host_pairs=host_pairs)
             if pending_no_progress:
                 # Persist only after the complete successful pass, including proof bookkeeping.
                 self._start_no_progress_hold("objective_only" if self._objective_only_noop else "no_progress",
@@ -2180,7 +2175,7 @@ class CompactionMixin:
                                  messages: List[Dict[str, Any]],
                                  current_tokens: int = None,
                                  force: bool = False,
-                                 recovery_attempt: bool = False) -> tuple[Literal["next", "return"], Optional[List[Dict[str, Any]]]]:
+                                 recovery_attempt: bool = False, *, host_pairs=()) -> tuple[Literal["next", "return"], Optional[List[Dict[str, Any]]]]:
         """Ingest the replay view and honor cleanup-only or held requests."""
         if self._compaction_is_closing():
             return "return", messages
@@ -2189,7 +2184,7 @@ class CompactionMixin:
         # or provider context after the durable row has been written.
         span_started = time.monotonic()
         try:
-            state.working_messages = self._ingest_messages(messages)
+            state.working_messages = self._ingest_messages(messages, **({"host_pairs": host_pairs} if host_pairs else {}))
             self._record_ingest_success()
         finally:  # #1127: ingest and reconcile, untimed by the sweep steps; a raised lock wait is theirs too
             self._pre_leaf_span("ingest", span_started)
@@ -3537,7 +3532,7 @@ class CompactionMixin:
                        current_tokens: int = None,
                        focus_topic: Optional[str] = None,
                        force: bool = False,
-                       recovery_attempt: bool = False) -> List[Dict[str, Any]]:
+                       recovery_attempt: bool = False, *, host_pairs=()) -> List[Dict[str, Any]]:
         """Main compaction entry point.
 
         1. Ingest any new messages into the store
@@ -3555,7 +3550,7 @@ class CompactionMixin:
         force_overflow = state.force_overflow
         recovery_assembly_cap = state.recovery_assembly_cap
 
-        action, result = self._ingest_compression_view(state, messages, current_tokens, force, recovery_attempt)
+        action, result = self._ingest_compression_view(state, messages, current_tokens, force, recovery_attempt, host_pairs=host_pairs)
         if action == "return":
             return result
         working_messages = state.working_messages

@@ -1,7 +1,9 @@
 """#2783: host-normalized text and exactly-once replay across persistence paths."""
 
+import base64
 import json
 import logging
+from contextlib import closing
 from copy import deepcopy
 from unittest.mock import Mock
 
@@ -9,10 +11,11 @@ import pytest
 
 import hermes_lcm.engine as lcm_engine
 from hermes_lcm.claude_code_capture import project_entry
-from hermes_lcm import ingest_ledger, sender_capture
+from hermes_lcm import claude_code_store, ingest_ledger, sender_capture
 from hermes_lcm.ingest_classifier import SqliteLedgerSnapshot
 from tests.harness import engine_context, pin_char_counter, stored_rows
 from tests.test_anchor_unstored_before_cursor import _presence
+from tests.test_claude_code_store import _entry, _open, _rows, _transcript
 
 SURROGATE = "\ud83d"
 REPLACEMENT = "\ufffd"
@@ -328,28 +331,19 @@ def test_colliding_keys_cold_replay_ignores_key_order(tmp_path, argument_form):
         assert sql_messages(resumed) == before
 
 
-@pytest.mark.parametrize("rekey_fails", [False, True], ids=["surrogate_id", "injected_failure"])
-def test_preflight_rekey_preserves_ingest_success(tmp_path, monkeypatch, caplog, rekey_fails):
+def test_preflight_surrogate_id_preserves_ingest_success(tmp_path, monkeypatch):
     view = messages("tool_call_id")
     view[2]["content"] += (
         "\n\n[OUT-OF-BAND USER MESSAGE — fixture]\nA synthetic follow-up.\n"
         "[/OUT-OF-BAND USER MESSAGE]"
     )
     with engine_at(tmp_path) as engine:
-        if rekey_fails:
-            def fail_rekey(*args):
-                raise RuntimeError("synthetic rekey failure")
-
-            monkeypatch.setattr(engine, "_rekey_host_rewrite_watch", fail_rekey)
         prepare_anchor = Mock(wraps=engine._prepare_retained_user_anchor)
         monkeypatch.setattr(engine, "_prepare_retained_user_anchor", prepare_anchor)
-        with caplog.at_level(logging.DEBUG, logger="hermes_lcm.compaction"):
-            engine.should_compress_preflight(view)
+        engine.should_compress_preflight(view)
         assert len(sql_messages(engine)) == len(view)
         assert engine._ingest_failure_count == 0
         prepare_anchor.assert_called_once()
-        rekey_logs = [r.levelno for r in caplog.records if "host-rewrite watch rekey failed" in r.message]
-        assert rekey_logs == ([logging.DEBUG] if rekey_fails else [])
 
 
 @pytest.mark.parametrize("entry", ["session_end", "compress", "preflight", "tool_dispatch"])
@@ -404,7 +398,7 @@ def test_gateway_sender_does_not_stamp_equal_older_surrogate_row(tmp_path):
 
 
 @pytest.mark.parametrize("text", ["fixture", f"fixture {SURROGATE}"], ids=["ascii", "surrogate"])
-def test_known_limit_repeated_surrogate_sender_captured_after_preflight(tmp_path, request, text):
+def test_repeated_surrogate_sender_captured_after_preflight(tmp_path, request, text):
     first = {"role": "user", "content": text}
     original = [first, {"role": "assistant", "content": "Finished."}]
     view = [*original, dict(first)]
@@ -419,10 +413,9 @@ def test_known_limit_repeated_surrogate_sender_captured_after_preflight(tmp_path
         }) is not None
         engine.ingest(view)
         assert len(sql_messages(engine)) == len(view)
-        expected_sender = (None, None) if SURROGATE in text else ("telegram:synthetic-repeat", "gateway_principal")
         assert engine._store.connection.execute(
             "SELECT sender_id, sender_source FROM messages WHERE session_id = 'S' AND role = 'user' ORDER BY store_id"
-        ).fetchall() == [(None, None), expected_sender]
+        ).fetchall() == [(None, None), ("telegram:synthetic-repeat", "gateway_principal")]
 
 
 def test_cross_turn_host_whitespace_rewrite_of_surrogate_user(tmp_path):
@@ -493,3 +486,153 @@ def test_claude_code_transcript_projection():
     assert call["id"] == f"call{REPLACEMENT}"
     assert json.loads(call["function"]["arguments"]) == {"query": REPLACEMENT}
     assert entry == original
+
+
+@pytest.mark.parametrize("first_entry,edit_entry", [
+    ("ingest", "ingest"), ("preflight", "ingest"),
+    ("ingest", "preflight"), ("ingest", "tool_dispatch"),
+    ("tool_dispatch", "ingest"), ("ingest", "compress"),
+    ("compress", "ingest"), ("ingest", "session_end"),
+])
+@pytest.mark.parametrize("before,after", [
+    ("draft", "edited"),
+    (f"draft{SURROGATE}", "edited"),
+    (f"draft{SURROGATE}", f"edited{SURROGATE}"),
+    ("draft", f"edited{SURROGATE}"),
+    ("draft", "draft\n\nmore words"),
+    (f"draft{SURROGATE}", f"draft{SURROGATE}\n\nmore words"),
+], ids=["ascii_edit", "sur_to_ascii", "sur_to_sur", "ascii_to_sur", "merge_ascii", "merge_sur"])
+def test_in_place_host_edit_across_entries(tmp_path, first_entry, edit_entry, before, after):
+    user = {"role": "user", "content": before}
+    view = [{"role": "user", "content": "hi"}, user]
+    with engine_at(tmp_path) as engine:
+        entries = {
+            "ingest": engine.ingest,
+            "preflight": engine.should_compress_preflight,
+            "tool_dispatch": lambda rows: engine.handle_tool_call("lcm_recall", {"query": "fixture"}, messages=rows),
+            "compress": lambda rows: engine.compress(rows, current_tokens=10),
+            "session_end": lambda rows: engine.on_session_end("S", rows),
+        }
+        entries[first_entry](view)
+        first = [row[:2] for row in sql_messages(engine)]
+        assert view[1] is user
+        assert user == {"role": "user", "content": before}
+        user["content"] = after
+        entries[edit_entry](view)
+        final = [row[:2] for row in sql_messages(engine)]
+        if edit_entry != "session_end":
+            engine.ingest(view)
+            assert [row[:2] for row in sql_messages(engine)] == final
+        assert view[1] is user
+        assert user == {"role": "user", "content": after}
+        assert final == [("user", text) for text in host_rewrite(["hi", before, after])]
+        assert first == final[:2]
+        assert engine._ingest_failure_count == 0
+
+
+@pytest.mark.parametrize("suffix", ["", SURROGATE], ids=["ascii", "surrogate"])
+@pytest.mark.parametrize("entry", ["ingest", "session_end"])
+@pytest.mark.parametrize("edit", ["text", "merge", "strip"])
+def test_compress_adopted_then_in_place_edit(tmp_path, suffix, entry, edit):
+    draft = f"draft{suffix}"
+    original = f"  {draft} \n" if edit == "strip" else draft
+    user = {"role": "user", "content": original}
+    view = [{"role": "user", "content": "hi"}, user, {"role": "assistant", "content": "ok"}]
+    with engine_at(tmp_path) as engine:
+        engine.ingest(view)
+        before = sql_messages(engine)
+        assert before == expected_rows(view)
+        store_id = stored_rows(engine)[1]["store_id"]
+
+        adopted = engine.compress(view, current_tokens=10)
+        adopted_user = adopted[1]
+        assert adopted_user["content"] == host_rewrite(original)
+        edited = {
+            "text": f"edited{suffix}",
+            "merge": adopted_user["content"] + "\n\nmore words",
+            "strip": adopted_user["content"].strip(),
+        }[edit]
+        adopted_user["content"] = edited
+
+        expected_tail = [] if edit == "strip" else [{"role": "user", "content": edited}]
+        if entry == "ingest":
+            next_turn = {"role": "user", "content": "next"}
+            adopted.append(next_turn)
+            engine.ingest(adopted)
+            expected_tail.append(next_turn)
+        else:
+            engine.on_session_end("S", adopted)
+
+        assert sql_messages(engine) == before + expected_rows(expected_tail)
+        assert engine._ingest_failure_count == 0
+        key = f"host_rewrite_identity:{store_id}"
+        overrides = engine._store.read_metadata_json_many([key])
+        if edit == "strip":
+            assert overrides[key]["content"] == host_rewrite(draft)
+        else:
+            assert overrides == {}
+
+
+def test_stopped_turn_preserves_raw_user_for_next_edit(tmp_path):
+    user = {"role": "user", "content": f"draft{SURROGATE}"}
+    view = [{"role": "user", "content": "hi"}, user, {"role": "assistant", "content": "Finished."}]
+    with engine_at(tmp_path) as engine:
+        engine.ingest(view[:1])
+        engine.on_turn_complete(view, interrupted=True)
+        before = [row[:2] for row in sql_messages(engine)]
+        user["content"] = f"edited{SURROGATE}"
+        engine.ingest(view)
+        assert [row[:2] for row in sql_messages(engine)] == before + [("user", f"edited{REPLACEMENT}")]
+        assert before == [("user", "hi"), ("user", f"draft{REPLACEMENT}"), ("assistant", "Finished.")]
+        assert engine._ingest_failure_count == 0
+
+
+def test_claude_code_capture_keeps_colliding_input_keys(tmp_path):
+    inputs = dict(zip("\ud800\ud801" + REPLACEMENT, ("first", "second", "unchanged"), strict=True))
+    tool = {"type": "tool_use", "id": "t1", "name": "Lookup",
+            "input": inputs}
+    transcript = _transcript(tmp_path, [_entry("user", "u1", "Find it"), _entry("assistant", "a1", [tool])])
+    with closing(_open(tmp_path / "home", tmp_path / "hermes")) as store:
+        lineage = claude_code_store.Lineage("s1", None, transcript)
+        claude_code_store.drain(store, lineage)
+        before = _rows(store)
+        assert len(before) == 2
+        claude_code_store.drain(store, lineage)
+        assert _rows(store) == before
+        [calls] = store.connection.execute("SELECT tool_calls FROM messages WHERE tool_calls IS NOT NULL").fetchone()
+        arguments = json.loads(json.loads(calls)[0]["function"]["arguments"])
+        assert arguments == {REPLACEMENT: "unchanged", f"{REPLACEMENT}~2": "first", f"{REPLACEMENT}~3": "second"}
+
+
+@pytest.mark.parametrize("redaction", [True, False], ids=["redaction", "payload"])
+def test_ingest_reserialization_keeps_colliding_argument_keys(tmp_path, redaction):
+    if redaction:
+        arguments = r'{"\ud83d":"first","�":"keep","password":"synthetic-password"}'
+    else:
+        payload = bytes((i * 131 + (i >> 3) * 17 + 7) % 256 for i in range(6000))
+        # Escaped slashes break the raw base64 run, so it is only externalized after JSON parsing.
+        escaped_payload = base64.b64encode(payload).decode().replace("/", r"\/")
+        arguments = rf'{{"\ud800":"{escaped_payload}","\ufffd":"keep"}}'
+    view = messages("escaped_args_string")
+    view[1]["tool_calls"][0]["function"]["arguments"] = arguments
+    original = deepcopy(view)
+    with engine_at(tmp_path, sensitive_patterns_enabled=redaction) as engine:
+        engine.ingest(view)
+        before = sql_messages(engine)
+        engine.ingest(deepcopy(view))
+        assert sql_messages(engine) == before
+        assert engine._ingest_failure_count == 0
+    with engine_at(tmp_path, sensitive_patterns_enabled=redaction) as resumed:
+        resumed.ingest(deepcopy(view))
+        after = sql_messages(resumed)
+        assert resumed._ingest_failure_count == 0
+    assert len(before) == len(view)
+    decoded = json.loads(json.loads(before[1][3])[0]["function"]["arguments"])
+    assert decoded[REPLACEMENT] == "keep"
+    if redaction:
+        assert decoded[f"{REPLACEMENT}~2"] == "first"
+        assert decoded["password"].startswith("[LCM sensitive redaction")
+    else:
+        assert decoded[f"{REPLACEMENT}~2"].startswith("[Externalized LCM ingest payload:")
+    assert after == before
+    assert view == original
