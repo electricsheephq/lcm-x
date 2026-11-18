@@ -1,328 +1,263 @@
-"""Synthetic threshold sweeps at the admission boundary."""
+"""Synthetic threshold-sweep ordering and progress against the pinned main tree."""
 
-from copy import deepcopy
-import hashlib
+from importlib import import_module
+from importlib.util import module_from_spec, spec_from_file_location
 import json
-import time
+import sys
 
 import pytest
 
+import hermes_lcm.dag as dag
+import hermes_lcm.engine as engine_module
 import hermes_lcm.escalation as escalation
-from hermes_lcm.dag import SummaryNode
+import hermes_lcm.survival_fit as survival_fit
+import hermes_lcm.tokens as tokens
+from tests.differential.trees import PrerequisiteUnavailable, materialize
 from tests import test_issue_605_foreground_budget as budget_fixtures
 from tests.test_issue_605_foreground_budget import (
     SUMMARY,
     _advance_on,
-    _compress,
     _engine,
+    _leaves,
     _pin_lcm_char_counter,  # noqa: F401 - shared autouse fixture
     _view,
 )
 
 clock = budget_fixtures.clock
 
-
-def _sweep_engine(tmp_path, window=1_000_000, **settings):
-    engine = _engine(tmp_path, **{
-        "context_threshold": 0.5,
-        "max_assembly_tokens": window,
-        "summary_timeout_ms": 120_000,
-        **settings,
-    })
-    engine.on_session_start("S", platform="telegram", context_length=window, conversation_id="conv")
-    return engine
+BASE = "31ac199b1ec52d7b43de852207415552dfe699d5"
+PREFIXES = {
+    "under-target": [(0, 10_000), (0, 10_000)],
+    "one-to-two-targets": [(0, 15_000)] * 4,
+    "over-twice-target": [(0, 25_250)] * 4,
+    "over-twice-no-group": [(3, 40_000), (2, 35_000), (1, 30_000)],
+}
+BACKLOG_LEAF = "Earlier synthetic facts. " * 150
 
 
-def _seed_prefix(engine, tokens):
-    for i in range(2):
-        engine._dag.add_node(SummaryNode(
-            session_id="S", depth=0, summary=f"Earlier arc {i}. " + "synthetic history " * 40,
-            token_count=tokens // 2, source_token_count=tokens, source_ids=[], source_type="messages",
-            created_at=float(i + 1),
-        ))
-
-
-def _script_provider(monkeypatch, clock, *, seconds=0, leaf=SUMMARY, completed=None):
-    calls = []
-
-    def summarize(prompt, max_tokens, model="", timeout=None, reasoning_effort=""):
-        kind = "leaf" if "user turn" in prompt else "condensation"
-        calls.append(kind)
-        if timeout is not None and seconds > timeout:
-            clock.offset += timeout
-            raise TimeoutError("synthetic call timed out")
-        clock.offset += seconds
-        if completed is not None:
-            completed.append(kind)
-        return leaf if kind == "leaf" else SUMMARY
-
-    monkeypatch.setattr(escalation, "_invoke_summary_llm", summarize)
-    return calls
-
-
-def _status(engine):
-    return engine.get_status()["threshold_full_sweep"]
-
-
-def _store_rows(engine):
-    return engine._store.get_session_messages("S", limit=100_000)
-
-
-def _snapshot(result):
-    return hashlib.sha256(json.dumps(result, sort_keys=True).encode()).hexdigest()
-
-
-@pytest.mark.parametrize(("estimate", "reserve", "pre_work", "admitted"), [
-    (30, 30, 59, False), (115, 0, 55, True), (115, 0, 61, False),
-])
-def test_first_call_cold_fit_and_stale_escape(monkeypatch, clock, estimate, reserve, pre_work, admitted):
-    monkeypatch.setattr(clock, "_real", lambda: 0.0)
-    estimates = escalation.ForegroundEstimates()
-    if estimate != 30:
-        estimates.record_call("", estimate)
-    budget = escalation.ForegroundBudget(soft=60, hard=120, configured_timeout=120, estimates=estimates)
-    budget.leaf_reserve = reserve
-    clock.offset += pre_work
-    if admitted:
-        assert budget.admit("") == 60
-    else:
-        with pytest.raises(escalation.SweepBudgetExhausted, match="time budget"):
-            budget.admit("")
-
-
-def test_late_entry_refuses_without_preparing_leaf_or_changing_input(tmp_path, monkeypatch, clock):
-    engine = _sweep_engine(tmp_path)
-    view = _view()
-    before = deepcopy(view)
-    calls = _script_provider(monkeypatch, clock, seconds=44)
-    engine._foreground_estimates.record_call(engine._primary_summary_route(), 44)
-    _advance_on(monkeypatch, engine, "_prepare_retained_user_anchor", clock, 80)
-    remaining_work = []
-    prepare = engine._prepare_leaf_input
-
-    def prepare_leaf(*args, **kwargs):
-        remaining_work.append("prepare_leaf_input")
-        return prepare(*args, **kwargs)
-
-    monkeypatch.setattr(engine, "_prepare_leaf_input", prepare_leaf)
+@pytest.fixture(scope="module")
+def base_tree(tmp_path_factory):
     try:
-        engine.ingest(view)
-        rows = _store_rows(engine)
-        result = engine.compress(view, current_tokens=engine.threshold_tokens + 1)
-        assert (calls, remaining_work, result, view) == ([], [], before, before)
-        assert _store_rows(engine) == rows
-        assert _status(engine)["leaf_passes"] == 0
-        assert _status(engine)["stop_reason"] == "time_budget_exhausted"
-    finally:
-        engine.shutdown()
+        root = materialize(BASE, tmp_path_factory.getbasetemp())
+    except PrerequisiteUnavailable as exc:
+        pytest.skip(str(exc))
+    # Use a distinct package so the engine, provider and store imports stay on
+    # their own tree while both engines run in one pytest process.
+    name = "lcm_issue_2869_base"
+    spec = spec_from_file_location(name, root / "__init__.py", submodule_search_locations=[str(root)])
+    sys.modules[name] = module_from_spec(spec)
+    return {part: import_module(f"{name}.{part}") for part in ("engine", "dag", "escalation", "tokens", "survival_fit")}
 
 
-def _route_chain(budget):
-    return escalation._invoke_summary_llm_routes(
-        "synthetic source", 50, note_error=lambda error: None, model="primary",
-        fallback_models=["fallback"], budget=budget, timeout=60,
-    )
+CANDIDATE = dict(engine=engine_module, dag=dag, escalation=escalation, tokens=tokens, survival_fit=survival_fit)
 
 
-@pytest.mark.parametrize(("warm", "cut", "expected"), [
-    (None, 22, 33), (55, 35, 55), (30, 40, 60), (45, 50, 60),
-])
-def test_cut_duration_is_a_lower_bound(monkeypatch, clock, warm, cut, expected):
-    monkeypatch.setattr(clock, "_real", lambda: 0.0)
-    estimates = escalation.ForegroundEstimates()
-    if warm is not None:
-        estimates.record_call("primary", warm)
-        for _ in range(7):
-            estimates.record_call("primary", 15)
-    budget = escalation.ForegroundBudget(soft=60, hard=120, configured_timeout=60, estimates=estimates)
-
-    def cutoff(prompt, max_tokens, *, model, timeout, reasoning_effort):
-        assert model == "primary"
-        clock.offset += timeout
-        raise TimeoutError("provider timed out")
-
-    monkeypatch.setattr(escalation, "_invoke_summary_llm", cutoff)
-    # Run the attempt at entry with a smaller usable window. The host can try
-    # its own fallback inside auxiliary_client.call_llm, outside this route chain.
-    budget.leaf_reserve = 115 - cut
-    if cut < 30 or (warm is not None and cut < warm):
-        # The timing sample models a host deadline reached after admission:
-        # route setup consumed part of the admitted window.
-        def late_cutoff(prompt, max_tokens, *, model, timeout, reasoning_effort):
-            assert model == "primary"
-            clock.offset += cut
-            raise TimeoutError("host compression deadline timeout")
-
-        monkeypatch.setattr(escalation, "_invoke_summary_llm", late_cutoff)
-        budget.leaf_reserve = 0
-        clock.offset = 115 - cut
-        monkeypatch.setattr(budget, "admit", lambda route: cut)
-    with pytest.raises(escalation.SweepBudgetExhausted):
-        _route_chain(budget)
-    assert estimates.call_estimate("primary", 60) == expected
-    estimates.record_call("fallback", 20)
-    assert estimates.call_estimate("fallback", 60) == 20
-    assert estimates.call_estimate("primary", 60) == expected
-    estimates.record_call("primary", 20, completed=False)
-    assert estimates.call_estimate("primary", 60) == expected
-    estimates.record_call("primary", 20)
-    assert estimates.call_estimate("primary", 60) == cut
-
-
-def test_plugin_fallback_refused_when_its_estimate_does_not_fit(monkeypatch, clock):
-    monkeypatch.setattr(clock, "_real", lambda: 0.0)
-    estimates = escalation.ForegroundEstimates()
-    budget = escalation.ForegroundBudget(soft=60, hard=120, configured_timeout=60, estimates=estimates)
-    clock.offset += 35
-    calls = []
-
-    def provider(prompt, max_tokens, *, model, timeout, reasoning_effort):
-        calls.append((model, timeout))
-        if model == "primary":
-            clock.offset += 60
-            raise TimeoutError("provider timed out")
-        return SUMMARY
-
-    monkeypatch.setattr(escalation, "_invoke_summary_llm", provider)
-    # This is the plugin route chain. The host's recovery ladder runs inside
-    # auxiliary_client.call_llm and sees its own deadlines.
-    with pytest.raises(escalation.SweepBudgetExhausted):
-        _route_chain(budget)
-    assert calls == [("primary", 60)] and clock.offset == 95
-
-
-@pytest.mark.parametrize("tokens", [60_000, 99_000])
-def test_over_target_prefix_does_not_take_first_leaf_call(tmp_path, monkeypatch, clock, caplog, tokens):
-    engine = _sweep_engine(tmp_path, leaf_chunk_tokens=24_000)
-    try:
-        _seed_prefix(engine, tokens)
-        calls = _script_provider(monkeypatch, clock, seconds=44)
-        _compress(engine, _view(240), caplog)
-        assert calls == ["leaf"] and _status(engine)["leaf_passes"] == 1
-        assert _status(engine)["summary_prefix_target_tokens"] == 50_000
-    finally:
-        engine.shutdown()
-
-
-def test_repeated_partial_sweeps_bound_the_prefix(tmp_path, monkeypatch, clock, caplog):
-    monkeypatch.setattr(clock, "_real", lambda: 0.0)
-    engine = _sweep_engine(tmp_path, leaf_chunk_tokens=24_000)
-    try:
-        _seed_prefix(engine, 99_000)
-        leaf = "Earlier synthetic facts. " * 150
-        calls = _script_provider(monkeypatch, clock, seconds=44, leaf=leaf)
-        view = _view(1720)
-        prefixes, first_calls = [], []
-        for _ in range(4):
-            prior_count = len(calls)
-            view = _compress(engine, view, caplog)
-            first_calls.append(calls[prior_count])
-            prefixes.append(engine._summary_frontier_tokens())
-            engine.note_turn_complete()
-        leaf_tokens = prefixes[0] - 99_000
-        print(f"partial sweeps: calls={first_calls}, prefixes={prefixes}, first leaf tokens={leaf_tokens}")
-        assert first_calls[:3] == ["leaf", "leaf", "condensation"]
-        assert 0 < leaf_tokens and max(prefixes) <= 100_000 + leaf_tokens
-        assert prefixes[2] < prefixes[1]
-    finally:
-        engine.shutdown()
-
-
-@pytest.mark.parametrize(("window", "target", "turns"), [
-    (64_000, 8_000, 110), (200_000, 24_000, 240), (272_000, 24_000, 240), (480_000, 24_000, 240),
-])
-def test_legacy_window_target_order_and_return(tmp_path, monkeypatch, clock, caplog, window, target, turns):
-    monkeypatch.setattr(clock, "_real", lambda: 0.0)
-    results = []
-    for explicit in (False, True):
-        root = tmp_path / str(explicit)
-        root.mkdir()
-        settings = {"summary_prefix_target_tokens": target} if explicit else {}
-        engine = _sweep_engine(root, window=window, leaf_chunk_tokens=24_000, **settings)
+def _run(tree, tmp_path, monkeypatch, clock, *, nodes, pre_work=0, pre_work_passes=None, estimate=None, seconds=8,
+         leaf=SUMMARY, turns=240, passes=1, window=1_000_000, settings=None, replay=False):
+    tmp_path.mkdir()
+    settings = {
+        "context_threshold": 0.5, "leaf_chunk_tokens": 24_000,
+        "max_assembly_tokens": window, "summary_timeout_ms": 120_000, "embeddings_enabled": False,
+        **(settings or {}),
+    }
+    with monkeypatch.context() as patch:
+        patch.setattr(clock, "_real", lambda: 0.0)
+        patch.setattr(clock, "offset", 0.0)
+        # Keep the shared #605 config and use the selected tree's engine and tokenizer.
+        patch.setitem(_engine.__globals__, "LCMEngine", tree["engine"].LCMEngine)
+        patch.setitem(_engine.__globals__, "LCMConfig", tree["engine"].LCMConfig)
+        patch.setattr(tree["survival_fit"], "_host_estimate", lambda messages: None)
+        counter = tree["tokens"]
+        patch.setattr(counter, "count_tokens", lambda text: 0 if not text else (
+            counter._fallback_token_estimate(text) if isinstance(text, str) else len(text) // 4 + 1))
+        engine = _engine(tmp_path, **settings)
+        engine.on_session_start("S", platform="telegram", context_length=window, conversation_id="conv")
         try:
-            _seed_prefix(engine, target + 2000)
-            calls = _script_provider(monkeypatch, clock, seconds=44)
-            result = _compress(engine, _view(turns), caplog)
-            status = _status(engine)
-            assert status["status"] in {"complete", "partial"}
-            results.append((status["summary_prefix_target_tokens"], calls, status["stop_reason"], result))
+            for i, (depth, size) in enumerate(nodes):
+                engine._dag.add_node(tree["dag"].SummaryNode(
+                    session_id="S", depth=depth, summary=f"arc {i} " + "history " * 40,
+                    token_count=size, source_token_count=size * 4, source_ids=[],
+                    source_type="messages", created_at=float(i + 1),
+                ))
+            def seed_estimate():
+                for _ in range(8):
+                    engine._foreground_estimates.record_call(engine._primary_summary_route(), estimate)
+
+            if estimate is not None and not replay:
+                seed_estimate()
+            _advance_on(patch, engine, "_prepare_retained_user_anchor", clock, pre_work, calls=pre_work_passes)
+            calls = []
+            condensing = False
+            condense_nodes = engine._condense_summary_nodes
+
+            def condense(*args, **kwargs):
+                nonlocal condensing
+                condensing = True
+                try:
+                    return condense_nodes(*args, **kwargs)
+                finally:
+                    condensing = False
+
+            patch.setattr(engine, "_condense_summary_nodes", condense)
+
+            def summarize(prompt, max_tokens, model="", timeout=None, reasoning_effort=""):
+                kind = "condensation" if condensing else "leaf"
+                calls.append((kind, round(timeout, 3)))
+                if seconds > timeout:
+                    clock.offset += timeout
+                    raise TimeoutError("synthetic provider timed out")
+                clock.offset += seconds
+                return leaf if kind == "leaf" else SUMMARY
+
+            patch.setattr(tree["escalation"], "_invoke_summary_llm", summarize)
+            original = _view(turns)
+            view = original
+            trace = []
+            for index in range(passes):
+                prior_calls, prior_leaves = len(calls), len(_leaves(engine))
+                if not replay or index == 0:
+                    engine.ingest(view)
+                elif estimate is not None:
+                    seed_estimate()
+                result = engine.compress(view, current_tokens=engine.threshold_tokens + 1)
+                status = engine.get_status()["threshold_full_sweep"]
+                trace.append(dict(
+                    calls=calls[prior_calls:], leaves=len(_leaves(engine)) - prior_leaves,
+                    reported_leaves=status["leaf_passes"], stop=status["stop_reason"],
+                    target=status["summary_prefix_target_tokens"], frontier=engine._summary_frontier_tokens(),
+                    compression_status=engine._last_compression_status,
+                ))
+                view = original if replay else result
+                engine.note_turn_complete()
+                clock.offset += 700  # Permit the next eligible sweep after any base hold.
+            return trace, result
         finally:
             engine.shutdown()
-    print(f"window {window}: {results[0][:3]}, returned rows={len(results[0][3])}, sha={_snapshot(results[0][3])}")
-    assert results[0] == results[1]
-    assert results[0][:2] == (target, ["condensation"])
 
 
-def test_measured_59_second_setup_does_not_spend_the_first_call_on_condensation(
-    tmp_path, monkeypatch, clock, caplog,
-):
-    engine = _sweep_engine(tmp_path, leaf_chunk_tokens=24_000)
-    try:
-        _seed_prefix(engine, 60_000)
-        calls = _script_provider(monkeypatch, clock, seconds=44)
-        _advance_on(monkeypatch, engine, "_prepare_retained_user_anchor", clock, 59)
-        view = _view(240)
-        result = _compress(engine, view, caplog)
-        if calls:
-            assert calls == ["leaf"] and _status(engine)["leaf_passes"] == 1
-        else:
-            assert result == view and _status(engine)["stop_reason"] == "time_budget_exhausted"
-    finally:
-        engine.shutdown()
+def _compare(base_tree, tmp_path, monkeypatch, clock, **case):
+    base, base_result = _run(base_tree, tmp_path / "base", monkeypatch, clock, **case)
+    candidate, candidate_result = _run(CANDIDATE, tmp_path / "candidate", monkeypatch, clock, **case)
+    print(json.dumps({"case": {key: value for key, value in case.items() if key != "leaf"},
+                      "base": base, "candidate": candidate}, sort_keys=True))
+    return base, candidate, base_result, candidate_result
 
 
-def test_three_late_turns_use_the_existing_budget_hold(tmp_path, monkeypatch, clock):
-    monkeypatch.setattr(clock, "_real", lambda: 0.0)
-    engine = _sweep_engine(tmp_path)
-    _advance_on(monkeypatch, engine, "_prepare_retained_user_anchor", clock, 93, calls=None)
-    calls = _script_provider(monkeypatch, clock, seconds=44)
-    view = _view()
-    durations, holds = [], []
-    try:
-        for _ in range(3):
-            engine.ingest(view)
-            start = time.monotonic()
-            assert engine.compress(view, current_tokens=engine.threshold_tokens + 1) == view
-            durations.append(time.monotonic() - start)
-            holds.append((engine._sweep_budget_hold_until - time.monotonic(), engine._sweep_budget_hold_turn_paced,
-                          engine._hung_summary_strike))
-            engine.note_turn_complete()
-        print(f"late turns: durations={durations}, calls={calls}, holds={holds}, total={sum(durations)}")
-        assert sum(durations) <= 115
-        assert durations == [93, 0, 0] and calls == []
-        assert holds == [(600, False, None)] * 3
-    finally:
-        engine.shutdown()
+def _assert_progress(base, candidate):
+    """Never less progress than the base: at least its leaves on every pass, and a call whenever work remains."""
+    available = sum(row["leaves"] for row in base)  # every leaf the base publishes in this cell
+    base_leaves = candidate_leaves = 0
+    for index, (before, after) in enumerate(zip(base, candidate, strict=True), start=1):
+        # The candidate may be ahead: all leaves published and the prefix at or under its target leaves it nothing to call for.
+        done = candidate_leaves >= available and after["frontier"] <= after["target"]
+        base_leaves += before["leaves"]
+        candidate_leaves += after["leaves"]
+        assert not before["calls"] or after["calls"] or done, (index, before, after)
+        assert candidate_leaves >= base_leaves, (index, base_leaves, candidate_leaves)
 
 
-def test_cold_cut_raises_the_next_estimate_until_a_call_completes(tmp_path, monkeypatch, clock):
-    monkeypatch.setattr(clock, "_real", lambda: 0.0)
-    engine = _sweep_engine(tmp_path, window=200_000, summary_model="primary")
-    for turn, seconds in enumerate((80, 79, 62), start=1):
-        _advance_on(monkeypatch, engine, "_prepare_retained_user_anchor", clock, seconds, calls=(turn,))
-    completed = []
-    calls = _script_provider(monkeypatch, clock, seconds=40, completed=completed)
-    view = _view()
-    passes = []
-    try:
-        engine.ingest(view)
-        rows = _store_rows(engine)
-        assert engine._foreground_estimates.call_estimate("primary", 120) == 30
-        for turn in range(3):
-            start, started_count, completed_count = time.monotonic(), len(calls), len(completed)
-            result = engine.compress(view, current_tokens=engine.threshold_tokens + 1)
-            elapsed = time.monotonic() - start
-            estimate = engine._foreground_estimates.call_estimate("primary", 120)
-            passes.append((elapsed, len(calls) - started_count, len(completed) - completed_count, estimate))
-            if turn < 2:
-                assert result == view and _store_rows(engine) == rows
-                assert _status(engine)["stop_reason"] == "time_budget_exhausted"
-                assert engine._sweep_budget_hold_until - time.monotonic() == 600
-                assert engine._summary_circuit_breaker.allows("primary") and engine._hung_summary_strike is None
-            engine.note_turn_complete()
-            clock.offset += 601  # Let the existing holds expire without adding to compress time.
-        print(f"cold route passes (elapsed, started, completed, next estimate): {passes}")
-        assert passes == [(115, 1, 0, 52.5), (79, 0, 0, 52.5), (102, 1, 1, 40)]
-        assert _status(engine)["leaf_passes"] == 1
-    finally:
-        engine.shutdown()
+@pytest.mark.parametrize("pre_work", [0, 37, 59, 88, 95])
+@pytest.mark.parametrize("estimate", [None, 20, 44, 58, 115], ids=["cold", "20", "44", "58", "115"])
+@pytest.mark.parametrize("prefix", PREFIXES)
+def test_progress_grid(base_tree, tmp_path, monkeypatch, clock, pre_work, estimate, prefix):
+    base, candidate, _, _ = _compare(
+        base_tree, tmp_path, monkeypatch, clock, nodes=PREFIXES[prefix],
+        pre_work=pre_work, estimate=estimate, seconds=8 if estimate is None else estimate, passes=10,
+    )
+    _assert_progress(base, candidate)
+
+
+@pytest.mark.parametrize(("pre_work", "estimate", "seconds", "nodes", "turns", "passes", "leaf"), [
+    pytest.param(59, 44, 44, [(0, 25_250)] * 4, 240, 4, SUMMARY, id="PROBE2-59-44"),
+    pytest.param(37, 44, 44, [(0, 25_250)] * 4, 240, 4, SUMMARY, id="PROBE2-37-44"),
+    pytest.param(30, 58, 40, [(0, 25_250)] * 4, 240, 4, SUMMARY, id="PROBE2-30-58"),
+    pytest.param(59, 44, 44, [(0, 22_500)] * 4, 240, 4, SUMMARY, id="PROBE2-90k"),
+    pytest.param(88, None, 8, [], 240, 3, SUMMARY, id="PROBE3-88-cold"),
+    pytest.param(95, None, 8, [], 240, 3, SUMMARY, id="PROBE3-95-cold"),
+    pytest.param(0, 200, 20, [(0, 25_250)] * 4, 240, 4, SUMMARY, id="PROBE5-115-stale"),
+    pytest.param(50, 44, 44, [(0, 24_000)] * 4, 1720, 6, BACKLOG_LEAF, id="PROBE6-96k"),
+    pytest.param(50, 44, 44, [(0, 24_750)] * 4, 1720, 6, BACKLOG_LEAF, id="PROBE6-99k"),
+])
+def test_review_probes(base_tree, tmp_path, monkeypatch, clock, pre_work, estimate, seconds, nodes, turns, passes, leaf):
+    base, candidate, _, _ = _compare(
+        base_tree, tmp_path, monkeypatch, clock, nodes=nodes, pre_work=pre_work, estimate=estimate,
+        seconds=seconds, turns=turns, passes=passes, leaf=leaf,
+    )
+    _assert_progress(base, candidate)
+
+
+@pytest.mark.parametrize(("settings", "target"), [
+    ({}, 50_000),
+    ({"context_threshold": 0.1}, 25_000),
+    ({"context_threshold": 0.05}, 12_500),
+    ({"leaf_chunk_tokens": 60_000}, 60_000),
+    ({"summary_prefix_target_tokens": 31_000, "summary_prefix_target_ratio": 0.1}, 31_000),
+    ({"summary_prefix_target_ratio": 0.06}, 60_000),
+])
+def test_window_relative_default_and_explicit_precedence(tmp_path, monkeypatch, clock, settings, target):
+    trace, _ = _run(CANDIDATE, tmp_path / "candidate", monkeypatch, clock, nodes=[], turns=12, settings=settings)
+    print(f"K1 settings={settings} target={trace[0]['target']}")
+    assert trace[0]["target"] == target
+
+
+@pytest.mark.parametrize(("prefix", "pre_work"), [(26_000, 59), (60_000, 59), (60_000, 0)])
+def test_leaf_is_first_and_publishes(tmp_path, monkeypatch, clock, prefix, pre_work):
+    trace, _ = _run(
+        CANDIDATE, tmp_path / "candidate", monkeypatch, clock, nodes=[(0, prefix // 4)] * 4,
+        estimate=44, seconds=44, pre_work=pre_work,
+    )
+    print(f"K2 prefix={prefix} pre_work={pre_work} {trace}")
+    assert trace[0]["calls"][0][0] == "leaf"
+    assert trace[0]["leaves"] >= 1
+
+
+def test_condensation_can_follow_the_leaves_in_the_same_pass(tmp_path, monkeypatch, clock):
+    trace, _ = _run(CANDIDATE, tmp_path / "candidate", monkeypatch, clock,
+                    nodes=PREFIXES["one-to-two-targets"], turns=12, estimate=20, seconds=20)
+    print(f"K2 leaf then condensation {trace}")
+    kinds = [kind for kind, _ in trace[0]["calls"]]
+    assert kinds[0] == "leaf" and "condensation" in kinds[1:]
+    assert trace[0]["leaves"] >= 1
+
+
+def test_prefix_grows_while_draining_then_shrinks_without_a_leaf(tmp_path, monkeypatch, clock):
+    trace, _ = _run(CANDIDATE, tmp_path / "candidate", monkeypatch, clock,
+                    nodes=PREFIXES["over-twice-target"], turns=12, estimate=44, seconds=44,
+                    pre_work=50, pre_work_passes=(1,), leaf=BACKLOG_LEAF, passes=2)
+    first, second = trace
+    print(f"K2 grow then shrink {trace}")
+    assert first["leaves"] == 1 and first["frontier"] > 101_000
+    assert second["leaves"] == 0 and second["calls"][0][0] == "condensation"
+    assert second["frontier"] < first["frontier"]
+
+
+@pytest.mark.parametrize(("window", "target"), [
+    (64_000, 8_000), (200_000, 24_000), (272_000, 24_000), (480_000, 24_000),
+])
+@pytest.mark.parametrize("override", [{}, {"leaf_chunk_tokens": 1}, {"summary_prefix_target_ratio": 0.04}])
+def test_legacy_window_parity(base_tree, tmp_path, monkeypatch, clock, window, target, override):
+    if "summary_prefix_target_ratio" in override:
+        target = int(window * override["summary_prefix_target_ratio"])
+    elif override:
+        target = 1
+    base, candidate, before, after = _compare(
+        base_tree, tmp_path, monkeypatch, clock, window=window, nodes=[(0, target // 2 + 1000)] * 2,
+        turns=80, seconds=44, settings=override,
+    )
+    assert base == candidate
+    assert base[0]["target"] == target
+    assert base[0]["calls"][0][0] == "condensation"
+    assert json.dumps(before, sort_keys=True).encode() == json.dumps(after, sort_keys=True).encode()
+
+
+def test_late_entry_adopts_committed_replay(base_tree, tmp_path, monkeypatch, clock):
+    base, candidate, before, after = _compare(
+        base_tree, tmp_path, monkeypatch, clock, nodes=[], turns=12, estimate=44, seconds=0,
+        pre_work=80, pre_work_passes=(2,), passes=2, replay=True,
+        settings={"leaf_chunk_tokens": 400, "summary_prefix_target_tokens": 400},
+    )
+    assert base == candidate
+    assert before == after
+    assert candidate[0]["leaves"] > 0
+    assert candidate[1]["compression_status"] == "compacted"
+    assert not candidate[1]["calls"]

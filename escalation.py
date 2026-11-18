@@ -108,35 +108,16 @@ def _p90(samples: list[float], cold: float) -> float:
 class ForegroundEstimates:
     """#605: process-local walls of the last 8 summariser calls per route and of the last 8 finalize steps."""
 
-    __slots__ = ("__dict__", "_call_lock", "_cut_floors")
-
     def __init__(self):
         self.calls: dict[str, list[float]] = {}
         self.finalize: list[float] = []
-        self._call_lock = threading.Lock()
-        self._cut_floors: dict[str, float] = {}
 
-    def record_call(self, route_key: str, wall: float, *, cut_ceiling: float | None = None,
-                    completed: bool = True) -> None:
-        with self._call_lock:
-            if cut_ceiling is not None:
-                # A cut measures a lower bound. Keep it separately from the observed wall times.
-                prior = self._route_estimate(route_key)
-                self._cut_floors[route_key] = min(cut_ceiling, max(prior, 1.5 * wall))
-            elif completed:
-                self._cut_floors.pop(route_key, None)
-            self.calls[route_key] = [*self.calls.get(route_key, []), wall][-8:]
+    def record_call(self, route_key: str, wall: float) -> None:
+        self.calls[route_key] = [*self.calls.get(route_key, []), wall][-8:]
 
-    def _route_estimate(self, route_key: str) -> float:
-        return max(_p90(self.calls.get(route_key, []), 30.0), self._cut_floors.get(route_key, 0.0),
-                   _THRESHOLD_FULL_SWEEP_MIN_CALL_SECONDS)
-
-    def call_estimate(self, route_key: str, ceiling: float, *, cut_only: bool = False) -> float:
+    def call_estimate(self, route_key: str, ceiling: float) -> float:
         """p90 of the route's last calls (30 s cold), at least 15 s, at most ``ceiling``."""
-        with self._call_lock:
-            if cut_only and route_key not in self._cut_floors:
-                return _THRESHOLD_FULL_SWEEP_MIN_CALL_SECONDS
-            return min(self._route_estimate(route_key), ceiling)
+        return min(max(_p90(self.calls.get(route_key, []), 30.0), _THRESHOLD_FULL_SWEEP_MIN_CALL_SECONDS), ceiling)
 
     def record_finalize(self, wall: float) -> None:
         self.finalize = [*self.finalize, wall][-8:]
@@ -153,13 +134,10 @@ class ForegroundBudget:
     interrupt a step already running. ``progress`` names the first stored leaf or condensed node of this
     compaction ("leaf" or "condensation"; empty before it); ``slot_taken`` its one spend-guard slot."""
 
-    __slots__ = ("__dict__", "estimate_first_call")
-
     def __init__(self, *, soft: float, hard: float, configured_timeout: float, estimates: ForegroundEstimates):
         self.t0 = time.monotonic()
         self.soft, self.hard, self.configured_timeout, self.estimates = soft, hard, configured_timeout, estimates
         self.reserve = estimates.finalize_reserve()
-        self.estimate_first_call = True
         self.leaf_reserve = 0.0  # #909: scoped to pre-leaf condensation; released before the leaf loop
         self.slot_taken = self.sweep_active = False
         self.progress = ""
@@ -175,24 +153,19 @@ class ForegroundBudget:
     def usable_deadline(self) -> float:
         return self.t0 + self.hard - self.reserve - self.leaf_reserve
 
-    def estimate(self, route_key: str, *, cut_only: bool = False) -> float:
-        return self.estimates.call_estimate(route_key, min(self.configured_timeout, self.hard - self.reserve),
-                                            cut_only=cut_only)
+    def estimate(self, route_key: str) -> float:
+        return self.estimates.call_estimate(route_key, min(self.configured_timeout, self.hard - self.reserve))
 
     def admit(self, route_key: str) -> float:
         """Raise SweepBudgetExhausted unless an attempt on ``route_key`` may start now; return the time left."""
         now = time.monotonic()
-        usable_left = self.usable_deadline - now
-        cut_only = not self.progress and not self.estimate_first_call
-        estimate = self.estimate(route_key, cut_only=cut_only)
-        if not self.progress and self.first_call_started is None:
-            # A stale estimate must leave an opportunity to make progress on a full pass.
-            estimate = min(estimate, (self.hard - self.reserve) / 2)
-        if cut_only:
-            estimate = max(estimate, _THRESHOLD_FULL_SWEEP_MIN_CALL_SECONDS)
-        if estimate > usable_left:
+        estimate, usable_left = self.estimate(route_key), self.usable_deadline - now
+        if not self.progress:  # the progress call (an over-target condensation, else the first leaf): no estimate
+            if usable_left < _THRESHOLD_FULL_SWEEP_MIN_CALL_SECONDS:
+                raise self.stop()
+        elif estimate > usable_left:
             raise self.stop()
-        if self.progress and self.soft > 0 and now + estimate > self.t0 + self.soft:
+        elif self.soft > 0 and now + estimate > self.t0 + self.soft:
             raise self.stop("foreground soft target reached", reason="soft_target_reached")
         return usable_left
 
@@ -202,10 +175,8 @@ class ForegroundBudget:
         self.stop_reason = reason
         return SweepBudgetExhausted(message, reason=reason)
 
-    def record_call(self, route_key: str, started: float, ended: float, *, cut: bool = False,
-                    completed: bool = True) -> None:
-        self.estimates.record_call(route_key, ended - started,
-                                   cut_ceiling=self.configured_timeout if cut else None, completed=completed)
+    def record_call(self, route_key: str, started: float, ended: float) -> None:
+        self.estimates.record_call(route_key, ended - started)
         if self.first_call_started is None:
             self.first_call_started = started
         self.last_call_ended = ended
@@ -1166,7 +1137,7 @@ def _invoke_summary_llm_routes(
         started, ended = attempt.timing.started, attempt.timing.ended
         if error is not None:
             note_error(error)
-        if budget is not None and result is not None:
+        if budget is not None:
             budget.record_call(route_key, started, ended)
         # Non-empty results consult the acceptance callback after route bookkeeping.
         # A missing result may be a budget cut, which must stop before note_route.
@@ -1191,12 +1162,6 @@ def _invoke_summary_llm_routes(
                            and source_tokens is not None else 0),
             context_length_rescue=context_length_rescue,
         ))
-        if budget is not None and result is None:
-            if isinstance(budget, ForegroundBudget):
-                budget.record_call(route_key, started, ended, cut=outcome.kind is SummaryOutcomeKind.BUDGET_CUT,
-                                   completed=error is None)
-            else:
-                budget.record_call(route_key, started, ended)
         if outcome.kind is SummaryOutcomeKind.BUDGET_CUT:
             if outcome.record_hang:
                 circuit_breaker.record_hang(route_key)

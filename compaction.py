@@ -963,7 +963,6 @@ class CompactionMixin:
         context = self._thread_context
         state = self._bypass_compress_state()
         budget = context.foreground_budget = self._new_foreground_budget()
-        budget.estimate_first_call = False
         outer_minted = vars(context).get("bypass_minted_engine_uids")  # a nested pass restores the enclosing tracker
         context.bypass_minted_engine_uids = []  # never recorded: this pass drops only the uids it minted
         returned = None
@@ -2405,11 +2404,10 @@ class CompactionMixin:
         # #605: one clock from compress() entry; the hard bound keeps today's step checks.
         state.budget = self._foreground_budget or self._new_foreground_budget()
         state.budget.sweep_active = state.threshold_full_sweep_active
-        large_automatic_window = self.context_length > _LARGE_SWEEP_WINDOW_TOKENS and not (force or state.force_overflow)
-        state.budget.estimate_first_call = large_automatic_window
         if force or state.force_overflow:  # #605: the soft target is for automatic compactions; these keep the hard bound
             state.budget.soft = 0.0
         state.sweep_deadline = state.budget.t0 + state.budget.hard
+        large_automatic_window = self.context_length > _LARGE_SWEEP_WINDOW_TOKENS and not (force or state.force_overflow)
         state.leaf_first = state.threshold_full_sweep_active and large_automatic_window and not recovery_attempt
         configured_sweep_target = int(self._config.summary_prefix_target_tokens)
         if configured_sweep_target > 0:
@@ -2419,7 +2417,7 @@ class CompactionMixin:
         else:
             state.sweep_target_tokens = int(self._config.leaf_chunk_tokens)
             if self.threshold_tokens > 0:
-                # Keep the same quarter-trigger bound that protects small windows.
+                # Default to one leaf budget capped at a quarter of the threshold, so a small window's prefix cannot fill it (rc3 compacted on every 32K call).
                 threshold_cap = int(self.threshold_tokens * _DEFAULT_SWEEP_TARGET_THRESHOLD_SHARE)
                 state.sweep_target_tokens = min(state.sweep_target_tokens, threshold_cap)
                 if large_automatic_window:
@@ -2490,7 +2488,7 @@ class CompactionMixin:
         return "next", None
 
     def _condense_before_leaves(
-        self, state: _CompressionState, focus_topic: Optional[str] = None, *, raw_unavailable: bool = False,
+        self, state: _CompressionState, focus_topic: Optional[str] = None, *, defer_for_leaf: bool = False,
     ) -> tuple[Literal["next", "return"], Optional[List[Dict[str, Any]]]]:
         """Condense the oversized prefix while preserving the leaf reservation scope."""
         if self._compaction_is_closing():
@@ -2499,19 +2497,16 @@ class CompactionMixin:
         if (
             state.threshold_full_sweep_active
             and state.sweep_summary_prefix_before > state.sweep_target_tokens
-            and (not state.leaf_first or raw_unavailable
-                 or state.sweep_summary_prefix_before > 2 * state.sweep_target_tokens
-                 or state.sweep_summary_prefix_before >= self.threshold_tokens)
+            and not defer_for_leaf
             and self._summary_route_available()
         ):
-            if not raw_unavailable:
-                state.budget.leaf_reserve = state.budget.estimate(self._primary_summary_route())
+            state.budget.leaf_reserve = state.budget.estimate(self._primary_summary_route())
             span_started = time.monotonic()
             try:
                 state.pre_leaf_condensation_passes, state.pre_leaf_condensation_reason = (
                     self._run_threshold_sweep_condensation(
                         target_tokens=state.sweep_target_tokens,
-                        pass_budget=_THRESHOLD_FULL_SWEEP_MAX_PASSES - int(not raw_unavailable),
+                        pass_budget=_THRESHOLD_FULL_SWEEP_MAX_PASSES - 1,
                         deadline=state.sweep_deadline,
                         focus_topic=focus_topic,
                     )
@@ -2563,11 +2558,8 @@ class CompactionMixin:
         if state.threshold_full_sweep_active and time.monotonic() >= state.sweep_deadline:
             state.sweep_stop_reason = "time_budget_exhausted"
             return "break", None
-        if state.budget.progress or (
-            state.threshold_full_sweep_active and state.budget.estimate_first_call
-            and not state.prep_enabled and self._summary_route_available()
-        ):
-            try:  # Refuse before the remaining leaf work if a summary could not start.
+        if state.budget.progress:
+            try:  # #605: no pass work for a later leaf whose call could not start (sweep on or off)
                 state.budget.admit(self._primary_summary_route())
             except SweepBudgetExhausted as exc:
                 state.sweep_stop_reason = exc.reason
@@ -2880,16 +2872,6 @@ class CompactionMixin:
                 if (not state.force_overflow and state.pre_leaf_condensation_passes == 0
                         and state.budget.hung_route is None):  # #909: stored condensation is progress
                     self._start_sweep_budget_hold()
-                if (state.threshold_full_sweep_active and state.budget.estimate_first_call
-                        and state.budget.stop_reason == state.sweep_stop_reason
-                        and state.budget.first_call_started is None and not state.pre_leaf_condensation_passes):
-                    self._last_compression_status = "noop"
-                    self._last_compression_noop_reason = state.noop_reason
-                    self._last_threshold_full_sweep.update(
-                        status="noop", stop_reason=state.sweep_stop_reason, budget_exhausted=True,
-                        duration_ms=round((time.perf_counter() - state._compress_started) * 1000.0, 3),
-                    )
-                    return "return", messages
             self._refresh_raw_backlog_debt(
                 state.working_messages,
                 observed_tokens=state.observed_prompt_tokens,
@@ -3012,9 +2994,7 @@ class CompactionMixin:
     def _condense_after_leaves(
         self, state: _CompressionState, focus_topic: Optional[str], warn_rejected: Callable[[], None],
     ) -> tuple[Literal["next", "return"], Optional[List[Dict[str, Any]]]]:
-        # Step 6: Check if condensation is needed. A threshold full sweep only
-        # condenses after the eligible raw prefix has been drained, and shares
-        # the same total pass/deadline budget as its leaf work.
+        # Step 6: Condensation shares the total pass/deadline budget with leaf work.
         if self._compaction_is_closing():
             return "return", state.host_messages
         state.pre_condensation_context = self._assemble_committed_compaction_context(
@@ -3028,17 +3008,20 @@ class CompactionMixin:
         try:
             if state.threshold_full_sweep_active:
                 post_leaf_condensation = state.sweep_raw_drained or state.sweep_stop_reason == "depth_target_reached"
-                if state.leaf_first and not state.sweep_stop_reason:
-                    post_leaf_condensation = self._summary_frontier_tokens() > state.sweep_target_tokens
+                deferred_condensation = (
+                    state.leaf_first and not post_leaf_condensation
+                    and state.sweep_stop_reason not in {"summary_result_rejected", "leaf_summary_error"}
+                    and self._summary_frontier_tokens() > state.sweep_target_tokens
+                )
                 if post_leaf_condensation and state.pre_leaf_condensation_reason == "summary_result_rejected":
                     state.post_drain_condensation_skipped = "pre_leaf_rejected"
                     state.sweep_stop_reason = "summary_result_rejected"
-                elif post_leaf_condensation:
+                elif post_leaf_condensation or deferred_condensation:
                     remaining_passes = max(
                         0,
                         _THRESHOLD_FULL_SWEEP_MAX_PASSES - state.leaf_passes - state.pre_leaf_condensation_passes,
                     )
-                    state.condensation_passes, state.sweep_stop_reason = (
+                    state.condensation_passes, condensation_reason = (
                         self._run_threshold_sweep_condensation(
                             target_tokens=state.sweep_target_tokens,
                             pass_budget=remaining_passes,
@@ -3046,6 +3029,9 @@ class CompactionMixin:
                             focus_topic=focus_topic,
                         )
                     )
+                    if (post_leaf_condensation or not state.sweep_stop_reason
+                            or condensation_reason == "summary_result_rejected"):
+                        state.sweep_stop_reason = condensation_reason
             else:
                 state.condensation_passes = self._maybe_condense(
                     focus_topic=focus_topic,
@@ -3448,8 +3434,6 @@ class CompactionMixin:
             if not state.threshold_full_sweep_active:
                 return "continue", None  # the next prepared leaf, else the leaf path's own pass
         if state.threshold_full_sweep_active:
-            if state.leaf_first and self._summary_frontier_tokens() > 2 * state.sweep_target_tokens:
-                return "break", None  # Condense before adding another leaf to the oversized prefix.
             leaf.leading_anchor_count = self._leading_anchor_count(state.working_messages)
             remaining_fresh_tail_start = self._fresh_tail_start(state.working_messages)
             remaining_raw = state.working_messages[
@@ -3753,24 +3737,22 @@ class CompactionMixin:
                     leaf_passes,
                 )
 
-        # Give a selectable leaf the first call where the window raises the default prefix target.
-        # #653 still bounds prefix growth when later condensation cannot keep up.
-        action, result = self._condense_before_leaves(state, focus_topic)
+        # #653: Historical sweeps condense an oversized summary prefix first, with time reserved for a leaf.
+        # Large-window sweeps give the first progress call to a selectable leaf.
+        defer_for_leaf = state.leaf_first and sweep_summary_prefix_before > sweep_target_tokens
+        pre_leaf_focus_topic = focus_topic
+        action, result = self._condense_before_leaves(state, focus_topic, defer_for_leaf=defer_for_leaf)
         if action == "return":
             return result
         pre_leaf_condensation_passes = state.pre_leaf_condensation_passes
         pre_leaf_condensation_reason = state.pre_leaf_condensation_reason
         max_leaf_passes = state.max_leaf_passes
-        if (state.leaf_first and sweep_summary_prefix_before > 2 * sweep_target_tokens
-                and self._summary_frontier_tokens() > 2 * sweep_target_tokens):
-            max_leaf_passes = 0
-            sweep_stop_reason = pre_leaf_condensation_reason or "summary_route_unavailable"
 
         # #787 (amendment M-1): a leaf pass whose chunk matches a prepared leaf publishes it without the call
         prep_enabled = bool(getattr(self._config, "background_leaf_prep_enabled", False))
-        state.prep_enabled = prep_enabled
         promoted_leaves = prep_freed = prep_low_water = 0
         no_call_only, refused_input, unattributed_leaf_refused = False, None, False
+        leaf_ready = False
         self._pre_leaf_span("pre_loop", budget.t0)
         if budget.pre_leaf is not None:
             budget.pre_leaf.steps = sweep_step_seconds
@@ -3860,6 +3842,7 @@ class CompactionMixin:
                 if action == "return":
                     return result
                 selected_raw_chunk = leaf.selected_raw_chunk
+                leaf_ready = True
                 anchored_input = leaf.anchored_input
                 summary_input_chunk = leaf.summary_input_chunk
                 sources = leaf.sources
@@ -3996,18 +3979,16 @@ class CompactionMixin:
         state.max_leaf_passes = max_leaf_passes
         state.noop_reason = noop_reason
         state.force_overflow = force_overflow
-        exited = self._use_stub_first_fallback(state)
-        if exited is not None:
-            return exited
-        if (state.leaf_first and not leaf_passes and not budget.selected
-                and state.sweep_stop_reason in {"", "raw_prefix_drained"}
-                and sweep_target_tokens < sweep_summary_prefix_before <= 2 * sweep_target_tokens
-                and sweep_summary_prefix_before < self.threshold_tokens):
-            action, result = self._condense_before_leaves(state, focus_topic, raw_unavailable=True)
+        if defer_for_leaf and not leaf_ready:
+            # Only the leaf path can determine whether replay and lineage leave a selectable leaf.
+            action, result = self._condense_before_leaves(state, pre_leaf_focus_topic)
             if action == "return":
                 return result
             pre_leaf_condensation_passes = state.pre_leaf_condensation_passes
             pre_leaf_condensation_reason = state.pre_leaf_condensation_reason
+        exited = self._use_stub_first_fallback(state)
+        if exited is not None:
+            return exited
         self._settle_leaf_stop(state, warn_rejected)
         working_messages = state.working_messages
         pressure_messages = state.pressure_messages
