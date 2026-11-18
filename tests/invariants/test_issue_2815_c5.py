@@ -103,7 +103,8 @@ def test_unlocated_cursor_cut_budget(tmp_path, monkeypatch, mode, turns, count):
         _store_copies(seed, [rows[-1]])
     view = _project(rows)
     prefix = int(count == 64)  # the budgeted cell needs a proven first row
-    view[prefix].pop("message_uid")
+    if not prefix:
+        view[0].pop("message_uid")
     for i, row in enumerate(view[prefix:], start=prefix):
         if row["role"] == "user":
             row["timestamp"] += 0.5
@@ -327,8 +328,7 @@ def test_native_recovery_digest_below_cut_budget_is_still_checked(tmp_path, monk
         seed.ingest(rows)
         _store_copies(seed, rows[-1:])
     view = _project(rows)
-    for row in view[1:]:  # keep a proven first row so the budget applies
-        row.pop("message_uid")
+    for row in view[1:]:  # keep the bindings, but only the first row is byte-proven
         row["content"] = (row["content"] or "") + " Different synthetic row."
     with _closing(_open(tmp_path)) as cold:
         projections = []

@@ -2521,11 +2521,17 @@ class LCMEngine(
         except Exception:
             pass  # a notification must never break a completed turn
 
+    def _compression_owned_by_another_thread(self) -> bool:
+        owner = self._compress_owner
+        return owner not in (None, threading.get_ident())
+
     def _automatic_compression_blocked(self, *, ignore_cooldown: bool = False) -> bool:
-        """#651 host breaker gate, read on the type before every automatic compress. A host recovery attempt
-        (``ignore_cooldown``), a pending below-threshold cleanup-only pass, forced overflow and the survival
-        ceiling are never blocked; the hold governs LCM-managed compaction only, never a bypassed session.
-        #625: the #608 sweep hold blocks the same way."""
+        """Defer while another thread owns a pass, including on host recovery attempts.
+
+        The #651 and #625 holds exempt recovery, cleanup-only, forced overflow, the survival ceiling
+        and bypassed sessions."""
+        if self._compression_owned_by_another_thread():
+            return True
         if ignore_cooldown or self._compaction_request.below_threshold_cleanup_only:
             return False
         tokens = max(int(self.last_prompt_tokens or 0), self._last_gate_tokens)
@@ -2554,6 +2560,8 @@ class LCMEngine(
     def _compression_block_reason(self) -> Optional[str]:
         """#651: the host classifies ``cooldown*`` as a transient block: defer, never exhaust. #625: the #608
         sweep hold is ``cooldown:lcm_sweep_budget``."""
+        if self._compression_owned_by_another_thread():
+            return "cooldown:lcm_compaction_in_progress"
         if self._retained_stop_hold_active():
             return "cooldown:lcm_retained_stop"
         status = self._no_progress_hold_status()

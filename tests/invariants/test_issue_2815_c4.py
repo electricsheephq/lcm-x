@@ -81,7 +81,10 @@ def test_cold_bind_projects_only_the_uid_located_cut(tmp_path, monkeypatch, carr
             row["content"] = _HERMES_PRUNED_TOOL_PLACEHOLDER
         elif index % 4 == 3:
             row["timestamp"] = rows[index]["timestamp"] + 0.5
-    view[12].pop("message_uid")
+    if carrier == "located":
+        view[12]["content"] += " Edited bound host row."
+    else:
+        view[12].pop("message_uid")
     if carrier == "missing":
         view[-1].pop("message_uid")
     elif carrier == "duplicate":

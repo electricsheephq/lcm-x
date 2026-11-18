@@ -108,27 +108,16 @@ def test_unbound_tool_pair_uses_full_cold_walk(tmp_path, monkeypatch, caplog, ne
     assert _BUDGET_LOG not in caplog.text
 
 
-def test_bound_tail_with_200_new_rows_uses_cut_budget(tmp_path, monkeypatch, caplog):
+def test_bound_prefix_with_200_unbound_rows_uses_full_cold_walk(tmp_path, monkeypatch, caplog):
     caplog.set_level(logging.INFO, logger="hermes_lcm.reconcile")
     added = _view(50, "new")
     seed, stored, cuts = _cold(tmp_path / "on", monkeypatch, on=True, bound=True, added=added, unlocated=True)
     assert len(seed) == 3
     assert stored == seed + _contents(added)
-    assert len(cuts) == 64
-    assert [r.message for r in caplog.records if r.message.startswith(_BUDGET_LOG)] == [
-        f"{_BUDGET_LOG} uid_cursor=2 cuts_skipped=139"
-    ]
-
-
-def test_known_limit_mixed_bound_prefix_and_unbound_legacy_stretch(tmp_path, monkeypatch):
-    legacy = [row for i in range(40) for row in _turn(f"legacy-{i}", 0, stamp_user=False)]
-    added = [row for i in range(35) for row in _turn(f"new-{i}", 2000.0 + i * 10)]
-    seed, stored, cuts = _cold(tmp_path / "on", monkeypatch, on=True, bound=True, legacy=legacy, added=added)
-    _, base, _ = _cold(tmp_path / "unset", monkeypatch, on=False, bound=True, legacy=legacy, added=added)
-    print(f"mixed cut: seed={len(seed)} on={len(stored)} unset={len(base)} projections={len(cuts)}")
-    assert len(seed) == 82 and len(cuts) == 64
-    assert base == seed + _contents(added)
-    assert stored == seed + _contents(legacy + added)
+    _, base, base_cuts = _cold(tmp_path / "unset", monkeypatch, on=False, bound=True, added=added, unlocated=True)
+    assert stored == base
+    assert cuts == base_cuts and len(cuts) > 64
+    assert "LCM UID cut budget disabled: unbound_host_rows=136" in caplog.text
 
 
 @pytest.mark.parametrize("shape", _TASK_ROWS)

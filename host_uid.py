@@ -231,7 +231,7 @@ class HostUidShadowMixin:
         except Exception as exc:
             self._host_uid_count(Counter(errors=1), exc)
 
-    def _host_uid_engine_uids(self, uids) -> set:
+    def _host_uid_engine_uids(self, uids, *, bound_uids=None) -> set:
         """The ``uids`` that are engine uids of this lineage: the durable record (one batched lookup) plus the
         uids this engine minted and has not recorded yet. Fails open to the in-memory set."""
         uids = {uid for uid in uids if isinstance(uid, str)}
@@ -244,8 +244,11 @@ class HostUidShadowMixin:
                 return known
             if recognition:
                 known = {uid for uid in uids if pending.get(uid, (None,))[0] == lineage}
-            if uids - known:
-                known |= set(self._store.host_uid_bindings_for(lineage, uids - known, ("engine",)))
+            if wanted := (uids - known if bound_uids is None else uids):
+                durable = self._store.host_uid_bindings_for(lineage, wanted, ("engine",))
+                known.update(durable)
+                if bound_uids is not None:
+                    bound_uids.update(durable)
         except Exception as exc:
             self._host_uid_count(Counter(errors=1), exc)
         return known
@@ -301,8 +304,13 @@ class HostUidShadowMixin:
             remaining = remaining[end + 2:]
         return False
 
-    def _host_uid_resolve(self, messages, identities=None, *, excluded=(), prefix_only=False, fetched=None):
-        """Resolve distinct, byte-proven occurrences in this store and lineage."""
+    def _host_uid_unbound_rows(self, messages, bound_uids) -> int:
+        return sum((not _valid_uid(uid := row.get("message_uid")) or uid not in bound_uids)
+                   and not self._host_uid_whole_scaffold(row) for row in messages)
+
+    def _host_uid_resolve(self, messages, identities=None, *, excluded=(), prefix_only=False, fetched=None,
+                          bound_uids=None):
+        """Resolve byte-proven occurrences and optionally collect durable bindings across the whole view."""
         if not self._uid_recognition_enabled():
             return {}
         uids = [m.get("message_uid") for m in messages]
@@ -311,7 +319,10 @@ class HostUidShadowMixin:
             return {}
         try:
             bindings = self._store.host_uid_bindings_for(lineage, wanted)
-            engine = self._host_uid_engine_uids(wanted) if prefix_only or identities is not None else set()
+            if bound_uids is not None:
+                bound_uids.update(bindings)
+            engine = (self._host_uid_engine_uids(wanted, bound_uids=bound_uids)
+                      if prefix_only or identities is not None else set())
             fetched = {} if fetched is None else fetched
             resolved, claimed = {}, set(excluded)
             self._host_uid_fetch({sid for items in bindings.values() for sid, _kind in items}, fetched)

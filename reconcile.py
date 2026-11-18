@@ -3169,7 +3169,8 @@ class ReconcileMixin:
         recognition = uid_recognition_enabled(self)
         uid_cursor = 0
         if recognition:
-            uid_matches = self._host_uid_resolve(messages, prefix_only=True, fetched=uid_fetched)
+            bound_uids = set()
+            uid_matches = self._host_uid_resolve(messages, prefix_only=True, fetched=uid_fetched, bound_uids=bound_uids)
             uid_cursor = next((i for i in range(len(messages)) if i not in uid_matches), len(messages))
             if uid_cursor == len(messages):
                 return self._record_uid_cursor(messages, uid_cursor, session_count, 0)
@@ -3199,8 +3200,14 @@ class ReconcileMixin:
             for row in stored_tail_rows
         ]
         run.stored_tail = stored_tail
+        budgeted = bool(uid_cursor)
+        if budgeted and (unbound := self._host_uid_unbound_rows(
+            messages[uid_cursor:-_UID_ON_CURSOR_CUT_BUDGET], bound_uids
+        )):
+            logger.info("LCM UID cut budget disabled: unbound_host_rows=%d", unbound)
+            budgeted = False
         # Later cuts can mistake new rows for older equal content (#1511). Earlier ones keep their own proof.
-        content_cut = self._host_uid_tail_cut(messages, stored_tail_rows[-1]) if uid_cursor and stored_tail_rows else None
+        content_cut = self._host_uid_tail_cut(messages, stored_tail_rows[-1]) if budgeted and stored_tail_rows else None
         cursor = self._find_reconciled_cursor_for_store_tail(
             messages,
             stored_tail,
@@ -3210,7 +3217,7 @@ class ReconcileMixin:
             raw_session_count=session_count,
             allow_session_end_replay_proof=allow_session_end_replay_proof,
             **({"content_cut": content_cut, "cut_budget": _UID_ON_CURSOR_CUT_BUDGET, "uid_cursor": uid_cursor}
-               if uid_cursor else {}),
+               if budgeted else {}),
         )
         head_cursor = self._cursor_from_host_rewrite_head(messages, session_count)
         if head_cursor is not None and head_cursor > (cursor or 0):
