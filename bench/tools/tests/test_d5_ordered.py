@@ -104,5 +104,5 @@ def test_ordered_pairs_at_field_scale():
         peak_bytes *= 1024  # Linux reports KiB and macOS reports bytes.
     print(f"Field scale 32168 x 53779: {elapsed:.3f} s wall, {peak_bytes} bytes peak RSS")
     assert pairs == expected
-    assert elapsed < 300
-    assert peak_bytes < 8_000_000_000
+    assert elapsed < 60
+    assert peak_bytes < 2_000_000_000

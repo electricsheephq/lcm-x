@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from collections import Counter, OrderedDict
 import json
+import os
 from operator import eq
 import random
 import time
@@ -207,6 +208,8 @@ def test_hint_cache_keeps_the_first_payload_error_in_loop_order(monkeypatch, tmp
     assert calls == ["first eligible"]
 
 
+# 100 million host/spare pairs: a timing case, so opt-in. The swap-count test above guards the cache.
+@pytest.mark.skipif(os.environ.get("LCMX_ENDREAD_FIELD_SCALE") != "1", reason="set LCMX_ENDREAD_FIELD_SCALE=1")
 def test_hint_cache_on_20000_unmatched_hosts_and_5000_spare_rows(tmp_path):
     payloads = tmp_path / "lcm-large-outputs"
     payloads.mkdir()
