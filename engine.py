@@ -5439,7 +5439,8 @@ class LCMEngine(
         # Only this path ends the foreground binding. Same-id bypass callbacks
         # above can leave it serving, so session-id equality alone is insufficient.
         try:
-            self._finalize_foreground_session_end_unlocked(session_id, messages, host_pairs=host_pairs)
+            self._finalize_foreground_session_end_unlocked(
+                session_id, messages, **({"host_pairs": host_pairs} if host_pairs else {}))
         finally:
             with self._attribution_span("retire"):
                 self._retire_embedding_maintenance(wait=False)

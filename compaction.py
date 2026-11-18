@@ -95,7 +95,8 @@ def _counted_compaction(operation):
             self._record_ingest_failure("compress", exc)
             return messages
         else:
-            return operation(self, messages, *args, **kwargs, **host_view)
+            # This call's generated pairs win over a caller-supplied keyword: they match the copy made here.
+            return operation(self, messages, *args, **{**kwargs, **host_view})
         finally:
             with self._compaction_gate:
                 self._compaction_inflight -= 1
