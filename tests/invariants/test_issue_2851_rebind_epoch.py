@@ -1,4 +1,8 @@
-"""I1/I2: a pass cannot adopt state for a later binding with the same IDs."""
+"""I1/I2: the reset epoch detects a rebind away from a session and back.
+
+A round trip between conversations on one session ID during the wait leaves
+the reset epoch unchanged and goes undetected, as on main.
+"""
 
 import threading
 from concurrent.futures import ThreadPoolExecutor

@@ -769,6 +769,7 @@ class CompactionMixin:
             if bypassed:
                 # #1931: a delegated child's rows are stored before the host's compaction rewrites its view.
                 return self._compress_delegate_child_bypassed(messages, current_tokens, focus_topic, force)
+        caller_messages = messages if caller_messages is None else caller_messages
         # The session reset epoch also detects a reset or a rebind back to the same IDs.
         binding = (self._session_id, self._conversation_id, self._pressure_yield_reset_epoch)
 
@@ -959,6 +960,8 @@ class CompactionMixin:
                 if thread_context is not None:
                     thread_context.foreground_budget = None
                 if binding_changed():
+                    # The dropped pass may already have moved the current session's cursor.
+                    self._ingest_cursor_needs_reconcile = True
                     logger.info("LCM compaction stopped because the session binding changed")
                 else:
                     self._last_compress_leaves = (self._hold_conversation_key(), budget.leaves)
