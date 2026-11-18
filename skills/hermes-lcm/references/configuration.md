@@ -119,8 +119,8 @@ Use [docs/operator-guide.md](https://github.com/electricsheephq/lcm-x/blob/main/
 - `LCM_FRESH_TAIL_COUNT` (default `24`) and `LCM_FRESH_TAIL_MAX_TOKENS` (default `24000`): newest messages kept raw, and their token cap;
 - `LCM_LEAF_CHUNK_TOKENS` (default `24000`): maximum raw material per leaf compaction group;
 - `LCM_THRESHOLD_FULL_SWEEP_ENABLED` (default `true`): the threshold full sweep;
-- `LCM_SUMMARY_PREFIX_TARGET_TOKENS` (default `0`) sets the threshold sweep's summary-frontier budget. A positive value overrides the ratio. With both settings at `0`, the budget is one leaf capped at a quarter of the compaction threshold (#1139).
-- `LCM_SUMMARY_PREFIX_TARGET_RATIO` (default `0`, env only) sets the summary-frontier budget as a share of the model window when the tokens setting is `0`.
+- `LCM_SUMMARY_PREFIX_TARGET_TOKENS` (default `0`) sets the threshold sweep's summary-frontier budget. A positive value overrides the ratio. With the tokens setting not positive and the ratio at `0`, the budget is one leaf capped at a quarter of the compaction threshold (#1139).
+- `LCM_SUMMARY_PREFIX_TARGET_RATIO` (default `0`, env only) sets the summary-frontier budget as a share of the model window when the tokens setting is not positive.
 - `LCM_DEPTH_TARGET_RATIO` (default `0`, env only) lets an automatic threshold sweep stop its leaf passes at a whole-prompt estimate expressed as a share of the model window. It is off at `0` and requires a target below the trigger. Both window ratios accept values from `0` up to but excluding `1`.
 - `LCM_BACKGROUND_LEAF_PREP_ENABLED` (default `false`, #787 slice 1): prepare leaf summaries off-turn above P = threshold − 0.15 × window and publish them at the threshold crossing with no model call, down to L = threshold − max(2 × chunk, 0.1 × window); `LCM_BACKGROUND_LEAF_PREP_MAX_CALLS` (default `8`) and `LCM_BACKGROUND_LEAF_PREP_WINDOW_S` (default `600`) bound its own spend guard;
 - `LCM_TEMPORAL_ROLLUPS_ENABLED` (default `true` from v0.27.0): background day/week rollup summaries; the first session bind creates the rollup tables and schedules maintenance; `false` opts out;

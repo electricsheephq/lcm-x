@@ -9,7 +9,7 @@ apply their own limits.
 flowchart TD
   subgraph WP["Whole prompt the model receives"]
     L1["1. Fixed load: system prompt, tool schemas, injected files (host-owned, re-sent on every request)"]
-    L2["2. Summary block (LCM-X; budget is a share of the window)"]
+    L2["2. Summary block (LCM-X; summary-prefix budget: LCM_SUMMARY_PREFIX_TARGET_TOKENS when positive, else a share of the window when LCM_SUMMARY_PREFIX_TARGET_RATIO is set, else one leaf budget capped at a quarter of the trigger)"]
     L3["3. Raw rows and the protected fresh tail"]
   end
   ING["Turn end: ingest stores the new rows"] --> HG{"Host gate, counter A: host prompt figure >= trigger share of the window?"}
@@ -20,13 +20,15 @@ flowchart TD
   PF -->|yes| CMP
   CMP --> SF{"Stub-first exit, counter A' (list + fixed load): free cuts reach min(built-in target, depth target)?"}
   SF -->|yes| OUT
-  SF -->|no| PC["Condense the summary block first if it is over its budget"]
+  SF -->|"no; free cuts staged when they reach the built-in target"| PC["Condense the summary block first if it is over its budget"]
   PC --> LEAF["Leaf pass: summarise the oldest chunk outside the fresh tail, or promote a prepared leaf"]
   LEAF --> STOP{"Stop? Counter E: host figure minus tokens freed so far"}
   STOP -->|"E <= depth target"| CN["Condense the summary block to its budget"]
   STOP -->|"raw prefix drained"| CN
   STOP -->|"time or pass budget spent"| ASM
   STOP -->|otherwise| LEAF
+  LEAF -->|"first leaf not stored, free cuts staged"| FB["Return the staged free stub-first cuts, as ratio 0 would; depth target unmet"]
+  FB --> OUT
   CN --> ASM["Assembly: summary block, raw rows, fresh tail"]
   ASM --> FIT["Exit fit, counter A': window and exit cap only, never the depth target; drops only rows a summary covers"]
   FIT --> OUT["Return the list; the host commits; status reports target, fixed load, whole prompt after, met or not"]

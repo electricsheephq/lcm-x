@@ -212,10 +212,15 @@ def test_t7_inert_depth_matches_disabled(make_engine, summaries, monkeypatch, ca
         if shape == "overflow":
             engine._config.max_assembly_tokens = 7_500
         if shape == "cleanup":
+            # A real below-threshold preflight request: compress() takes the cleanup-only return.
             engine.threshold_tokens = count_messages_tokens(view) + 1
-            assert engine.should_compress(count_messages_tokens(view)) is False
+            assert engine._mark_below_threshold_maintenance() is True
         kwargs = {"force": {"force": True}, "recovery": {"bypass_cooldown": True}}.get(shape, {})
         result = engine.compress(view, current_tokens=count_messages_tokens(view), **kwargs)
+        if shape == "cleanup":
+            assert engine._last_compression_status == "sanitized"
+            assert not summaries
+            assert DEPTH_KEYS.isdisjoint(_sweep(engine) or {})
         return result, _sweep(engine)
 
     ratio = {"equal": 0.06, "inverted": 0.065}.get(shape, 0.04)
