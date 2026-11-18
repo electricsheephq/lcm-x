@@ -59,8 +59,9 @@ filing authority; show the draft and obtain the reporter's approval first.
 - Schema changes follow `docs/process/schema-changes.md`: no new DDL owners, the migration's
   format and oldest reader recorded, forward and rollback tests.
 - Do not implement a `needs-repro` report merely because an upstream PR or issue claims a fix.
+- Before assigning a priority, answer four questions from evidence: can a turn fail, hang or wait without bound; can compaction stop making progress; is the prompt cache rewritten on consecutive turns; is a stored row lost or duplicated. A yes to any of the first three is `P0` unless a measurement shows it cannot reach a user at default settings; the fourth follows the loss rules in this file. A `P0` is fixed before the release that would carry it, never scheduled after it, and never recorded as an optimization.
 - Prioritize verified supported-path impact:
-  - `P0`: active catastrophic data loss, disclosure, or unusable core path.
+  - `P0`: active catastrophic data loss, disclosure, or unusable core path (a turn that cannot complete, compaction that cannot make progress, or a prompt cache rewritten turn after turn).
   - `P1`: severe integrity, security, crash, lockout, or release-blocking failure.
   - `P2`: significant bounded correctness or resource failure.
   - `P3`: limited bug, feature gap, or moderate maintainability/performance issue.
